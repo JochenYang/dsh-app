@@ -1,0 +1,50 @@
+appId: com.dshapp.desktop
+productName: DSH App
+copyright: Copyright © 2026 dsh-app contributors
+directories:
+  buildResources: resources
+  output: release
+files:
+  - dist/**/*
+  - package.json
+asar: true
+npmRebuild: false
+
+# ---- Shell update channel (electron-updater, GitHub Releases) ----
+publish:
+  provider: github
+  owner: YOUR_GITHUB_OWNER   # TODO: set repo owner before first release
+  repo: dsh-app
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+  artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: DSH App
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  category: public.app-category.developer-tools
+  # Notarization is enabled in CI via `--config.mac.notarize=true` when
+  # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID are present.
+  # Keep it false so local unsigned builds still work.
+  notarize: false
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]
+  category: Development
+  synopsis: DSH App desktop client for DeepSeek Harness

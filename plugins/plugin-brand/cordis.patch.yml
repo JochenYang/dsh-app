@@ -1,0 +1,5 @@
+# DSH App brand host plugin — layer-stack patch.
+# This file joins the profile's bundle layer stack (dsh.profile.bundles) when
+# the plugin is installed into a profile. Empty patch = no config overrides
+# yet; add profile-level settings here as the suite grows.
+{}

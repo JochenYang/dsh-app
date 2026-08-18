@@ -1,0 +1,115 @@
+name: release
+
+# Builds kernel runtime artifacts (per platform/arch) and the Electron app for
+# Windows / macOS / Linux, then publishes everything to a GitHub Release.
+# Triggers: push of a tag like v0.1.0 (shell) — the kernel version is read
+# from the npm registry dist-tag at build time, or pinned via inputs.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: 'dsh kernel version to bundle (default: dist-tag)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  DSH_VERSION: ${{ inputs.dsh_version || '' }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  runtime:
+    name: runtime (${{ matrix.os }}/${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            arch: x64
+          - os: windows-latest
+            platform: win32
+            arch: arm64
+          - os: macos-latest
+            platform: darwin
+            arch: x64
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build suite plugins
+        working-directory: plugins
+        run: |
+          for p in plugin-brand plugin-client-ui; do
+            (cd $p && npm install --no-audit --no-fund && npx tsc -p tsconfig.json)
+          done
+
+      - name: Build kernel runtime
+        run: node scripts/build-runtime.mjs ${{ matrix.platform }} ${{ matrix.arch }} "${{ env.DSH_VERSION }}"
+
+      - name: Attach runtime to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 runtime-dist/manifest.json --clobber
+
+  app:
+    name: app (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shell
+        run: npm run build
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx electron-builder --mac --publish always --config.mac.notarize=true
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: npx electron-builder --win --publish always
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: npx electron-builder --linux --publish always
