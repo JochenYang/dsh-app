@@ -79,7 +79,7 @@ export class KernelManager {
     }
     // First run (or broken install): fetch the latest kernel.
     const installed = await this.installLatest('installing')
-    this.status({ phase: 'ready', message: 'Kernel ready', progress: null })
+    this.status({ phase: 'ready', message: '内核就绪', progress: null })
     return installed
   }
 
@@ -130,7 +130,7 @@ export class KernelManager {
     if (this.opts.source === 'dev' || !this.current) {
       return { available: false, current: this.current?.manifest.dshVersion ?? null, latest: null, channel: this.opts.channel, reason: this.opts.source === 'dev' ? 'dev mode pinned to checkout' : 'no kernel installed' }
     }
-    this.status({ phase: 'checking', message: 'Checking for kernel updates…', progress: null })
+    this.status({ phase: 'checking', message: '正在检查内核更新…', progress: null })
     const info = await fetchRegistryInfo(this.opts.channel)
     if (!info) {
       return { available: false, current: this.current.manifest.dshVersion, latest: null, channel: this.opts.channel, reason: 'registry unreachable' }
@@ -156,9 +156,9 @@ export class KernelManager {
   async installLatest(reason: string): Promise<CurrentKernel> {
     if (this.opts.source === 'dev') return this.initDev()
     this.cancelRequested = false
-    this.status({ phase: 'checking', message: reason === 'installing' ? 'Preparing first install…' : 'Checking for updates…', progress: null })
+    this.status({ phase: 'checking', message: reason === 'installing' ? '正在准备首次安装…' : '正在检查更新…', progress: null })
     const info = await fetchRegistryInfo(this.opts.channel)
-    if (!info) throw new Error('cannot reach npm registry to resolve dsh version')
+    if (!info) throw new Error('无法连接 npm 注册表以解析 dsh 版本')
     return this.installVersion(info.version)
   }
 
@@ -166,33 +166,47 @@ export class KernelManager {
     if (this.opts.source === 'dev') return this.initDev()
     const resolver = this.makeResolver()
     const artifact = await resolver.fetchArtifact(version)
-    if (!artifact) throw new Error(`no runtime artifact for dsh ${version} on ${this.opts.platform}-${this.opts.arch}`)
+    if (!artifact) throw new Error(`未找到 dsh ${version} 在 ${this.opts.platform}-${this.opts.arch} 上的运行时产物`)
 
     await fs.mkdir(path.join(this.root, STAGING_DIR), { recursive: true })
     const tarball = path.join(this.root, STAGING_DIR, TARBALL_FILE)
     const extractDir = path.join(this.root, STAGING_DIR, 'extract')
 
-    // 1. Download with progress.
-    this.status({ phase: 'downloading', message: `Downloading dsh ${version}…`, progress: 0 })
-    await this.download(artifact.url, tarball)
-
-    // 2. Verify integrity (sha512 from the release asset).
-    this.status({ phase: 'extracting', message: 'Verifying download…', progress: null })
-    const actual = await sha512File(tarball)
-    if (!verifyIntegrity(artifact.sha512, actual)) {
-      throw new Error(`integrity mismatch for dsh ${version} (expected ${artifact.sha512.slice(0, 16)}…, got ${actual.slice(0, 16)}…)`)
+    // 1. Download from the first candidate that both transfers and verifies.
+    //    The trusted sha512 comes from the release metadata (official host
+    //    preferred), so a mirror can never substitute content.
+    this.status({ phase: 'downloading', message: `正在下载 dsh ${version}…`, progress: 0 })
+    let downloadedFrom: string | null = null
+    let lastError: Error | null = null
+    for (const candidate of artifact.candidates) {
+      try {
+        await this.download(candidate, tarball)
+        const actual = await sha512File(tarball)
+        if (!verifyIntegrity(artifact.sha512, actual)) {
+          throw new Error(`完整性校验失败（期望 ${artifact.sha512.slice(0, 16)}…，实际 ${actual.slice(0, 16)}…）`)
+        }
+        downloadedFrom = candidate
+        break
+      } catch (err) {
+        lastError = err as Error
+        this.log(`download candidate failed (${candidate}): ${(err as Error).message}`)
+        await fs.rm(tarball, { force: true })
+      }
+    }
+    if (!downloadedFrom) {
+      throw new Error(`dsh ${version} 下载失败（已尝试 ${artifact.candidates.length} 个源）：${lastError?.message ?? '未知错误'}`)
     }
 
-    // 3. Extract and sanity-check the inner manifest.
+    // 2. (Verified above.) Sanity-check the inner manifest after extract.
     await fs.rm(extractDir, { recursive: true, force: true })
     await fs.mkdir(extractDir, { recursive: true })
-    this.status({ phase: 'extracting', message: 'Extracting runtime…', progress: null })
+    this.status({ phase: 'extracting', message: '正在解压运行时…', progress: null })
     await tar.x({ file: tarball, cwd: extractDir })
     const inner = path.join(extractDir, 'runtime')
     const innerManifest = await readRuntimeManifest(inner)
-    if (!innerManifest) throw new Error('runtime artifact missing manifest.json')
+    if (!innerManifest) throw new Error('运行时产物缺少 manifest.json')
     if (innerManifest.platform !== this.opts.platform || innerManifest.arch !== this.opts.arch) {
-      throw new Error(`artifact platform mismatch: ${innerManifest.platform}-${innerManifest.arch} vs ${this.opts.platform}-${this.opts.arch}`)
+      throw new Error(`产物平台不匹配：${innerManifest.platform}-${innerManifest.arch} 与 ${this.opts.platform}-${this.opts.arch}`)
     }
 
     // 4. Move into a versioned, immutable directory.
@@ -202,7 +216,7 @@ export class KernelManager {
     await fs.rename(inner, target)
 
     // 5. Activate atomically, keeping the previous version for rollback.
-    this.status({ phase: 'installing', message: 'Activating runtime…', progress: null })
+    this.status({ phase: 'installing', message: '正在激活运行时…', progress: null })
     const previous = this.current ? this.current.active : null
     const next: CurrentKernel = {
       active: versionDir,
@@ -231,17 +245,17 @@ export class KernelManager {
 
   private async download(url: string, dest: string): Promise<void> {
     const res = await fetch(url, { signal: AbortSignal.timeout(300_000) })
-    if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`)
+    if (!res.ok || !res.body) throw new Error(`下载失败：HTTP ${res.status}`)
     const total = Number(res.headers.get('content-length') ?? 0)
     const body = Readable.fromWeb(res.body as never)
     const out = await fs.open(dest, 'w')
     let received = 0
     try {
       for await (const chunk of body) {
-        if (this.cancelRequested) throw new Error('download cancelled')
+        if (this.cancelRequested) throw new Error('下载已取消')
         received += chunk.length
         await out.write(chunk)
-        if (total > 0) this.status({ phase: 'downloading', message: `Downloading dsh…`, progress: Math.min(1, received / total) })
+        if (total > 0) this.status({ phase: 'downloading', message: `正在下载 dsh…`, progress: Math.min(1, received / total) })
       }
     } finally {
       await out.close()
@@ -271,7 +285,7 @@ export class KernelManager {
     if (manifest) rollbackTo.manifest = manifest
     await saveCurrentKernel(this.root, rollbackTo)
     this.current = rollbackTo
-    this.status({ phase: 'rollback', message: `Rolled back to ${previousDir}`, progress: null })
+    this.status({ phase: 'rollback', message: `已回滚到 ${previousDir}`, progress: null })
     this.log(`rolled back to ${previousDir}`)
     return rollbackTo
   }

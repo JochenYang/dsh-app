@@ -16,7 +16,7 @@ export const TARBALL_FILE = 'runtime.tgz'
 export const KERNEL_CHECK_INTERVAL_MS = 1000 * 60 * 60 * 6 // 6 hours
 
 /** How long to wait for the dsh web server to answer before declaring failure. */
-export const SERVER_HEALTH_TIMEOUT_MS = 30_000
+export const SERVER_HEALTH_TIMEOUT_MS = 90_000
 export const SERVER_HEALTH_POLL_MS = 500
 
 /** Grace period before force-killing the dsh server child on shutdown. */

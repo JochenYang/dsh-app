@@ -17,15 +17,19 @@ export function createTray(callbacks: TrayCallbacks): Tray {
   const icon = path.join(__dirname, '..', '..', 'resources', 'icon.png')
   tray = new Tray(icon)
   tray.setToolTip(APP_NAME)
+
+  // Double-click to restore/show the main window
+  tray.on('double-click', callbacks.onOpen)
+
   const menu = Menu.buildFromTemplate([
-    { label: 'Open DSH App', click: callbacks.onOpen },
+    { label: '打开 DSH App', click: callbacks.onOpen },
     { type: 'separator' },
-    { label: 'Check for kernel update…', click: callbacks.onCheckKernelUpdate },
-    { label: 'Check for app update…', click: callbacks.onCheckAppUpdate },
+    { label: '检查内核更新…', click: callbacks.onCheckKernelUpdate },
+    { label: '检查应用更新…', click: callbacks.onCheckAppUpdate },
     { type: 'separator' },
-    { label: 'Restart server', click: callbacks.onRestartServer },
+    { label: '重启服务', click: callbacks.onRestartServer },
     { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() },
+    { label: '退出', click: () => app.quit() },
   ])
   tray.setContextMenu(menu)
   return tray

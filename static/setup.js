@@ -27,40 +27,40 @@ function showError(text) {
   el.error.hidden = false
   el.error.textContent = text
   el.install.hidden = false
-  el.install.textContent = 'Retry'
+  el.install.textContent = '重试'
   busy = false
 }
 
 window.dshSetup.onStatus((status) => {
   switch (status.phase) {
     case 'checking':
-      setPhase('Checking for updates')
+      setPhase('正在检查更新')
       setMessage(status.message)
       setProgress(null)
       break
     case 'downloading':
-      setPhase('Downloading kernel')
+      setPhase('正在下载内核')
       setMessage(status.message)
       setProgress(status.progress)
       break
     case 'extracting':
     case 'installing':
     case 'starting':
-      setPhase('Installing')
+      setPhase('正在安装')
       setMessage(status.message)
       setProgress(null)
       break
     case 'ready':
-      setPhase('Ready')
-      setMessage('Starting DSH App…')
+      setPhase('就绪')
+      setMessage('正在启动 DSH App…')
       break
     case 'error':
-      setPhase('Something went wrong')
+      setPhase('出现问题')
       setMessage(status.message)
       showError(status.error || 'Unknown error')
       break
     default:
-      setPhase('DSH App setup')
+      setPhase('DSH App 安装')
       setMessage(status.message)
   }
 })
@@ -70,15 +70,15 @@ el.install.addEventListener('click', () => {
   busy = true
   el.install.hidden = true
   el.error.hidden = true
-  setPhase('Installing')
-  setMessage('Preparing kernel…')
+  setPhase('正在安装')
+  setMessage('正在准备内核…')
   window.dshSetup.install()
 })
 
 el.cancel.addEventListener('click', () => window.dshSetup.cancel())
 
 // Show the install button immediately on first run.
-setPhase('DSH App setup')
-setMessage('The kernel runtime is not installed yet.')
+setPhase('DSH App 安装')
+setMessage('内核运行时尚未安装。')
 el.install.hidden = false
-el.install.textContent = 'Install'
+el.install.textContent = '安装'
