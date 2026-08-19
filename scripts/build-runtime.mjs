@@ -56,7 +56,11 @@ async function main() {
   }
 
   // 2. npm-installed dsh profile. The suite plugins are added via file: refs
-  //    so npm installs them into the same flattened tree.
+  //    so npm installs them into the same flattened tree. Their lib/ outputs
+  //    are build artifacts (not committed), so build each plugin first.
+  for (const name of suitePlugins) {
+    run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], path.join(root, 'plugins', name.replace('@dsh-app/', '')))
+  }
   const appPkg = {
     name: 'dsh-app-runtime',
     private: true,

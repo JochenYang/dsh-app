@@ -36,7 +36,5 @@ export function apply(ctx: Context): void {
   // TODO(dev loop): register desktop bridge remotes (git info, native
   // dialogs, open-in-folder) guarded by the trusted-host fence.
 
-  ctx.on('ready', () => {
-    ctx.logger.info('[dsh-app-brand] loaded')
-  })
+  // No host-side behavior yet; the loader entry only needs to be loadable.
 }

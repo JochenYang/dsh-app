@@ -3,11 +3,12 @@ import net from 'node:net'
 import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
+import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
 import { createMainWindow, createSetupWindow } from './window'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { initShellUpdater, checkShellUpdate } from './updater'
 import { broadcast, registerIpc, type AppController } from './ipc'
-import { IPC, KERNEL_CHECK_INTERVAL_MS } from '../shared/constants'
+import { IPC, KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST } from '../shared/constants'
 import type { KernelInfoPayload, KernelStatusPayload } from '../shared/types'
 
 // ---------------------------------------------------------------- config
@@ -54,12 +55,17 @@ function broadcastStatus(status: KernelStatusPayload): void {
 
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
-  broadcastStatus({ phase: 'starting', message: 'Starting dsh server…', progress: null })
+  broadcastStatus({ phase: 'starting', message: '正在启动 dsh 服务…', progress: null })
   const port = await findFreePort()
+  // Brand suite wiring: profile-dir module links + the loader overlay that
+  // disables the upstream Models page and inserts the brand rows. An older
+  // kernel without the suite plugins boots vanilla (empty array).
+  const suiteSources = isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir())
+  const overlays = await prepareBrandSuite(suiteSources)
   try {
-    await server.start(kernel.getServerSpec(), port)
+    await server.start(kernel.getServerSpec(), port, DEFAULT_HTTP_HOST, overlays)
   } catch (err) {
-    await handleServerDown(`failed to start: ${(err as Error).message}`)
+    await handleServerDown(`启动失败：${(err as Error).message}`)
     return
   }
   const url = server.serverUrl
@@ -83,14 +89,14 @@ async function startServerAndOpenWindow(): Promise<void> {
   setupWindow = null
   restartAttempts = 0
   void kernel.cleanup()
-  broadcastStatus({ phase: 'ready', message: 'Ready', progress: null })
+  broadcastStatus({ phase: 'ready', message: '就绪', progress: null })
 }
 
 async function handleServerDown(reason: string): Promise<void> {
   if (quitting) return
   restartAttempts += 1
   console.error(`[server] down: ${reason} (attempt ${restartAttempts})`)
-  broadcastStatus({ phase: 'error', message: `Server ${reason}`, progress: null, error: reason })
+  broadcastStatus({ phase: 'error', message: `服务${reason}`, progress: null, error: reason })
 
   if (restartAttempts >= 2 && !isDev) {
     const rolledBack = await kernel.rollback()
@@ -99,7 +105,7 @@ async function handleServerDown(reason: string): Promise<void> {
       void dialog.showMessageBox({
         type: 'warning',
         title: 'DSH App',
-        message: `The kernel update failed to start. Rolled back to dsh ${rolledBack.manifest.dshVersion}.`,
+        message: `内核更新启动失败，已回滚到 dsh ${rolledBack.manifest.dshVersion}。`,
       })
       await startServerAndOpenWindow()
       return
@@ -110,7 +116,7 @@ async function handleServerDown(reason: string): Promise<void> {
     void dialog.showMessageBox({
       type: 'error',
       title: 'DSH App',
-      message: 'The dsh server could not be started. The app will quit.',
+      message: 'dsh 服务无法启动，应用即将退出。',
     })
     app.quit()
     return
@@ -127,7 +133,7 @@ async function installKernel(): Promise<void> {
     await kernel.installLatest('installing')
     await startServerAndOpenWindow()
   } catch (err) {
-    broadcastStatus({ phase: 'error', message: 'Install failed', progress: null, error: (err as Error).message })
+    broadcastStatus({ phase: 'error', message: '安装失败', progress: null, error: (err as Error).message })
   }
 }
 
@@ -139,33 +145,33 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
         void dialog.showMessageBox({
           type: 'info',
           title: 'DSH App',
-          message: `The kernel is up to date (dsh ${result.current ?? 'unknown'}).`,
+          message: `内核已是最新版本（dsh ${result.current ?? '未知'}）。`,
         })
       }
       return
     }
     const { response } = await dialog.showMessageBox({
       type: 'info',
-      title: 'Kernel update available',
+      title: '内核更新可用',
       message: `dsh ${result.current} → ${result.latest}`,
-      detail: 'Download and activate now? The server will restart.',
-      buttons: ['Update now', 'Later'],
+      detail: '现在下载并激活？服务将会重启。',
+      buttons: ['立即更新', '稍后'],
       defaultId: 0,
       cancelId: 1,
     })
     if (response === 0 && result.latest) await applyKernelUpdate(result.latest)
   } catch (err) {
-    if (manual) void dialog.showMessageBox({ type: 'error', title: 'DSH App', message: `Update check failed: ${(err as Error).message}` })
+    if (manual) void dialog.showMessageBox({ type: 'error', title: 'DSH App', message: `更新检查失败：${(err as Error).message}` })
   }
 }
 
 async function applyKernelUpdate(version: string): Promise<void> {
   try {
     const installed = await kernel.installVersion(version)
-    broadcastStatus({ phase: 'installing', message: `Activated dsh ${installed.manifest.dshVersion}`, progress: null })
+    broadcastStatus({ phase: 'installing', message: `已激活 dsh ${installed.manifest.dshVersion}`, progress: null })
     await startServerAndOpenWindow()
   } catch (err) {
-    void dialog.showMessageBox({ type: 'error', title: 'DSH App', message: `Kernel update failed: ${(err as Error).message}` })
+    void dialog.showMessageBox({ type: 'error', title: 'DSH App', message: `内核更新失败：${(err as Error).message}` })
   }
 }
 
@@ -203,7 +209,7 @@ async function boot(): Promise<void> {
   controller.kernel = kernel
 
   server = new DshServer({
-    onExit: (code, signal) => void handleServerDown(`exited (code ${code ?? '?'}, signal ${signal ?? '?'})`),
+    onExit: (code, signal) => void handleServerDown(`已退出（code ${code ?? '?'}, signal ${signal ?? '?'})`),
     onLog: (line) => console.log('[server]', line),
   })
 
@@ -215,7 +221,7 @@ async function boot(): Promise<void> {
   } else {
     // First run: show the setup window; it drives install through IPC.
     setupWindow = createSetupWindow()
-    broadcastStatus({ phase: 'idle', message: 'DSH App is not installed yet.', progress: null })
+    broadcastStatus({ phase: 'idle', message: 'DSH App 尚未安装。', progress: null })
   }
 
   createTray({
@@ -243,8 +249,12 @@ if (!gotLock) {
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()
       mainWindow.focus()
+    } else {
+      // Window was closed (hidden/destroyed) — recreate it
+      void startServerAndOpenWindow()
     }
   })
 

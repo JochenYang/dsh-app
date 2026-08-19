@@ -2,6 +2,10 @@ node_modules/
 dist/
 release/
 runtime-dist/
+# Suite plugin build outputs (rebuilt by scripts/build-runtime.mjs).
+plugins/*/lib/
+# Local scratch space for probes and one-off experiments.
+scratch/
 *.tgz
 *.log
 .DS_Store

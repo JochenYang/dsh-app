@@ -1,5 +1,7 @@
 /**
- * Package entry. For client plugins the dsh loader consumes the `./client`
- * subpath; this file exists so the package resolves as a normal module too.
+ * Host loader entry for the browser implementation exported from `./client`.
+ * The brand client plugin has no host-side behavior.
  */
-export * from './client.js'
+
+/** Host plugin body — no host-side behavior for the brand client plugin. */
+export function apply(): void {}

@@ -10,6 +10,40 @@ export interface ServerEvents {
   onLog?: (line: string) => void
 }
 
+/** Cap a diagnostic line so a runaway child cannot grow logs unbounded. */
+const MAX_LOG_LINE = 2_000
+
+/** Redact credential-looking fragments before a line reaches logs or events. */
+function redact(line: string): string {
+  return line
+    .replace(/(api[_-]?key|authorization|token)(\s*[:=]\s*)\S+/gi, '$1$2[redacted]')
+    .slice(0, MAX_LOG_LINE)
+}
+
+/**
+ * Accept only a loopback HTTP URL: the settled server address must be the
+ * harness's own local web UI, never an external origin.
+ */
+function isLocalServerUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:'
+      && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+      && url.username === ''
+      && url.password === ''
+      && url.port !== ''
+  } catch {
+    return false
+  }
+}
+
+/** Extract the settled server URL from a line emitted by `dsh web`. */
+function extractServerUrl(line: string): string | undefined {
+  const match = /(?:^|\s)dsh web:\s+(http:\/\/[^\s]+)/.exec(line)
+  if (match?.[1] === undefined || !isLocalServerUrl(match[1])) return undefined
+  return match[1]
+}
+
 /**
  * Manages the local dsh web server child process: spawn, health-check,
  * crash detection, and graceful shutdown.
@@ -17,8 +51,11 @@ export interface ServerEvents {
 export class DshServer {
   private child: ChildProcess | null = null
   private stopping = false
+  private shellMode = false
   private url = ''
   private logFile: string | null = null
+  /** Incremental line-split buffers (one per child stream). */
+  private lineBuffers = new Map<NodeJS.ReadableStream, string>()
 
   constructor(private readonly events: ServerEvents = {}) {}
 
@@ -30,27 +67,46 @@ export class DshServer {
     return this.url
   }
 
-  async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST): Promise<void> {
+  async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST, extraPatches: readonly string[] = []): Promise<void> {
     await this.stop()
     this.stopping = false
     this.url = `http://${host}:${port}`
 
-    const { command, args } = this.buildCommand(spec, port, host)
+    const { command, args, shell } = this.buildCommand(spec, port, host, extraPatches)
+    this.shellMode = shell === true
     this.logFile = await this.openLog()
-    this.events.onLog?.(`spawn ${command} ${args.join(' ')}`)
+    this.events.onLog?.(`spawn ${shell ? command : `${command} ${args.join(' ')}`}`)
 
-    const child = spawn(command, args, {
-      cwd: spec.cwd,
-      env: { ...process.env, DSH_APP_DESKTOP: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
+    const child = shell
+      ? spawn(command, {
+          shell: true,
+          cwd: spec.cwd,
+          env: { ...process.env, DSH_APP_DESKTOP: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        })
+      : spawn(command, args, {
+          cwd: spec.cwd,
+          env: { ...process.env, DSH_APP_DESKTOP: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        })
     this.child = child
 
-    child.stdout?.on('data', (d: Buffer) => void this.tee(d))
-    child.stderr?.on('data', (d: Buffer) => void this.tee(d))
+    const onChunk = (stream: NodeJS.ReadableStream) => (d: Buffer) => {
+      const pending = `${this.lineBuffers.get(stream) ?? ''}${d.toString('utf8')}`
+      const parts = pending.split(/\r?\n/)
+      this.lineBuffers.set(stream, parts.pop() ?? '')
+      for (const line of parts) this.handleLine(line)
+    }
+    child.stdout?.on('data', onChunk(child.stdout))
+    child.stderr?.on('data', onChunk(child.stderr))
     child.on('error', (err) => this.events.onLog?.(`server error: ${err.message}`))
     child.on('exit', (code, signal) => {
+      for (const [stream, rest] of this.lineBuffers) {
+        if (rest !== '') this.handleLine(rest)
+        this.lineBuffers.delete(stream)
+      }
       if (this.child === child) this.child = null
       if (!this.stopping) this.events.onExit?.(code, signal)
     })
@@ -59,14 +115,31 @@ export class DshServer {
     this.events.onReady?.(this.url)
   }
 
-  private buildCommand(spec: ServerSpec, port: number, host: string): { command: string; args: string[] } {
+  /** Quote a shell fragment for cmd.exe when it carries whitespace or quotes. */
+  private quoteForShell(value: string): string {
+    return /[\s"]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value
+  }
+
+  private buildCommand(spec: ServerSpec, port: number, host: string, extraPatches: readonly string[]): { command: string; args: string[]; shell?: boolean } {
+    // Brand-suite loader overlays (plugins/dsh-app.patch.yml): applied after
+    // every bundle layer, last write wins per row. Host/port are controlled
+    // values; overlay paths come from userData (see brand-suite.ts).
+    const patchArgs = extraPatches.flatMap((overlay) => ['--patch', overlay])
     if (spec.kind === 'pnpm') {
       // Dev mode: run the local checkout's dsh CLI via pnpm.
-      return { command: 'pnpm', args: ['dsh', 'web', '--host', host, '--port', String(port)] }
+      // On Windows, pnpm is a .cmd shim that cannot be spawned without a
+      // shell, so build one command line and let Node run it through the
+      // system shell (host/port are controlled values: no injection surface).
+      if (process.platform === 'win32') {
+        const patchFragment = patchArgs.map((token) => this.quoteForShell(token)).join(' ')
+        const overlays = patchFragment !== '' ? `${patchFragment} ` : ''
+        return { command: `pnpm dsh web ${overlays}--host ${host} --port ${port}`, args: [], shell: true }
+      }
+      return { command: 'pnpm', args: ['dsh', 'web', ...patchArgs, '--host', host, '--port', String(port)] }
     }
     return {
       command: spec.nodePath,
-      args: [spec.scriptPath, '--profile', 'web', '--host', host, '--port', String(port)],
+      args: [spec.scriptPath, '--profile', 'web', ...patchArgs, '--host', host, '--port', String(port)],
     }
   }
 
@@ -77,11 +150,21 @@ export class DshServer {
     return file
   }
 
-  private async tee(chunk: Buffer): Promise<void> {
-    const line = chunk.toString('utf8')
-    this.events.onLog?.(line.trimEnd())
+  /**
+   * One complete child-output line: redact, forward, and harvest the settled
+   * server URL when `dsh web` prints it (trusts the child's own report over
+   * the pre-allocated port, closing the find-free-port race).
+   */
+  private handleLine(line: string): void {
+    const safe = redact(line)
+    this.events.onLog?.(safe)
     if (this.logFile) {
-      await fs.appendFile(this.logFile, line).catch(() => undefined)
+      void fs.appendFile(this.logFile, `${safe}\n`).catch(() => undefined)
+    }
+    const url = extractServerUrl(line)
+    if (url && !this.stopping && url !== this.url) {
+      this.url = url
+      this.events.onLog?.(`server url settled: ${url}`)
     }
   }
 
@@ -106,14 +189,22 @@ export class DshServer {
     const child = this.child
     if (!child) return
     this.stopping = true
-    child.kill('SIGTERM')
-    const exited = await Promise.race([
-      new Promise<boolean>((resolve) => child.once('exit', () => resolve(true))),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), SERVER_SHUTDOWN_GRACE_MS)),
-    ])
-    if (!exited) {
-      child.kill('SIGKILL')
-      await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+    if (process.platform === 'win32' && this.shellMode) {
+      // The shell (cmd.exe) does not forward signals; kill the whole tree.
+      await new Promise<void>((resolve) => {
+        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+        killer.on('exit', () => resolve())
+      })
+    } else {
+      child.kill('SIGTERM')
+      const exited = await Promise.race([
+        new Promise<boolean>((resolve) => child.once('exit', () => resolve(true))),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), SERVER_SHUTDOWN_GRACE_MS)),
+      ])
+      if (!exited) {
+        child.kill('SIGKILL')
+        await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+      }
     }
     this.child = null
   }

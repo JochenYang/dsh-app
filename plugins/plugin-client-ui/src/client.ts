@@ -15,8 +15,12 @@
  * (see README.md for the mapping table).
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+import { BrandModelsStore } from './client/models-store.ts'
+import { BrandModelsSection, type BrandModelsSectionInjected } from './client/ModelsSection.tsx'
 
-export const inject = ['theme', 'slots', 'locale']
+export const inject = ['theme', 'slots', 'connection', 'remote']
 
 export const BRAND_THEME_ID = 'dsh-app-brand'
 
@@ -80,6 +84,40 @@ export function apply(ctx: ClientContext): void {
       Object.entries(BRAND_TOKENS).map(([name, modes]) => [name, modes.light]),
     ),
   })
+
+  // --- Brand Models page: replaces the upstream `models` settings section.
+  //     The shell's loader overlay disables the upstream ui-settings-models
+  //     entry and inserts this plugin, so the `models` id is registered
+  //     exactly once (a priority shadow would duplicate the nav row: the
+  //     settings nav rail projects the raw slot ledger, not the shadowed
+  //     render view). ---
+  const connection = ctx.get('connection') as ConnectionHandle
+  const controller = new BrandModelsStore(connection.api)
+  const useSnapshot = bindSnapshotSelector(controller.store)
+  const injected = (): BrandModelsSectionInjected => ({
+    controller,
+    useSnapshot,
+    api: connection.api,
+  })
+  ctx.effect(() => {
+    const refresh = (): void => {
+      if (controller.store.getSnapshot().status === 'idle') return
+      void controller.load()
+    }
+    const disposers = [
+      ctx.remote.$on('settings/document-updated', refresh),
+      ctx.remote.$on('credentials/updated', refresh),
+      ctx.remote.$on('llm/adapters-updated', refresh),
+    ]
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'dsh-app-client-ui: models invalidations')
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'models',
+    order: 10,
+    label: () => '模型',
+    inject: injected,
+  }, BrandModelsSection))
 
   // ------------------------------------------------------------------
   // Enhancement scaffolds — each TODO needs its component + store wired in

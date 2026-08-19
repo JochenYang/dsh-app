@@ -19,17 +19,18 @@
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-theme",
         "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-ui-theme"
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-remotes"
       ],
       "platform": "web"
     }
   },
   "files": ["lib"],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "node build.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.7",
