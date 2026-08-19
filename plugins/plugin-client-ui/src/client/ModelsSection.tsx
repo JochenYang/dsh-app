@@ -65,13 +65,24 @@ export interface BrandModelsSectionInjected {
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
 }
 
-export interface BrandModelsSectionProps {
+/**
+ * Props delivered by the slot outlet: the inject face spread FLAT (the
+ * renderer erases the share boundary at the render call — same contract as
+ * the upstream ModelsSection) plus the owner's `close`. Guarded like the
+ * upstream section: a missing face renders null instead of throwing into the
+ * slot error boundary (which blanks the whole panel).
+ */
+export type BrandModelsSectionProps = Partial<BrandModelsSectionInjected> & {
   close: () => void
-  inject: BrandModelsSectionInjected
 }
 
-export function BrandModelsSection({ inject }: BrandModelsSectionProps): ReactNode {
-  const { controller, useSnapshot, api } = inject
+export function BrandModelsSection(props: BrandModelsSectionProps): ReactNode {
+  const { controller, useSnapshot, api } = props
+  if (controller === undefined || useSnapshot === undefined || api === undefined) return null
+  return <Loaded controller={controller} useSnapshot={useSnapshot} api={api} />
+}
+
+function Loaded({ controller, useSnapshot, api }: BrandModelsSectionInjected): ReactNode {
   const state = useSnapshot(s => s)
   const [toast, setToast] = useState<{ text: string; ok: boolean; seq: number } | null>(null)
   const [adding, setAdding] = useState(false)

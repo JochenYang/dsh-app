@@ -216,6 +216,33 @@ body [class*="_titleRow"] a,
 body [class*="_titleRow"] input,
 body [class*="_titleRow"] [role="button"] { -webkit-app-region: no-drag; }
 body [data-details-collapsed] [class*="_headerUtilities"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
+/* Fallback drag bar for the main column: the session title bar only exists
+   once a session is open, so on the welcome/empty state the whole top strip
+   right of the sidebar had no drag region. :has() scopes the bar to that
+   case only — when a titleRow renders it owns the drag region instead. */
+body [class*="_centerCol"] { position: relative; }
+body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: ${OVERLAY_HEIGHT}px;
+  -webkit-app-region: drag;
+  z-index: 5;
+}
+/* The settings dialog floats above the frame, so the frame's drag regions are
+   masked while it is open; give the panel its own title strip instead. The
+   panel is position:relative, so the bar hugs its top edge; header controls
+   opt back out below. */
+body [class*="_panel"]::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 44px;
+  -webkit-app-region: drag;
+  z-index: 2;
+}
+body [class*="_panel"] [class*="_header"] button,
+body [class*="_panel"] [class*="_header"] a { -webkit-app-region: no-drag; }
 `
 
 /** Inject the desktop chrome stylesheet once per document. */
