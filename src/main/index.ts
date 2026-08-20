@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog } from 'electron'
 import net from 'node:net'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
@@ -230,9 +231,27 @@ async function boot(): Promise<void> {
     await kernel.init()
     await startServerAndOpenWindow()
   } else {
-    // First run: show the setup window; it drives install through IPC.
-    setupWindow = createSetupWindow()
-    broadcastStatus({ phase: 'idle', message: 'DSH App 尚未安装。', progress: null })
+    // First run. Prefer a kernel tarball bundled inside the app's resources
+    // (shipped with the installer) so the user need not download it; only
+    // fall back to the online setup wizard when no bundle is present.
+    const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
+    const bundledSha = `${bundledTgz}.sha512`
+    if (!isDev && existsSync(bundledTgz) && existsSync(bundledSha)) {
+      setupWindow = createSetupWindow()
+      try {
+        await kernel.installFromLocalTarball(bundledTgz, bundledSha)
+        await startServerAndOpenWindow()
+      } catch (err) {
+        // Bundled activation failed — fall through to online install so the
+        // app is still usable. Surface the cause in the setup window.
+        broadcastStatus({ phase: 'error', message: '内置内核初始化失败，改为在线安装', progress: null, error: (err as Error).message })
+        await installKernel()
+      }
+    } else {
+      // No bundled kernel: online setup wizard, driven by the user.
+      setupWindow = createSetupWindow()
+      broadcastStatus({ phase: 'idle', message: 'DSH App 尚未安装。', progress: null })
+    }
   }
 
   createTray({

@@ -213,7 +213,18 @@ export class KernelManager {
       throw new Error(`dsh ${version} 下载失败（已尝试 ${artifact.candidates.length} 个源）：${lastError?.message ?? '未知错误'}`)
     }
 
-    // 2. (Verified above.) Sanity-check the inner manifest after extract.
+    // 2. (Verified above.) Extract, sanity-check, and activate.
+    return this.activateTarball(tarball)
+  }
+
+  /**
+   * Extract a verified tarball into a versioned runtime dir and atomically
+   * activate it. Shared by online install (after download+verify) and local
+   * install from a bundled tarball (after sidecar sha512 verify). The caller
+   * is responsible for integrity verification before calling this.
+   */
+  private async activateTarball(tarball: string): Promise<CurrentKernel> {
+    const extractDir = path.join(this.root, STAGING_DIR, 'extract')
     await fs.rm(extractDir, { recursive: true, force: true })
     await fs.mkdir(extractDir, { recursive: true })
     this.status({ phase: 'extracting', message: '正在解压运行时…', progress: null })
@@ -225,13 +236,13 @@ export class KernelManager {
       throw new Error(`产物平台不匹配：${innerManifest.platform}-${innerManifest.arch} 与 ${this.opts.platform}-${this.opts.arch}`)
     }
 
-    // 4. Move into a versioned, immutable directory.
+    // 3. Move into a versioned, immutable directory.
     const versionDir = this.versionDirName(innerManifest)
     const target = this.kernelDir(versionDir)
     await fs.rm(target, { recursive: true, force: true })
     await fs.rename(inner, target)
 
-    // 5. Activate atomically, keeping the previous version for rollback.
+    // 4. Activate atomically, keeping the previous version for rollback.
     this.status({ phase: 'installing', message: '正在激活运行时…', progress: null })
     const previous = this.current ? this.current.active : null
     const next: CurrentKernel = {
@@ -244,9 +255,34 @@ export class KernelManager {
     this.current = next
     this.log(`activated kernel ${versionDir}${previous ? ` (previous ${previous})` : ''}`)
 
-    // 6. Clean staging.
+    // 5. Clean staging.
     await fs.rm(path.join(this.root, STAGING_DIR), { recursive: true, force: true })
     return next
+  }
+
+  /**
+   * Install the kernel from a tarball bundled inside the app's resources
+   * (no network download). The sha512 is read from a sidecar file produced
+   * by build-runtime.mjs. Used on first launch so the user need not download
+   * the kernel separately.
+   */
+  async installFromLocalTarball(tarballPath: string, sha512Path: string): Promise<CurrentKernel> {
+    if (this.opts.source === 'dev') return this.initDev()
+    await fs.mkdir(path.join(this.root, STAGING_DIR), { recursive: true })
+    const tarball = path.join(this.root, STAGING_DIR, TARBALL_FILE)
+    // Copy the bundled tarball into staging so activateTarball's cleanup
+    // (rm -rf staging) never deletes the original resource.
+    await fs.copyFile(tarballPath, tarball)
+
+    // Verify integrity against the bundled sidecar.
+    this.status({ phase: 'extracting', message: '正在校验内置运行时…', progress: null })
+    const expected = (await fs.readFile(sha512Path, 'utf8')).trim().toLowerCase()
+    const actual = await sha512File(tarball)
+    if (!verifyIntegrity(expected, actual)) {
+      throw new Error(`内置运行时完整性校验失败（期望 ${expected.slice(0, 16)}…，实际 ${actual.slice(0, 16)}…）`)
+    }
+    this.log(`bundled tarball verified: ${path.basename(tarballPath)}`)
+    return this.activateTarball(tarball)
   }
 
   private versionDirName(manifest: KernelManifest): string {

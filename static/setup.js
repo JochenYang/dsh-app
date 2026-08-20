@@ -37,33 +37,51 @@ window.dshSetup.onStatus((status) => {
       setPhase('正在检查更新')
       setMessage(status.message)
       setProgress(null)
+      hideActions()
       break
     case 'downloading':
       setPhase('正在下载内核')
       setMessage(status.message)
       setProgress(status.progress)
+      hideActions()
       break
     case 'extracting':
     case 'installing':
     case 'starting':
-      setPhase('正在安装')
+      // Bundled or in-progress activation: silent, no buttons.
+      setPhase('正在初始化应用内核')
       setMessage(status.message)
       setProgress(null)
+      hideActions()
       break
     case 'ready':
       setPhase('就绪')
       setMessage('正在启动 DSH App…')
+      hideActions()
       break
     case 'error':
       setPhase('出现问题')
       setMessage(status.message)
       showError(status.error || 'Unknown error')
       break
+    case 'idle':
+      // Online setup fallback: the user must click install to download.
+      setPhase('DSH App 安装')
+      setMessage(status.message)
+      el.install.hidden = false
+      el.install.textContent = '安装'
+      el.cancel.hidden = false
+      break
     default:
       setPhase('DSH App 安装')
       setMessage(status.message)
   }
 })
+
+function hideActions() {
+  el.install.hidden = true
+  el.cancel.hidden = true
+}
 
 el.install.addEventListener('click', () => {
   if (busy) return
@@ -77,8 +95,9 @@ el.install.addEventListener('click', () => {
 
 el.cancel.addEventListener('click', () => window.dshSetup.cancel())
 
-// Show the install button immediately on first run.
-setPhase('DSH App 安装')
-setMessage('内核运行时尚未安装。')
-el.install.hidden = false
-el.install.textContent = '安装'
+// Wait for the first status from the main process before showing anything:
+// bundled activation sends extracting/installing immediately (silent), while
+// the online fallback sends idle (then we show the install button).
+setPhase('正在准备…')
+setMessage('正在初始化应用内核。')
+hideActions()
