@@ -29,7 +29,7 @@ import { c as createTar } from 'tar'
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const [platform = process.platform, arch = process.arch, versionArg] = process.argv.slice(2)
 
-const DSH_VERSION = versionArg ?? process.env.DSH_VERSION ?? '0.1.0-rc.7'
+const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || '0.1.0-rc.7'
 const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION ?? '0.1.0'
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
