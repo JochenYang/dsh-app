@@ -20,7 +20,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,7 +29,7 @@ import { c as createTar } from 'tar'
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const [platform = process.platform, arch = process.arch, versionArg] = process.argv.slice(2)
 
-const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || '0.1.0-rc.7'
+const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || '0.1.0-rc.8'
 const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION ?? '0.1.0'
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
@@ -45,6 +45,50 @@ function run(cmd, args, cwd) {
   else execFileSync(cmd, args, opts)
 }
 
+// Map a (platform, arch) to the nodejs.org dist tuple. nodejs.org uses
+// 'win'|'darwin'|'linux' and 'x64'|'arm64'; our caller already passes those.
+const NODE_DIST_PLATFORM = { win32: 'win', darwin: 'darwin', linux: 'linux' }
+const NODE_DIST_EXT = { win32: 'zip', darwin: 'tar.gz', linux: 'tar.xz' }
+
+async function downloadNodeBinary(platform, arch, destDir) {
+  const ver = process.version // e.g. v22.x — matches the runtime's own major
+  const distPlatform = NODE_DIST_PLATFORM[platform]
+  if (!distPlatform) throw new Error(`unsupported platform for node download: ${platform}`)
+  const ext = NODE_DIST_EXT[platform]
+  const base = process.env.NODE_DIST_MIRROR?.replace(/\/$/, '') || 'https://nodejs.org/dist'
+  const archiveName = `node-${ver}-${distPlatform}-${arch}`
+  const url = `${base}/${ver}/${archiveName}.${ext}`
+  const archivePath = path.join(destDir, `node-archive.${ext}`)
+  console.log(`$ download ${url}`)
+  const res = await fetch(url, { redirect: 'follow' })
+  if (!res.ok) throw new Error(`node dist download failed (${res.status}): ${url}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  await writeFile(archivePath, buf)
+  // Extract to a temp dir then move just the node binary into destDir.
+  // Windows: MSYS tar mangles drive-letter paths and bsdtar-on-win is flaky
+  // for zip, so use PowerShell Expand-Archive via cmd. mac/linux: system tar
+  // auto-detects gz/xz.
+  const extractDir = path.join(destDir, 'extract')
+  await rm(extractDir, { recursive: true, force: true })
+  await mkdir(extractDir, { recursive: true })
+  if (platform === 'win32') {
+    execFileSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${archivePath}' -DestinationPath '${extractDir}' -Force`], { stdio: 'inherit' })
+  } else {
+    execFileSync('tar', ['-xf', archivePath, '-C', extractDir], { stdio: 'inherit' })
+  }
+  const nodeBin = platform === 'win32' ? 'node.exe' : 'node'
+  const src = path.join(extractDir, archiveName, 'bin', nodeBin)
+  // Windows official zip ships node.exe at the archive root, not under bin/.
+  const winSrc = path.join(extractDir, archiveName, nodeBin)
+  const finalSrc = platform === 'win32' ? winSrc : src
+  await rm(path.join(destDir, nodeBin), { force: true })
+  await rename(finalSrc, path.join(destDir, nodeBin))
+  if (platform !== 'win32') execFileSync('chmod', ['+x', path.join(destDir, nodeBin)])
+  await rm(extractDir, { recursive: true, force: true })
+  await rm(archivePath, { force: true })
+  console.log(`node ${ver} ${distPlatform}-${arch} placed at ${path.join(destDir, nodeBin)}`)
+}
+
 async function main() {
   const work = path.join(root, 'runtime-dist', 'work')
   const runtimeDir = path.join(work, 'runtime')
@@ -52,13 +96,11 @@ async function main() {
   await mkdir(path.join(runtimeDir, 'node'), { recursive: true })
   await mkdir(path.join(runtimeDir, 'app'), { recursive: true })
 
-  // 1. Node.js binary for the target platform (from the CI runner's own node).
-  const nodeBin = process.platform === 'win32' ? 'node.exe' : 'node'
-  await cp(process.execPath, path.join(runtimeDir, 'node', nodeBin))
-  if (process.platform !== 'win32') {
-    // mac/linux node binary needs exec permission preserved.
-    execFileSync('chmod', ['+x', path.join(runtimeDir, 'node', nodeBin)])
-  }
+  // 1. Node.js binary for the TARGET platform/arch (not the runner's own node).
+  //    Copying process.execPath produced wrong-arch binaries when the runner
+  //    (e.g. x64 windows-latest) built an arm64 runtime, so the kernel could
+  //    not start on arm64 hosts. Download the official same-version archive.
+  await downloadNodeBinary(platform, arch, path.join(runtimeDir, 'node'))
 
   // 2. npm-installed dsh profile. The suite plugins are added via file: refs
   //    so npm installs them into the same flattened tree. Their lib/ outputs
@@ -93,11 +135,19 @@ async function main() {
     source: 'artifact',
   }
 
-  // 4. Tar the runtime directory (single top-level dir: runtime/).
+  // 4. Write manifest.json (integrity left blank — it cannot reference the
+  //    archive that contains it without a self-referential paradox). The
+  //    authoritative integrity is the sidecar .sha512; activateTarball /
+  //    installFromLocalTarball verify against that, not manifest.integrity.
+  //    The runtime-dist/manifest.json copy is patched with the real sha512
+  //    after tarring for the artifact resolver / release metadata.
+  await writeFile(path.join(runtimeDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+
+  // 5. Tar the runtime directory (single top-level dir: runtime/).
   const tgzPath = path.join(root, 'runtime-dist', tgzName)
   await createTar({ gzip: true, file: tgzPath, cwd: work }, ['runtime'])
 
-  // 5. sha512 of the tarball goes into the manifest AND a sidecar asset.
+  // 6. sha512 sidecar — the trusted integrity value used at install time.
   const hash = createHash('sha512')
   await new Promise((resolve, reject) => {
     const stream = createReadStream(tgzPath)
@@ -107,13 +157,11 @@ async function main() {
   })
   const sha512 = hash.digest('hex')
   await writeFile(`${tgzPath}.sha512`, `${sha512}\n`)
-
-  manifest.integrity = sha512
-  await writeFile(path.join(runtimeDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
   await rm(path.join(runtimeDir, 'app', 'node_modules', '.package-lock.json'), { force: true })
 
-  // 6. Keep a copy of the manifest next to the tarball for the artifact resolver.
-  await cp(path.join(runtimeDir, 'manifest.json'), path.join(root, 'runtime-dist', 'manifest.json'))
+  // 7. Release-metadata copy of the manifest with the real integrity filled in.
+  manifest.integrity = sha512
+  await writeFile(path.join(root, 'runtime-dist', 'manifest.json'), JSON.stringify(manifest, null, 2))
 
   console.log(`\nRuntime artifact ready: ${tgzPath}`)
   console.log(`sha512: ${sha512}`)
