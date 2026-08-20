@@ -20,6 +20,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import path from 'node:path'
@@ -117,16 +118,53 @@ async function main() {
     version: DSH_VERSION,
     dependencies: {
       '@deepseek-ai/dsh': DSH_VERSION,
-      // Second-level peers of @deepseek-ai/dsh-app-boot (which is itself a
-      // peer of dsh). npm --legacy-peer-deps only installs the direct peers
-      // declared by dsh, not the peers of dsh's peers, so these must be
-      // listed explicitly or dsh-app-boot fails to resolve them at runtime.
-      '@deepseek-ai/cordis-plugin-group': '^1.0.1',
-      '@deepseek-ai/dsh-invariants': '^0.1.0-rc.8',
     },
   }
   await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
   run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
+
+  // 2a. npm --legacy-peer-deps skips ALL peer resolution, so second-level
+  //     peers (peers of dsh's peers, e.g. dsh-timeout, dsh-scope, dsh-sandbox)
+  //     are missing and crash dsh at boot. Scan every installed package's
+  //     peerDependencies and add any that are absent from node_modules as
+  //     direct dependencies, then reinstall. Generic: new peers added by
+  //     future dsh versions are picked up automatically.
+  const nmDir = path.join(runtimeDir, 'app', 'node_modules')
+  const nmDeep = path.join(nmDir, '@deepseek-ai')
+  const missingPeers = new Set()
+  // Walk every package.json under node_modules and collect declared peers.
+  for (const scopeDir of [nmDir, nmDeep].filter(existsSync)) {
+    for (const entry of readdirSync(scopeDir)) {
+      const pkgDirs = scopeDir === nmDeep ? [path.join(scopeDir, entry)] : (entry.startsWith('@') ? [] : [path.join(scopeDir, entry)])
+      for (const pkgDir of pkgDirs) {
+        const pj = path.join(pkgDir, 'package.json')
+        if (!existsSync(pj)) continue
+        const pkg = JSON.parse(readFileSync(pj, 'utf8'))
+        if (!pkg.peerDependencies) continue
+        for (const peer of Object.keys(pkg.peerDependencies)) {
+          // Check if this peer exists anywhere in the flattened node_modules.
+          const peerPath = peer.startsWith('@')
+            ? path.join(nmDir, peer)
+            : path.join(nmDir, peer)
+          if (!existsSync(path.join(peerPath, 'package.json'))) {
+            missingPeers.add(peer)
+          }
+        }
+      }
+    }
+  }
+  if (missingPeers.size > 0) {
+    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    const peerSpecs = {}
+    for (const name of missingPeers) {
+      const ver = execFileSync(npmBin, ['view', name, 'version'], { encoding: 'utf8', shell: process.platform === 'win32' }).trim()
+      peerSpecs[name] = name.startsWith('@deepseek-ai/dsh-') ? `^${DSH_VERSION}` : `^${ver}`
+      console.log(`missing peer: ${name}@${peerSpecs[name]}`)
+    }
+    appPkg.dependencies = { ...appPkg.dependencies, ...peerSpecs }
+    await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
+    run(npmBin, ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
+  }
 
   // 2b. Copy the built suite plugins into the runtime's node_modules so dsh
   //     can resolve them. Each plugin ships its package.json (for the main
