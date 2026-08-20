@@ -345,15 +345,19 @@ export function createMainWindow(url: string): BrowserWindow {
 /**
  * Setup window: shown before the kernel is ready (first run, repair,
  * update install). A tiny static page wired through a contextBridge preload.
+ * Pass `deferShow` to create the window hidden and only reveal it after a
+ * short delay — used for bundled (local) activation, which is fast enough
+ * that flashing a window for a second feels worse than showing nothing.
  */
-export function createSetupWindow(): BrowserWindow {
+export function createSetupWindow(deferShow = false): BrowserWindow {
   const win = new BrowserWindow({
     width: 520,
     height: 380,
     resizable: false,
     maximizable: false,
     fullscreenable: false,
-    title: 'DSH App — 安装',
+    show: !deferShow,
+    title: 'DSH App',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -362,5 +366,12 @@ export function createSetupWindow(): BrowserWindow {
     },
   })
   void win.loadFile(path.join(__dirname, '..', 'static', 'setup.html'))
+  if (deferShow) {
+    // Only show the window if activation is still in progress after a brief
+    // grace period; a fast local activation never surfaces a window at all.
+    setTimeout(() => {
+      if (!win.isDestroyed()) win.show()
+    }, 1200)
+  }
   return win
 }

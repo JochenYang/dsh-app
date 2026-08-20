@@ -237,13 +237,17 @@ async function boot(): Promise<void> {
     const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
     const bundledSha = `${bundledTgz}.sha512`
     if (!isDev && existsSync(bundledTgz) && existsSync(bundledSha)) {
-      setupWindow = createSetupWindow()
+      // Defer showing the window: a fast local activation may finish before
+      // the grace period, so the user sees the main window directly with no
+      // intermediate "install" flash.
+      setupWindow = createSetupWindow(true)
       try {
         await kernel.installFromLocalTarball(bundledTgz, bundledSha)
         await startServerAndOpenWindow()
       } catch (err) {
-        // Bundled activation failed — fall through to online install so the
-        // app is still usable. Surface the cause in the setup window.
+        // Bundled activation failed — make sure the window is visible for the
+        // online fallback, then fall through to online install.
+        setupWindow?.show()
         broadcastStatus({ phase: 'error', message: '内置内核初始化失败，改为在线安装', progress: null, error: (err as Error).message })
         await installKernel()
       }

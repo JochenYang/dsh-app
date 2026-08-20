@@ -102,9 +102,12 @@ async function main() {
   //    not start on arm64 hosts. Download the official same-version archive.
   await downloadNodeBinary(platform, arch, path.join(runtimeDir, 'node'))
 
-  // 2. npm-installed dsh profile. The suite plugins are added via file: refs
-  //    so npm installs them into the same flattened tree. Their lib/ outputs
-  //    are build artifacts (not committed), so build each plugin first.
+  // 2. npm-installed dsh profile. The suite plugins are NOT declared as
+  //    file: dependencies here — a relative file: path resolves outside the
+  //    runtime dir and breaks on a clean CI checkout (and would become a
+  //    dangling symlink once tarred). Instead we npm install dsh alone, then
+  //    copy each plugin's built lib/ + package.json into node_modules by hand
+  //    so the runtime is fully self-contained.
   for (const name of suitePlugins) {
     run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], path.join(root, 'plugins', name.replace('@dsh-app/', '')))
   }
@@ -114,13 +117,24 @@ async function main() {
     version: DSH_VERSION,
     dependencies: {
       '@deepseek-ai/dsh': DSH_VERSION,
-      ...Object.fromEntries(
-        suitePlugins.map((name) => [name, `file:../../plugins/${name.replace('@dsh-app/', '')}`]),
-      ),
     },
   }
   await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
   run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
+
+  // 2b. Copy the built suite plugins into the runtime's node_modules so dsh
+  //     can resolve them. Each plugin ships its package.json (for the main
+  //     field) + the lib/ build output; no source or external paths needed.
+  const nmScope = path.join(runtimeDir, 'app', 'node_modules', '@dsh-app')
+  await mkdir(nmScope, { recursive: true })
+  for (const name of suitePlugins) {
+    const shortName = name.replace('@dsh-app/', '')
+    const srcDir = path.join(root, 'plugins', shortName)
+    const destDir = path.join(nmScope, shortName)
+    await mkdir(destDir, { recursive: true })
+    await cp(path.join(srcDir, 'package.json'), path.join(destDir, 'package.json'))
+    await cp(path.join(srcDir, 'lib'), path.join(destDir, 'lib'), { recursive: true })
+  }
 
   // 3. Runtime manifest.
   const tgzName = `dsh-runtime-${platform}-${arch}-${DSH_VERSION}.tgz`
