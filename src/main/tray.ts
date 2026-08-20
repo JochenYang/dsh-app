@@ -32,7 +32,7 @@ export function createTray(callbacks: TrayCallbacks): Tray {
   const version = callbacks.getCurrentVersion()
   const kernelLabel = version ? `检查内核更新…（当前 dsh ${version}）` : '检查内核更新…'
   const menu = Menu.buildFromTemplate([
-    { label: '打开 DSH App', click: callbacks.onOpen },
+    { label: `打开 ${APP_NAME}`, click: callbacks.onOpen },
     { type: 'separator' },
     { label: kernelLabel, click: callbacks.onCheckKernelUpdate },
     { label: '检查应用更新…', click: callbacks.onCheckAppUpdate },

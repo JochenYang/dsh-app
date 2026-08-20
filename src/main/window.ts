@@ -33,7 +33,7 @@ const MAIN_WINDOW_OPTS = {
   height: 800,
   minWidth: 900,
   minHeight: 600,
-  title: 'DSH App',
+  title: 'DSH APP',
   autoHideMenuBar: true,
   // Title bar overlay: keeps native window controls but lets the web content
   // theme bleed through. The overlay color follows the page's own theme
@@ -367,7 +367,7 @@ export function createSetupWindow(deferShow = false): BrowserWindow {
     maximizable: false,
     fullscreenable: false,
     show: !deferShow,
-    title: 'DSH App',
+    title: 'DSH APP',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

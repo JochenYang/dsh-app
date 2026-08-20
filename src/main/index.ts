@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog } from 'electron'
 import net from 'node:net'
-import { existsSync } from 'node:fs'
+import { existsSync, renameSync } from 'node:fs'
 import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
@@ -49,7 +49,7 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 function broadcastStatus(status: KernelStatusPayload): void {
   broadcast(setupWindow, IPC.kernelStatus, status)
   broadcast(mainWindow, IPC.kernelStatus, status)
-  setTrayTooltip(status.phase === 'ready' ? `DSH App — dsh ${kernel.getCurrent()?.manifest.dshVersion ?? ''}` : `DSH App — ${status.message}`)
+  setTrayTooltip(status.phase === 'ready' ? `DSH APP — dsh ${kernel.getCurrent()?.manifest.dshVersion ?? ''}` : `DSH APP — ${status.message}`)
 }
 
 // ------------------------------------------------------------- lifecycle
@@ -57,6 +57,12 @@ function broadcastStatus(status: KernelStatusPayload): void {
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
   broadcastStatus({ phase: 'starting', message: '正在启动 dsh 服务…', progress: null })
+  // No main window yet: surface the setup window as a launch transition so the
+  // user gets immediate feedback while the kernel boots instead of a silent
+  // icon. If a window is already up (retry in flight), leave it alone.
+  if (!mainWindow && !setupWindow) {
+    setupWindow = createSetupWindow()
+  }
   const port = await findFreePort()
   // Brand suite wiring: profile-dir module links + the loader overlay that
   // inserts the brand rows. An older kernel without the suite plugins boots
@@ -105,7 +111,7 @@ async function handleServerDown(reason: string): Promise<void> {
       restartAttempts = 0
       void dialog.showMessageBox({
         type: 'warning',
-        title: 'DSH App',
+        title: 'DSH APP',
         message: `内核更新启动失败，已回滚到 dsh ${rolledBack.manifest.dshVersion}。`,
       })
       await startServerAndOpenWindow()
@@ -132,7 +138,7 @@ async function handleServerDown(reason: string): Promise<void> {
   if (restartAttempts >= 3) {
     void dialog.showMessageBox({
       type: 'error',
-      title: 'DSH App',
+      title: 'DSH APP',
       message: 'dsh 服务无法启动，应用即将退出。',
     })
     app.quit()
@@ -168,7 +174,7 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
             : result.reason === 'registry unreachable'
               ? '无法连接更新源，请检查网络后重试。'
               : `内核已是最新版本（dsh ${result.current ?? '未知'}）。`
-        void dialog.showMessageBox({ type: 'info', title: 'DSH App', message })
+        void dialog.showMessageBox({ type: 'info', title: 'DSH APP', message })
       }
       return
     }
@@ -183,7 +189,7 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
     })
     if (response === 0 && result.latest) await applyKernelUpdate(result.latest)
   } catch (err) {
-    if (manual) void dialog.showMessageBox({ type: 'error', title: 'DSH App', message: `更新检查失败：${(err as Error).message}` })
+    if (manual) void dialog.showMessageBox({ type: 'error', title: 'DSH APP', message: `更新检查失败：${(err as Error).message}` })
   }
 }
 
@@ -193,7 +199,7 @@ async function applyKernelUpdate(version: string): Promise<void> {
     broadcastStatus({ phase: 'installing', message: `已激活 dsh ${installed.manifest.dshVersion}`, progress: null })
     await startServerAndOpenWindow()
   } catch (err) {
-    void dialog.showMessageBox({ type: 'error', title: 'DSH App', message: `内核更新失败：${(err as Error).message}` })
+    void dialog.showMessageBox({ type: 'error', title: 'DSH APP', message: `内核更新失败：${(err as Error).message}` })
   }
 }
 
@@ -251,14 +257,11 @@ async function boot(): Promise<void> {
     getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
   })
 
-  const installed = isDev || (await kernel.isInstalled())
-  if (installed) {
-    // Initialize this.current so checkForUpdate / getCurrentVersion work.
-    // In dev mode this reads the checkout manifest; in artifact mode it
-    // loads the on-disk kernel. init() reuses the existing install and only
-    // reinstalls when the active dir is missing (isInstalled already ruled
-    // that out), so this is a local read, not a network fetch.
-    await kernel.init()
+  // load() reads the on-disk kernel (or the dev checkout manifest) into
+  // this.current — no network or install work. A null result means first run
+  // or a broken install, handled below by bundled/online activation.
+  const current = await kernel.load()
+  if (current) {
     await startServerAndOpenWindow()
   } else {
     // First run. Prefer a kernel tarball bundled inside the app's resources
@@ -284,7 +287,7 @@ async function boot(): Promise<void> {
     } else {
       // No bundled kernel: online setup wizard, driven by the user.
       setupWindow = createSetupWindow()
-      broadcastStatus({ phase: 'idle', message: 'DSH App 尚未安装。', progress: null })
+      broadcastStatus({ phase: 'idle', message: 'DSH APP 尚未安装。', progress: null })
     }
   }
 
@@ -296,6 +299,25 @@ async function boot(): Promise<void> {
 }
 
 // ---------------------------------------------------------------- app
+
+// Pin the userData directory to the DSH APP brand name, and migrate the old
+// "DSH App" directory once. Without this the product rename would change the
+// default userData path and orphan the installed kernel + settings. renameSync
+// is same-volume on every platform, so it preserves the existing install.
+const appDataDir = app.getPath('appData')
+const userDataDir = path.join(appDataDir, 'DSH APP')
+try {
+  const legacyDir = path.join(appDataDir, 'DSH App')
+  if (existsSync(legacyDir) && !existsSync(userDataDir)) {
+    renameSync(legacyDir, userDataDir)
+    console.log(`[userData] migrated ${legacyDir} → ${userDataDir}`)
+  }
+} catch (err) {
+  // Best-effort: on failure the new (empty) dir just falls back to a fresh
+  // first-run install, which handles itself.
+  console.error('[userData] migration failed:', err)
+}
+app.setPath('userData', userDataDir)
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {

@@ -1,8 +1,8 @@
 {
   "name": "dsh-app",
-  "productName": "DSH App",
-  "version": "0.1.5",
-  "description": "DSH App — branded desktop client for DeepSeek Harness (dsh). macOS / Windows / Linux.",
+  "productName": "DSH APP",
+  "version": "0.1.6",
+  "description": "DSH APP — branded desktop client for DeepSeek Harness (dsh). macOS / Windows / Linux.",
   "author": {
     "name": "dsh-app contributors",
     "email": "JochenYang@users.noreply.github.com"

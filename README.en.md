@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="resources/icon.png" alt="DSH App" width="128">
+  <img src="resources/icon.png" alt="DSH APP" width="128">
 </p>
 
-<h1 align="center">DSH App</h1>
+<h1 align="center">DSH APP</h1>
 
 <p align="center">
   A community-maintained branded desktop client for

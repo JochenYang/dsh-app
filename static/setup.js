@@ -47,16 +47,23 @@ window.dshSetup.onStatus((status) => {
       break
     case 'extracting':
     case 'installing':
-    case 'starting':
       // Bundled or in-progress activation: silent, no buttons.
       setPhase('正在初始化应用内核')
       setMessage(status.message)
       setProgress(null)
       hideActions()
       break
+    case 'starting':
+      // Launch transition for an already-installed kernel: show progress
+      // while the server boots, no buttons.
+      setPhase('正在启动 DSH APP')
+      setMessage(status.message)
+      setProgress(null)
+      hideActions()
+      break
     case 'ready':
       setPhase('就绪')
-      setMessage('正在启动 DSH App…')
+      setMessage('正在启动 DSH APP…')
       hideActions()
       break
     case 'error':
@@ -66,14 +73,14 @@ window.dshSetup.onStatus((status) => {
       break
     case 'idle':
       // Online setup fallback: the user must click install to download.
-      setPhase('DSH App 安装')
+      setPhase('DSH APP 安装')
       setMessage(status.message)
       el.install.hidden = false
       el.install.textContent = '安装'
       el.cancel.hidden = false
       break
     default:
-      setPhase('DSH App 安装')
+      setPhase('DSH APP 安装')
       setMessage(status.message)
   }
 })

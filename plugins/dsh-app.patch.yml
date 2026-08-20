@@ -1,4 +1,4 @@
-# DSH App brand suite — loader overlay injected by the desktop shell via
+# DSH APP brand suite — loader overlay injected by the desktop shell via
 # `dsh web --patch`. Applied AFTER every bundle layer and the profile's own
 # cordis.patch.yml (last write wins per row), so these rows join the composed
 # tree without touching the upstream profile templates.

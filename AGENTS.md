@@ -1,11 +1,11 @@
-# AGENTS.md — DSH App (dsh-app)
+# AGENTS.md — DSH APP (dsh-app)
 
 Guidance for AI coding agents working in this repository. Read this first;
 it assumes you know nothing about the project.
 
 ## 1. Project overview
 
-DSH App is a **branded desktop client for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)** — an Electron app
+DSH APP is a **branded desktop client for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)** — an Electron app
 for Windows / macOS / Linux, aimed at public release. Version `0.1.0`, MIT.
 
 The essential design idea is **"self-contained, no fork"**:
@@ -51,7 +51,9 @@ src/shared/      Shared constants + types (imported by main + kernel)
 static/          Setup/install window (first-run UI, zh-CN), no framework
 plugins/         Brand plugin suite: plugin-brand (host), plugin-client-ui
                  (client), dsh-app.patch.yml (loader overlay)
-scripts/         copy-static, kernel runtime build, mirror probe + dev probes
+scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
+                 release-notes generator (gen-release-notes.mjs)
+CHANGELOG.md     Bilingual version changelog; feeds release-notes generation
 .github/         CI: release.yml (runtime artifact matrix + app builds)
 docs/            ARCHITECTURE.md
 resources/       App icons
@@ -263,25 +265,67 @@ Plugin builds (CI runs these before `build-runtime`):
 
 ## 10. Release / deployment
 
-CI (`release.yml`) triggers on a `v*` tag push (or `workflow_dispatch` with an
-optional `dsh_version` input). It runs two jobs:
+### CI pipeline
 
-- **runtime**: a 6-cell matrix (win32/darwin/linux × x64/arm64) that builds
-  the suite plugins, then `build-runtime.mjs`, and uploads
+`release.yml` triggers on a `v*` tag push (or `workflow_dispatch` with an
+optional `dsh_version` input). Two jobs run per tag:
+
+- **runtime**: a 6-cell matrix (win32/darwin/linux × x64/arm64) builds the
+  suite plugins, then `build-runtime.mjs`, and uploads
   `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + `manifest.json` to the
-  GitHub Release.
+  GitHub Release (creates it as a **draft** if absent).
 - **app**: builds + packages the shell per OS with `electron-builder` and
   `--publish always`; macOS notarization via `--config.mac.notarize=true`
-  when Apple secrets are present.
+  when Apple signing secrets are present.
 
-**Pre-release checklist is NOT complete**:
-`electron-builder.yml` `publish.owner` and `DSH_APP_ARTIFACT_OWNER` default
-both still use the `YOUR_GITHUB_OWNER` placeholder — production artifact
-resolution and app self-update will not work until replaced. macOS signing /
-notarization and (optional) Windows signing secrets must be provided as CI
-secrets; `resources/icon.png` is a placeholder brand icon; the suite plugins
-are npm-installed via `file:` references and should switch to registry
-versions once published.
+### Release SOP (shell version, e.g. 0.1.6)
+
+1. **Bump + changelog**: set `version` in `package.json`; move the
+   `[Unreleased]` entry in `CHANGELOG.md` to `[v0.1.6]` (bilingual rules
+   below). Commit both.
+2. **Tag + push**: `git tag v0.1.6 && git push origin v0.1.6`. The tag must
+   equal the `package.json` version.
+3. **Wait for CI green**: poll
+   `gh run list --repo JochenYang/dsh-app --workflow release.yml --limit 1`
+   then `gh run view <id> --repo JochenYang/dsh-app`. All 12 jobs
+   (6 runtime + 6 app) must succeed; the release stays a draft.
+4. **Generate release notes**:
+   `node scripts/gen-release-notes.mjs v0.1.6` → writes `release-notes.md`.
+5. **Publish the draft**:
+   `gh release edit v0.1.6 --repo JochenYang/dsh-app --draft=false --notes-file release-notes.md`
+
+### Release notes rules
+
+- **Incremental only**: notes describe what changed *since the last released
+  version* — never a full history or a `vX...vY` compare dump.
+- **Bilingual, Chinese on top**: zh block first and open by default, English
+  folded below it, wrapped in `<details>/<summary>` — GitHub strips JS/CSS in
+  notes, so `<details>` is the native "click to switch" pattern. Let
+  `scripts/gen-release-notes.mjs` assemble this from `CHANGELOG.md`; do not
+  hand-write the HTML.
+- Keep the two languages' bullets aligned (same items, same order); record
+  each public/user-visible change as one bullet per language.
+
+### Failure recovery (learned the hard way)
+
+- **Never re-run the same tag** to "regenerate" a release: electron-builder's
+  publish is not idempotent and fails 422 `already_exists` on
+  installers/`latest-*.yml`. To rebuild: delete the draft release
+  (`gh api -X DELETE repos/JochenYang/dsh-app/releases/<id>`), delete the tag
+  (`git tag -d v0.1.6 && git push origin :refs/tags/v0.1.6`), then re-push.
+- A **single failed job** recovers best with `gh run rerun <run> --failed`
+  (also fixes a transient 404 from the runtime Attach step racing across the
+  6 parallel matrix jobs). Kernel version in runtime artifacts defaults to the
+  registry dist-tag, distinct from the shell version.
+
+**Pre-release checklist is NOT complete**: `DSH_APP_ARTIFACT_OWNER` defaults
+to `YOUR_GITHUB_OWNER` and is not injected in CI (`electron-builder.yml`
+`publish` is already set to `JochenYang/dsh-app`) — online kernel-update
+downloads will not resolve until that env is supplied per-run or set in the
+workflow. macOS signing/notarization and (optional) Windows signing secrets
+must be provided as CI secrets; `resources/icon.png` is a placeholder brand
+icon; the suite plugins are npm-installed via `file:` references and should
+switch to registry versions once published.
 
 ## 11. Known TODOs / scaffolds (do not assume finished)
 

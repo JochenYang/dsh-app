@@ -1,6 +1,6 @@
 {
   "name": "@dsh-app/plugin-client-ui",
-  "description": "DSH App brand client plugin: brand theme registration.",
+  "description": "DSH APP brand client plugin: brand theme registration.",
   "version": "0.1.0",
   "type": "module",
   "main": "lib/index.js",

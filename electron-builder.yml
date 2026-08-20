@@ -1,5 +1,5 @@
 appId: com.dshapp.desktop
-productName: DSH App
+productName: DSH APP
 copyright: Copyright © 2026 dsh-app contributors
 directories:
   buildResources: resources
@@ -35,7 +35,7 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
-  shortcutName: DSH App
+  shortcutName: DSH APP
 
 mac:
   target:
@@ -56,4 +56,4 @@ linux:
   # ships only an x86 binary and cannot run on arm64 Linux runners; arm64
   # CI jobs restrict to AppImage only via --config.linux.target.
   category: Development
-  synopsis: DSH App desktop client for DeepSeek Harness
+  synopsis: DSH APP desktop client for DeepSeek Harness

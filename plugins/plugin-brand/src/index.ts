@@ -1,5 +1,5 @@
 /**
- * DSH App brand host plugin (server side).
+ * DSH APP brand host plugin (server side).
  *
  * Runs inside the dsh host process (the local dsh server the desktop shell
  * spawns). It should provide:

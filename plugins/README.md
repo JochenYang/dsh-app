@@ -1,4 +1,4 @@
-# DSH App — brand plugin suite (M3)
+# DSH APP — brand plugin suite (M3)
 
 The suite is two dsh plugins that layer on top of upstream dsh **without forking
 it**. This is what keeps the desktop app updateable: when upstream dsh releases a

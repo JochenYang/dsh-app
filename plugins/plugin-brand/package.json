@@ -1,6 +1,6 @@
 {
   "name": "@dsh-app/plugin-brand",
-  "description": "DSH App brand host plugin: brand settings namespace, app/kernel info service, desktop bridge for shell capabilities.",
+  "description": "DSH APP brand host plugin: brand settings namespace, app/kernel info service, desktop bridge for shell capabilities.",
   "version": "0.1.0",
   "type": "module",
   "main": "lib/index.js",

@@ -1,5 +1,5 @@
 /**
- * DSH App brand client plugin (browser side).
+ * DSH APP brand client plugin (browser side).
  *
  * Loaded by the dsh web client composition through the `dsh.client` metadata
  * in package.json. Currently registers only the brand theme; the upstream

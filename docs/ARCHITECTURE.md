@@ -1,4 +1,4 @@
-# DSH App — Architecture
+# DSH APP — Architecture
 
 ## 1. Design goals
 

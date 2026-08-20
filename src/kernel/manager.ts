@@ -60,35 +60,25 @@ export class KernelManager {
     this.opts.log?.(`[kernel] ${message}`)
   }
 
-  // ------------------------------------------------------------------ init
+  // ----------------------------------------------------------- init / load
 
-  async init(): Promise<CurrentKernel> {
-    await fs.mkdir(this.root, { recursive: true })
-    if (this.opts.source === 'dev') {
-      return this.initDev()
-    }
+  /**
+   * Load the currently active kernel into memory: dev mode reads the local
+   * checkout manifest; artifact mode reads the on-disk install. Returns null
+   * when no usable kernel exists (first run or a broken install) and never
+   * performs network or install work, letting the caller choose the path.
+   */
+  async load(): Promise<CurrentKernel | null> {
+    if (this.opts.source === 'dev') return this.initDev()
     this.current = await loadCurrentKernel(this.root)
-    if (this.current) {
-      const dir = this.kernelDir(this.current.active)
-      if (await exists(dir)) {
-        this.log(`active kernel ${this.current.active} present`)
-        return this.current
-      }
-      this.log(`active kernel ${this.current.active} missing — reinstall`)
-      this.current = null
+    if (!this.current) return null
+    if (await exists(this.kernelDir(this.current.active))) {
+      this.log(`active kernel ${this.current.active} present`)
+      return this.current
     }
-    // First run (or broken install): fetch the latest kernel.
-    const installed = await this.installLatest('installing')
-    this.status({ phase: 'ready', message: '内核就绪', progress: null })
-    return installed
-  }
-
-  /** True when a usable kernel is already on disk (or dev mode). */
-  async isInstalled(): Promise<boolean> {
-    if (this.opts.source === 'dev') return true
-    const current = await loadCurrentKernel(this.root)
-    if (!current) return false
-    return exists(this.kernelDir(current.active))
+    this.log(`active kernel ${this.current.active} missing — reinstall`)
+    this.current = null
+    return null
   }
 
   private async initDev(): Promise<CurrentKernel> {
