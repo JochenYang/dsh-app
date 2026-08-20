@@ -10,6 +10,14 @@ files:
 asar: true
 npmRebuild: false
 
+# Kernel runtime tarball shipped inside the installer so first launch can
+# activate it locally without a download. prepare-bundled-kernel.mjs copies
+# the matching platform/arch tgz into bundled-kernel/ before packaging.
+extraResources:
+  - from: bundled-kernel
+    to: kernel
+    filter: ["kernel.tgz", "kernel.tgz.sha512"]
+
 # ---- Shell update channel (electron-updater, GitHub Releases) ----
 publish:
   provider: github

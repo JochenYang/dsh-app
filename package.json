@@ -1,7 +1,7 @@
 {
   "name": "dsh-app",
   "productName": "DSH App",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH App — branded desktop client for DeepSeek Harness (dsh). macOS / Windows / Linux.",
   "author": {
     "name": "dsh-app contributors",
@@ -14,10 +14,13 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux",
+    "dist": "npm run build && node scripts/prepare-bundled-kernel.mjs && electron-builder",
+    "dist:win": "npm run build && node scripts/prepare-bundled-kernel.mjs win32 && electron-builder --win",
+    "dist:mac": "npm run build && node scripts/prepare-bundled-kernel.mjs darwin && electron-builder --mac",
+    "dist:linux": "npm run build && node scripts/prepare-bundled-kernel.mjs linux && electron-builder --linux",
+    "dist:win:arm64": "npm run build && node scripts/prepare-bundled-kernel.mjs win32 arm64 && electron-builder --win --arm64",
+    "dist:mac:arm64": "npm run build && node scripts/prepare-bundled-kernel.mjs darwin arm64 && electron-builder --mac --arm64",
+    "dist:linux:arm64": "npm run build && node scripts/prepare-bundled-kernel.mjs linux arm64 && electron-builder --linux --arm64",
     "runtime:build": "node scripts/build-runtime.mjs"
   },
   "dependencies": {

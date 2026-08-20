@@ -36,16 +36,19 @@ jobs:
           - os: windows-latest
             platform: win32
             arch: arm64
-          - os: macos-latest
+          # macOS: split runners by arch so native optional deps (sharp/koffi)
+          # match the target. macos-13 is x64; macos-latest is arm64.
+          - os: macos-13
             platform: darwin
             arch: x64
           - os: macos-latest
             platform: darwin
             arch: arm64
+          # Linux: ubuntu-24.04-arm is a free arm64 runner for public repos.
           - os: ubuntu-latest
             platform: linux
             arch: x64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
     runs-on: ${{ matrix.os }}
@@ -84,12 +87,48 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --draft
           gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 runtime-dist/manifest.json --clobber
 
+      # Also expose the tgz as a workflow artifact so the app job can bundle it
+      # into the installer without re-downloading from the (still-draft) release.
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            runtime-dist/dsh-runtime-*.tgz
+            runtime-dist/dsh-runtime-*.tgz.sha512
+          retention-days: 1
+
   app:
-    name: app (${{ matrix.os }})
+    name: app (${{ matrix.os }}/${{ matrix.arch }})
+    needs: runtime
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            arch: x64
+            platform: win32
+            target: win
+          - os: windows-latest
+            arch: arm64
+            platform: win32
+            target: win
+          - os: macos-13
+            arch: x64
+            platform: darwin
+            target: mac
+          - os: macos-latest
+            arch: arm64
+            platform: darwin
+            target: mac
+          - os: ubuntu-latest
+            arch: x64
+            platform: linux
+            target: linux
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux
+            target: linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -104,6 +143,19 @@ jobs:
       - name: Build shell
         run: npm run build
 
+      # Pull the matching kernel tgz built by the runtime job and stage it as
+      # bundled-kernel/ so electron-builder's extraResources ships it inside the
+      # installer (first-launch local activation, no user download).
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-${{ matrix.platform }}-${{ matrix.arch }}
+          path: runtime-dist
+
+      - name: Stage bundled kernel
+        shell: bash
+        run: node scripts/prepare-bundled-kernel.mjs ${{ matrix.platform }} ${{ matrix.arch }}
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
         env:
@@ -114,11 +166,11 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -n "$CSC_LINK" ] && [ -n "$APPLE_ID" ]; then
-            npx electron-builder --mac --publish always --config.mac.notarize=true
+            npx electron-builder --mac --${{ matrix.arch }} --publish always --config.mac.notarize=true
           else
             # No signing credentials configured: ship an unsigned build
             # instead of failing the whole release.
-            npx electron-builder --mac --publish always --config.mac.notarize=false --config.mac.identity=null
+            npx electron-builder --mac --${{ matrix.arch }} --publish always --config.mac.notarize=false --config.mac.identity=null
           fi
 
       - name: Package (Windows)
@@ -126,8 +178,8 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder --win --${{ matrix.arch }} --publish always
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: npx electron-builder --linux --publish always
+        run: npx electron-builder --linux --${{ matrix.arch }} --publish always
