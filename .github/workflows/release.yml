@@ -36,11 +36,10 @@ jobs:
           - os: windows-latest
             platform: win32
             arch: arm64
-          # macOS: both arches build on macos-latest (arm64). build-runtime.mjs
-          # downloads the target-arch node binary and forces npm to install
-          # target-arch native optional deps (--os/--cpu), so an arm64 runner
-          # can produce a correct x64 runtime. macos-13 x64 runners are scarce.
-          - os: macos-latest
+          # macOS: macos-15-intel is the supported x64 runner (macos-13 is
+          # deprecated Dec 2025); macos-latest is arm64. Building on a
+          # same-arch runner avoids cross-compiling native optional deps.
+          - os: macos-15-intel
             platform: darwin
             arch: x64
           - os: macos-latest
@@ -116,7 +115,7 @@ jobs:
             arch: arm64
             platform: win32
             target: win
-          - os: macos-latest
+          - os: macos-15-intel
             arch: x64
             platform: darwin
             target: mac
