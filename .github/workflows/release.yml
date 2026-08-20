@@ -131,10 +131,6 @@ jobs:
             arch: x64
             platform: darwin
             target: mac
-          - os: macos-latest
-            arch: arm64
-            platform: darwin
-            target: mac
           - os: ubuntu-latest
             arch: x64
             platform: linux
@@ -170,6 +166,10 @@ jobs:
         shell: bash
         run: node scripts/prepare-bundled-kernel.mjs ${{ matrix.platform }} ${{ matrix.arch }}
 
+      # macOS shares the single-update-file constraint with Windows: latest-mac.yml
+      # must carry both arches, so x64 + arm64 are built in ONE invocation. The
+      # bundled kernel is staged for x64; Apple Silicon users get the correct
+      # darwin-arm64 kernel via an automatic online download on first launch.
       - name: Package (macOS)
         if: runner.os == 'macOS'
         env:
@@ -180,11 +180,11 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -n "$CSC_LINK" ] && [ -n "$APPLE_ID" ]; then
-            npx electron-builder --mac --${{ matrix.arch }} --publish always --config.mac.notarize=true
+            npx electron-builder --mac --x64 --arm64 --publish always --config.mac.notarize=true
           else
             # No signing credentials configured: ship an unsigned build
             # instead of failing the whole release.
-            npx electron-builder --mac --${{ matrix.arch }} --publish always --config.mac.notarize=false --config.mac.identity=null
+            npx electron-builder --mac --x64 --arm64 --publish always --config.mac.notarize=false --config.mac.identity=null
           fi
 
       - name: Package (Windows)
