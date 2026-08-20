@@ -24,8 +24,23 @@ env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  # Create the single draft release BEFORE any parallel job attaches assets.
+  # electron-builder and the runtime Attach step both create the release when
+  # none exists; without this dedicated first job they race and end up with two
+  # v0.1.7 drafts and uploads split across them.
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ github.ref_name }}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --draft
+
   runtime:
     name: runtime (${{ matrix.os }}/${{ matrix.arch }})
+    needs: prepare-release
     strategy:
       fail-fast: false
       matrix:
