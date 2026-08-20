@@ -133,13 +133,13 @@ export class DshServer {
       if (process.platform === 'win32') {
         const patchFragment = patchArgs.map((token) => this.quoteForShell(token)).join(' ')
         const overlays = patchFragment !== '' ? `${patchFragment} ` : ''
-        return { command: `pnpm dsh web ${overlays}--host ${host} --port ${port}`, args: [], shell: true }
+        return { command: `pnpm dsh web ${overlays}--host ${host} --port ${port} --no-open`, args: [], shell: true }
       }
-      return { command: 'pnpm', args: ['dsh', 'web', ...patchArgs, '--host', host, '--port', String(port)] }
+      return { command: 'pnpm', args: ['dsh', 'web', ...patchArgs, '--host', host, '--port', String(port), '--no-open'] }
     }
     return {
       command: spec.nodePath,
-      args: [spec.scriptPath, '--profile', 'web', ...patchArgs, '--host', host, '--port', String(port)],
+      args: [spec.scriptPath, '--profile', 'web', ...patchArgs, '--host', host, '--port', String(port), '--no-open'],
     }
   }
 

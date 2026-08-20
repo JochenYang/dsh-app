@@ -327,6 +327,16 @@ export function createMainWindow(url: string): BrowserWindow {
   installExportToast(win)
 
   win.webContents.setWindowOpenHandler(({ url: target }) => {
+    // Same-origin window.open (e.g. the Models settings page opening a
+    // sub-view) should open inside the app, not be kicked to the browser.
+    try {
+      const parsed = new URL(target)
+      if (parsed.hostname === DEFAULT_HTTP_HOST) {
+        return { action: 'allow', overrideBrowserWindowOptions: MAIN_WINDOW_OPTS }
+      }
+    } catch {
+      // not a valid URL — fall through to external
+    }
     void shell.openExternal(target)
     return { action: 'deny' }
   })

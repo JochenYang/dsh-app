@@ -237,6 +237,20 @@ async function boot(): Promise<void> {
 
   registerIpc(controller)
 
+  // Create the tray before any server/kernel work so it persists even when
+  // the server fails to start (reinstall/retry loops). Otherwise the user
+  // has no way to interact with the app while the main window is absent.
+  createTray({
+    onOpen: () => {
+      if (!mainWindow) void startServerAndOpenWindow()
+      else mainWindow.show()
+    },
+    onCheckKernelUpdate: () => void checkKernelUpdate(true),
+    onCheckAppUpdate: () => checkShellUpdate(true),
+    onRestartServer: () => void startServerAndOpenWindow(),
+    getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
+  })
+
   const installed = isDev || (await kernel.isInstalled())
   if (installed) {
     // Initialize this.current so checkForUpdate / getCurrentVersion work.
@@ -273,17 +287,6 @@ async function boot(): Promise<void> {
       broadcastStatus({ phase: 'idle', message: 'DSH App 尚未安装。', progress: null })
     }
   }
-
-  createTray({
-    onOpen: () => {
-      if (!mainWindow) void startServerAndOpenWindow()
-      else mainWindow.show()
-    },
-    onCheckKernelUpdate: () => void checkKernelUpdate(true),
-    onCheckAppUpdate: () => checkShellUpdate(true),
-    onRestartServer: () => void startServerAndOpenWindow(),
-    getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
-  })
 
   initShellUpdater()
   setTimeout(() => checkShellUpdate(false), 10_000)

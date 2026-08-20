@@ -14,3 +14,8 @@ console.log('static assets copied → dist/static')
 
 await cp(path.join(root, 'plugins', 'dsh-app.patch.yml'), path.join(root, 'dist', 'main', 'dsh-app.patch.yml'))
 console.log('brand-suite overlay copied → dist/main/dsh-app.patch.yml')
+
+// Tray icon: copy into dist/ so it lands inside app.asar at dist/icon.png
+// (resources/ is the buildResources dir and is NOT packaged into asar).
+await cp(path.join(root, 'resources', 'icon.png'), path.join(root, 'dist', 'icon.png'))
+console.log('tray icon copied → dist/icon.png')

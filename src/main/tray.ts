@@ -1,4 +1,5 @@
 import { Menu, Tray, app } from 'electron'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { APP_NAME } from '../shared/constants'
 
@@ -16,7 +17,12 @@ let tray: Tray | null = null
 /** System tray with the essential lifecycle actions. */
 export function createTray(callbacks: TrayCallbacks): Tray {
   if (tray) return tray
-  const icon = path.join(__dirname, '..', '..', 'resources', 'icon.png')
+  // In dev: resources/icon.png (project root buildResources).
+  // In production: the icon is bundled inside app.asar at dist/icon.png
+  // (copied by scripts/copy-static.mjs), so __dirname/../icon.png resolves it.
+  const devIcon = path.join(__dirname, '..', '..', 'resources', 'icon.png')
+  const prodIcon = path.join(__dirname, '..', 'icon.png')
+  const icon = existsSync(prodIcon) ? prodIcon : devIcon
   tray = new Tray(icon)
   tray.setToolTip(APP_NAME)
 
