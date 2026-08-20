@@ -184,4 +184,11 @@ jobs:
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: npx electron-builder --linux --${{ matrix.arch }} --publish always
+        run: |
+          # deb packaging uses fpm (x86 binary only); on arm64 runners it
+          # cannot execute, so restrict arm64 to AppImage.
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            npx electron-builder --linux --arm64 --publish always --config.linux.target=AppImage
+          else
+            npx electron-builder --linux --x64 --publish always
+          fi

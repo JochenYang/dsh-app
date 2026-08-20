@@ -27,7 +27,8 @@ publish:
 win:
   target:
     - target: nsis
-      arch: [x64, arm64]
+  # arch is chosen by the CI command line (--x64 / --arm64); omitting it here
+  # avoids every app job building both arches and colliding on release assets.
   artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 nsis:
   oneClick: false
@@ -39,9 +40,8 @@ nsis:
 mac:
   target:
     - target: dmg
-      arch: [x64, arm64]
     - target: zip
-      arch: [x64, arm64]
+  # arch chosen by CI command line (--x64 / --arm64).
   category: public.app-category.developer-tools
   # Notarization is enabled in CI via `--config.mac.notarize=true` when
   # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID are present.
@@ -51,8 +51,9 @@ mac:
 linux:
   target:
     - target: AppImage
-      arch: [x64, arm64]
     - target: deb
-      arch: [x64, arm64]
+  # arch chosen by CI command line. Note: deb packaging uses fpm, which
+  # ships only an x86 binary and cannot run on arm64 Linux runners; arm64
+  # CI jobs restrict to AppImage only via --config.linux.target.
   category: Development
   synopsis: DSH App desktop client for DeepSeek Harness
