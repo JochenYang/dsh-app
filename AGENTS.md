@@ -221,7 +221,7 @@ Plugin builds (CI runs these before `build-runtime`):
 | `DSH_APP_DEV=1` | `src/main/index.ts` | Dev mode: use local checkout instead of downloaded kernel |
 | `DSH_APP_DEV_RUNTIME` | `src/main/index.ts` | Override the dev harness checkout path |
 | `DSH_APP_CHANNEL` | `index.ts`, `build-runtime.mjs`, `dev.ts` | `beta` → beta dist-tag; anything else = stable |
-| `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `index.ts` | GitHub owner/repo hosting runtime artifacts (defaults to placeholder `YOUR_GITHUB_OWNER` / `dsh-app`) |
+| `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `index.ts` | GitHub owner/repo hosting runtime artifacts (defaults to `JochenYang` / `dsh-app`) |
 | `DSH_APP_NPM_REGISTRIES` | `sources/registry.ts` | Comma-separated registry chain replacing the default (`npmjs.org` → `npmmirror.com`) |
 | `NPM_CONFIG_REGISTRY` | `sources/registry.ts` | Single-registry override; npmmirror still appended as fallback |
 | `DSH_APP_GITHUB_MIRRORS` | `sources/artifact.ts` | Comma-separated mirror URL prefixes; empty value disables mirrors |
@@ -321,14 +321,13 @@ optional `dsh_version` input). Two jobs run per tag:
   6 parallel matrix jobs). Kernel version in runtime artifacts defaults to the
   registry dist-tag, distinct from the shell version.
 
-**Pre-release checklist is NOT complete**: `DSH_APP_ARTIFACT_OWNER` defaults
-to `YOUR_GITHUB_OWNER` and is not injected in CI (`electron-builder.yml`
-`publish` is already set to `JochenYang/dsh-app`) — online kernel-update
-downloads will not resolve until that env is supplied per-run or set in the
-workflow. macOS signing/notarization and (optional) Windows signing secrets
-must be provided as CI secrets; `resources/icon.png` is a placeholder brand
-icon; the suite plugins are npm-installed via `file:` references and should
-switch to registry versions once published.
+**Remaining pre-release gaps**: `DSH_APP_ARTIFACT_OWNER` now defaults to
+`JochenYang` (matching `electron-builder.yml` `publish`), so online
+kernel-update downloads resolve against this repo without an injected env.
+macOS signing/notarization and (optional) Windows signing secrets must be
+provided as CI secrets; `resources/icon.png` is a placeholder brand icon; the
+suite plugins are bundled via `file:` references and should switch to
+registry versions once published.
 
 ## 11. Known TODOs / scaffolds (do not assume finished)
 

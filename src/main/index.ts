@@ -19,7 +19,7 @@ const devCheckoutDir =
   process.env.DSH_APP_DEV_RUNTIME ??
   (isDev ? path.resolve(process.cwd(), '..', 'deepseek-harness') : undefined)
 const channel = process.env.DSH_APP_CHANNEL === 'beta' ? 'beta' : 'stable'
-const artifactOwner = process.env.DSH_APP_ARTIFACT_OWNER ?? 'YOUR_GITHUB_OWNER'
+const artifactOwner = process.env.DSH_APP_ARTIFACT_OWNER ?? 'JochenYang'
 const artifactRepo = process.env.DSH_APP_ARTIFACT_REPO ?? 'dsh-app'
 
 // ------------------------------------------------------------------ state

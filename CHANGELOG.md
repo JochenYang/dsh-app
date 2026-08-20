@@ -8,13 +8,21 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
-## [Unreleased]
+## [v0.1.7] - 2026-08-20
 
 ### 中文
-- 待填写：本次版本相对上一发布版的变更（中文）。
+- 对话页新增 minimap：会话左侧固定节点导航栏，每条用户消息一个节点，悬停预览、点击跳转，当前阅读位置高亮
+- 修复开发模式可能误删内置内核目录的问题，dev 模式不再触碰生产内核安装
+- 开发模式不再弹出内核安装过渡窗口，新增 `npm run dev` 跨平台一键启动（自动定位本地 harness 内核源码）
+- 内核在线下载源默认指向本仓库，全新安装无需额外配置即可获取内核
+- 插件依赖与文档统一对齐 dsh 0.1.0-rc.8
 
 ### English
-- To fill: incremental changes since the last release (English).
+- New conversation minimap: a fixed node rail on the left of the chat view, one node per user/steering/context message, hover preview, click to jump, reading position highlighted
+- Fixed dev mode wiping the bundled kernel directory — dev boots no longer touch the production kernel install
+- Dev mode no longer shows the kernel-setup transition window; added `npm run dev` cross-platform launcher that auto-locates the local harness checkout
+- Online kernel downloads now default to this repo's release artifacts, so fresh installs resolve a kernel without extra env config
+- Plugin dependencies and docs aligned to dsh 0.1.0-rc.8
 
 ## [v0.1.6] - 2026-08-20
 
