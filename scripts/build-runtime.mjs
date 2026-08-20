@@ -37,7 +37,12 @@ const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui']
 
 function run(cmd, args, cwd) {
   console.log(`$ ${cmd} ${args.join(' ')}`)
-  execFileSync(cmd, args, { cwd, stdio: 'inherit' })
+  const opts = { cwd, stdio: 'inherit' }
+  // Windows runners: Node 22.12+ no longer wraps .cmd via cmd.exe implicitly
+  // (CVE-2024-27980 mitigation), so shell is required; pass the joined line
+  // instead of args to avoid DEP0190. args here are script-built constants.
+  if (process.platform === 'win32') execFileSync(`${cmd} ${args.join(' ')}`, { ...opts, shell: true })
+  else execFileSync(cmd, args, opts)
 }
 
 async function main() {
