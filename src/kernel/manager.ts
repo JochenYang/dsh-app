@@ -334,6 +334,12 @@ export class KernelManager {
 
   /** Remove versioned dirs that are neither active nor previous, and staging. */
   async cleanup(): Promise<void> {
+    // Dev mode: the "kernel" is the local checkout; the versioned dir under
+    // root is a production install owned by artifact mode. Never touch it —
+    // wiping it during a dev boot deletes a production kernel that a later
+    // non-dev start still depends on (current.json keeps pointing at the
+    // removed dir and forces a broken reinstall).
+    if (this.opts.source === 'dev') return
     const keep = new Set<string>()
     if (this.current) {
       keep.add(this.current.active)
