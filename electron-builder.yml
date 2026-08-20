@@ -13,7 +13,7 @@ npmRebuild: false
 # ---- Shell update channel (electron-updater, GitHub Releases) ----
 publish:
   provider: github
-  owner: YOUR_GITHUB_OWNER   # TODO: set repo owner before first release
+  owner: JochenYang
   repo: dsh-app
 
 win:
