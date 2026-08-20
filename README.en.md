@@ -124,5 +124,5 @@ The kernel runtime artifact is built by `scripts/build-runtime.mjs` (one per
 platform/arch); CI publishes them to GitHub Releases:
 
 ```sh
-node scripts/build-runtime.mjs win32 x64 0.1.0-rc.7
+node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
 ```

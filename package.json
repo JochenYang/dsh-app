@@ -13,6 +13,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
     "start": "npm run build && electron .",
+    "dev": "node scripts/dev.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dist": "npm run build && node scripts/prepare-bundled-kernel.mjs && electron-builder",
     "dist:win": "npm run build && node scripts/prepare-bundled-kernel.mjs win32 && electron-builder --win",
@@ -30,7 +31,12 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-theme": "^0.1.0-rc.8",
     "@types/node": "^22.10.2",
+    "@types/react": "^18.3.1",
     "@types/semver": "^7.5.8",
     "@types/tar": "^6.1.13",
     "electron": "^33.2.1",

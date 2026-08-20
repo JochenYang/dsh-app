@@ -5,9 +5,13 @@
  * in package.json. Currently registers only the brand theme; the upstream
  * Models settings page (ui-settings-models) is left untouched.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime'
+import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+// Type-only: loads the theme plugin's Context merge (ctx.theme) and the
+// slot utility prop faces (ctx.slots) into this compilation unit.
+import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
+import { MinimapUtility } from './client/minimap.tsx'
 
-export const inject = ['theme']
+export const inject = ['theme', 'slots']
 
 export const BRAND_THEME_ID = 'dsh-app-brand'
 
@@ -71,4 +75,13 @@ export function apply(ctx: ClientContext): void {
       Object.entries(BRAND_TOKENS).map(([name, modes]) => [name, modes.light]),
     ),
   })
+
+  // --- Conversation minimap: hover to preview, click to jump to a past
+  // user message. Session-scoped, so it follows session switches; renders
+  // nothing while the chat view has fewer than two messages. ---
+  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+    name: 'conversation.session.header.utilities',
+    id: 'dsh-app-minimap',
+    order: 100,
+  }, MinimapUtility))
 }

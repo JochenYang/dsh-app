@@ -111,5 +111,5 @@ npm run dist:linux   # AppImage + deb（x64 + arm64）
 CI 工作流发布到 GitHub Releases：
 
 ```sh
-node scripts/build-runtime.mjs win32 x64 0.1.0-rc.7
+node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
 ```

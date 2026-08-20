@@ -182,7 +182,9 @@ npm run build
 # Build then launch Electron (production-like path).
 npm start
 
-# Dev mode (uses the local harness checkout, no downloads).
+# Dev mode (uses the local harness checkout, no downloads). `npm run dev` is
+# the cross-platform one-liner: it sets DSH_APP_DEV=1, probes ../deepseek-harness
+# and ../../deepseek-harness for the checkout, then builds + launches.
 # PowerShell:  $env:DSH_APP_DEV="1"; npm start
 # Override checkout:  $env:DSH_APP_DEV_RUNTIME="D:/.../deepseek-harness"
 # cmd:  set DSH_APP_DEV=1 && npm start   (PowerShell does NOT support VAR=1 cmd)
@@ -193,7 +195,7 @@ npm run dist:mac     # dmg+zip x64+arm64
 npm run dist:linux   # AppImage+deb x64+arm64
 
 # Build a kernel runtime artifact (CI does this per OS/arch).
-node scripts/build-runtime.mjs win32 x64 0.1.0-rc.7
+node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
 ```
 
 Plugin builds (CI runs these before `build-runtime`):
@@ -208,8 +210,9 @@ Plugin builds (CI runs these before `build-runtime`):
 > Manual/probe helpers live in `scripts/`:
 > `probe-mirror.mjs` (update-chain connectivity), `probe-drag.cjs` (drag
 > regions + brand Models render — **keep its `CSS` in sync with**
-> `src/main/window.ts` `DESKTOP_CHROME_CSS`), `capture.mjs` (page screenshots
-> for design work).
+> `src/main/window.ts` `DESKTOP_CHROME_CSS`), `probe-minimap.cjs` (opens a
+> session with history and reports minimap DOM evidence), `capture.mjs` (page
+> screenshots for design work).
 
 ## 8. Environment variables
 
@@ -225,7 +228,7 @@ Plugin builds (CI runs these before `build-runtime`):
 | `DSH_APP_SUITE_VERSION` | `build-runtime.mjs`, `dev.ts` | Brand suite version in the runtime manifest |
 | `DSH_APP_LOG_DIR` | `server.ts` | Log directory (default: `<cwd>/logs`) |
 | `DSH_HOME` | `brand-suite.ts` | dsh profiles home (default `~/.dsh`) |
-| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else default `0.1.0-rc.7`) |
+| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else default `0.1.0-rc.8`) |
 | `PROBE_BASE` / `PROBE_TAG` / `PROBE_ASSET` / `PROBE_URL` | `probe-mirror.mjs` | Connectivity probe targets |
 
 ## 9. Code & contribution conventions

@@ -60,7 +60,10 @@ async function startServerAndOpenWindow(): Promise<void> {
   // No main window yet: surface the setup window as a launch transition so the
   // user gets immediate feedback while the kernel boots instead of a silent
   // icon. If a window is already up (retry in flight), leave it alone.
-  if (!mainWindow && !setupWindow) {
+  // Dev mode skips the transition entirely: the checkout boots from the
+  // terminal (visible logs), and the flash of a kernel-install window makes no
+  // sense when no kernel is being installed.
+  if (!mainWindow && !setupWindow && !isDev) {
     setupWindow = createSetupWindow()
   }
   const port = await findFreePort()

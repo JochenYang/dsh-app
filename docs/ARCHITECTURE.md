@@ -37,7 +37,7 @@
 
 ```
 <userData>/kernel/
-  current.json            { active: "dsh-0.1.0-rc.7+suite-0.1.0", previous: "…", installedAt, manifest }
+  current.json            { active: "dsh-0.1.0-rc.8+suite-0.1.0", previous: "…", installedAt, manifest }
   dsh-<version>+suite-<v>/   immutable versioned kernel
     manifest.json           KernelManifest (dshVersion, suiteVersion, channel, platform, arch, integrity)
     node/                   Node.js binary

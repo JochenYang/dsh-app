@@ -6,7 +6,7 @@
  *   node scripts/build-runtime.mjs <platform> <arch> [version]
  *
  * Example:
- *   node scripts/build-runtime.mjs win32 x64 0.1.0-rc.7
+ *   node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
  *
  * Produces, under runtime-dist/:
  *   runtime/manifest.json
