@@ -111,6 +111,22 @@ async function handleServerDown(reason: string): Promise<void> {
       await startServerAndOpenWindow()
       return
     }
+    // No previous version to roll back to (e.g. a broken first install from
+    // an earlier release). Try reinstalling from the bundled tarball before
+    // giving up — this recovers users who upgraded over a bad v0.1.1 kernel.
+    const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
+    const bundledSha = `${bundledTgz}.sha512`
+    if (existsSync(bundledTgz) && existsSync(bundledSha)) {
+      try {
+        console.log('[kernel] server failed and no rollback available; reinstalling bundled kernel')
+        await kernel.installFromLocalTarball(bundledTgz, bundledSha)
+        restartAttempts = 0
+        await startServerAndOpenWindow()
+        return
+      } catch (err) {
+        console.error('[kernel] bundled reinstall failed:', (err as Error).message)
+      }
+    }
   }
 
   if (restartAttempts >= 3) {

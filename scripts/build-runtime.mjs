@@ -117,6 +117,12 @@ async function main() {
     version: DSH_VERSION,
     dependencies: {
       '@deepseek-ai/dsh': DSH_VERSION,
+      // Second-level peers of @deepseek-ai/dsh-app-boot (which is itself a
+      // peer of dsh). npm --legacy-peer-deps only installs the direct peers
+      // declared by dsh, not the peers of dsh's peers, so these must be
+      // listed explicitly or dsh-app-boot fails to resolve them at runtime.
+      '@deepseek-ai/cordis-plugin-group': '^1.0.1',
+      '@deepseek-ai/dsh-invariants': '^0.1.0-rc.8',
     },
   }
   await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
