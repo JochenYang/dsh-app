@@ -120,7 +120,16 @@ async function main() {
     },
   }
   await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
-  run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
+  // When the target platform/arch differs from the runner (e.g. building a
+  // darwin-x64 runtime on an arm64 macos-latest runner, because macos-13 x64
+  // runners are scarce), force npm to install platform-specific optional
+  // dependencies (sharp, koffi, …) for the TARGET arch instead of the host.
+  const npmArgs = ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps']
+  if (platform !== process.platform || arch !== process.arch) {
+    const npmOs = platform === 'win32' ? 'win' : platform === 'darwin' ? 'darwin' : 'linux'
+    npmArgs.push(`--os=${npmOs}`, `--cpu=${arch}`)
+  }
+  run(process.platform === 'win32' ? 'npm.cmd' : 'npm', npmArgs, path.join(runtimeDir, 'app'))
 
   // 3. Runtime manifest.
   const tgzName = `dsh-runtime-${platform}-${arch}-${DSH_VERSION}.tgz`
