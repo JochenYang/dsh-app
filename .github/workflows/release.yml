@@ -111,10 +111,6 @@ jobs:
             arch: x64
             platform: win32
             target: win
-          - os: windows-latest
-            arch: arm64
-            platform: win32
-            target: win
           - os: macos-15-intel
             arch: x64
             platform: darwin
@@ -180,7 +176,14 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        run: npx electron-builder --win --${{ matrix.arch }} --publish always
+        # Both Windows arches must be built in ONE electron-builder invocation:
+        # upstream publishes a single per-platform update file (latest.yml) that
+        # carries both arches; two parallel --win --x64 / --win --arm64 jobs
+        # race to upload the same filename and the loser fails 422 already_exists.
+        # The bundled kernel is staged for x64; Windows-on-ARM (≈0 users today)
+        # falls back to an online kernel download on first launch (the artifact
+        # source defaults to JochenYang/dsh-app so that resolves).
+        run: npx electron-builder --win --x64 --arm64 --publish always
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
