@@ -61,7 +61,10 @@ jobs:
         working-directory: plugins
         run: |
           for p in plugin-brand plugin-client-ui; do
-            (cd $p && npm install --no-audit --no-fund --legacy-peer-deps && npx tsc -p tsconfig.json)
+            # Use each plugin's own build script (brand: tsc, client-ui: esbuild
+            # loader-wrapped bundle). A bare `npx tsc` would neither produce the
+            # client bundle the dsh loader expects nor match published typings.
+            (cd $p && npm install --no-audit --no-fund --legacy-peer-deps && npm run build)
           done
 
       - name: Build kernel runtime
