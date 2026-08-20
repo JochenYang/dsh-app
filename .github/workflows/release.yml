@@ -56,6 +56,11 @@ jobs:
         with:
           node-version: 22
 
+      # build-runtime.mjs imports `tar` from the root package; the runner is a
+      # clean checkout, so install root deps before running it.
+      - name: Install dependencies
+        run: npm ci
+
       - name: Build suite plugins
         shell: bash
         working-directory: plugins
