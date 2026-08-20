@@ -37,6 +37,7 @@
   "devDependencies": {
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.7",
     "@deepseek-ai/dsh-client-ui-theme": "0.1.0-rc.7",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   },
   "license": "MIT"

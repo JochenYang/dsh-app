@@ -73,7 +73,7 @@ async function main() {
     },
   }
   await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
-  run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], path.join(runtimeDir, 'app'))
+  run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
 
   // 3. Runtime manifest.
   const tgzName = `dsh-runtime-${platform}-${arch}-${DSH_VERSION}.tgz`

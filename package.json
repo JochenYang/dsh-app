@@ -3,7 +3,10 @@
   "productName": "DSH App",
   "version": "0.1.0",
   "description": "DSH App — branded desktop client for DeepSeek Harness (dsh). macOS / Windows / Linux.",
-  "author": "dsh-app contributors",
+  "author": {
+    "name": "dsh-app contributors",
+    "email": "JochenYang@users.noreply.github.com"
+  },
   "license": "MIT",
   "main": "dist/main/index.js",
   "type": "commonjs",
