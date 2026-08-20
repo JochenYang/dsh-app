@@ -125,24 +125,40 @@ export class KernelManager {
 
   /**
    * Check the npm registry for a newer dsh version on the configured channel.
+   * In dev mode the kernel is pinned to a local checkout and cannot be
+   * auto-installed, but the registry is still queried so the caller can tell
+   * the user a newer version exists.
    */
   async checkForUpdate(): Promise<UpdateCheckResult> {
-    if (this.opts.source === 'dev' || !this.current) {
-      return { available: false, current: this.current?.manifest.dshVersion ?? null, latest: null, channel: this.opts.channel, reason: this.opts.source === 'dev' ? 'dev mode pinned to checkout' : 'no kernel installed' }
+    if (!this.current) {
+      return { available: false, current: null, latest: null, channel: this.opts.channel, reason: 'no kernel installed' }
     }
     this.status({ phase: 'checking', message: '正在检查内核更新…', progress: null })
-    const info = await fetchRegistryInfo(this.opts.channel)
-    if (!info) {
-      return { available: false, current: this.current.manifest.dshVersion, latest: null, channel: this.opts.channel, reason: 'registry unreachable' }
-    }
+    // A prerelease version (e.g. 0.1.0-rc.7) lives on the `next` dist-tag, so
+    // it can only see newer prereleases through the beta channel. Auto-switch
+    // when the user is on a prerelease but configured for stable — otherwise
+    // the `latest` tag never carries rc builds and the check always says "up
+    // to date" even when a newer rc shipped.
     const currentVersion = this.current.manifest.dshVersion
+    const isPrerelease = semver.valid(currentVersion) !== null && semver.prerelease(currentVersion) !== null
+    const channel = isPrerelease && this.opts.channel === 'stable' ? 'beta' : this.opts.channel
+    const info = await fetchRegistryInfo(channel)
+    if (!info) {
+      return { available: false, current: currentVersion, latest: null, channel, reason: this.opts.source === 'dev' ? 'dev mode' : 'registry unreachable' }
+    }
     const newer = semver.valid(info.version) && semver.valid(currentVersion) ? semver.gt(info.version, currentVersion) : info.version !== currentVersion
     this.log(`registry reports dsh ${info.version}; current ${currentVersion}`)
+    // Dev mode can detect a newer version but cannot auto-install it (the
+    // kernel is a local checkout). Surface the finding so the caller can tell
+    // the user; `available` stays false to block the install path.
+    if (this.opts.source === 'dev') {
+      return { available: false, current: currentVersion, latest: info.version, channel, reason: newer ? 'dev mode update available' : 'dev mode' }
+    }
     return {
       available: !!newer,
       current: currentVersion,
       latest: info.version,
-      channel: this.opts.channel,
+      channel,
     }
   }
 

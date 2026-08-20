@@ -3,16 +3,12 @@
 # cordis.patch.yml (last write wins per row), so these rows join the composed
 # tree without touching the upstream profile templates.
 #
-# - The upstream Models settings page is disabled in favour of the brand page
-#   (a shadow-by-priority would duplicate the nav row: the settings nav rail
-#   projects the raw slot ledger, not the shadowed render view).
+# - The upstream Models settings page is left enabled (the brand shadow was
+#   retired: the upstream page is more complete and better maintained).
 # - brand: host plugin (settings namespace / desktop bridge scaffold).
 # - brand-client-ui: dual-face package; the loader entry makes its node half
 #   visible to the client-modules scan, which picks up the `dsh.client`
 #   declaration and serves /plugins/@dsh-app/plugin-client-ui/client.js.
-
-- id: ui-settings-models
-  disabled: true
 
 - insert:
     - id: brand

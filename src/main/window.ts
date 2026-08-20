@@ -231,18 +231,30 @@ body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
 }
 /* The settings dialog floats above the frame, so the frame's drag regions are
    masked while it is open; give the panel its own title strip instead. The
-   panel is position:relative, so the bar hugs its top edge; header controls
-   opt back out below. */
+   strip is only as tall as the native overlay (36px) so the panel header's
+   close/config buttons sit below it, clear of the OS-level window controls
+   that the overlay paints in the top-right corner. */
 body [class*="_panel"]::before {
   content: "";
   position: absolute;
   top: 0; left: 0; right: 0;
-  height: 44px;
+  height: ${OVERLAY_HEIGHT}px;
   -webkit-app-region: drag;
-  z-index: 2;
+  z-index: 0;
 }
+/* Push the panel header below the native title-bar overlay so the close and
+   "open config" buttons are not occluded by the OS window controls. */
+body [class*="_panel"] [class*="_header"] {
+  padding-top: ${OVERLAY_HEIGHT}px;
+}
+/* Header controls (buttons, links, and any role=button element) stay clickable. */
 body [class*="_panel"] [class*="_header"] button,
-body [class*="_panel"] [class*="_header"] a { -webkit-app-region: no-drag; }
+body [class*="_panel"] [class*="_header"] a,
+body [class*="_panel"] [class*="_header"] [role="button"],
+body [class*="_panel"] [class*="_header"] [class*="button"],
+body [class*="_panel"] [class*="_header"] [class*="Button"],
+body [class*="_panel"] [class*="_close"],
+body [class*="_panel"] [class*="Close"] { -webkit-app-region: no-drag; }
 `
 
 /** Inject the desktop chrome stylesheet once per document. */

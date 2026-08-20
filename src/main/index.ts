@@ -58,8 +58,8 @@ async function startServerAndOpenWindow(): Promise<void> {
   broadcastStatus({ phase: 'starting', message: '正在启动 dsh 服务…', progress: null })
   const port = await findFreePort()
   // Brand suite wiring: profile-dir module links + the loader overlay that
-  // disables the upstream Models page and inserts the brand rows. An older
-  // kernel without the suite plugins boots vanilla (empty array).
+  // inserts the brand rows. An older kernel without the suite plugins boots
+  // vanilla (empty array).
   const suiteSources = isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir())
   const overlays = await prepareBrandSuite(suiteSources)
   try {
@@ -142,11 +142,16 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
     const result = await kernel.checkForUpdate()
     if (!result.available) {
       if (manual) {
-        void dialog.showMessageBox({
-          type: 'info',
-          title: 'DSH App',
-          message: `内核已是最新版本（dsh ${result.current ?? '未知'}）。`,
-        })
+        // Dev mode can detect a newer version but cannot auto-install; tell
+        // the user what's available rather than a flat "up to date".
+        const message = result.reason === 'dev mode update available'
+          ? `开发模式下内核固定为本地源码，不支持自动更新。\n检测到新版本：dsh ${result.current} → ${result.latest}。\n请以正式安装方式启动后更新，或手动拉取源码。`
+          : result.reason === 'dev mode'
+            ? `开发模式下内核固定为本地源码，不支持在线更新。\n当前版本：dsh ${result.current ?? '未知'}（已是最新）。`
+            : result.reason === 'registry unreachable'
+              ? '无法连接更新源，请检查网络后重试。'
+              : `内核已是最新版本（dsh ${result.current ?? '未知'}）。`
+        void dialog.showMessageBox({ type: 'info', title: 'DSH App', message })
       }
       return
     }
@@ -217,6 +222,12 @@ async function boot(): Promise<void> {
 
   const installed = isDev || (await kernel.isInstalled())
   if (installed) {
+    // Initialize this.current so checkForUpdate / getCurrentVersion work.
+    // In dev mode this reads the checkout manifest; in artifact mode it
+    // loads the on-disk kernel. init() reuses the existing install and only
+    // reinstalls when the active dir is missing (isInstalled already ruled
+    // that out), so this is a local read, not a network fetch.
+    await kernel.init()
     await startServerAndOpenWindow()
   } else {
     // First run: show the setup window; it drives install through IPC.
@@ -232,6 +243,7 @@ async function boot(): Promise<void> {
     onCheckKernelUpdate: () => void checkKernelUpdate(true),
     onCheckAppUpdate: () => checkShellUpdate(true),
     onRestartServer: () => void startServerAndOpenWindow(),
+    getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
   })
 
   initShellUpdater()

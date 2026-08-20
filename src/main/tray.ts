@@ -7,6 +7,8 @@ export interface TrayCallbacks {
   onCheckKernelUpdate: () => void
   onCheckAppUpdate: () => void
   onRestartServer: () => void
+  /** Current kernel version for the tray menu label, or null when unknown. */
+  getCurrentVersion: () => string | null
 }
 
 let tray: Tray | null = null
@@ -21,10 +23,12 @@ export function createTray(callbacks: TrayCallbacks): Tray {
   // Double-click to restore/show the main window
   tray.on('double-click', callbacks.onOpen)
 
+  const version = callbacks.getCurrentVersion()
+  const kernelLabel = version ? `检查内核更新…（当前 dsh ${version}）` : '检查内核更新…'
   const menu = Menu.buildFromTemplate([
     { label: '打开 DSH App', click: callbacks.onOpen },
     { type: 'separator' },
-    { label: '检查内核更新…', click: callbacks.onCheckKernelUpdate },
+    { label: kernelLabel, click: callbacks.onCheckKernelUpdate },
     { label: '检查应用更新…', click: callbacks.onCheckAppUpdate },
     { type: 'separator' },
     { label: '重启服务', click: callbacks.onRestartServer },

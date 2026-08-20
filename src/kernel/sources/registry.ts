@@ -57,7 +57,13 @@ async function fetchFromRegistry(registry: string, channel: KernelChannel): Prom
       versions?: Record<string, { dist?: { integrity?: string } }>
     }
     const tags = doc['dist-tags'] ?? {}
-    const version = tags[channel] ?? tags.latest ?? tags.rc
+    // Map the app channel to the dist-tag dsh's release script actually
+    // publishes: `latest` for stable releases, `next` for rc/pre-release
+    // (publish.ts tags versions containing '-' as `next`). A plain channel
+    // name is also accepted so a future release cadence that publishes a
+    // matching tag works without another edit here.
+    const tagForChannel = channel === 'stable' ? 'latest' : 'next'
+    const version = tags[tagForChannel] ?? tags[channel] ?? tags.latest ?? tags.next ?? tags.rc
     if (!version) return null
     const integrity = doc.versions?.[version]?.dist?.integrity ?? ''
     return { version, channel, integrity, source: base }
