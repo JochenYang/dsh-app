@@ -403,6 +403,13 @@ export class KernelManager {
     // non-dev start still depends on (current.json keeps pointing at the
     // removed dir and forces a broken reinstall).
     if (this.opts.source === 'dev') return
+    // Never race an install/update: cleanup's `rm -rf staging` would destroy
+    // the in-flight download (open 'staging/runtime.tgz' → ENOENT) when a
+    // server restart fires during a kernel update — exactly what happens in
+    // a crash/restart loop. activateTarball already removes staging at the
+    // end, and the post-boot cleanup (startServerAndOpenWindow) runs when no
+    // install is active.
+    if (this.installing) return
     const keep = new Set<string>()
     if (this.current) {
       keep.add(this.current.active)
