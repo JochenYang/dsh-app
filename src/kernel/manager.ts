@@ -45,6 +45,8 @@ export interface KernelManagerOptions {
 export class KernelManager {
   private current: CurrentKernel | null = null
   private cancelRequested = false
+  /** True while an install/update is running — blocks concurrent checks. */
+  private installing = false
 
   constructor(private readonly opts: KernelManagerOptions) {}
 
@@ -120,35 +122,66 @@ export class KernelManager {
    * the user a newer version exists.
    */
   async checkForUpdate(): Promise<UpdateCheckResult> {
-    if (!this.current) {
-      return { available: false, current: null, latest: null, channel: this.opts.channel, reason: 'no kernel installed' }
+    // An install in progress is already broadcasting its own status; letting a
+    // concurrent check run and then broadcast `ready` would clear the download
+    // card mid-install. Short-circuit before the status machinery.
+    if (this.installing) {
+      return {
+        available: false,
+        current: this.current?.manifest.dshVersion ?? null,
+        latest: null,
+        channel: this.opts.channel,
+        reason: 'install in progress',
+      }
     }
-    this.status({ phase: 'checking', message: '正在检查内核更新…', progress: null })
-    // A prerelease version (e.g. 0.1.0-rc.7) lives on the `next` dist-tag, so
-    // it can only see newer prereleases through the beta channel. Auto-switch
-    // when the user is on a prerelease but configured for stable — otherwise
-    // the `latest` tag never carries rc builds and the check always says "up
-    // to date" even when a newer rc shipped.
-    const currentVersion = this.current.manifest.dshVersion
-    const isPrerelease = semver.valid(currentVersion) !== null && semver.prerelease(currentVersion) !== null
-    const channel = isPrerelease && this.opts.channel === 'stable' ? 'beta' : this.opts.channel
-    const info = await fetchRegistryInfo(channel)
-    if (!info) {
-      return { available: false, current: currentVersion, latest: null, channel, reason: this.opts.source === 'dev' ? 'dev mode' : 'registry unreachable' }
-    }
-    const newer = semver.valid(info.version) && semver.valid(currentVersion) ? semver.gt(info.version, currentVersion) : info.version !== currentVersion
-    this.log(`registry reports dsh ${info.version}; current ${currentVersion}`)
-    // Dev mode can detect a newer version but cannot auto-install it (the
-    // kernel is a local checkout). Surface the finding so the caller can tell
-    // the user; `available` stays false to block the install path.
-    if (this.opts.source === 'dev') {
-      return { available: false, current: currentVersion, latest: info.version, channel, reason: newer ? 'dev mode update available' : 'dev mode' }
-    }
-    return {
-      available: !!newer,
-      current: currentVersion,
-      latest: info.version,
-      channel,
+    try {
+      if (!this.current) {
+        return { available: false, current: null, latest: null, channel: this.opts.channel, reason: 'no kernel installed' }
+      }
+      this.status({ phase: 'checking', message: '正在检查内核更新…', progress: null })
+      // A prerelease version (e.g. 0.1.0-rc.7) lives on the `next` dist-tag, so
+      // it can only see newer prereleases through the beta channel. Auto-switch
+      // when the user is on a prerelease but configured for stable — otherwise
+      // the `latest` tag never carries rc builds and the check always says "up
+      // to date" even when a newer rc shipped.
+      const currentVersion = this.current.manifest.dshVersion
+      const isPrerelease = semver.valid(currentVersion) !== null && semver.prerelease(currentVersion) !== null
+      const channel = isPrerelease && this.opts.channel === 'stable' ? 'beta' : this.opts.channel
+      const info = await fetchRegistryInfo(channel)
+      if (!info) {
+        return { available: false, current: currentVersion, latest: null, channel, reason: this.opts.source === 'dev' ? 'dev mode' : 'registry unreachable' }
+      }
+      const newer = semver.valid(info.version) && semver.valid(currentVersion) ? semver.gt(info.version, currentVersion) : info.version !== currentVersion
+      this.log(`registry reports dsh ${info.version}; current ${currentVersion}`)
+      // Dev mode can detect a newer version but cannot auto-install it (the
+      // kernel is a local checkout). Surface the finding so the caller can tell
+      // the user; `available` stays false to block the install path.
+      if (this.opts.source === 'dev') {
+        return { available: false, current: currentVersion, latest: info.version, channel, reason: newer ? 'dev mode update available' : 'dev mode' }
+      }
+      // A newer version can be published on npm before its runtime artifacts are
+      // built (kernel cadence is decoupled from the shell's). Gate on artifact
+      // availability so the user is never offered an update that cannot
+      // download; auto checks stay silent, manual checks show a friendly reason.
+      if (newer) {
+        const probe = await this.makeResolver().probeArtifact(info.version)
+        if (probe !== 'available') {
+          const reason = probe === 'unreachable' ? 'github unreachable' : 'artifact pending'
+          this.log(`dsh ${info.version} published but runtime artifact not yet available (${probe})`)
+          return { available: false, current: currentVersion, latest: info.version, channel, reason }
+        }
+      }
+      return {
+        available: !!newer,
+        current: currentVersion,
+        latest: info.version,
+        channel,
+      }
+    } finally {
+      // Terminal status: the in-window card never lingers after a check, on
+      // any return path (up to date / dev mode / artifact pending / throw).
+      // `ready`/`就绪` renders no card — it only clears the one above.
+      this.status({ phase: 'ready', message: '就绪', progress: null })
     }
   }
 
@@ -170,6 +203,16 @@ export class KernelManager {
 
   async installVersion(version: string): Promise<CurrentKernel> {
     if (this.opts.source === 'dev') return this.initDev()
+    if (this.installing) throw new Error('内核安装正在进行中，请稍候')
+    this.installing = true
+    try {
+      return await this.installVersionInner(version)
+    } finally {
+      this.installing = false
+    }
+  }
+
+  private async installVersionInner(version: string): Promise<CurrentKernel> {
     const resolver = this.makeResolver()
     const artifact = await resolver.fetchArtifact(version)
     if (!artifact) throw new Error(`未找到 dsh ${version} 在 ${this.opts.platform}-${this.opts.arch} 上的运行时产物`)
@@ -258,6 +301,16 @@ export class KernelManager {
    */
   async installFromLocalTarball(tarballPath: string, sha512Path: string): Promise<CurrentKernel> {
     if (this.opts.source === 'dev') return this.initDev()
+    if (this.installing) throw new Error('内核安装正在进行中，请稍候')
+    this.installing = true
+    try {
+      return await this.installFromLocalTarballInner(tarballPath, sha512Path)
+    } finally {
+      this.installing = false
+    }
+  }
+
+  private async installFromLocalTarballInner(tarballPath: string, sha512Path: string): Promise<CurrentKernel> {
     await fs.mkdir(path.join(this.root, STAGING_DIR), { recursive: true })
     const tarball = path.join(this.root, STAGING_DIR, TARBALL_FILE)
     // Copy the bundled tarball into staging so activateTarball's cleanup
@@ -292,12 +345,22 @@ export class KernelManager {
     const body = Readable.fromWeb(res.body as never)
     const out = await fs.open(dest, 'w')
     let received = 0
+    let lastEmit = 0
     try {
       for await (const chunk of body) {
         if (this.cancelRequested) throw new Error('下载已取消')
         received += chunk.length
         await out.write(chunk)
-        if (total > 0) this.status({ phase: 'downloading', message: `正在下载 dsh…`, progress: Math.min(1, received / total) })
+        // Throttle status broadcasts (~4/s): each one re-renders the in-window
+        // card and the tray tooltip, and a 160 MB download would otherwise
+        // fire thousands of IPCs per second on small chunks.
+        if (total > 0) {
+          const now = Date.now()
+          if (received === total || now - lastEmit >= 250) {
+            lastEmit = now
+            this.status({ phase: 'downloading', message: '正在下载 dsh…', progress: Math.min(1, received / total) })
+          }
+        }
       }
     } finally {
       await out.close()

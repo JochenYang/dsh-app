@@ -93,6 +93,37 @@ export class GitHubArtifactResolver {
     return null
   }
 
+  /**
+   * Tri-state availability probe for a kernel version's metadata sidecar:
+   *   'available'   — the .sha512 is reachable (official host or a mirror)
+   *   'missing'     — at least one base answered HTTP but not 200 (reachable
+   *                   GitHub, artifacts not published yet)
+   *   'unreachable' — every base failed at the network level (GitHub and all
+   *                   mirrors blocked — e.g. mainland China without proxy)
+   * Used to gate update availability: a newer dsh version can be published on
+   * npm before its runtime artifacts are built (dead-end offer), but a user
+   * with no route to GitHub at all should see "network unreachable", not
+   * "artifacts pending". Non-authoritative by design — the real download still
+   * verifies against the phase-1 sha512 fetched from the official host first.
+   */
+  async probeArtifact(version: string): Promise<'available' | 'missing' | 'unreachable'> {
+    const name = this.assetName(version)
+    let sawResponse = false
+    for (const base of this.bases(version)) {
+      try {
+        const res = await fetch(`${base}/${name}.sha512`, { signal: AbortSignal.timeout(10_000) })
+        // A non-5xx answer means we reached the ecosystem (host or mirror);
+        // 5xx is a mirror-side failure, NOT evidence the artifact is missing.
+        if (res.status >= 500) continue
+        sawResponse = true
+        if (res.ok) return 'available'
+      } catch {
+        // Base unreachable — try the next candidate.
+      }
+    }
+    return sawResponse ? 'missing' : 'unreachable'
+  }
+
   private async fetchMetadata(base: string, name: string): Promise<{ sha512: string; manifest: KernelManifest } | null> {
     try {
       const [shaRes, manifestRes] = await Promise.all([

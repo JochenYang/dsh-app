@@ -24,11 +24,13 @@ env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  # Create the single draft release BEFORE any parallel job attaches assets.
-  # electron-builder and the runtime Attach step both create the release when
-  # none exists; without this dedicated first job they race and end up with two
-  # v0.1.7 drafts and uploads split across them.
+  # Create the single draft shell release BEFORE the parallel app jobs publish
+  # installers. electron-builder creates the release when none exists, but a
+  # dedicated first job removes the race between the app matrix cells. Runtime
+  # artifacts no longer attach here — they go to their own runtime-* tags (see
+  # the runtime job), so on workflow_dispatch this job is skipped.
   prepare-release:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +43,9 @@ jobs:
 
   runtime:
     name: runtime (${{ matrix.os }}/${{ matrix.arch }})
-    needs: prepare-release
+    # No `needs: prepare-release`: runtime artifacts attach to their own
+    # runtime-* tags, never to the shell v* draft, so the job must run on
+    # workflow_dispatch too (a skipped `needs` would skip this job entirely).
     strategy:
       fail-fast: false
       matrix:
@@ -93,16 +97,25 @@ jobs:
           done
 
       - name: Build kernel runtime
+        id: runtime
         run: node scripts/build-runtime.mjs ${{ matrix.platform }} ${{ matrix.arch }} "${{ env.DSH_VERSION }}"
 
+      # Runtime artifacts attach to their own `runtime-<dshVersion>` tag
+      # (created published — artifacts are public releases), NOT the shell
+      # v* tag. The app's GitHubArtifactResolver resolves exactly this URL
+      # shape, and this keeps kernel updates decoupled from shell releases:
+      # workflow_dispatch can publish artifacts for a dsh version without
+      # cutting a shell tag. The version comes from build-runtime's output
+      # (dist-tag resolution when DSH_VERSION is empty).
       - name: Attach runtime to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        continue-on-error: true
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: runtime-${{ steps.runtime.outputs.dsh_version }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --draft
+          # Six cells race to create the tag; a 422 already_exists from a
+          # losing create is harmless (upload --clobber below is idempotent),
+          # so swallow create failures and only let the upload fail loudly.
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" || true
           gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 runtime-dist/manifest.json --clobber
 
       # Also expose the tgz as a workflow artifact so the app job can bundle it
@@ -116,7 +129,10 @@ jobs:
             runtime-dist/dsh-runtime-*.tgz.sha512
           retention-days: 1
 
+  # Runs only on tag pushes. workflow_dispatch is the runtime-only path:
+  # publish kernel artifacts for a dsh version without cutting a shell release.
   app:
+    if: startsWith(github.ref, 'refs/tags/v')
     name: app (${{ matrix.os }}/${{ matrix.arch }})
     needs: runtime
     strategy:

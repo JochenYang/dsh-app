@@ -53,17 +53,19 @@ export interface CurrentKernel {
   manifest: KernelManifest
 }
 
-export interface KernelInfoPayload {
-  current: CurrentKernel | null
-  available: string | null
-  phase: KernelPhase
-}
-
 export interface UpdateCheckResult {
   available: boolean
   current: string | null
   latest: string | null
   channel: KernelChannel
+  /**
+   * Why the check ended without an installable update. Known values:
+   * 'no kernel installed' | 'registry unreachable' | 'dev mode' |
+   * 'dev mode update available' | 'artifact pending' (a newer dsh version is
+   * published on npm but its runtime artifacts are not built yet) |
+   * 'github unreachable' (no route to GitHub or its mirrors) |
+   * 'install in progress' (an install/update is already running).
+   */
   reason?: string
 }
 

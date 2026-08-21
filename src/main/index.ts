@@ -5,12 +5,11 @@ import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
-import { createMainWindow } from './window'
+import { createMainWindow, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
-import { initShellUpdater, checkShellUpdate } from './updater'
-import type { AppController } from './ipc'
+import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST } from '../shared/constants'
-import type { KernelInfoPayload, KernelStatusPayload } from '../shared/types'
+import type { KernelStatusPayload } from '../shared/types'
 
 // ---------------------------------------------------------------- config
 
@@ -47,6 +46,7 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 function broadcastStatus(status: KernelStatusPayload): void {
   setTrayTooltip(status.phase === 'ready' ? `DSH APP — dsh ${kernel.getCurrent()?.manifest.dshVersion ?? ''}` : `DSH APP — ${status.message}`)
+  showKernelProgress(mainWindow, status)
 }
 
 // ------------------------------------------------------------- lifecycle
@@ -162,9 +162,21 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
             ? `开发模式下内核固定为本地源码，不支持在线更新。\n当前版本：dsh ${result.current ?? '未知'}（已是最新）。`
             : result.reason === 'registry unreachable'
               ? '无法连接更新源，请检查网络后重试。'
-              : `内核已是最新版本（dsh ${result.current ?? '未知'}）。`
+              : result.reason === 'artifact pending'
+                ? `检测到新版本 dsh ${result.latest}，但安装包尚未发布。\n将保持当前版本（dsh ${result.current ?? '未知'}），请稍后再试。`
+                : result.reason === 'github unreachable'
+                  ? '无法连接更新源（GitHub），请检查网络或稍后重试。'
+                  : result.reason === 'install in progress'
+                    ? '内核更新或安装正在进行中，请稍候再检查。'
+                    : `内核已是最新版本（dsh ${result.current ?? '未知'}）。`
         void dialog.showMessageBox({ type: 'info', title: 'DSH APP', message })
       }
+      return
+    }
+    if (!manual) {
+      // Background checks never pop a modal; a non-intrusive in-window toast
+      // surfaces the finding (the user installs from the tray menu).
+      showUpdateToast(mainWindow, `发现新版本 dsh ${result.latest}，可在托盘菜单中更新`, 'progress', 5_000)
       return
     }
     const { response } = await dialog.showMessageBox({
@@ -187,25 +199,14 @@ async function applyKernelUpdate(version: string): Promise<void> {
     const installed = await kernel.installVersion(version)
     broadcastStatus({ phase: 'installing', message: `已激活 dsh ${installed.manifest.dshVersion}`, progress: null })
     await startServerAndOpenWindow()
+    // The server restart's own starting→ready cycle clears the card, so the
+    // one-shot success toast lands afterwards and is visible for 3 s. Wait
+    // for the reloaded page first — injecting mid-loadURL would wipe the
+    // toast with the old document.
+    void showToastWhenLoaded(mainWindow, `内核已更新到 dsh ${installed.manifest.dshVersion}`, 'success', 3_000)
   } catch (err) {
     void dialog.showMessageBox({ type: 'error', title: 'DSH APP', message: `内核更新失败：${(err as Error).message}` })
   }
-}
-
-function getKernelInfo(): KernelInfoPayload {
-  return {
-    current: kernel.getCurrent(),
-    available: null,
-    phase: 'idle',
-  }
-}
-
-const controller: AppController = {
-  kernel: undefined as unknown as KernelManager,
-  installKernel,
-  applyKernelUpdate: () => applyKernelUpdate(''),
-  checkKernelUpdate,
-  getKernelInfo,
 }
 
 // ------------------------------------------------------------------ boot
@@ -223,7 +224,6 @@ async function boot(): Promise<void> {
     onStatus: broadcastStatus,
     log: (message) => console.log(message),
   })
-  controller.kernel = kernel
 
   server = new DshServer({
     onExit: (code, signal) => void handleServerDown(`已退出（code ${code ?? '?'}, signal ${signal ?? '?'})`),
@@ -239,7 +239,7 @@ async function boot(): Promise<void> {
       else mainWindow.show()
     },
     onCheckKernelUpdate: () => void checkKernelUpdate(true),
-    onCheckAppUpdate: () => checkShellUpdate(true),
+    onCheckAppUpdate: () => checkShellUpdate(true, mainWindow),
     onRestartServer: () => void startServerAndOpenWindow(),
     getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
   })
@@ -272,7 +272,10 @@ async function boot(): Promise<void> {
   }
 
   initShellUpdater()
-  setTimeout(() => checkShellUpdate(false), 10_000)
+  // Surface the previous silent-install result (if any) before the first
+  // update-check runs, so an install failure is never silent.
+  void consumeUpdaterInstallResult(mainWindow)
+  setTimeout(() => checkShellUpdate(false, mainWindow), 10_000)
   setInterval(() => {
     if (!quitting && !isDev) void checkKernelUpdate(false)
   }, KERNEL_CHECK_INTERVAL_MS)

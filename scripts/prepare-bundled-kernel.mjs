@@ -15,6 +15,7 @@
  */
 import { copyFile, mkdir, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
+import semver from 'semver'
 import { fileURLToPath } from 'node:url'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -25,10 +26,18 @@ const bundled = path.join(root, 'bundled-kernel')
 
 async function main() {
   // Match dsh-runtime-<platform>-<arch>-<version>.tgz; version may contain
-  // anything (rc.8, 0.1.0, …), so glob on the platform/arch prefix.
+  // anything (rc.8, 0.1.0, …), so glob on the platform/arch prefix. Multiple
+  // versions can accumulate in runtime-dist (local rebuilds), so pick the
+  // HIGHEST semver — a stale lower kernel must never end up in the installer.
   const prefix = `dsh-runtime-${platform}-${arch}-`
   const files = await readdir(runtimeDist).catch(() => [])
-  const tgz = files.find((f) => f.startsWith(prefix) && f.endsWith('.tgz'))
+  const matches = files.filter((f) => f.startsWith(prefix) && f.endsWith('.tgz'))
+  const tgz = matches.sort((a, b) => {
+    const va = a.slice(prefix.length, -'.tgz'.length)
+    const vb = b.slice(prefix.length, -'.tgz'.length)
+    if (semver.valid(va) && semver.valid(vb)) return semver.rcompare(va, vb)
+    return vb.localeCompare(va)
+  })[0]
   if (!tgz) {
     console.error(`No kernel tarball found for ${platform}-${arch} in runtime-dist/.`)
     console.error(`Expected a file matching: ${prefix}*.tgz`)

@@ -17,10 +17,10 @@
 ┌─ Shell (Electron main process)
 │   src/main/index.ts        boot, lifecycle, crash/rollback orchestration
 │   src/main/server.ts       dsh child process: spawn, health, restart, shutdown
-│   src/main/window.ts       sandboxed main window + setup window
+│   src/main/window.ts       sandboxed main window + desktop chrome + update card
 │   src/main/tray.ts         tray menu
-│   src/main/updater.ts      shell channel (electron-updater)
-│   src/main/ipc.ts          IPC contract for the setup window
+│   src/main/updater.ts      shell channel: Windows mirror download + silent install; else electron-updater
+│   src/main/update-card.ts  injected card script (message + progress bar)
 ├─ Kernel manager
 │   src/kernel/manager.ts    lifecycle: init / update / activate / rollback / cleanup
 │   src/kernel/sources/*     version + artifact resolution (npm registry, GitHub Releases, dev checkout)
@@ -88,9 +88,14 @@ is rolled back once, then the app surfaces the error rather than looping.
 ## 7. Packaging & distribution (M4)
 
 - `electron-builder.yml`: win NSIS, mac dmg+zip, linux AppImage+deb; x64+arm64.
-- Shell updates: `electron-updater` with GitHub Releases provider.
+- Shell updates: Windows uses a custom in-app flow — latest.yml detection via
+  the GitHub `releases/latest` alias, arch-matched installer download with an
+  official-first / gh-proxy-mirror fallback chain, sha512 verification, then
+  NSIS silent install (`/S`). macOS/Linux keep `electron-updater`.
 - Kernel artifacts: CI matrix builds `dsh-runtime-<platform>-<arch>-<version>.tgz`
-  per platform/arch and attaches them to the same release.
+  per platform/arch and attaches them to a dedicated `runtime-<dshVersion>`
+  release (created published), which `GitHubArtifactResolver` resolves; kernel
+  updates are thus decoupled from shell releases.
 - Signing: macOS notarization requires Apple credentials (CI secrets); Windows
   signing optional (SmartScreen without it); Linux unsigned.
 

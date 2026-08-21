@@ -20,7 +20,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import path from 'node:path'
@@ -30,7 +30,46 @@ import { c as createTar } from 'tar'
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const [platform = process.platform, arch = process.arch, versionArg] = process.argv.slice(2)
 
-const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || '0.1.0-rc.8'
+/**
+ * When no version is given (plain tag push or workflow_dispatch), publish the
+ * dsh version the app itself resolves from the npm dist-tag (stable→latest,
+ * beta→next) — the same mapping as src/kernel/sources/registry.ts — so runtime
+ * artifacts never lag behind the kernel registry again.
+ */
+async function resolveDefaultDshVersion() {
+  const channel = process.env.DSH_APP_CHANNEL === 'beta' ? 'next' : 'latest'
+  try {
+    const res = await fetch('https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags', {
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const tags = await res.json()
+    const version = tags[channel] ?? tags.latest ?? tags.next
+    if (version) return version
+    // Tags 200 OK but no usable key (mirror sync lag / odd package state) is
+    // the same pollution path as a network failure — route through the catch
+    // below so CI hard-fails instead of silently republishing an old version.
+    throw new Error(`no usable dist-tag found (channel=${channel}; tags=${JSON.stringify(tags)})`)
+  } catch (err) {
+    console.error(`[build-runtime] dist-tag resolution failed: ${err.message}`)
+    // CI must never silently rebuild an OLD version and --clobber its tag
+    // with content built from current code — that is exactly the drift this
+    // resolution was introduced to kill. Fail loudly; the job can be re-run
+    // once the registry is reachable again.
+    if (process.env.GITHUB_OUTPUT) {
+      throw new Error('cannot resolve dsh version from npm dist-tag — set DSH_VERSION explicitly or fix registry access')
+    }
+  }
+  return '0.1.0-rc.8'
+}
+
+const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || (await resolveDefaultDshVersion())
+
+// Publish the resolved version to GitHub Actions outputs so the release job
+// can name its release tag (runtime-<dshVersion>). No-op outside CI.
+if (process.env.GITHUB_OUTPUT) {
+  appendFileSync(process.env.GITHUB_OUTPUT, `dsh_version=${DSH_VERSION}\n`)
+}
 const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION ?? '0.1.0'
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 

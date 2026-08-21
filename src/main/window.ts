@@ -1,6 +1,8 @@
 import { BrowserWindow, shell } from 'electron'
 import path from 'node:path'
 import { DEFAULT_HTTP_HOST } from '../shared/constants'
+import type { KernelPhase, KernelStatusPayload } from '../shared/types'
+import { UPDATE_CARD_SCRIPT, type UpdateCardTone } from './update-card'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
 const OVERLAY_HEIGHT = 36
@@ -175,6 +177,7 @@ function startChromeSync(win: BrowserWindow): void {
   win.on('show', () => void syncOverlayOnce(win))
   win.webContents.on('did-finish-load', () => {
     installDesktopChrome(win)
+    reinjectKernelProgress(win)
     void syncOverlayOnce(win)
   })
   void (async () => {
@@ -309,6 +312,96 @@ function installExportToast(win: BrowserWindow): void {
         .catch(() => undefined)
     })
   })
+}
+
+/**
+ * In-window update status card state + APIs. The injected page script lives in
+ * update-card.ts (pure and probe-testable); this module owns the per-process
+ * state and the window wiring.
+ */
+
+/** Terminal phases that are not re-injected after a page reload. */
+const TERMINAL_PHASES: ReadonlySet<KernelPhase> = new Set(['idle', 'ready'])
+
+let activeKernelStatus: KernelStatusPayload | null = null
+
+function toneForPhase(phase: KernelPhase): UpdateCardTone {
+  if (phase === 'error') return 'error'
+  if (phase === 'ready') return 'success'
+  return 'progress'
+}
+
+function autoHideForPhase(phase: KernelPhase): number | undefined {
+  if (phase === 'error') return 5_000
+  if (phase === 'ready') return 1_200
+  return undefined
+}
+
+/** Inject (or update) the update status card in a window. */
+export function showKernelProgress(win: BrowserWindow | null, status: KernelStatusPayload): void {
+  // `ready` is terminal: drop the stored status so a later did-finish-load
+  // reinjection cannot resurrect a stale phase (e.g. "starting") after the
+  // server already restarted — that was a stuck-card race on healthy boots.
+  if (status.phase === 'ready') activeKernelStatus = null
+  else activeKernelStatus = status
+  if (!win || win.isDestroyed()) return
+  // A plain boot "ready" is not an event worth a toast (the tray tooltip still
+  // reflects it); only update flows (e.g. "已激活 dsh X") show a success card.
+  if (status.phase === 'ready' && status.message === '就绪') {
+    clearKernelProgress(win)
+    return
+  }
+  win.webContents
+    .executeJavaScript(
+      UPDATE_CARD_SCRIPT({
+        message: status.message,
+        progress: status.progress,
+        tone: toneForPhase(status.phase),
+        autoHide: autoHideForPhase(status.phase),
+      }),
+    )
+    .catch(() => undefined)
+}
+
+/** Re-inject the active status after a page reload (server restart mid-update). */
+function reinjectKernelProgress(win: BrowserWindow): void {
+  const status = activeKernelStatus
+  if (!status || TERMINAL_PHASES.has(status.phase)) return
+  showKernelProgress(win, status)
+}
+
+/** Transient notification toast (e.g. background update findings). */
+export function showUpdateToast(win: BrowserWindow | null, message: string, tone: UpdateCardTone = 'progress', durationMs = 6_000): void {
+  if (!win || win.isDestroyed()) return
+  win.webContents
+    .executeJavaScript(UPDATE_CARD_SCRIPT({ message, progress: null, tone, autoHide: durationMs }))
+    .catch(() => undefined)
+}
+
+/**
+ * One-shot toast that waits for the window's current page to finish loading
+ * before injecting. A loadURL in flight replaces the old document, so a toast
+ * injected during the reload would be destroyed almost immediately (this is
+ * the normal path after a server restart, e.g. kernel-update success and the
+ * previous-install-result notice). Times out after 10 s instead of hanging.
+ */
+export async function showToastWhenLoaded(win: BrowserWindow | null, message: string, tone: UpdateCardTone = 'progress', durationMs = 5_000): Promise<void> {
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  if (wc.isLoading()) {
+    const loaded = new Promise<void>((resolve) => wc.once('did-finish-load', () => resolve()))
+    await Promise.race([loaded, new Promise((resolve) => setTimeout(resolve, 10_000))])
+  }
+  showUpdateToast(win, message, tone, durationMs)
+}
+
+/** Remove the update status card immediately. */
+export function clearKernelProgress(win: BrowserWindow | null): void {
+  activeKernelStatus = null
+  if (!win || win.isDestroyed()) return
+  win.webContents
+    .executeJavaScript(`(function () { const el = document.getElementById('dsh-update-card'); if (el) el.remove(); })()`)
+    .catch(() => undefined)
 }
 
 /**

@@ -17,8 +17,10 @@ The essential design idea is **"self-contained, no fork"**:
   upstream kernel** (`plugins/`). Upstream `dsh` is never forked or patched,
   so every upstream release is just an ordinary kernel update.
 - There are **two independent update channels**: the Electron shell
-  (`electron-updater` → GitHub Releases) and the dsh kernel
-  (`KernelManager` → npm registry + GitHub Release artifacts). They are
+  (Windows: custom latest.yml detection + mirror download + silent install;
+  macOS/Linux: `electron-updater` → GitHub Releases) and the dsh kernel
+  (`KernelManager` → npm registry + `runtime-<version>` GitHub Release
+  artifacts). They are
   decoupled: an upstream dsh release never requires a new shell build.
 - Kernel updates are **atomic and reversible**: activation is a single atomic
   rewrite of `current.json`, keeping the previous version for rollback.
@@ -66,10 +68,10 @@ dist/            tsc + copy output (gitignored, generated)
 |---|---|
 | `index.ts` | Boot, single-instance lock, lifecycle orchestration, crash/rollback/cancel logic, kernel + server wiring |
 | `server.ts` | `DshServer`: spawn/health-check/restart/graceful-shutdown of the dsh child process; log redaction; settled-URL parsing |
-| `window.ts` | `createMainWindow` (sandboxed, desktop chrome injection, title-bar overlay sync, export toast) + `createSetupWindow` |
+| `window.ts` | `createMainWindow` (sandboxed, desktop chrome injection, title-bar overlay sync, export toast, in-window update status card) |
 | `tray.ts` | System tray menu (open, check kernel/app update, restart server, quit) |
-| `updater.ts` | Shell update channel via `electron-updater` |
-| `ipc.ts` | IPC contract + broker for the setup window |
+| `updater.ts` | Shell update channel: Windows custom latest.yml + mirror download + NSIS silent install; macOS/Linux via `electron-updater` |
+| `update-card.ts` | Pure injected update-card script (message + progress bar) shared by kernel and shell update progress |
 | `brand-suite.ts` | Suite seams: plugin symbolic links into `$DSH_HOME` + loader overlay copy |
 
 ### src/kernel (runtime manager)
@@ -100,10 +102,14 @@ dist/            tsc + copy output (gitignored, generated)
 1. **Resolve** the newest version from the npm registry dist-tag
    (`@deepseek-ai/dsh`: `stable` = `latest` tag, `beta` = `beta` tag).
 2. **Download** the runtime tarball
-   (`dsh-runtime-<platform>-<arch>-<version>.tgz`) from GitHub Releases,
+   (`dsh-runtime-<platform>-<arch>-<version>.tgz`) from the dedicated
+   `runtime-<dshVersion>` GitHub Release (created published by CI; see §10),
    with a mirror chain; verify the **trusted sha512** (metadata sidecar
    fetched from the official host first — mirrors can never substitute
    content because every candidate is checked against the same digest).
+   Before offering an update, the shell probes whether this artifact exists —
+   a newer npm version without built artifacts reports "安装包尚未发布"
+   instead of failing the update.
 3. **Extract** into `staging/`, validate the inner `manifest.json` and that
    platform/arch match the current OS.
 4. **Activate** atomically: rewrite `current.json` to
@@ -211,7 +217,10 @@ Plugin builds (CI runs these before `build-runtime`):
 > `probe-mirror.mjs` (update-chain connectivity), `probe-drag.cjs` (drag
 > regions + brand Models render — **keep its `CSS` in sync with**
 > `src/main/window.ts` `DESKTOP_CHROME_CSS`), `probe-minimap.cjs` (opens a
-> session with history and reports minimap DOM evidence), `capture.mjs` (page
+> session with history and reports minimap DOM evidence),
+> `probe-update-card.cjs` (executes the injected update-card script against a
+> DOM stub — run after `npm run build`), `probe-shell-update.mjs` (Windows
+> shell-update flow against the real `latest.yml`), `capture.mjs` (page
 > screenshots for design work).
 
 ## 8. Environment variables
@@ -228,7 +237,7 @@ Plugin builds (CI runs these before `build-runtime`):
 | `DSH_APP_SUITE_VERSION` | `build-runtime.mjs`, `dev.ts` | Brand suite version in the runtime manifest |
 | `DSH_APP_LOG_DIR` | `server.ts` | Log directory (default: `<cwd>/logs`) |
 | `DSH_HOME` | `brand-suite.ts` | dsh profiles home (default `~/.dsh`) |
-| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else default `0.1.0-rc.8`) |
+| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the npm dist-tag at build time; last-resort default `0.1.0-rc.8`) |
 | `PROBE_BASE` / `PROBE_TAG` / `PROBE_ASSET` / `PROBE_URL` | `probe-mirror.mjs` | Connectivity probe targets |
 
 ## 9. Code & contribution conventions
@@ -271,15 +280,21 @@ Plugin builds (CI runs these before `build-runtime`):
 ### CI pipeline
 
 `release.yml` triggers on a `v*` tag push (or `workflow_dispatch` with an
-optional `dsh_version` input). Two jobs run per tag:
+optional `dsh_version` input). Tag pushes run two jobs; `workflow_dispatch`
+is the **runtime-only** path (publish kernel artifacts for a dsh version
+without cutting a shell release):
 
 - **runtime**: a 6-cell matrix (win32/darwin/linux × x64/arm64) builds the
   suite plugins, then `build-runtime.mjs`, and uploads
   `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + `manifest.json` to the
-  GitHub Release (creates it as a **draft** if absent).
-- **app**: builds + packages the shell per OS with `electron-builder` and
-  `--publish always`; macOS notarization via `--config.mac.notarize=true`
-  when Apple signing secrets are present.
+  dedicated **`runtime-<dshVersion>`** release (created **published** if
+  absent — `GitHubArtifactResolver` resolves exactly this tag shape). The
+  tagged version comes from `build-runtime`'s output: when `DSH_VERSION` is
+  empty it resolves the npm dist-tag, so artifacts always match what the app
+  resolves.
+- **app** (tag pushes only): builds + packages the shell per OS with
+  `electron-builder` and `--publish always`; macOS notarization via
+  `--config.mac.notarize=true` when Apple signing secrets are present.
 
 ### Release SOP (shell version, e.g. 0.1.6)
 
@@ -316,10 +331,13 @@ optional `dsh_version` input). Two jobs run per tag:
   installers/`latest-*.yml`. To rebuild: delete the draft release
   (`gh api -X DELETE repos/JochenYang/dsh-app/releases/<id>`), delete the tag
   (`git tag -d v0.1.6 && git push origin :refs/tags/v0.1.6`), then re-push.
-- A **single failed job** recovers best with `gh run rerun <run> --failed`
-  (also fixes a transient 404 from the runtime Attach step racing across the
-  6 parallel matrix jobs). Kernel version in runtime artifacts defaults to the
-  registry dist-tag, distinct from the shell version.
+- **Runtime tags are different**: `runtime-<dshVersion>` releases are created
+  published and re-uploaded with `--clobber`, so re-running a failed runtime
+  job (or `gh run rerun <run> --failed`) is safe and idempotent — do NOT
+  delete/recreate a runtime tag, just re-upload.
+- A **single failed job** recovers best with `gh run rerun <run> --failed`.
+  Kernel version in runtime artifacts resolves from the registry dist-tag
+  (distinct from the shell version) unless `dsh_version` is supplied.
 
 **Remaining pre-release gaps**: `DSH_APP_ARTIFACT_OWNER` now defaults to
 `JochenYang` (matching `electron-builder.yml` `publish`), so online
