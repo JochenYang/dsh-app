@@ -21,13 +21,3 @@ export const SERVER_HEALTH_POLL_MS = 200
 
 /** Grace period before force-killing the dsh server child on shutdown. */
 export const SERVER_SHUTDOWN_GRACE_MS = 8_000
-
-/** IPC channel names (main <-> setup renderer). */
-export const IPC = {
-  kernelStatus: 'kernel:status',
-  kernelInstall: 'kernel:install',
-  kernelCancel: 'kernel:cancel',
-  kernelInfo: 'kernel:info',
-  kernelUpdateCheck: 'kernel:update-check',
-  kernelApplyUpdate: 'kernel:apply-update',
-} as const

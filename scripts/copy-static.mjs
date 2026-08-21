@@ -1,6 +1,6 @@
-// Copy static/ (setup window assets) into dist/static after tsc, and the
-// brand-suite loader overlay next to the main bundle (brand-suite.ts reads
-// it via __dirname at every server start).
+// Copy static/ (currently empty — setup UI removed with the silent-install
+// change) into dist/static after tsc, plus the brand-suite loader overlay
+// (read via __dirname at every server start).
 import { cp, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'

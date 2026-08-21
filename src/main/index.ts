@@ -5,11 +5,11 @@ import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
-import { createMainWindow, createSetupWindow } from './window'
+import { createMainWindow } from './window'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { initShellUpdater, checkShellUpdate } from './updater'
-import { broadcast, registerIpc, type AppController } from './ipc'
-import { IPC, KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST } from '../shared/constants'
+import type { AppController } from './ipc'
+import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST } from '../shared/constants'
 import type { KernelInfoPayload, KernelStatusPayload } from '../shared/types'
 
 // ---------------------------------------------------------------- config
@@ -27,7 +27,6 @@ const artifactRepo = process.env.DSH_APP_ARTIFACT_REPO ?? 'dsh-app'
 let kernel: KernelManager
 let server: DshServer
 let mainWindow: BrowserWindow | null = null
-let setupWindow: BrowserWindow | null = null
 let quitting = false
 let restartAttempts = 0
 
@@ -47,8 +46,6 @@ function findFreePort(): Promise<number> {
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 function broadcastStatus(status: KernelStatusPayload): void {
-  broadcast(setupWindow, IPC.kernelStatus, status)
-  broadcast(mainWindow, IPC.kernelStatus, status)
   setTrayTooltip(status.phase === 'ready' ? `DSH APP — dsh ${kernel.getCurrent()?.manifest.dshVersion ?? ''}` : `DSH APP — ${status.message}`)
 }
 
@@ -57,15 +54,6 @@ function broadcastStatus(status: KernelStatusPayload): void {
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
   broadcastStatus({ phase: 'starting', message: '正在启动 dsh 服务…', progress: null })
-  // No main window yet: surface the setup window as a launch transition so the
-  // user gets immediate feedback while the kernel boots instead of a silent
-  // icon. If a window is already up (retry in flight), leave it alone.
-  // Dev mode skips the transition entirely: the checkout boots from the
-  // terminal (visible logs), and the flash of a kernel-install window makes no
-  // sense when no kernel is being installed.
-  if (!mainWindow && !setupWindow && !isDev) {
-    setupWindow = createSetupWindow()
-  }
   const port = await findFreePort()
   // Brand suite wiring: profile-dir module links + the loader overlay that
   // inserts the brand rows. An older kernel without the suite plugins boots
@@ -95,8 +83,6 @@ async function startServerAndOpenWindow(): Promise<void> {
     void mainWindow.loadURL(url)
     mainWindow.show()
   }
-  setupWindow?.close()
-  setupWindow = null
   restartAttempts = 0
   void kernel.cleanup()
   broadcastStatus({ phase: 'ready', message: '就绪', progress: null })
@@ -244,8 +230,6 @@ async function boot(): Promise<void> {
     onLog: (line) => console.log('[server]', line),
   })
 
-  registerIpc(controller)
-
   // Create the tray before any server/kernel work so it persists even when
   // the server fails to start (reinstall/retry loops). Otherwise the user
   // has no way to interact with the app while the main window is absent.
@@ -267,30 +251,23 @@ async function boot(): Promise<void> {
   if (current) {
     await startServerAndOpenWindow()
   } else {
-    // First run. Prefer a kernel tarball bundled inside the app's resources
-    // (shipped with the installer) so the user need not download it; only
-    // fall back to the online setup wizard when no bundle is present.
+    // First run / broken install. Prefer the tarball bundled inside the app's
+    // resources (shipped with the installer) so the user need not download the
+    // kernel; only fall back to the online install when no bundle is present.
+    // All of this runs silently in the background — the main window opens once
+    // the server is healthy, with no intermediate setup window.
     const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
     const bundledSha = `${bundledTgz}.sha512`
     if (!isDev && existsSync(bundledTgz) && existsSync(bundledSha)) {
-      // Defer showing the window: a fast local activation may finish before
-      // the grace period, so the user sees the main window directly with no
-      // intermediate "install" flash.
-      setupWindow = createSetupWindow(true)
       try {
         await kernel.installFromLocalTarball(bundledTgz, bundledSha)
         await startServerAndOpenWindow()
       } catch (err) {
-        // Bundled activation failed — make sure the window is visible for the
-        // online fallback, then fall through to online install.
-        setupWindow?.show()
-        broadcastStatus({ phase: 'error', message: '内置内核初始化失败，改为在线安装', progress: null, error: (err as Error).message })
+        console.error(`bundled kernel install failed: ${(err as Error).message}; falling back to online install`)
         await installKernel()
       }
     } else {
-      // No bundled kernel: online setup wizard, driven by the user.
-      setupWindow = createSetupWindow()
-      broadcastStatus({ phase: 'idle', message: 'DSH APP 尚未安装。', progress: null })
+      await installKernel()
     }
   }
 
