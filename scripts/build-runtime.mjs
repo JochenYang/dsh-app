@@ -73,7 +73,7 @@ if (process.env.GITHUB_OUTPUT) {
 const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION ?? '0.1.0'
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
-const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui']
+const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar']
 
 function run(cmd, args, cwd) {
   console.log(`$ ${cmd} ${args.join(' ')}`)
