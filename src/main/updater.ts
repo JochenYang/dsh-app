@@ -338,10 +338,14 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       // installer runs (a plain %errorlevel% would expand at parse time).
       // Premise: per-user asInvoker NSIS (perMachine:false) installs in one
       // process; an elevation hop would change what the recorded code means.
+      //
+      // The trailing `del` removes the downloaded installer regardless of
+      // outcome (it can always be re-downloaded) — %TEMP% must not accumulate
+      // one ~100 MB package per version.
       const resultFile = path.join(app.getPath('userData'), 'updater-install-result.txt')
       const child = spawn(
         'cmd.exe',
-        ['/V:ON', '/c', `""${dest}" /S & echo !errorlevel! > "${resultFile}"`],
+        ['/V:ON', '/c', `""${dest}" /S & echo !errorlevel! > "${resultFile}" & del "${dest}"`],
         { detached: true, stdio: 'ignore', windowsHide: true, windowsVerbatimArguments: true },
       )
       child.unref()
