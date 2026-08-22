@@ -16,3 +16,6 @@
 
     - id: brand-client-ui
       name: '@dsh-app/plugin-client-ui'
+
+    - id: sidebar
+      name: '@dsh-app/plugin-sidebar'
