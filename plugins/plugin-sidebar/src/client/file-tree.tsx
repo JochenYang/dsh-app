@@ -7,6 +7,9 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeRaw from 'rehype-raw'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import type { ReactNode } from 'react'
 import type { FsListEntry } from '../fs-routes.ts'
 import { FsApiError, listDir, readFile } from './api.ts'
@@ -39,14 +42,50 @@ function isMarkdownPath(path: string): boolean {
 }
 
 /**
- * Rendered Markdown preview. react-markdown without rehype-raw never emits
- * raw HTML, so a hostile README stays inert text (strict mode by default);
- * links keep their href — the shell's navigation fence handles open-external.
+ * Sanitize schema over the GitHub default. README mark-up commonly carries
+ * legacy alignment attributes and sized images; both are inert, so keep them
+ * instead of dropping the tag. Everything else — scripts, event handlers,
+ * iframes, javascript:/data: URLs, style elements — stays stripped by the
+ * defaults (defaultSchema.tagNames admits no script/style/iframe).
+ */
+const MD_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    p: [['align']],
+    h1: [['align']],
+    h2: [['align']],
+    h3: [['align']],
+    h4: [['align']],
+    table: [['align']],
+    th: [['align']],
+    td: [['align']],
+    // defaultSchema's img lacks alt/width/height; keep them for real READMEs.
+    img: [['src'], ['alt'], ['width'], ['height'], ['title'], ['align']],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    // Base64 images inline in markdown previews (src, not href — href keeps
+    // its http/https/irc/ircs/mailto/xmpp list from the defaults).
+    src: ['http', 'https', 'data'],
+  },
+}
+
+/**
+ * Rendered Markdown preview: GFM tables/task lists, raw-HTML README mark-up
+ * through rehype-raw, then a sanitize pass so hostile files stay inert
+ * (scripts, event handlers and iframes are stripped, not emitted). Links
+ * keep their href — the shell's navigation fence handles open-external.
  */
 export function MarkdownPreview(props: { content: string }): ReactNode {
   return (
     <div className="dshAsb-md">
-      <Markdown>{props.content}</Markdown>
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, MD_SCHEMA]]}
+      >
+        {props.content}
+      </Markdown>
     </div>
   )
 }
