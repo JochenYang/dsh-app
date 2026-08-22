@@ -13,7 +13,8 @@
  *
  * Run `npm run runtime:build` first to produce runtime-dist/.
  */
-import { copyFile, existsSync, mkdir, readdir, rm } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import semver from 'semver'
 import { fileURLToPath } from 'node:url'
