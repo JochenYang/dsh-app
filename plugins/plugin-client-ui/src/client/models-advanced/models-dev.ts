@@ -14,8 +14,14 @@
 
 import type { ModelDraft } from './fields.ts'
 
-/** The public feed (one JSON document, every provider). */
-const MODELS_DEV_URL = 'https://models.dev/api.json'
+/** Data sources in fallback order: the public feed first, then a
+ * mainland-reachable gh-proxy mirror of the DSH APP fork. The mirror URL
+ * must be the RAW form (a blob URL answers with the HTML page); both send
+ * `access-control-allow-origin: *` (verified 2026-08-22). */
+const MODELS_DEV_SOURCES = [
+  'https://models.dev/api.json',
+  'https://gh-proxy.org/https://raw.githubusercontent.com/JochenYang/models.dev/main/api.json',
+] as const
 
 /** One models.dev model entry (defensively typed — the feed is external). */
 export interface ModelsDevModel {
@@ -43,21 +49,32 @@ export interface ModelsDevProvider {
 export type ModelsDevApi = Record<string, Omit<ModelsDevProvider, 'id' | 'models'> & { models?: Record<string, ModelsDevModel> }>
 
 /**
- * Fetch and minimally normalize the feed.
+ * Fetch and minimally normalize the feed, trying each source in order until
+ * one answers. The first network/CORS/shape failure falls through to the
+ * next mirror; only the LAST failure is reported, so the manual fallback
+ * message names the source the user can actually check.
  * @returns providers in feed order.
- * @throws on network or CORS failure — the caller shows the manual fallback.
+ * @throws the final source's error when every source failed.
  */
 export async function fetchModelsDev(): Promise<ModelsDevProvider[]> {
-  const response = await fetch(MODELS_DEV_URL, { signal: AbortSignal.timeout(15_000) })
-  if (!response.ok) throw new Error(`models.dev HTTP ${String(response.status)}`)
-  const data: unknown = await response.json()
-  if (typeof data !== 'object' || data === null) throw new Error('models.dev 返回格式异常')
-  const providers: ModelsDevProvider[] = []
-  for (const [id, entry] of Object.entries(data as ModelsDevApi)) {
-    if (typeof entry !== 'object' || entry === null) continue
-    providers.push({ id, npm: entry.npm, api: entry.api, models: entry.models ?? {} })
+  let lastError: unknown = new Error('no data source configured')
+  for (const source of MODELS_DEV_SOURCES) {
+    try {
+      const response = await fetch(source, { signal: AbortSignal.timeout(15_000) })
+      if (!response.ok) throw new Error(`${source} HTTP ${String(response.status)}`)
+      const data: unknown = await response.json()
+      if (typeof data !== 'object' || data === null) throw new Error(`${source} 返回格式异常`)
+      const providers: ModelsDevProvider[] = []
+      for (const [id, entry] of Object.entries(data as ModelsDevApi)) {
+        if (typeof entry !== 'object' || entry === null) continue
+        providers.push({ id, npm: entry.npm, api: entry.api, models: entry.models ?? {} })
+      }
+      return providers
+    } catch (error) {
+      lastError = error
+    }
   }
-  return providers
+  throw lastError
 }
 
 /**
