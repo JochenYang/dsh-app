@@ -116,7 +116,15 @@ jobs:
           # losing create is harmless (upload --clobber below is idempotent),
           # so swallow create failures and only let the upload fail loudly.
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" || true
-          gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 runtime-dist/manifest.json --clobber
+          # manifest.json carries platform/arch: name it per matrix cell so the
+          # parallel cells never clobber the same asset name (a --clobber race
+          # previously 404'd on a concurrently-deleted asset) nor leave the
+          # last-writer's platform in the shared name.
+          cp runtime-dist/manifest.json "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
+          gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 "runtime-dist/manifest-${PLATFORM}-${ARCH}.json" --clobber
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
 
       # Also expose the tgz as a workflow artifact so the app job can bundle it
       # into the installer without re-downloading from the (still-draft) release.

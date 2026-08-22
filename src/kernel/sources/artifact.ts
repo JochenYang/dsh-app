@@ -8,6 +8,7 @@ import type { KernelManifest } from '../../shared/types'
  * Naming convention (produced by scripts/build-runtime.mjs in CI):
  *   dsh-runtime-<platform>-<arch>-<version>.tgz
  *   dsh-runtime-<platform>-<arch>-<version>.tgz.sha512
+ *   manifest-<platform>-<arch>.json  — the artifact's KernelManifest
  *
  * The tgz contains a single top-level directory `runtime/` with:
  *   manifest.json   — KernelManifest for the artifact
@@ -15,9 +16,10 @@ import type { KernelManifest } from '../../shared/types'
  *   app/            — npm-installed dsh profile (package.json + node_modules)
  *
  * Two-phase resolution keeps mirrors from forging integrity:
- *   1. Metadata (.sha512 + manifest.json) is fetched from the OFFICIAL
- *      release first; mirrors are consulted only if the official host is
- *      unreachable. The sha512 obtained here is the single trusted digest.
+ *   1. Metadata (.sha512 + manifest-<platform>-<arch>.json) is fetched from
+ *      the OFFICIAL release first; mirrors are consulted only if the
+ *      official host is unreachable. The sha512 obtained here is the single
+ *      trusted digest.
  *   2. The large tarball is downloaded from an ordered candidate list —
  *      official URL first, then each mirror prefix wrapping that URL — and
  *      EVERY candidate is checked against the phase-1 digest, so a hostile
@@ -128,7 +130,10 @@ export class GitHubArtifactResolver {
     try {
       const [shaRes, manifestRes] = await Promise.all([
         fetch(`${base}/${name}.sha512`, { signal: AbortSignal.timeout(15_000) }),
-        fetch(`${base}/manifest.json`, { signal: AbortSignal.timeout(15_000) }),
+        // Platform-suffixed name: every runtime cell uploads its own copy, so
+        // the shared-name asset never suffers a last-writer platform mismatch
+        // (nor a --clobber race between the parallel cells).
+        fetch(`${base}/manifest-${this.platform}-${this.arch}.json`, { signal: AbortSignal.timeout(15_000) }),
       ])
       if (!shaRes.ok || !manifestRes.ok) return null
       const sha512 = (await shaRes.text()).trim()
