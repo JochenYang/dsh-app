@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
+import Markdown from 'react-markdown'
 import type { ReactNode } from 'react'
 import type { FsListEntry } from '../fs-routes.ts'
 import { FsApiError, listDir, readFile } from './api.ts'
@@ -29,6 +30,24 @@ function Chevron({ open }: { open: boolean }): ReactNode {
       style={{ transform: open ? 'rotate(90deg)' : undefined, transition: 'transform 120ms ease', flex: 'none' }}>
       <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  )
+}
+
+/** Whether a preview path ends with a Markdown extension. */
+function isMarkdownPath(path: string): boolean {
+  return /\.(md|markdown)$/iu.test(path)
+}
+
+/**
+ * Rendered Markdown preview. react-markdown without rehype-raw never emits
+ * raw HTML, so a hostile README stays inert text (strict mode by default);
+ * links keep their href — the shell's navigation fence handles open-external.
+ */
+export function MarkdownPreview(props: { content: string }): ReactNode {
+  return (
+    <div className="dshAsb-md">
+      <Markdown>{props.content}</Markdown>
+    </div>
   )
 }
 
@@ -214,7 +233,9 @@ export function FileTreeTab(props: FileTreeTabProps): ReactNode {
                 {preview.error !== undefined ? <p className="dshAsb-error">{preview.error}</p> : null}
                 {preview.content === undefined && preview.error === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
                 {preview.content?.kind === 'text'
-                  ? <pre className="dshAsb-pre">{preview.content.content}</pre>
+                  ? isMarkdownPath(preview.path)
+                    ? <MarkdownPreview content={preview.content.content} />
+                    : <pre className="dshAsb-pre">{preview.content.content}</pre>
                   : null}
                 {preview.content?.kind === 'image'
                   ? <img className="dshAsb-img" alt={preview.path} src={`data:${preview.content.mime};base64,${preview.content.dataBase64}`} />
@@ -252,4 +273,22 @@ const FILE_TREE_CSS = `
 .dshAsb-img { max-width: 100%; border-radius: 8px; }
 .dshAsb-error { margin: 2px 0; color: #dc2626; font-size: 12px; }
 .dshAsb-hint { margin: 4px 0; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 12px; }
+.dshAsb-md { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-size: 12.5px; line-height: 1.65; overflow-wrap: anywhere; }
+.dshAsb-md > :first-child { margin-top: 0; }
+.dshAsb-md > :last-child { margin-bottom: 0; }
+.dshAsb-md h1, .dshAsb-md h2, .dshAsb-md h3, .dshAsb-md h4 { margin: 0.9em 0 0.45em; line-height: 1.3; font-weight: 600; }
+.dshAsb-md h1 { font-size: 1.25em; }
+.dshAsb-md h2 { font-size: 1.15em; }
+.dshAsb-md h3 { font-size: 1.05em; }
+.dshAsb-md p { margin: 0.5em 0; }
+.dshAsb-md a { color: var(--dsw-alias-brand-primary, #2563eb); }
+.dshAsb-md code { padding: 0.1em 0.35em; border-radius: 4px; background: rgba(100, 116, 139, 0.18); font-family: ui-monospace, Consolas, monospace; font-size: 0.95em; }
+.dshAsb-md pre { margin: 0.5em 0; padding: 8px 10px; border-radius: 6px; background: rgba(15, 23, 42, 0.06); overflow: auto; }
+.dshAsb-md pre code { padding: 0; background: none; }
+.dshAsb-md ul, .dshAsb-md ol { margin: 0.5em 0; padding-left: 1.5em; }
+.dshAsb-md blockquote { margin: 0.5em 0; padding: 0.2em 0.8em; border-left: 3px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); color: var(--dsw-alias-label-secondary, #64748b); }
+.dshAsb-md table { border-collapse: collapse; }
+.dshAsb-md th, .dshAsb-md td { padding: 4px 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
+.dshAsb-md img { max-width: 100%; border-radius: 6px; }
+.dshAsb-md hr { margin: 0.9em 0; border: none; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
 `
