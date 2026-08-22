@@ -111,6 +111,8 @@ jobs:
         shell: bash
         env:
           TAG: runtime-${{ steps.runtime.outputs.dsh_version }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
         run: |
           # Six cells race to create the tag; a 422 already_exists from a
           # losing create is harmless (upload --clobber below is idempotent),
@@ -122,9 +124,6 @@ jobs:
           # last-writer's platform in the shared name.
           cp runtime-dist/manifest.json "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
           gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 "runtime-dist/manifest-${PLATFORM}-${ARCH}.json" --clobber
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          ARCH: ${{ matrix.arch }}
 
       # Also expose the tgz as a workflow artifact so the app job can bundle it
       # into the installer without re-downloading from the (still-draft) release.
