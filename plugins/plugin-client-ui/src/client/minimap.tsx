@@ -114,10 +114,12 @@ const MIN_HOST_HEIGHT = 240
 const MIN_ENTRIES = 2
 /** Jump offset so the targeted message sits just below the viewport top. */
 const JUMP_PAD = 12
-/** Fixed slot pitch of the node list (icons never move while scrolling). */
+/** Nominal slot pitch of the node list (bar + gap; icons never move while scrolling). */
 const TICK_SPACING = 14
+/** Shortest slot pitch when a long chat must compress the track. */
+const MIN_TICK_SPACING = 8
 /** Node bar height. */
-const TICK_HEIGHT = 4
+const TICK_HEIGHT = 6
 /** Re-measure de-bounce while a chat is streaming. */
 const MEASURE_THROTTLE_MS = 120
 
@@ -178,26 +180,28 @@ const MINIMAP_CSS = `
   position: absolute;
   left: 4px;
   width: 16px;
-  height: 4px;
+  height: 6px;
   border: none;
   padding: 0;
   margin: 0;
-  border-radius: 2px;
+  border-radius: 3px;
   background: color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent);
   cursor: pointer;
   pointer-events: auto;
   transition: background 0.12s ease, width 0.12s ease, left 0.12s ease;
-}
-.dshapp-mm-tick:hover {
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 75%, transparent);
-  width: 18px;
-  left: 3px;
 }
 .dshapp-mm-tick.is-active {
   width: 20px;
   left: 2px;
   background: var(--dsw-alias-brand-primary);
   box-shadow: 0 0 8px color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
+}
+/* Hover wins over the reading-anchor highlight: the bar under the cursor
+   becomes the brightest one (the gauge width already grows it to 24px via
+   inline style); the anchor keeps its shadow only while not hovered. */
+.dshapp-mm-tick:hover {
+  background: var(--dsw-alias-brand-primary);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--dsw-alias-brand-primary) 60%, transparent);
 }
 .dshapp-mm-preview {
   position: fixed;
@@ -241,6 +245,19 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
   const [layout, setLayout] = useState<LayoutState | null>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [hover, setHover] = useState<{ key: string; y: number } | null>(null)
+  // The tick currently under the cursor; drives the gauge width taper.
+  const [tickHover, setTickHover] = useState<number | null>(null)
+  /** Gauge width for one tick: base 16, active 20, hovered 24, neighbors taper. */
+  const tickGaugeWidth = (index: number): number => {
+    if (tickHover === null || Math.abs(index - tickHover) > 2) return index === activeIndex ? 20 : 16
+    const distance = Math.abs(index - tickHover)
+    return distance === 0 ? 24 : distance === 1 ? 19 : 14
+  }
+  /** Left offset keeps the tick centered on its 16px track as it grows. */
+  const tickGaugeLeft = (index: number): number => {
+    const width = tickGaugeWidth(index)
+    return width === 16 ? 4 : 4 - (width - 16) / 2
+  }
   // Manual jump target: while the jumped-to message is still on screen, its
   // bar stays highlighted no matter how the virtualized list jitters; only a
   // new jump or scrolling it fully off-screen yields to position tracking.
@@ -305,6 +322,27 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     if (hover !== null && !entries.some(entry => entry.key === hover.key)) setHover(null)
   }, [entries, hover])
 
+  // The minimap belongs to the CHAT view only. The header utilities seat
+  // keeps this component mounted across view switches (文件/Git), so the
+  // active view-tab is observed and anything but 对话 renders nothing.
+  const [viewIsChat, setViewIsChat] = useState(true)
+  useEffect(() => {
+    const check = (): void => {
+      const tabs = [...document.querySelectorAll('[role="tablist"]')]
+        .find(candidate => (candidate.textContent ?? '').includes('对话'))
+      if (tabs === undefined) {
+        setViewIsChat(true)
+        return
+      }
+      const label = (tabs.querySelector('[aria-selected="true"]')?.textContent ?? '').trim()
+      setViewIsChat(label === '' || label === '对话')
+    }
+    check()
+    const observer = new MutationObserver(check)
+    observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['aria-selected'] })
+    return () => { observer.disconnect() }
+  }, [])
+
   const jump = (key: string): void => {
     const host = hostRef.current
     if (host === null || layout === null) return
@@ -316,7 +354,10 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     host.scrollTo({ top: target, behavior: 'smooth' })
   }
 
-  if (layout === null || layout.hostHeight < MIN_HOST_HEIGHT || entries.length < MIN_ENTRIES) {
+  if (!viewIsChat || layout === null || layout.hostHeight < MIN_HOST_HEIGHT
+    // Only genuine user turns count toward the minimum: a system context
+    // reminder on an otherwise empty chat must not raise the rail.
+    || entries.filter(entry => entry.kind !== 'context').length < MIN_ENTRIES) {
     return null
   }
 
@@ -359,7 +400,10 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     return byPosition()
   })()
 
-  const trackH = Math.min((entries.length - 1) * TICK_SPACING + TICK_HEIGHT, vh - 16)
+  // Long chats compress the slot pitch (never below MIN_TICK_SPACING) so the
+  // whole rail still fits the viewport; short chats breathe at TICK_SPACING.
+  const spacing = Math.max(MIN_TICK_SPACING, Math.min(TICK_SPACING, (vh - 16 - TICK_HEIGHT) / Math.max(1, entries.length - 1)))
+  const trackH = (entries.length - 1) * spacing + TICK_HEIGHT
   const trackTop = layout.hostTop + Math.max(8, (vh - trackH) / 2)
 
   // Hover payload: position + the hovered entry; null when the hovered key
@@ -384,13 +428,19 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
             key={entry.key}
             type="button"
             className={index === activeIndex ? 'dshapp-mm-tick is-active' : 'dshapp-mm-tick'}
-            style={{ top: index * TICK_SPACING }}
+            style={{
+              top: index * spacing,
+              // Gauge-hover effect: the tick under the cursor grows, its
+              // neighbors taper by distance, others rest at base.
+              width: tickGaugeWidth(index),
+              left: tickGaugeLeft(index),
+            }}
             title={formatClock(entry.time) ?? undefined}
             aria-label={`跳转到${KIND_LABEL[entry.kind]}: ${entry.text ?? ''}`}
             aria-current={index === activeIndex ? 'true' : undefined}
             data-dshapp-mm-key={entry.key}
             onClick={() => { jump(entry.key) }}
-            onMouseEnter={(event) => { setHover({ key: entry.key, y: event.clientY }) }}
+            onMouseEnter={(event) => { setTickHover(index); setHover({ key: entry.key, y: event.clientY }) }}
             onMouseMove={(event) => {
               setHover(current => (
                 current !== null && current.key === entry.key
@@ -399,6 +449,7 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
               ))
             }}
             onMouseLeave={() => {
+              setTickHover(null)
               setHover(current => current?.key === entry.key ? null : current)
             }}
           />
