@@ -12,9 +12,11 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 ### 中文
 - 修复升级安装后品牌插件全部失效的问题：新版本内置运行时内容变化（如新增插件套件）但内核目录同名时会被直接复用，新内容从未生效；现在启动时会检测内置运行时内容变化并自动重新激活（此前内置安装仅首次启动触发）
+- 应用静默更新：安装包下载完成后自动删除，不再残留于系统临时目录
 
 ### English
 - Fixed all brand plugins disappearing after an upgrade: a new bundled runtime whose content changed under the same kernel version was never applied because the same-named kernel dir was reused verbatim; the shell now detects bundled content drift on boot and re-activates it (previously the bundled install ran only on first launch)
+- Silent app updates now delete the downloaded installer automatically, no longer leaving it in the system temp directory
 
 ## [v0.3.0] - 2026-08-23
 
