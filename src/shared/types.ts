@@ -51,6 +51,12 @@ export interface CurrentKernel {
   previous: string | null
   installedAt: string
   manifest: KernelManifest
+  /**
+   * sha512 of the tarball this install was activated from. Missing on
+   * installs predating the field; the shell compares it against the bundled
+   * sidecar to detect same-version content drift (new suite plugins).
+   */
+  sha512?: string
 }
 
 export interface UpdateCheckResult {

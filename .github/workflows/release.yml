@@ -127,6 +127,7 @@ jobs:
           path: |
             runtime-dist/dsh-runtime-*.tgz
             runtime-dist/dsh-runtime-*.tgz.sha512
+            runtime-dist/manifest.json
           retention-days: 1
 
   # Runs only on tag pushes. workflow_dispatch is the runtime-only path:

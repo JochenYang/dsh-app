@@ -16,7 +16,7 @@ npmRebuild: false
 extraResources:
   - from: bundled-kernel
     to: kernel
-    filter: ["kernel.tgz", "kernel.tgz.sha512"]
+    filter: ["kernel.tgz", "kernel.tgz.sha512", "manifest.json"]
 
 # ---- Shell update channel (electron-updater, GitHub Releases) ----
 publish:

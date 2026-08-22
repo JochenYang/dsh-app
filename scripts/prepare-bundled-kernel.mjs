@@ -13,7 +13,7 @@
  *
  * Run `npm run runtime:build` first to produce runtime-dist/.
  */
-import { copyFile, mkdir, readdir, rm } from 'node:fs/promises'
+import { copyFile, existsSync, mkdir, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import semver from 'semver'
 import { fileURLToPath } from 'node:url'
@@ -55,8 +55,14 @@ async function main() {
   await mkdir(bundled, { recursive: true })
   await copyFile(path.join(runtimeDist, tgz), path.join(bundled, 'kernel.tgz'))
   await copyFile(path.join(runtimeDist, sha), path.join(bundled, 'kernel.tgz.sha512'))
+  // The patched manifest (real sha512 integrity) ships alongside so the shell
+  // can version-check the bundle at boot without extracting the tarball.
+  const manifestSrc = path.join(runtimeDist, 'manifest.json')
+  if (existsSync(manifestSrc)) {
+    await copyFile(manifestSrc, path.join(bundled, 'manifest.json'))
+  }
 
-  console.log(`bundled kernel: ${tgz} -> bundled-kernel/kernel.tgz (+ .sha512)`)
+  console.log(`bundled kernel: ${tgz} -> bundled-kernel/kernel.tgz (+ .sha512 + manifest.json)`)
 }
 
 main().catch((err) => {

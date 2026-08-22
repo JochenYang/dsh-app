@@ -1,7 +1,8 @@
 import { app, BrowserWindow, dialog } from 'electron'
 import net from 'node:net'
-import { existsSync, renameSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync } from 'node:fs'
 import path from 'node:path'
+import semver from 'semver'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
@@ -249,6 +250,38 @@ async function boot(): Promise<void> {
   // or a broken install, handled below by bundled/online activation.
   const current = await kernel.load()
   if (current) {
+    // Bundled-runtime drift check. The versioned kernel dir name is
+    // dsh-<v>+suite-<v>; when a NEW shell ships a same-version kernel whose
+    // content changed (the brand suite gained a plugin), an existing
+    // same-named directory is reused verbatim and the new content never
+    // lands — linkSuitePlugins then bails on the missing member and the whole
+    // suite silently boots vanilla. Re-activate the bundled tarball whenever
+    // its verified hash differs from the recorded one and its version is not
+    // older than the installed kernel (a newer-dsh install stays online).
+    const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
+    const bundledSha = `${bundledTgz}.sha512`
+    const bundledManifestPath = path.join(process.resourcesPath, 'kernel', 'manifest.json')
+    if (!isDev && existsSync(bundledTgz) && existsSync(bundledSha) && existsSync(bundledManifestPath)) {
+      try {
+        const bundledManifest = JSON.parse(readFileSync(bundledManifestPath, 'utf8')) as {
+          dshVersion?: string
+          platform?: string
+          arch?: string
+        }
+        const samePlatform = bundledManifest.platform === current.manifest.platform
+          && bundledManifest.arch === current.manifest.arch
+        const sameVersion = bundledManifest.dshVersion === current.manifest.dshVersion
+        const newerVersion = bundledManifest.dshVersion !== undefined
+          && semver.gt(bundledManifest.dshVersion, current.manifest.dshVersion)
+        const contentDiffers = current.sha512 !== readFileSync(bundledSha, 'utf8').trim().toLowerCase()
+        if (samePlatform && contentDiffers && (sameVersion || newerVersion)) {
+          console.log('[kernel] bundled content differs from active install; re-activating')
+          await kernel.installFromLocalTarball(bundledTgz, bundledSha)
+        }
+      } catch (err) {
+        console.error(`[kernel] bundled content check failed: ${(err as Error).message}`)
+      }
+    }
     await startServerAndOpenWindow()
   } else {
     // First run / broken install. Prefer the tarball bundled inside the app's

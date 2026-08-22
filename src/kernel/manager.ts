@@ -247,7 +247,13 @@ export class KernelManager {
     }
 
     // 2. (Verified above.) Extract, sanity-check, and activate.
-    return this.activateTarball(tarball)
+    const next = await this.activateTarball(tarball)
+    // Record the verified source hash (mirror side of the download chain);
+    // see installFromLocalTarballInner for the comparison semantics.
+    next.sha512 = artifact.sha512
+    await saveCurrentKernel(this.root, next)
+    this.current = next
+    return next
   }
 
   /**
@@ -276,8 +282,10 @@ export class KernelManager {
     await fs.rename(inner, target)
 
     // 4. Activate atomically, keeping the previous version for rollback.
+    //    Same-name re-activation (bundled content drift) must not point
+    //    `previous` at itself — nothing to roll back to beyond the new dir.
     this.status({ phase: 'installing', message: '正在激活运行时…', progress: null })
-    const previous = this.current ? this.current.active : null
+    const previous = this.current && this.current.active !== versionDir ? this.current.active : null
     const next: CurrentKernel = {
       active: versionDir,
       previous,
@@ -325,7 +333,13 @@ export class KernelManager {
       throw new Error(`内置运行时完整性校验失败（期望 ${expected.slice(0, 16)}…，实际 ${actual.slice(0, 16)}…）`)
     }
     this.log(`bundled tarball verified: ${path.basename(tarballPath)}`)
-    return this.activateTarball(tarball)
+    const next = await this.activateTarball(tarball)
+    // Record the verified source hash: the shell compares it against the
+    // bundled sidecar on boot to detect same-version content drift.
+    next.sha512 = expected
+    await saveCurrentKernel(this.root, next)
+    this.current = next
+    return next
   }
 
   private versionDirName(manifest: KernelManifest): string {
