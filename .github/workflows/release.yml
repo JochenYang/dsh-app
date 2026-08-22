@@ -89,7 +89,7 @@ jobs:
         shell: bash
         working-directory: plugins
         run: |
-          for p in plugin-brand plugin-client-ui; do
+          for p in plugin-brand plugin-client-ui plugin-sidebar; do
             # Use each plugin's own build script (brand: tsc, client-ui: esbuild
             # loader-wrapped bundle). A bare `npx tsc` would neither produce the
             # client bundle the dsh loader expects nor match published typings.
