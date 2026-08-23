@@ -1,12 +1,40 @@
+# ---- Dependencies ----
 node_modules/
+plugins/*/node_modules/
+
+# ---- Build outputs (generated; rebuildable) ----
 dist/
 release/
 runtime-dist/
 bundled-kernel/
-# Suite plugin build outputs (rebuilt by scripts/build-runtime.mjs).
 plugins/*/lib/
-# Local scratch space for probes and one-off experiments.
-scratch/
+
+# ---- Runtime artifacts ----
 *.tgz
+
+# ---- Logs ----
+logs/
 *.log
+
+# ---- Local scratch / probes / one-off experiments ----
+scratch/
+
+# ---- Local agent context cache (context-codebase skill) ----
+repo/
+
+# ---- Generated release outputs (local only; rebuilt per release) ----
+release-notes.md
+
+# ---- Package locks: sibling plugins do not track lockfiles ----
+plugins/*/package-lock.json
+
+# ---- IDE / OS ----
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ---- Environment secrets ----
+.env
+.env.*
+!.env.example
