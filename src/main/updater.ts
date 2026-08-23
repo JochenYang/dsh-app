@@ -315,19 +315,22 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     const install = await dialog.showMessageBox({
       type: 'question',
       title: `${APP_NAME} 更新就绪`,
-      message: `将静默安装 ${APP_NAME} ${yaml.version} 并退出当前应用。`,
-      detail: '安装完成后重新打开应用即可使用新版本。',
+      message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
+      detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
       buttons: ['立即安装', '稍后'],
       defaultId: 0,
       cancelId: 1,
     })
     if (install.response === 0) {
-      // NSIS silent install; the app must be closed so the installer can
-      // replace the running binaries. The installer is detached so it
-      // survives this process exiting. The parent cannot wait for the exit
-      // code itself (it quits immediately after spawning), so a detached
-      // cmd watcher records the installer's exit code into a file that the
-      // next boot reads (consumeUpdaterInstallResult).
+      // VISIBLE NSIS install: the app must be closed so the installer can
+      // replace the running binaries; the wizard then shows the same flow as a
+      // first-time install (user clicks through, completion page relaunches
+      // the app). The installer is detached so it survives this process
+      // exiting. The parent cannot wait for the exit code itself (it quits
+      // immediately after spawning), so a detached cmd watcher records the
+      // installer's exit code into a file that the next boot reads
+      // (consumeUpdaterInstallResult) and deletes the downloaded package once
+      // the wizard exits — success OR cancel (re-downloadable).
       //
       // Quoting is load-bearing here: without windowsVerbatimArguments, libuv
       // re-escapes the inner `\"` pairs as `\\\"`, which cmd.exe cannot parse
@@ -336,16 +339,14 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       // cmd /? rule 2 strips the outer pair and leaves the inner ones intact
       // for the spaced exe path. /V:ON makes !errorlevel! expand AFTER the
       // installer runs (a plain %errorlevel% would expand at parse time).
-      // Premise: per-user asInvoker NSIS (perMachine:false) installs in one
-      // process; an elevation hop would change what the recorded code means.
-      //
-      // The trailing `del` removes the downloaded installer regardless of
-      // outcome (it can always be re-downloaded) — %TEMP% must not accumulate
-      // one ~100 MB package per version.
+      // cmd waits on the direct-run GUI process, so `del` only runs once the
+      // wizard closes. Premise: per-user asInvoker NSIS (perMachine:false)
+      // installs in one process; an elevation hop would change what the
+      // recorded code means.
       const resultFile = path.join(app.getPath('userData'), 'updater-install-result.txt')
       const child = spawn(
         'cmd.exe',
-        ['/V:ON', '/c', `""${dest}" /S & echo !errorlevel! > "${resultFile}" & del "${dest}"`],
+        ['/V:ON', '/c', `""${dest}" & echo !errorlevel! > "${resultFile}" & del "${dest}"`],
         { detached: true, stdio: 'ignore', windowsHide: true, windowsVerbatimArguments: true },
       )
       child.unref()
@@ -391,9 +392,10 @@ export async function consumeUpdaterInstallResult(win: BrowserWindow | null = nu
   if (code !== '') {
     console.log(`[shell-updater] previous silent-install exit code: ${code}`)
     if (code !== '0') {
-      // Wait for the reloaded page (boot just reloaded the window) — the same
-      // loadURL-in-flight problem as the kernel-update success toast.
-      void showToastWhenLoaded(win, `上次应用更新安装失败（退出码 ${code}），请从托盘「检查应用更新」重试`, 'error', 8_000)
+      // Visible-install flow: a non-zero code also covers the user CANCELLING
+      // the wizard — keep the wording neutral so a cancel and a real failure
+      // both read sensibly.
+      void showToastWhenLoaded(win, `上次应用更新未完成（退出码 ${code}），可从托盘「检查应用更新」重试`, 'error', 8_000)
     }
   }
   await fs.rm(file, { force: true }).catch(() => undefined)
