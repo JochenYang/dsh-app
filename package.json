@@ -1,7 +1,7 @@
 {
   "name": "dsh-app",
   "productName": "DSH APP",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "DSH APP — branded desktop client for DeepSeek Harness (dsh). macOS / Windows / Linux.",
   "author": {
     "name": "dsh-app contributors",

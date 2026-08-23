@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.4.0] - 2026-08-23
+
+### 中文
+- Git 页全面增强：会话级仓库隔离（host 按会话反查工作目录，拒绝伪造 session/路径穿越）、index/worktree 混合状态显示（如 MM）、重命名/复制路径、未跟踪文件 diff、全部暂存/取消暂存、大 diff 与大文件列表体量保护、还原文件确认弹窗、请求代际保护（旧响应不覆盖当前会话）、分离头提示、键盘与触摸操作；变化行操作区固定宽度，悬停不再布局抖动
+- 文件页 Markdown 预览支持本地图片：相对路径图片（README 徽章等）自动经内置文件接口渲染，不再 404；目录树展开/收缩命中更可靠（三角与整行点击一致）
+- 对话 minimap 交互升级：默认全部短线，悬停启用中心放大与邻近渐变（160ms 顺滑缓动），移出恢复；滚动事件逐帧合并、滚动停止后再测量，长会话快速滚动不掉帧；鼠标经过刻度间隙预览不再闪断，悬停期间布局冻结
+
+### English
+- Git page overhauls: session-scoped repo isolation (host resolves cwd from the session, rejecting forged sessions/path traversal), split index/worktree states (MM etc.), rename/copy paths, untracked diffs, stage-all / unstage-all, size guards for large diffs and lists, restore confirmation, request-generation guards (stale responses never overwrite the current session), detached-head hint, keyboard and touch support; row action areas are fixed-width so hover no longer jitters layout
+- The file page's Markdown preview now renders local images: relative paths (README badges etc.) are served through the built-in file endpoint instead of 404ing; directory expansion/collapse hit areas are reliable (chevron and row clicks agree)
+- Conversation minimap interaction upgrade: all short bars by default, hover enables center growth with neighbor taper (160ms smooth easing), release restores; scroll events coalesce per frame and measurement waits for scrolling to settle, so long chats scroll without frame drops; hover preview no longer blinks across tick gaps and layout freezes while hovering
+
 ## [v0.3.2] - 2026-08-23
 
 ### 中文
