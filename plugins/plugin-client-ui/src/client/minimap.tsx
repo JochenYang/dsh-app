@@ -1,6 +1,6 @@
 /**
  * DSH APP conversation minimap — a slim rail on the right edge of the chat
- * scrollport. Each user / steering / context message becomes one tick;
+ * scrollport. Each user / steering message becomes one tick;
  * hovering a tick shows a text preview of that message, clicking it scrolls
  * the conversation to the message.
  *
@@ -22,13 +22,14 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 
 export type MinimapProps = PropsRuntime<'conversation.session.header.utilities'>
 
-/** Chat node kinds the minimap tracks. */
-type TrackedKind = 'user' | 'steering' | 'context'
+/** Chat node kinds the minimap tracks: user-side turns only. Assistant
+ * replies are deliberately NOT tracked (too many ticks, no user intent) and
+ * system-injected context nodes are excluded as well. */
+type TrackedKind = 'user' | 'steering'
 
 const KIND_LABEL: Record<TrackedKind, string> = {
   user: '消息',
   steering: '追问',
-  context: '上下文',
 }
 
 /** Empty-image-fallback copy (zh-CN product copy). */
@@ -79,7 +80,7 @@ function collectEntries(chat: {
   for (const key of chat.order) {
     const node = chat.nodes.get(key)
     if (node === undefined) continue
-    if (node.kind !== 'user' && node.kind !== 'steering' && node.kind !== 'context') continue
+    if (node.kind !== 'user' && node.kind !== 'steering') continue
     const data = node.data as { content?: unknown; time?: unknown } | null
     entries.push({
       key,
@@ -102,6 +103,7 @@ interface LayoutState {
   hostTop: number
   hostLeft: number
   hostHeight: number
+  scrollTop: number
   scrollHeight: number
   positions: Map<string, RowGeometry>
 }
@@ -118,10 +120,27 @@ const JUMP_PAD = 12
 const TICK_SPACING = 14
 /** Shortest slot pitch when a long chat must compress the track. */
 const MIN_TICK_SPACING = 8
-/** Node bar height. */
-const TICK_HEIGHT = 6
+/** Thin tick-mark line height, matching the reference rail's 0.5rem line. */
+const TICK_HEIGHT = 2
 /** Re-measure de-bounce while a chat is streaming. */
 const MEASURE_THROTTLE_MS = 120
+/** The hover pyramid used by the beUI/Codex-style preview rail. */
+const PYRAMID_SCALE = 1
+const PYRAMID_NEAR_SCALE = 0.68
+const PYRAMID_FAR_SCALE = 0.44
+const PYRAMID_REST_SCALE = 0.25
+
+function pyramidScaleFor(index: number, hoveredIndex: number | null): number {
+  // Resting state is intentionally uniform and compact. The reading anchor
+  // remains available to assistive technology, but does not create a second
+  // visual emphasis before the pointer enters the rail.
+  if (hoveredIndex === null) return PYRAMID_REST_SCALE
+  const distance = Math.abs(index - hoveredIndex)
+  if (distance === 0) return PYRAMID_SCALE
+  if (distance === 1) return PYRAMID_NEAR_SCALE
+  if (distance === 2) return PYRAMID_FAR_SCALE
+  return PYRAMID_REST_SCALE
+}
 
 /** hh:mm for today, `M-D hh:mm` for older dates. */
 function formatClock(time: number | null): string | null {
@@ -163,6 +182,7 @@ function measureLayout(host: HTMLElement, keys: readonly string[]): LayoutState 
     hostTop: hostRect.top,
     hostLeft: hostRect.left,
     hostHeight: hostRect.height,
+    scrollTop: host.scrollTop,
     scrollHeight: host.scrollHeight,
     positions: positionsMap,
   }
@@ -174,32 +194,39 @@ const MINIMAP_CSS = `
   position: fixed;
   width: 24px;
   z-index: 20;
-  pointer-events: none;
+  pointer-events: auto;
 }
-.dshapp-mm-tick {
+.dshapp-mm-item {
   position: absolute;
-  left: 4px;
-  width: 16px;
-  height: 6px;
+  left: 2px;
+  width: 24px;
+  height: 14px;
   border: none;
   padding: 0;
   margin: 0;
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent);
+  display: flex;
+  align-items: center;
+  background: transparent;
   cursor: pointer;
   pointer-events: auto;
-  transition: background 0.12s ease, width 0.12s ease, left 0.12s ease;
+}
+.dshapp-mm-tick {
+  display: block;
+  flex: none;
+  width: 24px;
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent);
+  transform-origin: left center;
+  transform: scaleX(0.667);
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .dshapp-mm-tick.is-active {
-  width: 20px;
-  left: 2px;
   background: var(--dsw-alias-brand-primary);
   box-shadow: 0 0 8px color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
 }
-/* Hover wins over the reading-anchor highlight: the bar under the cursor
-   becomes the brightest one (the gauge width already grows it to 24px via
-   inline style); the anchor keeps its shadow only while not hovered. */
-.dshapp-mm-tick:hover {
+/* The hit area is the full slot; only the inner tick receives the color. */
+.dshapp-mm-item:hover .dshapp-mm-tick {
   background: var(--dsw-alias-brand-primary);
   box-shadow: 0 0 8px color-mix(in srgb, var(--dsw-alias-brand-primary) 60%, transparent);
 }
@@ -214,6 +241,8 @@ const MINIMAP_CSS = `
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
   pointer-events: none;
   color: var(--dsw-alias-label-primary);
+  transition: opacity 180ms cubic-bezier(0.16, 1, 0.3, 1), transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
 }
 .dshapp-mm-preview-head {
   font-size: 11px;
@@ -236,6 +265,12 @@ const MINIMAP_CSS = `
 .dshapp-mm-preview-text.is-empty {
   color: var(--dsw-alias-label-secondary);
 }
+@media (prefers-reduced-motion: reduce) {
+  .dshapp-mm-tick,
+  .dshapp-mm-preview {
+    transition: none;
+  }
+}
 `
 
 export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null {
@@ -244,27 +279,87 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
   const entryKeys = useMemo(() => entries.map(entry => entry.key), [entries])
   const [layout, setLayout] = useState<LayoutState | null>(null)
   const [scrollTop, setScrollTop] = useState(0)
+  const scrollTopRef = useRef(0)
   const [hover, setHover] = useState<{ key: string; y: number } | null>(null)
-  // The tick currently under the cursor; drives the gauge width taper.
-  const [tickHover, setTickHover] = useState<number | null>(null)
-  /** Gauge width for one tick: base 16, active 20, hovered 24, neighbors taper. */
-  const tickGaugeWidth = (index: number): number => {
-    if (tickHover === null || Math.abs(index - tickHover) > 2) return index === activeIndex ? 20 : 16
-    const distance = Math.abs(index - tickHover)
-    return distance === 0 ? 24 : distance === 1 ? 19 : 14
-  }
-  /** Left offset keeps the tick centered on its 16px track as it grows. */
-  const tickGaugeLeft = (index: number): number => {
-    const width = tickGaugeWidth(index)
-    return width === 16 ? 4 : 4 - (width - 16) / 2
-  }
+  // Hover mirrored into a ref: the measure scheduler (effect closure) reads it
+  // without depending on render cycles.
+  const hoverRef = useRef<{ key: string; y: number } | null>(null)
   // Manual jump target: while the jumped-to message is still on screen, its
   // bar stays highlighted no matter how the virtualized list jitters; only a
   // new jump or scrolling it fully off-screen yields to position tracking.
   const [lastJumpKey, setLastJumpKey] = useState<string | null>(null)
   const hostRef = useRef<HTMLElement | null>(null)
   const measureTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const settleMeasureTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scrollFrame = useRef<number | null>(null)
   const lastMeasure = useRef(0)
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const trackRef = useRef<HTMLDivElement | null>(null)
+  /** Index-centered hover state; the rail uses a discrete pyramid, not a
+   * pixel-distance heatmap. */
+  const hoverIndexRef = useRef<number | null>(null)
+  const gaugePaintedValuesRef = useRef<number[]>([])
+  const gaugeTicksRef = useRef<HTMLElement[]>([])
+  const lastPaintedActiveIndexRef = useRef(-1)
+  const lastPaintedHoverIndexRef = useRef<number | null>(null)
+  const activeIndexRef = useRef(-1)
+
+  /** Set target transforms only when the pyramid center changes. The browser's
+   * compositor owns the 180ms interruptible transition between these values.
+   * Hovering one slot only affects that slot and its two neighbors on either
+   * side; avoid touching every tick on each pointer transition. */
+  const paintGaugeTargets = (activeIndex: number, forceAll = false): void => {
+    const count = gaugeTicksRef.current.length > 0 ? gaugeTicksRef.current.length : entries.length
+    const hoveredIndex = hoverIndexRef.current
+    const previousActiveIndex = lastPaintedActiveIndexRef.current
+    const previousHoveredIndex = lastPaintedHoverIndexRef.current
+    const indexes = new Set<number>()
+    const addNeighborhood = (index: number | null): void => {
+      if (index === null || index < 0) return
+      for (let offset = -2; offset <= 2; offset += 1) indexes.add(index + offset)
+    }
+    if (forceAll || gaugePaintedValuesRef.current.length !== count) {
+      for (let index = 0; index < count; index += 1) indexes.add(index)
+    } else {
+      addNeighborhood(previousHoveredIndex)
+      addNeighborhood(hoveredIndex)
+      if (previousActiveIndex >= 0) indexes.add(previousActiveIndex)
+      if (activeIndex >= 0) indexes.add(activeIndex)
+    }
+    for (const index of indexes) {
+      if (index < 0 || index >= count) continue
+      const target = pyramidScaleFor(index, hoveredIndex)
+      const tick = gaugeTicksRef.current[index]
+      const painted = gaugePaintedValuesRef.current[index]
+      if (tick !== undefined && (painted === undefined || Math.abs(painted - target) > 0.0005)) {
+        tick.style.transform = `scaleX(${target.toFixed(3)})`
+        gaugePaintedValuesRef.current[index] = target
+      }
+    }
+    gaugePaintedValuesRef.current.length = count
+    lastPaintedActiveIndexRef.current = activeIndex
+    lastPaintedHoverIndexRef.current = hoveredIndex
+  }
+
+  const cancelHoverClear = (): void => {
+    if (hoverTimerRef.current !== null) {
+      clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = null
+    }
+  }
+
+  /** Keep the preview and pyramid alive across the small gaps inside the rail;
+   * only leaving the whole rail starts the delayed reset. */
+  const scheduleHoverClear = (): void => {
+    cancelHoverClear()
+    hoverTimerRef.current = setTimeout(() => {
+      hoverTimerRef.current = null
+      hoverIndexRef.current = null
+      hoverRef.current = null
+      setHover(null)
+      paintGaugeTargets(activeIndexRef.current)
+    }, 200)
+  }
 
   useEffect(() => {
     // (Re)bind the scrollport: session switch keeps the same element, view
@@ -272,6 +367,12 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     // parks the rail.
     const host = document.querySelector<HTMLElement>(SCROLLPORT_SELECTOR)
     hostRef.current = host
+    hoverRef.current = null
+    hoverIndexRef.current = null
+    gaugePaintedValuesRef.current = []
+    gaugeTicksRef.current = []
+    lastPaintedActiveIndexRef.current = -1
+    lastPaintedHoverIndexRef.current = null
     setHover(null)
     if (host === null) {
       setLayout(null)
@@ -290,14 +391,34 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
           setLayout(null)
           return
         }
+        // Freeze the rail while a preview is open: a streaming remeasure
+        // changes trackH/trackTop, the ticks move out from under the cursor
+        // and the hover dies — the blinking preview the user reported. The
+        // next measure after the hover ends catches the rail up.
+        if (hoverRef.current !== null) return
         setLayout(measureLayout(current, entryKeys))
       }, delay)
     }
 
+    const scheduleSettleMeasure = (): void => {
+      if (settleMeasureTimer.current !== null) clearTimeout(settleMeasureTimer.current)
+      settleMeasureTimer.current = setTimeout(() => {
+        settleMeasureTimer.current = null
+        scheduleMeasure()
+      }, 160)
+    }
+
     const onScroll = (): void => {
-      setScrollTop(host.scrollTop)
-      // Streaming grows the port: keep the rail's denominator fresh.
-      scheduleMeasure()
+      scrollTopRef.current = host.scrollTop
+      // Coalesce scroll events to one lightweight React update per frame. The
+      // expensive DOM measurement is deferred until scrolling settles below.
+      if (scrollFrame.current === null) {
+        scrollFrame.current = requestAnimationFrame(() => {
+          scrollFrame.current = null
+          setScrollTop(scrollTopRef.current)
+        })
+      }
+      scheduleSettleMeasure()
     }
 
     // Layout changes (details column, sidebar collapse) move the port.
@@ -305,11 +426,20 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     resizeObserver.observe(host)
     host.addEventListener('scroll', onScroll, { passive: true })
     scheduleMeasure()
+    scrollTopRef.current = host.scrollTop
     setScrollTop(host.scrollTop)
 
     return () => {
       resizeObserver.disconnect()
       host.removeEventListener('scroll', onScroll)
+      if (settleMeasureTimer.current !== null) {
+        clearTimeout(settleMeasureTimer.current)
+        settleMeasureTimer.current = null
+      }
+      if (scrollFrame.current !== null) {
+        cancelAnimationFrame(scrollFrame.current)
+        scrollFrame.current = null
+      }
       if (measureTimer.current !== null) {
         clearTimeout(measureTimer.current)
         measureTimer.current = null
@@ -317,10 +447,23 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     }
   }, [entryKeys])
 
-  // Hover preview can never outlive the hovered message.
+  // Hover preview can never outlive the hovered tick — but judge against the
+  // MEASURED positions, not the live snapshot: streaming rewrites the
+  // snapshot tree constantly and an entry can vanish for a frame, which would
+  // blink the preview. A real disappearance (message gone) shows up in the
+  // next layout and clears the hover then.
   useEffect(() => {
-    if (hover !== null && !entries.some(entry => entry.key === hover.key)) setHover(null)
-  }, [entries, hover])
+    if (hover !== null && layout !== null && !layout.positions.has(hover.key)) {
+      setHover(null)
+    }
+  }, [hover, layout])
+
+  // Clean up the hover-debounce timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (hoverTimerRef.current !== null) clearTimeout(hoverTimerRef.current)
+    }
+  }, [])
 
   // The minimap belongs to the CHAT view only. The header utilities seat
   // keeps this component mounted across view switches (文件/Git), so the
@@ -346,7 +489,9 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
   const jump = (key: string): void => {
     const host = hostRef.current
     if (host === null || layout === null) return
-    const pos = layout.positions.get(key)
+    // Measure fresh instead of trusting the (possibly hover-frozen) layout:
+    // a click can land while the rail geometry is outdated by streaming.
+    const pos = measureLayout(host, entryKeys).positions.get(key)
     if (pos === undefined) return
     const maxTop = Math.max(0, host.scrollHeight - host.clientHeight)
     const target = Math.min(maxTop, Math.max(0, host.scrollTop + pos.top - JUMP_PAD))
@@ -354,17 +499,11 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     host.scrollTo({ top: target, behavior: 'smooth' })
   }
 
-  if (!viewIsChat || layout === null || layout.hostHeight < MIN_HOST_HEIGHT
+  const canRender = viewIsChat && layout !== null && layout.hostHeight >= MIN_HOST_HEIGHT
     // Only genuine user turns count toward the minimum: a system context
     // reminder on an otherwise empty chat must not raise the rail.
-    || entries.filter(entry => entry.kind !== 'context').length < MIN_ENTRIES) {
-    return null
-  }
-
-  const ratio = (top: number): number => layout.scrollHeight <= 0
-    ? 0
-    : Math.min(1, Math.max(0, top / layout.scrollHeight))
-  const vh = layout.hostHeight
+    && entries.length >= MIN_ENTRIES
+  const vh = layout?.hostHeight ?? 0
 
   // Fixed node list (iconic navigator, not a scrollbar): every tracked message
   // maps to one fixed slot in a vertically centered track; scrolling only
@@ -372,16 +511,18 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
   // is the first row whose top edge is at or below the viewport's top edge —
   // the "reading anchor": jump to message #3 and #3's bar is the highlighted
   // one (its row top sits just under the viewport top), never a straggler.
-  const activeIndex = (() => {
+  const activeIndex = layout === null ? -1 : (() => {
+    const scrollDelta = scrollTop - layout.scrollTop
     const byPosition = () => {
       // `pos.top` is the row's offset in the *visible* scrollport (rect minus
-      // host rect): rows above the fold are negative, the first row at or
-      // below the fold is the reading anchor.
+      // host rect) at the last measurement. Scrolling changes every row by
+      // the same delta, so the active anchor can be calculated without a
+      // layout read on every scroll frame.
       let found = -1
       for (let i = 0; i < entries.length; i += 1) {
         const pos = layout.positions.get(entries[i].key)
         if (pos === undefined) continue
-        if (pos.top >= 0) {
+        if (pos.top - scrollDelta >= 0) {
           found = i
           break
         }
@@ -395,74 +536,120 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
       // streams into view — as long as we know it is at/below the fold (or on
       // screen) keep it highlighted; once fully scrolled away, let the
       // position-based anchor take over again.
-      if (pos !== undefined && pos.top + pos.height >= 0) return i
+      if (pos !== undefined && pos.top - scrollDelta + pos.height >= 0) return i
     }
     return byPosition()
   })()
 
   // Long chats compress the slot pitch (never below MIN_TICK_SPACING) so the
   // whole rail still fits the viewport; short chats breathe at TICK_SPACING.
-  const spacing = Math.max(MIN_TICK_SPACING, Math.min(TICK_SPACING, (vh - 16 - TICK_HEIGHT) / Math.max(1, entries.length - 1)))
+  const spacing = layout === null
+    ? TICK_SPACING
+    : Math.max(MIN_TICK_SPACING, Math.min(TICK_SPACING, (vh - 16 - TICK_HEIGHT) / Math.max(1, entries.length - 1)))
   const trackH = (entries.length - 1) * spacing + TICK_HEIGHT
-  const trackTop = layout.hostTop + Math.max(8, (vh - trackH) / 2)
+  const trackTop = layout === null ? 0 : layout.hostTop + Math.max(8, (vh - trackH) / 2)
 
   // Hover payload: position + the hovered entry; null when the hovered key
   // disappeared (session switch / stream rewrite).
   const preview = hover === null
     ? null
     : { y: hover.y, entry: entries.find(entry => entry.key === hover.key) ?? null }
+  const previewIndex = preview === null || preview.entry === null
+    ? -1
+    : entries.findIndex(entry => entry.key === preview.entry?.key)
+  // The pointer target temporarily owns the visual highlight. The reading
+  // anchor is only highlighted while the rail is at rest; otherwise the
+  // anchor and hovered tick compete as two equally bright targets.
+  const highlightedIndex = previewIndex
+  const previewRawTop = previewIndex < 0 ? trackTop : trackTop + previewIndex * spacing - 24
+  const previewTop = Math.min(window.innerHeight - 88, Math.max(12, previewRawTop))
+
+  // Cache the small set of tick nodes after React commits. Pointer changes then
+  // only update target transforms; CSS owns the compositor transition.
+  useEffect(() => {
+    activeIndexRef.current = activeIndex
+    if (!canRender || layout === null) {
+      gaugePaintedValuesRef.current = []
+      gaugeTicksRef.current = []
+      lastPaintedActiveIndexRef.current = -1
+      lastPaintedHoverIndexRef.current = null
+      return
+    }
+    const track = trackRef.current
+    gaugeTicksRef.current = track === null
+      ? []
+      : Array.from(track.querySelectorAll<HTMLElement>('[data-dshapp-mm-tick-index]'))
+    gaugePaintedValuesRef.current = []
+    paintGaugeTargets(activeIndex)
+  }, [canRender, layout, entryKeys, trackTop, spacing, activeIndex])
+
+  if (!viewIsChat || layout === null || layout.hostHeight < MIN_HOST_HEIGHT
+    || entries.length < MIN_ENTRIES) {
+    return null
+  }
 
   return (
     <>
       <style>{MINIMAP_CSS}</style>
       <div
         className="dshapp-mm-track"
+        ref={trackRef}
         style={{
           left: layout.hostLeft + 12,
           top: trackTop,
           height: trackH,
         }}
+        onPointerLeave={() => { scheduleHoverClear() }}
       >
         {entries.map((entry, index) => (
           <button
             key={entry.key}
             type="button"
-            className={index === activeIndex ? 'dshapp-mm-tick is-active' : 'dshapp-mm-tick'}
+            className="dshapp-mm-item"
             style={{
               top: index * spacing,
-              // Gauge-hover effect: the tick under the cursor grows, its
-              // neighbors taper by distance, others rest at base.
-              width: tickGaugeWidth(index),
-              left: tickGaugeLeft(index),
+              height: spacing,
             }}
             title={formatClock(entry.time) ?? undefined}
             aria-label={`跳转到${KIND_LABEL[entry.kind]}: ${entry.text ?? ''}`}
             aria-current={index === activeIndex ? 'true' : undefined}
             data-dshapp-mm-key={entry.key}
             onClick={() => { jump(entry.key) }}
-            onMouseEnter={(event) => { setTickHover(index); setHover({ key: entry.key, y: event.clientY }) }}
-            onMouseMove={(event) => {
-              setHover(current => (
-                current !== null && current.key === entry.key
-                  ? { ...current, y: event.clientY }
-                  : current
-              ))
+            onPointerEnter={(event) => {
+              cancelHoverClear()
+              hoverIndexRef.current = index
+              const next = { key: entry.key, y: event.clientY }
+              hoverRef.current = next
+              setHover(next)
+              paintGaugeTargets(activeIndexRef.current)
             }}
-            onMouseLeave={() => {
-              setTickHover(null)
-              setHover(current => current?.key === entry.key ? null : current)
+            onFocus={() => {
+              cancelHoverClear()
+              hoverIndexRef.current = index
+              hoverRef.current = { key: entry.key, y: 0 }
+              setHover({ key: entry.key, y: 0 })
+              paintGaugeTargets(activeIndexRef.current)
             }}
-          />
+            onBlur={(event) => {
+              if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) scheduleHoverClear()
+            }}
+          >
+            <span
+              className={index === highlightedIndex ? 'dshapp-mm-tick is-active' : 'dshapp-mm-tick'}
+              aria-hidden="true"
+              data-dshapp-mm-tick-index={index}
+            />
+          </button>
         ))}
         {preview !== null && preview.entry !== null && (
           <div
             className="dshapp-mm-preview"
             style={{
-              // Fixed to the viewport: stays next to the cursor (right of the
-              // node rail) instead of leaking to the bottom-left corner when
-              // the rail sits mid-column (the rail is vertically centered).
+              // Slot-aligned like PreviewRail: the card follows the selected
+              // item, not the last mouse pixel inside its hit area.
               left: layout.hostLeft + 12 + 24 + 10,
-              top: Math.min(window.innerHeight - 88, Math.max(12, preview.y - 24)),
+              top: previewTop,
+              transform: `translateY(${previewRawTop - previewTop}px)`,
             }}
           >
             <div className="dshapp-mm-preview-head">
