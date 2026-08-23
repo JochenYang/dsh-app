@@ -16,6 +16,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
 import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the host session service (ctx.sessions) into scope.
+import type {} from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { handleFsRequest } from './fs-routes.ts'
 import { handleGitRequest } from './git-routes.ts'
 import { passesFence } from './trust-fence.ts'
@@ -30,13 +33,22 @@ import { passesFence } from './trust-fence.ts'
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-sidebar/api'
 
 /** The cordis services this host half consumes. */
-export const inject = ['webServer']
+export const inject = ['webServer', 'sessions']
 
 /**
  * Register the fenced host routes.
  * @param ctx - the host plugin context.
  */
 export function apply(ctx: Context): void {
+  // The monorepo type surface also declares the client-side `ctx.sessions`
+  // face. Narrow the host service explicitly here; runtime injection still
+  // resolves the host SessionStore declared above.
+  const sessionStore = ctx.get('sessions') as unknown as {
+    get(id: SessionId): { header: { cwd?: string } } | undefined
+  }
+  const gitScope = {
+    cwdForSession: (sessionId: string): string | undefined => sessionStore.get(sessionId as SessionId)?.header.cwd,
+  }
   const dispose = ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -47,8 +59,9 @@ export function apply(ctx: Context): void {
         return
       }
       const url = new URL(req.url ?? '/', `http://${typeof req.headers.host === 'string' ? req.headers.host : '127.0.0.1'}`)
-      if (url.pathname.startsWith(`${ROUTE_PREFIX}/git`)) {
-        void handleGitRequest(req, res, url)
+      const gitPrefix = `${ROUTE_PREFIX}/git`
+      if (url.pathname === gitPrefix || url.pathname.startsWith(`${gitPrefix}/`)) {
+        void handleGitRequest(req, res, url, gitScope)
         return
       }
       void handleFsRequest(req, res, url)

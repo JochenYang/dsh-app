@@ -57,34 +57,41 @@ export function readFile(path: string): Promise<FileContent> {
 export interface GitStatusEntry {
   path: string
   xy: string
+  indexStatus: string
+  worktreeStatus: string
+  originalPath?: string
   staged: boolean
   untracked: boolean
 }
 
+function sessionQuery(sessionId: string | undefined): string {
+  return sessionId === undefined ? '' : `&sessionId=${encodeURIComponent(sessionId)}`
+}
+
 /** The host git routes. */
 export const gitApi = {
-  status(cwd: string): Promise<{ cwd: string, branch: string, entries: GitStatusEntry[] }> {
-    return get(`${ROUTE_PREFIX}/git/status?cwd=${encodeURIComponent(cwd)}`)
+  status(cwd: string, sessionId?: string): Promise<{ cwd: string, branch: string, detached: boolean, entries: GitStatusEntry[] }> {
+    return get(`${ROUTE_PREFIX}/git/status?cwd=${encodeURIComponent(cwd)}${sessionQuery(sessionId)}`)
   },
-  show(cwd: string, sha: string): Promise<{ message: string, stat: string }> {
-    return get(`${ROUTE_PREFIX}/git/show?cwd=${encodeURIComponent(cwd)}&sha=${encodeURIComponent(sha)}`)
+  show(cwd: string, sha: string, sessionId?: string): Promise<{ message: string, stat: string }> {
+    return get(`${ROUTE_PREFIX}/git/show?cwd=${encodeURIComponent(cwd)}&sha=${encodeURIComponent(sha)}${sessionQuery(sessionId)}`)
   },
-  diff(cwd: string, path?: string, cached = false): Promise<{ text: string }> {
+  diff(cwd: string, path?: string, cached = false, sessionId?: string, untracked = false): Promise<{ text: string, truncated?: boolean }> {
     const suffix = path === undefined ? '' : `&path=${encodeURIComponent(path)}`
-    return get(`${ROUTE_PREFIX}/git/diff?cwd=${encodeURIComponent(cwd)}${suffix}&cached=${cached ? '1' : '0'}`)
+    return get(`${ROUTE_PREFIX}/git/diff?cwd=${encodeURIComponent(cwd)}${suffix}&cached=${cached ? '1' : '0'}&untracked=${untracked ? '1' : '0'}${sessionQuery(sessionId)}`)
   },
-  log(cwd: string): Promise<{ text: string }> {
-    return get(`${ROUTE_PREFIX}/git/log?cwd=${encodeURIComponent(cwd)}`)
+  log(cwd: string, sessionId?: string): Promise<{ text: string }> {
+    return get(`${ROUTE_PREFIX}/git/log?cwd=${encodeURIComponent(cwd)}${sessionQuery(sessionId)}`)
   },
-  ls(cwd: string): Promise<{ files: string[] }> {
-    return get(`${ROUTE_PREFIX}/git/ls?cwd=${encodeURIComponent(cwd)}`)
+  ls(cwd: string, sessionId?: string): Promise<{ files: string[], truncated?: boolean }> {
+    return get(`${ROUTE_PREFIX}/git/ls?cwd=${encodeURIComponent(cwd)}${sessionQuery(sessionId)}`)
   },
-  action(op: string, cwd: string, path?: string, message?: string): Promise<Record<string, never>> {
+  action(op: string, cwd: string, path?: string, message?: string, sessionId?: string): Promise<Record<string, never>> {
     return fetch(`${ROUTE_PREFIX}/git/action`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ op, cwd, ...path === undefined ? {} : { path }, ...message === undefined ? {} : { message } }),
+      body: JSON.stringify({ op, cwd, sessionId, ...path === undefined ? {} : { path }, ...message === undefined ? {} : { message } }),
     }).then(async (response) => {
       const body = await response.json() as FsEnvelope<Record<string, never>>
       if (!body.ok) throw new FsApiError(body.error?.code ?? 'unknown', body.error?.message ?? `HTTP ${String(response.status)}`)

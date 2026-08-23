@@ -8,7 +8,7 @@
  *     click a commit row to see its file stat INSIDE the modal.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { FsApiError, gitApi } from './api.ts'
 import type { GitStatusEntry } from './api.ts'
@@ -17,12 +17,13 @@ import type { GitStatusEntry } from './api.ts'
 export interface GitTabProps {
   /** Workspace root (the session cwd); undefined with no session. */
   cwd: string | undefined
-  sessionId?: unknown
+  /** Host-owned session identity used to bind every Git request. */
+  sessionId?: string
   api?: unknown
 }
 
 /** One diff text as a colored block. */
-function DiffView(props: { text: string }): ReactNode {
+function DiffView(props: { text: string, truncated?: boolean }): ReactNode {
   if (props.text === '') return <p className="dshAsb-hint">无差异（未变更）</p>
   const lines = props.text.split('\n')
   // Unified-diff line numbering: each @@ hunk carries the new/old start
@@ -52,22 +53,26 @@ function DiffView(props: { text: string }): ReactNode {
     return row
   })
   return (
-    <pre className="dshAsbGit-diff">
-      {rows.map(row => (
-        <div key={row.key} className={row.cls}>
-          <span className="dshAsbGit-diffNo">{row.old === undefined ? '  ' : String(row.old).padEnd(4)}</span>
-          <span className="dshAsbGit-diffNo">{row.new === undefined ? '  ' : String(row.new).padEnd(4)}</span>
-          <span className="dshAsbGit-diffText">{row.text === '' ? ' ' : row.text}</span>
-        </div>
-      ))}
-    </pre>
+    <>
+      {props.truncated ? <p className="dshAsbGit-warning">差异较大，仅显示前 500 KB。</p> : null}
+      <pre className="dshAsbGit-diff">
+        {rows.map(row => (
+          <div key={row.key} className={row.cls}>
+            <span className="dshAsbGit-diffNo">{row.old === undefined ? '  ' : String(row.old).padEnd(4)}</span>
+            <span className="dshAsbGit-diffNo">{row.new === undefined ? '  ' : String(row.new).padEnd(4)}</span>
+            <span className="dshAsbGit-diffText">{row.text === '' ? ' ' : row.text}</span>
+          </div>
+        ))}
+      </pre>
+    </>
   )
 }
 
 /** Small chevron for directory group rows. */
 function ChevronGlyph({ open }: { open: boolean }): ReactNode {
   return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden style={{ flex: 'none' }}>
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden
+      style={{ flex: 'none', pointerEvents: 'none' }}>
       <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
         style={{ transform: open ? 'rotate(90deg)' : undefined, transformOrigin: 'center', transition: 'transform 120ms ease' }} />
     </svg>
@@ -80,16 +85,23 @@ function ChevronGlyph({ open }: { open: boolean }): ReactNode {
  * @returns the Git surface.
  */
 export function GitTab(props: GitTabProps): ReactNode {
-  const { cwd } = props
+  const { cwd, sessionId } = props
   const [entries, setEntries] = useState<readonly GitStatusEntry[]>([])
   const [branch, setBranch] = useState('')
+  const [detached, setDetached] = useState(false)
+  const [statusLoading, setStatusLoading] = useState(false)
   const [logText, setLogText] = useState<string | undefined>(undefined)
+  const [logLoading, setLogLoading] = useState(false)
+  const [logError, setLogError] = useState<string | undefined>(undefined)
   const [graphOpen, setGraphOpen] = useState(false)
-  const [showFor, setShowFor] = useState<{ sha: string, message: string, stat: string } | undefined>(undefined)
-  const [diffFor, setDiffFor] = useState<{ path: string, cached: boolean, text: string | undefined, error: string | undefined } | undefined>(undefined)
+  const [showFor, setShowFor] = useState<{ sha: string, message: string, stat: string, requestId: number } | undefined>(undefined)
+  const [diffFor, setDiffFor] = useState<{ path: string, cached: boolean, text: string | undefined, truncated?: boolean, error: string | undefined, requestId: number } | undefined>(undefined)
   /** 变更 | 仓库文件 selection + the tracked-file listing. */
   const [listMode, setListMode] = useState<'changes' | 'files'>('changes')
   const [repoFiles, setRepoFiles] = useState<readonly string[] | undefined>(undefined)
+  const [repoFilesTruncated, setRepoFilesTruncated] = useState(false)
+  const [filesLoading, setFilesLoading] = useState(false)
+  const [filesError, setFilesError] = useState<string | undefined>(undefined)
   const [commitMessage, setCommitMessage] = useState('')
   const [collapsedDirs, setCollapsedDirs] = useState<ReadonlySet<string>>(new Set())
   // Left/right split ratio (0..1 of the pane); drag the divider to adjust.
@@ -111,84 +123,242 @@ export function GitTab(props: GitTabProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [restoreFor, setRestoreFor] = useState<string | undefined>(undefined)
+  const viewGeneration = useRef(0)
+  const statusRequestId = useRef(0)
+  const logRequestId = useRef(0)
+  const filesRequestId = useRef(0)
+  const diffRequestId = useRef(0)
+  const showRequestId = useRef(0)
+  const cwdRef = useRef(cwd)
+  const sessionIdRef = useRef(sessionId)
+  cwdRef.current = cwd
+  sessionIdRef.current = sessionId
+
+  const isCurrent = (generation: number, targetCwd: string, targetSessionId: string): boolean => (
+    viewGeneration.current === generation
+    && cwdRef.current === targetCwd
+    && sessionIdRef.current === targetSessionId
+  )
+
+  const failureText = (failure: unknown): string => {
+    if (failure instanceof FsApiError) {
+      if (failure.code === 'git-missing') return '未找到 Git，请先安装 Git 或检查 PATH。'
+      if (failure.code === 'forbidden') return '当前会话的工作区校验失败，请刷新会话后重试。'
+      const detail = failure.message.trim().replace(/\s+/gu, ' ')
+      return detail === '' ? 'Git 操作失败。' : `Git 操作失败：${detail}`
+    }
+    if (failure instanceof Error) return failure.message
+    return String(failure)
+  }
+
+  const loadStatus = (targetCwd: string, targetSessionId: string, generation: number): Promise<boolean> => {
+    const requestId = statusRequestId.current + 1
+    statusRequestId.current = requestId
+    setStatusLoading(true)
+    return gitApi.status(targetCwd, targetSessionId).then(
+      result => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || statusRequestId.current !== requestId) return false
+        setEntries(result.entries)
+        setBranch(result.branch)
+        setDetached(result.detached)
+        setError(undefined)
+        return true
+      },
+      (failure: unknown) => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || statusRequestId.current !== requestId) return false
+        setEntries([])
+        setBranch('')
+        setDetached(false)
+        setNotice(undefined)
+        setError(failureText(failure))
+        return false
+      },
+    ).finally(() => {
+      if (isCurrent(generation, targetCwd, targetSessionId) && statusRequestId.current === requestId) setStatusLoading(false)
+    })
+  }
+
+  const loadLog = (targetCwd: string, targetSessionId: string, generation: number): Promise<boolean> => {
+    const requestId = logRequestId.current + 1
+    logRequestId.current = requestId
+    setLogLoading(true)
+    setLogError(undefined)
+    return gitApi.log(targetCwd, targetSessionId).then(
+      result => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || logRequestId.current !== requestId) return false
+        setLogText(result.text)
+        return true
+      },
+      (failure: unknown) => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || logRequestId.current !== requestId) return false
+        setLogText(undefined)
+        setLogError(failureText(failure))
+        return false
+      },
+    ).finally(() => {
+      if (isCurrent(generation, targetCwd, targetSessionId) && logRequestId.current === requestId) setLogLoading(false)
+    })
+  }
+
+  const loadRepoFiles = (targetCwd: string, targetSessionId: string, generation: number): Promise<boolean> => {
+    const requestId = filesRequestId.current + 1
+    filesRequestId.current = requestId
+    setFilesLoading(true)
+    setFilesError(undefined)
+    return gitApi.ls(targetCwd, targetSessionId).then(
+      result => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || filesRequestId.current !== requestId) return false
+        setRepoFiles(result.files)
+        setRepoFilesTruncated(result.truncated === true)
+        return true
+      },
+      (failure: unknown) => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || filesRequestId.current !== requestId) return false
+        setRepoFiles(undefined)
+        setRepoFilesTruncated(false)
+        setFilesError(failureText(failure))
+        return false
+      },
+    ).finally(() => {
+      if (isCurrent(generation, targetCwd, targetSessionId) && filesRequestId.current === requestId) setFilesLoading(false)
+    })
+  }
 
   const openGraph = (): void => {
     setGraphOpen(true)
     setShowFor(undefined)
-    if (cwd !== undefined) {
-      gitApi.log(cwd).then(
-        result => setLogText(result.text),
-        () => { setLogText(undefined); setError('图谱读取失败') },
-      )
-    }
+    if (cwd !== undefined && sessionId !== undefined) void loadLog(cwd, sessionId, viewGeneration.current)
   }
 
-  const load = (): void => {
-    if (cwd === undefined) return
-    gitApi.status(cwd).then(
-      result => { setEntries(result.entries); setBranch(result.branch); setError(undefined) },
-      (failure: unknown) => {
-        setError(failure instanceof FsApiError && failure.code === 'git-error'
-          ? '仓库不可用（可能不是 Git 仓库或 git 命令缺失）'
-          : failure instanceof Error ? failure.message : String(failure))
-      },
-    )
-  }
   // No wire event for repo state; refreshing on mount/cwd and after actions.
   useEffect(() => {
+    const generation = viewGeneration.current + 1
+    viewGeneration.current = generation
+    statusRequestId.current += 1
+    logRequestId.current += 1
+    filesRequestId.current += 1
+    diffRequestId.current += 1
+    showRequestId.current += 1
     if (cwd === undefined) {
       setEntries([])
+      setBranch('')
+      setDetached(false)
+      setStatusLoading(false)
       setLogText(undefined)
+      setLogLoading(false)
+      setLogError(undefined)
       setDiffFor(undefined)
+      setRepoFiles(undefined)
+      setRepoFilesTruncated(false)
+      setFilesLoading(false)
+      setFilesError(undefined)
+      setRestoreFor(undefined)
+      setGraphOpen(false)
+      setShowFor(undefined)
+      setCommitMessage('')
+      setListMode('changes')
+      setCollapsedDirs(new Set())
+      setBusy(false)
       setError(undefined)
+      setNotice(undefined)
       return
     }
-    load()
+    setEntries([])
+    setBranch('')
+    setDetached(false)
+    setStatusLoading(false)
+    setLogText(undefined)
+    setLogLoading(false)
+    setLogError(undefined)
+    setDiffFor(undefined)
+    setRepoFiles(undefined)
+    setRepoFilesTruncated(false)
+    setFilesLoading(false)
+    setFilesError(undefined)
+    setRestoreFor(undefined)
+    setGraphOpen(false)
+    setShowFor(undefined)
+    setCommitMessage('')
+    setListMode('changes')
+    setCollapsedDirs(new Set())
+    setBusy(false)
+    setError(undefined)
+    setNotice(undefined)
+    if (sessionId === undefined) {
+      setError('当前会话缺少安全标识，请重新打开该会话。')
+      return
+    }
+    void loadStatus(cwd, sessionId, generation)
     // Prefetch the graph so switching to it is instant; failures surface in
     // the graph view with a retry instead of a silent forever-loading state.
-    gitApi.log(cwd).then(
-      result => setLogText(result.text),
-      () => { setLogText(undefined) },
-    )
-  }, [cwd])
+    void loadLog(cwd, sessionId, generation)
+  }, [cwd, sessionId])
 
   const refresh = (): void => {
-    load()
-    if (cwd !== undefined && graphOpen) {
-      gitApi.log(cwd).then(
-        result => setLogText(result.text),
-        () => { setLogText(undefined); setError('图谱读取失败') },
-      )
-    }
+    if (cwd === undefined || sessionId === undefined) return
+    const generation = viewGeneration.current
+    setError(undefined)
+    setNotice(undefined)
+    void loadStatus(cwd, sessionId, generation)
+    if (listMode === 'files') void loadRepoFiles(cwd, sessionId, generation)
+    if (graphOpen) void loadLog(cwd, sessionId, generation)
   }
 
-  const run = async (action: () => Promise<unknown>, okText: string): Promise<void> => {
-    if (cwd === undefined) return
+  const run = async (action: () => Promise<unknown>, okText: string): Promise<boolean> => {
+    if (cwd === undefined || sessionId === undefined) return false
     setBusy(true)
     setError(undefined)
     setNotice(undefined)
     try {
       await action()
+      const generation = viewGeneration.current
+      const refreshed = await loadStatus(cwd, sessionId, generation)
+      if (graphOpen) await loadLog(cwd, sessionId, generation)
+      if (!refreshed) return false
       setNotice(okText)
-      load()
+      return true
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(failureText(failure))
+      return false
     } finally {
       setBusy(false)
     }
   }
 
-  const openDiff = (path: string, cached: boolean): void => {
-    if (cwd === undefined) return
-    setDiffFor({ path, cached, text: undefined, error: undefined })
-    gitApi.diff(cwd, path, cached).then(
-      result => { setDiffFor(current => current?.path !== path ? current : { ...current, text: result.text }) },
+  const openDiff = (path: string, cached: boolean, untracked = false): void => {
+    if (cwd === undefined || sessionId === undefined) return
+    const requestId = diffRequestId.current + 1
+    diffRequestId.current = requestId
+    setDiffFor({ path, cached, text: undefined, error: undefined, requestId })
+    gitApi.diff(cwd, path, cached, sessionId, untracked).then(
+      result => { setDiffFor(current => current?.requestId !== requestId ? current : { ...current, text: result.text, truncated: result.truncated }) },
       (failure: unknown) => {
-        setDiffFor(current => current?.path !== path ? current
-          : { ...current, error: failure instanceof Error ? failure.message : String(failure) })
+        setDiffFor(current => current?.requestId !== requestId ? current
+          : { ...current, error: failureText(failure) })
       },
     )
   }
+
+  const openCommit = (sha: string): void => {
+    if (cwd === undefined || sessionId === undefined) return
+    const requestId = showRequestId.current + 1
+    showRequestId.current = requestId
+    setShowFor({ sha, message: '加载中…', stat: '', requestId })
+    gitApi.show(cwd, sha, sessionId).then(
+      result => setShowFor(current => current?.requestId !== requestId ? current : { sha, message: String(result.message ?? ''), stat: String(result.stat ?? ''), requestId }),
+      (failure: unknown) => setShowFor(current => current?.requestId !== requestId ? current : { sha, message: `读取失败：${failureText(failure)}`, stat: '', requestId }),
+    )
+  }
+
+  useEffect(() => {
+    if (!graphOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setGraphOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [graphOpen])
 
   if (cwd === undefined) {
     return (
@@ -199,9 +369,10 @@ export function GitTab(props: GitTabProps): ReactNode {
     )
   }
 
-  const staged = entries.filter(entry => entry.staged)
-  const unstaged = entries.filter(entry => !entry.staged && !entry.untracked)
-  const untracked = entries.filter(entry => entry.untracked)
+  // A single porcelain entry can have both an index and a worktree change
+  // (for example `MM`). Render it in both groups so neither half disappears.
+  const staged = entries.filter(entry => entry.indexStatus !== ' ' && entry.indexStatus !== '?')
+  const unstaged = entries.filter(entry => entry.untracked || entry.worktreeStatus !== ' ')
 
   /** Group an entry list by its top-level directory (VS Code SCM tree view). */
   const dirGroups = (list: readonly GitStatusEntry[]): { key: string, files: GitStatusEntry[] }[] => {
@@ -218,42 +389,46 @@ export function GitTab(props: GitTabProps): ReactNode {
       .map(([key, files]) => ({ key, files }))
   }
 
-  const GroupRow = (props: { entry: GitStatusEntry }): ReactNode => {
-    const { entry } = props
+  const GroupRow = (props: { entry: GitStatusEntry, cached: boolean, readonly?: boolean }): ReactNode => {
+    const { entry, cached, readonly = false } = props
     // VS Code-style status letter: U untracked / M modified / D deleted / A added.
-    const letter = entry.untracked ? 'U'
-      : entry.xy[0] !== ' ' ? entry.xy[0] : entry.xy[1] !== ' ' ? entry.xy[1] : 'M'
+    const status = cached ? entry.indexStatus : entry.untracked ? '?' : entry.worktreeStatus
+    const letter = status === '?' ? 'U' : status === ' ' ? '·' : status
+    const pathTitle = entry.originalPath === undefined ? entry.path : `${entry.originalPath} → ${entry.path}`
+    const canRestore = !readonly && !cached && !entry.untracked && entry.worktreeStatus !== ' '
     return (
       <div className="dshAsbGit-row">
-        <button type="button" className="dshAsbGit-rowPath" title={entry.path}
-          onClick={() => { openDiff(entry.path, entry.staged) }}>
-          <span className={`dshAsbGit-letter${letter === 'U' ? ' dshAsbGit-letterNew' : entry.staged ? ' dshAsbGit-letterStaged' : ''}`}>{letter}</span>
+        <button type="button" className="dshAsbGit-rowPath" title={pathTitle}
+          onClick={() => { openDiff(entry.path, cached, entry.untracked) }}>
+          <span className={`dshAsbGit-letter${letter === 'U' ? ' dshAsbGit-letterNew' : cached ? ' dshAsbGit-letterStaged' : ''}`}>{letter}</span>
           <span className="dshAsbGit-path">{entry.path}</span>
         </button>
-        <span className="dshAsbGit-rowActions">
-          <button type="button" className="dshAsbGit-link" disabled={busy}
-            onClick={() => { void run(() => gitApi.action(entry.staged ? 'unstage' : 'stage', cwd, entry.path), entry.staged ? '已取消暂存' : '已暂存') }}>
-            {entry.staged ? '−' : '+'}
-          </button>
-          {!entry.staged && !entry.untracked
-            ? (
-              <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger" disabled={busy} title="还原文件"
-                onClick={() => { void run(() => gitApi.action('restore', cwd, entry.path), '已还原') }}>
-                ↺
-              </button>
-            )
-            : null}
-        </span>
+        {!readonly ? (
+          <span className="dshAsbGit-rowActions">
+            <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined} title={cached ? `取消暂存 ${entry.path}` : `暂存 ${entry.path}`} aria-label={cached ? `取消暂存 ${entry.path}` : `暂存 ${entry.path}`}
+              onClick={() => { void run(() => gitApi.action(cached ? 'unstage' : 'stage', cwd, entry.path, undefined, sessionId), cached ? '已取消暂存' : '已暂存') }}>
+              {cached ? '−' : '+'}
+            </button>
+            {canRestore
+              ? (
+                <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger" disabled={busy || sessionId === undefined} title={`还原 ${entry.path}`} aria-label={`还原 ${entry.path}`}
+                  onClick={() => { setRestoreFor(entry.path) }}>
+                  ↺
+                </button>
+              )
+              : null}
+          </span>
+        ) : null}
       </div>
     )
   }
 
   /** One directory group: expandable header + indented file rows (DEFAULT
    * expanded — the tree opens fully so nothing is hidden behind a fold). */
-  const GroupBlock = (props: { group: { key: string, files: GitStatusEntry[] } }): ReactNode => {
-    const { group } = props
+  const GroupBlock = (props: { group: { key: string, files: GitStatusEntry[] }, cached: boolean, readonly?: boolean }): ReactNode => {
+    const { group, cached, readonly = false } = props
     if (group.key === '') {
-      return <>{group.files.map(entry => <GroupRow key={entry.path} entry={entry} />)}</>
+      return <>{group.files.map(entry => <GroupRow key={entry.path} entry={entry} cached={cached} readonly={readonly} />)}</>
     }
     const open = !collapsedDirs.has(group.key)
     return (
@@ -273,7 +448,7 @@ export function GitTab(props: GitTabProps): ReactNode {
         {open
           ? group.files.map(entry => (
               <div key={entry.path} className="dshAsbGit-fileRow">
-                <GroupRow entry={entry} />
+                <GroupRow entry={entry} cached={cached} readonly={readonly} />
               </div>
             ))
           : null}
@@ -293,11 +468,11 @@ export function GitTab(props: GitTabProps): ReactNode {
             placeholder="提交信息（提交前可查看全部变更）" aria-label="提交信息"
             onChange={(event) => { setCommitMessage(event.target.value) }}
           />
-          <button type="button" className="dshAsbGit-primary" disabled={busy || commitMessage.trim() === '' || staged.length === 0}
+          <button type="button" className="dshAsbGit-primary" disabled={busy || statusLoading || sessionId === undefined || commitMessage.trim() === '' || staged.length === 0}
             title="提交已暂存的内容"
             onClick={() => {
-              void run(() => gitApi.action('commit', cwd, undefined, commitMessage), '已提交')
-                  .then(() => setCommitMessage(''))
+              void run(() => gitApi.action('commit', cwd, undefined, commitMessage, sessionId), '已提交')
+                .then(success => { if (success) setCommitMessage('') })
             }}>{busy ? '…' : '提交'}</button>
         </div>
         <div className="dshAsbGit-head">
@@ -308,45 +483,53 @@ export function GitTab(props: GitTabProps): ReactNode {
               onClick={() => {
                 setListMode('files')
                 setDiffFor(undefined)
-                if (cwd !== undefined && repoFiles === undefined) {
-                  gitApi.ls(cwd).then(
-                    result => setRepoFiles(result.files),
-                    () => { setRepoFiles([]); setError('仓库文件列表读取失败') },
-                  )
+                if (cwd !== undefined && sessionId !== undefined && repoFiles === undefined && !filesLoading) {
+                  void loadRepoFiles(cwd, sessionId, viewGeneration.current)
                 }
               }}>仓库文件</button>
+            </div>
+          <div className="dshAsbGit-tools">
+            <button type="button" className="dshAsbGit-link" disabled={busy || statusLoading || sessionId === undefined || unstaged.length === 0}
+              onClick={() => { void run(() => gitApi.action('stage', cwd, undefined, undefined, sessionId), '已暂存全部变更') }}>全部暂存</button>
+            <button type="button" className="dshAsbGit-link" disabled={busy || statusLoading || sessionId === undefined || staged.length === 0}
+              onClick={() => { void run(() => gitApi.action('unstage', cwd, undefined, undefined, sessionId), '已取消全部暂存') }}>全部取消暂存</button>
+            <button type="button" className="dshAsbGit-link" disabled={busy || filesLoading || statusLoading || sessionId === undefined} aria-label="刷新 Git 状态" title="刷新 Git 状态"
+              onClick={refresh}>刷新</button>
           </div>
-          <button type="button" className="dshAsbGit-link" disabled={busy}
-            onClick={() => { void run(() => (listMode === 'files' && cwd !== undefined && repoFiles === undefined
-              ? gitApi.ls(cwd).then(r => setRepoFiles(r.files))
-              : gitApi.ls(cwd!)) as Promise<unknown>, '已刷新'); setListMode(listMode) }}>刷新</button>
         </div>
         {listMode === 'files'
           ? (
             <>
               <p className="dshAsbGit-hint">仓库跟踪文件——点击查看它与 HEAD 的差异；无变化的文件标注“未变更”。</p>
-              {repoFiles === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
-              {repoFiles?.length === 0 ? <p className="dshAsb-hint">仓库无跟踪文件。</p> : null}
+              {filesLoading ? <p className="dshAsb-hint">正在读取仓库文件…</p> : null}
+              {filesError !== undefined ? <p className="dshAsb-error" role="alert">{filesError} <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadRepoFiles(cwd, sessionId, viewGeneration.current) }}>重试</button></p> : null}
+              {repoFilesTruncated ? <p className="dshAsbGit-warning">仓库文件较多，仅显示前 20,000 个。</p> : null}
+              {repoFiles !== undefined && repoFiles.length === 0 && filesError === undefined ? <p className="dshAsb-hint">仓库无跟踪文件。</p> : null}
               {dirGroups((repoFiles ?? []).map<GitStatusEntry>(path => ({
-                path, xy: '--', staged: false, untracked: false,
+                path, xy: '  ', indexStatus: ' ', worktreeStatus: ' ', staged: false, untracked: false,
               }))).map(group => (
-                <GroupBlock key={`f:${group.key}`} group={group} />
+                <GroupBlock key={`f:${group.key}`} group={group} cached={false} readonly />
               ))}
             </>
           )
           : (
             <>
-              {error !== undefined ? <p className="dshAsb-error">{error}</p> : null}
-              {notice !== undefined ? <p className="dshAsb-notice">{notice}</p> : null}
-              {dirGroups(unstaged.concat(untracked)).map(group => (
-                <GroupBlock key={`u:${group.key}`} group={group} />
-              ))}
-              {unstaged.length + untracked.length === 0 ? <p className="dshAsb-hint">工作区干净。</p> : null}
-              <p className="dshAsbGit-group">已暂存（{String(staged.length)}）</p>
-              {dirGroups(staged).map(group => (
-                <GroupBlock key={`s:${group.key}`} group={group} />
-              ))}
-              {staged.length === 0 ? <p className="dshAsb-hint">无已暂存变更。</p> : null}
+              {statusLoading && entries.length === 0 && error === undefined ? <p className="dshAsb-hint">正在读取 Git 状态…</p> : null}
+              {error !== undefined ? <p className="dshAsbError-box" role="alert"><span>{error}</span><button type="button" className="dshAsbGit-link" onClick={refresh}>重试</button></p> : null}
+              {notice !== undefined ? <p className="dshAsb-notice" role="status">{notice}</p> : null}
+              {error === undefined && !(statusLoading && entries.length === 0) ? (
+                <>
+                  {dirGroups(unstaged).map(group => (
+                    <GroupBlock key={`u:${group.key}`} group={group} cached={false} />
+                  ))}
+                  {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">工作区干净。</p> : null}
+                  {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">已暂存（{String(staged.length)}）</p> : null}
+                  {dirGroups(staged).map(group => (
+                    <GroupBlock key={`s:${group.key}`} group={group} cached />
+                  ))}
+                  {!statusLoading && entries.length > 0 && staged.length === 0 ? <p className="dshAsb-hint">无已暂存变更。</p> : null}
+                </>
+              ) : null}
             </>
           )}
       </div>
@@ -359,7 +542,7 @@ export function GitTab(props: GitTabProps): ReactNode {
               <p className="dshAsbGit-diffPath" title={diffFor.path}>{diffFor.path}</p>
               {diffFor.error !== undefined ? <p className="dshAsb-error">{diffFor.error}</p> : null}
               {diffFor.text === undefined && diffFor.error === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
-              {diffFor.text !== undefined ? <DiffView text={diffFor.text} /> : null}
+              {diffFor.text !== undefined ? <DiffView text={diffFor.text} truncated={diffFor.truncated} /> : null}
             </>
           )}
       </div>
@@ -375,18 +558,16 @@ export function GitTab(props: GitTabProps): ReactNode {
       >
         <div className="dshAsbGit-modalHead">
           <span className="dshAsbGit-title">Git 图谱</span>
-          <button type="button" className="dshAsbGit-link" disabled={busy}
+          <button type="button" className="dshAsbGit-link" disabled={busy || logLoading || sessionId === undefined}
             onClick={() => {
-              if (cwd !== undefined) {
-                gitApi.log(cwd).then(result => setLogText(result.text), () => setLogText(undefined))
-              }
+              if (cwd !== undefined && sessionId !== undefined) void loadLog(cwd, sessionId, viewGeneration.current)
             }}>刷新</button>
           <button type="button" className="dshAsbGit-modalClose" aria-label="关闭图谱" onClick={() => { setGraphOpen(false) }}>✕</button>
         </div>
         <div className="dshAsbGit-modalBody">
-          {error !== undefined ? <p className="dshAsbError-box">{error} <button type="button" className="dshAsbGit-link" onClick={refresh}>重试</button></p> : null}
-          {logText === undefined && error === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
-          {logText !== undefined && logText === '' ? <p className="dshAsb-hint">暂无提交。</p> : null}
+          {logError !== undefined ? <p className="dshAsbError-box" role="alert"><span>{logError}</span><button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadLog(cwd, sessionId, viewGeneration.current) }}>重试</button></p> : null}
+          {logLoading && logText === undefined && logError === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
+          {logText !== undefined && logText === '' && logError === undefined ? <p className="dshAsb-hint">暂无提交。</p> : null}
           {logText !== undefined && logText !== '' ? (
             <div className="dshAsbGraph">
               {showFor !== undefined
@@ -412,13 +593,7 @@ export function GitTab(props: GitTabProps): ReactNode {
                           <button key={index} type="button" className="dshAsbGraph-line" title="查看提交变更"
                             onClick={() => {
                               if (cwd !== undefined) {
-                                // Optimistic feedback: loading first, then the
-                                // structured message + stat split.
-                                setShowFor({ sha, message: '加载中…', stat: '' })
-                                gitApi.show(cwd, sha).then(
-                                  result => setShowFor({ sha, message: String(result.message ?? ''), stat: String(result.stat ?? '') }),
-                                  (failure: unknown) => setShowFor({ sha, message: `读取失败：${failure instanceof Error ? failure.message : String(failure)}`, stat: '' }),
-                                )
+                                openCommit(sha)
                               }
                             }}>{line}</button>
                         )
@@ -437,12 +612,31 @@ export function GitTab(props: GitTabProps): ReactNode {
       <style>{GIT_CSS}</style>
       {cwd !== undefined ? (
         <div className="dshAsbGit-top">
-          <span className="dshAsbGit-branch" title="当前分支">{branch === '' ? '（非 Git 仓库/分离头）' : `⎇ ${branch}`}</span>
-          <button type="button" className="dshAsbGit-ghostBtn" onClick={openGraph}>◈ 图谱</button>
+          <span className="dshAsbGit-branch" title="当前分支">
+            {statusLoading ? '正在读取 Git…' : error !== undefined ? 'Git 状态不可用' : detached ? '⎇ 分离头指针' : branch === '' ? '（未命名分支）' : `⎇ ${branch}`}
+          </span>
+          <button type="button" className="dshAsbGit-ghostBtn" disabled={statusLoading || sessionId === undefined} onClick={openGraph}>◈ 图谱</button>
         </div>
       ) : null}
       {statusView}
       {graphModal}
+      {restoreFor !== undefined ? (
+        <div className="dshAsbGit-modalMask" role="presentation" onClick={() => { if (!busy) setRestoreFor(undefined) }}>
+          <div className="dshAsbGit-confirm" role="dialog" aria-modal="true" aria-labelledby="dshAsbGit-restoreTitle" onClick={(event) => { event.stopPropagation() }}>
+            <h2 id="dshAsbGit-restoreTitle">还原文件？</h2>
+            <p>这会丢弃 <code>{restoreFor}</code> 的未暂存修改，且无法从 Git 管理面板恢复。</p>
+            <div className="dshAsbGit-confirmActions">
+              <button type="button" className="dshAsbGit-reviewBtn" disabled={busy} onClick={() => { setRestoreFor(undefined) }}>取消</button>
+              <button type="button" className="dshAsbGit-dangerBtn" disabled={busy}
+                onClick={() => {
+                  const path = restoreFor
+                  setRestoreFor(undefined)
+                  void run(() => gitApi.action('restore', cwd, path, undefined, sessionId), '已还原')
+                }}>确认还原</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -471,19 +665,20 @@ const GIT_CSS = `
 .dshAsbGit-primary:disabled { opacity: .5; cursor: default; }
 .dshAsbGit-reviewBtn { flex: none; padding: 6px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 8px; background: none; color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 12px; }
 .dshAsbGit-reviewBtn:hover { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
-.dshAsbGit-head { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.dshAsbGit-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin-top: 2px; }
+.dshAsbGit-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-left: auto; justify-content: flex-end; }
 .dshAsbGit-title { font-weight: 600; font-size: 13px; }
 .dshAsbGit-group { margin: 6px 0 0; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11px; }
-.dshAsbGit-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; }
+.dshAsbGit-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; overflow: hidden; }
 .dshAsbGit-row:hover { background: rgba(148, 163, 184, 0.16); }
 .dshAsbGit-rowPath { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; padding: 0; border: none; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12.5px; }
 .dshAsbGit-letter { flex: none; width: 14px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--dsw-alias-label-secondary, #94a3b8); }
 .dshAsbGit-letterStaged { color: #16a34a; }
 .dshAsbGit-letterNew { color: #2563eb; }
 .dshAsbGit-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dshAsbGit-rowActions { flex: none; display: none; gap: 8px; }
-.dshAsbGit-row:hover .dshAsbGit-rowActions { display: flex; }
-.dshAsbGit-link { padding: 0; border: none; background: none; color: var(--dsw-alias-brand-primary, #3b82f6); cursor: pointer; font-size: 11.5px; }
+.dshAsbGit-rowActions { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 8px; width: 44px; min-width: 44px; visibility: hidden; opacity: 0; pointer-events: none; }
+.dshAsbGit-row:hover .dshAsbGit-rowActions, .dshAsbGit-row:focus-within .dshAsbGit-rowActions { visibility: visible; opacity: 1; pointer-events: auto; }
+.dshAsbGit-link { min-height: 24px; padding: 2px 4px; border: none; border-radius: 4px; background: none; color: var(--dsw-alias-brand-primary, #3b82f6); cursor: pointer; font-size: 11.5px; }
 .dshAsbGit-link:disabled { opacity: .5; cursor: default; }
 .dshAsbGit-linkDanger { color: #dc2626; }
 .dshAsbGit-input { box-sizing: border-box; width: 100%; padding: 5px 8px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; font-size: 12.5px; }
@@ -509,8 +704,15 @@ const GIT_CSS = `
 .dshAsbGit-modalHead .dshAsbGit-title { flex: 1; }
 .dshAsbGit-modalClose { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: none; color: var(--dsw-alias-label-secondary, #64748b); cursor: pointer; font-size: 11px; }
 .dshAsbGit-modalClose:hover { background: rgba(148, 163, 184, 0.3); }
+.dshAsbGit-confirm { width: min(420px, calc(100vw - 40px)); padding: 18px; border-radius: 12px; background: var(--dsw-alias-bg-overlay, #fff); box-shadow: 0 20px 50px rgba(15, 23, 42, .25); }
+.dshAsbGit-confirm h2 { margin: 0 0 8px; font-size: 15px; }
+.dshAsbGit-confirm p { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.dshAsbGit-confirm code { color: var(--dsw-alias-label-primary, #0f172a); font-family: ui-monospace, Consolas, monospace; }
+.dshAsbGit-confirmActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.dshAsbGit-dangerBtn { min-height: 30px; padding: 5px 12px; border: none; border-radius: 7px; background: #dc2626; color: #fff; cursor: pointer; font-size: 12px; }
+.dshAsbGit-dangerBtn:disabled { opacity: .5; cursor: default; }
 .dshAsbGit-modalBody { padding: 12px 14px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
-.dshAsbGit-dirRow { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; cursor: pointer; border: none; background: none; color: inherit; width: 100%; text-align: left; font-size: 12.5px; }
+.dshAsbGit-dirRow { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; cursor: pointer; border: none; background: none; color: inherit; width: 100%; text-align: left; font-size: 12.5px; user-select: none; -webkit-user-select: none; }
 .dshAsbGit-dirRow:hover { background: rgba(148, 163, 184, 0.16); }
 .dshAsbGit-dirName { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAsbGit-dirCount { margin-left: 2px; padding: 0 6px; border-radius: 999px; background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-secondary, #64748b); font-size: 10.5px; }
@@ -519,4 +721,7 @@ const GIT_CSS = `
 .dshAsb-hint { margin: 2px 0; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 12px; }
 .dshAsb-error { margin: 2px 0; color: #dc2626; font-size: 12px; }
 .dshAsb-notice { margin: 2px 0; color: #16a34a; font-size: 12px; }
+.dshAsbGit-warning { margin: 2px 0; padding: 6px 8px; border-radius: 6px; background: rgba(234, 179, 8, .14); color: #a16207; font-size: 11px; }
+.dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
+@media (hover: none), (pointer: coarse) { .dshAsbGit-rowActions { visibility: visible; opacity: 1; pointer-events: auto; } }
 `
