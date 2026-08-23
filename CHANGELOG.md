@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.3.2] - 2026-08-23
+
+### 中文
+- 应用更新改为可视安装向导：下载完成后关闭当前应用并打开安装向导（与首次安装相同），安装进度全程可见；完成后自动启动应用，安装包自动删除
+
+### English
+- App updates now run the visible NSIS install wizard: after download the app quits and the same installer flow as a first-time install opens, so progress is fully visible; the app relaunches on completion and the installer file is deleted afterwards
+
 ## [v0.3.1] - 2026-08-23
 
 ### 中文
