@@ -11,6 +11,7 @@ import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import type { ReactNode } from 'react'
+import { ROUTE_PREFIX } from './api.ts'
 import type { FsListEntry } from '../fs-routes.ts'
 import { FsApiError, listDir, readFile } from './api.ts'
 import type { FileContent } from './api.ts'
@@ -30,7 +31,7 @@ type Children = readonly FsListEntry[] | undefined
 function Chevron({ open }: { open: boolean }): ReactNode {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden
-      style={{ transform: open ? 'rotate(90deg)' : undefined, transition: 'transform 120ms ease', flex: 'none' }}>
+      style={{ transform: open ? 'rotate(90deg)' : undefined, transition: 'transform 120ms ease', flex: 'none', pointerEvents: 'none' }}>
       <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
@@ -72,17 +73,48 @@ const MD_SCHEMA = {
 }
 
 /**
+ * Rehype pass: rewrite RELATIVE <img src> to the fenced fs/file raw endpoint.
+ * The preview lives on the dsh web origin, so a local path like
+ * `assets/banner.png` would resolve against the web server and 404 — the
+ * preview pane can only serve the user's disk through its own route. Remote
+ * (http/https/data), absolute and root-relative sources are left alone.
+ * @param baseDir - absolute dir of the file being previewed (POSIX separators).
+ */
+function rewriteLocalImages(baseDir: string) {
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child)
+      return
+    }
+    if (node === null || typeof node !== 'object') return
+    const element = node as { type?: string, tagName?: string, properties?: Record<string, unknown>, children?: unknown }
+    if (element.type === 'element' && element.tagName === 'img') {
+      const properties = element.properties
+      if (properties === undefined) return
+      const src = properties.src
+      if (typeof src === 'string' && src !== '' && !/^(?:https?:|data:|mailto:|\/)/iu.test(src)) {
+        const joined = `${baseDir}/${src}`.replace(/\/{2,}/gu, '/')
+        properties.src = `${ROUTE_PREFIX}/fs/file?path=${encodeURIComponent(joined)}&raw=1`
+      }
+    }
+    if (element.children !== undefined) walk(element.children)
+  }
+  return (tree: unknown): void => { walk(tree) }
+}
+
+/**
  * Rendered Markdown preview: GFM tables/task lists, raw-HTML README mark-up
  * through rehype-raw, then a sanitize pass so hostile files stay inert
  * (scripts, event handlers and iframes are stripped, not emitted). Links
  * keep their href — the shell's navigation fence handles open-external.
+ * Local relative images are rewritten to the fenced fs/file raw endpoint.
  */
-export function MarkdownPreview(props: { content: string }): ReactNode {
+export function MarkdownPreview(props: { content: string, baseDir: string }): ReactNode {
   return (
     <div className="dshAsb-md">
       <Markdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, MD_SCHEMA]]}
+        rehypePlugins={[rehypeRaw, [rewriteLocalImages, props.baseDir], [rehypeSanitize, MD_SCHEMA]]}
       >
         {props.content}
       </Markdown>
@@ -108,8 +140,7 @@ function TreeRow(props: {
         onClick={props.onToggleDir}>
         <Chevron open={props.expanded} />
         <span className="dshAsb-treeName" title={entry.name}>{entry.name}</span>
-      </button>
-    )
+      </button>    )
   }
   const isFile = entry.kind === 'file'
   return (
@@ -273,7 +304,12 @@ export function FileTreeTab(props: FileTreeTabProps): ReactNode {
                 {preview.content === undefined && preview.error === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
                 {preview.content?.kind === 'text'
                   ? isMarkdownPath(preview.path)
-                    ? <MarkdownPreview content={preview.content.content} />
+                    ? (
+                      <MarkdownPreview
+                        content={preview.content.content}
+                        baseDir={preview.path.slice(0, preview.path.lastIndexOf('/'))}
+                      />
+                    )
                     : <pre className="dshAsb-pre">{preview.content.content}</pre>
                   : null}
                 {preview.content?.kind === 'image'
@@ -300,7 +336,7 @@ const FILE_TREE_CSS = `
 .dshAsbTree-pane { width: 300px; flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 10px 8px calc(var(--dsh-composer-height, 132px) + 16px); border-right: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); display: flex; flex-direction: column; gap: 2px; }
 .dshAsbTree-preview { flex: 1; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 12px 16px calc(var(--dsh-composer-height, 132px) + 16px); display: flex; flex-direction: column; gap: 6px; }
 .dshAsbTree-pane > .dshAsb-hint, .dshAsbTree-pane > .dshAsb-error { text-align: right; padding-right: 4px; }
-.dshAsb-treeRow { display: flex; align-items: center; gap: 5px; width: 100%; padding: 4px 8px 4px 8px; border: none; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12.5px; min-width: 0; transition: background 80ms ease; }
+.dshAsb-treeRow { display: flex; align-items: center; gap: 5px; width: 100%; padding: 4px 8px 4px 8px; border: none; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12.5px; min-width: 0; transition: background 80ms ease; user-select: none; -webkit-user-select: none; }
 .dshAsb-treeRow:hover:not(:disabled) { background: rgba(148, 163, 184, 0.28); }
 .dshAsb-treeRowSelected { background: rgba(59, 130, 246, 0.18); color: #2563eb; }
 .dshAsb-treeRow:disabled { cursor: default; }

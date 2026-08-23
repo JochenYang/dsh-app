@@ -166,7 +166,23 @@ async function handleFile(req: IncomingMessage, res: ServerResponse, url: URL): 
   }
   const imageMime = sniffImage(bytes.subarray(0, 16))
   if (imageMime !== undefined) {
+    // raw=1 serves the image bytes directly (content-type, no JSON wrapper):
+    // the markdown preview rewrites relative <img src> to this URL so local
+    // images render instead of 404ing against the web server origin.
+    if (url.searchParams.get('raw') === '1') {
+      res.writeHead(200, {
+        'content-type': imageMime,
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      })
+      res.end(bytes)
+      return
+    }
     writeJson(res, 200, { ok: true, value: { path, kind: 'image', mime: imageMime, dataBase64: bytes.toString('base64') } })
+    return
+  }
+  if (url.searchParams.get('raw') === '1') {
+    writeError(res, 400, 'bad-request', 'raw mode only serves image files')
     return
   }
   if (!looksTextual(bytes.subarray(0, 4096))) {
