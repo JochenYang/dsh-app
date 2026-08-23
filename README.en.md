@@ -16,9 +16,37 @@
 
 The shell bundles a versioned dsh runtime (self-managed updates and rollback)
 and renders the official dsh web UI in a sandboxed window; all branding is
-delivered as dsh plugins — upstream is never forked. See
+delivered as a dsh plugin suite — upstream is never forked. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layered design, kernel
 runtime layout, update & rollback mechanism, and packaging.
+
+## Branded client features
+
+DSH APP is a **self-contained, no-fork** branded client: the kernel is
+self-hosted (`userData/kernel/`, atomic activation + rollback) and every
+feature is a dsh plugin suite (`plugins/`) layered on the upstream kernel, so
+an upstream release is just an ordinary kernel update. Current plugin
+capabilities:
+
+| Feature | Plugin | Implementation |
+|---|---|---|
+| Conversation sidebar (native views): **Files** — workspace tree (lazy-loaded, root auto-expanded), text/image/Markdown preview (independent column scrolling); **Git** — change list grouped by directory, unified diff with dual line numbers, stage/restore/commit, tracked-file list, graph modal (click a commit for its title/body/file stat) | `@dsh-app/plugin-sidebar` (host + client dual-face) | `plugins/plugin-sidebar/src/client/{file-tree,git-tab}.tsx` |
+| Conversation minimap: a slim rail on the right, one tick per message; hover for a content preview, click to jump; rendered only on the 对话 view; pitch compresses on long chats | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/minimap.tsx` |
+| Advanced models settings page: model-level editors and whole-list management for llm-pi-ai models (reasoning effort, input modalities, compat switches); companion-route migration for off-catalog models; models.dev prefill with gh-proxy mirror fallback | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
+| Brand theme and fully localized Chinese UI: `--dsw-alias-*` token overrides | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
+
+Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
+
+1. **Module resolution**: the three plugins are linked into
+   `$DSH_HOME/profiles/node_modules/@dsh-app/` (junction on Windows); dev uses
+   this repo's `plugins/*`, production the active kernel's
+   `app/node_modules/@dsh-app/*`.
+2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into userData and
+   injected via `dsh web --patch` (applied after the official bundle layers —
+   last write wins, no upstream profile template changes).
+
+Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
+rollback target) boots vanilla, never blocked by brand wiring.
 
 ## Quick start (development)
 
@@ -78,8 +106,28 @@ system-installed dsh. Update pipeline: resolve the version from npm registry
 dist-tags → download the runtime artifact from GitHub Releases → verify against
 the attached sha512 → activate atomically (previous version kept as
 `previous`) → automatically roll back after two consecutive startup failures.
-See [ARCHITECTURE.md §3–4](docs/ARCHITECTURE.md) for the runtime layout and the
+See [ARCHITECTURE.md §4–5](docs/ARCHITECTURE.md) for the runtime layout and the
 full update flow.
+
+**Bundled-runtime drift detection**: on an upgrade, if the bundled runtime
+content differs from the same-named kernel dir on disk (e.g. the suite gained a
+plugin), boot detects it (sha512 comparison + version guard) and re-activates
+the bundle — stale content can never silently lose plugins; a newer kernel
+installed online is never downgrade-overwritten.
+
+### Shell (app) updates
+
+Windows uses a custom in-app flow; macOS / Linux use `electron-updater`.
+
+1. Detect: `github.com/<owner>/<repo>/releases/latest/download/latest.yml`
+   (mirror fallback)
+2. Download: arch-matched installer, official URL first with
+   ghfast.top / gh-proxy.com fallback chain
+3. Verify: sha512 against latest.yml — a mirror can never substitute content
+4. Install: **visible install wizard** — "install now" quits the app and opens
+   the same NSIS wizard as a first-time install (progress fully visible); the
+   app relaunches on completion and the installer file is deleted afterwards
+   (also on cancel)
 
 ### Mainland China network adaptation (updates work without a VPN)
 
@@ -105,7 +153,9 @@ node scripts/probe-mirror.mjs
 
 The shell injects desktop niceties into the web UI at runtime with zero changes
 to harness source: window dragging, native window-button clearance, real-time
-title-bar color sync, and a fully localized Chinese UI. See
+title-bar color sync, and a fully localized Chinese UI. Brand functionality
+(sidebar, minimap, models page, …) is equally zero-upstream-change via the
+plugin suite above — `--patch` overlays and slot injections. See
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md) for implementation details.
 
 Some approaches borrow from pilot-harness's `apps/desktop` (process-tree
