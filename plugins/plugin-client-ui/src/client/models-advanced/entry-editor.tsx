@@ -10,11 +10,14 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
+import type { ModelProviderGroup } from '@deepseek-ai/dsh-api-remotes/client'
 import {
   COMPAT_FIELDS, COMPAT_PRESETS, MODALITIES, REASONING_LEVELS,
   formatCapacity, parseCapacity, readReasoning,
 } from './fields.ts'
 import type { ModelDraft, ReasoningDraft } from './fields.ts'
+
+type CatalogModel = ModelProviderGroup['models'][number]
 
 /** Props of {@link ModelEntryEditor}. */
 export interface ModelEntryEditorProps {
@@ -24,6 +27,8 @@ export interface ModelEntryEditorProps {
   onChange: (next: ModelDraft) => void
   /** Lock the id input (override rows address a catalog id by key). */
   lockedId?: boolean
+  /** Live provider metadata for the same model, when the route has a catalog. */
+  catalogModel?: CatalogModel
   /** Index for aria labels. */
   index: number
   /** Disable every control (read-only settings or a pending write). */
@@ -39,7 +44,7 @@ function withoutUndefined(row: ModelDraft, key: string): ModelDraft {
 }
 
 /** Chevron that rotates while its row is open. */
-function IconChevron({ open }: { open: boolean }): ReactNode {
+export function IconChevron({ open }: { open: boolean }): ReactNode {
   return (
     <svg
       width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden
@@ -66,17 +71,24 @@ export function IconTrash(): ReactNode {
 function ReasoningEditor(props: {
   value: ReasoningDraft
   onChange: (next: ReasoningDraft) => void
+  catalogReasoning: CatalogModel['reasoning'] | undefined
   index: number
   disabled: boolean
 }): ReactNode {
-  const { value, onChange, index, disabled } = props
+  const { value, onChange, catalogReasoning, index, disabled } = props
   const mode = value === undefined ? 'inherit' : value === false ? 'off' : 'custom'
+  const suggestedLevels = catalogReasoning === undefined
+    ? ['low', 'medium', 'high']
+    : catalogReasoning.efforts
+        .map(effort => effort.id)
+        .filter(level => (REASONING_LEVELS as readonly string[]).includes(level))
+  const initialLevels = suggestedLevels.length === 0 ? ['low', 'medium', 'high'] : suggestedLevels
   const setMode = (next: 'inherit' | 'off' | 'custom'): void => {
     // Switching into `custom` from either simple state starts from the
     // conventional spelling — the level name itself — which the user can then
     // per-row adjust; an empty custom dict would silently mean "no levels".
     onChange(next === 'inherit' ? undefined : next === 'off' ? false
-      : Object.fromEntries(['low', 'medium', 'high'].map(level => [level, level])))
+      : Object.fromEntries(initialLevels.map(level => [level, level])))
   }
   const dict = mode === 'custom' && typeof value === 'object' && value !== null ? value : {}
   const unusedLevels = REASONING_LEVELS.filter(level => !(level in dict))
@@ -91,8 +103,8 @@ function ReasoningEditor(props: {
           disabled={disabled}
           onChange={(event) => { setMode(event.target.value as 'inherit' | 'off' | 'custom') }}
         >
-          <option value="inherit">继承目录（未声明）</option>
-          <option value="off">禁用推理</option>
+          <option value="inherit">继承 provider 默认</option>
+          <option value="off">明确禁用推理</option>
           <option value="custom">自定义级别</option>
         </select>
         {mode === 'custom'
@@ -116,9 +128,17 @@ function ReasoningEditor(props: {
       </div>
       {mode === 'custom'
         ? (
-          <div className="dshAma-hint">级别 → 发送给网关的拼写；拼写留空表示该级别不发参数（如 off）。</div>
+          <div className="dshAma-hint">级别 → 发送给网关的拼写；留空表示该级别不发送参数。</div>
         )
         : null}
+      {catalogReasoning === undefined
+        ? null
+        : (
+          <div className="dshAma-capabilityHint">
+            provider 当前能力：{catalogReasoning.efforts.map(effort => effort.name).join('、')}
+            {catalogReasoning.defaultEffort === undefined ? '' : '；默认 ' + catalogReasoning.defaultEffort}
+          </div>
+        )}
       {Object.entries(dict).map(([level, spelling]) => (
         <div key={level} className="dshAma-kvRow">
           <span className="dshAma-kvKey">{level}</span>
@@ -179,8 +199,8 @@ function CompatEditor(props: {
           disabled={disabled}
           onChange={(event) => { setKey(field.key, event.target.value === 'true') }}
         >
-          <option value="true">true</option>
-          <option value="false">false</option>
+          <option value="true">启用</option>
+          <option value="false">禁用</option>
         </select>
       )
     }
@@ -261,7 +281,7 @@ function CompatEditor(props: {
  * @returns the entry editor.
  */
 export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
-  const { row, onChange, index, disabled } = props
+  const { row, onChange, catalogModel, index, disabled } = props
   // Capacities are edited as text; the buffer lives here so keystrokes are
   // never rewritten by the K/M formatter mid-word. The component stays
   // mounted while its row does, so the buffer is displaced only by the user.
@@ -375,9 +395,10 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
       <ReasoningEditor
         index={index}
         disabled={disabled}
+        catalogReasoning={catalogModel?.reasoning}
         value={readReasoning(row.reasoningEfforts)}
         onChange={(next) => {
-          onChange(next === undefined || next === false
+          onChange(next === undefined
             ? withoutUndefined({ ...row }, 'reasoningEfforts')
             : { ...row, reasoningEfforts: next })
         }}

@@ -10,7 +10,7 @@
  */
 
 import type {
-  ConfigurableProviderView, IApiClient, ModelProviderGroup,
+  ConfigurableProviderView, IApiClient, ModelCatalogFailure, ModelProviderGroup,
   SettingsNamespaceView, SettingsPathOpView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
@@ -51,6 +51,8 @@ export interface AdvancedModelsState {
   namespaces: ReadonlyMap<string, SettingsNamespaceView>
   /** Host model catalog by provider route id (candidate ids for overrides). */
   groups: ReadonlyMap<string, ModelProviderGroup>
+  /** Provider-local catalog failures; sound groups remain usable. */
+  catalogFailures: readonly ModelCatalogFailure[]
 }
 
 /** Human text for a rejected wire call (transport rejects with anything). */
@@ -113,6 +115,7 @@ export class AdvancedModelsStore {
   /** The snapshot the section renders from (uSES-safe store). */
   readonly store: SnapshotStore<AdvancedModelsState> = createSnapshotStore<AdvancedModelsState>({
     status: 'idle', error: null, writable: false, routes: [], namespaces: new Map(), groups: new Map(),
+    catalogFailures: [],
   })
 
   /** Latest load wins; an older response never overwrites a newer one. */
@@ -140,6 +143,7 @@ export class AdvancedModelsStore {
     this.store.update((s) => { s.status = 'loading'; s.error = null })
     let providers: ConfigurableProviderView[]
     let groups: readonly ModelProviderGroup[]
+    let catalogFailures: readonly ModelCatalogFailure[]
     let writable: boolean
     let views: readonly SettingsNamespaceView[]
     try {
@@ -156,6 +160,7 @@ export class AdvancedModelsStore {
       }
       providers = providersResponse.result.value.providers
       groups = modelsResponse.result.value.groups
+      catalogFailures = modelsResponse.result.value.failures ?? []
       writable = mirrored.view.writable
       views = mirrored.view.namespaces
     } catch (error) {
@@ -198,6 +203,7 @@ export class AdvancedModelsStore {
       s.routes = routes
       s.namespaces = namespaces
       s.groups = byGroup
+      s.catalogFailures = catalogFailures
     })
   }
 }

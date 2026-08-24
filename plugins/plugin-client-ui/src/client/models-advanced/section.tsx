@@ -26,10 +26,12 @@ import type { IApiClient, SettingsPathOpView } from '@deepseek-ai/dsh-api-remote
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { cloneDraft, getPath, modelRowFailure } from './fields.ts'
 import type { ModelDraft } from './fields.ts'
-import { ModelEntryEditor, IconTrash } from './entry-editor.tsx'
+import { IconChevron, IconTrash, ModelEntryEditor } from './entry-editor.tsx'
 import { AdvancedModelsStore, protocolChoices, writeOps } from './store.ts'
 import type { AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
 import { ModelsDevImportDialog } from './import-dialog.tsx'
+import { ProviderModelDiscoveryDialog } from './provider-discovery.tsx'
+import type { ProviderDiscoveryTarget } from './provider-discovery.tsx'
 
 /** The inject face the registering apply supplies (declared via `hooks`). */
 export interface AdvancedModelsInjected {
@@ -90,6 +92,31 @@ function overrideFields(row: ModelDraft): Record<string, unknown> {
   return fields
 }
 
+/** Merge imported rows by model id while keeping manual blank rows intact. */
+function mergeModelRows(existing: readonly ModelDraft[], additions: readonly ModelDraft[]): ModelDraft[] {
+  const next = [...existing]
+  const positions = new Map<string, number>()
+  next.forEach((model, index) => {
+    const id = typeof model.id === 'string' ? model.id.trim() : ''
+    if (id !== '') positions.set(id, index)
+  })
+  for (const model of additions) {
+    const id = typeof model.id === 'string' ? model.id.trim() : ''
+    const position = id === '' ? undefined : positions.get(id)
+    if (position === undefined) {
+      if (id !== '' && typeof model.id === 'string' && model.id !== id) {
+        next.push({ ...model, id })
+      } else {
+        next.push(model)
+      }
+      if (id !== '') positions.set(id, next.length - 1)
+    } else {
+      next[position] = model
+    }
+  }
+  return next
+}
+
 /**
  * Render the Advanced Models settings section.
  * @param props - the inject face plus the slot's owner props.
@@ -135,7 +162,8 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
   const [newRoute, setNewRoute] = useState<NewRouteDraft | undefined>(undefined)
-  const [importTarget, setImportTarget] = useState<ImportTarget | undefined>(undefined)
+  const [modelsDevTarget, setModelsDevTarget] = useState<ImportTarget | undefined>(undefined)
+  const [discoveryTarget, setDiscoveryTarget] = useState<ImportTarget | undefined>(undefined)
   /** The companion-route migration dialog (off-catalog rows on a catalog route). */
   const [migrate, setMigrate] = useState<
     | undefined
@@ -158,7 +186,20 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     setOpenRows(new Set())
     setFailure(undefined)
     setNotice(undefined)
+    setModelsDevTarget(undefined)
+    setDiscoveryTarget(undefined)
   }, [selectedId])
+
+  // The first active route is immediately useful on entry; a refresh keeps the
+  // current route when it still exists and falls back only when it vanished.
+  useEffect(() => {
+    if (state.status !== 'ready') return
+    const fallback = state.routes.find(candidate => candidate.entry.active) ?? state.routes[0]
+    setSelectedId(current => current !== undefined
+      && state.routes.some(candidate => candidate.entry.provider === current)
+      ? current
+      : fallback?.entry.provider)
+  }, [state.status, state.routes])
 
   /** The user-layer `models` array as loaded (undefined when unowned). */
   const baseModels = row !== undefined && Array.isArray(row.userProfile?.models)
@@ -180,6 +221,12 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   const catalogIdSet = row === undefined
     ? new Set<string>()
     : new Set((state.groups.get(row.entry.provider)?.models ?? []).map(model => model.id))
+  const catalogModelFor = (id: string) => row === undefined
+    ? undefined
+    : state.groups.get(row.entry.provider)?.models.find(model => model.id === id)
+  const catalogFailure = row === undefined
+    ? undefined
+    : state.catalogFailures.find(failure => failure.id === row.entry.provider)
   /** Catalog ids offered for a new override (this route's group only). */
   const catalogIds = row === undefined ? [] : [...catalogIdSet].filter(id => !overrideIds.includes(id))
   /**
@@ -378,6 +425,17 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   /** The resolved (all-layers) profile of one route, for the info bar. */
   const resolvedProfile = (row: RouteRow): Record<string, unknown> =>
     profileAt(row.entry.settingsPath)
+  const providerDiscoveryTarget = (candidate: RouteRow): ProviderDiscoveryTarget => {
+    const info = resolvedProfile(candidate)
+    const baseURL = typeof info.baseURL === 'string' ? info.baseURL : undefined
+    const apiName = typeof info.api === 'string' ? info.api : undefined
+    return {
+      settingsNs: candidate.entry.settingsNs,
+      provider: candidate.entry.provider,
+      ...(baseURL === undefined ? {} : { baseURL }),
+      ...(apiName === undefined ? {} : { api: apiName }),
+    }
+  }
   const routeInfo = (row: RouteRow): ReactNode => {
     const info = resolvedProfile(row)
     const text = (key: string): string => typeof info[key] === 'string' ? info[key] as string : '—'
@@ -562,17 +620,23 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     <section className="dshAma-root" aria-label="模型高级设置">
       <style>{ADVANCED_CSS}</style>
       <p className="dshAma-intro">
-        在此编辑官方“模型”页未覆盖的高级字段：推理等级、输入模态、网关兼容开关等，写入
-        <code>settings.yaml</code> 的 <code>llm-pi-ai</code> 节。路由的增删、密钥与端点发现请使用官方“模型”页。
+        在此调整模型条目的高级字段：推理等级、输入模态、网关兼容开关等。provider 路由、端点与凭据仍由官方“模型”页维护；
+        本页读取 dsh 的实时模型目录，只保存模型级改动。
       </p>
       {state.status === 'error'
         ? <p className="dshAma-error">{`加载失败：${state.error ?? ''}`}</p>
         : state.status === 'loading' && state.routes.length === 0
           ? <p className="dshAma-hint">加载中…</p>
           : null}
-      {!state.writable ? <p className="dshAma-hint">当前设置源为只读，页面仅可查看。</p> : null}
+      {state.status === 'ready' && !state.writable
+        ? <p className="dshAma-hint">当前设置源为只读，页面仅可查看。</p>
+        : null}
+      {state.status === 'loading' && state.routes.length > 0
+        ? <p className="dshAma-hint" aria-live="polite">正在同步 provider 配置…</p>
+        : null}
 
-      <div className="dshAma-field">
+      <div className="dshAma-routePicker">
+        <div className="dshAma-field">
         <span className="dshAma-fieldLabel">选择路由</span>
         <select
           className="dshAma-input dshAma-select"
@@ -592,11 +656,23 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
             </option>
           ))}
         </select>
+        </div>
+        <button
+          type="button"
+          className="dshAma-iconButton dshAma-refreshButton"
+          aria-label="刷新 provider 配置"
+          title="刷新 provider 配置"
+          disabled={state.status === 'loading'}
+          onClick={() => { void controller.load() }}
+        >⟳</button>
       </div>
 
       {row === undefined ? null : (
         <>
           {routeInfo(row)}
+          {catalogFailure === undefined
+            ? null
+            : <p className="dshAma-error">内置 provider 目录暂不可用，当前配置仍可编辑；可稍后刷新或从 provider 重新发现。</p>}
           {inModelsMode
             ? (
               <div className="dshAma-modeBanner">
@@ -630,8 +706,12 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                   <span className="dshAma-listTitle">{`模型清单（${String(models.length)}）`}</span>
                   <button
                     type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setImportTarget('models') }}
-                  >从 models.dev 导入</button>
+                    onClick={() => { setDiscoveryTarget('models') }}
+                  >从 provider 获取</button>
+                  <button
+                    type="button" className="dshAma-linkButton" disabled={disabled}
+                    onClick={() => { setModelsDevTarget('models') }}
+                  >models.dev 参考</button>
                   <button
                     type="button" className="dshAma-linkButton" disabled={disabled}
                     onClick={() => { setModelsDraft([...models, { id: '' }]) }}
@@ -645,13 +725,17 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                         type="button" className="dshAma-iconButton" aria-expanded={openRows.has(`m${String(index)}`)}
                         aria-label={`展开模型 ${index + 1}`}
                         onClick={() => { toggleOpen(`m${String(index)}`) }}
-                      >▶</button>
+                      ><IconChevron open={openRows.has('m' + String(index))} /></button>
                       <span className="dshAma-entryId">{typeof model.id === 'string' && model.id !== '' ? model.id : '（未命名）'}</span>
                       {typeof model.id === 'string' && model.id.trim() !== ''
                         && row.entry.declared !== true && !catalogIdSet.has(model.id.trim())
                         ? <span className="dshAma-offCatalogBadge" title="不在官方目录中，多协议目录路由无法为它声明协议">目录外</span>
                         : null}
-                      <span className="dshAma-entryName">{typeof model.name === 'string' ? model.name : ''}</span>
+                      <span className="dshAma-entryName">
+                        {typeof model.name === 'string' && model.name !== ''
+                          ? model.name
+                          : catalogModelFor(typeof model.id === 'string' ? model.id : '')?.name ?? ''}
+                      </span>
                       <button
                         type="button" className="dshAma-iconButton dshAma-iconButtonDanger" aria-label={`移除模型 ${index + 1}`}
                         disabled={disabled}
@@ -662,6 +746,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                       ? (
                         <ModelEntryEditor
                           row={model} index={index} disabled={disabled}
+                          catalogModel={catalogModelFor(typeof model.id === 'string' ? model.id : '')}
                           onChange={(next) => { patchModel(index, next) }}
                         />
                       )
@@ -705,8 +790,9 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                         aria-expanded={openRows.has(`o:${id}`)}
                         aria-label={`展开覆盖 ${id}`}
                         onClick={() => { toggleOpen(`o:${id}`) }}
-                      >▶</button>
-                      <span className="dshAma-entryId">{id}</span>
+                       ><IconChevron open={openRows.has('o:' + id)} /></button>
+                       <span className="dshAma-entryId">{id}</span>
+                       <span className="dshAma-entryName">{catalogModelFor(id)?.name ?? ''}</span>
                       <button
                         type="button" className="dshAma-iconButton dshAma-iconButtonDanger" aria-label={`移除覆盖 ${id}`}
                         disabled={disabled}
@@ -721,6 +807,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                       ? (
                         <ModelEntryEditor
                           row={{ ...overrides[id], id }} index={0} disabled={disabled} lockedId
+                          catalogModel={catalogModelFor(id)}
                           onChange={(next) => { setOverridesDraft({ ...overrides, [id]: next }) }}
                         />
                       )
@@ -842,7 +929,9 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                 <div className="dshAma-listHead">
                   <span className="dshAma-listTitle">{`${upsertTarget !== undefined ? '待追加' : '初始'}模型（${String(newRoute.rows.length)}）`}</span>
                   <button type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setImportTarget('new-route') }}>从 models.dev 导入</button>
+                    onClick={() => { setDiscoveryTarget('new-route') }}>从 provider 发现</button>
+                  <button type="button" className="dshAma-linkButton" disabled={disabled}
+                    onClick={() => { setModelsDevTarget('new-route') }}>models.dev 参考</button>
                   <button type="button" className="dshAma-linkButton" disabled={disabled}
                     onClick={() => { setNewRoute({ ...newRoute, rows: [...newRoute.rows, { id: '' }] }) }}>手动添加</button>
                 </div>
@@ -851,7 +940,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                     <div className="dshAma-entryHead">
                       <button type="button" className="dshAma-iconButton" aria-label={`展开初始模型 ${index + 1}`}
                         aria-expanded={openRows.has(`n${String(index)}`)}
-                        onClick={() => { toggleOpen(`n${String(index)}`) }}>▶</button>
+                        onClick={() => { toggleOpen(`n${String(index)}`) }}><IconChevron open={openRows.has('n' + String(index))} /></button>
                       <span className="dshAma-entryId">
                         {typeof model.id === 'string' && model.id !== '' ? model.id : '（未命名）'}
                       </span>
@@ -954,18 +1043,38 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       )}
 
       <ModelsDevImportDialog
-        open={importTarget !== undefined}
-        onClose={() => { setImportTarget(undefined) }}
+        open={modelsDevTarget !== undefined}
+        onClose={() => { setModelsDevTarget(undefined) }}
         onAdopt={(rows) => {
-          if (importTarget === 'new-route' && newRoute !== undefined) {
-            setNewRoute({ ...newRoute, rows: [...newRoute.rows, ...rows] })
+          if (modelsDevTarget === 'new-route' && newRoute !== undefined) {
+            setNewRoute({ ...newRoute, rows: mergeModelRows(newRoute.rows, rows) })
           } else {
-            setModelsDraft([...models, ...rows])
+            setModelsDraft(mergeModelRows(models, rows))
           }
         }}
-        existingIds={importTarget === 'new-route' && newRoute !== undefined
+        existingIds={modelsDevTarget === 'new-route' && newRoute !== undefined
           ? new Set(newRoute.rows.map(model => typeof model.id === 'string' ? model.id : ''))
           : modelIds}
+      />
+      <ProviderModelDiscoveryDialog
+        open={discoveryTarget !== undefined}
+        onClose={() => { setDiscoveryTarget(undefined) }}
+        api={api}
+        target={discoveryTarget === 'models' && row !== undefined
+          ? providerDiscoveryTarget(row)
+          : discoveryTarget === 'new-route' && newRoute !== undefined
+            ? { settingsNs: 'llm-pi-ai', baseURL: newRoute.baseURL, api: newRoute.api }
+            : undefined}
+        existingIds={discoveryTarget === 'new-route' && newRoute !== undefined
+          ? new Set(newRoute.rows.map(model => typeof model.id === 'string' ? model.id : ''))
+          : modelIds}
+        onAdopt={(rows) => {
+          if (discoveryTarget === 'new-route' && newRoute !== undefined) {
+            setNewRoute({ ...newRoute, rows: mergeModelRows(newRoute.rows, rows) })
+          } else {
+            setModelsDraft(mergeModelRows(models, rows))
+          }
+        }}
       />
     </section>
   )
@@ -973,7 +1082,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
 
 /** Page styles (class prefix dshAma-), injected inline — the brand bundle has no CSS pipeline. */
 const ADVANCED_CSS = `
-.dshAma-root { display: flex; flex-direction: column; gap: 10px; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); }
+.dshAma-root { display: flex; flex-direction: column; gap: 10px; padding-top: 16px; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAma-intro { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); line-height: 1.6; }
 .dshAma-intro code, .dshAma-modeBanner code, .dshAma-newRouteBody code { padding: 0 3px; border-radius: 4px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-size: 12px; }
 .dshAma-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -982,6 +1091,9 @@ const ADVANCED_CSS = `
 .dshAma-input:disabled { opacity: .55; }
 .dshAma-select { appearance: auto; }
 .dshAma-inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.dshAma-routePicker { display: flex; gap: 8px; align-items: flex-end; }
+.dshAma-routePicker .dshAma-field { flex: 1; }
+.dshAma-refreshButton { flex: none; margin-bottom: 1px; }
 .dshAma-capacityRow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .dshAma-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
 .dshAma-hint { margin: 2px 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.5; }
@@ -1034,4 +1146,18 @@ const ADVANCED_CSS = `
 .dshAma-candidateBlock { display: flex; flex-direction: column; gap: 6px; }
 .dshAma-candidateList { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0 0 0 4px; list-style: none; max-height: 200px; overflow: auto; }
 .dshAma-candidate { font-size: 12.5px; }
+.dshAma-capabilityHint { padding: 6px 8px; border-left: 2px solid var(--dsw-alias-brand-primary, #3b82f6); background: var(--dsw-alias-bg-layer-2, #f1f5f9); color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.5; }
+.dshAma-discoveryModal { width: min(640px, calc(100vw - 48px)); }
+.dshAma-discoverySource { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.dshAma-discoverySourceLabel { color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; }
+.dshAma-discoverySource code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshAma-discoveryToolbar { display: flex; gap: 8px; align-items: center; }
+.dshAma-discoveryToolbar .dshAma-input { flex: 1; min-width: 0; }
+.dshAma-discoveryList { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; }
+.dshAma-discoveryRow { display: flex; gap: 8px; align-items: flex-start; padding: 7px 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 6px; cursor: pointer; }
+.dshAma-discoveryRow:hover { background: var(--dsw-alias-bg-layer-2, #f1f5f9); }
+.dshAma-discoveryModel { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.dshAma-discoveryModel strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.dshAma-discoveryModel small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11.5px; }
+.dshAma-error p { margin: 0 0 6px; }
 `
