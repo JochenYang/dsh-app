@@ -276,7 +276,12 @@ const MINIMAP_CSS = `
 export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null {
   const chat = useSession(snapshot => snapshot.chat)
   const entries = useMemo(() => collectEntries(chat), [chat])
-  const entryKeys = useMemo(() => entries.map(entry => entry.key), [entries])
+  // Streaming assistant chunks replace the chat snapshot and therefore the
+  // `entries` array, even when the tracked user/steering keys are unchanged.
+  // Keep the effect dependency tied to the actual tracked-key sequence so a
+  // stream update cannot tear down the hover state.
+  const entryKeySignature = entries.map(entry => entry.key).join('\u0000')
+  const entryKeys = useMemo(() => entries.map(entry => entry.key), [entryKeySignature])
   const [layout, setLayout] = useState<LayoutState | null>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const scrollTopRef = useRef(0)
@@ -366,14 +371,26 @@ export function MinimapUtility({ useSession }: MinimapProps): JSX.Element | null
     // switch swaps the rows inside it. A missing port (no conversation yet)
     // parks the rail.
     const host = document.querySelector<HTMLElement>(SCROLLPORT_SELECTOR)
+    const previousHost = hostRef.current
+    const previousHoverKey = hoverRef.current?.key ?? hover?.key ?? null
+    const preserveHover = host !== null
+      && previousHost === host
+      && previousHoverKey !== null
+      && entryKeys.includes(previousHoverKey)
     hostRef.current = host
-    hoverRef.current = null
-    hoverIndexRef.current = null
+    if (preserveHover && previousHoverKey !== null) {
+      // A new user message can change the index of the hovered key. Keep the
+      // hover itself, but remap its pyramid center against the new sequence.
+      hoverIndexRef.current = entryKeys.indexOf(previousHoverKey)
+    } else {
+      hoverRef.current = null
+      hoverIndexRef.current = null
+      setHover(null)
+    }
     gaugePaintedValuesRef.current = []
     gaugeTicksRef.current = []
     lastPaintedActiveIndexRef.current = -1
     lastPaintedHoverIndexRef.current = null
-    setHover(null)
     if (host === null) {
       setLayout(null)
       return
