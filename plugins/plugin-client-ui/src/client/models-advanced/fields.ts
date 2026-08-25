@@ -192,6 +192,114 @@ export function compatFailure(compat: unknown): string | undefined {
   return undefined
 }
 
+// ---------------------------------------------------------------------------
+// Retry policy (provider-level `retryPolicy`, mirrored from harness
+// packages/llm/llm/src/retry-policy.ts). The defaults and bounds below are
+// the schema's own; the namespace validator still backs the write.
+// ---------------------------------------------------------------------------
+
+/** Schema defaults, shown as the blank-field semantics and in the card summary. */
+export const RETRY_POLICY_DEFAULTS = {
+  maxRetries: 5,
+  initialDelayMs: 500,
+  maxDelayMs: 10_000,
+  jitterRatio: 0.1,
+} as const
+
+/** The timer ceiling the schema enforces (Node's largest safe setTimeout delay). */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/** The retry-policy form draft: strings so a blank field means "use default". */
+export interface RetryPolicyDraft {
+  mode: 'normal' | 'always'
+  maxRetries: string
+  initialDelayMs: string
+  maxDelayMs: string
+  jitterRatio: string
+}
+
+/**
+ * Normalize a stored `retryPolicy` value into the form draft. An absent or
+ * malformed value reads as undefined ("not customized on this route").
+ */
+export function readRetryPolicy(value: unknown): RetryPolicyDraft | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const backoff = typeof record.backoff === 'object' && record.backoff !== null && !Array.isArray(record.backoff)
+    ? record.backoff as Record<string, unknown>
+    : {}
+  return {
+    mode: record.mode === 'always' ? 'always' : 'normal',
+    maxRetries: typeof record.maxRetries === 'number' ? String(record.maxRetries) : '',
+    initialDelayMs: typeof backoff.initialDelayMs === 'number' ? String(backoff.initialDelayMs) : '',
+    maxDelayMs: typeof backoff.maxDelayMs === 'number' ? String(backoff.maxDelayMs) : '',
+    jitterRatio: typeof backoff.jitterRatio === 'number' ? String(backoff.jitterRatio) : '',
+  }
+}
+
+/** Outcome of parsing a retry-policy draft into its settings value. */
+export type RetryPolicyParse =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; error: string }
+
+/** Parse one draft field into a finite number, or undefined when blank. */
+function parsePositiveFinite(text: string): number | undefined | 'bad' {
+  const trimmed = text.trim()
+  if (trimmed === '') return undefined
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 'bad'
+}
+
+/**
+ * Validate a draft and build the value this page would write: `mode` always,
+ * `maxRetries` only under normal mode, and `backoff` only when some field is
+ * set. Blank fields are omitted so the schema defaults fill them.
+ * @returns the settings value, or the first rule violation (zh-CN).
+ */
+export function parseRetryPolicy(draft: RetryPolicyDraft): RetryPolicyParse {
+  const maxRetries = draft.maxRetries.trim()
+  if (draft.mode === 'normal' && maxRetries !== '') {
+    const parsed = Number(maxRetries)
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      return { ok: false, error: '最大重试次数必须是非负整数' }
+    }
+  }
+  const initialDelayMs = parsePositiveFinite(draft.initialDelayMs)
+  if (initialDelayMs === 'bad') return { ok: false, error: '首次延迟必须是正数（毫秒）' }
+  const maxDelayMs = parsePositiveFinite(draft.maxDelayMs)
+  if (maxDelayMs === 'bad') return { ok: false, error: '延迟上限必须是正数（毫秒）' }
+  const jitterRatio = (() => {
+    const trimmed = draft.jitterRatio.trim()
+    if (trimmed === '') return undefined
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : 'bad'
+  })()
+  if (jitterRatio === 'bad') return { ok: false, error: '抖动比例必须是 0 到 1 之间的数字' }
+  if (jitterRatio !== undefined && (jitterRatio < 0 || jitterRatio > 1)) {
+    return { ok: false, error: '抖动比例必须在 0 到 1 之间' }
+  }
+  for (const [name, value] of [['首次延迟', initialDelayMs], ['延迟上限', maxDelayMs]] as const) {
+    if (typeof value === 'number' && value > MAX_TIMER_DELAY_MS) {
+      return { ok: false, error: `${name}不能超过 ${String(MAX_TIMER_DELAY_MS)} 毫秒` }
+    }
+  }
+  // Cross-check against effective values (a blank field falls back to the
+  // default, so 30000 initial vs blank max would resolve to an invalid pair).
+  const effectiveInitial = initialDelayMs ?? RETRY_POLICY_DEFAULTS.initialDelayMs
+  const effectiveMax = maxDelayMs ?? RETRY_POLICY_DEFAULTS.maxDelayMs
+  if (effectiveInitial > effectiveMax) {
+    return { ok: false, error: '首次延迟不能大于延迟上限（留空时按默认 500 / 10000 计算）' }
+  }
+  const backoff: Record<string, number> = {}
+  if (initialDelayMs !== undefined) backoff.initialDelayMs = initialDelayMs
+  if (maxDelayMs !== undefined) backoff.maxDelayMs = maxDelayMs
+  if (jitterRatio !== undefined) backoff.jitterRatio = jitterRatio
+  const value: Record<string, unknown> = { mode: draft.mode }
+  if (draft.mode === 'normal' && maxRetries !== '') value.maxRetries = Number(maxRetries)
+  if (Object.keys(backoff).length > 0) value.backoff = backoff
+  return { ok: true, value }
+}
+
 /**
  * Validate one model row the way the page refuses it: a non-empty id unique
  * in the list, well-formed capacities, a level-keyed reasoning dict with

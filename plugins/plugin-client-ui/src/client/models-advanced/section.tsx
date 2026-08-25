@@ -22,10 +22,10 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { IApiClient, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { cloneDraft, getPath, modelRowFailure } from './fields.ts'
-import type { ModelDraft } from './fields.ts'
+import { cloneDraft, getPath, modelRowFailure, parseRetryPolicy, readRetryPolicy, RETRY_POLICY_DEFAULTS } from './fields.ts'
+import type { ModelDraft, RetryPolicyDraft } from './fields.ts'
 import { IconChevron, IconTrash, ModelEntryEditor } from './entry-editor.tsx'
 import { AdvancedModelsStore, protocolChoices, writeOps } from './store.ts'
 import type { AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
@@ -670,6 +670,11 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       {row === undefined ? null : (
         <>
           {routeInfo(row)}
+          <RetryPolicyCard
+            key={row.entry.provider}
+            row={row} disabled={disabled} api={api}
+            namespace={namespace} controller={controller}
+          />
           {catalogFailure === undefined
             ? null
             : <p className="dshAma-error">内置 provider 目录暂不可用，当前配置仍可编辑；可稍后刷新或从 provider 重新发现。</p>}
@@ -1080,6 +1085,200 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   )
 }
 
+/** A blank retry-policy draft: every field "use the schema default". */
+const BLANK_RETRY: RetryPolicyDraft = {
+  mode: 'normal', maxRetries: '', initialDelayMs: '', maxDelayMs: '', jitterRatio: '',
+}
+
+/** One summary fragment for a customized policy, or the default label. */
+function retrySummary(base: RetryPolicyDraft | undefined): string {
+  if (base === undefined) return '（默认）'
+  if (base.mode === 'always') return '（自定义：无限重试）'
+  const retries = base.maxRetries.trim() === '' ? String(RETRY_POLICY_DEFAULTS.maxRetries) : base.maxRetries.trim()
+  return `（自定义：最多 ${retries} 次重试）`
+}
+
+/**
+ * The provider-level retry-policy editor for the selected route. Saved on its
+ * own button (a `set`/`unset` at `providers.<route>.retryPolicy`), separate
+ * from the model-list save below — the two edit different levels of the same
+ * profile and must not fence each other's writes.
+ */
+function RetryPolicyCard(props: {
+  row: RouteRow
+  disabled: boolean
+  api: Pick<IApiClient, 'settings'>
+  namespace: SettingsNamespaceView | undefined
+  controller: AdvancedModelsStore
+}): ReactNode {
+  const { row, api, namespace, controller } = props
+  const base = readRetryPolicy(row.userProfile?.retryPolicy)
+  const [draft, setDraft] = useState<RetryPolicyDraft | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<string | undefined>(undefined)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const effective = draft ?? base
+  const changed = draft !== undefined
+    && (base === undefined || JSON.stringify(draft) !== JSON.stringify(base))
+  const fieldDisabled = props.disabled || busy
+  /** Bind one string field of the draft, starting from blank on first edit. */
+  const bind = (key: 'maxRetries' | 'initialDelayMs' | 'maxDelayMs' | 'jitterRatio') => ({
+    value: effective?.[key] ?? '',
+    onChange: (value: string) => { setDraft({ ...(effective ?? BLANK_RETRY), [key]: value }) },
+  })
+
+  const run = async (ops: readonly SettingsPathOpView[], doneNotice: string): Promise<void> => {
+    if (namespace === undefined) return
+    setBusy(true)
+    setFailure(undefined)
+    setNotice(undefined)
+    const outcome = await writeOps(api, ops, namespace.revision)
+    setBusy(false)
+    if (outcome.kind === 'conflict') {
+      setFailure('配置已在别处更新。已重新加载，请检查后再次保存。')
+      setDraft(undefined)
+      await controller.load()
+      return
+    }
+    if (outcome.kind === 'failure') {
+      setFailure(outcome.message)
+      return
+    }
+    setDraft(undefined)
+    setNotice(doneNotice)
+    await controller.load()
+  }
+
+  const save = async (): Promise<void> => {
+    if (draft === undefined) return
+    const parsed = parseRetryPolicy(draft)
+    if (!parsed.ok) {
+      setFailure(parsed.error)
+      setNotice(undefined)
+      return
+    }
+    await run(
+      [{ op: 'set', path: [...row.entry.settingsPath, 'retryPolicy'], value: parsed.value }],
+      '已保存重试策略。',
+    )
+  }
+
+  const restoreDefault = async (): Promise<void> => {
+    if (base === undefined) return
+    await run(
+      [{ op: 'unset', path: [...row.entry.settingsPath, 'retryPolicy'] }],
+      '已恢复默认重试策略。',
+    )
+  }
+
+  const maxRetries = bind('maxRetries')
+  const initialDelayMs = bind('initialDelayMs')
+  const maxDelayMs = bind('maxDelayMs')
+  const jitterRatio = bind('jitterRatio')
+  return (
+    <details className="dshAma-newRoute dshAma-retryCard">
+      <summary className="dshAma-newRouteSummary">
+        {`重试策略（retryPolicy）${retrySummary(base)}`}
+      </summary>
+      <div className="dshAma-newRouteBody">
+        <p className="dshAma-hint">
+          本路由的模型请求重试策略，随网关稳定性调整。留空字段使用默认值：最多
+          {` ${String(RETRY_POLICY_DEFAULTS.maxRetries)} `}次、首次延迟
+          {` ${String(RETRY_POLICY_DEFAULTS.initialDelayMs)}ms `}、封顶
+          {` ${String(RETRY_POLICY_DEFAULTS.maxDelayMs)}ms `}、抖动 ±
+          {`${String(Math.round(RETRY_POLICY_DEFAULTS.jitterRatio * 100))}%`}；传输中断
+         （terminated）、超时、限流、服务器错误与空响应均在其重试范围内。
+        </p>
+        <div className="dshAma-grid">
+          <label className="dshAma-field">
+            <span className="dshAma-fieldLabel">模式（mode）</span>
+            <select
+              className="dshAma-input dshAma-select" value={effective?.mode ?? 'normal'}
+              aria-label="重试模式" disabled={fieldDisabled}
+              onChange={(event) => {
+                setDraft({ ...(effective ?? BLANK_RETRY), mode: event.target.value as RetryPolicyDraft['mode'] })
+              }}
+            >
+              <option value="normal">标准（normal）：仅重试瞬态错误</option>
+              <option value="always">无限（always）：重试所有错误</option>
+            </select>
+          </label>
+          {effective?.mode === 'always'
+            ? null
+            : (
+              <label className="dshAma-field">
+                <span className="dshAma-fieldLabel">最大重试次数（maxRetries）</span>
+                <input
+                  className="dshAma-input" type="text" inputMode="numeric"
+                  value={maxRetries.value} placeholder={`默认 ${String(RETRY_POLICY_DEFAULTS.maxRetries)}`}
+                  aria-label="最大重试次数" disabled={fieldDisabled}
+                  onChange={(event) => { maxRetries.onChange(event.target.value) }}
+                />
+              </label>
+            )}
+          <label className="dshAma-field">
+            <span className="dshAma-fieldLabel">首次延迟毫秒（initialDelayMs）</span>
+            <input
+              className="dshAma-input" type="text" inputMode="numeric"
+              value={initialDelayMs.value} placeholder={`默认 ${String(RETRY_POLICY_DEFAULTS.initialDelayMs)}`}
+              aria-label="首次重试延迟" disabled={fieldDisabled}
+              onChange={(event) => { initialDelayMs.onChange(event.target.value) }}
+            />
+          </label>
+          <label className="dshAma-field">
+            <span className="dshAma-fieldLabel">延迟上限毫秒（maxDelayMs）</span>
+            <input
+              className="dshAma-input" type="text" inputMode="numeric"
+              value={maxDelayMs.value} placeholder={`默认 ${String(RETRY_POLICY_DEFAULTS.maxDelayMs)}`}
+              aria-label="重试延迟上限" disabled={fieldDisabled}
+              onChange={(event) => { maxDelayMs.onChange(event.target.value) }}
+            />
+          </label>
+          <label className="dshAma-field">
+            <span className="dshAma-fieldLabel">抖动比例 0–1（jitterRatio）</span>
+            <input
+              className="dshAma-input" type="text" inputMode="decimal"
+              value={jitterRatio.value} placeholder={`默认 ${String(RETRY_POLICY_DEFAULTS.jitterRatio)}`}
+              aria-label="重试抖动比例" disabled={fieldDisabled}
+              onChange={(event) => { jitterRatio.onChange(event.target.value) }}
+            />
+          </label>
+        </div>
+        {effective?.mode === 'always'
+          ? (
+            <p className="dshAma-error">
+              无限模式会对所有错误重试（包括鉴权失败、配额超限），请求可能长时间卡住；并发任务下建议优先调大标准模式的次数与延迟。
+            </p>
+          )
+          : null}
+        <div className="dshAma-footer">
+          {failure !== undefined ? <p className="dshAma-error">{failure}</p> : null}
+          {notice !== undefined ? <p className="dshAma-notice">{notice}</p> : null}
+          <button
+            type="button" className="dshAma-button dshAma-buttonPrimary"
+            disabled={fieldDisabled || !changed}
+            onClick={() => { void save() }}
+          >{busy ? '保存中…' : '保存重试策略'}</button>
+          {base === undefined ? null : (
+            <button
+              type="button" className="dshAma-button"
+              disabled={fieldDisabled}
+              onClick={() => { void restoreDefault() }}
+            >恢复默认</button>
+          )}
+          {changed ? (
+            <button
+              type="button" className="dshAma-button"
+              disabled={fieldDisabled}
+              onClick={() => { setDraft(undefined); setFailure(undefined); setNotice(undefined) }}
+            >撤销修改</button>
+          ) : null}
+        </div>
+      </div>
+    </details>
+  )
+}
+
 /** Page styles (class prefix dshAma-), injected inline — the brand bundle has no CSS pipeline. */
 const ADVANCED_CSS = `
 .dshAma-root { display: flex; flex-direction: column; gap: 10px; padding-top: 16px; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); }
@@ -1130,6 +1329,7 @@ const ADVANCED_CSS = `
 .dshAma-button:disabled { opacity: .5; cursor: default; }
 .dshAma-buttonPrimary { border-color: transparent; background: var(--dsw-alias-brand-primary, #3b82f6); color: #fff; }
 .dshAma-newRoute { border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 8px; margin-top: 8px; }
+.dshAma-retryCard { margin-top: 0; }
 .dshAma-newRouteSummary { padding: 8px 10px; cursor: pointer; color: var(--dsw-alias-label-secondary, #475569); font-size: 12.5px; }
 .dshAma-newRouteBody { display: flex; flex-direction: column; gap: 10px; padding: 10px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
 .dshAma-modalMask { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(15, 23, 42, .45); }
