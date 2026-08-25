@@ -276,10 +276,23 @@ function installDesktopChrome(win: BrowserWindow): void {
 }
 
 /**
- * Shell-side export feedback: the in-page export dialog can be swallowed by
- * ancestor transforms/filters in some layouts, so when the Electron download
- * manager completes a dsh-session ZIP we inject a transient toast as a
- * guaranteed-visible confirmation. Pure shell adaptation; harness untouched.
+ * Shell-side export feedback for dsh-session ZIP downloads.
+ *
+ * The harness web UI owns the export flow: an in-page modal tracks the export
+ * and, once the browser download is handed off, parks on a browser-oriented
+ * "download started" state until it is manually closed. On the desktop the
+ * file lands in the OS Downloads folder moments later, so that copy is stale
+ * and the lingering modal is noise. When the Electron download manager
+ * settles:
+ *
+ *   - completed: dismiss the export modal (matched by its "Session" dialog
+ *     aria-label — both locales title it with "Session" — and closed through
+ *     its own close button so the harness dismiss path runs), then toast
+ *     where the file was actually saved;
+ *   - otherwise: toast the failure reason; the modal stays on its own error
+ *     state, which is the harness's surface for export-time failures.
+ *
+ * Pure shell adaptation; harness untouched.
  */
 function installExportToast(win: BrowserWindow): void {
   win.webContents.session.on('will-download', (_event, item) => {
@@ -287,26 +300,46 @@ function installExportToast(win: BrowserWindow): void {
     if (!name.startsWith('dsh-session-') || !name.endsWith('.zip')) return
     item.once('done', (_e, state) => {
       const ok = state === 'completed'
-      const text = ok ? 'Session 导出完成，已开始下载' : 'Session 导出失败'
+      const reason = state === 'cancelled' ? '已取消' : state === 'interrupted' ? '已中断' : state
+      const title = ok ? 'Session 导出完成' : 'Session 导出失败'
+      const detail = ok ? `已保存到：${item.getSavePath() || name}` : reason
+      // Desktop: the download has settled, so the modal's "download started"
+      // state is stale. Route through its own close button (React onClick),
+      // not a synthetic Escape, so only the export dialog is affected.
+      const dismissModal = ok
+        ? `for (const dialog of document.querySelectorAll('[role="dialog"][aria-label]')) {
+             if (!dialog.getAttribute('aria-label').includes('Session')) continue
+             const close = dialog.querySelector('button[aria-label]')
+             if (close) close.click()
+           }`
+        : ''
       win.webContents
         .executeJavaScript(
           `(function () {
             const old = document.getElementById('dsh-export-toast');
             if (old) old.remove();
+            ${dismissModal}
             const el = document.createElement('div');
             el.id = 'dsh-export-toast';
             el.setAttribute('role', 'status');
-            el.textContent = ${JSON.stringify(text)};
             el.style.cssText =
               'position:fixed;top:48px;left:50%;transform:translateX(-50%);' +
-              'z-index:2147483647;padding:8px 16px;border-radius:10px;' +
-              'font-size:13px;line-height:1.4;color:#fff;' +
+              'z-index:2147483647;padding:10px 18px;border-radius:10px;' +
+              'font-size:13px;line-height:1.5;color:#fff;max-width:min(90vw,640px);' +
               'background:${ok ? 'rgba(75, 103, 252, 0.92)' : 'rgba(190, 44, 44, 0.92)'};' +
               'box-shadow:0 4px 16px rgba(0,0,0,.25);pointer-events:none;' +
               'transition:opacity .4s;opacity:1;';
+            const title = document.createElement('div');
+            title.textContent = ${JSON.stringify(title)};
+            const detail = document.createElement('div');
+            detail.textContent = ${JSON.stringify(detail)};
+            detail.style.cssText =
+              'font-size:12px;opacity:.85;word-break:break-all;margin-top:2px;';
+            el.appendChild(title);
+            el.appendChild(detail);
             document.body.appendChild(el);
-            setTimeout(() => { el.style.opacity = '0'; }, 3200);
-            setTimeout(() => { el.remove(); }, 3800);
+            setTimeout(() => { el.style.opacity = '0'; }, 4200);
+            setTimeout(() => { el.remove(); }, 4800);
           })()`,
         )
         .catch(() => undefined)
