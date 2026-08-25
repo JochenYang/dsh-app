@@ -70,10 +70,27 @@ const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || (aw
 if (process.env.GITHUB_OUTPUT) {
   appendFileSync(process.env.GITHUB_OUTPUT, `dsh_version=${DSH_VERSION}\n`)
 }
-const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION ?? '0.1.0'
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
 const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm']
+
+/**
+ * Suite version, content-addressed from the bundled plugins' package.json
+ * versions. Any suite change yields a new versionDir name (dsh-<v>+suite-<h>)
+ * so activation lands in a fresh directory and the previous one stays for
+ * rollback, while an unchanged suite keeps the same name AND — with the
+ * reproducible tarball below — the same artifact sha512, so the shell's
+ * boot-time drift check sees "no change" and skips the extract entirely.
+ * Explicit DSH_APP_SUITE_VERSION still wins for hand-tagged builds.
+ */
+function deriveSuiteVersion() {
+  const parts = [...suitePlugins].sort().map((name) => {
+    const pkg = JSON.parse(readFileSync(path.join(root, 'plugins', name.replace('@dsh-app/', ''), 'package.json'), 'utf8'))
+    return `${name}@${pkg.version}`
+  })
+  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 8)
+}
+const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION?.trim() || deriveSuiteVersion()
 
 function run(cmd, args, cwd) {
   console.log(`$ ${cmd} ${args.join(' ')}`)
@@ -219,7 +236,11 @@ async function main() {
     await cp(path.join(srcDir, 'lib'), path.join(destDir, 'lib'), { recursive: true })
   }
 
-  // 3. Runtime manifest.
+  // 3. Runtime manifest. No publishedAt here: every byte of the in-archive
+  //    manifest must be a function of content, or the artifact sha512 changes
+  //    on every rebuild and boot-time drift detection would re-extract an
+  //    unchanged runtime on each app update. The build timestamp lands only
+  //    in the release-metadata copy below, outside the archive.
   const tgzName = `dsh-runtime-${platform}-${arch}-${DSH_VERSION}.tgz`
   const manifest = {
     dshVersion: DSH_VERSION,
@@ -228,7 +249,6 @@ async function main() {
     platform,
     arch,
     integrity: '', // filled after tarring
-    publishedAt: new Date().toISOString(),
     source: 'artifact',
   }
 
@@ -241,8 +261,12 @@ async function main() {
   await writeFile(path.join(runtimeDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
 
   // 5. Tar the runtime directory (single top-level dir: runtime/).
+  //    Reproducible archive: `portable` strips uid/gid/uname/gname/atime/ctime
+  //    (header fields that vary per CI runner) and `mtime` pins every entry to
+  //    the epoch, so the same content always yields the same sha512 — the
+  //    precondition for the shell's drift check (sha-equal ⇔ content-equal).
   const tgzPath = path.join(root, 'runtime-dist', tgzName)
-  await createTar({ gzip: true, file: tgzPath, cwd: work }, ['runtime'])
+  await createTar({ gzip: true, file: tgzPath, cwd: work, portable: true, mtime: new Date(0) }, ['runtime'])
 
   // 6. sha512 sidecar — the trusted integrity value used at install time.
   const hash = createHash('sha512')
@@ -256,8 +280,11 @@ async function main() {
   await writeFile(`${tgzPath}.sha512`, `${sha512}\n`)
   await rm(path.join(runtimeDir, 'app', 'node_modules', '.package-lock.json'), { force: true })
 
-  // 7. Release-metadata copy of the manifest with the real integrity filled in.
+  // 7. Release-metadata copy of the manifest with the real integrity and the
+  //    build timestamp — both live OUTSIDE the archive, so they never affect
+  //    the artifact sha512.
   manifest.integrity = sha512
+  manifest.publishedAt = new Date().toISOString()
   await writeFile(path.join(root, 'runtime-dist', 'manifest.json'), JSON.stringify(manifest, null, 2))
 
   console.log(`\nRuntime artifact ready: ${tgzPath}`)

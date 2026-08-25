@@ -39,7 +39,13 @@ export interface KernelManifest {
   arch: string
   /** sha512 hex of the artifact tarball. */
   integrity: string
-  publishedAt: string
+  /**
+   * Build timestamp. Present in the release-metadata manifest and dev
+   * manifests, deliberately ABSENT inside the archive: a timestamp in the
+   * tarball would change its sha512 on every rebuild and defeat reproducible
+   * builds (drift detection requires sha-equal ⇔ content-equal).
+   */
+  publishedAt?: string
   source: KernelSource
 }
 

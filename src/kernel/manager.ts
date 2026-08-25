@@ -267,7 +267,36 @@ export class KernelManager {
     await fs.rm(extractDir, { recursive: true, force: true })
     await fs.mkdir(extractDir, { recursive: true })
     this.status({ phase: 'extracting', message: '正在解压运行时…', progress: null })
-    await tar.x({ file: tarball, cwd: extractDir })
+    // One listing pass buys a real denominator: extracting ~10k small files
+    // takes minutes on Windows, and an indeterminate spinner over that span
+    // reads as a hang. Falls back to indeterminate when listing fails.
+    let total = 0
+    try {
+      await tar.t({ file: tarball, onentry: () => { total += 1 } })
+    } catch {
+      total = 0
+    }
+    let extracted = 0
+    let lastEmit = 0
+    await tar.x({
+      file: tarball,
+      cwd: extractDir,
+      // Throttled like the download path (~4/s): each status re-renders the
+      // in-window card and tray tooltip, and onentry fires once per file.
+      onentry: () => {
+        extracted += 1
+        if (total <= 0) return
+        const now = Date.now()
+        if (extracted === total || now - lastEmit >= 250) {
+          lastEmit = now
+          this.status({
+            phase: 'extracting',
+            message: `正在解压运行时…（${extracted}/${total}）`,
+            progress: Math.min(1, extracted / total),
+          })
+        }
+      },
+    })
     const inner = path.join(extractDir, 'runtime')
     const innerManifest = await readRuntimeManifest(inner)
     if (!innerManifest) throw new Error('运行时产物缺少 manifest.json')
