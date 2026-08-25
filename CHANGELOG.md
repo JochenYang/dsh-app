@@ -8,6 +8,26 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.5.0] - 2026-08-25
+
+### 中文
+- 新增 plugin-swarm：自适应批量子代理编排——独立子任务并行派发给可继续的子代理，自适应并发门控（失败收缩、连续成功增长）、保留会话的逐项自动重试、按子代理标识恢复
+- 模型高级设置页与 provider 配置对齐：新增 dsh provider 模型发现与目录感知的模型编辑（保护目录外模型、保留合法 provider 路由组合）；原生设置栏下方预留空间，不再与页面头部重叠
+- 模型页新增 provider 重试策略卡片：模式、最大重试、初始/最大延迟、抖动比均可选（留空回落到 dsh 默认值）；跨字段中文校验（含初始延迟 ≤ 最大延迟的隐含规则）；恢复默认即取消该键；摘要行显示生效策略，保存独立于模型列表编辑器，互不覆盖
+- 应用更新卡片进度动画修复：同进度阶段的状态更新改为原位补丁（消息 + 进度条宽度），不再重建卡片导致加载图标旋转重启；进度条在确定性/非确定性阶段切换时按需创建/移除；淡出窗口内的新状态会取消待移除；更新器进度回调增加节流
+- 对话 minimap 流式期间悬停保持：流式增量替换聊天快照时，悬停状态按跟踪键序列对齐（中心随新序列重映射），不再因流式更新而拆掉悬停预览
+- 导出文件完成后对话框自动关闭并提示保存路径；失败时保持打开并说明原因
+- dev 模式手动检查应用更新：只读探测更新通道（官方/镜像链）并在对话框报告结论；dev 构建仍禁用安装
+
+### English
+- New plugin-swarm: adaptive batch subagent orchestration — independent subtasks fan out to parallel continuable children with an adaptive concurrency gate (shrinks on failure, grows on clean streaks), per-item auto-retry on preserved sessions, and resume by child id
+- Advanced Models page now aligns with provider configuration: dsh provider model discovery and catalog-aware model editing (off-catalog models guarded, valid provider route combinations preserved); reserved space below the native settings chrome so the page header no longer overlaps
+- Provider retry policy card in the Advanced Models page: mode, max retries, initial/max delay and jitter ratio are all optional (blank fields fall back to the harness defaults); cross-field Chinese validation including the implied initialDelayMs ≤ maxDelayMs rule; revert-to-default unsets the key; the summary line shows the effective policy and saving is independent from the model-list editor so the two never clobber each other
+- App update-card progress animation fix: same-phase status updates now patch message and bar width in place instead of rebuilding the card, which restarted the loader icon's rotation; the bar is created/removed on phase changes between determinate and indeterminate; a status arriving inside the fade window cancels the pending removal; the updater progress callback is throttled
+- Conversation minimap hover survives streaming: when stream increments replace the chat snapshot, hover is remapped against the tracked-key sequence instead of being torn down
+- Export dialog auto-closes on save and toasts the saved path; on failure it stays open with a reason
+- On dev builds the manual app-update check now runs a read-only probe through the official/mirror chain and reports the verdict in a dialog (install stays disabled)
+
 ## [v0.4.0] - 2026-08-23
 
 ### 中文
