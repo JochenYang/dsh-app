@@ -5,7 +5,9 @@
  * Executes the REAL production script (from dist/) against a minimal DOM stub
  * and asserts: card creation, message text, determinate progress width,
  * indeterminate (no bar) rendering, tone background, idempotent in-place
- * updates, and auto-hide timer scheduling + cleanup on the next status.
+ * updates, auto-hide timer scheduling + cleanup on the next status, and —
+ * critically — that same-tone progress updates keep the spinner icon element
+ * identity so its CSS animation never restarts mid-download.
  *
  * Run after `npm run build`:
  *   node scripts/probe-update-card.cjs
@@ -45,10 +47,17 @@ function makeElement(tag, register) {
     _removed: false,
     attributes: {},
     setAttribute(k, v) { this.attributes[k] = v; if (k === 'id') register?.(v, this) },
-    appendChild(c) { this.children.push(c); if (c.attributes.id) register?.(c.attributes.id, c); return c },
+    appendChild(c) { c._parent = this; this.children.push(c); if (c.attributes.id) register?.(c.attributes.id, c); return c },
     remove() {
       this._removed = true
       if (this.attributes.id) register?.(this.attributes.id, null)
+      // Real-DOM detach semantics: remove() must take the node out of its
+      // parent's children, not just flag it (the fast-path update relies on
+      // removing the progress bar without touching its siblings).
+      if (this._parent) {
+        const i = this._parent.children.indexOf(this)
+        if (i >= 0) this._parent.children.splice(i, 1)
+      }
     },
   }
   // Direct `el.id = ...` assignment (as the production script uses) must hit
@@ -117,7 +126,7 @@ run({ message: '正在下载 dsh…', progress: 0.45, tone: 'progress' })
   const fill = content.children[1].children[0]
   assert.strictEqual(fill.style.width, '45%', 'determinate width')
   assert.strictEqual(windowStub.__dshCardTimer, null, 'no timer without autoHide')
-  console.log('pass 1/4: determinate progress card (45%) + spinner icon')
+  console.log('pass 1/5: determinate progress card (45%) + spinner icon')
 }
 
 // 2. Indeterminate: no progress bar rendered, element reused, message updated.
@@ -127,7 +136,7 @@ run({ message: '正在检查内核更新…', progress: null, tone: 'progress' }
   const content = documentStub.body.children[0].children[1]
   assert.strictEqual(content.children.length, 1, 'text only, no bar')
   assert.strictEqual(content.children[0].textContent, '正在检查内核更新…')
-  console.log('pass 2/4: indeterminate card, in-place update')
+  console.log('pass 2/5: indeterminate card, in-place update')
 }
 
 // 3. Error tone (✕ icon) + auto-hide schedules a timer; a later status clears it.
@@ -137,7 +146,7 @@ assert.strictEqual(documentStub.body.children[0].children[0].textContent, '✕',
 run({ message: '正在下载 dsh…', progress: 0.1, tone: 'progress' })
 assert.strictEqual(windowStub.__dshCardTimer, null, 'timer cleared by next status')
 assert.strictEqual(documentStub.body.children[0].children[1].children[0].textContent, '正在下载 dsh…')
-console.log('pass 3/4: auto-hide timer + cleanup on next status')
+console.log('pass 3/5: auto-hide timer + cleanup on next status')
 
 // 4. Progress width clamping (0..1 → 0-100%), ✓ icon and success tone.
 run({ message: '已激活 dsh 0.1.1-rc.2', progress: 1, tone: 'success', autoHide: 1500 })
@@ -145,6 +154,30 @@ assert.strictEqual(documentStub.body.children[0].children[1].children[1].childre
 assert.ok(windowStub.__dshCardTimer, 'success auto-hide scheduled')
 assert.ok(documentStub.body.children[0].style.background === 'rgba(34, 139, 80, 0.90)', 'success bg')
 assert.strictEqual(documentStub.body.children[0].children[0].textContent, '✓', 'success icon')
-console.log('pass 4/4: clamp + success tone + ✓ icon')
+console.log('pass 4/5: clamp + success tone + ✓ icon')
+
+// 5. Same-tone progress updates keep the icon element identity (the spinner's
+//    CSS animation would restart — visibly stuttering — if it were rebuilt)
+//    and update the bar width in place; a removed bar re-adds cleanly.
+resetDom()
+run({ message: '正在下载 dsh…', progress: 0.1, tone: 'progress' })
+{
+  const card = documentStub.body.children[0]
+  const icon = card.children[0]
+  const fill = card.children[1].children[1].children[0]
+  run({ message: '正在下载 dsh…', progress: 0.5, tone: 'progress' })
+  assert.strictEqual(documentStub.body.children[0], card, 'card element reused')
+  assert.strictEqual(card.children[0], icon, 'icon identity kept — animation not restarted')
+  assert.strictEqual(card.children[1].children[1].children[0], fill, 'fill element reused')
+  assert.strictEqual(fill.style.width, '50%', 'width updated in place')
+  run({ message: '正在解压运行时…', progress: null, tone: 'progress' })
+  assert.strictEqual(card.children[1].children.length, 1, 'bar removed for indeterminate phase')
+  assert.strictEqual(card.children[0], icon, 'icon identity kept across bar removal')
+  run({ message: '正在下载 dsh…', progress: 0.3, tone: 'progress' })
+  assert.strictEqual(card.children[1].children.length, 2, 'bar re-added for determinate phase')
+  assert.strictEqual(card.children[1].children[1].children[0].style.width, '30%', 're-added bar width')
+  assert.strictEqual(card.children[0], icon, 'icon identity kept across bar re-add')
+  console.log('pass 5/5: same-tone in-place update keeps the spinner spinning')
+}
 
 console.log('\nprobe-update-card: all assertions passed')

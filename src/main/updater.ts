@@ -297,11 +297,18 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     }
 
     const dest = path.join(app.getPath('temp'), `dsh-app-update-${yaml.version}-${process.arch}.exe`)
+    // Throttle card updates (~4/s) like the kernel downloader: every callback
+    // is an executeJavaScript hop into the renderer, and the per-chunk stream
+    // fires far faster than the eye can perceive.
+    let lastEmit = 0
     const downloadedFrom = await downloadWithFallback(
       assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url),
       dest,
       asset.sha512,
       (received, total) => {
+        const now = Date.now()
+        if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
+        lastEmit = now
         showKernelProgress(win, {
           phase: 'downloading',
           message: `正在下载 ${APP_NAME} ${yaml.version}…`,
