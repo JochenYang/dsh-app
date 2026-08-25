@@ -232,6 +232,22 @@ async function showDownloadError(message: string): Promise<void> {
 const UPDATER_OWNER = process.env.DSH_APP_ARTIFACT_OWNER ?? 'JochenYang'
 const UPDATER_REPO = process.env.DSH_APP_ARTIFACT_REPO ?? 'dsh-app'
 
+/**
+ * Fetch latest.yml through the official-first / mirror-fallback chain.
+ * @returns the raw YAML text, or null when every source failed.
+ */
+async function fetchLatestYamlText(): Promise<string | null> {
+  for (const url of latestYamlCandidates(UPDATER_OWNER, UPDATER_REPO)) {
+    try {
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
+      if (res.ok) return await res.text()
+    } catch {
+      // try next base
+    }
+  }
+  return null
+}
+
 /** Windows custom update flow (mirror fallback + sha512 + silent install). */
 async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null): Promise<void> {
   if (process.env.DSH_APP_DEV === '1') return
@@ -244,20 +260,7 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
   busy = true
   try {
     showUpdateToast(win, '正在检查应用更新…', 'progress', 0)
-    let yamlText: string | null = null
-    let yamlSource = ''
-    for (const url of latestYamlCandidates(UPDATER_OWNER, UPDATER_REPO)) {
-      try {
-        const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
-        if (res.ok) {
-          yamlText = await res.text()
-          yamlSource = url
-          break
-        }
-      } catch {
-        // try next base
-      }
-    }
+    const yamlText = await fetchLatestYamlText()
     if (!yamlText) throw new Error('无法获取更新元数据（latest.yml）')
 
     const yaml = parseLatestYaml(yamlText)
@@ -368,8 +371,49 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
   }
 }
 
+/**
+ * Read-only version probe for manual checks in dev mode. The running app is
+ * the unpackaged build, so download/install stays disabled — but the tray
+ * click must respond, and exercising the same metadata chain (official →
+ * mirrors) without packaging is exactly what dev verification needs.
+ */
+async function checkShellUpdateDev(win: BrowserWindow | null): Promise<void> {
+  try {
+    showUpdateToast(win, '正在检查应用更新…', 'progress', 0)
+    const yamlText = await fetchLatestYamlText()
+    if (!yamlText) throw new Error('无法获取更新元数据（latest.yml）')
+    const yaml = parseLatestYaml(yamlText)
+    if (!yaml) throw new Error('更新元数据格式无法解析')
+    if (!/^[\w.~-]+$/.test(yaml.version)) throw new Error('更新元数据版本格式异常')
+    const current = app.getVersion()
+    const newer = semver.valid(yaml.version) && semver.valid(current)
+      ? semver.gt(yaml.version, current)
+      : yaml.version !== current
+    clearKernelProgress(win)
+    await dialog.showMessageBox({
+      type: 'info',
+      title: APP_NAME,
+      message: newer
+        ? `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n检测到新版本：v${current} → v${yaml.version}，请从正式安装的副本更新。`
+        : `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n当前版本 v${current}，远端为同一版本。`,
+    })
+  } catch (err) {
+    clearKernelProgress(win)
+    void dialog.showMessageBox({
+      type: 'info',
+      title: APP_NAME,
+      message: `开发模式下不支持自动更新应用，且远端版本检查失败：${(err as Error).message}`,
+    })
+  }
+}
+
 export function checkShellUpdate(manual = false, win: BrowserWindow | null = null): void {
-  if (process.env.DSH_APP_DEV === '1') return
+  if (process.env.DSH_APP_DEV === '1') {
+    // Dev cannot self-install (the running app is the unpackaged build), but
+    // a manual tray click still deserves the check animation and a verdict.
+    if (manual) void checkShellUpdateDev(win)
+    return
+  }
   if (!initialized) initShellUpdater()
   if (process.platform === 'win32') {
     void checkShellUpdateWin32(manual, win)
