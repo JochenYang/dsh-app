@@ -9,6 +9,9 @@
 # - brand-client-ui: dual-face package; the loader entry makes its node half
 #   visible to the client-modules scan, which picks up the `dsh.client`
 #   declaration and serves /plugins/@dsh-app/plugin-client-ui/client.js.
+# - swarm: batch parallel subagent orchestration over the upstream subagent
+#   seam (model-facing `swarm` tool + `/swarm` command). Needs a kernel whose
+#   base bundle registers a subagent provider; older kernels boot without it.
 
 - insert:
     - id: brand
@@ -19,3 +22,38 @@
 
     - id: sidebar
       name: '@dsh-app/plugin-sidebar'
+
+    - id: swarm
+      name: '@dsh-app/plugin-swarm'
+      config:
+        provider: spawn
+        maxItems: 64
+        # Two orthogonal knobs: maxItems bounds batch size only (the worker
+        # pool bounds actual load, so a 64-item batch at pool 4 is just 16
+        # sequential waves), while the concurrency knobs bound how many
+        # children stream at once.
+        # Adaptive scheduling (on by default) replaces static guessing for
+        # gateways that drop concurrent streams without a rate-limit signal:
+        # the live pool starts at defaultConcurrency, halves (floor 1) and
+        # doubles the start stagger (cap 30s) whenever an item fails, and
+        # grows back toward maxConcurrency one step after every 4 consecutive
+        # completions, easing the stagger back to its base. An explicit
+        # max_concurrency tool argument pins the pool for that batch.
+        # Item-level auto-retry stacks on top: an item whose turn dies to a
+        # transient provider error is followed up on the preserved child
+        # session after an exponential backoff (15s, 30s), continuing from
+        # the interruption point rather than restarting. Provider-level
+        # request retries absorb sub-minute hiccups; this turn-level lane
+        # absorbs the outages that exhaust them.
+        adaptive: true
+        defaultConcurrency: 6
+        maxConcurrency: 8
+        startStaggerMs: 2000
+        itemMaxRetries: 2
+        itemRetryDelayMs: 15000
+        perItemOutputLimit: 4000
+        # maxDepth is the absolute delegation-depth cap (harness-enforced):
+        # 1 makes every child a leaf worker — its own delegation attempts are
+        # refused, so all LLM load stays inside the concurrency gate. A deeper
+        # tree would let grandchildren stream outside the gate's accounting.
+        maxDepth: 1
