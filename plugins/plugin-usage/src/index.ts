@@ -3,8 +3,8 @@
  *
  * Captures per-request token accounting from the `session/event` firehose,
  * backfills history from persisted session logs, aggregates on demand, and
- * serves three GET endpoints under `/plugins/@dsh-app/plugin-usage/api`
- * (status/summary/heatmap) for the settings-page client half.
+ * serves four GET endpoints under `/plugins/@dsh-app/plugin-usage/api`
+ * (status/summary/heatmap/balance) for the settings-page client half.
  *
  * Coexistence with third-party usage plugins: both read the same immutable
  * session logs and write only to their own namespaced store

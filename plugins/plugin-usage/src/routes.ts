@@ -100,7 +100,7 @@ function readInt(url: URL, key: string, fallback: number, max: number): number {
 }
 
 /**
- * Register the three API routes.
+ * Register the four API routes.
  * @param webServer - the dsh web server service.
  * @param store - the usage store; null in user-disabled mode (data routes 503).
  * @param options - route-layer options.
