@@ -8,6 +8,22 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.6.0] - 2026-08-26
+
+### 中文
+- 新增 usage 插件：设置页新增余额卡、每日使用热度图与趋势图——统计官方 deepseek providers 的消耗，按闲时/高峰双档计价（CNY）；余额经 host 侧代理查询官方接口，API 密钥不离开主机（走 dsh 凭证服务）
+- 新增 archives 插件：会话归档管理——按项目工作目录分组展示已归档的非活跃会话，可折叠面板、两次确认删除并展示跳过原因；兼容归档集后端 locate() 返回未定义的情况
+- 内核启动提速与可重现运行包：运行包可重现化（时间戳归一），启动时内容校验一致即跳过重新解压；解压过程按文件计数报告进度；套件内容变化自动落入新版本目录，回滚仍可用
+- 设置页头部恢复原生轴线：拖拽带收窄至 20px、标题行本身可拖拽，关闭/打开设置按钮回到原生位置并与导航标题同轴
+- usage 导航图标与原生设置图标对齐：齿轮替换为 16 网格柱状图字形（CSS mask），跟随色彩与导航激活态，亮暗主题下均按原生尺寸渲染
+
+### English
+- New usage plugin: a balance card, daily heatmap and trend chart in the settings page — usage is metered for official deepseek providers in CNY with idle/peak dual-tier pricing; the balance is fetched through a host-side proxy of the official API and the key never leaves the host (dsh credential store)
+- New archives plugin: session archive management — archived non-live sessions are grouped by project cwd with collapsible panels, two-step delete confirm and skip reasons; persistence backends whose locate() returns undefined are tolerated
+- Faster kernel boot with reproducible runtime packs: tarballs are reproducible (normalized timestamps), so boot skips re-extraction when the content hash matches; extraction reports file-count progress; suite content changes land in a fresh versioned dir while rollback stays available
+- Settings header restored to the native axis: the drag strip narrows to 20px and the header row itself drags, so the close/open-config buttons sit at their native position on the same axis as the nav title
+- Usage nav icon aligned with native settings icons: the gear becomes a 16-grid bar-chart glyph via CSS mask, following the current color and nav active state at native size in both light and dark themes
+
 ## [v0.5.0] - 2026-08-25
 
 ### 中文
