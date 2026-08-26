@@ -2,7 +2,7 @@
  * Brand suite wiring between the desktop shell and the dsh child process.
  *
  * The suite plugins (@dsh-app/plugin-brand, @dsh-app/plugin-client-ui,
- * @dsh-app/plugin-sidebar, @dsh-app/plugin-swarm)
+ * @dsh-app/plugin-sidebar, @dsh-app/plugin-swarm, @dsh-app/plugin-usage)
  * ship with the product, not with the upstream dsh kernel, so two seams have
  * to be stitched at every server start:
  *
@@ -36,7 +36,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /** Suite plugin directory names under dsh-app/plugins (and kernel node_modules). */
-export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm'] as const
+export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage'] as const
 
 /** npm scope shared by the suite plugins. */
 const PLUGIN_SCOPE = '@dsh-app'

@@ -12,6 +12,11 @@
 # - swarm: batch parallel subagent orchestration over the upstream subagent
 #   seam (model-facing `swarm` tool + `/swarm` command). Needs a kernel whose
 #   base bundle registers a subagent provider; older kernels boot without it.
+# - usage: usage statistics over session logs (host capture/aggregation +
+#   settings-page heatmap and daily trend chart). Coexists with third-party
+#   usage plugins (read-only shared source, namespaced store/routes); users
+#   disable it or extend the price table via
+#   <DSH_HOME>/storages/dsh-app-plugin-usage/config.json.
 
 - insert:
     - id: brand
@@ -57,3 +62,6 @@
         # refused, so all LLM load stays inside the concurrency gate. A deeper
         # tree would let grandchildren stream outside the gate's accounting.
         maxDepth: 1
+
+    - id: usage
+      name: '@dsh-app/plugin-usage'

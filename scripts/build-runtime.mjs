@@ -72,7 +72,7 @@ if (process.env.GITHUB_OUTPUT) {
 }
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
-const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm']
+const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage']
 
 /**
  * Suite version, content-addressed from the bundled plugins' package.json
