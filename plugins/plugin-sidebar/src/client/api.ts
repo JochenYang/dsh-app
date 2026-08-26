@@ -36,6 +36,21 @@ async function get<T>(path: string): Promise<T> {
   return body.value
 }
 
+/** One fenced POST with a JSON body. */
+async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+  })
+  const parsed = await response.json() as FsEnvelope<T>
+  if (!parsed.ok || parsed.value === undefined) {
+    throw new FsApiError(parsed.error?.code ?? 'unknown', parsed.error?.message ?? `HTTP ${String(response.status)}`)
+  }
+  return parsed.value
+}
+
 /** List one directory level (lazy tree node). */
 export function listDir(dir: string): Promise<{ dir: string, entries: FsListEntry[] }> {
   return get(`${ROUTE_PREFIX}/fs/list?dir=${encodeURIComponent(dir)}`)
@@ -68,9 +83,21 @@ function sessionQuery(sessionId: string | undefined): string {
   return sessionId === undefined ? '' : `&sessionId=${encodeURIComponent(sessionId)}`
 }
 
+/** Local branch list from the `branch.list` action. */
+export interface GitBranchList {
+  branches: string[]
+  current: string | null
+}
+
+/** Action response: pull/push carry a bounded git stdout excerpt so the UI
+ * can word the success notice from git's own verdict. */
+export interface GitActionValue {
+  out?: string
+}
+
 /** The host git routes. */
 export const gitApi = {
-  status(cwd: string, sessionId?: string): Promise<{ cwd: string, branch: string, detached: boolean, entries: GitStatusEntry[] }> {
+  status(cwd: string, sessionId?: string): Promise<{ cwd: string, branch: string, detached: boolean, ahead: number | null, behind: number | null, entries: GitStatusEntry[] }> {
     return get(`${ROUTE_PREFIX}/git/status?cwd=${encodeURIComponent(cwd)}${sessionQuery(sessionId)}`)
   },
   show(cwd: string, sha: string, sessionId?: string): Promise<{ message: string, stat: string }> {
@@ -86,16 +113,17 @@ export const gitApi = {
   ls(cwd: string, sessionId?: string): Promise<{ files: string[], truncated?: boolean }> {
     return get(`${ROUTE_PREFIX}/git/ls?cwd=${encodeURIComponent(cwd)}${sessionQuery(sessionId)}`)
   },
-  action(op: string, cwd: string, path?: string, message?: string, sessionId?: string): Promise<Record<string, never>> {
-    return fetch(`${ROUTE_PREFIX}/git/action`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ op, cwd, sessionId, ...path === undefined ? {} : { path }, ...message === undefined ? {} : { message } }),
-    }).then(async (response) => {
-      const body = await response.json() as FsEnvelope<Record<string, never>>
-      if (!body.ok) throw new FsApiError(body.error?.code ?? 'unknown', body.error?.message ?? `HTTP ${String(response.status)}`)
-      return body.value ?? {}
+  branchList(cwd: string, sessionId?: string): Promise<GitBranchList> {
+    return post(`${ROUTE_PREFIX}/git/action`, { op: 'branch.list', cwd, sessionId })
+  },
+  action(op: string, cwd: string, path?: string, message?: string, sessionId?: string, name?: string): Promise<GitActionValue> {
+    return post(`${ROUTE_PREFIX}/git/action`, {
+      op,
+      cwd,
+      sessionId,
+      ...path === undefined ? {} : { path },
+      ...message === undefined ? {} : { message },
+      ...name === undefined ? {} : { name },
     })
   },
 }

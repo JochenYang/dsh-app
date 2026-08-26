@@ -4,6 +4,9 @@
  *   - 变更: porcelain entries grouped by top-level directory (VS Code SCM
  *     order: Changes first, Staged below); click a file row for its diff;
  *     hover rows for +/−; commit box on top with a full-change review.
+ *   - 同步/分支/贮藏 (top bar): pull/push/fetch with a 120 s deadline,
+ *     ahead/behind badges (↑N ↓N) beside the branch pill, a click-to-open
+ *     branch switcher dropdown (checkout + create), and stash push/pop.
  *   - 图谱 (modal): `git log --graph --all --oneline` in a centered dialog —
  *     click a commit row to see its file stat INSIDE the modal.
  */
@@ -11,7 +14,30 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { FsApiError, gitApi } from './api.ts'
-import type { GitStatusEntry } from './api.ts'
+import type { GitActionValue, GitBranchList, GitStatusEntry } from './api.ts'
+
+/** Bounded git stdout a sync action returns, or nothing for other ops. */
+function actionOut(value: unknown): string | undefined {
+  return typeof value === 'object' && value !== null && typeof (value as GitActionValue).out === 'string'
+    ? (value as GitActionValue).out
+    : undefined
+}
+
+/**
+ * Pull/push success wording from git's own verdict: "Already up to date." /
+ * "Everything up-to-date" mean nothing actually moved, which deserves a
+ * different notice than a real transfer (git's messages are English — the
+ * fenced env passes no locale).
+ */
+function pullNotice(value: unknown): string {
+  const out = actionOut(value)
+  return out !== undefined && /already up to date/iu.test(out) ? '已是最新，无新提交' : '已拉取'
+}
+
+function pushNotice(value: unknown): string {
+  const out = actionOut(value)
+  return out !== undefined && /everything up-to-date/iu.test(out) ? '远程已是最新，无可推送' : '已推送'
+}
 
 /** Props of {@link GitTab} (view inject face; extra fields ignored). */
 export interface GitTabProps {
@@ -89,6 +115,9 @@ export function GitTab(props: GitTabProps): ReactNode {
   const [entries, setEntries] = useState<readonly GitStatusEntry[]>([])
   const [branch, setBranch] = useState('')
   const [detached, setDetached] = useState(false)
+  /** Divergence vs the upstream (null = no upstream); drives the ↑N ↓N badges. */
+  const [ahead, setAhead] = useState<number | null>(null)
+  const [behind, setBehind] = useState<number | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const [logText, setLogText] = useState<string | undefined>(undefined)
   const [logLoading, setLogLoading] = useState(false)
@@ -121,15 +150,25 @@ export function GitTab(props: GitTabProps): ReactNode {
     window.addEventListener('pointerup', onUp)
   }
   const [busy, setBusy] = useState(false)
+  /** Which action op is in flight (drives per-button loading labels). */
+  const [pendingOp, setPendingOp] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
   const [restoreFor, setRestoreFor] = useState<string | undefined>(undefined)
+  /** Branch switcher dropdown (absolute panel below the branch pill). */
+  const [branchPanelOpen, setBranchPanelOpen] = useState(false)
+  const [branchList, setBranchList] = useState<GitBranchList | undefined>(undefined)
+  const [branchesLoading, setBranchesLoading] = useState(false)
+  const [branchesError, setBranchesError] = useState<string | undefined>(undefined)
+  const [newBranchName, setNewBranchName] = useState('')
   const viewGeneration = useRef(0)
   const statusRequestId = useRef(0)
   const logRequestId = useRef(0)
   const filesRequestId = useRef(0)
   const diffRequestId = useRef(0)
   const showRequestId = useRef(0)
+  const branchesRequestId = useRef(0)
+  const branchMenuRef = useRef<HTMLDivElement | null>(null)
   const cwdRef = useRef(cwd)
   const sessionIdRef = useRef(sessionId)
   cwdRef.current = cwd
@@ -144,6 +183,7 @@ export function GitTab(props: GitTabProps): ReactNode {
   const failureText = (failure: unknown): string => {
     if (failure instanceof FsApiError) {
       if (failure.code === 'git-missing') return '未找到 Git，请先安装 Git 或检查 PATH。'
+      if (failure.code === 'git-timeout') return '网络操作超时，请检查网络或远程仓库后重试。'
       if (failure.code === 'forbidden') return '当前会话的工作区校验失败，请刷新会话后重试。'
       const detail = failure.message.trim().replace(/\s+/gu, ' ')
       return detail === '' ? 'Git 操作失败。' : `Git 操作失败：${detail}`
@@ -162,6 +202,8 @@ export function GitTab(props: GitTabProps): ReactNode {
         setEntries(result.entries)
         setBranch(result.branch)
         setDetached(result.detached)
+        setAhead(result.ahead)
+        setBehind(result.behind)
         setError(undefined)
         return true
       },
@@ -170,6 +212,8 @@ export function GitTab(props: GitTabProps): ReactNode {
         setEntries([])
         setBranch('')
         setDetached(false)
+        setAhead(null)
+        setBehind(null)
         setNotice(undefined)
         setError(failureText(failure))
         return false
@@ -225,10 +269,58 @@ export function GitTab(props: GitTabProps): ReactNode {
     })
   }
 
+  const loadBranches = (targetCwd: string, targetSessionId: string, generation: number): void => {
+    const requestId = branchesRequestId.current + 1
+    branchesRequestId.current = requestId
+    setBranchesLoading(true)
+    setBranchesError(undefined)
+    gitApi.branchList(targetCwd, targetSessionId).then(
+      result => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || branchesRequestId.current !== requestId) return
+        setBranchList(result)
+      },
+      (failure: unknown) => {
+        if (!isCurrent(generation, targetCwd, targetSessionId) || branchesRequestId.current !== requestId) return
+        setBranchList(undefined)
+        setBranchesError(failureText(failure))
+      },
+    ).finally(() => {
+      if (isCurrent(generation, targetCwd, targetSessionId) && branchesRequestId.current === requestId) setBranchesLoading(false)
+    })
+  }
+
   const openGraph = (): void => {
     setGraphOpen(true)
     setShowFor(undefined)
     if (cwd !== undefined && sessionId !== undefined) void loadLog(cwd, sessionId, viewGeneration.current)
+  }
+
+  const toggleBranchPanel = (): void => {
+    if (branchPanelOpen) {
+      setBranchPanelOpen(false)
+      return
+    }
+    setBranchPanelOpen(true)
+    // Re-list on every open: branches change under us without events.
+    if (cwd !== undefined && sessionId !== undefined) {
+      setBranchList(undefined)
+      loadBranches(cwd, sessionId, viewGeneration.current)
+    }
+  }
+
+  const checkoutBranch = (name: string): void => {
+    if (cwd === undefined || sessionId === undefined) return
+    setBranchPanelOpen(false)
+    void run(() => gitApi.action('branch.checkout', cwd, undefined, undefined, sessionId, name), `已切换到 ${name}`)
+  }
+
+  const createBranch = (): void => {
+    if (cwd === undefined || sessionId === undefined) return
+    const name = newBranchName.trim()
+    if (name === '') return
+    setBranchPanelOpen(false)
+    setNewBranchName('')
+    void run(() => gitApi.action('branch.create', cwd, undefined, undefined, sessionId, name), `已创建并切换到 ${name}`)
   }
 
   // No wire event for repo state; refreshing on mount/cwd and after actions.
@@ -240,10 +332,13 @@ export function GitTab(props: GitTabProps): ReactNode {
     filesRequestId.current += 1
     diffRequestId.current += 1
     showRequestId.current += 1
+    branchesRequestId.current += 1
     if (cwd === undefined) {
       setEntries([])
       setBranch('')
       setDetached(false)
+      setAhead(null)
+      setBehind(null)
       setStatusLoading(false)
       setLogText(undefined)
       setLogLoading(false)
@@ -260,13 +355,21 @@ export function GitTab(props: GitTabProps): ReactNode {
       setListMode('changes')
       setCollapsedDirs(new Set())
       setBusy(false)
+      setPendingOp(undefined)
       setError(undefined)
       setNotice(undefined)
+      setBranchPanelOpen(false)
+      setBranchList(undefined)
+      setBranchesLoading(false)
+      setBranchesError(undefined)
+      setNewBranchName('')
       return
     }
     setEntries([])
     setBranch('')
     setDetached(false)
+    setAhead(null)
+    setBehind(null)
     setStatusLoading(false)
     setLogText(undefined)
     setLogLoading(false)
@@ -283,8 +386,14 @@ export function GitTab(props: GitTabProps): ReactNode {
     setListMode('changes')
     setCollapsedDirs(new Set())
     setBusy(false)
+    setPendingOp(undefined)
     setError(undefined)
     setNotice(undefined)
+    setBranchPanelOpen(false)
+    setBranchList(undefined)
+    setBranchesLoading(false)
+    setBranchesError(undefined)
+    setNewBranchName('')
     if (sessionId === undefined) {
       setError('当前会话缺少安全标识，请重新打开该会话。')
       return
@@ -305,24 +414,26 @@ export function GitTab(props: GitTabProps): ReactNode {
     if (graphOpen) void loadLog(cwd, sessionId, generation)
   }
 
-  const run = async (action: () => Promise<unknown>, okText: string): Promise<boolean> => {
+  const run = async (action: () => Promise<unknown>, okText: string | ((value: unknown) => string), op?: string): Promise<boolean> => {
     if (cwd === undefined || sessionId === undefined) return false
     setBusy(true)
+    setPendingOp(op)
     setError(undefined)
     setNotice(undefined)
     try {
-      await action()
+      const actionValue = await action()
       const generation = viewGeneration.current
       const refreshed = await loadStatus(cwd, sessionId, generation)
       if (graphOpen) await loadLog(cwd, sessionId, generation)
       if (!refreshed) return false
-      setNotice(okText)
+      setNotice(typeof okText === 'function' ? okText(actionValue) : okText)
       return true
     } catch (failure) {
       setError(failureText(failure))
       return false
     } finally {
       setBusy(false)
+      setPendingOp(undefined)
     }
   }
 
@@ -360,6 +471,25 @@ export function GitTab(props: GitTabProps): ReactNode {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [graphOpen])
 
+  // Branch dropdown: close on any outside pointer press or Escape (same
+  // dismiss patterns as the graph modal, adapted to a non-modal panel).
+  useEffect(() => {
+    if (!branchPanelOpen) return undefined
+    const onPointerDown = (event: PointerEvent): void => {
+      const node = branchMenuRef.current
+      if (node !== null && event.target instanceof Node && !node.contains(event.target)) setBranchPanelOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setBranchPanelOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [branchPanelOpen])
+
   if (cwd === undefined) {
     return (
       <div className="dshAsbGit">
@@ -373,6 +503,18 @@ export function GitTab(props: GitTabProps): ReactNode {
   // (for example `MM`). Render it in both groups so neither half disappears.
   const staged = entries.filter(entry => entry.indexStatus !== ' ' && entry.indexStatus !== '?')
   const unstaged = entries.filter(entry => entry.untracked || entry.worktreeStatus !== ' ')
+  const aheadCount = ahead ?? 0
+  const behindCount = behind ?? 0
+  const currentBranch = branchList?.current ?? null
+  const branchLabel = statusLoading
+    ? '正在读取 Git…'
+    : error !== undefined
+      ? 'Git 状态不可用'
+      : detached
+        ? '⎇ 分离头指针'
+        : branch === ''
+          ? '（未命名分支）'
+          : `⎇ ${branch}`
 
   /** Group an entry list by its top-level directory (VS Code SCM tree view). */
   const dirGroups = (list: readonly GitStatusEntry[]): { key: string, files: GitStatusEntry[] }[] => {
@@ -612,10 +754,66 @@ export function GitTab(props: GitTabProps): ReactNode {
       <style>{GIT_CSS}</style>
       {cwd !== undefined ? (
         <div className="dshAsbGit-top">
-          <span className="dshAsbGit-branch" title="当前分支">
-            {statusLoading ? '正在读取 Git…' : error !== undefined ? 'Git 状态不可用' : detached ? '⎇ 分离头指针' : branch === '' ? '（未命名分支）' : `⎇ ${branch}`}
-          </span>
-          <button type="button" className="dshAsbGit-ghostBtn" disabled={statusLoading || sessionId === undefined} onClick={openGraph}>◈ 图谱</button>
+          <div className="dshAsbGit-branchWrap" ref={branchMenuRef}>
+            <button type="button" className="dshAsbGit-branchBtn" title="切换分支" aria-label="切换分支"
+              aria-expanded={branchPanelOpen} disabled={sessionId === undefined} onClick={toggleBranchPanel}>
+              <span className="dshAsbGit-branchText" title={branchLabel}>{branchLabel}</span>
+              {aheadCount > 0 ? <span className="dshAsbGit-diverge" title={`领先远程 ${String(aheadCount)} 个提交`}>{`↑${String(aheadCount)}`}</span> : null}
+              {behindCount > 0 ? <span className="dshAsbGit-diverge" title={`落后远程 ${String(behindCount)} 个提交`}>{`↓${String(behindCount)}`}</span> : null}
+              <span className="dshAsbGit-branchCaret" aria-hidden>▾</span>
+            </button>
+            {branchPanelOpen ? (
+              <div className="dshAsbGit-branchMenu" role="dialog" aria-label="切换分支">
+                <p className="dshAsbGit-branchMenuTitle">本地分支</p>
+                {branchesLoading ? <p className="dshAsb-hint">正在读取分支…</p> : null}
+                {branchesError !== undefined ? (
+                  <p className="dshAsb-error" role="alert">
+                    {branchesError}
+                    <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) loadBranches(cwd, sessionId, viewGeneration.current) }}>重试</button>
+                  </p>
+                ) : null}
+                {branchList !== undefined && branchList.branches.length === 0 && branchesError === undefined ? <p className="dshAsb-hint">暂无本地分支。</p> : null}
+                {(branchList?.branches ?? []).map(name => (
+                  <button key={name} type="button"
+                    className={`dshAsbGit-branchItem${name === currentBranch ? ' dshAsbGit-branchItemCur' : ''}`}
+                    disabled={busy || sessionId === undefined}
+                    title={name === currentBranch ? `当前分支：${name}` : `切换到 ${name}`}
+                    onClick={() => { checkoutBranch(name) }}>
+                    <span className="dshAsbGit-branchItemMark" aria-hidden>{name === currentBranch ? '✓' : ''}</span>
+                    <span className="dshAsbGit-branchItemName">{name}</span>
+                  </button>
+                ))}
+                <div className="dshAsbGit-branchCreate">
+                  <input className="dshAsbGit-input" type="text" value={newBranchName} placeholder="新分支名称" aria-label="新分支名称"
+                    onChange={(event) => { setNewBranchName(event.target.value) }}
+                    onKeyDown={(event) => { if (event.key === 'Enter') createBranch() }} />
+                  <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined || newBranchName.trim() === ''} onClick={createBranch}>创建</button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <div className="dshAsbGit-topActions">
+            <span className="dshAsbGit-syncGroup" role="group" aria-label="远程同步">
+              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                title="拉取远程更新（仅快进合并）" aria-label="拉取远程更新"
+                onClick={() => { void run(() => gitApi.action('pull', cwd, undefined, undefined, sessionId), pullNotice, 'pull') }}>{pendingOp === 'pull' ? '…' : '拉取'}</button>
+              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                title="推送本地提交到远程" aria-label="推送本地提交到远程"
+                onClick={() => { void run(() => gitApi.action('push', cwd, undefined, undefined, sessionId), pushNotice, 'push') }}>{pendingOp === 'push' ? '…' : '推送'}</button>
+              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                title="同步远程状态（不合并）" aria-label="同步远程状态"
+                onClick={() => { void run(() => gitApi.action('fetch', cwd, undefined, undefined, sessionId), '已同步远程状态', 'fetch') }}>{pendingOp === 'fetch' ? '…' : '同步'}</button>
+            </span>
+            <span className="dshAsbGit-syncGroup" role="group" aria-label="贮藏">
+              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                title="将当前修改入栈贮藏（含未跟踪文件）" aria-label="入栈贮藏当前修改"
+                onClick={() => { void run(() => gitApi.action('stash.push', cwd, undefined, undefined, sessionId), '已贮藏当前修改', 'stash.push') }}>{pendingOp === 'stash.push' ? '…' : '入栈'}</button>
+              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                title="弹出最近一次贮藏" aria-label="弹出最近一次贮藏"
+                onClick={() => { void run(() => gitApi.action('stash.pop', cwd, undefined, undefined, sessionId), '已弹出贮藏', 'stash.pop') }}>{pendingOp === 'stash.pop' ? '…' : '弹出'}</button>
+            </span>
+            <button type="button" className="dshAsbGit-ghostBtn" disabled={statusLoading || sessionId === undefined} onClick={openGraph}>◈ 图谱</button>
+          </div>
         </div>
       ) : null}
       {statusView}
@@ -649,7 +847,28 @@ const GIT_CSS = `
 .dshAsbGit-resize { flex: none; width: 8px; cursor: col-resize; margin: 0 -2px 0 2px; z-index: 2; }
 .dshAsbGit-detail { flex: 1; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-left: 8px; }
 .dshAsbGit-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.dshAsbGit-branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 10px; border-radius: 999px; background: rgba(148, 163, 184, 0.2); color: var(--dsw-alias-label-secondary, #475569); font-size: 11.5px; max-width: 60%; }
+.dshAsbGit-branchWrap { position: relative; min-width: 0; max-width: 58%; }
+.dshAsbGit-branchBtn { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; padding: 3px 10px; border: none; border-radius: 999px; background: rgba(148, 163, 184, 0.2); color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 11.5px; }
+.dshAsbGit-branchBtn:hover:not(:disabled) { background: rgba(148, 163, 184, 0.34); color: var(--dsw-alias-label-primary, #0f172a); }
+.dshAsbGit-branchBtn:disabled { opacity: .55; cursor: default; }
+.dshAsbGit-branchText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshAsbGit-diverge { flex: none; font-size: 10.5px; font-weight: 600; color: var(--dsw-alias-brand-primary, #2563eb); }
+.dshAsbGit-branchCaret { flex: none; font-size: 9px; opacity: .65; }
+.dshAsbGit-topActions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }
+.dshAsbGit-syncGroup { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 999px; }
+.dshAsbGit-syncBtn { padding: 2px 9px; border: none; border-radius: 999px; background: none; color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 11px; }
+.dshAsbGit-syncBtn:hover:not(:disabled) { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
+.dshAsbGit-syncBtn:disabled { opacity: .5; cursor: default; }
+.dshAsbGit-branchMenu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 55; width: min(280px, 90vw); max-height: 320px; overflow: auto; box-sizing: border-box; padding: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 10px; background: var(--dsw-alias-bg-overlay, #fff); box-shadow: 0 12px 32px rgba(15, 23, 42, .18); display: flex; flex-direction: column; gap: 2px; }
+.dshAsbGit-branchMenuTitle { margin: 0 0 4px; padding: 0 6px; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11px; }
+.dshAsbGit-branchItem { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 5px 6px; border: none; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12px; }
+.dshAsbGit-branchItem:hover:not(:disabled) { background: rgba(148, 163, 184, 0.16); }
+.dshAsbGit-branchItem:disabled { opacity: .5; cursor: default; }
+.dshAsbGit-branchItemCur { color: var(--dsw-alias-brand-primary, #2563eb); font-weight: 600; }
+.dshAsbGit-branchItemMark { flex: none; width: 12px; font-size: 10px; }
+.dshAsbGit-branchItemName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshAsbGit-branchCreate { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
+.dshAsbGit-branchCreate .dshAsbGit-input { flex: 1; min-width: 0; }
 .dshAsbGit-ghostBtn { flex: none; padding: 4px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 999px; background: none; color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 11.5px; }
 .dshAsbGit-ghostBtn:hover { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAsbGit-seg { display: flex; gap: 12px; }
@@ -722,6 +941,6 @@ const GIT_CSS = `
 .dshAsb-error { margin: 2px 0; color: #dc2626; font-size: 12px; }
 .dshAsb-notice { margin: 2px 0; color: #16a34a; font-size: 12px; }
 .dshAsbGit-warning { margin: 2px 0; padding: 6px 8px; border-radius: 6px; background: rgba(234, 179, 8, .14); color: #a16207; font-size: 11px; }
-.dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
+.dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible, .dshAsbGit-branchBtn:focus-visible, .dshAsbGit-syncBtn:focus-visible, .dshAsbGit-branchItem:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
 @media (hover: none), (pointer: coarse) { .dshAsbGit-rowActions { visibility: visible; opacity: 1; pointer-events: auto; } }
 `
