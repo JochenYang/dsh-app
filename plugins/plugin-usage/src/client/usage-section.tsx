@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { UsageAgg, UsageBalance, UsageHeatmap, UsageModelAgg, UsageSummary } from '../types.ts'
+import type { UsageAgg, UsageBalance, UsageBalanceSnapshot, UsageHeatmap, UsageModelAgg, UsageSummary } from '../types.ts'
 
 /** Wire types the host routes answer with. */
 type SummaryWire = UsageSummary
@@ -113,7 +113,12 @@ function Cards({ totals }: { totals: UsageAgg }): ReactNode {
 }
 
 // ---------------------------------------------------------------------------
-// DeepSeek official account balance card (manual query, no polling)
+// DeepSeek official account balance card
+//
+// Refresh contract: entering the page triggers ONE silent cache-aware query
+// (5-minute TTL on the host, silent failure keeps the neutral placeholder —
+// errors are only meaningful when the user actively asked); clicking the card
+// forces a cache-bypassing re-query and surfaces the failure reason.
 // ---------------------------------------------------------------------------
 
 type BalanceState =
@@ -124,17 +129,34 @@ type BalanceState =
 
 function BalanceCard(): ReactNode {
   const [state, setState] = useState<BalanceState>({ status: 'idle' })
+  // In-flight guard lives in a ref so `query` keeps a stable identity: a
+  // state-depended callback would recreate itself after every transition
+  // (idle→loading→ok→…), re-firing the mount effect below into an endless
+  // refresh loop that also parks the card in "查询中…" behind the guard.
+  const inFlight = useRef(false)
 
-  const query = useCallback(async () => {
-    if (state.status === 'loading') return
+  const query = useCallback(async (fresh: boolean) => {
+    if (inFlight.current) return
+    inFlight.current = true
     setState({ status: 'loading' })
     try {
-      const balance = await fetchJson<UsageBalance>('/plugins/@dsh-app/plugin-usage/api/balance')
-      setState({ status: 'ok', balance, at: Date.now() })
+      const snapshot = await fetchJson<UsageBalanceSnapshot>(`/plugins/@dsh-app/plugin-usage/api/balance${fresh ? '?fresh=1' : ''}`)
+      setState({ status: 'ok', balance: snapshot.balance, at: snapshot.fetchedAt })
     } catch (error) {
-      setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+      // Silent (mount) failures fall back to the neutral placeholder so an
+      // unconfigured key never greets the user with a red error.
+      if (fresh) {
+        setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+      } else {
+        setState({ status: 'idle' })
+      }
+    } finally {
+      inFlight.current = false
     }
-  }, [state.status])
+  }, [])
+
+  // Mount: one cache-aware refresh — instant value when the TTL holds.
+  useEffect(() => { void query(false) }, [query])
 
   const entry = state.status === 'ok' ? (state.balance.balances.find((b) => b.currency === 'CNY') ?? state.balance.balances[0]) : undefined
   const value = state.status === 'loading'
@@ -160,11 +182,11 @@ function BalanceCard(): ReactNode {
       role="button"
       tabIndex={0}
       aria-label="查询 DeepSeek 官方账户余额"
-      onClick={() => { void query() }}
+      onClick={() => { void query(true) }}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
-          void query()
+          void query(true)
         }
       }}
     >

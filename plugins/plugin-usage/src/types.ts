@@ -115,3 +115,14 @@ export interface UsageBalance {
   isAvailable: boolean
   balances: UsageBalanceEntry[]
 }
+
+/**
+ * Wire shape of GET api/balance: the payload plus the time the upstream call
+ * actually happened. A cache-served response carries the ORIGINAL fetch time
+ * so the card never shows a "just queried" timestamp for stale data.
+ */
+export interface UsageBalanceSnapshot {
+  balance: UsageBalance
+  /** Epoch ms of the real upstream fetch (not the cache-serving moment). */
+  fetchedAt: number
+}

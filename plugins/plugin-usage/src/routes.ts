@@ -6,7 +6,8 @@
  *   /status   — liveness signal ({active, reason?})
  *   /summary  — totals + per-day series + per-model table (?days=N)
  *   /heatmap  — calendar cells (?weeks=N)
- *   /balance  — proxied DeepSeek official balance (GET /user/balance)
+ *   /balance  — proxied DeepSeek official balance (GET /user/balance),
+ *               TTL-cached; ?fresh=1 bypasses the cache (manual re-query)
  *
  * The namespace deliberately lives inside the loader-owned `/plugins/<pkg>`
  * prefix with an `/api` segment (same discipline as plugin-sidebar): the
@@ -19,11 +20,18 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { DAY_MS, heatmap, startOfLocalDay, summarize } from './aggregate.ts'
-import type { UsageBalance, UsagePrice } from './types.ts'
+import type { UsageBalance, UsageBalanceSnapshot, UsagePrice } from './types.ts'
 import type { UsageStore } from './store.ts'
 
 /** Route namespace on the dsh web server (inside the plugin's package prefix). */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-usage/api'
+
+/**
+ * How long a successful balance fetch stays reusable. The balance only moves
+ * on spend/top-up, so short-burst re-entries into the settings page share one
+ * upstream call instead of re-sending the API key on every visit.
+ */
+const BALANCE_TTL_MS = 5 * 60_000
 
 /** Structural slice of the webServer service the routes consume. */
 export interface WebServerLike {
@@ -138,14 +146,37 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
       cells: heatmap(store.all(), weeks, since, today + DAY_MS - 1),
     })
   }
+  // Balance cache: only SUCCESSFUL fetches populate it (a failing silent
+  // refresh must not poison the next attempt) and the timestamp survives
+  // cache hits so the card can show the true upstream query time.
+  let balanceCached: UsageBalanceSnapshot | null = null
+  let balanceInflight: Promise<UsageBalanceSnapshot> | null = null
+  const runBalanceFetch = (): Promise<UsageBalanceSnapshot> => {
+    // Single-flight: concurrent callers (mount refresh racing a click) join
+    // the same upstream call instead of firing duplicates.
+    if (balanceInflight !== null) return balanceInflight
+    const fetcher = options.fetchBalance
+    if (fetcher === undefined) {
+      return Promise.reject(new BalanceError('missing-credential', '未配置 DeepSeek API Key，请先在设置 → 模型页配置'))
+    }
+    balanceInflight = fetcher().then((balance): UsageBalanceSnapshot => {
+      const snapshot = { balance, fetchedAt: Date.now() }
+      balanceCached = snapshot
+      return snapshot
+    }).finally(() => { balanceInflight = null })
+    return balanceInflight
+  }
   const balanceHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (!sameOrigin(req) || !requireGet(req, res)) return
     if (!options.active || options.fetchBalance === undefined) {
       fail(res, 503, 'disabled', 'built-in usage collection is disabled by the user config file')
       return
     }
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const fresh = url.searchParams.get('fresh') === '1'
     try {
-      ok(res, await options.fetchBalance())
+      const cacheHit = !fresh && balanceCached !== null && Date.now() - balanceCached.fetchedAt < BALANCE_TTL_MS
+      ok(res, cacheHit ? balanceCached : await runBalanceFetch())
     } catch (error) {
       if (error instanceof BalanceError) {
         // 502 for upstream trouble, 503 when the account side isn't usable here.
