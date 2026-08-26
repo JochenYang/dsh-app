@@ -234,22 +234,27 @@ body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
 }
 /* The settings dialog floats above the frame, so the frame's drag regions are
    masked while it is open; give the panel its own title strip instead. The
-   strip is only as tall as the native overlay (36px) so the panel header's
-   close/config buttons sit below it, clear of the OS-level window controls
-   that the overlay paints in the top-right corner. */
+   strip stops at the header's own top padding (20px) so it never covers the
+   header buttons: an absolutely positioned ::before paints above normal flow,
+   and a drag strip overlapping a button would swallow clicks on its upper
+   half even with the button marked no-drag. Below the strip the header row
+   itself carries the drag region (blank areas drag, buttons opt back out).
+   Geometry keeps everything clear of the native window controls for free:
+   the centered panel always starts >=24px below the viewport top and the
+   header padding adds 20 more, so buttons sit at >=44px — below the 36px
+   overlay strip — at every window size. */
 body [class*="_panel"]::before {
   content: "";
   position: absolute;
   top: 0; left: 0; right: 0;
-  height: ${OVERLAY_HEIGHT}px;
+  height: 20px;
   -webkit-app-region: drag;
   z-index: 0;
 }
-/* Push the panel header below the native title-bar overlay so the close and
-   "open config" buttons are not occluded by the OS window controls. */
-body [class*="_panel"] [class*="_header"] {
-  padding-top: ${OVERLAY_HEIGHT}px;
-}
+/* Header blank areas drag the window; controls opt back out (same pattern as
+   the frame's logoRow/titleRow). This restores the native layout: buttons
+   return to their original position, on the same axis as the nav title. */
+body [class*="_panel"] [class*="_header"] { -webkit-app-region: drag; }
 /* Header controls (buttons, links, and any role=button element) stay clickable. */
 body [class*="_panel"] [class*="_header"] button,
 body [class*="_panel"] [class*="_header"] a,

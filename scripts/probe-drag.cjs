@@ -33,12 +33,18 @@ body [class*="_panel"]::before {
   content: "";
   position: absolute;
   top: 0; left: 0; right: 0;
-  height: 44px;
+  height: 20px;
   -webkit-app-region: drag;
-  z-index: 2;
+  z-index: 0;
 }
+body [class*="_panel"] [class*="_header"] { -webkit-app-region: drag; }
 body [class*="_panel"] [class*="_header"] button,
-body [class*="_panel"] [class*="_header"] a { -webkit-app-region: no-drag; }
+body [class*="_panel"] [class*="_header"] a,
+body [class*="_panel"] [class*="_header"] [role="button"],
+body [class*="_panel"] [class*="_header"] [class*="button"],
+body [class*="_panel"] [class*="_header"] [class*="Button"],
+body [class*="_panel"] [class*="_close"],
+body [class*="_panel"] [class*="Close"] { -webkit-app-region: no-drag; }
 `
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -92,12 +98,39 @@ app.whenReady().then(async () => {
   out.settings_models = await win.webContents.executeJavaScript(`(() => {
     const m = document.querySelector('.dshapp-models');
     const panel = document.querySelector('[class*="_panel"]');
+    const header = document.querySelector('[class*="_panel"] [class*="_header"]');
     const headerBtn = document.querySelector('[class*="_panel"] [class*="_header"] button');
+    const navTitle = document.querySelector('[class*="_panel"] [class*="_navTitle"]');
+    const centerOf = (el) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return Math.round((r.top + r.bottom) / 2);
+    };
+    const hitAt = (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return null;
+      return { cls: String(el.className).slice(0, 60), region: getComputedStyle(el).webkitAppRegion };
+    };
+    let btnHit = null;
+    let headerBlankHit = null;
+    if (headerBtn && header) {
+      const br = headerBtn.getBoundingClientRect();
+      btnHit = hitAt((br.left + br.right) / 2, (br.top + br.bottom) / 2);
+      // Blank header area left of the actions cluster: same row as the buttons.
+      const hr = header.getBoundingClientRect();
+      headerBlankHit = hitAt(hr.left + 20, (br.top + br.bottom) / 2);
+    }
     return {
       modelsFound: !!m,
       modelsText: m ? m.innerText.slice(0, 200) : null,
       panelRegion: panel ? getComputedStyle(panel, '::before').webkitAppRegion : null,
+      headerRegion: header ? getComputedStyle(header).webkitAppRegion : null,
       closeBtnRegion: headerBtn ? getComputedStyle(headerBtn).webkitAppRegion : null,
+      // Native-axis check: nav title and header buttons share a center line.
+      navTitleCenterY: centerOf(navTitle),
+      headerBtnCenterY: centerOf(headerBtn),
+      btnHit,
+      headerBlankHit,
       styleTag: !!document.querySelector('style[data-plugin-css="dsh-app-client-ui/models.css"]'),
       errors: (window.__probeErrors || []).slice(0, 3),
     };
