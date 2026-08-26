@@ -1,11 +1,14 @@
 /**
  * Host API routes for the archive manager.
  *
- * Two endpoints under the plugin's route namespace on the dsh web server
+ * Three endpoints under the plugin's route namespace on the dsh web server
  * (`/plugins/@dsh-app/plugin-archives/api`):
  *   GET  /list   — archived sessions grouped by project (cwd), with sizes
  *                  and projection-cached titles
  *   POST /delete — remove the on-disk artifacts of archived sessions
+ *   POST /prune  — drop archive-set records whose session logs are already
+ *                  gone (stale records), through the registry's serialized
+ *                  write chain
  *
  * Deletion safety fences (all enforced server-side):
  *   - only ids present in the workspace registry's archive set are deletable
@@ -25,7 +28,7 @@
 import { readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchiveSkipReason, ArchivedSession } from './types.ts'
+import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveSkipReason, ArchivedSession } from './types.ts'
 
 /** Route namespace on the dsh web server (inside the plugin's package prefix). */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-archives/api'
@@ -57,6 +60,29 @@ export interface PersistenceLike {
 /** Structural slice of the workspaceRegistry service. */
 export interface WorkspaceRegistryLike {
   readonly archivedSessionIds: readonly string[]
+}
+
+/**
+ * The registry's domain global state as the prune path sees it: the archive
+ * set plus opaque sibling fields that must survive a rewrite verbatim.
+ */
+type RegistryState = { archivedSessionIds: readonly string[] } & Record<string, unknown>
+
+/**
+ * Private write-side slice of the upstream workspace registry. Upstream
+ * exposes no archive-set removal API (only `archiveSession`), so /prune
+ * reaches the registry's serialized read-modify-write chain — these methods
+ * are private in the source but live on the runtime prototype. Every method
+ * is capability-checked before use; a kernel that reshaped the class gets a
+ * structured 501, never a corrupted state.
+ */
+interface RegistryWriter extends WorkspaceRegistryLike {
+  /** Current domain global state. */
+  requireState(): RegistryState
+  /** Serialized mutation chain: check-then-write pairs cannot interleave. */
+  enqueueOperation<T>(operation: () => Promise<T>): Promise<T>
+  /** Durably replace the whole domain state. */
+  setState(state: unknown): Promise<unknown>
 }
 
 /** Structural slice of the sessions store (liveness guard). */
@@ -171,8 +197,9 @@ async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList>
   for (const id of archivedIds) {
     const header = headers.get(id)
     if (header === undefined) {
-      // Archived but no persisted log: nothing to show or delete. The id
-      // stays in the registry (no public removal API) but hides nothing.
+      // Archived but no persisted log: nothing to show or delete here.
+      // /prune is the surface that can drop such records; listing only
+      // counts them.
       staleCount += 1
       continue
     }
@@ -256,10 +283,34 @@ async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly strin
 }
 
 /**
- * Register the two API routes.
+ * Drop archive-set records whose session logs are already gone. A record is
+ * stale only when all three hold: still archived, absent from a fresh
+ * persistence listing, and not a live session — everything else stays
+ * untouched. The header snapshot is taken once per call; the archive set is
+ * re-read inside the registry's serialized write chain so a concurrent
+ * archive/unarchive write can never be lost.
+ */
+async function pruneStaleArchives(writer: RegistryWriter, options: ArchiveRoutesOptions): Promise<ArchivePruneResult> {
+  const headerIds = new Set((await options.persistence.list()).map((header) => String(header.id)))
+  return writer.enqueueOperation(async () => {
+    // Liveness is probed per candidate inside the chain (the store exposes
+    // no enumeration): fresher than a snapshot, and cheap in-memory lookups.
+    const state = writer.requireState()
+    const current = state.archivedSessionIds.map(String)
+    const filtered = current.filter((id) => headerIds.has(id) || options.sessions?.get(id) !== undefined)
+    if (filtered.length !== current.length) {
+      // Spread first: sibling state fields must survive the rewrite.
+      await writer.setState({ ...state, archivedSessionIds: filtered })
+    }
+    return { pruned: current.length - filtered.length, remaining: filtered.length }
+  })
+}
+
+/**
+ * Register the three API routes.
  * @param webServer - the dsh web server service.
  * @param options - route-layer dependencies.
- * @returns a disposer removing both of them.
+ * @returns a disposer removing all of them.
  */
 export function registerArchiveRoutes(webServer: WebServerLike, options: ArchiveRoutesOptions): () => void {
   const listHandler = (req: IncomingMessage, res: ServerResponse): void => {
@@ -296,9 +347,36 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
         fail(res, 500, 'delete-failed', `删除归档会话失败（${(error as Error).message}）`)
       })
   }
+  const pruneHandler = (req: IncomingMessage, res: ServerResponse): void => {
+    if (!sameOrigin(req)) return
+    if (req.method !== 'POST') {
+      res.setHeader('Allow', 'POST')
+      fail(res, 405, 'method-not-allowed', 'POST only')
+      return
+    }
+    // Capability check: the write path is private upstream API — a kernel
+    // that reshaped the registry must fail loudly (501) instead of risking
+    // a corrupted domain state.
+    const writer = options.registry as RegistryWriter
+    if (typeof writer.enqueueOperation !== 'function'
+      || typeof writer.requireState !== 'function'
+      || typeof writer.setState !== 'function') {
+      fail(res, 501, 'prune-unsupported', '当前内核版本不支持清理归档记录')
+      return
+    }
+    // Same body discipline as /delete (size-capped); prune takes no input,
+    // so the body is drained and ignored.
+    void readJsonBody(req)
+      .then(() => pruneStaleArchives(writer, options))
+      .then((value) => { ok(res, value) })
+      .catch((error: unknown) => {
+        fail(res, 500, 'prune-failed', `清理归档记录失败（${error instanceof Error ? error.message : String(error)}）`)
+      })
+  }
   const disposers = [
     webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/list`, handler: listHandler }),
     webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/delete`, handler: deleteHandler }),
+    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/prune`, handler: pruneHandler }),
   ]
   return () => {
     for (const dispose of disposers) dispose()

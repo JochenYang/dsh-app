@@ -34,6 +34,14 @@ const cssText = `
   font-size: 12px;
   line-height: 18px;
 }
+.dshar_staleHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
 .dshar_notice {
   padding: 8px 12px;
   border-radius: 8px;

@@ -52,3 +52,11 @@ export interface ArchiveDeleteResult {
   /** Ids left untouched, each with a reason. */
   skipped: Array<{ id: string; reason: ArchiveSkipReason }>
 }
+
+/** POST /prune response value. */
+export interface ArchivePruneResult {
+  /** Stale records removed from the registry's archive set. */
+  pruned: number
+  /** Archive-set size after the prune. */
+  remaining: number
+}

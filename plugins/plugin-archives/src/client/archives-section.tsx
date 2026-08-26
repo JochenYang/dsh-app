@@ -8,24 +8,35 @@
  * Deletion is a two-step flow: every request first arms the confirm banner
  * (naming what will vanish and the bytes freed); confirming POSTs the batch
  * and reloads the listing. The host re-checks every fence server-side, so a
- * stale UI can never delete a live or unarchived session.
+ * stale UI can never delete a live or unarchived session. Stale archive
+ * records (archived ids whose logs are already gone) are counted in the
+ * header and pruned through the same confirm-banner flow.
  *
  * @module @dsh-app/plugin-archives/client/archives-section
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList } from '../types.ts'
+import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult } from '../types.ts'
 
-/** A deletion awaiting the user's confirmation. */
-interface ConfirmState {
-  /** Session ids the batch would remove. */
-  ids: string[]
-  /** Human name of the target (one session's title, or a project's title). */
-  label: string
-  /** Bytes the batch would free (measured at list time). */
-  bytes: number
-}
+/** A destructive action awaiting the user's confirmation. */
+type ConfirmState =
+  | {
+      /** Remove the on-disk logs of these archived sessions. */
+      kind: 'delete'
+      /** Session ids the batch would remove. */
+      ids: string[]
+      /** Human name of the target (one session's title, or a project's title). */
+      label: string
+      /** Bytes the batch would free (measured at list time). */
+      bytes: number
+    }
+  | {
+      /** Drop stale archive records from the registry (logs already gone). */
+      kind: 'prune'
+      /** Stale records the action would drop (measured at list time). */
+      count: number
+    }
 
 /** One outcome notice: success or a warning with skipped ids. */
 interface NoticeState {
@@ -163,33 +174,53 @@ export function ArchivesSection(): ReactNode {
     const label = group.sessions.length === 1 && group.sessions[0].title !== ''
       ? `“${group.sessions[0].title}”`
       : `“${group.title}”的 ${ids.length} 个会话`
-    setConfirm({ ids, label, bytes })
+    setConfirm({ kind: 'delete', ids, label, bytes })
   }, [])
 
-  /** Confirm the pending batch: POST, surface the outcome, reload. */
-  const onConfirmDelete = useCallback(async () => {
+  /** Confirm the pending action: POST, surface the outcome, reload. */
+  const onConfirm = useCallback(async () => {
     if (confirm === null) return
+    // Captured before the try: narrowing does not flow into catch blocks,
+    // and the branch decides how a failure is surfaced.
+    const kind = confirm.kind
     setBusy(true)
     try {
-      const result = await fetchJson<ArchiveDeleteResult>('/plugins/@dsh-app/plugin-archives/api/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: confirm.ids }),
-      })
-      const parts = [`已删除 ${result.deleted.length} 个会话，释放 ${fmtBytes(result.freedBytes)}`]
-      if (result.skipped.length > 0) {
-        const counts = new Map<string, number>()
-        for (const skip of result.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1)
-        const skippedText = [...counts]
-          .map(([reason, count]) => `${SKIP_REASONS[reason] ?? reason} × ${count}`)
-          .join('、')
-        parts.push(`跳过 ${result.skipped.length} 个（${skippedText}）`)
+      if (confirm.kind === 'prune') {
+        const result = await fetchJson<ArchivePruneResult>('/plugins/@dsh-app/plugin-archives/api/prune', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        setNotice({ kind: 'ok', text: `已清理 ${result.pruned} 条无效归档记录` })
+      } else {
+        const result = await fetchJson<ArchiveDeleteResult>('/plugins/@dsh-app/plugin-archives/api/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: confirm.ids }),
+        })
+        const parts = [`已删除 ${result.deleted.length} 个会话，释放 ${fmtBytes(result.freedBytes)}`]
+        if (result.skipped.length > 0) {
+          const counts = new Map<string, number>()
+          for (const skip of result.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1)
+          const skippedText = [...counts]
+            .map(([reason, count]) => `${SKIP_REASONS[reason] ?? reason} × ${count}`)
+            .join('、')
+          parts.push(`跳过 ${result.skipped.length} 个（${skippedText}）`)
+        }
+        setNotice(result.skipped.length > 0 ? { kind: 'warn', text: parts.join('；') } : { kind: 'ok', text: parts[0] })
       }
-      setNotice(result.skipped.length > 0 ? { kind: 'warn', text: parts.join('；') } : { kind: 'ok', text: parts[0] })
       setConfirm(null)
       await load()
-    } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : String(deleteError))
+    } catch (actionError) {
+      const message = actionError instanceof Error ? actionError.message : String(actionError)
+      if (kind === 'prune') {
+        // A failed prune (e.g. an older kernel without the write path) must
+        // not blank the listing — surface it as a dismissible notice.
+        setNotice({ kind: 'warn', text: message })
+        setConfirm(null)
+      } else {
+        setError(message)
+      }
     } finally {
       setBusy(false)
     }
@@ -224,8 +255,19 @@ export function ArchivesSection(): ReactNode {
             : `${list.archivedCount} 个会话 · ${fmtBytes(list.totalBytes)} · ${list.groups.length} 个项目`}
         </span>
         {list.staleCount > 0 && (
-          <span className="dshar_sub" title="归档记录仍在，但其会话日志已不在磁盘上（无需处理）">
+          <span className="dshar_staleHint" title="归档记录仍在，但其会话日志已不在磁盘上；清理只会移除这些无效记录">
             另有 {list.staleCount} 条归档记录无日志
+            <button
+              type="button"
+              className="dshar_button"
+              disabled={busy}
+              onClick={() => {
+                setNotice(null)
+                setConfirm({ kind: 'prune', count: list.staleCount })
+              }}
+            >
+              清理
+            </button>
           </span>
         )}
       </div>
@@ -233,13 +275,22 @@ export function ArchivesSection(): ReactNode {
       {notice !== null && <div className={`dshar_notice ${notice.kind === 'warn' ? 'dshar_noticeWarn' : 'dshar_noticeOk'}`}>{notice.text}</div>}
 
       {confirm !== null && (
-        <div className="dshar_confirm" role="alertdialog" aria-label="确认删除归档会话">
-          <span>
-            即将删除{confirm.label}（约 {fmtBytes(confirm.bytes)}），删除后不可恢复。
-          </span>
+        <div className="dshar_confirm" role="alertdialog" aria-label={confirm.kind === 'prune' ? '确认清理归档记录' : '确认删除归档会话'}>
+          {confirm.kind === 'prune' ? (
+            <span>即将清理 {confirm.count} 条无日志的归档记录，仅移除记录本身，不影响任何会话数据。</span>
+          ) : (
+            <span>
+              即将删除{confirm.label}（约 {fmtBytes(confirm.bytes)}），删除后不可恢复。
+            </span>
+          )}
           <span className="dshar_confirmActions">
-            <button type="button" className="dshar_button dshar_buttonDanger" disabled={busy} onClick={() => { void onConfirmDelete() }}>
-              {busy ? '删除中…' : '确认删除'}
+            <button
+              type="button"
+              className={confirm.kind === 'prune' ? 'dshar_button' : 'dshar_button dshar_buttonDanger'}
+              disabled={busy}
+              onClick={() => { void onConfirm() }}
+            >
+              {busy ? (confirm.kind === 'prune' ? '清理中…' : '删除中…') : (confirm.kind === 'prune' ? '确认清理' : '确认删除')}
             </button>
             <button type="button" className="dshar_button" disabled={busy} onClick={() => { setConfirm(null) }}>
               取消
