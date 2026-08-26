@@ -17,6 +17,10 @@
 #   usage plugins (read-only shared source, namespaced store/routes); users
 #   disable it or extend the price table via
 #   <DSH_HOME>/storages/dsh-app-plugin-usage/config.json.
+# - archives: session archive manager (host list/delete routes over the
+#   workspace registry's archive set + settings-page section grouping
+#   archived sessions by project). Deletion is fenced server-side to
+#   archived, non-live sessions only.
 
 - insert:
     - id: brand
@@ -65,3 +69,6 @@
 
     - id: usage
       name: '@dsh-app/plugin-usage'
+
+    - id: archives
+      name: '@dsh-app/plugin-archives'
