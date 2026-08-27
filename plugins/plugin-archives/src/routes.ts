@@ -90,6 +90,27 @@ export interface SessionsLike {
   get(id: string): unknown
 }
 
+/**
+ * Whether a store-resident session is mid-turn (a `turn/start` with no
+ * matching `turn/end` yet — the same open-turn test the upstream fork
+ * boundary uses). The api-proxy keeps every opened session resident for the
+ * whole process lifetime, so mere store presence would flag every
+ * previously-opened archived session as live and make it undeletable; only a
+ * session still WRITING its log must be fenced. An unreadable event log is
+ * treated as mid-turn (conservative: keep the old skip behavior).
+ */
+function isMidTurn(session: unknown): boolean {
+  const events = (session as { events?: unknown } | undefined)?.events
+  if (!Array.isArray(events)) return true
+  let open = false
+  for (const event of events) {
+    const type = (event as { type?: unknown }).type
+    if (type === 'turn/start') open = true
+    else if (type === 'turn/end') open = false
+  }
+  return open
+}
+
 /** Structural slice of the sessionProjectionCache (zero-I/O title lookup). */
 export interface ProjectionCacheLike {
   cachedSnapshot(meta: SessionHeaderLike): { values: { title?: string | null } } | undefined
@@ -251,8 +272,11 @@ async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly strin
       result.skipped.push({ id, reason: 'not-archived' })
       continue
     }
-    // Fence 2: a live session's log is still being written; never remove it.
-    if (options.sessions?.get(id) !== undefined) {
+    // Fence 2: a mid-turn session's log is still being written; never remove
+    // it. Idle-but-resident sessions stay deletable (see isMidTurn); a
+    // session absent from the store (or no store service) is cold by design.
+    const resident = options.sessions?.get(id)
+    if (resident !== undefined && isMidTurn(resident)) {
       result.skipped.push({ id, reason: 'live' })
       continue
     }
