@@ -19,6 +19,7 @@ import { AdvancedModelsSection } from './client/models-advanced/section.tsx'
 import type { AdvancedModelsInjected } from './client/models-advanced/section.tsx'
 import { AdvancedModelsStore } from './client/models-advanced/store.ts'
 import type { AdvancedModelsState } from './client/models-advanced/store.ts'
+import { mountWhaleBackground } from './client/whale-background.ts'
 import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/dsh-client-ui-settings/client'
 
 export const inject = ['theme', 'slots', 'connection', 'remote', 'settingsScope', 'settingsSchema']
@@ -207,9 +208,14 @@ export function apply(ctx: ClientContext): void {
       ctx.on('connection/reset', refresh),
     ]
     const disposeIcon = mountNavIconPatch()
+    // Brand whale background: Canvas 2D port of the DeepSeek hero digitile
+    // whale (assembles on load, swims idly, scatters from the pointer),
+    // theme-aware through the live --dsw-alias-* tokens.
+    const disposeWhale = mountWhaleBackground()
     return () => {
       disposeIcon()
+      disposeWhale()
       for (const dispose of disposers) dispose()
     }
-  }, 'dsh-app plugin-client-ui: advanced models invalidations + nav icon')
+  }, 'dsh-app plugin-client-ui: advanced models invalidations + nav icon + whale background')
 }
