@@ -11,7 +11,7 @@
  *     click a commit row to see its file stat INSIDE the modal.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { FsApiError, gitApi } from './api.ts'
 import type { GitActionValue, GitBranchList, GitStatusEntry } from './api.ts'
@@ -531,8 +531,10 @@ export function GitTab(props: GitTabProps): ReactNode {
       .map(([key, files]) => ({ key, files }))
   }
 
-  const GroupRow = (props: { entry: GitStatusEntry, cached: boolean, readonly?: boolean }): ReactNode => {
-    const { entry, cached, readonly = false } = props
+  // Render-function row/group builders, CALLED DIRECTLY (never used as JSX
+  // component tags): as inline components their identity would change every
+  // render, remounting the whole list subtree and resetting its scroll.
+  const groupRow = (entry: GitStatusEntry, cached: boolean, readonly = false): ReactNode => {
     // VS Code-style status letter: U untracked / M modified / D deleted / A added.
     const status = cached ? entry.indexStatus : entry.untracked ? '?' : entry.worktreeStatus
     const letter = status === '?' ? 'U' : status === ' ' ? '·' : status
@@ -567,10 +569,9 @@ export function GitTab(props: GitTabProps): ReactNode {
 
   /** One directory group: expandable header + indented file rows (DEFAULT
    * expanded — the tree opens fully so nothing is hidden behind a fold). */
-  const GroupBlock = (props: { group: { key: string, files: GitStatusEntry[] }, cached: boolean, readonly?: boolean }): ReactNode => {
-    const { group, cached, readonly = false } = props
+  const groupBlock = (group: { key: string, files: GitStatusEntry[] }, cached: boolean, readonly = false): ReactNode => {
     if (group.key === '') {
-      return <>{group.files.map(entry => <GroupRow key={entry.path} entry={entry} cached={cached} readonly={readonly} />)}</>
+      return <>{group.files.map(entry => <Fragment key={entry.path}>{groupRow(entry, cached, readonly)}</Fragment>)}</>
     }
     const open = !collapsedDirs.has(group.key)
     return (
@@ -590,7 +591,7 @@ export function GitTab(props: GitTabProps): ReactNode {
         {open
           ? group.files.map(entry => (
               <div key={entry.path} className="dshAsbGit-fileRow">
-                <GroupRow entry={entry} cached={cached} readonly={readonly} />
+                {groupRow(entry, cached, readonly)}
               </div>
             ))
           : null}
@@ -650,7 +651,7 @@ export function GitTab(props: GitTabProps): ReactNode {
               {dirGroups((repoFiles ?? []).map<GitStatusEntry>(path => ({
                 path, xy: '  ', indexStatus: ' ', worktreeStatus: ' ', staged: false, untracked: false,
               }))).map(group => (
-                <GroupBlock key={`f:${group.key}`} group={group} cached={false} readonly />
+                <Fragment key={`f:${group.key}`}>{groupBlock(group, false, true)}</Fragment>
               ))}
             </>
           )
@@ -662,12 +663,12 @@ export function GitTab(props: GitTabProps): ReactNode {
               {error === undefined && !(statusLoading && entries.length === 0) ? (
                 <>
                   {dirGroups(unstaged).map(group => (
-                    <GroupBlock key={`u:${group.key}`} group={group} cached={false} />
+                    <Fragment key={`u:${group.key}`}>{groupBlock(group, false)}</Fragment>
                   ))}
                   {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">工作区干净。</p> : null}
                   {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">已暂存（{String(staged.length)}）</p> : null}
                   {dirGroups(staged).map(group => (
-                    <GroupBlock key={`s:${group.key}`} group={group} cached />
+                    <Fragment key={`s:${group.key}`}>{groupBlock(group, true)}</Fragment>
                   ))}
                   {!statusLoading && entries.length > 0 && staged.length === 0 ? <p className="dshAsb-hint">无已暂存变更。</p> : null}
                 </>
@@ -841,11 +842,13 @@ export function GitTab(props: GitTabProps): ReactNode {
 
 /** Git tab styles (prefix dshAsbGit-). */
 const GIT_CSS = `
-.dshAsbGit { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px calc(var(--dsh-composer-height, 132px) + 16px); min-height: 0; height: 100%; width: 100%; box-sizing: border-box; overflow: hidden; }
-.dshAsbGit-cols { display: flex; flex: 1; min-height: 0; overflow: hidden; gap: 0; }
+.dshAsbGit { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px max(160px, var(--dsh-composer-height, 152px) + 16px); min-height: 0; flex: 1 1 auto; width: 100%; box-sizing: border-box; overflow: hidden; }
+.dshAsbGit-cols { display: flex; flex: 1 1 0; min-height: 0; overflow: hidden; gap: 0; }
 .dshAsbGit-list { flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-right: 10px; }
+.dshAsbGit-list > * { flex-shrink: 0; }
 .dshAsbGit-resize { flex: none; width: 8px; cursor: col-resize; margin: 0 -2px 0 2px; z-index: 2; }
-.dshAsbGit-detail { flex: 1; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-left: 8px; }
+.dshAsbGit-detail { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-left: 8px; }
+.dshAsbGit-detail > * { flex-shrink: 0; }
 .dshAsbGit-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .dshAsbGit-branchWrap { position: relative; min-width: 0; max-width: 58%; }
 .dshAsbGit-branchBtn { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; padding: 3px 10px; border: none; border-radius: 999px; background: rgba(148, 163, 184, 0.2); color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 11.5px; }

@@ -331,10 +331,12 @@ export function FileTreeTab(props: FileTreeTabProps): ReactNode {
  * overflow, box-sizing) — that is what keeps the two columns scrolling
  * independently inside a bounded view area. */
 const FILE_TREE_CSS = `
-.dshAsbTree-root { display: flex; flex-direction: column; overflow: hidden; height: 100%; min-height: 0; width: 100%; box-sizing: border-box; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); background: var(--dsw-alias-bg-layer-1, #fff); }
-.dshAsbTree-cols { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-.dshAsbTree-pane { width: 300px; flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 10px 8px calc(var(--dsh-composer-height, 132px) + 16px); border-right: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); display: flex; flex-direction: column; gap: 2px; }
-.dshAsbTree-preview { flex: 1; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 12px 16px calc(var(--dsh-composer-height, 132px) + 16px); display: flex; flex-direction: column; gap: 6px; }
+.dshAsbTree-root { display: flex; flex-direction: column; overflow: hidden; flex: 1 1 auto; min-height: 0; width: 100%; box-sizing: border-box; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); background: var(--dsw-alias-bg-layer-1, #fff); }
+.dshAsbTree-cols { display: flex; flex: 1 1 0; min-height: 0; overflow: hidden; }
+.dshAsbTree-pane { width: 300px; flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 10px 8px max(160px, var(--dsh-composer-height, 152px) + 16px); display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
+.dshAsbTree-pane > * { flex-shrink: 0; }
+.dshAsbTree-preview { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 12px 16px max(160px, var(--dsh-composer-height, 152px) + 16px); display: flex; flex-direction: column; gap: 6px; }
+.dshAsbTree-preview > * { flex-shrink: 0; }
 .dshAsbTree-pane > .dshAsb-hint, .dshAsbTree-pane > .dshAsb-error { text-align: right; padding-right: 4px; }
 .dshAsb-treeRow { display: flex; align-items: center; gap: 5px; width: 100%; padding: 4px 8px 4px 8px; border: none; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12.5px; min-width: 0; transition: background 80ms ease; user-select: none; -webkit-user-select: none; }
 .dshAsb-treeRow:hover:not(:disabled) { background: rgba(148, 163, 184, 0.28); }
