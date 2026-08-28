@@ -272,8 +272,9 @@ Plugin builds (CI runs these before `build-runtime`):
   `plugins/*/lib/`, `logs/`, `scratch/`, `*.tgz`, `*.log` are gitignored —
   don't commit build output.
 - **Commits** follow `<type>(<scope>): <subject>` (e.g. `feat:`, `fix:`) with
-  an English imperative subject and a concise body; the repo history uses
-  `feat`/`fix` prefixes.
+  an English imperative subject; the repo history uses `feat`/`fix` prefixes.
+  The body lists the root cause and each change as bullets (`- `), then
+  closes with a `Verified:` line — no prose paragraphs. Wrap at ~72 chars.
 
 ## 10. Release / deployment
 
