@@ -29,12 +29,17 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 对话 minimap：右侧纵向导航条，每条消息一个刻度；悬停显示内容预览、点击跳转；仅在「对话」页渲染，长会话自动压缩刻度间距 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/minimap.tsx` |
 | 模型高级设置页：llm-pi-ai 模型级编辑器与整表管理（推理强度、输入模态、兼容开关）；目录外模型的伴生路由迁移；models.dev 表单预填（直连失败自动回退 gh-proxy 镜像） | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
 | 品牌主题与全中文 UI：`--dsw-alias-*` 令牌覆盖 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
+| 品牌鲸鱼背景：空闲静态帧、悬停时指针散开（指针离开即暂停渲染循环，滚动不卡顿）；主题感知对比度（亮色增强可读性、暗色低透明度水印）；悬停悬浮于输入框上方、活跃时放大并居中于会话列 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
+| 跨会话记忆：`memory_save`/`memory_recall`/`memory_forget` 工具 + 系统提示注入（预算内最新优先），全局与项目记忆按会话 cwd 路由；设置页开关；后台蒸馏器在静默 5 分钟后经只读子代理回填会话要点（进度轨迹、定时器可安全关闭） | `@dsh-app/plugin-memory` | `plugins/plugin-memory/src/{tools,routes,distiller}.ts` |
+| 批量子代理编排：独立子任务并行派发给可继续的子代理，自适应并发门控（失败收缩、连续成功增长）、保留会话的逐项自动重试、按子代理标识恢复；`swarm` 工具 + `/swarm` 命令 | `@dsh-app/plugin-swarm` | `plugins/plugin-swarm/src/orchestrator.ts` |
+| 用量统计：余额卡（官方 deepseek providers、CNY 闲时/高峰双档计价、密钥不出主机）、每日使用热度图与趋势图；余额 5 分钟 TTL 缓存（single-flight，挂载静默刷新、点击卡片强制重查） | `@dsh-app/plugin-usage` | `plugins/plugin-usage/src/client/usage-section.tsx` |
+| 会话归档管理：按项目工作目录分组（可折叠、键盘支持）、两步删除确认、过期归档清理；删除围栏仅放行归档且非活跃/非进行中的会话；兼容 `locate()` 返回未定义的持久化后端 | `@dsh-app/plugin-archives` | `plugins/plugin-archives/src/client/archives-section.tsx` |
 
 套件接线（每次 server 启动自动完成，`src/main/brand-suite.ts`）：
 
-1. **模块解析**：三个插件链接进 `$DSH_HOME/profiles/node_modules/@dsh-app/`（Windows 为 junction）；
+1. **模块解析**：七个套件插件链接进 `$DSH_HOME/profiles/node_modules/@dsh-app/`（Windows 为 junction）；
    开发源是仓库 `plugins/*`，生产源是激活内核里的 `app/node_modules/@dsh-app/*`。
-2. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经 `dsh web --patch` 注入三个插件条目
+2. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经 `dsh web --patch` 注入七个套件插件条目
    （应用在官方 bundle 层之后，last write wins，无需改上游 profile 模板）。
 
 两条接缝均**优雅降级**：内核缺少套件插件（例如回滚目标）时原样启动、无阻塞。

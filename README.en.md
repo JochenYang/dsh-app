@@ -34,16 +34,22 @@ capabilities:
 | Conversation minimap: a slim rail on the right, one tick per message; hover for a content preview, click to jump; rendered only on the 对话 view; pitch compresses on long chats | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/minimap.tsx` |
 | Advanced models settings page: model-level editors and whole-list management for llm-pi-ai models (reasoning effort, input modalities, compat switches); companion-route migration for off-catalog models; models.dev prefill with gh-proxy mirror fallback | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
 | Brand theme and fully localized Chinese UI: `--dsw-alias-*` token overrides | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
+| Brand whale background: static frame at idle, hover-only pointer scatter (the render loop parks when the pointer leaves — no scroll jank); theme-aware contrast (light boost for legibility, dark low-alpha watermark); hovers above the composer, active phase enlarges and centers on the conversation column | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
+| Cross-session memory: `memory_save`/`memory_recall`/`memory_forget` tools + system-prompt injection (newest first under budgets), global vs per-project memory files routed by session cwd; settings-page toggles; a background distiller backfills quiet sessions after 5 minutes through a read-only subagent (progress traces, shutdown-safe timers) | `@dsh-app/plugin-memory` | `plugins/plugin-memory/src/{tools,routes,distiller}.ts` |
+| Batch subagent orchestration: independent subtasks fan out to parallel continuable children with an adaptive concurrency gate (shrinks on failure, grows on clean streaks), per-item auto-retry on preserved sessions, resume by child id; `swarm` tool + `/swarm` command | `@dsh-app/plugin-swarm` | `plugins/plugin-swarm/src/orchestrator.ts` |
+| Usage statistics: balance card (official deepseek providers, CNY idle/peak dual-tier pricing, key never leaves the host), daily heatmap and trend chart; 5-minute TTL balance cache (single-flight, silent refresh on mount, forced re-query on card click) | `@dsh-app/plugin-usage` | `plugins/plugin-usage/src/client/usage-section.tsx` |
+| Session archive manager: grouped by project cwd (collapsible, keyboard support), two-step delete confirm, stale archive pruning; the delete fence admits only archived sessions with no open turn; tolerates persistence backends whose locate() returns undefined | `@dsh-app/plugin-archives` | `plugins/plugin-archives/src/client/archives-section.tsx` |
 
 Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
 
-1. **Module resolution**: the three plugins are linked into
+1. **Module resolution**: the seven suite plugins are linked into
    `$DSH_HOME/profiles/node_modules/@dsh-app/` (junction on Windows); dev uses
    this repo's `plugins/*`, production the active kernel's
    `app/node_modules/@dsh-app/*`.
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into userData and
-   injected via `dsh web --patch` (applied after the official bundle layers —
-   last write wins, no upstream profile template changes).
+   injected via `dsh web --patch` — seven suite plugin entries applied after
+   the official bundle layers (last write wins, no upstream profile template
+   changes).
 
 Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
 rollback target) boots vanilla, never blocked by brand wiring.

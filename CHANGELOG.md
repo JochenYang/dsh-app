@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.0] - 2026-08-26
+
+### 中文
+- 新增跨会话记忆（plugin-memory）：`memory_save`/`memory_recall`/`memory_forget` 工具 + 系统提示注入全局/项目记忆文件（预算内最新优先）；设置页开关；后台蒸馏器在会话静默 5 分钟后经只读子代理回填要点（进度轨迹、定时器可安全关闭）
+- 新增品牌鲸鱼背景：空闲静态帧、悬停时指针散开（指针离开即暂停渲染循环，滚动不卡顿）；主题感知对比度（亮色增强可读性、暗色低透明度水印）；悬停悬浮于输入框上方、活跃时放大并居中于会话列
+- 用量余额缓存：5 分钟 TTL + single-flight 并发合并；挂载时静默刷新、点击余额卡强制重查；修复刷新循环卡在加载态的问题
+- 归档删除修复：此前打开过的归档会话被误判为活跃而无法删除；删除围栏改为只拦有进行中轮次/start 的会话（与上游分叉边界一致），store 中缺席的会话视为可删除
+- 归档管理增强：项目分组可折叠（键盘支持）；过期归档自动清理；通知区改为中性背景 + 错误边框，主题对比度更好
+- 侧边栏 Git 面板健壮性：选中文件时列表与滚动位置保持稳定（底部条目不再被压缩）；同步操作解析默认远端、无远端时给出中文提示，pull 无上游时按 git 提示显式 fetch 远端/分支，输出限界、无变更时显示「已是最新」
+
+### English
+- New cross-session memory (plugin-memory): `memory_save`/`memory_recall`/`memory_forget` tools plus system-prompt injection of global/per-project memory files (newest first under budgets); settings-page toggles; a background distiller backfills quiet sessions after 5 minutes through a read-only subagent (progress traces, shutdown-safe timers)
+- New brand whale background: static frame at idle, hover-only pointer scatter (the render loop parks when the pointer leaves — no scroll jank); theme-aware contrast (light boost for legibility, dark low-alpha watermark); hovers above the composer, active phase enlarges and centers on the conversation column
+- Usage balance caching: 5-minute TTL with single-flight coalescing; silent refresh on mount, forced re-query on card click; fixes a refresh loop that stuck in the loading state
+- Archive deletion fix: previously-opened archived sessions were judged live and undeletable; the deletion fence now skips only sessions with an open turn/start (the same test the upstream fork boundary uses), and sessions absent from the store are treated as deletable
+- Archive manager enhancements: project groups are collapsible (keyboard support); stale archive ids are pruned; notices use a neutral background with an error border for better theme contrast
+- Sidebar Git panel robustness: the file list keeps its identity and scroll position on selection (bottom entries no longer squeezed); sync operations resolve a default remote with zh-CN errors when none exists, pull without an upstream fetches remote/branch explicitly like git hints, and bounded output reports 「已是最新」 when idle
+
 ## [v0.6.0] - 2026-08-26
 
 ### 中文
