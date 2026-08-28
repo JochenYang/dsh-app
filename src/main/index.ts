@@ -29,6 +29,7 @@ let server: DshServer
 let mainWindow: BrowserWindow | null = null
 let quitting = false
 let restartAttempts = 0
+let bundledReinstallTried = false
 
 // --------------------------------------------------------------- helpers
 
@@ -98,7 +99,10 @@ async function handleServerDown(reason: string): Promise<void> {
   if (restartAttempts >= 2 && !isDev) {
     const rolledBack = await kernel.rollback()
     if (rolledBack) {
-      restartAttempts = 0
+      // No reset here: a recovery action that boots once can still crash on
+      // the next start (e.g. a broken user patch layer). Only a genuinely
+      // ready server (above) resets the counter, so persistent failures
+      // terminate instead of looping forever.
       void dialog.showMessageBox({
         type: 'warning',
         title: 'DSH APP',
@@ -110,13 +114,15 @@ async function handleServerDown(reason: string): Promise<void> {
     // No previous version to roll back to (e.g. a broken first install from
     // an earlier release). Try reinstalling from the bundled tarball before
     // giving up — this recovers users who upgraded over a bad v0.1.1 kernel.
+    // Tried at most once per run: if the reinstall still crashes we fall
+    // through to the give-up branch below.
     const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
     const bundledSha = `${bundledTgz}.sha512`
-    if (existsSync(bundledTgz) && existsSync(bundledSha)) {
+    if (!bundledReinstallTried && existsSync(bundledTgz) && existsSync(bundledSha)) {
+      bundledReinstallTried = true
       try {
         console.log('[kernel] server failed and no rollback available; reinstalling bundled kernel')
         await kernel.installFromLocalTarball(bundledTgz, bundledSha)
-        restartAttempts = 0
         await startServerAndOpenWindow()
         return
       } catch (err) {
@@ -129,7 +135,7 @@ async function handleServerDown(reason: string): Promise<void> {
     void dialog.showMessageBox({
       type: 'error',
       title: 'DSH APP',
-      message: 'dsh 服务无法启动，应用即将退出。',
+      message: 'dsh 服务无法启动，应用即将退出。可查看安装目录 logs 文件夹中最新的 dsh-server 日志定位原因。',
     })
     app.quit()
     return
