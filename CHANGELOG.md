@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.1] - 2026-08-28
+
+### 中文
+- 修复内核崩溃重启循环：回滚/捆绑重装成功不再重置重启计数——配置类崩溃（如损坏的补丁层）能存活恢复时会反复弹退出提示，现在只有真正就绪的服务会重置计数，恢复动作不再触发循环；捆绑重装每次启动只尝试一次，放弃时对话框指向安装目录的日志文件夹
+- 修复高级设置页主按钮在暗色主题下显示为空白块：文字颜色硬编码 `#fff` 与近白背景令牌冲突；改用成对前景令牌 `--dsw-alias-label-primary-foreground`（浅色 #fff / 深色墨色），与原生主按钮同一配方
+- 模型高级设置页：声明推理强度自动填充兼容开关（`supportsDeveloperRole` false + `maxTokensField`）——私有网关被误识别为 OpenAI 会把系统提示切到 developer 角色，多数网关以 400 拒绝；填充仅做增量，已有键与用户显式设置均保留
+
+### English
+- Fixed the kernel crash restart loop: rollback and bundled reinstall no longer reset the restart counter — a config-driven crash that survives recovery (e.g. a broken patch layer) previously looped forever, re-showing the exit toast every few seconds; only a genuinely ready server resets the counter now, the bundled reinstall runs at most once per app run, and the give-up dialog points at the install-dir logs folder
+- Fixed the Advanced Models page primary button rendering as a blank block in the dark theme: the text color was hardcoded `#fff` against a near-white background token; it now uses the paired foreground token `--dsw-alias-label-primary-foreground` (light #fff / dark ink), the same recipe as the native primary button
+- Advanced Models page: declaring a reasoning level now auto-fills the compat switches (`supportsDeveloperRole` false + `maxTokensField`) — pi-ai treats an unidentified private gateway as OpenAI itself, switching the system prompt to the developer role, which most gateways reject with a 400; the fill is additive only and never overwrites existing keys or explicit user values
+
 ## [v0.7.0] - 2026-08-26
 
 ### 中文
