@@ -1,6 +1,5 @@
 import { BrowserWindow, shell } from 'electron'
 import path from 'node:path'
-import { DEFAULT_HTTP_HOST } from '../shared/constants'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
 import { UPDATE_CARD_SCRIPT, type UpdateCardTone } from './update-card'
 
@@ -444,7 +443,9 @@ export function clearKernelProgress(win: BrowserWindow | null): void {
 
 /**
  * Main window: loads the local dsh web UI. All navigation is confined to the
- * local server origin; everything else opens in the system browser.
+ * local server origin (host AND port); everything else opens in the system
+ * browser. A hostname-only check would let any 127.0.0.1:<other-port> page
+ * (e.g. a local dev server) load inside the app window.
  */
 export function createMainWindow(url: string): BrowserWindow {
   const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, show: false })
@@ -457,12 +458,21 @@ export function createMainWindow(url: string): BrowserWindow {
 
   installExportToast(win)
 
+  // Origin of the dsh server the window was created for. If the URL cannot be
+  // parsed (should never happen; the shell builds it), no origin is allowed.
+  let serverOrigin = ''
+  try {
+    serverOrigin = new URL(url).origin
+  } catch {
+    // leave empty — navigation falls back to external
+  }
+
   win.webContents.setWindowOpenHandler(({ url: target }) => {
     // Same-origin window.open (e.g. the Models settings page opening a
     // sub-view) should open inside the app, not be kicked to the browser.
     try {
       const parsed = new URL(target)
-      if (parsed.hostname === DEFAULT_HTTP_HOST) {
+      if (serverOrigin !== '' && parsed.origin === serverOrigin) {
         return { action: 'allow', overrideBrowserWindowOptions: MAIN_WINDOW_OPTS }
       }
     } catch {
@@ -472,8 +482,13 @@ export function createMainWindow(url: string): BrowserWindow {
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (event, target) => {
-    const allowed = new URL(target)
-    if (allowed.hostname !== DEFAULT_HTTP_HOST) {
+    let allowed = false
+    try {
+      allowed = serverOrigin !== '' && new URL(target).origin === serverOrigin
+    } catch {
+      // not a valid URL — treat as external
+    }
+    if (!allowed) {
       event.preventDefault()
       void shell.openExternal(target)
     }
