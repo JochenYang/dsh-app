@@ -340,7 +340,7 @@ const FILE_TREE_CSS = `
 .dshAsbTree-pane > .dshAsb-hint, .dshAsbTree-pane > .dshAsb-error { text-align: right; padding-right: 4px; }
 .dshAsb-treeRow { display: flex; align-items: center; gap: 5px; width: 100%; padding: 4px 8px 4px 8px; border: none; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12.5px; min-width: 0; transition: background 80ms ease; user-select: none; -webkit-user-select: none; }
 .dshAsb-treeRow:hover:not(:disabled) { background: rgba(148, 163, 184, 0.28); }
-.dshAsb-treeRowSelected { background: rgba(59, 130, 246, 0.18); color: #2563eb; }
+.dshAsb-treeRowSelected { background: rgba(59, 130, 246, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAsb-treeRow:disabled { cursor: default; }
 .dshAsb-treeName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAsb-treeBroken { color: var(--dsw-alias-label-secondary, #94a3b8); text-decoration: line-through; }

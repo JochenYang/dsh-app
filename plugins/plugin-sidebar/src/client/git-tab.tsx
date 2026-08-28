@@ -842,6 +842,12 @@ export function GitTab(props: GitTabProps): ReactNode {
 
 /** Git tab styles (prefix dshAsbGit-). */
 const GIT_CSS = `
+/* Popover/dialog surface: the native dark --dsw-alias-bg-overlay resolves
+   to a mid grey (97,102,107) that reads as a bright slab against the
+   near-black UI; the redesigned dark palette is black-based, so use the
+   layer-1 black there (light theme keeps the token default). */
+:root { --dshapp-overlay: var(--dsw-alias-bg-overlay, #fff); }
+body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px max(160px, var(--dsh-composer-height, 152px) + 16px); min-height: 0; flex: 1 1 auto; width: 100%; box-sizing: border-box; overflow: hidden; }
 .dshAsbGit-cols { display: flex; flex: 1 1 0; min-height: 0; overflow: hidden; gap: 0; }
 .dshAsbGit-list { flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-right: 10px; }
@@ -862,7 +868,7 @@ const GIT_CSS = `
 .dshAsbGit-syncBtn { padding: 2px 9px; border: none; border-radius: 999px; background: none; color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 11px; }
 .dshAsbGit-syncBtn:hover:not(:disabled) { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAsbGit-syncBtn:disabled { opacity: .5; cursor: default; }
-.dshAsbGit-branchMenu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 55; width: min(280px, 90vw); max-height: 320px; overflow: auto; box-sizing: border-box; padding: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 10px; background: var(--dsw-alias-bg-overlay, #fff); box-shadow: 0 12px 32px rgba(15, 23, 42, .18); display: flex; flex-direction: column; gap: 2px; }
+.dshAsbGit-branchMenu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 55; width: min(280px, 90vw); max-height: 320px; overflow: auto; box-sizing: border-box; padding: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 10px; background: var(--dshapp-overlay); box-shadow: 0 12px 32px rgba(0, 0, 0, .18); display: flex; flex-direction: column; gap: 2px; }
 .dshAsbGit-branchMenuTitle { margin: 0 0 4px; padding: 0 6px; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11px; }
 .dshAsbGit-branchItem { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 5px 6px; border: none; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12px; }
 .dshAsbGit-branchItem:hover:not(:disabled) { background: rgba(148, 163, 184, 0.16); }
@@ -883,7 +889,7 @@ const GIT_CSS = `
 .dshAsbGit-reviewFile:hover { background: rgba(148, 163, 184, 0.16); }
 .dshAsbGit-commitRow { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 10px; background: var(--dsw-alias-bg-layer-2, rgba(148,163,184,.08)); }
 .dshAsbGit-commitRow .dshAsbGit-input { flex: 1; min-width: 0; background: var(--dsw-alias-bg-layer-1, #fff); }
-.dshAsbGit-primary { padding: 6px 14px; border: none; border-radius: 8px; background: var(--dsw-alias-brand-primary, #3b82f6); color: #fff; cursor: pointer; font-size: 12px; flex: none; font-weight: 600; }
+.dshAsbGit-primary { padding: 6px 14px; border: none; border-radius: 8px; background: var(--dsw-alias-brand-primary, #3b82f6); color: var(--dsw-alias-label-primary-foreground, #fff); cursor: pointer; font-size: 12px; flex: none; font-weight: 600; }
 .dshAsbGit-primary:disabled { opacity: .5; cursor: default; }
 .dshAsbGit-reviewBtn { flex: none; padding: 6px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 8px; background: none; color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 12px; }
 .dshAsbGit-reviewBtn:hover { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
@@ -895,38 +901,38 @@ const GIT_CSS = `
 .dshAsbGit-row:hover { background: rgba(148, 163, 184, 0.16); }
 .dshAsbGit-rowPath { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; padding: 0; border: none; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12.5px; }
 .dshAsbGit-letter { flex: none; width: 14px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--dsw-alias-label-secondary, #94a3b8); }
-.dshAsbGit-letterStaged { color: #16a34a; }
-.dshAsbGit-letterNew { color: #2563eb; }
+.dshAsbGit-letterStaged { color: var(--dsw-alias-state-success-primary, #16a34a); }
+.dshAsbGit-letterNew { color: var(--dsw-alias-label-primary, #2563eb); }
 .dshAsbGit-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAsbGit-rowActions { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 8px; width: 44px; min-width: 44px; visibility: hidden; opacity: 0; pointer-events: none; }
 .dshAsbGit-row:hover .dshAsbGit-rowActions, .dshAsbGit-row:focus-within .dshAsbGit-rowActions { visibility: visible; opacity: 1; pointer-events: auto; }
 .dshAsbGit-link { min-height: 24px; padding: 2px 4px; border: none; border-radius: 4px; background: none; color: var(--dsw-alias-brand-primary, #3b82f6); cursor: pointer; font-size: 11.5px; }
 .dshAsbGit-link:disabled { opacity: .5; cursor: default; }
-.dshAsbGit-linkDanger { color: #dc2626; }
+.dshAsbGit-linkDanger { color: var(--dsw-alias-state-error-primary, #dc2626); }
 .dshAsbGit-input { box-sizing: border-box; width: 100%; padding: 5px 8px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; font-size: 12.5px; }
 .dshAsbGit-commitRow { display: flex; align-items: center; gap: 6px; }
 .dshAsbGit-commitRow .dshAsbGit-input { flex: 1; min-width: 0; }
-.dshAsbGit-primary { padding: 5px 12px; border: none; border-radius: 6px; background: var(--dsw-alias-brand-primary, #3b82f6); color: #fff; cursor: pointer; font-size: 12px; flex: none; }
+.dshAsbGit-primary { padding: 5px 12px; border: none; border-radius: 6px; background: var(--dsw-alias-brand-primary, #3b82f6); color: var(--dsw-alias-label-primary-foreground, #fff); cursor: pointer; font-size: 12px; flex: none; }
 .dshAsbGit-primary:disabled { opacity: .5; cursor: default; }
 .dshAsbGit-diffBlock { display: flex; flex-direction: column; gap: 4px; }
 .dshAsbGit-diffPath { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; white-space: normal; overflow-wrap: anywhere; word-break: break-all; line-height: 1.5; }
 .dshAsbGit-commitMsg { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-family: inherit; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .dshAsbGit-diff, .dshAsbGit-graph { margin: 0; padding: 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.5; overflow: auto; max-height: calc(100vh - 280px); }
-.dshAsbGit-diffAdd { color: #15803d; background: rgba(22, 163, 74, 0.08); }
-.dshAsbGit-diffDel { color: #b91c1c; background: rgba(220, 38, 38, 0.08); }
+.dshAsbGit-diffAdd { color: var(--dsw-alias-state-success-primary, #15803d); background: rgba(22, 163, 74, 0.08); }
+.dshAsbGit-diffDel { color: var(--dsw-alias-state-error-primary, #b91c1c); background: rgba(220, 38, 38, 0.08); }
 .dshAsbGit-graph { white-space: pre; color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAsbGraph { display: flex; flex-direction: column; }
 .dshAsbGraph-line { display: block; width: 100%; padding: 0; border: none; background: none; color: inherit; text-align: left; cursor: pointer; font-family: inherit; font-size: inherit; line-height: inherit; }
 .dshAsbGraph-line:hover { background: rgba(59, 130, 246, 0.1); }
 .dshAsbGraph-plain { display: block; white-space: pre; }
 .dshAsbGit-top[hidden] { display: none; }
-.dshAsbGit-modalMask { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(15, 23, 42, .45); }
-.dshAsbGit-modal { display: flex; flex-direction: column; width: min(860px, calc(100vw - 80px)); max-height: min(640px, calc(100vh - 96px)); border-radius: 10px; background: var(--dsw-alias-bg-overlay, #fff); box-shadow: 0 20px 50px rgba(15, 23, 42, .25); }
+.dshAsbGit-modalMask { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.5)); }
+.dshAsbGit-modal { display: flex; flex-direction: column; width: min(860px, calc(100vw - 80px)); max-height: min(640px, calc(100vh - 96px)); border-radius: 10px; background: var(--dshapp-overlay); box-shadow: 0 20px 50px rgba(0, 0, 0, .25); }
 .dshAsbGit-modalHead { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
 .dshAsbGit-modalHead .dshAsbGit-title { flex: 1; }
 .dshAsbGit-modalClose { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: none; color: var(--dsw-alias-label-secondary, #64748b); cursor: pointer; font-size: 11px; }
 .dshAsbGit-modalClose:hover { background: rgba(148, 163, 184, 0.3); }
-.dshAsbGit-confirm { width: min(420px, calc(100vw - 40px)); padding: 18px; border-radius: 12px; background: var(--dsw-alias-bg-overlay, #fff); box-shadow: 0 20px 50px rgba(15, 23, 42, .25); }
+.dshAsbGit-confirm { width: min(420px, calc(100vw - 40px)); padding: 18px; border-radius: 12px; background: var(--dshapp-overlay); box-shadow: 0 20px 50px rgba(0, 0, 0, .25); }
 .dshAsbGit-confirm h2 { margin: 0 0 8px; font-size: 15px; }
 .dshAsbGit-confirm p { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .dshAsbGit-confirm code { color: var(--dsw-alias-label-primary, #0f172a); font-family: ui-monospace, Consolas, monospace; }
@@ -939,11 +945,11 @@ const GIT_CSS = `
 .dshAsbGit-dirName { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAsbGit-dirCount { margin-left: 2px; padding: 0 6px; border-radius: 999px; background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-secondary, #64748b); font-size: 10.5px; }
 .dshAsbGit-fileRow { padding-left: 18px; border-left: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.10)); margin-left: 12px; }
-.dshAsbError-box { margin: 2px 0; color: #dc2626; font-size: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dshAsbError-box { margin: 2px 0; color: var(--dsw-alias-state-error-primary, #dc2626); font-size: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .dshAsb-hint { margin: 2px 0; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 12px; }
-.dshAsb-error { margin: 2px 0; color: #dc2626; font-size: 12px; }
-.dshAsb-notice { margin: 2px 0; color: #16a34a; font-size: 12px; }
-.dshAsbGit-warning { margin: 2px 0; padding: 6px 8px; border-radius: 6px; background: rgba(234, 179, 8, .14); color: #a16207; font-size: 11px; }
+.dshAsb-error { margin: 2px 0; color: var(--dsw-alias-state-error-primary, #dc2626); font-size: 12px; }
+.dshAsb-notice { margin: 2px 0; color: var(--dsw-alias-state-success-primary, #16a34a); font-size: 12px; }
+.dshAsbGit-warning { margin: 2px 0; padding: 6px 8px; border-radius: 6px; background: rgba(234, 179, 8, .14); color: var(--dsw-alias-state-warn-primary, #a16207); font-size: 11px; }
 .dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible, .dshAsbGit-branchBtn:focus-visible, .dshAsbGit-syncBtn:focus-visible, .dshAsbGit-branchItem:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
 @media (hover: none), (pointer: coarse) { .dshAsbGit-rowActions { visibility: visible; opacity: 1; pointer-events: auto; } }
 `
