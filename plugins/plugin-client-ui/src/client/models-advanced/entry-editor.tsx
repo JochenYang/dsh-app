@@ -43,6 +43,35 @@ function withoutUndefined(row: ModelDraft, key: string): ModelDraft {
   return next
 }
 
+/**
+ * Reasoning-mode change with a compat auto-fill: once a row starts declaring
+ * reasoning levels (a "reasoning model"), pi-ai may send its system prompt as
+ * the `developer` role — every field here stays what the user set, so the
+ * moment a level is declared without an explicit `supportsDeveloperRole` we
+ * fill `false` plus the `max_tokens` output-cap field those OpenAI-compatible
+ * gateways expect, keeping a freshly configured private gateway usable. The
+ * fill never overwrites keys the user already declared; the compat editor can
+ * still tune or remove them.
+ */
+function reasoningChange(row: ModelDraft, onChange: (next: ModelDraft) => void, next: ReasoningDraft): void {
+  const compatDict = typeof row.compat === 'object' && row.compat !== null && !Array.isArray(row.compat)
+    ? row.compat as Record<string, unknown>
+    : {}
+  // Purely additive: never clobber a compat key the user set before, and
+  // never touch the row when no reasoning level is being declared.
+  if (next !== undefined && next !== false && compatDict.supportsDeveloperRole === undefined) {
+    onChange({
+      ...row,
+      reasoningEfforts: next,
+      compat: { ...compatDict, supportsDeveloperRole: false, maxTokensField: 'max_tokens' },
+    })
+    return
+  }
+  onChange(next === undefined
+    ? withoutUndefined({ ...row }, 'reasoningEfforts')
+    : { ...row, reasoningEfforts: next })
+}
+
 /** Chevron that rotates while its row is open. */
 export function IconChevron({ open }: { open: boolean }): ReactNode {
   return (
@@ -397,11 +426,7 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
         disabled={disabled}
         catalogReasoning={catalogModel?.reasoning}
         value={readReasoning(row.reasoningEfforts)}
-        onChange={(next) => {
-          onChange(next === undefined
-            ? withoutUndefined({ ...row }, 'reasoningEfforts')
-            : { ...row, reasoningEfforts: next })
-        }}
+        onChange={(next) => reasoningChange(row, onChange, next)}
       />
       <CompatEditor
         index={index}
