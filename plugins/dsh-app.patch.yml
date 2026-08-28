@@ -21,6 +21,11 @@
 #   workspace registry's archive set + settings-page section grouping
 #   archived sessions by project). Deletion is fenced server-side to
 #   archived, non-live sessions only.
+# - memory: cross-session memory (host memory_save/memory_recall tools +
+#   system-prompt injection of the persisted files + a background distiller
+#   that reviews quiet sessions through a read-only subagent + settings-page
+#   toggles). Model-driven saving with a code-guaranteed async net; users
+#   disable it via <DSH_HOME>/storages/dsh-app-plugin-memory/config.json.
 
 - insert:
     - id: brand
@@ -72,3 +77,6 @@
 
     - id: archives
       name: '@dsh-app/plugin-archives'
+
+    - id: memory
+      name: '@dsh-app/plugin-memory'
