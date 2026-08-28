@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.2] - 2026-08-28
+
+### 中文
+- 修复 Git 页与文件页的深色主题适配：提交/确认按钮文字不再隐形（近白底白字 → 成对前景令牌）；图谱弹窗、还原确认框、分支菜单及其遮罩、投影统一为中性黑色系（不再泛蓝灰）；diff 增删行、状态提示与文件树选中行颜色随主题令牌自动适配
+- 修复链接跳转：`127.0.0.1:<其他端口>`（如本地开发服务器）等非 dsh 服务的链接不再在应用窗口内打开，一律改用系统默认浏览器打开
+
+### English
+- Dark-theme fixes for the Git and file views: commit/confirm buttons no longer render invisible text (near-white on near-white → paired foreground token); the graph modal, restore confirm, branch menu, their mask and shadows now use the neutral black palette (no more blue-grey cast); diff add/del lines, status notices and the file-tree selected row follow the theme tokens
+- Link handling fix: off-origin links such as `127.0.0.1:<other port>` (e.g. a local dev server) no longer load inside the app window; they open in the system default browser
+
 ## [v0.7.1] - 2026-08-28
 
 ### 中文
