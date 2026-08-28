@@ -1327,7 +1327,7 @@ const ADVANCED_CSS = `
 .dshAma-footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .dshAma-button { padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; cursor: pointer; font-size: 12.5px; }
 .dshAma-button:disabled { opacity: .5; cursor: default; }
-.dshAma-buttonPrimary { border-color: transparent; background: var(--dsw-alias-brand-primary, #3b82f6); color: #fff; }
+.dshAma-buttonPrimary { border-color: transparent; background: var(--dsw-alias-brand-primary, #3b82f6); color: var(--dsw-alias-label-primary-foreground, #fff); }
 .dshAma-newRoute { border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 8px; margin-top: 8px; }
 .dshAma-retryCard { margin-top: 0; }
 .dshAma-newRouteSummary { padding: 8px 10px; cursor: pointer; color: var(--dsw-alias-label-secondary, #475569); font-size: 12.5px; }
