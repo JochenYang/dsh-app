@@ -31,8 +31,18 @@ import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { MAX_ENTRY_CHARS, normalizeForMatch, type MemoryRoot } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
-/** Quiet window after the last turn before a distill fires (5 min). */
-const QUIET_MS = 5 * 60_000
+/**
+ * Quiet window after the last turn before a distill fires (60 s).
+ *
+ * Deliberately short: a distill can only run while the session's agent is
+ * still alive (the in-process subagent driver creates children through
+ * `parent.ctx`, so a session closed right after its last turn — agent
+ * already disposed — can never distill). A 60 s pause means most
+ * "conversation done, walk away" endings distill before the close; active
+ * back-and-forth still debounces (every turn/end re-arms the timer), and
+ * the MIN_NEW_MESSAGES gate skips the LLM call on tiny deltas.
+ */
+const QUIET_MS = 60_000
 
 /** The `ctx.subagents` provider name (same default as the swarm plugin). */
 const PROVIDER = 'spawn'
