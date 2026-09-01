@@ -7,6 +7,7 @@ import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
 import { createMainWindow, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
+import { inFrameDialogScript } from './in-frame-dialog'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST } from '../shared/constants'
@@ -56,6 +57,77 @@ function broadcastStatus(status: KernelStatusPayload): void {
 
 // ------------------------------------------------------------- lifecycle
 
+/**
+ * Prompt a themed in-window confirmation (in-frame dialog script) with a
+ * native showMessageBox fallback.
+ *
+ * @param win - the hosting window; null or destroyed skips injection.
+ * @param config - the in-frame dialog config (title/message/detail/buttons).
+ * @param native - native fallback options; invoked only when injection fails.
+ * @param map - map the resulting value (or fallback response index) to the
+ * caller's outcome.
+ * @returns the mapped outcome.
+ */
+async function promptThemedConfirm<O>(
+  win: BrowserWindow | null,
+  config: Parameters<typeof inFrameDialogScript>[0],
+  native: Electron.MessageBoxOptions,
+  map: (value: string, nativeResponse?: number) => O,
+): Promise<O> {
+  if (win !== null && !win.isDestroyed()) {
+    try {
+      const choice: unknown = await win.webContents.executeJavaScript(inFrameDialogScript(config))
+      if (typeof choice === 'string') return map(choice)
+    } catch {
+      // Page not answerable (crashed, mid-navigation, or before first load):
+      // fall through to the native dialog.
+    }
+  }
+  const prompt = win === null
+    ? dialog.showMessageBox(native)
+    : dialog.showMessageBox(win, native)
+  const { response } = await prompt
+  return map('', response)
+}
+
+/**
+ * Prompt the close-choice dialog inside the loaded dsh page (themed modal via
+ * CLOSE_DIALOG_SCRIPT) with a native showMessageBox fallback. Returns the
+ * user's choice, or 'cancel' when neither channel can produce an answer
+ * (e.g. the page never loaded) — the window then simply stays open.
+ * The in-window script resolves to 'tray' | 'quit' | 'cancel'; the native
+ * box maps its button indexes identically.
+ */
+async function promptCloseChoice(win: BrowserWindow | null): Promise<'tray' | 'quit' | 'cancel'> {
+  return promptThemedConfirm(
+    win,
+    {
+      title: '关闭 DSH APP',
+      message: '关闭窗口后要如何运行？',
+      buttons: [
+        { label: '取消', value: 'cancel' },
+        { label: '退出程序', value: 'quit' },
+        { label: '最小化到托盘', value: 'tray', primary: true },
+      ],
+      cancelValue: 'cancel',
+      enterValue: 'tray',
+    },
+    {
+      type: 'question',
+      title: '关闭 DSH APP',
+      message: '关闭窗口后要如何运行？',
+      buttons: ['最小化到托盘', '退出程序', '取消'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    },
+    (value, nativeResponse) => {
+      if (value !== '') return value as 'tray' | 'quit' | 'cancel'
+      return nativeResponse === 0 ? 'tray' : nativeResponse === 1 ? 'quit' : 'cancel'
+    },
+  )
+}
+
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
   broadcastStatus({ phase: 'starting', message: '正在启动 dsh 服务…', progress: null })
@@ -82,28 +154,16 @@ async function startServerAndOpenWindow(): Promise<void> {
       if (quitting) return
       event.preventDefault()
       const win = mainWindow
-      const options = {
-        type: 'question' as const,
-        title: '关闭 DSH APP',
-        message: '关闭窗口后要如何运行？',
-        buttons: ['最小化到托盘', '退出程序', '取消'],
-        defaultId: 0,
-        cancelId: 2,
-        noLink: true,
-      }
-      const prompt = win === null
-        ? dialog.showMessageBox(options)
-        : dialog.showMessageBox(win, options)
-      void prompt.then(({ response }) => {
-        if (response === 0) {
+      void promptCloseChoice(win).then((choice) => {
+        if (choice === 'tray') {
           // The dialog outlives the window in rare races (window closed while
           // the prompt is open); hide only a live window.
           if (win !== null && !win.isDestroyed()) win.hide()
-        } else if (response === 1) {
+        } else if (choice === 'quit') {
           quitting = true
           app.quit()
         }
-        // response === 2 or dialog dismissed: keep the window open, do nothing.
+        // 'cancel' (or the dialog being unanswerable): keep the window open.
       })
     })
     mainWindow.on('closed', () => {
@@ -214,16 +274,35 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
       showUpdateToast(mainWindow, `发现新版本 dsh ${result.latest}，可在托盘菜单中更新`, 'progress', 5_000)
       return
     }
-    const { response } = await dialog.showMessageBox({
-      type: 'info',
-      title: '内核更新可用',
-      message: `dsh ${result.current} → ${result.latest}`,
-      detail: '现在下载并激活？服务将会重启。',
-      buttons: ['立即更新', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (response === 0 && result.latest) await applyKernelUpdate(result.latest)
+    const proceed = await promptThemedConfirm(
+      mainWindow,
+      {
+        title: '内核更新可用',
+        message: `dsh ${result.current} → ${result.latest}`,
+        detail: '现在下载并激活？服务将会重启。',
+        buttons: [
+          { label: '稍后', value: 'later' },
+          { label: '立即更新', value: 'update', primary: true },
+        ],
+        cancelValue: 'later',
+        enterValue: 'update',
+      },
+      {
+        type: 'info',
+        title: '内核更新可用',
+        message: `dsh ${result.current} → ${result.latest}`,
+        detail: '现在下载并激活？服务将会重启。',
+        buttons: ['立即更新', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+      },
+      (value, nativeResponse) => {
+        if (value === 'update') return true
+        if (value === 'later') return false
+        return nativeResponse === 0
+      },
+    )
+    if (proceed && result.latest) await applyKernelUpdate(result.latest)
   } catch (err) {
     if (manual) void dialog.showMessageBox({ type: 'error', title: 'DSH APP', message: `更新检查失败：${(err as Error).message}` })
   }

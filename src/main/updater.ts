@@ -1,4 +1,4 @@
-import { app, dialog, shell, type BrowserWindow } from 'electron'
+import { app, dialog, shell, BrowserWindow } from 'electron'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
@@ -9,10 +9,41 @@ import semver from 'semver'
 import { autoUpdater } from 'electron-updater'
 import { APP_NAME } from '../shared/constants'
 import { githubMirrorPrefixes } from '../kernel/sources/artifact'
+import { inFrameDialogScript } from './in-frame-dialog'
 import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
 
 let initialized = false
 let busy = false
+
+/**
+ * Prompt a themed in-window confirmation (in-frame dialog script) with a
+ * native showMessageBox fallback. Used by the shell-updater confirmations;
+ * the target window is the focused one (or any open window) so these work on
+ * macOS/Linux where the updater listeners live.
+ * @param config - the in-frame dialog config.
+ * @param native - native fallback options.
+ * @returns true when the user picked the primary (download/restart) action.
+ */
+async function confirmInFrame(
+  config: Parameters<typeof inFrameDialogScript>[0],
+  native: Electron.MessageBoxOptions,
+  primaryValue: string,
+): Promise<boolean> {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null
+  if (win !== null && !win.isDestroyed()) {
+    try {
+      const choice: unknown = await win.webContents.executeJavaScript(inFrameDialogScript(config))
+      return choice === primaryValue
+    } catch {
+      // Page not answerable: fall through to the native dialog.
+    }
+  }
+  const prompt = win === null
+    ? dialog.showMessageBox(native)
+    : dialog.showMessageBox(win, native)
+  const { response } = await prompt
+  return response === 0
+}
 
 /**
  * Shell update channel.
@@ -39,16 +70,30 @@ export function initShellUpdater(): void {
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('update-available', async (info) => {
-    const { response } = await dialog.showMessageBox({
-      type: 'info',
-      title: `${APP_NAME} 更新可用`,
-      message: `发现新版本 ${APP_NAME}（${info.version}）。`,
-      detail: '现在下载并安装？应用将在完成后重启。',
-      buttons: ['下载', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (response === 0) {
+    const proceed = await confirmInFrame(
+      {
+        title: `${APP_NAME} 更新可用`,
+        message: `发现新版本 ${APP_NAME}（${info.version}）。`,
+        detail: '现在下载并安装？应用将在完成后重启。',
+        buttons: [
+          { label: '稍后', value: 'later' },
+          { label: '下载', value: 'download', primary: true },
+        ],
+        cancelValue: 'later',
+        enterValue: 'download',
+      },
+      {
+        type: 'info',
+        title: `${APP_NAME} 更新可用`,
+        message: `发现新版本 ${APP_NAME}（${info.version}）。`,
+        detail: '现在下载并安装？应用将在完成后重启。',
+        buttons: ['下载', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+      },
+      'download',
+    )
+    if (proceed) {
       try {
         await autoUpdater.downloadUpdate()
       } catch (err) {
@@ -58,15 +103,28 @@ export function initShellUpdater(): void {
   })
 
   autoUpdater.on('update-downloaded', async () => {
-    const { response } = await dialog.showMessageBox({
-      type: 'info',
-      title: `${APP_NAME} 更新就绪`,
-      message: '更新已下载完成，将在退出时安装。',
-      buttons: ['立即重启', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (response === 0) autoUpdater.quitAndInstall()
+    const proceed = await confirmInFrame(
+      {
+        title: `${APP_NAME} 更新就绪`,
+        message: '更新已下载完成，将在退出时安装。',
+        buttons: [
+          { label: '稍后', value: 'later' },
+          { label: '立即重启', value: 'restart', primary: true },
+        ],
+        cancelValue: 'later',
+        enterValue: 'restart',
+      },
+      {
+        type: 'info',
+        title: `${APP_NAME} 更新就绪`,
+        message: '更新已下载完成，将在退出时安装。',
+        buttons: ['立即重启', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+      },
+      'restart',
+    )
+    if (proceed) autoUpdater.quitAndInstall()
   })
 
   autoUpdater.on('error', (_err) => {
@@ -217,16 +275,30 @@ async function downloadWithFallback(
 }
 
 async function showDownloadError(message: string): Promise<void> {
-  const { response } = await dialog.showMessageBox({
-    type: 'error',
-    title: APP_NAME,
-    message: `应用更新失败：${message}`,
-    detail: '你可以稍后重试，或从下载页手动安装。',
-    buttons: ['打开下载页', '关闭'],
-    defaultId: 1,
-    cancelId: 1,
-  })
-  if (response === 0) void shell.openExternal(`https://github.com/${UPDATER_OWNER}/${UPDATER_REPO}/releases/latest`)
+  const proceed = await confirmInFrame(
+    {
+      title: APP_NAME,
+      message: `应用更新失败：${message}`,
+      detail: '你可以稍后重试，或从下载页手动安装。',
+      buttons: [
+        { label: '关闭', value: 'close' },
+        { label: '打开下载页', value: 'open', primary: true },
+      ],
+      cancelValue: 'close',
+      enterValue: 'open',
+    },
+    {
+      type: 'error',
+      title: APP_NAME,
+      message: `应用更新失败：${message}`,
+      detail: '你可以稍后重试，或从下载页手动安装。',
+      buttons: ['打开下载页', '关闭'],
+      defaultId: 1,
+      cancelId: 1,
+    },
+    'open',
+  )
+  if (proceed) void shell.openExternal(`https://github.com/${UPDATER_OWNER}/${UPDATER_REPO}/releases/latest`)
 }
 
 const UPDATER_OWNER = process.env.DSH_APP_ARTIFACT_OWNER ?? 'JochenYang'
