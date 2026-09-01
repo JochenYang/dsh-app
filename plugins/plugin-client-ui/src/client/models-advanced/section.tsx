@@ -24,6 +24,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm/types'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { cloneDraft, getPath, modelRowFailure, parseRetryPolicy, readRetryPolicy, RETRY_POLICY_DEFAULTS } from './fields.ts'
 import type { ModelDraft, RetryPolicyDraft } from './fields.ts'
@@ -313,7 +314,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
         }
         ops = [{ op: 'unset', path: [...path, 'models'] }]
       } else {
-        ops = [{ op: 'set', path: [...path, 'models'], value: models }]
+        ops = [{ op: 'set', path: [...path, 'models'], value: models as JsonValue }]
       }
     } else {
       ops = []
@@ -327,7 +328,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
         const comparable = Object.keys(fields).length === 0 ? undefined : fields
         if (JSON.stringify(baseOverrides[id]) !== JSON.stringify(comparable)) {
           if (comparable === undefined) ops.push({ op: 'unset', path: [...path, 'modelOverrides', id] })
-          else ops.push({ op: 'set', path: [...path, 'modelOverrides', id], value: fields })
+          else ops.push({ op: 'set', path: [...path, 'modelOverrides', id], value: fields as JsonValue })
         }
       }
     }
@@ -389,7 +390,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     let ops: SettingsPathOpView[]
     let doneNotice: string
     if (existingTarget === undefined) {
-      ops = [{ op: 'set', path: ['providers', id], value: cleanRouteValue(newRoute) }]
+      ops = [{ op: 'set', path: ['providers', id], value: cleanRouteValue(newRoute) as JsonValue }]
       doneNotice = `已创建路由 ${id}，可继续编辑其模型字段。`
     } else {
       // Merge into the existing declared route: keep its profile fields, upsert rows by id.
@@ -404,7 +405,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
         setFailure('没有可追加的模型。')
         return
       }
-      ops = [{ op: 'set', path: ['providers', id, 'models'], value: [...byId.values()] }]
+      ops = [{ op: 'set', path: ['providers', id, 'models'], value: [...byId.values()] as JsonValue }]
       doneNotice = `已向路由 ${id} 追加 ${String(newRoute.rows.length)} 个模型（同名覆盖）。`
     }
     const outcome = await writeOps(api, ops, namespace.revision)
@@ -590,7 +591,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     for (const model of offRows) byId.set(typeof model.id === 'string' ? model.id : '', model)
     const merged = [...byId.values()]
     const ops: SettingsPathOpView[] = extraExists
-      ? [{ op: 'set', path: ['providers', extraId, 'models'], value: merged }]
+      ? [{ op: 'set', path: ['providers', extraId, 'models'], value: merged as JsonValue }]
       : [{
           op: 'set', path: ['providers', extraId], value: {
             api: migrate.api,
@@ -598,11 +599,11 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
             ...(migrate.displayName.trim() === '' ? {} : { displayName: migrate.displayName.trim() }),
             ...(text('apiKeyEnv') === '' ? {} : { apiKeyEnv: text('apiKeyEnv') }),
             models: merged,
-          },
+          } as JsonValue,
         }]
     ops.push(keepRows.length === 0
       ? { op: 'unset', path: [...row.entry.settingsPath, 'models'] }
-      : { op: 'set', path: [...row.entry.settingsPath, 'models'], value: keepRows })
+      : { op: 'set', path: [...row.entry.settingsPath, 'models'], value: keepRows as JsonValue })
     setBusy(true)
     setFailure(undefined)
     const outcome = await writeOps(api, ops, namespace.revision)
@@ -1176,7 +1177,7 @@ function RetryPolicyCard(props: {
       return
     }
     await run(
-      [{ op: 'set', path: [...row.entry.settingsPath, 'retryPolicy'], value: parsed.value }],
+      [{ op: 'set', path: [...row.entry.settingsPath, 'retryPolicy'], value: parsed.value as JsonValue }],
       '已保存重试策略。',
     )
   }
