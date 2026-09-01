@@ -91,6 +91,29 @@ async function promptThemedConfirm<O>(
 }
 
 /**
+ * Themed single-button notice (info/warning/error) with native fallback.
+ * A notice is just a confirm with one button; the mapped outcome is unused.
+ * @param win - the hosting window; null/destroyed falls back to native.
+ * @param type - notice severity, used by the native fallback's icon only.
+ * @param title - card title.
+ * @param message - message line.
+ * @returns settlement once dismissed (either channel).
+ */
+async function promptNoticeThemed(
+  win: BrowserWindow | null,
+  type: 'info' | 'warning' | 'error',
+  title: string,
+  message: string,
+): Promise<void> {
+  await promptThemedConfirm(
+    win,
+    { title, message, buttons: [{ label: '确定', value: 'ok', primary: true }], cancelValue: 'ok', enterValue: 'ok' },
+    { type, title, message, buttons: ['确定'], defaultId: 0, cancelId: 0, noLink: true },
+    () => undefined,
+  )
+}
+
+/**
  * Prompt the close-choice dialog inside the loaded dsh page (themed modal via
  * CLOSE_DIALOG_SCRIPT) with a native showMessageBox fallback. Returns the
  * user's choice, or 'cancel' when neither channel can produce an answer
@@ -191,11 +214,7 @@ async function handleServerDown(reason: string): Promise<void> {
       // the next start (e.g. a broken user patch layer). Only a genuinely
       // ready server (above) resets the counter, so persistent failures
       // terminate instead of looping forever.
-      void dialog.showMessageBox({
-        type: 'warning',
-        title: 'DSH APP',
-        message: `内核更新启动失败，已回滚到 dsh ${rolledBack.manifest.dshVersion}。`,
-      })
+      void promptNoticeThemed(mainWindow, 'warning', 'DSH APP', `内核更新启动失败，已回滚到 dsh ${rolledBack.manifest.dshVersion}。`)
       await startServerAndOpenWindow()
       return
     }
@@ -220,11 +239,7 @@ async function handleServerDown(reason: string): Promise<void> {
   }
 
   if (restartAttempts >= 3) {
-    void dialog.showMessageBox({
-      type: 'error',
-      title: 'DSH APP',
-      message: 'dsh 服务无法启动，应用即将退出。可查看安装目录 logs 文件夹中最新的 dsh-server 日志定位原因。',
-    })
+    void promptNoticeThemed(mainWindow, 'error', 'DSH APP', 'dsh 服务无法启动，应用即将退出。可查看安装目录 logs 文件夹中最新的 dsh-server 日志定位原因。')
     app.quit()
     return
   }
@@ -264,7 +279,7 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
                   : result.reason === 'install in progress'
                     ? '内核更新或安装正在进行中，请稍候再检查。'
                     : `内核已是最新版本（dsh ${result.current ?? '未知'}）。`
-        void dialog.showMessageBox({ type: 'info', title: 'DSH APP', message })
+        void promptNoticeThemed(mainWindow, 'info', 'DSH APP', message)
       }
       return
     }
@@ -304,7 +319,7 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
     )
     if (proceed && result.latest) await applyKernelUpdate(result.latest)
   } catch (err) {
-    if (manual) void dialog.showMessageBox({ type: 'error', title: 'DSH APP', message: `更新检查失败：${(err as Error).message}` })
+    if (manual) void promptNoticeThemed(mainWindow, 'error', 'DSH APP', `更新检查失败：${(err as Error).message}`)
   }
 }
 
@@ -319,7 +334,7 @@ async function applyKernelUpdate(version: string): Promise<void> {
     // toast with the old document.
     void showToastWhenLoaded(mainWindow, `内核已更新到 dsh ${installed.manifest.dshVersion}`, 'success', 3_000)
   } catch (err) {
-    void dialog.showMessageBox({ type: 'error', title: 'DSH APP', message: `内核更新失败：${(err as Error).message}` })
+    void promptNoticeThemed(mainWindow, 'error', 'DSH APP', `内核更新失败：${(err as Error).message}`)
   }
 }
 

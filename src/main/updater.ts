@@ -46,6 +46,42 @@ async function confirmInFrame(
 }
 
 /**
+ * Themed single-button notice (info/warning/error) with native fallback,
+ * scoped to a caller-known window. The outcome is unused — a notice is just a
+ * confirm with one button.
+ * @param win - the hosting window (null/destroyed falls back to native).
+ * @param type - severity, used by the native fallback's icon only.
+ * @param title - card title.
+ * @param message - message line.
+ */
+async function noticeInFrame(
+  win: BrowserWindow | null,
+  type: 'info' | 'warning' | 'error',
+  title: string,
+  message: string,
+): Promise<void> {
+  const target = win ?? BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null
+  if (target !== null && !target.isDestroyed()) {
+    try {
+      await target.webContents.executeJavaScript(inFrameDialogScript({
+        title,
+        message,
+        buttons: [{ label: '确定', value: 'ok', primary: true }],
+        cancelValue: 'ok',
+        enterValue: 'ok',
+      }))
+      return
+    } catch {
+      // Page not answerable: fall through to the native dialog.
+    }
+  }
+  const prompt = target === null
+    ? dialog.showMessageBox({ type, title, message, buttons: ['确定'], defaultId: 0, cancelId: 0, noLink: true })
+    : dialog.showMessageBox(target, { type, title, message, buttons: ['确定'], defaultId: 0, cancelId: 0, noLink: true })
+  await prompt
+}
+
+/**
  * Shell update channel.
  *
  * Windows (primary market, mainland-first): a custom flow replaces
@@ -348,7 +384,7 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       : yaml.version !== current
     if (!newer) {
       clearKernelProgress(win)
-      if (manual) void dialog.showMessageBox({ type: 'info', title: APP_NAME, message: `已是最新版本（${APP_NAME} ${current}）。` })
+      if (manual) void noticeInFrame(win, 'info', APP_NAME, `已是最新版本（${APP_NAME} ${current}）。`)
       return
     }
 
@@ -357,16 +393,30 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     // Same charset guard for the asset filename (spliced into download URL
     // and cmd line): a crafted value must fail safely, never inject.
     if (!/^[\w.~-]+\.exe$/.test(asset.url)) throw new Error('更新包文件名格式异常')
-    const { response } = await dialog.showMessageBox({
-      type: 'info',
-      title: `${APP_NAME} 更新可用`,
-      message: `发现新版本 ${APP_NAME}（${yaml.version}）。`,
-      detail: `当前 v${current} → v${yaml.version}。将下载并静默安装，安装完成后需重新打开应用。`,
-      buttons: ['下载并安装', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (response !== 0) {
+    const proceed = await confirmInFrame(
+      {
+        title: `${APP_NAME} 更新可用`,
+        message: `发现新版本 ${APP_NAME}（${yaml.version}）。`,
+        detail: `当前 v${current} → v${yaml.version}。将下载并静默安装，安装完成后需重新打开应用。`,
+        buttons: [
+          { label: '稍后', value: 'later' },
+          { label: '下载并安装', value: 'install', primary: true },
+        ],
+        cancelValue: 'later',
+        enterValue: 'install',
+      },
+      {
+        type: 'info',
+        title: `${APP_NAME} 更新可用`,
+        message: `发现新版本 ${APP_NAME}（${yaml.version}）。`,
+        detail: `当前 v${current} → v${yaml.version}。将下载并静默安装，安装完成后需重新打开应用。`,
+        buttons: ['下载并安装', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+      },
+      'install',
+    )
+    if (!proceed) {
       clearKernelProgress(win)
       return
     }
@@ -394,16 +444,30 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     console.log(`[shell-updater] downloaded ${asset.url} from ${downloadedFrom}`)
     showUpdateToast(win, `${APP_NAME} ${yaml.version} 下载完成`, 'success', 3_000)
 
-    const install = await dialog.showMessageBox({
-      type: 'question',
-      title: `${APP_NAME} 更新就绪`,
-      message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
-      detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
-      buttons: ['立即安装', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (install.response === 0) {
+    const install = await confirmInFrame(
+      {
+        title: `${APP_NAME} 更新就绪`,
+        message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
+        detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
+        buttons: [
+          { label: '稍后', value: 'later' },
+          { label: '立即安装', value: 'install', primary: true },
+        ],
+        cancelValue: 'later',
+        enterValue: 'install',
+      },
+      {
+        type: 'question',
+        title: `${APP_NAME} 更新就绪`,
+        message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
+        detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
+        buttons: ['立即安装', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+      },
+      'install',
+    )
+    if (install) {
       // VISIBLE NSIS install: the app must be closed so the installer can
       // replace the running binaries; the wizard then shows the same flow as a
       // first-time install (user clicks through, completion page relaunches
@@ -462,20 +526,12 @@ async function checkShellUpdateDev(win: BrowserWindow | null): Promise<void> {
       ? semver.gt(yaml.version, current)
       : yaml.version !== current
     clearKernelProgress(win)
-    await dialog.showMessageBox({
-      type: 'info',
-      title: APP_NAME,
-      message: newer
-        ? `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n检测到新版本：v${current} → v${yaml.version}，请从正式安装的副本更新。`
-        : `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n当前版本 v${current}，远端为同一版本。`,
-    })
+    await noticeInFrame(win, 'info', APP_NAME, newer
+      ? `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n检测到新版本：v${current} → v${yaml.version}，请从正式安装的副本更新。`
+      : `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n当前版本 v${current}，远端为同一版本。`)
   } catch (err) {
     clearKernelProgress(win)
-    void dialog.showMessageBox({
-      type: 'info',
-      title: APP_NAME,
-      message: `开发模式下不支持自动更新应用，且远端版本检查失败：${(err as Error).message}`,
-    })
+    void noticeInFrame(win, 'info', APP_NAME, `开发模式下不支持自动更新应用，且远端版本检查失败：${(err as Error).message}`)
   }
 }
 
