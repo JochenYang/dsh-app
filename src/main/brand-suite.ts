@@ -29,6 +29,13 @@
  *
  * Both seams degrade gracefully: an older kernel without the suite plugins
  * (a rollback target) boots vanilla — no links, no overlay.
+ *
+ * Ownership fence: the scope dir ($DSH_HOME/profiles/node_modules/@dsh-app)
+ * is SHARED — a user may install a real @dsh-app package there independently.
+ * The shell therefore only ever replaces links it can prove it created (a
+ * journal inside the scope dir records every link this shell owns), and a
+ * directory or file it did not create is left untouched with a logged
+ * warning while the remaining plugins still link.
  */
 import { app } from 'electron'
 import { promises as fs } from 'node:fs'
@@ -41,7 +48,12 @@ export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-si
 /** npm scope shared by the suite plugins. */
 const PLUGIN_SCOPE = '@dsh-app'
 
-/** Mirror the harness's resolveDshHome: $DSH_HOME wins, else ~/.dsh. */
+/** Journal file inside the scope dir naming every link this shell owns. */
+const OWNERSHIP_JOURNAL = '.dsh-app-links.json'
+
+/**
+ * Mirror the harness's resolveDshHome: $DSH_HOME wins, else ~/.dsh.
+ */
 export function resolveDshHome(): string {
   const raw = (process.env.DSH_HOME ?? '').trim()
   if (raw !== '') {
@@ -72,10 +84,48 @@ export function prodSuiteSources(kernelDir: string): SuitePluginSource[] {
   }))
 }
 
+/** Read the ownership journal. Returns the owned set plus whether the journal
+ * file existed at all (a corrupt journal counts as existing: nothing is proven
+ * owned, but the historical-unowned-symlink exception must NOT apply either). */
+async function readOwnedLinks(scopeDir: string): Promise<{ owned: Set<string>; journalExists: boolean }> {
+  const journalPath = path.join(scopeDir, OWNERSHIP_JOURNAL)
+  try {
+    const raw = await fs.readFile(journalPath, 'utf8')
+    const parsed: unknown = JSON.parse(raw)
+    if (Array.isArray(parsed)) return {
+      owned: new Set(parsed.filter((entry): entry is string => typeof entry === 'string')),
+      journalExists: true,
+    }
+    // File exists but is not a JSON array: treat as corrupt → nothing owned,
+    // and do not extend the historical exception.
+    return { owned: new Set(), journalExists: true }
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException).code === 'ENOENT'
+    return { owned: new Set(), journalExists: !missing }
+  }
+}
+
+/** Persist the ownership journal (names the shell created or still owns). */
+async function writeOwnedLinks(scopeDir: string, owned: ReadonlySet<string>): Promise<void> {
+  await fs.writeFile(
+    path.join(scopeDir, OWNERSHIP_JOURNAL),
+    `${JSON.stringify([...owned], null, 2)}\n`,
+    'utf8',
+  )
+}
+
 /**
  * Ensure $DSH_HOME/profiles/node_modules/@dsh-app/<dirName> resolves to each
  * suite plugin's real directory. Junction on Windows (no elevation needed),
  * symlink elsewhere.
+ *
+ * Ownership fence: a link is replaced only when the journal proves this shell
+ * created it; a name the journal does not own (a real package dir, a foreign
+ * symlink) is left in place and skipped with a warning — never deleted, never
+ * overwritten. A non-link entry of ours from a pre-journal shell run is still
+ * replaceable when the journal is absent AND the entry is a symlink pointing
+ * at a suite source (the historical shape); anything else is foreign.
+ *
  * @param sources - suite plugin sources for the active kernel.
  * @returns true when every plugin linked (false → boot without the overlay).
  */
@@ -90,23 +140,58 @@ export async function linkSuitePlugins(sources: readonly SuitePluginSource[]): P
     }
   }
   await fs.mkdir(scopeDir, { recursive: true })
+
+  let { owned, journalExists: hadJournal } = await readOwnedLinks(scopeDir)
+  // Suite source realpaths, the only targets this shell ever links to.
+  const suiteTargets = new Set<string>()
+  for (const source of sources) suiteTargets.add(await fs.realpath(source.dir))
   for (const source of sources) {
     const target = await fs.realpath(source.dir)
     const linkPath = path.join(scopeDir, source.dirName)
+    const ours = owned.has(source.dirName)
     try {
       const stat = await fs.lstat(linkPath)
+      // Correct target already: mark ownership and move on. readlink may
+      // return a relative or 8.3-short form (Windows junction); compare via
+      // realpath on both sides so forms cannot fight.
       if (stat.isSymbolicLink()) {
-        if ((await fs.readlink(linkPath)) === target) continue
+        let existing: string | undefined
+        try { existing = await fs.realpath(linkPath) } catch { existing = undefined }
+        if (existing === target) {
+          owned.add(source.dirName)
+          continue
+        }
+      }
+      // Not ours to touch: a real dir/file or a foreign symlink.
+      // Historical exception: a pre-journal run left a symlink to a suite
+      // source; without a journal that is the only shape we still own.
+      // realpath may throw on a dangling link — that link is not ours to
+      // replace either, so a false (not owned) answer is the safe outcome.
+      let linkTarget: string | undefined
+      try {
+        linkTarget = await fs.realpath(linkPath)
+      } catch {
+        linkTarget = undefined
+      }
+      const isOwnedByUs = ours
+        || (!hadJournal && stat.isSymbolicLink() && linkTarget !== undefined && suiteTargets.has(linkTarget))
+      if (!isOwnedByUs) {
+        console.warn(`[brand-suite] @dsh-app/${source.dirName} at ${linkPath} is not a link managed by this shell; leaving it in place and skipping.`)
+        continue
+      }
+      // Ours to replace.
+      if (stat.isSymbolicLink()) {
         await fs.unlink(linkPath)
       } else {
-        // A real directory in the way (stale copy): replace it.
         await fs.rm(linkPath, { recursive: true, force: true })
       }
     } catch {
       /* absent → create below */
     }
     await fs.symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
+    owned.add(source.dirName)
   }
+  await writeOwnedLinks(scopeDir, owned)
   return true
 }
 
