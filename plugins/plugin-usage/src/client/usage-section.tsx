@@ -260,7 +260,6 @@ function HeatCalendar({ heat, metric, onTip }: { heat: HeatmapWire; metric: 'tok
             data-level={level}
             style={{ gridRow: dow + 2, gridColumn: week + 2 }}
             key={cell.date}
-            title={tipText(cell).join('\n')}
             onMouseEnter={(event) => {
               const rect = event.currentTarget.getBoundingClientRect()
               onTip({ text: tipText(cell), x: rect.left + rect.width / 2, y: rect.top })

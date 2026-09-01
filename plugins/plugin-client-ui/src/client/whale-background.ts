@@ -348,10 +348,12 @@ export function mountWhaleBackground(): () => void {
 
   /** Hero placement: hover above the composer card, following its DOM box. */
   function heroLayout(): LayoutState {
-    // The composer textarea is the only main-column textarea; its class is a
-    // CSS-module hash (`InputBar_input__…`) so match on the stable local part.
-    const seat = document.querySelector('textarea[class*="_input"]')
-    const rect = seat instanceof HTMLTextAreaElement ? seat.getBoundingClientRect() : null
+    // The composer input is the only main-column element carrying the input
+    // class; its class is a CSS-module hash (`InputBar_input__…`) so match on
+    // the stable local part. It renders as a DIV in current kernels (older
+    // ones used a textarea), so accept either once the class matches.
+    const seat = document.querySelector('[class*="_input"]')
+    const rect = seat instanceof HTMLElement ? seat.getBoundingClientRect() : null
     if (rect === null || rect.width === 0) {
       // DOM not ready yet: assume the centered composer sits slightly above
       // the vertical middle (its stack has a 32px bottom pad).

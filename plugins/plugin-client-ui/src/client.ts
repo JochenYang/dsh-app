@@ -24,7 +24,13 @@ import type { AdvancedModelsState } from './client/models-advanced/store.ts'
 import { mountWhaleBackground } from './client/whale-background.ts'
 import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/dsh-client-ui-settings/client'
 
-export const inject = ['theme', 'slots', 'remote', 'settingsScope', 'settingsSchema']
+// The Advanced Models store talks to the `llm` and `settings` Remote domains
+// directly (provider directory + discovery, settings.mutate), so those nested
+// namespace services must be declared here — Cordis refuses `remote.*` access
+// that is not in this plugin's `inject`.
+export const inject = [
+  'theme', 'slots', 'remote', 'remote.llm', 'remote.settings', 'settingsScope', 'settingsSchema',
+]
 
 export const BRAND_THEME_ID = 'dsh-app-brand'
 
