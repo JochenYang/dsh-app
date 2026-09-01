@@ -8,6 +8,22 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.4] - 2026-09-01
+
+### 中文
+- 修复插件设置卡片无法点击：桌面 chrome 的拖拽区规则把官方插件卡头部（header 按钮）也标成了窗口拖动区，真实鼠标点击被原生拖拽吞掉——现在 header 按钮自身退出拖拽区，空白区域仍可拖动窗口
+- 插件套件遗留适配修复：模型高级设置页补上 `remote.llm`/`remote.settings` 注入声明（Cordis 拒绝未声明的嵌套服务访问，此前页面报「加载失败」）；热力图格子的原生 title 移除，只保留主题化自定义 tooltip；新会话页鲸鱼背景的 hero 定位匹配 alpha.3 的 DIV 输入框（此前选择器只认 textarea，鲸鱼偏左）
+- 关闭窗口改为三次选择弹窗：最小化到托盘 / 退出程序 / 取消——退出不再是静默动作，默认最小化到托盘（Enter），Esc 取消
+- 确认与通知弹窗全部主题化：关闭、内核更新可用、应用更新流程、各失败与状态提示统一走注入式弹窗（颜色取自官方 `--dsw-alias-*` 主题令牌，浅色/深色自动适配）；页面不可用（未加载/崩溃）时回退系统原生框，保证任何情况都有消息
+- 品牌插件链接加入所有权护栅：`$DSH_HOME/profiles/node_modules/@dsh-app` 下与用户安装的真实包同名时会跳过而非删除，避免误删用户数据
+
+### English
+- Fixed the plugin settings cards not opening: the desktop chrome drag-region rule also marked official plugin card headers (button headers) as window drag regions, so real mouse clicks were swallowed by the native drag handling — header buttons now opt out of the drag region while blank header areas still drag the window
+- Remaining suite adaptation fixes: the Advanced Models page declares `remote.llm`/`remote.settings` in its inject (Cordis refuses undeclared nested service access, which previously failed the page load); the usage heatmap drops the native title and keeps only the themed custom tooltip; the whale hero layout matches the alpha.3 DIV input bar (the old selector only matched a textarea, leaving the whale off-center)
+- Closing the window now prompts a three-way choice: minimize to tray / quit / cancel — quitting is no longer a silent act; the default is minimize to tray (Enter), Esc cancels
+- All confirmation and notice dialogs are themed: close, kernel update available, app update flow, and every failure/status notice go through the injected dialog (colors from the official `--dsw-alias-*` theme tokens, light/dark auto-adaptive); when the page is unavailable (not loaded or crashed) it falls back to the native box so a message is always shown
+- Suite plugin links now carry an ownership fence: a real package a user installed under `$DSH_HOME/profiles/node_modules/@dsh-app` is skipped rather than deleted instead of being silently removed
+
 ## [v0.7.3] - 2026-09-01
 
 ### 中文
