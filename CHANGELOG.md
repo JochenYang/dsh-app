@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.5] - 2026-09-01
+
+### 中文
+- 修复内核重复解压导致的启动卡顿：启动时的内置内核漂移检查用 tarball 哈希比较，而同一版本内核的 tarball 无法跨构建字节复现（文件时间戳/顺序不同）——两次构建的同一版本哈希不同，检查每启动都判定「内容漂移」并重新解压约 1 万个小文件，启动出现分钟的等待与重复「解压完成」。现改为比较语义标识 `(dshVersion, suiteVersion)`（运行时与内置 manifest 均携带，suiteVersion 是 suite 内容的稳定指纹）：同版本直接启动不再解压，suite 真实变化或 dsh 版本升级仍会重新激活
+
+### English
+- Fixed the startup stall from repeated kernel extraction: the boot-time bundled drift check compared tarball sha512s, but a packaged runtime tarball is not byte-reproducible across builds (file mtimes/order differ) — two builds of the same version hash differently, so the check judged every boot as content drift and re-extracted ~10k small files, causing minutes of startup and a repeated "解压完成". It now compares the semantic identity `(dshVersion, suiteVersion)` (carried by both the runtime and bundled manifest; suiteVersion is the stable suite-content fingerprint): a same-version install boots without extraction, while a genuinely changed suite or a newer dsh still re-activates
+
 ## [v0.7.4] - 2026-09-01
 
 ### 中文
