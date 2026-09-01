@@ -348,6 +348,11 @@ macOS signing/notarization and (optional) Windows signing secrets must be
 provided as CI secrets; `resources/icon.png` is a placeholder brand icon; the
 suite plugins are bundled via `file:` references and should switch to
 registry versions once published.
+**Temporary**: `release.yml` sets `DSH_APP_CHANNEL: alpha` on tag pushes so
+runtime artifacts bundle the alpha.3 kernel the suite is adapted to (npm
+`latest` still points at the older rc). Remove this line once dsh promotes
+alpha to `latest`, or future formal releases will keep bundling alpha
+kernels; `workflow_dispatch` with an explicit `dsh_version` is unaffected.
 
 ## 11. Known TODOs / scaffolds (do not assume finished)
 
