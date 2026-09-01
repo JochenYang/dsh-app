@@ -168,17 +168,55 @@ export class DshServer {
     }
   }
 
+  /**
+   * One health probe: exchange the token for an auth cookie, then check the
+   * session root.
+   *
+   * `dsh web` answers `/?token=...` with `303 See Other` + `Set-Cookie` +
+   * `location: /` — the token authenticates once, the cookie carries the
+   * session. A browser follows this automatically (its cookie jar keeps the
+   * auth cookie for the redirected request). The undici `fetch` used here has
+   * no cookie jar, so a plain `redirect: 'follow'` request lands on the naked
+   * `/` without the cookie and gets `401` — the server is healthy but the
+   * probe can never see `res.ok`. So: take the redirect manually, extract the
+   * `Set-Cookie` header, and retry `/` with that cookie.
+   * @returns true when the session root answers 200; false when the probe
+   * failed (server busy, still booting, or the exchange failed).
+   */
+  private async probeHealth(): Promise<boolean> {
+    try {
+      const exchange = await fetch(this.url, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(2_000),
+      })
+      if (exchange.ok) return true
+      if (exchange.status !== 303 || exchange.headers.get('location') === null) {
+        return false
+      }
+      // The next hop is the same-origin session root the Location header names;
+      // only loopback-path relative locations are acceptable (never follow a
+      // redirect to another origin).
+      const next = new URL(exchange.headers.get('location')!, exchange.url)
+      if (!isLocalServerUrl(next.toString())) return false
+      const cookie = exchange.headers.get('set-cookie')
+      if (cookie === null) return false
+      const follow = await fetch(next.toString(), {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(2_000),
+        headers: { cookie: /^[^=]+=/.test(cookie) ? cookie.split(';')[0]! : cookie },
+      })
+      return follow.ok
+    } catch {
+      return false
+    }
+  }
+
   /** Poll the web server root until it answers 200 or the timeout elapses. */
   private async waitForHealth(): Promise<void> {
     const deadline = Date.now() + SERVER_HEALTH_TIMEOUT_MS
     while (Date.now() < deadline) {
       if (this.stopping || !this.child) throw new Error('server process exited during startup')
-      try {
-        const res = await fetch(this.url, { signal: AbortSignal.timeout(2_000) })
-        if (res.ok) return
-      } catch {
-        // not up yet
-      }
+      if (await this.probeHealth()) return
       await new Promise((r) => setTimeout(r, SERVER_HEALTH_POLL_MS))
     }
     throw new Error(`dsh server did not become healthy within ${SERVER_HEALTH_TIMEOUT_MS / 1000}s`)
