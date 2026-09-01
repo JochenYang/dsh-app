@@ -139,14 +139,20 @@ export class KernelManager {
         return { available: false, current: null, latest: null, channel: this.opts.channel, reason: 'no kernel installed' }
       }
       this.status({ phase: 'checking', message: '正在检查内核更新…', progress: null })
-      // A prerelease version (e.g. 0.1.0-rc.7) lives on the `next` dist-tag, so
-      // it can only see newer prereleases through the beta channel. Auto-switch
-      // when the user is on a prerelease but configured for stable — otherwise
-      // the `latest` tag never carries rc builds and the check always says "up
-      // to date" even when a newer rc shipped.
+      // A prerelease version lives on its own dist-tag: `rc` builds on `next`,
+      // `alpha` builds on `alpha`. Both are only visible through their matching
+      // channel, so when the user is on a prerelease but configured for stable,
+      // auto-switch to the channel that actually carries that prerelease kind —
+      // otherwise the `latest` tag never carries prereleases and the check
+      // always says "up to date" even when a newer build shipped.
       const currentVersion = this.current.manifest.dshVersion
-      const isPrerelease = semver.valid(currentVersion) !== null && semver.prerelease(currentVersion) !== null
-      const channel = isPrerelease && this.opts.channel === 'stable' ? 'beta' : this.opts.channel
+      const prereleaseTag = semver.valid(currentVersion) !== null
+        ? (semver.prerelease(currentVersion) ?? [])[0]
+        : undefined
+      const isPrerelease = prereleaseTag !== undefined
+      const channel = isPrerelease && this.opts.channel === 'stable'
+        ? (prereleaseTag === 'alpha' ? 'alpha' : 'beta')
+        : this.opts.channel
       const info = await fetchRegistryInfo(channel)
       if (!info) {
         return { available: false, current: currentVersion, latest: null, channel, reason: this.opts.source === 'dev' ? 'dev mode' : 'registry unreachable' }

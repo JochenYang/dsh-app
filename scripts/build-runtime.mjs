@@ -33,18 +33,21 @@ const [platform = process.platform, arch = process.arch, versionArg] = process.a
 /**
  * When no version is given (plain tag push or workflow_dispatch), publish the
  * dsh version the app itself resolves from the npm dist-tag (stable→latest,
- * beta→next) — the same mapping as src/kernel/sources/registry.ts — so runtime
- * artifacts never lag behind the kernel registry again.
+ * beta→next, alpha→alpha) — the same mapping as src/kernel/sources/registry.ts —
+ * so runtime artifacts never lag behind the kernel registry again.
  */
 async function resolveDefaultDshVersion() {
-  const channel = process.env.DSH_APP_CHANNEL === 'beta' ? 'next' : 'latest'
+  const channel =
+    process.env.DSH_APP_CHANNEL === 'alpha' ? 'alpha'
+    : process.env.DSH_APP_CHANNEL === 'beta' ? 'next'
+    : 'latest'
   try {
     const res = await fetch('https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags', {
       signal: AbortSignal.timeout(15_000),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const tags = await res.json()
-    const version = tags[channel] ?? tags.latest ?? tags.next
+    const version = tags[channel] ?? tags.latest ?? tags.next ?? tags.alpha
     if (version) return version
     // Tags 200 OK but no usable key (mirror sync lag / odd package state) is
     // the same pollution path as a network failure — route through the catch

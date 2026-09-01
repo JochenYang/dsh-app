@@ -32,9 +32,11 @@ export interface RegistryInfo {
 /**
  * Query npm registries (in order) for the @deepseek-ai/dsh dist-tags.
  *
- * The desktop app follows dsh's own release cadence: `rc` (current dev-preview
- * cadence) or `latest` (stable). The chosen version is used both for update
- * detection and for naming the runtime artifact to download.
+ * The desktop app follows dsh's own release cadence, mapping each app channel
+ * to the dist-tag dsh's release script actually publishes (families.ts):
+ * `stable` → `latest` (formal releases), `beta` → `next` (rc prereleases),
+ * `alpha` → `alpha` (alpha prereleases). The chosen version is used both for
+ * update detection and for naming the runtime artifact to download.
  */
 export async function fetchRegistryInfo(channel: KernelChannel): Promise<RegistryInfo | null> {
   for (const registry of registryCandidates()) {
@@ -58,12 +60,12 @@ async function fetchFromRegistry(registry: string, channel: KernelChannel): Prom
     }
     const tags = doc['dist-tags'] ?? {}
     // Map the app channel to the dist-tag dsh's release script actually
-    // publishes: `latest` for stable releases, `next` for rc/pre-release
-    // (publish.ts tags versions containing '-' as `next`). A plain channel
+    // publishes: `latest` for stable releases, `next` for rc prereleases,
+    // `alpha` for alpha prereleases (publish.ts families.ts). A plain channel
     // name is also accepted so a future release cadence that publishes a
     // matching tag works without another edit here.
-    const tagForChannel = channel === 'stable' ? 'latest' : 'next'
-    const version = tags[tagForChannel] ?? tags[channel] ?? tags.latest ?? tags.next ?? tags.rc
+    const tagForChannel = channel === 'stable' ? 'latest' : channel === 'alpha' ? 'alpha' : 'next'
+    const version = tags[tagForChannel] ?? tags[channel] ?? tags.latest ?? tags.next ?? tags.rc ?? tags.alpha
     if (!version) return null
     const integrity = doc.versions?.[version]?.dist?.integrity ?? ''
     return { version, channel, integrity, source: base }

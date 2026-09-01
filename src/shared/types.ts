@@ -1,6 +1,6 @@
 /** Shared types used across the main process, kernel manager, and renderers. */
 
-export type KernelChannel = 'stable' | 'beta'
+export type KernelChannel = 'stable' | 'beta' | 'alpha'
 export type KernelSource = 'dev' | 'registry' | 'artifact'
 
 export type KernelPhase =
