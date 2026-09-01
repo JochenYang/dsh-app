@@ -384,8 +384,16 @@ async function boot(): Promise<void> {
     // same-named directory is reused verbatim and the new content never
     // lands — linkSuitePlugins then bails on the missing member and the whole
     // suite silently boots vanilla. Re-activate the bundled tarball whenever
-    // its verified hash differs from the recorded one and its version is not
-    // older than the installed kernel (a newer-dsh install stays online).
+    // its semantic identity (dshVersion + suiteVersion, the kit the runtime's
+    // own manifest.json carries) differs from the installed one.
+    //
+    // The tarball sha512 is deliberately NOT the comparison key: a packaged
+    // runtime tarball is not byte-reproducible across builds (file mtimes and
+    // order differ), so two builds of the same dsh+suite version hash
+    // differently — comparing hashes would re-extract an already-identical
+    // runtime on every boot. The suiteVersion hash is the suite content
+    // source of truth (baked into the runtime manifest by build-runtime.mjs),
+    // so the semantic combination is both stable and precise.
     const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
     const bundledSha = `${bundledTgz}.sha512`
     const bundledManifestPath = path.join(process.resourcesPath, 'kernel', 'manifest.json')
@@ -393,6 +401,7 @@ async function boot(): Promise<void> {
       try {
         const bundledManifest = JSON.parse(readFileSync(bundledManifestPath, 'utf8')) as {
           dshVersion?: string
+          suiteVersion?: string
           platform?: string
           arch?: string
         }
@@ -401,8 +410,12 @@ async function boot(): Promise<void> {
         const sameVersion = bundledManifest.dshVersion === current.manifest.dshVersion
         const newerVersion = bundledManifest.dshVersion !== undefined
           && semver.gt(bundledManifest.dshVersion, current.manifest.dshVersion)
-        const contentDiffers = current.sha512 !== readFileSync(bundledSha, 'utf8').trim().toLowerCase()
-        if (samePlatform && contentDiffers && (sameVersion || newerVersion)) {
+        // Suite content drift: same dsh version but a different suite build
+        // (or a newer dsh version), same platform/arch. Identical dsh+suite
+        // means the runtime is already what installing would produce.
+        const suiteDrift = bundledManifest.suiteVersion !== undefined
+          && bundledManifest.suiteVersion !== current.manifest.suiteVersion
+        if (samePlatform && (newerVersion || (sameVersion && suiteDrift))) {
           console.log('[kernel] bundled content differs from active install; re-activating')
           await kernel.installFromLocalTarball(bundledTgz, bundledSha)
         }
