@@ -8,9 +8,10 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { DiscoveredModelView, IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
+import type { LlmDiscoveredModel, LlmModelDiscoveryRequest } from '@deepseek-ai/dsh-api-remotes/client'
 import { formatCapacity } from './fields.ts'
 import type { ModelDraft } from './fields.ts'
+import type { AdvancedModelsRemote } from './store.ts'
 
 /** Draft target used by the built-in dsh discovery endpoint. */
 export interface ProviderDiscoveryTarget {
@@ -26,7 +27,7 @@ export interface ProviderModelDiscoveryDialogProps {
   onClose: () => void
   onAdopt: (rows: ModelDraft[]) => void
   existingIds: ReadonlySet<string>
-  api: Pick<IApiClient, 'llm'>
+  api: Pick<AdvancedModelsRemote, 'llm'>
   target: ProviderDiscoveryTarget | undefined
 }
 
@@ -48,15 +49,8 @@ function friendlyFailure(message: string): string {
   return 'dsh 暂时无法从该 provider 获取模型，请检查协议、端点和凭据。'
 }
 
-function requestOf(target: ProviderDiscoveryTarget, apiKey: string): {
-  settingsNs: string
-  provider?: string
-  baseURL?: string
-  api?: string
-  apiKey?: string
-} {
+function requestOf(target: ProviderDiscoveryTarget, apiKey: string): LlmModelDiscoveryRequest {
   return {
-    settingsNs: target.settingsNs,
     ...(target.provider === undefined ? {} : { provider: target.provider }),
     ...(target.baseURL?.trim() === '' || target.baseURL === undefined ? {} : { baseURL: target.baseURL.trim() }),
     ...(target.api?.trim() === '' || target.api === undefined ? {} : { api: target.api.trim() }),
@@ -64,7 +58,7 @@ function requestOf(target: ProviderDiscoveryTarget, apiKey: string): {
   }
 }
 
-function draftOf(model: DiscoveredModelView): ModelDraft {
+function draftOf(model: LlmDiscoveredModel): ModelDraft {
   const draft: ModelDraft = { id: model.id }
   if (model.name !== undefined && model.name !== model.id) draft.name = model.name
   if (model.contextWindow !== undefined) draft.contextWindow = model.contextWindow
@@ -80,7 +74,7 @@ function targetKey(target: ProviderDiscoveryTarget | undefined): string {
 /** Discover and adopt models reported by the selected dsh provider. */
 export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialogProps): ReactNode {
   const { open, onClose, onAdopt, existingIds, api, target } = props
-  const [models, setModels] = useState<readonly DiscoveredModelView[] | undefined>(undefined)
+  const [models, setModels] = useState<readonly LlmDiscoveredModel[] | undefined>(undefined)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [query, setQuery] = useState('')
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
@@ -110,13 +104,13 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
     setBusy(true)
     setFailure(undefined)
     try {
-      const response = await api.llm.discoverModels(requestOf(target, secret), abort.signal)
+      const response = await api.llm.discoverModels(target.settingsNs, requestOf(target, secret), abort.signal)
       if (generation !== requestGeneration.current) return
-      if (!response.result.ok) throw new Error(response.result.error.message)
-      setModels(response.result.value.models)
-      setPicked(new Set(response.result.value.models
-        .filter(model => !existingIds.has(model.id))
-        .map(model => model.id)))
+      if (!response.ok) throw new Error(response.error.message)
+      setModels(response.value)
+      setPicked(new Set(response.value
+        .filter((model: LlmDiscoveredModel) => !existingIds.has(model.id))
+        .map((model: LlmDiscoveredModel) => model.id)))
     } catch (error) {
       if (generation !== requestGeneration.current || abort.signal.aborted) return
       setFailure(friendlyFailure(messageOf(error)))

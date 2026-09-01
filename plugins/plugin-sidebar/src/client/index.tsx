@@ -8,8 +8,10 @@
  * swallow, and the panel can never cover the chat.
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: pulls the slots service face (ctx.slots) and the conversation
+// view-tab SlotMap merges ('conversation.view') into this compilation unit.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { registerDockViews } from './views.tsx'
 
@@ -21,6 +23,5 @@ export const inject = ['slots', 'connection', 'sessions']
  * @param ctx - the client root context.
  */
 export function apply(ctx: ClientContext): void {
-  const connection = ctx.get('connection') as ConnectionHandle
-  registerDockViews(ctx, connection.api)
+  registerDockViews(ctx)
 }

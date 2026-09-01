@@ -8,9 +8,13 @@
  * uses — with the list store as fallback before the binding resolves.
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+// Type-only: pulls the session-scoped SlotMap merges — `SessionStandardProps`
+// declares `sessionId: SessionId` for every session-scope `inject` face, and
+// ui-conversation declares the 'conversation.view' SlotMap row.
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { FileTreeTab } from './file-tree.tsx'
 import { GitTab } from './git-tab.tsx'
 
@@ -36,7 +40,7 @@ function cwdFor(sessions: SessionsService, sessionId: SessionId): string | undef
 
 /** Register our two views into the native view-tab ring. Order 100/110 keeps
  * them AFTER every official view (official rows order at 10). */
-export function registerDockViews(ctx: ClientContext, _api: IApiClient): void {
+export function registerDockViews(ctx: ClientContext): void {
   const sessions = ctx.get('sessions') as unknown as SessionsService
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view',

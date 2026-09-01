@@ -9,9 +9,11 @@
  * @module @dsh-app/plugin-archives/client
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// Type-only: pulls the settings shell's SlotMap merge ('settings.section')
-// and the slot utility prop faces into this compilation unit.
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: pulls the settings shell's SlotMap merge ('settings.section'),
+// the slots service face (ctx.slots), and the slot utility prop faces into
+// this compilation unit.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { ArchivesSection } from './client/archives-section.tsx'

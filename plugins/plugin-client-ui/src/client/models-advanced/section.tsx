@@ -22,13 +22,14 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm/types'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { cloneDraft, getPath, modelRowFailure, parseRetryPolicy, readRetryPolicy, RETRY_POLICY_DEFAULTS } from './fields.ts'
 import type { ModelDraft, RetryPolicyDraft } from './fields.ts'
 import { IconChevron, IconTrash, ModelEntryEditor } from './entry-editor.tsx'
 import { AdvancedModelsStore, protocolChoices, writeOps } from './store.ts'
-import type { AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
+import type { AdvancedModelsRemote, AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
 import { ModelsDevImportDialog } from './import-dialog.tsx'
 import { ProviderModelDiscoveryDialog } from './provider-discovery.tsx'
 import type { ProviderDiscoveryTarget } from './provider-discovery.tsx'
@@ -40,7 +41,7 @@ export interface AdvancedModelsInjected {
     /** Page snapshot bound by the UI renderer as useSnapshot. */
     snapshot: AdvancedModelsStore['store']
   }
-  api: Pick<IApiClient, 'settings' | 'llm'>
+  api: AdvancedModelsRemote
   schema: SchemaOps
 }
 
@@ -126,7 +127,7 @@ function mergeModelRows(existing: readonly ModelDraft[], additions: readonly Mod
 interface ResolvedFace {
   controller: AdvancedModelsStore
   useSnapshot: (selector: (snapshot: AdvancedModelsState) => AdvancedModelsState) => AdvancedModelsState
-  api: Pick<IApiClient, 'settings' | 'llm'>
+  api: AdvancedModelsRemote
   schema: SchemaOps
 }
 
@@ -217,18 +218,35 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
 
   const modelIds = new Set(models.map(model => typeof model.id === 'string' ? model.id : ''))
   const overrideIds = Object.keys(overrides)
-  /** The route's full catalog listing (llm.models group), ids only. */
-  const catalogIdSet = row === undefined
-    ? new Set<string>()
-    : new Set((state.groups.get(row.entry.provider)?.models ?? []).map(model => model.id))
-  const catalogModelFor = (id: string) => row === undefined
-    ? undefined
-    : state.groups.get(row.entry.provider)?.models.find(model => model.id === id)
-  const catalogFailure = row === undefined
-    ? undefined
-    : state.catalogFailures.find(failure => failure.id === row.entry.provider)
-  /** Catalog ids offered for a new override (this route's group only). */
-  const catalogIds = row === undefined ? [] : [...catalogIdSet].filter(id => !overrideIds.includes(id))
+  /**
+   * Catalog-derived state, degraded for dsh 0.1.2: the host no longer exposes
+   * a per-provider model catalog (`ModelProviderGroup` / `llm.models` were
+   * removed upstream; only `listProviders` + `listConfigurableProviders` +
+   * `discoverModels` remain, the latter for whole-endpoint discovery).
+   *
+   * Consequences, kept deliberately conservative:
+   *  - `catalogIdSet` is empty, so the off-catalog gate below flags every
+   *    non-empty id on a NON-hand-declared route in models mode. That is fine
+   *    for hand-declared routes (`declared === true`), which skip the gate and
+   *    keep full-table editing. On catalog routes every model shows "目录外"
+   *    and the save is refused with the companion-route migration offer — the
+   *    exact flow that existed for genuinely off-catalog models.
+   *  - `catalogIds` is empty, so the overrides-mode "add a catalog id"
+   *    dropdown is gone (no catalog to list). Existing overrides stay fully
+   *    editable; adding a brand-new override id by hand is deliberately NOT
+   *    wired up (it would need a manual-id input + a real catalog to validate
+   *    against — a constructive change out of scope for this migration).
+   */
+  const catalogIdSet = new Set<string>()
+  /**
+   * Always undefined after the dsh 0.1.2 catalog removal; typed as the editor's
+   * catalog model so the `?.name` / `catalogModel` call sites keep compiling
+   * (they render an empty name and hand the editor no live metadata).
+   */
+  const catalogModelFor = (_id: string): LlmResolvedModelInfo | undefined => undefined
+  const catalogFailure = undefined
+  /** Catalog ids offered for a new override (no catalog in dsh 0.1.2). */
+  const catalogIds: string[] = []
   /**
    * Ids in the drafted list the installed catalog does not carry. On a
    * catalog route these cannot resolve a wire protocol (the route spans
@@ -1107,7 +1125,7 @@ function retrySummary(base: RetryPolicyDraft | undefined): string {
 function RetryPolicyCard(props: {
   row: RouteRow
   disabled: boolean
-  api: Pick<IApiClient, 'settings'>
+  api: Pick<AdvancedModelsRemote, 'settings'>
   namespace: SettingsNamespaceView | undefined
   controller: AdvancedModelsStore
 }): ReactNode {

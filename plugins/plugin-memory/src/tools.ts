@@ -19,7 +19,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Context } from '@deepseek-ai/cordis'
 import { MAX_ENTRY_CHARS, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES } from './types.ts'

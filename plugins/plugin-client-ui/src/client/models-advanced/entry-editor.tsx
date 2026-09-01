@@ -10,14 +10,14 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import type { ModelProviderGroup } from '@deepseek-ai/dsh-api-remotes/client'
+import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm/types'
 import {
   COMPAT_FIELDS, COMPAT_PRESETS, MODALITIES, REASONING_LEVELS,
   formatCapacity, parseCapacity, readReasoning,
 } from './fields.ts'
 import type { ModelDraft, ReasoningDraft } from './fields.ts'
 
-type CatalogModel = ModelProviderGroup['models'][number]
+type CatalogModel = LlmResolvedModelInfo
 
 /** Props of {@link ModelEntryEditor}. */
 export interface ModelEntryEditorProps {

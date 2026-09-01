@@ -2,19 +2,21 @@
  * DSH APP brand client plugin (browser side).
  *
  * Loaded by the dsh web client composition through the `dsh.client` metadata
- * in package.json. Registers the brand theme, the conversation minimap, and
- * the Advanced Models settings page (model-level fields the official Models
- * page leaves to settings.yaml); the upstream Models page stays untouched.
+ * in package.json. Registers the brand theme and the Advanced Models settings
+ * page (model-level fields the official Models page leaves to settings.yaml);
+ * the upstream Models page stays untouched. The conversation minimap was
+ * retired: the upstream turn rail (ui-chat TurnNavigator) covers the same
+ * right-edge turn navigation with full-history paging.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-// Type-only: loads the theme plugin's Context merge (ctx.theme) and the
-// slot utility prop faces (ctx.slots) into this compilation unit.
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: loads the theme plugin's Context merge (ctx.theme), the slots
+// service face (ctx.slots), and the slot utility prop faces into this
+// compilation unit.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 // Type-only: pulls the settings shell's SlotMap merge (the 'settings.section'
 // entry) and the settingsScope/settingsSchema Context merges.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { MinimapUtility } from './client/minimap.tsx'
 import { AdvancedModelsSection } from './client/models-advanced/section.tsx'
 import type { AdvancedModelsInjected } from './client/models-advanced/section.tsx'
 import { AdvancedModelsStore } from './client/models-advanced/store.ts'
@@ -22,7 +24,7 @@ import type { AdvancedModelsState } from './client/models-advanced/store.ts'
 import { mountWhaleBackground } from './client/whale-background.ts'
 import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/dsh-client-ui-settings/client'
 
-export const inject = ['theme', 'slots', 'connection', 'remote', 'settingsScope', 'settingsSchema']
+export const inject = ['theme', 'slots', 'remote', 'settingsScope', 'settingsSchema']
 
 export const BRAND_THEME_ID = 'dsh-app-brand'
 
@@ -146,19 +148,9 @@ export function apply(ctx: ClientContext): void {
     ),
   })
 
-  // --- Conversation minimap: hover to preview, click to jump to a past
-  // user message. Session-scoped, so it follows session switches; renders
-  // nothing while the chat view has fewer than two messages. ---
-  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
-    name: 'conversation.session.header.utilities',
-    id: 'dsh-app-minimap',
-    order: 100,
-  }, MinimapUtility))
-
   // --- Advanced Models settings page: model-level fields (reasoning
   // efforts, input modalities, compat switches) the official page leaves to
   // settings.yaml, plus a guarded create flow for out-of-catalog models. ---
-  const connection = ctx.get('connection') as ConnectionHandle
   const schemaService = ctx.settingsSchema as SettingsSchemaService
   // Bound method references keep the service's own signatures (the store's
   // SchemaOps type is a Pick of the service); hand-written wrappers would
@@ -172,15 +164,19 @@ export function apply(ctx: ClientContext): void {
     setPath: schemaService.setPath.bind(schemaService),
     deletePath: schemaService.deletePath.bind(schemaService),
   }
+  // The page talks through the Remote domains directly (the client `api`
+  // connection face was removed upstream in dsh 0.1.2): `ctx.remote`
+  // satisfies the store's advanced-models remote shape structurally, and the
+  // injected `api` field carries the same face so editors can call it.
   const controller = new AdvancedModelsStore(
-    connection.api,
+    ctx.remote,
     schema,
     ctx.settingsScope.describe() as SettingsDescribeFace,
   )
   const injected = (): AdvancedModelsInjected => ({
     controller,
     hooks: { snapshot: controller.store },
-    api: connection.api,
+    api: ctx.remote,
     schema,
   })
   ctx.slots.inject('settings.section', () => ctx.slots.register({

@@ -19,9 +19,10 @@
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-theme",
         "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-store",
         "@deepseek-ai/dsh-api-remotes"
       ],
       "platform": "web"
@@ -33,21 +34,27 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-theme": "^0.1.0-rc.8",
+    "@deepseek-ai/cordis": "^4.0.0",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-store": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-theme": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-llm": "^0.1.2-alpha.3",
     "react": "^18.2.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-settings": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-theme": "0.1.0-rc.8",
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-api-remotes": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-store": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-theme": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-llm": "0.1.2-alpha.3",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   },
