@@ -21,6 +21,11 @@ permissions:
 
 env:
   DSH_VERSION: ${{ inputs.dsh_version || '' }}
+  # Tag pushes leave DSH_VERSION empty, so build-runtime resolves the dist-tag.
+  # The suite is adapted to the alpha.3 kernel line, so resolution must use the
+  # alpha channel until dsh promotes alpha to latest; workflow_dispatch pins a
+  # version explicitly and is unaffected.
+  DSH_APP_CHANNEL: alpha
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
