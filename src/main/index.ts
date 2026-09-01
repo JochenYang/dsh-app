@@ -75,11 +75,36 @@ async function startServerAndOpenWindow(): Promise<void> {
   if (!mainWindow) {
     mainWindow = createMainWindow(url)
     mainWindow.on('close', (event) => {
-      // Tray app: closing the window hides it instead of quitting.
-      if (!quitting) {
-        event.preventDefault()
-        mainWindow?.hide()
+      // Tray app: closing the window may either hide it (keep running in the
+      // tray) or quit the app — the user picks once, per close. The dialog is
+      // shown on every close so quitting is never a silent surprise; while the
+      // dialog is open the close is prevented, and the choice decides.
+      if (quitting) return
+      event.preventDefault()
+      const win = mainWindow
+      const options = {
+        type: 'question' as const,
+        title: '关闭 DSH APP',
+        message: '关闭窗口后要如何运行？',
+        buttons: ['最小化到托盘', '退出程序', '取消'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
       }
+      const prompt = win === null
+        ? dialog.showMessageBox(options)
+        : dialog.showMessageBox(win, options)
+      void prompt.then(({ response }) => {
+        if (response === 0) {
+          // The dialog outlives the window in rare races (window closed while
+          // the prompt is open); hide only a live window.
+          if (win !== null && !win.isDestroyed()) win.hide()
+        } else if (response === 1) {
+          quitting = true
+          app.quit()
+        }
+        // response === 2 or dialog dismissed: keep the window open, do nothing.
+      })
     })
     mainWindow.on('closed', () => {
       mainWindow = null
