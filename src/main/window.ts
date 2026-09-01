@@ -254,6 +254,11 @@ body [class*="_panel"]::before {
    the frame's logoRow/titleRow). This restores the native layout: buttons
    return to their original position, on the same axis as the nav title. */
 body [class*="_panel"] [class*="_header"] { -webkit-app-region: drag; }
+/* The header rule above also catches headers that ARE buttons: a plugin
+   disclosure card (ui-settings-plugins header button) would otherwise be
+   swallowed by the drag region and never receive clicks. The button itself
+   opts back out; blank header areas of non-button headers keep dragging. */
+body [class*="_panel"] button[class*="_header"] { -webkit-app-region: no-drag; }
 /* Header controls (buttons, links, and any role=button element) stay clickable. */
 body [class*="_panel"] [class*="_header"] button,
 body [class*="_panel"] [class*="_header"] a,

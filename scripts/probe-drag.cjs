@@ -38,6 +38,7 @@ body [class*="_panel"]::before {
   z-index: 0;
 }
 body [class*="_panel"] [class*="_header"] { -webkit-app-region: drag; }
+body [class*="_panel"] button[class*="_header"] { -webkit-app-region: no-drag; }
 body [class*="_panel"] [class*="_header"] button,
 body [class*="_panel"] [class*="_header"] a,
 body [class*="_panel"] [class*="_header"] [role="button"],
