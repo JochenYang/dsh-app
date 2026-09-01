@@ -31,7 +31,6 @@ capabilities:
 | Feature | Plugin | Implementation |
 |---|---|---|
 | Conversation sidebar (native views): **Files** — workspace tree (lazy-loaded, root auto-expanded), text/image/Markdown preview (independent column scrolling); **Git** — change list grouped by directory, unified diff with dual line numbers, stage/restore/commit, tracked-file list, graph modal (click a commit for its title/body/file stat) | `@dsh-app/plugin-sidebar` (host + client dual-face) | `plugins/plugin-sidebar/src/client/{file-tree,git-tab}.tsx` |
-| Conversation minimap: a slim rail on the right, one tick per message; hover for a content preview, click to jump; rendered only on the 对话 view; pitch compresses on long chats | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/minimap.tsx` |
 | Advanced models settings page: model-level editors and whole-list management for llm-pi-ai models (reasoning effort, input modalities, compat switches); declaring a reasoning level auto-fills the compat switches (`supportsDeveloperRole` false + `maxTokensField`), additive-only and never overwriting explicit values; companion-route migration for off-catalog models; models.dev prefill with gh-proxy mirror fallback | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
 | Brand theme and fully localized Chinese UI: `--dsw-alias-*` token overrides | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
 | Brand whale background: static frame at idle, hover-only pointer scatter (the render loop parks when the pointer leaves — no scroll jank); theme-aware contrast (light boost for legibility, dark low-alpha watermark); hovers above the composer, active phase enlarges and centers on the conversation column | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
@@ -160,7 +159,7 @@ node scripts/probe-mirror.mjs
 The shell injects desktop niceties into the web UI at runtime with zero changes
 to harness source: window dragging, native window-button clearance, real-time
 title-bar color sync, and a fully localized Chinese UI. Brand functionality
-(sidebar, minimap, models page, …) is equally zero-upstream-change via the
+(sidebar, models page, …) is equally zero-upstream-change via the
 plugin suite above — `--patch` overlays and slot injections. See
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md) for implementation details.
 

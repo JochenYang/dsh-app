@@ -81,7 +81,7 @@ dist/            tsc + copy output (gitignored, generated)
 | `manager.ts` | `KernelManager`: init / check-update / download / extract / verify / activate / rollback / cleanup; `getServerSpec()` |
 | `manifest.ts` | `current.json` read/write (atomic tmp+rename), `manifest.json` read helpers |
 | `integrity.ts` | sha512 file hashing + comparison |
-| `sources/registry.ts` | npm registry dist-tag resolution (`stable`/`beta`), registry fallback chain |
+| `sources/registry.ts` | npm registry dist-tag resolution (`stable`/`beta`/`alpha`), registry fallback chain |
 | `sources/artifact.ts` | GitHub Release artifact resolution + mirror fallback chain (sha512-pinned) |
 | `sources/dev.ts` | Dev mode: build a manifest from the local checkout |
 
@@ -100,7 +100,9 @@ dist/            tsc + copy output (gitignored, generated)
 `current.json` is the single source of activation truth. Update flow:
 
 1. **Resolve** the newest version from the npm registry dist-tag
-   (`@deepseek-ai/dsh`: `stable` = `latest` tag, `beta` = `beta` tag).
+   (`@deepseek-ai/dsh`: `stable` = `latest` tag, `beta` = `next` tag for rc
+   builds, `alpha` = `alpha` tag — the same families dsh's own release
+   pipeline publishes).
 2. **Download** the runtime tarball
    (`dsh-runtime-<platform>-<arch>-<version>.tgz`) from the dedicated
    `runtime-<dshVersion>` GitHub Release (created published by CI; see §10),
@@ -216,8 +218,7 @@ Plugin builds (CI runs these before `build-runtime`):
 > Manual/probe helpers live in `scripts/`:
 > `probe-mirror.mjs` (update-chain connectivity), `probe-drag.cjs` (drag
 > regions + brand Models render — **keep its `CSS` in sync with**
-> `src/main/window.ts` `DESKTOP_CHROME_CSS`), `probe-minimap.cjs` (opens a
-> session with history and reports minimap DOM evidence),
+> `src/main/window.ts` `DESKTOP_CHROME_CSS`),
 > `probe-update-card.cjs` (executes the injected update-card script against a
 > DOM stub — run after `npm run build`), `probe-shell-update.mjs` (Windows
 > shell-update flow against the real `latest.yml`), `capture.mjs` (page
@@ -229,7 +230,7 @@ Plugin builds (CI runs these before `build-runtime`):
 |---|---|---|
 | `DSH_APP_DEV=1` | `src/main/index.ts` | Dev mode: use local checkout instead of downloaded kernel |
 | `DSH_APP_DEV_RUNTIME` | `src/main/index.ts` | Override the dev harness checkout path |
-| `DSH_APP_CHANNEL` | `index.ts`, `build-runtime.mjs`, `dev.ts` | `beta` → beta dist-tag; anything else = stable |
+| `DSH_APP_CHANNEL` | `index.ts`, `build-runtime.mjs`, `dev.ts` | `alpha` → `alpha` dist-tag; `beta` → `next` dist-tag (rc); anything else = stable (`latest`) |
 | `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `index.ts` | GitHub owner/repo hosting runtime artifacts (defaults to `JochenYang` / `dsh-app`) |
 | `DSH_APP_NPM_REGISTRIES` | `sources/registry.ts` | Comma-separated registry chain replacing the default (`npmjs.org` → `npmmirror.com`) |
 | `NPM_CONFIG_REGISTRY` | `sources/registry.ts` | Single-registry override; npmmirror still appended as fallback |

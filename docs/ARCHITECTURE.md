@@ -31,7 +31,7 @@
 │   First-run install UI (progress, install/retry/cancel) over a narrow preload bridge
 └─ Brand suite (plugins/)
     plugin-brand (host)      brand settings, app info, desktop bridge (scaffold)
-    plugin-client-ui (client) brand theme + minimap + advanced models settings page
+    plugin-client-ui (client) brand theme + advanced models settings page
     plugin-sidebar (dual-face) native conversation views: Files (tree + preview) and Git
 ```
 
@@ -63,10 +63,6 @@ Client-side composition (all zero-upstream-change):
   tracked files, graph modal with `%B` + `--stat`). Markdown previews run
   `remark-gfm` + `rehype-raw` + `rehype-sanitize` (raw HTML is rendered but
   scripts/event handlers are stripped; `client/file-tree.tsx` `MD_SCHEMA`).
-- **Minimap** (`plugin-client-ui`): mounted at
-  `conversation.session.header.utilities` (`client.ts:151`); chat-view-only via
-  an `aria-selected` observer; 6 px bars at a 14 px pitch (compressing to 8 px
-  on long chats), hover preview + click-to-jump.
 - **Advanced models settings page** (`plugin-client-ui`): `settings.section`
   at `order 11` (`client.ts:185`) — model-level editors over llm-pi-ai
   providers, companion-route migration, models.dev prefill with gh-proxy
@@ -98,7 +94,7 @@ boot can always point back at `previous`.
 
 ```
 check (startup + every 6h + manual)
-  → npm registry dist-tags (@deepseek-ai/dsh): latest | rc
+  → npm registry dist-tags (@deepseek-ai/dsh): latest | next (rc) | alpha
   → newer? → prompt
 download runtime artifact (GitHub Release asset, per platform/arch)
   → sha512 verify (sidecar .sha512 asset)

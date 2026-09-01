@@ -26,7 +26,6 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 功能 | 插件 | 实现位置 |
 |---|---|---|
 | 会话侧边栏（原生视图）：**文件页**——工作区目录树（懒加载、自动展开根目录）、文本/图片/Markdown 预览（目录与预览区独立滚动）；**Git 页**——按目录分组的变更列表、统一 diff 双行号、暂存/还原/提交、仓库文件列表、Git 图谱（点提交查看标题/正文/文件统计） | `@dsh-app/plugin-sidebar`（host + client 双面） | `plugins/plugin-sidebar/src/client/{file-tree,git-tab}.tsx` |
-| 对话 minimap：右侧纵向导航条，每条消息一个刻度；悬停显示内容预览、点击跳转；仅在「对话」页渲染，长会话自动压缩刻度间距 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/minimap.tsx` |
 | 模型高级设置页：llm-pi-ai 模型级编辑器与整表管理（推理强度、输入模态、兼容开关）；声明推理强度自动填充兼容开关（`supportsDeveloperRole` false + `maxTokensField`，仅增量、不覆盖用户显式设置）；目录外模型的伴生路由迁移；models.dev 表单预填（直连失败自动回退 gh-proxy 镜像） | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
 | 品牌主题与全中文 UI：`--dsw-alias-*` 令牌覆盖 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
 | 品牌鲸鱼背景：空闲静态帧、悬停时指针散开（指针离开即暂停渲染循环，滚动不卡顿）；主题感知对比度（亮色增强可读性、暗色低透明度水印）；悬停悬浮于输入框上方、活跃时放大并居中于会话列 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
@@ -134,7 +133,7 @@ node scripts/probe-mirror.mjs
 ## 桌面化适配
 
 外壳通过运行时注入为 Web UI 补桌面体验，harness 源码零改动：窗口拖拽、原生窗口按钮
-让位、顶栏配色实时同步、全中文 UI。品牌功能（侧边栏、minimap、模型页等）通过上面的
+让位、顶栏配色实时同步、全中文 UI。品牌功能（侧边栏、模型页等）通过上面的
 插件套件以 `--patch` 覆盖与 slot 注入实现，同等零上游改动。注入实现细节见
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md)。
 
