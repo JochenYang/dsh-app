@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.3] - 2026-09-01
+
+### 中文
+- 内核升级至 dsh 0.1.2-alpha.3，新增 alpha 内核更新通道（`DSH_APP_CHANNEL=alpha` 解析 npm `alpha` dist-tag）；预发布版本自动按版本类型走对应通道（alpha→alpha，rc→beta）
+- 插件套件完整适配 alpha.3：上游移除了 dsh-client-runtime 并重构 client 运行时，7 个插件全部迁移到新的 Cordis Context/ctx.remote/dsh-client-store 体系；模型高级设置页改用官方 joinProviderDirectory 目录（host 模型目录上游已删除，hand-declared 路由整表编辑保持不变）
+- 修复服务器健康检查误判：dsh web 以 303 + Set-Cookie + Location 交换会话 cookie，健康轮询此前因无 cookie jar 落到裸 `/` 拿到 401，90 秒超时后误杀健康服务——现在手动完成 token→cookie 交换后再探测
+- 移除品牌 minimap：上游官方 turn rail（全历史分页、点击跳转）已覆盖同功能，683 行组件与配套探针脚本一并退役
+
+### English
+- Kernel updated to dsh 0.1.2-alpha.3, with a new alpha kernel update channel (`DSH_APP_CHANNEL=alpha` resolves the npm `alpha` dist-tag); prerelease builds now auto-select their matching channel (alpha→alpha, rc→beta)
+- The plugin suite is fully adapted to alpha.3: upstream removed dsh-client-runtime and rebuilt the client runtime, so all seven plugins now use the Cordis Context / ctx.remote / dsh-client-store system; the Advanced Models page joins the configurable-provider directory like the official page (the host model catalog was removed upstream; hand-declared route full-table editing is unchanged)
+- Fixed the server health check misfiring: dsh web exchanges the session cookie via 303 + Set-Cookie + Location, and the probe (no cookie jar) previously followed the redirect onto the naked `/`, got 401, and killed a healthy server after a 90-second timeout — it now completes the token→cookie exchange before probing
+- Retired the brand minimap: the upstream turn rail (full-history paging, click-to-jump) covers the same feature, so the 683-line component and its probe script are removed
+
 ## [v0.7.2] - 2026-08-28
 
 ### 中文
