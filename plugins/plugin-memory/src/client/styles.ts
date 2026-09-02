@@ -226,6 +226,9 @@ const cssText = `
   line-height: 18px;
   font-family: var(--dsw-alias-font-mono, monospace);
 }
+.dshm_activityMore {
+  align-self: flex-start;
+}
 .dshm_projectRow {
   display: flex;
   align-items: center;

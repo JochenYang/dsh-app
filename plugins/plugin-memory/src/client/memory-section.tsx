@@ -44,6 +44,9 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 const ROUTE = '/plugins/@dsh-app/plugin-memory/api'
 
+/** Distill-activity rows shown before the "show all" fold (list caps at 20). */
+const ACTIVITY_PREVIEW = 5
+
 /** What the confirm banner is about to clear. */
 interface ConfirmState {
   scope: 'global' | 'project'
@@ -58,6 +61,7 @@ export function MemorySection(): ReactNode {
   const [notice, setNotice] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState<ConfirmState | null>(null)
+  const [activityExpanded, setActivityExpanded] = useState(false)
   const inFlight = useRef(false)
 
   const load = useCallback(async () => {
@@ -105,7 +109,7 @@ export function MemorySection(): ReactNode {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ distill: next }),
       })
-      setNotice(next ? '已开启后台提炼：会话静默 5 分钟后自动补记' : '已关闭后台提炼：仅保留对话中的即时记录')
+      setNotice(next ? '已开启后台提炼：会话静默 1 分钟后自动补记' : '已关闭后台提炼：仅保留对话中的即时记录')
       await load()
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
@@ -177,7 +181,7 @@ export function MemorySection(): ReactNode {
       <div className="dshm_toggleRow">
         <span className="dshm_toggleLabel">
           后台自动提炼（{status === null ? '…' : status.distill ? '已开启' : '已关闭'}）
-          <span className="dshm_toggleHint">会话静默 5 分钟后，后台只读代理自动补记遗漏的持久信息</span>
+          <span className="dshm_toggleHint">会话静默 1 分钟后，后台只读代理自动补记遗漏的持久信息</span>
         </span>
         <button
           type="button"
@@ -213,13 +217,25 @@ export function MemorySection(): ReactNode {
         ? (
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">最近提炼</div>
-            <div className="dshm_hint">后台只读代理在会话静默 5 分钟后自动运行，以下为最近记录（时间 · 来源会话 · 保存条数）。</div>
-            {status.activity.map((item: MemoryDistillActivity) => (
+            <div className="dshm_hint">后台只读代理在会话静默 1 分钟后自动运行，以下为最近记录（时间 · 来源会话 · 保存条数）。</div>
+            {status.activity.slice(0, activityExpanded ? status.activity.length : ACTIVITY_PREVIEW).map((item: MemoryDistillActivity) => (
               <div key={`${item.at}-${item.session}`} className="dshm_activityRow">
                 <span className="dshm_activityTime">{fmtTime(item.at)}</span>
                 <span className="dshm_activityMeta">会话 {item.session} · {item.saved === 0 ? '无新条目' : `保存 ${String(item.saved)} 条`}</span>
               </div>
             ))}
+            {status.activity.length > ACTIVITY_PREVIEW
+              ? (
+                <button
+                  type="button"
+                  className="dshm_button dshm_activityMore"
+                  aria-expanded={activityExpanded}
+                  onClick={() => { setActivityExpanded(expanded => !expanded) }}
+                >
+                  {activityExpanded ? '收起' : `查看全部（${String(status.activity.length)} 条）`}
+                </button>
+              )
+              : null}
           </div>
         )
         : null}

@@ -297,11 +297,17 @@ export interface DistillProgress {
   at: number
 }
 
+/** Short display id: the uuid segment's first 8 chars (`session-` prefix
+ * dropped), e.g. `session-49ce2455-...` → `49ce2455`. */
+export function shortSessionId(sessionId: string): string {
+  return sessionId.replace(/^session-/u, '').slice(0, 8)
+}
+
 /** One background-distill run's trace entry (settings-page transparency). */
 export interface DistillActivity {
   /** Unix epoch ms when the distill ran. */
   at: number
-  /** Short session id (first 8 hex) the run distilled. */
+  /** Short session id (first 8 hex of the uuid segment; {@link shortSessionId}). */
   session: string
   /** Entries the run persisted (0 = it ran but nothing new qualified). */
   saved: number
@@ -363,7 +369,7 @@ export class MemoryRoot {
   /** Append one distill trace and persist (bounded, survives restarts). */
   recordDistill(sessionId: string, saved: number): void {
     const state = this.readDistillState()
-    state.activity.push({ at: Date.now(), session: sessionId.slice(0, 8), saved })
+    state.activity.push({ at: Date.now(), session: shortSessionId(sessionId), saved })
     if (state.activity.length > MAX_ACTIVITY) {
       state.activity = state.activity.slice(-MAX_ACTIVITY)
     }

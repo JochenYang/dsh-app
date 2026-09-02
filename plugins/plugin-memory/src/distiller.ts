@@ -28,7 +28,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the subagents Context merge (ctx.subagents) into scope.
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import { MAX_ENTRY_CHARS, normalizeForMatch, type MemoryRoot } from './memory-store.ts'
+import { MAX_ENTRY_CHARS, normalizeForMatch, shortSessionId, type MemoryRoot } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /**
@@ -270,7 +270,7 @@ export class MemoryDistiller {
       // Short target-session id in the label so the workflow view shows WHO
       // this distill reviewed — the node is visible by design (transparency,
       // the same way swarm children are), not a hidden worker.
-      label: `memory-distill:${sessionId.slice(0, 8)}`,
+      label: `memory-distill:${shortSessionId(sessionId)}`,
       prompt: [{ type: 'text', text: prompt }],
       parent,
       signal: this.abort.signal,
