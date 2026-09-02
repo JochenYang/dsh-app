@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.6] - 2026-09-02
+
+### 中文
+- 升级内置内核至 dsh 0.1.2-alpha.4：shell 依赖、内核运行时与插件套件全部对齐 alpha 通道最新版（内核更新与 shell 更新保持解耦，alpha.4 运行时产物随本版本重新构建发布）
+- 记忆插件（会话记忆）：后台提炼静默窗口统一为 1 分钟——代码早已生效，设置页 3 处「5 分钟」文案此前未同步，本次对齐（开关提示、副文案、最近提炼说明）
+- 记忆插件：设置页「最近提炼」记录改为折叠展示——默认显示最近 5 条，超出显示「查看全部（N 条）」可一键展开/收起
+- 记忆插件：修复「最近提炼」记录中来源会话全部显示为「session-」的问题——短 id 此前截取的是会话 ID 的词缀而非 UUID 段，现显示真实 UUID 前 8 位（如 49ce2455），跨记录可区分；后台提炼子代理的工作流标签同步修复
+
+### English
+- Upgraded the bundled kernel to dsh 0.1.2-alpha.4: the shell deps, kernel runtime and the plugin suite now all align with the latest alpha channel (kernel updates stay decoupled from shell updates; the alpha.4 runtime artifacts are rebuilt and republished with this release)
+- Memory plugin (cross-session memory): the background-distill quiet window is now uniformly 1 minute — the code was already live, but three spots of the settings copy still said "5 minutes" and are now in sync (toggle notice, hint, and the "最近提炼" note)
+- Memory plugin: the "最近提炼" (recent distill) list in settings now folds — 5 rows show by default and a "查看全部（N 条）" button expands/collapses beyond that
+- Memory plugin: fixed the "最近提炼" rows all showing "session-" as the source session — the short id previously sliced the session-id prefix instead of the UUID segment; rows now show the first 8 hex of the real UUID (e.g. 49ce2455) and are distinguishable; the background-distill subagent's workflow label is fixed the same way
+
 ## [v0.7.5] - 2026-09-01
 
 ### 中文

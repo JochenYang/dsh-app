@@ -127,6 +127,35 @@ and via the tray menu (both skipped in dev mode); it does not check at
 startup — a missing/broken kernel is simply (re)installed during boot. Shell
 updates are checked 10 s after boot and via the tray.
 
+### Update timing gotcha (learned the hard way)
+
+- npm and GitHub publish on **different clocks**: a new dsh dist-tag goes live
+  on npm before CI finishes building/uploading the 6-cell runtime matrix, so
+  `runtime-<dshVersion>` can lag by ~30 min to hours. A check in that window
+  reports "安装包尚未发布" (artifact pending) — by design the shell never
+  offers an update whose tarball cannot yet download. **No new shell release is
+  ever needed for a kernel update**; the two channels are fully decoupled.
+  Users just re-check from the tray; a stale "尚未发布" with everything
+  published is not a bug.
+- Before diagnosing user reports as network issues, verify the artifact
+  release is complete:
+  `gh api repos/JochenYang/dsh-app/releases/tags/runtime-<v> --jq '.assets[].name'`
+  must list all 6 cells (win32/darwin/linux × x64/arm64) as tgz + .sha512 +
+  `manifest-<platform>-<arch>.json`, and each sidecar sha512 must equal the
+  manifest's `integrity`. A missing cell (e.g. an arm64 upload still in
+  flight) makes that platform report "artifact pending" while others succeed.
+- Rebuild the runtime + bundled kernel locally when bumping dsh:
+  1. `npm view @deepseek-ai/dsh dist-tags --json` and pick the version of the
+     configured channel (`DSH_APP_CHANNEL`: alpha→alpha tag, beta→next,
+     else latest).
+  2. Bump every `@deepseek-ai/dsh-*` devDependency in `package.json` to the
+     same version line (`^`-coupled) and `npm install` to refresh the lock.
+  3. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
+     then `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
+     (both outputs are gitignored; CI rebuilds them from the dist-tag).
+  4. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
+     node (`<runtime>/app` → `node_modules/@deepseek-ai/dsh/lib/bin.js --version`).
+
 ## 5. Server process management
 
 - The shell picks a **free port at runtime** (`net.listen(0)`) and pins the
