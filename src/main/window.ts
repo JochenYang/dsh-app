@@ -1,7 +1,7 @@
 import { BrowserWindow, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
-import { UPDATE_CARD_SCRIPT, type UpdateCardTone } from './update-card'
+import { UPDATE_CARD_SCRIPT, KERNEL_UPDATE_CARD_SCRIPT, type UpdateCardTone } from './update-card'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
 const OVERLAY_HEIGHT = 36
@@ -417,6 +417,32 @@ export function showUpdateToast(win: BrowserWindow | null, message: string, tone
   if (!win || win.isDestroyed()) return
   win.webContents
     .executeJavaScript(UPDATE_CARD_SCRIPT({ message, progress: null, tone, autoHide: durationMs }))
+    .catch(() => undefined)
+}
+
+/**
+ * Persistent "kernel update available" card for background checks (no toast,
+ * no modal). Resolves with 'update' | 'later' once the user clicks a button;
+ * never auto-hides, so a background finding stays visible until acted on.
+ * When the window is gone/unresponsive or the page doesn't answer, it
+ * resolves 'later' (a pending rejection) rather than crashing the caller.
+ */
+export async function showKernelUpdateCard(win: BrowserWindow | null, current: string, latest: string): Promise<'update' | 'later'> {
+  if (!win || win.isDestroyed()) return 'later'
+  try {
+    const choice = await win.webContents
+      .executeJavaScript(KERNEL_UPDATE_CARD_SCRIPT({ current, latest }))
+    return choice === 'update' ? 'update' : 'later'
+  } catch {
+    return 'later'
+  }
+}
+
+/** Remove the kernel update card (e.g. when the update flow starts elsewhere). */
+export function clearKernelUpdateCard(win: BrowserWindow | null): void {
+  if (!win || win.isDestroyed()) return
+  win.webContents
+    .executeJavaScript(`(function () { const el = document.getElementById('dsh-kernel-update-card'); if (el) el.remove(); })()`)
     .catch(() => undefined)
 }
 

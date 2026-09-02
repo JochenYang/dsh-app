@@ -124,8 +124,13 @@ dist/            tsc + copy output (gitignored, generated)
 
 The shell checks for kernel updates every 6 h (`KERNEL_CHECK_INTERVAL_MS`)
 and via the tray menu (both skipped in dev mode); it does not check at
-startup — a missing/broken kernel is simply (re)installed during boot. Shell
-updates are checked 10 s after boot and via the tray.
+startup — a missing/broken kernel is simply (re)installed during boot. A
+background check finding a newer kernel does not pop a modal and never
+auto-installs: it shows a persistent bottom-right card (稍后 / 立即更新,
+`src/main/update-card.ts` `KERNEL_UPDATE_CARD_SCRIPT`; no auto-hide, so a
+quiet finding is never missed) that resolves to the update flow when the
+user clicks 立即更新. Shell updates are checked 10 s after boot and via the
+tray.
 
 ### Update timing gotcha (learned the hard way)
 

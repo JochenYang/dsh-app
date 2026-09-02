@@ -6,7 +6,7 @@ import semver from 'semver'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
-import { createMainWindow, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
+import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult } from './updater'
@@ -284,9 +284,14 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
       return
     }
     if (!manual) {
-      // Background checks never pop a modal; a non-intrusive in-window toast
-      // surfaces the finding (the user installs from the tray menu).
-      showUpdateToast(mainWindow, `发现新版本 dsh ${result.latest}，可在托盘菜单中更新`, 'progress', 5_000)
+      if (!result.latest) return
+      // Background checks never pop a modal and never auto-install; they
+      // surface the finding as a persistent bottom-right card (no auto-hide)
+      // with an 立即更新 action when the user chooses. Unlike the old 5 s
+      // toast this stays visible until acted on, so a quiet channel cannot be
+      // missed mid-work; the user decides when to restart the server.
+      const choice = await showKernelUpdateCard(mainWindow, result.current ?? '未知', result.latest)
+      if (choice === 'update') await applyKernelUpdate(result.latest)
       return
     }
     const proceed = await promptThemedConfirm(
