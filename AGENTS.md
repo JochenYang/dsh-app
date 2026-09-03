@@ -161,8 +161,13 @@ tray.
      with nominal brand conflicts. Plugins must never keep their own
      `@deepseek-ai/*` copies: resolution comes from the repo root only, and
      local third-party deps are installed with
-     `npm install --legacy-peer-deps` (plain `npm install` auto-installs
-     peerDependencies and pulls `@deepseek-ai/*` back in).
+     `npm install --legacy-peer-deps` — and ONLY inside a plugin directory:
+     plain `npm install` there auto-installs peerDependencies and pulls
+     `@deepseek-ai/*` back in. NEVER use `--legacy-peer-deps` at the repo
+     root: it changes peer resolution globally and npm prunes the peer-only
+     tree out of package-lock.json (this wiped 13 @deepseek-ai packages plus
+     the electron-builder chain once, breaking `npm ci` on every CI job).
+     Root dependency changes always use plain `npm install`.
   3. `npm install` to refresh the lock.
   4. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
      then `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
