@@ -12,9 +12,11 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 ### 中文
 - 并行子代理（swarm）：新增 `tool_filter` 参数——批量任务可为每个子代理限定工具集（如只读批量仅保留读/搜索工具），批量分析、审阅、查找不再有子代理误写文件的风险；不指定时维持原行为（全工具集），恢复（resume）的子代理沿用其创建时的工具集
+- 插件套件工程：7 个插件的 `@deepseek-ai/*` 开发依赖与内核 rc 线对齐，移除四个插件陈旧的独立 node_modules/lockfile（其 alpha.3 双实例导致插件 typecheck 长期报错）；swarm 适配内核 rc.1 的 subagent API（`followup` → `sendMessage`，会话事件读取改为结构化切片）——全部插件 typecheck 与 build 全绿
 
 ### English
 - Swarm: new `tool_filter` parameter — scope every child's tool set per batch (e.g. keep only read/search tools for read-only batches), so analysis/review/lookup batches no longer risk a child writing files the parent never audits; omitting it keeps the previous full-tool behavior, and resumed children keep the tool set they were created with
+- Plugin suite engineering: all 7 plugins' `@deepseek-ai/*` devDependencies are aligned with the kernel rc line, and the four plugins' stale standalone node_modules/lockfiles were removed (their alpha.3 dual instances had kept plugin typecheck red); swarm was migrated to the rc.1 subagent API (`followup` → `sendMessage`, session event log read via a structural slice) — every plugin now typechecks and builds green
 
 ## [v0.7.8] - 2026-09-03
 

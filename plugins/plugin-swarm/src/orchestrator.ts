@@ -147,7 +147,11 @@ function textOf(blocks: readonly ContentBlock[]): string {
  * batch actionable instead of a bare "run failed".
  */
 function childTurnError(run: SubagentRun): string | undefined {
-  const events = run.localAgent?.session.events
+  // Session.events is not part of the public type surface in rc.1 — read it
+  // through the same structural cast the memory plugin uses for its
+  // SessionLike slice (the runtime object does carry the event log).
+  const session = run.localAgent?.session as unknown as { events?: ReadonlyArray<{ type: string, data: unknown }> } | undefined
+  const events = session?.events
   if (events === undefined) return undefined
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]
@@ -447,14 +451,13 @@ async function runContinuableTask(
     }
     let childId: string
     if (task.resumeChildId !== undefined) {
-      await ctx.subagents.followup(
+      // rc.1 renamed followup → sendMessage (and dropped the explicit source
+      // option: the coordinator-relay provenance is now implicit to the seam).
+      await ctx.subagents.sendMessage(
         options.parent,
         SessionId(task.resumeChildId),
         [{ type: 'text', text: task.prompt }],
-        {
-          source: { kind: 'coordinator', form: 'relay', senderSessionId: options.parent.id },
-          signal: options.signal,
-        },
+        { signal: options.signal },
       )
       childId = task.resumeChildId
     } else {
