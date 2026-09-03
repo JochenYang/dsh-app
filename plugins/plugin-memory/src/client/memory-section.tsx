@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { MemoryDistillActivity, MemoryProjectSummary, MemoryStatus } from '../types.ts'
+import type { MemoryDistillActivity, MemoryEntriesResponse, MemoryProjectSummary, MemoryStatus } from '../types.ts'
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -47,6 +47,9 @@ const ROUTE = '/plugins/@dsh-app/plugin-memory/api'
 /** Distill-activity rows shown before the "show all" fold (list caps at 20). */
 const ACTIVITY_PREVIEW = 5
 
+/** Global entry rows shown before the "show all" fold. */
+const ENTRIES_PREVIEW = 5
+
 /** What the confirm banner is about to clear. */
 interface ConfirmState {
   scope: 'global' | 'project'
@@ -62,6 +65,9 @@ export function MemorySection(): ReactNode {
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState<ConfirmState | null>(null)
   const [activityExpanded, setActivityExpanded] = useState(false)
+  const [entriesExpanded, setEntriesExpanded] = useState(false)
+  const [openSlug, setOpenSlug] = useState<string | null>(null)
+  const [projectRows, setProjectRows] = useState<{ slug: string, entries: MemoryEntriesResponse['entries'] } | null>(null)
   const inFlight = useRef(false)
 
   const load = useCallback(async () => {
@@ -71,6 +77,11 @@ export function MemorySection(): ReactNode {
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
     }
+  }, [])
+
+  const loadProjectRows = useCallback(async (slug: string) => {
+    const data = await fetchJson<MemoryEntriesResponse>(`${ROUTE}/entries?slug=${encodeURIComponent(slug)}`)
+    setProjectRows({ slug, entries: data.entries })
   }, [])
 
   useEffect(() => { void load() }, [load])
@@ -118,6 +129,66 @@ export function MemorySection(): ReactNode {
       inFlight.current = false
     }
   }, [status, load])
+
+  const onPin = useCallback(async (scope: 'global' | 'project', slug: string, text: string, pinned: boolean) => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    setNotice(undefined)
+    try {
+      await fetchJson(`${ROUTE}/pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text, pinned, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
+      })
+      setNotice(pinned ? '已固定：该条目将始终随会话注入，不再受注入长度截断影响' : '已取消固定')
+      if (scope === 'project') await loadProjectRows(slug)
+      else await load()
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setBusy(false)
+      inFlight.current = false
+    }
+  }, [load, loadProjectRows])
+
+  const onForget = useCallback(async (scope: 'global' | 'project', slug: string, text: string) => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    setNotice(undefined)
+    try {
+      const result = await fetchJson<{ forgotten: number }>(`${ROUTE}/forget`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ match: text, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
+      })
+      setNotice(result.forgotten > 0 ? `已删除 ${String(result.forgotten)} 条记忆` : '没有找到匹配的条目')
+      if (scope === 'project') { await loadProjectRows(slug); await load() }
+      else await load()
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setBusy(false)
+      inFlight.current = false
+    }
+  }, [load, loadProjectRows])
+
+  const onToggleProject = useCallback(async (project: MemoryProjectSummary) => {
+    if (openSlug === project.slug) {
+      setOpenSlug(null)
+      return
+    }
+    setOpenSlug(project.slug)
+    setProjectRows(null)
+    setNotice(undefined)
+    try {
+      await loadProjectRows(project.slug)
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+      setOpenSlug(null)
+    }
+  }, [openSlug, loadProjectRows])
 
   const onClear = useCallback(async () => {
     if (confirming === null || inFlight.current) return
@@ -240,6 +311,47 @@ export function MemorySection(): ReactNode {
         )
         : null}
 
+      {status !== null && status.globalList.length > 0
+        ? (
+          <div className="dshm_projects">
+            <div className="dshm_projectsTitle">全局条目</div>
+            <div className="dshm_hint">固定（📌）的条目始终随会话注入，不受注入长度截断影响；未固定的按“每分类保留最新”挑选。列表按保存时间倒序，默认只显示最近 {String(ENTRIES_PREVIEW)} 条。</div>
+            {[...status.globalList].reverse().slice(0, entriesExpanded ? status.globalList.length : ENTRIES_PREVIEW).map((entry, index) => (
+              <div key={`${entry.text}-${index}`} className="dshm_entryRow">
+                <span className="dshm_entryText">{entry.text}</span>
+                <button
+                  type="button"
+                  className={entry.pinned ? 'dshm_pinBtn dshm_pinBtnOn' : 'dshm_pinBtn'}
+                  aria-pressed={entry.pinned}
+                  aria-label={entry.pinned ? '取消固定该条目' : '固定该条目'}
+                  disabled={busy}
+                  onClick={() => { void onPin('global', '', entry.text, !entry.pinned) }}
+                >{entry.pinned ? '已固定' : '固定'}</button>
+                <button
+                  type="button"
+                  className="dshm_button dshm_buttonDanger"
+                  aria-label="删除该条目"
+                  disabled={busy}
+                  onClick={() => { void onForget('global', '', entry.text) }}
+                >删除</button>
+              </div>
+            ))}
+            {status.globalList.length > ENTRIES_PREVIEW
+              ? (
+                <button
+                  type="button"
+                  className="dshm_button dshm_activityMore"
+                  aria-expanded={entriesExpanded}
+                  onClick={() => { setEntriesExpanded(expanded => !expanded) }}
+                >
+                  {entriesExpanded ? '收起' : `查看全部（${String(status.globalList.length)} 条）`}
+                </button>
+              )
+              : null}
+          </div>
+        )
+        : null}
+
       <div className="dshm_actions">
         <button
           type="button"
@@ -253,16 +365,54 @@ export function MemorySection(): ReactNode {
         ? (
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">项目记忆</div>
+            <div className="dshm_hint">点击“条目”展开该项目的记忆明细，可逐条固定或删除；“删除”移除整个项目的记忆目录（需确认）。</div>
             {status.projects.map(project => (
-              <div key={project.slug} className="dshm_projectRow">
-                <span className="dshm_projectName" title={project.cwd === '' ? project.slug : project.cwd}>{projectTitle(project)}</span>
-                <span className="dshm_projectMeta">{String(project.entries)} 条 · {fmtBytes(project.sizeBytes)}</span>
-                <button
-                  type="button"
-                  className="dshm_button dshm_buttonDanger"
-                  disabled={busy}
-                  onClick={() => { setConfirming({ scope: 'project', slug: project.slug, title: projectTitle(project), entries: project.entries }) }}
-                >删除</button>
+              <div key={project.slug} className="dshm_projectBlock">
+                <div className="dshm_projectRow">
+                  <span className="dshm_projectName" title={project.cwd === '' ? project.slug : project.cwd}>{projectTitle(project)}</span>
+                  <span className="dshm_projectMeta">{String(project.entries)} 条 · {fmtBytes(project.sizeBytes)}</span>
+                  <button
+                    type="button"
+                    className="dshm_button"
+                    aria-expanded={openSlug === project.slug}
+                    disabled={busy}
+                    onClick={() => { void onToggleProject(project) }}
+                  >{openSlug === project.slug ? '收起' : '条目'}</button>
+                  <button
+                    type="button"
+                    className="dshm_button dshm_buttonDanger"
+                    disabled={busy}
+                    onClick={() => { setConfirming({ scope: 'project', slug: project.slug, title: projectTitle(project), entries: project.entries }) }}
+                  >删除</button>
+                </div>
+                {openSlug === project.slug
+                  ? (
+                    projectRows === null || projectRows.slug !== project.slug
+                      ? <div className="dshm_hint">加载中…</div>
+                      : projectRows.entries.length === 0
+                        ? <div className="dshm_hint">（暂无条目）</div>
+                        : [...projectRows.entries].reverse().map((entry, index) => (
+                          <div key={`${entry.text}-${index}`} className="dshm_entryRow">
+                            <span className="dshm_entryText">{entry.text}</span>
+                            <button
+                              type="button"
+                              className={entry.pinned ? 'dshm_pinBtn dshm_pinBtnOn' : 'dshm_pinBtn'}
+                              aria-pressed={entry.pinned}
+                              aria-label={entry.pinned ? '取消固定该条目' : '固定该条目'}
+                              disabled={busy}
+                              onClick={() => { void onPin('project', project.slug, entry.text, !entry.pinned) }}
+                            >{entry.pinned ? '已固定' : '固定'}</button>
+                            <button
+                              type="button"
+                              className="dshm_button dshm_buttonDanger"
+                              aria-label="删除该条目"
+                              disabled={busy}
+                              onClick={() => { void onForget('project', project.slug, entry.text) }}
+                            >删除</button>
+                          </div>
+                        ))
+                  )
+                  : null}
               </div>
             ))}
           </div>

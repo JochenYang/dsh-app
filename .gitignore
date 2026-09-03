@@ -8,6 +8,7 @@ release/
 runtime-dist/
 bundled-kernel/
 plugins/*/lib/
+plugins/*/.test-dist/
 
 # ---- Runtime artifacts ----
 *.tgz

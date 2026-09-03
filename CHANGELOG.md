@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- 记忆插件（会话记忆）：注入策略升级为「每分类保留最新 + 固定优先」——全局/项目记忆不再整文件尾部截断，五类条目按配额各保其最新 N 条，单类不会挤占其他类别；固定条目在任何预算下都注入
+- 记忆插件：新增条目「固定」——设置页固定（📌）的条目始终随会话注入、不受注入预算截断影响；全局与各项目拥有独立固定集；新增条目级删除（精确内容匹配，不误伤仅含相同片段的其他条目）
+- 记忆插件：新增后台整理器（curator）——后台提炼保存条目后自动合并近义条目、清理过时条目、修正分类，记忆文件不再单向膨胀；整理提案由只读子代理提出、宿主逐条验证后原子落盘
+- 记忆插件：设置页条目列表可折叠——全局默认显示最近 5 条、可展开查看全部；项目记忆可展开逐条明细并逐条固定/删除
+- 记忆插件修复：无工作目录的会话也能沉淀全局偏好（此前被直接跳过）；后台提炼去重从「子串误杀」改为内容精确匹配（如已有「用 pnpm 跑 typecheck」不再吞掉「用 pnpm」）；设置页跨源请求由挂起改为 403 明确拒绝；整理器单轮编辑上限在两个阶段都生效
+- 记忆插件工程：新增 25 个单测（`npm test`），覆盖注入选择、固定、蒸馏去重与整理器编辑验证；插件套件 README/AGENTS 插件清单与论坛帖记忆描述同步修正
+
+### English
+- Memory plugin: injection upgraded to "newest-per-category + pinned-first" — the global/project files are no longer tail-truncated wholesale; each of the five categories keeps its newest quota so one category cannot crowd out another; pinned entries inject under any budget
+- Memory plugin: entry pinning — a pinned (📌) entry is always injected, immune to the injection budget; the global file and each project have independent pin sets; plus per-entry delete (exact-content, never hits rows that merely share a phrase)
+- Memory plugin: new background curator — after the distiller saves entries, it merges near-duplicates, prunes stale entries and re-categorizes, so a memory file no longer grows monotonically; a read-only subagent proposes edits and the host validates each before an atomic rewrite
+- Memory plugin: foldable entry lists in settings — global shows the newest 5 by default with an expand-all toggle; projects expand into per-entry rows with pin/delete
+- Memory plugin fixes: sessions without a workspace now distill global preferences too (previously skipped); distill dedupe is exact-content instead of substring ("用 pnpm" no longer gets eaten by a stored "用 pnpm 跑 typecheck"); cross-origin settings requests answer 403 instead of hanging; the curator's per-run edit cap applies in both stages
+- Memory plugin engineering: 25 unit tests shipped (`npm test`) covering injection selection, pinning, distill dedupe and curator edit validation; plugin-suite README/AGENTS plugin lists and the forum post's memory description are synced
+
 ## [v0.7.6] - 2026-09-02
 
 ### 中文

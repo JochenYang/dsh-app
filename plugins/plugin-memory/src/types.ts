@@ -31,6 +31,11 @@ export interface MemoryDistillActivity {
   saved: number
 }
 
+/** Response of GET api/entries — one store's rows with pin state. */
+export interface MemoryEntriesResponse {
+  entries: Array<{ text: string, pinned: boolean }>
+}
+
 /** Response of GET api/status — the settings section's whole world. */
 export interface MemoryStatus {
   /** Whether memory injection + tools are active (master toggle). */
@@ -43,6 +48,8 @@ export interface MemoryStatus {
   sizeBytes: number
   /** GLOBAL memory file path, shown so the user can edit it by hand. */
   filePath: string
+  /** GLOBAL entries in file order with their pin state (settings list). */
+  globalList: Array<{ text: string, pinned: boolean }>
   /** Per-project summaries, largest first. */
   projects: MemoryProjectSummary[]
   /** Recent background-distill traces, newest first (bounded list). */

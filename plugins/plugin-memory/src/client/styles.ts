@@ -259,6 +259,60 @@ const cssText = `
 .dshm_projectRow .dshm_button {
   flex: none;
 }
+.dshm_projectBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.dshm_projectBlock .dshm_entryRow {
+  margin-top: 0;
+  margin-left: 12px;
+}
+.dshm_projectBlock .dshm_hint {
+  margin-left: 12px;
+}
+.dshm_entryRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  min-width: 0;
+}
+.dshm_entryRow + .dshm_entryRow {
+  margin-top: 6px;
+}
+.dshm_entryText {
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.dshm_pinBtn {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 2px 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.dshm_pinBtn:hover {
+  color: var(--dsw-alias-label-primary);
+}
+.dshm_pinBtn[aria-pressed='true'] {
+  color: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
 `
 
 /** Inject the section styles once. */

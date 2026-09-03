@@ -10,16 +10,17 @@
  * memory_save mid-session is visible to the NEXT turn, and the master
  * toggle is honored live.
  *
- * Injection budgets (line-boundary truncation keeping the NEWEST entries
- * with a recall hint — the file is append-only, so freshness sits at the
- * bottom and matters most to the current session):
+ * Injection budgets (per-assembly selection: pinned entries always win, then
+ * the NEWEST entries of each category up to a quota — one bucket cannot crowd
+ * out the others; whatever is dropped stays reachable via memory_recall):
  *   global  ≤ {@link MAX_GLOBAL_CHARS}   — preferences stay small by discipline
  *   project ≤ {@link MAX_PROJECT_CHARS}  — the growth valve
  *
  * @module @dsh-app/plugin-memory/prompt
  */
 
-import type { MemoryRoot } from './memory-store.ts'
+import { normalizeForMatch, parseEntries, type MemoryEntry, type MemoryRoot } from './memory-store.ts'
+import type { MemoryCategory } from './types.ts'
 
 /** Hard ceiling on the injected GLOBAL memory text (characters). */
 export const MAX_GLOBAL_CHARS = 1_200
@@ -64,16 +65,80 @@ const GUIDELINES_TEXT = [
   'lean — these files are re-read by every future session of their scope.',
 ].join('\n')
 
-/** Truncate to a budget on a line boundary, keeping the NEWEST tail:
- * memory files are append-only so fresh entries live at the bottom and are
- * the most likely to matter right now; the dropped head stays reachable via
- * memory_recall. Returns the kept tail and whether anything was dropped. */
-function truncateTail(text: string, budget: number): { tail: string, truncated: boolean } {
-  if (text.length <= budget) return { tail: text, truncated: false }
-  const slice = text.slice(text.length - budget)
-  const firstBreak = slice.indexOf('\n')
-  const tail = (firstBreak > 0 ? slice.slice(firstBreak + 1) : slice).trimStart()
-  return { tail, truncated: true }
+/** Per-category quota inside the injection budget: every category keeps its
+ *  NEWEST entries so one class cannot crowd out the others (a project today
+ *  rarely needs more than this from each bucket). */
+const CATEGORY_QUOTA: Record<MemoryCategory, number> = {
+  preference: 3,
+  convention: 3,
+  decision: 2,
+  lesson: 2,
+  fact: 2,
+}
+
+/** One injection selection: the picked lines plus whether anything was dropped. */
+interface MemorySelection {
+  selected: string[]
+  truncated: boolean
+}
+
+/**
+ * Pick the injection lines under a character budget:
+ *  1. pinned entries always win (the user's hard guarantee — they survive
+ *     growth regardless of how the rest is truncated);
+ *  2. per category the newest {@link CATEGORY_QUOTA} entries (memory files
+ *     are append-only, so the tail holds the fresh facts);
+ *  3. non-standard lines (hand edits) are carried verbatim.
+ * Budget is accumulated in that priority order (quota overflow only ever
+ * drops the oldest picks), while the emitted text keeps file order so the
+ * timeline stays readable. What is dropped under the budget stays reachable
+ * via memory_recall.
+ */
+export function selectBalanced(text: string, budget: number, pinned: Set<string>): MemorySelection {
+  const entries = parseEntries(text)
+  if (entries.length === 0) return { selected: [], truncated: false }
+
+  const byCategory = new Map<string, MemoryEntry[]>()
+  const pinnedEntries: MemoryEntry[] = []
+  const handNotes: MemoryEntry[] = []
+  for (const entry of entries) {
+    if (pinned.has(normalizeForMatch(entry.content))) {
+      pinnedEntries.push(entry)
+    } else if (entry.category === undefined) {
+      handNotes.push(entry)
+    } else {
+      const list = byCategory.get(entry.category) ?? []
+      list.push(entry)
+      byCategory.set(entry.category, list)
+    }
+  }
+  // Pinned entries rank FIRST — nothing (not even a long hand note) may ever
+  // crowd them out of the budget; that is what "pin" promises.
+  const priority: MemoryEntry[] = [...pinnedEntries, ...handNotes]
+  for (const [category, list] of byCategory) {
+    const quota = CATEGORY_QUOTA[category as MemoryCategory] ?? 2
+    priority.push(...list.slice(Math.max(0, list.length - quota)))
+  }
+
+  const picked: MemoryEntry[] = []
+  let used = 0
+  for (const entry of priority) {
+    const width = entry.raw.length + 1
+    if (used + width > budget) break
+    picked.push(entry)
+    used += width
+  }
+  if (picked.length === 0) {
+    // The pin contract never blanks: even when the very first line exceeds
+    // the whole budget, the FIRST pinned entry is still injected whole.
+    const fallback = pinnedEntries[0]
+    if (fallback !== undefined) return { selected: [fallback.raw], truncated: true }
+    return { selected: [], truncated: true }
+  }
+
+  const order = new Map(entries.map((entry, index) => [entry, index]))
+  picked.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
+  return { selected: picked.map(entry => entry.raw), truncated: picked.length < entries.length }
 }
 
 /**
@@ -85,13 +150,17 @@ function truncateTail(text: string, budget: number): { tail: string, truncated: 
  */
 export function renderMemoryText(root: MemoryRoot, cwd: string | undefined): string {
   if (!root.global.isEnabled()) return ''
+  const globalPinned = root.global.pinnedSet()
   const globalText = root.global.read().trim()
-  const projectText = cwd === undefined ? '' : root.projectFor(cwd).read().trim()
+  const projectStore = cwd === undefined ? undefined : root.projectFor(cwd)
+  const projectText = projectStore === undefined ? '' : projectStore.read().trim()
   const projectName = cwd === undefined ? '' : cwd.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
 
   const parts: string[] = [GUIDELINES_TEXT]
-  const g = truncateTail(globalText, MAX_GLOBAL_CHARS)
-  const p = truncateTail(projectText, MAX_PROJECT_CHARS)
+  const g = selectBalanced(globalText, MAX_GLOBAL_CHARS, globalPinned)
+  // Each scope pins against its OWN store: a global pin never leaks into a
+  // project file, and project pins (set from the settings page) actually work.
+  const p = selectBalanced(projectText, MAX_PROJECT_CHARS, projectStore === undefined ? new Set<string>() : projectStore.pinnedSet())
 
   if (globalText === '' && projectText === '') {
     parts.push('', '## Memory (persisted)', '', '(empty — nothing saved yet)')
@@ -99,11 +168,11 @@ export function renderMemoryText(root: MemoryRoot, cwd: string | undefined): str
   }
 
   if (globalText !== '') {
-    parts.push('', '### Memory — global', '', g.tail)
+    parts.push('', '### Memory — global', '', g.selected.join('\n'))
     if (g.truncated) parts.push('', '— older entries not injected; memory_recall reads the full file.')
   }
   if (projectText !== '') {
-    parts.push('', `### Memory — current project (${projectName})`, '', p.tail)
+    parts.push('', `### Memory — current project (${projectName})`, '', p.selected.join('\n'))
     if (p.truncated) parts.push('', '— older entries not injected; memory_recall reads the full file.')
   }
   return parts.join('\n')

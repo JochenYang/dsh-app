@@ -42,7 +42,7 @@ export const MAX_ENTRY_CHARS = 500
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 
 /** Local-date line prefix for an entry. */
-function todayStamp(): string {
+export function todayStamp(): string {
   const now = new Date()
   const month = String(now.getMonth() + 1).padStart(2, '0')
   const day = String(now.getDate()).padStart(2, '0')
@@ -58,6 +58,39 @@ export function normalizeForMatch(text: string): string {
 
 /** Entry-line prefix shape: `- [category] YYYY-MM-DD `. */
 const ENTRY_PREFIX = /^- \[[a-z]+\] \d{4}-\d{2}-\d{2} /u
+
+/** Capturing variant: category and date of a standard entry line. */
+const FULL_ENTRY_PREFIX = /^- \[([a-z]+)\] (\d{4}-\d{2}-\d{2}) /u
+
+/** One parsed line of a memory file. */
+export interface MemoryEntry {
+  /** The raw line without its trailing newline. */
+  raw: string
+  /** Category of a standard entry line; undefined otherwise. */
+  category: string | undefined
+  /** `YYYY-MM-DD` stamp of a standard entry line; undefined otherwise. */
+  date: string | undefined
+  /** Prefix-stripped content (the whole raw line when non-standard). */
+  content: string
+}
+
+/** Split a memory file into its lines (empty lines dropped). Shared by the
+ *  injection selector, the curator, and the settings list. */
+export function parseEntries(text: string): MemoryEntry[] {
+  const out: MemoryEntry[] = []
+  for (const line of text.split('\n')) {
+    if (line === '') continue
+    const match = FULL_ENTRY_PREFIX.exec(line)
+    if (match !== null) out.push({
+      raw: line,
+      category: match[1],
+      date: match[2],
+      content: line.slice(match[0].length),
+    })
+    else out.push({ raw: line, category: undefined, date: undefined, content: line })
+  }
+  return out
+}
 
 /** The content part of an entry line (prefix stripped; the whole line when
  * it does not carry the standard prefix). */
@@ -110,10 +143,12 @@ export class MemoryStore {
     return line
   }
 
-  /** Drop every entry (the file is recreated empty on the next append). */
+  /** Drop every entry and every pin (the file is recreated empty on the next
+ *  append). A clear is a full reset, not a soft wipe that leaves pins behind
+ *  to resurrect matching future entries. */
   clear(): void {
-    if (!existsSync(this.memoryPath)) return
-    atomicWrite(this.memoryPath, '')
+    if (existsSync(this.memoryPath)) atomicWrite(this.memoryPath, '')
+    this.writeConfig({ pinned: [] })
   }
 
   /**
@@ -195,32 +230,87 @@ export class MemoryStore {
 
   /** One boolean field out of config.json with a default. */
   private readConfigField(field: string, fallback: boolean): boolean {
-    try {
-      const raw = readFileSync(this.configPath, 'utf8')
-      const parsed: unknown = JSON.parse(raw)
-      if (typeof parsed === 'object' && parsed !== null) {
-        const value = (parsed as Record<string, unknown>)[field]
-        if (typeof value === 'boolean') return value
-      }
-    } catch {
-      // absent or unreadable → default
-    }
-    return fallback
+    const value = this.readConfigJson()[field]
+    return typeof value === 'boolean' ? value : fallback
   }
 
   /** Merge-write one field into config.json (keeps the sibling fields). */
-  private writeConfig(patch: Record<string, boolean>): void {
+  private writeConfig(patch: Record<string, unknown>): void {
     mkdirSync(this.dir, { recursive: true })
-    let merged: Record<string, boolean> = {}
+    atomicWrite(this.configPath, `${JSON.stringify({ ...this.readConfigJson(), ...patch }, null, 2)}\n`)
+  }
+
+  /** Raw config.json as a plain object (absent/unreadable → empty). */
+  private readConfigJson(): Record<string, unknown> {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.configPath, 'utf8'))
-      if (typeof parsed === 'object' && parsed !== null) {
-        merged = { ...(parsed as Record<string, boolean>) }
-      }
+      return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
     } catch {
-      // absent/unreadable → start fresh
+      return {}
     }
-    atomicWrite(this.configPath, `${JSON.stringify({ ...merged, ...patch }, null, 2)}\n`)
+  }
+
+  /**
+   * Normalized contents pinned to always inject. Pin persists in config.json
+   * (not in the memory file), keyed by {@link normalizeForMatch} so it
+   * survives line rewrites; a pin of an entry that no longer exists is a
+   * harmless no-op at injection time.
+   */
+  pinnedSet(): Set<string> {
+    const pins = this.readConfigJson().pinned
+    return new Set(Array.isArray(pins) ? pins.filter((p): p is string => typeof p === 'string') : [])
+  }
+
+  /** Pin an entry by content; false when already pinned or matchless. */
+  addPin(content: string): boolean {
+    const needle = normalizeForMatch(content)
+    if (needle === '') return false
+    const pins = [...this.pinnedSet()]
+    if (pins.includes(needle)) return false
+    this.writeConfig({ pinned: [...pins, needle] })
+    return true
+  }
+
+  /** Unpin an entry by content; false when it was not pinned. */
+  removePin(content: string): boolean {
+    const needle = normalizeForMatch(content)
+    const pins = [...this.pinnedSet()]
+    if (!pins.includes(needle)) return false
+    this.writeConfig({ pinned: pins.filter(p => p !== needle) })
+    return true
+  }
+
+  /** Replace the whole file content crash-safely (used by the curator). */
+  replace(text: string): void {
+    if (text === '') {
+      if (existsSync(this.memoryPath)) atomicWrite(this.memoryPath, '')
+      return
+    }
+    atomicWrite(this.memoryPath, text.endsWith('\n') ? text : `${text}\n`)
+  }
+
+  /**
+   * Remove entries whose CONTENT normalizes to the exact same string — the
+   * settings-page row delete. Precise (unlike {@link forget}'s substring
+   * sweep): deleting the row "用 pnpm" never touches "用 pnpm 跑 typecheck".
+   */
+  removeContent(content: string): { removed: string[], remaining: number } {
+    const needle = normalizeForMatch(content)
+    if (needle === '') return { removed: [], remaining: 0 }
+    const kept: string[] = []
+    const removed: string[] = []
+    for (const line of this.read().split('\n')) {
+      if (line.startsWith('- [') && normalizeForMatch(entryContent(line)) === needle) {
+        removed.push(line)
+      } else {
+        kept.push(line)
+      }
+    }
+    if (removed.length > 0) {
+      const body = kept.join('\n').replace(/\n+$/u, '')
+      atomicWrite(this.memoryPath, body === '' ? '' : `${body}\n`)
+    }
+    return { removed, remaining: kept.filter(l => l.startsWith('- [')).length }
   }
 
   /** Absolute memory-file path (for the settings UI). */
@@ -338,6 +428,22 @@ export class MemoryRoot {
   /** Project store for a workspace cwd (cheap: no I/O until a write). */
   projectFor(cwd: string): MemoryStore {
     return new MemoryStore(join(this.dir, 'projects', projectSlug(cwd)), cwd)
+  }
+
+  /** Project store by slug (the settings routes resolve projects by slug,
+   *  not cwd; undefined for an unknown or malformed slug). */
+  projectBySlug(slug: string): MemoryStore | undefined {
+    if (!isValidSlug(slug)) return undefined
+    const dir = join(this.dir, 'projects', slug)
+    if (!existsSync(dir)) return undefined
+    try {
+      const meta: unknown = JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8'))
+      const cwd = (meta as { cwd?: unknown }).cwd
+      if (typeof cwd === 'string' && cwd !== '') return this.projectFor(cwd)
+    } catch {
+      // missing/stale metadata → operate on the directory as-is
+    }
+    return new MemoryStore(dir)
   }
 
   /** Last-consumed event seq for one session (0 when never distilled). */

@@ -24,11 +24,11 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the subagents Context merge (ctx.subagents) into scope.
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import { MAX_ENTRY_CHARS, normalizeForMatch, shortSessionId, type MemoryRoot } from './memory-store.ts'
+import { MAX_ENTRY_CHARS, normalizeForMatch, parseEntries, shortSessionId, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /**
@@ -129,6 +129,18 @@ function messageText(event: { type: string, data: unknown }): string {
   return ''
 }
 
+/** Exact-content set of one store's standard entries. Same dedupe rule as
+ *  memory_save's hasContent — never a substring test: "用户用 pnpm" must
+ *  survive a stored "用户用 pnpm 跑 typecheck", only identical wording is a
+ *  duplicate (near-duplicates in different words are the CURATOR's job). */
+export function existingNeedles(store: MemoryStore): Set<string> {
+  const set = new Set<string>()
+  for (const entry of parseEntries(store.read())) {
+    if (entry.category !== undefined) set.add(normalizeForMatch(entry.content))
+  }
+  return set
+}
+
 /**
  * The background distiller. {@link attach} subscribes to session events and
  * owns the per-session quiet timers; everything below the timer is fail-soft
@@ -142,7 +154,18 @@ export class MemoryDistiller {
   private readonly inFlight = new Set<SessionId>()
   private readonly abort = new AbortController()
 
-  constructor(ctx: Context, root: MemoryRoot, log: ReturnType<Context['logger']>) {
+  constructor(
+    ctx: Context,
+    root: MemoryRoot,
+    log: ReturnType<Context['logger']>,
+    /**
+     * Called (and awaited) after a run persisted ≥1 entry — the curator's
+     * trigger seam. Runs in the SAME background window, while the parent
+     * agent this distill used is still alive; it must not keep the agent
+     * reference past this call.
+     */
+    private readonly onSaved?: (parent: NonNullable<ReturnType<Context['agents']['get']>>) => void | Promise<void>,
+  ) {
     this.ctx = ctx
     this.root = root
     this.log = log
@@ -150,11 +173,10 @@ export class MemoryDistiller {
 
   /** Subscribe to the event feed; returns the disposer. */
   attach(): () => void {
-    const disposeFeed = this.ctx.on('session/event', (session: SessionLike, event) => {
+    const disposeFeed = this.ctx.on('session/event', (session: Session, event) => {
       if (event.type !== 'turn/end') return
       // Subagent sessions (including our own distill children) never distill.
       if (session.header.origin === 'subagent') return
-      if (session.header.cwd === undefined || session.header.cwd === '') return
       this.arm(session.id)
     })
     this.ctx.effect(() => () => {
@@ -189,8 +211,10 @@ export class MemoryDistiller {
       if (agent === undefined) return
       const session = agent.session as unknown as SessionLike
       if (session.header.origin === 'subagent') return
-      const cwd = session.header.cwd
-      if (cwd === undefined || cwd === '') return
+      // No workspace → the session still distills, but only the GLOBAL
+      // channel applies: a user preference is never lost just because the
+      // session was started without a cwd.
+      const cwd = session.header.cwd === '' ? undefined : session.header.cwd
 
       this.inFlight.add(sessionId)
       try {
@@ -204,7 +228,7 @@ export class MemoryDistiller {
   }
 
   /** The distill body: gather the delta, consult the child, apply entries. */
-  private async runDistill(parent: NonNullable<ReturnType<Context['agents']['get']>>, session: SessionLike, cwd: string): Promise<void> {
+  private async runDistill(parent: NonNullable<ReturnType<Context['agents']['get']>>, session: SessionLike, cwd: string | undefined): Promise<void> {
     const sessionId = session.id
     const lastSeq = this.root.distillSeqOf(sessionId)
     const fresh: Array<{ type: string, seq: number, text: string }> = []
@@ -242,7 +266,10 @@ export class MemoryDistiller {
     const transcript = lines.join('\n')
 
     const globalText = this.root.global.read().trim()
-    const projectText = this.root.projectFor(cwd).read().trim()
+    const projectText = cwd === undefined ? '' : this.root.projectFor(cwd).read().trim()
+    const projectSection = cwd === undefined
+      ? ['--- No workspace for this session: propose scope "global" entries ONLY (project entries have nowhere to land and are dropped) ---']
+      : ['--- Current PROJECT memory (this workspace only) ---', projectText === '' ? '(empty)' : projectText]
     const prompt = [
       'You are the memory distiller of an AI coding assistant. Review the conversation excerpt below',
       '(everything said since the last distill) and the current memory files, then propose NEW entries',
@@ -259,8 +286,7 @@ export class MemoryDistiller {
       '--- Current GLOBAL memory (user preferences, all projects) ---',
       globalText === '' ? '(empty)' : globalText,
       '',
-      '--- Current PROJECT memory (this workspace only) ---',
-      projectText === '' ? '(empty)' : projectText,
+      ...projectSection,
       '',
       '--- Conversation excerpt (since the last distill) ---',
       transcript,
@@ -291,21 +317,25 @@ export class MemoryDistiller {
       // Leave a durable trace (time, target session, saved count) so the
       // settings page can show what the background pass actually did.
       this.root.recordDistill(sessionId, applied)
-      if (applied > 0) this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
+      if (applied > 0) {
+        this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
+        await this.onSaved?.(parent)
+      }
     } finally {
       await run.dispose().catch(() => undefined)
     }
   }
 
   /** Validate proposals against the store; returns how many were appended. */
-  private applyEntries(structured: unknown, cwd: string): number {
+  private applyEntries(structured: unknown, cwd: string | undefined): number {
     if (typeof structured !== 'object' || structured === null) return 0
     const proposals = (structured as { entries?: unknown }).entries
     if (!Array.isArray(proposals)) return 0
 
-    // Dedupe basis: existing lines plus entries accepted within THIS run.
-    let globalSeen = normalizeForMatch(this.root.global.read())
-    let projectSeen = normalizeForMatch(this.root.projectFor(cwd).read())
+    // Dedupe basis: exact-content sets of both stores, plus entries accepted
+    // within THIS run (an accepted entry instantly becomes "existing").
+    const globalSeen = existingNeedles(this.root.global)
+    const projectSeen = cwd === undefined ? new Set<string>() : existingNeedles(this.root.projectFor(cwd))
     let applied = 0
     for (const raw of proposals) {
       if (applied >= MAX_DISTILL_ENTRIES) break
@@ -315,13 +345,15 @@ export class MemoryDistiller {
         ? proposal.category as MemoryCategory
         : undefined
       if (content === '' || content.length > MAX_ENTRY_CHARS || category === undefined) continue
+      // No workspace: a project-scoped proposal has nowhere to land — drop it
+      // rather than promote a project fact into the global file by mistake.
+      if (proposal.scope !== 'global' && cwd === undefined) continue
       const scope = proposal.scope === 'global' ? 'global' : 'project'
       const needle = normalizeForMatch(content)
-      if (needle !== '' && (globalSeen.includes(needle) || projectSeen.includes(needle))) continue
-      const store = scope === 'global' ? this.root.global : this.root.projectFor(cwd)
+      if (needle === '' || globalSeen.has(needle) || projectSeen.has(needle)) continue
+      const store = scope === 'global' ? this.root.global : this.root.projectFor(cwd as string)
       store.append(category, content)
-      if (scope === 'global') globalSeen += needle
-      else projectSeen += needle
+      ;(scope === 'global' ? globalSeen : projectSeen).add(needle)
       applied += 1
     }
     return applied

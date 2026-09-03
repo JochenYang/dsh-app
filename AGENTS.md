@@ -51,8 +51,9 @@ src/kernel/      Kernel runtime manager: lifecycle, manifest I/O, integrity,
                  version/artifact resolution sources
 src/shared/      Shared constants + types (imported by main + kernel)
 static/          Setup/install window (first-run UI, zh-CN), no framework
-plugins/         Brand plugin suite: plugin-brand (host), plugin-client-ui
-                 (client), dsh-app.patch.yml (loader overlay)
+plugins/         Brand plugin suite (7 plugins): plugin-brand, plugin-client-ui,
+                 plugin-sidebar, plugin-swarm, plugin-usage, plugin-archives,
+                 plugin-memory; dsh-app.patch.yml (loader overlay)
 scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
                  release-notes generator (gen-release-notes.mjs)
 CHANGELOG.md     Bilingual version changelog; feeds release-notes generation
@@ -181,7 +182,7 @@ tray.
 
 ## 6. Brand suite wiring (`plugins/`)
 
-Two dsh plugins ship with the product and layer on upstream **without
+Seven dsh plugins ship with the product and layer on upstream **without
 forking it**:
 
 - `@dsh-app/plugin-brand` (host side): settings namespace, app/kernel info
@@ -192,6 +193,21 @@ forking it**:
   (`BrandModelsStore` + `ModelsSection`), plus commented-out enhancement
   scaffolds (workspace file panel, reminder summary, trajectory export,
   model badges). UI copy is **zh-CN** (see §9).
+- `@dsh-app/plugin-sidebar` (dual face): workspace file tree + preview and
+  the Git panel (grouped changes, unified diff, stage/revert/commit, graph)
+  as native conversation-view tabs.
+- `@dsh-app/plugin-swarm` (host): batch parallel subagent orchestration —
+  model-facing `swarm` tool + `/swarm` command, adaptive concurrency gate,
+  per-item auto-retry.
+- `@dsh-app/plugin-usage` (dual face): usage capture/aggregation over
+  session logs + settings-page balance card, heatmap and daily trend chart.
+- `@dsh-app/plugin-archives` (dual face): session archive manager — host
+  list/delete routes + settings-page section grouped by project.
+- `@dsh-app/plugin-memory` (dual face): cross-session memory — global and
+  per-project files injected into every prompt, memory_save/recall/forget
+  LLM tools, a background distiller on quiet sessions, a background curator
+  that merges/prunes grown files, and a settings page (toggles, stats,
+  per-entry pin/delete).
 
 Two seams are stitched at every server start (`brand-suite.ts`):
 

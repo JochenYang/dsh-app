@@ -15,9 +15,13 @@
  * 3. the background distiller (see distiller.ts): after a session goes
  *    quiet, a read-only one-shot subagent reviews the conversation delta
  *    and proposes entries the host validates before writing — the
- *    code-guaranteed half of proactive memory. Mounted only when the
- *    subagent services are available (graceful on kernels without them);
- * 4. settings-page routes (status/toggle/clear) for the client half.
+ *    code-guaranteed half of proactive memory;
+ * 4. the background curator (see curator.ts): when a distill saved entries,
+ *    a deferred read-only pass merges near-duplicates, prunes stale ones,
+ *    and re-categories, so the file stays lean instead of growing forever.
+ *    Both passes mount only when the subagent services are available
+ *    (graceful on kernels without them);
+ * 5. settings-page routes (status/toggle/pin/clear) for the client half.
  *
  * The user's exit valve is `<storeDir>/config.json` (`enabled: false`, the
  * same discipline as plugin-usage): a disabled plugin mounts nothing but
@@ -45,6 +49,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import { MemoryRoot } from './memory-store.ts'
 import { MemoryDistiller } from './distiller.ts'
+import { MemoryCurator } from './curator.ts'
 import { renderMemoryText } from './prompt.ts'
 import { registerMemoryRoutes } from './routes.ts'
 import { registerMemoryTools } from './tools.ts'
@@ -93,12 +98,21 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => registerMemoryTools(ctx, root), 'plugin-memory: llm tools')
   ctx.effect(() => registerMemoryRoutes(ctx.webServer, root), 'plugin-memory: settings routes')
 
-  // The background distiller needs the subagent seam; on a kernel without
-  // it (e.g. a rollback target) the plugin still mounts everything else —
-  // only the async safety net is absent.
-  ctx.inject(['agents', 'subagents'], distillCtx => {
-    const distiller = new MemoryDistiller(distillCtx, root, log)
-    distillCtx.effect(() => distiller.attach(), 'plugin-memory: background distiller')
+  // The background passes need the subagent seam; on a kernel without it
+  // (e.g. a rollback target) the plugin still mounts everything else — only
+  // the async safety nets are absent. The distiller appends NEW entries; a
+  // saved run hands the curator the trigger, and the curator then merges/
+  // prunes the file (see distiller.ts / curator.ts).
+  ctx.inject(['agents', 'subagents'], memCtx => {
+    const curator = new MemoryCurator(memCtx, root, log)
+    // The curator runs in the distill's own window (parent still alive), so
+    // it wires through onSaved rather than a timer of its own.
+    const distiller = new MemoryDistiller(memCtx, root, log, parent => curator.runAfterDistill(parent))
+    memCtx.effect(() => {
+      const disposeDistiller = distiller.attach()
+      const disposeCurator = curator.attach()
+      return () => { disposeDistiller(); disposeCurator() }
+    }, 'plugin-memory: background passes')
   })
 
   log.info(`memory root: ${dir}`)
