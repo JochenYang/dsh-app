@@ -160,6 +160,7 @@ interface SwarmToolArgs {
   readonly prompt_template?: string
   readonly resume_entries?: readonly { readonly child_id: string; readonly followup: string }[]
   readonly max_concurrency?: number
+  readonly tool_filter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] }
 }
 
 /** One flattened resume entry, keyed by its durable child id. */
@@ -313,7 +314,9 @@ export function apply(ctx: Context, config: Config): void {
         + 'multiple independent, non-overlapping subtasks that are worth running at once — batch analyses, '
         + 'per-module edits in disjoint areas, parallel lookups. Prefer it over calling the subagent tool '
         + 'repeatedly: one call, one aggregated result. Items must be self-contained (each child sees only its '
-        + 'expanded prompt) and must not depend on each other.',
+        + 'expanded prompt) and must not depend on each other. Children run with the full tool set by default; '
+        + 'for read-only batches (analysis, review, lookups) pass tool_filter to scope every child to read/search '
+        + 'tools only.',
       parameters: {
         description: {
           type: 'string',
@@ -352,6 +355,23 @@ export function apply(ctx: Context, config: Config): void {
         max_concurrency: {
           type: 'number',
           description: 'Optional worker-pool size (how many children run simultaneously). Pins the batch pool: adaptive scheduling may run below it after failures and recover back to it, but never above it. Values outside the configured bounds are clamped; omit to use the deployment default.',
+        },
+        tool_filter: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            allow: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Global tool names that stay visible to every child; everything else is removed. Omit to keep all tools.',
+            },
+            deny: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Global tool names removed from every child. Omit to remove none.',
+            },
+          },
+          description: 'Optional tool scoping applied to EVERY child in the batch. Children otherwise run with the full tool set — for read-only batches (analysis, review, lookups) pass an allow-list of read/search tools so no child can write files the parent never audits. Applies to fresh children at creation; resumed children keep the tool set they were created with.',
         },
       },
       output: {
@@ -464,6 +484,7 @@ export function apply(ctx: Context, config: Config): void {
           outputLimit: config.perItemOutputLimit,
           startStaggerMs: config.startStaggerMs,
           ...config.agentOptions !== undefined ? { agentOptions: config.agentOptions } : {},
+          ...args.tool_filter !== undefined ? { toolFilter: args.tool_filter } : {},
           maxDepth: config.maxDepth,
         })
         if (exec.signal.aborted) {

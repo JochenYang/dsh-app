@@ -32,6 +32,7 @@ import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentResult, SubagentRun, SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
+import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 
 /** Terminal state of one swarm item, mirroring the batch-level vocabulary. */
 export type SwarmItemStatus = 'completed' | 'failed' | 'aborted'
@@ -119,6 +120,13 @@ export interface SwarmBatchOptions {
   readonly itemRetryDelayMs?: number
   /** Optional child model routing. */
   readonly agentOptions?: AgentOptions
+  /**
+   * Optional per-child tool scoping (the seam's ToolRestriction, applied at
+   * child creation on BOTH backends). Read-only batches (analysis, review,
+   * lookups) should pass an allow-list — a batch of full-tool children can
+   * otherwise write files the parent never audits.
+   */
+  readonly toolFilter?: ToolRestriction
   /** Optional delegation-depth cap for each child. */
   readonly maxDepth?: number
 }
@@ -457,6 +465,7 @@ async function runContinuableTask(
           prompt: [{ type: 'text', text: task.prompt }],
           parent: options.parent,
           ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
+          ...options.toolFilter !== undefined ? { toolFilter: options.toolFilter } : {},
           ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
         },
         signal: options.signal,
@@ -535,6 +544,7 @@ async function runOneShotTask(
       parent: options.parent,
       signal: options.signal,
       ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
+      ...options.toolFilter !== undefined ? { toolFilter: options.toolFilter } : {},
       ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
     })
     const result = await run.result
