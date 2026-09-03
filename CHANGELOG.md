@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.8.0] - 2026-09-03
+
+### 中文
+- 快速文件搜索（plugin-fff）：新增 `fffind` / `ffgrep` / `fff-glob` 三个工具——基于 FFF 原生搜索引擎（Rust C 引擎，平台二进制随内核运行时分发），支持模糊文件/目录路径搜索、文件内容检索与 glob 匹配，性能数倍于常用 glob 实现；索引按会话工作区隔离复用，搜索结果只返回工作区内的相对路径，不越权读取工作区之外
+- 插件套件扩展为 8 个插件：plugin-fff 的运行时依赖（FFF 原生绑定）随内核运行时安装，内核/套件更新照常解耦；新增探针脚本 `probe-fff.mjs` 覆盖三个工具的成功路径与错误分支
+
+### English
+- Fast file search (plugin-fff): new `fffind` / `ffgrep` / `fff-glob` tools — built on the FFF native search engine (Rust C library, platform binaries shipped with the kernel runtime), covering fuzzy file/directory path search, content grep and glob matching, an order of magnitude faster than typical glob implementations; per-workspace shared indexes, and results are only ever relative paths inside the session's workspace — nothing outside is read
+- Plugin suite grows to 8 plugins: plugin-fff's runtime dependency (the FFF native binding) installs with the kernel runtime, keeping kernel/suite updates decoupled as usual; a new probe script `probe-fff.mjs` covers all three tools' happy paths and error branches
+
 ## [v0.7.9] - 2026-09-03
 
 ### 中文
