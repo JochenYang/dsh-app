@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.7.8] - 2026-09-03
+
+### 中文
+- 内核升级至 dsh 0.1.2-rc.1：上游 0.1.2 版本线已从 alpha 推进到 rc 阶段（发布在 npm `next` 通道）；CI 打包通道同步从 alpha 切到 beta（next），未来发版自动跟随 rc 线最新版本
+- 内核更新检查不再被钉在旧预发布线上：预发布内核（alpha/rc）现在跨 alpha/next/latest 三个通道查询并跟随最高版本，上游换线（如 alpha → rc）后用户能自动跟上，不再受困于已停更的旧线；稳定版内核行为不变（仍只跟随正式版通道）
+
+### English
+- Kernel upgraded to dsh 0.1.2-rc.1: the upstream 0.1.2 line has moved from alpha to rc (published on the npm `next` tag); the CI packaging channel switches from alpha to beta (next) so future releases automatically follow the newest rc build
+- Kernel update checks no longer strand users on a stale prerelease line: prerelease kernels (alpha/rc) now query all three dist-tags (alpha/next/latest) and follow the highest version, so users automatically keep up when upstream moves a line forward (e.g. alpha → rc); stable kernels are unchanged (still follow the formal-release tag only)
+
 ## [v0.7.7] - 2026-09-03
 
 ### 中文
