@@ -53,8 +53,20 @@ export interface SessionHeaderLike {
 
 /** Structural slice of the sessionPersistence service. */
 export interface PersistenceLike {
-  list(signal?: AbortSignal): Promise<SessionHeaderLike[]>
+  list(signal?: AbortSignal): Promise<Array<SessionHeaderLike | { header: SessionHeaderLike }>>
   locate(meta: SessionHeaderLike): { kind: string; path: string } | undefined
+}
+
+/**
+ * Unwrap one list() entry to its session header. The rc-line kernel lists
+ * bare headers; the alpha line wraps them in snapshots (`{ header, … }`).
+ * The archive set predates any single kernel line, so both shapes are
+ * admitted — reading `.id` off a snapshot wrapper silently yields
+ * `undefined` and misfiles every live archive as stale.
+ */
+function listedHeader(entry: SessionHeaderLike | { header: SessionHeaderLike }): SessionHeaderLike {
+  const wrapped = (entry as { header?: SessionHeaderLike }).header
+  return wrapped !== undefined && typeof wrapped.id === 'string' ? wrapped : (entry as SessionHeaderLike)
 }
 
 /** Structural slice of the workspaceRegistry service. */
@@ -111,9 +123,21 @@ function isMidTurn(session: unknown): boolean {
   return open
 }
 
-/** Structural slice of the sessionProjectionCache (zero-I/O title lookup). */
+/**
+ * Structural slice of the sessionProjectionCache (zero-I/O title lookup).
+ *
+ * Upstream signature: `cachedSnapshot(meta, inheritedEventCount, keys?)` —
+ * the inherited-event count is a required branded `SessionLogOffset`; passing
+ * `undefined` makes the brand constructor throw. Archive listings feed the
+ * cold-path with `0` (the upstream list route uses the same default: a value
+ * of 0 skips nothing and reads the folded/title snapshot at the record base).
+ */
 export interface ProjectionCacheLike {
-  cachedSnapshot(meta: SessionHeaderLike): { values: { title?: string | null } } | undefined
+  cachedSnapshot(
+    meta: SessionHeaderLike,
+    inheritedEventCount: number,
+    keys?: readonly string[],
+  ): { values: { title?: string | null } } | undefined
 }
 
 /** Route-layer dependencies, injected by the host half. */
@@ -211,7 +235,10 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
 /** Build the grouped listing of archived sessions. */
 async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList> {
   const archivedIds = new Set(options.registry.archivedSessionIds.map(String))
-  const headers = new Map((await options.persistence.list()).map((header) => [String(header.id), header]))
+  const headers = new Map((await options.persistence.list()).map((entry) => {
+    const header = listedHeader(entry)
+    return [String(header.id), header] as const
+  }))
   const groups = new Map<string, ArchiveGroup>()
   let staleCount = 0
   let totalBytes = 0
@@ -239,7 +266,7 @@ async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList>
     }
     const dir = dirname(located.path)
     const sizeBytes = await dirSize(dir)
-    const cachedTitle = options.projectionCache?.cachedSnapshot(header)?.values.title
+    const cachedTitle = options.projectionCache?.cachedSnapshot(header, 0)?.values.title
     const session: ArchivedSession = {
       id,
       createdAt: header.createdAt,
@@ -265,7 +292,10 @@ async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList>
 async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly string[]): Promise<ArchiveDeleteResult> {
   const result: ArchiveDeleteResult = { deleted: [], freedBytes: 0, skipped: [] }
   const archivedIds = new Set(options.registry.archivedSessionIds.map(String))
-  const headers = new Map((await options.persistence.list()).map((header) => [String(header.id), header]))
+  const headers = new Map((await options.persistence.list()).map((entry) => {
+    const header = listedHeader(entry)
+    return [String(header.id), header] as const
+  }))
   for (const id of ids) {
     // Fence 1: only sessions the user archived are manageable here.
     if (!archivedIds.has(id)) {
@@ -315,7 +345,7 @@ async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly strin
  * archive/unarchive write can never be lost.
  */
 async function pruneStaleArchives(writer: RegistryWriter, options: ArchiveRoutesOptions): Promise<ArchivePruneResult> {
-  const headerIds = new Set((await options.persistence.list()).map((header) => String(header.id)))
+  const headerIds = new Set((await options.persistence.list()).map((entry) => String(listedHeader(entry).id)))
   return writer.enqueueOperation(async () => {
     // Liveness is probed per candidate inside the chain (the store exposes
     // no enumeration): fresher than a snapshot, and cheap in-memory lookups.
