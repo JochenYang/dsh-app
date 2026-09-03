@@ -17,6 +17,7 @@ import { CURRENT_FILE, KERNEL_ROOT_DIR, STAGING_DIR, TARBALL_FILE } from '../sha
 import { exists, loadCurrentKernel, readRuntimeManifest, saveCurrentKernel } from './manifest'
 import { sha512File, verifyIntegrity } from './integrity'
 import { fetchRegistryInfo } from './sources/registry'
+import type { RegistryInfo } from './sources/registry'
 import { GitHubArtifactResolver } from './sources/artifact'
 import { readDevManifest } from './sources/dev'
 
@@ -139,21 +140,43 @@ export class KernelManager {
         return { available: false, current: null, latest: null, channel: this.opts.channel, reason: 'no kernel installed' }
       }
       this.status({ phase: 'checking', message: '正在检查内核更新…', progress: null })
-      // A prerelease version lives on its own dist-tag: `rc` builds on `next`,
-      // `alpha` builds on `alpha`. Both are only visible through their matching
-      // channel, so when the user is on a prerelease but configured for stable,
-      // auto-switch to the channel that actually carries that prerelease kind —
-      // otherwise the `latest` tag never carries prereleases and the check
-      // always says "up to date" even when a newer build shipped.
+      // A prerelease kernel lives on its own dist-tag: `rc` builds on `next`,
+      // `alpha` builds on `alpha`. When the user is on a prerelease but
+      // configured for stable, follow the highest available version across
+      // all prerelease tags (alpha/next/latest) instead of only the tag
+      // matching the current prerelease kind — upstream moves a version line
+      // across tags as it matures (alpha → rc → stable), and pinning the user
+      // to their line's tag would leave them stranded once upstream moves on
+      // (e.g. alpha stalled at 0.1.2-alpha.5 while 0.1.2-rc.1 shipped on
+      // next). Explicit DSH_APP_CHANNEL=alpha/beta overrides still take
+      // effect (single-channel query, for dev/testing).
       const currentVersion = this.current.manifest.dshVersion
       const prereleaseTag = semver.valid(currentVersion) !== null
         ? (semver.prerelease(currentVersion) ?? [])[0]
         : undefined
       const isPrerelease = prereleaseTag !== undefined
-      const channel = isPrerelease && this.opts.channel === 'stable'
-        ? (prereleaseTag === 'alpha' ? 'alpha' : 'beta')
-        : this.opts.channel
-      const info = await fetchRegistryInfo(channel)
+      let info: RegistryInfo | null
+      let channel: KernelChannel
+      if (isPrerelease && this.opts.channel === 'stable') {
+        const candidates = (await Promise.all([
+          fetchRegistryInfo('alpha'),
+          fetchRegistryInfo('beta'),
+          fetchRegistryInfo('stable'),
+        ])).filter((c): c is RegistryInfo => c !== null)
+        info = candidates.length === 0 ? null
+          : candidates.sort((a, b) => {
+              const va = semver.valid(a.version)
+              const vb = semver.valid(b.version)
+              if (va && vb) return semver.gt(va, vb) ? 1 : -1
+              return a.version.localeCompare(b.version)
+            })[candidates.length - 1]
+        channel = info?.channel ?? 'stable'
+      } else {
+        channel = isPrerelease && this.opts.channel === 'stable'
+          ? (prereleaseTag === 'alpha' ? 'alpha' : 'beta')
+          : this.opts.channel
+        info = await fetchRegistryInfo(channel)
+      }
       if (!info) {
         return { available: false, current: currentVersion, latest: null, channel, reason: this.opts.source === 'dev' ? 'dev mode' : 'registry unreachable' }
       }
