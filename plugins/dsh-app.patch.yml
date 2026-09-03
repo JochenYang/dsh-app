@@ -26,6 +26,10 @@
 #   that reviews quiet sessions through a read-only subagent + settings-page
 #   toggles). Model-driven saving with a code-guaranteed async net; users
 #   disable it via <DSH_HOME>/storages/dsh-app-plugin-memory/config.json.
+# - fff: fast file search over the FFF engine (in-process C library) — host
+#   fffind/ffgrep/fff-glob LLM tools, per-workspace index managed by the
+#   picker. Every search is fenced to the executing agent's session workspace;
+#   no client half. Exit valve: remove this row (or tune config).
 
 - insert:
     - id: brand
@@ -80,3 +84,6 @@
 
     - id: memory
       name: '@dsh-app/plugin-memory'
+
+    - id: fff
+      name: '@dsh-app/plugin-fff'

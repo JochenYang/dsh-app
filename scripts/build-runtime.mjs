@@ -75,7 +75,15 @@ if (process.env.GITHUB_OUTPUT) {
 }
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
-const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory']
+const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-fff']
+
+/**
+ * FFF native binding version, derived from the plugin that declares it (plugins
+ * are copied into node_modules by hand, never npm-installed, so the runtime's
+ * app/package.json must carry the binding itself). Reading it here keeps the
+ * runtime install and the plugin spec in lockstep.
+ */
+const FFF_NODE_PIN = JSON.parse(readFileSync(path.join(root, 'plugins', '@dsh-app/plugin-fff'.replace('@dsh-app/', ''), 'package.json'), 'utf8')).dependencies['@ff-labs/fff-node']
 
 /**
  * Suite version, content-addressed from the bundled plugins' package.json
@@ -177,6 +185,9 @@ async function main() {
     version: DSH_VERSION,
     dependencies: {
       '@deepseek-ai/dsh': DSH_VERSION,
+      // fff-node ships the platform-specific FFF binary into the runtime so
+      // plugin-fff's external require resolves from app/node_modules.
+      '@ff-labs/fff-node': FFF_NODE_PIN,
     },
   }
   await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))

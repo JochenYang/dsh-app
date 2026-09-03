@@ -51,9 +51,9 @@ src/kernel/      Kernel runtime manager: lifecycle, manifest I/O, integrity,
                  version/artifact resolution sources
 src/shared/      Shared constants + types (imported by main + kernel)
 static/          Setup/install window (first-run UI, zh-CN), no framework
-plugins/         Brand plugin suite (7 plugins): plugin-brand, plugin-client-ui,
+plugins/         Brand plugin suite (8 plugins): plugin-brand, plugin-client-ui,
                  plugin-sidebar, plugin-swarm, plugin-usage, plugin-archives,
-                 plugin-memory; dsh-app.patch.yml (loader overlay)
+                 plugin-memory, plugin-fff; dsh-app.patch.yml (loader overlay)
 scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
                  release-notes generator (gen-release-notes.mjs)
 CHANGELOG.md     Bilingual version changelog; feeds release-notes generation
@@ -190,7 +190,7 @@ tray.
 
 ## 6. Brand suite wiring (`plugins/`)
 
-Seven dsh plugins ship with the product and layer on upstream **without
+Eight dsh plugins ship with the product and layer on upstream **without
 forking it**:
 
 - `@dsh-app/plugin-brand` (host side): settings namespace, app/kernel info
@@ -216,6 +216,14 @@ forking it**:
   LLM tools, a background distiller on quiet sessions, a background curator
   that merges/prunes grown files, and a settings page (toggles, stats,
   per-entry pin/delete).
+- `@dsh-app/plugin-fff` (host side): fast file search over the FFF engine
+  (`@ff-labs/fff-node`, an in-process C library with platform binaries
+  installed via optionalDependencies) — `fffind`/`ffgrep`/`fff-glob` LLM
+  tools, one shared in-memory index per workspace (PickerManager: single-
+  flight create, ref-counted guards, idle/LRU reaping), frecency/history db
+  per workspace under `$DSH_HOME/storages/dsh-app-plugin-fff`. Every search
+  is fenced to the executing agent's session workspace (results are relative
+  to the indexed root). No client half.
 
 Two seams are stitched at every server start (`brand-suite.ts`):
 
@@ -225,7 +233,7 @@ Two seams are stitched at every server start (`brand-suite.ts`):
    sources are the active kernel's `app/node_modules/@dsh-app/*` (npm-installed
    via `file:` references by `scripts/build-runtime.mjs`).
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into `userData`
-   and passed to `dsh web --patch ...`. It inserts all seven suite entries
+   and passed to `dsh web --patch ...`. It inserts all eight suite entries
    after every bundle layer and the profile's own patch (last write wins per
    row; the upstream Models settings page stays enabled — the brand shadow
    was retired).

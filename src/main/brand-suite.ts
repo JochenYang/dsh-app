@@ -3,7 +3,8 @@
  *
  * The suite plugins (@dsh-app/plugin-brand, @dsh-app/plugin-client-ui,
  * @dsh-app/plugin-sidebar, @dsh-app/plugin-swarm, @dsh-app/plugin-usage,
- * @dsh-app/plugin-archives) ship with the product, not with the upstream dsh
+ * @dsh-app/plugin-archives, @dsh-app/plugin-memory, @dsh-app/plugin-fff)
+ * ship with the product, not with the upstream dsh
  * kernel, so two seams have to be stitched at every server start:
  *
  *   1. Module resolution — the composed loader resolves entry names through
@@ -43,7 +44,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /** Suite plugin directory names under dsh-app/plugins (and kernel node_modules). */
-export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory'] as const
+export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff'] as const
 
 /** npm scope shared by the suite plugins. */
 const PLUGIN_SCOPE = '@dsh-app'
