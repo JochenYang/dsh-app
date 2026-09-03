@@ -6,7 +6,7 @@ it assumes you know nothing about the project.
 ## 1. Project overview
 
 DSH APP is a **branded desktop client for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)** — an Electron app
-for Windows / macOS / Linux, aimed at public release. Version `0.1.0`, MIT.
+for Windows / macOS / Linux, aimed at public release. MIT.
 
 The essential design idea is **"self-contained, no fork"**:
 
@@ -155,11 +155,19 @@ tray.
      configured channel (`DSH_APP_CHANNEL`: alpha→alpha tag, beta→next,
      else latest).
   2. Bump every `@deepseek-ai/dsh-*` devDependency in `package.json` to the
-     same version line (`^`-coupled) and `npm install` to refresh the lock.
-  3. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
+     same version line (`^`-coupled), **and in every `plugins/*/package.json`**
+     — plugin devDeps track the kernel line too; a stale plugin
+     node_modules/lockfile dual-instances dsh-llm and breaks plugin typecheck
+     with nominal brand conflicts. Plugins must never keep their own
+     `@deepseek-ai/*` copies: resolution comes from the repo root only, and
+     local third-party deps are installed with
+     `npm install --legacy-peer-deps` (plain `npm install` auto-installs
+     peerDependencies and pulls `@deepseek-ai/*` back in).
+  3. `npm install` to refresh the lock.
+  4. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
      then `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
      (both outputs are gitignored; CI rebuilds them from the dist-tag).
-  4. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
+  5. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
      node (`<runtime>/app` → `node_modules/@deepseek-ai/dsh/lib/bin.js --version`).
 
 ## 5. Server process management
@@ -217,8 +225,10 @@ Two seams are stitched at every server start (`brand-suite.ts`):
    sources are the active kernel's `app/node_modules/@dsh-app/*` (npm-installed
    via `file:` references by `scripts/build-runtime.mjs`).
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into `userData`
-   and passed to `dsh web --patch ...`. It disables the upstream
-   `ui-settings-models` page and inserts the two brand plugin entries.
+   and passed to `dsh web --patch ...`. It inserts all seven suite entries
+   after every bundle layer and the profile's own patch (last write wins per
+   row; the upstream Models settings page stays enabled — the brand shadow
+   was retired).
 
 Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
 rollback target) boots vanilla — no links, no overlay, boot is never blocked
@@ -259,12 +269,14 @@ node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
 Plugin builds (CI runs these before `build-runtime`):
 
 ```sh
-(cd plugins/plugin-brand && npm run build)        # tsc -> lib/
-(cd plugins/plugin-client-ui && npm run build)    # esbuild -> lib/client.js + lib/index.js
+node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins except brand)
+(cd plugins/plugin-brand && npm run build)  # tsc -> lib/
+(cd plugins/plugin-memory && npm test)      # node:test suites (esbuild bundles TS -> .test-dist)
 ```
 
-> **No automated test suite exists yet** (no test runner, no test files in
-> the repo). Verification is: `npm run typecheck` + manual run in dev mode.
+> Tests live in `plugins/plugin-memory/tests/` (node:test, `npm test` inside
+> that plugin). The shell/kernel have no test runner; verification is
+> `npm run typecheck` + manual run in dev mode.
 > Manual/probe helpers live in `scripts/`:
 > `probe-mirror.mjs` (update-chain connectivity), `probe-drag.cjs` (drag
 > regions + brand Models render — **keep its `CSS` in sync with**
@@ -408,9 +420,10 @@ rc kernels; `workflow_dispatch` with an explicit `dsh_version` is unaffected.
 
 - `plugin-brand/src/index.ts`: host services are scaffolds — settings
   namespace, app-info service, desktop bridge remotes are not yet wired.
-- `plugin-client-ui/src/client.ts`: three enhancement slots are commented
-  out (workspace file panel, reminder summary, trajectory export, model
-  badges); slot ids still to be verified against the running UI.
+- `plugin-client-ui/src/client.ts`: remaining enhancement slots are commented
+  out (reminder summary, trajectory export, model badges); slot ids still to
+  be verified against the running UI. (The workspace file panel shipped
+  separately as `@dsh-app/plugin-sidebar`.)
 - First-run UX: kernel download progress is wired; pause/resume and checksum
   display are not.
 - Optional future: signed manifests + rollback of `$DSH_HOME` settings on
