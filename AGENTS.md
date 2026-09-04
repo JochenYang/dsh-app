@@ -216,7 +216,12 @@ forking it**:
   `shared_context` (shared background prepended per child), `dry_run`
   (validate + preview expanded prompts without running), split-quality
   warnings. Batch token budget (`token_budget` arg / `tokenBudget` config,
-  default off) stops launches when spent.
+  default off) stops launches when spent. Unpinned adaptive batches probe
+  past `maxConcurrency` (up to 64) on clean streaks and relearn the ceiling
+  on transport failures; `output_mode` (full/summary/status_only) trims
+  result payloads for large batches. User overrides:
+  `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json` (the overlay is
+  rewritten at every server start, so the file is the tuning point).
 - `@dsh-app/plugin-usage` (dual face): usage capture/aggregation over
   session logs + settings-page balance card, heatmap and daily trend chart.
 - `@dsh-app/plugin-archives` (dual face): session archive manager — host

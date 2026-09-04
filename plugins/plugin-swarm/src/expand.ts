@@ -25,6 +25,7 @@ export interface SwarmToolArgs {
   readonly tool_filter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] }
   readonly dry_run?: boolean
   readonly token_budget?: number
+  readonly output_mode?: 'full' | 'summary' | 'status_only'
 }
 
 /** One flattened resume entry, keyed by its durable child id. */

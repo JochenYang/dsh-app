@@ -13,11 +13,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   AdaptiveGate,
+  projectOutputItems,
   runSwarmBatch,
   type SwarmBatchOptions,
   type SwarmTask,
 } from '../src/orchestrator.ts'
 import { expandTasks } from '../src/expand.ts'
+import { loadSwarmUserConfig } from '../src/user-config.ts'
 
 // --- expandTasks -------------------------------------------------------------
 
@@ -381,4 +383,128 @@ test('runSwarmBatch (continuable): tripping the budget drops a pending retry and
   assert.equal(flaky.childId, 'child-flaky', 'resume handle survives the reap')
   assert.equal(outcome.budgetExhausted, true)
   assert.deepEqual(harness.sentFollowups, [], 'no follow-up was sent for the reaped retry')
+})
+
+// --- adaptive exploration (gate v2) ------------------------------------------
+
+test('AdaptiveGate: clean streaks probe past the configured ceiling up to exploreCeiling', () => {
+  const gate = new AdaptiveGate(2, 4, true, 8)
+  const completions = (n: number): void => {
+    for (let i = 0; i < n; i++) gate.noteSettled('completed')
+  }
+  completions(8) // two streaks: 2 → 4 (the configured cap)
+  assert.equal(gate.learnedCeiling, 4)
+  completions(16) // four probe streaks: 4 → 8 (the exploration bound)
+  assert.equal(gate.noteSettled('completed'), undefined, 'no growth past the exploration bound')
+  // A failure at the probed level shrinks from 8 but never relearns the cap
+  // UPWARD: the learned ceiling stays at the configured 4.
+  assert.equal(gate.noteSettled('failed'), 'shrunk')
+  assert.equal(gate.learnedCeiling, 4)
+})
+
+test('AdaptiveGate: a failure below the cap relearns the ceiling down', () => {
+  const gate = new AdaptiveGate(4, 4, true, 8) // starts at the cap
+  assert.equal(gate.noteSettled('failed'), 'shrunk') // limit 4 → 2
+  assert.equal(gate.learnedCeiling, 3, 'cap relearned just below the failed level')
+})
+
+test('AdaptiveGate: a pinned batch (exploreCeiling == ceiling) never grows past its cap', () => {
+  const gate = new AdaptiveGate(2, 4, true, 4)
+  for (let i = 0; i < 40; i++) gate.noteSettled('completed')
+  assert.equal(gate.noteSettled('completed'), undefined, 'no growth beyond the pinned ceiling')
+})
+
+// --- user config -------------------------------------------------------------
+
+test('loadSwarmUserConfig: missing file, malformed JSON, and bad fields all degrade to safe overrides', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
+  const warnings: string[] = []
+  const log = (m: string): void => { warnings.push(m) }
+
+  assert.deepEqual(loadSwarmUserConfig(join(dir, 'absent.json'), log), {})
+
+  writeFileSync(join(dir, 'bad.json'), '{not json')
+  assert.deepEqual(loadSwarmUserConfig(join(dir, 'bad.json'), log), {})
+  assert.ok(warnings.some(w => w.includes('unreadable JSON')))
+
+  writeFileSync(join(dir, 'mixed.json'), JSON.stringify({ maxConcurrency: 24, adaptive: false, startStaggerMs: 'fast', enabled: 1 }))
+  const cfg = loadSwarmUserConfig(join(dir, 'mixed.json'), log)
+  assert.equal(cfg.maxConcurrency, 24)
+  assert.equal(cfg.adaptive, false)
+  assert.equal(cfg.startStaggerMs, undefined, 'non-numeric field ignored')
+  assert.equal(cfg.enabled, undefined, 'non-boolean field ignored')
+})
+
+// --- output_mode projection ---------------------------------------------------
+
+test('projectOutputItems: full keeps outputs, summary truncates, status_only drops output but keeps childId', async () => {
+  const items = [{
+    index: 0,
+    item: 'a',
+    status: 'completed' as const,
+    childId: 'child-a',
+    output: 'x'.repeat(1200),
+  }]
+  assert.equal(projectOutputItems(items, 'full')[0].output!.length, 1200)
+  const summary = projectOutputItems(items, 'summary')[0]
+  assert.ok(summary.output!.length < 700 && summary.output!.includes('truncated'))
+  const statusOnly = projectOutputItems(items, 'status_only')[0]
+  assert.equal(statusOnly.output, undefined)
+  assert.equal(statusOnly.childId, 'child-a', 'resume handle survives status_only')
+})
+
+test('AdaptiveGate: a probe failure lowers the exploration bound for the rest of the batch', () => {
+  const gate = new AdaptiveGate(2, 4, true, 8)
+  const completions = (n: number): void => {
+    for (let i = 0; i < n; i++) gate.noteSettled('completed')
+  }
+  completions(24) // 6 streaks: 2 → 8 (exploration bound)
+  gate.noteSettled('failed') // probe failure at 8: limit → 4, exploreBound → 7
+  completions(16) // recover 4 → 7 (growth passes the cap up to the remembered bound)
+  // 4 more streaks would try 8, but the bound now remembers the wall at 8.
+  assert.equal(gate.noteSettled('failed'), 'shrunk')
+  assert.equal(gate.learnedCeiling <= 6, true, 'cap stays below the remembered wall')
+})
+
+test('AdaptiveGate: a pinned batch shrinks on failure and recovers exactly to the pin', () => {
+  const gate = new AdaptiveGate(4, 4, true, 4)
+  assert.equal(gate.noteSettled('failed'), 'shrunk') // 4 → 2
+  assert.equal(gate.learnedCeiling, 3)
+  for (let i = 0; i < 8; i++) gate.noteSettled('completed') // two streaks: 2 → 3 → 4
+  for (let i = 0; i < 20; i++) gate.noteSettled('completed')
+  assert.equal(gate.noteSettled('completed'), undefined, 'pinned pool never exceeds the pin')
+})
+
+test('loadSwarmUserConfig: zero values on floored fields are rejected, not merged', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
+  const warnings: string[] = []
+  writeFileSync(join(dir, 'zero.json'), JSON.stringify({ maxConcurrency: 0, maxItems: 0, defaultConcurrency: 0, tokenBudget: 0 }))
+  const cfg = loadSwarmUserConfig(join(dir, 'zero.json'), m => { warnings.push(m) })
+  assert.equal(cfg.maxConcurrency, undefined)
+  assert.equal(cfg.maxItems, undefined)
+  assert.equal(cfg.defaultConcurrency, undefined)
+  assert.equal(cfg.tokenBudget, 0, 'tokenBudget legitimately allows 0 (disabled)')
+  assert.equal(warnings.length, 3)
+})
+
+test('runSwarmBatch (one-shot, adaptive): outcome carries peakConcurrency and learnedCeiling', async () => {
+  const ctx = mockOneShotCtx({
+    alpha: { stopReason: 'completed', text: 'a' },
+    beta: { stopReason: 'completed', text: 'b' },
+  })
+  const outcome = await runSwarmBatch(ctx, {
+    ...baseOptions(),
+    tasks: tasksOf('alpha', 'beta'),
+    adaptive: true,
+    maxConcurrency: 4,
+    exploreCeiling: 8,
+  })
+  assert.equal(outcome.peakConcurrency, 2)
+  assert.equal(outcome.learnedCeiling, 4, 'no failures: the ceiling stays at the configured cap')
 })

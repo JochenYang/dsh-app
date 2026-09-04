@@ -27,10 +27,12 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
@@ -41,15 +43,25 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { runSwarmBatch } from './orchestrator.ts'
-import type { SwarmBatchOutcome } from './orchestrator.ts'
+import type { SwarmBatchOutcome, SwarmOutputMode } from './orchestrator.ts'
+import { projectOutputItems } from './orchestrator.ts'
 import { MIN_ITEMS, expandTasks } from './expand.ts'
 import type { SwarmToolArgs } from './expand.ts'
+import { loadSwarmUserConfig } from './user-config.ts'
 
 export const name = 'plugin-swarm'
 export const inject = ['tools', 'subagents', 'commands', 'systemPrompt']
 
 /** Prompt order directly after the single-delegation policy section. */
 const SWARM_SECTION_ORDER = 116.6
+
+/**
+ * Hard bound for adaptive pool exploration when the model did not pin
+ * max_concurrency: clean streaks at the configured ceiling may probe upward
+ * to this value. Matches the default maxItems — a pool larger than the batch
+ * is pointless anyway.
+ */
+const SWARM_EXPLORE_CEILING = 64
 
 /** Config: provider, scheduling bounds, and child defaults. */
 export interface Config {
@@ -180,7 +192,7 @@ function renderBatch(outcome: SwarmBatchOutcome, warnings: readonly string[]): s
   // legitimately differs from the requested steady-state size.
   const concurrencyNote = outcome.peakConcurrency === undefined
     ? `concurrency ${outcome.concurrency}`
-    : `concurrency ${outcome.concurrency}, peak ${outcome.peakConcurrency}`
+    : `concurrency ${outcome.concurrency}, peak ${outcome.peakConcurrency}, ceiling ${outcome.learnedCeiling ?? outcome.concurrency}`
   const budgetNote = outcome.budgetExhausted === true ? ', TOKEN BUDGET EXHAUSTED — launch stopped early' : ''
   const usageNote = outcome.usage === undefined
     ? ''
@@ -232,6 +244,7 @@ interface SwarmToolOutput {
   readonly label: string
   readonly concurrency: number
   readonly peakConcurrency?: number
+  readonly learnedCeiling?: number
   readonly total: number
   readonly completed: number
   readonly failed: number
@@ -259,7 +272,19 @@ interface SwarmItemOutput {
   readonly prompt?: string
 }
 
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, baseConfig: Config): void {
+  // User-level overrides: the shell rewrites the loader overlay on every
+  // server start, so `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json`
+  // is the user's tuning point (see user-config.ts).
+  const userConfig = loadSwarmUserConfig(
+    join(resolveDshHome(), 'storages', 'dsh-app-plugin-swarm', 'config.json'),
+    (message) => ctx.logger.warn(message),
+  )
+  if (userConfig.enabled === false) {
+    ctx.logger.info('swarm plugin: disabled by user config')
+    return
+  }
+  const config: Config = { ...baseConfig, ...userConfig }
   assertSubagentMaxDepth(config.maxDepth)
   if (config.maxItems < MIN_ITEMS) {
     throw new Error(`plugin-swarm: maxItems must be at least ${MIN_ITEMS}`)
@@ -363,6 +388,11 @@ export function apply(ctx: Context, config: Config): void {
           type: 'number',
           description: 'Optional batch token budget: once the summed usage of settled children reaches this, the batch stops launching new work (in-flight children settle normally; unstarted items report aborted with budgetExhausted set). Omit to use the deployment default (0 = no budget).',
         },
+        output_mode: {
+          type: 'string',
+          enum: ['full', 'summary', 'status_only'],
+          description: 'How much of each item\'s output the result carries. full (default): complete outputs; summary: each output truncated to ~500 characters; status_only: no output text at all — statuses and childIds only, then drill into any child via resume_entries. Use status_only for large batches to keep the parent context lean.',
+        },
       },
       output: {
         schema: {
@@ -374,8 +404,11 @@ export function apply(ctx: Context, config: Config): void {
             label: { type: 'string', required: true },
             concurrency: { type: 'number', required: true },
             // Present only on adaptive batches: the highest simultaneous
-            // live children actually observed.
+            // live children actually observed, and the ceiling the pool was
+            // growing toward at batch end (exploration may push it past the
+            // configured cap; transport failures pull it down).
             peakConcurrency: { type: 'number' },
+            learnedCeiling: { type: 'number' },
             total: { type: 'number', required: true },
             completed: { type: 'number', required: true },
             failed: { type: 'number', required: true },
@@ -476,11 +509,14 @@ export function apply(ctx: Context, config: Config): void {
         if (value === undefined || typeof value !== 'object' || value.kind !== 'swarm') return undefined
         const lines = value.items.map((item) => {
           const mark = item.status === 'completed' ? '✓' : item.status === 'failed' ? '✗' : '−'
-          return `${mark} [${item.index}] ${item.item}`
+          const detail = item.status === 'failed' && item.failureKind !== undefined ? ` (${item.failureKind})` : ''
+          return `${mark} [${item.index}] ${item.item}${detail}`
         })
+        const seconds = value.durationMs === undefined ? '' : ` · ${(value.durationMs / 1000).toFixed(1)}s`
+        const tokens = value.usage === undefined ? '' : ` · ${value.usage.totalTokens ?? value.usage.inputTokens + value.usage.outputTokens} tok`
         return {
           card: 'generic',
-          title: `swarm · ${args.description} — ${value.completed}/${value.total} 完成`,
+          title: `swarm · ${args.description} — ${value.completed}/${value.total} 完成${seconds}${tokens}`,
           content: [{ type: 'text', text: lines.join('\n') }],
         }
       },
@@ -500,6 +536,11 @@ export function apply(ctx: Context, config: Config): void {
         }
         const expanded = expandTasks(args, config.maxItems)
         const concurrency = resolveConcurrency(args.max_concurrency, config)
+        // An explicit max_concurrency pins the pool: adaptive feedback may
+        // shrink below it and recover back to it, but never exceed it, and
+        // exploration stays off. Unpinned batches may explore upward toward
+        // SWARM_EXPLORE_CEILING on clean streaks.
+        const pinned = args.max_concurrency !== undefined && Number.isFinite(args.max_concurrency)
         const label = args.description.trim().length > 0 ? args.description : 'swarm batch'
         if (args.dry_run === true) {
           // Validation + expansion only: the model inspects what WOULD run.
@@ -527,9 +568,8 @@ export function apply(ctx: Context, config: Config): void {
           label,
           tasks: expanded.tasks,
           concurrency,
-          // An explicit max_concurrency pins the pool: adaptive feedback may
-          // shrink below it and recover back to it, but never exceed it.
-          maxConcurrency: config.maxConcurrency,
+          maxConcurrency: pinned ? concurrency : config.maxConcurrency,
+          exploreCeiling: pinned ? concurrency : SWARM_EXPLORE_CEILING,
           adaptive: config.adaptive,
           itemMaxRetries: config.itemMaxRetries,
           itemRetryDelayMs: config.itemRetryDelayMs,
@@ -567,6 +607,7 @@ export function apply(ctx: Context, config: Config): void {
           label: outcome.label,
           concurrency: outcome.concurrency,
           ...outcome.peakConcurrency !== undefined ? { peakConcurrency: outcome.peakConcurrency } : {},
+          ...outcome.learnedCeiling !== undefined ? { learnedCeiling: outcome.learnedCeiling } : {},
           total: outcome.total,
           completed: outcome.completed,
           failed: outcome.failed,
@@ -575,7 +616,7 @@ export function apply(ctx: Context, config: Config): void {
           ...outcome.budgetExhausted === true ? { budgetExhausted: true } : {},
           ...outcome.usage !== undefined ? { usage: outcome.usage } : {},
           ...expanded.warnings.length > 0 ? { warnings: expanded.warnings } : {},
-          items: [...outcome.items],
+          items: projectOutputItems(outcome.items, args.output_mode ?? 'full'),
         }
       },
     })))

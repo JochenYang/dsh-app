@@ -55,8 +55,11 @@
         # the live pool starts at defaultConcurrency, halves (floor 1) and
         # doubles the start stagger (cap 30s) whenever an item fails, and
         # grows back toward maxConcurrency one step after every 4 consecutive
-        # completions, easing the stagger back to its base. An explicit
-        # max_concurrency tool argument pins the pool for that batch.
+        # completions, easing the stagger back to its base. At the ceiling,
+        # clean streaks PROBE one level beyond (up to 64) on unpinned batches,
+        # so the pool discovers gateway headroom on its own; a probe failure
+        # relearns the ceiling below the failed level. An explicit
+        # max_concurrency tool argument pins the pool (no exploration).
         # Item-level auto-retry stacks on top: an item whose turn dies to a
         # transient provider error is followed up on the preserved child
         # session after an exponential backoff (15s, 30s), continuing from
@@ -76,6 +79,10 @@
         # Batch token budget (0 = disabled): once settled children's summed
         # usage reaches this, the batch stops launching work. Per-call
         # override: the swarm tool's token_budget argument.
+        # User-level overrides live in
+        # $DSH_HOME/storages/dsh-app-plugin-swarm/config.json (this overlay is
+        # rewritten by the shell on every start, so edits here do not stick
+        # for end users — the config file wins over these values).
         tokenBudget: 0
         # maxDepth is the absolute delegation-depth cap (harness-enforced):
         # 1 makes every child a leaf worker — its own delegation attempts are

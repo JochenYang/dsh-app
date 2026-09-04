@@ -117,6 +117,13 @@ export interface SwarmBatchOutcome {
    * steady-state size.
    */
   readonly peakConcurrency?: number
+  /**
+   * The ceiling the adaptive pool grew toward at batch end (transport
+   * failures pull it down from the configured cap; it never exceeds it).
+   * Present only on adaptive batches. Headroom discovered by exploration is
+   * carried by `peakConcurrency`, not this field.
+   */
+  readonly learnedCeiling?: number
   readonly total: number
   readonly completed: number
   readonly failed: number
@@ -164,6 +171,15 @@ export interface SwarmBatchOptions {
    * failures. Defaults to `concurrency` (no growth room).
    */
   readonly maxConcurrency?: number
+  /**
+   * Hard bound for pool EXPLORATION beyond `maxConcurrency` (adaptive batches
+   * only): clean-completion streaks at the learned ceiling probe one level
+   * higher, up to this value, letting the batch discover gateway headroom
+   * above the configured cap. Defaults to `maxConcurrency` (no exploration).
+   * A batch the model pinned via max_concurrency passes its pinned value —
+   * an explicit pin is never explored past.
+   */
+  readonly exploreCeiling?: number
   /** Whether the live pool adapts to observed item failures/completions. */
   readonly adaptive?: boolean
   /** Per-item output truncation limit in UTF-16 code units. */
@@ -423,10 +439,15 @@ const WORKER_IDLE_POLL_MS = 250
  * `acquire()` while the number of in-flight children is at the current
  * limit; every item settlement feeds back:
  *
- *   - failed  → the limit halves (floor 1) immediately, so one gateway
- *     meltdown does not take down the whole pool;
+ *   - failed  → the limit halves (floor 1) immediately, and the learned
+ *     ceiling drops just below the level that failed, so one gateway
+ *     meltdown neither takes down the whole pool nor gets retried at the
+ *     same level;
  *   - completed → after a streak of clean completions the limit grows by
- *     one toward the ceiling, so a healthy batch recovers lost throughput.
+ *     one toward the learned ceiling; once there, further streaks PROBE one
+ *     level beyond it (up to `exploreCeiling`), so a batch can discover
+ *     headroom above the configured steady-state instead of trusting the
+ *     deployment default forever.
  *
  * Disabled (static batches) the limit is pinned to the requested size and
  * feedback is a no-op, which is exactly the legacy behavior.
@@ -435,15 +456,26 @@ export class AdaptiveGate {
   private active = 0
   private streak = 0
   private limit: number
+  /** Learned ceiling: init to the configured cap, lowered by transport failures. */
+  private cap: number
   private peakActive = 0
   private readonly waiters = new Set<() => void>()
+  /** Mutable: a probe failure lowers the exploration bound for this batch. */
+  private exploreBound: number
+  /** The configured cap, remembered so probe failures are distinguishable. */
+  private readonly configuredCeiling: number
 
   constructor(
     requestedLimit: number,
-    private readonly ceiling: number,
+    ceiling: number,
     private readonly enabled: boolean,
+    /** Hard growth bound for exploration beyond the learned ceiling. */
+    exploreCeiling: number = ceiling,
   ) {
-    this.limit = Math.max(1, Math.min(requestedLimit, ceiling))
+    this.configuredCeiling = Math.max(1, ceiling)
+    this.cap = this.configuredCeiling
+    this.exploreBound = Math.max(this.cap, exploreCeiling)
+    this.limit = Math.max(1, Math.min(requestedLimit, this.cap))
   }
 
   /** Highest simultaneous in-flight children observed so far. */
@@ -454,6 +486,11 @@ export class AdaptiveGate {
   /** Children currently in flight (claimed but not yet settled). */
   get activeCount(): number {
     return this.active
+  }
+
+  /** The ceiling the pool currently grows toward (learned, may move down). */
+  get learnedCeiling(): number {
+    return this.cap
   }
 
   /**
@@ -495,6 +532,13 @@ export class AdaptiveGate {
     if (!this.enabled) return undefined
     if (status === 'failed') {
       this.streak = 0
+      // Learn: the level that just failed is above the sustainable rate. A
+      // failure while PROBING above the configured cap also lowers the
+      // exploration bound, so the batch stops rediscovering the same wall.
+      if (this.limit > this.configuredCeiling) {
+        this.exploreBound = Math.max(this.cap, Math.min(this.exploreBound, this.limit - 1))
+      }
+      this.cap = Math.max(1, Math.min(this.cap, this.limit - 1))
       const shrunken = Math.max(1, Math.floor(this.limit / 2))
       if (shrunken < this.limit) {
         this.limit = shrunken
@@ -504,10 +548,15 @@ export class AdaptiveGate {
     }
     if (status === 'completed') {
       this.streak += 1
-      if (this.streak >= ADAPTIVE_GROW_STREAK && this.limit < this.ceiling) {
-        this.limit += 1
+      if (this.streak >= ADAPTIVE_GROW_STREAK) {
         this.streak = 0
-        return 'grew'
+        // Grow toward the learned ceiling; at the ceiling, probe one level
+        // beyond it up to the exploration bound (a probe failure pulls that
+        // bound down, so the wall is remembered for the rest of the batch).
+        if (this.limit < this.cap || this.limit < this.exploreBound) {
+          this.limit += 1
+          return 'grew'
+        }
       }
     }
     return undefined
@@ -792,15 +841,44 @@ async function runOneShotTask(
   }
 }
 
+/** How much of each item's output the tool result carries back to the parent. */
+export type SwarmOutputMode = 'full' | 'summary' | 'status_only'
+
+/** Per-item output cap under the `summary` mode. */
+const SUMMARY_OUTPUT_LIMIT = 500
+
+/**
+ * Project item outcomes to the requested verbosity. `status_only` drops the
+ * output text entirely — large batches stay readable in the parent context,
+ * and the parent drills into a specific child via resume_entries (the
+ * childId survives in every mode). `summary` keeps a short head of each
+ * output for orientation.
+ */
+export function projectOutputItems(
+  items: readonly SwarmItemOutcome[],
+  mode: SwarmOutputMode,
+): SwarmItemOutcome[] {
+  if (mode === 'full') return [...items]
+  return items.map((item) => {
+    if (mode === 'status_only') {
+      const { output: _output, ...rest } = item
+      return rest
+    }
+    // 'summary' — the schema enum keeps other values from reaching here.
+    return item.output === undefined ? item : { ...item, output: truncate(item.output, SUMMARY_OUTPUT_LIMIT) }
+  })
+}
+
 /**
  * Execute the whole batch through a bounded worker pool. Workers pull task
  * indices from a shared cursor, so a slow child delays only its own worker;
  * the pool drains without head-of-line blocking. Items never started before
  * an abort are reported as `aborted` so the result array is always complete.
  *
- * Adaptive batches run `maxConcurrency` workers behind the gate (the gate,
+ * Adaptive batches run `exploreCeiling` workers behind the gate (the gate,
  * not the worker count, bounds live children), so pool growth after failures
- * needs no new workers — a waiting one is woken immediately. Static batches
+ * — including exploratory growth past the configured ceiling — needs no new
+ * workers: a waiting one is woken immediately. Static batches
  * keep the legacy shape: worker count equals the requested pool size and the
  * gate never blocks.
  *
@@ -824,7 +902,10 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
   const ceiling = adaptive
     ? Math.max(options.concurrency, options.maxConcurrency ?? options.concurrency)
     : options.concurrency
-  const gate = new AdaptiveGate(options.concurrency, ceiling, adaptive)
+  const exploreCeiling = adaptive
+    ? Math.max(ceiling, options.exploreCeiling ?? ceiling)
+    : ceiling
+  const gate = new AdaptiveGate(options.concurrency, ceiling, adaptive, exploreCeiling)
   const maxRetries = Math.max(0, options.itemMaxRetries ?? 0)
   const retryDelayMs = Math.max(0, options.itemRetryDelayMs ?? 15_000)
   const tokenBudget = Math.max(0, options.tokenBudget ?? 0)
@@ -974,7 +1055,10 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
     }
   }
   const workers = Array.from(
-    { length: Math.max(1, Math.min(ceiling, options.tasks.length)) },
+    // Adaptive batches need workers up to the exploration bound, not the
+    // configured ceiling — a probed-open gate slot is useless without a
+    // waiting worker to fill it.
+    { length: Math.max(1, Math.min(adaptive ? exploreCeiling : ceiling, options.tasks.length)) },
     () => worker(),
   )
   try {
@@ -995,7 +1079,7 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
   return {
     label: options.label,
     concurrency: options.concurrency,
-    ...adaptive ? { peakConcurrency: gate.peak } : {},
+    ...adaptive ? { peakConcurrency: gate.peak, learnedCeiling: gate.learnedCeiling } : {},
     total: items.length,
     completed: items.filter(item => item.status === 'completed').length,
     failed: items.filter(item => item.status === 'failed').length,
