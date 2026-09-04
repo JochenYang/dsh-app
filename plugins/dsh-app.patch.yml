@@ -62,14 +62,21 @@
         # session after an exponential backoff (15s, 30s), continuing from
         # the interruption point rather than restarting. Provider-level
         # request retries absorb sub-minute hiccups; this turn-level lane
-        # absorbs the outages that exhaust them.
+        # absorbs the outages that exhaust them. Failures classify as
+        # transport/content/structural from the child session's turn/end
+        # error code — only transport failures throttle the pool and qualify
+        # for auto-retry.
         adaptive: true
-        defaultConcurrency: 6
-        maxConcurrency: 8
-        startStaggerMs: 2000
+        defaultConcurrency: 8
+        maxConcurrency: 16
+        startStaggerMs: 1000
         itemMaxRetries: 2
         itemRetryDelayMs: 15000
         perItemOutputLimit: 4000
+        # Batch token budget (0 = disabled): once settled children's summed
+        # usage reaches this, the batch stops launching work. Per-call
+        # override: the swarm tool's token_budget argument.
+        tokenBudget: 0
         # maxDepth is the absolute delegation-depth cap (harness-enforced):
         # 1 makes every child a leaf worker — its own delegation attempts are
         # refused, so all LLM load stays inside the concurrency gate. A deeper

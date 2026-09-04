@@ -1,6 +1,6 @@
 {
   "name": "@dsh-app/plugin-swarm",
-  "description": "DSH APP swarm: batch parallel subagent orchestration (swarm tool + /swarm command, continuable children with resume, adaptive concurrency, item auto-retry) over the ctx.subagents seam.",
+  "description": "DSH APP swarm: batch parallel subagent orchestration (swarm tool + /swarm command, continuable children with resume, adaptive concurrency gated on transport-classified failures, per-item auto-retry, shared_context/dry_run split aids, batch token budget) over the ctx.subagents seam.",
   "version": "0.5.0",
   "type": "module",
   "main": "lib/index.js",
@@ -23,6 +23,7 @@
   ],
   "scripts": {
     "build": "node build.mjs",
+    "test": "node scripts/test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {

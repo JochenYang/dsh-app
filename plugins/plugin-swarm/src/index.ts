@@ -31,6 +31,7 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 // Type-only: pulls the ctx merges (tools / subagents / commands /
@@ -40,16 +41,15 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { runSwarmBatch } from './orchestrator.ts'
-import type { SwarmBatchOutcome, SwarmTask } from './orchestrator.ts'
+import type { SwarmBatchOutcome } from './orchestrator.ts'
+import { MIN_ITEMS, expandTasks } from './expand.ts'
+import type { SwarmToolArgs } from './expand.ts'
 
 export const name = 'plugin-swarm'
 export const inject = ['tools', 'subagents', 'commands', 'systemPrompt']
 
 /** Prompt order directly after the single-delegation policy section. */
 const SWARM_SECTION_ORDER = 116.6
-
-/** Minimum batch size — a single item has nothing to parallelize. */
-const MIN_ITEMS = 2
 
 /** Config: provider, scheduling bounds, and child defaults. */
 export interface Config {
@@ -78,6 +78,13 @@ export interface Config {
   itemRetryDelayMs: number
   /** Per-item output truncation limit in characters (default 4000). */
   perItemOutputLimit: number
+  /**
+   * Batch token budget (default 0 = disabled). Once the summed usage of
+   * settled children reaches this, the batch stops launching work; in-flight
+   * children settle normally. Best-effort: children whose sessions are
+   * unreadable contribute no accounting.
+   */
+  tokenBudget: number
   /** Delay between consecutive child starts in ms; smooths provider rate limits (default 800). */
   startStaggerMs: number
   /** Agent options applied to every child; omitted fields use child-loop defaults. */
@@ -100,6 +107,7 @@ export const Config: z<Config> = z.object({
   itemMaxRetries: z.natural().max(Number.MAX_SAFE_INTEGER).default(2),
   itemRetryDelayMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(15000),
   perItemOutputLimit: z.natural().max(Number.MAX_SAFE_INTEGER).default(4000),
+  tokenBudget: z.natural().max(Number.MAX_SAFE_INTEGER).default(0),
   startStaggerMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(800),
   // Prevent Schemastery from materializing omitted agentOptions as `{}`.
   agentOptions: z.object({
@@ -109,9 +117,6 @@ export const Config: z<Config> = z.object({
   }).default(undefined as unknown as { provider: string; model: string; maxTokens: number }),
   maxDepth: z.natural().max(Number.MAX_SAFE_INTEGER).default(1),
 })
-
-/** The `{{item}}` placeholder the template must contain. */
-const ITEM_PLACEHOLDER = /\{\{\s*item\s*\}\}/gu
 
 /**
  * Standing guidance for the autonomous (tool-choice) path.
@@ -126,8 +131,17 @@ const SWARM_SECTION_TEXT =
   + '(separate analyses, per-module edits in disjoint areas, batch lookups), prefer the swarm tool over repeated '
   + 'subagent calls: state the shared instructions once in prompt_template using the item placeholder token '
   + 'documented in the tool\'s parameter descriptions, list the varying part of each subtask in items, and '
-  + 'synthesize the returned per-item results into one answer. Keep each item self-contained; do not fan out '
-  + 'subtasks that depend on each other or share mutable state. Items that die from transient provider errors '
+  + 'synthesize the returned per-item results into one answer. '
+  + 'Split quality decides batch quality. Each item must be self-contained: a child sees only its own expanded '
+  + 'prompt, so spell out the input, the expected output, and the completion criterion of every subtask — write '
+  + 'items a stranger could execute without asking questions. Good split for "add test coverage": one item per '
+  + 'top-level module, each naming the module path, the test framework in use, and "new tests pass" as the '
+  + 'criterion. Bad split: "write tests", "fix bugs", "clean up" — vague items produce vague, overlapping work. '
+  + 'Never fan out subtasks that depend on each other or share mutable state; run those sequentially yourself or '
+  + 'in a later batch. When every subtask needs the same background (project conventions, a file inventory), pass '
+  + 'it once via shared_context instead of repeating it per item. For a large or unfamiliar split, call with '
+  + 'dry_run first to inspect the expanded per-child prompts before spending the batch. '
+  + 'Items that die from transient provider errors '
   + '(network, rate limit) are retried automatically and only report failure when the retries are exhausted. '
   + 'When a result item carries a childId, a later '
   + 'swarm call can resume that child with follow-up instructions via resume_entries — it keeps its prior context.'
@@ -153,96 +167,6 @@ const SWARM_COMMAND_DIRECTIVE =
 const SWARM_COMMAND_USAGE =
   '用法：/swarm <任务描述>\n将任务拆分为多个并行子代理执行，完成后自动汇总结果。\n示例：/swarm 为 src/api、src/ui、src/store 三个目录分别补充单元测试'
 
-/** Typed view of the tool arguments after the framework's schema validation. */
-interface SwarmToolArgs {
-  readonly description: string
-  readonly items?: readonly string[]
-  readonly prompt_template?: string
-  readonly resume_entries?: readonly { readonly child_id: string; readonly followup: string }[]
-  readonly max_concurrency?: number
-  readonly tool_filter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] }
-}
-
-/** One flattened resume entry, keyed by its durable child id. */
-interface ResumeEntry {
-  readonly childId: string
-  readonly followup: string
-}
-
-/** Display preview of one resume follow-up, bounded like the fresh item text. */
-function followupPreview(followup: string): string {
-  const flat = followup.trim().replace(/\s+/g, ' ')
-  return `resume: ${flat.length > 48 ? `${flat.slice(0, 45)}...` : flat}`
-}
-
-/**
- * Validate the business rules the schema cannot express (batch composition,
- * bounds, placeholder presence, distinct items and child ids) and expand the
- * call into one runnable task per fresh item and per resume entry. Throws
- * with actionable text so the model can correct its next call.
- *
- * Composition rules: fresh items require `prompt_template`; a batch with any
- * fresh item needs at least MIN_ITEMS tasks total (fresh + resume) since a
- * lone fresh item has nothing to parallelize; a resume-only batch may be a
- * single entry because resuming keeps prior context and has no cheaper
- * alternative in this tool family.
- */
-function expandTasks(args: SwarmToolArgs, maxItems: number): SwarmTask[] {
-  const items = args.items ?? []
-  const resumes: ResumeEntry[] = (args.resume_entries ?? []).map((entry) => ({
-    childId: entry.child_id.trim(),
-    followup: entry.followup,
-  }))
-  if (items.length === 0 && resumes.length === 0) {
-    throw new Error('swarm: provide `items` (with `prompt_template`) and/or `resume_entries` — an empty batch has nothing to run')
-  }
-  if (items.length === 0 && args.prompt_template !== undefined) {
-    throw new Error('swarm: `prompt_template` applies only to `items`; a resume-only batch needs no template')
-  }
-  if (items.length > 0 && args.prompt_template === undefined) {
-    throw new Error('swarm: `prompt_template` is required when `items` is present')
-  }
-  if (items.length > 0 && items.length + resumes.length < MIN_ITEMS) {
-    throw new Error(`swarm: a batch with fresh items needs at least ${MIN_ITEMS} tasks total (items + resume_entries) — a single fresh subtask should use the subagent tool instead`)
-  }
-  if (items.length + resumes.length > maxItems) {
-    throw new Error(`swarm: batch has ${items.length + resumes.length} tasks (items + resume_entries) but the configured maximum is ${maxItems}`)
-  }
-  if (args.prompt_template !== undefined && !ITEM_PLACEHOLDER.test(args.prompt_template)) {
-    throw new Error('swarm: `prompt_template` must contain the {{item}} placeholder')
-  }
-  ITEM_PLACEHOLDER.lastIndex = 0
-  const seen = new Set<string>()
-  for (const item of items) {
-    const key = item.trim()
-    if (key.length === 0) throw new Error('swarm: `items` contains an empty entry')
-    if (seen.has(key)) throw new Error(`swarm: duplicate \`items\` entry "${key.slice(0, 60)}" — items must be distinct`)
-    seen.add(key)
-  }
-  const seenChildren = new Set<string>()
-  for (const entry of resumes) {
-    if (entry.childId.length === 0) throw new Error('swarm: `resume_entries` contains an empty child_id')
-    if (entry.followup.trim().length === 0) throw new Error('swarm: `resume_entries` contains an empty followup')
-    if (seenChildren.has(entry.childId)) {
-      throw new Error(`swarm: duplicate resume child_id "${entry.childId.slice(0, 24)}" — deliver one combined followup per child instead`)
-    }
-    seenChildren.add(entry.childId)
-  }
-  const fresh: SwarmTask[] = items.map((item, index) => ({
-    index,
-    item,
-    // Function form: a string replacement would interpret `$&`/`$'`/`` $` ``/
-    // `$n` sequences inside the item as replace-pattern tokens.
-    prompt: args.prompt_template!.replace(ITEM_PLACEHOLDER, () => item),
-  }))
-  const resumed: SwarmTask[] = resumes.map((entry, offset) => ({
-    index: fresh.length + offset,
-    item: followupPreview(entry.followup),
-    prompt: entry.followup,
-    resumeChildId: entry.childId,
-  }))
-  return [...fresh, ...resumed]
-}
 
 /** Clamp a requested pool size into the configured bounds. */
 function resolveConcurrency(requested: number | undefined, config: Config): number {
@@ -251,29 +175,60 @@ function resolveConcurrency(requested: number | undefined, config: Config): numb
 }
 
 /** Render the batch outcome as the model-facing text form of the tool result. */
-function renderBatch(outcome: SwarmBatchOutcome): string {
+function renderBatch(outcome: SwarmBatchOutcome, warnings: readonly string[]): string {
   // peakConcurrency appears only on adaptive batches, where the live pool
   // legitimately differs from the requested steady-state size.
   const concurrencyNote = outcome.peakConcurrency === undefined
     ? `concurrency ${outcome.concurrency}`
     : `concurrency ${outcome.concurrency}, peak ${outcome.peakConcurrency}`
-  const header = `swarm "${outcome.label}": ${outcome.completed} completed, ${outcome.failed} failed, ${outcome.aborted} aborted (${concurrencyNote})`
+  const budgetNote = outcome.budgetExhausted === true ? ', TOKEN BUDGET EXHAUSTED — launch stopped early' : ''
+  const usageNote = outcome.usage === undefined
+    ? ''
+    : `, tokens ${outcome.usage.totalTokens ?? outcome.usage.inputTokens + outcome.usage.outputTokens} (in ${outcome.usage.inputTokens} / out ${outcome.usage.outputTokens})`
+  const header = `swarm "${outcome.label}": ${outcome.completed} completed, ${outcome.failed} failed, ${outcome.aborted} aborted (${concurrencyNote}, ${outcome.durationMs}ms${usageNote}${budgetNote})`
   const entries = outcome.items.map((item) => {
     const lines = [`[${item.index}] ${item.item}`, `status: ${item.status}`]
     // The child id is the handle a later resume_entries call needs; surface
     // it explicitly so the model does not have to infer it from elsewhere.
     if (item.childId !== undefined) lines.push(`childId: ${item.childId}`)
+    if (item.failureKind !== undefined) lines.push(`failureKind: ${item.failureKind}`)
+    if (item.failureCode !== undefined) lines.push(`failureCode: ${item.failureCode}`)
+    if (item.durationMs !== undefined) lines.push(`durationMs: ${item.durationMs}`)
+    if (item.usage !== undefined) lines.push(`tokens: ${item.usage.totalTokens ?? item.usage.inputTokens + item.usage.outputTokens}`)
     if (item.retries !== undefined && item.retries > 0) lines.push(`retries: ${item.retries}`)
     if (item.output !== undefined) lines.push(`output:\n${item.output}`)
     if (item.error !== undefined) lines.push(`error: ${item.error}`)
     return lines.join('\n')
   })
-  return entries.length === 0 ? header : [header, '', entries.join('\n\n')].join('\n')
+  const sections = [header]
+  if (warnings.length > 0) sections.push(`split hints:\n${warnings.map(w => `- ${w}`).join('\n')}`)
+  if (entries.length > 0) sections.push(entries.join('\n\n'))
+  return sections.join('\n\n')
+}
+
+/** Render a dry-run preview: what WOULD run, nothing executed. */
+function renderDryRun(output: SwarmToolOutput): string {
+  const header = `swarm "${output.label}" (dry run, nothing executed): ${output.total} children would start (concurrency ${output.concurrency})`
+  const previews = output.items.map(item => `[${item.index}] ${item.item}\nprompt:\n${item.prompt ?? ''}`)
+  const sections = [header]
+  if (output.warnings !== undefined && output.warnings.length > 0) {
+    sections.push(`split hints:\n${output.warnings.map(w => `- ${w}`).join('\n')}`)
+  }
+  sections.push(previews.join('\n\n'))
+  return sections.join('\n\n')
+}
+
+/** Render either tool output flavor to its model-facing text. */
+function renderToolOutput(value: SwarmToolOutput): string {
+  if (value.kind === 'swarm-dry-run') return renderDryRun(value)
+  // Executed batches always carry durationMs (execute maps the outcome
+  // verbatim); the fallback keeps a hand-shaped value renderable.
+  return renderBatch({ ...value, durationMs: value.durationMs ?? 0 }, value.warnings ?? [])
 }
 
 /** Structured tool output: the batch outcome with the schema's field names. */
 interface SwarmToolOutput {
-  readonly kind: 'swarm'
+  readonly kind: 'swarm' | 'swarm-dry-run'
   readonly label: string
   readonly concurrency: number
   readonly peakConcurrency?: number
@@ -281,7 +236,27 @@ interface SwarmToolOutput {
   readonly completed: number
   readonly failed: number
   readonly aborted: number
-  readonly items: SwarmBatchOutcome['items']
+  readonly durationMs?: number
+  readonly budgetExhausted?: boolean
+  readonly usage?: TokenUsage
+  readonly warnings?: readonly string[]
+  readonly items: readonly SwarmItemOutput[]
+}
+
+/** One item row of the tool output; a dry-run row carries `prompt` instead. */
+interface SwarmItemOutput {
+  readonly index: number
+  readonly item: string
+  readonly status: 'completed' | 'failed' | 'aborted'
+  readonly childId?: string
+  readonly output?: string
+  readonly error?: string
+  readonly failureKind?: 'transport' | 'content' | 'structural'
+  readonly failureCode?: string
+  readonly durationMs?: number
+  readonly usage?: TokenUsage
+  readonly retries?: number
+  readonly prompt?: string
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -314,7 +289,10 @@ export function apply(ctx: Context, config: Config): void {
         + 'multiple independent, non-overlapping subtasks that are worth running at once — batch analyses, '
         + 'per-module edits in disjoint areas, parallel lookups. Prefer it over calling the subagent tool '
         + 'repeatedly: one call, one aggregated result. Items must be self-contained (each child sees only its '
-        + 'expanded prompt) and must not depend on each other. Children run with the full tool set by default; '
+        + 'expanded prompt) and must not depend on each other: write each item with its input, expected output, '
+        + 'and completion criterion, and pass background every subtask shares via shared_context. Unsure about a '
+        + 'split? Call with dry_run to preview the expanded per-child prompts before running them. Children run '
+        + 'with the full tool set by default; '
         + 'for read-only batches (analysis, review, lookups) pass tool_filter to scope every child to read/search '
         + 'tools only.',
       parameters: {
@@ -330,7 +308,11 @@ export function apply(ctx: Context, config: Config): void {
         },
         prompt_template: {
           type: 'string',
-          description: 'The complete, self-contained instructions shared by every fresh child, with an {{item}} placeholder where each entry of `items` is substituted. Required when `items` is present. Include everything a child needs — it sees no other context.',
+          description: 'The complete, self-contained instructions shared by every fresh child, with an {{item}} placeholder where each entry of `items` is substituted. Required when `items` is present. Include everything a child needs — it sees no other context. State the expected output and the completion criterion explicitly.',
+        },
+        shared_context: {
+          type: 'string',
+          description: 'Optional background text prepended to every FRESH child\'s prompt (project conventions, file inventory, constraints every subtask shares). Pass shared background once here instead of repeating it inside the template or every item. Ignored for resume_entries — a resumed child keeps its existing context.',
         },
         resume_entries: {
           type: 'array',
@@ -373,13 +355,22 @@ export function apply(ctx: Context, config: Config): void {
           },
           description: 'Optional tool scoping applied to EVERY child in the batch. Children otherwise run with the full tool set — for read-only batches (analysis, review, lookups) pass an allow-list of read/search tools so no child can write files the parent never audits. Applies to fresh children at creation; resumed children keep the tool set they were created with.',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'When true, validate the batch and return each child\'s fully expanded prompt WITHOUT running anything. Use it to inspect a large or unfamiliar split before spending the batch; fix the split from the preview, then call again without dry_run.',
+        },
+        token_budget: {
+          type: 'number',
+          description: 'Optional batch token budget: once the summed usage of settled children reaches this, the batch stops launching new work (in-flight children settle normally; unstarted items report aborted with budgetExhausted set). Omit to use the deployment default (0 = no budget).',
+        },
       },
       output: {
         schema: {
           type: 'object',
           additionalProperties: false,
           properties: {
-            kind: { type: 'string', required: true, const: 'swarm' },
+            // 'swarm' = executed batch; 'swarm-dry-run' = validated preview only.
+            kind: { type: 'string', required: true, enum: ['swarm', 'swarm-dry-run'] },
             label: { type: 'string', required: true },
             concurrency: { type: 'number', required: true },
             // Present only on adaptive batches: the highest simultaneous
@@ -389,6 +380,22 @@ export function apply(ctx: Context, config: Config): void {
             completed: { type: 'number', required: true },
             failed: { type: 'number', required: true },
             aborted: { type: 'number', required: true },
+            // Whole-batch wall time in ms (executed batches only).
+            durationMs: { type: 'number' },
+            // True when the token budget stopped the batch early.
+            budgetExhausted: { type: 'boolean' },
+            // Batch-wide token accounting (absent when no child reported usage).
+            usage: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                inputTokens: { type: 'number', required: true },
+                outputTokens: { type: 'number', required: true },
+                totalTokens: { type: 'number' },
+              },
+            },
+            // Non-blocking split-quality hints from expansion.
+            warnings: { type: 'array', items: { type: 'string' } },
             items: {
               type: 'array',
               required: true,
@@ -404,14 +411,36 @@ export function apply(ctx: Context, config: Config): void {
                   childId: { type: 'string' },
                   output: { type: 'string' },
                   error: { type: 'string' },
+                  // Why a failed item failed: transport (provider/network;
+                  // throttles the pool, auto-retried unless terminal like
+                  // QUOTA), content (the task itself), structural (the call
+                  // was unsound).
+                  failureKind: { type: 'string', enum: ['transport', 'content', 'structural'] },
+                  // The provider-neutral failure code (e.g. RATE_LIMIT).
+                  failureCode: { type: 'string' },
+                  // Wall time of this item's settled attempt(s) in ms.
+                  durationMs: { type: 'number' },
+                  // Token accounting recovered from the child session.
+                  usage: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      inputTokens: { type: 'number', required: true },
+                      outputTokens: { type: 'number', required: true },
+                      totalTokens: { type: 'number' },
+                    },
+                  },
                   // Present when the item needed automatic retries to settle.
                   retries: { type: 'number' },
+                  // Dry-run only: the fully expanded prompt the child WOULD
+                  // receive (status is always 'aborted' on a dry run).
+                  prompt: { type: 'string' },
                 },
               },
             },
           },
         },
-        render: (_args, value) => [{ type: 'text', text: renderBatch(value as SwarmToolOutput) }],
+        render: (_args, value) => [{ type: 'text', text: renderToolOutput(value as SwarmToolOutput) }],
         // Project the structured outcome so presentResult (and any future UI
         // bridge) reads typed data instead of re-parsing the rendered text.
         presentationMeta: (_args, value) => value,
@@ -436,6 +465,8 @@ export function apply(ctx: Context, config: Config): void {
             resumes: args.resume_entries?.length ?? 0,
             concurrency: resolveConcurrency(args.max_concurrency, config),
             template: args.prompt_template,
+            ...args.shared_context !== undefined ? { sharedContext: true } : {},
+            ...args.dry_run === true ? { dryRun: true } : {},
           },
         }
       },
@@ -467,14 +498,35 @@ export function apply(ctx: Context, config: Config): void {
             throw new Error(`swarm: resume_entries need a provider with continuable children, but provider "${config.provider}" does not support them — restart the failed work as fresh items instead`)
           }
         }
-        const tasks = expandTasks(args, config.maxItems)
+        const expanded = expandTasks(args, config.maxItems)
+        const concurrency = resolveConcurrency(args.max_concurrency, config)
+        const label = args.description.trim().length > 0 ? args.description : 'swarm batch'
+        if (args.dry_run === true) {
+          // Validation + expansion only: the model inspects what WOULD run.
+          return {
+            kind: 'swarm-dry-run' as const,
+            label,
+            concurrency,
+            total: expanded.tasks.length,
+            completed: 0,
+            failed: 0,
+            aborted: expanded.tasks.length,
+            ...expanded.warnings.length > 0 ? { warnings: expanded.warnings } : {},
+            items: expanded.tasks.map(task => ({
+              index: task.index,
+              item: task.item,
+              status: 'aborted' as const,
+              prompt: task.prompt,
+            })),
+          }
+        }
         const outcome = await runSwarmBatch(ctx, {
           provider: config.provider,
           parent,
           signal: exec.signal,
-          label: args.description.trim().length > 0 ? args.description : 'swarm batch',
-          tasks,
-          concurrency: resolveConcurrency(args.max_concurrency, config),
+          label,
+          tasks: expanded.tasks,
+          concurrency,
           // An explicit max_concurrency pins the pool: adaptive feedback may
           // shrink below it and recover back to it, but never exceed it.
           maxConcurrency: config.maxConcurrency,
@@ -483,6 +535,9 @@ export function apply(ctx: Context, config: Config): void {
           itemRetryDelayMs: config.itemRetryDelayMs,
           outputLimit: config.perItemOutputLimit,
           startStaggerMs: config.startStaggerMs,
+          tokenBudget: args.token_budget !== undefined && Number.isFinite(args.token_budget)
+            ? Math.max(0, Math.floor(args.token_budget))
+            : config.tokenBudget,
           ...config.agentOptions !== undefined ? { agentOptions: config.agentOptions } : {},
           ...args.tool_filter !== undefined ? { toolFilter: args.tool_filter } : {},
           maxDepth: config.maxDepth,
@@ -493,11 +548,19 @@ export function apply(ctx: Context, config: Config): void {
         if (outcome.completed === 0 && outcome.failed > 0) {
           // Every child failed: surface the batch as a tool error so the model
           // retries or escalates instead of treating the batch as a success.
-          const failures = outcome.items
-            .filter(item => item.status === 'failed')
+          // The dominant failure class decides the advice: transport outages
+          // are worth a wholesale resume, content failures need better items.
+          const failures = outcome.items.filter(item => item.status === 'failed')
+          const transportCount = failures.filter(item => item.failureKind === 'transport').length
+          const advice = failures.every(item => item.failureCode === 'QUOTA')
+            ? 'the account quota/balance is exhausted — top up or switch provider, then resume the failed children via resume_entries'
+            : transportCount === failures.length
+              ? 'all failures look transient (provider/network); wait a moment, then resume the failed children via resume_entries'
+              : 'failures are content/structural, not transient — revise the failing items instead of retrying them unchanged'
+          const detail = failures
             .map(item => `[${item.index}] ${item.item}: ${item.error ?? 'unknown failure'}`)
             .join('\n')
-          throw new Error(`swarm batch "${outcome.label}" failed on every item:\n${failures}`)
+          throw new Error(`swarm batch "${outcome.label}" failed on every item (${advice}):\n${detail}`)
         }
         return {
           kind: 'swarm' as const,
@@ -508,6 +571,10 @@ export function apply(ctx: Context, config: Config): void {
           completed: outcome.completed,
           failed: outcome.failed,
           aborted: outcome.aborted,
+          durationMs: outcome.durationMs,
+          ...outcome.budgetExhausted === true ? { budgetExhausted: true } : {},
+          ...outcome.usage !== undefined ? { usage: outcome.usage } : {},
+          ...expanded.warnings.length > 0 ? { warnings: expanded.warnings } : {},
           items: [...outcome.items],
         }
       },

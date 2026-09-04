@@ -211,7 +211,12 @@ forking it**:
   as native conversation-view tabs.
 - `@dsh-app/plugin-swarm` (host): batch parallel subagent orchestration —
   model-facing `swarm` tool + `/swarm` command, adaptive concurrency gate,
-  per-item auto-retry.
+  per-item auto-retry. Failures classify as transport/content/structural —
+  only transport throttles the pool and auto-retries. Split aids:
+  `shared_context` (shared background prepended per child), `dry_run`
+  (validate + preview expanded prompts without running), split-quality
+  warnings. Batch token budget (`token_budget` arg / `tokenBudget` config,
+  default off) stops launches when spent.
 - `@dsh-app/plugin-usage` (dual face): usage capture/aggregation over
   session logs + settings-page balance card, heatmap and daily trend chart.
 - `@dsh-app/plugin-archives` (dual face): session archive manager — host
@@ -287,9 +292,9 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 (cd plugins/plugin-memory && npm test)      # node:test suites (esbuild bundles TS -> .test-dist)
 ```
 
-> Tests live in `plugins/plugin-memory/tests/` (node:test, `npm test` inside
-> that plugin). The shell/kernel have no test runner; verification is
-> `npm run typecheck` + manual run in dev mode.
+> Tests live in `plugins/plugin-memory/tests/` and `plugins/plugin-swarm/tests/`
+> (node:test, `npm test` inside each plugin). The shell/kernel have no test
+> runner; verification is `npm run typecheck` + manual run in dev mode.
 > Manual/probe helpers live in `scripts/`:
 > `probe-mirror.mjs` (update-chain connectivity), `probe-drag.cjs` (drag
 > regions + brand Models render — **keep its `CSS` in sync with**
