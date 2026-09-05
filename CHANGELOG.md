@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.2] - 2026-09-05
+
+### 中文
+- 修复后台记忆提炼与策展器静默失效：dsh 0.1.2-alpha.4 删除了 `Session.events` 读取器（改为 `snapshotEvents()`），提炼器读取旧属性拿到 undefined 后抛错、被 fail-soft 静默吞掉——自升级 alpha.4 起后台提炼从未真正运行（主动记忆 memory_save 不受影响）；改用 `snapshotEvents()` 后已实测恢复（含提炼活动记录的会话短 id 显示修复）
+- 修复 swarm 子代理的失败诊断与 token 统计失效：同一根因导致失败原因读取静默降级、续跑 watermark 计算抛错
+- 修复归档会话删除被全部拦截：同一根因导致「进行中」判定恒真，所有归档会话被误判为不可删除
+
+### English
+- Fixed the background memory distiller and curator silently never running: dsh 0.1.2-alpha.4 removed the `Session.events` getter in favor of `snapshotEvents()`, so the distiller read `undefined`, threw, and had the failure swallowed by its fail-soft path — no background distill ran since the alpha.4 upgrade (proactive `memory_save` was unaffected); it now reads via `snapshotEvents()` and is verified running end-to-end (the distill activity's short session id fix included)
+- Fixed swarm child failure diagnostics and token accounting: the same root cause silently degraded failure-reason reads and threw on resume-watermark computation
+- Fixed archived sessions being undeletable: the same root cause made the mid-turn check always true, fencing every archived session from deletion
+
 ## [v0.9.1] - 2026-09-05
 
 ### 中文
