@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.0] - 2026-09-05
+
+### 中文
+- 并行子代理（swarm）失败分级：子任务失败按错误码分为传输/内容/结构三类——只有限流、断流、超时等传输类失败会压低批次并发并进入自动重试；任务本身做不到（拒绝、超长）或调用不合法的失败不再拖垮整批吞吐；配额耗尽只降速不空重试，批次全失败时按失败类型给出可执行的下一步建议
+- swarm 拆分质量：新增 `shared_context`（公共背景写一次、注入每个子代理）、`dry_run`（只校验并预览每个子代理的完整指令，不真正执行）、拆分质量提示（过短/过粗的子任务随结果返回改进建议）；系统提示补充好/坏拆分范例
+- swarm 批次 token 预算：`token_budget` 参数或配置项达到预算后停止启动新子任务（在途任务正常完成），未启动项标记中止并保留 childId 可随时恢复；结果新增每项耗时、失败分类、错误码、token 用量与批次总耗时/总用量
+- swarm 自适应调度升级：未显式指定并发时，池子在持续稳定完成后可探测性爬过配置上限（最高 64），探针失败会记住本批次的实际上界不再反复撞墙；显式指定 `max_concurrency` 时严格钉死；出厂默认起始并发 6→8、上限 8→16、启动间隔 2s→1s
+- swarm 设置页：设置页新增「并行子代理」区块——启用开关、自适应开关与全部调度参数可视化编辑，保存后下一次调用即时生效（仅启用/禁用需重启）；用户配置独立落盘，不再被应用更新覆盖
+- swarm 修复：自动重试此前从未真正等待重试轮次（结算监听会把子代理上一轮的旧结果重复交付），修复后重试正确等待新一轮完成；调度卡片新增耗时、token 用量与失败分类显示
+
+### English
+- Swarm failure classification: item failures are classified as transport/content/structural from the child session's error code — only transient transport failures (rate limit, disconnects, timeouts) throttle the batch pool and qualify for auto-retry; task-level refusals or unsound calls no longer drag down the whole batch's throughput; quota exhaustion throttles without pointless retries, and a fully failed batch now suggests the actionable next step per failure class
+- Swarm split quality: new `shared_context` (write shared background once, injected into every child), `dry_run` (validate and preview each child's full prompt without running anything), and split-quality hints (stub or vague items return improvement suggestions with the result); the system prompt gains good/bad split examples
+- Swarm batch token budget: once the `token_budget` argument or config value is spent, the batch stops launching new work (in-flight children settle normally), and unstarted items report aborted with their childId preserved for later resume; results now carry per-item duration, failure class, error code, token usage, plus batch totals
+- Swarm adaptive scheduling upgrade: unpinned batches may probe past the configured concurrency ceiling (up to 64) on sustained clean completions, and a probe failure ratchets the exploration bound down so the batch stops rediscovering the same wall; an explicit `max_concurrency` pins the pool strictly; shipped defaults move to 8 initial / 16 ceiling concurrency and a 1s launch stagger
+- Swarm settings page: a new 并行子代理 settings section edits the enable toggle, adaptive toggle, and every scheduling knob visually — saved values apply to the next swarm call with no restart (only enable/disable needs one); user configuration persists in its own file, no longer overwritten by app updates
+- Swarm fixes: auto-retry never actually waited for the retry epoch (the settlement watcher re-delivered the child's previous terminal result) — retries now correctly await the new epoch; the batch card additionally shows duration, token usage, and failure classes
+
 ## [v0.8.1] - 2026-09-03
 
 ### 中文
