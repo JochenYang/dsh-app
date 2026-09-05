@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.1] - 2026-09-05
+
+### 中文
+- 修复：Windows 应用更新点击「立即安装」时不再闪烁黑色终端窗口——安装向导改为直接启动（此前经 cmd.exe 包装，detached 控制台窗口无法完全隐藏）；安装结果改为下次启动时按版本号确认，取消或失败会提示重试，安装包残留自动清理
+
+### English
+- Fix: clicking "Install now" for a Windows app update no longer flashes a console window — the installer wizard is spawned directly (the detached cmd.exe wrapper could not be fully hidden); install completion is now confirmed by version comparison on the next boot, with a retry prompt on cancel/failure and automatic cleanup of the leftover installer
+
 ## [v0.9.0] - 2026-09-05
 
 ### 中文
