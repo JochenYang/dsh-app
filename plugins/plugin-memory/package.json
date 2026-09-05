@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-memory",
   "description": "DSH APP cross-session memory: dual-face plugin (host half exposes memory_save/memory_recall/memory_forget LLM tools, system-prompt injection of the persisted memory files, and a background distiller that reviews quiet sessions through a read-only subagent; client half is a settings section with toggles, stats, and clear).",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

@@ -230,13 +230,12 @@ interface ChildTurnFailure {
 }
 
 /**
- * Minimal structural slice of a child session's event log. `Session.events`
- * is not part of the public type surface in rc.1 — read it through the same
- * structural cast the memory plugin uses for its SessionLike slice (the
- * runtime object does carry the event log).
+ * Minimal structural slice of a child session's event log. alpha.4 replaced
+ * the `Session.events` getter with `snapshotEvents()`/`ownEvents()`; read
+ * through the method so the slice works on rc-line kernels.
  */
 interface ChildSessionSlice {
-  readonly events: ReadonlyArray<{ type: string, data: unknown }>
+  snapshotEvents(): ReadonlyArray<{ type: string, data: unknown }>
 }
 
 /**
@@ -247,7 +246,7 @@ interface ChildSessionSlice {
  * batch actionable instead of a bare "run failed".
  */
 function childTurnFailure(session: ChildSessionSlice | undefined): ChildTurnFailure | undefined {
-  const events = session?.events
+  const events = session?.snapshotEvents()
   if (events === undefined) return undefined
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]
@@ -268,7 +267,7 @@ function childTurnFailure(session: ChildSessionSlice | undefined): ChildTurnFail
  * readable at launch.
  */
 function childUsage(session: ChildSessionSlice | undefined, watermark: number): TokenUsage | undefined {
-  const events = session?.events
+  const events = session?.snapshotEvents()
   if (events === undefined) return undefined
   let input = 0
   let output = 0
@@ -685,7 +684,7 @@ async function runContinuableTask(
         { signal: options.signal },
       )
       childId = task.resumeChildId
-      watermark = liveChildSession(ctx, childId)?.events.length ?? 0
+      watermark = liveChildSession(ctx, childId)?.snapshotEvents().length ?? 0
     } else {
       const started = await ctx.subagents.startContinuable({
         provider: options.provider,

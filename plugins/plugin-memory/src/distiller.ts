@@ -103,7 +103,8 @@ interface ProposedEntry {
 /** Structural slice of a Session (the event feed the distiller reads). */
 interface SessionLike {
   readonly id: SessionId
-  readonly events: ReadonlyArray<{ type: string, seq: number, data: unknown }>
+  /** All events including any fork-inherited prefix (seq-ordered). */
+  snapshotEvents(): ReadonlyArray<{ type: string, seq: number, data: unknown }>
   readonly header: { readonly cwd?: string, readonly origin?: string }
 }
 
@@ -231,14 +232,15 @@ export class MemoryDistiller {
   private async runDistill(parent: NonNullable<ReturnType<Context['agents']['get']>>, session: SessionLike, cwd: string | undefined): Promise<void> {
     const sessionId = session.id
     const lastSeq = this.root.distillSeqOf(sessionId)
+    const events = session.snapshotEvents()
     const fresh: Array<{ type: string, seq: number, text: string }> = []
-    for (const event of session.events) {
+    for (const event of events) {
       if (event.seq <= lastSeq) continue
       const text = messageText(event)
       if (text !== '') fresh.push({ type: event.type, seq: event.seq, text })
     }
-    const lastEventSeq = session.events.length > 0
-      ? session.events[session.events.length - 1]!.seq
+    const lastEventSeq = events.length > 0
+      ? events[events.length - 1]!.seq
       : lastSeq
 
     // Too little new material: advance progress and skip the LLM call.

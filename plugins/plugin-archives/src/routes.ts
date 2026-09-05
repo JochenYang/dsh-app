@@ -112,7 +112,10 @@ export interface SessionsLike {
  * treated as mid-turn (conservative: keep the old skip behavior).
  */
 function isMidTurn(session: unknown): boolean {
-  const events = (session as { events?: unknown } | undefined)?.events
+  // alpha.4 replaced the `Session.events` getter with `snapshotEvents()`;
+  // an unreadable/absent log stays fenced (treated as mid-turn).
+  const source = session as { snapshotEvents?: () => unknown } | undefined
+  const events = typeof source?.snapshotEvents === 'function' ? source.snapshotEvents() : undefined
   if (!Array.isArray(events)) return true
   let open = false
   for (const event of events) {

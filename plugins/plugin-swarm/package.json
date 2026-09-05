@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-swarm",
   "description": "DSH APP swarm: batch parallel subagent orchestration (swarm tool + /swarm command, continuable children with resume, adaptive concurrency with exploration, transport-classified failure gating, per-item auto-retry, shared_context/dry_run split aids, batch token budget) plus a settings-page section for the scheduling knobs.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
