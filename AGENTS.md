@@ -17,8 +17,8 @@ The essential design idea is **"self-contained, no fork"**:
   upstream kernel** (`plugins/`). Upstream `dsh` is never forked or patched,
   so every upstream release is just an ordinary kernel update.
 - There are **two independent update channels**: the Electron shell
-  (Windows: custom latest.yml detection + mirror download + silent install;
-  macOS/Linux: `electron-updater` → GitHub Releases) and the dsh kernel
+  (Windows: custom latest.yml detection + mirror download + visible NSIS
+  wizard; macOS/Linux: `electron-updater` → GitHub Releases) and the dsh kernel
   (`KernelManager` → npm registry + `runtime-<version>` GitHub Release
   artifacts). They are
   decoupled: an upstream dsh release never requires a new shell build.
@@ -71,7 +71,7 @@ dist/            tsc + copy output (gitignored, generated)
 | `server.ts` | `DshServer`: spawn/health-check/restart/graceful-shutdown of the dsh child process; log redaction; settled-URL parsing |
 | `window.ts` | `createMainWindow` (sandboxed, desktop chrome injection, title-bar overlay sync, export toast, in-window update status card) |
 | `tray.ts` | System tray menu (open, check kernel/app update, restart server, quit) |
-| `updater.ts` | Shell update channel: Windows custom latest.yml + mirror download + NSIS silent install; macOS/Linux via `electron-updater` |
+| `updater.ts` | Shell update channel: Windows custom latest.yml + mirror download + visible NSIS wizard (direct GUI spawn, pending-install record consumed on next boot); macOS/Linux via `electron-updater` |
 | `update-card.ts` | Pure injected update-card script (message + progress bar) shared by kernel and shell update progress |
 | `brand-suite.ts` | Suite seams: plugin symbolic links into `$DSH_HOME` + loader overlay copy |
 

@@ -150,9 +150,12 @@ suffixed manifest (`artifact.ts:131`).
 - Shell updates: Windows uses a custom in-app flow — latest.yml detection via
   the GitHub `releases/latest` alias, arch-matched installer download with an
   official-first / gh-proxy-mirror fallback chain, sha512 verification, then a
-  **visible** NSIS install wizard (`updater.ts`: the app quits, cmd waits for
-  the wizard, records the exit code and deletes the installer afterwards —
-  success or cancel). macOS/Linux keep `electron-updater`.
+  **visible** NSIS install wizard (`updater.ts`: the app writes a
+  pending-install record and quits; the GUI installer is spawned directly —
+  a detached cmd watcher always flashes a console window on Windows, even
+  with `windowsHide` — and the next boot deletes the leftover package and
+  confirms the version advanced, toasting when it did not).
+  macOS/Linux keep `electron-updater`.
 - Kernel artifacts: CI matrix builds `dsh-runtime-<platform>-<arch>-<version>.tgz`
   per platform/arch and attaches them to a dedicated `runtime-<dshVersion>`
   release (created published), which `GitHubArtifactResolver` resolves; kernel

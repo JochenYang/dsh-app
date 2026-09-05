@@ -373,9 +373,10 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
 
     const yaml = parseLatestYaml(yamlText)
     if (!yaml) throw new Error('更新元数据格式无法解析')
-    // Version is spliced into an installer filename and a cmd command line;
-    // constrain it to a safe charset so a crafted metadata value can never
-    // break the quoting pairs (defense in depth for an unsigned latest.yml).
+    // Version is spliced into an installer filename and the pending-install
+    // record; constrain it to a safe charset so a crafted metadata value can
+    // never break the path or the spawn target (defense in depth for an
+    // unsigned latest.yml).
     if (!/^[\w.~-]+$/.test(yaml.version)) throw new Error('更新元数据版本格式异常')
 
     const current = app.getVersion()
@@ -390,8 +391,9 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
 
     const asset = pickAsset(yaml.files, process.arch)
     if (!asset) throw new Error('未找到适用于当前系统的安装包')
-    // Same charset guard for the asset filename (spliced into download URL
-    // and cmd line): a crafted value must fail safely, never inject.
+    // Same charset guard for the asset filename (spliced into the download
+    // URL and the spawned installer path): a crafted value must fail safely,
+    // never inject.
     if (!/^[\w.~-]+\.exe$/.test(asset.url)) throw new Error('更新包文件名格式异常')
     const proceed = await confirmInFrame(
       {
@@ -471,30 +473,23 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       // VISIBLE NSIS install: the app must be closed so the installer can
       // replace the running binaries; the wizard then shows the same flow as a
       // first-time install (user clicks through, completion page relaunches
-      // the app). The installer is detached so it survives this process
-      // exiting. The parent cannot wait for the exit code itself (it quits
-      // immediately after spawning), so a detached cmd watcher records the
-      // installer's exit code into a file that the next boot reads
-      // (consumeUpdaterInstallResult) and deletes the downloaded package once
-      // the wizard exits — success OR cancel (re-downloadable).
+      // the app). The installer is a GUI-subsystem binary spawned DIRECTLY —
+      // no cmd wrapper: a detached cmd.exe always flashes a console window on
+      // Windows, even with windowsHide.
       //
-      // Quoting is load-bearing here: without windowsVerbatimArguments, libuv
-      // re-escapes the inner `\"` pairs as `\\\"`, which cmd.exe cannot parse
-      // and the installer never starts (only the app quits). With verbatim,
-      // the command string must also be wrapped in an EXTRA pair of quotes so
-      // cmd /? rule 2 strips the outer pair and leaves the inner ones intact
-      // for the spaced exe path. /V:ON makes !errorlevel! expand AFTER the
-      // installer runs (a plain %errorlevel% would expand at parse time).
-      // cmd waits on the direct-run GUI process, so `del` only runs once the
-      // wizard closes. Premise: per-user asInvoker NSIS (perMachine:false)
-      // installs in one process; an elevation hop would change what the
-      // recorded code means.
-      const resultFile = path.join(app.getPath('userData'), 'updater-install-result.txt')
-      const child = spawn(
-        'cmd.exe',
-        ['/V:ON', '/c', `""${dest}" & echo !errorlevel! > "${resultFile}" & del "${dest}"`],
-        { detached: true, stdio: 'ignore', windowsHide: true, windowsVerbatimArguments: true },
+      // Completion is verified on the next boot instead of by a watcher
+      // process (the host quits right after spawning, so it cannot observe the
+      // exit itself): the pending-install record holds the target version and
+      // the installer path, so the next run deletes the leftover package and
+      // toasts when the version did not advance (wizard cancelled or failed).
+      // Premise: per-user asInvoker NSIS (perMachine:false) installs in one
+      // process; an elevation hop would change what the version check means.
+      await fs.writeFile(
+        pendingInstallFile(),
+        `${JSON.stringify({ version: yaml.version, installerPath: dest } satisfies PendingInstall)}\n`,
+        'utf8',
       )
+      const child = spawn(dest, [], { detached: true, stdio: 'ignore', windowsHide: true })
       child.unref()
       app.quit()
     }
@@ -554,28 +549,55 @@ export function checkShellUpdate(manual = false, win: BrowserWindow | null = nul
 }
 
 /**
- * Log the previous installer's exit code (written by the detached cmd watcher
- * during the last silent install) so a failed install is never silent — the
- * host process quits right after spawning, so the event can only be observed
- * on the next boot. A non-zero code also surfaces as an error toast.
- * No-op when no result was recorded.
+ * Record of an in-flight visible install, written right before the app quits
+ * for the installer. The next boot consumes it: delete the leftover package
+ * and confirm the running version actually advanced.
+ */
+interface PendingInstall {
+  readonly version: string
+  readonly installerPath: string
+}
+
+function pendingInstallFile(): string {
+  return path.join(app.getPath('userData'), 'updater-pending-install.json')
+}
+
+/**
+ * Consume the pending-install record of the last update attempt: delete the
+ * leftover installer package (success or cancel — it is re-downloadable), and
+ * toast when the running version did not advance to the recorded target
+ * (wizard cancelled or failed). The host process quits right after spawning
+ * the installer, so the outcome can only be observed on the next boot.
+ * No-op when no install was in flight.
  */
 export async function consumeUpdaterInstallResult(win: BrowserWindow | null = null): Promise<void> {
-  const file = path.join(app.getPath('userData'), 'updater-install-result.txt')
-  let code = ''
+  const file = pendingInstallFile()
+  let pending: PendingInstall
   try {
-    code = (await fs.readFile(file, 'utf8')).trim()
+    pending = JSON.parse(await fs.readFile(file, 'utf8')) as PendingInstall
   } catch {
-    return // no result recorded (fresh install or normal run)
-  }
-  if (code !== '') {
-    console.log(`[shell-updater] previous silent-install exit code: ${code}`)
-    if (code !== '0') {
-      // Visible-install flow: a non-zero code also covers the user CANCELLING
-      // the wizard — keep the wording neutral so a cancel and a real failure
-      // both read sensibly.
-      void showToastWhenLoaded(win, `上次应用更新未完成（退出码 ${code}），可从托盘「检查应用更新」重试`, 'error', 8_000)
-    }
+    return // no install was in flight (fresh install or normal run)
   }
   await fs.rm(file, { force: true }).catch(() => undefined)
+  // The recorded path must stay inside the temp dir: the file lives in
+  // userData (writable by anything running as the user), so a tampered record
+  // must never redirect the delete elsewhere.
+  const tempDir = path.resolve(app.getPath('temp'))
+  const installer = typeof pending.installerPath === 'string' ? pending.installerPath : ''
+  if (installer !== '' && path.resolve(installer).startsWith(tempDir + path.sep)) {
+    await fs.rm(installer, { force: true }).catch(() => undefined)
+  }
+  const target = typeof pending.version === 'string' ? pending.version : ''
+  if (target === '') return
+  const current = app.getVersion()
+  const advanced = semver.valid(target) !== null && semver.valid(current) !== null
+    ? semver.gte(current, target)
+    : current === target
+  if (advanced) {
+    console.log(`[shell-updater] update to ${target} confirmed (running ${current})`)
+    return
+  }
+  // The wizard was cancelled or failed: still on the old version.
+  console.log(`[shell-updater] update to ${target} did not complete (running ${current})`)
+  void showToastWhenLoaded(win, `上次应用更新未完成（当前仍为 v${current}），可从托盘「检查应用更新」重试`, 'error', 8_000)
 }
