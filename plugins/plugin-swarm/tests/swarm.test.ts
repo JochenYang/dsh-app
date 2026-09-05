@@ -508,3 +508,47 @@ test('runSwarmBatch (one-shot, adaptive): outcome carries peakConcurrency and le
   assert.equal(outcome.peakConcurrency, 2)
   assert.equal(outcome.learnedCeiling, 4, 'no failures: the ceiling stays at the configured cap')
 })
+
+test('writeSwarmUserConfig: validates, merges, persists atomically, and null clears an override', async () => {
+  const { mkdtempSync, readFileSync, existsSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { writeSwarmUserConfig } = await import('../src/user-config.ts')
+  const file = join(mkdtempSync(join(tmpdir(), 'dshs-test-')), 'config.json')
+
+  // Write two fields; the file is created with the parent directory.
+  const after = writeSwarmUserConfig(file, { maxConcurrency: 24, adaptive: false })
+  assert.equal(after.maxConcurrency, 24)
+  assert.equal(after.adaptive, false)
+  assert.ok(existsSync(file))
+
+  // A second write merges without dropping the first field.
+  const merged = writeSwarmUserConfig(file, { tokenBudget: 500000 })
+  assert.equal(merged.maxConcurrency, 24)
+  assert.equal(merged.tokenBudget, 500000)
+
+  // null clears one override; the others survive.
+  const cleared = writeSwarmUserConfig(file, { maxConcurrency: null })
+  assert.equal(cleared.maxConcurrency, undefined)
+  assert.equal(cleared.adaptive, false)
+  assert.equal(cleared.tokenBudget, 500000)
+  assert.ok(!('maxConcurrency' in JSON.parse(readFileSync(file, 'utf8')) as object))
+
+  // Unknown fields and invalid values reject the whole write.
+  assert.throws(() => writeSwarmUserConfig(file, { nonsense: 1 }), /未知配置项/)
+  assert.throws(() => writeSwarmUserConfig(file, { maxConcurrency: 0 }), /不合法/)
+  assert.throws(() => writeSwarmUserConfig(file, { adaptive: 'yes' }), /不合法/)
+  // A rejected write leaves the file untouched.
+  assert.equal(loadSwarmUserConfig(file, () => {}).tokenBudget, 500000)
+})
+
+test('sameOrigin: browser Origin matches by host part; malformed Origin rejected; missing Origin allowed', async () => {
+  const { sameOrigin } = await import('../src/routes.ts')
+  const req = (headers: Record<string, string>): import('node:http').IncomingMessage =>
+    ({ headers }) as import('node:http').IncomingMessage
+
+  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' })), true)
+  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'http://evil.example.com' })), false)
+  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'not a url' })), false)
+  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000' })), true, 'non-browser caller (no Origin)')
+})

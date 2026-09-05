@@ -37,20 +37,25 @@ import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 // Type-only: pulls the ctx merges (tools / subagents / commands /
-// systemPrompt) into scope without runtime imports.
+// systemPrompt / webServer) into scope without runtime imports.
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-host-webserver'
 import { runSwarmBatch } from './orchestrator.ts'
 import type { SwarmBatchOutcome, SwarmOutputMode } from './orchestrator.ts'
 import { projectOutputItems } from './orchestrator.ts'
 import { MIN_ITEMS, expandTasks } from './expand.ts'
 import type { SwarmToolArgs } from './expand.ts'
 import { loadSwarmUserConfig } from './user-config.ts'
+import { registerSwarmRoutes } from './routes.ts'
 
 export const name = 'plugin-swarm'
-export const inject = ['tools', 'subagents', 'commands', 'systemPrompt']
+// webServer is a hard inject like the other suite plugins with settings
+// routes (memory/usage/archives): this product's host is always `dsh web`,
+// so the service is guaranteed to exist.
+export const inject = ['tools', 'subagents', 'commands', 'systemPrompt', 'webServer']
 
 /** Prompt order directly after the single-delegation policy section. */
 const SWARM_SECTION_ORDER = 116.6
@@ -275,16 +280,37 @@ interface SwarmItemOutput {
 export function apply(ctx: Context, baseConfig: Config): void {
   // User-level overrides: the shell rewrites the loader overlay on every
   // server start, so `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json`
-  // is the user's tuning point (see user-config.ts).
-  const userConfig = loadSwarmUserConfig(
-    join(resolveDshHome(), 'storages', 'dsh-app-plugin-swarm', 'config.json'),
-    (message) => ctx.logger.warn(message),
+  // is the user's tuning point (see user-config.ts). Read lazily per swarm
+  // call so settings-page edits apply to the next execution with no restart.
+  const configPath = join(resolveDshHome(), 'storages', 'dsh-app-plugin-swarm', 'config.json')
+  const resolveConfig = (): Config & { enabled?: boolean } => ({
+    ...baseConfig,
+    ...loadSwarmUserConfig(configPath, message => ctx.logger.warn(message)),
+  })
+
+  // The settings routes mount even when the tool is disabled, so the page
+  // can re-enable the plugin (a re-enable needs a restart either way).
+  ctx.effect(
+    () => registerSwarmRoutes(ctx.webServer, {
+      enabled: true,
+      defaultConcurrency: baseConfig.defaultConcurrency,
+      maxConcurrency: baseConfig.maxConcurrency,
+      maxItems: baseConfig.maxItems,
+      startStaggerMs: baseConfig.startStaggerMs,
+      itemMaxRetries: baseConfig.itemMaxRetries,
+      itemRetryDelayMs: baseConfig.itemRetryDelayMs,
+      perItemOutputLimit: baseConfig.perItemOutputLimit,
+      tokenBudget: baseConfig.tokenBudget,
+      adaptive: baseConfig.adaptive,
+    }, configPath),
+    'plugin-swarm: settings routes',
   )
-  if (userConfig.enabled === false) {
+
+  const config = resolveConfig()
+  if (config.enabled === false) {
     ctx.logger.info('swarm plugin: disabled by user config')
     return
   }
-  const config: Config = { ...baseConfig, ...userConfig }
   assertSubagentMaxDepth(config.maxDepth)
   if (config.maxItems < MIN_ITEMS) {
     throw new Error(`plugin-swarm: maxItems must be at least ${MIN_ITEMS}`)
@@ -496,7 +522,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
           rawInput: {
             items: args.items?.length ?? 0,
             resumes: args.resume_entries?.length ?? 0,
-            concurrency: resolveConcurrency(args.max_concurrency, config),
+            concurrency: resolveConcurrency(args.max_concurrency, resolveConfig()),
             template: args.prompt_template,
             ...args.shared_context !== undefined ? { sharedContext: true } : {},
             ...args.dry_run === true ? { dryRun: true } : {},
@@ -525,17 +551,19 @@ export function apply(ctx: Context, baseConfig: Config): void {
         if (!parent) {
           throw new Error('swarm tool requires a calling agent (exec.agent was undefined)')
         }
+        // Live per call: settings-page edits apply to the next execution.
+        const live = resolveConfig()
         // Fail a resume batch up front when the provider cannot back it: the
         // alternative (fresh items succeed, resume items fail mid-batch) wastes
         // the whole call and reports a confusing half-outcome.
         if (args.resume_entries !== undefined && args.resume_entries.length > 0) {
-          const provider = ctx.subagents.getProvider(config.provider)
+          const provider = ctx.subagents.getProvider(live.provider)
           if (provider?.prepareContinuable === undefined) {
-            throw new Error(`swarm: resume_entries need a provider with continuable children, but provider "${config.provider}" does not support them — restart the failed work as fresh items instead`)
+            throw new Error(`swarm: resume_entries need a provider with continuable children, but provider "${live.provider}" does not support them — restart the failed work as fresh items instead`)
           }
         }
-        const expanded = expandTasks(args, config.maxItems)
-        const concurrency = resolveConcurrency(args.max_concurrency, config)
+        const expanded = expandTasks(args, live.maxItems)
+        const concurrency = resolveConcurrency(args.max_concurrency, live)
         // An explicit max_concurrency pins the pool: adaptive feedback may
         // shrink below it and recover back to it, but never exceed it, and
         // exploration stays off. Unpinned batches may explore upward toward
@@ -562,25 +590,25 @@ export function apply(ctx: Context, baseConfig: Config): void {
           }
         }
         const outcome = await runSwarmBatch(ctx, {
-          provider: config.provider,
+          provider: live.provider,
           parent,
           signal: exec.signal,
           label,
           tasks: expanded.tasks,
           concurrency,
-          maxConcurrency: pinned ? concurrency : config.maxConcurrency,
+          maxConcurrency: pinned ? concurrency : live.maxConcurrency,
           exploreCeiling: pinned ? concurrency : SWARM_EXPLORE_CEILING,
-          adaptive: config.adaptive,
-          itemMaxRetries: config.itemMaxRetries,
-          itemRetryDelayMs: config.itemRetryDelayMs,
-          outputLimit: config.perItemOutputLimit,
-          startStaggerMs: config.startStaggerMs,
+          adaptive: live.adaptive,
+          itemMaxRetries: live.itemMaxRetries,
+          itemRetryDelayMs: live.itemRetryDelayMs,
+          outputLimit: live.perItemOutputLimit,
+          startStaggerMs: live.startStaggerMs,
           tokenBudget: args.token_budget !== undefined && Number.isFinite(args.token_budget)
             ? Math.max(0, Math.floor(args.token_budget))
-            : config.tokenBudget,
-          ...config.agentOptions !== undefined ? { agentOptions: config.agentOptions } : {},
+            : live.tokenBudget,
+          ...live.agentOptions !== undefined ? { agentOptions: live.agentOptions } : {},
           ...args.tool_filter !== undefined ? { toolFilter: args.tool_filter } : {},
-          maxDepth: config.maxDepth,
+          maxDepth: live.maxDepth,
         })
         if (exec.signal.aborted) {
           throw new Error('swarm batch was cancelled')

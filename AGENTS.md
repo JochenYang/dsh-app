@@ -209,7 +209,7 @@ forking it**:
 - `@dsh-app/plugin-sidebar` (dual face): workspace file tree + preview and
   the Git panel (grouped changes, unified diff, stage/revert/commit, graph)
   as native conversation-view tabs.
-- `@dsh-app/plugin-swarm` (host): batch parallel subagent orchestration —
+- `@dsh-app/plugin-swarm` (dual face): batch parallel subagent orchestration —
   model-facing `swarm` tool + `/swarm` command, adaptive concurrency gate,
   per-item auto-retry. Failures classify as transport/content/structural —
   only transport throttles the pool and auto-retries. Split aids:
@@ -220,8 +220,9 @@ forking it**:
   past `maxConcurrency` (up to 64) on clean streaks and relearn the ceiling
   on transport failures; `output_mode` (full/summary/status_only) trims
   result payloads for large batches. User overrides:
-  `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json` (the overlay is
-  rewritten at every server start, so the file is the tuning point).
+  `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json`, editable from the
+  settings page (client half: 并行子代理 section; scheduling fields apply
+  live, `enabled` needs a restart).
 - `@dsh-app/plugin-usage` (dual face): usage capture/aggregation over
   session logs + settings-page balance card, heatmap and daily trend chart.
 - `@dsh-app/plugin-archives` (dual face): session archive manager — host

@@ -1,6 +1,6 @@
 {
   "name": "@dsh-app/plugin-swarm",
-  "description": "DSH APP swarm: batch parallel subagent orchestration (swarm tool + /swarm command, continuable children with resume, adaptive concurrency gated on transport-classified failures, per-item auto-retry, shared_context/dry_run split aids, batch token budget) over the ctx.subagents seam.",
+  "description": "DSH APP swarm: batch parallel subagent orchestration (swarm tool + /swarm command, continuable children with resume, adaptive concurrency with exploration, transport-classified failure gating, per-item auto-retry, shared_context/dry_run split aids, batch token budget) plus a settings-page section for the scheduling knobs.",
   "version": "0.5.0",
   "type": "module",
   "main": "lib/index.js",
@@ -10,11 +10,23 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
     }
   },
   "files": [
@@ -29,24 +41,34 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
     "@deepseek-ai/dsh-agent": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.2-alpha.3",
     "@deepseek-ai/dsh-commands": "^0.1.2-alpha.3",
     "@deepseek-ai/dsh-home-paths": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.2-alpha.3",
     "@deepseek-ai/dsh-llm": "^0.1.2-alpha.3",
     "@deepseek-ai/dsh-subagent": "^0.1.2-alpha.3",
     "@deepseek-ai/dsh-system-prompt": "^0.1.2-alpha.3",
     "@deepseek-ai/dsh-tools": "^0.1.2-alpha.3",
-    "@deepseek-ai/schemastery": "^3.0.0"
+    "@deepseek-ai/schemastery": "^3.0.0",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.2-rc.1",
     "@deepseek-ai/dsh-commands": "0.1.2-rc.1",
     "@deepseek-ai/dsh-home-paths": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "0.1.2-rc.1",
     "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
     "@deepseek-ai/dsh-subagent": "0.1.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
     "@deepseek-ai/schemastery": "3.18.2",
+    "@types/react": "18.3.1",
     "typescript": "^5.7.2"
   },
   "license": "MIT"

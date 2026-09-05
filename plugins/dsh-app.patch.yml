@@ -10,8 +10,11 @@
 #   visible to the client-modules scan, which picks up the `dsh.client`
 #   declaration and serves /plugins/@dsh-app/plugin-client-ui/client.js.
 # - swarm: batch parallel subagent orchestration over the upstream subagent
-#   seam (model-facing `swarm` tool + `/swarm` command). Needs a kernel whose
-#   base bundle registers a subagent provider; older kernels boot without it.
+#   seam (model-facing `swarm` tool + `/swarm` command), dual-face: the
+#   package.json `dsh.client` declaration adds the settings-page section
+#   (并行子代理) editing $DSH_HOME/storages/dsh-app-plugin-swarm/config.json.
+#   Needs a kernel whose base bundle registers a subagent provider; older
+#   kernels boot without it.
 # - usage: usage statistics over session logs (host capture/aggregation +
 #   settings-page heatmap and daily trend chart). Coexists with third-party
 #   usage plugins (read-only shared source, namespaced store/routes); users
