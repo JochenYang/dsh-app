@@ -322,6 +322,13 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 - **Desktop adaptation must stay shell-side**: inject through
   `executeJavaScript`/stylesheets and `--patch` overlays only — never modify
   harness source. Keep the drag-region CSS mirrored in `probe-drag.cjs`.
+- **No native browser dialogs in client UI**: never `window.alert` /
+  `window.confirm` / `window.prompt` — confirmations render the in-app modal
+  idiom instead (mask + centered alias-token card, Esc/mask = cancel, Enter =
+  primary), the same design as the shell's close/update dialogs.
+  `src/main/in-frame-dialog.ts` is the reference implementation; client
+  plugins port it as React (see `plugins/plugin-mcp/src/client/confirm-dialog.tsx`).
+  All copy zh-CN.
 - **Security invariants to preserve** (see `docs/ARCHITECTURE.md` §6):
   - Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, and
     **no preload** for the remote-origin dsh UI.
