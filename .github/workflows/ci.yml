@@ -1,0 +1,77 @@
+# PR/push gate: the checks that only ran at release time (or by hand) before.
+# The heavy runtime-artifact pipeline stays in release.yml; this workflow is
+# the fast static + unit + real-kernel smoke gate for everyday changes.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: typecheck + plugins + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck shell + kernel
+        run: npm run typecheck
+      - name: Build suite plugins
+        run: |
+          for dir in plugins/*/; do
+            name=$(basename "$dir")
+            if [ -f "$dir/build.mjs" ]; then
+              node "$dir/build.mjs"
+            elif [ -f "$dir/package.json" ]; then
+              (cd "$dir" && npm run build)
+            fi
+          done
+      - name: Plugin unit tests
+        run: |
+          (cd plugins/plugin-memory && npm test)
+          (cd plugins/plugin-swarm && npm test)
+
+  smoke:
+    name: suite smoke probe (real kernel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build suite plugins
+        run: |
+          for dir in plugins/*/; do
+            name=$(basename "$dir")
+            if [ -f "$dir/build.mjs" ]; then
+              node "$dir/build.mjs"
+            elif [ -f "$dir/package.json" ]; then
+              (cd "$dir" && npm run build)
+            fi
+          done
+      # Same recipe as the release.yml runtime job for one cell: resolve the
+      # kernel from the configured channel's dist-tag and npm-install the real
+      # runtime the app ships, so the probe exercises the shipped composition.
+      - name: Build kernel runtime (linux x64)
+        run: node scripts/build-runtime.mjs linux x64
+      - name: Extract runtime
+        run: |
+          mkdir smoke-rt
+          tar -xzf runtime-dist/dsh-runtime-*.tgz -C smoke-rt
+      - name: Run suite smoke probe
+        run: node scripts/smoke-suite.mjs --runtime smoke-rt/runtime

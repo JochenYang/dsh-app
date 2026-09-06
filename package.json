@@ -15,6 +15,7 @@
     "start": "npm run build && electron .",
     "dev": "node scripts/dev.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "node scripts/smoke-suite.mjs",
     "dist": "npm run build && node scripts/prepare-bundled-kernel.mjs && electron-builder",
     "dist:win": "npm run build && node scripts/prepare-bundled-kernel.mjs win32 && electron-builder --win",
     "dist:mac": "npm run build && node scripts/prepare-bundled-kernel.mjs darwin && electron-builder --mac",
