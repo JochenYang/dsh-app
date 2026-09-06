@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.4] - 2026-09-06
+
+### 中文
+- 修复 swarm 并行批次全员误报失败：编排器在子代理结算后读取会话统计（失败详情、token 用量）时访问了未声明的 `agents` 服务，内核依赖注入抛 `cannot get property "agents" without inject`，把每个实际已完成的子代理都记为失败——成果本身保留在子会话中未丢失；已补服务声明，并把该统计读取改为降级安全（读取失败只损失统计与失败详情，不再影响结算结果）
+- 后台记忆维护子代理（提炼/策展）标签统一加 `memory-maint:` 前缀：策展器会清扫所有项目的记忆库、与触发会话所属项目无关，前缀避免这类代理被误认为当前会话自身的工作
+
+### English
+- Fixed swarm batches reporting every item as failed: after children settled, the orchestrator read session metrics (failure detail, token usage) through the undeclared `agents` service, so the kernel DI threw `cannot get property "agents" without inject` and marked every actually-completed child as failed — the completed work itself stayed intact in the child sessions; the service is now declared, and the metrics read degrades safely (a failed read only loses metrics and failure detail, never the outcome)
+- Background memory maintenance subagents (distiller/curator) now carry a unified `memory-maint:` label prefix: the curator sweeps every project's memory file regardless of which session triggered it, and the prefix keeps these agents from being mistaken for the current session's own work
+
 ## [v0.9.3] - 2026-09-06
 
 ### 中文
