@@ -11,22 +11,29 @@
  * entry that duplicates nothing that remains. Any failure leaves the file
  * untouched and retries on the next trigger.
  *
- * Trigger: the distiller hands us the parent agent of the quiet session
- * right after it persisted entries, and this pass runs in the SAME background
- * window — the parent is still alive there, so no deferred timer can outlive
- * it (a "wait and run later" design would need a parent that no longer
- * exists). Files below {@link CURATE_MIN_ENTRIES} are left alone: the
- * distiller keeps them healthy on its own and the injection budget still
- * fits.
+ * Trigger: the distiller hands us the triggering session right after it
+ * persisted entries. Two gates keep the pass cheap and rare:
+ *   - Cooldown: at most one sweep per {@link CURATE_COOLDOWN_MS}; requests
+ *     inside the window coalesce into a single trailing sweep whose parent
+ *     is re-resolved by session id at fire time (the original parent may be
+ *     disposed by then — a dead parent drops the pass and every due file
+ *     simply waits for the next distill save).
+ *   - Change detection: a file whose content hash is unchanged since its
+ *     last completed pass is skipped, so a sweep only pays for files a
+ *     writer actually touched.
+ * Files below {@link CURATE_MIN_ENTRIES} are left alone: the distiller keeps
+ * them healthy on its own and the injection budget still fits.
  *
  * @module @dsh-app/plugin-memory/curator
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the subagents Context merge (ctx.subagents) into scope.
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import {
+  contentHash,
   listProjects,
   MAX_ENTRY_CHARS,
   normalizeForMatch,
@@ -39,6 +46,12 @@ import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /** A file below this many lines is not worth an LLM pass. */
 const CURATE_MIN_ENTRIES = 8
+
+/** Minimum spacing between sweeps. Distill saves arrive one quiet window
+ * apart (60 s), so without this gate an active session re-sweeps every
+ * untouched file each minute; requests inside the window coalesce into one
+ * trailing sweep. */
+const CURATE_COOLDOWN_MS = 10 * 60_000
 
 /** Cap on the input file text handed to the child (characters); anything
  *  older than this tail is left for a future pass. */
@@ -119,8 +132,19 @@ export class MemoryCurator {
   private readonly root: MemoryRoot
   private readonly log: ReturnType<Context['logger']>
   private readonly abort = new AbortController()
+  /** Start time of the last sweep — the anchor the cooldown measures from. */
+  private lastSweepAt = 0
+  /** The coalesced trailing sweep; further requests never push its deadline. */
+  private pendingTimer: ReturnType<typeof setTimeout> | undefined
+  private pendingSessionId: SessionId | undefined
 
-  constructor(ctx: Context, root: MemoryRoot, log: ReturnType<Context['logger']>) {
+  constructor(
+    ctx: Context,
+    root: MemoryRoot,
+    log: ReturnType<Context['logger']>,
+    /** Injectable so tests exercise the coalescing without real waiting. */
+    private readonly cooldownMs: number = CURATE_COOLDOWN_MS,
+  ) {
     this.ctx = ctx
     this.root = root
     this.log = log
@@ -130,14 +154,57 @@ export class MemoryCurator {
   attach(): () => void {
     this.ctx.effect(() => () => {
       this.abort.abort()
+      if (this.pendingTimer !== undefined) clearTimeout(this.pendingTimer)
     }, 'plugin-memory: curator abort')
     return () => undefined
   }
 
-  /** Consolidate every file above the threshold, in the distill's own window
-   *  (the parent agent stays alive for this call). Never throws per target. */
-  async runAfterDistill(parent: ParentAgent): Promise<void> {
+  /**
+   * The distiller's save trigger: sweep now when the cooldown has elapsed,
+   * otherwise coalesce into the pending trailing sweep. Never throws.
+   */
+  async runAfterDistill(parent: ParentAgent, sessionId: SessionId): Promise<void> {
     if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
+    const dueAt = this.lastSweepAt + this.cooldownMs
+    if (Date.now() >= dueAt) {
+      await this.sweep(parent)
+      return
+    }
+    // Inside the cooldown: one trailing sweep at the ORIGINAL deadline —
+    // later requests re-point it at the newest triggering session (most
+    // likely to still be alive) but never push the deadline back, so a
+    // busy session cannot starve curation.
+    this.pendingSessionId = sessionId
+    if (this.pendingTimer !== undefined) return
+    this.pendingTimer = setTimeout(() => {
+      this.pendingTimer = undefined
+      const sessionId = this.pendingSessionId
+      this.pendingSessionId = undefined
+      void this.fireDeferredSweep(sessionId)
+    }, dueAt - Date.now())
+    this.pendingTimer.unref?.()
+  }
+
+  /**
+   * The coalesced sweep: the triggering session's agent is re-resolved at
+   * fire time because the parent this request rode in on may be long gone.
+   * A dead parent drops the pass — every due file waits for the next distill
+   * save, which re-arms a fresh sweep.
+   */
+  private async fireDeferredSweep(sessionId: SessionId | undefined): Promise<void> {
+    if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
+    if (sessionId === undefined) return
+    const parent = this.ctx.agents.get(sessionId)
+    if (parent === undefined) {
+      this.log.info('memory curate: deferred sweep dropped, triggering session already closed')
+      return
+    }
+    await this.sweep(parent)
+  }
+
+  /** One full pass over every due file. Never throws per target. */
+  private async sweep(parent: ParentAgent): Promise<void> {
+    this.lastSweepAt = Date.now()
     for (const target of this.selectTargets()) {
       try {
         await this.curate(target, parent)
@@ -147,18 +214,24 @@ export class MemoryCurator {
     }
   }
 
-  /** Every store (global + projects with a resolvable cwd) above the threshold. */
+  /**
+   * Every DUE store (global + projects with a resolvable cwd): at or above
+   * the entry threshold AND changed since its last completed pass — a file
+   * whose hash still matches the recorded one was already consolidated, and
+   * re-reading the same text would only propose the same nothing.
+   */
   private selectTargets(): CurateTarget[] {
     const targets: CurateTarget[] = []
-    if (parseEntries(this.root.global.read()).length >= CURATE_MIN_ENTRIES) {
-      targets.push({ label: 'global', store: this.root.global })
+    const consider = (key: string, store: MemoryStore): void => {
+      const text = store.read()
+      if (parseEntries(text).length < CURATE_MIN_ENTRIES) return
+      if (this.root.curatedHashOf(key) === contentHash(text)) return
+      targets.push({ label: key, store })
     }
+    consider('global', this.root.global)
     for (const project of listProjects(this.root.dir)) {
       if (project.cwd === '') continue
-      const store = this.root.projectFor(project.cwd)
-      if (parseEntries(store.read()).length >= CURATE_MIN_ENTRIES) {
-        targets.push({ label: project.slug, store })
-      }
+      consider(project.slug, this.root.projectFor(project.cwd))
     }
     return targets
   }
@@ -216,6 +289,13 @@ export class MemoryCurator {
       const { merged, deleted } = this.applyEdits(target.store, result.structured)
       if (merged + deleted > 0) {
         this.log.info(`memory curate: ${merged > 0 ? `${String(merged)} merged` : ''}${merged > 0 && deleted > 0 ? ', ' : ''}${deleted > 0 ? `${String(deleted)} deleted` : ''} from "${target.label}"`)
+      }
+      // Mark the pass done so unchanged files stop re-sweeping. Only a pass
+      // that saw the WHOLE file may mark it: with the input cap active the
+      // omitted head was never reviewed and stays due. The hash is of the
+      // post-edit file — the content this pass actually leaves behind.
+      if (text.length <= MAX_INPUT_CHARS) {
+        this.root.recordCurated(target.label, contentHash(target.store.read()))
       }
     } finally {
       await run.dispose().catch(() => undefined)

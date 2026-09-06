@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import {
   MemoryRoot,
   MemoryStore,
+  contentHash,
   normalizeForMatch,
   parseEntries,
   projectSlug,
@@ -264,4 +265,79 @@ test('curator: oversized merge content rejected', () => {
   const out = curatorApply(store, { edits: [{ op: 'merge', lines: ['- [lesson] 2026-09-02 two'], category: 'fact', content: 'x'.repeat(501) }] })
   assert.deepEqual(out, { merged: 0, deleted: 0 })
   assert.equal(store.read(), '- [lesson] 2026-09-02 two\n')
+})
+
+// --- curator sweep gating: change detection + cooldown -------------------------
+
+/** A file just above CURATE_MIN_ENTRIES (8 lines). */
+const eightEntries = (): string =>
+  Array.from({ length: 8 }, (_, i) => `- [lesson] 2026-09-0${String((i % 8) + 1)} 条目-${String(i + 1)}`).join('\n')
+
+const selectTargetsOf = (curator: MemoryCurator): { label: string }[] =>
+  (curator as unknown as { selectTargets(): { label: string }[] }).selectTargets()
+
+test('curator: selectTargets skips files unchanged since their last pass', () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-cd-')))
+  root.global.replace(eightEntries())
+  const curator = new MemoryCurator(null as never, root, console)
+
+  assert.deepEqual(selectTargetsOf(curator).map(t => t.label), ['global'], 'no hash recorded yet → due')
+
+  root.recordCurated('global', contentHash(root.global.read()))
+  assert.deepEqual(selectTargetsOf(curator), [], 'unchanged file is skipped')
+
+  root.global.append('lesson', '新写的一条')
+  assert.deepEqual(selectTargetsOf(curator).map(t => t.label), ['global'], 'any writer touching the file re-arms it')
+
+  // A project store is gated the same way, keyed by its slug (append, since
+  // it is the write path that creates a fresh project directory).
+  const demo = root.projectFor('D:/codes/Demo')
+  for (let i = 1; i <= 8; i++) demo.append('lesson', `条目-${String(i)}`)
+  const slug = projectSlug('D:/codes/Demo')
+  assert.ok(selectTargetsOf(curator).some(t => t.label === slug), 'changed project store is due')
+  root.recordCurated(slug, contentHash(demo.read()))
+  assert.equal(selectTargetsOf(curator).some(t => t.label === slug), false, 'recorded project store is skipped')
+})
+
+test('curator: saves inside the cooldown coalesce into one trailing sweep', async () => {
+  const { setTimeout: sleep } = await import('node:timers/promises')
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-cool-')))
+  root.global.replace(eightEntries())
+  const starts: string[] = []
+  const parent = {} as never
+  const ctx = {
+    subagents: {
+      start: async (_provider: unknown, req: { label: string }) => {
+        starts.push(req.label)
+        return {
+          result: Promise.resolve({ stopReason: 'completed', structured: { edits: [] } }),
+          dispose: async () => {},
+        }
+      },
+    },
+    agents: { get: () => parent },
+  }
+  const curator = new MemoryCurator(ctx as never, root, console, 60)
+
+  // 1st save: sweeps immediately and records the file hash.
+  await curator.runAfterDistill(parent, 'session-a' as never)
+  assert.equal(starts.length, 1, 'first save sweeps right away')
+  assert.equal(root.curatedHashOf('global'), contentHash(root.global.read()), 'completed pass records the hash')
+
+  // 2nd/3rd saves inside the cooldown: no immediate work. The appended
+  // entry stands in for what the distill just wrote — it makes the file
+  // due again for the trailing sweep.
+  root.global.append('lesson', '冷却期内新增的一条')
+  await curator.runAfterDistill(parent, 'session-b' as never)
+  await curator.runAfterDistill(parent, 'session-c' as never)
+  assert.equal(starts.length, 1, 'no sweep while inside the cooldown')
+
+  await sleep(200)
+  assert.equal(starts.length, 2, 'exactly one trailing sweep at the original deadline')
+  assert.equal(starts[1], 'memory-maint:curate:global')
+
+  // After the cooldown elapses a save sweeps immediately — and since the
+  // trailing pass just consolidated the file, it launches no child at all.
+  await curator.runAfterDistill(parent, 'session-d' as never)
+  assert.equal(starts.length, 2, 'unchanged file: sweep runs, launches nothing')
 })

@@ -105,9 +105,11 @@ export function apply(ctx: Context, config: Config): void {
   // prunes the file (see distiller.ts / curator.ts).
   ctx.inject(['agents', 'subagents'], memCtx => {
     const curator = new MemoryCurator(memCtx, root, log)
-    // The curator runs in the distill's own window (parent still alive), so
-    // it wires through onSaved rather than a timer of its own.
-    const distiller = new MemoryDistiller(memCtx, root, log, parent => curator.runAfterDistill(parent))
+    // The distill hands the curator its save trigger with the session id:
+    // the first sweep runs in the distill's own window, further saves inside
+    // the cooldown coalesce into one trailing sweep that re-resolves the
+    // parent by session id at fire time.
+    const distiller = new MemoryDistiller(memCtx, root, log, (parent, sessionId) => curator.runAfterDistill(parent, sessionId))
     memCtx.effect(() => {
       const disposeDistiller = distiller.attach()
       const disposeCurator = curator.attach()

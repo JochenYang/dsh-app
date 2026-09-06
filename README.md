@@ -29,7 +29,7 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 模型高级设置页：llm-pi-ai 模型级编辑器与整表管理（推理强度、输入模态、兼容开关）；声明推理强度自动填充兼容开关（`supportsDeveloperRole` false + `maxTokensField`，仅增量、不覆盖用户显式设置）；目录外模型的伴生路由迁移；models.dev 表单预填（直连失败自动回退 gh-proxy 镜像） | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
 | 品牌主题与全中文 UI：`--dsw-alias-*` 令牌覆盖 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
 | 品牌鲸鱼背景：空闲静态帧、悬停时指针散开（指针离开即暂停渲染循环，滚动不卡顿）；主题感知对比度（亮色增强可读性、暗色低透明度水印）；悬停悬浮于输入框上方、活跃时放大并居中于会话列 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
-| 跨会话记忆：`memory_save`/`memory_recall`/`memory_forget` 工具 + 系统提示注入（预算内最新优先），全局与项目记忆按会话 cwd 路由；设置页开关；后台蒸馏器在静默 5 分钟后经只读子代理回填会话要点（进度轨迹、定时器可安全关闭） | `@dsh-app/plugin-memory` | `plugins/plugin-memory/src/{tools,routes,distiller}.ts` |
+| 跨会话记忆：`memory_save`/`memory_recall`/`memory_forget` 工具 + 系统提示注入（预算内最新优先），全局与项目记忆按会话 cwd 路由；设置页开关；后台蒸馏器在静默 60 秒后经只读子代理回填会话要点（进度轨迹、定时器可安全关闭），策展清扫按冷却窗口与文件变更检测触发 | `@dsh-app/plugin-memory` | `plugins/plugin-memory/src/{tools,routes,distiller}.ts` |
 | 批量子代理编排：独立子任务并行派发给可继续的子代理，自适应并发门控（失败收缩、连续成功增长）、保留会话的逐项自动重试、按子代理标识恢复；`swarm` 工具 + `/swarm` 命令 | `@dsh-app/plugin-swarm` | `plugins/plugin-swarm/src/orchestrator.ts` |
 | 用量统计：余额卡（官方 deepseek providers、CNY 闲时/高峰双档计价、密钥不出主机）、每日使用热度图与趋势图；余额 5 分钟 TTL 缓存（single-flight，挂载静默刷新、点击卡片强制重查） | `@dsh-app/plugin-usage` | `plugins/plugin-usage/src/client/usage-section.tsx` |
 | 会话归档管理：按项目工作目录分组（可折叠、键盘支持）、两步删除确认、过期归档清理；删除围栏仅放行归档且非活跃/非进行中的会话；兼容 `locate()` 返回未定义的持久化后端 | `@dsh-app/plugin-archives` | `plugins/plugin-archives/src/client/archives-section.tsx` |

@@ -327,6 +327,13 @@ export function projectSlug(cwd: string): string {
   return `${base}-${hash}`
 }
 
+/** Content fingerprint of a memory file — curation change detection. Covers
+ * every write path (append, forget, clear, curator edits) because it hashes
+ * the file text itself, not the writer. */
+export function contentHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
 /** Whether a slug is well-formed (used to fence the clear route). */
 export function isValidSlug(slug: string): boolean {
   return SLUG_PATTERN.test(slug)
@@ -408,6 +415,13 @@ interface DistillState {
   version: 1
   sessions: Record<string, DistillProgress>
   activity: DistillActivity[]
+  /**
+   * Content hash of each memory file ('global' or a project slug) at its
+   * last completed curation pass; a file whose current hash differs is due
+   * again. Absent for state written before curation tracking — the file
+   * then counts as due, never skipped.
+   */
+  curated?: Record<string, string>
 }
 
 /**
@@ -472,6 +486,19 @@ export class MemoryRoot {
     return [...this.readDistillState().activity].sort((a, b) => b.at - a.at)
   }
 
+  /** Content hash recorded at a target's last completed curation pass. */
+  curatedHashOf(key: string): string | undefined {
+    return this.readDistillState().curated?.[key]
+  }
+
+  /** Record a target's post-curation content hash and persist. */
+  recordCurated(key: string, hash: string): void {
+    const state = this.readDistillState()
+    state.curated = { ...state.curated, [key]: hash }
+    mkdirSync(this.dir, { recursive: true })
+    atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+  }
+
   /** Append one distill trace and persist (bounded, survives restarts). */
   recordDistill(sessionId: string, saved: number): void {
     const state = this.readDistillState()
@@ -490,12 +517,16 @@ export class MemoryRoot {
       if (typeof parsed === 'object' && parsed !== null) {
         const sessions = (parsed as { sessions?: unknown }).sessions
         const activity = (parsed as { activity?: unknown }).activity
+        const curated = (parsed as { curated?: unknown }).curated
         return {
           version: 1,
           sessions: typeof sessions === 'object' && sessions !== null
             ? sessions as Record<string, DistillProgress>
             : {},
           activity: Array.isArray(activity) ? activity as DistillActivity[] : [],
+          curated: typeof curated === 'object' && curated !== null
+            ? curated as Record<string, string>
+            : undefined,
         }
       }
     } catch {

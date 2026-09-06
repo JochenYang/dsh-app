@@ -161,11 +161,15 @@ export class MemoryDistiller {
     log: ReturnType<Context['logger']>,
     /**
      * Called (and awaited) after a run persisted ≥1 entry — the curator's
-     * trigger seam. Runs in the SAME background window, while the parent
-     * agent this distill used is still alive; it must not keep the agent
-     * reference past this call.
+     * trigger seam. Runs in the distill's own background window while the
+     * parent agent is still alive; the curator may defer its sweep into a
+     * cooldown and re-resolve the parent by sessionId at fire time, so the
+     * session id — not just the agent — must cross this seam.
      */
-    private readonly onSaved?: (parent: NonNullable<ReturnType<Context['agents']['get']>>) => void | Promise<void>,
+    private readonly onSaved?: (
+      parent: NonNullable<ReturnType<Context['agents']['get']>>,
+      sessionId: SessionId,
+    ) => void | Promise<void>,
   ) {
     this.ctx = ctx
     this.root = root
@@ -324,7 +328,7 @@ export class MemoryDistiller {
       this.root.recordDistill(sessionId, applied)
       if (applied > 0) {
         this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
-        await this.onSaved?.(parent)
+        await this.onSaved?.(parent, sessionId)
       }
     } finally {
       await run.dispose().catch(() => undefined)
