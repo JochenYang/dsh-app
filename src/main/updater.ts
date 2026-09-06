@@ -477,6 +477,12 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       // no cmd wrapper: a detached cmd.exe always flashes a console window on
       // Windows, even with windowsHide.
       //
+      // `windowsHide` must NOT be set on a GUI binary: libuv maps it to
+      // STARTF_USESHOWWINDOW + SW_HIDE, which Windows applies to the GUI
+      // process's first window — the wizard then runs invisibly and the user
+      // sees nothing (learned the hard way; the flag only ever hides console
+      // windows, and a GUI binary has none to hide).
+      //
       // Completion is verified on the next boot instead of by a watcher
       // process (the host quits right after spawning, so it cannot observe the
       // exit itself): the pending-install record holds the target version and
@@ -489,7 +495,9 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
         `${JSON.stringify({ version: yaml.version, installerPath: dest } satisfies PendingInstall)}\n`,
         'utf8',
       )
-      const child = spawn(dest, [], { detached: true, stdio: 'ignore', windowsHide: true })
+      const child = spawn(dest, [], { detached: true, stdio: 'ignore' })
+      // Spawn failure is otherwise invisible (the app is about to quit).
+      child.on('error', (err) => { console.error('[shell-updater] installer spawn failed:', err.message) })
       child.unref()
       app.quit()
     }
