@@ -297,8 +297,11 @@ export class MemoryDistiller {
     const run = await this.ctx.subagents.start(PROVIDER, {
       // Short target-session id in the label so the workflow view shows WHO
       // this distill reviewed — the node is visible by design (transparency,
-      // the same way swarm children are), not a hidden worker.
-      label: `memory-distill:${shortSessionId(sessionId)}`,
+      // the same way swarm children are), not a hidden worker. The
+      // `memory-maint` family prefix marks background maintenance agents, so
+      // a sweep targeting another project's file is never mistaken for the
+      // current session's own work.
+      label: `memory-maint:distill:${shortSessionId(sessionId)}`,
       prompt: [{ type: 'text', text: prompt }],
       parent,
       signal: this.abort.signal,

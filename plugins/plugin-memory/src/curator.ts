@@ -193,7 +193,11 @@ export class MemoryCurator {
     ].join('\n')
 
     const run = await this.ctx.subagents.start(PROVIDER, {
-      label: `memory-curate:${target.label}`,
+      // `memory-maint` family prefix: the curator sweeps EVERY project file
+      // above the threshold regardless of which session's distill triggered
+      // it, so its label must read as background maintenance, not as the
+      // current session's own work.
+      label: `memory-maint:curate:${target.label}`,
       prompt: [{ type: 'text', text: prompt }],
       parent,
       signal: this.abort.signal,
