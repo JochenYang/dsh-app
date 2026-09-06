@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.5] - 2026-09-06
+
+### 中文
+- 优化后台记忆策展的触发频率与成本：策展清扫新增 10 分钟冷却窗口（冷却期内的多次触发合并为一次尾延清扫），并新增按文件内容 hash 的变更检测——自上次策展完成后没有任何写入的记忆文件直接跳过。此前活跃会话每 60 秒提炼落库一次就会把所有达标项目库全量重扫一遍，未变化的文件每轮白耗约 1.7 万 token
+- 修正 README 中蒸馏静默时长的文档漂移（写的是 5 分钟，实际 60 秒）
+
+### English
+- Optimized background memory curation frequency and cost: sweeps now respect a 10-minute cooldown (requests inside the window coalesce into one trailing sweep) and a per-file content-hash change check — memory files untouched since their last completed pass are skipped entirely. Previously an active session saving entries every 60-second quiet window re-ran full curation over every above-threshold project file, burning ~17K tokens per unchanged file each round
+- Fixed a README drift on the distill quiet window (said 5 minutes, actually 60 seconds)
+
 ## [v0.9.4] - 2026-09-06
 
 ### 中文
