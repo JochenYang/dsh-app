@@ -294,12 +294,19 @@ function usageTotal(usage: TokenUsage): number {
 /**
  * Resolve a live child agent's session slice. Returns undefined when the
  * child already cold-unloaded (a settled continuable child may leave the
- * in-process registry); callers degrade to "no detail, no accounting".
+ * in-process registry) or the read cannot be served at all (service
+ * resolution failure); callers degrade to "no detail, no accounting".
  */
 function liveChildSession(ctx: Context, childId: string): ChildSessionSlice | undefined {
-  const agent = ctx.agents.get(SessionId(childId))
-  if (agent === undefined) return undefined
-  return agent.session as unknown as ChildSessionSlice | undefined
+  try {
+    const agent = ctx.agents.get(SessionId(childId))
+    if (agent === undefined) return undefined
+    return agent.session as unknown as ChildSessionSlice | undefined
+  } catch {
+    // Metrics only — a resolve failure here must never flip a settled item
+    // to failed; the terminal outcome rides the `subagent/end` event.
+    return undefined
+  }
 }
 
 /** Classify a settled failure: only transport feeds throttling and retry. */

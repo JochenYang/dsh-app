@@ -139,7 +139,7 @@ function mockOneShotCtx(children: Record<string, MockChild>): Context {
             stopReason: spec.stopReason,
             output: spec.text === undefined ? [] : [{ type: 'text', text: spec.text }],
           }),
-          localAgent: { session: { events: spec.events ?? [] } },
+          localAgent: { session: { snapshotEvents: () => spec.events ?? [] } },
           dispose: async () => {},
         }
       },
@@ -230,7 +230,7 @@ function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHar
         const key = String(id).replace(/^child-/, '')
         const spec = children[key]
         if (spec === undefined) return undefined
-        return { session: { events: spec.events ?? [] } }
+        return { session: { snapshotEvents: () => spec.events ?? [] } }
       },
     },
     subagents: {
@@ -551,4 +551,15 @@ test('sameOrigin: browser Origin matches by host part; malformed Origin rejected
   assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'http://evil.example.com' })), false)
   assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'not a url' })), false)
   assert.equal(sameOrigin(req({ host: '127.0.0.1:3000' })), true, 'non-browser caller (no Origin)')
+})
+
+// --- plugin shape guards -------------------------------------------------------
+
+test('plugin shape: settle-time session reads declare the agents service in inject', async () => {
+  const plugin = await import('../src/index.ts')
+  assert.ok(
+    (plugin.inject as readonly string[]).includes('agents'),
+    'liveChildSession reads ctx.agents after children settle; an undeclared access throws '
+    + 'cordis "without inject" and marks every settled item failed',
+  )
 })

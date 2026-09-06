@@ -55,7 +55,9 @@ export const name = 'plugin-swarm'
 // webServer is a hard inject like the other suite plugins with settings
 // routes (memory/usage/archives): this product's host is always `dsh web`,
 // so the service is guaranteed to exist.
-export const inject = ['tools', 'subagents', 'commands', 'systemPrompt', 'webServer']
+// `agents` backs the settle-time child-session reads (usage/failure detail);
+// an undeclared access throws cordis "without inject" and fails every item.
+export const inject = ['tools', 'subagents', 'commands', 'systemPrompt', 'webServer', 'agents']
 
 /** Prompt order directly after the single-delegation policy section. */
 const SWARM_SECTION_ORDER = 116.6
