@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.3] - 2026-09-06
+
+### 中文
+- 修复 Windows 应用更新点击「立即安装」后安装向导不出现：v0.9.1 移除 cmd 包装时保留了 windowsHide 标志，该标志会被 Windows 应用到 GUI 进程的首个窗口——安装进程在后台隐身运行，用户看不到任何界面；已移除该标志，并为安装进程启动失败补充日志
+
+### English
+- Fixed the Windows update flow showing no installer wizard after clicking "Install now": v0.9.1 dropped the cmd wrapper but kept the windowsHide flag, which Windows applies to a GUI process's first window — the installer ran invisibly in the background and the user saw nothing; the flag is removed and a spawn-failure log line was added
+
 ## [v0.9.2] - 2026-09-05
 
 ### 中文
