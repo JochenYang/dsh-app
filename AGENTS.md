@@ -18,10 +18,10 @@ The essential design idea is **"self-contained, no fork"**:
   so every upstream release is just an ordinary kernel update.
 - There are **two independent update channels**: the Electron shell
   (Windows: custom latest.yml detection + mirror download + visible NSIS
-  wizard; macOS/Linux: `electron-updater` → GitHub Releases) and the dsh kernel
-  (`KernelManager` → npm registry + `runtime-<version>` GitHub Release
-  artifacts). They are
-  decoupled: an upstream dsh release never requires a new shell build.
+  wizard; macOS/Linux: `electron-updater` → GitHub Releases) and the dsh
+  kernel (`KernelManager` → npm registry + `runtime-<version>` GitHub
+  Release artifacts). They are decoupled: an upstream dsh release never
+  requires a new shell build.
 - Kernel updates are **atomic and reversible**: activation is a single atomic
   rewrite of `current.json`, keeping the previous version for rollback.
 
@@ -33,8 +33,7 @@ README: `README.md`.
 - **Electron 33** main process (shell), **TypeScript 5.7**, compiled to
   **CommonJS / ES2022** via `tsc` (`tsconfig.json`). `"main": "dist/main/index.js"`.
   Deps are minimal by design: `electron-updater`, `semver`, `tar`.
-- **electron-builder 25** for packaging; **esbuild** for the brand client
-  plugin bundle.
+- **electron-builder 25** for packaging; **esbuild** for the plugin bundles.
 - The **rendered UI is not this repo's code**: the shell spawns the dsh web
   server and loads its web UI in a sandboxed `BrowserWindow`. The harness
   lives in a sibling checkout (`../deepseek-harness`) and is built with
@@ -51,9 +50,8 @@ src/kernel/      Kernel runtime manager: lifecycle, manifest I/O, integrity,
                  version/artifact resolution sources
 src/shared/      Shared constants + types (imported by main + kernel)
 static/          Setup/install window (first-run UI, zh-CN), no framework
-plugins/         Brand plugin suite (8 plugins): plugin-brand, plugin-client-ui,
-                 plugin-sidebar, plugin-swarm, plugin-usage, plugin-archives,
-                 plugin-memory, plugin-fff; dsh-app.patch.yml (loader overlay)
+plugins/         Brand plugin suite (8 plugins, see §6) + dsh-app.patch.yml
+                 (loader overlay)
 scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
                  release-notes generator (gen-release-notes.mjs)
 CHANGELOG.md     Bilingual version changelog; feeds release-notes generation
@@ -103,7 +101,8 @@ dist/            tsc + copy output (gitignored, generated)
 1. **Resolve** the newest version from the npm registry dist-tag
    (`@deepseek-ai/dsh`: `stable` = `latest` tag, `beta` = `next` tag for rc
    builds, `alpha` = `alpha` tag — the same families dsh's own release
-   pipeline publishes).
+   pipeline publishes). A prerelease current kernel follows the highest
+   version across all prerelease tags (alpha/next/latest).
 2. **Download** the runtime tarball
    (`dsh-runtime-<platform>-<arch>-<version>.tgz`) from the dedicated
    `runtime-<dshVersion>` GitHub Release (created published by CI; see §10),
@@ -128,51 +127,41 @@ and via the tray menu (both skipped in dev mode); it does not check at
 startup — a missing/broken kernel is simply (re)installed during boot. A
 background check finding a newer kernel does not pop a modal and never
 auto-installs: it shows a persistent bottom-right card (稍后 / 立即更新,
-`src/main/update-card.ts` `KERNEL_UPDATE_CARD_SCRIPT`; no auto-hide, so a
-quiet finding is never missed) that resolves to the update flow when the
-user clicks 立即更新. Shell updates are checked 10 s after boot and via the
-tray.
+`src/main/update-card.ts` `KERNEL_UPDATE_CARD_SCRIPT`) that resolves to the
+update flow when the user clicks 立即更新. Shell updates are checked 10 s
+after boot and via the tray.
 
 ### Update timing gotcha (learned the hard way)
 
-- npm and GitHub publish on **different clocks**: a new dsh dist-tag goes live
-  on npm before CI finishes building/uploading the 6-cell runtime matrix, so
-  `runtime-<dshVersion>` can lag by ~30 min to hours. A check in that window
-  reports "安装包尚未发布" (artifact pending) — by design the shell never
-  offers an update whose tarball cannot yet download. **No new shell release is
-  ever needed for a kernel update**; the two channels are fully decoupled.
-  Users just re-check from the tray; a stale "尚未发布" with everything
-  published is not a bug.
+- npm and GitHub publish on **different clocks**: a new dsh dist-tag goes
+  live on npm before CI finishes building/uploading the 6-cell runtime
+  matrix, so `runtime-<dshVersion>` can lag by ~30 min to hours. A check in
+  that window reports "安装包尚未发布" (artifact pending) — by design the
+  shell never offers an update whose tarball cannot yet download. **No new
+  shell release is ever needed for a kernel update**; users just re-check
+  from the tray.
 - Before diagnosing user reports as network issues, verify the artifact
   release is complete:
   `gh api repos/JochenYang/dsh-app/releases/tags/runtime-<v> --jq '.assets[].name'`
-  must list all 6 cells (win32/darwin/linux × x64/arm64) as tgz + .sha512 +
-  `manifest-<platform>-<arch>.json`, and each sidecar sha512 must equal the
-  manifest's `integrity`. A missing cell (e.g. an arm64 upload still in
-  flight) makes that platform report "artifact pending" while others succeed.
+  must list all 6 cells (tgz + .sha512 + `manifest-<platform>-<arch>.json`),
+  and each sidecar sha512 must equal the manifest's `integrity`. A missing
+  cell makes that platform report "artifact pending" while others succeed.
 - Rebuild the runtime + bundled kernel locally when bumping dsh:
-  1. `npm view @deepseek-ai/dsh dist-tags --json` and pick the version of the
-     configured channel (`DSH_APP_CHANNEL`: alpha→alpha tag, beta→next,
-     else latest).
-  2. Bump every `@deepseek-ai/dsh-*` devDependency in `package.json` to the
-     same version line (`^`-coupled), **and in every `plugins/*/package.json`**
-     — plugin devDeps track the kernel line too; a stale plugin
-     node_modules/lockfile dual-instances dsh-llm and breaks plugin typecheck
-     with nominal brand conflicts. Plugins must never keep their own
-     `@deepseek-ai/*` copies: resolution comes from the repo root only, and
-     local third-party deps are installed with
-     `npm install --legacy-peer-deps` — and ONLY inside a plugin directory:
-     plain `npm install` there auto-installs peerDependencies and pulls
-     `@deepseek-ai/*` back in. NEVER use `--legacy-peer-deps` at the repo
-     root: it changes peer resolution globally and npm prunes the peer-only
-     tree out of package-lock.json (this wiped 13 @deepseek-ai packages plus
-     the electron-builder chain once, breaking `npm ci` on every CI job).
-     Root dependency changes always use plain `npm install`.
-  3. `npm install` to refresh the lock.
-  4. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
+  1. Pick the dist-tag version of the configured channel
+     (`npm view @deepseek-ai/dsh dist-tags --json`; `DSH_APP_CHANNEL`:
+     alpha→alpha tag, beta→next, else latest).
+  2. Bump every `@deepseek-ai/dsh-*` devDependency in `package.json` **and in
+     every `plugins/*/package.json`** to the same `^`-coupled line — a stale
+     plugin lockfile dual-instances dsh-llm and breaks plugin typecheck.
+     Root dependency changes use plain `npm install`; plugin-local installs
+     use `npm install --legacy-peer-deps` **inside the plugin dir only**
+     (plain install there re-pulls peers; `--legacy-peer-deps` at the ROOT
+     prunes the peer-only tree from package-lock.json and once broke
+     `npm ci` in every CI job).
+  3. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
      then `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
      (both outputs are gitignored; CI rebuilds them from the dist-tag).
-  5. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
+  4. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
      node (`<runtime>/app` → `node_modules/@deepseek-ai/dsh/lib/bin.js --version`).
 
 ## 5. Server process management
@@ -196,50 +185,35 @@ tray.
 ## 6. Brand suite wiring (`plugins/`)
 
 Eight dsh plugins ship with the product and layer on upstream **without
-forking it**:
+forking it** (per-plugin details live in each plugin's README):
 
-- `@dsh-app/plugin-brand` (host side): settings namespace, app/kernel info
-  service, desktop bridge — **currently a scaffold** (see TODOs in
+- `@dsh-app/plugin-brand` (host): settings namespace / app-info / desktop
+  bridge — **currently a scaffold** (see TODOs in
   `plugins/plugin-brand/src/index.ts`).
-- `@dsh-app/plugin-client-ui` (client side): brand theme
-  (`--dsw-alias-*` token overrides), brand Models settings section
-  (`BrandModelsStore` + `ModelsSection`), plus commented-out enhancement
-  scaffolds (workspace file panel, reminder summary, trajectory export,
-  model badges). UI copy is **zh-CN** (see §9).
+- `@dsh-app/plugin-client-ui` (client): brand theme (`--dsw-alias-*` token
+  overrides), brand Models settings section, commented-out enhancement
+  scaffolds. UI copy is **zh-CN** (see §9).
 - `@dsh-app/plugin-sidebar` (dual face): workspace file tree + preview and
   the Git panel (grouped changes, unified diff, stage/revert/commit, graph)
   as native conversation-view tabs.
 - `@dsh-app/plugin-swarm` (dual face): batch parallel subagent orchestration —
-  model-facing `swarm` tool + `/swarm` command, adaptive concurrency gate,
-  per-item auto-retry. Failures classify as transport/content/structural —
-  only transport throttles the pool and auto-retries. Split aids:
-  `shared_context` (shared background prepended per child), `dry_run`
-  (validate + preview expanded prompts without running), split-quality
-  warnings. Batch token budget (`token_budget` arg / `tokenBudget` config,
-  default off) stops launches when spent. Unpinned adaptive batches probe
-  past `maxConcurrency` (up to 64) on clean streaks and relearn the ceiling
-  on transport failures; `output_mode` (full/summary/status_only) trims
-  result payloads for large batches. User overrides:
+  `swarm` tool + `/swarm` command, adaptive concurrency gate with failure
+  classification (only transport throttles/retries), per-item auto-retry,
+  split aids, batch token budget, `output_mode` trimming. User overrides:
   `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json`, editable from the
-  settings page (client half: 并行子代理 section; scheduling fields apply
-  live, `enabled` needs a restart).
+  settings page.
 - `@dsh-app/plugin-usage` (dual face): usage capture/aggregation over
   session logs + settings-page balance card, heatmap and daily trend chart.
 - `@dsh-app/plugin-archives` (dual face): session archive manager — host
   list/delete routes + settings-page section grouped by project.
 - `@dsh-app/plugin-memory` (dual face): cross-session memory — global and
-  per-project files injected into every prompt, memory_save/recall/forget
-  LLM tools, a background distiller on quiet sessions, a background curator
-  that merges/prunes grown files, and a settings page (toggles, stats,
-  per-entry pin/delete).
-- `@dsh-app/plugin-fff` (host side): fast file search over the FFF engine
-  (`@ff-labs/fff-node`, an in-process C library with platform binaries
-  installed via optionalDependencies) — `fffind`/`ffgrep`/`fff-glob` LLM
-  tools, one shared in-memory index per workspace (PickerManager: single-
-  flight create, ref-counted guards, idle/LRU reaping), frecency/history db
-  per workspace under `$DSH_HOME/storages/dsh-app-plugin-fff`. Every search
-  is fenced to the executing agent's session workspace (results are relative
-  to the indexed root). No client half.
+  per-project Markdown files injected into every prompt,
+  memory_save/recall/forget LLM tools, a background distiller on quiet
+  sessions, a background curator that merges/prunes grown files, and a
+  settings page (toggles, stats, per-entry pin/delete).
+- `@dsh-app/plugin-fff` (host): fast file search over the FFF engine
+  (`fffind`/`ffgrep`/`fff-glob` tools), one shared in-memory index per
+  workspace, every search fenced to the executing agent's session workspace.
 
 Two seams are stitched at every server start (`brand-suite.ts`):
 
@@ -257,6 +231,17 @@ Two seams are stitched at every server start (`brand-suite.ts`):
 Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
 rollback target) boots vanilla — no links, no overlay, boot is never blocked
 by brand wiring.
+
+### Upstream API drift (learned the hard way)
+
+Structural slices plus `as unknown as` casts bypass the type gate: when the
+kernel deletes an API (alpha.4 dropped the `Session.events` getter for
+`snapshotEvents()`), plugin typecheck and unit tests stay green while the
+runtime throws — the memory distiller (and parts of swarm/archives) failed
+silently for days behind fail-soft catches. After every kernel-line bump,
+verify each suite plugin's behavior **end-to-end at runtime** (a tiny probe
+plugin can drive a real turn and watch the effect), never trust
+compile-green across the plugin/kernel boundary.
 
 ## 7. Build, dev & verification commands
 
@@ -301,14 +286,10 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 > Tests live in `plugins/plugin-memory/tests/` and `plugins/plugin-swarm/tests/`
 > (node:test, `npm test` inside each plugin). The shell/kernel have no test
 > runner; verification is `npm run typecheck` + manual run in dev mode.
-> Manual/probe helpers live in `scripts/`:
-> `probe-mirror.mjs` (update-chain connectivity), `probe-drag.cjs` (drag
-> regions + brand Models render — **keep its `CSS` in sync with**
-> `src/main/window.ts` `DESKTOP_CHROME_CSS`),
-> `probe-update-card.cjs` (executes the injected update-card script against a
-> DOM stub — run after `npm run build`), `probe-shell-update.mjs` (Windows
-> shell-update flow against the real `latest.yml`), `capture.mjs` (page
-> screenshots for design work).
+> Manual/probe helpers live in `scripts/`: `probe-mirror.mjs`,
+> `probe-drag.cjs` (**keep its CSS in sync with** `src/main/window.ts`
+> `DESKTOP_CHROME_CSS`), `probe-update-card.cjs`, `probe-shell-update.mjs`,
+> `capture.mjs`.
 
 ## 8. Environment variables
 
@@ -325,7 +306,6 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 | `DSH_APP_LOG_DIR` | `server.ts` | Log directory (default: `<cwd>/logs`) |
 | `DSH_HOME` | `brand-suite.ts` | dsh profiles home (default `~/.dsh`) |
 | `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the npm dist-tag at build time; last-resort default `0.1.0-rc.8`) |
-| `PROBE_BASE` / `PROBE_TAG` / `PROBE_ASSET` / `PROBE_URL` | `probe-mirror.mjs` | Connectivity probe targets |
 
 ## 9. Code & contribution conventions
 
@@ -368,15 +348,15 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 ### CI pipeline
 
 `release.yml` triggers on a `v*` tag push (or `workflow_dispatch` with an
-optional `dsh_version` input). Tag pushes run two jobs; `workflow_dispatch`
-is the **runtime-only** path (publish kernel artifacts for a dsh version
-without cutting a shell release):
+optional `dsh_version` input). Tag pushes run the full pipeline;
+`workflow_dispatch` is the **runtime-only** path (publish kernel artifacts
+for a dsh version without cutting a shell release):
 
 - **runtime**: a 6-cell matrix (win32/darwin/linux × x64/arm64) builds the
   suite plugins, then `build-runtime.mjs`, and uploads
-  `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + `manifest.json` to the
-  dedicated **`runtime-<dshVersion>`** release (created **published** if
-  absent — `GitHubArtifactResolver` resolves exactly this tag shape). The
+  `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + per-cell `manifest.json`
+  to the dedicated **`runtime-<dshVersion>`** release (created **published**
+  if absent — `GitHubArtifactResolver` resolves exactly this tag shape). The
   tagged version comes from `build-runtime`'s output: when `DSH_VERSION` is
   empty it resolves the npm dist-tag, so artifacts always match what the app
   resolves.
@@ -393,8 +373,9 @@ without cutting a shell release):
    equal the `package.json` version.
 3. **Wait for CI green**: poll
    `gh run list --repo JochenYang/dsh-app --workflow release.yml --limit 1`
-   then `gh run view <id> --repo JochenYang/dsh-app`. All 12 jobs
-   (6 runtime + 6 app) must succeed; the release stays a draft.
+   then `gh run view <id> --repo JochenYang/dsh-app`. All jobs
+   (prepare-release + 6 runtime + 4 app) must succeed; the release stays a
+   draft.
 4. **Generate release notes**:
    `node scripts/gen-release-notes.mjs v0.1.6` → writes `release-notes.md`.
 5. **Publish the draft**:
@@ -427,18 +408,17 @@ without cutting a shell release):
   Kernel version in runtime artifacts resolves from the registry dist-tag
   (distinct from the shell version) unless `dsh_version` is supplied.
 
-**Remaining pre-release gaps**: `DSH_APP_ARTIFACT_OWNER` now defaults to
-`JochenYang` (matching `electron-builder.yml` `publish`), so online
-kernel-update downloads resolve against this repo without an injected env.
-macOS signing/notarization and (optional) Windows signing secrets must be
-provided as CI secrets; `resources/icon.png` is a placeholder brand icon; the
-suite plugins are bundled via `file:` references and should switch to
-registry versions once published.
-**Temporary**: `release.yml` sets `DSH_APP_CHANNEL: beta` on tag pushes so
-runtime artifacts bundle the 0.1.2-rc kernel line the suite is adapted to
-(npm `latest` still points at the older 0.1.1-rc.2). Remove this line once
-dsh promotes 0.1.2 to `latest`, or future formal releases will keep bundling
-rc kernels; `workflow_dispatch` with an explicit `dsh_version` is unaffected.
+**Remaining pre-release gaps**: macOS signing/notarization and (optional)
+Windows signing secrets must be provided as CI secrets;
+`resources/icon.png` is a placeholder brand icon; the suite plugins are
+bundled via `file:` references and should switch to registry versions once
+published.
+**Temporary**: `release.yml` pins `DSH_APP_CHANNEL: beta` on tag pushes so
+runtime artifacts bundle the 0.1.2-rc line the suite is adapted to (rc.1
+currently sits on both `next` and `latest`, so the pin is inert today).
+Revisit when dsh ships a 0.1.2+ stable to `latest` or the suite tracks the
+alpha line again; `workflow_dispatch` with an explicit `dsh_version` is
+unaffected.
 
 ## 11. Known TODOs / scaffolds (do not assume finished)
 
