@@ -3,8 +3,8 @@
  *
  * The suite plugins (@dsh-app/plugin-brand, @dsh-app/plugin-client-ui,
  * @dsh-app/plugin-sidebar, @dsh-app/plugin-swarm, @dsh-app/plugin-usage,
- * @dsh-app/plugin-archives, @dsh-app/plugin-memory, @dsh-app/plugin-fff)
- * ship with the product, not with the upstream dsh
+ * @dsh-app/plugin-archives, @dsh-app/plugin-memory, @dsh-app/plugin-fff,
+ * @dsh-app/plugin-mcp) ship with the product, not with the upstream dsh
  * kernel, so two seams have to be stitched at every server start:
  *
  *   1. Module resolution — the composed loader resolves entry names through
@@ -21,10 +21,10 @@
  *      does not manage, so these survive every boot.
  *
  *   2. Composition — the loader overlay (plugins/dsh-app.patch.yml, copied
- *      next to the main bundle by copy-static.mjs) disables the upstream
- *      Models settings page and inserts the two brand rows. The shell writes
+ *      next to the main bundle by copy-static.mjs) inserts the suite plugin
+ *      rows. The shell writes
  *      a copy into userData and passes it via `dsh web --patch`, so the
- *      brand rows join the tree without touching the user's profile files.
+ *      suite rows join the tree without touching the user's profile files.
  *      (--patch overlays apply after the profile's own layer: last write
  *      wins per row.)
  *
@@ -44,7 +44,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /** Suite plugin directory names under dsh-app/plugins (and kernel node_modules). */
-export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff'] as const
+export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp'] as const
 
 /** npm scope shared by the suite plugins. */
 const PLUGIN_SCOPE = '@dsh-app'

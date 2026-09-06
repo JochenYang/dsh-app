@@ -33,6 +33,13 @@
 #   fffind/ffgrep/fff-glob LLM tools, per-workspace index managed by the
 #   picker. Every search is fenced to the executing agent's session workspace;
 #   no client half. Exit valve: remove this row (or tune config).
+# - mcp: MCP manager — settings-page CRUD over external MCP servers. The
+#   user's server set lives in
+#   $DSH_HOME/storages/dsh-app-plugin-mcp/servers.json (the overlay is
+#   rewritten by the shell on every start and can never hold user state);
+#   the plugin dynamically mounts one @deepseek-ai/dsh-mcp-client instance
+#   per enabled server, so their tools register as mcp__<server>__<tool>.
+#   Mount failures degrade to per-server status and never fail the boot.
 
 - insert:
     - id: brand
@@ -104,3 +111,6 @@
 
     - id: fff
       name: '@dsh-app/plugin-fff'
+
+    - id: mcp
+      name: '@dsh-app/plugin-mcp'
