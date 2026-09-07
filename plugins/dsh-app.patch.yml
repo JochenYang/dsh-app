@@ -133,14 +133,16 @@
     openAt: first-search
 
 # Schedule: session-scoped reminders (schedule_create/list/delete tools +
-# read-only schedule directory in the session header). The two host services
-# are verified in the CLI runtime closure (apps/cli dependencies, 2026-09-07);
-# the ui row exists disabled in the web bundle and is flipped on here.
-# Verified with the packaged bin.js before merging (never trust the dev pnpm
-# closure alone): a missing package fails the whole tree, not one row.
+# read-only schedule directory in the session header). Only the schedule
+# service is mounted — dsh-time-context is deliberately LEFT OUT: it injects
+# the current time at every pre-step (token burn on every tool call), while
+# schedule only needs the time at delivery (computed server-side). Users who
+# need the time on demand use their own time plugin.
+# The schedule package is verified in the CLI runtime closure (apps/cli deps,
+# 2026-09-07); the ui row exists disabled in the web bundle and is flipped on
+# here. Verified with the packaged bin.js before merging (never trust the dev
+# pnpm closure alone): a missing package fails the whole tree, not one row.
 - insert:
-    - id: time-context
-      name: '@deepseek-ai/dsh-time-context'
     - id: schedule
       name: '@deepseek-ai/dsh-schedule'
 

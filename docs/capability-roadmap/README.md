@@ -20,16 +20,22 @@ workflow/ralph、subagent(spawn/fork)、web 检索、审批、权限预设、轨
 
 | 优先级 | 文档 | 主题 | 状态 |
 |---|---|---|---|
-| P0 | [mcp-manager.md](mcp-manager.md) | MCP 服务器管理（UI 化配置 + 动态挂载） | 🔧 已实现待实测（V1 已由冒烟探针自动化验证） |
-| P1 | [hooks-bridge.md](hooks-bridge.md) | Hooks 桥（复用 Claude Code/Codex hooks.json） | 📄 |
-| P2 | [session-search.md](session-search.md) | 会话全文检索（sqlite 后端 + agent 工具 + UI） | 📄 |
-| P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 + 系统通知 | 📄 |
-| P4 | [external-cli-subagents.md](external-cli-subagents.md) | 外部 CLI 子代理（Claude Code / Codex） | 📄 🔍 |
-| P5 | [lsp-tools.md](lsp-tools.md) | LSP 代码智能工具 | 📄 🔍 |
-| P6 | [agent-team-watchlist.md](agent-team-watchlist.md) | Agent Teams（experimental） | 👀 |
-| — | [code-quality-enhancements.md](code-quality-enhancements.md) | 验收钩子 / 审查桥 / 检查点映射 | 📄 |
+| P0 | [mcp-manager.md](mcp-manager.md) | MCP 服务器管理（UI 化配置 + 动态挂载） | ✅ 已落地（main 未 push） |
+| P1 | [hooks-bridge.md](hooks-bridge.md) | Hooks 桥 + DSH 原生规则 | ✅ 已落地（main 未 push，用户已实测拦截生效） |
+| P2 | [session-search.md](session-search.md) | 会话全文检索（sqlite 后端 + UI） | ✅ 已落地（main 未 push；agent 工具暂缓，见搁置区） |
+| P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 | ✅ 已落地（main 未 push，用户已实测投递生效；系统通知 V2 待 desktop bridge） |
+| — | [code-quality-enhancements.md](code-quality-enhancements.md) | 验收钩子（MVP 已验证，单门价值不足，停止投入；等效替代=原生 Hook 用户自配） | 📄 |
 | — | [desktop-shell-experience.md](desktop-shell-experience.md) | plugin-brand 落地 / 诊断中心 / 首启补全 | 📄 |
-| — | [dev-process-tooling.md](dev-process-tooling.md) | PR CI / 套件冒烟探针 / 版本对齐脚本 | 🔧 CI 门 + 冒烟探针已实现待实测；单测/对齐脚本/看板未做 |
+| — | [dev-process-tooling.md](dev-process-tooling.md) | PR CI / 套件冒烟探针 / 版本对齐脚本 | 🔧 CI 门 + 冒烟探针已落地；单测/对齐脚本/看板未做 |
+
+## 搁置区（判死刑项，留档备查，不占队列）
+
+| 原优先级 | 主题 | 死因 | 重启条件 |
+|---|---|---|---|
+| P4 | 外部 CLI 子代理（Claude Code / Codex） | provider 后端包（dsh-subagent-claude-code / -codex）不在 CLI 闭包；硬上需改构建组合 + 白屏风险 | 上游把包打进 apps/cli 闭包 |
+| P5 | LSP 代码智能工具 | dsh-lsp / -stdio / tool-lsp 全不在 CLI 闭包，同上 | 同上 |
+| P6 | Agent Teams | 上游 experimental，未稳定 | 上游转正 |
+| P2 子项 | agent 侧 session_search 工具 | dsh-tool-session-query 不在 CLI 闭包；insert 曾致整树失败白屏（2026-09-07 事故） | 同上 |
 
 ## 依赖关系
 
