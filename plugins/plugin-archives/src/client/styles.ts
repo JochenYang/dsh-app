@@ -208,6 +208,47 @@ const cssText = `
   border: 1px dashed var(--dsw-alias-border-l2);
   border-radius: 10px;
 }
+.dshar_search {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.dshar_searchInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+.dshar_searchResults {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dshar_searchHit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dshar_searchSnippet {
+  flex: 1 1 100%;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
 `
 
 /** Inject the section styles once per document. */

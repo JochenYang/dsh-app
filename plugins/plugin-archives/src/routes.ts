@@ -102,6 +102,36 @@ export interface SessionsLike {
   get(id: string): unknown
 }
 
+/** Structural slice of ctx.sessionQuery: enough to run a cross-session search. */
+export interface SessionQueryLike {
+  searchSessions(request: { query: string; limit?: number }): Promise<{
+    items: ReadonlyArray<{
+      header: { id: string; createdAt?: number; cwd?: string; title?: string }
+      bestMatch?: { snippet?: string }
+    }>
+    nextCursor?: unknown
+  }>
+}
+
+/** Structural slice of ctx.tools: enough to report agent-tool availability. */
+export interface ToolsLike {
+  schemas(): ReadonlyArray<{ name: string }>
+}
+
+/** GET /search response value: hits + whether the agent-side session_search tool is mounted. */
+export interface ArchiveSearchResult {
+  /** Hits ranked by strongest matching event. */
+  items: ReadonlyArray<{
+    id: string
+    title: string
+    createdAt: number
+    cwd: string
+    snippet: string
+  }>
+  /** Whether the model-facing session_search tool is registered for preset agents. */
+  agentToolAvailable: boolean
+}
+
 /**
  * Whether a store-resident session is mid-turn (a `turn/start` with no
  * matching `turn/end` yet — the same open-turn test the upstream fork
@@ -149,6 +179,10 @@ export interface ArchiveRoutesOptions {
   registry: WorkspaceRegistryLike
   sessions: SessionsLike | undefined
   projectionCache: ProjectionCacheLike | undefined
+  /** Cross-session full-text search service (structural slice of ctx.sessionQuery). */
+  sessionQuery: SessionQueryLike | undefined
+  /** Tools registry (structural slice of ctx.tools): enough to report agent-tool availability. */
+  tools: ToolsLike | undefined
 }
 
 /**
@@ -430,10 +464,48 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
         fail(res, 500, 'prune-failed', `清理归档记录失败（${error instanceof Error ? error.message : String(error)}）`)
       })
   }
+  const searchHandler = (req: IncomingMessage, res: ServerResponse): void => {
+    if (!sameOrigin(req)) return
+    if (req.method !== 'GET') {
+      res.setHeader('Allow', 'GET')
+      fail(res, 405, 'method-not-allowed', 'GET only')
+      return
+    }
+    if (options.sessionQuery === undefined) {
+      fail(res, 503, 'session-query-unavailable', '当前内核未提供会话检索服务（session-query-sqlite 未启用）')
+      return
+    }
+    const url = new URL(req.url ?? '/', 'http://x')
+    const query = (url.searchParams.get('q') ?? '').trim()
+    if (query === '') {
+      fail(res, 400, 'bad-request', '查询词不能为空')
+      return
+    }
+    const limitParam = Number(url.searchParams.get('limit') ?? '20')
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(50, Math.floor(limitParam)) : 20
+    void options.sessionQuery.searchSessions({ query, limit })
+      .then((page) => {
+        const items = page.items.map((hit) => ({
+          id: String(hit.header.id ?? ''),
+          title: typeof hit.header.title === 'string' ? hit.header.title : '',
+          createdAt: typeof hit.header.createdAt === 'number' ? hit.header.createdAt : 0,
+          cwd: typeof hit.header.cwd === 'string' ? hit.header.cwd : '',
+          snippet: typeof hit.bestMatch?.snippet === 'string' ? hit.bestMatch.snippet : '',
+        }))
+        const agentToolAvailable = options.tools !== undefined
+          && options.tools.schemas().some((schema) => schema.name === 'session_search')
+        ok(res, { items, agentToolAvailable } satisfies ArchiveSearchResult)
+      })
+      .catch((error: unknown) => {
+        fail(res, 500, 'search-failed', `会话检索失败（${error instanceof Error ? error.message : String(error)}）`)
+      })
+  }
+
   const disposers = [
     webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/list`, handler: listHandler }),
     webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/delete`, handler: deleteHandler }),
     webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/prune`, handler: pruneHandler }),
+    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/search`, handler: searchHandler }),
   ]
   return () => {
     for (const dispose of disposers) dispose()

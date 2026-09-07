@@ -36,7 +36,9 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import {
   registerArchiveRoutes,
   type ProjectionCacheLike,
+  type SessionQueryLike,
   type SessionsLike,
+  type ToolsLike,
 } from './routes.ts'
 
 export const name = 'plugin-archives'
@@ -59,5 +61,9 @@ export function apply(ctx: Context): void {
     // without the projection cache rows just lose their titles.
     sessions: ctx.get('sessions') as SessionsLike | undefined,
     projectionCache: ctx.get('sessionProjectionCache') as ProjectionCacheLike | undefined,
+    // Session full-text search + agent-tool availability (opt-in overlay):
+    // without them /search answers 503 and agentToolAvailable stays false.
+    sessionQuery: ctx.get('sessionQuery') as SessionQueryLike | undefined,
+    tools: ctx.get('tools') as ToolsLike | undefined,
   }), 'plugin-archives: api routes')
 }

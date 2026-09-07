@@ -144,7 +144,8 @@ function GroupPanel({ group, busy, onDeleteSessions }: {
 }
 
 /**
- * The settings section: load the grouped listing on mount, confirm-and-delete.
+ * The settings section: load the grouped listing on mount, confirm-and-delete,
+ * plus a cross-session full-text search panel (GET /search?q=...).
  */
 export function ArchivesSection(): ReactNode {
   const [list, setList] = useState<ArchiveList | null>(null)
@@ -152,6 +153,9 @@ export function ArchivesSection(): ReactNode {
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [notice, setNotice] = useState<NoticeState | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<{ items: Array<{ id: string; title: string; createdAt: number; cwd: string; snippet: string }>; agentToolAvailable: boolean } | null>(null)
+  const [searchBusy, setSearchBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -165,6 +169,21 @@ export function ArchivesSection(): ReactNode {
   useEffect(() => {
     void load()
   }, [load])
+
+  /** Cross-session full-text search over the live-preferred corpus. */
+  const onSearch = useCallback(async () => {
+    const q = searchQuery.trim()
+    if (q === '') return
+    setSearchBusy(true)
+    try {
+      setSearchResults(await fetchJson<{ items: Array<{ id: string; title: string; createdAt: number; cwd: string; snippet: string }>; agentToolAvailable: boolean }>(`/plugins/@dsh-app/plugin-archives/api/search?q=${encodeURIComponent(q)}`))
+      setError('')
+    } catch (searchError) {
+      setError(searchError instanceof Error ? searchError.message : String(searchError))
+    } finally {
+      setSearchBusy(false)
+    }
+  }, [searchQuery])
 
   /** Arm the confirm banner for one session or a whole project group. */
   const onDeleteSessions = useCallback((group: ArchiveGroup) => {
@@ -273,6 +292,41 @@ export function ArchivesSection(): ReactNode {
       </div>
 
       {notice !== null && <div className={`dshar_notice ${notice.kind === 'warn' ? 'dshar_noticeWarn' : 'dshar_noticeOk'}`}>{notice.text}</div>}
+
+      {/* Cross-session full-text search */}
+      <div className="dshar_search">
+        <input
+          type="text"
+          className="dshar_searchInput"
+          value={searchQuery}
+          placeholder="搜索历史会话内容…"
+          disabled={searchBusy}
+          onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void onSearch() } }}
+          onChange={(event) => { setSearchQuery(event.target.value) }}
+        />
+        <button type="button" className="dshar_button" disabled={searchBusy || searchQuery.trim() === ''} onClick={() => { void onSearch() }}>
+          {searchBusy ? '搜索中…' : '搜索'}
+        </button>
+      </div>
+      {searchResults !== null && (
+        <div className="dshar_searchResults">
+          {searchResults.items.length === 0
+            ? <div className="dshar_empty">未找到匹配的会话。</div>
+            : searchResults.items.map((hit) => (
+              <div key={hit.id} className="dshar_searchHit" title={hit.id}>
+                {rowTitle(hit.id, hit.title)}
+                <span className="dshar_rowMeta">
+                  <span>{fmtDate(hit.createdAt)}</span>
+                  {hit.cwd !== '' && <span title={hit.cwd}>{hit.cwd}</span>}
+                </span>
+                {hit.snippet !== '' && <div className="dshar_searchSnippet">{hit.snippet}</div>}
+              </div>
+            ))}
+          {!searchResults.agentToolAvailable && (
+            <div className="dshar_notice dshar_noticeWarn">agent 侧的 session_search 工具尚未挂载（该包暂未进入内核运行时，模型无法主动检索历史会话），页面搜索不受影响。</div>
+          )}
+        </div>
+      )}
 
       {confirm !== null && (
         <div className="dshar_confirm" role="alertdialog" aria-label={confirm.kind === 'prune' ? '确认清理归档记录' : '确认删除归档会话'}>
