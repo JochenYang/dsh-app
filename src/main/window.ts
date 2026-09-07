@@ -1,4 +1,4 @@
-import { BrowserWindow, shell } from 'electron'
+import { BrowserWindow, session, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
 import { UPDATE_CARD_SCRIPT, KERNEL_UPDATE_CARD_SCRIPT, type UpdateCardTone } from './update-card'
@@ -10,9 +10,31 @@ const WINDOW_CONTROLS_WIDTH = 140
 /** Last overlay color applied per window, so identical samples are no-ops. */
 const appliedChromeColors = new WeakMap<BrowserWindow, string>()
 
+/**
+ * Clear stale dsh web auth cookies for this host. dsh sets a fresh
+ * `dsh-auth-<random>` cookie on every server start (random port, random
+ * cookie name, host-only → domain 127.0.0.1, port ignored). Electron's
+ * persistent session keeps every one of them, so they pile up across
+ * restarts; once the Cookie header exceeds the Node http maxHeaderSize
+ * (16 KB) the server answers 431 and the app white-screens. Remove every
+ * old dsh-auth-* cookie before the window loads the new server, so only the
+ * current one survives. Best-effort: cleanup must never block the window.
+ */
+export async function clearStaleAuthCookies(): Promise<void> {
+  try {
+    const ses = session.defaultSession
+    const cookies = await ses.cookies.get({ domain: '127.0.0.1' })
+    for (const cookie of cookies) {
+      if (!cookie.name.startsWith('dsh-auth-')) continue
+      await ses.cookies.remove(`http://127.0.0.1${cookie.path ?? '/'}`, cookie.name)
+    }
+  } catch {
+    // Best-effort cleanup; never block the window over cookies.
+  }
+}
+
 /** '#rrggbb' from 'rgb(r, g, b)' / 'rgba(...)' strings. */
-function rgbToHex(rgb: string): string {
-  const m = rgb.match(/\d+/g)
+function rgbToHex(rgb: string): string {  const m = rgb.match(/\d+/g)
   if (!m || m.length < 3) return '#ffffff'
   return `#${m
     .slice(0, 3)

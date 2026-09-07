@@ -6,7 +6,7 @@ import semver from 'semver'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
-import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
+import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies } from './window'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult } from './updater'
@@ -167,6 +167,10 @@ async function startServerAndOpenWindow(): Promise<void> {
     return
   }
   const url = server.serverUrl
+  // dsh seeds a fresh auth cookie per start; the persistent session otherwise
+  // accumulates them until the Cookie header trips the server's 16 KB cap
+  // (431 → white screen). Clear stale ones before the window loads.
+  await clearStaleAuthCookies()
   if (!mainWindow) {
     mainWindow = createMainWindow(url)
     mainWindow.on('close', (event) => {
