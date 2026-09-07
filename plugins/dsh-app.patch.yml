@@ -114,3 +114,20 @@
 
     - id: mcp
       name: '@dsh-app/plugin-mcp'
+
+    - id: hooks
+      name: '@dsh-app/plugin-hooks'
+
+# Session full-text search: override the base/web-app row's openAt from
+# 'never' to 'first-search' (the sqlite handle is created lazily on the
+# first search, so Node 22 startup stays quiet). The agent-side
+# session_search/session_event_search tools stay unmounted: their package
+# (@deepseek-ai/dsh-tool-session-query) is not in the CLI runtime closure
+# (apps/cli has no dependency on it), so inserting that row fails the whole
+# plugin tree (ERR_MODULE_NOT_FOUND → white screen). Re-add the insert once
+# the package ships inside the CLI closure; until then the archives /search
+# route reports agentToolAvailable: false.
+- id: session-query-sqlite
+  config:
+    path: ':memory:'
+    openAt: first-search

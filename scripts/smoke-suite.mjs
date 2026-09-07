@@ -39,7 +39,7 @@ import net from 'node:net'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
-const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp']
+const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks']
 const FIXTURE = path.join(root, 'scripts', 'fixtures', 'minimal-mcp-server.mjs')
 const MCP_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
 
@@ -400,8 +400,10 @@ async function main() {
       ['/plugins/@dsh-app/plugin-usage/api/status', 'usage: status route'],
       ['/plugins/@dsh-app/plugin-memory/api/status', 'memory: status route'],
       ['/plugins/@dsh-app/plugin-archives/api/list', 'archives: list route'],
+      ['/plugins/@dsh-app/plugin-archives/api/search?q=probe', 'archives: search route'],
       ['/plugins/@dsh-app/plugin-swarm/api/config', 'swarm: config route'],
       [`${MCP_PREFIX}/servers`, 'mcp: servers route'],
+      ['/plugins/@dsh-app/plugin-hooks/api/hooks', 'hooks: hooks route'],
     ]) {
       await probeRoute(base, route, name)
     }
@@ -414,7 +416,7 @@ async function main() {
     // must include plugin-mcp's bundle, and one combo must actually serve.
     const index = await getJson(base, '/')
     const html = index.text
-    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-swarm', '@dsh-app/plugin-mcp']
+    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-swarm', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks']
     check('client: boot graph lists suite client packages',
       index.status === 200 && suiteClientPackages.every(id => html.includes(id)),
       `HTTP ${index.status}; ids found: ${suiteClientPackages.filter(id => html.includes(id)).join(',') || 'none'}`)
@@ -427,6 +429,88 @@ async function main() {
     }
 
     await probeMcpChain(base)
+
+    // Hooks bridge dynamic-mount chain: create a claude-code bridge pointing
+    // at the fixture hooks.json → mounted → disable → delete.
+    const HOOKS_FIXTURE = path.join(root, 'scripts', 'fixtures', 'hooks-claude-code.json')
+    const HOOKS_ROUTE = '/plugins/@dsh-app/plugin-hooks/api'
+    const hookCreated = await postJson(base, `${HOOKS_ROUTE}/bridge/create`, {
+      dialect: 'claude-code',
+      enabled: true,
+      configPath: HOOKS_FIXTURE,
+    })
+    check('hooks: create claude-code bridge', hookCreated.status === 200 && hookCreated.body?.ok === true,
+      `HTTP ${hookCreated.status}: ${JSON.stringify(hookCreated.body).slice(0, 200)}`)
+    if (hookCreated.status === 200) {
+      const hookId = hookCreated.body?.value?.bridges?.find(b => b.configPath === HOOKS_FIXTURE)?.id
+      check('hooks: bridge has an id', typeof hookId === 'string' && hookId !== '')
+      // Hooks mount may take a moment (configPath read at load).
+      let hookStatus = null
+      const hookDeadline = Date.now() + 10_000
+      while (Date.now() < hookDeadline) {
+        const hookList = await getJson(base, `${HOOKS_ROUTE}/hooks`)
+        const bridge = hookList.body?.value?.bridges?.find(b => b.id === hookId)
+        hookStatus = bridge?.status ?? null
+        if (hookStatus?.state === 'mounted' || hookStatus?.state === 'error') break
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+      }
+      check('hooks: bridge mounted', hookStatus?.state === 'mounted', `final status: ${JSON.stringify(hookStatus)}`)
+      // Disable + re-enable to exercise the update path.
+      const hookView = (await getJson(base, `${HOOKS_ROUTE}/hooks`)).body?.value?.bridges?.find(b => b.id === hookId)
+      const disabled = await postJson(base, `${HOOKS_ROUTE}/bridge/update`, { ...hookView, enabled: false })
+      check('hooks: update disables the bridge', disabled.status === 200 && disabled.body?.ok === true,
+        `HTTP ${disabled.status}`)
+      await postJson(base, `${HOOKS_ROUTE}/bridge/delete`, { id: hookId })
+      const hookAfter = await getJson(base, `${HOOKS_ROUTE}/hooks`)
+      check('hooks: bridge gone after delete',
+        !(hookAfter.body?.value?.bridges ?? []).some(b => b.id === hookId))
+
+      // Inline-mode bridge: content authored in the UI, saved as a managed
+      // file. This is the path that had the configContent-stripped-on-load
+      // bug — verify the entry survives a fresh GET after create.
+      const inlineCreated = await postJson(base, `${HOOKS_ROUTE}/bridge/create`, {
+        dialect: 'claude-code',
+        enabled: true,
+        configSource: 'inline',
+        configContent: JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo inline-hook-smoke' }] }] } }),
+      })
+      check('hooks: create inline bridge', inlineCreated.status === 200 && inlineCreated.body?.ok === true,
+        `HTTP ${inlineCreated.status}: ${JSON.stringify(inlineCreated.body).slice(0, 200)}`)
+      if (inlineCreated.status === 200) {
+        // The critical assertion: the entry must survive a fresh GET (not
+        // dropped as "invalid" by validateBridge on re-read).
+        const inlineList = await getJson(base, `${HOOKS_ROUTE}/hooks`)
+        const inlineBridge = inlineList.body?.value?.bridges?.find(b => b.configSource === 'inline')
+        check('hooks: inline bridge survives re-read', inlineBridge !== undefined && inlineBridge.id !== undefined,
+          `bridges: ${JSON.stringify(inlineList.body?.value?.bridges?.map(b => ({ id: b.id, source: b.configSource }))) ?? '[]'}`)
+        if (inlineBridge !== undefined) {
+          check('hooks: inline bridge has configContent', typeof inlineBridge.configContent === 'string' && inlineBridge.configContent !== '',
+            `configContent: ${String(inlineBridge.configContent).slice(0, 80)}`)
+          await postJson(base, `${HOOKS_ROUTE}/bridge/delete`, { id: inlineBridge.id })
+        }
+      }
+
+      // Native-format bridge: DSH APP's own hook format, no kernel bridge
+      // mounted — the native runtime registers typed interception handlers.
+      const nativeCreated = await postJson(base, `${HOOKS_ROUTE}/bridge/create`, {
+        dialect: 'native',
+        enabled: true,
+        configSource: 'inline',
+        configContent: JSON.stringify({ rules: [{ name: 'smoke-block', on: 'pre-tool-use', matcher: 'read|Read', action: 'block', message: 'smoke native block' }] }),
+      })
+      check('hooks: create native bridge', nativeCreated.status === 200 && nativeCreated.body?.ok === true,
+        `HTTP ${nativeCreated.status}: ${JSON.stringify(nativeCreated.body).slice(0, 200)}`)
+      if (nativeCreated.status === 200) {
+        const nativeList = await getJson(base, `${HOOKS_ROUTE}/hooks`)
+        const nativeBridge = nativeList.body?.value?.bridges?.find(b => b.dialect === 'native')
+        check('hooks: native bridge survives re-read', nativeBridge !== undefined && nativeBridge.id !== undefined)
+        if (nativeBridge !== undefined) {
+          check('hooks: native bridge mounted', nativeBridge.status?.state === 'mounted',
+            `status: ${JSON.stringify(nativeBridge.status)}`)
+          await postJson(base, `${HOOKS_ROUTE}/bridge/delete`, { id: nativeBridge.id })
+        }
+      }
+    }
 
     if (failures.length > 0) {
       console.error(`\nsmoke: ${String(failures.length)} check(s) failed`)
