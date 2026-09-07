@@ -131,3 +131,18 @@
   config:
     path: ':memory:'
     openAt: first-search
+
+# Schedule: session-scoped reminders (schedule_create/list/delete tools +
+# read-only schedule directory in the session header). The two host services
+# are verified in the CLI runtime closure (apps/cli dependencies, 2026-09-07);
+# the ui row exists disabled in the web bundle and is flipped on here.
+# Verified with the packaged bin.js before merging (never trust the dev pnpm
+# closure alone): a missing package fails the whole tree, not one row.
+- insert:
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
+
+- id: ui-schedule
+  disabled: false

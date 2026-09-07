@@ -53,3 +53,12 @@ UI 只读查看），本期不做设置页。
    需在探针确认 loader 对缺失包的行为是 warn 不是 crash，并入 mcp-manager V1 验证清单）。
 
 风险：低。上游有完整用户指南 + 示例 overlay，工作量 ≈ 半天 + 验证。
+
+## 4. 落地记录（2026-09-07）
+
+- overlay 3 行已加入 `dsh-app.patch.yml`（time-context + schedule insert，
+  ui-schedule 翻开）。两个包均在 `apps/cli` dependencies 内（L1），并用
+  packaged `bin.js` 实测整树启动成功（不再只信 dev pnpm 闭包——tool-session-query
+  白屏教训）。`--dump-config` 确认三行在 composed tree 内生效。
+- 未做：系统通知桥（V2，依赖 plugin-brand desktop bridge）、端到端投递验证
+  （需真实模型调用，交用户实测）。
