@@ -223,7 +223,7 @@ Two seams are stitched at every server start (`brand-suite.ts`):
    sources are the active kernel's `app/node_modules/@dsh-app/*` (npm-installed
    via `file:` references by `scripts/build-runtime.mjs`).
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into `userData`
-   and passed to `dsh web --patch ...`. It inserts all eight suite entries
+   and passed to `dsh web --patch ...`. It inserts all ten suite entries
    after every bundle layer and the profile's own patch (last write wins per
    row; the upstream Models settings page stays enabled — the brand shadow
    was retired).
@@ -231,6 +231,20 @@ Two seams are stitched at every server start (`brand-suite.ts`):
 Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
 rollback target) boots vanilla — no links, no overlay, boot is never blocked
 by brand wiring.
+
+### Suite plugin list sync (learned the hard way)
+
+The suite member list lives in **five** places and they must match exactly:
+`plugins/dsh-app.patch.yml` (insert rows), `scripts/build-runtime.mjs`
+(`suitePlugins`), `src/main/brand-suite.ts` (`SUITE_PLUGIN_DIRS`),
+`scripts/smoke-suite.mjs` (`SUITE_DIRS`), and the pre-build loop in
+`.github/workflows/release.yml`. Adding an overlay row without its package in
+the build list ships a runtime the loader cannot compose — every suite page
+(settings sections, sidebar dock views) silently disappears behind the
+fail-soft vanilla boot (v0.9.6→v0.9.8 incident: MCP/hooks rows without their
+packages). When adding/removing a suite plugin, update all five sites in the
+same commit, then run `smoke-suite.mjs --tgz` against a fresh local build:
+it fails fast on a missing package instead of a silent vanilla boot.
 
 ### Upstream API drift (learned the hard way)
 
@@ -342,6 +356,15 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
     store (`credentials.set`), not in plain settings.
 - **Failure paths**: user-facing error messages are stable, actionable,
   zh-CN, and must not leak sensitive detail.
+- **Gate commands must run bare — never behind a pipe**: `npm run typecheck
+  2>&1 | tail -2 && git commit` commits even when typecheck fails, because
+  `&&` sees `tail`'s exit code, not tsc's. Run the gate first, check
+  `EXIT=$?`/the tool result, and only then commit. (A broken commit from this
+  exact pattern had to be amended once already.)
+- **No backticks inside template-literal CSS/scripts**: `DESKTOP_CHROME_CSS`
+  and the injected scripts are backtick literals — a backtick in a comment
+  or copy silently terminates the string and only surfaces as a syntax error
+  at the next typecheck. Use plain quotes in embedded comments.
 - **Generated/tracked**: `dist/`, `release/`, `runtime-dist/`,
   `plugins/*/lib/`, `logs/`, `scratch/`, `*.tgz`, `*.log` are gitignored —
   don't commit build output.
@@ -383,6 +406,12 @@ for a dsh version without cutting a shell release):
    then `gh run view <id> --repo JochenYang/dsh-app`. All jobs
    (prepare-release + 6 runtime + 4 app) must succeed; the release stays a
    draft.
+   **Then verify what was built before publishing** — green jobs are not
+   proof of the right content: read the runtime job log's
+   `Runtime artifact ready: ...dsh-runtime-<platform>-<arch>-<version>.tgz`
+   line and confirm `<version>` equals the intended kernel (a stale
+   `DSH_APP_CHANNEL` pin once shipped rc.1 inside a shell meant to bundle
+   alpha.1, and CI was fully green). Only then proceed.
 4. **Generate release notes**:
    `node scripts/gen-release-notes.mjs v0.1.6` → writes `release-notes.md`.
 5. **Publish the draft**:
@@ -414,6 +443,15 @@ for a dsh version without cutting a shell release):
 - A **single failed job** recovers best with `gh run rerun <run> --failed`.
   Kernel version in runtime artifacts resolves from the registry dist-tag
   (distinct from the shell version) unless `dsh_version` is supplied.
+- **Never run two writers against one runtime tag**: a `workflow_dispatch`
+  re-upload and a tag-push CI both `--clobber` to `runtime-<dshVersion>`,
+  and the loser silently overwrites the winner (once shipped a stale 8-plugin
+  artifact over a fresh 10-plugin one). Before any manual re-upload, confirm
+  no other `release.yml` run is in progress
+  (`gh run list --repo JochenYang/dsh-app --workflow release.yml --status in_progress`),
+  and confirm the fix is pushed (`git log origin/main..HEAD` empty) —
+  dispatch checks out origin/main, not the local worktree, so triggering it
+  from unpushed code rebuilds the bug.
 
 **Remaining pre-release gaps**: macOS signing/notarization and (optional)
 Windows signing secrets must be provided as CI secrets;
