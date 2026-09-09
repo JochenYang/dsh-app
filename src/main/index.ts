@@ -11,7 +11,7 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST } from '../shared/constants'
-import type { KernelStatusPayload } from '../shared/types'
+import type { KernelChannel, KernelStatusPayload } from '../shared/types'
 
 // ---------------------------------------------------------------- config
 
@@ -263,10 +263,27 @@ async function installKernel(): Promise<void> {
   }
 }
 
+const KERNEL_CHANNEL_LABEL_ZH: Record<string, string> = {
+  stable: '正式版',
+  beta: '候选版',
+  alpha: '测试版',
+}
+
 async function checkKernelUpdate(manual: boolean): Promise<void> {
   try {
     const result = await kernel.checkForUpdate()
-    if (!result.available) {
+    // Installable options: the primary line's update (if any) first, then
+    // one button per other line carrying something newer. Every entry passed
+    // the artifact probe in checkForUpdate, so all of them install directly.
+    const options: Array<{ version: string; channel: KernelChannel; primary?: boolean }> = []
+    if (result.available && result.latest) {
+      options.push({ version: result.latest, channel: result.channel, primary: true })
+    }
+    for (const alt of result.alternatives ?? []) {
+      if (alt.version === result.latest) continue
+      options.push({ version: alt.version, channel: alt.channel })
+    }
+    if (options.length === 0) {
       if (manual) {
         // Dev mode can detect a newer version but cannot auto-install; tell
         // the user what's available rather than a flat "up to date".
@@ -288,45 +305,55 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
       return
     }
     if (!manual) {
-      if (!result.latest) return
       // Background checks never pop a modal and never auto-install; they
       // surface the finding as a persistent bottom-right card (no auto-hide)
-      // with an 立即更新 action when the user chooses. Unlike the old 5 s
+      // with one button per line when the user chooses. Unlike the old 5 s
       // toast this stays visible until acted on, so a quiet channel cannot be
       // missed mid-work; the user decides when to restart the server.
-      const choice = await showKernelUpdateCard(mainWindow, result.current ?? '未知', result.latest)
-      if (choice === 'update') await applyKernelUpdate(result.latest)
+      const choice = await showKernelUpdateCard(mainWindow, result.current ?? '未知', options)
+      if (choice !== 'later') await applyKernelUpdate(choice)
       return
     }
-    const proceed = await promptThemedConfirm(
+    const optionLabel = (o: { version: string; channel: string }): string =>
+      options.length > 1
+        ? `更新到 dsh ${o.version}（${KERNEL_CHANNEL_LABEL_ZH[o.channel] ?? o.channel}）`
+        : `更新到 dsh ${o.version}`
+    const primaryVersion = options.find((o) => o.primary)?.version ?? options[0].version
+    const picked = await promptThemedConfirm(
       mainWindow,
       {
         title: '内核更新可用',
-        message: `dsh ${result.current} → ${result.latest}`,
-        detail: '现在下载并激活？服务将会重启。',
+        message: options.length > 1
+          ? `dsh ${result.current} 有多个新版本可选`
+          : `dsh ${result.current} → ${options[0].version}`,
+        detail: '选择要安装的版本，服务将会重启。',
         buttons: [
           { label: '稍后', value: 'later' },
-          { label: '立即更新', value: 'update', primary: true },
+          ...options.map((o) => ({ label: optionLabel(o), value: o.version, primary: o.primary })),
         ],
         cancelValue: 'later',
-        enterValue: 'update',
+        enterValue: primaryVersion,
       },
       {
         type: 'info',
         title: '内核更新可用',
-        message: `dsh ${result.current} → ${result.latest}`,
-        detail: '现在下载并激活？服务将会重启。',
-        buttons: ['立即更新', '稍后'],
+        message: options.length > 1
+          ? `dsh ${result.current} 有多个新版本可选`
+          : `dsh ${result.current} → ${options[0].version}`,
+        detail: '选择要安装的版本，服务将会重启。',
+        buttons: ['稍后', ...options.map((o) => optionLabel(o))],
         defaultId: 0,
-        cancelId: 1,
+        cancelId: 0,
       },
       (value, nativeResponse) => {
-        if (value === 'update') return true
-        if (value === 'later') return false
-        return nativeResponse === 0
+        if (value && value !== 'later') return value
+        if (typeof nativeResponse === 'number' && nativeResponse > 0) {
+          return options[nativeResponse - 1]?.version ?? null
+        }
+        return null
       },
     )
-    if (proceed && result.latest) await applyKernelUpdate(result.latest)
+    if (picked) await applyKernelUpdate(picked)
   } catch (err) {
     if (manual) void promptNoticeThemed(mainWindow, 'error', 'DSH APP', `更新检查失败：${(err as Error).message}`)
   }

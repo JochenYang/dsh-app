@@ -199,7 +199,8 @@ run({ message: '正在下载 dsh…', progress: 0.1, tone: 'progress' })
 console.log('\nprobe-update-card: all assertions passed')
 
 // --------------------------------------------------------------------------
-// 6. KERNEL_UPDATE_CARD_SCRIPT: persistent card with 稍后 / 立即更新 buttons.
+// 6. KERNEL_UPDATE_CARD_SCRIPT: persistent card with one button per option
+//    (+ 稍后), resolving the chosen version or 'later'.
 const getComputedStyleStub = () => ({ getPropertyValue: () => '' })
 global.getComputedStyle = getComputedStyleStub
 
@@ -210,49 +211,70 @@ function runKernelCard(payload) {
 }
 
 ;(async () => {
-  // 6a. Mounts a bottom-right card with both buttons; 立即更新 resolves 'update'
-  //     and removes the card + clears the registry key.
+  // 6a. Single option: mounts a bottom-right card with 稍后 + one update
+  //     button; clicking it resolves the version and removes the card +
+  //     clears the registry key.
   resetDom()
-  const pick1 = runKernelCard({ current: '0.1.2-alpha.4', latest: '0.1.2-alpha.5' })
+  const pick1 = runKernelCard({ current: '0.1.2-alpha.4', options: [{ version: '0.1.2-alpha.5', channel: 'alpha', primary: true }] })
   const card = documentStub.body.children.find((c) => c.id === 'dsh-kernel-update-card')
   assert.ok(card, 'kernel update card appended to body')
   assert.strictEqual(card.attributes.role, 'status')
   const title = card.children[0]
-  assert.strictEqual(title.textContent, '发现新版本 dsh 0.1.2-alpha.5', 'card title (latest)')
+  assert.strictEqual(title.textContent, '发现内核更新', 'card title (single option)')
   const detail = card.children[1]
   assert.strictEqual(detail.textContent, '当前版本 dsh 0.1.2-alpha.4。更新将下载新运行时并重启服务。', 'card detail (current)')
   const actions = card.children[2]
   assert.strictEqual(actions.children.length, 2, 'later + update buttons')
   assert.strictEqual(actions.children[0].textContent, '稍后')
-  assert.strictEqual(actions.children[1].textContent, '立即更新')
+  assert.strictEqual(actions.children[1].textContent, '立即更新到 0.1.2-alpha.5')
   assert.ok(actions.children[1].style.background.includes('#3b82f6'), 'primary button uses brand fallback')
   assert.strictEqual(windowStub.__dshKernelUpdateCard && typeof windowStub.__dshKernelUpdateCard.resolve, 'function', 'registry holds resolve')
   actions.children[1].click()
-  assert.strictEqual(await pick1, 'update', '立即更新 resolves update')
+  assert.strictEqual(await pick1, '0.1.2-alpha.5', 'update button resolves its version')
   assert.strictEqual(windowStub.__dshKernelUpdateCard, null, 'registry cleared after settle')
   assert.strictEqual(card._removed || card._parent === null || !card._parent.children.includes(card), true, 'card detached after settle')
-  console.log('pass 6/8: kernel update card mounts, buttons resolve, cleans up')
+  console.log('pass 6/9: kernel update card mounts, buttons resolve, cleans up')
 
   // 6b. 稍后 resolves 'later'.
   resetDom()
-  const pick2 = runKernelCard({ current: '0.1.2-alpha.4', latest: '0.1.2-alpha.5' })
+  const pick2 = runKernelCard({ current: '0.1.2-alpha.4', options: [{ version: '0.1.2-alpha.5', channel: 'alpha', primary: true }] })
   const card2 = documentStub.body.children.find((c) => c.id === 'dsh-kernel-update-card')
   card2.children[2].children[0].click()
   assert.strictEqual(await pick2, 'later', '稍后 resolves later')
-  console.log('pass 7/8: 稍后 resolves later')
+  console.log('pass 7/9: 稍后 resolves later')
 
   // 6c. A re-invocation while the first card is pending settles the previous
   //     promise as 'later' (no stale card, no leaked unresolved promise).
   resetDom()
   windowStub.__dshKernelUpdateCard = null
-  const pick3 = runKernelCard({ current: '0.1.2-alpha.4', latest: '0.1.2-alpha.5' })
-  const pick4 = runKernelCard({ current: '0.1.2-alpha.5', latest: '0.1.2-alpha.6' })
+  const pick3 = runKernelCard({ current: '0.1.2-alpha.4', options: [{ version: '0.1.2-alpha.5', channel: 'alpha', primary: true }] })
+  const pick4 = runKernelCard({ current: '0.1.2-alpha.5', options: [{ version: '0.1.2-alpha.6', channel: 'alpha', primary: true }] })
   const cards = documentStub.body.children.filter((c) => c.id === 'dsh-kernel-update-card')
   assert.strictEqual(cards.length, 1, 're-invocation replaces, never stacks')
   assert.strictEqual(await pick3, 'later', 'stale card settles later')
   cards[0].children[2].children[1].click()
-  assert.strictEqual(await pick4, 'update', 'fresh card still interactive')
-  console.log('pass 8/8: re-invocation settles stale promise as later')
+  assert.strictEqual(await pick4, '0.1.2-alpha.6', 'fresh card still interactive')
+  console.log('pass 8/9: re-invocation settles stale promise as later')
+
+  // 6d. Multi-line: one button per option with the line label; each resolves
+  //     its own version.
+  resetDom()
+  const pick5 = runKernelCard({
+    current: '0.1.2-rc.1',
+    options: [
+      { version: '0.1.5-alpha.1', channel: 'alpha' },
+      { version: '0.1.2-rc.1', channel: 'beta', primary: true },
+    ],
+  })
+  const card5 = documentStub.body.children.find((c) => c.id === 'dsh-kernel-update-card')
+  assert.strictEqual(card5.children[0].textContent, '发现多个内核更新', 'multi-line title')
+  const actions5 = card5.children[2]
+  assert.strictEqual(actions5.children.length, 3, 'later + two line buttons')
+  assert.strictEqual(actions5.children[1].textContent, '更新到 0.1.5-alpha.1（测试版）', 'alpha line label')
+  assert.strictEqual(actions5.children[2].textContent, '更新到 0.1.2-rc.1（候选版）', 'beta line label')
+  actions5.children[1].click()
+  assert.strictEqual(await pick5, '0.1.5-alpha.1', 'alpha button resolves its version')
+  console.log('pass 9/9: multi-line options resolve their own versions')
 
   console.log('\nprobe-update-card: all kernel-update-card assertions passed')
 })().catch((err) => {

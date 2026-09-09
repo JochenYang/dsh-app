@@ -11,6 +11,7 @@
  * Kept in its own module so scripts/probe-update-card.cjs can execute the
  * exact production script against a DOM stub instead of duplicating it.
  */
+import type { KernelChannel } from '../shared/types'
 
 export type UpdateCardTone = 'progress' | 'success' | 'error'
 
@@ -132,25 +133,44 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
 /**
  * Persistent "kernel update available" card script (pure, testable).
  *
- * Renders a fixed bottom-right card into the loaded dsh web UI: a heading
- * (`dsh <current> → <latest>`) plus a `稍后` / `立即更新` button pair. Unlike
- * {@link UPDATE_CARD_SCRIPT} it never auto-hides — the background kernel
+ * Renders a fixed bottom-right card into the loaded dsh web UI: a heading,
+ * the running version, and one button per installable option plus `稍后`.
+ * Unlike {@link UPDATE_CARD_SCRIPT} it never auto-hides — a background kernel
  * check surfaces its finding once, and the card stays until the user either
  * acts on it or closes it, so a quiet update is not missed while remaining
  * non-blocking (in contrast to the modal in-frame dialog, which interrupts
  * whatever the user is doing).
  *
+ * Multiple options cover the multi-line case: the registry check reports the
+ * primary line's update plus any other line carrying something newer (e.g.
+ * an alpha build while running rc), and the user picks a line instead of
+ * only getting one version.
+ *
  * The promise it returns is what the shell's `executeJavaScript` awaits: it
- * resolves with 'update' or 'later' when the user clicks the matching button,
- * and with 'later' when a re-invocation replaces the card (each invocation is
- * a fresh card; a stale one settles as 'later').
+ * resolves with the chosen option's version, or 'later' when the user clicks
+ * 稍后, and with 'later' when a re-invocation replaces the card (each
+ * invocation is a fresh card; a stale one settles as 'later').
  *
  * Kept in this module for the same reason as UPDATE_CARD_SCRIPT: probe
  * scripts execute it against a DOM stub to verify behavior.
  */
-export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; latest: string }): string => `(function () {
+export interface KernelUpdateCardOption {
+  version: string
+  channel: KernelChannel
+  /** Render as the filled primary button (the primary line's update). */
+  primary?: boolean
+}
+
+const KERNEL_CHANNEL_LABEL: Record<KernelChannel, string> = {
+  stable: '正式版',
+  beta: '候选版',
+  alpha: '测试版',
+}
+
+export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; options: KernelUpdateCardOption[] }): string => `(function () {
   'use strict';
   var cfg = ${JSON.stringify(payload)};
+  var CHANNEL_LABEL = ${JSON.stringify(KERNEL_CHANNEL_LABEL)};
   var id = 'dsh-kernel-update-card';
   var KEY = '__dshKernelUpdateCard';
   // A re-invocation must not leave two cards (or one stale promise) behind:
@@ -189,7 +209,7 @@ export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; latest: st
 
   var title = document.createElement('div');
   style(title, 'font-size:13px;font-weight:600;color:' + ink + ';line-height:1.5;');
-  title.textContent = '发现新版本 dsh ' + cfg.latest;
+  title.textContent = cfg.options.length > 1 ? '发现多个内核更新' : '发现内核更新';
   root.appendChild(title);
 
   var detail = document.createElement('div');
@@ -214,9 +234,19 @@ export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; latest: st
   }
 
   var actions = document.createElement('div');
-  style(actions, 'display:flex;gap:8px;justify-content:flex-end;margin-top:2px;');
+  style(actions, 'display:flex;gap:8px;justify-content:flex-end;margin-top:2px;flex-wrap:wrap;');
   actions.appendChild(button({ label: '稍后', value: 'later' }));
-  actions.appendChild(button({ label: '立即更新', value: 'update', primary: true }));
+  for (var i = 0; i < cfg.options.length; i++) {
+    var opt = cfg.options[i];
+    var lineLabel = CHANNEL_LABEL[opt.channel] || opt.channel;
+    actions.appendChild(button({
+      label: cfg.options.length > 1
+        ? '更新到 ' + opt.version + '（' + lineLabel + '）'
+        : '立即更新到 ' + opt.version,
+      value: opt.version,
+      primary: !!opt.primary,
+    }));
+  }
   root.appendChild(actions);
   document.body.appendChild(root);
 

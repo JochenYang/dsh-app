@@ -1,7 +1,7 @@
 import { BrowserWindow, session, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
-import { UPDATE_CARD_SCRIPT, KERNEL_UPDATE_CARD_SCRIPT, type UpdateCardTone } from './update-card'
+import { UPDATE_CARD_SCRIPT, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
 const OVERLAY_HEIGHT = 36
@@ -444,17 +444,22 @@ export function showUpdateToast(win: BrowserWindow | null, message: string, tone
 
 /**
  * Persistent "kernel update available" card for background checks (no toast,
- * no modal). Resolves with 'update' | 'later' once the user clicks a button;
- * never auto-hides, so a background finding stays visible until acted on.
- * When the window is gone/unresponsive or the page doesn't answer, it
- * resolves 'later' (a pending rejection) rather than crashing the caller.
+ * no modal). Renders one button per installable option (primary line first)
+ * plus 稍后; resolves with the chosen version, or 'later' once the user
+ * clicks 稍后. Never auto-hides, so a background finding stays visible until
+ * acted on. When the window is gone/unresponsive or the page doesn't answer,
+ * it resolves 'later' (a pending rejection) rather than crashing the caller.
  */
-export async function showKernelUpdateCard(win: BrowserWindow | null, current: string, latest: string): Promise<'update' | 'later'> {
+export async function showKernelUpdateCard(
+  win: BrowserWindow | null,
+  current: string,
+  options: KernelUpdateCardOption[],
+): Promise<string> {
   if (!win || win.isDestroyed()) return 'later'
   try {
     const choice = await win.webContents
-      .executeJavaScript(KERNEL_UPDATE_CARD_SCRIPT({ current, latest }))
-    return choice === 'update' ? 'update' : 'later'
+      .executeJavaScript(KERNEL_UPDATE_CARD_SCRIPT({ current, options }))
+    return typeof choice === 'string' && choice !== '' ? choice : 'later'
   } catch {
     return 'later'
   }

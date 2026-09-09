@@ -141,28 +141,41 @@ export class KernelManager {
       }
       this.status({ phase: 'checking', message: '正在检查内核更新…', progress: null })
       // A prerelease kernel lives on its own dist-tag: `rc` builds on `next`,
-      // `alpha` builds on `alpha`. When the user is on a prerelease but
-      // configured for stable, follow the highest available version across
-      // all prerelease tags (alpha/next/latest) instead of only the tag
-      // matching the current prerelease kind — upstream moves a version line
-      // across tags as it matures (alpha → rc → stable), and pinning the user
-      // to their line's tag would leave them stranded once upstream moves on
-      // (e.g. alpha stalled at 0.1.2-alpha.5 while 0.1.2-rc.1 shipped on
-      // next). Explicit DSH_APP_CHANNEL=alpha/beta overrides still take
-      // effect (single-channel query, for dev/testing).
+      // `alpha` builds on `alpha`. Upstream moves a version line across tags
+      // as it matures (alpha → rc → stable), so a single-tag query would
+      // strand users once upstream moves on (e.g. alpha stalled at
+      // 0.1.2-alpha.5 while 0.1.2-rc.1 shipped on next). Query all three tags
+      // up front: the primary line follows the configured channel (with the
+      // prerelease fallback below), and any OTHER line carrying something
+      // newer than the running kernel is offered as an alternative — the user
+      // picks a line instead of only getting the primary update. Explicit
+      // DSH_APP_CHANNEL=alpha/beta still pins the primary line to a single
+      // tag (dev/testing); stable kernels keep `latest` as primary.
       const currentVersion = this.current.manifest.dshVersion
       const prereleaseTag = semver.valid(currentVersion) !== null
         ? (semver.prerelease(currentVersion) ?? [])[0]
         : undefined
       const isPrerelease = prereleaseTag !== undefined
+      const [infoAlpha, infoBeta, infoStable] = await Promise.all([
+        fetchRegistryInfo('alpha'),
+        fetchRegistryInfo('beta'),
+        fetchRegistryInfo('stable'),
+      ])
+      const byChannel = new Map<KernelChannel, RegistryInfo | null>([
+        ['alpha', infoAlpha],
+        ['beta', infoBeta],
+        ['stable', infoStable],
+      ])
       let info: RegistryInfo | null
       let channel: KernelChannel
-      if (isPrerelease && this.opts.channel === 'stable') {
-        const candidates = (await Promise.all([
-          fetchRegistryInfo('alpha'),
-          fetchRegistryInfo('beta'),
-          fetchRegistryInfo('stable'),
-        ])).filter((c): c is RegistryInfo => c !== null)
+      if (this.opts.channel !== 'stable') {
+        channel = this.opts.channel
+        info = byChannel.get(channel) ?? null
+      } else if (!isPrerelease) {
+        channel = 'stable'
+        info = infoStable
+      } else {
+        const candidates = [infoAlpha, infoBeta, infoStable].filter((c): c is RegistryInfo => c !== null)
         info = candidates.length === 0 ? null
           : candidates.sort((a, b) => {
               const va = semver.valid(a.version)
@@ -171,11 +184,6 @@ export class KernelManager {
               return a.version.localeCompare(b.version)
             })[candidates.length - 1]
         channel = info?.channel ?? 'stable'
-      } else {
-        channel = isPrerelease && this.opts.channel === 'stable'
-          ? (prereleaseTag === 'alpha' ? 'alpha' : 'beta')
-          : this.opts.channel
-        info = await fetchRegistryInfo(channel)
       }
       if (!info) {
         return { available: false, current: currentVersion, latest: null, channel, reason: this.opts.source === 'dev' ? 'dev mode' : 'registry unreachable' }
@@ -200,11 +208,33 @@ export class KernelManager {
           return { available: false, current: currentVersion, latest: info.version, channel, reason }
         }
       }
+      // Other lines carrying something newer than the running kernel become
+      // user-pickable alternatives (each gated on its own artifact probe, so
+      // every offered option is directly installable). Same-version entries
+      // across tags (e.g. next and latest pointing at one rc) collapse to the
+      // primary line above and are skipped here.
+      const alternatives: Array<{ version: string; channel: KernelChannel }> = []
+      const seen = new Set(info ? [info.version] : [])
+      for (const other of [infoAlpha, infoBeta, infoStable]) {
+        if (!other || seen.has(other.version)) continue
+        seen.add(other.version)
+        const otherNewer = semver.valid(other.version) && semver.valid(currentVersion)
+          ? semver.gt(other.version, currentVersion)
+          : other.version !== currentVersion
+        if (!otherNewer) continue
+        const probe = await this.makeResolver().probeArtifact(other.version)
+        if (probe === 'available') {
+          alternatives.push({ version: other.version, channel: other.channel })
+        } else {
+          this.log(`dsh ${other.version} (${other.channel}) skipped as alternative (${probe})`)
+        }
+      }
       return {
         available: !!newer,
         current: currentVersion,
         latest: info.version,
         channel,
+        alternatives,
       }
     } finally {
       // Terminal status: the in-window card never lingers after a check, on

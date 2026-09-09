@@ -71,6 +71,14 @@ export interface UpdateCheckResult {
   latest: string | null
   channel: KernelChannel
   /**
+   * Newer versions on OTHER lines than the primary one (e.g. an alpha build
+   * while running rc, or vice versa). Each entry passed the artifact
+   * availability probe, so every option is directly installable — the caller
+   * lets the user pick a line instead of only offering the primary update.
+   * Empty/absent when no other line has anything newer.
+   */
+  alternatives?: Array<{ version: string; channel: KernelChannel }>
+  /**
    * Why the check ended without an installable update. Known values:
    * 'no kernel installed' | 'registry unreachable' | 'dev mode' |
    * 'dev mode update available' | 'artifact pending' (a newer dsh version is
