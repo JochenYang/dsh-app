@@ -240,6 +240,14 @@ body [class*="_titleRow"] a,
 body [class*="_titleRow"] input,
 body [class*="_titleRow"] [role="button"] { -webkit-app-region: no-drag; }
 body [data-details-collapsed] [class*="_headerUtilities"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
+/* Alpha.1 removed the details column and added a far-right corner seat
+   (data-conversation-header-corner, e.g. the sidebar expand button) that
+   sits flush against the header's right edge — directly under the native
+   window controls. Push the corner seat left of the controls; the flex row
+   carries utilities along, and the vacated zone stays draggable via the
+   titleRow drag region. (The details-collapsed rule above covers older
+   kernels.) */
+body [class*="_titleRow"]:has([data-conversation-header-corner]) [data-conversation-header-corner] { margin-right: ${WINDOW_CONTROLS_WIDTH}px; }
 /* Fallback drag bar for the main column: the session title bar only exists
    once a session is open, so on the welcome/empty state the whole top strip
    right of the sidebar had no drag region. :has() scopes the bar to that
