@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.9] - 2026-09-09
+
+### 中文
+- 修复会话页顶部右侧按钮被窗口控制按钮遮挡：alpha.1 新增的最右侧角落按钮（侧边栏展开）贴着标题栏右边缘，正好压在原生最小化 / 最大化 / 关闭按钮之下，文件管理图标与相邻工具按钮点不到；现将角落按钮整体左移让出控制条，同行工具按钮随之让位，空出的区域仍可拖动窗口
+
+### English
+- Fixed session-page top-right buttons hidden under the window controls: the far-right corner button added in alpha.1 (sidebar expand) sits flush against the header edge, right beneath the native minimize / maximize / close buttons, leaving the file-manager icon and neighboring utility buttons unclickable; the corner is now shifted left of the control strip with the row's utilities following, and the vacated zone stays draggable
+
 ## [v0.9.8] - 2026-09-09
 
 ### 中文
