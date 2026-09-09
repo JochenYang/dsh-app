@@ -95,7 +95,12 @@ jobs:
         shell: bash
         working-directory: plugins
         run: |
-          for p in plugin-brand plugin-client-ui plugin-sidebar; do
+          # KEEP IN SYNC with the suitePlugins list in scripts/build-runtime.mjs
+          # (and the overlay rows in plugins/dsh-app.patch.yml): every shipped
+          # plugin must be installed + built before the runtime step copies
+          # lib/ into the artifact. build-runtime.mjs rebuilds them anyway;
+          # this pre-pass guarantees each plugin's own node_modules is ready.
+          for p in plugin-brand plugin-client-ui plugin-sidebar plugin-swarm plugin-usage plugin-archives plugin-memory plugin-fff plugin-mcp plugin-hooks; do
             # Use each plugin's own build script (brand: tsc, client-ui: esbuild
             # loader-wrapped bundle). A bare `npx tsc` would neither produce the
             # client bundle the dsh loader expects nor match published typings.

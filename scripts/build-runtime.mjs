@@ -75,7 +75,14 @@ if (process.env.GITHUB_OUTPUT) {
 }
 const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
-const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-fff']
+/**
+ * Suite plugins copied into the runtime's node_modules. KEEP IN SYNC with
+ * plugins/dsh-app.patch.yml (insert rows), src/main/brand-suite.ts
+ * SUITE_PLUGIN_DIRS, and scripts/smoke-suite.mjs SUITE_DIRS — a row in the
+ * overlay without its package here ships a runtime that fails to compose
+ * (settings pages silently missing), while the reverse ships dead weight.
+ */
+const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-fff', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks']
 
 /**
  * FFF native binding version, derived from the plugin that declares it (plugins
