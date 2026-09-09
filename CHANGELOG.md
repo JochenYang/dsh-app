@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.8] - 2026-09-09
+
+### 中文
+- 修复卡在损坏 alpha.1 内核的用户无法自动恢复：v0.9.7 内置的是 rc.1 内核，启动漂移检查不处理版本回退，已装坏版 alpha.1 的用户收不到修复；本版内置完整的 alpha.1 内核（10 个套件插件齐全），启动时自动重新激活，无需手动删除内核目录
+- 修复打包脚本遗漏 MCP 管理器与 Hooks 桥（上一版代码已修，本版起实际生效）：运行时产物现包含全部 10 个套件插件；四处插件名单已锁定同步
+- 打包通道跟随 alpha 线（0.1.5-alpha.1），未来发版自动打包最新 alpha 内核
+
+### English
+- Fixed users stuck on the broken alpha.1 kernel never auto-recovering: v0.9.7 bundled an rc.1 kernel and the boot drift check does not handle version downgrades, so users already on the broken alpha.1 got no fix; this version bundles the complete alpha.1 kernel (all ten suite plugins) and re-activates it automatically on boot, no manual kernel-directory deletion needed
+- Fixed the packaging script omitting the MCP manager and hooks bridge (code fixed in the previous version, effective from this one): runtime artifacts now contain all ten suite plugins; the four plugin-list sites are pinned in sync
+- Packaging channel follows the alpha line (0.1.5-alpha.1); future releases automatically bundle the newest alpha kernel
+
 ## [v0.9.7] - 2026-09-09
 
 ### 中文
