@@ -420,12 +420,11 @@ Windows signing secrets must be provided as CI secrets;
 `resources/icon.png` is a placeholder brand icon; the suite plugins are
 bundled via `file:` references and should switch to registry versions once
 published.
-**Temporary**: `release.yml` pins `DSH_APP_CHANNEL: beta` on tag pushes so
-runtime artifacts bundle the 0.1.2-rc line the suite is adapted to (rc.1
-currently sits on both `next` and `latest`, so the pin is inert today).
-Revisit when dsh ships a 0.1.2+ stable to `latest` or the suite tracks the
-alpha line again; `workflow_dispatch` with an explicit `dsh_version` is
-unaffected.
+**Temporary**: `release.yml` pins `DSH_APP_CHANNEL: alpha` on tag pushes so
+runtime artifacts bundle the newest kernel line the suite tracks (currently
+0.1.5-alpha.1 on the npm `alpha` tag). Flip to `beta`/delete whenever the
+followed line moves tags; `workflow_dispatch` with an explicit `dsh_version`
+is unaffected for the tag name (the channel still labels the manifest).
 
 ## 11. Known TODOs / scaffolds (do not assume finished)
 

@@ -22,11 +22,13 @@ permissions:
 env:
   DSH_VERSION: ${{ inputs.dsh_version || '' }}
   # Tag pushes leave DSH_VERSION empty, so build-runtime resolves the dist-tag.
-  # The suite follows the 0.1.2 kernel line, which has moved from alpha to rc;
-  # npm `latest` still points at the older 0.1.1-rc.2, so resolution must use
-  # the beta (next) channel until dsh promotes the 0.1.2 line to latest.
-  # workflow_dispatch pins a version explicitly and is unaffected.
-  DSH_APP_CHANNEL: beta
+  # The suite follows the newest kernel line, currently 0.1.5-alpha.1 on the
+  # npm `alpha` tag; resolution must use the alpha channel until dsh promotes
+  # that line to `next`/`latest`. Flip this line whenever the followed line
+  # moves tags (alpha -> beta -> delete once on latest).
+  # workflow_dispatch pins a version explicitly for the tag name; the channel
+  # still labels the manifest, so keep it on the pinned version's line.
+  DSH_APP_CHANNEL: alpha
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
