@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.6] - 2026-09-09
+
+### 中文
+- 内核更新支持多线自选：检查更新时同时查询正式版 / 候选版 / 测试版三条线，有新版本的线各自成为一个可安装选项（如 rc 用户看到更新的 alpha），后台常驻卡片与托盘手动检查弹窗都可逐线选择；每个选项发布前都经过安装包可用性探测，不会给出装不了的选项
+- 新增 MCP 服务器管理器：设置页可直接添加、管理 MCP 服务器（表单 / JSON 双模式编辑、批量 JSON 导入、显示名自动生成），服务器启用后动态挂载、工具数量实时可见
+- 新增外部 Hooks 桥：设置页可管理 Claude Code / Codex 兼容的 hooks.json 桥接，也支持免配置文件、手写规则的 DSH 原生格式（工具执行前拦截、执行后阻断反馈、智能体步骤前阻断或注入上下文、会话开始时注入）；确认框统一走应用内弹窗样式
+- 新增会话提醒：通过套件 overlay 启用上游日程服务，会话内可创建定时提醒，到期自动跟进一条消息
+- 新增归档会话全文搜索：设置页搜索框按关键词检索历史会话（标题 / 时间 / 工作目录 / 内容摘要），无结果时给出明确提示
+- 修复长期运行后应用白屏：dsh 每次启动服务生成新的随机认证 Cookie，Electron 持久会话不断累积，Cookie 头超过 16KB 上限后服务端返回 431——现每次加载窗口前清理过期认证 Cookie，用户已确认白屏消失
+
+### English
+- Kernel updates now offer every line for the user to pick: each check queries the stable / beta / alpha lines together, and any line carrying something newer becomes its own installable option (e.g. an rc user sees a newer alpha); both the persistent background card and the manual tray-check dialog list per-line choices. Every option passes an artifact-availability probe first, so uninstallable options are never shown
+- New MCP server manager: add and manage MCP servers from settings (form / JSON dual-mode editing, bulk JSON import, auto-generated display names); enabled servers mount dynamically with live tool counts
+- New external hooks bridge: manage Claude Code / Codex compatible hooks.json bridges from settings, plus a DSH-native rule format with no config file required (pre-execution deny, post-execution block with feedback, pre-step block or context injection, session-start injection); confirmations use the in-app dialog style throughout
+- New session reminders: the upstream schedule service is enabled through the suite overlay — create timed reminders inside a session and get an automatic follow-up message when due
+- New archived-session full-text search: the settings search box finds past sessions by keyword (title / time / working directory / content snippet) with a clear hint when nothing matches
+- Fixed the app white-screening after long use: dsh mints a fresh random auth cookie on every server start and Electron's persistent session accumulated them until the Cookie header exceeded the 16KB limit and the server answered 431 — stale auth cookies are now cleared before each window load, and the fix is user-confirmed
+
 ## [v0.9.5] - 2026-09-06
 
 ### 中文
