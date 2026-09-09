@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.9.7] - 2026-09-09
+
+### 中文
+- 修复设置页自有插件项全部消失：打包脚本的插件名单漏掉了新增的 MCP 管理器与 Hooks 桥，overlay 引用了运行时里不存在的包，插件组合失败后所有套件页面（含侧边栏文件/Git 视图）静默缺失；名单已补齐并与 overlay、桌面壳、冒烟探针四处锁定同步。已在坏内核上的用户更新到本版后会自动重新激活完整内核，无需手动操作
+
+### English
+- Fixed all suite plugin sections disappearing from settings: the packaging script's plugin list missed the newly added MCP manager and hooks bridge while the loader overlay already inserted them, so plugin composition failed and every suite page (including the sidebar file/Git views) silently went missing; the list is now complete and pinned in sync across the four list sites (build script, overlay, desktop shell, smoke probe). Users already on the broken kernel will automatically re-activate the complete kernel after updating to this version, no manual steps needed
+
 ## [v0.9.6] - 2026-09-09
 
 ### 中文
