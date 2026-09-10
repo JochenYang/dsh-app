@@ -6,7 +6,15 @@
  *   node scripts/build-runtime.mjs <platform> <arch> [version]
  *
  * Example:
- *   node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
+ *   node scripts/build-runtime.mjs win32 x64
+ *   node scripts/build-runtime.mjs win32 x64 0.1.5-rc.1
+ *
+ * Without a version, the dist-tag to resolve from is derived from the
+ * @deepseek-ai/dsh* dependency in package.json (scripts/kernel-line.mjs).
+ * Whichever version is finally used — resolved or explicit — is asserted to
+ * satisfy that same spec, so a build can never bundle a kernel from a line the
+ * shell and plugins were not built against. DSH_APP_CHANNEL overrides the
+ * derivation for a deliberate cross-line build.
  *
  * Produces, under runtime-dist/:
  *   runtime/manifest.json

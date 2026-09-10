@@ -147,10 +147,7 @@ after boot and via the tray.
   and each sidecar sha512 must equal the manifest's `integrity`. A missing
   cell makes that platform report "artifact pending" while others succeed.
 - Rebuild the runtime + bundled kernel locally when bumping dsh:
-  1. Pick the dist-tag version of the configured channel
-     (`npm view @deepseek-ai/dsh dist-tags --json`; `DSH_APP_CHANNEL`:
-     alpha→alpha tag, beta→next, else latest).
-  2. Bump every `@deepseek-ai/dsh-*` devDependency in `package.json` **and in
+  1. Bump every `@deepseek-ai/dsh-*` devDependency in `package.json` **and in
      every `plugins/*/package.json`** to the same `^`-coupled line — a stale
      plugin lockfile dual-instances dsh-llm and breaks plugin typecheck.
      Root dependency changes use plain `npm install`; plugin-local installs
@@ -162,11 +159,19 @@ after boot and via the tray.
      tempts a root `--legacy-peer-deps`, which writes an incomplete lockfile
      (missing peer entries) that fails CI's strict `npm ci` on all platforms;
      a clean strict install resolves the new line fine.
-  3. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
-     then `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
+  2. `node scripts/build-runtime.mjs <platform> <arch> <version>`, then
+     `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
      (both outputs are gitignored; CI rebuilds them from the dist-tag).
-  4. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
+     Omit `<version>` to resolve the followed line's dist-tag instead.
+  3. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
      node (`<runtime>/app` → `node_modules/@deepseek-ai/dsh/lib/bin.js --version`).
+
+  Step 1 is the only step that moves the kernel line. Which dist-tag a build
+  follows is derived from those devDependencies by `scripts/kernel-line.mjs`,
+  and the resolved version is asserted to satisfy them — so a build that would
+  bundle a kernel from another line fails instead of shipping (see §10 for the
+  incident that replaced). `DSH_APP_CHANNEL` overrides the derivation for a
+  deliberate cross-line build.
 
 ## 5. Server process management
 
@@ -290,7 +295,8 @@ npm run dist:mac     # dmg+zip x64+arm64
 npm run dist:linux   # AppImage+deb x64+arm64
 
 # Build a kernel runtime artifact (CI does this per OS/arch).
-node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
+node scripts/build-runtime.mjs win32 x64              # resolves the followed line's dist-tag
+node scripts/build-runtime.mjs win32 x64 0.1.5-rc.1   # or pin one explicitly (asserted)
 ```
 
 Plugin builds (CI runs these before `build-runtime`):
@@ -319,15 +325,15 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 |---|---|---|
 | `DSH_APP_DEV=1` | `src/main/index.ts` | Dev mode: use local checkout instead of downloaded kernel |
 | `DSH_APP_DEV_RUNTIME` | `src/main/index.ts` | Override the dev harness checkout path |
-| `DSH_APP_CHANNEL` | `index.ts`, `build-runtime.mjs`, `dev.ts` | `alpha` → `alpha` dist-tag; `beta` → `next` dist-tag (rc); anything else = stable (`latest`) |
+| `DSH_APP_CHANNEL` | `index.ts`, `dev.ts`, `scripts/kernel-line.mjs` | Kernel line: `alpha` → `alpha` dist-tag; `beta` → `next` (rc); anything else = stable (`latest`). At runtime it picks the update channel (default `stable`); at build time it is only an explicit cross-line override — the default comes from `package.json`'s `@deepseek-ai/dsh*` devDependencies |
 | `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `index.ts` | GitHub owner/repo hosting runtime artifacts (defaults to `JochenYang` / `dsh-app`) |
 | `DSH_APP_NPM_REGISTRIES` | `sources/registry.ts` | Comma-separated registry chain replacing the default (`npmjs.org` → `npmmirror.com`) |
 | `NPM_CONFIG_REGISTRY` | `sources/registry.ts` | Single-registry override; npmmirror still appended as fallback |
 | `DSH_APP_GITHUB_MIRRORS` | `sources/artifact.ts` | Comma-separated mirror URL prefixes; empty value disables mirrors |
-| `DSH_APP_SUITE_VERSION` | `build-runtime.mjs`, `dev.ts` | Brand suite version in the runtime manifest |
-| `DSH_APP_LOG_DIR` | `server.ts` | Log directory (default: `<cwd>/logs`) |
+| `DSH_APP_SUITE_VERSION` | `scripts/kernel-line.mjs`, `dev.ts` | Brand suite version in the runtime manifest (default: content hash of the ten plugin versions) |
+| `DSH_APP_LOG_DIR` | `server.ts`, `index.ts` | Log directory (default: `<userData>/logs`) |
 | `DSH_HOME` | `brand-suite.ts` | dsh profiles home (default `~/.dsh`) |
-| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the npm dist-tag at build time; last-resort default `0.1.0-rc.8`) |
+| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the followed line's dist-tag at build time, then asserted against the followed spec) |
 
 ## 9. Code & contribution conventions
 
@@ -475,11 +481,15 @@ Windows signing secrets must be provided as CI secrets;
 `resources/icon.png` is a placeholder brand icon; the suite plugins are
 bundled via `file:` references and should switch to registry versions once
 published.
-**Temporary**: `release.yml` pins `DSH_APP_CHANNEL: alpha` on tag pushes so
-runtime artifacts bundle the newest kernel line the suite tracks (currently
-0.1.5-alpha.1 on the npm `alpha` tag). Flip to `beta`/delete whenever the
-followed line moves tags; `workflow_dispatch` with an explicit `dsh_version`
-is unaffected for the tag name (the channel still labels the manifest).
+**Kernel line provenance**: `release.yml` no longer pins a channel. The line a
+build follows is derived from `package.json`'s `@deepseek-ai/dsh*`
+devDependencies by `scripts/kernel-line.mjs`, and both the workflow's resolve
+job and `build-runtime.mjs` assert that the resolved version satisfies them —
+so bundling a kernel from another line fails CI instead of shipping silently.
+Moving the line means bumping those devDependencies (§4). A `workflow_dispatch`
+build with an explicit `dsh_version` is asserted the same way, and its
+artifacts are labelled by the version actually built rather than by the line
+the tree happens to sit on.
 
 ## 11. Known TODOs / scaffolds (do not assume finished)
 
