@@ -58,9 +58,11 @@ export interface CurrentKernel {
   installedAt: string
   manifest: KernelManifest
   /**
-   * sha512 of the tarball this install was activated from. Missing on
-   * installs predating the field; the shell compares it against the bundled
-   * sidecar to detect same-version content drift (new suite plugins).
+   * sha512 of the tarball this install was activated from, recorded for
+   * provenance. It is NOT the boot drift key — that is `bundledStamp`, which
+   * compares the bundle's semantic identity. Tarball bytes are not
+   * reproducible across builds (mtimes, order), so a hash comparison would
+   * re-extract an identical runtime on every boot.
    */
   sha512?: string
   /**

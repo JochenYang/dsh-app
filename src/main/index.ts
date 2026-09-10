@@ -260,7 +260,21 @@ const KERNEL_CHANNEL_LABEL_ZH: Record<string, string> = {
   alpha: '测试版',
 }
 
+/** Guards against overlapping checks: the 6 h timer and a tray click can land
+ * together, and both would drive a registry probe for the same answer. */
+let kernelCheckBusy = false
+
 async function checkKernelUpdate(manual: boolean): Promise<void> {
+  if (kernelCheckBusy) return
+  kernelCheckBusy = true
+  try {
+    await checkKernelUpdateInner(manual)
+  } finally {
+    kernelCheckBusy = false
+  }
+}
+
+async function checkKernelUpdateInner(manual: boolean): Promise<void> {
   try {
     const result = await kernel.checkForUpdate()
     // Nothing installed is not "up to date": there is no update to offer

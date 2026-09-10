@@ -10,7 +10,12 @@ export async function readJson<T>(file: string): Promise<T | null> {
   try {
     raw = await fs.readFile(file, 'utf8')
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+    // ENOENT is the ordinary "nothing installed yet". Anything else is a real
+    // fault worth a log line — and it still answers null, because every caller
+    // treats null as "install one" rather than as a reason to crash.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn(`[kernel] cannot read ${file}: ${String(err)}`)
+    }
     return null
   }
   try {

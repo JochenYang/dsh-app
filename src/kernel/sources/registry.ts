@@ -67,7 +67,12 @@ async function fetchFromRegistry(registry: string, channel: KernelChannel): Prom
     // name is also accepted so a future release cadence that publishes a
     // matching tag works without another edit here.
     const tagForChannel = channel === 'stable' ? 'latest' : channel === 'alpha' ? 'alpha' : 'next'
-    const version = tags[tagForChannel] ?? tags[channel] ?? tags.latest ?? tags.next ?? tags.rc ?? tags.alpha
+    // Only the tag this channel maps to (or a same-named one for a future
+    // cadence). Falling back across lines offered an rc or alpha build as a
+    // STABLE update while still labelling it `stable` — semver ordering alone
+    // made it look newer. A registry without the tag answers null and the
+    // candidate chain moves on.
+    const version = tags[tagForChannel] ?? tags[channel]
     if (!version) return null
     if (semver.valid(version) === null) return null
     return { version, channel, source: base }

@@ -339,8 +339,19 @@ function installDesktopChrome(win: BrowserWindow): void {
  *
  * Pure shell adaptation; harness untouched.
  */
+/** Sessions already wired for the export toast (see installExportToast). */
+const exportToastSessions = new WeakSet<Electron.Session>()
+
 function installExportToast(win: BrowserWindow): void {
-  win.webContents.session.on('will-download', (_event, item) => {
+  const session = win.webContents.session
+  // The download event lives on the SESSION, not the window, and the session
+  // is shared: a rebuilt window (second-instance) would otherwise stack a
+  // second listener and fire one toast per download. Install once per session
+  // and address the downloading window through the event's own webContents,
+  // so a rebuilt window gets its toast rather than a stale one's.
+  if (exportToastSessions.has(session)) return
+  exportToastSessions.add(session)
+  session.on('will-download', (_event, item, contents) => {
     const name = item.getFilename()
     if (!name.startsWith('dsh-session-') || !name.endsWith('.zip')) return
     item.once('done', (_e, state) => {
@@ -358,7 +369,8 @@ function installExportToast(win: BrowserWindow): void {
              if (close) close.click()
            }`
         : ''
-      win.webContents
+      if (contents.isDestroyed()) return
+      contents
         .executeJavaScript(
           `(function () {
             const old = document.getElementById('dsh-export-toast');
