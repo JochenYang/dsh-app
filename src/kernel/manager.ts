@@ -395,8 +395,13 @@ export class KernelManager {
     this.current = next
     this.log(`activated kernel ${versionDir}${previous ? ` (previous ${previous})` : ''}`)
 
-    // 5. Clean staging.
-    await fs.rm(path.join(this.root, STAGING_DIR), { recursive: true, force: true })
+    // 5. Clean staging — best effort. `force` only ignores ENOENT, and on
+    //    Windows a just-extracted file can still be locked (AV scanner, indexer),
+    //    which would throw here. Letting that escape would report a SUCCESSFUL
+    //    activation as a failed install and send the caller into a pointless
+    //    network reinstall of a kernel that is already active. Same discipline
+    //    as cleanup(); the staging dir is reclaimed on the next install anyway.
+    await fs.rm(path.join(this.root, STAGING_DIR), { recursive: true, force: true }).catch(() => undefined)
     return next
   }
 

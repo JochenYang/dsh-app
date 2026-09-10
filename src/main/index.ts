@@ -1,6 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import net from 'node:net'
-import { existsSync, readFileSync, renameSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 import semver from 'semver'
 import { KernelManager } from '../kernel/manager'
@@ -357,6 +357,38 @@ async function applyKernelUpdate(version: string): Promise<void> {
 
 // ------------------------------------------------------------------ boot
 
+/** Resolved kernel log file for this run (see {@link logKernel}). */
+let kernelLogFile: string | null = null
+
+/**
+ * Kernel diagnostics sink. KernelManager reports through `log`, which the
+ * shell wires to console.log — invisible in a packaged Windows app, so a
+ * failed install or activation used to leave no trace at all. The same lines
+ * also go to `<logs>/dsh-kernel.log` (same directory rule as the server logs,
+ * including the DSH_APP_LOG_DIR override). Best effort by design: diagnostics
+ * must never fail a boot.
+ */
+function logKernel(line: string): void {
+  console.log(line)
+  try {
+    if (kernelLogFile === null) {
+      const dir = path.join(process.env.DSH_APP_LOG_DIR ?? app.getPath('userData'), 'logs')
+      mkdirSync(dir, { recursive: true })
+      const file = path.join(dir, 'dsh-kernel.log')
+      // Keep exactly one previous run: an unbounded log is worse than none.
+      if ((statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 1_000_000) {
+        // Windows refuses a rename onto an existing target.
+        rmSync(`${file}.1`, { force: true })
+        renameSync(file, `${file}.1`)
+      }
+      kernelLogFile = file
+    }
+    appendFileSync(kernelLogFile, `${new Date().toISOString()} ${line}\n`)
+  } catch {
+    // Never let diagnostics break the boot path.
+  }
+}
+
 async function boot(): Promise<void> {
   kernel = new KernelManager({
     runtimeRoot: app.getPath('userData'),
@@ -368,7 +400,7 @@ async function boot(): Promise<void> {
     artifactOwner,
     artifactRepo,
     onStatus: broadcastStatus,
-    log: (message) => console.log(message),
+    log: logKernel,
   })
 
   server = new DshServer({
@@ -454,8 +486,19 @@ async function boot(): Promise<void> {
         await kernel.installFromLocalTarball(bundledTgz, bundledSha)
         await startServerAndOpenWindow()
       } catch (err) {
-        console.error(`bundled kernel install failed: ${(err as Error).message}; falling back to online install`)
-        await installKernel()
+        // Activation can succeed and still throw afterwards (activateTarball's
+        // staging cleanup loses a race with a file lock). Re-read the on-disk
+        // state before calling this a failed install: a kernel that is already
+        // active must never be replaced by a network reinstall — that both
+        // discards a good install and fails outright on an offline machine.
+        const installed = await kernel.load().catch(() => null)
+        if (installed) {
+          console.warn(`[kernel] bundled install threw but ${installed.active} is active; starting it`)
+          await startServerAndOpenWindow()
+        } else {
+          console.error(`bundled kernel install failed: ${(err as Error).message}; falling back to online install`)
+          await installKernel()
+        }
       }
     } else {
       await installKernel()
