@@ -38,6 +38,7 @@ import {
   MAX_ENTRY_CHARS,
   normalizeForMatch,
   parseEntries,
+  stripEntryPrefix,
   todayStamp,
   type MemoryRoot,
   type MemoryStore,
@@ -256,8 +257,8 @@ export class MemoryCurator {
       '- NEVER mention credentials (API keys, tokens, passwords) — not even in a rewrite.',
       '- Each cited line must appear EXACTLY as written below (verbatim, including the bullet and',
       '  the "- [category] YYYY-MM-DD" prefix). The same line may be cited at most once across all edits.',
-      '- A merge result is ONE concise line in the user\'s language, at most 500 characters, in the',
-      '  same "- [category] YYYY-MM-DD content" shape (the date is refreshed).',
+      '- A merge result is ONE concise line in the user\'s language, at most 500 characters,',
+      '  content TEXT only — no "- [category] date" prefix, no bullets (the host stamps the prefix).',
       '- An empty edits array is a VALID answer — prefer it over marginal edits.',
       `- At most ${String(MAX_CURATE_EDITS)} edits total.`,
       '',
@@ -351,8 +352,10 @@ export class MemoryCurator {
         continue
       }
       if (!MEMORY_CATEGORIES.includes(category as MemoryCategory) || content === '') continue
-      const oneLine = content.replace(/\s+/gu, ' ').trim()
-      if (oneLine.length > MAX_ENTRY_CHARS) continue
+      // Same prefix-echo hazard as distill proposals (see stripEntryPrefix):
+      // the cited lines carry the prefix, so models copy it into the rewrite.
+      const oneLine = stripEntryPrefix(content).replace(/\s+/gu, ' ').trim()
+      if (oneLine.length === 0 || oneLine.length > MAX_ENTRY_CHARS) continue
       const indices = claim(edit)
       if (indices === undefined) continue
       merges.push({ indices, category: category as MemoryCategory, oneLine })

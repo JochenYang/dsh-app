@@ -28,7 +28,8 @@ import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the subagents Context merge (ctx.subagents) into scope.
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import { MAX_ENTRY_CHARS, normalizeForMatch, parseEntries, shortSessionId, type MemoryRoot, type MemoryStore } from './memory-store.ts'
+import { streamJson, type DirectRoute } from './llm-direct.ts'
+import { MAX_ENTRY_CHARS, normalizeForMatch, parseEntries, shortSessionId, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /**
@@ -100,12 +101,64 @@ interface ProposedEntry {
   scope?: unknown
 }
 
+/**
+ * Build the distill prompt as system (task + rules + output contract) and
+ * user (memory files + transcript) halves. Shared by both backends: the
+ * direct call maps them to system/user messages, the child concatenates.
+ */
+export function buildDistillPrompt(transcript: string, cwd: string | undefined, root: MemoryRoot): { system: string, user: string } {
+  const globalText = root.global.read().trim()
+  const projectText = cwd === undefined ? '' : root.projectFor(cwd).read().trim()
+  const projectSection = cwd === undefined
+    ? ['--- No workspace for this session: propose scope "global" entries ONLY (project entries have nowhere to land and are dropped) ---']
+    : ['--- Current PROJECT memory (this workspace only) ---', projectText === '' ? '(empty)' : projectText]
+  const system = [
+    'You are the memory distiller of an AI coding assistant. Review the conversation excerpt below',
+    '(everything said since the last distill) and the current memory files, then propose NEW entries',
+    'worth persisting for future sessions.',
+    '',
+    'Rules:',
+    '- Only durable facts: settled decisions, conventions, user preferences/habits, root causes, pitfalls.',
+    '- NEVER propose credentials (API keys, tokens, passwords) — not even if the user shared one.',
+    '- Skip anything already covered by an existing entry (the files below are the source of truth).',
+    '- Skip ephemeral state: search results, temporary paths, tool errors, work derivable from the repo.',
+    '- An empty entries array is a VALID answer — prefer it over marginal proposals.',
+    `- At most ${String(MAX_DISTILL_ENTRIES)} entries; each is ONE concise line in the user's language.`,
+    '- content holds the entry TEXT only: no "- [category] date" prefix (the host stamps it), no markdown bullets.',
+    '',
+    'Answer with JSON ONLY, no prose or fences:',
+    '{"entries": [{"category": "<preference|convention|decision|lesson|fact>", "content": "<one line>", "scope": "<project|global>"}]}',
+  ].join('\n')
+  const user = [
+    '--- Current GLOBAL memory (user preferences, all projects) ---',
+    globalText === '' ? '(empty)' : globalText,
+    '',
+    ...projectSection,
+    '',
+    '--- Conversation excerpt (since the last distill) ---',
+    transcript,
+  ].join('\n')
+  return { system, user }
+}
+
 /** Structural slice of a Session (the event feed the distiller reads). */
 interface SessionLike {
   readonly id: SessionId
   /** All events including any fork-inherited prefix (seq-ordered). */
   snapshotEvents(): ReadonlyArray<{ type: string, seq: number, data: unknown }>
+  /** Latest assembled call config (provider/model route for direct calls). */
+  requestHeader?: () => { config?: { provider?: unknown, model?: unknown } } | undefined
   readonly header: { readonly cwd?: string, readonly origin?: string }
+}
+
+/** Model route for a direct call, from the session's latest request header. */
+function directRouteOf(session: SessionLike): DirectRoute | undefined {
+  const config = session.requestHeader?.()?.config
+  const provider = config?.provider
+  const model = config?.model
+  return typeof provider === 'string' && provider !== '' && typeof model === 'string' && model !== ''
+    ? { provider, model }
+    : undefined
 }
 
 /** Extract the text blocks of one user/assistant message's content. */
@@ -159,6 +212,11 @@ export class MemoryDistiller {
     ctx: Context,
     root: MemoryRoot,
     log: ReturnType<Context['logger']>,
+    /**
+     * Background-distill LLM channel: 'direct' calls `ctx.llm.stream` once
+     * (cheap, default); 'subagent' keeps the legacy read-only one-shot child.
+     */
+    private readonly backend: 'direct' | 'subagent' = 'direct',
     /**
      * Called (and awaited) after a run persisted ≥1 entry — the curator's
      * trigger seam. Runs in the distill's own background window while the
@@ -232,7 +290,7 @@ export class MemoryDistiller {
     }
   }
 
-  /** The distill body: gather the delta, consult the child, apply entries. */
+  /** The distill body: gather the delta, consult the model, apply entries. */
   private async runDistill(parent: NonNullable<ReturnType<Context['agents']['get']>>, session: SessionLike, cwd: string | undefined): Promise<void> {
     const sessionId = session.id
     const lastSeq = this.root.distillSeqOf(sessionId)
@@ -270,34 +328,74 @@ export class MemoryDistiller {
       lines.push(`[${role}] ${text}`)
     }
     const transcript = lines.join('\n')
+    const { system, user } = buildDistillPrompt(transcript, cwd, this.root)
 
-    const globalText = this.root.global.read().trim()
-    const projectText = cwd === undefined ? '' : this.root.projectFor(cwd).read().trim()
-    const projectSection = cwd === undefined
-      ? ['--- No workspace for this session: propose scope "global" entries ONLY (project entries have nowhere to land and are dropped) ---']
-      : ['--- Current PROJECT memory (this workspace only) ---', projectText === '' ? '(empty)' : projectText]
-    const prompt = [
-      'You are the memory distiller of an AI coding assistant. Review the conversation excerpt below',
-      '(everything said since the last distill) and the current memory files, then propose NEW entries',
-      'worth persisting for future sessions.',
-      '',
-      'Rules:',
-      '- Only durable facts: settled decisions, conventions, user preferences/habits, root causes, pitfalls.',
-      '- NEVER propose credentials (API keys, tokens, passwords) — not even if the user shared one.',
-      '- Skip anything already covered by an existing entry (the files below are the source of truth).',
-      '- Skip ephemeral state: search results, temporary paths, tool errors, work derivable from the repo.',
-      '- An empty entries array is a VALID answer — prefer it over marginal proposals.',
-      `- At most ${String(MAX_DISTILL_ENTRIES)} entries; each is ONE concise line in the user's language.`,
-      '',
-      '--- Current GLOBAL memory (user preferences, all projects) ---',
-      globalText === '' ? '(empty)' : globalText,
-      '',
-      ...projectSection,
-      '',
-      '--- Conversation excerpt (since the last distill) ---',
-      transcript,
-    ].join('\n')
+    if (this.backend === 'direct') {
+      await this.runDirect(sessionId, session, cwd, lastEventSeq, system, user, parent)
+      return
+    }
+    await this.runViaChild(sessionId, parent, cwd, lastEventSeq, `${system}\n\n${user}`)
+  }
 
+  /**
+   * Direct channel: one `ctx.llm.stream` call on the session's own
+   * provider/model route, JSON parsed by the host. No route (a session that
+   * never assembled a request) skips the run but still advances progress.
+   */
+  private async runDirect(
+    sessionId: SessionId,
+    session: SessionLike,
+    cwd: string | undefined,
+    lastEventSeq: number,
+    system: string,
+    user: string,
+    parent: NonNullable<ReturnType<Context['agents']['get']>>,
+  ): Promise<void> {
+    const route = directRouteOf(session)
+    if (route === undefined) {
+      this.log.warn(`memory distill for "${sessionId}" skipped: no model route on the session`)
+      this.root.advanceDistill(sessionId, lastEventSeq)
+      return
+    }
+    const result = await streamJson(this.ctx, {
+      route,
+      system,
+      user,
+      signal: this.abort.signal,
+    })
+    this.root.recordLlmAudit({
+      at: Date.now(),
+      source: 'distill',
+      session: shortSessionId(sessionId),
+      status: result.status,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      durationMs: result.durationMs,
+      error: result.error,
+    })
+    if (result.status !== 'ok') {
+      this.log.warn(`memory distill for "${sessionId}" direct call ${result.status} (${result.error ?? 'no detail'}); progress kept`)
+      return
+    }
+    const applied = this.applyEntries(result.parsed, cwd)
+    this.root.advanceDistill(sessionId, lastEventSeq)
+    // Leave a durable trace (time, target session, saved count) so the
+    // settings page can show what the background pass actually did.
+    this.root.recordDistill(sessionId, applied, 'direct', result.inputTokens + result.outputTokens)
+    if (applied > 0) {
+      this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
+      await this.onSaved?.(parent, sessionId)
+    }
+  }
+
+  /** Legacy channel: a read-only one-shot child answers via outputSchema. */
+  private async runViaChild(
+    sessionId: SessionId,
+    parent: NonNullable<ReturnType<Context['agents']['get']>>,
+    cwd: string | undefined,
+    lastEventSeq: number,
+    prompt: string,
+  ): Promise<void> {
     const run = await this.ctx.subagents.start(PROVIDER, {
       // Short target-session id in the label so the workflow view shows WHO
       // this distill reviewed — the node is visible by design (transparency,
@@ -325,7 +423,7 @@ export class MemoryDistiller {
       this.root.advanceDistill(sessionId, lastEventSeq)
       // Leave a durable trace (time, target session, saved count) so the
       // settings page can show what the background pass actually did.
-      this.root.recordDistill(sessionId, applied)
+      this.root.recordDistill(sessionId, applied, 'subagent')
       if (applied > 0) {
         this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
         await this.onSaved?.(parent, sessionId)
@@ -349,7 +447,9 @@ export class MemoryDistiller {
     for (const raw of proposals) {
       if (applied >= MAX_DISTILL_ENTRIES) break
       const proposal = raw as ProposedEntry
-      const content = typeof proposal.content === 'string' ? proposal.content.trim() : ''
+      // Models echo the file format they see (prefix included); strip it
+      // before validating so one logical entry never lands double-prefixed.
+      const content = typeof proposal.content === 'string' ? stripEntryPrefix(proposal.content) : ''
       const category = MEMORY_CATEGORIES.includes(proposal.category as MemoryCategory)
         ? proposal.category as MemoryCategory
         : undefined

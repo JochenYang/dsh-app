@@ -47,7 +47,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 // AssembleContext.agent augmentation into scope.
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
-import { MemoryRoot } from './memory-store.ts'
+import { MemoryRoot, listProjects, repairDoublePrefix } from './memory-store.ts'
 import { MemoryDistiller } from './distiller.ts'
 import { MemoryCurator } from './curator.ts'
 import { renderMemoryText } from './prompt.ts'
@@ -61,14 +61,47 @@ export const inject = ['webServer', 'tools', 'systemPrompt']
 export interface Config {
   /** Absolute store directory; empty → $DSH_HOME/storages/dsh-app-plugin-memory. */
   storePath: string
+  /**
+   * Background-distill LLM channel: 'direct' (one `ctx.llm.stream` call,
+   * default — an order of magnitude cheaper than a child session) or
+   * 'subagent' (the legacy read-only one-shot child).
+   */
+  distillBackend: 'direct' | 'subagent'
 }
 
 export const Config: z<Config> = z.object({
   storePath: z.string().default(''),
+  distillBackend: z.union([z.const('direct'), z.const('subagent')]).default('direct'),
 })
 
 /** Tool-guidance section order (upstream convention: 100–199). */
 const PROMPT_SECTION_ORDER = 118
+
+/**
+ * Collapse legacy double-prefixed lines in every memory file (global + all
+ * projects). Runs on every boot; idempotent and byte-identical on clean
+ * files, so there is nothing to migrate or version.
+ */
+function repairLegacyDoublePrefixes(root: MemoryRoot): void {
+  try {
+    const stores = [root.global]
+    for (const project of listProjects(root.dir)) {
+      if (project.cwd !== '') stores.push(root.projectFor(project.cwd))
+    }
+    let fixed = 0
+    for (const store of stores) {
+      const text = store.read()
+      if (text === '') continue
+      const { fixed: repaired, count } = repairDoublePrefix(text)
+      if (count > 0) {
+        store.replace(repaired)
+        fixed += count
+      }
+    }
+  } catch {
+    // Repair is best-effort: a failure must never block the plugin mount.
+  }
+}
 
 /**
  * Host apply: mount prompt injection + tools + routes, unless disabled by
@@ -80,6 +113,11 @@ export function apply(ctx: Context, config: Config): void {
   const log = ctx.logger(name)
   const dir = config.storePath !== '' ? config.storePath : join(resolveDshHome(), 'storages', 'dsh-app-plugin-memory')
   const root = new MemoryRoot(dir)
+
+  // One-shot repair of double-prefixed lines written before prefix
+  // stripping (`- [a] date - [b] date …`): idempotent, clean files are left
+  // byte-identical, so this is safe to run on every boot.
+  repairLegacyDoublePrefixes(root)
 
   if (!root.global.isEnabled()) {
     log.info(`memory plugin: disabled by user config (${join(dir, 'config.json')})`)
@@ -102,14 +140,15 @@ export function apply(ctx: Context, config: Config): void {
   // (e.g. a rollback target) the plugin still mounts everything else — only
   // the async safety nets are absent. The distiller appends NEW entries; a
   // saved run hands the curator the trigger, and the curator then merges/
-  // prunes the file (see distiller.ts / curator.ts).
-  ctx.inject(['agents', 'subagents'], memCtx => {
+  // prunes the file (see distiller.ts / curator.ts). 'llm' rides along for
+  // the direct channel (a core service, always present when agents are).
+  ctx.inject(['agents', 'subagents', 'llm'], memCtx => {
     const curator = new MemoryCurator(memCtx, root, log)
     // The distill hands the curator its save trigger with the session id:
     // the first sweep runs in the distill's own window, further saves inside
     // the cooldown coalesce into one trailing sweep that re-resolves the
     // parent by session id at fire time.
-    const distiller = new MemoryDistiller(memCtx, root, log, (parent, sessionId) => curator.runAfterDistill(parent, sessionId))
+    const distiller = new MemoryDistiller(memCtx, root, log, config.distillBackend, (parent, sessionId) => curator.runAfterDistill(parent, sessionId))
     memCtx.effect(() => {
       const disposeDistiller = distiller.attach()
       const disposeCurator = curator.attach()

@@ -29,11 +29,34 @@ export interface MemoryDistillActivity {
   session: string
   /** Entries the run persisted (0 = it ran but nothing new qualified). */
   saved: number
+  /** LLM channel that ran the pass (absent for traces before backend tracking). */
+  backend?: 'direct' | 'subagent'
+  /** Model tokens spent on the pass (direct channel only). */
+  tokens?: number
+}
+
+/** One background-LLM audit row (cost observability). */
+export interface MemoryLlmAuditRun {
+  at: number
+  source: 'distill' | 'curate'
+  session: string
+  status: 'ok' | 'error' | 'aborted'
+  inputTokens: number
+  outputTokens: number
+  durationMs: number
+  error?: string
 }
 
 /** Response of GET api/entries — one store's rows with pin state. */
 export interface MemoryEntriesResponse {
   entries: Array<{ text: string, pinned: boolean }>
+}
+
+/** Response of GET api/llm-audit — recent background-LLM cost rows. */
+export interface MemoryLlmAuditResponse {
+  runs: MemoryLlmAuditRun[]
+  /** Summed tokens across the returned rows. */
+  totalTokens: number
 }
 
 /** Response of GET api/status — the settings section's whole world. */

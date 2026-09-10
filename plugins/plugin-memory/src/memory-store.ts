@@ -98,6 +98,37 @@ function entryContent(line: string): string {
   return ENTRY_PREFIX.test(line) ? line.replace(ENTRY_PREFIX, '') : line
 }
 
+/**
+ * Strip a `- [category] YYYY-MM-DD ` prefix from MODEL-PROPOSED content.
+ * Models imitate the file format they see in the prompt and echo the prefix
+ * into `content`; without this the host stamps a second prefix and the file
+ * grows `- [lesson] 2026-09-06 - [lesson] 2026-09-06 ...` lines. Idempotent:
+ * plain content passes through untouched.
+ */
+export function stripEntryPrefix(content: string): string {
+  const trimmed = content.trim()
+  return ENTRY_PREFIX.test(trimmed) ? trimmed.replace(ENTRY_PREFIX, '').trim() : content
+}
+
+/**
+ * Repair double-prefixed lines already persisted (`- [a] date - [b] date …`
+ * from runs before {@link stripEntryPrefix}): collapse to a single prefix,
+ * keeping the OUTER category/date. Returns how many lines were fixed.
+ * Idempotent — clean files report 0 and are left byte-identical.
+ */
+export function repairDoublePrefix(text: string): { fixed: string, count: number } {
+  let count = 0
+  const lines = text.split('\n').map(line => {
+    const outer = ENTRY_PREFIX.exec(line)
+    if (outer === null) return line
+    const rest = line.slice(outer[0].length)
+    if (!ENTRY_PREFIX.test(rest)) return line
+    count += 1
+    return `${outer[0]}${rest.replace(ENTRY_PREFIX, '')}`
+  })
+  return { fixed: lines.join('\n'), count }
+}
+
 /** Crash-safe replace: write a sibling temp file, then rename over. */
 function atomicWrite(path: string, text: string): void {
   const tmp = `${path}.tmp`
@@ -408,6 +439,36 @@ export interface DistillActivity {
   session: string
   /** Entries the run persisted (0 = it ran but nothing new qualified). */
   saved: number
+  /** LLM channel that ran the pass (absent for traces before backend tracking). */
+  backend?: 'direct' | 'subagent'
+  /** Model tokens spent on the pass (direct channel only). */
+  tokens?: number
+}
+
+/** One background LLM call's audit record (cost observability). */
+export interface LlmAuditRun {
+  /** Unix epoch ms when the call finished. */
+  at: number
+  /** Which pass spent it. */
+  source: 'distill' | 'curate'
+  /** Short session id that triggered the pass. */
+  session: string
+  /** Call outcome. */
+  status: 'ok' | 'error' | 'aborted'
+  inputTokens: number
+  outputTokens: number
+  durationMs: number
+  /** Human-readable cause (non-ok only). */
+  error?: string
+}
+
+/** How many audit rows llm-audit.json retains (FIFO). */
+const MAX_AUDIT_RUNS = 100
+
+/** Persisted shape of llm-audit.json. */
+interface LlmAuditState {
+  version: 1
+  runs: LlmAuditRun[]
 }
 
 /** Persisted shape of distill-state.json. */
@@ -432,11 +493,13 @@ export class MemoryRoot {
   readonly dir: string
   readonly global: MemoryStore
   private readonly distillStatePath: string
+  private readonly llmAuditPath: string
 
   constructor(dir: string) {
     this.dir = dir
     this.global = new MemoryStore(dir)
     this.distillStatePath = join(dir, 'distill-state.json')
+    this.llmAuditPath = join(dir, 'llm-audit.json')
   }
 
   /** Project store for a workspace cwd (cheap: no I/O until a write). */
@@ -500,14 +563,44 @@ export class MemoryRoot {
   }
 
   /** Append one distill trace and persist (bounded, survives restarts). */
-  recordDistill(sessionId: string, saved: number): void {
+  recordDistill(sessionId: string, saved: number, backend?: 'direct' | 'subagent', tokens?: number): void {
     const state = this.readDistillState()
-    state.activity.push({ at: Date.now(), session: shortSessionId(sessionId), saved })
+    state.activity.push({ at: Date.now(), session: shortSessionId(sessionId), saved, backend, tokens })
     if (state.activity.length > MAX_ACTIVITY) {
       state.activity = state.activity.slice(-MAX_ACTIVITY)
     }
     mkdirSync(this.dir, { recursive: true })
     atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+  }
+
+  /** Append one background-LLM audit row and persist (bounded FIFO). */
+  recordLlmAudit(run: Omit<LlmAuditRun, 'at'> & { at?: number }): void {
+    let runs: LlmAuditRun[] = []
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.llmAuditPath, 'utf8'))
+      if (typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { runs?: unknown }).runs)) {
+        runs = (parsed as { runs: LlmAuditRun[] }).runs
+      }
+    } catch {
+      // absent or unreadable → fresh list
+    }
+    runs.push({ ...run, at: run.at ?? Date.now() })
+    if (runs.length > MAX_AUDIT_RUNS) runs = runs.slice(-MAX_AUDIT_RUNS)
+    mkdirSync(this.dir, { recursive: true })
+    atomicWrite(this.llmAuditPath, `${JSON.stringify({ version: 1, runs }, null, 2)}\n`)
+  }
+
+  /** Recent audit rows, newest first (bounded FIFO). */
+  llmAudit(): LlmAuditRun[] {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.llmAuditPath, 'utf8'))
+      if (typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { runs?: unknown }).runs)) {
+        return [...(parsed as { runs: LlmAuditRun[] }).runs].sort((a, b) => b.at - a.at)
+      }
+    } catch {
+      // absent or unreadable → empty
+    }
+    return []
   }
 
   /** Read (and repair) distill-state.json; missing/malformed → empty. */

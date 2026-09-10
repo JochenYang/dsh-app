@@ -33,6 +33,15 @@ function projectTitle(project: MemoryProjectSummary): string {
   return parts[parts.length - 1] ?? project.slug
 }
 
+/** Backend + token suffix for one distill trace, e.g. ` · 直调 1.2k tokens`. */
+function formatBackend(item: MemoryDistillActivity): string {
+  if (item.backend === undefined) return ''
+  const channel = item.backend === 'direct' ? '直调' : '子代理'
+  if (item.tokens === undefined) return ` · ${channel}`
+  const tokens = item.tokens >= 1000 ? `${(item.tokens / 1000).toFixed(1)}k` : String(item.tokens)
+  return ` · ${channel} ${tokens} tokens`
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init })
   const body = (await response.json()) as { ok: boolean, value?: T, error?: { message?: string } }
@@ -252,7 +261,7 @@ export function MemorySection(): ReactNode {
       <div className="dshm_toggleRow">
         <span className="dshm_toggleLabel">
           后台自动提炼（{status === null ? '…' : status.distill ? '已开启' : '已关闭'}）
-          <span className="dshm_toggleHint">会话静默 1 分钟后，后台只读代理自动补记遗漏的持久信息</span>
+          <span className="dshm_toggleHint">会话静默 1 分钟后，后台自动补记遗漏的持久信息（直接调用模型，低消耗）</span>
         </span>
         <button
           type="button"
@@ -288,11 +297,11 @@ export function MemorySection(): ReactNode {
         ? (
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">最近提炼</div>
-            <div className="dshm_hint">后台只读代理在会话静默 1 分钟后自动运行，以下为最近记录（时间 · 来源会话 · 保存条数）。</div>
+            <div className="dshm_hint">后台提炼在会话静默 1 分钟后自动运行（默认直接调用模型，低消耗），以下为最近记录（时间 · 来源会话 · 保存条数 · 通道）。</div>
             {status.activity.slice(0, activityExpanded ? status.activity.length : ACTIVITY_PREVIEW).map((item: MemoryDistillActivity) => (
               <div key={`${item.at}-${item.session}`} className="dshm_activityRow">
                 <span className="dshm_activityTime">{fmtTime(item.at)}</span>
-                <span className="dshm_activityMeta">会话 {item.session} · {item.saved === 0 ? '无新条目' : `保存 ${String(item.saved)} 条`}</span>
+                <span className="dshm_activityMeta">会话 {item.session} · {item.saved === 0 ? '无新条目' : `保存 ${String(item.saved)} 条`}{formatBackend(item)}</span>
               </div>
             ))}
             {status.activity.length > ACTIVITY_PREVIEW

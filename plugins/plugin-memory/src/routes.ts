@@ -2,6 +2,7 @@
  * Settings-page API under `/plugins/@dsh-app/plugin-memory/api`:
  *   GET  /status        — toggle states + global/project stats + global rows
  *   GET  /entries?slug= — one PROJECT store's rows with pin state
+ *   GET  /llm-audit      — recent background-LLM cost rows (newest 20)
  *   POST /config        — set toggles (body {enabled?, distill?} booleans)
  *   POST /pin           — pin/unpin one row (body {content, pinned, scope?, slug?})
  *   POST /forget        — delete one row by exact content (body {match, scope?, slug?})
@@ -19,7 +20,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isValidSlug, listProjects, normalizeForMatch, parseEntries, removeProject, type MemoryRoot, type MemoryStore } from './memory-store.ts'
-import type { MemoryEntriesResponse, MemoryStatus } from './types.ts'
+import type { MemoryEntriesResponse, MemoryLlmAuditResponse, MemoryStatus } from './types.ts'
 
 /** Route namespace on the dsh web server. */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-memory/api'
@@ -315,6 +316,33 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
         .catch(error => {
           fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid body')
         })
+    },
+  }))
+
+  disposers.push(webServer.register({
+    path: `${ROUTE_PREFIX}/llm-audit`,
+    handler: (req, res) => {
+      if (!requireSameOrigin(req, res)) return
+      if (req.method !== 'GET') {
+        res.setHeader('Allow', 'GET')
+        fail(res, 405, 'method-not-allowed', 'GET only')
+        return
+      }
+      const runs = root.llmAudit().slice(0, 20).map(run => ({
+        at: run.at,
+        source: run.source,
+        session: run.session,
+        status: run.status,
+        inputTokens: run.inputTokens,
+        outputTokens: run.outputTokens,
+        durationMs: run.durationMs,
+        ...(run.error === undefined ? {} : { error: run.error }),
+      }))
+      const body: MemoryLlmAuditResponse = {
+        runs,
+        totalTokens: runs.reduce((sum, run) => sum + run.inputTokens + run.outputTokens, 0),
+      }
+      ok(res, body)
     },
   }))
 
