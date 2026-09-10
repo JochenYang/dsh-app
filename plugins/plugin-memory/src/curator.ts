@@ -162,8 +162,14 @@ export class MemoryCurator {
   }
 
   /**
-   * The distiller's save trigger: sweep now when the cooldown has elapsed,
-   * otherwise coalesce into the pending trailing sweep. Never throws.
+   * The save trigger: sweep now when the cooldown has elapsed, otherwise
+   * coalesce into the pending trailing sweep. Never throws.
+   *
+   * Gated by `isDistillEnabled()` — the user-facing 后台自动提炼 toggle
+   * means "no background model work", so it stops the curator too, not just
+   * the distiller. Keeping one gate for every background pass is what makes
+   * flipping it cost-predictable; a save-triggered sweep slipping through
+   * with the toggle off would spend tokens the user opted out of.
    */
   async runAfterDistill(parent: ParentAgent, sessionId: SessionId): Promise<void> {
     if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
@@ -190,8 +196,8 @@ export class MemoryCurator {
   /**
    * The coalesced sweep: the triggering session's agent is re-resolved at
    * fire time because the parent this request rode in on may be long gone.
-   * A dead parent drops the pass — every due file waits for the next distill
-   * save, which re-arms a fresh sweep.
+   * A dead parent drops the pass — every due file waits for the next save,
+   * which re-arms a fresh sweep.
    */
   private async fireDeferredSweep(sessionId: SessionId | undefined): Promise<void> {
     if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
