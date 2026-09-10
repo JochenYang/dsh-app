@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { extractJson, streamJson } from '../src/llm-direct.ts'
+import { extractJson, resolveLlm, streamJson } from '../src/llm-direct.ts'
 import { MemoryRoot, repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
 import { buildDistillPrompt } from '../src/distiller.ts'
 
@@ -82,12 +82,10 @@ test('buildDistillPrompt splits system/user and bans prefixes', () => {
   assert.match(user, /No workspace/)
 })
 
-function stubCtx(chunks: Array<Record<string, unknown>>): never {
+function stubLlm(chunks: Array<Record<string, unknown>>): never {
   return {
-    llm: {
-      stream: async function* () {
-        for (const chunk of chunks) yield chunk
-      },
+    stream: async function* () {
+      for (const chunk of chunks) yield chunk
     },
   } as never
 }
@@ -98,8 +96,29 @@ const SPEC = {
   user: 'usr',
 }
 
+test('resolveLlm rejects a context without the service', () => {
+  assert.throws(() => resolveLlm({}), /ctx\.llm unavailable/)
+  assert.throws(() => resolveLlm(undefined), /ctx\.llm unavailable/)
+})
+
+test('streamJson keeps the runtime receiver (this-bound call)', async () => {
+  // The real LlmRuntime.stream reads instance state; a detached call throws
+  // "Cannot read properties of undefined (reading 'streamWithRegistration')".
+  const runtime = {
+    marker: 42,
+    async *stream(this: { marker: number }, _options: unknown): AsyncIterable<Record<string, unknown>> {
+      if (this?.marker !== 42) throw new TypeError("Cannot read properties of undefined (reading 'streamWithRegistration')");
+      yield { type: 'text-delta', index: 0, text: '{"entries": []}' };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    },
+  };
+  const result = await streamJson(runtime as never, SPEC);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.parsed, { entries: [] });
+});
+
 test('streamJson accumulates deltas and parses', async () => {
-  const result = await streamJson(stubCtx([
+  const result = await streamJson(stubLlm([
     { type: 'text-delta', index: 0, text: '{"entries"' },
     { type: 'text-delta', index: 0, text: ': []}' },
     { type: 'usage', usage: { inputTokens: 50, outputTokens: 5 } },
@@ -112,7 +131,7 @@ test('streamJson accumulates deltas and parses', async () => {
 })
 
 test('streamJson reports bad-json as error', async () => {
-  const result = await streamJson(stubCtx([
+  const result = await streamJson(stubLlm([
     { type: 'text-delta', index: 0, text: 'not json at all' },
     { type: 'finish', reason: { kind: 'stop' } },
   ]), SPEC)
@@ -121,7 +140,7 @@ test('streamJson reports bad-json as error', async () => {
 })
 
 test('streamJson surfaces error finish', async () => {
-  const result = await streamJson(stubCtx([
+  const result = await streamJson(stubLlm([
     { type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } },
   ]), SPEC)
   assert.equal(result.status, 'error')
@@ -129,7 +148,7 @@ test('streamJson surfaces error finish', async () => {
 })
 
 test('streamJson surfaces abort', async () => {
-  const result = await streamJson(stubCtx([
+  const result = await streamJson(stubLlm([
     { type: 'finish', reason: { kind: 'aborted', failure: { message: 'x' } } },
   ]), SPEC)
   assert.equal(result.status, 'aborted')

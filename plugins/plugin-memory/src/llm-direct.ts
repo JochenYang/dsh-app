@@ -20,9 +20,6 @@
  * @module @dsh-app/plugin-memory/llm-direct
  */
 
-import type { Context } from '@deepseek-ai/cordis'
-// Type-only: pulls the llm Context merge (ctx.llm) into scope.
-import type {} from '@deepseek-ai/dsh-llm'
 import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 
 /** Model route for one direct call (resolved from the triggering session). */
@@ -121,24 +118,41 @@ export function extractJson(text: string): { ok: true, value: unknown } | { ok: 
   return { ok: false }
 }
 
+/** Structural face of the LLM runtime (nominal brands stay behind this wall). */
+export interface LlmRuntimeLike {
+  stream(options: unknown): AsyncIterable<unknown>
+}
+
 /**
- * One direct JSON model call through `ctx.llm.stream`. Never throws for
- * model-side failures (bad JSON, error/abort finish, rate-limit exhaustion
- * after retries) — those surface as a non-ok status so the caller stays
- * fail-soft. Transport-level throws (no route, disposed context) propagate.
+ * Resolve the LLM runtime off a plugin context. The dsh-llm Context merge
+ * is not relied on (see {@link streamJson}); a missing service throws so a
+ * mis-mounted distiller fails loud at the quiet window, not silently.
  */
-export async function streamJson(ctx: Context, spec: DirectCallSpec): Promise<DirectCallResult> {
+export function resolveLlm(ctx: unknown): LlmRuntimeLike {
+  const llm = (ctx as { llm?: unknown } | undefined)?.llm as { stream?: unknown } | undefined
+  if (llm === undefined || typeof llm.stream !== 'function') {
+    throw new Error('memory distill: ctx.llm unavailable (missing inject)')
+  }
+  return llm as LlmRuntimeLike
+}
+
+/**
+ * One direct JSON model call. Never throws for model-side failures (bad
+ * JSON, error/abort finish, rate-limit exhaustion after retries) — those
+ * surface as a non-ok status so the caller stays fail-soft. Transport-level
+ * throws (no route, disposed context) propagate.
+ */
+export async function streamJson(llm: LlmRuntimeLike, spec: DirectCallSpec): Promise<DirectCallResult> {
   const startedAt = Date.now()
   const messages = [
     createSystemMessage(spec.system, 'plugin-memory'),
     createUserMessage({ content: [{ type: 'text', text: spec.user }], source: { kind: 'user' } }),
   ]
-  // Dual dsh-llm instances (the repo-root alpha line vs the copy nested under
-  // dsh-session) carry incompatible nominal brands, so the typed stream face
-  // cannot accept these messages even though the wire shape is identical
-  // plain JSON. Adapt once at this boundary: the loosened face covers exactly
-  // the chunks this module reads (runtime imports stay external regardless).
-  const stream = ctx.llm.stream as unknown as (options: {
+  // The structural face erases the nominal brands (see LlmRuntimeLike), so
+  // the loosened signature below covers exactly the chunks this module
+  // reads; runtime imports stay external regardless. Bound to the runtime:
+  // the method reads instance state (this.streamWithRegistration).
+  const stream = (llm.stream as unknown as (this: unknown, options: {
     provider: string
     model: string
     messages: typeof messages
@@ -149,7 +163,7 @@ export async function streamJson(ctx: Context, spec: DirectCallSpec): Promise<Di
     text?: unknown
     usage?: { inputTokens?: unknown, outputTokens?: unknown }
     reason?: { kind?: unknown, failure?: unknown }
-  }>
+  }>).bind(llm)
   return enqueue(async () => {
     let lastError: string | undefined
     for (let attempt = 0; ; attempt++) {
