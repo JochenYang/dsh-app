@@ -157,7 +157,11 @@ after boot and via the tray.
      use `npm install --legacy-peer-deps` **inside the plugin dir only**
      (plain install there re-pulls peers; `--legacy-peer-deps` at the ROOT
      prunes the peer-only tree from package-lock.json and once broke
-     `npm ci` in every CI job).
+     `npm ci` in every CI job). When switching kernel lines (rc→alpha),
+     delete root `node_modules/` first — stale trees cause ERESOLVE that
+     tempts a root `--legacy-peer-deps`, which writes an incomplete lockfile
+     (missing peer entries) that fails CI's strict `npm ci` on all platforms;
+     a clean strict install resolves the new line fine.
   3. `DSH_APP_CHANNEL=<channel> node scripts/build-runtime.mjs <platform> <arch> <version>`,
      then `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
      (both outputs are gitignored; CI rebuilds them from the dist-tag).
@@ -440,7 +444,11 @@ for a dsh version without cutting a shell release):
   published and re-uploaded with `--clobber`, so re-running a failed runtime
   job (or `gh run rerun <run> --failed`) is safe and idempotent — do NOT
   delete/recreate a runtime tag, just re-upload.
-- A **single failed job** recovers best with `gh run rerun <run> --failed`.
+- A **single failed job** recovers best with `gh run rerun <run> --failed` —
+  but only for environmental flakes. `rerun` re-executes the run's ORIGINAL
+  commit: if the fix is a code change pushed afterwards, rerun rebuilds the
+  bug and fails identically — re-trigger (`workflow_dispatch`) instead so the
+  new run checks out the fixed SHA (verify via `headSha`).
   Kernel version in runtime artifacts resolves from the registry dist-tag
   (distinct from the shell version) unless `dsh_version` is supplied.
 - **Never run two writers against one runtime tag**: a `workflow_dispatch`
