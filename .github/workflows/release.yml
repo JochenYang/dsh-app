@@ -22,13 +22,13 @@ permissions:
 env:
   DSH_VERSION: ${{ inputs.dsh_version || '' }}
   # Tag pushes leave DSH_VERSION empty, so build-runtime resolves the dist-tag.
-  # The suite follows the newest kernel line, currently 0.1.5-alpha.1 on the
-  # npm `alpha` tag; resolution must use the alpha channel until dsh promotes
-  # that line to `next`/`latest`. Flip this line whenever the followed line
-  # moves tags (alpha -> beta -> delete once on latest).
+  # The suite follows the newest kernel line, currently 0.1.5-rc.1 on the npm
+  # `next` tag (the rc line); resolution uses the beta channel, which maps to
+  # `next`. Flip this line whenever the followed line moves tags (beta ->
+  # delete once the line is on `latest`).
   # workflow_dispatch pins a version explicitly for the tag name; the channel
   # still labels the manifest, so keep it on the pinned version's line.
-  DSH_APP_CHANNEL: alpha
+  DSH_APP_CHANNEL: beta
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
@@ -220,7 +220,11 @@ jobs:
   # Runs only on tag pushes. workflow_dispatch is the runtime-only path:
   # publish kernel artifacts for a dsh version without cutting a shell release.
   app:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # `!cancelled()` lets the reuse path (skip_runtime=true, runtime job
+    # skipped) still run; without it GitHub skips every `needs: runtime`
+    # job when the runtime job is skipped, and the "download from release"
+    # branch below never executes — a shell-only release would ship empty.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     name: app (${{ matrix.os }}/${{ matrix.arch }})
     needs: [resolve, runtime]
     strategy:
