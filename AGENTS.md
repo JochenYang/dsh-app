@@ -396,22 +396,48 @@ optional `dsh_version` input). Tag pushes run the full pipeline;
 `workflow_dispatch` is the **runtime-only** path (publish kernel artifacts
 for a dsh version without cutting a shell release):
 
-- **resolve**: resolves the kernel version from the npm dist-tag (or the
-  dispatch input) and checks whether `runtime-<dshVersion>` already carries
-  all 6 cells. If complete, the runtime matrix is skipped and the app job
-  downloads the assets from the release — shell-only releases never rebuild
-  an unchanged kernel. Dispatch always builds.
+- **resolve**: derives the kernel line from `package.json` (see below),
+  resolves it to a version, and asserts that version satisfies the followed
+  spec. It reuses an existing `runtime-<dshVersion>` release only when all 6
+  cells are present **and** that release's `suiteVersion` matches this tree's
+  — a complete-but-stale runtime, or one whose manifest cannot be read,
+  triggers a rebuild instead. On reuse the app job downloads the assets from
+  the release, so shell-only releases never rebuild an unchanged kernel.
+  Dispatch always builds, and its `dsh_version` input is asserted the same way.
 - **runtime**: a 6-cell matrix (win32/darwin/linux × x64/arm64) builds the
   suite plugins, then `build-runtime.mjs`, and uploads
   `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + per-cell `manifest.json`
   to the dedicated **`runtime-<dshVersion>`** release (created **published**
-  if absent — `GitHubArtifactResolver` resolves exactly this tag shape). The
-  tagged version comes from `build-runtime`'s output: when `DSH_VERSION` is
-  empty it resolves the npm dist-tag, so artifacts always match what the app
-  resolves.
+  if absent — `GitHubArtifactResolver` resolves exactly this tag shape).
 - **app** (tag pushes only): builds + packages the shell per OS with
   `electron-builder` and `--publish always`; macOS notarization via
   `--config.mac.notarize=true` when Apple signing secrets are present.
+
+### Kernel line (single source of truth)
+
+**Which dsh line a build follows is decided by `package.json` alone.** All 24
+`@deepseek-ai/dsh*` devDependencies must agree on one spec;
+`scripts/kernel-line.mjs` reads that spec, maps it to a dist-tag (`-alpha.` →
+`alpha`, `-rc.`/`-beta.` → `next`, otherwise `latest`), and owns the suite
+plugin roster plus the `suiteVersion` hash derived from it. Both consumers
+assert against the spec:
+
+- `build-runtime.mjs` refuses a version that does not satisfy it — on the
+  dist-tag path **and** on an explicitly pinned `DSH_VERSION` — and labels the
+  artifact by the version actually built, not by the line the tree sits on.
+- the workflow's `resolve` job runs the same assertion before deciding whether
+  to reuse a published runtime.
+
+**Moving the line is therefore one edit**: bump those devDependencies in the
+root and in every `plugins/*/package.json` (§4 step 1), then tag. Nothing in
+`release.yml` needs touching. `DSH_APP_CHANNEL` is the explicit cross-line
+override for a one-off build — it skips the assertion, warns loudly, and still
+labels the artifact by the version built. At runtime the same variable keeps a
+separate meaning: which channel the update check follows.
+
+This replaced a hand-flipped `DSH_APP_CHANNEL: alpha` pin in the workflow. With
+two copies of the line and nothing comparing them, v0.11.1 bundled a
+`0.1.5-alpha.2` kernel beside `^0.1.5-rc.1` code and every CI job was green.
 
 ### Release SOP (shell version, e.g. 0.1.6)
 
@@ -425,12 +451,13 @@ for a dsh version without cutting a shell release):
    then `gh run view <id> --repo JochenYang/dsh-app`. All jobs
    (prepare-release + 6 runtime + 4 app) must succeed; the release stays a
    draft.
-   **Then verify what was built before publishing** — green jobs are not
-   proof of the right content: read the runtime job log's
+   **Then verify what was built before publishing** — green jobs are still not
+   proof of the right content. Read the runtime job log's
    `Runtime artifact ready: ...dsh-runtime-<platform>-<arch>-<version>.tgz`
-   line and confirm `<version>` equals the intended kernel (a stale
-   `DSH_APP_CHANNEL` pin once shipped rc.1 inside a shell meant to bundle
-   alpha.1, and CI was fully green). Only then proceed.
+   line and confirm `<version>` is the kernel you meant to ship. The kernel-line
+   assertion (§ Kernel line) catches a *mismatched* line at the start of the
+   run; a wrong intent — bumping to the wrong dist-tag, say — stays silent.
+   Only then proceed.
 4. **Generate release notes**:
    `node scripts/gen-release-notes.mjs v0.1.6` → writes `release-notes.md`.
 5. **Publish the draft**:
@@ -464,8 +491,9 @@ for a dsh version without cutting a shell release):
   commit: if the fix is a code change pushed afterwards, rerun rebuilds the
   bug and fails identically — re-trigger (`workflow_dispatch`) instead so the
   new run checks out the fixed SHA (verify via `headSha`).
-  Kernel version in runtime artifacts resolves from the registry dist-tag
-  (distinct from the shell version) unless `dsh_version` is supplied.
+  Kernel versions in runtime artifacts resolve from the followed line's
+  dist-tag (distinct from the shell version) unless `dsh_version` is supplied;
+  see § Kernel line for how that line is chosen and asserted.
 - **Never run two writers against one runtime tag**: a `workflow_dispatch`
   re-upload and a tag-push CI both `--clobber` to `runtime-<dshVersion>`,
   and the loser silently overwrites the winner (once shipped a stale 8-plugin
@@ -481,15 +509,6 @@ Windows signing secrets must be provided as CI secrets;
 `resources/icon.png` is a placeholder brand icon; the suite plugins are
 bundled via `file:` references and should switch to registry versions once
 published.
-**Kernel line provenance**: `release.yml` no longer pins a channel. The line a
-build follows is derived from `package.json`'s `@deepseek-ai/dsh*`
-devDependencies by `scripts/kernel-line.mjs`, and both the workflow's resolve
-job and `build-runtime.mjs` assert that the resolved version satisfies them —
-so bundling a kernel from another line fails CI instead of shipping silently.
-Moving the line means bumping those devDependencies (§4). A `workflow_dispatch`
-build with an explicit `dsh_version` is asserted the same way, and its
-artifacts are labelled by the version actually built rather than by the line
-the tree happens to sit on.
 
 ## 11. Known TODOs / scaffolds (do not assume finished)
 

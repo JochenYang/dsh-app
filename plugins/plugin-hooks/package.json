@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-hooks",
   "description": "DSH APP hooks bridge: settings-page CRUD over external Claude Code / Codex hooks.json files, dynamically mounting @deepseek-ai/dsh-hooks-claude-code or -codex instances from $DSH_HOME/storages/dsh-app-plugin-hooks/config.json so existing command-hook configs gate prompts, tools, and turns without rewrite.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

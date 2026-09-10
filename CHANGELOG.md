@@ -8,6 +8,26 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.2] - 2026-09-10
+
+### 中文
+- 安全：mcp / hooks / memory / swarm / usage 五个插件的设置接口补齐 loopback 围栏——此前只校验 Origin 与 Host 同源，而 DNS rebinding 下两者都指向攻击者域名因而通过；其中 mcp 的「新建服务器」可借这条路径执行任意 stdio 命令
+- 内核线不再有两份：跟随哪条线由 `package.json` 的 `@deepseek-ai/dsh*` 依赖决定（`scripts/kernel-line.mjs` 推导 dist-tag 并断言版本满足该依赖），v0.11.1 那种「alpha 内核 + rc 代码 + CI 全绿」的错配从本版起会直接构建失败
+- 复用已发布的内核产物更严格：`runtime-<版本>` 只有在 6 个平台齐全且套件版本与当前树一致时才复用，套件有变必重建
+- 内核采纳改按身份判断：`current.json` 记录已采纳的 bundled 运行时标识，不再把用户在线更新过的内核降级回内置版本
+- 修复内核安装成功后误报「安装失败」并触发联网重装：解压完成后清理 staging 失败（Windows 文件锁）会把已成功的激活当成失败上报；现清理改为尽力而为，失败时先重读磁盘状态再决定
+- 内核日志落盘到 `<logs>/dsh-kernel.log`：此前只走 stdout，在打包后的 Windows 应用里不可见，这类问题完全无法取证
+- 修复发版流水线在「复用已发布内核」时产出空 release：app 任务缺少 `!cancelled()`，runtime 被跳过时 GitHub 会连带跳过全部 app 任务
+
+### English
+- Security: the settings APIs of mcp / hooks / memory / swarm / usage now require a loopback Host — they compared Origin against Host only, which DNS rebinding satisfies because both carry the attacker's domain; mcp's "create server" could execute an arbitrary stdio command through that path
+- The kernel line no longer exists in two copies: which line a build follows comes from the `@deepseek-ai/dsh*` dependencies in `package.json` (`scripts/kernel-line.mjs` derives the dist-tag and asserts the version satisfies them), so the v0.11.1 mismatch of an alpha kernel beside rc code — with CI green — now fails the build outright
+- Reuse of a published runtime is stricter: `runtime-<version>` is reused only when all six cells are present AND that release's suite version matches this tree's; a suite change always rebuilds
+- Adopting the bundled kernel is now identity-based: `current.json` records which bundle was adopted, so a kernel the user updated online is never downgraded back to the installer's
+- Fixed a successful kernel install being reported as "安装失败" and followed by a pointless network reinstall: a staging-cleanup failure after activation (a Windows file lock) surfaced as an install failure; cleanup is now best effort and the first-run path re-reads the on-disk state before deciding
+- Kernel diagnostics now land in `<logs>/dsh-kernel.log`; they previously went only to stdout, invisible in a packaged Windows app, which left this class of failure with no evidence at all
+- Fixed the release pipeline producing an empty release on the "reuse published kernel" path: the app job lacked `!cancelled()`, so GitHub skipped every app job whenever the runtime matrix was skipped
+
 ## [v0.11.1] - 2026-09-10
 
 ### 中文
