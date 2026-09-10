@@ -438,9 +438,15 @@ export class KernelManager {
     }
     this.log(`bundled tarball verified: ${path.basename(tarballPath)}`)
     const next = await this.activateTarball(tarball)
-    // Record the verified source hash: the shell compares it against the
-    // bundled sidecar on boot to detect same-version content drift.
+    // Record the verified source hash and the identity of the bundle itself.
+    // The stamp is what the boot drift check compares against: it says WHICH
+    // bundled runtime this install adopted, so "already adopted" is
+    // distinguishable from "a new shell shipped a different one". It is read
+    // from the same manifest.json the boot check reads, so the two can never
+    // disagree about what was adopted.
     next.sha512 = expected
+    const shipped = await readRuntimeManifest(path.dirname(tarballPath))
+    if (shipped !== null) next.bundledStamp = `${shipped.dshVersion}+${shipped.suiteVersion}`
     await saveCurrentKernel(this.root, next)
     this.current = next
     return next

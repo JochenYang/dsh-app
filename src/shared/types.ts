@@ -63,6 +63,16 @@ export interface CurrentKernel {
    * sidecar to detect same-version content drift (new suite plugins).
    */
   sha512?: string
+  /**
+   * Identity of the bundled runtime this install adopted, as
+   * `<dshVersion>+<suiteVersion>` from the installer's own
+   * `resources/kernel/manifest.json`. The boot drift check re-activates the
+   * bundled tarball only when this differs from what the running shell ships,
+   * which separates "a new shell brought a new runtime" from "an online update
+   * already got there" — version arithmetic cannot tell those apart, and
+   * treating the second as drift downgrades the user's kernel.
+   */
+  bundledStamp?: string
 }
 
 export interface UpdateCheckResult {

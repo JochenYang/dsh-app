@@ -427,14 +427,14 @@ async function boot(): Promise<void> {
   // or a broken install, handled below by bundled/online activation.
   const current = await kernel.load()
   if (current) {
-    // Bundled-runtime drift check. The versioned kernel dir name is
+    // Bundled-runtime adoption check. The versioned kernel dir name is
     // dsh-<v>+suite-<v>; when a NEW shell ships a same-version kernel whose
     // content changed (the brand suite gained a plugin), an existing
     // same-named directory is reused verbatim and the new content never
     // lands — linkSuitePlugins then bails on the missing member and the whole
-    // suite silently boots vanilla. Re-activate the bundled tarball whenever
-    // its semantic identity (dshVersion + suiteVersion, the kit the runtime's
-    // own manifest.json carries) differs from the installed one.
+    // suite silently boots vanilla. Adopt the bundled tarball whenever its
+    // semantic identity (dshVersion + suiteVersion, the kit the runtime's own
+    // manifest.json carries) is not the one this install already adopted.
     //
     // The tarball sha512 is deliberately NOT the comparison key: a packaged
     // runtime tarball is not byte-reproducible across builds (file mtimes and
@@ -456,16 +456,24 @@ async function boot(): Promise<void> {
         }
         const samePlatform = bundledManifest.platform === current.manifest.platform
           && bundledManifest.arch === current.manifest.arch
-        const sameVersion = bundledManifest.dshVersion === current.manifest.dshVersion
-        const newerVersion = bundledManifest.dshVersion !== undefined
-          && semver.gt(bundledManifest.dshVersion, current.manifest.dshVersion)
-        // Suite content drift: same dsh version but a different suite build
-        // (or a newer dsh version), same platform/arch. Identical dsh+suite
-        // means the runtime is already what installing would produce.
-        const suiteDrift = bundledManifest.suiteVersion !== undefined
-          && bundledManifest.suiteVersion !== current.manifest.suiteVersion
-        if (samePlatform && (newerVersion || (sameVersion && suiteDrift))) {
-          console.log('[kernel] bundled content differs from active install; re-activating')
+        // Identity of the runtime THIS shell build ships. Comparing it with what
+        // the active install already adopted answers the only question that
+        // matters here — "has this install seen this bundled tarball?" — which
+        // version arithmetic cannot: the previous `sameVersion && suiteDrift`
+        // test fired just as readily when the bundle's suite was OLDER than the
+        // installed one, silently downgrading a kernel the user had updated
+        // online, and it could not tell an already-adopted bundle from a new one
+        // at the same version.
+        const bundledStamp = bundledManifest.dshVersion !== undefined && bundledManifest.suiteVersion !== undefined
+          ? `${bundledManifest.dshVersion}+${bundledManifest.suiteVersion}`
+          : undefined
+        const adopted = bundledStamp !== undefined && current.bundledStamp === bundledStamp
+        // An online update already ahead of this shell's bundled kernel must not
+        // be rolled back by adopting the older bundle.
+        const onlineAhead = bundledManifest.dshVersion !== undefined
+          && semver.gt(current.manifest.dshVersion, bundledManifest.dshVersion)
+        if (samePlatform && !adopted && !onlineAhead) {
+          console.log('[kernel] bundled runtime not adopted yet; activating')
           await kernel.installFromLocalTarball(bundledTgz, bundledSha)
         }
       } catch (err) {
