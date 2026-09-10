@@ -26,10 +26,11 @@ import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm/types'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { cloneDraft, getPath, modelRowFailure, parseHeaders, parseRetryPolicy, readHeaders, readRetryPolicy, RETRY_POLICY_DEFAULTS } from './fields.ts'
+import { cloneDraft, defaultReasoningEfforts, getPath, modelRowFailure, parseHeaders, parseRetryPolicy, readHeaders, readRetryPolicy, RETRY_POLICY_DEFAULTS, REASONING_LEVELS } from './fields.ts'
+import { enrichDraftsFromModelsDev, fetchModelsDev } from './models-dev.ts'
 import type { HeaderRow, ModelDraft, RetryPolicyDraft } from './fields.ts'
 import { IconChevron, IconTrash, ModelEntryEditor } from './entry-editor.tsx'
-import { AdvancedModelsStore, protocolChoices, writeOps } from './store.ts'
+import { AdvancedModelsStore, messageOf, protocolChoices, writeOps } from './store.ts'
 import type { AdvancedModelsRemote, AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
 import { ModelsDevImportDialog } from './import-dialog.tsx'
 import { ProviderModelDiscoveryDialog } from './provider-discovery.tsx'
@@ -161,6 +162,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   // one override, 'n1' one create-card row) so lists never alias state.
   const [openRows, setOpenRows] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState(false)
+  const [enrichBusy, setEnrichBusy] = useState(false)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
   const [newRoute, setNewRoute] = useState<NewRouteDraft | undefined>(undefined)
@@ -220,46 +222,36 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   const modelIds = new Set(models.map(model => typeof model.id === 'string' ? model.id : ''))
   const overrideIds = Object.keys(overrides)
   /**
-   * Catalog-derived state, degraded for dsh 0.1.2: the host no longer exposes
-   * a per-provider model catalog (`ModelProviderGroup` / `llm.models` were
-   * removed upstream; only `listProviders` + `listConfigurableProviders` +
-   * `discoverModels` remain, the latter for whole-endpoint discovery).
-   *
-   * Consequences, kept deliberately conservative:
-   *  - `catalogIdSet` is empty, so the off-catalog gate below flags every
-   *    non-empty id on a NON-hand-declared route in models mode. That is fine
-   *    for hand-declared routes (`declared === true`), which skip the gate and
-   *    keep full-table editing. On catalog routes every model shows "目录外"
-   *    and the save is refused with the companion-route migration offer — the
-   *    exact flow that existed for genuinely off-catalog models.
-   *  - `catalogIds` is empty, so the overrides-mode "add a catalog id"
-   *    dropdown is gone (no catalog to list). Existing overrides stay fully
-   *    editable; adding a brand-new override id by hand is deliberately NOT
-   *    wired up (it would need a manual-id input + a real catalog to validate
-   *    against — a constructive change out of scope for this migration).
+   * Catalog-derived state after dsh 0.1.2: the host no longer exposes a
+   * per-provider model catalog (`ModelProviderGroup` / `llm.models` were
+   * removed). An empty set means "unknown", NOT "every id is off-catalog" —
+   * the off-catalog gate below is therefore disabled. Models-mode editing
+   * stays fully writable on catalog routes whose user layer owns the list.
    */
   const catalogIdSet = new Set<string>()
-  /**
-   * Always undefined after the dsh 0.1.2 catalog removal; typed as the editor's
-   * catalog model so the `?.name` / `catalogModel` call sites keep compiling
-   * (they render an empty name and hand the editor no live metadata).
-   */
   const catalogModelFor = (_id: string): LlmResolvedModelInfo | undefined => undefined
   const catalogFailure = undefined
-  /** Catalog ids offered for a new override (no catalog in dsh 0.1.2). */
+  /** Catalog ids offered for a new override (empty after dsh 0.1.2 catalog removal). */
   const catalogIds: string[] = []
   /**
-   * Ids in the drafted list the installed catalog does not carry. On a
-   * catalog route these cannot resolve a wire protocol (the route spans
-   * several, so no route-level api may be named without rerouting every
-   * catalog model too) and the adapter's validator rejects the write — so
-   * the page names them up front and routes them to a split route instead.
+   * Off-catalog gate: only active when a real catalog set is known. With an
+   * empty stub set this returns [] so taken-over catalog routes stay saveable.
    */
-  const offCatalogIds: string[] = row !== undefined && row.entry.declared !== true && inModelsMode
+  const offCatalogIds: string[] = row !== undefined && row.entry.declared !== true
+    && inModelsMode && catalogIdSet.size > 0
     ? models
         .map(model => typeof model.id === 'string' ? model.id.trim() : '')
         .filter(id => id !== '' && !catalogIdSet.has(id))
     : []
+
+  /** Resolved wire protocol for the selected route (user-layer or composed profile.api). */
+  const routeApi = (() => {
+    if (row === undefined || namespace === undefined) return undefined
+    const profile = getPath(namespace.value, row.entry.settingsPath)
+    if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) return undefined
+    const value = (profile as Record<string, unknown>).api
+    return typeof value === 'string' && value !== '' ? value : undefined
+  })()
 
   const rowsFailure = useMemo(() => {
     if (row === undefined) return undefined
@@ -272,7 +264,10 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       }
       const seen = new Set<string>()
       for (const model of models) {
-        const text = modelRowFailure(model, seen)
+        const modelApi = typeof model.api === 'string' && model.api !== ''
+          ? model.api as string
+          : routeApi
+        const text = modelRowFailure(model, seen, modelApi)
         if (text !== undefined) return text
         seen.add(typeof model.id === 'string' ? model.id : '')
       }
@@ -282,11 +277,11 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       // Override rows address a catalog id by key; a row that sets nothing
       // would write a meaningless empty object into settings.yaml.
       if (Object.keys(overrideFields(value)).length === 0) return `覆盖 ${id}：至少设置一个字段`
-      const text = modelRowFailure({ ...value, id }, new Set())
+      const text = modelRowFailure({ ...value, id }, new Set(), routeApi)
       if (text !== undefined) return text.replace(`${id} 的 `, `覆盖 ${id}：`)
     }
     return undefined
-  }, [row, inModelsMode, models, overrides])
+  }, [row, inModelsMode, models, overrides, routeApi])
 
   const modelsChanged = modelsDraft !== undefined
     && JSON.stringify(models) !== JSON.stringify(baseModels ?? [])
@@ -381,7 +376,10 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     }
     const seen = new Set<string>()
     for (const model of newRoute.rows) {
-      const text = modelRowFailure(model, seen)
+      const modelApi = typeof model.api === 'string' && model.api !== ''
+        ? model.api as string
+        : newRoute.api
+      const text = modelRowFailure(model, seen, modelApi)
       if (text !== undefined) { setFailure(text); return }
       seen.add(typeof model.id === 'string' ? model.id : '')
     }
@@ -460,6 +458,14 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     const text = (key: string): string => typeof info[key] === 'string' ? info[key] as string : '—'
     return (
       <dl className="dshAma-routeInfo">
+        <div>
+          <dt>类型</dt>
+          <dd>
+            <span className={`dshAma-badge ${row.entry.declared === true ? 'dshAma-badgeCustom' : 'dshAma-badgeCatalog'}`}>
+              {row.entry.declared === true ? '手写路由' : '目录路由'}
+            </span>
+          </dd>
+        </div>
         <div><dt>显示名</dt><dd>{text('displayName')}</dd></div>
         <div><dt>baseURL</dt><dd>{text('baseURL')}</dd></div>
         <div><dt>协议</dt><dd>{text('api')}</dd></div>
@@ -467,6 +473,52 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
         <div><dt>状态</dt><dd>{row.entry.active ? '已注册' : '未生效'}</dd></div>
       </dl>
     )
+  }
+
+  /**
+   * Gap-fill missing fields (especially reasoningEfforts) from models.dev by
+   * model id. Hand-declared routes have no catalog inherit, so this is how a
+   * batch of discovered/copied ids gets xhigh/max and the rest without a
+   * per-row manual enable. Pass `explicitRows` when the caller just set a
+   * draft this render has not seen yet (discovery adopt).
+   */
+  const enrichFromModelsDev = async (
+    target: 'models' | 'new-route',
+    explicitRows?: readonly ModelDraft[],
+  ): Promise<void> => {
+    const source = explicitRows
+      ?? (target === 'new-route' && newRoute !== undefined ? newRoute.rows : models)
+    const ids = source.filter(model => typeof model.id === 'string' && model.id.trim() !== '')
+    if (ids.length === 0) {
+      setNotice('列表里还没有可补全的模型 ID。')
+      return
+    }
+    setEnrichBusy(true)
+    setFailure(undefined)
+    setNotice(undefined)
+    try {
+      const providers = await fetchModelsDev()
+      const prefer = row?.entry.provider
+      const result = enrichDraftsFromModelsDev(providers, source, prefer)
+      if (target === 'new-route' && newRoute !== undefined) {
+        setNewRoute({ ...newRoute, rows: result.drafts })
+      } else {
+        setModelsDraft(result.drafts)
+      }
+      if (result.filled.length === 0) {
+        setNotice(result.missing.length > 0
+          ? `models.dev 未收录：${result.missing.slice(0, 8).join('、')}${result.missing.length > 8 ? '…' : ''}`
+          : '所有字段都已填写，无需补全。')
+      } else {
+        setNotice(`已从 models.dev 补全 ${String(result.filled.length)} 个模型的缺失字段（含推理等级）。记得点「保存更改」。${
+          result.missing.length > 0 ? ` 未收录：${result.missing.slice(0, 5).join('、')}…` : ''
+        }`)
+      }
+    } catch (error) {
+      setFailure(messageOf(error))
+    } finally {
+      setEnrichBusy(false)
+    }
   }
 
   const patchModel = (index: number, next: ModelDraft): void => {
@@ -478,19 +530,28 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     if (row === undefined) return
     const info = resolvedProfile(row)
     const text = (key: string): string => typeof info[key] === 'string' ? info[key] as string : ''
-    let id = `${row.entry.provider}-custom`
-    const keys = existingRouteKeys(state, schema)
-    for (let attempt = 2; keys.has(id); attempt += 1) id = `${row.entry.provider}-custom-${String(attempt)}`
+    // One companion suffix everywhere: -extra (same as the migrate dialog).
+    const canonical = `${row.entry.provider}-extra`
+    const exists = existingRouteKeys(state, schema).has(canonical)
+    let id = canonical
+    for (let attempt = 2; existingRouteKeys(state, schema).has(id); attempt += 1) {
+      id = `${canonical}-${String(attempt)}`
+    }
     setFailure(undefined)
     setNotice(undefined)
     setNewRoute({
       id,
-      displayName: `${row.entry.displayName} 自定义`,
-      api: '',
+      displayName: `${row.entry.displayName} 扩展`,
+      // Prefill the source route's protocol when it names one; otherwise the
+      // hand-declared default the migrate flow uses.
+      api: typeof info.api === 'string' && info.api !== '' ? info.api : 'openai-completions',
       baseURL: text('baseURL'),
       apiKeyEnv: text('apiKeyEnv'),
       rows: [],
     })
+    if (exists) {
+      setNotice(`已有伴生路由 ${canonical}：可直接向它追加模型，或改用新 ID。`)
+    }
   }
 
   /**
@@ -639,8 +700,10 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     <section className="dshAma-root" aria-label="模型高级设置">
       <style>{ADVANCED_CSS}</style>
       <p className="dshAma-intro">
-        在此调整模型条目的高级字段：推理等级、输入模态、网关兼容开关等。provider 路由、端点与凭据仍由官方“模型”页维护；
-        本页读取 dsh 的实时模型目录，只保存模型级改动。
+        调整模型的高级字段（推理等级、输入模态、兼容开关）与路由级默认（请求头、重试、默认推理档）。
+        端点与凭据仍在官方「模型」页维护。两件事请分清：
+        <b>目录路由</b>继承官方模型列表，可按 ID 覆盖；
+        <b>手写路由</b>自带协议与清单。目录外新模型请建 <code>-extra</code> 伴生路由，不要硬塞进目录路由。
       </p>
       {state.status === 'error'
         ? <p className="dshAma-error">{`加载失败：${state.error ?? ''}`}</p>
@@ -667,13 +730,18 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           }}
         >
           <option value="">（选择要编辑的 provider 路由）</option>
-          {state.routes.map(candidate => (
-            <option key={candidate.entry.provider} value={candidate.entry.provider}>
-              {candidate.entry.displayName === candidate.entry.provider
-                ? candidate.entry.provider
-                : `${candidate.entry.displayName}（${candidate.entry.provider}）`}
-            </option>
-          ))}
+          {state.routes.map(candidate => {
+            const kind = candidate.entry.declared === true ? '手写' : '目录'
+            const live = candidate.entry.active ? '' : ' · 未生效'
+            const name = candidate.entry.displayName === candidate.entry.provider
+              ? candidate.entry.provider
+              : `${candidate.entry.displayName}（${candidate.entry.provider}）`
+            return (
+              <option key={candidate.entry.provider} value={candidate.entry.provider}>
+                {`[${kind}${live}] ${name}`}
+              </option>
+            )
+          })}
         </select>
         </div>
         <button
@@ -689,6 +757,11 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       {row === undefined ? null : (
         <>
           {routeInfo(row)}
+          <RouteReasoningCard
+            key={`${row.entry.provider}-reasoning`}
+            row={row} disabled={disabled} api={api}
+            namespace={namespace} controller={controller}
+          />
           <RetryPolicyCard
             key={row.entry.provider}
             row={row} disabled={disabled} api={api}
@@ -705,14 +778,19 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           {inModelsMode
             ? (
               <div className="dshAma-modeBanner">
-                <b>整表模式</b>：此路由自带模型清单（手写路由或已接管的目录路由）。保存将整表写入
-                <code>models</code>；清空列表可恢复目录继承（仅目录路由）。
+                <b>整表模式</b>
+                {row.entry.declared === true
+                  ? '：手写路由自带模型清单，保存会整表写入 models。'
+                  : '：用户层已接管本路由的模型清单，保存会整表写入 models（不再是「仅覆盖目录里的某几个」）。'}
+                {' '}目录路由清空列表可恢复目录继承。
               </div>
             )
             : row.mode === 'overrides'
               ? (
                 <div className="dshAma-modeBanner">
-                  <b>覆盖模式</b>：按模型 ID 微调官方目录（<code>modelOverrides</code>），不影响清单本身。
+                  <b>覆盖模式</b>：按模型 ID 微调官方目录中的单个模型（<code>modelOverrides</code>），
+                  其余目录模型不受影响。若要新增目录里没有的模型，请
+                  <button type="button" className="dshAma-linkButton" onClick={startSplitRoute}>创建 -extra 伴生路由</button>。
                 </div>
               )
               : row.entry.declared === true
@@ -723,9 +801,10 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                 )
                 : (
                   <div className="dshAma-modeBanner">
-                    <b>目录路由</b>：可按模型 ID 覆盖高级字段；如需接入<b>目录外的新模型</b>，请
-                    <button type="button" className="dshAma-linkButton" onClick={startSplitRoute}>创建独立接入路由</button>
-                    （避免路由级协议覆盖影响目录内模型）。
+                    <b>目录路由</b>：当前未覆盖任何模型，沿用官方目录列表。
+                    可按模型 ID 覆盖高级字段；接入<b>目录外新模型</b>请
+                    <button type="button" className="dshAma-linkButton" onClick={startSplitRoute}>创建 -extra 伴生路由</button>
+                    （同端点同凭据，独立协议，不影响目录内模型）。
                   </div>
                 )}
           {inModelsMode
@@ -743,10 +822,29 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                   >models.dev 参考</button>
                   <button
                     type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setModelsDraft([...models, { id: '' }]) }}
+                    onClick={() => {
+                      const blank: ModelDraft = row.entry.declared === true
+                        ? { id: '', ...defaultReasoningEfforts() as ModelDraft }
+                        : { id: '' }
+                      setModelsDraft([...models, blank])
+                    }}
                   >手动添加</button>
+                  <button
+                    type="button" className="dshAma-linkButton" disabled={disabled || enrichBusy}
+                    title="按模型 ID 从 models.dev 补全缺失的推理等级 / 容量 / 模态（不覆盖已有字段）"
+                    onClick={() => { void enrichFromModelsDev('models') }}
+                  >{enrichBusy ? '补全中…' : '从 models.dev 补全'}</button>
                 </div>
                 {models.length === 0 ? <p className="dshAma-hint">清单为空。</p> : null}
+                {row.entry.declared === true && models.some(model => model.reasoningEfforts === undefined)
+                  ? (
+                    <p className="dshAma-hint">
+                      有 {String(models.filter(model => model.reasoningEfforts === undefined).length)} 个模型未声明推理等级：
+                      手写路由不会从官方目录继承，这些模型在聊天选择器里
+                      <b>没有推理档</b>。展开模型行 →「启用推理」即可。
+                    </p>
+                  )
+                  : null}
                 {models.map((model, index) => (
                   <div key={index} className="dshAma-entry">
                     <div className="dshAma-entryHead">
@@ -757,8 +855,8 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                       ><IconChevron open={openRows.has('m' + String(index))} /></button>
                       <span className="dshAma-entryId">{typeof model.id === 'string' && model.id !== '' ? model.id : '（未命名）'}</span>
                       {typeof model.id === 'string' && model.id.trim() !== ''
-                        && row.entry.declared !== true && !catalogIdSet.has(model.id.trim())
-                        ? <span className="dshAma-offCatalogBadge" title="不在官方目录中，多协议目录路由无法为它声明协议">目录外</span>
+                        && catalogIdSet.size > 0 && row.entry.declared !== true && !catalogIdSet.has(model.id.trim())
+                        ? <span className="dshAma-offCatalogBadge" title="不在官方目录中">目录外</span>
                         : null}
                       <span className="dshAma-entryName">
                         {typeof model.name === 'string' && model.name !== ''
@@ -775,6 +873,10 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                       ? (
                         <ModelEntryEditor
                           row={model} index={index} disabled={disabled}
+                          api={typeof model.api === 'string' && model.api !== ''
+                            ? model.api as string
+                            : routeApi}
+                          handDeclared={row.entry.declared === true}
                           catalogModel={catalogModelFor(typeof model.id === 'string' ? model.id : '')}
                           onChange={(next) => { patchModel(index, next) }}
                         />
@@ -836,6 +938,8 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                       ? (
                         <ModelEntryEditor
                           row={{ ...overrides[id], id }} index={0} disabled={disabled} lockedId
+                          api={routeApi}
+                          handDeclared={false}
                           catalogModel={catalogModelFor(id)}
                           onChange={(next) => { setOverridesDraft({ ...overrides, [id]: next }) }}
                         />
@@ -961,8 +1065,15 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                     onClick={() => { setDiscoveryTarget('new-route') }}>从 provider 发现</button>
                   <button type="button" className="dshAma-linkButton" disabled={disabled}
                     onClick={() => { setModelsDevTarget('new-route') }}>models.dev 参考</button>
+                  <button type="button" className="dshAma-linkButton" disabled={disabled || enrichBusy}
+                    onClick={() => { void enrichFromModelsDev('new-route') }}>
+                    {enrichBusy ? '补全中…' : '从 models.dev 补全'}
+                  </button>
                   <button type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setNewRoute({ ...newRoute, rows: [...newRoute.rows, { id: '' }] }) }}>手动添加</button>
+                    onClick={() => {
+                      const blank: ModelDraft = { id: '', ...defaultReasoningEfforts() as ModelDraft }
+                      setNewRoute({ ...newRoute, rows: [...newRoute.rows, blank] })
+                    }}>手动添加</button>
                 </div>
                 {newRoute.rows.map((model, index) => (
                   <div key={index} className="dshAma-entry">
@@ -984,6 +1095,10 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                       ? (
                         <ModelEntryEditor
                           row={model} index={index} disabled={disabled}
+                          api={typeof model.api === 'string' && model.api !== ''
+                            ? model.api as string
+                            : newRoute.api}
+                          handDeclared
                           onChange={(next) => {
                             setNewRoute({ ...newRoute, rows: newRoute.rows.map((m, at) => at === index ? next : m) })
                           }}
@@ -1099,9 +1214,14 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           : modelIds}
         onAdopt={(rows) => {
           if (discoveryTarget === 'new-route' && newRoute !== undefined) {
-            setNewRoute({ ...newRoute, rows: mergeModelRows(newRoute.rows, rows) })
+            const merged = mergeModelRows(newRoute.rows, rows)
+            setNewRoute({ ...newRoute, rows: merged })
+            // Discovery only returns id/name/capacities — enrich reasoning etc.
+            void enrichFromModelsDev('new-route', merged)
           } else {
-            setModelsDraft(mergeModelRows(models, rows))
+            const merged = mergeModelRows(models, rows)
+            setModelsDraft(merged)
+            void enrichFromModelsDev('models', merged)
           }
         }}
       />
@@ -1120,6 +1240,105 @@ function retrySummary(base: RetryPolicyDraft | undefined): string {
   if (base.mode === 'always') return '（自定义：无限重试）'
   const retries = base.maxRetries.trim() === '' ? String(RETRY_POLICY_DEFAULTS.maxRetries) : base.maxRetries.trim()
   return `（自定义：最多 ${retries} 次重试）`
+}
+
+/**
+ * Route-level default reasoning effort (`providers.<route>.reasoning`).
+ * Not a capability declaration — it only seeds the effort when a call omits
+ * one. Unsupported levels fail the request, so the picker offers only the
+ * canonical levels and the copy says so.
+ */
+function RouteReasoningCard(props: {
+  row: RouteRow
+  disabled: boolean
+  api: Pick<AdvancedModelsRemote, 'settings'>
+  namespace: SettingsNamespaceView | undefined
+  controller: AdvancedModelsStore
+}): ReactNode {
+  const { row, api, namespace, controller } = props
+  const base = typeof row.userProfile?.reasoning === 'string' ? row.userProfile.reasoning as string : ''
+  const [draft, setDraft] = useState<string | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<string | undefined>(undefined)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const effective = draft ?? base
+  const changed = draft !== undefined && draft !== base
+  const fieldDisabled = props.disabled || busy
+
+  const run = async (ops: readonly SettingsPathOpView[], doneNotice: string): Promise<void> => {
+    if (namespace === undefined) return
+    setBusy(true)
+    setFailure(undefined)
+    setNotice(undefined)
+    const outcome = await writeOps(api, ops, namespace.revision)
+    setBusy(false)
+    if (outcome.kind === 'conflict') {
+      setFailure('配置已在别处更新。已重新加载，请检查后再次保存。')
+      setDraft(undefined)
+      await controller.load()
+      return
+    }
+    if (outcome.kind === 'failure') {
+      setFailure(outcome.message)
+      return
+    }
+    setDraft(undefined)
+    setNotice(doneNotice)
+    await controller.load()
+  }
+
+  const save = async (): Promise<void> => {
+    if (draft === undefined) return
+    await run(
+      draft === ''
+        ? [{ op: 'unset', path: [...row.entry.settingsPath, 'reasoning'] }]
+        : [{ op: 'set', path: [...row.entry.settingsPath, 'reasoning'], value: draft as JsonValue }],
+      '已保存路由默认推理档。',
+    )
+  }
+
+  return (
+    <details className="dshAma-newRoute dshAma-retryCard">
+      <summary className="dshAma-newRouteSummary">
+        {`路由默认推理档（reasoning）${base === '' ? '（默认：不指定）' : `（${base}）`}`}
+      </summary>
+      <div className="dshAma-newRouteBody">
+        <p className="dshAma-hint">
+          仅当会话未单独选择推理档时生效；它不扩展模型支持的级别。
+          模型不支持该档时请求会失败——请与模型行的「推理等级」声明保持一致。
+        </p>
+        <label className="dshAma-field">
+          <span className="dshAma-fieldLabel">默认档位</span>
+          <select
+            className="dshAma-input dshAma-select" value={effective}
+            aria-label="路由默认推理档" disabled={fieldDisabled}
+            onChange={(event) => { setDraft(event.target.value) }}
+          >
+            <option value="">不指定（跟随会话 / 目录）</option>
+            {REASONING_LEVELS.map(level => (
+              <option key={level} value={level}>{level}</option>
+            ))}
+          </select>
+        </label>
+        <div className="dshAma-footer">
+          {failure !== undefined ? <p className="dshAma-error">{failure}</p> : null}
+          {notice !== undefined ? <p className="dshAma-notice">{notice}</p> : null}
+          <button
+            type="button" className="dshAma-button dshAma-buttonPrimary"
+            disabled={fieldDisabled || !changed}
+            onClick={() => { void save() }}
+          >{busy ? '保存中…' : '保存默认推理档'}</button>
+          {changed ? (
+            <button
+              type="button" className="dshAma-button"
+              disabled={fieldDisabled}
+              onClick={() => { setDraft(undefined); setFailure(undefined); setNotice(undefined) }}
+            >撤销修改</button>
+          ) : null}
+        </div>
+      </div>
+    </details>
+  )
 }
 
 /**
@@ -1483,6 +1702,9 @@ const ADVANCED_CSS = `
 .dshAma-entryId { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAma-entryName { color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAma-offCatalogBadge { flex: none; padding: 1px 6px; border-radius: 999px; background: rgba(220, 38, 38, .12); color: #dc2626; font-size: 11px; }
+.dshAma-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; }
+.dshAma-badgeCatalog { background: rgba(59, 130, 246, .12); color: #2563eb; }
+.dshAma-badgeCustom { background: rgba(22, 163, 74, .12); color: #16a34a; }
 .dshAma-entryBody { display: flex; flex-direction: column; gap: 10px; padding: 10px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
 .dshAma-iconButton { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: none; color: var(--dsw-alias-label-secondary, #64748b); cursor: pointer; font-size: 10px; }
 .dshAma-iconButton:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2, rgba(148,163,184,.15)); }
@@ -1492,6 +1714,8 @@ const ADVANCED_CSS = `
 .dshAma-kvKey { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); }
 .dshAma-readonlyValue { font-size: 12px; color: var(--dsw-alias-label-secondary, #94a3b8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAma-check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.dshAma-levelGrid { display: flex; flex-wrap: wrap; gap: 10px 14px; padding: 6px 0; }
+.dshAma-invalid { color: #dc2626; }
 .dshAma-footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .dshAma-button { padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; cursor: pointer; font-size: 12.5px; }
 .dshAma-button:disabled { opacity: .5; cursor: default; }

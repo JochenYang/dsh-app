@@ -63,6 +63,74 @@ export const COMPAT_FIELDS: readonly CompatFieldMeta[] = [
 const COMPAT_BY_KEY = new Map(COMPAT_FIELDS.map(field => [field.key, field]))
 
 /**
+ * Wire protocols a hand-declared route may name, plus the Responses family
+ * aliases pi-ai shares a compat gate with. Mirrors harness
+ * `packages/llm/llm-pi-ai/src/{provider,catalog}.ts`.
+ */
+export const HAND_PROTOCOLS = [
+  'openai-completions', 'openai-responses', 'anthropic-messages',
+] as const
+
+/** Compat switches each protocol offers (mirrors harness COMPAT_GATES 'offer'). */
+const PROTOCOL_COMPAT: Readonly<Record<string, readonly string[]>> = {
+  'openai-completions': [
+    'supportsStore', 'supportsDeveloperRole', 'supportsReasoningEffort',
+    'supportsUsageInStreaming', 'supportsFinishReason', 'maxTokensField',
+    'requiresToolResultName', 'requiresAssistantAfterToolResult',
+    'requiresThinkingAsText', 'requiresReasoningContentOnAssistantMessages',
+    'thinkingFormat', 'supportsThinkingTokenBudget', 'thinkingTokenBudgetField',
+    'vllmPriority', 'supportsStrictMode', 'cacheControlFormat',
+    'supportsLongCacheRetention',
+  ],
+  // azure/codex-responses share this gate with openai-responses.
+  'openai-responses': [
+    'supportsDeveloperRole', 'supportsMaxOutputTokens', 'supportsStrictMode',
+    'supportsLongCacheRetention',
+  ],
+  'anthropic-messages': [
+    'supportsEagerToolInputStreaming', 'supportsLongCacheRetention',
+    'supportsCacheControlOnTools', 'supportsTemperature',
+    'forceAdaptiveThinking', 'allowEmptySignature', 'supportsStrictTools',
+  ],
+  'bedrock-converse-stream': ['supportsStrictMode'],
+}
+
+/**
+ * Compat fields valid for one resolved protocol. An unknown protocol returns
+ * the union of hand-declared protocols so an undeclared catalog route still
+ * offers every switch a configured route can name — with a UI warning.
+ */
+export function compatFieldsForApi(api: string | undefined): readonly CompatFieldMeta[] {
+  if (api !== undefined && api !== '') {
+    const offered = PROTOCOL_COMPAT[api]
+    if (offered !== undefined) {
+      return COMPAT_FIELDS.filter(field => offered.includes(field.key))
+    }
+  }
+  const allowed = new Set<string>()
+  for (const list of Object.values(PROTOCOL_COMPAT)) {
+    for (const key of list) allowed.add(key)
+  }
+  return COMPAT_FIELDS.filter(field => allowed.has(field.key))
+}
+
+/**
+ * Auto-fill for a freshly declared reasoning dict on a private gateway.
+ * OpenAI-compatible completions gateways mis-detect as OpenAI and flip the
+ * system prompt to `developer`; responses only takes `supportsDeveloperRole`.
+ * Anthropic takes neither — leave the row alone.
+ */
+export function reasoningCompatFill(api: string | undefined): Record<string, unknown> {
+  if (api === 'openai-completions') {
+    return { supportsDeveloperRole: false, maxTokensField: 'max_tokens' }
+  }
+  if (api === 'openai-responses') {
+    return { supportsDeveloperRole: false }
+  }
+  return {}
+}
+
+/**
  * Family presets for the wire-compatibility switches models.dev cannot
  * supply. The DeepSeek-gateway set is field-verified against a live route
  * (`opencode-go-vision` in settings.yaml, 2026-08); others stay hand-written
@@ -152,6 +220,16 @@ export type ModelDraft = Record<string, unknown>
 
 /** Reasoning-effort tri-state as the form holds it. */
 export type ReasoningDraft = undefined | false | Record<string, string | null>
+
+/**
+ * Default reasoning efforts for a hand-declared model: a conventional trio
+ * with identity wire spellings. Private OpenAI-compatible gateways almost
+ * always accept these; models.dev enrichment can replace them with the
+ * model's real set (including xhigh/max) when the feed knows the id.
+ */
+export function defaultReasoningEfforts(): Record<string, string> {
+  return { low: 'low', medium: 'medium', high: 'high' }
+}
 
 /**
  * Normalize a stored `reasoningEfforts` value into the form's tri-state.
@@ -304,9 +382,16 @@ export function parseRetryPolicy(draft: RetryPolicyDraft): RetryPolicyParse {
  * Validate one model row the way the page refuses it: a non-empty id unique
  * in the list, well-formed capacities, a level-keyed reasoning dict with
  * string-or-null spellings, and compat values the mirrored metadata accepts.
+ * When `api` is named, model-level compat switches that protocol does not
+ * take are refused here so the write never reaches the adapter's English
+ * resolve-time error.
  * @returns the failure text (zh-CN), or undefined when the row is writable.
  */
-export function modelRowFailure(row: ModelDraft, knownIds: ReadonlySet<string>): string | undefined {
+export function modelRowFailure(
+  row: ModelDraft,
+  knownIds: ReadonlySet<string>,
+  api?: string,
+): string | undefined {
   const id = typeof row.id === 'string' ? row.id.trim() : ''
   if (id === '') return '模型 ID 不能为空'
   if (knownIds.has(id)) return `模型 ID 重复：${id}`
@@ -323,6 +408,9 @@ export function modelRowFailure(row: ModelDraft, knownIds: ReadonlySet<string>):
       return `${id} 的推理等级格式不正确`
     }
     const levels = Object.keys(reasoning as Record<string, unknown>)
+    if (levels.length === 0) {
+      return `${id} 的推理等级为空：至少声明一个档位（如 high），或改为“禁用推理”`
+    }
     for (const level of levels) {
       if (!(REASONING_LEVELS as readonly string[]).includes(level)) {
         return `${id} 的推理级别未知：${level}`
@@ -343,6 +431,18 @@ export function modelRowFailure(row: ModelDraft, knownIds: ReadonlySet<string>):
   }
   const failingCompat = compatFailure(row.compat)
   if (failingCompat !== undefined) return `${id} 的兼容开关 ${failingCompat} 取值不合法`
+  if (api !== undefined && api !== '' && typeof row.compat === 'object'
+    && row.compat !== null && !Array.isArray(row.compat)) {
+    const offered = new Set(compatFieldsForApi(api).map(field => field.key))
+    // Unknown keys stay a hand-written escape hatch (the adapter still gates
+    // them), but keys this page knows and the protocol does not take are a
+    // write the adapter would refuse — catch them here.
+    for (const key of Object.keys(row.compat as Record<string, unknown>)) {
+      if (COMPAT_BY_KEY.has(key) && !offered.has(key)) {
+        return `${id} 的兼容开关 ${key} 不适用于 ${api} 协议`
+      }
+    }
+  }
   return undefined
 }
 

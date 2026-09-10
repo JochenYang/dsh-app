@@ -171,3 +171,102 @@ export function mapProviderModels(provider: ModelsDevProvider): { id: string; dr
   }
   return mapped
 }
+
+/**
+ * Find the best models.dev entry for one model id.
+ * Preference: a provider whose id matches `preferProvider`, then any provider
+ * that actually declares reasoning for that id, then the first hit.
+ */
+export function lookupModelsDevModel(
+  providers: readonly ModelsDevProvider[],
+  modelId: string,
+  preferProvider?: string,
+): { providerId: string; draft: ModelDraft } | undefined {
+  const id = modelId.trim()
+  if (id === '') return undefined
+  const hits: { providerId: string; draft: ModelDraft; hasReasoning: boolean }[] = []
+  for (const provider of providers) {
+    for (const [key, entry] of Object.entries(provider.models)) {
+      const entryId = entry.id ?? key
+      if (entryId !== id) continue
+      const draft = mapModel(entryId, entry)
+      if (draft === undefined) continue
+      hits.push({
+        providerId: provider.id,
+        draft,
+        hasReasoning: draft.reasoningEfforts !== undefined,
+      })
+    }
+  }
+  if (hits.length === 0) return undefined
+  if (preferProvider !== undefined && preferProvider !== '') {
+    const preferred = hits.find(hit => hit.providerId === preferProvider && hit.hasReasoning)
+      ?? hits.find(hit => hit.providerId === preferProvider)
+    if (preferred !== undefined) {
+      return { providerId: preferred.providerId, draft: preferred.draft }
+    }
+  }
+  const withReasoning = hits.find(hit => hit.hasReasoning)
+  const chosen = withReasoning ?? hits[0]
+  return { providerId: chosen.providerId, draft: chosen.draft }
+}
+
+/** Outcome of enriching a draft list from the feed. */
+export interface EnrichResult {
+  /** Drafts after gap-fill (same order, same ids). */
+  drafts: ModelDraft[]
+  /** Ids that received at least one new field. */
+  filled: string[]
+  /** Ids with no feed hit. */
+  missing: string[]
+}
+
+/**
+ * Gap-fill drafts from models.dev: never overwrite a field the user already
+ * set; only supply what is absent (name, capacities, input, reasoningEfforts).
+ * Reasoning is the primary reason this exists — hand-declared routes have no
+ * catalog to inherit from, so an omitted `reasoningEfforts` means "no picker".
+ */
+export function enrichDraftsFromModelsDev(
+  providers: readonly ModelsDevProvider[],
+  drafts: readonly ModelDraft[],
+  preferProvider?: string,
+): EnrichResult {
+  const out: ModelDraft[] = []
+  const filled: string[] = []
+  const missing: string[] = []
+  for (const row of drafts) {
+    const id = typeof row.id === 'string' ? row.id.trim() : ''
+    if (id === '') {
+      out.push(row)
+      continue
+    }
+    const hit = lookupModelsDevModel(providers, id, preferProvider)
+    if (hit === undefined) {
+      out.push(row)
+      missing.push(id)
+      continue
+    }
+    const next: ModelDraft = { ...row }
+    let changed = false
+    const fill = <K extends string>(key: K, value: unknown): void => {
+      if (value === undefined) return
+      if (next[key] !== undefined) return
+      next[key] = value
+      changed = true
+    }
+    fill('name', hit.draft.name)
+    fill('contextWindow', hit.draft.contextWindow)
+    fill('maxTokens', hit.draft.maxTokens)
+    fill('input', hit.draft.input)
+    // Prefer the feed's real effort set (may include xhigh/max) over a
+    // hand-filled default trio the user has not touched beyond identity.
+    if (next.reasoningEfforts === undefined) {
+      fill('reasoningEfforts', hit.draft.reasoningEfforts)
+    }
+    out.push(next)
+    if (changed) filled.push(id)
+    else out[out.length - 1] = row
+  }
+  return { drafts: out, filled, missing }
+}
