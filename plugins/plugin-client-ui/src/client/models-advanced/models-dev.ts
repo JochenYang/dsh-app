@@ -91,6 +91,38 @@ export function searchProviders(providers: readonly ModelsDevProvider[], query: 
   })
 }
 
+/** One model-level hit: which provider serves it, and the mapped draft. */
+export interface ModelsDevModelHit {
+  providerId: string
+  modelId: string
+  draft: ModelDraft
+}
+
+/**
+ * Search models across every provider by wire id OR display name.
+ * Complements {@link searchProviders}: users type marketing names
+ * ("V4.1 Flash") that never appear in the wire id (`deepseek-flash`).
+ */
+export function searchModels(
+  providers: readonly ModelsDevProvider[],
+  query: string,
+  limit = 30,
+): ModelsDevModelHit[] {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return []
+  const hits: ModelsDevModelHit[] = []
+  for (const provider of providers) {
+    for (const mapped of mapProviderModels(provider)) {
+      const name = typeof mapped.draft.name === 'string' ? mapped.draft.name.toLowerCase() : ''
+      if (mapped.id.toLowerCase().includes(needle) || name.includes(needle)) {
+        hits.push({ providerId: provider.id, modelId: mapped.id, draft: mapped.draft })
+        if (hits.length >= limit) return hits
+      }
+    }
+  }
+  return hits
+}
+
 /**
  * Parse `reasoning_options` into the level list it carries. The feed's real
  * shape is an array of typed option objects (`{type:'effort',values:[…]}`,

@@ -8,8 +8,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ModelDraft } from './fields.ts'
-import { fetchModelsDev, mapProviderModels, searchProviders } from './models-dev.ts'
-import type { ModelsDevProvider } from './models-dev.ts'
+import { fetchModelsDev, mapProviderModels, searchModels, searchProviders } from './models-dev.ts'
+import type { ModelsDevModelHit, ModelsDevProvider } from './models-dev.ts'
 
 /** Props of {@link ModelsDevImportDialog}. */
 export interface ModelsDevImportDialogProps {
@@ -40,6 +40,8 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<ProviderDraft | undefined>(undefined)
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
+  /** Picks from the model-name search list (keyed providerId + space + modelId). */
+  const [pickedModels, setPickedModels] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -64,6 +66,15 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
     () => providers === undefined ? [] : searchProviders(providers, query).slice(0, 20),
     [providers, query],
   )
+  const modelHits = useMemo(
+    () => providers === undefined ? [] : searchModels(providers, query, 30),
+    [providers, query],
+  )
+  const hitKey = (hit: ModelsDevModelHit): string => hit.providerId + ' ' + hit.modelId
+  const pickedHits = modelHits.filter(hit => pickedModels.has(hitKey(hit)))
+  const adoptCount = pickedHits.length > 0
+    ? pickedHits.length
+    : expanded === undefined ? 0 : picked.size
 
   const openProvider = (provider: ModelsDevProvider): void => {
     setExpanded({ provider, models: mapProviderModels(provider) })
@@ -108,11 +119,50 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                     className="dshAma-input"
                     type="text"
                     value={query}
-                    placeholder="搜索 provider（如 opencode、deepseek、openai-compatible）"
-                    aria-label="搜索 provider"
-                    onChange={(event) => { setQuery(event.target.value); setExpanded(undefined) }}
+                    placeholder="搜模型 ID / 显示名 / provider（如 V4.1、deepseek-flash、opencode）"
+                    aria-label="搜索模型或 provider"
+                    onChange={(event) => {
+                      setQuery(event.target.value)
+                      setExpanded(undefined)
+                      setPickedModels(new Set())
+                    }}
                   />
-                  {query.trim() === '' ? <p className="dshAma-hint">输入关键词搜索 provider，再选择要导入的模型。</p> : null}
+                  {query.trim() === ''
+                    ? <p className="dshAma-hint">可按显示名搜索（如 V4.1 Flash）。wire ID 与营销名可能不同，例如 V4.1 的 ID 是 deepseek-flash。</p>
+                    : null}
+                  {modelHits.length > 0 ? (
+                    <div className="dshAma-candidateBlock">
+                      <p className="dshAma-hint">模型匹配（wire ID 与显示名都搜）：</p>
+                      <ul className="dshAma-candidateList">
+                        {modelHits.map(hit => {
+                          const key = hitKey(hit)
+                          const name = typeof hit.draft.name === 'string' ? hit.draft.name : ''
+                          return (
+                            <li key={key} className="dshAma-candidate">
+                              <label className="dshAma-check">
+                                <input
+                                  type="checkbox"
+                                  checked={pickedModels.has(key)}
+                                  onChange={() => {
+                                    setPickedModels(current => {
+                                      const next = new Set(current)
+                                      if (!next.delete(key)) next.add(key)
+                                      return next
+                                    })
+                                  }}
+                                />
+                                <span>
+                                  {name !== '' && name !== hit.modelId ? name + '（' + hit.modelId + '）' : hit.modelId}
+                                </span>
+                                <span className="dshAma-muted"> · {hit.providerId}</span>
+                                {existingIds.has(hit.modelId) ? <span className="dshAma-muted">（已配置）</span> : null}
+                              </label>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    </div>
+                  ) : null}
                   <div className="dshAma-providerList">
                     {results.map(provider => (
                       <button
@@ -128,8 +178,8 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                         </span>
                       </button>
                     ))}
-                    {query.trim() !== '' && results.length === 0
-                      ? <p className="dshAma-hint">没有匹配的 provider。</p>
+                    {query.trim() !== '' && results.length === 0 && modelHits.length === 0
+                      ? <p className="dshAma-hint">没有匹配的 provider 或模型。</p>
                       : null}
                   </div>
                   {expanded === undefined ? null : (
@@ -171,13 +221,18 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
           <button
             type="button"
             className="dshAma-button dshAma-buttonPrimary"
-            disabled={expanded === undefined || picked.size === 0}
+            disabled={adoptCount === 0}
             onClick={() => {
-              if (expanded === undefined) return
-              onAdopt(expanded.models.filter(model => picked.has(model.id)).map(model => model.draft))
+              if (pickedHits.length > 0) {
+                onAdopt(pickedHits.map(hit => hit.draft))
+              } else if (expanded !== undefined && picked.size > 0) {
+                onAdopt(expanded.models.filter(model => picked.has(model.id)).map(model => model.draft))
+              } else {
+                return
+              }
               onClose()
             }}
-          >{`采用 ${String(picked.size)} 个模型`}</button>
+          >{`采用 ${String(adoptCount)} 个模型`}</button>
         </div>
       </div>
     </div>
