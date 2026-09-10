@@ -120,8 +120,14 @@ function run(cmd, args, cwd) {
   // (CVE-2024-27980 mitigation), so shell is required; pass one joined line
   // instead of args to avoid DEP0190. Every token is strictly quoted so paths
   // with spaces (e.g. under Program Files) cannot split or inject.
-  if (process.platform === 'win32') execFileSync([cmd, ...args].map(quoteWinArg).join(' '), { ...opts, shell: true })
-  else execFileSync(cmd, args, opts)
+  // npm resolves to an absolute path beside the running node: a bare
+  // `npm.cmd` lets cmd.exe prefer a same-named file under the cwd (a plugin
+  // dir whose node_modules happens to ship npm shims), running the wrong
+  // cli.js and failing with a missing-module error.
+  if (process.platform === 'win32') {
+    if (cmd === 'npm.cmd' || cmd === 'npm') cmd = path.join(path.dirname(process.execPath), 'npm.cmd')
+    execFileSync([cmd, ...args].map(quoteWinArg).join(' '), { ...opts, shell: true })
+  } else execFileSync(cmd, args, opts)
 }
 
 // Map a (platform, arch) to the nodejs.org dist tuple. nodejs.org uses
