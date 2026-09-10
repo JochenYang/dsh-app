@@ -141,9 +141,15 @@ export function containsCredential(text: string): boolean {
 }
 
 /**
- * Repair double-prefixed lines already persisted (`- [a] date - [b] date …`
- * from runs before {@link stripEntryPrefix}): collapse to a single prefix,
- * keeping the OUTER category/date. Returns how many lines were fixed.
+ * Repair double-prefixed lines already persisted. Two shapes came from runs
+ * before the guards landed; both collapse to one prefix, keeping the OUTER
+ * category/date:
+ *   - `- [a] 2026-01-02 - [b] 2026-01-03 text` (echoed full prefix);
+ *   - `- [a] 2026-01-02 2026-01-02 text` (echoed bare date, same value —
+ *     provably redundant, so the duplicate is dropped).
+ * A bare-date echo whose values DIFFER is left alone: the inner date is
+ * content the writer meant to keep, and guessing which one wins would lose
+ * information.
  * Idempotent — clean files report 0 and are left byte-identical.
  */
 export function repairDoublePrefix(text: string): { fixed: string, count: number } {
@@ -151,10 +157,17 @@ export function repairDoublePrefix(text: string): { fixed: string, count: number
   const lines = text.split('\n').map(line => {
     const outer = ENTRY_PREFIX.exec(line)
     if (outer === null) return line
+    const date = /\d{4}-\d{2}-\d{2}/u.exec(outer[0])?.[0]
     const rest = line.slice(outer[0].length)
-    if (!ENTRY_PREFIX.test(rest)) return line
-    count += 1
-    return `${outer[0]}${rest.replace(ENTRY_PREFIX, '')}`
+    if (ENTRY_PREFIX.test(rest)) {
+      count += 1
+      return `${outer[0]}${rest.replace(ENTRY_PREFIX, '')}`
+    }
+    if (date !== undefined && rest.startsWith(`${date} `)) {
+      count += 1
+      return `${outer[0]}${rest.slice(date.length + 1)}`
+    }
+    return line
   })
   return { fixed: lines.join('\n'), count }
 }

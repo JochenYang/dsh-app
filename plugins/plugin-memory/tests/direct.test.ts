@@ -54,6 +54,35 @@ test('repairDoublePrefix collapses nested prefixes', () => {
   assert.equal(fixed, '- [lesson] 2026-09-06 real content\n- [fact] 2026-09-07 clean\n')
 })
 
+test('repairDoublePrefix collapses redundant bare-date echoes', () => {
+  const { fixed, count } = repairDoublePrefix('- [fact] 2026-08-28 2026-08-28 skills work\n- [fact] 2026-09-07 clean\n')
+  assert.equal(count, 1)
+  assert.equal(fixed, '- [fact] 2026-08-28 skills work\n- [fact] 2026-09-07 clean\n')
+})
+
+test('repairDoublePrefix keeps a DIFFERING inner date (it is content)', () => {
+  const text = '- [decision] 2026-08-30 2026-09-02 设置页重构定案\n'
+  const { fixed, count } = repairDoublePrefix(text)
+  assert.equal(count, 0)
+  assert.equal(fixed, text)
+})
+
+test('repairDoublePrefix only strips when the echoed date matches exactly', () => {
+  // Same date -> the echo is provably redundant, one copy is dropped.
+  const same = repairDoublePrefix('- [fact] 2026-09-10 2026-09-10 body\n')
+  assert.equal(same.count, 1)
+  assert.equal(same.fixed, '- [fact] 2026-09-10 body\n')
+
+  // Different date -> the inner date is content, nothing is touched.
+  const diff = repairDoublePrefix('- [fact] 2026-09-10 2026-11-02 deadline\n')
+  assert.equal(diff.count, 0)
+  assert.equal(diff.fixed, '- [fact] 2026-09-10 2026-11-02 deadline\n')
+
+  // A date that merely STARTS the body but is not the outer date is content too.
+  const other = repairDoublePrefix('- [fact] 2026-09-10 2026-09-11 later\n')
+  assert.equal(other.count, 0)
+})
+
 test('repairDoublePrefix leaves clean files byte-identical', () => {
   const text = '- [fact] 2026-09-07 clean\n- [lesson] 2026-09-06 also clean\n'
   const { fixed, count } = repairDoublePrefix(text)
@@ -71,6 +100,16 @@ test('recordLlmAudit round-trips newest-first', () => {
   assert.equal(runs[0]!.session, 'def456')
   assert.equal(runs[1]!.session, 'abc123')
   assert.equal(runs[0]!.error, 'unparseable JSON response')
+})
+
+test('buildDistillPrompt bans work logs and repo restatements', () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-prompt-')))
+  const { system } = buildDistillPrompt('[user] hello', undefined, root)
+  // The false-positive classes this prompt must name explicitly.
+  assert.match(system, /work log/i)
+  assert.match(system, /commit ids/i)
+  assert.match(system, /different conversation/i)
+  assert.match(system, /restating project code or docs/i)
 })
 
 test('buildDistillPrompt splits system/user and bans prefixes', () => {

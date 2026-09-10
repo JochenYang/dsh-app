@@ -21,6 +21,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+// Type-only: pulls the agents Context merge (ctx.agents) into scope.
+import type {} from '@deepseek-ai/dsh-agent'
 import { MAX_ENTRY_CHARS, containsCredential, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
@@ -42,9 +45,16 @@ function execCwd(exec: ToolRunContext): string | undefined {
  * Register both memory tools on the context.
  * @param ctx - host plugin context (tools service).
  * @param root - the two-level memory root.
+ * @param onSaved - called after a save persisted (the curator's trigger, so
+ *   the model-driven direct path consolidates too — not only the distiller);
+ *   receives the executing agent and its session id when both are resolvable.
  * @returns disposer removing both registrations.
  */
-export function registerMemoryTools(ctx: Context, root: MemoryRoot): () => void {
+export function registerMemoryTools(
+  ctx: Context,
+  root: MemoryRoot,
+  onSaved?: (parent: NonNullable<ReturnType<Context['agents']['get']>>, sessionId: SessionId) => void,
+): () => void {
   const disposeSave = ctx.tools.register(defineTool({
     name: 'memory_save',
     description:
@@ -124,6 +134,17 @@ export function registerMemoryTools(ctx: Context, root: MemoryRoot): () => void 
         } as unknown as JsonValue)
       }
       const line = store.append(category as MemoryCategory, content)
+      // The direct path consolidates too: without this, a project whose
+      // entries all arrive through memory_save (never through a distill run)
+      // could grow forever with the curator never receiving a trigger.
+      // `ctx.get` (not `ctx.agents`): the tools mount without declaring the
+      // agents service, and property access would throw on an undeclared key.
+      const agent = exec.agent
+      const agents = ctx.get('agents') as { get(id: SessionId): unknown } | undefined
+      const parent = agent === undefined ? undefined : agents?.get(agent.id)
+      if (parent !== undefined && agent !== undefined) {
+        onSaved?.(parent as NonNullable<ReturnType<Context['agents']['get']>>, agent.id)
+      }
       return Promise.resolve({ saved: true, scope, entry: line } as unknown as JsonValue)
     },
   }))

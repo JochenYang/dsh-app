@@ -48,6 +48,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 // AssembleContext.agent augmentation into scope.
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { MemoryRoot, listProjects, repairDoublePrefix } from './memory-store.ts'
 import { MemoryDistiller } from './distiller.ts'
 import { MemoryCurator } from './curator.ts'
@@ -134,7 +135,11 @@ export function apply(ctx: Context, config: Config): void {
     text: context => renderMemoryText(root, context.agent?.session.header.cwd),
   }), 'plugin-memory: system prompt section')
 
-  ctx.effect(() => registerMemoryTools(ctx, root), 'plugin-memory: llm tools')
+  // The direct-save path's curator trigger. Tools mount regardless of the
+  // subagent seam (below), so the callback is a late-bound holder: a kernel
+  // without agents/subagents leaves it unset and memory_save still works.
+  let requestCurate: ((parent: NonNullable<ReturnType<Context['agents']['get']>>, sessionId: SessionId) => void) | undefined
+  ctx.effect(() => registerMemoryTools(ctx, root, (parent, sessionId) => { requestCurate?.(parent, sessionId) }), 'plugin-memory: llm tools')
   ctx.effect(() => registerMemoryRoutes(ctx.webServer, root), 'plugin-memory: settings routes')
 
   // The background passes need the subagent seam; on a kernel without it
@@ -150,6 +155,9 @@ export function apply(ctx: Context, config: Config): void {
     // the cooldown coalesce into one trailing sweep that re-resolves the
     // parent by session id at fire time.
     const distiller = new MemoryDistiller(memCtx, root, log, config.distillBackend, (parent, sessionId) => curator.runAfterDistill(parent, sessionId))
+    // Both save paths must be able to consolidate: the distill's own trigger
+    // above, and memory_save's direct path through this holder.
+    requestCurate = (parent, sessionId) => { void curator.runAfterDistill(parent, sessionId) }
     memCtx.effect(() => {
       const disposeDistiller = distiller.attach()
       const disposeCurator = curator.attach()

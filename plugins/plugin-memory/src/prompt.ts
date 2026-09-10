@@ -61,6 +61,14 @@ const GUIDELINES_TEXT = [
   'ephemeral state derivable within the current session; routine facts the user',
   'will obviously restate. When genuinely unsure whether something is durable, skip it — do not save guesses.',
   '',
+  'NEVER save work logs: what you implemented, fixed, or committed in this conversation '
+  + '(commit ids, "已完成/已落地" progress reports, file-by-file change lists). The repo and '
+  + 'git history already carry that. Neither save summaries of the current task, nor restate '
+  + 'things a future session reads from the repo in one tool call (file paths, API signatures, '
+  + 'config values, build commands, directory layouts). The test: would a future session in a '
+  + 'DIFFERENT conversation act better because this line exists? If it only describes what this '
+  + 'conversation did, do not save it.',
+  '',
   'Entry discipline: one line per entry; write in the user\'s language; keep it',
   'lean — these files are re-read by every future session of their scope.',
 ].join('\n')
