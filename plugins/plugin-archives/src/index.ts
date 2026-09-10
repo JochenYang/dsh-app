@@ -9,15 +9,17 @@
  * projection cache (zero-I/O), and liveness from the sessions store.
  *
  * Upstream has no session-deletion API (persistence is append-only by
- * contract), so deletion is logical: it drops the ids' archive-set records
- * through the registry's serialized write chain and leaves stored logs to
- * the backend. Safety fences:
- * only archived ids are deletable, live sessions are skipped, and every
- * result reports what was freed and what was skipped with a reason.
+ * contract), so deletion is ours: /delete removes the archived ids' log
+ * artifact directories through the persistence backend's public
+ * `resolveCurrentLog` path. Safety fences: only archived ids are deletable,
+ * live sessions are skipped, and every result reports what was freed and
+ * what was skipped with a reason.
  *
- * /delete drops the deleted ids' records; /prune drops records whose logs are
- * already gone. Ids the backend reclaimed without either path surface as
- * `staleCount` by /list.
+ * /delete keeps the archive-set records on purpose (the set is the client's
+ * visibility fence — dropping a record un-hides that session in the list
+ * snapshot the browser still holds, so it pops back until the next reload);
+ * the records it leaves behind are stale and /prune reclaims them. /list
+ * counts them as `staleCount`.
  *
  * Stability discipline: zero global side effects — no context prototype
  * mutation, no process-wide state. A kernel without the consumed services

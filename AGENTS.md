@@ -299,10 +299,14 @@ Plugin builds (CI runs these before `build-runtime`):
 node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins except brand)
 (cd plugins/plugin-brand && npm run build)  # tsc -> lib/
 (cd plugins/plugin-memory && npm test)      # node:test suites (esbuild bundles TS -> .test-dist)
+(cd plugins/plugin-archives && npm test)    # same harness: /delete + /prune contract tests
 ```
 
-> Tests live in `plugins/plugin-memory/tests/` and `plugins/plugin-swarm/tests/`
-> (node:test, `npm test` inside each plugin). The shell/kernel have no test
+> Tests live in `plugins/plugin-memory/tests/`, `plugins/plugin-swarm/tests/`,
+> `plugins/plugin-usage/tests/`, `plugins/plugin-hooks/tests/`,
+> `plugins/plugin-mcp/tests/` and `plugins/plugin-archives/tests/`
+> (node:test, `npm test` inside each plugin — `scripts/test.mjs` is the shared
+> esbuild + `node --test` wrapper). The shell/kernel have no test
 > runner; verification is `npm run typecheck` + manual run in dev mode.
 > Manual/probe helpers live in `scripts/`: `probe-mirror.mjs`,
 > `probe-drag.cjs` (**keep its CSS in sync with** `src/main/window.ts`

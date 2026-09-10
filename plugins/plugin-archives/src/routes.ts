@@ -5,10 +5,10 @@
  * (`/plugins/@dsh-app/plugin-archives/api`):
  *   GET  /list   — archived sessions grouped by project (cwd), with sizes
  *                  and projection-cached titles
- *   POST /delete — remove archived sessions: the log artifact directory is
- *                  deleted through the JSONL backend's public
- *                  `resolveCurrentLog` path, then the archive-set records
- *                  drop (record-only on backends without a log path)
+ *   POST /delete — remove the archived sessions' log artifact directories
+ *                  through the JSONL backend's public `resolveCurrentLog`
+ *                  (with a directory lookup for logs it refuses to name);
+ *                  the archive-set records are KEPT (see below)
  *   POST /prune  — drop archive-set records whose session logs are already
  *                  gone (stale records), through the registry's serialized
  *                  write chain
@@ -18,9 +18,22 @@
  *   - only ids present in the workspace registry's archive set are deletable
  *     (this surface can never touch an unarchived session);
  *   - a live/attached session is skipped (`live`);
- *   - removal targets exactly the session's own log directory (resolved via
- *     `resolveCurrentLog`) — never a parent or the root; on backends without
- *     a log path only the archive-set records drop.
+ *   - removal targets exactly the session's own log directory — never a
+ *     parent or the root; on backends without a log path nothing is removed
+ *     (`unsupported`).
+ *
+ * `resolveCurrentLog` answers only for logs written in the current session
+ * format, so a session still stored as an older generation resolves to
+ * `undefined` while still listing everywhere. /delete therefore falls back to
+ * locating `<root>/<project>/<id>/` itself before calling an id missing.
+ *
+ * Why /delete keeps the archive-set record: the archive set is the CLIENT's
+ * visibility fence, applied to the session-list snapshot the browser already
+ * holds (`sessionVisible` filters on `archivedSessionIds`). Dropping the
+ * record publishes an `archived` frame immediately, so the deleted session
+ * pops back into the sidebar out of that stale snapshot and only disappears
+ * on the next reload. Keeping the record holds the session hidden; with its
+ * log gone the record is stale, which is exactly what /prune reclaims.
  *
  * The namespace deliberately lives inside the loader-owned `/plugins/<pkg>`
  * prefix with an `/api` segment (same discipline as plugin-usage): the
@@ -31,7 +44,7 @@
  */
 
 import { readdir, rm, stat } from 'node:fs/promises'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveSkipReason, ArchivedSession } from './types.ts'
 
@@ -356,26 +369,104 @@ async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList>
 
 /** Structural slice of the JSONL persistence backend's public log resolver:
  * the rc-line replacement for the old private `locate()` (same artifact
- * path, public API). Optional — a non-JSONL backend (e.g. SQLite) answers
- * `undefined` and deletion degrades to record-only. */
+ * path, public API). Optional — a non-JSONL backend (e.g. SQLite) has no
+ * artifact to remove, so /delete skips those ids as `unsupported`. */
 interface LogResolverLike {
   resolveCurrentLog(id: string, signal?: AbortSignal): Promise<string | undefined>
 }
 
+/** Structural slice of the backend's on-disk root. `root` is private in the
+ * source but live on the runtime instance; `config.root` is the public copy
+ * the constructor resolves into it. Read-only probes — neither is written. */
+interface SessionRootLike {
+  readonly root?: unknown
+  readonly config?: { readonly root?: unknown }
+}
+
+/** Session log filenames inside one session directory: `session.jsonl`,
+ * `session.v3.jsonl`, each optionally `.zstd`. Pre-v3 generations carry no
+ * version infix, which is why this is a pattern and not an exact name. */
+const SESSION_LOG_FILE = /^session(\.[0-9a-z]+)*\.jsonl(\.zstd)?$/i
+
+/** The ids whose on-disk directory name is the id itself: upstream
+ * `encodeSegment` leaves exactly this character set literal and escapes
+ * `~` plus everything outside it. Anything else is skipped, never guessed
+ * at — that encoder exists precisely because a SessionId is unvalidated. */
+const LITERAL_SEGMENT = /^[A-Za-z0-9._-]+$/
+
+/** The directory the backend stores sessions under, or undefined when the
+ * instance does not expose one. */
+function sessionsRoot(persistence: unknown): string | undefined {
+  const source = persistence as SessionRootLike
+  const raw = typeof source.root === 'string' && source.root !== ''
+    ? source.root
+    : typeof source.config?.root === 'string' && source.config.root !== ''
+      ? source.config.root
+      : undefined
+  return raw === undefined ? undefined : resolve(raw)
+}
+
+/**
+ * Locate one session's own artifact directory without the backend's resolver.
+ *
+ * `resolveCurrentLog` answers only for logs already written in the CURRENT
+ * session format — a session still stored as a pre-v3 generation gets
+ * `undefined` even though its directory is intact (the resolver deliberately
+ * refuses to name a non-current log as "the current log"). Those sessions
+ * still appear in every listing, so without this fallback they sit in the
+ * archive panel and can never be deleted.
+ *
+ * Layout is `<root>/<encoded project>/<encoded id>/`; a directory is accepted
+ * only when the name matches the id verbatim AND it actually holds session log
+ * files, so a stray name collision can never aim a deletion at something that
+ * is not a stored session.
+ */
+async function locatedSessionDir(root: string, id: string): Promise<string | undefined> {
+  if (id === '.' || id === '..' || !LITERAL_SEGMENT.test(id)) return undefined
+  let projectNames: string[]
+  try {
+    projectNames = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+  } catch {
+    // An absent/unreadable root means "could not locate": the caller reports
+    // the id as missing rather than failing the batch.
+    return undefined
+  }
+  for (const project of projectNames) {
+    const dir = join(root, project, id)
+    try {
+      const entries = await readdir(dir)
+      if (entries.some((entry) => SESSION_LOG_FILE.test(entry))) return dir
+    } catch {
+      // Not in this project directory; the id is unique, so keep looking.
+    }
+  }
+  return undefined
+}
+
 /** Physically delete the requested archived sessions: remove each session's
  * log artifact directory through the backend's public `resolveCurrentLog`,
- * then drop the archive-set records through the registry's serialized write
- * chain. A backend without `resolveCurrentLog` degrades to record-only
- * removal (same fenced reasons as before). */
-async function deleteArchives(writer: RegistryWriter, options: ArchiveRoutesOptions, ids: readonly string[]): Promise<ArchiveDeleteResult> {
+ * falling back to a directory lookup for sessions the resolver refuses to
+ * name (a pre-current-format generation has no "current log").
+ * The archive-set records stay untouched (see the module header: dropping
+ * them would un-hide the session in the client's stale list snapshot).
+ * A backend without `resolveCurrentLog` has no artifact to remove and skips
+ * every id as `unsupported` — degrading to a record drop is the exact
+ * pop-back-into-the-list behavior this surface must not produce. */
+async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly string[]): Promise<ArchiveDeleteResult> {
   const result: ArchiveDeleteResult = { deleted: [], freedBytes: 0, skipped: [] }
+  const resolver = options.persistence as unknown as LogResolverLike | undefined
+  if (resolver === undefined || typeof resolver.resolveCurrentLog !== 'function') {
+    for (const id of ids) result.skipped.push({ id, reason: 'unsupported' })
+    return result
+  }
+  const root = sessionsRoot(options.persistence)
   const entries = new Map((await options.persistence.list()).map((entry) => {
     const header = listedHeader(entry)
     return [String(header.id), entry] as const
   }))
   const archivedIds = new Set(options.registry.archivedSessionIds.map(String))
-  const resolver = options.persistence as unknown as LogResolverLike | undefined
-  const resolvable = resolver !== undefined && typeof resolver.resolveCurrentLog === 'function'
   const deletable = ids.filter((id) => {
     // Fence 1: only sessions the user archived are manageable here.
     if (!archivedIds.has(id)) {
@@ -394,38 +485,26 @@ async function deleteArchives(writer: RegistryWriter, options: ArchiveRoutesOpti
     return true
   })
   for (const id of deletable) {
-    const snapshotBytes = entrySizeBytes(entries.get(id))
     try {
-      if (resolvable) {
-        // The log artifact is `<sessionDir>/…`; removing the directory takes
-        // every generation and sidecar with it. `force` tolerates a racing
-        // removal; other faults surface as `io` skips, never a failed batch.
-        const logPath = await (resolver as LogResolverLike).resolveCurrentLog(id)
-        if (logPath === undefined) {
-          result.skipped.push({ id, reason: 'missing' })
-          continue
-        }
-        const dir = dirname(logPath)
-        const sizeBytes = await dirSize(dir)
-        await rm(dir, { recursive: true, force: true })
-        result.deleted.push(id)
-        result.freedBytes += sizeBytes
-      } else {
-        // Non-JSONL backend: no artifact path to remove — record-only.
-        result.deleted.push(id)
-        result.freedBytes += snapshotBytes
+      // The log artifact is `<sessionDir>/…`; removing the directory takes
+      // every generation and sidecar with it. `force` tolerates a racing
+      // removal; other faults surface as `io` skips, never a failed batch.
+      const logPath = await resolver.resolveCurrentLog(id)
+      const dir = logPath !== undefined
+        ? dirname(logPath)
+        : root === undefined ? undefined : await locatedSessionDir(root, id)
+      if (dir === undefined) {
+        result.skipped.push({ id, reason: 'missing' })
+        continue
       }
+      const sizeBytes = await dirSize(dir)
+      await rm(dir, { recursive: true, force: true })
+      result.deleted.push(id)
+      result.freedBytes += sizeBytes
     } catch {
       result.skipped.push({ id, reason: 'io' })
     }
   }
-  if (result.deleted.length === 0) return result
-  const removed = new Set(result.deleted)
-  await writer.enqueueOperation(async () => {
-    const state = writer.requireState()
-    const remaining = state.archivedSessionIds.map(String).filter((id) => !removed.has(id))
-    await writer.setState({ ...state, archivedSessionIds: remaining })
-  })
   return result
 }
 
@@ -487,17 +566,9 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
           fail(res, 400, 'bad-request', '请求体需要非空的 ids 字符串数组')
           return
         }
-        // Same private-write capability check as /prune: after the artifact
-        // removal, archive-set records are rewritten through the registry
-        // chain.
-        const writer = options.registry as RegistryWriter
-        if (typeof writer.enqueueOperation !== 'function'
-          || typeof writer.requireState !== 'function'
-          || typeof writer.setState !== 'function') {
-          fail(res, 501, 'delete-unsupported', '当前内核版本不支持删除归档记录')
-          return
-        }
-        return deleteArchives(writer, options, ids as string[])
+        // No registry-write capability is required: /delete only removes log
+        // artifacts and leaves the archive set to /prune.
+        return deleteArchives(options, ids as string[])
           .then((value) => { ok(res, value) })
       })
       .catch((error: unknown) => {

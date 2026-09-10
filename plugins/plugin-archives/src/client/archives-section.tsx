@@ -66,7 +66,9 @@ function rowTitle(id: string, title: string): ReactNode {
 const SKIP_REASONS: Record<string, string> = {
   live: '会话正在进行',
   'not-archived': '不在归档中',
-  missing: '日志已不存在',
+  missing: '会话日志已不存在或无法定位',
+  io: '读写失败',
+  unsupported: '当前内核不支持物理删除',
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -217,6 +219,12 @@ export function ArchivesSection(): ReactNode {
           body: JSON.stringify({ ids: confirm.ids }),
         })
         const parts = [`已删除 ${result.deleted.length} 个会话，释放 ${fmtBytes(result.freedBytes)}`]
+        if (result.deleted.length > 0) {
+          // The archive-set records are kept on purpose — dropping them would
+          // un-hide the session in the client's stale list snapshot. Say so,
+          // since the header's stale-record hint just grew by these ids.
+          parts.push('归档记录已保留，可用上方「清理」移除')
+        }
         if (result.skipped.length > 0) {
           const counts = new Map<string, number>()
           for (const skip of result.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1)

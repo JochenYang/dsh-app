@@ -34,19 +34,20 @@ export interface ArchiveList {
   groups: ArchiveGroup[]
   /** Sessions listed (archived ids that still have a persisted header). */
   archivedCount: number
-  /** Archived ids whose log is already gone from disk (no action possible). */
+  /** Archived ids whose log is already gone from disk (prunable records,
+   *  including every id /delete just removed). */
   staleCount: number
   /** Sum of all listed session sizes. */
   totalBytes: number
 }
 
 /** Why one requested deletion was skipped. */
-export type ArchiveSkipReason = 'live' | 'not-archived' | 'missing' | 'io'
+export type ArchiveSkipReason = 'live' | 'not-archived' | 'missing' | 'io' | 'unsupported'
 
 /** POST /delete response value. */
 export interface ArchiveDeleteResult {
-  /** Ids physically removed (log artifact deleted; record-only on backends
-   *  without a resolvable log path). */
+  /** Ids whose log artifact was deleted. Archive-set records are kept (they
+   *  are the client's visibility fence; /prune reclaims them as stale). */
   deleted: string[]
   /** Bytes freed by the deletions (sizes measured before removal). */
   freedBytes: number
