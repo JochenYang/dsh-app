@@ -8,6 +8,22 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.4] - 2026-09-10
+
+### 中文
+- 修复 Windows 上内核激活后 `current.json` 写不完整：写入器的目录 fsync 在 Windows 必然失败（EPERM）且会向上抛出，而抛点在 rename 之后——文件已更新、函数却报失败，导致激活后写入的字段（已采纳标识 `bundledStamp` 等）从未落盘，于是每次启动都重新解压一次内核、`cleanup` 还会删掉刚激活的目录；目录 fsync 改为尽力而为
+- 记忆策展（curator）改为直连模型调用：此前它仍起只读子代理，而那个子代理没有任何工具（`toolFilter: allow []`），等于为一次 JSON 回答付整套会话生命周期的钱，单次 7k–47k tokens；现与提炼共用直连通道，成本降一个数量级，宿主侧校验（逐字引用、去重、编辑上限）完全不变
+- 记忆插件彻底移除子代理通道：提炼的 `distillBackend` 开关、`ctx.subagents` 依赖与 `@deepseek-ai/dsh-subagent` 声明一并删除——少依赖一个内核 API 就少一处「类型全绿、运行时炸」的漂移面
+- 策展规则新增「删除工作日志式条目」：只报告"这次做了什么"的条目（完成清单、逐文件改动清单、任务摘要）会被清掉，而不是越积越多
+- 策展开始记入 LLM 审计（来源 `curate`），设置页终于能看到它的开销
+
+### English
+- Fixed `current.json` being written incompletely on Windows: the writer's directory fsync always fails there (EPERM) and throws, and it throws AFTER the rename — so the file was updated while the call reported failure, and every field written after that point (the adopted-bundle `bundledStamp` among them) never landed. The result was a full runtime re-extraction on every start and a `cleanup` that deleted the directory it had just activated. The directory fsync is best effort now
+- The memory curator now calls the model directly. It was the last background path spawning a read-only subagent, and that child declared no tools at all (`toolFilter: allow []`) — a whole session lifecycle paid for one JSON answer, 7k–47k tokens per run. It shares the distiller's direct channel now, an order of magnitude cheaper, with host-side validation (verbatim citations, dedupe, edit cap) unchanged
+- The subagent channel is gone from the memory plugin entirely: the distiller's `distillBackend` switch, the `ctx.subagents` inject and the `@deepseek-ai/dsh-subagent` dependency are removed — one fewer consumed kernel API is one less place for silent type-green/runtime-throw drift
+- The curator's rules gained a work-log clause: entries that merely report what a session did (completion lists, file-by-file change lists, task summaries) are deleted instead of accumulating
+- Curate runs are audited at last (`source: 'curate'`), so the settings page can show the curator's cost
+
 ## [v0.11.3] - 2026-09-10
 
 ### 中文
