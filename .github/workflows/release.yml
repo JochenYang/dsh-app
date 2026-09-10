@@ -1,5 +1,11 @@
 name: release
 
+# Action versions are pinned per action rather than unified: checkout and
+# setup-node reach node24 at v5, upload-artifact at v6, download-artifact at
+# v7 (v5/v6 of the artifact actions still run node20). Going higher buys
+# nothing here — download-artifact v8 moves to ESM with new enforced checks.
+# All four require Actions runner >= 2.327.1, which GitHub-hosted satisfies.
+
 # Builds kernel runtime artifacts (per platform/arch) and the Electron app for
 # Windows / macOS / Linux, then publishes everything to a GitHub Release.
 # Triggers: push of a tag like v0.1.0 (shell) — the kernel version is read
@@ -40,7 +46,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,9 +68,9 @@ jobs:
     steps:
       # kernel-line.mjs reads the followed kernel line straight out of the
       # tree's package.json, so this job needs the checkout and its deps.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -162,9 +168,9 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -221,7 +227,7 @@ jobs:
       # Also expose the tgz as a workflow artifact so the app job can bundle it
       # into the installer without re-downloading from the (still-draft) release.
       - name: Upload runtime artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: runtime-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
@@ -262,9 +268,9 @@ jobs:
             target: linux
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -284,7 +290,7 @@ jobs:
       # through to the wrong download source.
       - name: Download kernel artifact
         if: needs.runtime.result != 'skipped'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: runtime-${{ matrix.platform }}-${{ matrix.arch }}
           path: runtime-dist

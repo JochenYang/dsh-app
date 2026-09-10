@@ -3,6 +3,12 @@
 # the fast static + unit + real-kernel smoke gate for everyday changes.
 name: ci
 
+# Action versions are pinned per action rather than unified: checkout and
+# setup-node reach node24 at v5, upload-artifact at v6, download-artifact at
+# v7 (v5/v6 of the artifact actions still run node20). Going higher buys
+# nothing here — download-artifact v8 moves to ESM with new enforced checks.
+# All four require Actions runner >= 2.327.1, which GitHub-hosted satisfies.
+
 on:
   push:
     branches: [main]
@@ -18,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -47,8 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
