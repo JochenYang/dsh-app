@@ -15,7 +15,6 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 // ui-conversation declares the 'conversation.view' SlotMap row.
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { FileTreeTab } from './file-tree.tsx'
 import { GitTab } from './git-tab.tsx'
 
 /** Narrowed sessions service face (list store + binding both exist upstream). */
@@ -38,17 +37,11 @@ function cwdFor(sessions: SessionsService, sessionId: SessionId): string | undef
   return typeof summary?.cwd === 'string' && summary.cwd !== '' ? summary.cwd : undefined
 }
 
-/** Register our two views into the native view-tab ring. Order 100/110 keeps
- * them AFTER every official view (official rows order at 10). */
+/** Register our view into the native view-tab ring. Order 110 keeps it
+ * AFTER every official view (official rows order at 10). The file tree tab
+ * was retired: the upstream sidebar ships file management natively. */
 export function registerDockViews(ctx: ClientContext): void {
   const sessions = ctx.get('sessions') as unknown as SessionsService
-  ctx.slots.inject('conversation.view', () => ctx.slots.register({
-    name: 'conversation.view',
-    id: 'files',
-    order: 100,
-    label: () => '文件',
-    inject: (sessionId: SessionId) => ({ sessionId, cwd: cwdFor(sessions, sessionId) }),
-  }, FileTreeTab))
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view',
     id: 'git',

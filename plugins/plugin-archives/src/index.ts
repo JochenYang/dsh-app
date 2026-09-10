@@ -1,7 +1,7 @@
 /**
  * DSH APP session archive manager — host half.
  *
- * Serves the archive manager's two routes (list/delete) under
+ * Serves the archive manager's four routes (list/delete/prune/search) under
  * `/plugins/@dsh-app/plugin-archives/api`. The archive set comes from the
  * workspace registry (`archivedSessionIds` — upstream archiving hides a
  * session from every grouping surface but never touches its stored log),
@@ -9,14 +9,15 @@
  * projection cache (zero-I/O), and liveness from the sessions store.
  *
  * Upstream has no session-deletion API (persistence is append-only by
- * contract), so deletion removes exactly the session's own on-disk
- * directory, resolved through the backend's `locate()`. Safety fences:
+ * contract), so deletion is logical: it drops the ids' archive-set records
+ * through the registry's serialized write chain and leaves stored logs to
+ * the backend. Safety fences:
  * only archived ids are deletable, live sessions are skipped, and every
  * result reports what was freed and what was skipped with a reason.
  *
- * The archived id itself stays in the registry after its log is deleted
- * (the registry exposes no removal API): a stale entry hides nothing and
- * is reported as `staleCount` by /list.
+ * /delete drops the deleted ids' records; /prune drops records whose logs are
+ * already gone. Ids the backend reclaimed without either path surface as
+ * `staleCount` by /list.
  *
  * Stability discipline: zero global side effects — no context prototype
  * mutation, no process-wide state. A kernel without the consumed services

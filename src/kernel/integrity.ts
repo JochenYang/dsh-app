@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 
 /** Compute the sha512 hex digest of a file. */
@@ -14,5 +14,8 @@ export async function sha512File(file: string): Promise<string> {
 }
 
 export function verifyIntegrity(expected: string, actual: string): boolean {
-  return expected.trim().toLowerCase() === actual.trim().toLowerCase()
+  const a = expected.trim().toLowerCase()
+  const b = actual.trim().toLowerCase()
+  if (!/^[0-9a-f]{128}$/.test(a) || !/^[0-9a-f]{128}$/.test(b)) return false
+  return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
 }

@@ -36,9 +36,9 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 
 套件接线（每次 server 启动自动完成，`src/main/brand-suite.ts`）：
 
-1. **模块解析**：七个套件插件链接进 `$DSH_HOME/profiles/node_modules/@dsh-app/`（Windows 为 junction）；
+1. **模块解析**：十个套件插件链接进 `$DSH_HOME/profiles/node_modules/@dsh-app/`（Windows 为 junction）；
    开发源是仓库 `plugins/*`，生产源是激活内核里的 `app/node_modules/@dsh-app/*`。
-2. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经 `dsh web --patch` 注入七个套件插件条目
+2. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经 `dsh web --patch` 注入十个套件插件条目
    （应用在官方 bundle 层之后，last write wins，无需改上游 profile 模板）。
 
 两条接缝均**优雅降级**：内核缺少套件插件（例如回滚目标）时原样启动、无阻塞。
@@ -147,6 +147,9 @@ npm run dist:win     # NSIS 安装器（x64 + arm64）
 npm run dist:mac     # dmg + zip（x64 + arm64，公证走环境变量）
 npm run dist:linux   # AppImage + deb（x64 + arm64）
 ```
+
+应用图标：`resources/icon.png` 当前为占位品牌图标，发布前请替换为正式图标；
+`npm run icon:gen` 生成占位图标，`npm run icon:build` 由它裁剪多尺寸 PNG + ICO（需 Pillow）。
 
 内核运行时产物由 `scripts/build-runtime.mjs` 构建（每个 platform/arch 一份），
 CI 工作流发布到 GitHub Releases：

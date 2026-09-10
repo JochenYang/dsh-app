@@ -21,8 +21,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Context } from '@deepseek-ai/cordis'
-import { MAX_ENTRY_CHARS, type MemoryRoot, type MemoryStore } from './memory-store.ts'
-import { MEMORY_CATEGORIES } from './types.ts'
+import { MAX_ENTRY_CHARS, containsCredential, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
+import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /** Hard ceiling for recall output; a runaway file must not flood the
  * context either. */
@@ -82,9 +82,25 @@ export function registerMemoryTools(ctx: Context, root: MemoryRoot): () => void 
       if (!root.global.isEnabled()) {
         return Promise.resolve({ saved: false, reason: 'disabled' } as unknown as JsonValue)
       }
-      const content = String(args.content ?? '').trim()
+      // Models echo the file's `- [category] date` prefix into `content`;
+      // strip it before validating so one logical entry never lands
+      // double-prefixed (see stripEntryPrefix).
+      const content = stripEntryPrefix(String(args.content ?? '').trim())
       if (content === '') {
         return Promise.resolve({ saved: false, reason: 'empty content' } as unknown as JsonValue)
+      }
+      const category = args.category
+      if (typeof category !== 'string' || !(MEMORY_CATEGORIES as readonly string[]).includes(category)) {
+        return Promise.resolve({
+          saved: false,
+          reason: `unknown category "${String(args.category ?? '')}"; must be one of: ${MEMORY_CATEGORIES.join(', ')}`,
+        } as unknown as JsonValue)
+      }
+      if (containsCredential(content)) {
+        return Promise.resolve({
+          saved: false,
+          reason: '内容可能包含密钥或凭据，拒绝保存；如确需记录请先脱敏再保存',
+        } as unknown as JsonValue)
       }
       if (content.length > MAX_ENTRY_CHARS) {
         return Promise.resolve({
@@ -107,7 +123,7 @@ export function registerMemoryTools(ctx: Context, root: MemoryRoot): () => void 
           reason: 'duplicate: an entry with this content is already saved; if the user CORRECTED it, remove the old one with memory_forget first',
         } as unknown as JsonValue)
       }
-      const line = store.append(args.category as (typeof MEMORY_CATEGORIES)[number], content)
+      const line = store.append(category as MemoryCategory, content)
       return Promise.resolve({ saved: true, scope, entry: line } as unknown as JsonValue)
     },
   }))

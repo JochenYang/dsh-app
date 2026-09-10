@@ -59,7 +59,7 @@ const GUIDELINES_TEXT = [
   '',
   'NEVER save: API keys, tokens, passwords, or any credential — not even when asked;',
   'ephemeral state derivable within the current session; routine facts the user',
-  'will obviously restate. When genuinely unsure whether something is durable, ask.',
+  'will obviously restate. When genuinely unsure whether something is durable, skip it — do not save guesses.',
   '',
   'Entry discipline: one line per entry; write in the user\'s language; keep it',
   'lean — these files are re-read by every future session of their scope.',

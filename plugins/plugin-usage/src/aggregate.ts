@@ -27,32 +27,39 @@ const DAY_MS = 86_400_000
  * row timestamp — unlike a flat idle-tier table this estimates the real
  * bill. Cache-write has no separate official price and is billed at the
  * input (cache-miss) rate, matching DeepSeek's convention. Prices may
- * change upstream; re-check the page before shipping a bump. Config rows
- * with the same provider/model replace these; rows for other models
- * (e.g. personal gateways) extend the table.
+ * change upstream; re-check the page before shipping a bump. One canonical
+ * table: provider/model aliases (see PROVIDER_ALIASES / MODEL_ALIASES) resolve
+ * to these rows at lookup. Config rows with the same canonical provider/model
+ * replace these; rows for other models (e.g. personal gateways) extend the table.
  */
 export const DEFAULT_PRICING: UsagePrice[] = [
-  // DeepSeek V4 (direct API, both observed provider ids).
-  { provider: 'deepseek-official', model: 'deepseek-v4-flash', input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 1.5, peakFactor: 2 },
-  { provider: 'deepseek-official', model: 'deepseek-v4-pro', input: 4.5, output: 13.5, cacheRead: 0.15, cacheWrite: 4.5, peakFactor: 2 },
-  { provider: 'deepseek-official', model: 'deepseek-v4-flash-vision-exp', input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 1.5, peakFactor: 2 },
   { provider: 'deepseek', model: 'deepseek-v4-flash', input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 1.5, peakFactor: 2 },
   { provider: 'deepseek', model: 'deepseek-v4-pro', input: 4.5, output: 13.5, cacheRead: 0.15, cacheWrite: 4.5, peakFactor: 2 },
   { provider: 'deepseek', model: 'deepseek-v4-flash-vision-exp', input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 1.5, peakFactor: 2 },
-  // Legacy model names (deprecated 2026-07-24) alias v4-flash's modes.
-  { provider: 'deepseek', model: 'deepseek-chat', input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 1.5, peakFactor: 2 },
-  { provider: 'deepseek', model: 'deepseek-reasoner', input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 1.5, peakFactor: 2 },
 ]
 
-/** Merge config pricing over the built-in table (config row wins per key). */
+/** Provider id aliases: both observed provider ids bill the same table. */
+const PROVIDER_ALIASES: Record<string, string> = { 'deepseek-official': 'deepseek' }
+
+/** Legacy model names (deprecated 2026-07-24) alias v4-flash's modes. */
+const MODEL_ALIASES: Record<string, string> = { 'deepseek-chat': 'deepseek-v4-flash', 'deepseek-reasoner': 'deepseek-v4-flash' }
+
+/** Canonical lookup key: aliases resolved on both halves, so config rows and
+ * usage rows may each use either spelling. */
+function priceKey(provider: string, model: string): string {
+  return `${PROVIDER_ALIASES[provider] ?? provider}/${MODEL_ALIASES[model] ?? model}`
+}
+
+/** Merge config pricing over the built-in table (config row wins per canonical key). */
 export function mergePricing(config: readonly UsagePrice[]): UsagePrice[] {
-  const merged = new Map(DEFAULT_PRICING.map((p) => [`${p.provider}/${p.model}`, p]))
-  for (const entry of config) merged.set(`${entry.provider}/${entry.model}`, entry)
+  const merged = new Map(DEFAULT_PRICING.map((p) => [priceKey(p.provider, p.model), p]))
+  for (const entry of config) merged.set(priceKey(entry.provider, entry.model), entry)
   return [...merged.values()]
 }
 
 function priceFor(prices: readonly UsagePrice[], provider: string, model: string): UsagePrice | undefined {
-  return prices.find((entry) => entry.provider === provider && entry.model === model)
+  const key = priceKey(provider, model)
+  return prices.find((entry) => priceKey(entry.provider, entry.model) === key)
 }
 
 /**

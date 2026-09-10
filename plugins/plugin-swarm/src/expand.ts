@@ -11,8 +11,11 @@ import type { SwarmTask } from './orchestrator.ts'
 /** Minimum batch size — a single item has nothing to parallelize. */
 export const MIN_ITEMS = 2
 
-/** The `{{item}}` placeholder the template must contain. */
-const ITEM_PLACEHOLDER = /\{\{\s*item\s*\}\}/gu
+/** The `{{item}}` placeholder the template must contain. No `g` flag: this
+ * regex runs through RegExp.test (where `g` would make lastIndex stateful)
+ * and through split/join for substitution (which replaces every occurrence
+ * without needing `g`). */
+const ITEM_PLACEHOLDER = /\{\{\s*item\s*\}\}/u
 
 /** Typed view of the tool arguments after the framework's schema validation. */
 export interface SwarmToolArgs {
@@ -103,7 +106,6 @@ export function expandTasks(args: SwarmToolArgs, maxItems: number): ExpandedBatc
   if (args.prompt_template !== undefined && !ITEM_PLACEHOLDER.test(args.prompt_template)) {
     throw new Error('swarm: `prompt_template` must contain the {{item}} placeholder')
   }
-  ITEM_PLACEHOLDER.lastIndex = 0
   const seen = new Set<string>()
   for (const item of items) {
     const key = item.trim()
@@ -126,9 +128,10 @@ export function expandTasks(args: SwarmToolArgs, maxItems: number): ExpandedBatc
   const fresh: SwarmTask[] = items.map((item, index) => ({
     index,
     item,
-    // Function form: a string replacement would interpret `$&`/`$'`/`` $` ``/
-    // `$n` sequences inside the item as replace-pattern tokens.
-    prompt: sharedPrefix + args.prompt_template!.replace(ITEM_PLACEHOLDER, () => item),
+    // Split/join (not String.replace): the item text is inserted verbatim,
+    // so `$&`/`$'`/`` $` ``/`$n` sequences inside it stay literal, and every
+    // placeholder occurrence is substituted without a `g`-flagged regex.
+    prompt: sharedPrefix + args.prompt_template!.split(ITEM_PLACEHOLDER).join(item),
   }))
   const resumed: SwarmTask[] = resumes.map((entry, offset) => ({
     index: fresh.length + offset,

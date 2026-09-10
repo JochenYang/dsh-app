@@ -1,4 +1,4 @@
-import { app, dialog, shell, BrowserWindow } from 'electron'
+import { app, shell, type BrowserWindow } from 'electron'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
@@ -7,9 +7,10 @@ import { Readable } from 'node:stream'
 import path from 'node:path'
 import semver from 'semver'
 import { autoUpdater } from 'electron-updater'
-import { APP_NAME } from '../shared/constants'
+import { APP_NAME, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { githubMirrorPrefixes } from '../kernel/sources/artifact'
 import { inFrameDialogScript } from './in-frame-dialog'
+import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
 
 let initialized = false
@@ -29,20 +30,10 @@ async function confirmInFrame(
   native: Electron.MessageBoxOptions,
   primaryValue: string,
 ): Promise<boolean> {
-  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null
-  if (win !== null && !win.isDestroyed()) {
-    try {
-      const choice: unknown = await win.webContents.executeJavaScript(inFrameDialogScript(config))
-      return choice === primaryValue
-    } catch {
-      // Page not answerable: fall through to the native dialog.
-    }
-  }
-  const prompt = win === null
-    ? dialog.showMessageBox(native)
-    : dialog.showMessageBox(win, native)
-  const { response } = await prompt
-  return response === 0
+  return promptThemedDialog(null, inFrameDialogScript(config), native, (value, nativeResponse) => {
+    if (value !== '') return value === primaryValue
+    return nativeResponse === 0
+  })
 }
 
 /**
@@ -60,25 +51,19 @@ async function noticeInFrame(
   title: string,
   message: string,
 ): Promise<void> {
-  const target = win ?? BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null
-  if (target !== null && !target.isDestroyed()) {
-    try {
-      await target.webContents.executeJavaScript(inFrameDialogScript({
-        title,
-        message,
-        buttons: [{ label: '确定', value: 'ok', primary: true }],
-        cancelValue: 'ok',
-        enterValue: 'ok',
-      }))
-      return
-    } catch {
-      // Page not answerable: fall through to the native dialog.
-    }
-  }
-  const prompt = target === null
-    ? dialog.showMessageBox({ type, title, message, buttons: ['确定'], defaultId: 0, cancelId: 0, noLink: true })
-    : dialog.showMessageBox(target, { type, title, message, buttons: ['确定'], defaultId: 0, cancelId: 0, noLink: true })
-  await prompt
+  await noticeThemedDialog(
+    win,
+    type,
+    title,
+    message,
+    inFrameDialogScript({
+      title,
+      message,
+      buttons: [{ label: '确定', value: 'ok', primary: true }],
+      cancelValue: 'ok',
+      enterValue: 'ok',
+    }),
+  )
 }
 
 /**
@@ -174,7 +159,6 @@ export function initShellUpdater(): void {
 interface UpdateFileEntry {
   url: string
   sha512: string
-  size?: number
 }
 
 interface LatestYaml {
@@ -256,7 +240,7 @@ export function pickAsset(files: UpdateFileEntry[], arch: string): UpdateFileEnt
   const byArch = assets.find((f) => f.url.endsWith(archSuffix))
   if (byArch) return byArch
   // Fallbacks: the generic `*-win.exe` (x64) or the x64-named asset.
-  return assets.find((f) => /-win\.exe$/.test(f.url) || /-win-x64\.exe$/.test(f.url)) ?? assets[0] ?? null
+  return assets.find((f) => /-win\.exe$/.test(f.url) || /-win-x64\.exe$/.test(f.url)) ?? assets.find((f) => f.url.endsWith('.exe')) ?? null
 }
 
 /** sha512 (base64, as latest.yml encodes it) of the downloaded installer. */
@@ -337,8 +321,8 @@ async function showDownloadError(message: string): Promise<void> {
   if (proceed) void shell.openExternal(`https://github.com/${UPDATER_OWNER}/${UPDATER_REPO}/releases/latest`)
 }
 
-const UPDATER_OWNER = process.env.DSH_APP_ARTIFACT_OWNER ?? 'JochenYang'
-const UPDATER_REPO = process.env.DSH_APP_ARTIFACT_REPO ?? 'dsh-app'
+const UPDATER_OWNER = resolveArtifactOwner()
+const UPDATER_REPO = resolveArtifactRepo()
 
 /**
  * Fetch latest.yml through the official-first / mirror-fallback chain.
@@ -356,6 +340,23 @@ async function fetchLatestYamlText(): Promise<string | null> {
   return null
 }
 
+/**
+ * Fetch latest.yml through the metadata chain and parse it.
+ * @returns the parsed metadata, or null when unreachable or unparseable.
+ */
+async function fetchAndParseLatest(): Promise<LatestYaml | null> {
+  const yamlText = await fetchLatestYamlText()
+  if (!yamlText) return null
+  return parseLatestYaml(yamlText)
+}
+
+/** True when the remote version is newer than the running app version. */
+function isNewerThan(latest: string, current: string): boolean {
+  return semver.valid(latest) && semver.valid(current)
+    ? semver.gt(latest, current)
+    : latest !== current
+}
+
 /** Windows custom update flow (mirror fallback + sha512 + silent install). */
 async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null): Promise<void> {
   if (process.env.DSH_APP_DEV === '1') return
@@ -367,12 +368,9 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
   }
   busy = true
   try {
-    showUpdateToast(win, '正在检查应用更新…', 'progress', 0)
-    const yamlText = await fetchLatestYamlText()
-    if (!yamlText) throw new Error('无法获取更新元数据（latest.yml）')
-
-    const yaml = parseLatestYaml(yamlText)
-    if (!yaml) throw new Error('更新元数据格式无法解析')
+    showUpdateToast(win, '正在检查应用更新…', 'progress', undefined)
+    const yaml = await fetchAndParseLatest()
+    if (!yaml) throw new Error('无法获取更新元数据（latest.yml）或格式无法解析')
     // Version is spliced into an installer filename and the pending-install
     // record; constrain it to a safe charset so a crafted metadata value can
     // never break the path or the spawn target (defense in depth for an
@@ -380,9 +378,7 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     if (!/^[\w.~-]+$/.test(yaml.version)) throw new Error('更新元数据版本格式异常')
 
     const current = app.getVersion()
-    const newer = semver.valid(yaml.version) && semver.valid(current)
-      ? semver.gt(yaml.version, current)
-      : yaml.version !== current
+    const newer = isNewerThan(yaml.version, current)
     if (!newer) {
       clearKernelProgress(win)
       if (manual) void noticeInFrame(win, 'info', APP_NAME, `已是最新版本（${APP_NAME} ${current}）。`)
@@ -518,16 +514,12 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
  */
 async function checkShellUpdateDev(win: BrowserWindow | null): Promise<void> {
   try {
-    showUpdateToast(win, '正在检查应用更新…', 'progress', 0)
-    const yamlText = await fetchLatestYamlText()
-    if (!yamlText) throw new Error('无法获取更新元数据（latest.yml）')
-    const yaml = parseLatestYaml(yamlText)
-    if (!yaml) throw new Error('更新元数据格式无法解析')
+    showUpdateToast(win, '正在检查应用更新…', 'progress', undefined)
+    const yaml = await fetchAndParseLatest()
+    if (!yaml) throw new Error('无法获取更新元数据（latest.yml）或格式无法解析')
     if (!/^[\w.~-]+$/.test(yaml.version)) throw new Error('更新元数据版本格式异常')
     const current = app.getVersion()
-    const newer = semver.valid(yaml.version) && semver.valid(current)
-      ? semver.gt(yaml.version, current)
-      : yaml.version !== current
+    const newer = isNewerThan(yaml.version, current)
     clearKernelProgress(win)
     await noticeInFrame(win, 'info', APP_NAME, newer
       ? `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n检测到新版本：v${current} → v${yaml.version}，请从正式安装的副本更新。`

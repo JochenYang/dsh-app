@@ -1,3 +1,4 @@
+import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -6,29 +7,38 @@ import { DEFAULT_HTTP_HOST, SERVER_HEALTH_POLL_MS, SERVER_HEALTH_TIMEOUT_MS, SER
 
 export interface ServerEvents {
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void
-  onReady?: (url: string) => void
   onLog?: (line: string) => void
 }
 
 /** Cap a diagnostic line so a runaway child cannot grow logs unbounded. */
 const MAX_LOG_LINE = 2_000
 
+/** How many recent server log files to keep on disk. */
+const MAX_KEPT_LOG_FILES = 10
+
 /** Redact credential-looking fragments before a line reaches logs or events. */
 function redact(line: string): string {
   return line
-    .replace(/(api[_-]?key|authorization|token)(\s*[:=]\s*)\S+/gi, '$1$2[redacted]')
+    // JSON quoted pairs first: "apiKey": "sk-..." keeps only the key name.
+    .replace(/("(?:api[_-]?key|authorization|token|secret|passwd|password)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"')
+    .replace(/('(?:api[_-]?key|authorization|token|secret|passwd|password)'\s*:\s*)'[^']*'/gi, "$1'[redacted]'")
+    // Query-string token (?token=abc&next=/) keeps only the key name: the bare
+    // rule below would swallow the rest of the URL with \S+.
+    .replace(/([?&](?:token|api[_-]?key)=)[^&\s]+/gi, '$1[redacted]')
+    // Bare key=value / key: value pairs last (key name kept, value dropped).
+    .replace(/(api[_-]?key|authorization|token|secret|passwd|password)(\s*[:=]\s*)\S+/gi, '$1$2[redacted]')
     .slice(0, MAX_LOG_LINE)
 }
 
 /**
- * Accept only a loopback HTTP URL: the settled server address must be the
+ * Accept only a 127.0.0.1 HTTP URL: the settled server address must be the
  * harness's own local web UI, never an external origin.
  */
 function isLocalServerUrl(value: string): boolean {
   try {
     const url = new URL(value)
     return url.protocol === 'http:'
-      && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+      && url.hostname === '127.0.0.1'
       && url.username === ''
       && url.password === ''
       && url.port !== ''
@@ -112,7 +122,6 @@ export class DshServer {
     })
 
     await this.waitForHealth()
-    this.events.onReady?.(this.url)
   }
 
   /** Quote a shell fragment for cmd.exe when it carries whitespace or quotes. */
@@ -143,11 +152,29 @@ export class DshServer {
     }
   }
 
+  /** Open a new server log file under the log dir, pruning older ones. */
   private async openLog(): Promise<string> {
-    const dir = path.join(process.env.DSH_APP_LOG_DIR ?? '', 'logs')
+    const base = process.env.DSH_APP_LOG_DIR ?? app.getPath('userData')
+    const dir = path.join(base, 'logs')
     const file = path.join(dir, `dsh-server-${new Date().toISOString().replace(/[:.]/g, '-')}.log`)
     await fs.mkdir(dir, { recursive: true })
+    await this.pruneOldLogs(dir)
     return file
+  }
+
+  /**
+   * Keep only the most recent server log files so a long-lived install cannot
+   * grow the log dir unbounded. Best-effort: never fail the start over logs.
+   */
+  private async pruneOldLogs(dir: string): Promise<void> {
+    try {
+      const entries = await fs.readdir(dir)
+      const logs = entries.filter((name) => name.startsWith('dsh-server-') && name.endsWith('.log')).sort()
+      const stale = logs.slice(0, Math.max(0, logs.length - MAX_KEPT_LOG_FILES))
+      await Promise.all(stale.map((name) => fs.rm(path.join(dir, name), { force: true })))
+    } catch {
+      // Best-effort pruning; the new log file is already usable.
+    }
   }
 
   /**
@@ -164,7 +191,9 @@ export class DshServer {
     const url = extractServerUrl(line)
     if (url && !this.stopping && url !== this.url) {
       this.url = url
-      this.events.onLog?.(`server url settled: ${url}`)
+      // The settled URL carries ?token=…: log it redacted (key name only),
+      // never the credential.
+      this.events.onLog?.(`server url settled: ${redact(url)}`)
     }
   }
 
@@ -247,9 +276,4 @@ export class DshServer {
     this.child = null
   }
 
-  async kill(): Promise<void> {
-    this.stopping = true
-    this.child?.kill('SIGKILL')
-    this.child = null
-  }
 }

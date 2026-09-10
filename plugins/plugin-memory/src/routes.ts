@@ -20,10 +20,11 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isValidSlug, listProjects, normalizeForMatch, parseEntries, removeProject, type MemoryRoot, type MemoryStore } from './memory-store.ts'
-import type { MemoryEntriesResponse, MemoryLlmAuditResponse, MemoryStatus } from './types.ts'
+import { ROUTE_PREFIX, type MemoryEntriesResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
 
-/** Route namespace on the dsh web server. */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-memory/api'
+/** Route namespace on the dsh web server (single source in types.ts, shared
+ * with the browser half). Re-exported so existing importers keep working. */
+export { ROUTE_PREFIX }
 
 /** Structural slice of the webServer service (no full dep on its types). */
 interface WebServerLike {
@@ -86,7 +87,8 @@ function fail(res: ServerResponse, status: number, code: string, message: string
   sendJson(res, status, { ok: false, error: { code, message } })
 }
 
-/** Bounded JSON body read (same discipline as the sidebar git routes). */
+/** Bounded JSON body read (same discipline as the swarm routes: drain, never
+ * destroy, so the 413 answer actually reaches the client). */
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let size = 0
@@ -94,8 +96,10 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
     req.on('data', (chunk: Buffer) => {
       size += chunk.length
       if (size > 8_192) {
-        reject(new Error('request body too large'))
-        req.destroy()
+        // Drain instead of destroy: the socket stays alive so the 413 answer
+        // actually reaches the client (same as the swarm routes).
+        reject(new Error('payload-too-large'))
+        req.resume()
         return
       }
       chunks.push(chunk)
@@ -179,8 +183,13 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
             distill: root.global.isDistillEnabled(),
           })
         })
-        .catch(error => {
-          fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid body')
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : 'invalid body'
+          if (message === 'payload-too-large') {
+            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            return
+          }
+          fail(res, 400, 'bad-request', message)
         })
     },
   }))
@@ -205,8 +214,8 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
             try {
               removeProject(root.dir, slug)
               ok(res, { scope: 'project', slug })
-            } catch (error) {
-              fail(res, 500, 'io', `清空项目记忆失败：${error instanceof Error ? error.message : String(error)}`)
+            } catch {
+              fail(res, 500, 'io', '清空项目记忆失败，请稍后重试')
             }
             return
           }
@@ -217,12 +226,17 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           try {
             root.global.clear()
             ok(res, { scope: 'global' })
-          } catch (error) {
-            fail(res, 500, 'io', `清空全局记忆失败：${error instanceof Error ? error.message : String(error)}`)
+          } catch {
+            fail(res, 500, 'io', '清空全局记忆失败，请稍后重试')
           }
         })
-        .catch(error => {
-          fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid body')
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : 'invalid body'
+          if (message === 'payload-too-large') {
+            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            return
+          }
+          fail(res, 400, 'bad-request', message)
         })
     },
   }))
@@ -283,8 +297,13 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           const changed = pinned ? store.addPin(content) : store.removePin(content)
           ok(res, { pinned, changed })
         })
-        .catch(error => {
-          fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid body')
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : 'invalid body'
+          if (message === 'payload-too-large') {
+            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            return
+          }
+          fail(res, 400, 'bad-request', message)
         })
     },
   }))
@@ -313,8 +332,13 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           const result = store.removeContent(match)
           ok(res, { forgotten: result.removed.length, remaining: result.remaining })
         })
-        .catch(error => {
-          fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid body')
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : 'invalid body'
+          if (message === 'payload-too-large') {
+            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            return
+          }
+          fail(res, 400, 'bad-request', message)
         })
     },
   }))

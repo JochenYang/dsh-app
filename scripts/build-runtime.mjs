@@ -63,7 +63,7 @@ async function resolveDefaultDshVersion() {
       throw new Error('cannot resolve dsh version from npm dist-tag — set DSH_VERSION explicitly or fix registry access')
     }
   }
-  return '0.1.0-rc.8'
+  throw new Error('cannot resolve dsh version from npm dist-tag — set DSH_VERSION explicitly or fix registry access')
 }
 
 const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || (await resolveDefaultDshVersion())
@@ -110,13 +110,17 @@ function deriveSuiteVersion() {
 }
 const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION?.trim() || deriveSuiteVersion()
 
+function quoteWinArg(value) {
+  return `"${value.replace(/"/g, '\\"')}"`
+}
 function run(cmd, args, cwd) {
   console.log(`$ ${cmd} ${args.join(' ')}`)
   const opts = { cwd, stdio: 'inherit' }
   // Windows runners: Node 22.12+ no longer wraps .cmd via cmd.exe implicitly
-  // (CVE-2024-27980 mitigation), so shell is required; pass the joined line
-  // instead of args to avoid DEP0190. args here are script-built constants.
-  if (process.platform === 'win32') execFileSync(`${cmd} ${args.join(' ')}`, { ...opts, shell: true })
+  // (CVE-2024-27980 mitigation), so shell is required; pass one joined line
+  // instead of args to avoid DEP0190. Every token is strictly quoted so paths
+  // with spaces (e.g. under Program Files) cannot split or inject.
+  if (process.platform === 'win32') execFileSync([cmd, ...args].map(quoteWinArg).join(' '), { ...opts, shell: true })
   else execFileSync(cmd, args, opts)
 }
 
@@ -124,13 +128,17 @@ function run(cmd, args, cwd) {
 // 'win'|'darwin'|'linux' and 'x64'|'arm64'; our caller already passes those.
 const NODE_DIST_PLATFORM = { win32: 'win', darwin: 'darwin', linux: 'linux' }
 const NODE_DIST_EXT = { win32: 'zip', darwin: 'tar.gz', linux: 'tar.xz' }
+// Official Node.js distribution host. SHASUMS256.txt metadata is always fetched
+// here first so a NODE_DIST_MIRROR can never substitute content; the mirror
+// only fills in when the official host is unreachable.
+const OFFICIAL_NODE_DIST = 'https://nodejs.org/dist'
 
 async function downloadNodeBinary(platform, arch, destDir) {
   const ver = process.version // e.g. v22.x — matches the runtime's own major
   const distPlatform = NODE_DIST_PLATFORM[platform]
   if (!distPlatform) throw new Error(`unsupported platform for node download: ${platform}`)
   const ext = NODE_DIST_EXT[platform]
-  const base = process.env.NODE_DIST_MIRROR?.replace(/\/$/, '') || 'https://nodejs.org/dist'
+  const base = process.env.NODE_DIST_MIRROR?.replace(/\/$/, '') || OFFICIAL_NODE_DIST
   const archiveName = `node-${ver}-${distPlatform}-${arch}`
   const url = `${base}/${ver}/${archiveName}.${ext}`
   const archivePath = path.join(destDir, `node-archive.${ext}`)
@@ -138,6 +146,30 @@ async function downloadNodeBinary(platform, arch, destDir) {
   const res = await fetch(url, { redirect: 'follow' })
   if (!res.ok) throw new Error(`node dist download failed (${res.status}): ${url}`)
   const buf = Buffer.from(await res.arrayBuffer())
+  // Verify the archive against the official SHASUMS256.txt before extracting,
+  // so a dist mirror can never substitute bytes. Metadata is fetched from the
+  // official host first (mirrors only fill in when the official host is
+  // unreachable); every candidate is checked against the same digest.
+  const sumsName = `${archiveName}.${ext}`
+  const sumsBases = base === OFFICIAL_NODE_DIST ? [base] : [OFFICIAL_NODE_DIST, base]
+  let sumsText = ''
+  let sumsFrom = ''
+  for (const sumsBase of sumsBases) {
+    const sumsUrl = `${sumsBase}/${ver}/SHASUMS256.txt`
+    try {
+      const sumsRes = await fetch(sumsUrl, { redirect: 'follow' })
+      if (sumsRes.ok) { sumsText = await sumsRes.text(); sumsFrom = sumsUrl; break }
+      console.log(`$ node SHASUMS256.txt ${sumsRes.status}: ${sumsUrl}`)
+    } catch (err) {
+      console.log(`$ node SHASUMS256.txt ERR: ${sumsUrl} (${err.message})`)
+    }
+  }
+  if (sumsText === '') throw new Error(`node SHASUMS256.txt unreachable for ${ver}`)
+  const want = sumsText.split('\n').map((line) => line.trim().split(/\s+/)).find((parts) => parts[1] === sumsName)?.[0]?.toLowerCase()
+  if (want === undefined) throw new Error(`archive ${sumsName} missing from ${sumsFrom}`)
+  const got = createHash('sha256').update(buf).digest('hex')
+  if (got !== want) throw new Error(`node dist sha256 mismatch for ${sumsName}: expected ${want}, got ${got}`)
+  console.log(`$ verified ${sumsName} sha256 against ${sumsFrom}`)
   await writeFile(archivePath, buf)
   // Extract to a temp dir then move just the node binary into destDir.
   // Windows: MSYS tar mangles drive-letter paths and bsdtar-on-win is flaky
@@ -207,34 +239,49 @@ async function main() {
   //     direct dependencies, then reinstall. Generic: new peers added by
   //     future dsh versions are picked up automatically.
   const nmDir = path.join(runtimeDir, 'app', 'node_modules')
-  const nmDeep = path.join(nmDir, '@deepseek-ai')
   const missingPeers = new Set()
-  // Walk every package.json under node_modules and collect declared peers.
-  for (const scopeDir of [nmDir, nmDeep].filter(existsSync)) {
-    for (const entry of readdirSync(scopeDir)) {
-      const pkgDirs = scopeDir === nmDeep ? [path.join(scopeDir, entry)] : (entry.startsWith('@') ? [] : [path.join(scopeDir, entry)])
-      for (const pkgDir of pkgDirs) {
-        const pj = path.join(pkgDir, 'package.json')
-        if (!existsSync(pj)) continue
-        const pkg = JSON.parse(readFileSync(pj, 'utf8'))
-        if (!pkg.peerDependencies) continue
-        for (const peer of Object.keys(pkg.peerDependencies)) {
-          // Check if this peer exists anywhere in the flattened node_modules.
-          const peerPath = peer.startsWith('@')
-            ? path.join(nmDir, peer)
-            : path.join(nmDir, peer)
-          if (!existsSync(path.join(peerPath, 'package.json'))) {
-            missingPeers.add(peer)
+  // Recursively walk every package.json under node_modules (including nested
+  // node_modules of transitive deps) and collect declared peers. The old scan
+  // only looked one level deep, so peers declared by transitive dependencies
+  // were missed and crashed dsh at boot. Symlinks and .bin are skipped so the
+  // walk cannot loop or descend into bin shims.
+  function collectPeers(dir) {
+    let entries = []
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch { return }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+      if (entry.name === '.bin') continue
+      const sub = path.join(dir, entry.name)
+      if (entry.name === 'node_modules') { collectPeers(sub); continue }
+      const pj = path.join(sub, 'package.json')
+      if (existsSync(pj)) {
+        try {
+          const pkg = JSON.parse(readFileSync(pj, 'utf8'))
+          if (pkg.peerDependencies) {
+            for (const peer of Object.keys(pkg.peerDependencies)) {
+              // Check if this peer exists in the flattened top-level node_modules.
+              if (!existsSync(path.join(path.join(nmDir, peer), 'package.json'))) {
+                missingPeers.add(peer)
+              }
+            }
           }
-        }
+        } catch { /* unreadable manifest: ignore */ }
       }
+      collectPeers(sub)
     }
   }
+  collectPeers(nmDir)
   if (missingPeers.size > 0) {
     const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
     const peerSpecs = {}
     for (const name of missingPeers) {
-      const ver = execFileSync(npmBin, ['view', name, 'version'], { encoding: 'utf8', shell: process.platform === 'win32' }).trim()
+      // Array form with shell:true trips DEP0190 on newer Node; on Windows pass
+      // one strictly-quoted line instead (same discipline as run()).
+      const ver = (process.platform === 'win32'
+        ? execFileSync([npmBin, 'view', name, 'version'].map(quoteWinArg).join(' '), { encoding: 'utf8', shell: true })
+        : execFileSync(npmBin, ['view', name, 'version'], { encoding: 'utf8' })).trim()
       peerSpecs[name] = name.startsWith('@deepseek-ai/dsh-') ? `^${DSH_VERSION}` : `^${ver}`
       console.log(`missing peer: ${name}@${peerSpecs[name]}`)
     }

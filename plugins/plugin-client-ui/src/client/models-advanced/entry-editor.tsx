@@ -10,14 +10,11 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm/types'
 import {
   COMPAT_PRESETS, MODALITIES, REASONING_LEVELS,
   compatFieldsForApi, formatCapacity, parseCapacity, readReasoning, reasoningCompatFill,
 } from './fields.ts'
 import type { ModelDraft, ReasoningDraft } from './fields.ts'
-
-type CatalogModel = LlmResolvedModelInfo
 
 /** Props of {@link ModelEntryEditor}. */
 export interface ModelEntryEditorProps {
@@ -27,8 +24,6 @@ export interface ModelEntryEditorProps {
   onChange: (next: ModelDraft) => void
   /** Lock the id input (override rows address a catalog id by key). */
   lockedId?: boolean
-  /** Live provider metadata for the same model, when the route has a catalog. */
-  catalogModel?: CatalogModel
   /**
    * Resolved wire protocol for this row (model.api ?? route.api). Gates the
    * compat editor and the reasoning auto-fill. Unknown → union of hand
@@ -120,25 +115,16 @@ export function IconTrash(): ReactNode {
 function ReasoningEditor(props: {
   value: ReasoningDraft
   onChange: (next: ReasoningDraft) => void
-  catalogReasoning: CatalogModel['reasoning'] | undefined
   /** True when the route is hand-declared (no installed catalog base). */
   handDeclared: boolean
   index: number
   disabled: boolean
 }): ReactNode {
-  const { value, onChange, catalogReasoning, handDeclared, index, disabled } = props
+  const { value, onChange, handDeclared, index, disabled } = props
   const mode = value === undefined ? 'inherit' : value === false ? 'off' : 'custom'
   const dict = mode === 'custom' && typeof value === 'object' && value !== null ? value : {}
 
-  const suggestedLevels = (): string[] => {
-    if (catalogReasoning !== undefined) {
-      const fromCatalog = catalogReasoning.efforts
-        .map(effort => effort.id)
-        .filter(level => (REASONING_LEVELS as readonly string[]).includes(level))
-      if (fromCatalog.length > 0) return fromCatalog
-    }
-    return ['low', 'medium', 'high']
-  }
+  const suggestedLevels = (): string[] => ['low', 'medium', 'high']
 
   const setMode = (next: 'inherit' | 'off' | 'custom'): void => {
     if (next === 'inherit') {
@@ -240,14 +226,6 @@ function ReasoningEditor(props: {
           </>
         )
         : null}
-      {catalogReasoning === undefined
-        ? null
-        : (
-          <div className="dshAma-capabilityHint">
-            目录能力：{catalogReasoning.efforts.map(effort => effort.name).join('、')}
-            {catalogReasoning.defaultEffort === undefined ? '' : '；默认 ' + catalogReasoning.defaultEffort}
-          </div>
-        )}
       {mode === 'custom' && spellable.length > 0
         ? (
           <div className="dshAma-field">
@@ -432,7 +410,7 @@ function CompatEditor(props: {
  * @returns the entry editor.
  */
 export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
-  const { row, onChange, catalogModel, api, handDeclared, index, disabled } = props
+  const { row, onChange, api, handDeclared, index, disabled } = props
   // Capacities are edited as text; the buffer lives here so keystrokes are
   // never rewritten by the K/M formatter mid-word. The component stays
   // mounted while its row does, so the buffer is displaced only by the user.
@@ -547,7 +525,6 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
         index={index}
         disabled={disabled}
         handDeclared={handDeclared === true}
-        catalogReasoning={catalogModel?.reasoning}
         value={readReasoning(row.reasoningEfforts)}
         onChange={(next) => reasoningChange(row, onChange, next, api)}
       />

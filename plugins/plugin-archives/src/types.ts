@@ -41,11 +41,11 @@ export interface ArchiveList {
 }
 
 /** Why one requested deletion was skipped. */
-export type ArchiveSkipReason = 'live' | 'not-archived' | 'missing' | 'io'
+export type ArchiveSkipReason = 'live' | 'not-archived' | 'missing'
 
 /** POST /delete response value. */
 export interface ArchiveDeleteResult {
-  /** Ids whose on-disk directories were removed. */
+  /** Ids dropped from the archive set (logical deletion). */
   deleted: string[]
   /** Bytes freed by the deletions (sizes measured before removal). */
   freedBytes: number

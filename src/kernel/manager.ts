@@ -1,6 +1,5 @@
 import { promises as fs } from 'node:fs'
 import { Readable } from 'node:stream'
-import { once } from 'node:events'
 import path from 'node:path'
 import semver from 'semver'
 import * as tar from 'tar'
@@ -13,7 +12,7 @@ import type {
   ServerSpec,
   UpdateCheckResult,
 } from '../shared/types'
-import { CURRENT_FILE, KERNEL_ROOT_DIR, STAGING_DIR, TARBALL_FILE } from '../shared/constants'
+import { KERNEL_ROOT_DIR, STAGING_DIR, TARBALL_FILE } from '../shared/constants'
 import { exists, loadCurrentKernel, readRuntimeManifest, saveCurrentKernel } from './manifest'
 import { sha512File, verifyIntegrity } from './integrity'
 import { fetchRegistryInfo } from './sources/registry'
@@ -45,7 +44,6 @@ export interface KernelManagerOptions {
  */
 export class KernelManager {
   private current: CurrentKernel | null = null
-  private cancelRequested = false
   /** True while an install/update is running — blocks concurrent checks. */
   private installing = false
 
@@ -61,6 +59,15 @@ export class KernelManager {
 
   private log(message: string): void {
     this.opts.log?.(`[kernel] ${message}`)
+  }
+
+  /** Emit a status at most ~4/s; always emit when done. Shared by download/extract. */
+  private throttledStatus(state: { lastEmit: number }, payload: KernelStatusPayload, done: boolean): void {
+    const now = Date.now()
+    if (done || now - state.lastEmit >= 250) {
+      state.lastEmit = now
+      this.status(payload)
+    }
   }
 
   // ----------------------------------------------------------- init / load
@@ -86,8 +93,8 @@ export class KernelManager {
 
   private async initDev(): Promise<CurrentKernel> {
     const checkout = this.opts.devCheckoutDir
-    if (!checkout) throw new Error('dev source requires devCheckoutDir')
-    const manifest = await readDevManifest(checkout)
+    if (!checkout) throw new Error('开发模式需要配置 devCheckoutDir（本地 deepseek-harness 源码目录）')
+    const manifest = await readDevManifest(checkout, this.opts.platform, this.opts.arch)
     this.current = {
       active: 'dev',
       previous: null,
@@ -106,7 +113,7 @@ export class KernelManager {
 
   /** Absolute path of the active kernel directory ('dev' → the checkout). */
   getCurrentDir(): string {
-    if (!this.current) throw new Error('kernel not initialized')
+    if (!this.current) throw new Error('内核尚未初始化')
     if (this.opts.source === 'dev') return this.opts.devCheckoutDir!
     return this.kernelDir(this.current.active)
   }
@@ -180,7 +187,7 @@ export class KernelManager {
           : candidates.sort((a, b) => {
               const va = semver.valid(a.version)
               const vb = semver.valid(b.version)
-              if (va && vb) return semver.gt(va, vb) ? 1 : -1
+              if (va && vb) return semver.compare(va, vb)
               return a.version.localeCompare(b.version)
             })[candidates.length - 1]
         channel = info?.channel ?? 'stable'
@@ -200,8 +207,9 @@ export class KernelManager {
       // built (kernel cadence is decoupled from the shell's). Gate on artifact
       // availability so the user is never offered an update that cannot
       // download; auto checks stay silent, manual checks show a friendly reason.
+      const resolver = this.makeResolver()
       if (newer) {
-        const probe = await this.makeResolver().probeArtifact(info.version)
+        const probe = await resolver.probeArtifact(info.version)
         if (probe !== 'available') {
           const reason = probe === 'unreachable' ? 'github unreachable' : 'artifact pending'
           this.log(`dsh ${info.version} published but runtime artifact not yet available (${probe})`)
@@ -215,20 +223,23 @@ export class KernelManager {
       // primary line above and are skipped here.
       const alternatives: Array<{ version: string; channel: KernelChannel }> = []
       const seen = new Set(info ? [info.version] : [])
+      const pending: RegistryInfo[] = []
       for (const other of [infoAlpha, infoBeta, infoStable]) {
         if (!other || seen.has(other.version)) continue
         seen.add(other.version)
         const otherNewer = semver.valid(other.version) && semver.valid(currentVersion)
           ? semver.gt(other.version, currentVersion)
           : other.version !== currentVersion
-        if (!otherNewer) continue
-        const probe = await this.makeResolver().probeArtifact(other.version)
-        if (probe === 'available') {
+        if (otherNewer) pending.push(other)
+      }
+      const probes = await Promise.all(pending.map((other) => resolver.probeArtifact(other.version)))
+      pending.forEach((other, index) => {
+        if (probes[index] === 'available') {
           alternatives.push({ version: other.version, channel: other.channel })
         } else {
-          this.log(`dsh ${other.version} (${other.channel}) skipped as alternative (${probe})`)
+          this.log(`dsh ${other.version} (${other.channel}) skipped as alternative (${probes[index]})`)
         }
-      }
+      })
       return {
         available: !!newer,
         current: currentVersion,
@@ -250,10 +261,13 @@ export class KernelManager {
    * Install (or update to) a kernel version. Downloads the runtime artifact,
    * verifies its integrity, extracts to a versioned directory, and atomically
    * activates it. Returns the new CurrentKernel.
+   *
+   * Deliberately re-resolves the registry here instead of reusing a prior
+   * checkForUpdate result: the check may be hours old and the dist-tag may
+   * have moved since, so install pins whatever the channel points at now.
    */
   async installLatest(reason: string): Promise<CurrentKernel> {
     if (this.opts.source === 'dev') return this.initDev()
-    this.cancelRequested = false
     this.status({ phase: 'checking', message: reason === 'installing' ? '正在准备首次安装…' : '正在检查更新…', progress: null })
     const info = await fetchRegistryInfo(this.opts.channel)
     if (!info) throw new Error('无法连接 npm 注册表以解析 dsh 版本')
@@ -275,10 +289,12 @@ export class KernelManager {
     const resolver = this.makeResolver()
     const artifact = await resolver.fetchArtifact(version)
     if (!artifact) throw new Error(`未找到 dsh ${version} 在 ${this.opts.platform}-${this.opts.arch} 上的运行时产物`)
+    if (artifact.manifest.platform !== this.opts.platform || artifact.manifest.arch !== this.opts.arch) {
+      throw new Error(`产物平台不匹配：${artifact.manifest.platform}-${artifact.manifest.arch} 与 ${this.opts.platform}-${this.opts.arch}`)
+    }
 
     await fs.mkdir(path.join(this.root, STAGING_DIR), { recursive: true })
     const tarball = path.join(this.root, STAGING_DIR, TARBALL_FILE)
-    const extractDir = path.join(this.root, STAGING_DIR, 'extract')
 
     // 1. Download from the first candidate that both transfers and verifies.
     //    The trusted sha512 comes from the release metadata (official host
@@ -336,24 +352,19 @@ export class KernelManager {
       total = 0
     }
     let extracted = 0
-    let lastEmit = 0
+    const throttle = { lastEmit: 0 }
     await tar.x({
       file: tarball,
       cwd: extractDir,
-      // Throttled like the download path (~4/s): each status re-renders the
-      // in-window card and tray tooltip, and onentry fires once per file.
+      filter: (entryPath) => !path.isAbsolute(entryPath) && !entryPath.split('/').includes('..'),
       onentry: () => {
         extracted += 1
         if (total <= 0) return
-        const now = Date.now()
-        if (extracted === total || now - lastEmit >= 250) {
-          lastEmit = now
-          this.status({
-            phase: 'extracting',
-            message: `正在解压运行时…（${extracted}/${total}）`,
-            progress: Math.min(1, extracted / total),
-          })
-        }
+        this.throttledStatus(throttle, {
+          phase: 'extracting',
+          message: `正在解压运行时…（${extracted}/${total}）`,
+          progress: Math.min(1, extracted / total),
+        }, extracted === total)
       },
     })
     const inner = path.join(extractDir, 'runtime')
@@ -436,7 +447,7 @@ export class KernelManager {
 
   private makeResolver(): GitHubArtifactResolver {
     const { artifactOwner, artifactRepo } = this.opts
-    if (!artifactOwner || !artifactRepo) throw new Error('artifact source requires artifactOwner/artifactRepo')
+    if (!artifactOwner || !artifactRepo) throw new Error('制品源需要配置 artifactOwner/artifactRepo（GitHub 仓库）')
     return new GitHubArtifactResolver(artifactOwner, artifactRepo, this.opts.platform, this.opts.arch)
   }
 
@@ -447,30 +458,24 @@ export class KernelManager {
     const body = Readable.fromWeb(res.body as never)
     const out = await fs.open(dest, 'w')
     let received = 0
-    let lastEmit = 0
+    const throttle = { lastEmit: 0 }
+    // F20: cap a single runtime download (typical ~160 MB) at 1 GiB.
+    const MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
+    if (total > MAX_DOWNLOAD_BYTES) throw new Error(`下载失败：安装包过大（${total} 字节）`)
     try {
       for await (const chunk of body) {
-        if (this.cancelRequested) throw new Error('下载已取消')
+        // TODO: wire download cancellation from the shell (tray/close) when a cancel UI exists.
         received += chunk.length
         await out.write(chunk)
-        // Throttle status broadcasts (~4/s): each one re-renders the in-window
-        // card and the tray tooltip, and a 160 MB download would otherwise
-        // fire thousands of IPCs per second on small chunks.
+        // Throttled (~4/s): each status re-renders the in-window card and tray tooltip.
         if (total > 0) {
-          const now = Date.now()
-          if (received === total || now - lastEmit >= 250) {
-            lastEmit = now
-            this.status({ phase: 'downloading', message: '正在下载 dsh…', progress: Math.min(1, received / total) })
-          }
+          if (received > MAX_DOWNLOAD_BYTES) throw new Error(`下载失败：安装包过大（已接收 ${received} 字节）`)
+          this.throttledStatus(throttle, { phase: 'downloading', message: '正在下载 dsh…', progress: Math.min(1, received / total) }, received === total)
         }
       }
     } finally {
       await out.close()
     }
-  }
-
-  requestCancel(): void {
-    this.cancelRequested = true
   }
 
   // -------------------------------------------------------------- rollback
@@ -482,14 +487,14 @@ export class KernelManager {
   async rollback(): Promise<CurrentKernel | null> {
     if (!this.current?.previous) return null
     const previousDir = this.current.previous
+    const manifest = await readRuntimeManifest(this.kernelDir(previousDir))
+    if (!manifest) throw new Error(`回滚失败：上一个内核 ${previousDir} 缺少 manifest.json`)
     const rollbackTo: CurrentKernel = {
       active: previousDir,
       previous: null,
       installedAt: new Date().toISOString(),
-      manifest: this.current.manifest, // replaced below by the real manifest
+      manifest,
     }
-    const manifest = await readRuntimeManifest(this.kernelDir(previousDir))
-    if (manifest) rollbackTo.manifest = manifest
     await saveCurrentKernel(this.root, rollbackTo)
     this.current = rollbackTo
     this.status({ phase: 'rollback', message: `已回滚到 ${previousDir}`, progress: null })
@@ -536,7 +541,7 @@ export class KernelManager {
       return { kind: 'pnpm', cwd: this.opts.devCheckoutDir! }
     }
     const dir = this.getCurrentDir()
-    const nodePath = path.join(dir, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
+    const nodePath = path.join(dir, 'node', this.opts.platform === 'win32' ? 'node.exe' : 'node')
     return {
       kind: 'node',
       nodePath,
@@ -545,10 +550,4 @@ export class KernelManager {
     }
   }
 
-  /** Resolve the artifact host for the current source (for UI display). */
-  describeSource(): string {
-    return this.opts.source === 'dev'
-      ? `dev:${this.opts.devCheckoutDir}`
-      : `${this.opts.artifactOwner}/${this.opts.artifactRepo} (${this.opts.channel})`
-  }
 }

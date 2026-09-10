@@ -41,12 +41,12 @@ capabilities:
 
 Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
 
-1. **Module resolution**: the seven suite plugins are linked into
+1. **Module resolution**: the ten suite plugins are linked into
    `$DSH_HOME/profiles/node_modules/@dsh-app/` (junction on Windows); dev uses
    this repo's `plugins/*`, production the active kernel's
    `app/node_modules/@dsh-app/*`.
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into userData and
-   injected via `dsh web --patch` — seven suite plugin entries applied after
+   injected via `dsh web --patch` — ten suite plugin entries applied after
    the official bundle layers (last write wins, no upstream profile template
    changes).
 
@@ -174,6 +174,9 @@ npm run dist:win     # NSIS installer (x64 + arm64)
 npm run dist:mac     # dmg + zip (x64 + arm64; notarization via env vars)
 npm run dist:linux   # AppImage + deb (x64 + arm64)
 ```
+
+App icon: `resources/icon.png` is currently a placeholder brand icon — replace it with the final icon before release;
+`npm run icon:gen` generates the placeholder, `npm run icon:build` derives multi-size PNGs + ICO from it (requires Pillow).
 
 The kernel runtime artifact is built by `scripts/build-runtime.mjs` (one per
 platform/arch); CI publishes them to GitHub Releases:

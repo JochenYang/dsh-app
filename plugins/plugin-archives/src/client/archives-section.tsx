@@ -67,7 +67,6 @@ const SKIP_REASONS: Record<string, string> = {
   live: '会话正在进行',
   'not-archived': '不在归档中',
   missing: '日志已不存在',
-  io: '文件访问失败',
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {

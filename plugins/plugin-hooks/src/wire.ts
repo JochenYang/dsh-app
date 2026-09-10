@@ -198,9 +198,15 @@ export function validateBridge(raw: unknown, existingIds: ReadonlySet<string>): 
     if (pluginRoot !== undefined && pluginRoot !== '') bridge.pluginRoot = pluginRoot
     const projectDir = asString(raw.projectDir)?.trim()
     if (projectDir !== undefined && projectDir !== '') bridge.projectDir = projectDir
-  } else {
+  }
+  // model is a codex-only field: any other dialect carrying it is a caller
+  // bug (e.g. a stale form), rejected here rather than silently dropped.
+  if (dialect === 'codex') {
     const model = asString(raw.model)?.trim()
     if (model !== undefined && model !== '') bridge.model = model
+  } else {
+    const model = asString(raw.model)?.trim()
+    if (model !== undefined && model !== '') throw new HooksValidationError('model 只支持 codex 桥')
   }
   for (const field of ['defaultTimeoutMs', 'stderrSummaryMaxChars'] as const) {
     const v = raw[field]
@@ -221,7 +227,7 @@ export function toBridgeConfig(bridge: HooksBridge): Record<string, unknown> {
   if (bridge.dialect === 'claude-code') {
     if (bridge.pluginRoot !== undefined) config.pluginRoot = bridge.pluginRoot
     if (bridge.projectDir !== undefined) config.projectDir = bridge.projectDir
-  } else {
+  } else if (bridge.dialect === 'codex') {
     if (bridge.model !== undefined) config.model = bridge.model
   }
   if (bridge.defaultTimeoutMs !== undefined) config.defaultTimeoutMs = bridge.defaultTimeoutMs

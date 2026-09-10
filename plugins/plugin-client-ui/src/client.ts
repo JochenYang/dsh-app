@@ -14,6 +14,8 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // compilation unit.
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
+// Type-only: pulls the connection Events merge ('connection/reset') into scope.
+import type {} from '@deepseek-ai/dsh-client-connection/client'
 // Type-only: pulls the settings shell's SlotMap merge (the 'settings.section'
 // entry) and the settingsScope/settingsSchema Context merges.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'

@@ -3,8 +3,10 @@
  *
  * While the in-session `memory_save` tool relies on the model noticing
  * durable facts, this pass makes persistence deterministic: after a session
- * goes quiet for {@link QUIET_MS}, a ONE-SHOT read-only subagent reviews the
- * conversation delta since the last distill plus the current memory files
+ * goes quiet for {@link QUIET_MS}, one direct LLM call (default; the legacy
+ * read-only one-shot subagent stays behind the `distillBackend` switch)
+ * reviews the conversation delta since the last distill plus the current
+ * memory files
  * and proposes NEW entries as structured JSON. The HOST validates every
  * entry (category, length, dedup against existing lines) before it ever
  * reaches a memory file — the child cannot write anything itself.
@@ -28,8 +30,8 @@ import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the subagents Context merge (ctx.subagents) into scope.
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import { streamJson, type DirectRoute } from './llm-direct.ts'
-import { MAX_ENTRY_CHARS, normalizeForMatch, parseEntries, shortSessionId, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
+import { resolveLlm, streamJson, type DirectRoute } from './llm-direct.ts'
+import { MAX_ENTRY_CHARS, containsCredential, normalizeForMatch, parseEntries, shortSessionId, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /**
@@ -357,7 +359,7 @@ export class MemoryDistiller {
       this.root.advanceDistill(sessionId, lastEventSeq)
       return
     }
-    const result = await streamJson(this.ctx, {
+    const result = await streamJson(resolveLlm(this.ctx), {
       route,
       system,
       user,
@@ -454,6 +456,9 @@ export class MemoryDistiller {
         ? proposal.category as MemoryCategory
         : undefined
       if (content === '' || content.length > MAX_ENTRY_CHARS || category === undefined) continue
+      // A leaked secret must never reach the file, even from the background
+      // pass (the transcript may contain a pasted key the user shared).
+      if (containsCredential(content)) continue
       // No workspace: a project-scoped proposal has nowhere to land — drop it
       // rather than promote a project fact into the global file by mistake.
       if (proposal.scope !== 'global' && cwd === undefined) continue

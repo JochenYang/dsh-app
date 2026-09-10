@@ -23,11 +23,6 @@ for (const [label, url] of targets) await probe(label, url)
 
 // GitHub asset probes. Use a real, stable public release asset so the mirror
 // chain is validated even before the dsh-app release repo exists.
-const base = process.env.PROBE_BASE
-  ?? 'https://github.com/deepseek-ai/deepseek-harness/releases/download'
-const tag = process.env.PROBE_TAG
-const asset = process.env.PROBE_ASSET
-
 console.log('\n=== 2. GitHub release-asset mirrors (real asset through each proxy) ===')
 // A small, stable public release asset; proves the mirror proxies real
 // GitHub release downloads from this network.

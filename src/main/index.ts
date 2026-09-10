@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import net from 'node:net'
 import { existsSync, readFileSync, renameSync } from 'node:fs'
 import path from 'node:path'
@@ -7,10 +7,12 @@ import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
 import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies } from './window'
+import { CLOSE_DIALOG_SCRIPT, type CloseDialogChoice } from './close-dialog'
 import { inFrameDialogScript } from './in-frame-dialog'
-import { createTray, destroyTray, setTrayTooltip } from './tray'
+import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
+import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult } from './updater'
-import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST } from '../shared/constants'
+import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import type { KernelChannel, KernelStatusPayload } from '../shared/types'
 
 // ---------------------------------------------------------------- config
@@ -23,8 +25,8 @@ const channel =
   process.env.DSH_APP_CHANNEL === 'alpha' ? 'alpha'
   : process.env.DSH_APP_CHANNEL === 'beta' ? 'beta'
   : 'stable'
-const artifactOwner = process.env.DSH_APP_ARTIFACT_OWNER ?? 'JochenYang'
-const artifactRepo = process.env.DSH_APP_ARTIFACT_REPO ?? 'dsh-app'
+const artifactOwner = resolveArtifactOwner()
+const artifactRepo = resolveArtifactRepo()
 
 // ------------------------------------------------------------------ state
 
@@ -74,20 +76,7 @@ async function promptThemedConfirm<O>(
   native: Electron.MessageBoxOptions,
   map: (value: string, nativeResponse?: number) => O,
 ): Promise<O> {
-  if (win !== null && !win.isDestroyed()) {
-    try {
-      const choice: unknown = await win.webContents.executeJavaScript(inFrameDialogScript(config))
-      if (typeof choice === 'string') return map(choice)
-    } catch {
-      // Page not answerable (crashed, mid-navigation, or before first load):
-      // fall through to the native dialog.
-    }
-  }
-  const prompt = win === null
-    ? dialog.showMessageBox(native)
-    : dialog.showMessageBox(win, native)
-  const { response } = await prompt
-  return map('', response)
+  return promptThemedDialog(win, inFrameDialogScript(config), native, map)
 }
 
 /**
@@ -105,36 +94,27 @@ async function promptNoticeThemed(
   title: string,
   message: string,
 ): Promise<void> {
-  await promptThemedConfirm(
+  await noticeThemedDialog(
     win,
-    { title, message, buttons: [{ label: '确定', value: 'ok', primary: true }], cancelValue: 'ok', enterValue: 'ok' },
-    { type, title, message, buttons: ['确定'], defaultId: 0, cancelId: 0, noLink: true },
-    () => undefined,
+    type,
+    title,
+    message,
+    inFrameDialogScript({ title, message, buttons: [{ label: '确定', value: 'ok', primary: true }], cancelValue: 'ok', enterValue: 'ok' }),
   )
 }
 
 /**
  * Prompt the close-choice dialog inside the loaded dsh page (themed modal via
- * CLOSE_DIALOG_SCRIPT) with a native showMessageBox fallback. Returns the
- * user's choice, or 'cancel' when neither channel can produce an answer
- * (e.g. the page never loaded) — the window then simply stays open.
+ * close-dialog.ts CLOSE_DIALOG_SCRIPT) with a native showMessageBox fallback.
+ * Returns the user's choice, or 'cancel' when neither channel can produce an
+ * answer (e.g. the page never loaded) — the window then simply stays open.
  * The in-window script resolves to 'tray' | 'quit' | 'cancel'; the native
  * box maps its button indexes identically.
  */
-async function promptCloseChoice(win: BrowserWindow | null): Promise<'tray' | 'quit' | 'cancel'> {
-  return promptThemedConfirm(
+async function promptCloseChoice(win: BrowserWindow | null): Promise<CloseDialogChoice> {
+  return promptThemedDialog(
     win,
-    {
-      title: '关闭 DSH APP',
-      message: '关闭窗口后要如何运行？',
-      buttons: [
-        { label: '取消', value: 'cancel' },
-        { label: '退出程序', value: 'quit' },
-        { label: '最小化到托盘', value: 'tray', primary: true },
-      ],
-      cancelValue: 'cancel',
-      enterValue: 'tray',
-    },
+    CLOSE_DIALOG_SCRIPT,
     {
       type: 'question',
       title: '关闭 DSH APP',
@@ -145,7 +125,7 @@ async function promptCloseChoice(win: BrowserWindow | null): Promise<'tray' | 'q
       noLink: true,
     },
     (value, nativeResponse) => {
-      if (value !== '') return value as 'tray' | 'quit' | 'cancel'
+      if (value !== '') return value as CloseDialogChoice
       return nativeResponse === 0 ? 'tray' : nativeResponse === 1 ? 'quit' : 'cancel'
     },
   )
@@ -203,6 +183,7 @@ async function startServerAndOpenWindow(): Promise<void> {
   restartAttempts = 0
   void kernel.cleanup()
   broadcastStatus({ phase: 'ready', message: '就绪', progress: null })
+  updateTrayMenu()
 }
 
 async function handleServerDown(reason: string): Promise<void> {

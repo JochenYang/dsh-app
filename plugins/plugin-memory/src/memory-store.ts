@@ -31,8 +31,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, join } from 'node:path'
-import type { MemoryCategory } from './types.ts'
-
+import type { MemoryCategory, MemoryDistillActivity, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
 /** One saved entry gets at most this many characters; longer input is
  * rejected so the model re-thinks a leaner line instead of bloating the
  * file every session re-reads. */
@@ -108,6 +107,37 @@ function entryContent(line: string): string {
 export function stripEntryPrefix(content: string): string {
   const trimmed = content.trim()
   return ENTRY_PREFIX.test(trimmed) ? trimmed.replace(ENTRY_PREFIX, '').trim() : content
+}
+
+/**
+ * Credential-looking fragments that must never be persisted. Every pattern
+ * needs either a key NAME with a `:`/`=` separator or a known token PREFIX:
+ * bare words alone never match, so legitimate entries about token budgets or
+ * model limits ("token 上限导致失败") pass through. No `g` flag — these run
+ * through RegExp.test, where `g` would make lastIndex stateful.
+ */
+const CREDENTIAL_PATTERNS: readonly RegExp[] = [
+  /api[_-]?key\s*[:=：]/iu,
+  /\bsecret\s*[:=：]/iu,
+  /passw(or)?d\s*[:=：]/iu,
+  /\btoken\s*[:=：]/iu,
+  /\bauthorization\s*[:=：]/iu,
+  /\bbearer\s+[A-Za-z0-9]/iu,
+  /\bsk-[A-Za-z0-9_-]{16,}\b/u,
+  /(gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}/u,
+  /xox[bpas]-[A-Za-z0-9-]+/u,
+  /密[码钥]\s*[是为:：=]/u,
+  /口令\s*[是为:：=]/u,
+]
+
+/**
+ * Whether `text` looks like it carries a credential (key/token/password).
+ * Checked before every persist path (tool save, distill apply, curator merge)
+ * so a pasted secret never lands in a file that is re-injected into every
+ * future session.
+ */
+export function containsCredential(text: string): boolean {
+  return CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text))
 }
 
 /**
@@ -370,15 +400,8 @@ export function isValidSlug(slug: string): boolean {
   return SLUG_PATTERN.test(slug)
 }
 
-/** One project's summary for the settings page. */
-export interface ProjectSummary {
-  slug: string
-  /** Full workspace path (from project.json; '' when unreadable). */
-  cwd: string
-  entries: number
-  sizeBytes: number
-}
-
+/** One project's summary for the settings page (store view of the wire shape). */
+export type ProjectSummary = Pick<MemoryProjectSummary, 'slug' | 'cwd' | 'entries' | 'sizeBytes'>
 /** Summarize every project directory, busiest first. */
 export function listProjects(rootDir: string): ProjectSummary[] {
   const projectsDir = join(rootDir, 'projects')
@@ -404,8 +427,11 @@ export function listProjects(rootDir: string): ProjectSummary[] {
   return out
 }
 
-/** Remove one project directory entirely (scoped clear). */
+/** Remove one project directory entirely (scoped clear). Rejects malformed
+ * slugs before touching the filesystem (traversal fence, defense in depth
+ * behind the route's own check). */
 export function removeProject(rootDir: string, slug: string): void {
+  if (!isValidSlug(slug)) throw new Error(`invalid project slug: ${slug}`)
   rmSync(join(rootDir, 'projects', slug), { recursive: true, force: true })
 }
 
@@ -431,37 +457,10 @@ export function shortSessionId(sessionId: string): string {
   return sessionId.replace(/^session-/u, '').slice(0, 8)
 }
 
-/** One background-distill run's trace entry (settings-page transparency). */
-export interface DistillActivity {
-  /** Unix epoch ms when the distill ran. */
-  at: number
-  /** Short session id (first 8 hex of the uuid segment; {@link shortSessionId}). */
-  session: string
-  /** Entries the run persisted (0 = it ran but nothing new qualified). */
-  saved: number
-  /** LLM channel that ran the pass (absent for traces before backend tracking). */
-  backend?: 'direct' | 'subagent'
-  /** Model tokens spent on the pass (direct channel only). */
-  tokens?: number
-}
-
-/** One background LLM call's audit record (cost observability). */
-export interface LlmAuditRun {
-  /** Unix epoch ms when the call finished. */
-  at: number
-  /** Which pass spent it. */
-  source: 'distill' | 'curate'
-  /** Short session id that triggered the pass. */
-  session: string
-  /** Call outcome. */
-  status: 'ok' | 'error' | 'aborted'
-  inputTokens: number
-  outputTokens: number
-  durationMs: number
-  /** Human-readable cause (non-ok only). */
-  error?: string
-}
-
+/** One background-distill run's trace entry (store view of the wire shape). */
+export type DistillActivity = Pick<MemoryDistillActivity, 'at' | 'session' | 'saved' | 'backend' | 'tokens'>
+/** One background LLM call's audit record (store view of the wire shape). */
+export type LlmAuditRun = Pick<MemoryLlmAuditRun, 'at' | 'source' | 'session' | 'status' | 'inputTokens' | 'outputTokens' | 'durationMs' | 'error'>
 /** How many audit rows llm-audit.json retains (FIFO). */
 const MAX_AUDIT_RUNS = 100
 

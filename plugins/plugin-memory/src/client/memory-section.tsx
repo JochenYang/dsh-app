@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { MemoryDistillActivity, MemoryEntriesResponse, MemoryProjectSummary, MemoryStatus } from '../types.ts'
+import { ROUTE_PREFIX, type MemoryDistillActivity, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -51,8 +51,6 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return body.value as T
 }
 
-const ROUTE = '/plugins/@dsh-app/plugin-memory/api'
-
 /** Distill-activity rows shown before the "show all" fold (list caps at 20). */
 const ACTIVITY_PREVIEW = 5
 
@@ -81,7 +79,7 @@ export function MemorySection(): ReactNode {
 
   const load = useCallback(async () => {
     try {
-      setStatus(await fetchJson<MemoryStatus>(`${ROUTE}/status`))
+      setStatus(await fetchJson<MemoryStatus>(`${ROUTE_PREFIX}/status`))
       setError(undefined)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
@@ -89,7 +87,7 @@ export function MemorySection(): ReactNode {
   }, [])
 
   const loadProjectRows = useCallback(async (slug: string) => {
-    const data = await fetchJson<MemoryEntriesResponse>(`${ROUTE}/entries?slug=${encodeURIComponent(slug)}`)
+    const data = await fetchJson<MemoryEntriesResponse>(`${ROUTE_PREFIX}/entries?slug=${encodeURIComponent(slug)}`)
     setProjectRows({ slug, entries: data.entries })
   }, [])
 
@@ -102,7 +100,7 @@ export function MemorySection(): ReactNode {
     setNotice(undefined)
     try {
       const next = !status.enabled
-      await fetchJson<{ enabled: boolean }>(`${ROUTE}/config`, {
+      await fetchJson<{ enabled: boolean }>(`${ROUTE_PREFIX}/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: next }),
@@ -124,7 +122,7 @@ export function MemorySection(): ReactNode {
     setNotice(undefined)
     try {
       const next = !status.distill
-      await fetchJson(`${ROUTE}/config`, {
+      await fetchJson(`${ROUTE_PREFIX}/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ distill: next }),
@@ -145,7 +143,7 @@ export function MemorySection(): ReactNode {
     setBusy(true)
     setNotice(undefined)
     try {
-      await fetchJson(`${ROUTE}/pin`, {
+      await fetchJson(`${ROUTE_PREFIX}/pin`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, pinned, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
@@ -167,7 +165,7 @@ export function MemorySection(): ReactNode {
     setBusy(true)
     setNotice(undefined)
     try {
-      const result = await fetchJson<{ forgotten: number }>(`${ROUTE}/forget`, {
+      const result = await fetchJson<{ forgotten: number }>(`${ROUTE_PREFIX}/forget`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ match: text, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
@@ -207,7 +205,7 @@ export function MemorySection(): ReactNode {
     setConfirming(null)
     setNotice(undefined)
     try {
-      await fetchJson(`${ROUTE}/clear`, {
+      await fetchJson(`${ROUTE_PREFIX}/clear`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(target.scope === 'global' ? { scope: 'global' } : { scope: 'project', slug: target.slug }),

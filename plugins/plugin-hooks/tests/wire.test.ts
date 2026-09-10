@@ -22,6 +22,13 @@ describe('validateBridge', () => {
     assert.throws(() => validateBridge({ ...VALID_CC, id: 'hook-1', defaultTimeoutMs: -1 }, new Set()), HooksValidationError)
   })
 
+  it('accepts model on codex only; other dialects carrying one are rejected', () => {
+    const codex = validateBridge({ ...VALID_CODEX, id: 'hook-1' }, new Set())
+    assert.equal(codex.model, 'deepseek-v4')
+    assert.throws(() => validateBridge({ ...VALID_CC, id: 'hook-1', model: 'deepseek-v4' }, new Set()), HooksValidationError)
+    assert.throws(() => validateBridge({ id: 'hook-1', dialect: 'native', configSource: 'inline', configContent: '{}', model: 'deepseek-v4' }, new Set()), HooksValidationError)
+  })
+
   it('accepts a valid claude-code bridge and normalizes enabled to true by default', () => {
     const b = validateBridge({ ...VALID_CC, id: 'hook-1' }, new Set())
     assert.equal(b.enabled, true)

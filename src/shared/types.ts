@@ -1,7 +1,7 @@
 /** Shared types used across the main process, kernel manager, and renderers. */
 
 export type KernelChannel = 'stable' | 'beta' | 'alpha'
-export type KernelSource = 'dev' | 'registry' | 'artifact'
+export type KernelSource = 'dev' | 'artifact'
 
 export type KernelPhase =
   | 'idle'
@@ -16,7 +16,7 @@ export type KernelPhase =
 
 export interface KernelStatusPayload {
   phase: KernelPhase
-  /** Human-readable (English for now; i18n lives in the renderer layer). */
+  /** 用户可见文案（zh-CN，由调用方直接展示）。 */
   message: string
   /** 0..1 download/extract progress, or null when indeterminate. */
   progress: number | null

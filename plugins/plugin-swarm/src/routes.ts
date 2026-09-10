@@ -152,7 +152,7 @@ export function registerSwarmRoutes(webServer: WebServerLike, defaults: SwarmOve
               if (error instanceof SwarmConfigValidationError) {
                 fail(res, 400, 'bad-request', error.message)
               } else {
-                fail(res, 500, 'io', `写入配置失败：${error instanceof Error ? error.message : String(error)}`)
+                fail(res, 500, 'io', '写入配置失败，请稍后重试')
               }
               return
             }

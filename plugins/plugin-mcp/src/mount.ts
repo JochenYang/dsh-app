@@ -205,8 +205,22 @@ export class McpMountManager {
     }
     try {
       if (record.loaderId !== undefined) {
-        await this.loader.remove(record.loaderId).catch(() => undefined)
-        record.loaderId = undefined
+        // Reconfigure in place: loader.update keeps the same instance (and its
+        // tools registered) instead of churning remove+create. A stale loaderId
+        // (e.g. the kernel restarted underneath us) fails the update, and the
+        // create path below remounts from scratch.
+        try {
+          await this.loader.update(record.loaderId, { name: KERNEL_PLUGIN, config })
+          record.configKey = configKey
+          record.error = undefined
+          record.warnings = warnings.length > 0 ? warnings : undefined
+          this.log(`mcp mount: ${entry.serverName} updated (${record.loaderId})`)
+          this.records.set(entry.id, { ...record })
+          return
+        } catch {
+          await this.loader.remove(record.loaderId).catch(() => undefined)
+          record.loaderId = undefined
+        }
       }
       const loaderId = await this.loader.create({ name: KERNEL_PLUGIN, config })
       record.loaderId = loaderId

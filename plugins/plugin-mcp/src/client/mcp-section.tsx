@@ -166,8 +166,10 @@ function draftFromJson(text: string, previous: Draft): Draft {
 /** One structured save body from either editor view. */
 function bodyFromDraft(draft: Draft): Record<string, unknown> {
   const name = draft.serverName.trim()
-  if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) {
-    throw new McpValidationError('serverName 只能包含字母、数字、下划线和连字符（1–32 位）')
+  // Empty-only gate: the serverName shape is validated server-side
+  // (validateEntry → 400 with a zh-CN reason); the client never duplicates it.
+  if (name === '') {
+    throw new McpValidationError('请填写服务器名（serverName）')
   }
   const body: Record<string, unknown> = {
     serverName: name,
@@ -191,8 +193,10 @@ function bodyFromDraft(draft: Draft): Record<string, unknown> {
     if (draft.cwd.trim() !== '') body.cwd = draft.cwd.trim()
   } else {
     const url = draft.url.trim()
-    if (!/^https?:\/\//.test(url)) {
-      throw new McpValidationError('streamable-http 服务器必须填写合法的 http(s) URL')
+    // Empty-only gate: URL legality is validated server-side (validateEntry →
+    // 400); an empty value is rejected here so a blank form never posts.
+    if (url === '') {
+      throw new McpValidationError('请填写 streamable-http 服务器的 URL')
     }
     body.url = url
     if (draft.headersText.trim() !== '') {
@@ -202,11 +206,9 @@ function bodyFromDraft(draft: Draft): Record<string, unknown> {
     }
   }
   if (draft.toolCallTimeoutMs.trim() !== '') {
-    const timeout = Number(draft.toolCallTimeoutMs)
-    if (!Number.isFinite(timeout) || timeout <= 0) {
-      throw new McpValidationError('工具调用超时必须是正数（毫秒）')
-    }
-    body.toolCallTimeoutMs = timeout
+    // Empty-only gate: positivity is enforced server-side (validateEntry →
+    // 400); a non-numeric entry serializes to null and is rejected there.
+    body.toolCallTimeoutMs = Number(draft.toolCallTimeoutMs)
   }
   return body
 }

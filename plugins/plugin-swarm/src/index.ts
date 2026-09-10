@@ -33,7 +33,6 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 // Type-only: pulls the ctx merges (tools / subagents / commands /
@@ -43,9 +42,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { runSwarmBatch } from './orchestrator.ts'
-import type { SwarmBatchOutcome, SwarmOutputMode } from './orchestrator.ts'
-import { projectOutputItems } from './orchestrator.ts'
+import { projectOutputItems, runSwarmBatch, type SwarmBatchOutcome, type SwarmItemOutcome } from './orchestrator.ts'
 import { MIN_ITEMS, expandTasks } from './expand.ts'
 import type { SwarmToolArgs } from './expand.ts'
 import { loadSwarmUserConfig } from './user-config.ts'
@@ -119,13 +116,15 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   provider: z.string().default('spawn'),
-  maxItems: z.natural().max(Number.MAX_SAFE_INTEGER).default(8),
-  defaultConcurrency: z.natural().max(Number.MAX_SAFE_INTEGER).default(4),
-  maxConcurrency: z.natural().max(Number.MAX_SAFE_INTEGER).default(8),
+  // Floors mirror FIELD_MINIMUMS in user-config.ts — a 0 here would merge
+  // into the effective config and trip the load-time assertions below.
+  maxItems: z.natural().min(MIN_ITEMS).max(Number.MAX_SAFE_INTEGER).default(8),
+  defaultConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4),
+  maxConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(8),
   adaptive: z.boolean().default(true),
   itemMaxRetries: z.natural().max(Number.MAX_SAFE_INTEGER).default(2),
   itemRetryDelayMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(15000),
-  perItemOutputLimit: z.natural().max(Number.MAX_SAFE_INTEGER).default(4000),
+  perItemOutputLimit: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4000),
   tokenBudget: z.natural().max(Number.MAX_SAFE_INTEGER).default(0),
   startStaggerMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(800),
   // Prevent Schemastery from materializing omitted agentOptions as `{}`.
@@ -245,37 +244,22 @@ function renderToolOutput(value: SwarmToolOutput): string {
   return renderBatch({ ...value, durationMs: value.durationMs ?? 0 }, value.warnings ?? [])
 }
 
-/** Structured tool output: the batch outcome with the schema's field names. */
-interface SwarmToolOutput {
+/** Structured tool output: the batch outcome with the schema's field names,
+ * derived from the orchestrator shape so the two never drift apart. */
+interface SwarmToolOutput extends Pick<SwarmBatchOutcome,
+  'label' | 'concurrency' | 'peakConcurrency' | 'learnedCeiling' | 'total'
+  | 'completed' | 'failed' | 'aborted' | 'budgetExhausted' | 'usage'> {
   readonly kind: 'swarm' | 'swarm-dry-run'
-  readonly label: string
-  readonly concurrency: number
-  readonly peakConcurrency?: number
-  readonly learnedCeiling?: number
-  readonly total: number
-  readonly completed: number
-  readonly failed: number
-  readonly aborted: number
   readonly durationMs?: number
-  readonly budgetExhausted?: boolean
-  readonly usage?: TokenUsage
   readonly warnings?: readonly string[]
   readonly items: readonly SwarmItemOutput[]
 }
 
-/** One item row of the tool output; a dry-run row carries `prompt` instead. */
-interface SwarmItemOutput {
-  readonly index: number
-  readonly item: string
-  readonly status: 'completed' | 'failed' | 'aborted'
-  readonly childId?: string
-  readonly output?: string
-  readonly error?: string
-  readonly failureKind?: 'transport' | 'content' | 'structural'
-  readonly failureCode?: string
-  readonly durationMs?: number
-  readonly usage?: TokenUsage
-  readonly retries?: number
+/** One item row of the tool output (orchestrator shape plus the dry-run
+ * `prompt`); a dry-run row carries `prompt` instead of outcome detail. */
+interface SwarmItemOutput extends Pick<SwarmItemOutcome,
+  'index' | 'item' | 'status' | 'childId' | 'output' | 'error'
+  | 'failureKind' | 'failureCode' | 'durationMs' | 'usage' | 'retries'> {
   readonly prompt?: string
 }
 

@@ -14,6 +14,11 @@
  * Dynamic mount/re-unmount runs inline so the UI reflects reality; a mount
  * failure is reported in the entry's status, never as a failed save.
  *
+ * Isolation note: the small HTTP helpers below intentionally mirror
+ * plugin-hooks' routes.ts instead of being shared — each suite plugin bundles
+ * standalone (esbuild, no cross-plugin runtime imports), so a shared util
+ * would be a new package for ~30 lines.
+ *
  * @module @dsh-app/plugin-mcp/routes
  */
 

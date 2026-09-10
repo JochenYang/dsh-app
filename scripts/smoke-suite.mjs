@@ -69,7 +69,10 @@ function findDevCheckout() {
 async function extractTgz(tgzPath) {
   const work = await mkdtemp(path.join(tmpdir(), 'dsh-smoke-rt-'))
   await new Promise((resolve, reject) => {
-    const child = spawn('tar', ['-xf', tgzPath, '-C', work], { stdio: 'inherit', shell: process.platform === 'win32' })
+    // Array form with shell:false on every platform: tar needs no shell, and
+    // array+shell on Windows mangles quoting (DEP0190 class). Both paths are
+    // script-built absolute paths passed as argv, never a command line.
+    const child = spawn('tar', ['-xf', tgzPath, '-C', work], { stdio: 'inherit', shell: false })
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`tar exited ${code}`))))
     child.on('error', reject)
   })
@@ -85,7 +88,7 @@ async function extractTgz(tgzPath) {
 function buildLaunch(args) {
   if (args.mode === 'runtime' || args.mode === 'tgz') {
     const dir = args.mode === 'tgz' ? args.extracted.dir : args.runtime
-    const nodeBin = path.join(dir, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
+    const nodeBin = path.join(dir, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
     const script = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
     if (!existsSync(nodeBin) || !existsSync(script)) throw new Error(`runtime dir incomplete: ${dir}`)
     return {
@@ -340,7 +343,8 @@ async function main() {
   // Built plugins are a precondition in dev mode (runtime mode ships them).
   if (args.mode === 'dev') {
     for (const dir of SUITE_DIRS) {
-      if (dir === 'plugin-brand') continue // tsc-built; lib/ may pre-exist
+      // No exceptions: a missing lib/ (including plugin-brand's tsc output)
+      // fails fast here instead of a silent vanilla boot downstream.
       if (!existsSync(path.join(root, 'plugins', dir, 'lib', 'index.js'))) {
         throw new Error(`plugins not built (missing plugins/${dir}/lib) — run the plugin builds first`)
       }
@@ -366,7 +370,7 @@ async function main() {
     if (process.platform === 'win32') {
       // Junction via `cmd /c mklink /J` — node symlink('junction') also works.
       const { execFileSync } = await import('node:child_process')
-      execFileSync('cmd', ['/c', 'mklink', '/J', path.join(scope, dir), target], { stdio: 'ignore' })
+      execFileSync('cmd', ['/c', 'mklink', '/J', `"${path.join(scope, dir)}"`, `"${target}"`], { stdio: 'ignore' })
     } else {
       const { symlinkSync } = await import('node:fs')
       symlinkSync(target, path.join(scope, dir), 'dir')
@@ -408,6 +412,18 @@ async function main() {
       await probeRoute(base, route, name)
     }
 
+    // Sidebar probe: the git routes demand a live session cwd (scopedCwd),
+    // which a throwaway smoke home cannot offer — so assert the MISSING-param
+    // shape instead. A 400 { ok:false, code: bad-request } proves the sidebar
+    // host half is mounted, fenced, and validating; any 404/500 would mean the
+    // routes never registered.
+    {
+      const sidebar = await getJson(base, '/plugins/@dsh-app/plugin-sidebar/api/git/status')
+      check('sidebar: git routes mounted (paramless status rejects 400)',
+        sidebar.status === 400 && sidebar.body !== null && sidebar.body.ok === false,
+        `HTTP ${sidebar.status}: ${sidebar.text.slice(0, 200)}`)
+    }
+
     // Client bundles are served only as revisioned combo URLs composed from
     // the boot graph injected into the index page (a plain
     // /plugins/<id>/client.js path 404s by design). So verify the dual-face
@@ -416,7 +432,9 @@ async function main() {
     // must include plugin-mcp's bundle, and one combo must actually serve.
     const index = await getJson(base, '/')
     const html = index.text
-    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-swarm', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks']
+    // Every suite plugin with a dsh.client half (package.json dsh.client +
+    // lib/client.js); host-only plugins (brand, fff) are absent by design.
+    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks']
     check('client: boot graph lists suite client packages',
       index.status === 200 && suiteClientPackages.every(id => html.includes(id)),
       `HTTP ${index.status}; ids found: ${suiteClientPackages.filter(id => html.includes(id)).join(',') || 'none'}`)
@@ -507,6 +525,36 @@ async function main() {
         if (nativeBridge !== undefined) {
           check('hooks: native bridge mounted', nativeBridge.status?.state === 'mounted',
             `status: ${JSON.stringify(nativeBridge.status)}`)
+          // Event-name contract, end to end through the real kernel: an unknown
+          // interception event and an unsupported action-for-event must both
+          // surface as an error status naming the offense — never mount, and
+          // never fail the create call itself (rule validation lives in
+          // native.sync, so create stores the entry and the status reports it).
+          for (const [label, rules, match, messageWant] of [
+            ['unknown event', [{ name: 'smoke-bad-on', on: 'session-end', action: 'context', message: 'x' }], 'session-end', '的 on'],
+            ['unsupported action', [{ name: 'smoke-bad-action', on: 'session-start', action: 'block', message: 'x' }], 'session-start', '不支持'],
+          ]) {
+            const badCreated = await postJson(base, `${HOOKS_ROUTE}/bridge/create`, {
+              dialect: 'native',
+              enabled: true,
+              configSource: 'inline',
+              configContent: JSON.stringify({ rules }),
+            })
+            check(`hooks: native accepts ${label} entry for validation`, badCreated.status === 200 && badCreated.body?.ok === true,
+              `HTTP ${badCreated.status}: ${JSON.stringify(badCreated.body).slice(0, 200)}`)
+            if (badCreated.status === 200) {
+              const badList = await getJson(base, `${HOOKS_ROUTE}/hooks`)
+              const badBridge = badList.body?.value?.bridges?.find(b => typeof b.configContent === 'string' && b.configContent.includes(match) && b.id !== nativeBridge.id)
+              check(`hooks: native ${label} reports error status`, badBridge?.status?.state === 'error',
+                `status: ${JSON.stringify(badBridge?.status)}`)
+              // The error names the offense (event predicate / unsupported pair),
+              // proving the rule was validated rather than silently dropped.
+              check(`hooks: native ${label} error names the offense`,
+                typeof badBridge?.status?.message === 'string' && badBridge.status.message.includes(messageWant),
+                `message: ${JSON.stringify(badBridge?.status?.message)}`)
+              if (badBridge?.id !== undefined) await postJson(base, `${HOOKS_ROUTE}/bridge/delete`, { id: badBridge.id })
+            }
+          }
           await postJson(base, `${HOOKS_ROUTE}/bridge/delete`, { id: nativeBridge.id })
         }
       }

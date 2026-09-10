@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.0] - 2026-09-10
+
+### 中文
+- 内核跟进 dsh 0.1.5-rc.1：依赖全线对齐；归档删除改为逻辑删除（上游移除物理删除 API，记录移除后由上游生命周期回收文件）；用量回填改用 `open/read` 新 API；修复 Linux/macOS 内核 node 路径（`node/bin/node` → `node/node`，否则非 Windows 全新安装无法启动）
+- 侧边栏文件管理退役：上游 sidebar 已原生支持文件管理，删除自带文件树（约 650 行）避免冗余；Git 页保留
+- 记忆直调修复：子调用丢失 `this` 导致每次提炼抛错（审计 5 连错、0 token），现已绑定并补回归测试；食用审计验证单次提炼约 11k tokens
+- 全仓冗余清理与加固（88 文件）：死代码删除、错误 fail-closed、日志脱敏、完整性校验加强、构建脚本收敛；发布流程改用 `needs.runtime.result` 判定产物来源
+
+### English
+- Kernel follows dsh 0.1.5-rc.1: all deps aligned; archive deletion is now logical (upstream removed physical deletion APIs — records drop, files reclaimed by upstream lifecycle); usage backfill uses the new `open/read` API; fixed the kernel node path on Linux/macOS (`node/bin/node` → `node/node`, fresh installs otherwise fail to boot)
+- Sidebar file manager retired: upstream ships file management natively, so the built-in file tree (~650 lines) is removed; the Git tab stays
+- Memory direct-channel fix: the detached stream call lost `this` and every distill threw (5 audit errors, 0 tokens); now bound with a regression test; audit shows ~11k tokens per distill
+- Repo-wide redundancy cleanup and hardening (88 files): dead code removal, fail-closed errors, log redaction, stronger integrity checks, converged build scripts; release flow now keys artifact source on `needs.runtime.result`
+
 ## [v0.10.0] - 2026-09-10
 
 ### 中文
@@ -34,21 +48,21 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 ### 中文
 - 修复卡在损坏 alpha.1 内核的用户无法自动恢复：v0.9.7 内置的是 rc.1 内核，启动漂移检查不处理版本回退，已装坏版 alpha.1 的用户收不到修复；本版内置完整的 alpha.1 内核（10 个套件插件齐全），启动时自动重新激活，无需手动删除内核目录
-- 修复打包脚本遗漏 MCP 管理器与 Hooks 桥（上一版代码已修，本版起实际生效）：运行时产物现包含全部 10 个套件插件；四处插件名单已锁定同步
+- 修复打包脚本遗漏 MCP 管理器与 Hooks 桥（上一版代码已修，本版起实际生效）：运行时产物现包含全部 10 个套件插件；五处插件名单已锁定同步
 - 打包通道跟随 alpha 线（0.1.5-alpha.1），未来发版自动打包最新 alpha 内核
 
 ### English
 - Fixed users stuck on the broken alpha.1 kernel never auto-recovering: v0.9.7 bundled an rc.1 kernel and the boot drift check does not handle version downgrades, so users already on the broken alpha.1 got no fix; this version bundles the complete alpha.1 kernel (all ten suite plugins) and re-activates it automatically on boot, no manual kernel-directory deletion needed
-- Fixed the packaging script omitting the MCP manager and hooks bridge (code fixed in the previous version, effective from this one): runtime artifacts now contain all ten suite plugins; the four plugin-list sites are pinned in sync
+- Fixed the packaging script omitting the MCP manager and hooks bridge (code fixed in the previous version, effective from this one): runtime artifacts now contain all ten suite plugins; the five plugin-list sites are pinned in sync
 - Packaging channel follows the alpha line (0.1.5-alpha.1); future releases automatically bundle the newest alpha kernel
 
 ## [v0.9.7] - 2026-09-09
 
 ### 中文
-- 修复设置页自有插件项全部消失：打包脚本的插件名单漏掉了新增的 MCP 管理器与 Hooks 桥，overlay 引用了运行时里不存在的包，插件组合失败后所有套件页面（含侧边栏文件/Git 视图）静默缺失；名单已补齐并与 overlay、桌面壳、冒烟探针四处锁定同步。已在坏内核上的用户更新到本版后会自动重新激活完整内核，无需手动操作
+- 修复设置页自有插件项全部消失：打包脚本的插件名单漏掉了新增的 MCP 管理器与 Hooks 桥，overlay 引用了运行时里不存在的包，插件组合失败后所有套件页面（含侧边栏文件/Git 视图）静默缺失；名单已补齐并与 overlay、桌面壳、冒烟探针、CI 预构建五处锁定同步。已在坏内核上的用户更新到本版后会自动重新激活完整内核，无需手动操作
 
 ### English
-- Fixed all suite plugin sections disappearing from settings: the packaging script's plugin list missed the newly added MCP manager and hooks bridge while the loader overlay already inserted them, so plugin composition failed and every suite page (including the sidebar file/Git views) silently went missing; the list is now complete and pinned in sync across the four list sites (build script, overlay, desktop shell, smoke probe). Users already on the broken kernel will automatically re-activate the complete kernel after updating to this version, no manual steps needed
+- Fixed all suite plugin sections disappearing from settings: the packaging script's plugin list missed the newly added MCP manager and hooks bridge while the loader overlay already inserted them, so plugin composition failed and every suite page (including the sidebar file/Git views) silently went missing; the list is now complete and pinned in sync across the five list sites (build script, overlay, desktop shell, smoke probe, CI pre-build loop). Users already on the broken kernel will automatically re-activate the complete kernel after updating to this version, no manual steps needed
 
 ## [v0.9.6] - 2026-09-09
 

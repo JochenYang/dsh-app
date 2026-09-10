@@ -261,17 +261,19 @@ jobs:
       # electron-builder's extraResources ships it inside the installer
       # (first-launch local activation, no user download). Fresh build:
       # workflow artifact from the runtime job above. Reuse path (the runtime
-      # matrix was skipped as already published): download the same asset
-      # names from the runtime release instead.
+      # job was skipped as already published): download the same asset
+      # names from the runtime release instead. Both branches key on
+      # needs.runtime.result so a skipped runtime matrix can never fall
+      # through to the wrong download source.
       - name: Download kernel artifact
-        if: needs.resolve.outputs.skip_runtime != 'true'
+        if: needs.runtime.result != 'skipped'
         uses: actions/download-artifact@v4
         with:
           name: runtime-${{ matrix.platform }}-${{ matrix.arch }}
           path: runtime-dist
 
       - name: Download kernel artifact from release
-        if: needs.resolve.outputs.skip_runtime == 'true'
+        if: needs.runtime.result == 'skipped'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

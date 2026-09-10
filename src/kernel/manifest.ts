@@ -1,24 +1,50 @@
 import { promises as fs } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import type { CurrentKernel, KernelManifest } from '../shared/types'
 import { CURRENT_FILE } from '../shared/constants'
 
-/** Read a JSON file; return null when missing or unparsable. */
+/** Read a JSON file; null when missing. A corrupt file is backed up then null. */
 export async function readJson<T>(file: string): Promise<T | null> {
+  let raw: string
   try {
-    const raw = await fs.readFile(file, 'utf8')
+    raw = await fs.readFile(file, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+    return null
+  }
+  try {
     return JSON.parse(raw) as T
   } catch {
+    const backup = `${file}.corrupt-${process.pid}-${Date.now()}.bak`
+    await fs.rename(file, backup).catch(() => undefined)
     return null
   }
 }
 
-/** Atomically write a JSON file (tmp + rename). */
+/** Atomically write a JSON file (random tmp + fsync + rename + dir fsync). */
 export async function writeJson(file: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.tmp`
-  await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8')
-  await fs.rename(tmp, file)
+  const tmp = `${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`
+  try {
+    await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8')
+    const handle = await fs.open(tmp, 'r+')
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await fs.rename(tmp, file)
+    const dir = await fs.open(path.dirname(file), 'r')
+    try {
+      await dir.sync()
+    } finally {
+      await dir.close()
+    }
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined)
+    throw err
+  }
 }
 
 export async function loadCurrentKernel(root: string): Promise<CurrentKernel | null> {

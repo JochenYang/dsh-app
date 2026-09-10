@@ -1,10 +1,8 @@
 /**
- * Typed client for the sidebar dock's host fs routes (M1: read-only).
+ * Typed client for the sidebar dock's host git routes.
  * Same-origin fetch against the dsh web server; the host fence admits
  * loopback-Host requests, which every same-origin browser request is.
  */
-
-import type { FsListEntry } from '../fs-routes.ts'
 
 /**
  * The plugin's route prefix on the dsh web server (mirrors the host half;
@@ -12,7 +10,7 @@ import type { FsListEntry } from '../fs-routes.ts'
  */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-sidebar/api'
 
-/** One fs API failure. */
+/** One sidebar API failure. */
 export class FsApiError extends Error {
   constructor(readonly code: string, message: string) {
     super(message)
@@ -49,21 +47,6 @@ async function post<T>(path: string, body: Record<string, unknown>): Promise<T> 
     throw new FsApiError(parsed.error?.code ?? 'unknown', parsed.error?.message ?? `HTTP ${String(response.status)}`)
   }
   return parsed.value
-}
-
-/** List one directory level (lazy tree node). */
-export function listDir(dir: string): Promise<{ dir: string, entries: FsListEntry[] }> {
-  return get(`${ROUTE_PREFIX}/fs/list?dir=${encodeURIComponent(dir)}`)
-}
-
-/** One file's previewable content. */
-export type FileContent =
-  | { kind: 'text', content: string, size: number }
-  | { kind: 'image', mime: string, dataBase64: string }
-  | { kind: 'unsupported', reason: string }
-
-export function readFile(path: string): Promise<FileContent> {
-  return get<FileContent>(`${ROUTE_PREFIX}/fs/file?path=${encodeURIComponent(path)}`)
 }
 
 // --- git face ---------------------------------------------------------------

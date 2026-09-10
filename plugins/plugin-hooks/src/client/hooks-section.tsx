@@ -129,7 +129,9 @@ export function HooksSection(): ReactNode {
     } else {
       const configPath = draft.configPath.trim()
       if (configPath === '') { setError('请填写 hooks.json 的绝对路径'); return }
-      if (!/^[A-Za-z]:[\\/]|^\/[^/]/.test(configPath)) { setError('configPath 必须是绝对路径'); return }
+      // Empty-only gate here: the absolute-path shape is validated server-side
+      // (validateBridge → 400 with a zh-CN reason, surfaced by post), so the
+      // client never duplicates that rule.
       body.configPath = configPath
     }
     if (draft.dialect === 'claude-code') {
@@ -140,9 +142,9 @@ export function HooksSection(): ReactNode {
     }
     for (const [field, val] of [['defaultTimeoutMs', draft.defaultTimeoutMs], ['stderrSummaryMaxChars', draft.stderrSummaryMaxChars]] as const) {
       if (val.trim() !== '') {
-        const n = Number(val)
-        if (!Number.isFinite(n) || n <= 0) { setError(`${field} 必须是正数`); return }
-        body[field] = n
+        // Empty-only gate: positivity is enforced server-side (400, surfaced by
+        // post); a non-numeric entry serializes to null and is rejected there.
+        body[field] = Number(val)
       }
     }
     try {

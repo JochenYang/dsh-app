@@ -1,3 +1,4 @@
+import semver from 'semver'
 import type { KernelChannel } from '../../shared/types'
 
 /**
@@ -23,8 +24,6 @@ const DSH_PACKAGE = '@deepseek-ai/dsh'
 export interface RegistryInfo {
   version: string
   channel: KernelChannel
-  /** npm integrity string (sha512) for the package tarball. */
-  integrity: string
   /** Registry URL that answered (for diagnostics). */
   source: string
 }
@@ -49,14 +48,17 @@ export async function fetchRegistryInfo(channel: KernelChannel): Promise<Registr
 async function fetchFromRegistry(registry: string, channel: KernelChannel): Promise<RegistryInfo | null> {
   try {
     const base = registry.endsWith('/') ? registry.slice(0, -1) : registry
+    if (!base.startsWith('https://')) return null
     const res = await fetch(`${base}/${DSH_PACKAGE}`, {
       headers: { accept: 'application/vnd.npm.install-v1+json' },
       signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) return null
+    const contentLength = Number(res.headers.get('content-length') ?? 0)
+    if (contentLength > 8 * 1024 * 1024) return null
     const doc = (await res.json()) as {
       'dist-tags'?: Record<string, string>
-      versions?: Record<string, { dist?: { integrity?: string } }>
+      versions?: Record<string, unknown>
     }
     const tags = doc['dist-tags'] ?? {}
     // Map the app channel to the dist-tag dsh's release script actually
@@ -67,9 +69,10 @@ async function fetchFromRegistry(registry: string, channel: KernelChannel): Prom
     const tagForChannel = channel === 'stable' ? 'latest' : channel === 'alpha' ? 'alpha' : 'next'
     const version = tags[tagForChannel] ?? tags[channel] ?? tags.latest ?? tags.next ?? tags.rc ?? tags.alpha
     if (!version) return null
-    const integrity = doc.versions?.[version]?.dist?.integrity ?? ''
-    return { version, channel, integrity, source: base }
-  } catch {
+    if (semver.valid(version) === null) return null
+    return { version, channel, source: base }
+  } catch (err) {
+    console.warn(`[registry] fetch failed for ${registry}: ${(err as Error).message}`)
     return null
   }
 }

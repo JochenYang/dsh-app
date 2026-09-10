@@ -45,7 +45,6 @@ export interface GitTabProps {
   cwd: string | undefined
   /** Host-owned session identity used to bind every Git request. */
   sessionId?: string
-  api?: unknown
 }
 
 /** One diff text as a colored block. */

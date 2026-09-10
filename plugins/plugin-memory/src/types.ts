@@ -78,3 +78,8 @@ export interface MemoryStatus {
   /** Recent background-distill traces, newest first (bounded list). */
   activity: MemoryDistillActivity[]
 }
+
+/** Route namespace on the dsh web server (`/plugins/<pkg>/api` discipline).
+ * Lives here (not in routes.ts) so the browser half references the same
+ * constant without importing host-only modules. */
+export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-memory/api'

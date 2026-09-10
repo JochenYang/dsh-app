@@ -79,6 +79,7 @@ async function main() {
   const candidates = [
     `https://github.com/${OWNER}/${REPO}/releases/latest/download/${asset.url}`,
     `https://gh-proxy.com/https://github.com/${OWNER}/${REPO}/releases/latest/download/${asset.url}`,
+    `https://ghfast.top/https://github.com/${OWNER}/${REPO}/releases/latest/download/${asset.url}`,
   ]
   let reachable = false
   for (const url of candidates) {

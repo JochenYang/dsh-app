@@ -13,7 +13,7 @@ export interface TrayCallbacks {
 }
 
 let tray: Tray | null = null
-
+let savedCallbacks: TrayCallbacks | null = null
 /** System tray with the essential lifecycle actions. */
 export function createTray(callbacks: TrayCallbacks): Tray {
   if (tray) return tray
@@ -29,9 +29,16 @@ export function createTray(callbacks: TrayCallbacks): Tray {
   // Double-click to restore/show the main window
   tray.on('double-click', callbacks.onOpen)
 
+  savedCallbacks = callbacks
+  tray.setContextMenu(buildTrayMenu(callbacks))
+  return tray
+}
+
+/** Build the tray menu, stamping the current kernel version into its label. */
+function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
   const version = callbacks.getCurrentVersion()
   const kernelLabel = version ? `检查内核更新…（当前 dsh ${version}）` : '检查内核更新…'
-  const menu = Menu.buildFromTemplate([
+  return Menu.buildFromTemplate([
     { label: `打开 ${APP_NAME}`, click: callbacks.onOpen },
     { type: 'separator' },
     { label: kernelLabel, click: callbacks.onCheckKernelUpdate },
@@ -41,13 +48,21 @@ export function createTray(callbacks: TrayCallbacks): Tray {
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ])
-  tray.setContextMenu(menu)
-  return tray
+}
+
+/**
+ * Rebuild the tray menu (e.g. after a kernel update changed the version
+ * stamped into the menu label). No-op before createTray.
+ */
+export function updateTrayMenu(): void {
+  if (!tray || !savedCallbacks) return
+  tray.setContextMenu(buildTrayMenu(savedCallbacks))
 }
 
 export function destroyTray(): void {
   tray?.destroy()
   tray = null
+  savedCallbacks = null
 }
 
 export function setTrayTooltip(text: string): void {

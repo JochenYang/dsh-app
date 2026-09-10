@@ -33,6 +33,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import {
+  containsCredential,
   contentHash,
   listProjects,
   MAX_ENTRY_CHARS,
@@ -355,7 +356,7 @@ export class MemoryCurator {
       // Same prefix-echo hazard as distill proposals (see stripEntryPrefix):
       // the cited lines carry the prefix, so models copy it into the rewrite.
       const oneLine = stripEntryPrefix(content).replace(/\s+/gu, ' ').trim()
-      if (oneLine.length === 0 || oneLine.length > MAX_ENTRY_CHARS) continue
+      if (oneLine.length === 0 || oneLine.length > MAX_ENTRY_CHARS || containsCredential(oneLine)) continue
       const indices = claim(edit)
       if (indices === undefined) continue
       merges.push({ indices, category: category as MemoryCategory, oneLine })

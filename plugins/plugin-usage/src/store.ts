@@ -33,6 +33,9 @@ export class UsageStore {
   private readonly watermarkPath: string
   private readonly log: (message: string) => void
   private pendingLines: string[] = []
+  /** Set when a watermark advanced since the last flush; the watermarks file
+   * is rewritten only then, so row-only flushes never pay for it. */
+  private watermarksDirty = false
   private flushTimer: NodeJS.Timeout | undefined
   private disposed = false
 
@@ -94,6 +97,7 @@ export class UsageStore {
     const current = this.watermarks.get(sessionId) ?? 0
     if (seq > current) {
       this.watermarks.set(sessionId, seq)
+      this.watermarksDirty = true
       this.scheduleFlush()
     }
   }
@@ -126,12 +130,15 @@ export class UsageStore {
   }
 
   private flush(): void {
-    if (this.pendingLines.length === 0 && this.watermarks.size === 0) return
+    if (this.pendingLines.length === 0 && !this.watermarksDirty) return
     const lines = this.pendingLines
     this.pendingLines = []
     try {
       if (lines.length > 0) appendFileSync(this.filePath, `${lines.join('\n')}\n`, 'utf8')
-      writeFileSync(this.watermarkPath, `${JSON.stringify(Object.fromEntries(this.watermarks), null, 2)}\n`, 'utf8')
+      if (this.watermarksDirty) {
+        writeFileSync(this.watermarkPath, `${JSON.stringify(Object.fromEntries(this.watermarks), null, 2)}\n`, 'utf8')
+        this.watermarksDirty = false
+      }
     } catch (error) {
       this.log(`usage store: persist failed: ${(error as Error).message}`)
     }

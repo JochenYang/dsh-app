@@ -38,5 +38,10 @@ export function passesFence(request: FenceRequestHeaders): boolean {
   }
   if (hostname === 'localhost' || hostname === '[::1]') return true
   // 127.0.0.0/8 in full: rebinding into 127.0.0.2 still names the machine.
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
+  // Each octet is validated (a bare \d{1,3} pattern would admit
+  // 127.999.999.999, which names no local interface).
+  const octets = hostname.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
 }

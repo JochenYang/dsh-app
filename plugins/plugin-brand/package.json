@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-brand",
   "description": "DSH APP brand host plugin: brand settings namespace, app/kernel info service, desktop bridge for shell capabilities.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -26,11 +26,11 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
-    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.3"
+    "@deepseek-ai/dsh-settings": "^0.1.5-rc.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-settings": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-settings": "0.1.5-rc.1",
     "typescript": "^5.7.2"
   },
   "license": "MIT"

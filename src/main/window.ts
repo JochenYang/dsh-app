@@ -1,7 +1,7 @@
 import { BrowserWindow, session, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
-import { UPDATE_CARD_SCRIPT, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
+import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
 const OVERLAY_HEIGHT = 36
@@ -33,20 +33,26 @@ export async function clearStaleAuthCookies(): Promise<void> {
   }
 }
 
+/** Parse 'rgb(r, g, b)' / 'rgba(...)' into [r, g, b]; null when unparseable. */
+function parseRgb(color: string): [number, number, number] | null {
+  const m = color.match(/\d+/g)
+  if (!m || m.length < 3) return null
+  const [r, g, b] = m.slice(0, 3).map(Number)
+  return [r, g, b]
+}
+
 /** '#rrggbb' from 'rgb(r, g, b)' / 'rgba(...)' strings. */
-function rgbToHex(rgb: string): string {  const m = rgb.match(/\d+/g)
-  if (!m || m.length < 3) return '#ffffff'
-  return `#${m
-    .slice(0, 3)
-    .map((n) => parseInt(n, 10).toString(16).padStart(2, '0'))
-    .join('')}`
+function rgbToHex(rgb: string): string {
+  const parsed = parseRgb(rgb)
+  if (!parsed) return '#ffffff'
+  return `#${parsed.map((n) => Math.round(n).toString(16).padStart(2, '0')).join('')}`
 }
 
 /** Choose a readable window-button color for a given background. */
 function symbolColorFor(bg: string): string {
-  const m = bg.match(/\d+/g)
-  if (!m || m.length < 3) return '#1a1a1a'
-  const [r, g, b] = m.slice(0, 3).map(Number)
+  const parsed = parseRgb(bg)
+  if (!parsed) return '#1a1a1a'
+  const [r, g, b] = parsed
   const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
   return lum > 0.5 ? '#1a1a1a' : '#e0e0e0'
 }
@@ -365,7 +371,7 @@ function installExportToast(win: BrowserWindow): void {
               'position:fixed;top:48px;left:50%;transform:translateX(-50%);' +
               'z-index:2147483647;padding:10px 18px;border-radius:10px;' +
               'font-size:13px;line-height:1.5;color:#fff;max-width:min(90vw,640px);' +
-              'background:${ok ? 'rgba(75, 103, 252, 0.92)' : 'rgba(190, 44, 44, 0.92)'};' +
+              'background:${ok ? UPDATE_CARD_TONE_BG.progress : UPDATE_CARD_TONE_BG.error};' +
               'box-shadow:0 4px 16px rgba(0,0,0,.25);pointer-events:none;' +
               'transition:opacity .4s;opacity:1;';
             const title = document.createElement('div');
@@ -442,8 +448,11 @@ function reinjectKernelProgress(win: BrowserWindow): void {
   showKernelProgress(win, status)
 }
 
-/** Transient notification toast (e.g. background update findings). */
-export function showUpdateToast(win: BrowserWindow | null, message: string, tone: UpdateCardTone = 'progress', durationMs = 6_000): void {
+/**
+ * Transient notification toast (e.g. background update findings).
+ * @param durationMs - auto-hide delay; undefined keeps the card until cleared.
+ */
+export function showUpdateToast(win: BrowserWindow | null, message: string, tone: UpdateCardTone = 'progress', durationMs?: number): void {
   if (!win || win.isDestroyed()) return
   win.webContents
     .executeJavaScript(UPDATE_CARD_SCRIPT({ message, progress: null, tone, autoHide: durationMs }))
@@ -473,13 +482,6 @@ export async function showKernelUpdateCard(
   }
 }
 
-/** Remove the kernel update card (e.g. when the update flow starts elsewhere). */
-export function clearKernelUpdateCard(win: BrowserWindow | null): void {
-  if (!win || win.isDestroyed()) return
-  win.webContents
-    .executeJavaScript(`(function () { const el = document.getElementById('dsh-kernel-update-card'); if (el) el.remove(); })()`)
-    .catch(() => undefined)
-}
 
 /**
  * One-shot toast that waits for the window's current page to finish loading
@@ -507,9 +509,19 @@ export function clearKernelProgress(win: BrowserWindow | null): void {
     .catch(() => undefined)
 }
 
+/** Open only http(s) URLs in the system browser; non-web schemes are dropped. */
+function openExternalSafe(target: string): void {
+  let protocol = ''
+  try {
+    protocol = new URL(target).protocol
+  } catch {
+    return
+  }
+  if (protocol === 'http:' || protocol === 'https:') void shell.openExternal(target)
+}
 /**
  * Main window: loads the local dsh web UI. All navigation is confined to the
- * local server origin (host AND port); everything else opens in the system
+ * local server origin (host AND port); other http(s) URLs open in the system
  * browser. A hostname-only check would let any 127.0.0.1:<other-port> page
  * (e.g. a local dev server) load inside the app window.
  */
@@ -544,7 +556,7 @@ export function createMainWindow(url: string): BrowserWindow {
     } catch {
       // not a valid URL — fall through to external
     }
-    void shell.openExternal(target)
+    openExternalSafe(target)
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (event, target) => {
@@ -556,7 +568,7 @@ export function createMainWindow(url: string): BrowserWindow {
     }
     if (!allowed) {
       event.preventDefault()
-      void shell.openExternal(target)
+      openExternalSafe(target)
     }
   })
 
@@ -564,8 +576,3 @@ export function createMainWindow(url: string): BrowserWindow {
   return win
 }
 
-/**
- * Setup window: removed — kernel install/repair now runs silently in the
- * background (the main window appears when the server is healthy). The static
- * setup UI (setup.html/preload) was deleted together with this function.
- */

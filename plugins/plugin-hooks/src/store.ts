@@ -14,7 +14,6 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { HooksValidationError, nextBridgeId, validateBridge, type HooksBridge, type HooksConfigFile } from './wire.ts'
 
 export { HooksValidationError, nextBridgeId, validateBridge } from './wire.ts'
-export { KERNEL_PLUGIN, toBridgeConfig } from './wire.ts'
 
 type Raw = Record<string, unknown>
 

@@ -23,7 +23,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
-import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm/types'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { cloneDraft, defaultReasoningEfforts, getPath, modelRowFailure, parseHeaders, parseRetryPolicy, readHeaders, readRetryPolicy, RETRY_POLICY_DEFAULTS, REASONING_LEVELS } from './fields.ts'
@@ -168,12 +167,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   const [newRoute, setNewRoute] = useState<NewRouteDraft | undefined>(undefined)
   const [modelsDevTarget, setModelsDevTarget] = useState<ImportTarget | undefined>(undefined)
   const [discoveryTarget, setDiscoveryTarget] = useState<ImportTarget | undefined>(undefined)
-  /** The companion-route migration dialog (off-catalog rows on a catalog route). */
-  const [migrate, setMigrate] = useState<
-    | undefined
-    | { routeId: string; displayName: string; api: string; baseURL: string; exists: boolean }
-  >(undefined)
-
   const row: RouteRow | undefined = useMemo(
     () => state.routes.find(candidate => candidate.entry.provider === selectedId),
     [state.routes, selectedId],
@@ -221,29 +214,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
 
   const modelIds = new Set(models.map(model => typeof model.id === 'string' ? model.id : ''))
   const overrideIds = Object.keys(overrides)
-  /**
-   * Catalog-derived state after dsh 0.1.2: the host no longer exposes a
-   * per-provider model catalog (`ModelProviderGroup` / `llm.models` were
-   * removed). An empty set means "unknown", NOT "every id is off-catalog" —
-   * the off-catalog gate below is therefore disabled. Models-mode editing
-   * stays fully writable on catalog routes whose user layer owns the list.
-   */
-  const catalogIdSet = new Set<string>()
-  const catalogModelFor = (_id: string): LlmResolvedModelInfo | undefined => undefined
-  const catalogFailure = undefined
-  /** Catalog ids offered for a new override (empty after dsh 0.1.2 catalog removal). */
-  const catalogIds: string[] = []
-  /**
-   * Off-catalog gate: only active when a real catalog set is known. With an
-   * empty stub set this returns [] so taken-over catalog routes stay saveable.
-   */
-  const offCatalogIds: string[] = row !== undefined && row.entry.declared !== true
-    && inModelsMode && catalogIdSet.size > 0
-    ? models
-        .map(model => typeof model.id === 'string' ? model.id.trim() : '')
-        .filter(id => id !== '' && !catalogIdSet.has(id))
-    : []
-
   /** Resolved wire protocol for the selected route (user-layer or composed profile.api). */
   const routeApi = (() => {
     if (row === undefined || namespace === undefined) return undefined
@@ -256,12 +226,9 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   const rowsFailure = useMemo(() => {
     if (row === undefined) return undefined
     if (inModelsMode) {
-      // The off-catalog gate comes first: the adapter's own validator would
-      // reject these with its English diagnostic, one model per attempt —
-      // the exact trap this page exists to prevent.
-      if (offCatalogIds.length > 0) {
-        return `以下模型太新，官方目录尚未收录：${offCatalogIds.join('、')}。它们无法直接加入这个路由（协议无法声明）；请点下方“迁移”按钮——页面会自动创建一条同端点、同密钥的伴生路由（如 opencode-go-extra）来承载它们。`
-      }
+      // Row validation first: the adapter's own validator would reject bad
+      // rows with its English diagnostic, one model per attempt — the exact
+      // trap this page exists to prevent.
       const seen = new Set<string>()
       for (const model of models) {
         const modelApi = typeof model.api === 'string' && model.api !== ''
@@ -367,7 +334,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     }
     const existingTarget = state.routes.find(candidate => candidate.entry.provider === id)
     if (existingTarget !== undefined && existingTarget.entry.declared !== true) {
-      setFailure(`「${id}」是官方目录路由：目录内模型本就直接可用，目录外模型请回到该路由用“迁移”按钮接入。`)
+      setFailure(`「${id}」是官方目录路由：目录内模型本就直接可用，目录外模型请另建一条独立接入路由承载。`)
       return
     }
     if (existingTarget === undefined && newRoute.api === '') {
@@ -530,7 +497,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     if (row === undefined) return
     const info = resolvedProfile(row)
     const text = (key: string): string => typeof info[key] === 'string' ? info[key] as string : ''
-    // One companion suffix everywhere: -extra (same as the migrate dialog).
+    // One companion suffix everywhere: -extra (the manual companion-route convention).
     const canonical = `${row.entry.provider}-extra`
     const exists = existingRouteKeys(state, schema).has(canonical)
     let id = canonical
@@ -543,7 +510,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       id,
       displayName: `${row.entry.displayName} 扩展`,
       // Prefill the source route's protocol when it names one; otherwise the
-      // hand-declared default the migrate flow uses.
+      // hand-declared default for manual creation.
       api: typeof info.api === 'string' && info.api !== '' ? info.api : 'openai-completions',
       baseURL: text('baseURL'),
       apiKeyEnv: text('apiKeyEnv'),
@@ -552,137 +519,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     if (exists) {
       setNotice(`已有伴生路由 ${canonical}：可直接向它追加模型，或改用新 ID。`)
     }
-  }
-
-  /**
-   * Open the companion-route migration dialog for the drafted off-catalog
-   * rows. The kernel cannot host them on this route (a multi-protocol
-   * catalog route has no resolvable api for ids it does not carry), so the
-   * page offers the split for them: a sibling route on the SAME endpoint and
-   * credential — one click instead of a manual redo of the import.
-   */
-  const startMigrate = (): void => {
-    if (row === undefined) return
-    const info = resolvedProfile(row)
-    const text = (key: string): string => typeof info[key] === 'string' ? info[key] as string : ''
-    // The canonical companion id: reuse (merge into) it when it exists, use
-    // it straight when it does not. No increments — one companion per route.
-    const canonical = `${row.entry.provider}-extra`
-    const exists = existingRouteKeys(state, schema).has(canonical)
-    const existing = exists
-      ? profileAt([...row.entry.settingsPath.slice(0, -1), canonical])
-      : {}
-    const existingApi = typeof existing.api === 'string' ? existing.api : ''
-    const existingName = typeof existing.displayName === 'string' ? existing.displayName : ''
-    const existingBaseURL = typeof existing.baseURL === 'string' ? existing.baseURL : ''
-    setMigrate({
-      routeId: canonical,
-      displayName: existingName !== '' ? existingName : `${row.entry.displayName} 扩展`,
-      // openai-completions is the opencode zen gateway's OpenAI-compatible
-      // face (verified by the opencode-go-vision route); models.dev's
-      // openai-compatible marker maps to the same.
-      api: existingApi !== '' ? existingApi : 'openai-completions',
-      // The companion is a route the installed catalog does not know, so the
-      // adapter requires an explicit baseURL. Prefill from the companion
-      // (merge case) or the source route; the catalog's own internal base
-      // address (e.g. opencode-go's) is not visible to any client API.
-      baseURL: existingBaseURL !== '' ? existingBaseURL : text('baseURL'),
-      exists,
-    })
-  }
-
-  /**
-   * Execute the migration as ONE mutate call: upsert the companion route's
-   * models (merged, new rows winning by id) and rewrite this route's list
-   * without the migrated rows — or restore catalog inheritance when nothing
-   * user-owned remains.
-   */
-  const doMigrate = async (): Promise<void> => {
-    if (row === undefined || namespace === undefined || migrate === undefined) return
-    const extraId = migrate.routeId.trim()
-    if (!/^[a-z0-9][a-z0-9-]*$/i.test(extraId)) {
-      setFailure('伴生路由 ID 只能包含字母、数字与连字符。')
-      return
-    }
-    if (migrate.api === '') {
-      setFailure('请选择伴生路由的 wire 协议。')
-      return
-    }
-    if (!migrate.exists && migrate.baseURL.trim() === '') {
-      setFailure('伴生路由必须填写 baseURL：官方目录不认识这个新路由，无法继承地址（openai-completions 协议通常以 /v1 结尾，如 https://opencode.ai/zen/go/v1）。')
-      return
-    }
-    const keys = existingRouteKeys(state, schema)
-    const extraExists = keys.has(extraId)
-    if (!migrate.exists && extraExists) {
-      setFailure(`路由 ID 已存在：${extraId}`)
-      return
-    }
-    if (migrate.exists && !extraExists) {
-      setFailure('伴生路由已不存在（可能在别处被删除），请关闭后重试。')
-      return
-    }
-    const info = resolvedProfile(row)
-    const text = (key: string): string => typeof info[key] === 'string' ? info[key] as string : ''
-    const offRows = models.filter(model =>
-      typeof model.id === 'string' && model.id.trim() !== '' && !catalogIdSet.has(model.id.trim()))
-    const keepRows = models.filter(model =>
-      !(typeof model.id === 'string' && model.id.trim() !== '' && !catalogIdSet.has(model.id.trim())))
-    if (offRows.length === 0) return
-    // The same row gate as save: a migrated row the validator would refuse
-    // must fail HERE, inside the dialog, not as a rejected atomic write
-    // that loses the whole migration.
-    const seen = new Set<string>()
-    for (const model of offRows) {
-      const text = modelRowFailure(model, seen)
-      if (text !== undefined) {
-        setFailure(`迁移被阻止：${text}`)
-        return
-      }
-      seen.add(typeof model.id === 'string' ? model.id : '')
-    }
-    // Merge with the companion's existing rows; migrated rows win by id.
-    const existingModels = extraExists
-      ? profileAt([...row.entry.settingsPath.slice(0, -1), extraId]).models
-      : undefined
-    const byId = new Map<string, ModelDraft>()
-    for (const model of Array.isArray(existingModels) ? existingModels as ModelDraft[] : []) {
-      if (typeof model.id === 'string' && model.id !== '') byId.set(model.id, model)
-    }
-    for (const model of offRows) byId.set(typeof model.id === 'string' ? model.id : '', model)
-    const merged = [...byId.values()]
-    const ops: SettingsPathOpView[] = extraExists
-      ? [{ op: 'set', path: ['providers', extraId, 'models'], value: merged as JsonValue }]
-      : [{
-          op: 'set', path: ['providers', extraId], value: {
-            api: migrate.api,
-            baseURL: migrate.baseURL.trim(),
-            ...(migrate.displayName.trim() === '' ? {} : { displayName: migrate.displayName.trim() }),
-            ...(text('apiKeyEnv') === '' ? {} : { apiKeyEnv: text('apiKeyEnv') }),
-            models: merged,
-          } as JsonValue,
-        }]
-    ops.push(keepRows.length === 0
-      ? { op: 'unset', path: [...row.entry.settingsPath, 'models'] }
-      : { op: 'set', path: [...row.entry.settingsPath, 'models'], value: keepRows as JsonValue })
-    setBusy(true)
-    setFailure(undefined)
-    const outcome = await writeOps(api, ops, namespace.revision)
-    setBusy(false)
-    if (outcome.kind === 'conflict') {
-      setFailure('配置已在别处更新。已重新加载，请重试迁移。')
-      setModelsDraft(undefined)
-      await controller.load()
-      return
-    }
-    if (outcome.kind === 'failure') {
-      setFailure(outcome.message)
-      return
-    }
-    setMigrate(undefined)
-    setModelsDraft(undefined)
-    setNotice(`已将 ${String(offRows.length)} 个模型迁移到路由 ${extraId}（同端点同凭据）。`)
-    await controller.load()
   }
 
   const toggleOpen = (key: string): void => {
@@ -772,9 +608,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
             row={row} disabled={disabled} api={api}
             namespace={namespace} controller={controller}
           />
-          {catalogFailure === undefined
-            ? null
-            : <p className="dshAma-error">内置 provider 目录暂不可用，当前配置仍可编辑；可稍后刷新或从 provider 重新发现。</p>}
           {inModelsMode
             ? (
               <div className="dshAma-modeBanner">
@@ -854,14 +687,8 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                         onClick={() => { toggleOpen(`m${String(index)}`) }}
                       ><IconChevron open={openRows.has('m' + String(index))} /></button>
                       <span className="dshAma-entryId">{typeof model.id === 'string' && model.id !== '' ? model.id : '（未命名）'}</span>
-                      {typeof model.id === 'string' && model.id.trim() !== ''
-                        && catalogIdSet.size > 0 && row.entry.declared !== true && !catalogIdSet.has(model.id.trim())
-                        ? <span className="dshAma-offCatalogBadge" title="不在官方目录中">目录外</span>
-                        : null}
                       <span className="dshAma-entryName">
-                        {typeof model.name === 'string' && model.name !== ''
-                          ? model.name
-                          : catalogModelFor(typeof model.id === 'string' ? model.id : '')?.name ?? ''}
+                        {typeof model.name === 'string' ? model.name : ''}
                       </span>
                       <button
                         type="button" className="dshAma-iconButton dshAma-iconButtonDanger" aria-label={`移除模型 ${index + 1}`}
@@ -877,7 +704,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                             ? model.api as string
                             : routeApi}
                           handDeclared={row.entry.declared === true}
-                          catalogModel={catalogModelFor(typeof model.id === 'string' ? model.id : '')}
                           onChange={(next) => { patchModel(index, next) }}
                         />
                       )
@@ -890,25 +716,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
               <>
                 <div className="dshAma-listHead">
                   <span className="dshAma-listTitle">{`目录内覆盖（${String(overrideIds.length)}）`}</span>
-                  {catalogIds.length > 0
-                    ? (
-                      <select
-                        className="dshAma-input dshAma-select dshAma-addOverride"
-                        aria-label="覆盖目录内模型"
-                        disabled={disabled}
-                        value=""
-                        onChange={(event) => {
-                          const id = event.target.value
-                          if (id === '') return
-                          setOpenRows(current => new Set([...current, `o:${id}`]))
-                          setOverridesDraft({ ...overrides, [id]: {} })
-                        }}
-                      >
-                        <option value="">覆盖目录内模型…</option>
-                        {catalogIds.map(id => <option key={id} value={id}>{id}</option>)}
-                      </select>
-                    )
-                    : <span className="dshAma-hint">目录模型列表不可用或已全部覆盖。</span>}
+                  <span className="dshAma-hint">目录模型列表不可用。</span>
                 </div>
                 {overrideIds.length === 0
                   ? <p className="dshAma-hint">尚未覆盖任何模型。目录外新模型请创建独立接入路由。</p>
@@ -923,7 +731,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                         onClick={() => { toggleOpen(`o:${id}`) }}
                        ><IconChevron open={openRows.has('o:' + id)} /></button>
                        <span className="dshAma-entryId">{id}</span>
-                       <span className="dshAma-entryName">{catalogModelFor(id)?.name ?? ''}</span>
                       <button
                         type="button" className="dshAma-iconButton dshAma-iconButtonDanger" aria-label={`移除覆盖 ${id}`}
                         disabled={disabled}
@@ -940,7 +747,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                           row={{ ...overrides[id], id }} index={0} disabled={disabled} lockedId
                           api={routeApi}
                           handDeclared={false}
-                          catalogModel={catalogModelFor(id)}
                           onChange={(next) => { setOverridesDraft({ ...overrides, [id]: next }) }}
                         />
                       )
@@ -952,17 +758,9 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           <div className="dshAma-footer">
             {failure !== undefined ? <p className="dshAma-error">{failure}</p> : null}
             {/* The gate names WHY the write is refused while the button stays
-                disabled — a silent disabled save is a dead end. Off-catalog
-                rows get the one-click companion migration right beside it. */}
+                disabled — a silent disabled save is a dead end. */}
             {failure === undefined && rowsFailure !== undefined
               ? <p className="dshAma-error">{rowsFailure}</p>
-              : null}
-            {offCatalogIds.length > 0 && !disabled
-              ? (
-                <button type="button" className="dshAma-button" onClick={startMigrate}>
-                  {`迁移 ${String(offCatalogIds.length)} 个模型到伴生路由`}
-                </button>
-              )
               : null}
             {notice !== undefined ? <p className="dshAma-notice">{notice}</p> : null}
             <button
@@ -1007,7 +805,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
               <>
                 {/* Upsert targeting: an existing declared route's id switches
                     the card from create to merge-append; a catalog route's id
-                    is refused with the pointer to the migrate flow. */}
+                    is refused (its models resolve from the official catalog). */}
                 {(() => {
                   const trimmed = newRoute.id.trim()
                   if (trimmed === '') return null
@@ -1021,7 +819,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                     )
                     : (
                       <p className="dshAma-error">
-                        「{trimmed}」是官方目录路由，不能在此追加：目录内模型本就直接可用，目录外模型请选中该路由后用“迁移”按钮接入。
+                        「{trimmed}」是官方目录路由，不能在此追加：目录内模型本就直接可用，目录外模型请另建一条独立接入路由承载。
                       </p>
                     )
                 })()}
@@ -1123,68 +921,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
             )}
         </div>
       </details>
-
-      {migrate === undefined ? null : (
-        <div className="dshAma-modalMask" role="presentation" onClick={() => { setMigrate(undefined) }}>
-          <div
-            className="dshAma-modal" role="dialog" aria-modal="true" aria-label="迁移到伴生路由"
-            onClick={(event) => { event.stopPropagation() }}
-          >
-            <div className="dshAma-modalHead">
-              <span className="dshAma-modalTitle">{`迁移 ${String(offCatalogIds.length)} 个目录外模型`}</span>
-              <button type="button" className="dshAma-iconButton" aria-label="关闭" onClick={() => { setMigrate(undefined) }}>✕</button>
-            </div>
-            <div className="dshAma-modalBody">
-              <p className="dshAma-hint">
-                这些模型将写入伴生路由（同一端点、同一凭据变量），协议在伴生路由上声明，不影响
-                {row === undefined ? '' : `「${row.entry.displayName}」`}目录内模型的协议。当前路由的清单将同步移除它们。
-              </p>
-              <label className="dshAma-field">
-                <span className="dshAma-fieldLabel">伴生路由 ID{migrate.exists ? '（已存在，将合并追加）' : ''}</span>
-                <input
-                  className="dshAma-input" type="text" value={migrate.routeId} aria-label="伴生路由 ID"
-                  disabled={migrate.exists}
-                  onChange={(event) => { setMigrate({ ...migrate, routeId: event.target.value }) }}
-                />
-              </label>
-              <label className="dshAma-field">
-                <span className="dshAma-fieldLabel">显示名称</span>
-                <input
-                  className="dshAma-input" type="text" value={migrate.displayName} aria-label="伴生路由显示名称"
-                  onChange={(event) => { setMigrate({ ...migrate, displayName: event.target.value }) }}
-                />
-              </label>
-              <label className="dshAma-field">
-                <span className="dshAma-fieldLabel">baseURL{migrate.exists ? '（沿用已建路由）' : '（新路由必填）'}</span>
-                <input
-                  className="dshAma-input" type="text" value={migrate.baseURL}
-                  placeholder="https://opencode.ai/zen/go/v1" aria-label="伴生路由 baseURL"
-                  disabled={migrate.exists}
-                  onChange={(event) => { setMigrate({ ...migrate, baseURL: event.target.value }) }}
-                />
-              </label>
-              <label className="dshAma-field">
-                <span className="dshAma-fieldLabel">wire 协议（仅新建时生效）</span>
-                <select
-                  className="dshAma-input dshAma-select" value={migrate.api} aria-label="伴生路由协议"
-                  disabled={migrate.exists}
-                  onChange={(event) => { setMigrate({ ...migrate, api: event.target.value }) }}
-                >
-                  {protocols.map(choice => <option key={choice} value={choice}>{choice}</option>)}
-                </select>
-              </label>
-              {failure !== undefined ? <p className="dshAma-error">{failure}</p> : null}
-            </div>
-            <div className="dshAma-modalFoot">
-              <button type="button" className="dshAma-button" onClick={() => { setMigrate(undefined) }}>取消</button>
-              <button
-                type="button" className="dshAma-button dshAma-buttonPrimary" disabled={disabled}
-                onClick={() => { void doMigrate() }}
-              >{busy ? '迁移中…' : '迁移'}</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <ModelsDevImportDialog
         open={modelsDevTarget !== undefined}
@@ -1701,7 +1437,6 @@ const ADVANCED_CSS = `
 .dshAma-entryHead { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .dshAma-entryId { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAma-entryName { color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dshAma-offCatalogBadge { flex: none; padding: 1px 6px; border-radius: 999px; background: rgba(220, 38, 38, .12); color: #dc2626; font-size: 11px; }
 .dshAma-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; }
 .dshAma-badgeCatalog { background: rgba(59, 130, 246, .12); color: #2563eb; }
 .dshAma-badgeCustom { background: rgba(22, 163, 74, .12); color: #16a34a; }

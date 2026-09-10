@@ -81,13 +81,18 @@ function fail(res: ServerResponse, status: number, code: string, message: string
   sendJson(res, status, { ok: false, error: { code, message } })
 }
 
-/** Same-origin fence: an absent Origin is fine (same-origin fetch sends none). */
+/** Same-origin fence (same semantics as the memory/swarm routes): a raw string
+ * compare against the Host header can never pass for browser requests because
+ * Origin carries the scheme — compare the host parts instead. A missing Origin
+ * is a non-browser caller (curl, in-process): allowed. */
 function sameOrigin(req: IncomingMessage): boolean {
   const origin = req.headers.origin
   if (origin === undefined || origin === '') return true
-  const host = req.headers.host
-  if (host === undefined) return false
-  return origin === `http://${host}` || origin === `https://${host}`
+  try {
+    return new URL(origin).host === req.headers.host
+  } catch {
+    return false
+  }
 }
 
 function requireGet(req: IncomingMessage, res: ServerResponse): boolean {

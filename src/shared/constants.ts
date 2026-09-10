@@ -3,6 +3,21 @@
 export const APP_ID = 'com.dshapp.desktop'
 export const APP_NAME = 'DSH APP'
 
+/** GitHub owner/repo hosting kernel runtime + shell update artifacts. */
+export const DEFAULT_ARTIFACT_OWNER = 'JochenYang'
+export const DEFAULT_ARTIFACT_REPO = 'dsh-app'
+
+/** Resolve the artifact owner/repo, honoring the DSH_APP_ARTIFACT_* overrides. */
+export function resolveArtifactOwner(): string {
+  const raw = (process.env.DSH_APP_ARTIFACT_OWNER ?? '').trim()
+  return raw !== '' ? raw : DEFAULT_ARTIFACT_OWNER
+}
+
+/** Resolve the artifact repo, honoring the DSH_APP_ARTIFACT_* overrides. */
+export function resolveArtifactRepo(): string {
+  const raw = (process.env.DSH_APP_ARTIFACT_REPO ?? '').trim()
+  return raw !== '' ? raw : DEFAULT_ARTIFACT_REPO
+}
 /** Host the local dsh web server binds to (loopback only — never 0.0.0.0). */
 export const DEFAULT_HTTP_HOST = '127.0.0.1'
 

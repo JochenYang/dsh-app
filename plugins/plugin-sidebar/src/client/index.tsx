@@ -1,9 +1,9 @@
 /**
  * DSH APP sidebar dock — client half apply.
  *
- * The dock IS the conversation view ring: 文件 and Git register as native
- * `conversation.view` tabs (same ring as 对话/审查/轨迹), each rendering a
- * full page in the conversation area. No floating chrome — the tab row is
+ * The dock IS the conversation view ring: Git registers as a native
+ * `conversation.view` tab (same ring as 对话/审查/轨迹), rendering a full
+ * page in the conversation area. No floating chrome — the tab row is
  * the rail, so there is nothing to mis-position, nothing a drag strip can
  * swallow, and the panel can never cover the chat.
  */
@@ -19,7 +19,7 @@ import { registerDockViews } from './views.tsx'
 export const inject = ['slots', 'connection', 'sessions']
 
 /**
- * Client apply: register the two native views.
+ * Client apply: register the native view.
  * @param ctx - the client root context.
  */
 export function apply(ctx: ClientContext): void {

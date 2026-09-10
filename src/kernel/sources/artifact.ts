@@ -16,10 +16,12 @@ import type { KernelManifest } from '../../shared/types'
  *   app/            — npm-installed dsh profile (package.json + node_modules)
  *
  * Two-phase resolution keeps mirrors from forging integrity:
- *   1. Metadata (.sha512 + manifest-<platform>-<arch>.json) is fetched from
- *      the OFFICIAL release first; mirrors are consulted only if the
- *      official host is unreachable. The sha512 obtained here is the single
- *      trusted digest.
+ *   1. Metadata (.sha512 + manifest-<platform>-<arch>.json) is trusted from
+ *      the OFFICIAL release first, fail-closed: an official HTTP answer is
+ *      authoritative (a 404 means the artifacts are genuinely not published),
+ *      and mirrors supplement metadata only when the official host is
+ *      unreachable at the network level. The sha512 obtained here is the
+ *      single trusted digest.
  *   2. The large tarball is downloaded from an ordered candidate list —
  *      official URL first, then each mirror prefix wrapping that URL — and
  *      EVERY candidate is checked against the phase-1 digest, so a hostile
@@ -78,27 +80,48 @@ export class GitHubArtifactResolver {
     return [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
   }
 
+  /**
+   * Resolve the tarball candidates + trusted digest for a kernel version.
+   * Fail-closed metadata rule: the official release is authoritative. Mirror
+   * metadata is consulted only when the official host is unreachable at the
+   * network level (fetch threw or answered 5xx); an official HTTP answer is
+   * final and never falls through to mirrors, so a stale or forged mirror
+   * sidecar can neither hide nor substitute the release metadata.
+   */
   async fetchArtifact(version: string): Promise<ArtifactInfo | null> {
     const name = this.assetName(version)
     const bases = this.bases(version)
-    for (const base of bases) {
-      const meta = await this.fetchMetadata(base, name)
-      if (meta) {
-        return {
-          candidates: bases.map((b) => `${b}/${name}`),
-          sha512: meta.sha512,
-          manifest: meta.manifest,
-          source: base,
+    const [officialBase, ...mirrorBases] = bases
+    const official = await this.fetchMetadataOutcome(officialBase, name)
+    let meta = official.meta
+    let source = officialBase
+    if (!official.reached) {
+      for (const base of mirrorBases) {
+        const outcome = await this.fetchMetadataOutcome(base, name)
+        if (outcome.meta) {
+          meta = outcome.meta
+          source = base
+          break
         }
+        if (outcome.reached) break
       }
     }
-    return null
+    if (!meta) {
+      console.warn(`[artifact] no metadata for dsh ${version} on ${this.platform}-${this.arch}`)
+      return null
+    }
+    return {
+      candidates: bases.map((b) => `${b}/${name}`),
+      sha512: meta.sha512,
+      manifest: meta.manifest,
+      source,
+    }
   }
 
   /**
    * Tri-state availability probe for a kernel version's metadata sidecar:
    *   'available'   — the .sha512 is reachable (official host or a mirror)
-   *   'missing'     — at least one base answered HTTP but not 200 (reachable
+   *   'missing'     — the official host answered HTTP but not 200 (reachable
    *                   GitHub, artifacts not published yet)
    *   'unreachable' — every base failed at the network level (GitHub and all
    *                   mirrors blocked — e.g. mainland China without proxy)
@@ -111,22 +134,36 @@ export class GitHubArtifactResolver {
   async probeArtifact(version: string): Promise<'available' | 'missing' | 'unreachable'> {
     const name = this.assetName(version)
     let sawResponse = false
-    for (const base of this.bases(version)) {
+    const bases = this.bases(version)
+    for (let index = 0; index < bases.length; index += 1) {
+      const base = bases[index]
+      const isOfficial = index === 0
       try {
         const res = await fetch(`${base}/${name}.sha512`, { signal: AbortSignal.timeout(10_000) })
-        // A non-5xx answer means we reached the ecosystem (host or mirror);
-        // 5xx is a mirror-side failure, NOT evidence the artifact is missing.
+        // A non-5xx answer means we reached that host; 5xx is a mirror-side
+        // failure, NOT evidence the artifact is missing.
         if (res.status >= 500) continue
-        sawResponse = true
+        // Only the official host counts toward 'missing': a mirror answering
+        // 404 says nothing about whether the release exists.
+        if (isOfficial) sawResponse = true
         if (res.ok) return 'available'
-      } catch {
-        // Base unreachable — try the next candidate.
+      } catch (err) {
+        console.warn(`[artifact] probe failed for ${base}: ${(err as Error).message}`)
       }
     }
     return sawResponse ? 'missing' : 'unreachable'
   }
 
-  private async fetchMetadata(base: string, name: string): Promise<{ sha512: string; manifest: KernelManifest } | null> {
+  /**
+   * Fetch one base's metadata sidecars, distinguishing "host answered HTTP"
+   * from "host unreachable" (fetch threw, or a 5xx mirror-side failure).
+   * A 5xx counts as unreachable — same policy as probeArtifact — so a sick
+   * mirror never produces a final "missing" verdict for the whole chain.
+   */
+  private async fetchMetadataOutcome(
+    base: string,
+    name: string,
+  ): Promise<{ reached: boolean; meta: { sha512: string; manifest: KernelManifest } | null }> {
     try {
       const [shaRes, manifestRes] = await Promise.all([
         fetch(`${base}/${name}.sha512`, { signal: AbortSignal.timeout(15_000) }),
@@ -135,12 +172,17 @@ export class GitHubArtifactResolver {
         // (nor a --clobber race between the parallel cells).
         fetch(`${base}/manifest-${this.platform}-${this.arch}.json`, { signal: AbortSignal.timeout(15_000) }),
       ])
-      if (!shaRes.ok || !manifestRes.ok) return null
+      if (shaRes.status >= 500 || manifestRes.status >= 500) {
+        console.warn(`[artifact] metadata unavailable (HTTP ${shaRes.status}/${manifestRes.status}) for ${base}/${name}`)
+        return { reached: false, meta: null }
+      }
+      if (!shaRes.ok || !manifestRes.ok) return { reached: true, meta: null }
       const sha512 = (await shaRes.text()).trim()
       const manifest = (await manifestRes.json()) as KernelManifest
-      return { sha512, manifest }
-    } catch {
-      return null
+      return { reached: true, meta: { sha512, manifest } }
+    } catch (err) {
+      console.warn(`[artifact] metadata fetch failed for ${base}/${name}: ${(err as Error).message}`)
+      return { reached: false, meta: null }
     }
   }
 }

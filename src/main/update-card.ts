@@ -23,7 +23,8 @@ export interface UpdateCardPayload {
   autoHide?: number
 }
 
-const TONE_BG: Record<UpdateCardTone, string> = {
+/** Card background per tone, shared by the in-page script and shell-side toasts. */
+export const UPDATE_CARD_TONE_BG: Record<UpdateCardTone, string> = {
   progress: 'rgba(75, 103, 252, 0.92)',
   success: 'rgba(34, 139, 80, 0.90)',
   error: 'rgba(190, 44, 44, 0.92)',
@@ -79,7 +80,7 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
       root.setAttribute('role', 'status');
       document.body.appendChild(root);
     }
-    const bg = ${JSON.stringify(TONE_BG)}[p.tone];
+    const bg = ${JSON.stringify(UPDATE_CARD_TONE_BG)}[p.tone];
     root.style.cssText =
       'position:fixed;top:48px;left:50%;transform:translateX(-50%);' +
       'z-index:2147483647;display:flex;align-items:center;gap:10px;' +

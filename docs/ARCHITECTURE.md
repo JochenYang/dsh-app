@@ -33,6 +33,13 @@
     plugin-brand (host)      brand settings, app info, desktop bridge (scaffold)
     plugin-client-ui (client) brand theme + advanced models settings page
     plugin-sidebar (dual-face) native conversation views: Files (tree + preview) and Git
+    plugin-swarm (dual-face)   batch parallel subagent orchestration (swarm tool + /swarm command)
+    plugin-usage (dual-face)   usage capture/aggregation + balance card, heatmap, trend chart
+    plugin-archives (dual-face) session archive manager (host list/delete + settings section)
+    plugin-memory (dual-face)  cross-session memory (tools + prompt injection + distiller/curator)
+    plugin-fff (host)          fast file search over the FFF engine (fffind/ffgrep/fff-glob)
+    plugin-mcp (dual-face)     external MCP server manager with dynamic mounting
+    plugin-hooks (dual-face)   external hooks bridge (Claude Code / Codex / native rules)
 ```
 
 ## 3. Brand suite wiring
@@ -43,10 +50,11 @@ Two seams are stitched at every server start (`src/main/brand-suite.ts`):
    a junction (Windows) / symlink to the real package: dev = this repo's
    `plugins/*`, prod = the active kernel's npm-flattened
    `app/node_modules/@dsh-app/*`. `SUITE_PLUGIN_DIRS` lists
-   `plugin-brand`, `plugin-client-ui`, `plugin-sidebar`
-   (`brand-suite.ts:38`).
+   `plugin-brand`, `plugin-client-ui`, `plugin-sidebar`, `plugin-swarm`,
+   `plugin-usage`, `plugin-archives`, `plugin-memory`, `plugin-fff`,
+   `plugin-mcp`, `plugin-hooks` (`brand-suite.ts:38`).
 2. **Loader overlay** — `plugins/dsh-app.patch.yml` is copied into userData and
-   passed via `dsh web --patch`; it inserts the three plugin entries after the
+   passed via `dsh web --patch`; it inserts the ten plugin entries after the
    official bundle layers (last write wins), so no upstream profile template is
    touched.
 

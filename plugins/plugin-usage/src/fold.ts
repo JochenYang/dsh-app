@@ -49,17 +49,43 @@ const asObject = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
 
 /**
+ * Last-seen request header per session. Live capture folds one event at a
+ * time (see foldLiveEvent), so a turn's `request/header` and its
+ * `assistant/message` events arrive in separate calls — without this cache
+ * the message-side header fallback would always resolve to ''. Backfill
+ * replays refresh the same entries with identical values, so sharing the map
+ * across both paths is safe.
+ */
+const headerBySession = new Map<string, { provider: string, model: string }>()
+
+/** Cap on cached session headers; past it the oldest session drops (its next
+ * header event simply re-seeds it). */
+const MAX_CACHED_SESSIONS = 1_000
+
+function rememberHeader(sessionId: string, provider: string, model: string): void {
+  headerBySession.delete(sessionId)
+  headerBySession.set(sessionId, { provider, model })
+  if (headerBySession.size > MAX_CACHED_SESSIONS) {
+    const oldest = headerBySession.keys().next()
+    if (!oldest.done) headerBySession.delete(oldest.value)
+  }
+}
+
+/**
  * Fold `events` (one session's suffix, `seq` above the stored watermark)
  * into the store. Provider/model resolution prefers the message's own model
- * source and falls back to the turn's request header.
+ * source, falls back to the turn's request header, and finally to the
+ * session's last-seen header (the live path folds one event per call, so the
+ * header usually arrived in an earlier call).
  * @returns the number of rows actually added (deduped).
  */
 export function foldEvents(store: UsageStore, sessionId: string, events: readonly FoldEvent[]): number {
   if (events.length === 0) return 0
   const fromSeq = store.watermark(sessionId)
   const rows: UsageRow[] = []
-  let provider = ''
-  let model = ''
+  const cached = headerBySession.get(sessionId)
+  let provider = cached?.provider ?? ''
+  let model = cached?.model ?? ''
   for (const event of events) {
     if (event.seq <= fromSeq) continue
     if (event.type === 'request/header') {
@@ -67,6 +93,7 @@ export function foldEvents(store: UsageStore, sessionId: string, events: readonl
       const config = asObject(data?.header?.config)
       provider = asString(config?.provider)
       model = asString(config?.model)
+      rememberHeader(sessionId, provider, model)
     } else if (event.type === 'assistant/message') {
       const data = asObject(event.data) as AssistantMessageShape | undefined
       const usage = data?.usage
@@ -93,7 +120,8 @@ export function foldEvents(store: UsageStore, sessionId: string, events: readonl
   return store.addRows(rows)
 }
 
-/** Fold one live event as it streams through the session bus. */
+/** Fold one live event as it streams through the session bus. Header events
+ * seed the per-session cache; message events resolve provider/model through it. */
 export function foldLiveEvent(store: UsageStore, sessionId: string, event: FoldEvent): number {
   return foldEvents(store, sessionId, [event])
 }

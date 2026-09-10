@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-sidebar",
-  "description": "DSH APP sidebar dock: dual-face plugin (host fs routes + client dock UI) for the file tree, preview, terminal, git and subagent pages.",
-  "version": "0.1.0",
+  "description": "DSH APP sidebar dock: dual-face plugin (host git routes + client Git view tab) for repository status, diff, log, and sync actions.",
+  "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -23,7 +23,7 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-slots"
       ],
       "platform": "web"
@@ -39,24 +39,23 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
-    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.2-alpha.3",
-    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.2-alpha.3",
-    "@deepseek-ai/dsh-client-ui-session": "^0.1.2-alpha.3",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.2-alpha.3",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.2-alpha.3",
-    "@deepseek-ai/dsh-session": "^0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-session": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-session": "^0.1.5-rc.1",
     "react": "^18.2.0"
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-session": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-session": "0.1.5-rc.1",
     "@types/react": "18.3.1",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   },
-  "license": "MIT",
-  "dependencies": {
-    "react-markdown": "10.1.0",
-    "rehype-raw": "7.0.0",
-    "rehype-sanitize": "6.0.0",
-    "remark-gfm": "4.0.1"
-  }
+  "license": "MIT"
 }

@@ -32,6 +32,14 @@ import type { HooksMountStatus } from './wire.ts'
 /** Source stamped on every context message this runtime injects. */
 const NATIVE_SOURCE: MessageSource = { kind: 'plugin', plugin: 'dsh-app-native-hooks' }
 
+/** Overlong matchers are rejected at sync: unbounded patterns are a ReDoS vector. */
+const MAX_MATCHER_CHARS = 500
+
+/** One rule with its matcher compiled once at sync (null = match-all). */
+interface CompiledRule {
+  readonly rule: NativeRule
+  readonly test: RegExp | null
+}
 /**
  * Structural slice of the cordis Context's `on` method for the four
  * interception events we register. The Events augmentation from dsh-tools /
@@ -48,7 +56,7 @@ type Hookable = {
 }
 
 export class NativeHookRuntime {
-  private rules: NativeRule[] = []
+  private compiled: CompiledRule[] = []
   private readonly statuses = new Map<string, HooksMountStatus>()
 
   constructor(private readonly log: (message: string) => void) {}
@@ -58,12 +66,28 @@ export class NativeHookRuntime {
    * sync — handlers stay registered and read the refreshed rules.
    */
   sync(entries: ReadonlyArray<{ id: string; configContent?: string }>): void {
-    const rules: NativeRule[] = []
+    const compiled: CompiledRule[] = []
     const statuses = new Map<string, HooksMountStatus>()
     for (const entry of entries) {
       try {
         const parsed = parseNativeRules(entry.configContent ?? '')
-        rules.push(...parsed)
+        // Compile every matcher ONCE here and cache the RegExp: per-event
+        // recompilation would redo this work on every tool call. Overlong
+        // matchers are rejected (the entry reports error, like any bad rule).
+        for (const rule of parsed) {
+          if (rule.matcher !== undefined && rule.matcher.length > MAX_MATCHER_CHARS) {
+            throw new Error(`matcher 过长（${String(rule.matcher.length)}/${String(MAX_MATCHER_CHARS)} 字符）：${rule.name}`)
+          }
+          let test: RegExp | null = null
+          if (rule.matcher !== undefined) {
+            try {
+              test = new RegExp(rule.matcher)
+            } catch {
+              throw new Error(`matcher 不是合法正则：${rule.matcher}`)
+            }
+          }
+          compiled.push({ rule, test })
+        }
         statuses.set(entry.id, { state: 'mounted' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -71,7 +95,7 @@ export class NativeHookRuntime {
         this.log(`native hooks: entry ${entry.id} invalid: ${message}`)
       }
     }
-    this.rules = rules
+    this.compiled = compiled
     this.statuses.clear()
     for (const [id, status] of statuses) this.statuses.set(id, status)
   }
@@ -83,16 +107,22 @@ export class NativeHookRuntime {
 
   /** Whether any native entry currently contributes rules. */
   get active(): boolean {
-    return this.rules.length > 0
+    return this.compiled.length > 0
+  }
+
+  /** Live rules for the non-tool events (the compiled entries' rule faces). */
+  private get liveRules(): NativeRule[] {
+    return this.compiled.map(entry => entry.rule)
   }
 
   /** Rules matching one tool event (block action only). */
   private toolRules(on: NativeRule['on'], toolName: string): NativeRule[] {
-    return this.rules.filter((rule) => {
-      if (rule.on !== on || rule.action !== 'block') return false
-      if (rule.matcher === undefined) return true
-      try { return new RegExp(rule.matcher).test(toolName) } catch { return false }
-    })
+    const matched: NativeRule[] = []
+    for (const { rule, test } of this.compiled) {
+      if (rule.on !== on || rule.action !== 'block') continue
+      if (test === null || test.test(toolName)) matched.push(rule)
+    }
+    return matched
   }
 
   /**
@@ -117,7 +147,7 @@ export class NativeHookRuntime {
       }),
       hookable.on('agent/pre-step', async (data, next) => {
         if (data.messages.length === 0) return next()
-        const applicable = this.rules.filter(rule => rule.on === 'prompt-submit')
+        const applicable = this.liveRules.filter(rule => rule.on === 'prompt-submit')
         if (applicable.some(rule => rule.action === 'block')) return { kind: 'reject' }
         const contexts = applicable.filter(rule => rule.action === 'context')
         if (contexts.length === 0) return next()
@@ -128,7 +158,7 @@ export class NativeHookRuntime {
         return { ...downstream, messages: [...(downstream.messages ?? []), ours] }
       }),
       hookable.on('agent/session-start', ({ agent }) => {
-        const contexts = this.rules.filter(rule => rule.on === 'session-start' && rule.action === 'context')
+        const contexts = this.liveRules.filter(rule => rule.on === 'session-start' && rule.action === 'context')
         if (contexts.length === 0) return
         const content: ContentBlock[] = contexts.map(rule => ({ type: 'text' as const, text: rule.message }))
         agent.inject(createUserMessage({ content, source: NATIVE_SOURCE }))

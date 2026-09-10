@@ -8,6 +8,11 @@
  * Same-origin fence on all routes; body cap 16 KiB. No secret masking needed
  * (bridges carry file paths only, no credentials).
  *
+ * Isolation note: the small HTTP helpers below (sameOrigin, sendJson, ok/fail,
+ * readJsonBody) intentionally mirror plugin-mcp's routes.ts instead of being
+ * shared — each suite plugin bundles standalone (esbuild, no cross-plugin
+ * runtime imports), so a shared util would be a new package for ~30 lines.
+ *
  * @module @dsh-app/plugin-hooks/routes
  */
 

@@ -1,21 +1,23 @@
 /**
  * Host API routes for the archive manager.
  *
- * Three endpoints under the plugin's route namespace on the dsh web server
+ * Four endpoints under the plugin's route namespace on the dsh web server
  * (`/plugins/@dsh-app/plugin-archives/api`):
  *   GET  /list   — archived sessions grouped by project (cwd), with sizes
  *                  and projection-cached titles
- *   POST /delete — remove the on-disk artifacts of archived sessions
+ *   POST /delete — logically delete archived sessions (drop their archive-set
+ *                  records; the backend owns physical log removal)
  *   POST /prune  — drop archive-set records whose session logs are already
  *                  gone (stale records), through the registry's serialized
  *                  write chain
+ *   GET  /search — cross-session full-text search over the live-preferred corpus
  *
  * Deletion safety fences (all enforced server-side):
  *   - only ids present in the workspace registry's archive set are deletable
  *     (this surface can never touch an unarchived session);
  *   - a live/attached session is skipped (`live`);
- *   - removal targets exactly the session's own directory, resolved through
- *     the persistence backend's `locate()` — never a parent or the root.
+ *   - removal drops the ids' archive-set records only (logical deletion);
+ *     the persistence backend owns physical log removal.
  *
  * The namespace deliberately lives inside the loader-owned `/plugins/<pkg>`
  * prefix with an `/api` segment (same discipline as plugin-usage): the
@@ -25,8 +27,7 @@
  * @module @dsh-app/plugin-archives/routes
  */
 
-import { readdir, rm, stat } from 'node:fs/promises'
-import { basename, dirname } from 'node:path'
+import { basename } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveSkipReason, ArchivedSession } from './types.ts'
 
@@ -53,8 +54,7 @@ export interface SessionHeaderLike {
 
 /** Structural slice of the sessionPersistence service. */
 export interface PersistenceLike {
-  list(signal?: AbortSignal): Promise<Array<SessionHeaderLike | { header: SessionHeaderLike }>>
-  locate(meta: SessionHeaderLike): { kind: string; path: string } | undefined
+  list(): Promise<readonly unknown[]>
 }
 
 /**
@@ -64,9 +64,15 @@ export interface PersistenceLike {
  * admitted — reading `.id` off a snapshot wrapper silently yields
  * `undefined` and misfiles every live archive as stale.
  */
-function listedHeader(entry: SessionHeaderLike | { header: SessionHeaderLike }): SessionHeaderLike {
+function listedHeader(entry: unknown): SessionHeaderLike {
   const wrapped = (entry as { header?: SessionHeaderLike }).header
   return wrapped !== undefined && typeof wrapped.id === 'string' ? wrapped : (entry as SessionHeaderLike)
+}
+
+/** Cheap byte size off a listing entry (snapshot metadata; absent → 0). */
+function entrySizeBytes(entry: unknown): number {
+  const size = (entry as { sizeBytes?: unknown }).sizeBytes
+  return typeof size === 'number' && Number.isFinite(size) && size >= 0 ? size : 0
 }
 
 /** Structural slice of the workspaceRegistry service. */
@@ -185,31 +191,6 @@ export interface ArchiveRoutesOptions {
   tools: ToolsLike | undefined
 }
 
-/**
- * Sum the file sizes in one session directory (what deleting it frees).
- * Shallow by design: the layout is `<sessionDir>/session.jsonl[.zstd]` plus
- * backend-owned siblings. Any read fault scores 0 — listing must never fail
- * because one directory is unreadable.
- */
-async function dirSize(dir: string): Promise<number> {
-  let entries: Array<{ isFile(): boolean; name: string }>
-  try {
-    entries = await readdir(dir, { withFileTypes: true }) as Array<{ isFile(): boolean; name: string }>
-  } catch {
-    return 0
-  }
-  let total = 0
-  for (const entry of entries) {
-    if (!entry.isFile()) continue
-    try {
-      total += (await stat(`${dir}/${entry.name}`)).size
-    } catch {
-      // racing deletion or unreadable file: contribute nothing
-    }
-  }
-  return total
-}
-
 /** Group display name: cwd basename, or a placeholder for cwd-less sessions. */
 function groupTitle(cwd: string): string {
   if (cwd === '') return '未记录项目目录'
@@ -244,6 +225,29 @@ function sameOrigin(req: IncomingMessage): boolean {
   return origin === `http://${host}` || origin === `https://${host}`
 }
 
+/**
+ * Loopback-host fence (behavioral parity with plugin-sidebar's trust fence):
+ * admit only requests whose Host names this machine's loopback interface,
+ * so a rebinding/cross-site request carrying an attacker's Host is refused
+ * even when it forges an Origin. Reads ONLY the Host header.
+ */
+function passesFence(req: IncomingMessage): boolean {
+  const raw = req.headers.host
+  if (typeof raw !== 'string' || raw === '') return false
+  let hostname: string
+  try {
+    hostname = new URL(`http://${raw}`).hostname
+  } catch {
+    return false
+  }
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  // 127.0.0.0/8 in full, validated per octet (a bare \d{1,3} pattern would
+  // admit 127.999.999.999, which names no local interface).
+  const octets = hostname.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
 /** Read and JSON-parse a request body, enforcing the size cap. */
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -272,37 +276,33 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
 /** Build the grouped listing of archived sessions. */
 async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList> {
   const archivedIds = new Set(options.registry.archivedSessionIds.map(String))
-  const headers = new Map((await options.persistence.list()).map((entry) => {
+  const entries = new Map((await options.persistence.list()).map((entry) => {
     const header = listedHeader(entry)
-    return [String(header.id), header] as const
+    return [String(header.id), entry] as const
   }))
   const groups = new Map<string, ArchiveGroup>()
   let staleCount = 0
   let totalBytes = 0
   for (const id of archivedIds) {
-    const header = headers.get(id)
-    if (header === undefined) {
+    const entry = entries.get(id)
+    if (entry === undefined) {
       // Archived but no persisted log: nothing to show or delete here.
       // /prune is the surface that can drop such records; listing only
       // counts them.
       staleCount += 1
       continue
     }
+    const header = listedHeader(entry)
     const cwd = header.cwd ?? ''
-    const located = options.persistence.locate(header)
-    if (located === undefined) {
-      // Backend owns no per-session artifact (e.g. SQLite): nothing to list
-      // or delete here. Same bucket as a missing header.
-      staleCount += 1
-      continue
-    }
     let group = groups.get(cwd)
     if (group === undefined) {
       group = { cwd, title: groupTitle(cwd), sessions: [], totalBytes: 0 }
       groups.set(cwd, group)
     }
-    const dir = dirname(located.path)
-    const sizeBytes = await dirSize(dir)
+    // Byte size comes from the listing snapshot itself (cheap metadata the
+    // backend provides); the rc-line kernel no longer exposes per-session
+    // artifact paths, so directory walks are gone.
+    const sizeBytes = entrySizeBytes(entry)
     const cachedTitle = options.projectionCache?.cachedSnapshot(header, 0)?.values.title
     const session: ArchivedSession = {
       id,
@@ -325,51 +325,46 @@ async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList>
   }
 }
 
-/** Delete the on-disk artifacts of the requested archived sessions. */
-async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly string[]): Promise<ArchiveDeleteResult> {
+/** Logically delete the requested archived sessions (drop archive-set records). */
+async function deleteArchives(writer: RegistryWriter, options: ArchiveRoutesOptions, ids: readonly string[]): Promise<ArchiveDeleteResult> {
   const result: ArchiveDeleteResult = { deleted: [], freedBytes: 0, skipped: [] }
-  const archivedIds = new Set(options.registry.archivedSessionIds.map(String))
-  const headers = new Map((await options.persistence.list()).map((entry) => {
+  const entries = new Map((await options.persistence.list()).map((entry) => {
     const header = listedHeader(entry)
-    return [String(header.id), header] as const
+    return [String(header.id), entry] as const
   }))
-  for (const id of ids) {
+  // The rc-line kernel exposes no per-session artifact paths (locate is
+  // gone) and no persistence delete API — the lifecycle owns physical
+  // removal. Deleting here drops the archive-set records (the sessions leave
+  // the archive view); the stale-record bucket in /list covers anything the
+  // backend already reclaimed.
+  const archivedIds = new Set(options.registry.archivedSessionIds.map(String))
+  const deletable = ids.filter((id) => {
     // Fence 1: only sessions the user archived are manageable here.
     if (!archivedIds.has(id)) {
       result.skipped.push({ id, reason: 'not-archived' })
-      continue
+      return false
     }
-    // Fence 2: a mid-turn session's log is still being written; never remove
-    // it. Idle-but-resident sessions stay deletable (see isMidTurn); a
-    // session absent from the store (or no store service) is cold by design.
+    if (entries.get(id) === undefined) {
+      result.skipped.push({ id, reason: 'missing' })
+      return false
+    }
     const resident = options.sessions?.get(id)
     if (resident !== undefined && isMidTurn(resident)) {
       result.skipped.push({ id, reason: 'live' })
-      continue
+      return false
     }
-    const header = headers.get(id)
-    if (header === undefined) {
-      result.skipped.push({ id, reason: 'missing' })
-      continue
-    }
-    try {
-      const located = options.persistence.locate(header)
-      if (located === undefined) {
-        // Backend owns no per-session artifact: nothing exists to remove.
-        result.skipped.push({ id, reason: 'missing' })
-        continue
-      }
-      const dir = dirname(located.path)
-      const sizeBytes = await dirSize(dir)
-      // force tolerates a racing removal (ENOENT); other faults (e.g. a file
-      // locked open on Windows) surface as `io` skips, never a failed batch.
-      await rm(dir, { recursive: true, force: true })
-      result.deleted.push(id)
-      result.freedBytes += sizeBytes
-    } catch {
-      result.skipped.push({ id, reason: 'io' })
-    }
-  }
+    return true
+  })
+  if (deletable.length === 0) return result
+  await writer.enqueueOperation(async () => {
+    const state = writer.requireState()
+    const remaining = state.archivedSessionIds.map(String).filter((id) => !deletable.includes(id))
+    await writer.setState({ ...state, archivedSessionIds: remaining })
+  })
+  result.deleted.push(...deletable)
+  // Logical deletion drops archive-set records only; report the snapshot
+  // sizes the listing measured so the UI names what left the archive view.
+  for (const id of deletable) result.freedBytes += entrySizeBytes(entries.get(id))
   return result
 }
 
@@ -398,14 +393,14 @@ async function pruneStaleArchives(writer: RegistryWriter, options: ArchiveRoutes
 }
 
 /**
- * Register the three API routes.
+ * Register the four API routes.
  * @param webServer - the dsh web server service.
  * @param options - route-layer dependencies.
  * @returns a disposer removing all of them.
  */
 export function registerArchiveRoutes(webServer: WebServerLike, options: ArchiveRoutesOptions): () => void {
   const listHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) return
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET')
       fail(res, 405, 'method-not-allowed', 'GET only')
@@ -418,7 +413,7 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       })
   }
   const deleteHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) return
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
       fail(res, 405, 'method-not-allowed', 'POST only')
@@ -431,7 +426,16 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
           fail(res, 400, 'bad-request', '请求体需要非空的 ids 字符串数组')
           return
         }
-        return deleteArchives(options, ids as string[])
+        // Same private-write capability check as /prune: logical deletion
+        // rewrites the archive set through the registry chain.
+        const writer = options.registry as RegistryWriter
+        if (typeof writer.enqueueOperation !== 'function'
+          || typeof writer.requireState !== 'function'
+          || typeof writer.setState !== 'function') {
+          fail(res, 501, 'delete-unsupported', '当前内核版本不支持删除归档记录')
+          return
+        }
+        return deleteArchives(writer, options, ids as string[])
           .then((value) => { ok(res, value) })
       })
       .catch((error: unknown) => {
@@ -439,7 +443,7 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       })
   }
   const pruneHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) return
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
       fail(res, 405, 'method-not-allowed', 'POST only')
@@ -465,7 +469,7 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       })
   }
   const searchHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) return
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET')
       fail(res, 405, 'method-not-allowed', 'GET only')
@@ -476,7 +480,8 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       return
     }
     const url = new URL(req.url ?? '/', 'http://x')
-    const query = (url.searchParams.get('q') ?? '').trim()
+    // Cap the query: the backend scores the full text, so bound what we send.
+    const query = (url.searchParams.get('q') ?? '').trim().slice(0, 500)
     if (query === '') {
       fail(res, 400, 'bad-request', '查询词不能为空')
       return

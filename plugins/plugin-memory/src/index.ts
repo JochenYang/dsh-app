@@ -1,7 +1,7 @@
 /**
  * DSH APP cross-session memory — host half.
  *
- * Mounts four things over one two-level root
+ * Mounts five things over one two-level root
  * (`$DSH_HOME/storages/dsh-app-plugin-memory`):
  *
  * 1. a system-prompt section whose text is a per-assembly provider —
@@ -9,13 +9,14 @@
  *    project's file (resolved from the assembling agent's session cwd;
  *    bounded, see prompt.ts), so a mid-session memory_save is visible to
  *    the next turn;
- * 2. two LLM tools, `memory_save` / `memory_recall` (model-driven proactive
- *    saving; project routing comes from the executing agent's session
- *    cwd, never from model input);
+ * 2. three LLM tools, `memory_save` / `memory_recall` / `memory_forget`
+ *    (model-driven proactive saving; project routing comes from the
+ *    executing agent's session cwd, never from model input);
  * 3. the background distiller (see distiller.ts): after a session goes
- *    quiet, a read-only one-shot subagent reviews the conversation delta
- *    and proposes entries the host validates before writing — the
- *    code-guaranteed half of proactive memory;
+ *    quiet, one direct LLM call (default — the legacy read-only one-shot
+ *    subagent stays behind the `distillBackend` switch) reviews the
+ *    conversation delta and proposes entries the host validates before
+ *    writing — the code-guaranteed half of proactive memory;
  * 4. the background curator (see curator.ts): when a distill saved entries,
  *    a deferred read-only pass merges near-duplicates, prunes stale ones,
  *    and re-categories, so the file stays lean instead of growing forever.

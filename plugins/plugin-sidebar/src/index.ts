@@ -2,10 +2,9 @@
  * DSH APP sidebar dock — host half.
  *
  * Registers the plugin's trust-fenced HTTP routes on the dsh web server
- * (`/plugins/@dsh-app/plugin-sidebar/*`). The M1 surface is read-only
- * filesystem access (directory listing + bounded file preview); terminal
- * (pty), git, and writes arrive in later milestones, each fenced the same
- * way and disposed with the plugin's fiber.
+ * (`/plugins/@dsh-app/plugin-sidebar/*`) backing the Git tab. The file
+ * tree tab was retired with its fs routes: the upstream sidebar ships
+ * file management natively.
  *
  * Stability discipline: the host half keeps ZERO global side effects — no
  * context prototype mutation, no process-wide state — because a host plugin
@@ -19,7 +18,6 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 // Type-only: pulls the host session service (ctx.sessions) into scope.
 import type {} from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import { handleFsRequest } from './fs-routes.ts'
 import { handleGitRequest } from './git-routes.ts'
 import { passesFence } from './trust-fence.ts'
 
@@ -64,8 +62,9 @@ export function apply(ctx: Context): void {
         void handleGitRequest(req, res, url, gitScope)
         return
       }
-      void handleFsRequest(req, res, url)
+      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: { code: 'not-found', message: 'unknown sidebar api path' } }))
     },
   })
-  ctx.effect(() => dispose, 'plugin-sidebar: dispose fs routes')
+  ctx.effect(() => dispose, 'plugin-sidebar: dispose git routes')
 }

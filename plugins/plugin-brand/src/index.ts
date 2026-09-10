@@ -22,7 +22,9 @@ import type { Context } from '@deepseek-ai/cordis'
 
 export const name = 'dsh-app-brand'
 
-export const inject = ['settings']
+// No host services consumed yet: the settings namespace, app-info service,
+// and desktop bridge are scaffold TODOs below, so nothing is injected.
+export const inject: string[] = []
 
 export function apply(ctx: Context): void {
   // TODO(dev loop): ctx.settings.register('brand', BrandSettingsSchema) with

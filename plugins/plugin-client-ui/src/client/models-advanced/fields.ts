@@ -71,7 +71,17 @@ export const HAND_PROTOCOLS = [
   'openai-completions', 'openai-responses', 'anthropic-messages',
 ] as const
 
-/** Compat switches each protocol offers (mirrors harness COMPAT_GATES 'offer'). */
+/**
+ * Compat switches each protocol offers (mirrors harness COMPAT_GATES 'offer').
+ *
+ * Coverage note: the 'offer' lists below deliberately name more keys than
+ * {@link COMPAT_FIELDS} renders (`supportsFinishReason`,
+ * `supportsThinkingTokenBudget`, `thinkingTokenBudgetField`, `vllmPriority`,
+ * `supportsMaxOutputTokens`). Those stay hand-written YAML: `compatFailure`
+ * and `modelRowFailure` skip unknown keys, so an unrendered switch still
+ * writes and reads untouched instead of failing the save. Promote a key into
+ * `COMPAT_FIELDS` (with its value shape) only once its rendering is verified.
+ */
 const PROTOCOL_COMPAT: Readonly<Record<string, readonly string[]>> = {
   'openai-completions': [
     'supportsStore', 'supportsDeveloperRole', 'supportsReasoningEffort',
