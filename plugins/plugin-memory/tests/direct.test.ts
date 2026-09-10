@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { extractJson, resolveLlm, streamJson } from '../src/llm-direct.ts'
 import { MemoryRoot, repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
 import { buildDistillPrompt } from '../src/distiller.ts'
+import { buildCuratePrompt } from '../src/curator.ts'
 
 test('extractJson parses bare objects', () => {
   const result = extractJson('{"entries": []}')
@@ -119,6 +120,20 @@ test('buildDistillPrompt splits system/user and bans prefixes', () => {
   assert.match(system, /no "- \[category\] date" prefix/)
   assert.match(user, /\[user\] hello/)
   assert.match(user, /No workspace/)
+})
+
+test('buildCuratePrompt bans work logs and spells out the JSON contract', () => {
+  const { system, user } = buildCuratePrompt('- [lesson] 2026-09-06 two entries')
+  // The work-log class the curator must delete (the prompt is now the only
+  // carrier of the output contract — outputSchema is gone).
+  assert.match(system, /work logs/i)
+  assert.match(system, /commit\s+ids/i)
+  assert.match(system, /session did/i)
+  assert.match(system, /Reply with ONE JSON object/)
+  assert.ok(system.includes('"edits"'))
+  assert.ok(system.includes('preference|convention|decision|lesson|fact'))
+  assert.match(user, /--- Memory file ---/)
+  assert.match(user, /two entries/)
 })
 
 function stubLlm(chunks: Array<Record<string, unknown>>): never {

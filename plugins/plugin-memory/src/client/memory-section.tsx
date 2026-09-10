@@ -295,7 +295,7 @@ export function MemorySection(): ReactNode {
         ? (
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">最近提炼</div>
-            <div className="dshm_hint">后台提炼在会话静默 1 分钟后自动运行（默认直接调用模型，低消耗），以下为最近记录（时间 · 来源会话 · 保存条数 · 通道）。</div>
+            <div className="dshm_hint">后台提炼在会话静默 1 分钟后自动运行（直接调用模型，低消耗），以下为最近记录（时间 · 来源会话 · 保存条数 · 通道）。</div>
             {status.activity.slice(0, activityExpanded ? status.activity.length : ACTIVITY_PREVIEW).map((item: MemoryDistillActivity) => (
               <div key={`${item.at}-${item.session}`} className="dshm_activityRow">
                 <span className="dshm_activityTime">{fmtTime(item.at)}</span>

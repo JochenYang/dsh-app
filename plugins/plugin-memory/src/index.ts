@@ -13,14 +13,13 @@
  *    (model-driven proactive saving; project routing comes from the
  *    executing agent's session cwd, never from model input);
  * 3. the background distiller (see distiller.ts): after a session goes
- *    quiet, one direct LLM call (default — the legacy read-only one-shot
- *    subagent stays behind the `distillBackend` switch) reviews the
- *    conversation delta and proposes entries the host validates before
- *    writing — the code-guaranteed half of proactive memory;
+ *    quiet, one direct LLM call reviews the conversation delta and proposes
+ *    entries the host validates before writing — the code-guaranteed half of
+ *    proactive memory;
  * 4. the background curator (see curator.ts): when a distill saved entries,
- *    a deferred read-only pass merges near-duplicates, prunes stale ones,
- *    and re-categories, so the file stays lean instead of growing forever.
- *    Both passes mount only when the subagent services are available
+ *    a deferred direct call merges near-duplicates, prunes stale ones, and
+ *    re-categorizes, so the file stays lean instead of growing forever.
+ *    Both passes mount only when the agents + llm services are available
  *    (graceful on kernels without them);
  * 5. settings-page routes (status/toggle/pin/clear) for the client half.
  *
@@ -63,17 +62,10 @@ export const inject = ['webServer', 'tools', 'systemPrompt']
 export interface Config {
   /** Absolute store directory; empty → $DSH_HOME/storages/dsh-app-plugin-memory. */
   storePath: string
-  /**
-   * Background-distill LLM channel: 'direct' (one `ctx.llm.stream` call,
-   * default — an order of magnitude cheaper than a child session) or
-   * 'subagent' (the legacy read-only one-shot child).
-   */
-  distillBackend: 'direct' | 'subagent'
 }
 
 export const Config: z<Config> = z.object({
   storePath: z.string().default(''),
-  distillBackend: z.union([z.const('direct'), z.const('subagent')]).default('direct'),
 })
 
 /** Tool-guidance section order (upstream convention: 100–199). */
@@ -136,25 +128,25 @@ export function apply(ctx: Context, config: Config): void {
   }), 'plugin-memory: system prompt section')
 
   // The direct-save path's curator trigger. Tools mount regardless of the
-  // subagent seam (below), so the callback is a late-bound holder: a kernel
-  // without agents/subagents leaves it unset and memory_save still works.
+  // agents/llm seam (below), so the callback is a late-bound holder: a kernel
+  // without those services leaves it unset and memory_save still works.
   let requestCurate: ((parent: NonNullable<ReturnType<Context['agents']['get']>>, sessionId: SessionId) => void) | undefined
   ctx.effect(() => registerMemoryTools(ctx, root, (parent, sessionId) => { requestCurate?.(parent, sessionId) }), 'plugin-memory: llm tools')
   ctx.effect(() => registerMemoryRoutes(ctx.webServer, root), 'plugin-memory: settings routes')
 
-  // The background passes need the subagent seam; on a kernel without it
-  // (e.g. a rollback target) the plugin still mounts everything else — only
-  // the async safety nets are absent. The distiller appends NEW entries; a
-  // saved run hands the curator the trigger, and the curator then merges/
-  // prunes the file (see distiller.ts / curator.ts). 'llm' rides along for
-  // the direct channel (a core service, always present when agents are).
-  ctx.inject(['agents', 'subagents', 'llm'], memCtx => {
+  // The background passes need the agents + llm services; on a kernel
+  // without them (e.g. a rollback target) the plugin still mounts everything
+  // else — only the async safety nets are absent. The distiller appends NEW
+  // entries; a saved run hands the curator the trigger, and the curator then
+  // merges/prunes the file (see distiller.ts / curator.ts). Both call the
+  // model directly on the triggering session's own route.
+  ctx.inject(['agents', 'llm'], memCtx => {
     const curator = new MemoryCurator(memCtx, root, log)
     // The distill hands the curator its save trigger with the session id:
     // the first sweep runs in the distill's own window, further saves inside
     // the cooldown coalesce into one trailing sweep that re-resolves the
-    // parent by session id at fire time.
-    const distiller = new MemoryDistiller(memCtx, root, log, config.distillBackend, (parent, sessionId) => curator.runAfterDistill(parent, sessionId))
+    // session by id at fire time.
+    const distiller = new MemoryDistiller(memCtx, root, log, (parent, sessionId) => curator.runAfterDistill(parent, sessionId))
     // Both save paths must be able to consolidate: the distill's own trigger
     // above, and memory_save's direct path through this holder (both remain
     // gated by the same 后台自动提炼 toggle, inside the curator).

@@ -303,16 +303,21 @@ test('curator: saves inside the cooldown coalesce into one trailing sweep', asyn
   const { setTimeout: sleep } = await import('node:timers/promises')
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-cool-')))
   root.global.replace(eightEntries())
-  const starts: string[] = []
-  const parent = {} as never
+  // One entry per direct model call, holding the reviewed file text: that is
+  // what proves WHICH target the sweep curated (the subagent channel used to
+  // carry the target in its label).
+  const reviewed: string[] = []
+  const session = {
+    id: 'session-a',
+    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+  }
+  const parent = { session } as never
   const ctx = {
-    subagents: {
-      start: async (_provider: unknown, req: { label: string }) => {
-        starts.push(req.label)
-        return {
-          result: Promise.resolve({ stopReason: 'completed', structured: { edits: [] } }),
-          dispose: async () => {},
-        }
+    llm: {
+      stream: async function* (options: { messages: { content?: { text?: string }[] }[] }) {
+        reviewed.push(options.messages.map(m => (m.content ?? []).map(c => c.text ?? '').join('\n')).join('\n'))
+        yield { type: 'text-delta', index: 0, text: '{"edits": []}' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
       },
     },
     agents: { get: () => parent },
@@ -321,7 +326,8 @@ test('curator: saves inside the cooldown coalesce into one trailing sweep', asyn
 
   // 1st save: sweeps immediately and records the file hash.
   await curator.runAfterDistill(parent, 'session-a' as never)
-  assert.equal(starts.length, 1, 'first save sweeps right away')
+  assert.equal(reviewed.length, 1, 'first save sweeps right away')
+  assert.match(reviewed[0]!, /条目-1/, 'the sweep curated the global file')
   assert.equal(root.curatedHashOf('global'), contentHash(root.global.read()), 'completed pass records the hash')
 
   // 2nd/3rd saves inside the cooldown: no immediate work. The appended
@@ -330,14 +336,54 @@ test('curator: saves inside the cooldown coalesce into one trailing sweep', asyn
   root.global.append('lesson', '冷却期内新增的一条')
   await curator.runAfterDistill(parent, 'session-b' as never)
   await curator.runAfterDistill(parent, 'session-c' as never)
-  assert.equal(starts.length, 1, 'no sweep while inside the cooldown')
+  assert.equal(reviewed.length, 1, 'no sweep while inside the cooldown')
 
   await sleep(200)
-  assert.equal(starts.length, 2, 'exactly one trailing sweep at the original deadline')
-  assert.equal(starts[1], 'memory-maint:curate:global')
+  assert.equal(reviewed.length, 2, 'exactly one trailing sweep at the original deadline')
+  assert.match(reviewed[1]!, /冷却期内新增的一条/, 'the trailing sweep curated the global file')
 
   // After the cooldown elapses a save sweeps immediately — and since the
-  // trailing pass just consolidated the file, it launches no child at all.
+  // trailing pass just consolidated the file, it calls the model not at all.
   await curator.runAfterDistill(parent, 'session-d' as never)
-  assert.equal(starts.length, 2, 'unchanged file: sweep runs, launches nothing')
+  assert.equal(reviewed.length, 2, 'unchanged file: sweep runs, calls nothing')
+})
+
+test('curator: a direct call feeds its JSON through the host validation', async () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-direct-curate-')))
+  root.global.replace(`${eightEntries()}\n- [lesson] 2026-09-01 用户用 pnpm\n- [fact] 2026-09-02 用户偏好 pnpm`)
+  const session = {
+    id: 'session-49ce2455-aaaa-bbbb-cccc-ddddeeeeffff',
+    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+  }
+  const parent = { session } as never
+  const ctx = {
+    llm: {
+      // A fenced answer like a real model's: the contract is prompt-only now,
+      // so the host's tolerant extraction has to do the parsing.
+      stream: async function* () {
+        yield {
+          type: 'text-delta',
+          index: 0,
+          text: '```json\n{"edits": [{"op": "merge", "lines": ["- [lesson] 2026-09-01 用户用 pnpm", "- [fact] 2026-09-02 用户偏好 pnpm"], "category": "preference", "content": "用户用 pnpm"}]}\n```',
+        }
+        yield { type: 'usage', usage: { inputTokens: 700, outputTokens: 40 } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    },
+    agents: { get: () => parent },
+  }
+  const curator = new MemoryCurator(ctx as never, root, console, 60)
+
+  await curator.runAfterDistill(parent, session.id as never)
+
+  const text = root.global.read()
+  assert.equal(text.includes('用户偏好 pnpm'), false, 'the merged pair is replaced')
+  assert.ok(text.includes(`- [preference] ${todayStamp()} 用户用 pnpm`), 'the surviving merge is stamped by the host')
+  assert.equal(root.curatedHashOf('global'), contentHash(text), 'the pass recorded the post-edit hash')
+  const [run] = root.llmAudit()
+  assert.equal(run?.source, 'curate', 'the pass is audited as a curate run')
+  assert.equal(run?.status, 'ok')
+  assert.equal(run?.inputTokens, 700)
+  assert.equal(run?.outputTokens, 40)
+  assert.equal(run?.session, '49ce2455')
 })

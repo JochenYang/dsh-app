@@ -4,20 +4,20 @@
  * reviews a file that has grown past a threshold and proposes edits: merge
  * near-duplicates, delete stale entries, re-categorize.
  *
- * Identical safety model to the distiller: a ONE-SHOT read-only subagent
- * proposes (no tools, structured output only), and the HOST validates every
- * edit before the file is rewritten atomically — referenced lines must exist
- * verbatim and be cited at most once; a merge must produce one lean standard
- * entry that duplicates nothing that remains. Any failure leaves the file
- * untouched and retries on the next trigger.
+ * Identical safety model to the distiller: a direct LLM call proposes (the
+ * JSON contract lives in the prompt, see {@link buildCuratePrompt}) and the
+ * HOST validates every edit before the file is rewritten atomically —
+ * referenced lines must exist verbatim and be cited at most once; a merge
+ * must produce one lean standard entry that duplicates nothing that remains.
+ * Any failure leaves the file untouched and retries on the next trigger.
  *
  * Trigger: the distiller hands us the triggering session right after it
  * persisted entries. Two gates keep the pass cheap and rare:
  *   - Cooldown: at most one sweep per {@link CURATE_COOLDOWN_MS}; requests
- *     inside the window coalesce into a single trailing sweep whose parent
- *     is re-resolved by session id at fire time (the original parent may be
- *     disposed by then — a dead parent drops the pass and every due file
- *     simply waits for the next distill save).
+ *     inside the window coalesce into a single trailing sweep whose session
+ *     is re-resolved by id at fire time (the original agent may be disposed
+ *     by then — a dead session drops the pass and every due file simply
+ *     waits for the next distill save).
  *   - Change detection: a file whose content hash is unchanged since its
  *     last completed pass is skipped, so a sweep only pays for files a
  *     writer actually touched.
@@ -29,9 +29,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-// Type-only: pulls the subagents Context merge (ctx.subagents) into scope.
-import type {} from '@deepseek-ai/dsh-subagent'
-import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
+import { directRouteOf, type SessionLike } from './distiller.ts'
+import { resolveLlm, streamJson, type DirectRoute } from './llm-direct.ts'
 import {
   containsCredential,
   contentHash,
@@ -39,6 +38,7 @@ import {
   MAX_ENTRY_CHARS,
   normalizeForMatch,
   parseEntries,
+  shortSessionId,
   stripEntryPrefix,
   todayStamp,
   type MemoryRoot,
@@ -55,7 +55,7 @@ const CURATE_MIN_ENTRIES = 8
  * trailing sweep. */
 const CURATE_COOLDOWN_MS = 10 * 60_000
 
-/** Cap on the input file text handed to the child (characters); anything
+/** Cap on the input file text handed to the model (characters); anything
  *  older than this tail is left for a future pass. */
 const MAX_INPUT_CHARS = 40_000
 
@@ -63,52 +63,59 @@ const MAX_INPUT_CHARS = 40_000
  *  several passes, not one destructive sweep). */
 const MAX_CURATE_EDITS = 20
 
-/** The `ctx.subagents` provider name (same default as the swarm plugin). */
-const PROVIDER = 'spawn'
+/** Output allowance for one curate answer. Every edit quotes its cited lines
+ *  VERBATIM (a Chinese entry runs 300+ characters) on top of the merged text,
+ *  so a legitimate multi-edit answer blows past the shared 2k default and gets
+ *  truncated into unparseable JSON — which fails soft and would retry forever
+ *  without ever curating. The limit is an allowance, not a spend. */
+const CURATE_MAX_TOKENS = 8_000
 
-/** The parent-agent type the subagent seam hands us (from the distiller). */
+/** The parent-agent type the distill seam hands us (from the distiller). */
 type ParentAgent = NonNullable<ReturnType<Context['agents']['get']>>
 
-/** Structured-output contract: the child answers via the capture tool. */
-const CURATE_SCHEMA: ObjectJsonSchema = {
-  type: 'object',
-  properties: {
-    edits: {
-      type: 'array',
-      description: 'Edits: merge near-duplicates or delete stale entries. Each cited line is used at most once; prefer an empty array over marginal edits.',
-      items: {
-        type: 'object',
-        properties: {
-          op: {
-            type: 'string',
-            enum: ['merge', 'delete'],
-            description: 'merge: replace the cited lines with one refreshed entry; delete: drop stale or wrong lines',
-          },
-          lines: {
-            type: 'array',
-            description: 'Verbatim input lines this edit replaces (exact text, including the "- [category] YYYY-MM-DD" prefix)',
-            items: { type: 'string' },
-          },
-          category: {
-            type: 'string',
-            enum: [...MEMORY_CATEGORIES],
-            description: 'merge only: category of the replacement entry',
-          },
-          content: {
-            type: 'string',
-            description: `merge only: one concise replacement line in the user's language, at most ${String(MAX_ENTRY_CHARS)} characters`,
-          },
-        },
-        required: ['op', 'lines'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['edits'],
-  additionalProperties: false,
-} as unknown as ObjectJsonSchema
+/** The slice of the triggering session a sweep needs: its id + model route. */
+type CurateSession = Pick<SessionLike, 'id' | 'requestHeader'>
 
-/** A possibly-malformed edit as proposed by the child (pre-validation). */
+/** Derive the curator's session slice off the triggering agent. */
+function sessionOf(parent: ParentAgent): CurateSession {
+  return parent.session as unknown as CurateSession
+}
+
+/**
+ * Build the curate prompt as system (task + rules + output contract) and
+ * user (the memory file) halves — the same split the distiller uses.
+ */
+export function buildCuratePrompt(input: string): { system: string, user: string } {
+  const system = [
+    'You are the memory curator of an AI coding assistant. Review the memory file below',
+    'and propose EDITS that keep it lean and accurate over time.',
+    '',
+    'Rules:',
+    '- merge: two or more entries that now say the same thing (near-duplicates, the same fact',
+    '  restated on different dates, or one superseding the other). One refreshed entry replaces them all.',
+    '- delete: entries that are stale (already superseded), wrong, or no longer relevant.',
+    '- delete: entries that are work logs rather than reusable knowledge — reports of what a',
+    '  session did ("X 已完成", "修复全落地", "审查后…"), file-by-file change lists, commit',
+    '  ids, task summaries. Keep only what a future session could act on.',
+    '- Prefer keeping the SURVIVING entry when one strictly supersedes another: delete the stale one.',
+    '- NEVER mention credentials (API keys, tokens, passwords) — not even in a rewrite.',
+    '- Each cited line must appear EXACTLY as written below (verbatim, including the bullet and',
+    '  the "- [category] YYYY-MM-DD" prefix). The same line may be cited at most once across all edits.',
+    '- A merge result is ONE concise line in the user\'s language, at most 500 characters,',
+    '  content TEXT only — no "- [category] date" prefix, no bullets (the host stamps the prefix).',
+    '- An empty edits array is a VALID answer — prefer it over marginal edits.',
+    `- At most ${String(MAX_CURATE_EDITS)} edits total.`,
+    '',
+    'Reply with ONE JSON object and nothing else:',
+    `{"edits": [{"op": "merge", "lines": ["<verbatim line>"], "category": "<${MEMORY_CATEGORIES.join('|')}>", "content": "<merged text, no prefix>"},`,
+    '           {"op": "delete", "lines": ["<verbatim line>"]}]}',
+    '"category" and "content" apply to merge edits only.',
+  ].join('\n')
+  const user = ['--- Memory file ---', input].join('\n')
+  return { system, user }
+}
+
+/** A possibly-malformed edit as proposed by the model (pre-validation). */
 interface ProposedEdit {
   op?: unknown
   lines?: unknown
@@ -126,7 +133,7 @@ interface CurateTarget {
  * The background curator. {@link attach} provides the cleanup seam; the
  * trigger arrives through {@link runAfterDistill} (called by the host when
  * a distill run persisted entries). Everything below the trigger is
- * fail-soft: a bad child output or a dead parent just logs and retries on
+ * fail-soft: a bad model answer or a dead session just logs and retries on
  * the next distill.
  */
 export class MemoryCurator {
@@ -175,7 +182,7 @@ export class MemoryCurator {
     if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
     const dueAt = this.lastSweepAt + this.cooldownMs
     if (Date.now() >= dueAt) {
-      await this.sweep(parent)
+      await this.sweep(sessionOf(parent))
       return
     }
     // Inside the cooldown: one trailing sweep at the ORIGINAL deadline —
@@ -194,10 +201,10 @@ export class MemoryCurator {
   }
 
   /**
-   * The coalesced sweep: the triggering session's agent is re-resolved at
-   * fire time because the parent this request rode in on may be long gone.
-   * A dead parent drops the pass — every due file waits for the next save,
-   * which re-arms a fresh sweep.
+   * The coalesced sweep: the triggering session is re-resolved at fire time
+   * because the agent this request rode in on may be long gone. A dead
+   * session drops the pass — every due file waits for the next save, which
+   * re-arms a fresh sweep.
    */
   private async fireDeferredSweep(sessionId: SessionId | undefined): Promise<void> {
     if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
@@ -207,15 +214,25 @@ export class MemoryCurator {
       this.log.info('memory curate: deferred sweep dropped, triggering session already closed')
       return
     }
-    await this.sweep(parent)
+    await this.sweep(sessionOf(parent))
   }
 
-  /** One full pass over every due file. Never throws per target. */
-  private async sweep(parent: ParentAgent): Promise<void> {
+  /**
+   * One full pass over every due file. The model route comes from the
+   * triggering session (same rule as the distiller): no route means no call
+   * at all, and the sweep is skipped without burning the cooldown. Never
+   * throws per target.
+   */
+  private async sweep(session: CurateSession): Promise<void> {
+    const route = directRouteOf(session)
+    if (route === undefined) {
+      this.log.warn(`memory curate skipped: no model route on session "${session.id}"`)
+      return
+    }
     this.lastSweepAt = Date.now()
     for (const target of this.selectTargets()) {
       try {
-        await this.curate(target, parent)
+        await this.curate(target, route, session.id)
       } catch (error) {
         this.log.warn(`memory curate for "${target.label}" failed (file untouched, will retry on next distill): ${String(error)}`)
       }
@@ -244,69 +261,45 @@ export class MemoryCurator {
     return targets
   }
 
-  /** The pass body for one file: hand it to a read-only child, apply the
-   *  validated edits. */
-  private async curate(target: CurateTarget, parent: ParentAgent): Promise<void> {
+  /** The pass body for one file: one direct call, then the validated edits. */
+  private async curate(target: CurateTarget, route: DirectRoute, sessionId: SessionId): Promise<void> {
     const text = target.store.read()
     const input = text.length > MAX_INPUT_CHARS
       ? `${text.slice(0, MAX_INPUT_CHARS)}\n[note: file tail beyond ${String(MAX_INPUT_CHARS)} chars was omitted in this pass]`
       : text
 
-    const prompt = [
-      'You are the memory curator of an AI coding assistant. Review the memory file below',
-      'and propose EDITS that keep it lean and accurate over time.',
-      '',
-      'Rules:',
-      '- merge: two or more entries that now say the same thing (near-duplicates, the same fact',
-      '  restated on different dates, or one superseding the other). One refreshed entry replaces them all.',
-      '- delete: entries that are stale (already superseded), wrong, or no longer relevant.',
-      '- Prefer keeping the SURVIVING entry when one strictly supersedes another: delete the stale one.',
-      '- NEVER mention credentials (API keys, tokens, passwords) — not even in a rewrite.',
-      '- Each cited line must appear EXACTLY as written below (verbatim, including the bullet and',
-      '  the "- [category] YYYY-MM-DD" prefix). The same line may be cited at most once across all edits.',
-      '- A merge result is ONE concise line in the user\'s language, at most 500 characters,',
-      '  content TEXT only — no "- [category] date" prefix, no bullets (the host stamps the prefix).',
-      '- An empty edits array is a VALID answer — prefer it over marginal edits.',
-      `- At most ${String(MAX_CURATE_EDITS)} edits total.`,
-      '',
-      '--- Memory file ---',
-      input,
-    ].join('\n')
-
-    const run = await this.ctx.subagents.start(PROVIDER, {
-      // `memory-maint` family prefix: the curator sweeps EVERY project file
-      // above the threshold regardless of which session's distill triggered
-      // it, so its label must read as background maintenance, not as the
-      // current session's own work.
-      label: `memory-maint:curate:${target.label}`,
-      prompt: [{ type: 'text', text: prompt }],
-      parent,
+    const { system, user } = buildCuratePrompt(input)
+    const result = await streamJson(resolveLlm(this.ctx), {
+      route,
+      system,
+      user,
+      maxTokens: CURATE_MAX_TOKENS,
       signal: this.abort.signal,
-      // Read-only child, same as the distiller: no global tool stays visible;
-      // it answers purely through the structured capture tool.
-      toolFilter: { allow: [] },
-      maxDepth: 1,
-      outputSchema: CURATE_SCHEMA,
     })
-    try {
-      const result = await run.result
-      if (result.stopReason !== 'completed' || result.structured === undefined) {
-        this.log.warn(`memory curate for "${target.label}" ended ${result.stopReason} without structured output`)
-        return
-      }
-      const { merged, deleted } = this.applyEdits(target.store, result.structured)
-      if (merged + deleted > 0) {
-        this.log.info(`memory curate: ${merged > 0 ? `${String(merged)} merged` : ''}${merged > 0 && deleted > 0 ? ', ' : ''}${deleted > 0 ? `${String(deleted)} deleted` : ''} from "${target.label}"`)
-      }
-      // Mark the pass done so unchanged files stop re-sweeping. Only a pass
-      // that saw the WHOLE file may mark it: with the input cap active the
-      // omitted head was never reviewed and stays due. The hash is of the
-      // post-edit file — the content this pass actually leaves behind.
-      if (text.length <= MAX_INPUT_CHARS) {
-        this.root.recordCurated(target.label, contentHash(target.store.read()))
-      }
-    } finally {
-      await run.dispose().catch(() => undefined)
+    this.root.recordLlmAudit({
+      at: Date.now(),
+      source: 'curate',
+      session: shortSessionId(sessionId),
+      status: result.status,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      durationMs: result.durationMs,
+      error: result.error,
+    })
+    if (result.status !== 'ok') {
+      this.log.warn(`memory curate for "${target.label}" direct call ${result.status} (${result.error ?? 'no detail'})`)
+      return
+    }
+    const { merged, deleted } = this.applyEdits(target.store, result.parsed)
+    if (merged + deleted > 0) {
+      this.log.info(`memory curate: ${merged > 0 ? `${String(merged)} merged` : ''}${merged > 0 && deleted > 0 ? ', ' : ''}${deleted > 0 ? `${String(deleted)} deleted` : ''} from "${target.label}"`)
+    }
+    // Mark the pass done so unchanged files stop re-sweeping. Only a pass
+    // that saw the WHOLE file may mark it: with the input cap active the
+    // omitted head was never reviewed and stays due. The hash is of the
+    // post-edit file — the content this pass actually leaves behind.
+    if (text.length <= MAX_INPUT_CHARS) {
+      this.root.recordCurated(target.label, contentHash(target.store.read()))
     }
   }
 

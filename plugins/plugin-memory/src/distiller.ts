@@ -3,13 +3,11 @@
  *
  * While the in-session `memory_save` tool relies on the model noticing
  * durable facts, this pass makes persistence deterministic: after a session
- * goes quiet for {@link QUIET_MS}, one direct LLM call (default; the legacy
- * read-only one-shot subagent stays behind the `distillBackend` switch)
- * reviews the conversation delta since the last distill plus the current
- * memory files
+ * goes quiet for {@link QUIET_MS}, one direct LLM call reviews the
+ * conversation delta since the last distill plus the current memory files
  * and proposes NEW entries as structured JSON. The HOST validates every
  * entry (category, length, dedup against existing lines) before it ever
- * reaches a memory file — the child cannot write anything itself.
+ * reaches a memory file — the model cannot write anything itself.
  *
  * Design points:
  *   - Debounce: every `turn/end` re-arms the quiet timer, so an active
@@ -17,8 +15,9 @@
  *     skipped (its progress stays, the next activation re-distills the gap).
  *   - Incremental: `distill-state.json` records the last-consumed event seq
  *     per session, so repeat distills cost only the delta.
- *   - Self-exclusion: subagent sessions (`origin: 'subagent'`) never trigger
- *     distills — the distiller must not distill itself.
+ *   - Self-exclusion: subagent sessions (`origin: 'subagent'`, e.g. swarm
+ *     children) never trigger distills — background maintenance must not run
+ *     off another plugin's worker sessions.
  *   - Fail-soft: any failure logs a warning and leaves progress unchanged,
  *     so the next quiet window retries the same delta.
  *
@@ -27,9 +26,6 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
-// Type-only: pulls the subagents Context merge (ctx.subagents) into scope.
-import type {} from '@deepseek-ai/dsh-subagent'
-import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { resolveLlm, streamJson, type DirectRoute } from './llm-direct.ts'
 import { MAX_ENTRY_CHARS, containsCredential, normalizeForMatch, parseEntries, shortSessionId, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
@@ -38,19 +34,16 @@ import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
  * Quiet window after the last turn before a distill fires (60 s).
  *
  * Deliberately short: a distill can only run while the session's agent is
- * still alive (the in-process subagent driver creates children through
- * `parent.ctx`, so a session closed right after its last turn — agent
- * already disposed — can never distill). A 60 s pause means most
+ * still alive (the event feed and the model route are read off the live
+ * session — see {@link MemoryDistiller.distill}), so a session closed right
+ * after its last turn could never distill. A 60 s pause means most
  * "conversation done, walk away" endings distill before the close; active
  * back-and-forth still debounces (every turn/end re-arms the timer), and
  * the MIN_NEW_MESSAGES gate skips the LLM call on tiny deltas.
  */
 const QUIET_MS = 60_000
 
-/** The `ctx.subagents` provider name (same default as the swarm plugin). */
-const PROVIDER = 'spawn'
-
-/** Cap on the conversation excerpt handed to the child (characters). */
+/** Cap on the conversation excerpt handed to the model (characters). */
 const MAX_TRANSCRIPT_CHARS = 24_000
 
 /** Cap on a single message's text inside the excerpt (characters). */
@@ -62,41 +55,7 @@ const MIN_NEW_MESSAGES = 2
 /** Hard cap on entries accepted from one distill run (quality over spam). */
 const MAX_DISTILL_ENTRIES = 5
 
-/** Structured-output contract: the child must answer via the capture tool. */
-const DISTILL_SCHEMA: ObjectJsonSchema = {
-  type: 'object',
-  properties: {
-    entries: {
-      type: 'array',
-      description: 'New memory entries worth persisting; empty array when nothing qualifies.',
-      items: {
-        type: 'object',
-        properties: {
-          category: {
-            type: 'string',
-            enum: [...MEMORY_CATEGORIES],
-            description: 'preference (user taste/habit) | convention (project rule) | decision (settled choice) | lesson (root cause/pitfall) | fact (durable context)',
-          },
-          content: {
-            type: 'string',
-            description: `One concise line in the user's language, at most ${String(MAX_ENTRY_CHARS)} characters.`,
-          },
-          scope: {
-            type: 'string',
-            enum: ['project', 'global'],
-            description: 'project (default) = this workspace only; global = a cross-project user preference',
-          },
-        },
-        required: ['category', 'content'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['entries'],
-  additionalProperties: false,
-} as unknown as ObjectJsonSchema
-
-/** One candidate entry as proposed by the child (pre-validation). */
+/** One candidate entry as proposed by the model (pre-validation). */
 interface ProposedEntry {
   category?: unknown
   content?: unknown
@@ -105,8 +64,8 @@ interface ProposedEntry {
 
 /**
  * Build the distill prompt as system (task + rules + output contract) and
- * user (memory files + transcript) halves. Shared by both backends: the
- * direct call maps them to system/user messages, the child concatenates.
+ * user (memory files + transcript) halves: the direct call maps them to
+ * system/user messages.
  */
 export function buildDistillPrompt(transcript: string, cwd: string | undefined, root: MemoryRoot): { system: string, user: string } {
   const globalText = root.global.read().trim()
@@ -156,7 +115,7 @@ export function buildDistillPrompt(transcript: string, cwd: string | undefined, 
 }
 
 /** Structural slice of a Session (the event feed the distiller reads). */
-interface SessionLike {
+export interface SessionLike {
   readonly id: SessionId
   /** All events including any fork-inherited prefix (seq-ordered). */
   snapshotEvents(): ReadonlyArray<{ type: string, seq: number, data: unknown }>
@@ -165,8 +124,12 @@ interface SessionLike {
   readonly header: { readonly cwd?: string, readonly origin?: string }
 }
 
-/** Model route for a direct call, from the session's latest request header. */
-function directRouteOf(session: SessionLike): DirectRoute | undefined {
+/**
+ * Model route for a direct call, from the session's latest request header.
+ * Shared with the curator: both background passes call the model on the
+ * route of the session that triggered them.
+ */
+export function directRouteOf(session: Pick<SessionLike, 'requestHeader'>): DirectRoute | undefined {
   const config = session.requestHeader?.()?.config
   const provider = config?.provider
   const model = config?.model
@@ -227,11 +190,6 @@ export class MemoryDistiller {
     root: MemoryRoot,
     log: ReturnType<Context['logger']>,
     /**
-     * Background-distill LLM channel: 'direct' calls `ctx.llm.stream` once
-     * (cheap, default); 'subagent' keeps the legacy read-only one-shot child.
-     */
-    private readonly backend: 'direct' | 'subagent' = 'direct',
-    /**
      * Called (and awaited) after a run persisted ≥1 entry — the curator's
      * trigger seam. Runs in the distill's own background window while the
      * parent agent is still alive; the curator may defer its sweep into a
@@ -252,7 +210,7 @@ export class MemoryDistiller {
   attach(): () => void {
     const disposeFeed = this.ctx.on('session/event', (session: Session, event) => {
       if (event.type !== 'turn/end') return
-      // Subagent sessions (including our own distill children) never distill.
+      // Subagent sessions (another plugin's worker) never distill.
       if (session.header.origin === 'subagent') return
       this.arm(session.id)
     })
@@ -343,16 +301,11 @@ export class MemoryDistiller {
     }
     const transcript = lines.join('\n')
     const { system, user } = buildDistillPrompt(transcript, cwd, this.root)
-
-    if (this.backend === 'direct') {
-      await this.runDirect(sessionId, session, cwd, lastEventSeq, system, user, parent)
-      return
-    }
-    await this.runViaChild(sessionId, parent, cwd, lastEventSeq, `${system}\n\n${user}`)
+    await this.runDirect(sessionId, session, cwd, lastEventSeq, system, user, parent)
   }
 
   /**
-   * Direct channel: one `ctx.llm.stream` call on the session's own
+   * The model call: one `ctx.llm.stream` request on the session's own
    * provider/model route, JSON parsed by the host. No route (a session that
    * never assembled a request) skips the run but still advances progress.
    */
@@ -399,51 +352,6 @@ export class MemoryDistiller {
     if (applied > 0) {
       this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
       await this.onSaved?.(parent, sessionId)
-    }
-  }
-
-  /** Legacy channel: a read-only one-shot child answers via outputSchema. */
-  private async runViaChild(
-    sessionId: SessionId,
-    parent: NonNullable<ReturnType<Context['agents']['get']>>,
-    cwd: string | undefined,
-    lastEventSeq: number,
-    prompt: string,
-  ): Promise<void> {
-    const run = await this.ctx.subagents.start(PROVIDER, {
-      // Short target-session id in the label so the workflow view shows WHO
-      // this distill reviewed — the node is visible by design (transparency,
-      // the same way swarm children are), not a hidden worker. The
-      // `memory-maint` family prefix marks background maintenance agents, so
-      // a sweep targeting another project's file is never mistaken for the
-      // current session's own work.
-      label: `memory-maint:distill:${shortSessionId(sessionId)}`,
-      prompt: [{ type: 'text', text: prompt }],
-      parent,
-      signal: this.abort.signal,
-      // Read-only child: no global tool stays visible, so it cannot touch
-      // anything — it answers purely through the structured capture tool.
-      toolFilter: { allow: [] },
-      maxDepth: 1,
-      outputSchema: DISTILL_SCHEMA,
-    })
-    try {
-      const result = await run.result
-      if (result.stopReason !== 'completed' || result.structured === undefined) {
-        this.log.warn(`memory distill for "${sessionId}" ended ${result.stopReason} without structured output; progress kept`)
-        return
-      }
-      const applied = this.applyEntries(result.structured, cwd)
-      this.root.advanceDistill(sessionId, lastEventSeq)
-      // Leave a durable trace (time, target session, saved count) so the
-      // settings page can show what the background pass actually did.
-      this.root.recordDistill(sessionId, applied, 'subagent')
-      if (applied > 0) {
-        this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
-        await this.onSaved?.(parent, sessionId)
-      }
-    } finally {
-      await run.dispose().catch(() => undefined)
     }
   }
 

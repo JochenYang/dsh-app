@@ -1,13 +1,11 @@
 /**
- * Direct LLM calls for background maintenance — the low-cost alternative to
- * a read-only subagent child.
+ * Direct LLM calls for background maintenance (distill + curate).
  *
  * A subagent run carries a whole session lifecycle (agent creation, prompt
  * assembly with the full system prompt, structured-output capture tooling);
  * a distill/curate prompt needs none of that — one system + one user message
  * through `ctx.llm.stream()` returns the same JSON for roughly an order of
- * magnitude fewer tokens. The child path stays available behind the
- * `distillBackend` switch, but direct is the default.
+ * magnitude fewer tokens, so both background passes call the model this way.
  *
  * Two shared disciplines live here:
  *   - a process-wide serial queue with exponential backoff on 429: quiet
