@@ -113,6 +113,17 @@ const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION?.trim() || deriveSuiteVe
 function quoteWinArg(value) {
   return `"${value.replace(/"/g, '\\"')}"`
 }
+
+/**
+ * npm executable for child processes. On Windows this must be absolute
+ * (beside the running node): a bare `npm.cmd` lets cmd.exe prefer a
+ * same-named shim under the cwd (see run()), and the same hijack applies
+ * to direct execFileSync calls — a missing-module failure pointing inside
+ * the cwd's node_modules is the tell.
+ */
+function npmBin() {
+  return process.platform === 'win32' ? path.join(path.dirname(process.execPath), 'npm.cmd') : 'npm'
+}
 function run(cmd, args, cwd) {
   console.log(`$ ${cmd} ${args.join(' ')}`)
   const opts = { cwd, stdio: 'inherit' }
@@ -125,7 +136,7 @@ function run(cmd, args, cwd) {
   // dir whose node_modules happens to ship npm shims), running the wrong
   // cli.js and failing with a missing-module error.
   if (process.platform === 'win32') {
-    if (cmd === 'npm.cmd' || cmd === 'npm') cmd = path.join(path.dirname(process.execPath), 'npm.cmd')
+    if (cmd === 'npm.cmd' || cmd === 'npm') cmd = npmBin()
     execFileSync([cmd, ...args].map(quoteWinArg).join(' '), { ...opts, shell: true })
   } else execFileSync(cmd, args, opts)
 }
@@ -280,20 +291,20 @@ async function main() {
   }
   collectPeers(nmDir)
   if (missingPeers.size > 0) {
-    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    const npm = npmBin()
     const peerSpecs = {}
     for (const name of missingPeers) {
       // Array form with shell:true trips DEP0190 on newer Node; on Windows pass
       // one strictly-quoted line instead (same discipline as run()).
       const ver = (process.platform === 'win32'
-        ? execFileSync([npmBin, 'view', name, 'version'].map(quoteWinArg).join(' '), { encoding: 'utf8', shell: true })
-        : execFileSync(npmBin, ['view', name, 'version'], { encoding: 'utf8' })).trim()
+        ? execFileSync([npm, 'view', name, 'version'].map(quoteWinArg).join(' '), { encoding: 'utf8', shell: true })
+        : execFileSync(npm, ['view', name, 'version'], { encoding: 'utf8' })).trim()
       peerSpecs[name] = name.startsWith('@deepseek-ai/dsh-') ? `^${DSH_VERSION}` : `^${ver}`
       console.log(`missing peer: ${name}@${peerSpecs[name]}`)
     }
     appPkg.dependencies = { ...appPkg.dependencies, ...peerSpecs }
     await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
-    run(npmBin, ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
+    run(npm, ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
   }
 
   // 2b. Copy the built suite plugins into the runtime's node_modules so dsh
