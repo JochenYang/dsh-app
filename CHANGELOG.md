@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.1] - 2026-09-10
+
+### 中文
+- 会话归档：删除恢复为物理删除——v0.11.0 因上游移除私有 `locate()` 而降级成"只删归档记录"，归档会话删掉又回到列表；现改走 rc 线公开的 `resolveCurrentLog` 真正删除日志目录。同时删除不再移除归档记录：该记录是客户端的可见性栅栏，移除它会立刻广播"取消归档"，而浏览器仍握着旧列表快照，已删除的会话会短暂弹回会话列表（刷新才消失）；保留的记录由面板「清理」回收
+- 会话归档：修复迁移前格式的老会话永远删不掉、一直提示"日志已不存在"——上游 `resolveCurrentLog` 只对当前格式的日志作答，旧会话能列出却解析不出路径；现补一条按后端目录布局定位会话目录的回退，并在删除前校验目录名与会话日志文件
+- 会话记忆：提炼提示词加入否定清单，不再把工作日志、commit 号、"已完成"汇报、逐文件改动清单写进长期记忆（实测一段混合会话中三条流水账被拒、耐久偏好正常保存）；`memory_save` 直存此前不会触发后台策展，现已接上；修复存量 `- [分类] 日期 日期 内容` 双日期行
+
+### English
+- Session archives: deletion is physical again — v0.11.0 had degraded it to dropping the archive record after upstream removed the private `locate()`, so a deleted archive came back to the list; it now uses the rc line's public `resolveCurrentLog` to remove the log directory. Deletion also stops touching the archive set: that set is the client's visibility fence, and removing a record broadcasts "unarchived" while the browser still holds a stale list snapshot, briefly popping the deleted session back into the sidebar until a reload; the kept record is reclaimed by the panel's 清理 action
+- Session archives: fixed pre-migration sessions that could never be deleted and always reported "日志已不存在" — upstream `resolveCurrentLog` answers only for logs in the current format, so an old session listed but resolved to no path; /delete now falls back to locating the session directory by the backend's own layout, validating the directory name and the presence of session log files before removing anything
+- Memory plugin: the distill prompt gained an explicit NEVER list, keeping work logs, commit ids, "already done" reports and file-by-file change lists out of long-term memory (a mixed transcript had three work-log lines rejected while the durable preference saved); direct `memory_save` calls now fire the background curator; legacy `- [category] date date content` rows are repaired
+
 ## [v0.11.0] - 2026-09-10
 
 ### 中文
