@@ -386,6 +386,11 @@ optional `dsh_version` input). Tag pushes run the full pipeline;
 `workflow_dispatch` is the **runtime-only** path (publish kernel artifacts
 for a dsh version without cutting a shell release):
 
+- **resolve**: resolves the kernel version from the npm dist-tag (or the
+  dispatch input) and checks whether `runtime-<dshVersion>` already carries
+  all 6 cells. If complete, the runtime matrix is skipped and the app job
+  downloads the assets from the release — shell-only releases never rebuild
+  an unchanged kernel. Dispatch always builds.
 - **runtime**: a 6-cell matrix (win32/darwin/linux × x64/arm64) builds the
   suite plugins, then `build-runtime.mjs`, and uploads
   `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + per-cell `manifest.json`
