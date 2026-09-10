@@ -41,11 +41,12 @@ export interface ArchiveList {
 }
 
 /** Why one requested deletion was skipped. */
-export type ArchiveSkipReason = 'live' | 'not-archived' | 'missing'
+export type ArchiveSkipReason = 'live' | 'not-archived' | 'missing' | 'io'
 
 /** POST /delete response value. */
 export interface ArchiveDeleteResult {
-  /** Ids dropped from the archive set (logical deletion). */
+  /** Ids physically removed (log artifact deleted; record-only on backends
+   *  without a resolvable log path). */
   deleted: string[]
   /** Bytes freed by the deletions (sizes measured before removal). */
   freedBytes: number
