@@ -45,10 +45,31 @@ export function sameOrigin(req: IncomingMessage): boolean {
   }
 }
 
-/** Reject cross-origin callers with an answer, never a hung connection. */
+/**
+ * Loopback-host fence: admit only requests whose Host names this machine's
+ * loopback interface, so a rebinding/cross-site request carrying an
+ * attacker's Host is refused even when it forges a matching Origin.
+ */
+function passesFence(req: IncomingMessage): boolean {
+  const raw = req.headers.host
+  if (typeof raw !== 'string' || raw === '') return false
+  let hostname: string
+  try {
+    hostname = new URL(`http://${raw}`).hostname
+  } catch {
+    return false
+  }
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  const octets = hostname.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
+
+/** Reject cross-origin and non-local callers with an answer, never a hung connection. */
 function requireSameOrigin(req: IncomingMessage, res: ServerResponse): boolean {
-  if (sameOrigin(req)) return true
-  fail(res, 403, 'forbidden', 'cross-origin request')
+  if (sameOrigin(req) && passesFence(req)) return true
+  fail(res, 403, 'forbidden', 'cross-origin or non-local request')
   return false
 }
 

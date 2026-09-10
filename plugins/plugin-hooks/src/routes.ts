@@ -47,6 +47,23 @@ export function sameOrigin(req: IncomingMessage): boolean {
   try { return new URL(origin).host === req.headers.host } catch { return false }
 }
 
+/**
+ * Loopback-host fence: admit only requests whose Host names this machine's
+ * loopback interface, so a rebinding/cross-site request carrying an
+ * attacker's Host is refused even when it forges a matching Origin.
+ */
+function passesFence(req: IncomingMessage): boolean {
+  const raw = req.headers.host
+  if (typeof raw !== 'string' || raw === '') return false
+  let hostname: string
+  try { hostname = new URL(`http://${raw}`).hostname } catch { return false }
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  const octets = hostname.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
+
 function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
   res.setHeader('Content-Type', 'application/json')
   res.writeHead(status)
@@ -97,7 +114,7 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/hooks`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
         if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); fail(res, 405, 'method-not-allowed', 'GET only'); return }
         void respond(res)
       },
@@ -106,7 +123,7 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/bridge/create`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
         if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', 'POST only'); return }
         void readJsonBody(req).then(async (body) => {
           if (!guardWrite(res)) return
@@ -131,7 +148,7 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/bridge/update`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
         if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', 'POST only'); return }
         void readJsonBody(req).then(async (body) => {
           if (!guardWrite(res)) return
@@ -157,7 +174,7 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/bridge/delete`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
         if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', 'POST only'); return }
         void readJsonBody(req).then(async (body) => {
           if (!guardWrite(res)) return

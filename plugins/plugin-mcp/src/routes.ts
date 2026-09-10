@@ -81,6 +81,27 @@ export function sameOrigin(req: IncomingMessage): boolean {
   }
 }
 
+/**
+ * Loopback-host fence: admit only requests whose Host names this machine's
+ * loopback interface, so a rebinding/cross-site request carrying an
+ * attacker's Host is refused even when it forges a matching Origin.
+ */
+function passesFence(req: IncomingMessage): boolean {
+  const raw = req.headers.host
+  if (typeof raw !== 'string' || raw === '') return false
+  let hostname: string
+  try {
+    hostname = new URL(`http://${raw}`).hostname
+  } catch {
+    return false
+  }
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  const octets = hostname.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
+
 function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
   res.setHeader('Content-Type', 'application/json')
   res.writeHead(status)
@@ -203,7 +224,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       kind: 'exact',
       path: `${ROUTE_PREFIX}/servers`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) {
+        if (!sameOrigin(req) || !passesFence(req)) {
           fail(res, 403, 'forbidden', 'cross-origin request')
           return
         }
@@ -219,7 +240,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       kind: 'exact',
       path: `${ROUTE_PREFIX}/server/create`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) {
+        if (!sameOrigin(req) || !passesFence(req)) {
           fail(res, 403, 'forbidden', 'cross-origin request')
           return
         }
@@ -258,7 +279,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       kind: 'exact',
       path: `${ROUTE_PREFIX}/server/update`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) {
+        if (!sameOrigin(req) || !passesFence(req)) {
           fail(res, 403, 'forbidden', 'cross-origin request')
           return
         }
@@ -303,7 +324,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       kind: 'exact',
       path: `${ROUTE_PREFIX}/server/delete`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) {
+        if (!sameOrigin(req) || !passesFence(req)) {
           fail(res, 403, 'forbidden', 'cross-origin request')
           return
         }
@@ -329,7 +350,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       kind: 'exact',
       path: `${ROUTE_PREFIX}/server/import`,
       handler: (req, res) => {
-        if (!sameOrigin(req)) {
+        if (!sameOrigin(req) || !passesFence(req)) {
           fail(res, 403, 'forbidden', 'cross-origin request')
           return
         }

@@ -95,6 +95,27 @@ function sameOrigin(req: IncomingMessage): boolean {
   }
 }
 
+/**
+ * Loopback-host fence: admit only requests whose Host names this machine's
+ * loopback interface, so a rebinding/cross-site request carrying an
+ * attacker's Host is refused even when it forges a matching Origin.
+ */
+function passesFence(req: IncomingMessage): boolean {
+  const raw = req.headers.host
+  if (typeof raw !== 'string' || raw === '') return false
+  let hostname: string
+  try {
+    hostname = new URL(`http://${raw}`).hostname
+  } catch {
+    return false
+  }
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  const octets = hostname.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
+
 function requireGet(req: IncomingMessage, res: ServerResponse): boolean {
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET')
@@ -121,11 +142,11 @@ function readInt(url: URL, key: string, fallback: number, max: number): number {
  */
 export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore | null, options: UsageRoutesOptions): () => void {
   const statusHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !requireGet(req, res)) return
+    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
     ok(res, options.active ? { active: true } : { active: false, reason: 'disabled-by-user-config' })
   }
   const summaryHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !requireGet(req, res)) return
+    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
     if (!options.active || store === null) {
       fail(res, 503, 'disabled', 'built-in usage collection is disabled by the user config file')
       return
@@ -135,7 +156,7 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
     ok(res, summarize(store.all(), days, options.pricing ?? []))
   }
   const heatmapHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !requireGet(req, res)) return
+    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
     if (!options.active || store === null) {
       fail(res, 503, 'disabled', 'built-in usage collection is disabled by the user config file')
       return
@@ -172,7 +193,7 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
     return balanceInflight
   }
   const balanceHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    if (!sameOrigin(req) || !requireGet(req, res)) return
+    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
     if (!options.active || options.fetchBalance === undefined) {
       fail(res, 503, 'disabled', 'built-in usage collection is disabled by the user config file')
       return
