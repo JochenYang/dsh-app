@@ -345,3 +345,61 @@ export function modelRowFailure(row: ModelDraft, knownIds: ReadonlySet<string>):
   if (failingCompat !== undefined) return `${id} 的兼容开关 ${failingCompat} 取值不合法`
   return undefined
 }
+
+// ---------------------------------------------------------------------------
+// Provider request headers (provider-level `headers`, mirrored from harness
+// packages/llm/llm-pi-ai/src/config.ts). Profile resolution validates each
+// pair with `new Headers([[name, value]])`; harness attribution names win
+// over same-named entries at request time.
+// ---------------------------------------------------------------------------
+
+/** One form row: header name + value, both strings so a blank means "unset". */
+export interface HeaderRow {
+  name: string
+  value: string
+}
+
+/**
+ * Normalize a stored `headers` value into form rows. An absent or malformed
+ * value reads as empty ("not customized on this route").
+ */
+export function readHeaders(value: unknown): HeaderRow[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([, raw]) => typeof raw === 'string')
+    .map(([name, raw]) => ({ name, value: raw as string }))
+}
+
+/** Outcome of parsing header rows into a settings value. */
+export type HeadersParse =
+  | { ok: true; value: Record<string, string> }
+  | { ok: false; error: string }
+
+/**
+ * Validate draft rows and build the `headers` value this page would write.
+ * Blank names are ignored; a non-blank name needs a value (empty string is
+ * allowed). Names must be Fetch-representable single-line HTTP field names.
+ * @returns the settings value, or the first rule violation (zh-CN).
+ */
+export function parseHeaders(rows: readonly HeaderRow[]): HeadersParse {
+  const value: Record<string, string> = {}
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const name = row.name.trim()
+    if (name === '') continue
+    const lower = name.toLowerCase()
+    if (seen.has(lower)) return { ok: false, error: `请求头名称重复：${name}` }
+    seen.add(lower)
+    if (/[\r\n\0]/.test(row.value)) {
+      return { ok: false, error: `${name} 的值不能包含换行` }
+    }
+    try {
+      // Same gate the adapter's profile resolver uses.
+      new Headers([[name, row.value]])
+    } catch {
+      return { ok: false, error: `${name} 不是合法的 HTTP 请求头名称` }
+    }
+    value[name] = row.value
+  }
+  return { ok: true, value }
+}

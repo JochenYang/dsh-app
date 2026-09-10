@@ -26,8 +26,8 @@ import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm/types'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { cloneDraft, getPath, modelRowFailure, parseRetryPolicy, readRetryPolicy, RETRY_POLICY_DEFAULTS } from './fields.ts'
-import type { ModelDraft, RetryPolicyDraft } from './fields.ts'
+import { cloneDraft, getPath, modelRowFailure, parseHeaders, parseRetryPolicy, readHeaders, readRetryPolicy, RETRY_POLICY_DEFAULTS } from './fields.ts'
+import type { HeaderRow, ModelDraft, RetryPolicyDraft } from './fields.ts'
 import { IconChevron, IconTrash, ModelEntryEditor } from './entry-editor.tsx'
 import { AdvancedModelsStore, protocolChoices, writeOps } from './store.ts'
 import type { AdvancedModelsRemote, AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
@@ -694,6 +694,11 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
             row={row} disabled={disabled} api={api}
             namespace={namespace} controller={controller}
           />
+          <HeadersCard
+            key={`${row.entry.provider}-headers`}
+            row={row} disabled={disabled} api={api}
+            namespace={namespace} controller={controller}
+          />
           {catalogFailure === undefined
             ? null
             : <p className="dshAma-error">内置 provider 目录暂不可用，当前配置仍可编辑；可稍后刷新或从 provider 重新发现。</p>}
@@ -1284,6 +1289,150 @@ function RetryPolicyCard(props: {
               disabled={fieldDisabled}
               onClick={() => { void restoreDefault() }}
             >恢复默认</button>
+          )}
+          {changed ? (
+            <button
+              type="button" className="dshAma-button"
+              disabled={fieldDisabled}
+              onClick={() => { setDraft(undefined); setFailure(undefined); setNotice(undefined) }}
+            >撤销修改</button>
+          ) : null}
+        </div>
+      </div>
+    </details>
+  )
+}
+
+/**
+ * The provider-level request-header editor for the selected route. Writes
+ * `providers.<route>.headers` as its own set/unset (same fence discipline as
+ * RetryPolicyCard). Useful for gateways that require a custom header — e.g.
+ * OpenCode Go's `x-opencode-session` — until upstream injects a per-session
+ * value automatically. Attribution reserved names still win at request time.
+ */
+function HeadersCard(props: {
+  row: RouteRow
+  disabled: boolean
+  api: Pick<AdvancedModelsRemote, 'settings'>
+  namespace: SettingsNamespaceView | undefined
+  controller: AdvancedModelsStore
+}): ReactNode {
+  const { row, api, namespace, controller } = props
+  const base = readHeaders(row.userProfile?.headers)
+  const [draft, setDraft] = useState<HeaderRow[] | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<string | undefined>(undefined)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const effective = draft ?? base
+  const changed = draft !== undefined && JSON.stringify(draft) !== JSON.stringify(base)
+  const fieldDisabled = props.disabled || busy
+
+  const run = async (ops: readonly SettingsPathOpView[], doneNotice: string): Promise<void> => {
+    if (namespace === undefined) return
+    setBusy(true)
+    setFailure(undefined)
+    setNotice(undefined)
+    const outcome = await writeOps(api, ops, namespace.revision)
+    setBusy(false)
+    if (outcome.kind === 'conflict') {
+      setFailure('配置已在别处更新。已重新加载，请检查后再次保存。')
+      setDraft(undefined)
+      await controller.load()
+      return
+    }
+    if (outcome.kind === 'failure') {
+      setFailure(outcome.message)
+      return
+    }
+    setDraft(undefined)
+    setNotice(doneNotice)
+    await controller.load()
+  }
+
+  const save = async (): Promise<void> => {
+    if (draft === undefined) return
+    const parsed = parseHeaders(draft)
+    if (!parsed.ok) {
+      setFailure(parsed.error)
+      setNotice(undefined)
+      return
+    }
+    await run(
+      Object.keys(parsed.value).length === 0
+        ? [{ op: 'unset', path: [...row.entry.settingsPath, 'headers'] }]
+        : [{ op: 'set', path: [...row.entry.settingsPath, 'headers'], value: parsed.value as JsonValue }],
+      '已保存请求头。',
+    )
+  }
+
+  const restoreDefault = async (): Promise<void> => {
+    if (base.length === 0) return
+    await run(
+      [{ op: 'unset', path: [...row.entry.settingsPath, 'headers'] }],
+      '已清除自定义请求头。',
+    )
+  }
+
+  const patchRow = (index: number, patch: Partial<HeaderRow>): void => {
+    const next = effective.map((entry, i) => (i === index ? { ...entry, ...patch } : entry))
+    setDraft(next)
+  }
+
+  return (
+    <details className="dshAma-newRoute dshAma-retryCard">
+      <summary className="dshAma-newRouteSummary">
+        {`自定义请求头（headers）${base.length === 0 ? '（默认：无）' : `（自定义：${String(base.length)} 条）`}`}
+      </summary>
+      <div className="dshAma-newRouteBody">
+        <p className="dshAma-hint">
+          随本路由每个模型请求附加的静态 HTTP 请求头。适合网关强制要求的字段（如 OpenCode Go 的
+          <code> x-opencode-session</code>）。注意：静态值对所有会话相同；若网关按会话做路由亲和，
+          固定值可能导致缓存失效。归属保留名（如 <code>User-Agent</code>）不会被此表覆盖。
+        </p>
+        {effective.length === 0
+          ? <p className="dshAma-hint">当前未配置自定义请求头。</p>
+          : effective.map((entry, index) => (
+            <div key={index} className="dshAma-kvRow">
+              <input
+                className="dshAma-input" type="text" value={entry.name}
+                placeholder="x-opencode-session" aria-label={`请求头名称 ${String(index + 1)}`}
+                disabled={fieldDisabled}
+                onChange={(event) => { patchRow(index, { name: event.target.value }) }}
+              />
+              <input
+                className="dshAma-input" type="text" value={entry.value}
+                placeholder="value" aria-label={`请求头值 ${String(index + 1)}`}
+                disabled={fieldDisabled}
+                onChange={(event) => { patchRow(index, { value: event.target.value }) }}
+              />
+              <button
+                type="button" className="dshAma-iconButton dshAma-iconButtonDanger"
+                aria-label={`删除请求头 ${String(index + 1)}`} disabled={fieldDisabled}
+                onClick={() => {
+                  setDraft(effective.filter((_, i) => i !== index))
+                }}
+              >×</button>
+            </div>
+          ))}
+        <div className="dshAma-footer">
+          {failure !== undefined ? <p className="dshAma-error">{failure}</p> : null}
+          {notice !== undefined ? <p className="dshAma-notice">{notice}</p> : null}
+          <button
+            type="button" className="dshAma-button"
+            disabled={fieldDisabled}
+            onClick={() => { setDraft([...effective, { name: '', value: '' }]) }}
+          >添加请求头</button>
+          <button
+            type="button" className="dshAma-button dshAma-buttonPrimary"
+            disabled={fieldDisabled || !changed}
+            onClick={() => { void save() }}
+          >{busy ? '保存中…' : '保存请求头'}</button>
+          {base.length === 0 ? null : (
+            <button
+              type="button" className="dshAma-button"
+              disabled={fieldDisabled}
+              onClick={() => { void restoreDefault() }}
+            >清除全部</button>
           )}
           {changed ? (
             <button
