@@ -40,11 +40,21 @@ export async function writeJson(file: string, value: unknown): Promise<void> {
       await handle.close()
     }
     await fs.rename(tmp, file)
-    const dir = await fs.open(path.dirname(file), 'r')
+    // Directory fsync makes the rename durable on POSIX, and must never fail
+    // the call: the rename above already published the content, so throwing
+    // here reports a completed write as a failure. Windows refuses to open a
+    // directory for reading at all (EPERM) — which silently broke kernel
+    // activation, because activateTarball's save threw right after its rename
+    // and every field written after it (sha512, bundledStamp) never landed.
     try {
-      await dir.sync()
-    } finally {
-      await dir.close()
+      const dir = await fs.open(path.dirname(file), 'r')
+      try {
+        await dir.sync()
+      } finally {
+        await dir.close()
+      }
+    } catch {
+      // best effort: durability nicety, not a correctness requirement
     }
   } catch (err) {
     await fs.rm(tmp, { force: true }).catch(() => undefined)
