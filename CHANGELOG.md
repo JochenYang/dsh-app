@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.3] - 2026-09-10
+
+### 中文
+- 修复内核更新后应用内跳转被丢给系统浏览器：窗口的导航守卫在创建时记下服务 origin，而内核更新会重启服务、换到新端口，守卫仍拿旧 origin 把站内链接判成外部链接；现在每次重载窗口前都会刷新
+- 修复启动期一次崩溃被计两次：子进程在启动窗口内退出时，rejected 的 `start()` 与 `onExit` 会各驱动一次恢复流程，导致跳过退避重试直接回滚或退出；现在只上报一次
+- 首装失败现在会弹出对话框说明原因（此前只有托盘 tooltip，无窗口时用户什么都看不到）；未安装内核时手动「检查内核更新」会直接安装，而不是提示"内核已是最新版本"
+- 更新通道不再跨线回退：registry 缺少该通道对应的 dist-tag 时，不再退而取 rc/alpha 版本并当作正式版更新提供
+- 修复 Session 导出完成提示重复弹出：下载监听挂在共享 session 上，窗口重建后会叠加，一次下载弹两次（且可能打到已销毁的窗口）
+- 内核更新检查改为互斥（定时与手动不再并发探测）；归档接口的围栏失败改为立即返回 403，不再让连接空等
+
+### English
+- Fixed in-app navigation being handed to the system browser after a kernel update: the window's navigation guard captured the server origin at creation, but a kernel update restarts the server on a new port and the guard kept the old origin, so in-app links were classified as external; it is now retargeted before every window reload
+- Fixed a startup crash being counted twice: when the child exited during startup, both the rejected `start()` and `onExit` drove the recovery path, skipping the backoff retry and jumping straight to rollback or exit; it is reported once now
+- A first-run install failure now raises a dialog explaining it (previously only a tray tooltip, invisible with no window); a manual kernel check with nothing installed installs instead of reporting "内核已是最新版本"
+- The update channel no longer falls back across lines: a registry lacking the channel's dist-tag no longer substitutes an rc/alpha version and offers it as a stable update
+- Fixed duplicate Session-export toasts: the download listener lives on the shared session and stacked when a window was rebuilt, firing twice per download and possibly at a destroyed window
+- Kernel update checks are serialized (timer and tray no longer probe concurrently); archive routes answer a fenced request with an immediate 403 instead of holding the connection
+
 ## [v0.11.2] - 2026-09-10
 
 ### 中文
