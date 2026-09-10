@@ -1,6 +1,6 @@
 {
   "name": "@dsh-app/plugin-brand",
-  "description": "DSH APP brand host plugin: brand settings namespace, app/kernel info service, desktop bridge for shell capabilities.",
+  "description": "DSH APP brand host plugin — SCAFFOLD: the brand settings namespace, app/kernel info service and desktop bridge are declared but not wired yet (see the TODOs in src/index.ts). The shell injects its desktop chrome directly, and plugin-client-ui talks to upstream remotes rather than through this plugin.",
   "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",

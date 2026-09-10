@@ -15,7 +15,7 @@
 
 ```
 ┌─ Shell (Electron main process)
-│   src/main/index.ts        boot, lifecycle, crash/rollback orchestration, bundled drift check
+│   src/main/index.ts        boot, lifecycle, crash/rollback orchestration, bundled adoption check
 │   src/main/server.ts       dsh child process: spawn, health, restart, shutdown
 │   src/main/window.ts       sandboxed main window + desktop chrome + update card
 │   src/main/tray.ts         tray menu
@@ -27,12 +27,10 @@
 │   src/kernel/sources/*     version + artifact resolution (npm registry, GitHub Releases, dev checkout)
 │   src/kernel/manifest.ts   current.json + manifest I/O (atomic writes)
 │   src/kernel/integrity.ts  sha512 verification
-├─ Setup renderer (static/)
-│   First-run install UI (progress, install/retry/cancel) over a narrow preload bridge
 └─ Brand suite (plugins/)
     plugin-brand (host)      brand settings, app info, desktop bridge (scaffold)
     plugin-client-ui (client) brand theme + advanced models settings page
-    plugin-sidebar (dual-face) native conversation views: Files (tree + preview) and Git
+    plugin-sidebar (dual-face) native conversation view: Git
     plugin-swarm (dual-face)   batch parallel subagent orchestration (swarm tool + /swarm command)
     plugin-usage (dual-face)   usage capture/aggregation + balance card, heatmap, trend chart
     plugin-archives (dual-face) session archive manager (host list/delete + settings section)
@@ -41,6 +39,9 @@
     plugin-mcp (dual-face)     external MCP server manager with dynamic mounting
     plugin-hooks (dual-face)   external hooks bridge (Claude Code / Codex / native rules)
 ```
+
+There is no setup renderer: the first run downloads/activates the kernel in the
+background and reports through the in-window update card and the tray.
 
 ## 3. Brand suite wiring
 
@@ -52,7 +53,7 @@ Two seams are stitched at every server start (`src/main/brand-suite.ts`):
    `app/node_modules/@dsh-app/*`. `SUITE_PLUGIN_DIRS` lists
    `plugin-brand`, `plugin-client-ui`, `plugin-sidebar`, `plugin-swarm`,
    `plugin-usage`, `plugin-archives`, `plugin-memory`, `plugin-fff`,
-   `plugin-mcp`, `plugin-hooks` (`brand-suite.ts:38`).
+   `plugin-mcp`, `plugin-hooks` (`brand-suite.ts:48`).
 2. **Loader overlay** — `plugins/dsh-app.patch.yml` is copied into userData and
    passed via `dsh web --patch`; it inserts the ten plugin entries after the
    official bundle layers (last write wins), so no upstream profile template is
@@ -63,30 +64,28 @@ target kernel) boot vanilla — no links, no overlay, boot is never blocked.
 
 Client-side composition (all zero-upstream-change):
 
-- **Files / Git native views** (`plugin-sidebar`): registered as
-  `conversation.view` tabs beside 对话/审查/轨迹 with `order 100` / `110`
-  (`client/views.tsx`), each rendering a full page — file tree with lazy
-  directory loading + text/image/Markdown preview, and the Git surface
-  (grouped change list, dual-line-number unified diff, stage/restore/commit,
-  tracked files, graph modal with `%B` + `--stat`). Markdown previews run
-  `remark-gfm` + `rehype-raw` + `rehype-sanitize` (raw HTML is rendered but
-  scripts/event handlers are stripped; `client/file-tree.tsx` `MD_SCHEMA`).
-- **Advanced models settings page** (`plugin-client-ui`): `settings.section`
-  at `order 11` (`client.ts:185`) — model-level editors over llm-pi-ai
-  providers, companion-route migration, models.dev prefill with gh-proxy
-  mirror fallback.
+- **Git native view** (`plugin-sidebar`): registered as a `conversation.view`
+  tab beside 对话/审查/轨迹 (`client/views.tsx`), rendering the Git surface —
+  grouped change list, dual-line-number unified diff, stage/restore/commit,
+  tracked files, graph modal with `%B` + `--stat`. The file-tree tab was retired
+  once the upstream sidebar shipped workspace file management.
+- **Advanced models settings page** (`plugin-client-ui`): `settings.section` —
+  model-level editors over llm-pi-ai providers, companion-route migration,
+  models.dev prefill with gh-proxy mirror fallback.
 
 Host side (fenced routes): everything under
-`/plugins/@dsh-app/plugin-sidebar/api` (`fs-routes.ts`, `git-routes.ts`) runs
-through a loopback Host fence, `execFile` with argument arrays, an env baseline
-of PATH + HOME only, `windowsHide`, and reads via `sessions.binding(sessionId)`
-(never the "most recent session" — blank sessions sort wrong).
+`/plugins/@dsh-app/plugin-sidebar/api` (`git-routes.ts`) runs through a loopback
+Host fence, `execFile` with argument arrays, an env baseline of PATH + HOME
+only, `windowsHide`, and reads via `sessions.binding(sessionId)` (never the
+"most recent session" — blank sessions sort wrong). Every other suite plugin's
+`/api` routes carry the same loopback fence.
 
 ## 4. Kernel runtime layout
 
 ```
 <userData>/kernel/
-  current.json            { active: "dsh-0.1.0-rc.8+suite-0.1.0", previous: "…", installedAt, manifest }
+  current.json            { active: "dsh-<dshVersion>+suite-<suiteVersion>", previous: "…",
+                            installedAt, manifest, sha512?, bundledStamp? }
   dsh-<version>+suite-<v>/   immutable versioned kernel
     manifest.json           KernelManifest (dshVersion, suiteVersion, channel, platform, arch, integrity)
     node/                   Node.js binary
@@ -101,7 +100,7 @@ boot can always point back at `previous`.
 ## 5. Update flow (kernel channel)
 
 ```
-check (startup + every 6h + manual)
+check (every 6 h + manual; never at startup)
   → npm registry dist-tags (@deepseek-ai/dsh): latest | next (rc) | alpha
   → newer? → prompt
 download runtime artifact (GitHub Release asset, per platform/arch)
@@ -117,38 +116,52 @@ after healthy boot: cleanup (drop non-active/non-previous dirs + staging)
 Rollback is automatic and bounded: a kernel that fails to become healthy twice
 is rolled back once, then the app surfaces the error rather than looping.
 
-**Bundled-runtime drift check** (`index.ts` boot, when an install already
-exists): `resources/kernel/` ships the runtime tarball, its sha512 sidecar AND
-a `manifest.json` (produced by `scripts/prepare-bundled-kernel.mjs`). Boot
-compares the bundled sidecar sha512 against the `sha512` recorded in
-`current.json` (legacy installs lack the field → always differs). When content
-differs AND the bundled version is not older than the installed kernel
-(`semver.gt`), the bundle is re-activated — the same-named versioned dir is
-replaced and `previous` never points at itself. This is what lets an upgrade
-ship new suite plugins under the same kernel version; online-installed newer
-kernels are left untouched.
+**Bundled-runtime adoption** (`index.ts` boot, when an install already exists):
+`resources/kernel/` ships the runtime tarball, its sha512 sidecar AND a
+`manifest.json` (produced by `scripts/prepare-bundled-kernel.mjs`). The bundle's
+identity — `<dshVersion>+<suiteVersion>` from that manifest — is recorded in
+`current.json` as `bundledStamp` when it is adopted, so boot asks the only
+question that matters: *has this install seen THIS bundled tarball?* It adopts
+the bundle when the stamp differs (a new shell shipped a different runtime,
+which is how an upgrade delivers new suite plugins under the same kernel
+version) and skips it when the installed kernel is already ahead (an online
+update must never be rolled back to an older bundle). Version arithmetic alone
+cannot express either half.
+
+The tarball sha512 is deliberately not the comparison key: a packaged runtime
+tarball is not byte-reproducible across builds, so a hash comparison would
+re-extract an identical runtime on every boot.
 
 Artifact metadata naming: `build-runtime.mjs` publishes
 `dsh-runtime-<platform>-<arch>-<ver>.tgz`, its `.sha512` sidecar, and a
 platform-suffixed `manifest-<platform>-<arch>.json` (six parallel CI cells
 upload distinct names). The resolver's phase-1 metadata fetch reads the
-suffixed manifest (`artifact.ts:131`).
+suffixed manifest (`sources/artifact.ts`).
 
-## 5. Server process management
+Which kernel line a build follows is decided by `package.json` alone (the
+`@deepseek-ai/dsh*` dependencies), resolved by `scripts/kernel-line.mjs` and
+asserted in both the build and CI — see `AGENTS.md` §10.
+
+## 6. Server process management
 
 - Dynamic free port (`net.listen(0)`), passed as `--port`; host pinned to
   `127.0.0.1` (loopback passes the dsh trusted-host fence with no extra flags).
 - Health = HTTP 200 on the server root within 90 s (`SERVER_HEALTH_TIMEOUT_MS`,
-  `shared/constants.ts:19`).
-- Crash → restart with backoff; repeated failure → kernel rollback.
+  `shared/constants.ts:34`).
+- Crash → restart with backoff; repeated failure → kernel rollback. A crash
+  during startup is reported once (through the rejected `start()`), not twice.
 - Shutdown: SIGTERM → 8 s grace → SIGKILL; logs tee'd to
-  `<userData>/logs/dsh-server-*.log`.
+  `<userData>/logs/dsh-server-*.log` (kernel diagnostics go to
+  `<userData>/logs/dsh-kernel.log`).
 
-## 6. Security posture
+## 7. Security posture
 
 - Main window: `contextIsolation`, `sandbox`, no preload, `nodeIntegration:false`.
-- Navigation confined to `127.0.0.1`; everything else → `shell.openExternal`.
-- Setup window: minimal static page, explicit `contextBridge` API, CSP header.
+- Navigation confined to the server's own origin; everything else →
+  `shell.openExternal`. The origin is retargeted when a kernel update restarts
+  the server on a new port.
+- Plugin `/api` routes: same-origin check **plus** a loopback Host fence, so a
+  DNS-rebinding request cannot reach them by presenting a matching Origin.
 - Kernel downloads verified by sha512 before activation (integrity from the
   release asset sidecar; can be upgraded to signed manifests later).
 
@@ -169,7 +182,8 @@ suffixed manifest (`artifact.ts:131`).
   release (created published), which `GitHubArtifactResolver` resolves; kernel
   updates are thus decoupled from shell releases. The same release carries the
   platform-suffixed `manifest-<platform>-<arch>.json` (one per matrix cell,
-  no shared-name clobber races).
+  no shared-name clobber races). An existing release is reused only when it is
+  complete AND its suite version matches the tree's.
 - Signing: macOS notarization requires Apple credentials (CI secrets); Windows
   signing optional (SmartScreen without it); Linux unsigned.
 
@@ -180,10 +194,9 @@ suffixed manifest (`artifact.ts:131`).
 - `plugin-client-ui`: the four commented-out enhancement slots (workspace file
   panel, reminder summary, trajectory export, model badges) are not wired yet;
   slot ids still to be verified against the running UI.
-- `plugin-sidebar`: no automated test suite for the client components — probes
-  live in `scripts/` (SSR markdown probe, kernel-manager e2e probe) and the
+- `plugin-sidebar`: no automated test suite for the client components — the
   plugin is verified through tsc + esbuild + headless dsh server API smokes.
-- First-run UX polish: kernel download progress in the setup window is wired;
-  add pause/resume and checksum display.
+- First-run UX: kernel download progress is wired into the in-window update
+  card; pause/resume and checksum display are not.
 - Optional: signed manifests + rollback of `$DSH_HOME` settings on major
   version cross-grades.

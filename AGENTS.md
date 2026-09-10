@@ -50,7 +50,7 @@ src/kernel/      Kernel runtime manager: lifecycle, manifest I/O, integrity,
                  version/artifact resolution sources
 src/shared/      Shared constants + types (imported by main + kernel)
 static/          Setup/install window (first-run UI, zh-CN), no framework
-plugins/         Brand plugin suite (8 plugins, see §6) + dsh-app.patch.yml
+plugins/         Brand plugin suite (10 plugins, see §6) + dsh-app.patch.yml
                  (loader overlay)
 scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
                  release-notes generator (gen-release-notes.mjs)
@@ -193,36 +193,11 @@ after boot and via the tray.
 
 ## 6. Brand suite wiring (`plugins/`)
 
-Eight dsh plugins ship with the product and layer on upstream **without
-forking it** (per-plugin details live in each plugin's README):
-
-- `@dsh-app/plugin-brand` (host): settings namespace / app-info / desktop
-  bridge — **currently a scaffold** (see TODOs in
-  `plugins/plugin-brand/src/index.ts`).
-- `@dsh-app/plugin-client-ui` (client): brand theme (`--dsw-alias-*` token
-  overrides), brand Models settings section, commented-out enhancement
-  scaffolds. UI copy is **zh-CN** (see §9).
-- `@dsh-app/plugin-sidebar` (dual face): workspace file tree + preview and
-  the Git panel (grouped changes, unified diff, stage/revert/commit, graph)
-  as native conversation-view tabs.
-- `@dsh-app/plugin-swarm` (dual face): batch parallel subagent orchestration —
-  `swarm` tool + `/swarm` command, adaptive concurrency gate with failure
-  classification (only transport throttles/retries), per-item auto-retry,
-  split aids, batch token budget, `output_mode` trimming. User overrides:
-  `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json`, editable from the
-  settings page.
-- `@dsh-app/plugin-usage` (dual face): usage capture/aggregation over
-  session logs + settings-page balance card, heatmap and daily trend chart.
-- `@dsh-app/plugin-archives` (dual face): session archive manager — host
-  list/delete routes + settings-page section grouped by project.
-- `@dsh-app/plugin-memory` (dual face): cross-session memory — global and
-  per-project Markdown files injected into every prompt,
-  memory_save/recall/forget LLM tools, a background distiller on quiet
-  sessions, a background curator that merges/prunes grown files, and a
-  settings page (toggles, stats, per-entry pin/delete).
-- `@dsh-app/plugin-fff` (host): fast file search over the FFF engine
-  (`fffind`/`ffgrep`/`fff-glob` tools), one shared in-memory index per
-  workspace, every search fenced to the executing agent's session workspace.
+Ten dsh plugins ship with the product, layered on upstream **without forking
+it**. `plugins/README.md` is the authoritative roster — each plugin's side,
+role and status (including which are still scaffolds). Start there when you
+need the list; the five sites it must stay in sync with are under "Suite
+plugin list sync" below.
 
 Two seams are stitched at every server start (`brand-suite.ts`):
 
@@ -244,10 +219,11 @@ by brand wiring.
 ### Suite plugin list sync (learned the hard way)
 
 The suite member list lives in **five** places and they must match exactly:
-`plugins/dsh-app.patch.yml` (insert rows), `scripts/build-runtime.mjs`
-(`suitePlugins`), `src/main/brand-suite.ts` (`SUITE_PLUGIN_DIRS`),
-`scripts/smoke-suite.mjs` (`SUITE_DIRS`), and the pre-build loop in
-`.github/workflows/release.yml`. Adding an overlay row without its package in
+`plugins/dsh-app.patch.yml` (insert rows), `scripts/kernel-line.mjs`
+(`SUITE_PLUGINS` — also what the suite version hash is derived from),
+`src/main/brand-suite.ts` (`SUITE_PLUGIN_DIRS`), `scripts/smoke-suite.mjs`
+(`SUITE_DIRS`), and the pre-build loop in `.github/workflows/release.yml`.
+Adding an overlay row without its package in
 the build list ships a runtime the loader cannot compose — every suite page
 (settings sections, sidebar dock views) silently disappears behind the
 fail-soft vanilla boot (v0.9.6→v0.9.8 incident: MCP/hooks rows without their
