@@ -87,7 +87,12 @@ async function extractTgz(tgzPath) {
  */
 function buildLaunch(args) {
   if (args.mode === 'runtime' || args.mode === 'tgz') {
-    const dir = args.mode === 'tgz' ? args.extracted.dir : args.runtime
+    // Absolute, and the rest of the spec derives from it. spawn resolves a
+    // RELATIVE executable against the child's cwd (the `cwd` option below),
+    // not this process's, so a relative runtime dir became
+    // `smoke-rt/runtime/app/smoke-rt/runtime/node/node` and died with ENOENT
+    // on Linux — the probe's own path handling, not the kernel's.
+    const dir = path.resolve(args.mode === 'tgz' ? args.extracted.dir : args.runtime)
     const nodeBin = path.join(dir, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
     const script = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
     if (!existsSync(nodeBin) || !existsSync(script)) throw new Error(`runtime dir incomplete: ${dir}`)
