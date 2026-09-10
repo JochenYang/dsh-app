@@ -61,6 +61,14 @@ function extractServerUrl(line: string): string | undefined {
 export class DshServer {
   private child: ChildProcess | null = null
   private stopping = false
+  /** True from spawn until the health check settles. An exit inside that
+   * window reaches the caller through start()'s rejection instead of onExit —
+   * firing both counted one crash twice, which skipped the backoff retry and
+   * jumped straight to rollback/exit. */
+  private starting = false
+  /** Exit seen while starting, handed to onExit only when start() succeeded
+   * (an unhealthy start already reported it via the rejection). */
+  private deferredExit: { code: number | null, signal: NodeJS.Signals | null } | null = null
   private shellMode = false
   private url = ''
   private logFile: string | null = null
@@ -80,48 +88,80 @@ export class DshServer {
   async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST, extraPatches: readonly string[] = []): Promise<void> {
     await this.stop()
     this.stopping = false
+    this.starting = true
+    this.deferredExit = null
     this.url = `http://${host}:${port}`
 
-    const { command, args, shell } = this.buildCommand(spec, port, host, extraPatches)
-    this.shellMode = shell === true
-    this.logFile = await this.openLog()
-    this.events.onLog?.(`spawn ${shell ? command : `${command} ${args.join(' ')}`}`)
+    let healthy = false
+    try {
+      const { command, args, shell } = this.buildCommand(spec, port, host, extraPatches)
+      this.shellMode = shell === true
+      this.logFile = await this.openLog()
+      this.events.onLog?.(`spawn ${shell ? command : `${command} ${args.join(' ')}`}`)
 
-    const child = shell
-      ? spawn(command, {
-          shell: true,
-          cwd: spec.cwd,
-          env: { ...process.env, DSH_APP_DESKTOP: '1' },
-          stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true,
-        })
-      : spawn(command, args, {
-          cwd: spec.cwd,
-          env: { ...process.env, DSH_APP_DESKTOP: '1' },
-          stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true,
-        })
-    this.child = child
+      const child = shell
+        ? spawn(command, {
+            shell: true,
+            cwd: spec.cwd,
+            env: { ...process.env, DSH_APP_DESKTOP: '1' },
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+          })
+        : spawn(command, args, {
+            cwd: spec.cwd,
+            env: { ...process.env, DSH_APP_DESKTOP: '1' },
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+          })
+      this.child = child
 
-    const onChunk = (stream: NodeJS.ReadableStream) => (d: Buffer) => {
-      const pending = `${this.lineBuffers.get(stream) ?? ''}${d.toString('utf8')}`
-      const parts = pending.split(/\r?\n/)
-      this.lineBuffers.set(stream, parts.pop() ?? '')
-      for (const line of parts) this.handleLine(line)
-    }
-    child.stdout?.on('data', onChunk(child.stdout))
-    child.stderr?.on('data', onChunk(child.stderr))
-    child.on('error', (err) => this.events.onLog?.(`server error: ${err.message}`))
-    child.on('exit', (code, signal) => {
-      for (const [stream, rest] of this.lineBuffers) {
-        if (rest !== '') this.handleLine(rest)
-        this.lineBuffers.delete(stream)
+      const onChunk = (stream: NodeJS.ReadableStream) => (d: Buffer) => {
+        const pending = `${this.lineBuffers.get(stream) ?? ''}${d.toString('utf8')}`
+        const parts = pending.split(/\r?\n/)
+        this.lineBuffers.set(stream, parts.pop() ?? '')
+        for (const line of parts) this.handleLine(line)
       }
-      if (this.child === child) this.child = null
-      if (!this.stopping) this.events.onExit?.(code, signal)
-    })
+      child.stdout?.on('data', onChunk(child.stdout))
+      child.stderr?.on('data', onChunk(child.stderr))
+      child.on('error', (err) => this.events.onLog?.(`server error: ${err.message}`))
+      child.on('exit', (code, signal) => {
+        for (const [stream, rest] of this.lineBuffers) {
+          if (rest !== '') this.handleLine(rest)
+          this.lineBuffers.delete(stream)
+        }
+        if (this.child === child) this.child = null
+        if (this.stopping) return
+        if (this.starting) {
+          this.deferredExit = { code, signal }
+          return
+        }
+        this.events.onExit?.(code, signal)
+      })
 
-    await this.waitForHealth()
+      await this.waitForHealth()
+      healthy = true
+    } finally {
+      this.starting = false
+      const deferred = this.takeDeferredExit()
+      // Only a HEALTHY start defers nothing: the process came up and then died
+      // inside this window, so the caller learns about it exactly once, here.
+      if (healthy && deferred !== null && !this.stopping) {
+        this.events.onExit?.(deferred.code, deferred.signal)
+      }
+    }
+  }
+
+  /**
+   * Take (and clear) an exit observed while start() was in flight. Reading the
+   * field through a method is deliberate: inside start() the exit callback is
+   * the only writer control-flow analysis can see, so the field narrows to its
+   * `null` initializer and a null check on it collapses to `never`. Across a
+   * method boundary the declared type is used instead.
+   */
+  private takeDeferredExit(): { code: number | null, signal: NodeJS.Signals | null } | null {
+    const pending = this.deferredExit
+    this.deferredExit = null
+    return pending
   }
 
   /** Quote a shell fragment for cmd.exe when it carries whitespace or quotes. */

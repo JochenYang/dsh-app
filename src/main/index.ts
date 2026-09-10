@@ -6,7 +6,7 @@ import semver from 'semver'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
-import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies } from './window'
+import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies, updateServerOrigin } from './window'
 import { CLOSE_DIALOG_SCRIPT, type CloseDialogChoice } from './close-dialog'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
@@ -177,6 +177,10 @@ async function startServerAndOpenWindow(): Promise<void> {
       mainWindow = null
     })
   } else {
+    // The server may have restarted on a fresh port (kernel update or crash
+    // recovery); retarget the navigation guard before reloading, otherwise
+    // every same-origin link in the reloaded page is pushed to the browser.
+    updateServerOrigin(mainWindow, url)
     void mainWindow.loadURL(url)
     mainWindow.show()
   }
@@ -240,7 +244,13 @@ async function installKernel(): Promise<void> {
     await kernel.installLatest('installing')
     await startServerAndOpenWindow()
   } catch (err) {
-    broadcastStatus({ phase: 'error', message: '安装失败', progress: null, error: (err as Error).message })
+    const detail = (err as Error).message
+    broadcastStatus({ phase: 'error', message: '安装失败', progress: null, error: detail })
+    // broadcastStatus only paints an update card and the tray tooltip. On a
+    // first run there is no window to paint, so the user was left with a dead
+    // app and no explanation; the themed dialog falls back to a native one
+    // when the window is absent.
+    void promptNoticeThemed(mainWindow, 'error', 'DSH APP', `内核安装失败：${detail}\n\n请检查网络连接，然后从托盘菜单重新执行「检查内核更新」。`)
   }
 }
 
@@ -253,6 +263,13 @@ const KERNEL_CHANNEL_LABEL_ZH: Record<string, string> = {
 async function checkKernelUpdate(manual: boolean): Promise<void> {
   try {
     const result = await kernel.checkForUpdate()
+    // Nothing installed is not "up to date": there is no update to offer
+    // because there is no kernel, and the message switch below would report
+    // the reassuring-but-wrong "内核已是最新版本" while blocking recovery.
+    if (manual && result.reason === 'no kernel installed') {
+      await installKernel()
+      return
+    }
     // Installable options: the primary line's update (if any) first, then
     // one button per other line carrying something newer. Every entry passed
     // the artifact probe in checkForUpdate, so all of them install directly.

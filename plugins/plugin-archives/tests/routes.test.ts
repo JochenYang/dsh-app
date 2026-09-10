@@ -341,14 +341,17 @@ test('prune: a registry without the write chain answers 501', async () => {
 
 // --- fences -----------------------------------------------------------------
 
-test('routes: a non-loopback Host is refused before the body is read', async () => {
+test('routes: a non-loopback Host is refused with an answer, not a hang', async () => {
   const s = await scenario({ ids: ['session-a'], archived: ['session-a'] })
   const req = request('POST', { ids: ['session-a'] })
   ;(req.headers as Record<string, string>).host = 'evil.example'
 
   const reply = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, req)
 
-  assert.equal(reply.status, 0, 'a fenced request gets no response at all')
+  // Answered, never left hanging: a fenced caller used to hold the socket
+  // until its own timeout, unlike every other plugin's route surface.
+  assert.equal(reply.status, 403)
+  assert.equal((reply.body as { error: { code: string } }).error.code, 'forbidden')
   assert.equal(existsSync(s.logs.get('session-a')!), true)
 })
 

@@ -171,13 +171,15 @@ async function downloadNodeBinary(platform, arch, destDir) {
   const url = `${base}/${ver}/${archiveName}.${ext}`
   const archivePath = path.join(destDir, `node-archive.${ext}`)
   console.log(`$ download ${url}`)
-  const res = await fetch(url, { redirect: 'follow' })
+  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60_000) })
   if (!res.ok) throw new Error(`node dist download failed (${res.status}): ${url}`)
   const buf = Buffer.from(await res.arrayBuffer())
   // Verify the archive against the official SHASUMS256.txt before extracting,
   // so a dist mirror can never substitute bytes. Metadata is fetched from the
   // official host first (mirrors only fill in when the official host is
   // unreachable); every candidate is checked against the same digest.
+  // Both fetches are bounded: without a timeout a stalled connection hangs the
+  // CI cell until the runner's 6 h default, which reads as a stuck release.
   const sumsName = `${archiveName}.${ext}`
   const sumsBases = base === OFFICIAL_NODE_DIST ? [base] : [OFFICIAL_NODE_DIST, base]
   let sumsText = ''
@@ -185,7 +187,7 @@ async function downloadNodeBinary(platform, arch, destDir) {
   for (const sumsBase of sumsBases) {
     const sumsUrl = `${sumsBase}/${ver}/SHASUMS256.txt`
     try {
-      const sumsRes = await fetch(sumsUrl, { redirect: 'follow' })
+      const sumsRes = await fetch(sumsUrl, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
       if (sumsRes.ok) { sumsText = await sumsRes.text(); sumsFrom = sumsUrl; break }
       console.log(`$ node SHASUMS256.txt ${sumsRes.status}: ${sumsUrl}`)
     } catch (err) {

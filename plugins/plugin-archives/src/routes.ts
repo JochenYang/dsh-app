@@ -540,7 +540,10 @@ async function pruneStaleArchives(writer: RegistryWriter, options: ArchiveRoutes
  */
 export function registerArchiveRoutes(webServer: WebServerLike, options: ArchiveRoutesOptions): () => void {
   const listHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) {
+      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      return
+    }
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET')
       fail(res, 405, 'method-not-allowed', 'GET only')
@@ -553,7 +556,10 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       })
   }
   const deleteHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) {
+      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      return
+    }
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
       fail(res, 405, 'method-not-allowed', 'POST only')
@@ -576,7 +582,10 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       })
   }
   const pruneHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) {
+      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      return
+    }
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
       fail(res, 405, 'method-not-allowed', 'POST only')
@@ -602,7 +611,10 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       })
   }
   const searchHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) return
+    if (!sameOrigin(req) || !passesFence(req)) {
+      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      return
+    }
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET')
       fail(res, 405, 'method-not-allowed', 'GET only')

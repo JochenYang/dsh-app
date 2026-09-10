@@ -525,6 +525,27 @@ function openExternalSafe(target: string): void {
  * browser. A hostname-only check would let any 127.0.0.1:<other-port> page
  * (e.g. a local dev server) load inside the app window.
  */
+/** Live server origin of each window; see {@link updateServerOrigin}. */
+const windowOrigins = new WeakMap<BrowserWindow, { value: string }>()
+
+/**
+ * Retarget a window's navigation guard at a new server origin. The shell must
+ * call this before reloading a window after the server restarted on a
+ * different port — a kernel update does exactly that. The guard captures the
+ * origin when the window is created, so without this update every
+ * same-origin navigation in the reloaded page is classified as external and
+ * handed to the system browser.
+ */
+export function updateServerOrigin(win: BrowserWindow, url: string): void {
+  const origin = windowOrigins.get(win)
+  if (origin === undefined) return
+  try {
+    origin.value = new URL(url).origin
+  } catch {
+    origin.value = ''
+  }
+}
+
 export function createMainWindow(url: string): BrowserWindow {
   const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, show: false })
   win.once('ready-to-show', () => win.show())
@@ -536,21 +557,25 @@ export function createMainWindow(url: string): BrowserWindow {
 
   installExportToast(win)
 
-  // Origin of the dsh server the window was created for. If the URL cannot be
-  // parsed (should never happen; the shell builds it), no origin is allowed.
-  let serverOrigin = ''
+  // Origin of the dsh server this window may navigate within. Held in a box
+  // rather than a plain local because a kernel update restarts the server on a
+  // fresh port and reloads this same window: without a way to update it, every
+  // same-origin navigation after the restart looks external and gets pushed to
+  // the system browser. An unparsable URL leaves it empty — no origin allowed.
+  const origin = { value: '' }
   try {
-    serverOrigin = new URL(url).origin
+    origin.value = new URL(url).origin
   } catch {
     // leave empty — navigation falls back to external
   }
+  windowOrigins.set(win, origin)
 
   win.webContents.setWindowOpenHandler(({ url: target }) => {
     // Same-origin window.open (e.g. the Models settings page opening a
     // sub-view) should open inside the app, not be kicked to the browser.
     try {
       const parsed = new URL(target)
-      if (serverOrigin !== '' && parsed.origin === serverOrigin) {
+      if (origin.value !== '' && parsed.origin === origin.value) {
         return { action: 'allow', overrideBrowserWindowOptions: MAIN_WINDOW_OPTS }
       }
     } catch {
@@ -562,7 +587,7 @@ export function createMainWindow(url: string): BrowserWindow {
   win.webContents.on('will-navigate', (event, target) => {
     let allowed = false
     try {
-      allowed = serverOrigin !== '' && new URL(target).origin === serverOrigin
+      allowed = origin.value !== '' && new URL(target).origin === origin.value
     } catch {
       // not a valid URL — treat as external
     }
