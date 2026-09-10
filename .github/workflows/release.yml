@@ -49,11 +49,78 @@ jobs:
           tag="${{ github.ref_name }}"
           gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --draft
 
+  # Resolve the kernel version once and decide whether the runtime matrix can
+  # be skipped: rebuilding 6 platforms of an already-published
+  # runtime-<dshVersion> is pure waste when only the shell changed, so a tag
+  # push reuses the existing assets and the app job downloads them from the
+  # release instead of the workflow artifact. workflow_dispatch always builds
+  # (it exists to publish new/changed runtimes).
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      dsh_version: ${{ steps.resolve.outputs.dsh_version }}
+      skip_runtime: ${{ steps.resolve.outputs.skip_runtime }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve kernel version and check existing artifacts
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DSH_VERSION_INPUT: ${{ inputs.dsh_version || '' }}
+        run: |
+          if [ -n "$DSH_VERSION_INPUT" ]; then
+            echo "dsh_version=$DSH_VERSION_INPUT" >> "$GITHUB_OUTPUT"
+            echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Same channel mapping as scripts/build-runtime.mjs: alpha→alpha
+          # tag, beta→next, else latest.
+          CHANNEL="${DSH_APP_CHANNEL:-stable}"
+          case "$CHANNEL" in
+            alpha) TAG_NAME="alpha" ;;
+            beta) TAG_NAME="next" ;;
+            *) TAG_NAME="latest" ;;
+          esac
+          DSH_VERSION="$(TAG_NAME="$TAG_NAME" node -e "
+            fetch('https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags', { signal: AbortSignal.timeout(15000) })
+              .then((r) => r.json())
+              .then((t) => console.log(t[process.env.TAG_NAME] ?? t.latest))
+              .catch(() => process.exit(1))
+          ")"
+          if [ -z "$DSH_VERSION" ]; then
+            echo "dist-tag resolution failed; building instead of skipping" >&2
+            echo "dsh_version=" >> "$GITHUB_OUTPUT"
+            echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "dsh_version=$DSH_VERSION" >> "$GITHUB_OUTPUT"
+          # All 6 cells × (tgz + sha512 + per-cell manifest) must be present;
+          # anything missing (or no release at all) means a full rebuild.
+          TAG="runtime-$DSH_VERSION"
+          if ! ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null)"; then
+            echo "no $TAG release; building" >&2
+            echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for p in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
+            for name in "dsh-runtime-${p}-${DSH_VERSION}.tgz" "dsh-runtime-${p}-${DSH_VERSION}.tgz.sha512" "manifest-${p}.json"; do
+              if ! grep -qxF "$name" <<< "$ASSETS"; then
+                echo "missing $name on $TAG; building" >&2
+                echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done
+          done
+          echo "$TAG already complete; skipping runtime matrix" >&2
+          echo "skip_runtime=true" >> "$GITHUB_OUTPUT"
+
   runtime:
     name: runtime (${{ matrix.os }}/${{ matrix.arch }})
-    # No `needs: prepare-release`: runtime artifacts attach to their own
-    # runtime-* tags, never to the shell v* draft, so the job must run on
-    # workflow_dispatch too (a skipped `needs` would skip this job entirely).
+    needs: resolve
+    if: needs.resolve.outputs.skip_runtime != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -155,7 +222,7 @@ jobs:
   app:
     if: startsWith(github.ref, 'refs/tags/v')
     name: app (${{ matrix.os }}/${{ matrix.arch }})
-    needs: runtime
+    needs: [resolve, runtime]
     strategy:
       fail-fast: false
       matrix:
@@ -190,14 +257,34 @@ jobs:
       - name: Build shell
         run: npm run build
 
-      # Pull the matching kernel tgz built by the runtime job and stage it as
-      # bundled-kernel/ so electron-builder's extraResources ships it inside the
-      # installer (first-launch local activation, no user download).
+      # Pull the matching kernel tgz and stage it as bundled-kernel/ so
+      # electron-builder's extraResources ships it inside the installer
+      # (first-launch local activation, no user download). Fresh build:
+      # workflow artifact from the runtime job above. Reuse path (the runtime
+      # matrix was skipped as already published): download the same asset
+      # names from the runtime release instead.
       - name: Download kernel artifact
+        if: needs.resolve.outputs.skip_runtime != 'true'
         uses: actions/download-artifact@v4
         with:
           name: runtime-${{ matrix.platform }}-${{ matrix.arch }}
           path: runtime-dist
+
+      - name: Download kernel artifact from release
+        if: needs.resolve.outputs.skip_runtime == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: runtime-${{ needs.resolve.outputs.dsh_version }}
+        run: |
+          mkdir -p runtime-dist
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            -D runtime-dist \
+            -p "dsh-runtime-${{ matrix.platform }}-${{ matrix.arch }}-*.tgz" \
+            -p "dsh-runtime-${{ matrix.platform }}-${{ matrix.arch }}-*.tgz.sha512" \
+            -p "manifest-${{ matrix.platform }}-${{ matrix.arch }}.json"
+          # prepare-bundled-kernel expects the shared manifest.json name.
+          cp "runtime-dist/manifest-${{ matrix.platform }}-${{ matrix.arch }}.json" runtime-dist/manifest.json
 
       - name: Stage bundled kernel
         shell: bash
