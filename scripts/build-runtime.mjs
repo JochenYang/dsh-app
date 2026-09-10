@@ -26,63 +26,78 @@ import { createReadStream } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { c as createTar } from 'tar'
+import {
+  assertFollowedVersion,
+  assertValidVersion,
+  channelFromVersion,
+  computeSuiteVersion,
+  followedSpec,
+  resolveFollowChannel,
+  resolveDistTagVersion,
+  SUITE_PLUGINS,
+  distTagFor,
+} from './kernel-line.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const [platform = process.platform, arch = process.arch, versionArg] = process.argv.slice(2)
 
 /**
  * When no version is given (plain tag push or workflow_dispatch), publish the
- * dsh version the app itself resolves from the npm dist-tag (stable→latest,
- * beta→next, alpha→alpha) — the same mapping as src/kernel/sources/registry.ts —
- * so runtime artifacts never lag behind the kernel registry again.
+ * dsh version the tree itself follows: the dist-tag is derived from the
+ * @deepseek-ai/dsh* dependency in package.json, which is also the line the
+ * shell and every plugin are typechecked against. Keeping that mapping here
+ * (rather than in a hand-flipped workflow variable) is what stops a release
+ * from bundling a kernel the code was never built against.
+ *
+ * DSH_APP_CHANNEL, when set, is a deliberate cross-line override and skips the
+ * spec assertion below — it exists for one-off builds, not for routine
+ * releases; the default path is always asserted.
  */
-async function resolveDefaultDshVersion() {
-  const channel =
-    process.env.DSH_APP_CHANNEL === 'alpha' ? 'alpha'
-    : process.env.DSH_APP_CHANNEL === 'beta' ? 'next'
-    : 'latest'
+async function resolveDefaultDshVersion(channelOverride) {
+  const channel = channelOverride ?? resolveFollowChannel()
+  let tag
+  if (channel === 'alpha') tag = 'alpha'
+  else if (channel === 'beta') tag = distTagFor('beta')
+  else tag = distTagFor('stable')
   try {
-    const res = await fetch('https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags', {
-      signal: AbortSignal.timeout(15_000),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const tags = await res.json()
-    const version = tags[channel] ?? tags.latest ?? tags.next ?? tags.alpha
-    if (version) return version
-    // Tags 200 OK but no usable key (mirror sync lag / odd package state) is
-    // the same pollution path as a network failure — route through the catch
-    // below so CI hard-fails instead of silently republishing an old version.
-    throw new Error(`no usable dist-tag found (channel=${channel}; tags=${JSON.stringify(tags)})`)
+    return await resolveDistTagVersion(tag)
   } catch (err) {
     console.error(`[build-runtime] dist-tag resolution failed: ${err.message}`)
     // CI must never silently rebuild an OLD version and --clobber its tag
     // with content built from current code — that is exactly the drift this
     // resolution was introduced to kill. Fail loudly; the job can be re-run
     // once the registry is reachable again.
-    if (process.env.GITHUB_OUTPUT) {
-      throw new Error('cannot resolve dsh version from npm dist-tag — set DSH_VERSION explicitly or fix registry access')
-    }
+    throw new Error('cannot resolve dsh version from npm dist-tag — set DSH_VERSION explicitly or fix registry access')
   }
-  throw new Error('cannot resolve dsh version from npm dist-tag — set DSH_VERSION explicitly or fix registry access')
 }
 
-const DSH_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim() || (await resolveDefaultDshVersion())
+const CHANNEL_OVERRIDE = process.env.DSH_APP_CHANNEL?.trim() || undefined
+const REQUESTED_VERSION = versionArg?.trim() || process.env.DSH_VERSION?.trim()
+const DSH_VERSION = REQUESTED_VERSION || (await resolveDefaultDshVersion(CHANNEL_OVERRIDE))
+
+if (CHANNEL_OVERRIDE === undefined) {
+  // The default path (and any explicitly pinned dsh_version) must land on the
+  // line the tree follows. This is the assertion whose absence let v0.11.1
+  // ship a 0.1.5-alpha.2 kernel beside ^0.1.5-rc.1 code with CI fully green.
+  assertFollowedVersion(DSH_VERSION)
+} else {
+  assertValidVersion(DSH_VERSION)
+  console.warn(
+    `[build-runtime] DSH_APP_CHANNEL=${CHANNEL_OVERRIDE} overrides the followed line (${followedSpec()}); `
+    + `bundling ${DSH_VERSION} on purpose`,
+  )
+}
 
 // Publish the resolved version to GitHub Actions outputs so the release job
 // can name its release tag (runtime-<dshVersion>). No-op outside CI.
 if (process.env.GITHUB_OUTPUT) {
   appendFileSync(process.env.GITHUB_OUTPUT, `dsh_version=${DSH_VERSION}\n`)
 }
-const CHANNEL = process.env.DSH_APP_CHANNEL ?? 'stable'
 
-/**
- * Suite plugins copied into the runtime's node_modules. KEEP IN SYNC with
- * plugins/dsh-app.patch.yml (insert rows), src/main/brand-suite.ts
- * SUITE_PLUGIN_DIRS, and scripts/smoke-suite.mjs SUITE_DIRS — a row in the
- * overlay without its package here ships a runtime that fails to compose
- * (settings pages silently missing), while the reverse ships dead weight.
- */
-const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-fff', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks']
+// The artifact's channel LABEL describes the version actually built, never the
+// line the repo happens to follow: a workflow_dispatch build of an explicitly
+// pinned alpha version is labelled alpha even while the tree sits on rc.
+const CHANNEL = channelFromVersion(DSH_VERSION)
 
 /**
  * FFF native binding version, derived from the plugin that declares it (plugins
@@ -92,23 +107,11 @@ const suitePlugins = ['@dsh-app/plugin-brand', '@dsh-app/plugin-client-ui', '@ds
  */
 const FFF_NODE_PIN = JSON.parse(readFileSync(path.join(root, 'plugins', '@dsh-app/plugin-fff'.replace('@dsh-app/', ''), 'package.json'), 'utf8')).dependencies['@ff-labs/fff-node']
 
-/**
- * Suite version, content-addressed from the bundled plugins' package.json
- * versions. Any suite change yields a new versionDir name (dsh-<v>+suite-<h>)
- * so activation lands in a fresh directory and the previous one stays for
- * rollback, while an unchanged suite keeps the same name AND — with the
- * reproducible tarball below — the same artifact sha512, so the shell's
- * boot-time drift check sees "no change" and skips the extract entirely.
- * Explicit DSH_APP_SUITE_VERSION still wins for hand-tagged builds.
- */
-function deriveSuiteVersion() {
-  const parts = [...suitePlugins].sort().map((name) => {
-    const pkg = JSON.parse(readFileSync(path.join(root, 'plugins', name.replace('@dsh-app/', ''), 'package.json'), 'utf8'))
-    return `${name}@${pkg.version}`
-  })
-  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 8)
-}
-const SUITE_VERSION = process.env.DSH_APP_SUITE_VERSION?.trim() || deriveSuiteVersion()
+// The plugin roster and the suite version it hashes to both come from
+// scripts/kernel-line.mjs — the same module the release workflow reads to
+// decide whether a published runtime can be reused, so the two can never
+// disagree about what "the current suite" is.
+const SUITE_VERSION = computeSuiteVersion()
 
 function quoteWinArg(value) {
   return `"${value.replace(/"/g, '\\"')}"`
@@ -232,7 +235,7 @@ async function main() {
   //    dangling symlink once tarred). Instead we npm install dsh alone, then
   //    copy each plugin's built lib/ + package.json into node_modules by hand
   //    so the runtime is fully self-contained.
-  for (const name of suitePlugins) {
+  for (const name of SUITE_PLUGINS) {
     run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], path.join(root, 'plugins', name.replace('@dsh-app/', '')))
   }
   const appPkg = {
@@ -312,7 +315,7 @@ async function main() {
   //     field) + the lib/ build output; no source or external paths needed.
   const nmScope = path.join(runtimeDir, 'app', 'node_modules', '@dsh-app')
   await mkdir(nmScope, { recursive: true })
-  for (const name of suitePlugins) {
+  for (const name of SUITE_PLUGINS) {
     const shortName = name.replace('@dsh-app/', '')
     const srcDir = path.join(root, 'plugins', shortName)
     const destDir = path.join(nmScope, shortName)

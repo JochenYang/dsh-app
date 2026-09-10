@@ -21,14 +21,13 @@ permissions:
 
 env:
   DSH_VERSION: ${{ inputs.dsh_version || '' }}
-  # Tag pushes leave DSH_VERSION empty, so build-runtime resolves the dist-tag.
-  # The suite follows the newest kernel line, currently 0.1.5-rc.1 on the npm
-  # `next` tag (the rc line); resolution uses the beta channel, which maps to
-  # `next`. Flip this line whenever the followed line moves tags (beta ->
-  # delete once the line is on `latest`).
-  # workflow_dispatch pins a version explicitly for the tag name; the channel
-  # still labels the manifest, so keep it on the pinned version's line.
-  DSH_APP_CHANNEL: beta
+  # No channel pin here on purpose. Which kernel line to follow comes from the
+  # @deepseek-ai/dsh* dependency in package.json through scripts/kernel-line.mjs
+  # — the same spec the shell and every plugin are typechecked against — and the
+  # resolved version is asserted to satisfy it before anything is built. A
+  # second, hand-flipped copy of the channel in this file is exactly how v0.11.1
+  # bundled a 0.1.5-alpha.2 kernel beside rc-typed code with CI fully green.
+  # DSH_APP_CHANNEL stays available as an explicit cross-line override.
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
@@ -61,9 +60,16 @@ jobs:
       dsh_version: ${{ steps.resolve.outputs.dsh_version }}
       skip_runtime: ${{ steps.resolve.outputs.skip_runtime }}
     steps:
+      # kernel-line.mjs reads the followed kernel line straight out of the
+      # tree's package.json, so this job needs the checkout and its deps.
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Resolve kernel version and check existing artifacts
         id: resolve
@@ -71,30 +77,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DSH_VERSION_INPUT: ${{ inputs.dsh_version || '' }}
         run: |
+          # The followed line, its dist-tag and the tree's suite version all
+          # come from package.json via kernel-line.mjs. An explicitly pinned
+          # version is asserted against that same line, so a pin that would
+          # bundle a kernel the code was not built against fails here instead
+          # of shipping a silently mismatched installer.
+          LINE="$(node scripts/kernel-line.mjs --json)"
+          SUITE_VERSION="$(printf '%s' "$LINE" | jq -r .suiteVersion)"
+          echo "followed line: $LINE" >&2
           if [ -n "$DSH_VERSION_INPUT" ]; then
-            echo "dsh_version=$DSH_VERSION_INPUT" >> "$GITHUB_OUTPUT"
-            echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Same channel mapping as scripts/build-runtime.mjs: alpha→alpha
-          # tag, beta→next, else latest.
-          CHANNEL="${DSH_APP_CHANNEL:-stable}"
-          case "$CHANNEL" in
-            alpha) TAG_NAME="alpha" ;;
-            beta) TAG_NAME="next" ;;
-            *) TAG_NAME="latest" ;;
-          esac
-          DSH_VERSION="$(TAG_NAME="$TAG_NAME" node -e "
-            fetch('https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags', { signal: AbortSignal.timeout(15000) })
-              .then((r) => r.json())
-              .then((t) => console.log(t[process.env.TAG_NAME] ?? t.latest))
-              .catch(() => process.exit(1))
-          ")"
-          if [ -z "$DSH_VERSION" ]; then
-            echo "dist-tag resolution failed; building instead of skipping" >&2
-            echo "dsh_version=" >> "$GITHUB_OUTPUT"
-            echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            DSH_VERSION="$(node scripts/kernel-line.mjs --assert "$DSH_VERSION_INPUT")"
+          else
+            DSH_VERSION="$(node scripts/kernel-line.mjs --resolve)"
           fi
           echo "dsh_version=$DSH_VERSION" >> "$GITHUB_OUTPUT"
           # All 6 cells × (tgz + sha512 + per-cell manifest) must be present;
@@ -114,7 +108,26 @@ jobs:
               fi
             done
           done
-          echo "$TAG already complete; skipping runtime matrix" >&2
+          # Complete is not the same as current: a runtime published from an
+          # earlier suite is still complete, and reusing it would bundle stale
+          # plugins into the installer. Compare the suite version baked into
+          # the published manifest against this tree's — a suite change always
+          # rebuilds, and an unreadable manifest rebuilds too rather than
+          # trusting an unknown.
+          probe="$(mktemp -d)"
+          if gh release download "$TAG" -D "$probe" -p "manifest-win32-x64.json" >/dev/null 2>&1; then
+            published="$(node -e "try{console.log(require('$probe/manifest-win32-x64.json').suiteVersion ?? '')}catch{console.log('')}")"
+            if [ "$published" != "$SUITE_VERSION" ]; then
+              echo "$TAG carries suite '$published' but this tree has '$SUITE_VERSION'; building" >&2
+              echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            echo "could not read $TAG's manifest; building to be safe" >&2
+            echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$TAG already complete for suite $SUITE_VERSION; skipping runtime matrix" >&2
           echo "skip_runtime=true" >> "$GITHUB_OUTPUT"
 
   runtime:
