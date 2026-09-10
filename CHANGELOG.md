@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.10.0] - 2026-09-10
+
+### 中文
+- 记忆插件：后台提炼改走直接模型调用——此前每个静默窗口起一个只读子代理（完整会话生命周期，token 开销大）；现默认一次 `ctx.llm.stream` 直调加宿主侧 JSON 解析，同样的提炼质量、约一个数量级的 token 消耗；保留子代理通道为可配置回退（`distillBackend`）
+- 记忆插件：修复提炼/策展合并时条目内容带 `- [分类] 日期` 前缀导致落盘双前缀的问题——宿主侧强制剥离，提示词明确禁止，并一次性清洗存量坏数据
+- 记忆插件：后台 LLM 消耗可观测——每次提炼/策展调用记 tokens/耗时/状态到 `llm-audit.json`（新增 `/llm-audit` 路由），设置页「最近提炼」显示通道与 token 消耗
+- 模型高级设置页：provider 支持自定义请求头——每个 provider 可配多组 HTTP 请求头（如 OpenCode Go 要求的 `x-opencode-session`），与适配器解析规则一致校验，冲突时提示重载
+
+### English
+- Memory plugin: background distill now calls the model directly — each quiet window previously spawned a read-only subagent (full session lifecycle, heavy token cost); now a single `ctx.llm.stream` call plus host-side JSON parsing delivers the same quality at roughly an order of magnitude fewer tokens; the subagent channel stays as a configurable fallback (`distillBackend`)
+- Memory plugin: fixed distill/curate merges persisting double-prefixed lines (`- [category] date` echoed into content) — the host strips the prefix, the prompt bans it, and legacy bad rows are repaired once on boot
+- Memory plugin: background LLM cost is now observable — every distill/curate call logs tokens/duration/status to `llm-audit.json` (new `/llm-audit` route), and the settings "recent distills" list shows the channel and token spend
+- Advanced Models page: per-provider custom request headers — each provider route accepts HTTP header pairs (e.g. the `x-opencode-session` OpenCode Go requires), validated against the same rules as the adapter resolver, with reload prompting on conflict
+
 ## [v0.9.9] - 2026-09-09
 
 ### 中文
