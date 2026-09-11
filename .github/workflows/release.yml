@@ -206,6 +206,9 @@ jobs:
       # workflow_dispatch can publish artifacts for a dsh version without
       # cutting a shell tag. The version comes from build-runtime's output
       # (dist-tag resolution when DSH_VERSION is empty).
+      # The release MUST be flagged --prerelease: otherwise GitHub's
+      # /releases/latest alias resolves to the newest runtime tag (it has no
+      # latest.yml) and the shell's app-update check 404s (Sep 2026 incident).
       - name: Attach runtime to release
         shell: bash
         env:
@@ -216,7 +219,7 @@ jobs:
           # Six cells race to create the tag; a 422 already_exists from a
           # losing create is harmless (upload --clobber below is idempotent),
           # so swallow create failures and only let the upload fail loudly.
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" || true
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --prerelease || true
           # manifest.json carries platform/arch: name it per matrix cell so the
           # parallel cells never clobber the same asset name (a --clobber race
           # previously 404'd on a concurrently-deleted asset) nor leave the
