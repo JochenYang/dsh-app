@@ -385,6 +385,11 @@ for a dsh version without cutting a shell release):
   `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + per-cell `manifest.json`
   to the dedicated **`runtime-<dshVersion>`** release (created **published**
   if absent — `GitHubArtifactResolver` resolves exactly this tag shape).
+  The release MUST stay flagged **prerelease**: GitHub's `/releases/latest`
+  alias resolves to the newest non-draft, non-prerelease release, so a fresh
+  runtime tag would hijack it (it carries no `latest.yml`) and break the
+  shell app-update check with a metadata 404 — exactly what happened when
+  `runtime-0.1.5-rc.2` outranked `v0.11.4`.
 - **app** (tag pushes only): builds + packages the shell per OS with
   `electron-builder` and `--publish always`; macOS notarization via
   `--config.mac.notarize=true` when Apple signing secrets are present.
