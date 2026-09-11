@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { extractJson, resolveLlm, streamJson } from '../src/llm-direct.ts'
 import { MemoryRoot, repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
-import { buildDistillPrompt } from '../src/distiller.ts'
+import { buildDistillPrompt, resolveScope } from '../src/distiller.ts'
 import { buildCuratePrompt } from '../src/curator.ts'
 
 test('extractJson parses bare objects', () => {
@@ -37,6 +37,42 @@ test('extractJson rejects non-JSON', () => {
   assert.equal(extractJson('no json here').ok, false)
   assert.equal(extractJson('').ok, false)
   assert.equal(extractJson('{"unclosed": true').ok, false)
+})
+
+test('extractJson falls through to a later fence when the first quotes data', () => {
+  // The curator asks for verbatim "- [category] date" lines, so an answer that
+  // quotes the file before answering opens with brackets that are not JSON.
+  const answer = [
+    '先贴一下待合并的原文行：',
+    '```text',
+    '- [fact] 2026-09-07 ffmpeg 探针必须先解析 stderr',
+    '- [lesson] 2026-09-06 镜像源失败要重试',
+    '```',
+    '```json',
+    '{"edits": [{"op": "delete", "lines": ["- [lesson] 2026-09-06 镜像源失败要重试"]}]}',
+    '```',
+  ].join('\n')
+  const result = extractJson(answer)
+  assert.equal(result.ok, true)
+  assert.deepEqual((result as { ok: true, value: unknown }).value, {
+    edits: [{ op: 'delete', lines: ['- [lesson] 2026-09-06 镜像源失败要重试'] }],
+  })
+})
+
+test('extractJson walks past a balanced non-JSON fragment before the object', () => {
+  // Unfenced shape: the bracketed note balances, so the first candidate is
+  // "brackets match but this is not JSON" — the object comes after it.
+  const result = extractJson('[note: 以下是策展结果]\n{"edits": []}')
+  assert.equal(result.ok, true)
+  assert.deepEqual((result as { ok: true, value: unknown }).value, { edits: [] })
+})
+
+test('extractJson tries more candidates without loosening what counts as JSON', () => {
+  // Trying every candidate must not become a repair pass: a malformed object
+  // after the junk stays malformed (no eval, no bare keys, no trailing comma).
+  assert.equal(extractJson('see [x] then {"a": 1,}').ok, false)
+  assert.equal(extractJson('see [x] then {a: 1}').ok, false)
+  assert.equal(extractJson('see [x] then [1, 2,]').ok, false)
 })
 
 test('stripEntryPrefix removes the stamped prefix', () => {
@@ -111,6 +147,23 @@ test('buildDistillPrompt bans work logs and repo restatements', () => {
   assert.match(system, /commit ids/i)
   assert.match(system, /different conversation/i)
   assert.match(system, /restating project code or docs/i)
+})
+
+test('buildDistillPrompt offers no scope field to fill in', () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-prompt-')))
+  const { system } = buildDistillPrompt('[user] hello', 'D:/proj', root)
+  // The host derives scope from the session's workspace (resolveScope), so the
+  // prompt must not ask the model to guess it. A previous revision both asked
+  // AND ignored the answer — the model burned tokens on a dead field, and a
+  // test pinned that stale rule in place.
+  assert.doesNotMatch(system, /"scope"/)
+  assert.match(system, /the host decides, not you/i)
+  assert.match(system, /every entry in that workspace's project memory/)
+  // No-workspace sessions must be told where their entries land too, without
+  // being asked to tag them.
+  const none = buildDistillPrompt('[user] hello', undefined, root)
+  assert.match(none.user, /GLOBAL memory file/)
+  assert.doesNotMatch(none.user, /propose scope/)
 })
 
 test('buildDistillPrompt splits system/user and bans prefixes', () => {
@@ -206,4 +259,50 @@ test('streamJson surfaces abort', async () => {
     { type: 'finish', reason: { kind: 'aborted', failure: { message: 'x' } } },
   ]), SPEC)
   assert.equal(result.status, 'aborted')
+})
+
+test('streamJson times out a hung stream and leaves the serial queue usable', async () => {
+  let opened = 0
+  const hungLlm = {
+    async *stream(): AsyncIterable<Record<string, unknown>> {
+      opened += 1
+      // A provider that opened the stream and never closed it: no chunk, no
+      // finish, no throw — the promise this call returns never settles.
+      await new Promise<never>(() => { /* never settles */ })
+    },
+  }
+  const startedAt = Date.now()
+  const timedOut = await streamJson(hungLlm as never, { ...SPEC, timeoutMs: 120 })
+  assert.equal(timedOut.status, 'error')
+  assert.match(timedOut.error ?? '', /timeout/)
+  assert.ok(Date.now() - startedAt >= 60, 'the deadline was actually waited for')
+  assert.equal(opened, 1)
+  // The queue is free again: the hung call settled as a failure instead of
+  // blocking every later distill/curate behind a promise that never settles.
+  const after = await streamJson(stubLlm([
+    { type: 'text-delta', index: 0, text: '{"entries": []}' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]), SPEC)
+  assert.equal(after.status, 'ok')
+  assert.deepEqual(after.parsed, { entries: [] })
+})
+
+test('streamJson keeps a caller abort distinct from our timeout', async () => {
+  const controller = new AbortController()
+  const aborting = {
+    async *stream(): AsyncIterable<Record<string, unknown>> {
+      controller.abort()
+      throw Object.assign(new Error('aborted by caller'), { name: 'AbortError' })
+    },
+  }
+  const result = await streamJson(aborting as never, { ...SPEC, signal: controller.signal, timeoutMs: 5_000 })
+  assert.equal(result.status, 'aborted')
+  assert.equal(result.error, 'aborted')
+})
+
+test('resolveScope: only a session without a workspace reaches the global file', () => {
+  // The host decides the address from the one fact it has; the model no longer
+  // gets a say (see the prompt test above).
+  assert.equal(resolveScope('D:/proj'), 'project')
+  assert.equal(resolveScope(undefined), 'global')
 })

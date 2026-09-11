@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-memory",
   "description": "DSH APP cross-session memory: dual-face plugin (host half exposes memory_save/memory_recall/memory_forget LLM tools, system-prompt injection of the persisted memory files, and a background distiller that reviews quiet sessions through a direct LLM call; client half is a settings section with toggles, stats, and clear).",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -67,6 +67,7 @@
     "@deepseek-ai/dsh-util-values": "0.1.5-rc.1",
     "@deepseek-ai/schemastery": "3.18.2",
     "@types/react": "18.3.1",
+    "@types/react-dom": "^18.3.1",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   },

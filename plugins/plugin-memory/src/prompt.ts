@@ -102,10 +102,19 @@ interface MemorySelection {
  * timeline stays readable. What is dropped under the budget stays reachable
  * via memory_recall.
  */
+/** Shortest clipped remainder worth injecting. Below this a pin would be a
+ *  fragment carrying no information, so it is skipped rather than emitted. */
+const MIN_PIN_CLIP_CHARS = 40
+
+/** Fit one line into `room` characters, marking the cut with an ellipsis. */
+function clipToBudget(line: string, room: number): string {
+  if (line.length <= room) return line
+  return room <= 1 ? line.slice(0, Math.max(0, room)) : `${line.slice(0, room - 1)}…`
+}
+
 export function selectBalanced(text: string, budget: number, pinned: Set<string>): MemorySelection {
   const entries = parseEntries(text)
   if (entries.length === 0) return { selected: [], truncated: false }
-
   const byCategory = new Map<string, MemoryEntry[]>()
   const pinnedEntries: MemoryEntry[] = []
   const handNotes: MemoryEntry[] = []
@@ -128,25 +137,54 @@ export function selectBalanced(text: string, budget: number, pinned: Set<string>
     priority.push(...list.slice(Math.max(0, list.length - quota)))
   }
 
-  const picked: MemoryEntry[] = []
+  // Pins outrank hand notes, and both outrank the category quotas; within each
+  // group every entry has to reach the prompt. Reserve room for the entries
+  // still ahead IN THE SAME GROUP, so a long line cannot swallow the budget and
+  // starve its peers — the list runs oldest-first, so a plain break used to drop
+  // the newest pins first. Across groups nothing is reserved: a pin that needs
+  // the room takes it, which is what ranking first means.
+  const pinnedSet = new Set(pinnedEntries)
+  const picked: Array<{ entry: MemoryEntry, text: string }> = []
   let used = 0
+  let pinsSeen = 0
+  let handsSeen = 0
   for (const entry of priority) {
+    const isPinned = pinnedSet.has(entry)
+    const isHandNote = !isPinned && entry.category === undefined
+    if (isPinned) pinsSeen += 1
+    if (isHandNote) handsSeen += 1
+    const reserve = isPinned
+      ? Math.max(0, pinnedEntries.length - pinsSeen) * MIN_PIN_CLIP_CHARS
+      : isHandNote
+        ? Math.max(0, handNotes.length - handsSeen) * MIN_PIN_CLIP_CHARS
+        : 0
     const width = entry.raw.length + 1
-    if (used + width > budget) break
-    picked.push(entry)
-    used += width
+    if (used + width <= budget - reserve) {
+      picked.push({ entry, text: entry.raw })
+      used += width
+      continue
+    }
+    // An ordinary entry that no longer fits means the budget is spent: by the
+    // priority order above, nothing behind it outranks it.
+    if (!isPinned && !isHandNote) break
+    const room = budget - used - 1 - reserve
+    if (room < MIN_PIN_CLIP_CHARS) continue
+    picked.push({ entry, text: clipToBudget(entry.raw, room) })
+    used += room + 1
   }
   if (picked.length === 0) {
-    // The pin contract never blanks: even when the very first line exceeds
-    // the whole budget, the FIRST pinned entry is still injected whole.
+    // Nothing fit at all. The contract still holds as far as the budget allows:
+    // inject the first pin CLIPPED to the budget rather than whole — a
+    // hand-written line can exceed any budget, and a promise that blows up the
+    // context is worse than one that ellipsizes.
     const fallback = pinnedEntries[0]
-    if (fallback !== undefined) return { selected: [fallback.raw], truncated: true }
+    if (fallback !== undefined) return { selected: [clipToBudget(fallback.raw, budget)], truncated: true }
     return { selected: [], truncated: true }
   }
 
   const order = new Map(entries.map((entry, index) => [entry, index]))
-  picked.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
-  return { selected: picked.map(entry => entry.raw), truncated: picked.length < entries.length }
+  picked.sort((a, b) => (order.get(a.entry) ?? 0) - (order.get(b.entry) ?? 0))
+  return { selected: picked.map(pick => pick.text), truncated: picked.length < entries.length }
 }
 
 /**

@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { ConfirmDialog } from './confirm-dialog.tsx'
 import { ROUTE_PREFIX, type MemoryDistillActivity, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
 
 function fmtBytes(n: number): string {
@@ -57,12 +58,34 @@ const ACTIVITY_PREVIEW = 5
 /** Global entry rows shown before the "show all" fold. */
 const ENTRIES_PREVIEW = 5
 
-/** What the confirm banner is about to clear. */
-interface ConfirmState {
-  scope: 'global' | 'project'
-  slug: string
-  title: string
-  entries: number
+/** Longest row excerpt a single-entry confirm quotes back; rows can be paragraphs. */
+const FORGET_EXCERPT_CHARS = 120
+
+/** What the confirm dialog is armed to destroy: a whole store, or a single row. */
+type ConfirmState =
+  | { kind: 'clear', scope: 'global' | 'project', slug: string, title: string, entries: number }
+  | { kind: 'forget', scope: 'global' | 'project', slug: string, text: string, pinned: boolean }
+
+/** Quote at most {@link FORGET_EXCERPT_CHARS} of a row back at the user. */
+function excerpt(text: string): string {
+  return text.length <= FORGET_EXCERPT_CHARS ? text : `${text.slice(0, FORGET_EXCERPT_CHARS)}…`
+}
+
+/** Dialog heading for the armed action. */
+function confirmTitle(state: ConfirmState | null): string {
+  if (state === null) return ''
+  if (state.kind === 'clear') return state.scope === 'global' ? '清空全局记忆' : '删除项目记忆'
+  return state.pinned ? '删除已固定的条目' : '删除该条记忆'
+}
+
+/** Dialog body for the armed action. */
+function confirmMessage(state: ConfirmState | null): string {
+  if (state === null) return ''
+  if (state.kind === 'clear') {
+    return `即将删除${state.scope === 'global' ? '全局记忆' : `项目「${state.title}」的记忆`}（${String(state.entries)} 条），删除后不可恢复。`
+  }
+  const where = state.scope === 'global' ? '全局记忆' : '项目记忆'
+  return `即将从${where}中删除这一条：\n「${excerpt(state.text)}」\n删除后不可恢复。`
 }
 
 export function MemorySection(): ReactNode {
@@ -127,7 +150,7 @@ export function MemorySection(): ReactNode {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ distill: next }),
       })
-      setNotice(next ? '已开启后台提炼：会话静默 1 分钟后自动补记' : '已关闭后台提炼：仅保留对话中的即时记录')
+      setNotice(next ? '已开启后台提炼：会话静默 1 分钟后，新增内容足够多时补记项目记忆' : '已关闭后台提炼：仅保留对话中的即时记录')
       await load()
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
@@ -159,26 +182,16 @@ export function MemorySection(): ReactNode {
     }
   }, [load, loadProjectRows])
 
-  const onForget = useCallback(async (scope: 'global' | 'project', slug: string, text: string) => {
-    if (inFlight.current) return
-    inFlight.current = true
-    setBusy(true)
-    setNotice(undefined)
-    try {
-      const result = await fetchJson<{ forgotten: number }>(`${ROUTE_PREFIX}/forget`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ match: text, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
-      })
-      setNotice(result.forgotten > 0 ? `已删除 ${String(result.forgotten)} 条记忆` : '没有找到匹配的条目')
-      if (scope === 'project') { await loadProjectRows(slug); await load() }
-      else await load()
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
-    } finally {
-      setBusy(false)
-      inFlight.current = false
-    }
+  /** Drop one row by exact content. Every caller goes through the confirm dialog. */
+  const runForget = useCallback(async (scope: 'global' | 'project', slug: string, text: string) => {
+    const result = await fetchJson<{ forgotten: number }>(`${ROUTE_PREFIX}/forget`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ match: text, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
+    })
+    setNotice(result.forgotten > 0 ? `已删除 ${String(result.forgotten)} 条记忆` : '没有找到匹配的条目')
+    if (scope === 'project') { await loadProjectRows(slug); await load() }
+    else await load()
   }, [load, loadProjectRows])
 
   const onToggleProject = useCallback(async (project: MemoryProjectSummary) => {
@@ -197,51 +210,57 @@ export function MemorySection(): ReactNode {
     }
   }, [openSlug, loadProjectRows])
 
-  const onClear = useCallback(async () => {
-    if (confirming === null || inFlight.current) return
+  /** Run whatever the confirm dialog was armed for: clear a store, or drop one row. */
+  const onConfirm = useCallback(async () => {
+    const target = confirming
+    if (target === null || inFlight.current) return
     inFlight.current = true
     setBusy(true)
-    const target = confirming
     setConfirming(null)
     setNotice(undefined)
     try {
-      await fetchJson(`${ROUTE_PREFIX}/clear`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(target.scope === 'global' ? { scope: 'global' } : { scope: 'project', slug: target.slug }),
-      })
-      setNotice(target.scope === 'global' ? '已清空全局记忆' : `已删除项目「${target.title}」的记忆`)
-      await load()
+      if (target.kind === 'clear') {
+        await fetchJson(`${ROUTE_PREFIX}/clear`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(target.scope === 'global' ? { scope: 'global' } : { scope: 'project', slug: target.slug }),
+        })
+        setNotice(target.scope === 'global' ? '已清空全局记忆' : `已删除项目「${target.title}」的记忆`)
+        await load()
+      } else {
+        await runForget(target.scope, target.slug, target.text)
+      }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
       setBusy(false)
       inFlight.current = false
     }
-  }, [confirming, load])
+  }, [confirming, load, runForget])
 
   return (
     <div className="dshm_section">
       <p className="dshm_title">会话记忆</p>
       <p className="dshm_hint">
         模型在对话中主动记录长期有效的信息（跨会话持久保存），每个新会话自动带入。
-        全局记忆（偏好与习惯）对所有项目生效；项目记忆（决策/约定/教训）仅注入该项目的会话，互不串扰。
+        全局记忆（偏好与习惯）对所有项目生效，只能由 AI 主动保存或你手写；项目记忆（决策/约定/教训）仅注入该项目的会话，由后台提炼补记，互不串扰。
         记忆不含密钥等敏感信息；文件为纯文本，可手动编辑。
       </p>
 
       {error !== undefined ? <div className="dshm_banner" role="alert">{error}</div> : null}
       {notice !== undefined ? <div className="dshm_noticeOk">{notice}</div> : null}
-      {confirming !== null
-        ? (
-          <div className="dshm_confirm">
-            <span>即将删除{confirming.scope === 'global' ? '全局记忆' : `项目「${confirming.title}」的记忆`}（{String(confirming.entries)} 条），删除后不可恢复。</span>
-            <span className="dshm_confirmActions">
-              <button type="button" className="dshm_button dshm_buttonDanger" disabled={busy} onClick={() => { void onClear() }}>确认删除</button>
-              <button type="button" className="dshm_button" disabled={busy} onClick={() => { setConfirming(null) }}>取消</button>
-            </span>
-          </div>
-        )
-        : null}
+      {/* A destructive confirmation is a body-portal modal, not a banner at the
+          top of the section: the button that armed it sits far down the list,
+          so a top-anchored banner would make the user hunt for it. */}
+      <ConfirmDialog
+        open={confirming !== null}
+        title={confirmTitle(confirming)}
+        message={confirmMessage(confirming)}
+        confirmLabel="删除"
+        busy={busy}
+        onConfirm={() => { void onConfirm() }}
+        onClose={() => { setConfirming(null) }}
+      />
 
       <div className="dshm_toggleRow">
         <span className="dshm_toggleLabel">启用会话记忆（{status === null ? '…' : status.enabled ? '已启用' : '已禁用'}）</span>
@@ -259,7 +278,7 @@ export function MemorySection(): ReactNode {
       <div className="dshm_toggleRow">
         <span className="dshm_toggleLabel">
           后台自动提炼（{status === null ? '…' : status.distill ? '已开启' : '已关闭'}）
-          <span className="dshm_toggleHint">会话静默 1 分钟后，后台自动补记遗漏的持久信息（直接调用模型，低消耗）</span>
+          <span className="dshm_toggleHint">会话静默 1 分钟后，且新增内容足够多时，后台补记遗漏的项目记忆（直接调用模型，低消耗）</span>
         </span>
         <button
           type="button"
@@ -295,7 +314,7 @@ export function MemorySection(): ReactNode {
         ? (
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">最近提炼</div>
-            <div className="dshm_hint">后台提炼在会话静默 1 分钟后自动运行（直接调用模型，低消耗），以下为最近记录（时间 · 来源会话 · 保存条数 · 通道）。</div>
+            <div className="dshm_hint">后台提炼在会话静默 1 分钟后运行，且需累计足够新内容；它只写项目记忆（直接调用模型，低消耗）。以下为最近记录（时间 · 来源会话 · 保存条数 · 通道）。</div>
             {status.activity.slice(0, activityExpanded ? status.activity.length : ACTIVITY_PREVIEW).map((item: MemoryDistillActivity) => (
               <div key={`${item.at}-${item.session}`} className="dshm_activityRow">
                 <span className="dshm_activityTime">{fmtTime(item.at)}</span>
@@ -339,7 +358,7 @@ export function MemorySection(): ReactNode {
                   className="dshm_button dshm_buttonDanger"
                   aria-label="删除该条目"
                   disabled={busy}
-                  onClick={() => { void onForget('global', '', entry.text) }}
+                  onClick={() => { setConfirming({ kind: 'forget', scope: 'global', slug: '', text: entry.text, pinned: entry.pinned }) }}
                 >删除</button>
               </div>
             ))}
@@ -364,7 +383,7 @@ export function MemorySection(): ReactNode {
           type="button"
           className="dshm_button dshm_buttonDanger"
           disabled={busy || status === null || status.entries === 0}
-          onClick={() => { setConfirming({ scope: 'global', slug: '', title: '全局', entries: status?.entries ?? 0 }) }}
+          onClick={() => { setConfirming({ kind: 'clear', scope: 'global', slug: '', title: '全局', entries: status?.entries ?? 0 }) }}
         >清空全局记忆</button>
       </div>
 
@@ -372,7 +391,7 @@ export function MemorySection(): ReactNode {
         ? (
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">项目记忆</div>
-            <div className="dshm_hint">点击“条目”展开该项目的记忆明细，可逐条固定或删除；“删除”移除整个项目的记忆目录（需确认）。</div>
+            <div className="dshm_hint">点击“条目”展开该项目的记忆明细，可逐条固定或删除；“删除”移除整个项目的记忆目录。删除条目与删除项目都需确认。</div>
             {status.projects.map(project => (
               <div key={project.slug} className="dshm_projectBlock">
                 <div className="dshm_projectRow">
@@ -389,7 +408,7 @@ export function MemorySection(): ReactNode {
                     type="button"
                     className="dshm_button dshm_buttonDanger"
                     disabled={busy}
-                    onClick={() => { setConfirming({ scope: 'project', slug: project.slug, title: projectTitle(project), entries: project.entries }) }}
+                    onClick={() => { setConfirming({ kind: 'clear', scope: 'project', slug: project.slug, title: projectTitle(project), entries: project.entries }) }}
                   >删除</button>
                 </div>
                 {openSlug === project.slug
@@ -414,7 +433,7 @@ export function MemorySection(): ReactNode {
                               className="dshm_button dshm_buttonDanger"
                               aria-label="删除该条目"
                               disabled={busy}
-                              onClick={() => { void onForget('project', project.slug, entry.text) }}
+                              onClick={() => { setConfirming({ kind: 'forget', scope: 'project', slug: project.slug, text: entry.text, pinned: entry.pinned }) }}
                             >删除</button>
                           </div>
                         ))

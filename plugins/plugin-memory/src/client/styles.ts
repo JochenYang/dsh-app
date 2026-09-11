@@ -166,23 +166,50 @@ const cssText = `
   border-color: var(--dsw-alias-state-error-secondary);
   color: var(--dsw-alias-state-error-primary);
 }
-.dshm_confirm {
+/* Confirmation modal: body-portal mask + centered card. */
+.dshm_mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 8px 12px;
-  border: 1px solid var(--dsw-alias-state-error-secondary);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-1);
-  color: var(--dsw-alias-state-error-primary);
-  font-size: 13px;
-  line-height: 20px;
+  justify-content: center;
+  background: rgba(0, 0, 0, .35);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
-.dshm_confirmActions {
-  display: inline-flex;
+.dshm_dialogCard {
+  position: relative;
+  width: 340px;
+  max-width: calc(100vw - 48px);
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(15, 23, 42, 0.06));
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .28);
+}
+.dshm_dialogTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #0f172a);
+  margin-bottom: 6px;
+}
+.dshm_dialogMessage {
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary, #475569);
+  line-height: 1.6;
+  /* Single-entry confirms quote the row on its own lines; a long unbroken run
+     (URL, hash) must still wrap, and a paragraph-long row must not push the
+     buttons off screen. */
+  white-space: pre-line;
+  word-break: break-word;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.dshm_dialogActions {
+  display: flex;
   gap: 8px;
-  margin-left: auto;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 .dshm_projects {
   display: flex;

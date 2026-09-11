@@ -108,7 +108,7 @@ function fail(res: ServerResponse, status: number, code: string, message: string
   sendJson(res, status, { ok: false, error: { code, message } })
 }
 
-/** Bounded JSON body read (same discipline as the swarm routes: drain, never
+/** Bounded JSON body read (same discipline as the other route surfaces: drain, never
  * destroy, so the 413 answer actually reaches the client). */
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -118,7 +118,7 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
       size += chunk.length
       if (size > 8_192) {
         // Drain instead of destroy: the socket stays alive so the 413 answer
-        // actually reaches the client (same as the swarm routes).
+        // actually reaches the client.
         reject(new Error('payload-too-large'))
         req.resume()
         return

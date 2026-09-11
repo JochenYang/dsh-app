@@ -8,6 +8,30 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.5] - 2026-09-11
+
+### 中文
+- 会话记忆：后台提炼的空转与漏跑一起修——主 agent 在本轮已主动写过记忆时直接让位，新增内容不足 4000 字符时不再调用模型（最近 16 次调用里 7 次返回 0 条，空耗 2.4 万 tokens）；静默窗口内重复触发改为重排定时器，不再吞掉那一段内容
+- 会话记忆：设置页的单条删除也要确认了，弹窗把该条原文引回来（超长截断），标题区分「删除该条记忆」与「删除已固定的条目」——此前只有"清空全局"和"删项目"有确认，逐条删除点一下就没了，而全局列表里放着的正是你亲手固定过的条目
+- 会话记忆：修复注入预算下固定条目被整条丢弃——超预算的 pin 现在截断注入，一个长 pin 不再独吞预算、把它后面的 pin 全饿死
+- 会话记忆：写入范围不再由模型决定——提炼 prompt 与 JSON 契约都不再提供 scope 字段，只按会话工作目录判定，唯一能写项目记忆的后台通道再也不会被内容诱导去写全局文件
+- 会话记忆：提炼读到的既有记忆封顶 12000 字符（取最新），超长文件不再把 prompt 撑爆
+- 会话记忆：策展（curator）不得再动固定的条目——引用 pinned 行的编辑一律拒绝
+- 会话记忆：后台直连调用加 180 秒超时（与调用方取消区分开）；模型把引用的原文排在结论 JSON 前面时也能正确取出结论
+- 会话记忆：精确匹配改为 Unicode 感知——纯假名、西里尔文、带音标拉丁文的条目此前会被规范化成空串，导致删除与去重误伤
+- 会话记忆：设置页文案澄清全局与项目各自的写入来源（全局只能由 AI 主动保存或手写，项目由后台提炼补记）
+
+### English
+- Memory: the background distiller's wasted runs and missed runs are fixed together — it stands down when the agent already saved this turn, and it never calls the model when a session's new content is under 4000 characters (7 of the last 16 runs returned 0 entries, ~24k tokens burnt); a trigger landing inside the quiet window is rescheduled instead of swallowed, so that content no longer waits for a later window
+- Memory: single-row deletes in the settings page confirm too now, through the same dialog that quotes the row back (truncated when long), with the heading separating "delete this row" from "delete a pinned row" — previously only clearing the global file and deleting a whole project asked, while one click dropped a row for good, and the global list is exactly where the rows you pinned by hand live
+- Memory: fixed pinned rows being dropped outright once the injection budget ran out — an over-budget pin is clipped into the budget instead, so one long pin can no longer swallow the budget and starve the pins behind it
+- Memory: the write scope is no longer the model's choice — neither the distill prompt nor its JSON contract offers a scope field any more; it follows the session's working directory, so the one background channel that writes project memory can no longer be talked into writing the global file
+- Memory: the existing memory a distill reads is capped at 12000 characters (newest first), so an oversized file can no longer blow up the prompt
+- Memory: the curator may no longer touch a pinned row — any edit citing one is rejected
+- Memory: the background direct call now times out at 180s (kept distinct from a caller abort), and a conclusion still parses when the model puts a quoted excerpt ahead of its JSON
+- Memory: exact matching is Unicode-aware — kana-only, Cyrillic and accented-Latin rows used to normalize to an empty string, which made deletion and dedupe hit the wrong entries
+- Memory: settings copy spells out where each store is written from (the global file only via the agent's own saves or by hand, project files via the background distill)
+
 ## [v0.11.4] - 2026-09-10
 
 ### 中文

@@ -60,9 +60,11 @@ export function registerMemoryTools(
     description:
       'Append one entry to the persistent cross-session memory. Scope "project" (default) saves to the '
       + 'current workspace\'s memory — decisions, conventions, lessons seen only by sessions of this '
-      + 'project; scope "global" saves a cross-project user preference or habit. One concise line, in '
-      + 'the user\'s language. NEVER save API keys, tokens, passwords, or credentials. These files are '
-      + 're-injected into future sessions; keep entries lean.',
+      + 'project. Scope "global" saves a cross-project user preference or habit, and is the ONLY path '
+      + 'by which the global file grows from work like this: the background pass writes project memory '
+      + 'only, so a genuinely cross-workspace fact has to be saved here or it will not be remembered. '
+      + 'One concise line, in the user\'s language. NEVER save API keys, tokens, passwords, or '
+      + 'credentials. These files are re-injected into future sessions; keep entries lean.',
     parameters: {
       category: {
         type: 'string',
@@ -140,6 +142,10 @@ export function registerMemoryTools(
       // `ctx.get` (not `ctx.agents`): the tools mount without declaring the
       // agents service, and property access would throw on an undeclared key.
       const agent = exec.agent
+      // Tell the background pass this session curated its own memory: it then
+      // stands down on the same delta rather than inferring a second time over
+      // material the agent has already judged worth keeping.
+      if (agent !== undefined) root.recordDirectSave(agent.id)
       const agents = ctx.get('agents') as { get(id: SessionId): unknown } | undefined
       const parent = agent === undefined ? undefined : agents?.get(agent.id)
       if (parent !== undefined && agent !== undefined) {

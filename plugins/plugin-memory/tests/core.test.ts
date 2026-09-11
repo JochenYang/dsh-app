@@ -7,6 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +22,7 @@ import {
 } from '../src/memory-store.ts'
 import { selectBalanced } from '../src/prompt.ts'
 import { MemoryCurator } from '../src/curator.ts'
+import { ROUTE_PREFIX, registerMemoryRoutes } from '../src/routes.ts'
 import { existingNeedles } from '../src/distiller.ts'
 
 const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), 'dshm-test-')))
@@ -37,6 +39,13 @@ test('normalizeForMatch: lowercase, keeps letters/digits/CJK, drops the rest', (
   assert.equal(normalizeForMatch('用 pnpm 跑 typecheck'), '用pnpm跑typecheck')
   assert.equal(normalizeForMatch('a-b_c.d'), 'abcd')
   assert.equal(normalizeForMatch(''), '')
+})
+
+test('normalizeForMatch: kana, Cyrillic and accented Latin survive too (no script is erased)', () => {
+  assert.equal(normalizeForMatch('Резервное копирование'), 'резервноекопирование')
+  assert.equal(normalizeForMatch('ありがとう ございます'), 'ありがとうございます')
+  assert.equal(normalizeForMatch('café  ÀÉÎ'), 'caféàéî')
+  assert.equal(normalizeForMatch('한국어 메모'), '한국어메모')
 })
 
 // --- parseEntries ------------------------------------------------------------
@@ -82,11 +91,31 @@ test('selectBalanced: pin ranks first and survives a budget-hogging hand note', 
   assert.ok(sel.selected.some(line => line.includes('pinned-fact')), 'pin injected')
 })
 
-test('selectBalanced: a single over-budget line still injects the first pinned entry whole', () => {
+test('selectBalanced: an over-budget pin is clipped into the budget, never dropped or injected whole', () => {
   const text = '- [preference] 2026-09-01 pinned-fact'
-  const sel = selectBalanced(text, 10, new Set([normalizeForMatch('pinned-fact')]))
-  assert.deepEqual(sel.selected, ['- [preference] 2026-09-01 pinned-fact'], 'first pin beats the budget')
+  const budget = 10
+  const sel = selectBalanced(text, budget, new Set([normalizeForMatch('pinned-fact')]))
+  // A pin MUST reach the prompt — that is the contract — but "whole" used to
+  // mean an over-long hand-written line could grow every new session's system
+  // prompt without bound. It is clipped to the budget with a marked cut.
+  assert.equal(sel.selected.length, 1, 'the pin still reaches the prompt')
+  assert.ok(sel.selected[0]!.length <= budget, 'the injected line fits the budget')
+  assert.match(sel.selected[0]!, /…$/, 'the cut is visible')
   assert.equal(sel.truncated, true)
+})
+
+test('selectBalanced: a pin that does not fit must not evict the pins behind it', () => {
+  // The priority list runs oldest-first, so a plain `break` dropped the NEWEST
+  // pins first — exactly backwards for the entries a user explicitly pinned.
+  const big = `- [preference] 2026-09-01 ${'x'.repeat(200)}`
+  const newest = '- [preference] 2026-09-02 newest-pin'
+  const text = [big, newest].join('\n')
+  const budget = 200
+  const sel = selectBalanced(text, budget, new Set([
+    normalizeForMatch('x'.repeat(200)),
+    normalizeForMatch('newest-pin'),
+  ]))
+  assert.ok(sel.selected.some(line => line.includes('newest-pin')), 'the newest pin survives the older over-long one')
 })
 
 test('selectBalanced: an unpinned over-budget file returns empty (recall hint applies)', () => {
@@ -125,6 +154,24 @@ test('removeContent: exact row delete (settings-page semantics)', () => {
   assert.ok(store.read().includes('用 pnpm 跑 typecheck'), 'the longer row survives')
 })
 
+test('forget: a pure-Cyrillic match sweeps the entry (no empty needle)', () => {
+  const store = tmpStore()
+  store.append('fact', 'Резервное копирование идёт в 3 часа ночи')
+  const { removed, remaining } = store.forget('резервное копирование')
+  assert.equal(removed.length, 1)
+  assert.equal(remaining, 0)
+  assert.equal(store.read(), '')
+})
+
+test('hasContent/addPin: pure-kana text is real content, not an empty needle', () => {
+  const store = tmpStore()
+  store.append('fact', 'ありがとう ございます')
+  assert.equal(store.hasContent('ありがとう ございます'), true)
+  assert.equal(store.hasContent('ありがとう'), false, 'shorter wording is not a duplicate')
+  assert.equal(store.addPin('ありがとう ございます'), true)
+  assert.equal(store.pinnedSet().has(normalizeForMatch('ありがとう ございます')), true)
+})
+
 // --- pin persistence + clear -------------------------------------------------
 
 test('pin: persists in config.json, deduped, removable', () => {
@@ -134,6 +181,42 @@ test('pin: persists in config.json, deduped, removable', () => {
   assert.equal(store.pinnedSet().has(normalizeForMatch('Hello  World!')), true)
   assert.equal(store.removePin('hello world!'), true)
   assert.equal(store.pinnedSet().size, 0)
+})
+
+test('removeContent: the deleted row takes its pin with it, survivors keep theirs', () => {
+  const store = tmpStore()
+  store.append('lesson', '用 pnpm')
+  store.append('lesson', '服务器在东京')
+  store.addPin('用 pnpm')
+  store.addPin('服务器在东京')
+  const { removed } = store.removeContent('用 pnpm')
+  assert.equal(removed.length, 1)
+  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm')), false, 'no dangling pin for the deleted row')
+  assert.equal(store.pinnedSet().has(normalizeForMatch('服务器在东京')), true, 'the surviving row stays pinned')
+})
+
+test('forget: pins follow the swept rows only (substring match, per-row cleanup)', () => {
+  const store = tmpStore()
+  store.append('lesson', '用 pnpm 跑 typecheck')
+  store.append('lesson', '用 pnpm 跑 build')
+  store.addPin('用 pnpm 跑 typecheck')
+  store.addPin('用 pnpm 跑 build')
+  const { removed } = store.forget('typecheck')
+  assert.equal(removed.length, 1)
+  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm 跑 typecheck')), false)
+  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm 跑 build')), true, 'the untouched row stays pinned')
+})
+
+test('a row re-saved after deletion is not auto-pinned by a leftover pin', () => {
+  const store = tmpStore()
+  store.append('lesson', '用 pnpm')
+  store.addPin('用 pnpm')
+  assert.equal(store.removeContent('用 pnpm').removed.length, 1)
+  assert.equal(store.pinnedSet().size, 0, 'the pin went with the row')
+  assert.equal(store.hasContent('用 pnpm'), false, 'nothing left to dedupe against')
+  store.append('lesson', '用 pnpm')
+  // The settings row flag is pinnedSet().has(normalizeForMatch(content)).
+  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm')), false, 'the rewritten row is NOT pinned')
 })
 
 test('clear: drops entries AND pins (full reset)', () => {
@@ -267,6 +350,39 @@ test('curator: oversized merge content rejected', () => {
   assert.equal(store.read(), '- [lesson] 2026-09-02 two\n')
 })
 
+test('curator: an edit citing a pinned line is skipped, the pin stays matched', () => {
+  const store = tmpStore()
+  store.replace([
+    '- [lesson] 2026-09-01 用户喜欢 pnpm',
+    '- [lesson] 2026-09-02 继续用 pnpm',
+    '- [fact] 2026-09-01 服务器在东京',
+  ].join('\n'))
+  store.addPin('用户喜欢 pnpm')
+  const out = curatorApply(store, {
+    edits: [
+      { op: 'merge', lines: ['- [lesson] 2026-09-01 用户喜欢 pnpm', '- [lesson] 2026-09-02 继续用 pnpm'], category: 'lesson', content: '用户坚持用 pnpm' },
+      { op: 'delete', lines: ['- [fact] 2026-09-01 服务器在东京'] },
+    ],
+  })
+  assert.deepEqual(out, { merged: 0, deleted: 1 }, 'the pinned merge is skipped, the unpinned delete lands')
+  assert.equal(store.read(), '- [lesson] 2026-09-01 用户喜欢 pnpm\n- [lesson] 2026-09-02 继续用 pnpm\n')
+  assert.equal(store.pinnedSet().size, 1)
+  const survivors = new Set(parseEntries(store.read()).map(entry => normalizeForMatch(entry.content)))
+  for (const pin of store.pinnedSet()) {
+    assert.ok(survivors.has(pin), 'no pin is left without a matching line')
+  }
+})
+
+test('curator: a delete citing only a pinned line leaves file and pin untouched', () => {
+  const store = tmpStore()
+  store.replace('- [fact] 2026-09-01 服务器在东京\n')
+  store.addPin('服务器在东京')
+  const out = curatorApply(store, { edits: [{ op: 'delete', lines: ['- [fact] 2026-09-01 服务器在东京'] }] })
+  assert.deepEqual(out, { merged: 0, deleted: 0 })
+  assert.equal(store.read(), '- [fact] 2026-09-01 服务器在东京\n')
+  assert.equal(store.pinnedSet().has(normalizeForMatch('服务器在东京')), true)
+})
+
 // --- curator sweep gating: change detection + cooldown -------------------------
 
 /** A file just above CURATE_MIN_ENTRIES (8 lines). */
@@ -386,4 +502,115 @@ test('curator: a direct call feeds its JSON through the host validation', async 
   assert.equal(run?.inputTokens, 700)
   assert.equal(run?.outputTokens, 40)
   assert.equal(run?.session, '49ce2455')
+})
+
+// --- curator sweep: pinned lines are named to the model and survive ----------
+
+test('curator sweep: a pinned line is listed in the prompt and survives the pass', async () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-curate-pin-')))
+  root.global.replace(`${eightEntries()}\n- [lesson] 2026-09-01 用户用 pnpm\n- [fact] 2026-09-02 用户偏好 pnpm`)
+  root.global.addPin('用户用 pnpm')
+  const prompts: string[] = []
+  const session = { id: 'session-pin', requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) }
+  const parent = { session } as never
+  const ctx = {
+    llm: {
+      stream: async function* (options: unknown) {
+        prompts.push(JSON.stringify(options))
+        yield {
+          type: 'text-delta',
+          index: 0,
+          text: '{"edits": [{"op": "merge", "lines": ["- [lesson] 2026-09-01 用户用 pnpm", "- [fact] 2026-09-02 用户偏好 pnpm"], "category": "preference", "content": "用户用 pnpm"}]}',
+        }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    },
+    agents: { get: () => parent },
+  }
+  const curator = new MemoryCurator(ctx as never, root, console, 60)
+
+  await curator.runAfterDistill(parent, session.id as never)
+
+  assert.match(prompts[0] ?? '', /--- Pinned entries \(user-fixed, never edited\) ---/, 'the model is told which line is pinned')
+  const text = root.global.read()
+  assert.ok(text.includes('- [lesson] 2026-09-01 用户用 pnpm'), 'the pinned line survives the pass')
+  assert.ok(text.includes('- [fact] 2026-09-02 用户偏好 pnpm'), 'the rejected edit is not half-applied')
+  assert.equal(root.global.pinnedSet().has(normalizeForMatch('用户用 pnpm')), true)
+  const survivors = new Set(parseEntries(text).map(entry => normalizeForMatch(entry.content)))
+  for (const pin of root.global.pinnedSet()) {
+    assert.ok(survivors.has(pin), 'no pin is left without a matching line')
+  }
+})
+
+// --- settings route: the pin fence still holds -------------------------------
+
+test('pin route: an invalid or unknown project slug is rejected before any write', async () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-pin-route-')))
+  const handlers = new Map<string, (req: unknown, res: unknown) => void>()
+  const dispose = registerMemoryRoutes({
+    register: (route: { path: string, handler: (req: never, res: never) => void }) => {
+      handlers.set(route.path, route.handler as unknown as (req: unknown, res: unknown) => void)
+      return () => undefined
+    },
+  }, root)
+  const pin = handlers.get(`${ROUTE_PREFIX}/pin`)
+  assert.ok(pin !== undefined, 'the pin route is registered')
+
+  const call = async (body: Record<string, unknown>): Promise<{ status: number, body: Record<string, unknown> }> => {
+    const req = Object.assign(new EventEmitter(), {
+      method: 'POST',
+      headers: { host: '127.0.0.1:3080' },
+    })
+    let status = 0
+    let payload: Record<string, unknown> = {}
+    const res = {
+      setHeader: (): void => undefined,
+      writeHead: (code: number): void => { status = code },
+      end: (text: string): void => { payload = JSON.parse(text) as Record<string, unknown> },
+    }
+    pin(req as never, res as never)
+    req.emit('data', Buffer.from(JSON.stringify(body)))
+    req.emit('end')
+    await new Promise(resolve => setImmediate(resolve))
+    return { status, body: payload }
+  }
+
+  const invalid = await call({ content: 'x', pinned: true, scope: 'project', slug: '../etc' })
+  assert.equal(invalid.status, 400, 'traversal slug rejected')
+  const unknown = await call({ content: 'x', pinned: true, scope: 'project', slug: 'nope-nope' })
+  assert.equal(unknown.status, 400, 'unknown slug rejected')
+  assert.equal(root.global.read(), '', 'no entry was written')
+  assert.equal(existsSync(join(root.dir, 'config.json')), false, 'no pin was written')
+  dispose()
+})
+
+test('savedSinceDistill: a session that curated its own memory stands the background pass down', () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-save-')))
+  const id = 'session-abc'
+  // Never saved, never distilled: nothing to stand down from.
+  assert.equal(root.savedSinceDistill(id), false)
+
+  root.recordDirectSave(id)
+  // The session judged its own material worth keeping → skip the second pass.
+  assert.equal(root.savedSinceDistill(id), true)
+
+  // A background pass AFTER the save clears the flag...
+  root.advanceDistill(id, 42)
+  assert.equal(root.savedSinceDistill(id), false)
+  // ...and the cursor survives, so the next save does not rewind progress.
+  assert.equal(root.distillSeqOf(id), 42)
+
+  // A later save re-arms it.
+  root.recordDirectSave(id)
+  assert.equal(root.savedSinceDistill(id), true)
+  assert.equal(root.distillSeqOf(id), 42, 'a direct save must not rewind the distill cursor')
+})
+
+test('recordDirectSave: creates the session record before any distill ever ran', () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-save-new-')))
+  // A session that saves first must still register: otherwise the background
+  // pass would see no record at all and infer over material already curated.
+  root.recordDirectSave('session-fresh')
+  assert.equal(root.savedSinceDistill('session-fresh'), true)
+  assert.equal(root.distillSeqOf('session-fresh'), 0)
 })

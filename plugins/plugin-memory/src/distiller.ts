@@ -15,9 +15,9 @@
  *     skipped (its progress stays, the next activation re-distills the gap).
  *   - Incremental: `distill-state.json` records the last-consumed event seq
  *     per session, so repeat distills cost only the delta.
- *   - Self-exclusion: subagent sessions (`origin: 'subagent'`, e.g. swarm
- *     children) never trigger distills — background maintenance must not run
- *     off another plugin's worker sessions.
+ *   - Self-exclusion: subagent sessions (`origin: 'subagent'`, i.e. another
+ *     plugin's worker) never trigger distills — background maintenance must
+ *     not run off work that is not the user's own conversation.
  *   - Fail-soft: any failure logs a warning and leaves progress unchanged,
  *     so the next quiet window retries the same delta.
  *
@@ -46,20 +46,60 @@ const QUIET_MS = 60_000
 /** Cap on the conversation excerpt handed to the model (characters). */
 const MAX_TRANSCRIPT_CHARS = 24_000
 
+/** Cap on each memory file handed to the model (characters). */
+const MAX_MEMORY_INPUT_CHARS = 12_000
+
+/**
+ * Trim one memory file for the prompt, keeping the TAIL — the newest entries
+ * are the ones a distill must not miss, since the curator is what prunes the
+ * old ones. Without a cap a grown file overflows the model's context on every
+ * call; the run fails, progress is never advanced, and the next quiet window
+ * pays again for the same doomed call. That is the feedback loop the curator
+ * exists to prevent, made permanent.
+ */
+function cappedMemoryText(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= MAX_MEMORY_INPUT_CHARS) return trimmed
+  return `[note: older entries beyond ${String(MAX_MEMORY_INPUT_CHARS)} chars omitted]\n${trimmed.slice(-MAX_MEMORY_INPUT_CHARS)}`
+}
+
 /** Cap on a single message's text inside the excerpt (characters). */
 const MAX_MESSAGE_CHARS = 2_000
 
 /** Fewer new surface messages than this → skip the LLM call entirely. */
 const MIN_NEW_MESSAGES = 2
 
+/**
+ * Fewer new characters than this → skip the LLM call entirely. The message
+ * count alone is a weak gate: two short exchanges can clear it while carrying
+ * nothing durable, and every pass over such a delta pays a full model call for
+ * an answer that should have been "nothing to save". Paired with
+ * {@link MIN_NEW_MESSAGES} this reads as "enough material to be worth a look",
+ * measured in characters because that is how the transcript is capped.
+ */
+const MIN_NEW_CHARS = 4_000
+
 /** Hard cap on entries accepted from one distill run (quality over spam). */
 const MAX_DISTILL_ENTRIES = 5
 
-/** One candidate entry as proposed by the model (pre-validation). */
+/** One candidate entry as proposed by the model (pre-validation). There is no
+ *  scope field: the host decides where an entry lands (see resolveScope). */
 interface ProposedEntry {
   category?: unknown
   content?: unknown
-  scope?: unknown
+}
+
+/**
+ * Where one proposal lands. The host decides, not the model: a proposer that
+ * sees one conversation has no way to know whether a line holds in EVERY
+ * workspace, and asking it to guess is exactly what scattered one session's
+ * project learning into the global file. Scope is derived from the one fact
+ * the host actually has — whether the session had a workspace — and the
+ * prompt no longer offers a scope field for the model to fill in.
+ * memory_save remains the deliberate path for cross-workspace knowledge.
+ */
+export function resolveScope(cwd: string | undefined): 'global' | 'project' {
+  return cwd === undefined ? 'global' : 'project'
 }
 
 /**
@@ -68,10 +108,10 @@ interface ProposedEntry {
  * system/user messages.
  */
 export function buildDistillPrompt(transcript: string, cwd: string | undefined, root: MemoryRoot): { system: string, user: string } {
-  const globalText = root.global.read().trim()
-  const projectText = cwd === undefined ? '' : root.projectFor(cwd).read().trim()
+  const globalText = cappedMemoryText(root.global.read())
+  const projectText = cwd === undefined ? '' : cappedMemoryText(root.projectFor(cwd).read())
   const projectSection = cwd === undefined
-    ? ['--- No workspace for this session: propose scope "global" entries ONLY (project entries have nowhere to land and are dropped) ---']
+    ? ['--- No workspace for this session: entries land in the GLOBAL memory file ---']
     : ['--- Current PROJECT memory (this workspace only) ---', projectText === '' ? '(empty)' : projectText]
   const system = [
     'You are the memory distiller of an AI coding assistant. Review the conversation excerpt below',
@@ -80,6 +120,13 @@ export function buildDistillPrompt(transcript: string, cwd: string | undefined, 
     '',
     'The test for every candidate: would a future session in a DIFFERENT conversation act better',
     'because this line exists? A line that only restates what this conversation did fails it.',
+    '',
+    'Where entries land (the host decides, not you):',
+    '- A session WITH a workspace stores every entry in that workspace\'s project memory. That is',
+    '  where its pitfalls, tool quirks, debugging recipes and decisions about its code belong,',
+    '  even when the project file below looks unrelated.',
+    '- Cross-workspace knowledge (reply language and tone, evidence discipline, commit format)',
+    '  is recorded through a different path — do not try to address it from here.',
     '',
     'Rules:',
     '- Only durable facts: settled decisions, conventions, user preferences/habits, root causes, pitfalls.',
@@ -100,7 +147,7 @@ export function buildDistillPrompt(transcript: string, cwd: string | undefined, 
     '- content holds the entry TEXT only: no "- [category] date" prefix (the host stamps it), no markdown bullets.',
     '',
     'Answer with JSON ONLY, no prose or fences:',
-    '{"entries": [{"category": "<preference|convention|decision|lesson|fact>", "content": "<one line>", "scope": "<project|global>"}]}',
+    '{"entries": [{"category": "<preference|convention|decision|lesson|fact>", "content": "<one line>"}]}',
   ].join('\n')
   const user = [
     '--- Current GLOBAL memory (user preferences, all projects) ---',
@@ -239,7 +286,14 @@ export class MemoryDistiller {
   private async distill(sessionId: SessionId): Promise<void> {
     try {
       if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
-      if (this.inFlight.has(sessionId)) return
+      if (this.inFlight.has(sessionId)) {
+        // A run is already in flight for this session, and it can be long: the
+        // curator sweep it triggers is awaited inside it. Dropping this timer
+        // would lose the turn/end that armed it — its delta never distilled,
+        // and no later event may arrive to retry. Re-arm instead.
+        this.arm(sessionId)
+        return
+      }
       // The session must still be live (its agent resolvable) — a cold
       // session is skipped and the retained progress re-covers it later.
       const agent = this.ctx.agents.get(sessionId)
@@ -277,8 +331,20 @@ export class MemoryDistiller {
       ? events[events.length - 1]!.seq
       : lastSeq
 
-    // Too little new material: advance progress and skip the LLM call.
-    if (fresh.length < MIN_NEW_MESSAGES) {
+    // The session wrote its own entries after the last background pass: stand
+    // down and advance. An agent that has already judged this material worth
+    // keeping does not need a second, inferential opinion on it.
+    if (this.root.savedSinceDistill(sessionId)) {
+      this.log.info(`memory distill for "${sessionId}" skipped: the session already saved its own entries`)
+      this.root.advanceDistill(sessionId, lastEventSeq)
+      return
+    }
+
+    // Too little new material: advance progress and skip the LLM call. Both
+    // gates must pass — see MIN_NEW_CHARS for why the message count alone is
+    // not enough of a filter.
+    const newChars = fresh.reduce((total, message) => total + message.text.length, 0)
+    if (fresh.length < MIN_NEW_MESSAGES || newChars < MIN_NEW_CHARS) {
       this.root.advanceDistill(sessionId, lastEventSeq)
       return
     }
@@ -379,10 +445,9 @@ export class MemoryDistiller {
       // A leaked secret must never reach the file, even from the background
       // pass (the transcript may contain a pasted key the user shared).
       if (containsCredential(content)) continue
-      // No workspace: a project-scoped proposal has nowhere to land — drop it
-      // rather than promote a project fact into the global file by mistake.
-      if (proposal.scope !== 'global' && cwd === undefined) continue
-      const scope = proposal.scope === 'global' ? 'global' : 'project'
+      // The host decides the address (see resolveScope): no workspace means
+      // the only file available is the global one.
+      const scope = resolveScope(cwd)
       const needle = normalizeForMatch(content)
       if (needle === '' || globalSeen.has(needle) || projectSeen.has(needle)) continue
       const store = scope === 'global' ? this.root.global : this.root.projectFor(cwd as string)

@@ -9,6 +9,8 @@
  * HOST validates every edit before the file is rewritten atomically —
  * referenced lines must exist verbatim and be cited at most once; a merge
  * must produce one lean standard entry that duplicates nothing that remains.
+ * User-pinned lines are additionally off limits: any edit citing one is
+ * rejected whole, so a pin never survives its line as a dangling record.
  * Any failure leaves the file untouched and retries on the next trigger.
  *
  * Trigger: the distiller hands us the triggering session right after it
@@ -84,8 +86,11 @@ function sessionOf(parent: ParentAgent): CurateSession {
 /**
  * Build the curate prompt as system (task + rules + output contract) and
  * user (the memory file) halves — the same split the distiller uses.
+ * Pinned entries are listed in a separate section and called out as
+ * untouchable: the host rejects any edit citing one, so telling the model
+ * up front saves a wasted proposal.
  */
-export function buildCuratePrompt(input: string): { system: string, user: string } {
+export function buildCuratePrompt(input: string, pinned: readonly string[] = []): { system: string, user: string } {
   const system = [
     'You are the memory curator of an AI coding assistant. Review the memory file below',
     'and propose EDITS that keep it lean and accurate over time.',
@@ -99,6 +104,10 @@ export function buildCuratePrompt(input: string): { system: string, user: string
     '  ids, task summaries. Keep only what a future session could act on.',
     '- Prefer keeping the SURVIVING entry when one strictly supersedes another: delete the stale one.',
     '- NEVER mention credentials (API keys, tokens, passwords) — not even in a rewrite.',
+    ...(pinned.length > 0
+      ? ['- Entries listed under "Pinned entries" were pinned by the user and are NEVER edited:',
+         '  don\'t cite those lines in a merge or delete — the whole edit is rejected when you do.']
+      : []),
     '- Each cited line must appear EXACTLY as written below (verbatim, including the bullet and',
     '  the "- [category] YYYY-MM-DD" prefix). The same line may be cited at most once across all edits.',
     '- A merge result is ONE concise line in the user\'s language, at most 500 characters,',
@@ -111,7 +120,11 @@ export function buildCuratePrompt(input: string): { system: string, user: string
     '           {"op": "delete", "lines": ["<verbatim line>"]}]}',
     '"category" and "content" apply to merge edits only.',
   ].join('\n')
-  const user = ['--- Memory file ---', input].join('\n')
+  const user = [
+    '--- Memory file ---',
+    input,
+    ...(pinned.length > 0 ? ['', '--- Pinned entries (user-fixed, never edited) ---', ...pinned] : []),
+  ].join('\n')
   return { system, user }
 }
 
@@ -268,7 +281,14 @@ export class MemoryCurator {
       ? `${text.slice(0, MAX_INPUT_CHARS)}\n[note: file tail beyond ${String(MAX_INPUT_CHARS)} chars was omitted in this pass]`
       : text
 
-    const { system, user } = buildCuratePrompt(input)
+    // The pinned lines go to the model verbatim so it can leave them alone;
+    // applyEdits enforces the same rule regardless of what the model proposes.
+    const pinnedKeys = target.store.pinnedSet()
+    const pinnedLines = parseEntries(text)
+      .filter(entry => pinnedKeys.has(normalizeForMatch(entry.content)))
+      .map(entry => entry.raw)
+
+    const { system, user } = buildCuratePrompt(input, pinnedLines)
     const result = await streamJson(resolveLlm(this.ctx), {
       route,
       system,
@@ -316,6 +336,15 @@ export class MemoryCurator {
     lines.forEach((line, index) => { if (!lineIndex.has(line)) lineIndex.set(line, index) })
     const referenced = new Set<number>()
 
+    // Pinned lines are the user's explicit "always inject this" intent, so no
+    // edit may rewrite or drop one: an edit citing a pinned line is rejected
+    // whole (the model is told which lines those are, but the guarantee is
+    // enforced here). Skipping the edit — rather than re-pinning a merge — is
+    // what keeps config.json free of pins that no longer match a line.
+    const pinned = store.pinnedSet()
+    const isPinned = (index: number): boolean =>
+      pinned.has(normalizeForMatch(entries[index]!.content))
+
     // Two stages: deletes claim their lines first, then merges dedupe against
     // what actually SURVIVES (kept lines plus merges already accepted) —
     // never against lines this very pass removes, otherwise "merge A+B back
@@ -332,7 +361,7 @@ export class MemoryCurator {
       for (const line of cited) {
         if (typeof line !== 'string') return undefined
         const index = lineIndex.get(line)
-        if (index === undefined || referenced.has(index)) return undefined
+        if (index === undefined || referenced.has(index) || isPinned(index)) return undefined
         indices.push(index)
       }
       return indices

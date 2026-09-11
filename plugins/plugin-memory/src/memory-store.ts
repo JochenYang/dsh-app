@@ -48,11 +48,12 @@ export function todayStamp(): string {
   return `${now.getFullYear()}-${month}-${day}`
 }
 
-/** Normalize text for matching: lowercase, keep letters/digits/CJK, drop the
- *  rest. Shared by the distiller's dedupe and memory_forget's match so both
+/** Normalize text for matching: lowercase, keep every Unicode letter/digit
+ *  (Latin, CJK, kana, Hangul, Cyrillic, ...), drop the rest. Shared by the
+ *  distiller's dedupe, memory_forget's match, and the pin keys so all three
  *  agree on what counts as "the same text". */
 export function normalizeForMatch(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gu, '')
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
 /** Entry-line prefix shape: `- [category] YYYY-MM-DD `. */
@@ -227,9 +228,10 @@ export class MemoryStore {
 
   /**
    * Remove entries whose normalized CONTENT contains the normalized match
-   * (substring, case-insensitive, CJK preserved; the category/date prefix is
-   * excluded so matching a date or category name never sweeps entries).
-   * Returns the removed lines so the caller can report exactly what went.
+   * (substring, case-insensitive, every script's letters/digits preserved; the
+   * category/date prefix is excluded so matching a date or category name never
+   * sweeps entries). Returns the removed lines so the caller can report
+   * exactly what went.
    */
   forget(match: string): { removed: string[], remaining: number } {
     const text = this.read()
@@ -248,6 +250,10 @@ export class MemoryStore {
       }
     }
     if (removed.length > 0) {
+      // Drop the pins of the lines that go BEFORE the file rewrite: a crash in
+      // between may leave a line that lost its pin (visible, harmless), never
+      // a pin pointing at a line that no longer exists.
+      this.dropPinsFor(removed)
       // Drop trailing empty lines the removed entries may leave behind; keep
       // exactly one newline when anything remains.
       const body = kept.join('\n').replace(/\n+$/u, '')
@@ -327,8 +333,8 @@ export class MemoryStore {
   /**
    * Normalized contents pinned to always inject. Pin persists in config.json
    * (not in the memory file), keyed by {@link normalizeForMatch} so it
-   * survives line rewrites; a pin of an entry that no longer exists is a
-   * harmless no-op at injection time.
+   * survives line rewrites; the deletion paths drop the pins of every line
+   * they remove, so a pin left without its entry no longer accumulates.
    */
   pinnedSet(): Set<string> {
     const pins = this.readConfigJson().pinned
@@ -352,6 +358,23 @@ export class MemoryStore {
     if (!pins.includes(needle)) return false
     this.writeConfig({ pinned: pins.filter(p => p !== needle) })
     return true
+  }
+
+  /**
+   * Drop the pins attached to lines this store just removed. A pin is keyed by
+   * the normalized CONTENT of its entry (the same rule injection and the
+   * settings rows match by), so the pins to drop are exactly the keys of the
+   * removed lines. Deliberately not a blanket reset: a deletion must never
+   * unpin a line it left in place — a surviving pin keeps matching its line,
+   * and a stale pin can no longer resurrect a future entry as pinned.
+   */
+  private dropPinsFor(removed: readonly string[]): void {
+    const doomed = new Set(removed.map(line => normalizeForMatch(entryContent(line))))
+    doomed.delete('')
+    if (doomed.size === 0) return
+    const pins = [...this.pinnedSet()]
+    const kept = pins.filter(pin => !doomed.has(pin))
+    if (kept.length !== pins.length) this.writeConfig({ pinned: kept })
   }
 
   /** Replace the whole file content crash-safely (used by the curator). */
@@ -381,6 +404,10 @@ export class MemoryStore {
       }
     }
     if (removed.length > 0) {
+      // Same pin cleanup as forget: the exact rows that go take their pins
+      // with them, nothing else is touched. Before the rewrite — a crash may
+      // leave an unpinned line, never a pin without its line.
+      this.dropPinsFor(removed)
       const body = kept.join('\n').replace(/\n+$/u, '')
       atomicWrite(this.memoryPath, body === '' ? '' : `${body}\n`)
     }
@@ -462,6 +489,17 @@ export interface DistillProgress {
   seq: number
   /** Unix epoch ms of the last distill run for this session. */
   at: number
+  /**
+   * Own-writes the session has made since the last background pass (absent =
+   * none). The distiller stands down while this is non-zero: material the
+   * agent has already judged worth keeping does not need a second,
+   * inferential pass over the same delta.
+   *
+   * A count, deliberately not a timestamp: a save and a distill landing in
+   * the same millisecond are indistinguishable by time, and the comparison
+   * would silently read "already distilled" for a delta that was not.
+   */
+  savesSinceDistill?: number
 }
 
 /** Short display id: the uuid segment's first 8 chars (`session-` prefix
@@ -543,7 +581,10 @@ export class MemoryRoot {
   /** Advance one session's distill progress and persist (with pruning). */
   advanceDistill(sessionId: string, seq: number): void {
     const state = this.readDistillState()
-    state.sessions[sessionId] = { seq, at: Date.now() }
+    const previous = state.sessions[sessionId]
+    // A completed pass consumes the delta, own-writes included: the counter
+    // starts over so the NEXT save can stand the next pass down.
+    state.sessions[sessionId] = { ...previous, seq, at: Date.now(), savesSinceDistill: 0 }
     // Prune to the newest MAX_TRACKED_SESSIONS by last-run time.
     const ids = Object.keys(state.sessions)
     if (ids.length > MAX_TRACKED_SESSIONS) {
@@ -551,6 +592,36 @@ export class MemoryRoot {
       for (const id of ids.slice(0, ids.length - MAX_TRACKED_SESSIONS)) {
         delete state.sessions[id]
       }
+    }
+    mkdirSync(this.dir, { recursive: true })
+    atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+  }
+
+  /**
+   * Whether this session wrote its own entries since the last background pass.
+   * The distiller stands down while this is true: an agent that has already
+   * judged the material worth keeping does not need a second, inferential pass
+   * over the same delta. One predicate (rather than fields the caller
+   * compares) so the rule lives with the state it reads.
+   */
+  savedSinceDistill(sessionId: string): boolean {
+    const progress = this.readDistillState().sessions[sessionId]
+    return progress !== undefined && (progress.savesSinceDistill ?? 0) > 0
+  }
+
+  /**
+   * Record that the session wrote an entry itself, through the save tool. The
+   * background pass reads this to stand down on material the agent has already
+   * curated by hand. Creates the session record when absent — a session can
+   * save before its first distill ever runs.
+   */
+  recordDirectSave(sessionId: string): void {
+    const state = this.readDistillState()
+    const previous = state.sessions[sessionId]
+    state.sessions[sessionId] = {
+      seq: previous?.seq ?? 0,
+      at: previous?.at ?? 0,
+      savesSinceDistill: (previous?.savesSinceDistill ?? 0) + 1,
     }
     mkdirSync(this.dir, { recursive: true })
     atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
