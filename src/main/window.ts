@@ -133,6 +133,12 @@ const SAMPLE_SCRIPT = `(function () {${SAMPLE_FN} return sample(); })()`
  * on `window` across executeJavaScript calls, so the shell's sync loop blocks
  * quietly until a real change happens — no polling traffic. Navigation resets
  * the script context; the shell reinstalls it on the fresh document.
+ *
+ * The promise must NOT resolve on entry once `last` is known. The shell's loop
+ * re-enters on every resolution, so an eager resolve degrades into a tight
+ * executeJavaScript ping-pong (measured ~5k round-trips/s, ~9% total CPU
+ * across main + renderer, GPU idle at 0%). `push()` self-guards on an
+ * unchanged sample, and that guard is what parks the loop.
  */
 const OBSERVER_SCRIPT = `(function () {
   ${SAMPLE_FN}
@@ -166,8 +172,7 @@ const OBSERVER_SCRIPT = `(function () {
   }
   return new Promise((resolve) => {
     state.pending = resolve;
-    if (state.last !== null) { state.pending = null; resolve(state.last); }
-    else push();
+    push();
   });
 })()`
 

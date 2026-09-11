@@ -355,6 +355,17 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
   and the injected scripts are backtick literals — a backtick in a comment
   or copy silently terminates the string and only surfaces as a syntax error
   at the next typecheck. Use plain quotes in embedded comments.
+- **Injected `executeJavaScript` promises must not resolve eagerly**: the
+  chrome-sync loop in `src/main/window.ts` awaits `OBSERVER_SCRIPT` and
+  re-enters on *every* resolution, so a promise that resolves on entry once
+  the color is already known becomes a tight main↔renderer round-trip —
+  measured ~5-8k `executeJavaScript` calls/s and ~9% total CPU (4% main +
+  4-5% renderer) with the window sitting idle. Keep such promises
+  change-triggered and let the in-page guard park them (`push()` returns early
+  on an unchanged sample). Triaging idle burn: sample per-process CPU first —
+  **GPU ≈ 0% beside non-zero main + renderer means an IPC loop, not
+  rendering**; then reproduce the loop alone against a blank page to separate
+  it from the harness renderer's own work.
 - **Generated/tracked**: `dist/`, `release/`, `runtime-dist/`,
   `plugins/*/lib/`, `logs/`, `scratch/`, `*.tgz`, `*.log` are gitignored —
   don't commit build output.

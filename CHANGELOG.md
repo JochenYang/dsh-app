@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.6] - 2026-09-11
+
+### 中文
+- 修复窗口空闲时空烧约 10% CPU：标题栏取色同步靠一个「颜色不变就不 resolve」的 Promise 让同步循环安静阻塞，但页面脚本里还留了一条"颜色已知就直接 resolve"的短路，于是每次调用都立刻返回，主进程与渲染进程之间每秒来回 5000–8000 次 `executeJavaScript`——窗口开着什么都不做也要占约 4% 主进程 + 5% 渲染进程（GPU 反而是 0，正是 IPC 空转而非绘制开销的破绽），风扇和续航都跟着受影响；去掉短路后回到 0%
+
+### English
+- Fixed the ~10% CPU burnt while the window sits idle: the title-bar colour sync parks its loop on a promise that resolves only when the colour changes, but the page script also short-circuited once a colour was already known — so every call returned at once and the main process ping-ponged `executeJavaScript` with the renderer 5000-8000 times a second. An idle window cost ~4% of the main process and ~5% of the renderer (with the GPU flat at 0, the giveaway that this was IPC spin and not painting), and the fan and battery life followed. Removing the short-circuit brings it back to 0%
+
 ## [v0.11.5] - 2026-09-11
 
 ### 中文
