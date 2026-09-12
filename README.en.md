@@ -166,10 +166,6 @@ title-bar color sync, and a fully localized Chinese UI. Brand functionality
 plugin suite above — `--patch` overlays and slot injections. See
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md) for implementation details.
 
-Some approaches borrow from pilot-harness's `apps/desktop` (process-tree
-termination, log credential redaction, settled-URL parsing from child stdout,
-loopback-only URL validation, etc.).
-
 ## Building & distribution
 
 ```sh

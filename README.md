@@ -140,9 +140,6 @@ node scripts/probe-mirror.mjs
 插件套件以 `--patch` 覆盖与 slot 注入实现，同等零上游改动。注入实现细节见
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md)。
 
-部分做法借鉴自 pilot-harness 的 `apps/desktop`（进程树终止、日志凭据脱敏、
-从子进程 stdout 解析 settled URL、loopback-only URL 校验等）。
-
 ## 构建分发
 
 ```sh
