@@ -35,12 +35,12 @@ jobs:
         run: npm run typecheck
       - name: Build suite plugins
         run: |
+          # Each plugin owns its dependencies (docx, exceljs, pptxgenjs, ...),
+          # so the workspace install above is not enough: install per plugin
+          # first, exactly like the release job does.
           for dir in plugins/*/; do
-            name=$(basename "$dir")
-            if [ -f "$dir/build.mjs" ]; then
-              node "$dir/build.mjs"
-            elif [ -f "$dir/package.json" ]; then
-              (cd "$dir" && npm run build)
+            if [ -f "$dir/package.json" ]; then
+              (cd "$dir" && npm install --no-audit --no-fund --legacy-peer-deps && npm run build)
             fi
           done
       - name: Plugin unit tests
@@ -62,12 +62,12 @@ jobs:
         run: npm ci
       - name: Build suite plugins
         run: |
+          # Each plugin owns its dependencies (docx, exceljs, pptxgenjs, ...),
+          # so the workspace install above is not enough: install per plugin
+          # first, exactly like the release job does.
           for dir in plugins/*/; do
-            name=$(basename "$dir")
-            if [ -f "$dir/build.mjs" ]; then
-              node "$dir/build.mjs"
-            elif [ -f "$dir/package.json" ]; then
-              (cd "$dir" && npm run build)
+            if [ -f "$dir/package.json" ]; then
+              (cd "$dir" && npm install --no-audit --no-fund --legacy-peer-deps && npm run build)
             fi
           done
       # Same recipe as the release.yml runtime job for one cell: resolve the
