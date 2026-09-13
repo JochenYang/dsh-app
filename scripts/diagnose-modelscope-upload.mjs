@@ -126,7 +126,7 @@ function authHeaders(token, extra = {}) {
 
 // POST /api/v1/repos/models/{id}/info/lfs/objects/batch
 async function batch(token, repoId, object) {
-  const resp = await rawRequest('POST', `${ENDPOINT}/api/v1/${REPO_TYPE_SEGMENT}/${repoId}/info/lfs/objects/batch`, {
+  const resp = await rawRequest('POST', `${ENDPOINT}/api/v1/repos/${REPO_TYPE_SEGMENT}/${repoId}/info/lfs/objects/batch`, {
     headers: authHeaders(token, { 'Content-Type': 'application/json' }),
     body: JSON.stringify({ operation: 'upload', objects: [object] }),
   })
