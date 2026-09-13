@@ -309,10 +309,13 @@ async function validateBlobs(token, repoId, objects) {
     'LFS batch 校验',
   )
   const result = {}
-  // 响应必须逐对象回执；缺失视为协议异常而非“blob 已存在”，避免静默
-  // 提交指向未上传 blob 的 LFS 指针
-  if (!Array.isArray(data?.objects) || data.objects.length !== objects.length) {
-    throw new Error(`LFS batch 响应异常: 预期 ${objects.length} 个对象回执，实际 ${data?.objects?.length ?? 0}`)
+  // 只要求 objects 是数组。服务端对已存在的 blob 会省略其回执（实测重跑时
+  // 全局去重命中，batch 对 1 个对象返回 0 条回执），官方客户端同样把缺失回执
+  // 当作「blob 已存在，复用」。这里沿用该语义：无回执 → href null（跳过上传）。
+  // 若服务端真的漏报而不存在的 blob，commit 阶段会因指针校验失败而报可行动
+  // 错误，不会静默提交出无效指针。
+  if (!Array.isArray(data?.objects)) {
+    throw new Error(`LFS batch 响应异常: objects 不是数组（收到 ${typeof data?.objects}）`)
   }
   for (const obj of data.objects) {
     result[obj.oid] = {
@@ -320,6 +323,9 @@ async function validateBlobs(token, repoId, objects) {
       // 服务端显式要求的上传头（LFS 协议的 actions.upload.header）
       headers: obj.actions?.upload?.header ?? {},
     }
+  }
+  for (const requested of objects) {
+    if (!(requested.oid in result)) result[requested.oid] = { href: null, headers: {} }
   }
   return result
 }
