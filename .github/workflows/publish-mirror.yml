@@ -29,12 +29,21 @@ name: publish-mirror
 on:
   release:
     types: [published]
-  # Manual backfill for a mirror that failed or was skipped.
+  # Manual backfill for a mirror that failed or was skipped, or a synthetic
+  # upload probe (mode=diagnose) that touches no real release asset.
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag to mirror (e.g. v0.11.6)'
+      mode:
+        description: 'mirror = publish the release; diagnose = synthetic LFS upload probe'
         required: true
+        default: mirror
+        type: choice
+        options:
+          - mirror
+          - diagnose
+      tag:
+        description: 'Release tag to mirror (e.g. v0.11.6); required for mode=mirror'
+        required: false
         type: string
 
 permissions:
@@ -53,6 +62,7 @@ jobs:
           node-version: 22
 
       - name: Mirror release assets to ModelScope
+        if: ${{ inputs.mode != 'diagnose' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
@@ -60,3 +70,13 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           node scripts/publish-modelscope.mjs --tag "$RELEASE_TAG" --repo "${{ github.repository }}"
+
+      # mode=diagnose: probe the LFS blob upload path with throwaway synthetic
+      # files. Does not download release assets or commit anything to the repo.
+      - name: Diagnose ModelScope LFS upload
+        if: ${{ inputs.mode == 'diagnose' }}
+        env:
+          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+          MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
+        run: |
+          node scripts/diagnose-modelscope-upload.mjs --repo "${{ github.repository }}"
