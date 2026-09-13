@@ -261,14 +261,23 @@ function sourceLabel(url: string): string {
  * Installer download candidates for one asset, same-source-first: metadata
  * served by the mirror makes the mirror lead, with official GitHub and its
  * prefixes kept as fallbacks; metadata from GitHub keeps the original order.
- * The sha512 from the metadata still gates every candidate.
+ * Either way the ModelScope mirror closes the chain as the last resort.
+ *
+ * Why the mirror is a safe last resort even when the metadata came from
+ * GitHub: the mainland failure topology is asymmetric — a small latest.yml
+ * often slips through (corporate proxy / brief connectivity) while a ~180 MB
+ * installer consistently dies. Without the trailing mirror those users only
+ * ever see "请手动下载". Every candidate is gated by the sha512 taken from
+ * that same latest.yml, so a mirror serving a *different* build (lagging or
+ * tampered) fails verification and falls through — it can degrade to a
+ * slower download, never substitute content. When metadata came from the
+ * mirror the same URL leads instead of being appended twice.
  */
 export function assetCandidates(owner: string, repo: string, assetUrl: string, metadataSource: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/latest/download/${assetUrl}`
+  const mirror = modelscopeReleaseFileUrl(`releases/latest/${assetUrl}`)
   const fallbacks = [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
-  return isModelscopeSource(metadataSource)
-    ? [modelscopeReleaseFileUrl(`releases/latest/${assetUrl}`), ...fallbacks]
-    : fallbacks
+  return isModelscopeSource(metadataSource) ? [mirror, ...fallbacks] : [...fallbacks, mirror]
 }
 
 /** Pick the installer matching the running arch (x64 primary, arm64 explicit). */
@@ -298,8 +307,18 @@ async function sha512Base64(filePath: string): Promise<string> {
 /** Actionable suffix for any "every source failed" message (user-visible). */
 export const MANUAL_DOWNLOAD_HINT = `可手动从镜像仓库下载：${MODELSCOPE_RELEASES_URL}`
 
+/**
+ * Per-candidate download timeout. 180 s is generous for a ~180 MB installer
+ * even on a slow mainland link, while bounding the worst case: with the
+ * mirror appended, the chain holds at most four candidates, so a total
+ * black-hole network costs ~12 min instead of ~40 min (the old 600 s value)
+ * before the actionable "download manually" dialog appears. Exported for
+ * the offline asset-layer tests.
+ */
+export const DOWNLOAD_TIMEOUT_MS = 180_000
+
 /** Download a file with progress, trying each candidate until one verifies. */
-async function downloadWithFallback(
+export async function downloadWithFallback(
   candidates: string[],
   dest: string,
   expectedSha512: string,
@@ -309,7 +328,7 @@ async function downloadWithFallback(
   for (const url of candidates) {
     try {
       await fs.rm(dest, { force: true })
-      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(600_000) })
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
       const total = Number(res.headers.get('content-length') ?? 0)
       const body = Readable.fromWeb(res.body as never)
@@ -410,6 +429,19 @@ function isNewerThan(latest: string, current: string): boolean {
   return semver.valid(latest) && semver.valid(current)
     ? semver.gt(latest, current)
     : latest !== current
+}
+
+/**
+ * Charset + shape guard for a version spliced into installer filenames, URLs,
+ * the mirror archive path and the pending-install record. Beyond the original
+ * `[\w.~-]` charset it must start with a digit and must not contain a literal
+ * `..` segment: `..` passes the charset but is a relative path component, so
+ * an unsigned latest.yml (or a tampered version history) could otherwise steer
+ * a path one level up. Real versions all start with a digit and contain no
+ * `..` — 0.11.7, 0.11.8-beta.1, 1.2.3-rc.2 — so this stays compatible.
+ */
+export function isSafeVersion(value: string): boolean {
+  return /^\d[\w.~-]*$/.test(value) && !value.includes('..')
 }
 
 // ------------------------------------------------- skip version / history
@@ -570,7 +602,7 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     // record; constrain it to a safe charset so a crafted metadata value can
     // never break the path or the spawn target (defense in depth for an
     // unsigned latest.yml).
-    if (!/^[\w.~-]+$/.test(yaml.version)) throw new Error('更新元数据版本格式异常')
+    if (!isSafeVersion(yaml.version)) throw new Error('更新元数据版本格式异常')
 
     const current = app.getVersion()
     const newer = isNewerThan(yaml.version, current)
@@ -726,13 +758,18 @@ export function releaseLatestYamlCandidates(owner: string, repo: string, version
   return [modelscopeReleaseFileUrl(`releases/archive/${version}/latest.yml`), official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
 }
 
-/** Tagged-release installer candidates, mirror archive first when metadata came from the mirror. */
+/**
+ * Tagged-release installer candidates: the mirror archive leads when the
+ * metadata came from the mirror, and closes the chain otherwise — same
+ * trailing-mirror policy and sha512 gate as {@link assetCandidates} (the
+ * trailing copy is what rescues a rollback whose metadata reached GitHub but
+ * whose installer cannot be fetched from there).
+ */
 export function releaseAssetCandidates(owner: string, repo: string, version: string, assetUrl: string, metadataSource: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/download/v${version}/${assetUrl}`
+  const mirror = modelscopeReleaseFileUrl(`releases/archive/${version}/${assetUrl}`)
   const fallbacks = [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
-  return isModelscopeSource(metadataSource)
-    ? [modelscopeReleaseFileUrl(`releases/archive/${version}/${assetUrl}`), ...fallbacks]
-    : fallbacks
+  return isModelscopeSource(metadataSource) ? [mirror, ...fallbacks] : [...fallbacks, mirror]
 }
 
 /**
@@ -820,7 +857,7 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
     // history[len-1] is the running version (recorded on its confirmation);
     // len-2 is the state before it — where a rollback lands.
     const previous = history.length >= 2 ? history[history.length - 2].version : null
-    if (previous === null || previous === current || !/^[\w.~-]+$/.test(previous)) {
+    if (previous === null || previous === current || !isSafeVersion(previous)) {
       await noticeInFrame(win, 'info', APP_NAME, '没有可回滚的历史版本。')
       return
     }
@@ -892,7 +929,7 @@ async function checkShellUpdateDev(win: BrowserWindow | null): Promise<void> {
     const meta = await fetchAndParseLatest()
     if (!meta) throw new Error(`无法获取更新元数据（latest.yml）或格式无法解析。${MANUAL_DOWNLOAD_HINT}`)
     const yaml = meta.yaml
-    if (!/^[\w.~-]+$/.test(yaml.version)) throw new Error('更新元数据版本格式异常')
+    if (!isSafeVersion(yaml.version)) throw new Error('更新元数据版本格式异常')
     const current = app.getVersion()
     const newer = isNewerThan(yaml.version, current)
     clearKernelProgress(win)
