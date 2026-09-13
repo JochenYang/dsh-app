@@ -45,6 +45,10 @@ on:
         description: 'Release tag to mirror (e.g. v0.11.6); required for mode=mirror'
         required: false
         type: string
+      only_pattern:
+        description: 'Partial drill: only mirror assets whose name contains this substring (skips versions.json)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -68,8 +72,13 @@ jobs:
           MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
           MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          ONLY_PATTERN: ${{ inputs.only_pattern }}
         run: |
-          node scripts/publish-modelscope.mjs --tag "$RELEASE_TAG" --repo "${{ github.repository }}"
+          args=(--tag "$RELEASE_TAG" --repo "${{ github.repository }}")
+          if [ -n "${ONLY_PATTERN:-}" ]; then
+            args+=(--only-pattern "$ONLY_PATTERN")
+          fi
+          node scripts/publish-modelscope.mjs "${args[@]}"
 
       # mode=diagnose: probe the LFS blob upload path with throwaway synthetic
       # files. Does not download release assets or commit anything to the repo.

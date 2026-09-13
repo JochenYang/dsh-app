@@ -17,12 +17,16 @@
 //   3) POST /api/v1/repos/models/{id}/commit/master（含 versions.json，原子提交）
 //
 // 不变式（改动前先读这三条）：
-// - 预签名 PUT 绝不携带仓库凭据。uploadHeaders() 是白名单（Content-Type、
-//   Content-Length、X-Request-ID，外加 batch 响应显式要求的上传头）；
-//   putBlob() 连 token 参数都没有，从签名上就发不出凭据。把 Authorization /
-//   Cookie 发往对象存储域，既让仓库 token 外泄给 ModelScope 之外的第三方，
-//   也常因预签名把请求头纳入签名而破坏校验、直接 403。
-//   rawRequest() 的跨 host 重定向剥离在此之上再做一层兜底。
+// - 预签名 PUT 的凭据只允许发往 ModelScope 自有主机。诊断证实 blob 上传地址
+//   落在 www.modelscope.cn（与 API 同 host，非第三方对象存储），且该端点要求
+//   同时携带 Authorization: Bearer 与 Cookie: m_session_id —— 只带 Bearer
+//   会得到 HTTP 400 Code 10030000001（会话校验失败）。这与官方客户端
+//   modelscope_hub 的 LegacyClient.upload_blob 一致：它显式发送这两个头，并
+//   用 _same_host_as_endpoint() 限定只有 endpoint 主机及其 lfs./pre-lfs. 兄弟
+//   主机才会收到凭据，指他处的签名 URL 一律不带。本脚本沿用同一判定
+//   （isCredentialSafeUploadHost）；uploadHeaders() 的白名单继续剔除 batch
+//   响应里可能出现的凭据形状头（实测该 header 为空），rawRequest() 的跨 host
+//   重定向剥离在此之上再做一层兜底。
 // - versions.json 是读-改-写且非原子：404 视为“首次发布”（空索引），其他任何
 //   读取失败都 exit 1 —— 从空重建会静默丢掉全部历史条目，资产可以补发、历史
 //   不可补。不同 tag 必须串行发布；同一 tag 重跑幂等（blob 按 sha256 去重，
@@ -33,7 +37,12 @@
 // - Node 20+，零依赖（仅内置模块）；CI Linux runner 与本地 Windows 均可运行
 // - MODELSCOPE_TOKEN 未设置时在任何网络调用之前打印 skip 说明并 exit 0；
 //   workflow 侧保持绿色，并把 skip 写进 step summary
-// - 单文件下载/上传失败重试 1 次；任一文件最终失败则放弃提交，exit 1
+// - 单文件下载/上传失败重试 1 次；任一文件最终失败则放弃提交，exit 1。
+//   逐个资产「下载 → 上传 → 删除本地副本」，不再全部落盘后再上传：失败更早
+//   暴露、峰值磁盘占用从全量（~2.5GB）降到单文件。内联小文件的内容读进内存
+//   供 commit 组装后即删本地文件。
+// - --only-pattern 为部分演练：只处理名字命中给定子串的资产，且不改
+//   releases/versions.json（避免用子集覆盖索引），仅为验证上传通路。
 // - 临时目录在任何路径下必删；设置了 GITHUB_STEP_SUMMARY 时写入
 //   成功/跳过/失败原因与补发命令
 // - ModelScope 目标仓库需预先存在（一次性手动创建），缺失时报可行动错误；
@@ -42,8 +51,10 @@
 // 用法：
 //   node scripts/publish-modelscope.mjs --tag v0.11.6 --repo owner/name [--dry-run]
 //       [--modelscope-repo namespace/name] [--assets-file <gh assets json 路径>]
+//       [--only-pattern <资产名子串>]
 //   --dry-run     只拉资产清单并打印上传计划，不下载、不上传、不需要 token
 //   --assets-file 离线提供 gh release view --json assets 的输出，替代 gh 调用
+//   --only-pattern 只镜像名字包含该子串的资产（部分演练；不更新 versions.json）
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -82,6 +93,7 @@ function parseArgs(argv) {
       case '--repo': args.repo = value; break
       case '--modelscope-repo': args.modelscopeRepo = value; break
       case '--assets-file': args.assetsFile = value; break
+      case '--only-pattern': args.onlyPattern = value; break
       default: fail(`未知参数: ${key}`)
     }
   }
@@ -93,7 +105,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  console.log('用法: node scripts/publish-modelscope.mjs --tag v0.11.6 --repo owner/name [--dry-run] [--modelscope-repo ns/name] [--assets-file <path>]')
+  console.log('用法: node scripts/publish-modelscope.mjs --tag v0.11.6 --repo owner/name [--dry-run] [--modelscope-repo ns/name] [--assets-file <path>] [--only-pattern <substr>]')
 }
 
 function fail(message) {
@@ -317,6 +329,25 @@ async function validateBlobs(token, repoId, objects) {
 // 显式剔除任何 credential 形状的头：发出去就是 token 外泄 + 签名校验失败。
 const CREDENTIAL_HEADER_PATTERN = /^(authorization|cookie|proxy-authorization)$|token|session/i
 
+// 凭据只允许发往 ModelScope 自有主机。判定与官方客户端
+// OpenAPIClient._same_host_as_endpoint 一致：endpoint 主机本身，或其 lfs./
+// pre-lfs. 兄弟主机（blob 端点所在）。实测 blob 上传地址就在 www.modelscope.cn，
+// 因此这一判定不会阻止正常上传；指向第三方对象存储的签名 URL 则一律不带凭据。
+function isCredentialSafeUploadHost(uploadUrl) {
+  let targetHost
+  try {
+    targetHost = new URL(uploadUrl).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  const endpointHost = new URL(ENDPOINT).hostname.toLowerCase()
+  if (!targetHost || !endpointHost) return false
+  if (targetHost === endpointHost) return true
+  const labels = endpointHost.split('.')
+  const base = labels.length >= 3 ? labels.slice(1).join('.') : endpointHost
+  return targetHost === `lfs.${base}` || targetHost === `pre-lfs.${base}`
+}
+
 function uploadHeaders(serverHeaders, size) {
   const headers = {
     'Content-Type': 'application/octet-stream',
@@ -331,12 +362,24 @@ function uploadHeaders(serverHeaders, size) {
 }
 
 // 预签名 PUT 上传 blob（流式，带 Content-Length）。
-// 刻意不接收 token 参数：不带凭据是这一层的结构性不变式，而不是靠过滤。
-async function putBlob(uploadUrl, filePath, size, serverHeaders) {
+// 诊断（scripts/diagnose-modelscope-upload.mjs，CI run 34766719580）证实该端点
+// 需要同时带 Authorization: Bearer 与 Cookie: m_session_id，只带 Bearer 会
+// HTTP 400 Code 10030000001。凭据仅在 isCredentialSafeUploadHost() 通过时注入：
+// 上传地址跨到 ModelScope 之外时必须退化为无凭据请求，绝不让仓库 token 外泄。
+async function putBlob(uploadUrl, filePath, size, token, serverHeaders) {
+  const headers = uploadHeaders(serverHeaders, size)
+  if (token) {
+    if (isCredentialSafeUploadHost(uploadUrl)) {
+      headers.Authorization = `Bearer ${token}`
+      headers.Cookie = `m_session_id=${token}`
+    } else {
+      log(`警告: 上传地址不属于 ModelScope 自有主机，已剥离凭据: ${redactSecrets(uploadUrl)}`)
+    }
+  }
   const stream = fs.createReadStream(filePath)
   try {
     const resp = await rawRequest('PUT', uploadUrl, {
-      headers: uploadHeaders(serverHeaders, size),
+      headers,
       bodyStream: stream,
     })
     if (resp.status < 200 || resp.status >= 300) {
@@ -415,7 +458,9 @@ function buildCommitAction(remotePath, file) {
     action.encoding = ''
   } else {
     action.sha256 = ''
-    action.content = fs.readFileSync(file.localPath).toString('base64')
+    // 内联内容在下载阶段就读进内存（file.base64），本地副本随后即删，
+    // 因此这里优先用内存副本，避免再读一个已不存在的文件。
+    action.content = file.base64 ?? fs.readFileSync(file.localPath).toString('base64')
     action.encoding = 'base64'
   }
   return action
@@ -451,19 +496,32 @@ async function main() {
   const repoId = (args.modelscopeRepo || process.env.MODELSCOPE_REPO || `${ghOwner}/${ghName}`).replace(/^\/+|\/+$/g, '')
 
   // 布局计划：每个资产 → 远端路径列表
-  const plan = assets.map((asset) => ({
+  let plan = assets.map((asset) => ({
     ...asset,
     remotePaths: prerelease
       ? [`releases/prerelease/${args.tag}/${asset.name}`]
       : [`releases/latest/${asset.name}`, `releases/archive/${version}/${asset.name}`],
   }))
 
+  // 部分演练：只处理名字命中子串的资产，并跳过索引读写（避免用子集覆盖历史）
+  const partial = Boolean(args.onlyPattern)
+  if (partial) {
+    const needle = args.onlyPattern.toLowerCase()
+    const before = plan.length
+    plan = plan.filter((item) => item.name.toLowerCase().includes(needle))
+    if (plan.length === 0) fail(`--only-pattern ${args.onlyPattern} 未匹配任何资产（release ${args.tag} 共 ${before} 个）`)
+  }
+
   if (args.dryRun) {
-    log(`dry-run: tag=${args.tag} repo=${args.repo} → ModelScope ${repoId}（${channel}）`)
+    log(`dry-run: tag=${args.tag} repo=${args.repo} → ModelScope ${repoId}（${channel}${partial ? `，部分演练 --only-pattern ${args.onlyPattern}` : ''}）`)
     for (const item of plan) {
       log(`  ${item.name} (${item.size} bytes) → ${item.remotePaths.join(', ')}`)
     }
-    log(`  ${VERSIONS_PATH} → versions["${version}"] = {tag: ${args.tag}, channel: ${channel}, assets: [${assets.map((a) => a.name).join(', ')}]}`)
+    if (partial) {
+      log(`  部分演练不改 ${VERSIONS_PATH}`)
+    } else {
+      log(`  ${VERSIONS_PATH} → versions["${version}"] = {tag: ${args.tag}, channel: ${channel}, assets: [${assets.map((a) => a.name).join(', ')}]}`)
+    }
     log('dry-run 完成，未做任何下载或上传')
     return
   }
@@ -471,72 +529,92 @@ async function main() {
   if (!repoId.includes('/')) fail(`ModelScope 仓库 id 不合法: ${repoId}（预期 namespace/name，可用 --modelscope-repo 或 MODELSCOPE_REPO 指定）`)
 
   // 远端索引必须在任何下载/上传之前读：按上面的失败语义，读取失败要立刻
-  // exit 1，而不是先跑完昂贵的上传再发现历史保不住。
-  const remote = await readRemoteVersions(token, repoId)
-  const remoteVersions = remote.versions && typeof remote.versions === 'object' && !Array.isArray(remote.versions) ? remote.versions : {}
-  const previousCount = Object.keys(remoteVersions).length
+  // exit 1，而不是先跑完昂贵的上传再发现历史保不住。部分演练不碰索引。
+  let remoteVersions = {}
+  let previousCount = 0
+  if (partial) {
+    log(`部分演练（--only-pattern ${args.onlyPattern}）：不读取、不更新 ${VERSIONS_PATH}`)
+  } else {
+    const remote = await readRemoteVersions(token, repoId)
+    remoteVersions = remote.versions && typeof remote.versions === 'object' && !Array.isArray(remote.versions) ? remote.versions : {}
+    previousCount = Object.keys(remoteVersions).length
+  }
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms-mirror-'))
   try {
-    // 1) 下载全部资产（单文件失败重试 1 次）
+    // 1) 逐个资产「下载 → 校验大小 → 算 sha256 → 上传（LFS）或读入内存
+    //    （内联）→ 删除本地副本」。峰值磁盘占用为单文件，失败更早暴露。
+    //    判定阈值必须与 buildCommitAction() 里的 type 判定保持一致。
     const files = []
     for (const item of plan) {
+      let localPath
       try {
-        const localPath = await downloadAsset(args, item, tempDir)
-        const size = fs.statSync(localPath).size
-        files.push({ ...item, localPath, size, sha256: await sha256File(localPath) })
-        log(`已下载: ${item.name} (${size} bytes)`)
+        localPath = await downloadAsset(args, item, tempDir)
       } catch (err) {
         throw new Error(`下载 ${item.name} 失败（已重试 1 次）: ${truncate(err.message, 300)}`)
       }
+      try {
+        const size = fs.statSync(localPath).size
+        const sha256 = await sha256File(localPath)
+        const record = { ...item, size, sha256 }
+        if (size > LFS_FORCE_THRESHOLD) {
+          // 只为本文件 batch 取预签名 URL；blob 按 sha256 去重，重跑只补缺
+          const hrefs = await validateBlobs(token, repoId, [{ oid: sha256, size }])
+          const action = hrefs[sha256]
+          if (!action || action.href == null) {
+            log(`blob 已存在，跳过上传: ${item.name} (${size} bytes)`)
+          } else {
+            await withRetry(() => putBlob(action.href, localPath, size, token, action.headers), `上传 ${item.name}`)
+            log(`已上传: ${item.name} (${size} bytes)`)
+          }
+        } else {
+          // 内联文件不经过 blob 存储：内容读进内存供 commit，batch 它们只会
+          // 产生不被引用的幽灵 blob
+          record.base64 = fs.readFileSync(localPath).toString('base64')
+          log(`内联提交（未超过 LFS 阈值，不 batch）: ${item.name} (${size} bytes)`)
+        }
+        files.push(record)
+      } finally {
+        // 本地副本用完即删：成功或失败都不再保留，避免全量落盘
+        try {
+          fs.rmSync(localPath, { force: true })
+        } catch {
+          // 临时目录稍后整体清理，单文件删除失败不影响正确性
+        }
+      }
     }
 
-    // 2) 只有超过 LFS 阈值的对象才 batch 取预签名 URL；其余走 base64 内联，
-    //    对它们 batch 只会产生不被引用的幽灵 blob。判定阈值必须与
-    //    buildCommitAction() 里的 type 判定保持一致。
     const lfsFiles = files.filter((f) => f.size > LFS_FORCE_THRESHOLD)
     const inlineFiles = files.filter((f) => f.size <= LFS_FORCE_THRESHOLD)
-    const hrefs = lfsFiles.length
-      ? await validateBlobs(token, repoId, lfsFiles.map((f) => ({ oid: f.sha256, size: f.size })))
-      : {}
-    for (const file of lfsFiles) {
-      const action = hrefs[file.sha256]
-      if (!action || action.href == null) {
-        log(`blob 已存在，跳过上传: ${file.name}`)
-        continue
-      }
-      await withRetry(() => putBlob(action.href, file.localPath, file.size, action.headers), `上传 ${file.name}`)
-      log(`已上传: ${file.name} (${file.size} bytes)`)
-    }
-    for (const file of inlineFiles) {
-      log(`内联提交（未超过 LFS 阈值，不 batch）: ${file.name} (${file.size} bytes)`)
-    }
 
-    // 3) 组装 versions.json（合并远端既有索引）+ 原子 commit
-    const versions = { ...remoteVersions }
-    const now = new Date().toISOString()
-    versions[version] = {
-      tag: args.tag,
-      channel,
-      assets: files.map((f) => f.name),
-      uploadedAt: now,
-    }
-    // 提交前自校验：合并只能新增/覆盖本版本，条目数不得少于读取到的数量。
-    // 退化说明合并逻辑出错或发生并发写，宁可报错也不提交一份丢掉历史的索引。
-    // 抛错而非 fail()：这样 finally 仍会删掉临时目录（fail 会直接 exit）。
-    const mergedCount = Object.keys(versions).length
-    if (mergedCount < previousCount) {
-      throw new Error(`versions.json 合并异常: 读取 ${previousCount} 条，合并后 ${mergedCount} 条（疑似并发发布），拒绝提交`)
-    }
-    const indexFile = { name: VERSIONS_PATH, localPath: path.join(tempDir, 'versions.json'), size: 0, sha256: '' }
-    fs.writeFileSync(indexFile.localPath, JSON.stringify({ updated: now, versions }, null, 2) + '\n', 'utf8')
-    indexFile.size = fs.statSync(indexFile.localPath).size
-
+    // 2) 组装 commit actions；非部分演练时合并远端既有索引并原子提交
     const actions = []
     for (const file of files) {
       for (const remotePath of file.remotePaths) actions.push(buildCommitAction(remotePath, file))
     }
-    actions.push(buildCommitAction(VERSIONS_PATH, indexFile))
+
+    let mergedCount = previousCount
+    if (!partial) {
+      const versions = { ...remoteVersions }
+      const now = new Date().toISOString()
+      versions[version] = {
+        tag: args.tag,
+        channel,
+        assets: files.map((f) => f.name),
+        uploadedAt: now,
+      }
+      // 提交前自校验：合并只能新增/覆盖本版本，条目数不得少于读取到的数量。
+      // 退化说明合并逻辑出错或发生并发写，宁可报错也不提交一份丢掉历史的索引。
+      // 抛错而非 fail()：这样 finally 仍会删掉临时目录（fail 会直接 exit）。
+      mergedCount = Object.keys(versions).length
+      if (mergedCount < previousCount) {
+        throw new Error(`versions.json 合并异常: 读取 ${previousCount} 条，合并后 ${mergedCount} 条（疑似并发发布），拒绝提交`)
+      }
+      const indexFile = { name: VERSIONS_PATH, localPath: path.join(tempDir, 'versions.json'), size: 0, sha256: '' }
+      fs.writeFileSync(indexFile.localPath, JSON.stringify({ updated: now, versions }, null, 2) + '\n', 'utf8')
+      indexFile.size = fs.statSync(indexFile.localPath).size
+      actions.push(buildCommitAction(VERSIONS_PATH, indexFile))
+    }
 
     const commitMessage = `Mirror ${args.tag} from ${args.repo}`
     await withRetry(
@@ -546,14 +624,16 @@ async function main() {
       }),
       `提交 ${actions.length} 个变更`,
     )
-    log(`镜像完成: ${repoId} ← ${args.tag}（${files.length} 个资产，${actions.length} 个路径变更）`)
+    log(`镜像完成: ${repoId} ← ${args.tag}（${files.length} 个资产，${actions.length} 个路径变更${partial ? '，部分演练' : ''}）`)
     writeSummary([
-      '### ModelScope mirror: OK',
+      `### ModelScope mirror: ${partial ? 'OK (partial drill)' : 'OK'}`,
       '',
       `- Release: \`${args.tag}\` (${channel})`,
       `- Target: \`${repoId}\``,
       `- Files: ${files.length} assets (${lfsFiles.length} via LFS, ${inlineFiles.length} inlined), ${actions.length} paths committed`,
-      `- Index: \`${VERSIONS_PATH}\` now holds ${mergedCount} version(s)`,
+      partial
+        ? `- Partial drill (\`--only-pattern ${args.onlyPattern}\`): \`${VERSIONS_PATH}\` was not modified`
+        : `- Index: \`${VERSIONS_PATH}\` now holds ${mergedCount} version(s)`,
       `- Backfill if this run needs repeating: \`${backfillCommand()}\``,
     ])
   } finally {
