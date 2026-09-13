@@ -1,0 +1,68 @@
+pageType: content
+background:
+  type: solid
+  color: '#F1F5F5'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 48
+      - 72
+      - 864
+      - 396
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#E2EBE9'
+    border:
+      width: 0
+      color: '#E2EBE9'
+  - elementId: s2
+    elementType: shape
+    bounds:
+      - 72
+      - 108
+      - 120
+      - 4.5
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#C0CCC9'
+    border:
+      width: 0
+      color: '#C0CCC9'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 72
+      - 138
+      - 816
+      - 156
+    content:
+      text: 少即是多
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 51
+      color: '#16302B'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 72
+      - 318
+      - 570
+      - 54
+    content:
+      text: 一页只承载一条主信息
+      fontFamily: *ref_0
+      fontSize: 19.5
+      color: '#5F736E'
+      lineHeight: 1.15
+      bold: false
+      align: [left, middle]

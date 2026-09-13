@@ -1,0 +1,68 @@
+pageType: content
+background:
+  type: solid
+  color: '#FFFFFF'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 48
+      - 108
+      - 6
+      - 324
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#CBD5E1'
+    border:
+      width: 0
+      color: '#CBD5E1'
+  - elementId: s2
+    elementType: shape
+    bounds:
+      - 792
+      - 81
+      - 108
+      - 108
+    shapeName: ellipse
+    fill:
+      type: solid
+      color: '#F4F6F8'
+    border:
+      width: 0.75
+      color: '#D6DCE3'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 120
+      - 168
+      - 672
+      - 84
+    content:
+      text: 第一章 · 版式语言
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 37.5
+      color: '#1E293B'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 120
+      - 267
+      - 600
+      - 69
+    content:
+      text: 用结构区分页面：开篇给主张，内容承载证据。
+      fontFamily: *ref_0
+      fontSize: 18
+      color: '#64748B'
+      lineHeight: 1.15
+      bold: false
+      align: [left, middle]

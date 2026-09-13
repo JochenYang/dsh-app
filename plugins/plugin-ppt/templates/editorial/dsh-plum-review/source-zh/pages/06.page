@@ -1,0 +1,192 @@
+pageType: content
+background:
+  type: solid
+  color: '#F8F2F6'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: l1
+    elementType: line
+    bounds:
+      - 147
+      - 192
+      - 666
+      - 0.75
+    viewBox:
+      - 666
+      - 0.75
+    points: 0,0 666,0
+    border:
+      color: '#CDBBC8'
+      width: 3
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 138
+      - 183
+      - 18
+      - 18
+    shapeName: ellipse
+    fill:
+      type: solid
+      color: '#F8F2F6'
+    border:
+      width: 3
+      color: '#9D8998'
+  - elementId: s2
+    elementType: shape
+    bounds:
+      - 360
+      - 183
+      - 18
+      - 18
+    shapeName: ellipse
+    fill:
+      type: solid
+      color: '#F8F2F6'
+    border:
+      width: 3
+      color: '#9D8998'
+  - elementId: s3
+    elementType: shape
+    bounds:
+      - 582
+      - 183
+      - 18
+      - 18
+    shapeName: ellipse
+    fill:
+      type: solid
+      color: '#F8F2F6'
+    border:
+      width: 3
+      color: '#9D8998'
+  - elementId: s4
+    elementType: shape
+    bounds:
+      - 804
+      - 183
+      - 18
+      - 18
+    shapeName: ellipse
+    fill:
+      type: solid
+      color: '#F8F2F6'
+    border:
+      width: 3
+      color: '#9D8998'
+  - elementId: s5
+    elementType: shape
+    bounds:
+      - 48
+      - 426
+      - 864
+      - 54
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#EEDDE9'
+    border:
+      width: 0.75
+      color: '#D4C3CF'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 48
+      - 30
+      - 864
+      - 54
+    content:
+      text: 四步落地路径
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 27
+      color: '#2A1B28'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 60
+      - 126
+      - 174
+      - 258
+    content:
+      text: |-
+        盘点资产
+        汇总现有版式
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#7A3B6B'
+      lineHeight: 1.15
+      bold: false
+      align: [center, middle]
+  - elementId: t3
+    elementType: text
+    bounds:
+      - 282
+      - 126
+      - 174
+      - 258
+    content:
+      text: |-
+        定义骨架
+        锁定栅格层级
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#7A3B6B'
+      lineHeight: 1.15
+      bold: false
+      align: [center, middle]
+  - elementId: t4
+    elementType: text
+    bounds:
+      - 504
+      - 126
+      - 174
+      - 258
+    content:
+      text: |-
+        派生配色
+        映射场景色板
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#7A3B6B'
+      lineHeight: 1.15
+      bold: false
+      align: [center, middle]
+  - elementId: t5
+    elementType: text
+    bounds:
+      - 726
+      - 126
+      - 174
+      - 258
+    content:
+      text: |-
+        校验闭环
+        检查与导出
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#7A3B6B'
+      lineHeight: 1.15
+      bold: false
+      align: [center, middle]
+  - elementId: t6
+    elementType: text
+    bounds:
+      - 66
+      - 438
+      - 828
+      - 30
+    content:
+      text: 每一步都以可验证的产出收尾
+      fontFamily: *ref_0
+      fontSize: 15
+      color: '#52404E'
+      lineHeight: 1.15
+      bold: false
+      align: [center, middle]

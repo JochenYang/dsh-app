@@ -1,0 +1,76 @@
+/**
+ * DSH APP plugin market — host half.
+ *
+ * Registers the market API routes over two collaborators:
+ *
+ * 1. The sources store (`$DSH_HOME/storages/dsh-app-plugin-market/
+ *    sources.json`) — the user's catalog source URL list.
+ * 2. The install executor — a serialized wrapper around the kernel's own
+ *    `plugin` CLI, which forwards to the profile's package manager and
+ *    reconciles the profile's bundle (mount) layer, so installing a package
+ *    that declares `dsh.bundle` mounts it without any patch-file editing
+ *    here. The CLI is pinned to the RUNNING kernel's bin (see npm.ts).
+ *
+ * The profile is `DSH_APP_PROFILE` (default `web`) — the same profile the
+ * desktop shell boots, so what the panel installs is what the app loads on
+ * its next start.
+ *
+ * @module @dsh-app/plugin-market
+ */
+
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
+import type {} from '@deepseek-ai/dsh-host-webserver'
+import { PluginInstaller } from './installer.ts'
+import { validateProfileName } from './npm.ts'
+import { registerMarketRoutes } from './routes.ts'
+
+export const name = 'plugin-market'
+export const inject = ['webServer']
+
+/** Config: storage location + profile override. */
+export interface Config {
+  /** Absolute store directory; empty → $DSH_HOME/storages/dsh-app-plugin-market. */
+  storePath: string
+  /** Profile the market installs into; empty → $DSH_APP_PROFILE or `web`. */
+  profile: string
+}
+
+export const Config: z<Config> = z.object({
+  storePath: z.string().default(''),
+  profile: z.string().default(''),
+})
+
+/** The effective profile for install operations. */
+export function effectiveProfile(configProfile: string): string {
+  const raw = configProfile !== '' ? configProfile : (process.env.DSH_APP_PROFILE ?? 'web')
+  return validateProfileName(raw)
+}
+
+/**
+ * Host apply: register the market routes. The plugin owns no kernel seams —
+ * a boot never fails because of it.
+ * @param ctx - the host plugin context.
+ * @param config - validated plugin config.
+ */
+export function apply(ctx: Context, config: Config): void {
+  const log = ctx.logger(name)
+  const dir = config.storePath !== ''
+    ? config.storePath
+    : join(resolveDshHome(), 'storages', 'dsh-app-plugin-market')
+  const profile = effectiveProfile(config.profile)
+  const installer = new PluginInstaller(profile, process.argv[1], spawn, (message) => log.warn(message))
+
+  ctx.effect(() => registerMarketRoutes(ctx.webServer, {
+    sourcesPath: join(dir, 'sources.json'),
+    catalogCachePath: join(dir, 'catalog-cache.json'),
+    installer,
+    profile,
+  }, (message) => log.warn(message)), 'plugin-market: api routes')
+
+  log.info(`plugin market: sources at ${join(dir, 'sources.json')} (profile ${profile})`)
+}

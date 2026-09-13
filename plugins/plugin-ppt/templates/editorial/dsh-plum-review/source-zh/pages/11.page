@@ -1,0 +1,87 @@
+pageType: content
+background:
+  type: solid
+  color: '#F8F2F6'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 444
+      - 48
+      - 468
+      - 444
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#EAD9E5'
+    border:
+      width: 0.75
+      color: '#D4C3CF'
+  - elementId: s2
+    elementType: shape
+    bounds:
+      - 414
+      - 48
+      - 3
+      - 444
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#CDBBC8'
+    border:
+      width: 0
+      color: '#CDBBC8'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 48
+      - 48
+      - 336
+      - 78
+    content:
+      text: 图文分栏
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 28.5
+      color: '#2A1B28'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 48
+      - 156
+      - 336
+      - 264
+    content:
+      text: |-
+        左侧叙述，右侧画面。
+        图片区留白，标题与正文
+        保持同一条基线。
+      fontFamily: *ref_0
+      fontSize: 18
+      color: '#6F5A6A'
+      lineHeight: 1.15
+      bold: false
+  - elementId: t3
+    elementType: text
+    bounds:
+      - 444
+      - 48
+      - 468
+      - 444
+    content:
+      text: |-
+        图片占位区
+        替换为实拍图或截图
+      fontFamily: *ref_0
+      fontSize: 18
+      color: '#2A1B28'
+      lineHeight: 1.15
+      bold: false
+      align: [center, middle]

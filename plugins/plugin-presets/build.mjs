@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+// Builds the preset-packages plugin's two halves (host zip pack/unpack +
+// routes, browser settings section) via the shared suite recipe. fflate is
+// pure JS with a real ESM build, so it bundles into both halves without
+// shims; no require handoff is needed (unlike CJS-heavy dependencies).
+//
+// Run from the dsh-app root (esbuild resolves out of dsh-app/node_modules):
+//   node plugins/plugin-presets/build.mjs
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { buildDual } from '../build-lib.mjs'
+
+const here = dirname(fileURLToPath(import.meta.url))
+
+await buildDual(here, '@dsh-app/plugin-presets')

@@ -1,0 +1,131 @@
+pageType: content
+background:
+  type: solid
+  color: '#FFFAF1'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 48
+      - 114
+      - 414
+      - 378
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#F3E7D3'
+    border:
+      width: 0.75
+      color: '#DACDB8'
+  - elementId: s2
+    elementType: shape
+    bounds:
+      - 498
+      - 114
+      - 414
+      - 378
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#F3E7D3'
+    border:
+      width: 0.75
+      color: '#DACDB8'
+  - elementId: s3
+    elementType: shape
+    bounds:
+      - 478.5
+      - 138
+      - 3
+      - 330
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#D3C6B0'
+    border:
+      width: 0
+      color: '#D3C6B0'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 48
+      - 30
+      - 864
+      - 54
+    content:
+      text: 两种改造路径
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 27
+      color: '#2A2116'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 66
+      - 132
+      - 378
+      - 42
+    content:
+      text: 渐进式沿用
+      fontFamily: *ref_0
+      fontSize: 18
+      color: '#A96A14'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t3
+    elementType: text
+    bounds:
+      - 66
+      - 186
+      - 378
+      - 282
+    content:
+      text: |-
+        保留现有骨架，替换配色与文案。
+        风险低、上线快，
+        适合季度汇报与内部评审。
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#A4957D'
+      lineHeight: 1.15
+      bold: false
+  - elementId: t4
+    elementType: text
+    bounds:
+      - 516
+      - 132
+      - 378
+      - 42
+    content:
+      text: 重构式设计
+      fontFamily: *ref_0
+      fontSize: 18
+      color: '#A96A14'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t5
+    elementType: text
+    bounds:
+      - 516
+      - 186
+      - 378
+      - 282
+    content:
+      text: |-
+        重排栅格与信息层级。
+        表达力强、学习成本高，
+        适合年度发布与对外评审。
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#A4957D'
+      lineHeight: 1.15
+      bold: false

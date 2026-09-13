@@ -1,0 +1,54 @@
+pageType: cover
+background:
+  type: solid
+  color: '#FFF5F0'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 48
+      - 162
+      - 6
+      - 144
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#DABCB1'
+    border:
+      width: 0
+      color: '#DABCB1'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 84
+      - 162
+      - 792
+      - 87
+    content:
+      text: 几何版式系统
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 40.5
+      color: '#2A1712'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 84
+      - 262.5
+      - 660
+      - 48
+    content:
+      text: 十六比九 · 十二页结构母版
+      fontFamily: *ref_0
+      fontSize: 19.5
+      color: '#7C5850'
+      lineHeight: 1.15
+      bold: false
+      align: [left, middle]

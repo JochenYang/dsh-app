@@ -1,0 +1,243 @@
+{
+  "$comment": "Colorway variants derived from a bundled base template. Each entry remaps the base layout sources, structure index and design document onto a new palette; the generator renders fresh previews. `baseCategory` defaults to the variant's own category and lets one geometry family (e.g. dsh-slate-grid) seed colorways across several categories. Add an entry here to extend the catalogue.",
+  "variants": [
+    {
+      "id": "dsh-teal-counsel",
+      "category": "consulting",
+      "base": "dsh-slate-grid",
+      "baseCategory": "business",
+      "name": "青灰决策",
+      "nameEn": "Teal Counsel",
+      "colorwayNote": "Colorway variant of the bundled Slate Grid / 灰阶网格 template: the same twelve page geometries, panels and slot structure, rebuilt around deep teal ink on a cool mist ground.",
+      "palette": { "background": "F1F5F5", "text": "16302B", "accent": "2F7D74", "surface": "E2EBE9", "secondary": "5F736E" },
+      "replacements": [
+        ["A neutral, structure-first presentation system on white (#ffffff)", "A cool, structure-first presentation system on mist (#f1f5f5)"],
+        ["a single slate accent (#334155)", "a single deep-teal accent (#2f7d74)"]
+      ]
+    },
+    {
+      "id": "dsh-amber-weekly",
+      "category": "work",
+      "base": "dsh-slate-grid",
+      "baseCategory": "business",
+      "name": "琥珀周报",
+      "nameEn": "Amber Weekly",
+      "colorwayNote": "Colorway variant of the bundled Slate Grid / 灰阶网格 template: the same twelve page geometries, panels and slot structure, rebuilt around warm amber ink on a sand-paper ground.",
+      "palette": { "background": "FFFAF1", "text": "2A2116", "accent": "A96A14", "surface": "F3E7D3", "secondary": "77664C" },
+      "replacements": [
+        ["A neutral, structure-first presentation system on white (#ffffff)", "A warm, structure-first presentation system on sand (#fffaf1)"],
+        ["a single slate accent (#334155)", "a single amber accent (#a96a14)"]
+      ]
+    },
+    {
+      "id": "dsh-indigo-study",
+      "category": "academic",
+      "base": "dsh-slate-grid",
+      "baseCategory": "business",
+      "name": "靛蓝学记",
+      "nameEn": "Indigo Study",
+      "colorwayNote": "Colorway variant of the bundled Slate Grid / 灰阶网格 template: the same twelve page geometries, panels and slot structure, rebuilt around indigo ink on cool ivory paper.",
+      "palette": { "background": "F2F4FB", "text": "1B2140", "accent": "3B4FA8", "surface": "E1E6F6", "secondary": "5D6689" },
+      "replacements": [
+        ["A neutral, structure-first presentation system on white (#ffffff)", "An indigo, structure-first presentation system on ivory (#f2f4fb)"],
+        ["a single slate accent (#334155)", "a single indigo accent (#3b4fa8)"]
+      ]
+    },
+    {
+      "id": "dsh-plum-review",
+      "category": "editorial",
+      "base": "dsh-slate-grid",
+      "baseCategory": "business",
+      "name": "紫李季刊",
+      "nameEn": "Plum Review",
+      "colorwayNote": "Colorway variant of the bundled Slate Grid / 灰阶网格 template: the same twelve page geometries, panels and slot structure, rebuilt around plum ink on a rose-paper ground.",
+      "palette": { "background": "F8F2F6", "text": "2A1B28", "accent": "7A3B6B", "surface": "EEDDE9", "secondary": "6F5A6A" },
+      "replacements": [
+        ["A neutral, structure-first presentation system on white (#ffffff)", "A plum, structure-first presentation system on rose paper (#f8f2f6)"],
+        ["a single slate accent (#334155)", "a single plum accent (#7a3b6b)"]
+      ]
+    },
+    {
+      "id": "dsh-coral-bill",
+      "category": "promotion",
+      "base": "dsh-slate-grid",
+      "baseCategory": "business",
+      "name": "珊瑚招贴",
+      "nameEn": "Coral Bill",
+      "colorwayNote": "Colorway variant of the bundled Slate Grid / 灰阶网格 template: the same twelve page geometries, panels and slot structure, rebuilt around coral ink on a warm cream ground.",
+      "palette": { "background": "FFF5F0", "text": "2A1712", "accent": "DC4A22", "surface": "FBDFD3", "secondary": "7C5850" },
+      "replacements": [
+        ["A neutral, structure-first presentation system on white (#ffffff)", "A coral, structure-first presentation system on cream (#fff5f0)"],
+        ["a single slate accent (#334155)", "a single coral accent (#dc4a22)"]
+      ]
+    },
+    {
+      "id": "dsh-indigo-folio",
+      "category": "academic",
+      "base": "dsh-monochrome",
+      "name": "靛青学报",
+      "nameEn": "Indigo Folio",
+      "colorwayNote": "Colorway variant of the bundled Monochrome / 极简研究 template: the same twelve editable layouts and geometry, rebuilt as deep indigo ink on cool ivory paper.",
+      "palette": { "background": "EEF2F9", "text": "1B2333", "accent": "1B2333", "surface": "D9E2F0", "secondary": "56657A" },
+      "replacements": [
+        ["black ink on cream paper", "indigo ink on cool ivory paper"],
+        ["graphite or cream tone", "indigo or ivory tone"]
+      ]
+    },
+    {
+      "id": "dsh-moss-lecture",
+      "category": "academic",
+      "base": "dsh-monochrome",
+      "name": "苔绿讲席",
+      "nameEn": "Moss Lecture",
+      "colorwayNote": "Colorway variant of the bundled Monochrome / 极简研究 template: the same twelve editable layouts and geometry, rebuilt as dark moss ink on a muted sage ground.",
+      "palette": { "background": "EFF3E7", "text": "242C22", "accent": "242C22", "surface": "DAE3C9", "secondary": "5E6B54" },
+      "replacements": [
+        ["black ink on cream paper", "moss ink on muted sage paper"],
+        ["graphite or cream tone", "moss or sage tone"]
+      ]
+    },
+    {
+      "id": "dsh-graphite-executive",
+      "category": "business",
+      "base": "dsh-blue-professional",
+      "name": "石墨商务",
+      "nameEn": "Graphite Executive",
+      "colorwayNote": "Colorway variant of the bundled Blue Professional / 蓝色商务 template: the same twelve editable layouts and geometry, rebuilt around graphite black with a single muted antique-gold accent.",
+      "palette": { "background": "191B1F", "text": "F3F1EC", "accent": "D9A441", "surface": "24262B", "secondary": "9BA1A9" },
+      "replacements": [
+        ["warm cream canvas", "graphite-black canvas"],
+        ["saturated cobalt blue", "muted antique gold"],
+        ["soft-tinted cobalt", "soft-tinted gold"],
+        ["Keep cream as the field and use cobalt to identify", "Keep graphite as the field and use gold to identify"]
+      ]
+    },
+    {
+      "id": "dsh-crimson-ledger",
+      "category": "business",
+      "base": "dsh-blue-professional",
+      "name": "绯红商务",
+      "nameEn": "Crimson Ledger",
+      "colorwayNote": "Colorway variant of the bundled Blue Professional / 蓝色商务 template: the same twelve editable layouts and geometry, rebuilt around warm ivory with a single deep-crimson accent.",
+      "palette": { "background": "FBF6F1", "text": "191310", "accent": "B02228", "surface": "EEE1D8", "secondary": "6C5B51" },
+      "replacements": [
+        ["warm cream canvas", "warm ivory canvas"],
+        ["saturated cobalt blue", "deep crimson"],
+        ["soft-tinted cobalt", "soft-tinted crimson"],
+        ["Keep cream as the field and use cobalt to identify", "Keep ivory as the field and use crimson to identify"]
+      ]
+    },
+    {
+      "id": "dsh-silver-counsel",
+      "category": "consulting",
+      "base": "dsh-signal",
+      "name": "银灰咨询",
+      "nameEn": "Silver Counsel",
+      "colorwayNote": "Colorway variant of the bundled Signal / 深蓝决策 template: the same twelve editable layouts and geometry, rebuilt around cool silver paper with a single steel-blue accent.",
+      "palette": { "background": "F3F5F6", "text": "1B2127", "accent": "2E6E8E", "surface": "E2E7EB", "secondary": "67717B" },
+      "replacements": [
+        ["warm cream paper (#F0ECE3)", "cool silver paper (#E7EDF0)"],
+        ["deep editorial navy (#1C2644)", "slate charcoal (#2A3238)"],
+        ["antique gold (#C8A870)", "steel blue (#2E6E8E)"],
+        ["antique gold", "steel blue"]
+      ]
+    },
+    {
+      "id": "dsh-verdigris-counsel",
+      "category": "consulting",
+      "base": "dsh-signal",
+      "name": "松绿决策",
+      "nameEn": "Verdigris Counsel",
+      "colorwayNote": "Colorway variant of the bundled Signal / 深蓝决策 template: the same twelve editable layouts and geometry, rebuilt around deep pine with a single verdigris-green accent.",
+      "palette": { "background": "17211F", "text": "E8EEEB", "accent": "6FAE9C", "surface": "1F2B28", "secondary": "8FA79F" },
+      "replacements": [
+        ["warm cream paper (#F0ECE3)", "pale pine paper (#26332F)"],
+        ["deep editorial navy (#1C2644)", "deep pine (#17211F)"],
+        ["antique gold (#C8A870)", "verdigris green (#6FAE9C)"],
+        ["antique gold", "verdigris green"]
+      ]
+    },
+    {
+      "id": "dsh-nocturne-editorial",
+      "category": "editorial",
+      "base": "dsh-soft-editorial",
+      "name": "夜读季刊",
+      "nameEn": "Nocturne Editorial",
+      "colorwayNote": "Colorway variant of the bundled Soft Editorial / 柔和编辑部 template: the same twelve editable layouts and geometry, rebuilt around midnight aubergine with muted jewel accents.",
+      "palette": { "background": "1D1A23", "text": "EFE9F1", "accent": "C79AD6", "surface": "292431", "secondary": "A79CB0" },
+      "replacements": [
+        ["cream paper with a quartet of pastel candy accents (dusty pink, chartreuse lemon, soft peach blush, sage green, lilac)", "midnight paper with a quartet of muted jewel accents (orchid, dusty rose, soft mauve, sage, slate)"],
+        ["over the cream field", "over the midnight field"]
+      ]
+    },
+    {
+      "id": "dsh-slate-journal",
+      "category": "editorial",
+      "base": "dsh-soft-editorial",
+      "name": "灰蓝手记",
+      "nameEn": "Slate Journal",
+      "colorwayNote": "Colorway variant of the bundled Soft Editorial / 柔和编辑部 template: the same twelve editable layouts and geometry, rebuilt around cool slate paper with muted mineral accents.",
+      "palette": { "background": "EEF1F2", "text": "222A2E", "accent": "4C7A8A", "surface": "DCE4E6", "secondary": "6A757B" },
+      "replacements": [
+        ["cream paper with a quartet of pastel candy accents (dusty pink, chartreuse lemon, soft peach blush, sage green, lilac)", "slate paper with a quartet of muted mineral accents (dusty blue, pale teal, soft sand, sage, grey-lilac)"],
+        ["over the cream field", "over the slate field"]
+      ]
+    },
+    {
+      "id": "dsh-cobalt-poster",
+      "category": "promotion",
+      "base": "dsh-broadside",
+      "name": "潮蓝海报",
+      "nameEn": "Cobalt Poster",
+      "colorwayNote": "Colorway variant of the bundled Broadside / 橙黑宣言 template: the same twelve editable layouts and geometry, rebuilt around cobalt black with a single electric-cobalt accent.",
+      "palette": { "background": "0D1230", "text": "EDF0FA", "accent": "3D6BFF", "surface": "1A2044", "secondary": "9098B8" },
+      "replacements": [
+        ["fire-orange", "electric cobalt"],
+        ["\"ink on fire\"", "\"ink on voltage\""],
+        ["orange slides", "cobalt slides"]
+      ]
+    },
+    {
+      "id": "dsh-magenta-bill",
+      "category": "promotion",
+      "base": "dsh-broadside",
+      "name": "品红招贴",
+      "nameEn": "Magenta Bill",
+      "colorwayNote": "Colorway variant of the bundled Broadside / 橙黑宣言 template: the same twelve editable layouts and geometry, rebuilt around wine black with a single hot-magenta accent.",
+      "palette": { "background": "1A0D14", "text": "F5E9EE", "accent": "E01E5A", "surface": "2A1620", "secondary": "9A7E88" },
+      "replacements": [
+        ["fire-orange", "hot magenta"],
+        ["\"ink on fire\"", "\"ink on flash\""],
+        ["orange slides", "magenta slides"]
+      ]
+    },
+    {
+      "id": "dsh-mist-weekly",
+      "category": "work",
+      "base": "dsh-editorial-forest",
+      "name": "雾蓝周报",
+      "nameEn": "Mist Weekly",
+      "colorwayNote": "Colorway variant of the bundled Editorial Forest / 森林季刊 template: the same twelve editable layouts and geometry, rebuilt around cool mist grey with a single teal accent.",
+      "palette": { "background": "F1F4F4", "text": "1E2422", "accent": "2F7D74", "surface": "E1E8E6", "secondary": "616E6A" },
+      "replacements": [
+        ["deep forest green", "cool mist grey"],
+        ["dusty rose pink", "dusty teal"],
+        ["over an oat-cream paper ground", "over a deep slate ink ground"]
+      ]
+    },
+    {
+      "id": "dsh-umber-weekly",
+      "category": "work",
+      "base": "dsh-editorial-forest",
+      "name": "炭褐周报",
+      "nameEn": "Umber Weekly",
+      "colorwayNote": "Colorway variant of the bundled Editorial Forest / 森林季刊 template: the same twelve editable layouts and geometry, rebuilt around warm charcoal with a single clay-rust accent.",
+      "palette": { "background": "221C18", "text": "F0E9E1", "accent": "C4714E", "surface": "2F2722", "secondary": "A99C90" },
+      "replacements": [
+        ["deep forest green", "warm charcoal"],
+        ["dusty rose pink", "clay rust"],
+        ["over an oat-cream paper ground", "over a warm sand ground"]
+      ]
+    }
+  ]
+}

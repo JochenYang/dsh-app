@@ -1,0 +1,196 @@
+{
+  "$comment": "Layout-family imports: select 16:9 SVG page layouts from the pinned open-source layout asset root (--layouts), extract their editable slots and fixed decoration, and emit a bundled template (source-zh pages + metadata zones + deck manifest). Geometry is converted once here: source pixels x 0.75 -> .page points (960x540); metadata zones stay in the 1280x720 reference pixel space (.page points x 4/3). Chinese example copy is per page below; size/alignment overrides exist only to keep a slot inside its capacity.",
+  "imports": [
+    {
+      "id": "dsh-slate-grid",
+      "category": "business",
+      "name": "灰阶网格",
+      "nameEn": "Slate Grid",
+      "description": "灰阶网格 · Slate Grid",
+      "visualGrammar": "slate-grid",
+      "recommendedDensity": "medium",
+      "palette": {
+        "background": "FFFFFF",
+        "text": "1E293B",
+        "accent": "334155",
+        "surface": "F4F6F8",
+        "secondary": "64748B"
+      },
+      "fonts": {
+        "zh": { "title": "PingFang SC", "body": "PingFang SC" },
+        "en": { "title": "Arial", "body": "Arial" },
+        "fallbacks": {
+          "en": { "title": "Arial", "body": "Arial" },
+          "zh": {
+            "macOS": { "serif": "Songti SC", "sans": "PingFang SC" },
+            "Windows": { "serif": "SimSun", "sans": "Microsoft YaHei" },
+            "Linux": { "serif": "Noto Serif CJK SC", "sans": "Noto Sans CJK SC" }
+          }
+        }
+      },
+      "notes": "结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。",
+      "pages": [
+        {
+          "file": "presentation_core/templates/01_title_slide.svg",
+          "pageType": "cover",
+          "family": "cover",
+          "sourceTitle": "Cover",
+          "density": "low",
+          "relationship": "statement",
+          "structureSummary": "左侧竖条，大标题与副标题的封面",
+          "examples": { "TITLE": "几何版式系统", "SUBTITLE": "十六比九 · 十二页结构母版" }
+        },
+        {
+          "file": "presentation_core/templates/03_section_header.svg",
+          "pageType": "content",
+          "family": "section",
+          "sourceTitle": "Section header",
+          "density": "low",
+          "relationship": "statement",
+          "structureSummary": "左侧长条与章节标题，右上圆形锚点",
+          "examples": { "CHAPTER_TITLE": "第一章 · 版式语言", "CHAPTER_DESC": "用结构区分页面：开篇给主张，内容承载证据。" }
+        },
+        {
+          "file": "presentation_core/templates/02_title_content.svg",
+          "pageType": "content",
+          "family": "content",
+          "sourceTitle": "Title and content",
+          "density": "medium",
+          "relationship": "generic",
+          "structureSummary": "顶部短色条与整幅内容面板",
+          "examples": {
+            "PAGE_TITLE": "章节导读",
+            "CONTENT_AREA": "先判断信息关系，再挑选参考页。\n一页只保留一个主结论，\n证据与解读各就其位。"
+          }
+        },
+        {
+          "file": "presentation_core/templates/12_three_card.svg",
+          "pageType": "content",
+          "family": "grid",
+          "sourceTitle": "Three-card synthesis",
+          "density": "medium",
+          "relationship": "independent",
+          "structureSummary": "三张等宽圆角面板并列的卡片组",
+          "examples": {
+            "PAGE_TITLE": "三类结构元素",
+            "CARD_1": "论点\n一页一个主张",
+            "CARD_2": "证据\n数字先于形容词",
+            "CARD_3": "动作\n写明责任人与门槛"
+          }
+        },
+        {
+          "file": "presentation_core/templates/05_comparison.svg",
+          "pageType": "content",
+          "family": "comparison",
+          "sourceTitle": "Comparison",
+          "density": "medium",
+          "relationship": "comparison",
+          "structureSummary": "左右等宽面板与中缝分隔条的双栏对比",
+          "examples": {
+            "PAGE_TITLE": "两种改造路径",
+            "LEFT_TITLE": "渐进式沿用",
+            "LEFT_CONTENT": "保留现有骨架，替换配色与文案。\n风险低、上线快，\n适合季度汇报与内部评审。",
+            "RIGHT_TITLE": "重构式设计",
+            "RIGHT_CONTENT": "重排栅格与信息层级。\n表达力强、学习成本高，\n适合年度发布与对外评审。"
+          }
+        },
+        {
+          "file": "presentation_core/templates/14_process_timeline.svg",
+          "pageType": "content",
+          "family": "process",
+          "sourceTitle": "Process timeline",
+          "density": "medium",
+          "relationship": "process",
+          "structureSummary": "横向时间轴、四个节点圆与底部结论条",
+          "examples": {
+            "PAGE_TITLE": "四步落地路径",
+            "STEP_1": "盘点资产\n汇总现有版式",
+            "STEP_2": "定义骨架\n锁定栅格层级",
+            "STEP_3": "派生配色\n映射场景色板",
+            "STEP_4": "校验闭环\n检查与导出",
+            "KEY_MESSAGE": "每一步都以可验证的产出收尾"
+          }
+        },
+        {
+          "file": "presentation_core/templates/13_kpi_dashboard.svg",
+          "pageType": "content",
+          "family": "data",
+          "sourceTitle": "KPI dashboard",
+          "density": "high",
+          "relationship": "data",
+          "structureSummary": "四张指标卡加整幅证据面板",
+          "examples": {
+            "PAGE_TITLE": "关键指标总览",
+            "KPI_1": "68%",
+            "KPI_2": "12 天",
+            "KPI_3": "94%",
+            "KPI_4": "1.08",
+            "CONTENT_AREA": "四周内采用率提升 12 个百分点，\n平均周期缩短 4 天。\n口径与统计窗口见页面备注。"
+          }
+        },
+        {
+          "file": "presentation_core/templates/19_chart_insight.svg",
+          "pageType": "content",
+          "family": "data",
+          "sourceTitle": "Chart and insight",
+          "density": "high",
+          "relationship": "data",
+          "structureSummary": "左侧大图表区加右侧解读栏与来源注",
+          "examples": {
+            "PAGE_TITLE": "季度趋势洞察",
+            "KEY_MESSAGE": "采用率连续四个季度上行",
+            "SOURCE": "示例数据 · 仅作演示"
+          }
+        },
+        {
+          "file": "presentation_core/templates/20_table_summary.svg",
+          "pageType": "content",
+          "family": "table",
+          "sourceTitle": "Table and summary",
+          "density": "high",
+          "relationship": "data",
+          "structureSummary": "左侧宽表格区加右侧解读栏与来源注",
+          "examples": {
+            "PAGE_TITLE": "指标对照表",
+            "KEY_MESSAGE": "三项指标全部达标",
+            "SOURCE": "示例数据 · 仅作演示"
+          }
+        },
+        {
+          "file": "presentation_core/templates/10_hero_statement.svg",
+          "pageType": "content",
+          "family": "quote",
+          "sourceTitle": "Hero statement",
+          "density": "low",
+          "relationship": "statement",
+          "structureSummary": "整幅浅色底场加居左大金句与副题",
+          "examples": { "KEY_MESSAGE": "少即是多", "SUBTITLE": "一页只承载一条主信息" }
+        },
+        {
+          "file": "presentation_core/templates/11_editorial_split.svg",
+          "pageType": "content",
+          "family": "content",
+          "sourceTitle": "Editorial split",
+          "density": "medium",
+          "relationship": "generic",
+          "structureSummary": "左侧窄栏文字与右侧整幅画面区的分栏",
+          "examples": {
+            "PAGE_TITLE": "图文分栏",
+            "BODY_TEXT": "左侧叙述，右侧画面。\n图片区留白，标题与正文\n保持同一条基线。"
+          }
+        },
+        {
+          "file": "report_core/templates/13_closing.svg",
+          "pageType": "content",
+          "family": "closing",
+          "sourceTitle": "Closing",
+          "density": "low",
+          "relationship": "statement",
+          "structureSummary": "短色条、收尾信息与联系人行的结尾页",
+          "colorOverrides": { "#1E293B": "#F4F6F8", "#F8FAFC": "#1E293B", "#94A3B8": "#64748B", "#64748B": "#334155" },
+          "examples": { "CLOSING_MESSAGE": "谢谢观看", "CONTACT_LINE": "后续步骤与联系人见会议纪要" }
+        }
+      ]
+    }
+  ]
+}

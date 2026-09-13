@@ -1,0 +1,115 @@
+pageType: content
+background:
+  type: solid
+  color: '#F8F2F6'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 48
+      - 126
+      - 276
+      - 354
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#EEDDE9'
+    border:
+      width: 0.75
+      color: '#D4C3CF'
+  - elementId: s2
+    elementType: shape
+    bounds:
+      - 342
+      - 126
+      - 276
+      - 354
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#EEDDE9'
+    border:
+      width: 0.75
+      color: '#D4C3CF'
+  - elementId: s3
+    elementType: shape
+    bounds:
+      - 636
+      - 126
+      - 276
+      - 354
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#EEDDE9'
+    border:
+      width: 0.75
+      color: '#D4C3CF'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 48
+      - 36
+      - 864
+      - 60
+    content:
+      text: 三类结构元素
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 27
+      color: '#2A1B28'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 66
+      - 144
+      - 240
+      - 318
+    content:
+      text: |-
+        论点
+        一页一个主张
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#6F5A6A'
+      lineHeight: 1.15
+      bold: false
+  - elementId: t3
+    elementType: text
+    bounds:
+      - 360
+      - 144
+      - 240
+      - 318
+    content:
+      text: |-
+        证据
+        数字先于形容词
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#6F5A6A'
+      lineHeight: 1.15
+      bold: false
+  - elementId: t4
+    elementType: text
+    bounds:
+      - 654
+      - 144
+      - 240
+      - 318
+    content:
+      text: |-
+        动作
+        写明责任人与门槛
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#6F5A6A'
+      lineHeight: 1.15
+      bold: false

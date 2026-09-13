@@ -1,0 +1,862 @@
+{
+  "id": "dsh-plum-review",
+  "category": "editorial",
+  "name": "紫李季刊",
+  "nameEn": "Plum Review",
+  "description": "紫李季刊 · Plum Review",
+  "fonts": {
+    "zh": {
+      "title": "PingFang SC",
+      "body": "PingFang SC"
+    },
+    "en": {
+      "title": "Arial",
+      "body": "Arial"
+    },
+    "fallbacks": {
+      "en": {
+        "title": "Arial",
+        "body": "Arial"
+      },
+      "zh": {
+        "macOS": {
+          "serif": "Songti SC",
+          "sans": "PingFang SC"
+        },
+        "Windows": {
+          "serif": "SimSun",
+          "sans": "Microsoft YaHei"
+        },
+        "Linux": {
+          "serif": "Noto Serif CJK SC",
+          "sans": "Noto Sans CJK SC"
+        }
+      }
+    }
+  },
+  "palette": {
+    "background": "F8F2F6",
+    "text": "2A1B28",
+    "accent": "7A3B6B",
+    "surface": "EEDDE9",
+    "secondary": "6F5A6A",
+    "muted": "6F5A6A"
+  },
+  "width": 1280,
+  "height": 720,
+  "designSummary": "# Plum Review / 紫李季刊\n\nColorway variant of the bundled Slate Grid / 灰阶网格 template: the same twelve page geometries, panels and slot structure, rebuilt around plum ink on a rose-paper ground. The base edition is adapted from open-source layout assets (MIT/Apache-2.0): a structure-only 16:9 geometry family rebuilt as a native, editable twelve-page template. 结构参考自开源版式资产（MIT/Apache-2.0）。This native edition re-authors the slot geometry and Chinese examples; it is not a copy of any upstream deck.\n\n## Typography\n\nEnglish display: Arial; English body: Arial. Chinese display: PingFang SC; body: PingFang SC. On Windows use Microsoft YaHei / Microsoft YaHei; on Linux use Noto Sans CJK SC / Noto Sans CJK SC. No font binary is distributed.\n\nLayout examples live in source-zh/. Preview language does not select the language of the user's output. Choose the matching fonts for the actual content; reflow longer translations instead of shrinking titles.\n\n## Layout grammar\n\nA plum, structure-first presentation system on rose paper (#f8f2f6): one soft panel tint (#eedde9), one hairline border (#d4c3cf), one rail tone (#cdbbc8) and one ink (#2a1b28) with a single plum accent (#7a3b6b). The geometry family is drawn from authored 16:9 page structures rather than one skeleton recolored many times: a left-rail cover, a full-width panel page, three equal cards, a two-column comparison with a center rule, a horizontal timeline with node circles, a four-card KPI row over an evidence panel, a chart-and-insight split, a table-and-summary split, a hero statement field, an editorial split, a section header with an anchor circle and a closing page. Corner radii step 2/4/12/16 px by element size; every panel is filled and hairlined, never outlined in the accent.\n\n1. 封面 (cover)\n2. 章节页 (section)\n3. 章节导读 (content)\n4. 三卡并列 (grid)\n5. 双栏对比 (comparison)\n6. 四步时间轴 (process)\n7. 指标总览 (data)\n8. 图表洞察 (data)\n9. 指标对照表 (table)\n10. 金句页 (quote)\n11. 图文分栏 (content)\n12. 结尾页 (closing)\n\n## Expanded composition rules\n\nThis pack has twelve layouts. Start with the information relationship, then choose a reference page. Do not default to three equal cards or one chart per slide.\n\nUse the family as a progression: a statement cover, a quiet section break, one page per claim, then the evidence pages. A detailed page should have one dominant argument, a supporting exhibit and one concise interpretation. Alternate detailed pages with quiet synthesis pages, and keep the closing page almost empty.\n\nAdapt the reference geometry to the real content. Add units, owners, measurement windows and annotations where they carry meaning. These examples use invented, explicitly marked sample data: replace every value and conclusion with user evidence; never fabricate data to make a page look fuller. Preserve native editable text and geometry. Do not turn all content into images. Keep body text around 16–20 pt and exhibit labels around 11–14 pt; reflow or split before shrinking.\n\nThe chart, table and picture slots in this edition carry a placeholder text block that preserves the slot rectangle: the structure-only source declares no data or image, so the slot is authored as copy until real content replaces it. The region, bounds and zone remain valid for a native exhibit later.\n\nReference families: 2 section; 3 content; 4 grid; 5 comparison; 6 process; 7–8 data; 9 table; 10 quote; 11 content; 12 closing.\n\n## Composition finish\n\nTreat an analytical page as a small argument: a claim at the top, a dominant exhibit, and a concise readout or next decision. A second exhibit must add evidence, not repeat the headline. Do not fill every page with equally sized cards. Keep a quiet section break between dense runs.\n\nUse a shared baseline for labels, aligned numeric columns and a limited set of type sizes. Distinguish a section label, headline, exhibit label, evidence text and source note by size and spacing before adding color. Avoid single-word last lines, detached punctuation and arbitrary line breaks. Reflow Chinese and English separately.\n\nPut units, population and measurement window beside the relevant exhibit. Reconcile subtotals and deltas, and use a common quantitative scale. Highlight the one decision or exception, not every cell.\n\nInspect a rendered page, not just its bounding boxes: check the reading order, line endings, label collisions and the gap above the source note. Use native editable text and geometry. Fictional reference data must be replaced by verified user material or visibly marked as an example.\n\nAll layout geometry is native and editable. Example figures are illustrative, not reported facts. Retain a 48 pt outer margin and use 16:9, 960 × 540 pt.\n\n结构参考自开源版式资产（MIT/Apache-2.0）。\n",
+  "visualGrammar": "plum-review",
+  "recommendedDensity": "medium",
+  "layoutFamilies": [
+    "cover",
+    "section",
+    "content",
+    "grid",
+    "comparison",
+    "process",
+    "data",
+    "table",
+    "quote",
+    "closing"
+  ],
+  "pages": [
+    {
+      "slideNumber": 1,
+      "sourceTitle": "Cover",
+      "family": "cover",
+      "density": "low",
+      "structureSummary": "左侧竖条，大标题与副标题的封面",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 216,
+          "width": 8,
+          "height": 192,
+          "shape": "roundRect",
+          "fill": "CDBBC8"
+        },
+        {
+          "kind": "title",
+          "x": 112,
+          "y": 216,
+          "width": 1056,
+          "height": 116,
+          "textRole": "title",
+          "fontSize": 40.5,
+          "textCapacity": 16
+        },
+        {
+          "kind": "text",
+          "x": 112,
+          "y": 350,
+          "width": 880,
+          "height": 64,
+          "textRole": "body",
+          "fontSize": 19.5,
+          "textCapacity": 57
+        }
+      ]
+    },
+    {
+      "slideNumber": 2,
+      "sourceTitle": "Section header",
+      "family": "section",
+      "density": "low",
+      "structureSummary": "左侧长条与章节标题，右上圆形锚点",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 144,
+          "width": 8,
+          "height": 432,
+          "shape": "roundRect",
+          "fill": "CDBBC8"
+        },
+        {
+          "kind": "shape",
+          "x": 1056,
+          "y": 108,
+          "width": 144,
+          "height": 144,
+          "shape": "ellipse",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "title",
+          "x": 160,
+          "y": 224,
+          "width": 896,
+          "height": 112,
+          "textRole": "title",
+          "fontSize": 37.5,
+          "textCapacity": 15
+        },
+        {
+          "kind": "text",
+          "x": 160,
+          "y": 356,
+          "width": 800,
+          "height": 92,
+          "textRole": "body",
+          "fontSize": 18,
+          "textCapacity": 83
+        }
+      ]
+    },
+    {
+      "slideNumber": 3,
+      "sourceTitle": "Title and content",
+      "family": "content",
+      "density": "medium",
+      "structureSummary": "顶部短色条与整幅内容面板",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 120,
+          "width": 96,
+          "height": 4,
+          "shape": "roundRect",
+          "fill": "CDBBC8"
+        },
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 152,
+          "width": 1152,
+          "height": 504,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 40,
+          "width": 1152,
+          "height": 72,
+          "textRole": "title",
+          "fontSize": 27,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 176,
+          "width": 1104,
+          "height": 456,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 761
+        }
+      ]
+    },
+    {
+      "slideNumber": 4,
+      "sourceTitle": "Three-card synthesis",
+      "family": "grid",
+      "density": "medium",
+      "structureSummary": "三张等宽圆角面板并列的卡片组",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 168,
+          "width": 368,
+          "height": 472,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 456,
+          "y": 168,
+          "width": 368,
+          "height": 472,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 848,
+          "y": 168,
+          "width": 368,
+          "height": 472,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 48,
+          "width": 1152,
+          "height": 80,
+          "textRole": "title",
+          "fontSize": 27,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 192,
+          "width": 320,
+          "height": 424,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 187
+        },
+        {
+          "kind": "text",
+          "x": 480,
+          "y": 192,
+          "width": 320,
+          "height": 424,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 187
+        },
+        {
+          "kind": "text",
+          "x": 872,
+          "y": 192,
+          "width": 320,
+          "height": 424,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 187
+        }
+      ]
+    },
+    {
+      "slideNumber": 5,
+      "sourceTitle": "Comparison",
+      "family": "comparison",
+      "density": "medium",
+      "structureSummary": "左右等宽面板与中缝分隔条的双栏对比",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 152,
+          "width": 552,
+          "height": 504,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 664,
+          "y": 152,
+          "width": 552,
+          "height": 504,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 638,
+          "y": 184,
+          "width": 4,
+          "height": 440,
+          "shape": "roundRect",
+          "fill": "CDBBC8"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 40,
+          "width": 1152,
+          "height": 72,
+          "textRole": "title",
+          "fontSize": 27,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 176,
+          "width": 504,
+          "height": 56,
+          "textRole": "body",
+          "fontSize": 18,
+          "textCapacity": 34
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 248,
+          "width": 504,
+          "height": 376,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 264
+        },
+        {
+          "kind": "text",
+          "x": 688,
+          "y": 176,
+          "width": 504,
+          "height": 56,
+          "textRole": "body",
+          "fontSize": 18,
+          "textCapacity": 34
+        },
+        {
+          "kind": "text",
+          "x": 688,
+          "y": 248,
+          "width": 504,
+          "height": 376,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 264
+        }
+      ]
+    },
+    {
+      "slideNumber": 6,
+      "sourceTitle": "Process timeline",
+      "family": "process",
+      "density": "medium",
+      "structureSummary": "横向时间轴、四个节点圆与底部结论条",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 184,
+          "y": 244,
+          "width": 24,
+          "height": 24,
+          "shape": "ellipse",
+          "fill": "F8F2F6"
+        },
+        {
+          "kind": "shape",
+          "x": 480,
+          "y": 244,
+          "width": 24,
+          "height": 24,
+          "shape": "ellipse",
+          "fill": "F8F2F6"
+        },
+        {
+          "kind": "shape",
+          "x": 776,
+          "y": 244,
+          "width": 24,
+          "height": 24,
+          "shape": "ellipse",
+          "fill": "F8F2F6"
+        },
+        {
+          "kind": "shape",
+          "x": 1072,
+          "y": 244,
+          "width": 24,
+          "height": 24,
+          "shape": "ellipse",
+          "fill": "F8F2F6"
+        },
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 568,
+          "width": 1152,
+          "height": 72,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 40,
+          "width": 1152,
+          "height": 72,
+          "textRole": "title",
+          "fontSize": 27,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 80,
+          "y": 168,
+          "width": 232,
+          "height": 344,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 117
+        },
+        {
+          "kind": "text",
+          "x": 376,
+          "y": 168,
+          "width": 232,
+          "height": 344,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 117
+        },
+        {
+          "kind": "text",
+          "x": 672,
+          "y": 168,
+          "width": 232,
+          "height": 344,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 117
+        },
+        {
+          "kind": "text",
+          "x": 968,
+          "y": 168,
+          "width": 232,
+          "height": 344,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 117
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 584,
+          "width": 1104,
+          "height": 40,
+          "textRole": "body",
+          "fontSize": 15,
+          "textCapacity": 46
+        }
+      ]
+    },
+    {
+      "slideNumber": 7,
+      "sourceTitle": "KPI dashboard",
+      "family": "data",
+      "density": "high",
+      "structureSummary": "四张指标卡加整幅证据面板",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 152,
+          "width": 264,
+          "height": 128,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 360,
+          "y": 152,
+          "width": 264,
+          "height": 128,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 656,
+          "y": 152,
+          "width": 264,
+          "height": 128,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 952,
+          "y": 152,
+          "width": 264,
+          "height": 128,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 320,
+          "width": 1152,
+          "height": 320,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 40,
+          "width": 1152,
+          "height": 72,
+          "textRole": "title",
+          "fontSize": 27,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 80,
+          "y": 168,
+          "width": 232,
+          "height": 96,
+          "textRole": "body",
+          "fontSize": 21,
+          "textCapacity": 12
+        },
+        {
+          "kind": "text",
+          "x": 376,
+          "y": 168,
+          "width": 232,
+          "height": 96,
+          "textRole": "body",
+          "fontSize": 21,
+          "textCapacity": 12
+        },
+        {
+          "kind": "text",
+          "x": 672,
+          "y": 168,
+          "width": 232,
+          "height": 96,
+          "textRole": "body",
+          "fontSize": 21,
+          "textCapacity": 12
+        },
+        {
+          "kind": "text",
+          "x": 968,
+          "y": 168,
+          "width": 232,
+          "height": 96,
+          "textRole": "body",
+          "fontSize": 21,
+          "textCapacity": 12
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 344,
+          "width": 1104,
+          "height": 272,
+          "textRole": "body",
+          "fontSize": 16.5,
+          "textCapacity": 423
+        }
+      ]
+    },
+    {
+      "slideNumber": 8,
+      "sourceTitle": "Chart and insight",
+      "family": "data",
+      "density": "high",
+      "structureSummary": "左侧大图表区加右侧解读栏与来源注",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 152,
+          "width": 760,
+          "height": 456,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 856,
+          "y": 152,
+          "width": 360,
+          "height": 456,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 40,
+          "width": 1152,
+          "height": 72,
+          "textRole": "title",
+          "fontSize": 27,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 176,
+          "width": 712,
+          "height": 408,
+          "textRole": "body",
+          "fontSize": 20,
+          "textCapacity": 292
+        },
+        {
+          "kind": "text",
+          "x": 888,
+          "y": 184,
+          "width": 296,
+          "height": 360,
+          "textRole": "body",
+          "fontSize": 18,
+          "textCapacity": 128
+        },
+        {
+          "kind": "text",
+          "x": 888,
+          "y": 552,
+          "width": 296,
+          "height": 32,
+          "textRole": "body",
+          "fontSize": 10.5,
+          "textCapacity": 18
+        }
+      ]
+    },
+    {
+      "slideNumber": 9,
+      "sourceTitle": "Table and summary",
+      "family": "table",
+      "density": "high",
+      "structureSummary": "左侧宽表格区加右侧解读栏与来源注",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 152,
+          "width": 824,
+          "height": 456,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 920,
+          "y": 152,
+          "width": 296,
+          "height": 456,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 40,
+          "width": 1152,
+          "height": 72,
+          "textRole": "title",
+          "fontSize": 27,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 88,
+          "y": 176,
+          "width": 776,
+          "height": 408,
+          "textRole": "body",
+          "fontSize": 20,
+          "textCapacity": 315
+        },
+        {
+          "kind": "text",
+          "x": 952,
+          "y": 184,
+          "width": 232,
+          "height": 344,
+          "textRole": "body",
+          "fontSize": 18,
+          "textCapacity": 97
+        },
+        {
+          "kind": "text",
+          "x": 952,
+          "y": 552,
+          "width": 232,
+          "height": 32,
+          "textRole": "body",
+          "fontSize": 10.5,
+          "textCapacity": 13
+        }
+      ]
+    },
+    {
+      "slideNumber": 10,
+      "sourceTitle": "Hero statement",
+      "family": "quote",
+      "density": "low",
+      "structureSummary": "整幅浅色底场加居左大金句与副题",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 64,
+          "y": 96,
+          "width": 1152,
+          "height": 528,
+          "shape": "roundRect",
+          "fill": "EEDDE9"
+        },
+        {
+          "kind": "shape",
+          "x": 96,
+          "y": 144,
+          "width": 160,
+          "height": 6,
+          "shape": "roundRect",
+          "fill": "CDBBC8"
+        },
+        {
+          "kind": "title",
+          "x": 96,
+          "y": 184,
+          "width": 1088,
+          "height": 208,
+          "textRole": "title",
+          "fontSize": 51,
+          "textCapacity": 27
+        },
+        {
+          "kind": "text",
+          "x": 96,
+          "y": 424,
+          "width": 760,
+          "height": 72,
+          "textRole": "body",
+          "fontSize": 19.5,
+          "textCapacity": 48
+        }
+      ]
+    },
+    {
+      "slideNumber": 11,
+      "sourceTitle": "Editorial split",
+      "family": "content",
+      "density": "medium",
+      "structureSummary": "左侧窄栏文字与右侧整幅画面区的分栏",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 592,
+          "y": 64,
+          "width": 624,
+          "height": 592,
+          "shape": "roundRect",
+          "fill": "EAD9E5"
+        },
+        {
+          "kind": "shape",
+          "x": 552,
+          "y": 64,
+          "width": 4,
+          "height": 592,
+          "shape": "roundRect",
+          "fill": "CDBBC8"
+        },
+        {
+          "kind": "title",
+          "x": 64,
+          "y": 64,
+          "width": 448,
+          "height": 104,
+          "textRole": "title",
+          "fontSize": 28.5,
+          "textCapacity": 19
+        },
+        {
+          "kind": "text",
+          "x": 64,
+          "y": 208,
+          "width": 448,
+          "height": 352,
+          "textRole": "body",
+          "fontSize": 18,
+          "textCapacity": 183
+        },
+        {
+          "kind": "text",
+          "x": 592,
+          "y": 64,
+          "width": 624,
+          "height": 592,
+          "textRole": "body",
+          "fontSize": 18,
+          "textCapacity": 453
+        }
+      ]
+    },
+    {
+      "slideNumber": 12,
+      "sourceTitle": "Closing",
+      "family": "closing",
+      "density": "low",
+      "structureSummary": "短色条、收尾信息与联系人行的结尾页",
+      "zones": [
+        {
+          "kind": "shape",
+          "x": 48,
+          "y": 280,
+          "width": 88,
+          "height": 6,
+          "shape": "roundRect",
+          "fill": "7A3B6B"
+        },
+        {
+          "kind": "title",
+          "x": 48,
+          "y": 330,
+          "width": 1184,
+          "height": 96,
+          "textRole": "title",
+          "fontSize": 33,
+          "textCapacity": 22
+        },
+        {
+          "kind": "text",
+          "x": 48,
+          "y": 452,
+          "width": 900,
+          "height": 48,
+          "textRole": "body",
+          "fontSize": 15,
+          "textCapacity": 75
+        }
+      ]
+    }
+  ]
+}

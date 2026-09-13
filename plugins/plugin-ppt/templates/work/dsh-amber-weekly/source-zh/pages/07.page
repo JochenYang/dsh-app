@@ -1,0 +1,172 @@
+pageType: content
+background:
+  type: solid
+  color: '#FFFAF1'
+notes: 结构参考自开源版式资产（MIT/Apache-2.0）。示例文案与数值均为演示用途。
+elements:
+  - elementId: s1
+    elementType: shape
+    bounds:
+      - 48
+      - 114
+      - 198
+      - 96
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#F3E7D3'
+    border:
+      width: 0.75
+      color: '#DACDB8'
+  - elementId: s2
+    elementType: shape
+    bounds:
+      - 270
+      - 114
+      - 198
+      - 96
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#F3E7D3'
+    border:
+      width: 0.75
+      color: '#DACDB8'
+  - elementId: s3
+    elementType: shape
+    bounds:
+      - 492
+      - 114
+      - 198
+      - 96
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#F3E7D3'
+    border:
+      width: 0.75
+      color: '#DACDB8'
+  - elementId: s4
+    elementType: shape
+    bounds:
+      - 714
+      - 114
+      - 198
+      - 96
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#F3E7D3'
+    border:
+      width: 0.75
+      color: '#DACDB8'
+  - elementId: s5
+    elementType: shape
+    bounds:
+      - 48
+      - 240
+      - 864
+      - 240
+    shapeName: roundRect
+    fill:
+      type: solid
+      color: '#F3E7D3'
+    border:
+      width: 0.75
+      color: '#DACDB8'
+  - elementId: t1
+    elementType: text
+    bounds:
+      - 48
+      - 30
+      - 864
+      - 54
+    content:
+      text: 关键指标总览
+      fontFamily: &ref_0
+        latin: Arial
+        ea: Noto Sans CJK SC
+        mac: PingFang SC
+        win: Microsoft YaHei
+      fontSize: 27
+      color: '#2A2116'
+      lineHeight: 1.15
+      bold: true
+      align: [left, middle]
+  - elementId: t2
+    elementType: text
+    bounds:
+      - 60
+      - 126
+      - 174
+      - 72
+    content:
+      text: '68%'
+      fontFamily: *ref_0
+      fontSize: 21
+      color: '#A96A14'
+      lineHeight: 1.15
+      bold: true
+      align: [center, middle]
+  - elementId: t3
+    elementType: text
+    bounds:
+      - 282
+      - 126
+      - 174
+      - 72
+    content:
+      text: '12 天'
+      fontFamily: *ref_0
+      fontSize: 21
+      color: '#A96A14'
+      lineHeight: 1.15
+      bold: true
+      align: [center, middle]
+  - elementId: t4
+    elementType: text
+    bounds:
+      - 504
+      - 126
+      - 174
+      - 72
+    content:
+      text: '94%'
+      fontFamily: *ref_0
+      fontSize: 21
+      color: '#A96A14'
+      lineHeight: 1.15
+      bold: true
+      align: [center, middle]
+  - elementId: t5
+    elementType: text
+    bounds:
+      - 726
+      - 126
+      - 174
+      - 72
+    content:
+      text: '1.08'
+      fontFamily: *ref_0
+      fontSize: 21
+      color: '#A96A14'
+      lineHeight: 1.15
+      bold: true
+      align: [center, middle]
+  - elementId: t6
+    elementType: text
+    bounds:
+      - 66
+      - 258
+      - 828
+      - 204
+    content:
+      text: |-
+        四周内采用率提升 12 个百分点，
+        平均周期缩短 4 天。
+        口径与统计窗口见页面备注。
+      fontFamily: *ref_0
+      fontSize: 16.5
+      color: '#A4957D'
+      lineHeight: 1.15
+      bold: false
