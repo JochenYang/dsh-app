@@ -253,7 +253,7 @@ async function api(method, apiPath, token, payload) {
   const ok = resp.status >= 200 && resp.status < 300 && (code === undefined || code === 200 || code === '200')
   if (!ok) {
     const msg = parsed ? parsed.Message ?? parsed.message ?? '' : truncate(resp.body.toString('utf8'), 200)
-    throw new Error(`API ${method} ${apiPath} 失败: HTTP ${resp.status}${code !== undefined ? ` Code ${code}` : ''} ${truncate(msg, 300)}`)
+    throw new Error(`API ${method} ${apiPath} 失败: HTTP ${resp.status}${code !== undefined ? ` Code ${code}` : ''} ${truncate(redactSecrets(msg), 300)}`)
   }
   return { data: parsed ? parsed.Data ?? parsed.data : null, raw: parsed }
 }
@@ -340,12 +340,15 @@ const CREDENTIAL_HEADER_PATTERN = /^(authorization|cookie|proxy-authorization)$|
 // pre-lfs. 兄弟主机（blob 端点所在）。实测 blob 上传地址就在 www.modelscope.cn，
 // 因此这一判定不会阻止正常上传；指向第三方对象存储的签名 URL 则一律不带凭据。
 function isCredentialSafeUploadHost(uploadUrl) {
-  let targetHost
+  let target
   try {
-    targetHost = new URL(uploadUrl).hostname.toLowerCase()
+    target = new URL(uploadUrl)
   } catch {
     return false
   }
+  // Credentials travel only over TLS, and only to the endpoint's own hosts.
+  if (target.protocol !== 'https:') return false
+  const targetHost = target.hostname.toLowerCase()
   const endpointHost = new URL(ENDPOINT).hostname.toLowerCase()
   if (!targetHost || !endpointHost) return false
   if (targetHost === endpointHost) return true
@@ -353,6 +356,8 @@ function isCredentialSafeUploadHost(uploadUrl) {
   const base = labels.length >= 3 ? labels.slice(1).join('.') : endpointHost
   return targetHost === `lfs.${base}` || targetHost === `pre-lfs.${base}`
 }
+
+const HOP_BY_HOP_HEADER_PATTERN = /^(host|connection|keep-alive|transfer-encoding|upgrade|te|trailer)$/i
 
 function uploadHeaders(serverHeaders, size) {
   const headers = {
@@ -362,6 +367,8 @@ function uploadHeaders(serverHeaders, size) {
   }
   for (const [name, value] of Object.entries(serverHeaders || {})) {
     if (value == null || CREDENTIAL_HEADER_PATTERN.test(name)) continue
+    // Connection-scoped headers belong to the batch hop, not this upload.
+    if (HOP_BY_HOP_HEADER_PATTERN.test(name)) continue
     headers[name] = value
   }
   return headers
@@ -512,6 +519,12 @@ async function main() {
   // 部分演练：只处理名字命中子串的资产，并跳过索引读写（避免用子集覆盖历史）
   const partial = Boolean(args.onlyPattern)
   if (partial) {
+    // A partial run on a stable tag really writes releases/latest/<asset> for
+    // the selected files (the index is untouched), so calling it out keeps a
+    // rehearsal from silently rewriting the stable channel.
+    if (!String(args.tag).includes('-')) {
+      log('警告: 对稳定版本做部分镜像会覆盖 releases/latest 的对应文件（releases/versions.json 不改动）；只想验证链路时优先用预发布版本演练')
+    }
     const needle = args.onlyPattern.toLowerCase()
     const before = plan.length
     plan = plan.filter((item) => item.name.toLowerCase().includes(needle))
