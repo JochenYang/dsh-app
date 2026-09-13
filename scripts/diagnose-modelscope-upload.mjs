@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+// NOTE: manual / local diagnosis only. CI probes the commit endpoint through
+// the official ModelScope SDK instead:
+//   gh workflow run publish-mirror.yml -f mode=diagnose
+// Keep this script for offline header/endpoint experiments against the raw
+// LFS batch and presigned PUT.
+//
 // Diagnostic probe for the ModelScope LFS blob upload path.
 //
 // WHY THIS EXISTS

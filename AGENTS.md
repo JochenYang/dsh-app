@@ -411,12 +411,42 @@ Mirroring to ModelScope is a **separate workflow**,
 `.github/workflows/publish-mirror.yml`, triggered by
 `on: release: types: [published]` — the moment the draft is flipped (SOP step
 5) — and never when the app matrix merely finishes, so a version discarded
-during review is never mirrored. It runs the same script on
-`workflow_dispatch` (`-f tag=v0.1.6`) for backfill. A failed or skipped mirror
-cannot roll back the release (different run, and the release is already
-published by then); the script records success / skip / failure plus the
-backfill command in `$GITHUB_STEP_SUMMARY`, and the workflow's tag filter keeps
-`runtime-*` releases out.
+during review is never mirrored. It also runs on `workflow_dispatch`
+(`-f tag=v0.11.7`) for backfill and `-f mode=diagnose` for a commit-endpoint
+probe. A failed or skipped mirror cannot roll back the release (different run,
+and the release is already published by then), and the workflow's tag filter
+keeps `runtime-*` releases out.
+
+The upload uses the **official ModelScope Python SDK**
+(`modelscope.hub.api.HubApi.upload_folder` / `upload_file`, pinned in
+`MODELSCOPE_SDK_VERSION`), not the batch -> PUT -> commit path hand-rolled in
+`scripts/publish-modelscope.mjs`: our client retried a rejected commit once
+with no backoff and lost `503 commit publisher unavailable` races, while the
+SDK retries a commit up to 5 times with exponential backoff and honours
+`Retry-After`. Workflow-level `concurrency: publish-mirror`
+(`cancel-in-progress: false`) serializes **every** mirror run repo-wide,
+including manual ones from other branches, so only one multi-GB commit
+pipeline targets the repo at a time — the overlapping backfills were the
+suspected source of the 503 storm. `scripts/publish-modelscope.mjs` and
+`scripts/diagnose-modelscope-upload.mjs` stay for manual/local drills; CI does
+not call them.
+
+`releases/versions.json` is rebuilt from the **published** copy (public `repo`
+API read; a `{Data: ...}` envelope is unwrapped) plus this version, and is
+committed last, so a partial upload never advertises a version whose assets are
+missing. The merge refuses to shrink the entry count — that would mean a lost
+history — and any read failure other than a genuine 404 fails the run instead
+of rebuilding the index from empty (assets can be re-uploaded, history cannot).
+The first step records `SKIPPED` in `$GITHUB_STEP_SUMMARY` when
+`MODELSCOPE_TOKEN` is unset (the mirror is optional; the release is
+unaffected), and an unset `MODELSCOPE_REPO` falls back to the lowercased GitHub
+`owner/name`.
+
+When a mirror fails with `503 commit publisher unavailable`, the fastest check
+is a probe commit: `gh workflow run publish-mirror.yml -f mode=diagnose` commits
+a few-byte `releases/.probe-<ts>.json` through the SDK. A `FAILED` probe means
+the platform still refuses writes — wait (the storm followed several 2 GB
+backfills inside 20 minutes), then dispatch `-f tag=v0.11.7` to backfill.
 
 ### Kernel line (single source of truth)
 
@@ -472,15 +502,18 @@ two copies of the line and nothing comparing them, v0.11.1 bundled a
    the mirror.
 6. **Verify the mirror**: publishing the draft (step 5) triggers the
    `publish-mirror` workflow, which mirrors the assets to ModelScope
-   (`releases/latest|archive|prerelease` + `versions.json`). Open that run's
-   Summary panel: it records `OK` (target repo, assets committed, index size),
-   `SKIPPED` (no `MODELSCOPE_TOKEN`) or `FAILED` (reason), each with the
-   backfill command. Confirm `releases/latest/` now points at this version.
-   Re-mirror a failed run with
-   `node scripts/publish-modelscope.mjs --tag v0.1.6 --repo JochenYang/dsh-app`
-   or `gh workflow run publish-mirror.yml -f tag=v0.1.6`. A failed mirror never
-   blocks or rolls back the release; a missing `MODELSCOPE_TOKEN` reports
-   `SKIPPED` and is expected, not a failure.
+   (`releases/latest|archive|prerelease` + `versions.json`) with the official
+   Python SDK. Open that run's Summary panel: it records `OK` (target repo,
+   paths, assets committed, index size), `SKIPPED` (no `MODELSCOPE_TOKEN`) or
+   `FAILED` (reason), each with the backfill command. Confirm
+   `releases/latest/` now points at this version. Re-mirror a failed run with
+   `gh workflow run publish-mirror.yml -f tag=v0.1.6`; if the failure was
+   `503 commit publisher unavailable`, run
+   `gh workflow run publish-mirror.yml -f mode=diagnose` first to check the
+   endpoint, and use `-f only_pattern=<substr>` for a partial drill (on a
+   stable tag that overwrites the matching `releases/latest` files). A failed
+   mirror never blocks or rolls back the release; a missing `MODELSCOPE_TOKEN`
+   reports `SKIPPED` and is expected, not a failure.
 
 Before publishing a runtime (`workflow_dispatch` / kernel line bump), run the
 plugin compatibility dry-run against a real profile:

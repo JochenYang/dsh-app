@@ -1,7 +1,24 @@
 name: publish-mirror
 
 # Mirrors a PUBLISHED GitHub Release to the ModelScope model repo
-# (releases/latest|archive|prerelease + releases/versions.json).
+# (releases/latest|archive|prerelease + releases/versions.json) through the
+# OFFICIAL ModelScope Python SDK (modelscope.hub.api.HubApi.upload_folder /
+# upload_file).
+#
+# WHY THE SDK REPLACED OUR OWN HTTP THREE-STEP (batch -> PUT -> commit):
+# the hand-rolled client in scripts/publish-modelscope.mjs uploaded every blob
+# but its final POST .../commit/master kept coming back as HTTP 503
+# "commit publisher unavailable" after several multi-GB commits to the same
+# repo inside 20 minutes — that client retried the commit once, with no
+# backoff. The SDK uploader retries a rejected commit up to 5 times with
+# exponential backoff (honouring Retry-After) and batches a folder upload,
+# which is what carries a multi-GB mirror through a busy per-repo commit
+# publisher.
+# MODELSCOPE_SDK_VERSION is pinned because the uploader's batching/retry
+# defaults are behaviour, not API: an unpinned upgrade could silently change
+# how a 2.5 GB mirror is committed. Bump it deliberately, and only after a
+# successful mirror run. The Node scripts stay in the tree for manual/local
+# drills; CI no longer calls them.
 #
 # WHY A SEPARATE WORKFLOW: the mirror must start only after a human has
 # reviewed the draft and flipped it to published. A job inside release.yml
@@ -12,15 +29,32 @@ name: publish-mirror
 # and keeps release.yml's tag-push graph unchanged. Backfill is a dispatch here
 # instead of a full release re-run.
 #
+# - `concurrency: publish-mirror` with `cancel-in-progress: false` serializes
+#   every mirror run repo-wide (release-triggered and manual, whatever the
+#   branch), so exactly one multi-GB commit pipeline targets the ModelScope
+#   repo at a time — overlapping backfills were the suspected source of the
+#   503 storm. A queued run waits instead of cancelling the running one.
+# - MODELSCOPE_TOKEN unset: the first step prints a skip notice, writes
+#   SKIPPED to $GITHUB_STEP_SUMMARY and exits 0 — the mirror stays optional and
+#   the run is green.
 # - Mirror failure never blocks or rolls back the release: this is a separate
 #   run and the release is already published when it starts.
-# - MODELSCOPE_TOKEN unset: the script skips before any network call and exits
-#   0, so the run is green and the summary records the skip.
 # - Success / skip / failure plus the backfill command are written to
-#   $GITHUB_STEP_SUMMARY by the script; read the Summary panel of this run when
-#   publishing (AGENTS.md §10).
+#   $GITHUB_STEP_SUMMARY (AGENTS.md §10).
 # - runtime-* releases are published too (they are created as prereleases), and
 #   the tag filter below keeps them out: only v* shell releases are mirrored.
+#
+# Dispatch modes:
+#   mirror   (default) mirror `tag`.
+#   diagnose commit a few-byte probe file (releases/.probe-<ts>.json) with the
+#            SDK to test whether the commit endpoint accepts writes again. Run
+#            this before backfilling after a 503 storm: it is the fastest way
+#            to tell whether the rate limit has lifted. It commits no release
+#            asset; the probe file itself stays in the repo (a few bytes).
+#   only_pattern  partial drill: download and upload only the assets whose name
+#            contains the substring; releases/versions.json is NOT written. On
+#            a stable tag this OVERWRITES the matching releases/latest files
+#            (logged and recorded in the summary); prefer a prerelease tag.
 #
 # Note: a release published by the workflow's own GITHUB_TOKEN does not trigger
 # workflows, so the draft flip must be performed by a user credential — which
@@ -30,11 +64,11 @@ on:
   release:
     types: [published]
   # Manual backfill for a mirror that failed or was skipped, or a synthetic
-  # upload probe (mode=diagnose) that touches no real release asset.
+  # commit probe (mode=diagnose) that touches no real release asset.
   workflow_dispatch:
     inputs:
       mode:
-        description: 'mirror = publish the release; diagnose = synthetic LFS upload probe'
+        description: 'mirror = publish the release; diagnose = probe the commit endpoint with a tiny file'
         required: true
         default: mirror
         type: choice
@@ -42,50 +76,417 @@ on:
           - mirror
           - diagnose
       tag:
-        description: 'Release tag to mirror (e.g. v0.11.6); required for mode=mirror'
+        description: 'Release tag to mirror (e.g. v0.11.7); required for mode=mirror'
         required: false
         type: string
       only_pattern:
-        description: 'Partial drill: only mirror assets whose name contains this substring (skips versions.json)'
+        description: 'Partial drill: only mirror assets whose name contains this substring (skips versions.json, overwrites latest files on a stable tag)'
         required: false
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: publish-mirror
+  cancel-in-progress: false
+
 jobs:
   mirror:
     name: modelscope mirror
     runs-on: ubuntu-latest
+    # A full mirror is ~2.5 GB per path (latest + archive); this bound only
+    # exists so a stuck run cannot hold the concurrency slot for 6 hours.
+    timeout-minutes: 180
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.release && !github.event.release.draft && startsWith(github.event.release.tag_name, 'v')) }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+      MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
+      # Pinned deliberately: see the header comment.
+      MODELSCOPE_SDK_VERSION: '1.40.0'
+      MIRROR_MODE: ${{ inputs.mode || 'mirror' }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      ONLY_PATTERN: ${{ inputs.only_pattern }}
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-
-      - name: Mirror release assets to ModelScope
-        if: ${{ inputs.mode != 'diagnose' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
-          MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
-          ONLY_PATTERN: ${{ inputs.only_pattern }}
+      # The token gate lives here, not in the workflow triggers, so a missing
+      # secret becomes an explicit SKIPPED record instead of a silent no-op.
+      - name: Skip mirror (MODELSCOPE_TOKEN not set)
+        if: ${{ env.MODELSCOPE_TOKEN == '' }}
         run: |
-          args=(--tag "$RELEASE_TAG" --repo "${{ github.repository }}")
-          if [ -n "${ONLY_PATTERN:-}" ]; then
-            args+=(--only-pattern "$ONLY_PATTERN")
+          set -euo pipefail
+          echo "::notice title=ModelScope mirror skipped::MODELSCOPE_TOKEN is not set; the mirror is optional and the release is unaffected."
+          {
+            echo '### ModelScope mirror: SKIPPED'
+            echo ''
+            echo '- Reason: `MODELSCOPE_TOKEN` is not configured for this repository.'
+            echo '- Effect: none on the GitHub Release; ModelScope keeps the previous version.'
+            echo '- Backfill once the secret exists: `gh workflow run publish-mirror.yml -f tag=<tag>`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download release assets
+        if: ${{ env.MODELSCOPE_TOKEN != '' && env.MIRROR_MODE != 'diagnose' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_TAG:-}" ]; then
+            echo "::error title=Missing tag::mode=mirror needs -f tag=vX.Y.Z (or must be triggered by an actual release)."
+            exit 1
           fi
-          node scripts/publish-modelscope.mjs "${args[@]}"
+          echo "Downloading assets of ${RELEASE_TAG} from ${GITHUB_REPOSITORY}"
+          # only_pattern is applied at download time (bandwidth and disk) and
+          # again in Python, which is the single source of truth for what gets
+          # uploaded.
+          if [ -n "${ONLY_PATTERN:-}" ]; then
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --dir release-assets --pattern "*${ONLY_PATTERN}*"
+          else
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --dir release-assets --pattern '*'
+          fi
+          du -sh release-assets
+          ls -1 release-assets
 
-      # mode=diagnose: probe the LFS blob upload path with throwaway synthetic
-      # files. Does not download release assets or commit anything to the repo.
-      - name: Diagnose ModelScope LFS upload
-        if: ${{ inputs.mode == 'diagnose' }}
-        env:
-          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
-          MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
+      - name: Install ModelScope SDK
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
         run: |
-          node scripts/diagnose-modelscope-upload.mjs --repo "${{ github.repository }}"
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/ms-env"
+          "$RUNNER_TEMP/ms-env/bin/pip" install -q --disable-pip-version-check \
+            "modelscope==${MODELSCOPE_SDK_VERSION}"
+          "$RUNNER_TEMP/ms-env/bin/python3" -c \
+            "from modelscope import __version__; print('modelscope', __version__)"
+
+      - name: Upload to ModelScope via SDK
+        if: ${{ env.MODELSCOPE_TOKEN != '' && env.MIRROR_MODE != 'diagnose' }}
+        run: |
+          "$RUNNER_TEMP/ms-env/bin/python3" <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          ENDPOINT = os.environ.get('MODELSCOPE_ENDPOINT', 'https://www.modelscope.cn').rstrip('/')
+          # MODELSCOPE_REPO overrides the target; the fallback mirrors the
+          # GitHub owner/name lowercased.
+          REPO = os.environ.get('MODELSCOPE_REPO') or os.environ['GITHUB_REPOSITORY'].lower()
+          TOKEN = os.environ['MODELSCOPE_TOKEN']
+          GH_REPO = os.environ['GITHUB_REPOSITORY']
+          TAG = os.environ.get('RELEASE_TAG', '').strip()
+          ONLY = os.environ.get('ONLY_PATTERN', '').strip()
+          ASSETS_DIR = Path('release-assets')
+          VERSIONS_PATH = 'releases/versions.json'
+          BACKFILL = f'gh workflow run publish-mirror.yml -f tag={TAG or "<tag>"}'
+
+
+          def log(message):
+              print(f'[modelscope] {message}', flush=True)
+
+
+          def redact(text):
+              # Never let the token reach the log, even through an exception.
+              return text.replace(TOKEN, '<redacted>') if TOKEN and TOKEN in text else text
+
+
+          def write_summary(lines):
+              target = os.environ.get('GITHUB_STEP_SUMMARY')
+              if not target:
+                  return
+              try:
+                  with open(target, 'a', encoding='utf-8') as handle:
+                      handle.write('\n'.join(lines) + '\n')
+              except OSError:
+                  pass
+
+
+          def fail(reason, extra=None):
+              log(f'FAILED: {reason}')
+              lines = ['### ModelScope mirror: FAILED', '', f'- Reason: {reason}']
+              lines += [f'- {item}' for item in (extra or [])]
+              lowered = reason.lower()
+              if '503' in reason or 'unavailable' in lowered:
+                  lines.append(
+                      '- Reading: looks like the 503 "commit publisher unavailable" rate limit'
+                      ' — run `gh workflow run publish-mirror.yml -f mode=diagnose` before backfilling.'
+                  )
+              lines += ['', f'- Backfill once the endpoint recovers: `{BACKFILL}`']
+              write_summary(lines)
+              sys.exit(1)
+
+
+          def read_published_index():
+              """Read the PUBLIC releases/versions.json; never rebuild from scratch.
+
+              The index is a read-modify-write. Only a 404 means "first
+              publish"; any other read failure is fatal, because rebuilding
+              from empty would silently drop the whole history while missing
+              assets can always be re-uploaded.
+              """
+              url = (
+                  f'{ENDPOINT}/api/v1/models/{REPO}/repo'
+                  f'?Revision=master&FilePath={urllib.parse.quote(VERSIONS_PATH, safe="/")}'
+              )
+              request = urllib.request.Request(url, headers={'User-Agent': 'dsh-app-publish-mirror'})
+              try:
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      body = response.read().decode('utf-8')
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      log(f'{VERSIONS_PATH} not published yet -> starting from an empty index')
+                      return {}
+                  fail(
+                      f'cannot read the published {VERSIONS_PATH}: HTTP {exc.code}'
+                      ' (refusing to rebuild the index from scratch)'
+                  )
+              except (urllib.error.URLError, TimeoutError) as exc:
+                  fail(
+                      f'cannot read the published {VERSIONS_PATH}: {redact(str(exc))}'
+                      ' (refusing to rebuild the index from scratch)'
+                  )
+              try:
+                  parsed = json.loads(body)
+              except json.JSONDecodeError:
+                  fail(f'the published {VERSIONS_PATH} is not valid JSON (refusing to rebuild it)')
+
+              # The repo API may wrap payloads in a {Data: ...} envelope, and an
+              # HTTP 200 can still carry a non-200 business Code.
+              if isinstance(parsed, dict) and 'versions' not in parsed and 'Data' in parsed:
+                  data = parsed['Data']
+                  if isinstance(data, str):
+                      try:
+                          data = json.loads(data)
+                      except json.JSONDecodeError:
+                          fail('the published index envelope does not contain JSON')
+                  parsed = data
+              if not isinstance(parsed, dict):
+                  fail(f'the published {VERSIONS_PATH} is not an index object')
+              code = parsed.get('Code', parsed.get('code'))
+              if code is not None and str(code) != '200':
+                  fail(f'the published {VERSIONS_PATH} is unavailable: Code {code}')
+              return parsed
+
+
+          def run():
+              if not TAG.lower().startswith('v'):
+                  fail(f'invalid release tag {TAG!r}: expected a v-prefixed tag')
+
+              version = TAG[1:]
+              prerelease = '-' in version
+              channel = 'prerelease' if prerelease else 'stable'
+              partial = bool(ONLY)
+              if prerelease:
+                  targets = [f'releases/prerelease/{TAG}']
+              else:
+                  targets = ['releases/latest', f'releases/archive/{version}']
+
+              if not ASSETS_DIR.is_dir():
+                  fail(f'{ASSETS_DIR} is missing: the download step produced no assets')
+
+              files = sorted(
+                  (item for item in ASSETS_DIR.iterdir() if item.is_file()),
+                  key=lambda item: item.name,
+              )
+              if partial:
+                  needle = ONLY.lower()
+                  files = [item for item in files if needle in item.name.lower()]
+              if not files:
+                  detail = f' matching only_pattern {ONLY!r}' if partial else ''
+                  fail(f'no local assets{detail} to upload from {ASSETS_DIR}')
+
+              warnings = []
+              if partial and not prerelease:
+                  warnings.append(
+                      f'PARTIAL DRILL ON STABLE TAG `{TAG}`: the matching files in'
+                      ' `releases/latest` were overwritten by this run.'
+                  )
+                  log(f'WARNING: {warnings[-1]}')
+
+              info = [
+                  f'Release: `{TAG}` ({channel})',
+                  f'Target: `{REPO}`',
+                  'Paths: ' + ', '.join(f'`{target}`' for target in targets),
+                  f'Files: {len(files)} asset(s)'
+                  + (f' (only_pattern `{ONLY}`)' if partial else ''),
+              ]
+              log(f'mirror plan: {TAG} ({channel}) -> {REPO} [{", ".join(targets)}]')
+
+              # Read the index BEFORE the uploads: a read failure must cost
+              # nothing, and `concurrency: publish-mirror` guarantees no other
+              # mirror run can interleave between this read and the commit below.
+              index = read_published_index()
+              published = index.get('versions') or {}
+              if not isinstance(published, dict):
+                  fail(f'{VERSIONS_PATH} has no usable "versions" object')
+              previous_count = len(published)
+
+              from modelscope.hub.api import HubApi
+
+              api = HubApi(endpoint=ENDPOINT, token=TOKEN)
+
+              for target in targets:
+                  log(f'uploading {len(files)} file(s) to {target}')
+                  result = api.upload_folder(
+                      repo_id=REPO,
+                      repo_type='model',
+                      folder_path=str(ASSETS_DIR),
+                      path_in_repo=target,
+                      commit_message=f'Mirror {TAG} from {GH_REPO} to {target}',
+                      disable_tqdm=True,
+                  )
+                  if result is None:
+                      log(f'{target}: already up to date, nothing new to commit')
+                  else:
+                      batches = len(result) if isinstance(result, list) else 1
+                      log(f'{target}: committed in {batches} batch(es)')
+
+              merged_count = previous_count
+              if partial:
+                  log(f'partial drill: {VERSIONS_PATH} left untouched')
+                  info.append(f'Index: `{VERSIONS_PATH}` not modified (partial drill)')
+              else:
+                  versions = dict(published)
+                  now = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime())
+                  versions[version] = {
+                      'tag': TAG,
+                      'channel': channel,
+                      'assets': [item.name for item in files],
+                      'uploadedAt': now,
+                  }
+                  merged_count = len(versions)
+                  # Self-check: merging one version can only grow the index. A
+                  # shrinking result means the merge lost history, so refuse to
+                  # commit rather than publish a truncated index.
+                  if merged_count < previous_count:
+                      fail(
+                          f'{VERSIONS_PATH} merge shrank the index: read {previous_count},'
+                          f' merged {merged_count} (concurrent publish?)'
+                      )
+                  index_file = Path(os.environ.get('RUNNER_TEMP', '.')) / 'versions.json'
+                  index_file.write_text(
+                      json.dumps({'updated': now, 'versions': versions}, indent=2) + '\n',
+                      encoding='utf-8',
+                  )
+                  log(f'committing {VERSIONS_PATH}: {previous_count} -> {merged_count} version(s)')
+                  api.upload_file(
+                      repo_id=REPO,
+                      repo_type='model',
+                      path_or_fileobj=str(index_file),
+                      path_in_repo=VERSIONS_PATH,
+                      commit_message=f'Update {VERSIONS_PATH} for {TAG}',
+                      disable_tqdm=True,
+                  )
+                  info.append(f'Index: `{VERSIONS_PATH}` now holds {merged_count} version(s)')
+
+              write_summary(
+                  [f'### ModelScope mirror: OK{" (partial drill)" if partial else ""}', '']
+                  + [f'- {item}' for item in info]
+                  + [f'- WARNING: {item}' for item in warnings]
+                  + ['', f'- Backfill if this run needs repeating: `{BACKFILL}`']
+              )
+              log(f'OK: {TAG} mirrored to {REPO}')
+
+
+          try:
+              run()
+          except SystemExit:
+              raise
+          except BaseException as exc:
+              # Report instead of a traceback: a traceback could echo the token.
+              fail(f'unexpected {type(exc).__name__}: {redact(str(exc))[:400]}')
+          PY
+
+      # mode=diagnose: commit one tiny probe file through the SDK and report
+      # whether the commit endpoint accepted the write. This is the fastest
+      # signal that a 503 "commit publisher unavailable" spell has lifted, and
+      # it deliberately commits nothing else.
+      - name: Probe the commit endpoint via SDK
+        if: ${{ env.MODELSCOPE_TOKEN != '' && env.MIRROR_MODE == 'diagnose' }}
+        run: |
+          "$RUNNER_TEMP/ms-env/bin/python3" <<'PY'
+          import json
+          import os
+          import sys
+          import time
+
+          ENDPOINT = os.environ.get('MODELSCOPE_ENDPOINT', 'https://www.modelscope.cn').rstrip('/')
+          REPO = os.environ.get('MODELSCOPE_REPO') or os.environ['GITHUB_REPOSITORY'].lower()
+          TOKEN = os.environ['MODELSCOPE_TOKEN']
+          RUN_ID = os.environ.get('GITHUB_RUN_ID', '')
+          BACKFILL = 'gh workflow run publish-mirror.yml -f tag=<tag>'
+
+
+          def log(message):
+              print(f'[modelscope] {message}', flush=True)
+
+
+          def redact(text):
+              return text.replace(TOKEN, '<redacted>') if TOKEN and TOKEN in text else text
+
+
+          def write_summary(lines):
+              target = os.environ.get('GITHUB_STEP_SUMMARY')
+              if not target:
+                  return
+              try:
+                  with open(target, 'a', encoding='utf-8') as handle:
+                      handle.write('\n'.join(lines) + '\n')
+              except OSError:
+                  pass
+
+
+          stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+          probe_path = f'releases/.probe-{stamp}.json'
+          payload = json.dumps({
+              'probe': True,
+              'workflow': 'publish-mirror',
+              'run_id': RUN_ID,
+              'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+          }).encode('utf-8')
+
+          log(f'committing probe {probe_path} ({len(payload)} bytes) to {REPO}')
+          try:
+              from modelscope.hub.api import HubApi
+
+              HubApi(endpoint=ENDPOINT, token=TOKEN).upload_file(
+                  repo_id=REPO,
+                  repo_type='model',
+                  path_or_fileobj=payload,
+                  path_in_repo=probe_path,
+                  commit_message=f'Probe commit endpoint (workflow run {RUN_ID})',
+                  disable_tqdm=True,
+              )
+          except BaseException as exc:
+              reason = redact(f'{type(exc).__name__}: {exc}')[:400]
+              lowered = reason.lower()
+              rate_limited = '503' in reason or 'servererror' in lowered or 'unavailable' in lowered
+              hint = (
+                  'the platform still refuses commits (looks like the 503 "commit publisher'
+                  ' unavailable" rate limit); wait, then dispatch again before backfilling'
+                  if rate_limited else
+                  'not the known rate limit; check the token scope and the target repo id'
+              )
+              log(f'PROBE FAILED: {reason}')
+              write_summary([
+                  '### ModelScope commit probe: FAILED',
+                  '',
+                  f'- Target: `{REPO}`',
+                  f'- Probe: `{probe_path}`',
+                  f'- Error: `{reason}`',
+                  f'- Reading: {hint}',
+                  f'- Backfill once probes pass: `{BACKFILL}`',
+              ])
+              sys.exit(1)
+
+          log('PROBE OK: the commit endpoint accepted a write')
+          write_summary([
+              '### ModelScope commit probe: OK',
+              '',
+              f'- Target: `{REPO}`',
+              f'- Probe: `{probe_path}` committed',
+              '- Reading: the commit endpoint is accepting writes again; a backfill should succeed.',
+              f'- Backfill: `{BACKFILL}`',
+          ])
+          PY

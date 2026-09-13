@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+// NOTE: manual mirror / local drill only. CI uploads go through
+// .github/workflows/publish-mirror.yml, which uses the official ModelScope
+// Python SDK (HubApi.upload_folder / upload_file) under serialized
+// concurrency. The SDK replaced this script's hand-rolled batch -> PUT ->
+// commit path because that path retried a rejected commit only once and kept
+// losing "503 commit publisher unavailable" races. Keep this script for local
+// and offline drills (--dry-run, --assets-file, --only-pattern).
+//
 // 把 GitHub Release 资产镜像到 ModelScope（model 仓库类型），布局：
 //   releases/latest/<asset>             稳定版最新（稳定 tag 才写）
 //   releases/archive/<version>/<asset>  稳定版归档
