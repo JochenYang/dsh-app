@@ -39,7 +39,7 @@ import net from 'node:net'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
-const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks']
+const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf']
 const FIXTURE = path.join(root, 'scripts', 'fixtures', 'minimal-mcp-server.mjs')
 const MCP_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
 
@@ -372,14 +372,10 @@ async function main() {
       throw new Error(`suite plugin missing at ${target} (built? runtime complete?)`)
     }
     mkdirSync(path.dirname(path.join(scope, dir)), { recursive: true })
-    if (process.platform === 'win32') {
-      // Junction via `cmd /c mklink /J` — node symlink('junction') also works.
-      const { execFileSync } = await import('node:child_process')
-      execFileSync('cmd', ['/c', 'mklink', '/J', `"${path.join(scope, dir)}"`, `"${target}"`], { stdio: 'ignore' })
-    } else {
-      const { symlinkSync } = await import('node:fs')
-      symlinkSync(target, path.join(scope, dir), 'dir')
-    }
+    // node's symlinkSync('junction') works on Windows without elevation and
+    // avoids cmd.exe argument re-quoting on paths with spaces.
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(target, path.join(scope, dir), 'junction')
   }
 
   const logPath = path.join(home, 'smoke-server.log')
@@ -413,6 +409,13 @@ async function main() {
       ['/plugins/@dsh-app/plugin-swarm/api/config', 'swarm: config route'],
       [`${MCP_PREFIX}/servers`, 'mcp: servers route'],
       ['/plugins/@dsh-app/plugin-hooks/api/hooks', 'hooks: hooks route'],
+      ['/plugins/@dsh-app/plugin-market/api/sources', 'market: sources route'],
+      ['/plugins/@dsh-app/plugin-presets/api/presets', 'presets: list route'],
+      ['/plugins/@dsh-app/plugin-ppt/api/mode?sessionId=smoke', 'ppt: mode route'],
+      ['/plugins/@dsh-app/plugin-ppt/api/templates', 'ppt: templates route'],
+      ['/plugins/@dsh-app/plugin-doc/api/mode?sessionId=smoke', 'doc: mode route'],
+      ['/plugins/@dsh-app/plugin-sheet/api/mode?sessionId=smoke', 'sheet: mode route'],
+      ['/plugins/@dsh-app/plugin-pdf/api/mode?sessionId=smoke', 'pdf: mode route'],
     ]) {
       await probeRoute(base, route, name)
     }
@@ -439,7 +442,7 @@ async function main() {
     const html = index.text
     // Every suite plugin with a dsh.client half (package.json dsh.client +
     // lib/client.js); host-only plugins (brand, fff) are absent by design.
-    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks']
+    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks', '@dsh-app/plugin-ppt', '@dsh-app/plugin-market', '@dsh-app/plugin-presets', '@dsh-app/plugin-doc', '@dsh-app/plugin-sheet', '@dsh-app/plugin-pdf']
     check('client: boot graph lists suite client packages',
       index.status === 200 && suiteClientPackages.every(id => html.includes(id)),
       `HTTP ${index.status}; ids found: ${suiteClientPackages.filter(id => html.includes(id)).join(',') || 'none'}`)

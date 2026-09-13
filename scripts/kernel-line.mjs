@@ -2,7 +2,7 @@
  * Kernel-line resolution, shared by the build script and the release workflow.
  *
  * WHICH kernel line to follow has exactly one source of truth: the root
- * package.json's `@deepseek-ai/dsh` devDependency. The shell and all ten suite
+ * package.json's `@deepseek-ai/dsh` devDependency. The shell and all thirteen suite
  * plugins are typechecked and built against that spec, so the kernel bundled
  * into an installer must be resolved from the same line. Keeping a second,
  * hand-flipped copy of the channel in the workflow is how v0.11.1 shipped an
@@ -47,6 +47,12 @@ export const SUITE_PLUGINS = [
   '@dsh-app/plugin-fff',
   '@dsh-app/plugin-mcp',
   '@dsh-app/plugin-hooks',
+  '@dsh-app/plugin-ppt',
+  '@dsh-app/plugin-market',
+  '@dsh-app/plugin-presets',
+  '@dsh-app/plugin-doc',
+  '@dsh-app/plugin-sheet',
+  '@dsh-app/plugin-pdf',
 ]
 
 function readJson(file) {

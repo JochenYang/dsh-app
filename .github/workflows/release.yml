@@ -10,6 +10,8 @@ name: release
 # Windows / macOS / Linux, then publishes everything to a GitHub Release.
 # Triggers: push of a tag like v0.1.0 (shell) — the kernel version is read
 # from the npm registry dist-tag at build time, or pinned via inputs.
+# ModelScope mirroring is deliberately NOT here: it runs after the draft is
+# published (publish-mirror.yml).
 
 on:
   push:
@@ -188,7 +190,7 @@ jobs:
           # plugin must be installed + built before the runtime step copies
           # lib/ into the artifact. build-runtime.mjs rebuilds them anyway;
           # this pre-pass guarantees each plugin's own node_modules is ready.
-          for p in plugin-brand plugin-client-ui plugin-sidebar plugin-swarm plugin-usage plugin-archives plugin-memory plugin-fff plugin-mcp plugin-hooks; do
+          for p in plugin-brand plugin-client-ui plugin-sidebar plugin-swarm plugin-usage plugin-archives plugin-memory plugin-fff plugin-mcp plugin-hooks plugin-ppt plugin-market plugin-presets plugin-doc plugin-sheet plugin-pdf; do
             # Use each plugin's own build script (brand: tsc, client-ui: esbuild
             # loader-wrapped bundle). A bare `npx tsc` would neither produce the
             # client bundle the dsh loader expects nor match published typings.
@@ -363,3 +365,10 @@ jobs:
           else
             npx electron-builder --linux --x64 --publish always
           fi
+
+  # ModelScope mirroring deliberately does NOT live here. The mirror must run
+  # only after a human flips the draft to published, and no job in this file can
+  # observe that moment — it would mirror right after the app matrix, keeping
+  # every version later discarded during review in ModelScope forever. It is a
+  # separate event-driven workflow instead: publish-mirror.yml
+  # (`on: release: types: [published]`), which also owns manual backfill.

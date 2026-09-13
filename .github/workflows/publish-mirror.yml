@@ -1,0 +1,62 @@
+name: publish-mirror
+
+# Mirrors a PUBLISHED GitHub Release to the ModelScope model repo
+# (releases/latest|archive|prerelease + releases/versions.json).
+#
+# WHY A SEPARATE WORKFLOW: the mirror must start only after a human has
+# reviewed the draft and flipped it to published. A job inside release.yml
+# cannot observe that moment — it would run right after the app matrix and push
+# every version that review later discards into ModelScope permanently. The
+# `release: published` event IS the draft-flip moment (step 5 of the release
+# SOP: `gh release edit <tag> --draft=false`), so this file hooks it directly
+# and keeps release.yml's tag-push graph unchanged. Backfill is a dispatch here
+# instead of a full release re-run.
+#
+# - Mirror failure never blocks or rolls back the release: this is a separate
+#   run and the release is already published when it starts.
+# - MODELSCOPE_TOKEN unset: the script skips before any network call and exits
+#   0, so the run is green and the summary records the skip.
+# - Success / skip / failure plus the backfill command are written to
+#   $GITHUB_STEP_SUMMARY by the script; read the Summary panel of this run when
+#   publishing (AGENTS.md §10).
+# - runtime-* releases are published too (they are created as prereleases), and
+#   the tag filter below keeps them out: only v* shell releases are mirrored.
+#
+# Note: a release published by the workflow's own GITHUB_TOKEN does not trigger
+# workflows, so the draft flip must be performed by a user credential — which
+# is what the SOP does.
+
+on:
+  release:
+    types: [published]
+  # Manual backfill for a mirror that failed or was skipped.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to mirror (e.g. v0.11.6)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: modelscope mirror
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.release && !github.event.release.draft && startsWith(github.event.release.tag_name, 'v')) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Mirror release assets to ModelScope
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+          MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          node scripts/publish-modelscope.mjs --tag "$RELEASE_TAG" --repo "${{ github.repository }}"

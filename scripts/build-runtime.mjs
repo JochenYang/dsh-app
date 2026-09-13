@@ -138,6 +138,16 @@ function npmBin() {
 function run(cmd, args, cwd) {
   console.log(`$ ${cmd} ${args.join(' ')}`)
   const opts = { cwd, stdio: 'inherit' }
+  // `npm run` serialises the caller's npmrc (including its allow-scripts
+  // policy) into npm_config_* environment variables, and npm ≥11 rejects an
+  // allow-scripts policy that arrives through the environment for a
+  // project-scoped install (EALLOWSCRIPTS). The artifact install owns its
+  // policy via package.json allowScripts, so drop the inherited keys.
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) {
+    if (/^npm_config_(strict_)?allow_scripts/i.test(key) || /^npm_config_dangerously_allow_all_scripts/i.test(key)) delete env[key]
+  }
+  opts.env = env
   // Windows runners: Node 22.12+ no longer wraps .cmd via cmd.exe implicitly
   // (CVE-2024-27980 mitigation), so shell is required; pass one joined line
   // instead of args to avoid DEP0190. Every token is strictly quoted so paths
@@ -258,9 +268,34 @@ async function main() {
       // plugin-fff's external require resolves from app/node_modules.
       '@ff-labs/fff-node': FFF_NODE_PIN,
     },
+    // npm ≥11 refuses to run install/build scripts of dependencies unless the
+    // project allow-lists them. The field must be an OBJECT keyed by package
+    // spec (`name@*` or bare name — an array degrades to useless numeric keys
+    // because the loader uses Object.entries). These are the kernel dependency
+    // tree's native bindings and their build prerequisites; npm ≤10 ignores
+    // the field. A new dependency needing scripts fails the install with a
+    // named EALLOWSCRIPTS error — add it here after verifying what its scripts
+    // do. Note the CLI --allow-scripts flag is rejected outright for
+    // project-scoped installs, so the field is the only project-level channel.
+    allowScripts: {
+      '@deepseek-ai/dsh-subprocess-local@*': true,
+      'koffi@*': true,
+      'node-pty@*': true,
+      '@google/genai@*': true,
+      'protobufjs@*': true,
+      'bufferutil@*': true,
+      'utf-8-validate@*': true,
+    },
   }
   await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
-  run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
+  // npm ≥11 rejects an allow-scripts policy arriving through the environment
+  // (which `npm run` produces from the caller's npmrc) for a project-scoped
+  // install — run() strips those keys below. The policy itself lives in the
+  // generated package.json above; --userconfig isolates the install from the
+  // build machine's personal npmrc (tokens, registries, mirrors).
+  const installNpmrc = path.join(runtimeDir, 'app', '.npmrc-build')
+  await writeFile(installNpmrc, '')
+  run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps', '--userconfig', installNpmrc], path.join(runtimeDir, 'app'))
 
   // 2a. npm --legacy-peer-deps skips ALL peer resolution, so second-level
   //     peers (peers of dsh's peers, e.g. dsh-timeout, dsh-scope, dsh-sandbox)
@@ -317,7 +352,7 @@ async function main() {
     }
     appPkg.dependencies = { ...appPkg.dependencies, ...peerSpecs }
     await writeFile(path.join(runtimeDir, 'app', 'package.json'), JSON.stringify(appPkg, null, 2))
-    run(npm, ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps'], path.join(runtimeDir, 'app'))
+    run(npm, ['install', '--omit=dev', '--no-audit', '--no-fund', '--legacy-peer-deps', '--userconfig', installNpmrc], path.join(runtimeDir, 'app'))
   }
 
   // 2b. Copy the built suite plugins into the runtime's node_modules so dsh
@@ -364,6 +399,8 @@ async function main() {
   //    the epoch, so the same content always yields the same sha512 — the
   //    precondition for the shell's drift check (sha-equal ⇔ content-equal).
   const tgzPath = path.join(root, 'runtime-dist', tgzName)
+  // Build-only npm config file: it must not ship inside the artifact.
+  await rm(path.join(runtimeDir, 'app', '.npmrc-build'), { force: true })
   await createTar({ gzip: true, file: tgzPath, cwd: work, portable: true, mtime: new Date(0) }, ['runtime'])
 
   // 6. sha512 sidecar — the trusted integrity value used at install time.

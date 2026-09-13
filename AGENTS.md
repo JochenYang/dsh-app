@@ -50,7 +50,7 @@ src/kernel/      Kernel runtime manager: lifecycle, manifest I/O, integrity,
                  version/artifact resolution sources
 src/shared/      Shared constants + types (imported by main + kernel)
 static/          Setup/install window (first-run UI, zh-CN), no framework
-plugins/         Brand plugin suite (10 plugins, see §6) + dsh-app.patch.yml
+plugins/         Brand plugin suite (16 plugins, see §6) + dsh-app.patch.yml
                  (loader overlay)
 scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
                  release-notes generator (gen-release-notes.mjs)
@@ -193,7 +193,7 @@ after boot and via the tray.
 
 ## 6. Brand suite wiring (`plugins/`)
 
-Ten dsh plugins ship with the product, layered on upstream **without forking
+Sixteen dsh plugins ship with the product, layered on upstream **without forking
 it**. `plugins/README.md` is the authoritative roster — each plugin's side,
 role and status (including which are still scaffolds). Start there when you
 need the list; the five sites it must stay in sync with are under "Suite
@@ -207,7 +207,7 @@ Two seams are stitched at every server start (`brand-suite.ts`):
    sources are the active kernel's `app/node_modules/@dsh-app/*` (npm-installed
    via `file:` references by `scripts/build-runtime.mjs`).
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into `userData`
-   and passed to `dsh web --patch ...`. It inserts all ten suite entries
+   and passed to `dsh web --patch ...`. It inserts all sixteen suite entries
    after every bundle layer and the profile's own patch (last write wins per
    row; the upstream Models settings page stays enabled — the brand shadow
    was retired).
@@ -286,7 +286,9 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 
 > Tests live in `plugins/plugin-memory/tests/`, `plugins/plugin-swarm/tests/`,
 > `plugins/plugin-usage/tests/`, `plugins/plugin-hooks/tests/`,
-> `plugins/plugin-mcp/tests/` and `plugins/plugin-archives/tests/`
+> `plugins/plugin-mcp/tests/`, `plugins/plugin-archives/tests/`,
+> `plugins/plugin-presets/tests/`, `plugins/plugin-doc/tests/`,
+> `plugins/plugin-sheet/tests/` and `plugins/plugin-pdf/tests/`
 > (node:test, `npm test` inside each plugin — `scripts/test.mjs` is the shared
 > esbuild + `node --test` wrapper). The shell/kernel have no test
 > runner; verification is `npm run typecheck` + manual run in dev mode.
@@ -306,7 +308,7 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 | `DSH_APP_NPM_REGISTRIES` | `sources/registry.ts` | Comma-separated registry chain replacing the default (`npmjs.org` → `npmmirror.com`) |
 | `NPM_CONFIG_REGISTRY` | `sources/registry.ts` | Single-registry override; npmmirror still appended as fallback |
 | `DSH_APP_GITHUB_MIRRORS` | `sources/artifact.ts` | Comma-separated mirror URL prefixes; empty value disables mirrors |
-| `DSH_APP_SUITE_VERSION` | `scripts/kernel-line.mjs`, `dev.ts` | Brand suite version in the runtime manifest (default: content hash of the ten plugin versions) |
+| `DSH_APP_SUITE_VERSION` | `scripts/kernel-line.mjs`, `dev.ts` | Brand suite version in the runtime manifest (default: content hash of the sixteen plugin versions) |
 | `DSH_APP_LOG_DIR` | `server.ts`, `index.ts` | Log directory (default: `<userData>/logs`) |
 | `DSH_HOME` | `brand-suite.ts` | dsh profiles home (default `~/.dsh`) |
 | `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the followed line's dist-tag at build time, then asserted against the followed spec) |
@@ -405,6 +407,17 @@ for a dsh version without cutting a shell release):
   `electron-builder` and `--publish always`; macOS notarization via
   `--config.mac.notarize=true` when Apple signing secrets are present.
 
+Mirroring to ModelScope is a **separate workflow**,
+`.github/workflows/publish-mirror.yml`, triggered by
+`on: release: types: [published]` — the moment the draft is flipped (SOP step
+5) — and never when the app matrix merely finishes, so a version discarded
+during review is never mirrored. It runs the same script on
+`workflow_dispatch` (`-f tag=v0.1.6`) for backfill. A failed or skipped mirror
+cannot roll back the release (different run, and the release is already
+published by then); the script records success / skip / failure plus the
+backfill command in `$GITHUB_STEP_SUMMARY`, and the workflow's tag filter keeps
+`runtime-*` releases out.
+
 ### Kernel line (single source of truth)
 
 **Which dsh line a build follows is decided by `package.json` alone.** All 24
@@ -453,7 +466,27 @@ two copies of the line and nothing comparing them, v0.11.1 bundled a
 4. **Generate release notes**:
    `node scripts/gen-release-notes.mjs v0.1.6` → writes `release-notes.md`.
 5. **Publish the draft**:
-   `gh release edit v0.1.6 --repo JochenYang/dsh-app --draft=false --notes-file release-notes.md`
+   `gh release edit v0.1.6 --repo JochenYang/dsh-app --draft=false --notes-file release-notes.md`.
+   Use your own credentials: a release published by CI's `GITHUB_TOKEN` does
+   not trigger another workflow, so a token-driven publish would silently skip
+   the mirror.
+6. **Verify the mirror**: publishing the draft (step 5) triggers the
+   `publish-mirror` workflow, which mirrors the assets to ModelScope
+   (`releases/latest|archive|prerelease` + `versions.json`). Open that run's
+   Summary panel: it records `OK` (target repo, assets committed, index size),
+   `SKIPPED` (no `MODELSCOPE_TOKEN`) or `FAILED` (reason), each with the
+   backfill command. Confirm `releases/latest/` now points at this version.
+   Re-mirror a failed run with
+   `node scripts/publish-modelscope.mjs --tag v0.1.6 --repo JochenYang/dsh-app`
+   or `gh workflow run publish-mirror.yml -f tag=v0.1.6`. A failed mirror never
+   blocks or rolls back the release; a missing `MODELSCOPE_TOKEN` reports
+   `SKIPPED` and is expected, not a failure.
+
+Before publishing a runtime (`workflow_dispatch` / kernel line bump), run the
+plugin compatibility dry-run against a real profile:
+`npm run check:plugins -- --kernel <runtime.tgz> --home <real profile dir>`
+(without `--home` the script uses a temporary DSH_HOME and never writes the real
+`~/.dsh`).
 
 ### Release notes rules
 

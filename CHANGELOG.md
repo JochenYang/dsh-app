@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.7] - 2026-09-13
+
+### 中文
+- 插件市场（新）：侧边栏设置上方的入口改为右侧抽屉（无遮罩、左缘把手收起，不再与窗口按钮打架）；内置两个目录源（含国内可达源），支持中文分类、作者搜索、卡片信息与"仅源码"标注；**按仓库地址识别插件身份**——本地 tgz 或 Git 安装的插件不再被同名包静默覆盖，覆盖必须显式确认；安装遇到 pnpm 构建脚本拦截时可一键"放行并重试"；已安装页显示版本与"有更新"，支持单个与批量更新；首屏改为两段式（已安装列表读本地事实立即显示，联网更新信息异步补上），目录走磁盘缓存与内置离线快照，断网也有内容可浏览
+- 办公套件（新，四个格式）：PPT、Word、Excel、PDF 四个模式全部使用本地引擎渲染（不经服务端、离线可用）；输入框下方四个胶囊入口，点击即进入会话级模式并自动在输入框携带对应技能引用；四个模式互斥，切换时即时替换；PPT 提供 30 个模板（含从开源结构版式导入的新几何族）、原生可编辑图表，以及"模板风格/自由创作"两种通道；PDF 可把工作区里的 PDF 读成材料，也能生成带页码的报告
+- 办公套件排版规范：四格式共用一套设计标准——中文文档首行缩进 2 字符、两端对齐、标点避头尾；表格统一为极简水平线、数字右对齐且同列小数位一致、千分位、负数括号、比率按百分比、合计行强调、三套可选配色谱；渲染前强制校验（结构、容量、规范），不合格直接拒绝导出并给出逐条修复指引
+- 预设与备份（新）：`.dshpreset` 预设包导出/导入（对名称与路径做围栏）；配置备份导出/导入——自动排除凭据文件、扫描密钥内容、按实际解压体积防 zip 炸弹、恢复失败自动还原
+- 更新与恢复（新）：可"跳过此版本"，可回滚到上一版本；新增安全模式（托盘一键进入，只加载官方内核，用于排查插件问题）；启动失败时按类别给出诊断（插件树冲突／端口占用／模块缺失）并可一键转入安全模式
+- 发布与构建：新增 ModelScope 镜像通道（正式发布后自动执行，失败不阻塞主发布，结果写入 CI 摘要；修复了上传凭据外泄，以及一处导致该通道从未真正跑通的缺陷）；新增内核升级前的插件兼容性 dry-run（`npm run check:plugins`）；修复运行时构建的包脚本白名单，以及探针脚本在含空格路径下的问题
+
+### English
+- Plugin market (new): the entry above Settings opens a right-edge drawer (no scrim, a handle on its left edge to collapse it, no overlap with the native window buttons); two built-in catalog sources (including one reachable from mainland China), with Chinese categories, author search, card details and a "source-only" marker; **plugin identity is now the repository address** — a locally installed tgz or Git plugin is never silently replaced by a same-named package, and replacing it requires an explicit confirmation; blocked pnpm build scripts can be approved and retried in one click; the installed tab shows versions and available updates, with single and batch updates; the first paint is two-phase (the installed list renders immediately from local facts, update information follows asynchronously) and the catalog is served from a disk cache plus a bundled offline snapshot, so it stays browsable without network
+- Office suite (new, four formats): PPT, Word, Excel and PDF all render through local engines (no server round-trip, usable offline); four capsules below the composer enter a session-scoped mode and seed the matching skill reference into the input; the four modes are mutually exclusive and switch instantly; PPT ships 30 templates (including a new geometry family imported from open-source structural layouts), native editable charts, and both a template-styled and a free-form authoring channel; PDF can read workspace PDFs as material and produce paginated reports
+- Office suite typography: one shared design standard across the four formats — Chinese documents get a 2-character first-line indent, justified paragraphs and forbidden line-break punctuation rules; tables use minimal horizontal rules, right-aligned numbers with consistent decimals per column, thousands separators, parenthesised negatives, percentages for ratio columns, emphasised total rows and three selectable palettes; rendering is gated on validation (structure, capacity, conventions) so a failing project is refused with per-item repair guidance
+- Presets and backup (new): `.dshpreset` export/import with name and path fencing; configuration backup export/import that excludes credential files, scans for secret content, verifies actual inflated size against zip bombs, and rolls back a failed restore
+- Updates and recovery (new): skip a version, roll back to the previous one; a Safe Mode (one tray click, official kernel only) for diagnosing plugin problems; startup failures now classify into plugin-tree conflicts, port conflicts and missing modules, with a one-click switch into Safe Mode
+- Release and build: a new ModelScope mirror channel (runs after the release is published, never blocks the main release, and reports into the CI summary; fixed a credential leak on upload and a defect that had prevented the channel from ever completing); a pre-upgrade plugin compatibility dry-run (`npm run check:plugins`); fixed the runtime build's package-script allowlist and probe scripts on paths containing spaces
+
 ## [v0.11.6] - 2026-09-11
 
 ### 中文
