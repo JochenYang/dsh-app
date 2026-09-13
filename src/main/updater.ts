@@ -10,6 +10,7 @@ import { autoUpdater } from 'electron-updater'
 import { APP_NAME, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { githubMirrorPrefixes } from '../kernel/sources/artifact'
 import { inFrameDialogScript } from './in-frame-dialog'
+import { readJsonFile, writeJsonFileAtomic } from './json-file'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
 
@@ -357,6 +358,145 @@ function isNewerThan(latest: string, current: string): boolean {
     : latest !== current
 }
 
+// ------------------------------------------------- skip version / history
+
+/** Record of the update version the user chose to skip (auto-checks go silent). */
+interface SkippedVersion {
+  readonly version: string
+}
+
+function skippedVersionFile(): string {
+  return path.join(app.getPath('userData'), 'dsh-app-skipped-version.json')
+}
+
+/** The skipped version, or null when none recorded (any parse error = none). */
+async function readSkippedVersion(): Promise<string | null> {
+  const record = await readJsonFile<SkippedVersion>(skippedVersionFile())
+  return typeof record?.version === 'string' ? record.version : null
+}
+
+async function writeSkippedVersion(version: string): Promise<void> {
+  try {
+    await writeJsonFileAtomic(skippedVersionFile(), { version } satisfies SkippedVersion)
+  } catch (err) {
+    console.error('[shell-updater] failed to record skipped version:', (err as Error).message)
+  }
+}
+
+async function clearSkippedVersion(): Promise<void> {
+  await fs.rm(skippedVersionFile(), { force: true }).catch(() => undefined)
+}
+
+/** One confirmed version advance, kept for the tray's rollback menu. */
+interface VersionHistoryEntry {
+  readonly version: string
+  /** ISO timestamp of when this version was confirmed running. */
+  readonly at: string
+}
+
+/** How many confirmed version advances to keep for rollback. */
+const VERSION_HISTORY_MAX = 5
+
+function versionHistoryFile(): string {
+  return path.join(app.getPath('userData'), 'dsh-app-version-history.json')
+}
+
+async function readVersionHistory(): Promise<VersionHistoryEntry[]> {
+  const list = await readJsonFile<VersionHistoryEntry[]>(versionHistoryFile())
+  return Array.isArray(list)
+    ? list.filter((entry) => entry !== null && typeof entry.version === 'string')
+    : []
+}
+
+/**
+ * Append a confirmed version advance (max {@link VERSION_HISTORY_MAX}).
+ * Consecutive duplicates collapse: the pending-install consumption of a
+ * rollback re-records the version it just landed on otherwise. Best-effort.
+ */
+async function appendVersionHistory(version: string): Promise<void> {
+  try {
+    const history = await readVersionHistory()
+    if (history[history.length - 1]?.version === version) return
+    const next = [...history, { version, at: new Date().toISOString() } satisfies VersionHistoryEntry].slice(-VERSION_HISTORY_MAX)
+    await writeJsonFileAtomic(versionHistoryFile(), next)
+  } catch (err) {
+    console.error('[shell-updater] failed to record version history:', (err as Error).message)
+  }
+}
+
+/** Outcome of the Windows update-available dialog. */
+type UpdateConfirmChoice = 'install' | 'skip' | 'cancel'
+
+/**
+ * The update-available dialog: install / skip-this-version / cancel. The
+ * in-frame dialog carries the three buttons natively (values map 1:1); the
+ * native fallback maps response indexes to the same outcomes.
+ */
+async function promptUpdateConfirm(win: BrowserWindow | null, current: string, version: string): Promise<UpdateConfirmChoice> {
+  const message = `发现新版本 ${APP_NAME}（${version}）。`
+  const detail = `当前 v${current} → v${version}。将下载并静默安装，安装完成后需重新打开应用。`
+  return promptThemedDialog<UpdateConfirmChoice>(
+    win,
+    inFrameDialogScript({
+      title: `${APP_NAME} 更新可用`,
+      message,
+      detail,
+      buttons: [
+        { label: '立即更新', value: 'install', primary: true },
+        { label: '跳过此版本', value: 'skip' },
+        { label: '取消', value: 'cancel' },
+      ],
+      cancelValue: 'cancel',
+      enterValue: 'install',
+    }),
+    {
+      type: 'info',
+      title: `${APP_NAME} 更新可用`,
+      message,
+      detail,
+      buttons: ['立即更新', '跳过此版本', '取消'],
+      defaultId: 0,
+      cancelId: 2,
+    },
+    (value, nativeResponse) => {
+      if (value === 'install' || value === 'skip' || value === 'cancel') return value
+      return nativeResponse === 0 ? 'install' : nativeResponse === 1 ? 'skip' : 'cancel'
+    },
+  )
+}
+
+/**
+ * Manual re-check landing on a previously skipped version: name the skip and
+ * let the user install it anyway or keep it skipped (auto checks never got
+ * here — they stay silent on skipped versions).
+ */
+async function promptSkippedVersionConfirm(win: BrowserWindow | null, version: string): Promise<UpdateConfirmChoice> {
+  const proceed = await confirmInFrame(
+    {
+      title: `${APP_NAME} 更新可用`,
+      message: `检测到 ${APP_NAME} ${version}（你曾跳过此版本）。`,
+      detail: '仍要安装该版本吗？',
+      buttons: [
+        { label: '保持跳过', value: 'cancel' },
+        { label: '仍要安装', value: 'install', primary: true },
+      ],
+      cancelValue: 'cancel',
+      enterValue: 'install',
+    },
+    {
+      type: 'info',
+      title: `${APP_NAME} 更新可用`,
+      message: `检测到 ${APP_NAME} ${version}（你曾跳过此版本）。`,
+      detail: '仍要安装该版本吗？',
+      buttons: ['仍要安装', '保持跳过'],
+      defaultId: 0,
+      cancelId: 1,
+    },
+    'install',
+  )
+  return proceed ? 'install' : 'cancel'
+}
+
 /** Windows custom update flow (mirror fallback + sha512 + silent install). */
 async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null): Promise<void> {
   if (process.env.DSH_APP_DEV === '1') return
@@ -385,122 +525,284 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       return
     }
 
+    // A version the user explicitly skipped stays silent for auto checks;
+    // only a manual re-check surfaces it (with an opt-in below).
+    const skippedVersion = await readSkippedVersion()
+    if (skippedVersion === yaml.version && !manual) {
+      clearKernelProgress(win)
+      return
+    }
+
     const asset = pickAsset(yaml.files, process.arch)
     if (!asset) throw new Error('未找到适用于当前系统的安装包')
     // Same charset guard for the asset filename (spliced into the download
     // URL and the spawned installer path): a crafted value must fail safely,
     // never inject.
     if (!/^[\w.~-]+\.exe$/.test(asset.url)) throw new Error('更新包文件名格式异常')
-    const proceed = await confirmInFrame(
-      {
-        title: `${APP_NAME} 更新可用`,
-        message: `发现新版本 ${APP_NAME}（${yaml.version}）。`,
-        detail: `当前 v${current} → v${yaml.version}。将下载并静默安装，安装完成后需重新打开应用。`,
-        buttons: [
-          { label: '稍后', value: 'later' },
-          { label: '下载并安装', value: 'install', primary: true },
-        ],
-        cancelValue: 'later',
-        enterValue: 'install',
-      },
-      {
-        type: 'info',
-        title: `${APP_NAME} 更新可用`,
-        message: `发现新版本 ${APP_NAME}（${yaml.version}）。`,
-        detail: `当前 v${current} → v${yaml.version}。将下载并静默安装，安装完成后需重新打开应用。`,
-        buttons: ['下载并安装', '稍后'],
-        defaultId: 0,
-        cancelId: 1,
-      },
-      'install',
-    )
-    if (!proceed) {
+
+    const choice = skippedVersion === yaml.version
+      ? await promptSkippedVersionConfirm(win, yaml.version)
+      : await promptUpdateConfirm(win, current, yaml.version)
+    if (choice === 'skip') {
+      await writeSkippedVersion(yaml.version)
+      clearKernelProgress(win)
+      showUpdateToast(win, `已跳过 ${APP_NAME} ${yaml.version}，之后将不再自动提醒`, 'success', 3_000)
+      return
+    }
+    if (choice !== 'install') {
       clearKernelProgress(win)
       return
     }
 
-    const dest = path.join(app.getPath('temp'), `dsh-app-update-${yaml.version}-${process.arch}.exe`)
-    // Throttle card updates (~4/s) like the kernel downloader: every callback
-    // is an executeJavaScript hop into the renderer, and the per-chunk stream
-    // fires far faster than the eye can perceive.
-    let lastEmit = 0
-    const downloadedFrom = await downloadWithFallback(
-      assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url),
-      dest,
-      asset.sha512,
-      (received, total) => {
-        const now = Date.now()
-        if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
-        lastEmit = now
-        showKernelProgress(win, {
-          phase: 'downloading',
-          message: `正在下载 ${APP_NAME} ${yaml.version}…`,
-          progress: total > 0 ? Math.min(1, received / total) : null,
-        })
-      },
-    )
-    console.log(`[shell-updater] downloaded ${asset.url} from ${downloadedFrom}`)
-    showUpdateToast(win, `${APP_NAME} ${yaml.version} 下载完成`, 'success', 3_000)
-
-    const install = await confirmInFrame(
-      {
-        title: `${APP_NAME} 更新就绪`,
-        message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
-        detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
-        buttons: [
-          { label: '稍后', value: 'later' },
-          { label: '立即安装', value: 'install', primary: true },
-        ],
-        cancelValue: 'later',
-        enterValue: 'install',
-      },
-      {
-        type: 'question',
-        title: `${APP_NAME} 更新就绪`,
-        message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
-        detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
-        buttons: ['立即安装', '稍后'],
-        defaultId: 0,
-        cancelId: 1,
-      },
-      'install',
-    )
-    if (install) {
-      // VISIBLE NSIS install: the app must be closed so the installer can
-      // replace the running binaries; the wizard then shows the same flow as a
-      // first-time install (user clicks through, completion page relaunches
-      // the app). The installer is a GUI-subsystem binary spawned DIRECTLY —
-      // no cmd wrapper: a detached cmd.exe always flashes a console window on
-      // Windows, even with windowsHide.
-      //
-      // `windowsHide` must NOT be set on a GUI binary: libuv maps it to
-      // STARTF_USESHOWWINDOW + SW_HIDE, which Windows applies to the GUI
-      // process's first window — the wizard then runs invisibly and the user
-      // sees nothing (learned the hard way; the flag only ever hides console
-      // windows, and a GUI binary has none to hide).
-      //
-      // Completion is verified on the next boot instead of by a watcher
-      // process (the host quits right after spawning, so it cannot observe the
-      // exit itself): the pending-install record holds the target version and
-      // the installer path, so the next run deletes the leftover package and
-      // toasts when the version did not advance (wizard cancelled or failed).
-      // Premise: per-user asInvoker NSIS (perMachine:false) installs in one
-      // process; an elevation hop would change what the version check means.
-      await fs.writeFile(
-        pendingInstallFile(),
-        `${JSON.stringify({ version: yaml.version, installerPath: dest } satisfies PendingInstall)}\n`,
-        'utf8',
-      )
-      const child = spawn(dest, [], { detached: true, stdio: 'ignore' })
-      // Spawn failure is otherwise invisible (the app is about to quit).
-      child.on('error', (err) => { console.error('[shell-updater] installer spawn failed:', err.message) })
-      child.unref()
-      app.quit()
-    }
+    await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url), {
+      title: `${APP_NAME} 更新就绪`,
+      message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
+      detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
+    })
   } catch (err) {
     console.error('[shell-updater]', (err as Error).message)
     clearKernelProgress(win)
     if (manual) await showDownloadError((err as Error).message)
+  } finally {
+    busy = false
+  }
+}
+
+/**
+ * Shared Windows installer tail: download with progress (mirror fallback +
+ * sha512), confirm, stage the pending-install record, spawn the visible NSIS
+ * wizard and quit. Returns when the user defers; the host process quits when
+ * the install starts.
+ */
+async function downloadAndInstallPackage(
+  win: BrowserWindow | null,
+  version: string,
+  asset: UpdateFileEntry,
+  candidates: string[],
+  installPrompt: { title: string; message: string; detail: string },
+): Promise<void> {
+  const dest = path.join(app.getPath('temp'), `dsh-app-update-${version}-${process.arch}.exe`)
+  // Throttle card updates (~4/s) like the kernel downloader: every callback
+  // is an executeJavaScript hop into the renderer, and the per-chunk stream
+  // fires far faster than the eye can perceive.
+  let lastEmit = 0
+  const downloadedFrom = await downloadWithFallback(
+    candidates,
+    dest,
+    asset.sha512,
+    (received, total) => {
+      const now = Date.now()
+      if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
+      lastEmit = now
+      showKernelProgress(win, {
+        phase: 'downloading',
+        message: `正在下载 ${APP_NAME} ${version}…`,
+        progress: total > 0 ? Math.min(1, received / total) : null,
+      })
+    },
+  )
+  console.log(`[shell-updater] downloaded ${asset.url} from ${downloadedFrom}`)
+  showUpdateToast(win, `${APP_NAME} ${version} 下载完成`, 'success', 3_000)
+
+  const install = await confirmInFrame(
+    {
+      title: installPrompt.title,
+      message: installPrompt.message,
+      detail: installPrompt.detail,
+      buttons: [
+        { label: '稍后', value: 'later' },
+        { label: '立即安装', value: 'install', primary: true },
+      ],
+      cancelValue: 'later',
+      enterValue: 'install',
+    },
+    {
+      type: 'question',
+      title: installPrompt.title,
+      message: installPrompt.message,
+      detail: installPrompt.detail,
+      buttons: ['立即安装', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+    },
+    'install',
+  )
+  if (!install) return
+  // VISIBLE NSIS install: the app must be closed so the installer can
+  // replace the running binaries; the wizard then shows the same flow as a
+  // first-time install (user clicks through, completion page relaunches
+  // the app). The installer is a GUI-subsystem binary spawned DIRECTLY —
+  // no cmd wrapper: a detached cmd.exe always flashes a console window on
+  // Windows, even with windowsHide.
+  //
+  // `windowsHide` must NOT be set on a GUI binary: libuv maps it to
+  // STARTF_USESHOWWINDOW + SW_HIDE, which Windows applies to the GUI
+  // process's first window — the wizard then runs invisibly and the user
+  // sees nothing (learned the hard way; the flag only ever hides console
+  // windows, and a GUI binary has none to hide).
+  //
+  // Completion is verified on the next boot instead of by a watcher
+  // process (the host quits right after spawning, so it cannot observe the
+  // exit itself): the pending-install record holds the target version and
+  // the installer path, so the next run deletes the leftover package and
+  // toasts when the version did not advance (wizard cancelled or failed).
+  // Premise: per-user asInvoker NSIS (perMachine:false) installs in one
+  // process; an elevation hop would change what the version check means.
+  await fs.writeFile(
+    pendingInstallFile(),
+    `${JSON.stringify({ version, installerPath: dest } satisfies PendingInstall)}\n`,
+    'utf8',
+  )
+  const child = spawn(dest, [], { detached: true, stdio: 'ignore' })
+  // Spawn failure is otherwise invisible (the app is about to quit).
+  child.on('error', (err) => { console.error('[shell-updater] installer spawn failed:', err.message) })
+  child.unref()
+  app.quit()
+}
+
+// -------------------------------------------------------- version rollback
+// Windows-only: rollback leans on the custom update chain's asset contract
+// (a tagged release carrying the installers + latest.yml), which exists only
+// there — macOS/Linux update through electron-updater.
+
+/** Tagged-release asset download candidates (official first, then mirrors). */
+function releaseAssetCandidates(owner: string, repo: string, tag: string, assetUrl: string): string[] {
+  const official = `https://github.com/${owner}/${repo}/releases/download/${tag}/${assetUrl}`
+  return [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+}
+
+/**
+ * Fetch a tagged release's latest.yml. The asset name is fixed by the release
+ * contract, so the deterministic `releases/download/<tag>/latest.yml` URL (with
+ * its mirror chain — the API is routinely unreachable in the regions these
+ * mirrors exist for) is tried first; the unauthenticated GitHub API stays as a
+ * fallback for anything that renamed it. The parsed version must agree with
+ * the tag: a mismatched file would install a version nobody asked for. Null on
+ * any failure (caller reports and stays put).
+ */
+async function fetchReleaseLatestYaml(version: string): Promise<LatestYaml | null> {
+  const parse = async (text: string): Promise<LatestYaml | null> => {
+    const parsed = parseLatestYaml(text)
+    return parsed && parsed.version === version ? parsed : null
+  }
+  // 1. Deterministic asset URL, official first then mirrors.
+  for (const url of releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, `v${version}`, 'latest.yml')) {
+    try {
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
+      if (!res.ok) continue
+      const parsed = await parse(await res.text())
+      if (parsed) return parsed
+    } catch {
+      // try next source
+    }
+  }
+  // 2. API fallback (asset renamed, deterministic URL missing).
+  try {
+    const api = `https://api.github.com/repos/${UPDATER_OWNER}/${UPDATER_REPO}/releases/tags/v${version}`
+    const res = await fetch(api, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(30_000),
+      headers: { accept: 'application/vnd.github+json' },
+    })
+    if (!res.ok) return null
+    const release = await res.json() as { assets?: ReadonlyArray<{ name?: string; browser_download_url?: string }> }
+    const yamls = (release.assets ?? []).filter((a) => a.name === 'latest.yml' && typeof a.browser_download_url === 'string')
+    if (yamls.length === 0) return null
+    const official = yamls[0].browser_download_url as string
+    for (const url of [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]) {
+      try {
+        const meta = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
+        if (!meta.ok) continue
+        const parsed = await parse(await meta.text())
+        if (parsed) return parsed
+      } catch {
+        // try next source
+      }
+    }
+  } catch {
+    // API unreachable / rate-limited: caller reports, nothing to retry here.
+  }
+  return null
+}
+
+/**
+ * Roll the shell app back to the previous recorded version (see the version
+ * history the pending-install consumer appends to). Deliberately bypasses
+ * isNewerThan: a rollback IS a downgrade, gated by an explicit confirm.
+ */
+export async function rollbackShellUpdate(win: BrowserWindow | null = null): Promise<void> {
+  if (process.platform !== 'win32') return
+  if (process.env.DSH_APP_DEV === '1') {
+    await noticeInFrame(win, 'info', APP_NAME, '开发模式下不支持回滚应用版本（当前运行的是未打包构建）。')
+    return
+  }
+  if (busy) {
+    // Shares the check guard with checkShellUpdateWin32 so a download and a
+    // rollback can never interleave.
+    showUpdateToast(win, '正在检查应用更新，请稍候…', 'progress', 3_000)
+    return
+  }
+  busy = true
+  try {
+    const history = await readVersionHistory()
+    const current = app.getVersion()
+    // history[len-1] is the running version (recorded on its confirmation);
+    // len-2 is the state before it — where a rollback lands.
+    const previous = history.length >= 2 ? history[history.length - 2].version : null
+    if (previous === null || previous === current || !/^[\w.~-]+$/.test(previous)) {
+      await noticeInFrame(win, 'info', APP_NAME, '没有可回滚的历史版本。')
+      return
+    }
+    showUpdateToast(win, `正在获取 ${APP_NAME} ${previous} 的安装包信息…`, 'progress', undefined)
+    const yaml = await fetchReleaseLatestYaml(previous)
+    clearKernelProgress(win)
+    if (!yaml) {
+      await noticeInFrame(win, 'error', APP_NAME, `无法获取 ${APP_NAME} ${previous} 的更新元数据，请检查网络后重试。`)
+      return
+    }
+    const asset = pickAsset(yaml.files, process.arch)
+    if (!asset || !/^[\w.~-]+\.exe$/.test(asset.url)) {
+      await noticeInFrame(win, 'error', APP_NAME, `未找到 ${APP_NAME} ${previous} 适用于当前系统的安装包。`)
+      return
+    }
+    const proceed = await confirmInFrame(
+      {
+        title: `${APP_NAME} 回滚到上一版本`,
+        message: `将把 ${APP_NAME} 从 v${current} 回滚到 v${previous}。`,
+        detail: '将下载该版本的安装包并打开安装向导，完成后应用会重新启动。',
+        buttons: [
+          { label: '取消', value: 'cancel' },
+          { label: '确认回滚', value: 'rollback', primary: true },
+        ],
+        cancelValue: 'cancel',
+        enterValue: 'rollback',
+      },
+      {
+        type: 'question',
+        title: `${APP_NAME} 回滚到上一版本`,
+        message: `将把 ${APP_NAME} 从 v${current} 回滚到 v${previous}。`,
+        detail: '将下载该版本的安装包并打开安装向导，完成后应用会重新启动。',
+        buttons: ['确认回滚', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+      },
+      'rollback',
+    )
+    if (!proceed) return
+    await downloadAndInstallPackage(
+      win,
+      previous,
+      asset,
+      releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, `v${previous}`, asset.url),
+      {
+        title: `${APP_NAME} 回滚就绪`,
+        message: `将关闭当前应用并安装 ${APP_NAME} ${previous}（回滚到上一版本）。`,
+        detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
+      },
+    )
+  } catch (err) {
+    clearKernelProgress(win)
+    await noticeInFrame(win, 'error', APP_NAME, `回滚失败：${(err as Error).message}`)
   } finally {
     busy = false
   }
@@ -530,22 +832,27 @@ async function checkShellUpdateDev(win: BrowserWindow | null): Promise<void> {
   }
 }
 
-export function checkShellUpdate(manual = false, win: BrowserWindow | null = null): void {
+/**
+ * Run one shell-update check. Returns the flow's promise (callers ignore it;
+ * it exists so probes and diagnostics can await the outcome — the win32 flow
+ * itself never rejects, it reports through dialogs/toasts).
+ */
+export function checkShellUpdate(manual = false, win: BrowserWindow | null = null): Promise<void> {
   if (process.env.DSH_APP_DEV === '1') {
     // Dev cannot self-install (the running app is the unpackaged build), but
     // a manual tray click still deserves the check animation and a verdict.
-    if (manual) void checkShellUpdateDev(win)
-    return
+    return manual ? checkShellUpdateDev(win) : Promise.resolve()
   }
   if (!initialized) initShellUpdater()
   if (process.platform === 'win32') {
-    void checkShellUpdateWin32(manual, win)
-    return
+    return checkShellUpdateWin32(manual, win)
   }
-  void autoUpdater.checkForUpdates().catch((err) => {
-    console.error('[shell-updater]', err.message)
-    if (manual) void showDownloadError((err as Error).message)
-  })
+  return autoUpdater.checkForUpdates()
+    .catch(async (err) => {
+      console.error('[shell-updater]', err.message)
+      if (manual) await showDownloadError((err as Error).message)
+    })
+    .then(() => undefined)
 }
 
 /**
@@ -595,6 +902,10 @@ export async function consumeUpdaterInstallResult(win: BrowserWindow | null = nu
     : current === target
   if (advanced) {
     console.log(`[shell-updater] update to ${target} confirmed (running ${current})`)
+    // The user now runs the version they may have skipped: retire the skip
+    // record, and record the advance the tray rollback menu reads.
+    await clearSkippedVersion()
+    await appendVersionHistory(current)
     return
   }
   // The wizard was cancelled or failed: still on the old version.

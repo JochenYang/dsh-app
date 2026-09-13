@@ -5,13 +5,15 @@ import path from 'node:path'
 import semver from 'semver'
 import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
+import { isSafeModeEnabled, setSafeMode } from './safe-mode'
+import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
 import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies, updateServerOrigin } from './window'
 import { CLOSE_DIALOG_SCRIPT, type CloseDialogChoice } from './close-dialog'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
-import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult } from './updater'
+import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import type { KernelChannel, KernelStatusPayload } from '../shared/types'
 
@@ -36,6 +38,8 @@ let mainWindow: BrowserWindow | null = null
 let quitting = false
 let restartAttempts = 0
 let bundledReinstallTried = false
+/** Safe-mode marker read once per run; toggling always relaunches the app. */
+let safeModeActive = false
 
 // --------------------------------------------------------------- helpers
 
@@ -53,8 +57,111 @@ function findFreePort(): Promise<number> {
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 function broadcastStatus(status: KernelStatusPayload): void {
-  setTrayTooltip(status.phase === 'ready' ? `DSH APP — dsh ${kernel.getCurrent()?.manifest.dshVersion ?? ''}` : `DSH APP — ${status.message}`)
-  showKernelProgress(mainWindow, status)
+  // Safe-mode tag: the steady-state labels (tooltip + ready card) must tell
+  // the user the suite overlay is off; failure text stays verbatim so the
+  // error detail is never mangled.
+  const tag = safeModeActive ? '（安全模式）' : ''
+  setTrayTooltip(status.phase === 'ready'
+    ? `DSH APP — dsh ${kernel.getCurrent()?.manifest.dshVersion ?? ''}${tag}`
+    : `DSH APP — ${status.message}${tag}`)
+  showKernelProgress(mainWindow, status.phase === 'ready' && safeModeActive ? { ...status, message: `${status.message}${tag}` } : status)
+}
+
+// ------------------------------------------------------ server diagnostics
+
+/** How many recent server output lines (already redacted) to keep. */
+const SERVER_LOG_RING_MAX = 40
+
+/** Ring of the most recent server output lines, for failure classification. */
+const serverLogRing: string[] = []
+
+function recordServerLog(line: string): void {
+  serverLogRing.push(line)
+  if (serverLogRing.length > SERVER_LOG_RING_MAX) serverLogRing.shift()
+}
+
+type ServerFailureKind = 'plugin-tree' | 'port' | 'module' | 'other'
+
+/** The shell's own command echo (emitted through the same onLog channel). */
+const SPAWN_ECHO_LOG = /^spawn /
+
+/**
+ * Classify a startup failure from the server's recent output lines. The
+ * command echo is excluded: it always contains "--patch" and would poison
+ * the patch-conflict match on every failure. Prescribed match order: a
+ * plugin-tree conflict is the one kind with a first-class recovery action
+ * (safe mode), so it outranks the more specific but action-less signatures.
+ */
+function classifyRecentServerFailure(): ServerFailureKind {
+  const lines = serverLogRing.filter((line) => !SPAWN_ECHO_LOG.test(line))
+  if (lines.some((line) => /fail the whole plugin tree|patch|insert|invalid config/i.test(line))) return 'plugin-tree'
+  if (lines.some((line) => /EADDRINUSE/i.test(line))) return 'port'
+  if (lines.some((line) => /Cannot find module/i.test(line))) return 'module'
+  return 'other'
+}
+
+/** Conclusion + one actionable suggestion per failure kind (zh-CN, user-facing). */
+const SERVER_FAILURE_ADVICE: Record<ServerFailureKind, string> = {
+  'plugin-tree': '疑似套件插件加载失败（patch 冲突或配置无效）。可尝试以安全模式重启，跳过套件插件后排查。',
+  port: '服务端口被占用。请确认没有另一个 DSH APP 实例正在运行，然后重试。',
+  module: '内核缺少模块文件，安装可能不完整。可从托盘菜单执行「检查内核更新」重装内核。',
+  other: '可查看安装目录 logs 文件夹中最新的 dsh-server 日志定位原因。',
+}
+
+/**
+ * Enter/leave safe mode and relaunch: the marker is consumed at the next
+ * boot's server start, so a restart (not an in-place reload) is the only way
+ * to apply it.
+ */
+async function restartWithSafeMode(enabled: boolean): Promise<void> {
+  await setSafeMode(enabled)
+  safeModeActive = enabled
+  app.relaunch()
+  app.quit()
+}
+
+/**
+ * Give-up dialog after repeated startup failures: classify the collected
+ * server output, show the conclusion plus one actionable suggestion, and —
+ * when the failure looks like a suite patch conflict — offer the safe-mode
+ * escape hatch (write the marker, relaunch without the overlay).
+ */
+async function reportStartupFailureAndExit(): Promise<void> {
+  const kind = classifyRecentServerFailure()
+  const message = `dsh 服务无法启动。${SERVER_FAILURE_ADVICE[kind]}`
+  if (kind === 'plugin-tree') {
+    const choice = await promptThemedConfirm<'safe' | 'quit'>(
+      mainWindow,
+      {
+        title: 'DSH APP',
+        message,
+        detail: '以安全模式重启将跳过套件插件，仅加载官方内核与你自己的配置。',
+        buttons: [
+          { label: '退出', value: 'quit' },
+          { label: '以安全模式重启', value: 'safe', primary: true },
+        ],
+        cancelValue: 'quit',
+        enterValue: 'safe',
+      },
+      {
+        type: 'error',
+        title: 'DSH APP',
+        message,
+        detail: '以安全模式重启将跳过套件插件，仅加载官方内核与你自己的配置。',
+        buttons: ['以安全模式重启', '退出'],
+        defaultId: 0,
+        cancelId: 1,
+      },
+      (value, nativeResponse) => (value !== '' ? (value as 'safe' | 'quit') : nativeResponse === 0 ? 'safe' : 'quit'),
+    )
+    if (choice === 'safe') {
+      await restartWithSafeMode(true)
+      return
+    }
+  } else {
+    await promptNoticeThemed(mainWindow, 'error', 'DSH APP', `${message}\n\n应用即将退出。`)
+  }
+  app.quit()
 }
 
 // ------------------------------------------------------------- lifecycle
@@ -133,15 +240,27 @@ async function promptCloseChoice(win: BrowserWindow | null): Promise<CloseDialog
 
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
+  // Ring reset: failure classification must reflect THIS startup attempt only.
+  serverLogRing.length = 0
   broadcastStatus({ phase: 'starting', message: '正在启动 dsh 服务…', progress: null })
   const port = await findFreePort()
   // Brand suite wiring: profile-dir module links + the loader overlay that
   // inserts the brand rows. An older kernel without the suite plugins boots
-  // vanilla (empty array).
-  const suiteSources = isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir())
-  const overlays = await prepareBrandSuite(suiteSources)
+  // vanilla (empty array). Safe mode skips the suite overlay entirely — the
+  // kernel boots the official bundle plus the user's own profile layers only.
+  const overlays = safeModeActive
+    ? []
+    : await prepareBrandSuite(isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir()))
+  // Environment scrub (opt-in): a missing config removes nothing, so the
+  // default boot spawns the kernel with an unchanged inherited env. Names
+  // are logged, never values — the removed list cannot leak credentials.
+  const scrub = await loadEnvScrubConfig(userDataDir)
+  const scrubbed = scrubEnvironment(process.env, scrub.removePatterns)
+  if (scrubbed.removed.length > 0) {
+    logKernel(`[kernel] env scrubbed: ${scrubbed.removed.join(', ')}`)
+  }
   try {
-    await server.start(kernel.getServerSpec(), port, DEFAULT_HTTP_HOST, overlays)
+    await server.start(kernel.getServerSpec(), port, DEFAULT_HTTP_HOST, overlays, scrubbed.env)
   } catch (err) {
     await handleServerDown(`启动失败：${(err as Error).message}`)
     return
@@ -228,8 +347,7 @@ async function handleServerDown(reason: string): Promise<void> {
   }
 
   if (restartAttempts >= 3) {
-    void promptNoticeThemed(mainWindow, 'error', 'DSH APP', 'dsh 服务无法启动，应用即将退出。可查看安装目录 logs 文件夹中最新的 dsh-server 日志定位原因。')
-    app.quit()
+    await reportStartupFailureAndExit()
     return
   }
 
@@ -421,6 +539,10 @@ function logKernel(line: string): void {
 }
 
 async function boot(): Promise<void> {
+  // Read once per run: entering/leaving safe mode relaunches the app, so the
+  // in-process flag cannot drift from the on-disk marker mid-session.
+  safeModeActive = await isSafeModeEnabled()
+  if (safeModeActive) console.log('[safe-mode] booting without the brand-suite overlay')
   kernel = new KernelManager({
     runtimeRoot: app.getPath('userData'),
     platform: process.platform,
@@ -436,7 +558,10 @@ async function boot(): Promise<void> {
 
   server = new DshServer({
     onExit: (code, signal) => void handleServerDown(`已退出（code ${code ?? '?'}, signal ${signal ?? '?'})`),
-    onLog: (line) => console.log('[server]', line),
+    onLog: (line) => {
+      console.log('[server]', line)
+      recordServerLog(line)
+    },
   })
 
   // Create the tray before any server/kernel work so it persists even when
@@ -450,6 +575,9 @@ async function boot(): Promise<void> {
     onCheckKernelUpdate: () => void checkKernelUpdate(true),
     onCheckAppUpdate: () => checkShellUpdate(true, mainWindow),
     onRestartServer: () => void startServerAndOpenWindow(),
+    onToggleSafeMode: () => void restartWithSafeMode(!safeModeActive),
+    isSafeMode: () => safeModeActive,
+    onRollbackApp: () => void rollbackShellUpdate(mainWindow),
     getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
   })
 

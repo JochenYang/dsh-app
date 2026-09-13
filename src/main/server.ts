@@ -85,7 +85,13 @@ export class DshServer {
     return this.url
   }
 
-  async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST, extraPatches: readonly string[] = []): Promise<void> {
+  /**
+   * @param envOverride - base environment for the child, replacing this
+   *   process's env (the env-scrub result lands here). When omitted the
+   *   child inherits the shell env unchanged — identical to the pre-scrub
+   *   behavior.
+   */
+  async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST, extraPatches: readonly string[] = [], envOverride?: NodeJS.ProcessEnv): Promise<void> {
     await this.stop()
     this.stopping = false
     this.starting = true
@@ -103,13 +109,13 @@ export class DshServer {
         ? spawn(command, {
             shell: true,
             cwd: spec.cwd,
-            env: { ...process.env, DSH_APP_DESKTOP: '1' },
+            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1' },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
         : spawn(command, args, {
             cwd: spec.cwd,
-            env: { ...process.env, DSH_APP_DESKTOP: '1' },
+            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1' },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })

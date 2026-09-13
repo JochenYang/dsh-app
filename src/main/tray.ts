@@ -8,6 +8,12 @@ export interface TrayCallbacks {
   onCheckKernelUpdate: () => void
   onCheckAppUpdate: () => void
   onRestartServer: () => void
+  /** Write/clear the safe-mode marker, then relaunch the app. */
+  onToggleSafeMode: () => void
+  /** True while the shell runs in safe mode; picks the toggle's menu label. */
+  isSafeMode: () => boolean
+  /** Roll the shell app back to the previous recorded version. */
+  onRollbackApp: () => void
   /** Current kernel version for the tray menu label, or null when unknown. */
   getCurrentVersion: () => string | null
 }
@@ -45,6 +51,18 @@ function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
     { label: '检查应用更新…', click: callbacks.onCheckAppUpdate },
     { type: 'separator' },
     { label: '重启服务', click: callbacks.onRestartServer },
+    // Windows-only: rollback drives the custom shell-update chain (tagged
+    // release assets + latest.yml + NSIS wizard); macOS/Linux update through
+    // electron-updater, which has no per-release asset contract to lean on.
+    ...(process.platform === 'win32'
+      ? [{ label: '回滚到上一版本', click: callbacks.onRollbackApp }]
+      : []),
+    { type: 'separator' },
+    // Mutually exclusive by state: toggling safe mode relaunches the app, so
+    // the label never needs live-refreshing within one session.
+    callbacks.isSafeMode()
+      ? { label: '退出安全模式', click: callbacks.onToggleSafeMode }
+      : { label: '以安全模式重启', click: callbacks.onToggleSafeMode },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ])
