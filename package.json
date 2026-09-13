@@ -15,6 +15,7 @@
     "start": "npm run build && electron .",
     "dev": "node scripts/dev.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
     "verify": "node scripts/smoke-suite.mjs",
     "check:plugins": "node scripts/check-plugin-compat.mjs",
     "dist": "npm run build && node scripts/prepare-bundled-kernel.mjs && electron-builder",

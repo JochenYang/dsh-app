@@ -7,7 +7,14 @@ import { Readable } from 'node:stream'
 import path from 'node:path'
 import semver from 'semver'
 import { autoUpdater } from 'electron-updater'
-import { APP_NAME, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
+import {
+  APP_NAME,
+  MODELSCOPE_ENDPOINT,
+  MODELSCOPE_RELEASES_URL,
+  MODELSCOPE_REPO,
+  resolveArtifactOwner,
+  resolveArtifactRepo,
+} from '../shared/constants'
 import { githubMirrorPrefixes } from '../kernel/sources/artifact'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
@@ -71,14 +78,16 @@ async function noticeInFrame(
  * Shell update channel.
  *
  * Windows (primary market, mainland-first): a custom flow replaces
- * electron-updater — detect via latest.yml (GitHub `releases/latest` alias),
- * pick the installer for the running arch, download with an official-first /
- * mirror-fallback chain (gh-proxy.com), verify the sha512 from latest.yml,
- * then run the NSIS installer silently and quit. This is what makes app
- * updates work without a proxy in mainland China.
+ * electron-updater — detect via latest.yml (GitHub `releases/latest` alias, or
+ * its ModelScope mirror), pick the installer for the running arch, download
+ * with a ModelScope-first / GitHub / mirror-prefix fallback chain, verify the
+ * sha512 from latest.yml, then run the NSIS installer silently and quit. This
+ * is what makes app updates work without a proxy in mainland China.
  *
  * macOS / Linux: keep electron-updater (native update formats), but surface
- * errors in a dialog and offer a release-page fallback.
+ * errors in a dialog and offer a release-page fallback. The ModelScope mirror
+ * cannot back those platforms: electron-updater needs a static directory feed
+ * while the ModelScope API is query-shaped (`.../repo?FilePath=<path>`).
  *
  * The dsh kernel is updated separately by the KernelManager; the two channels
  * stay decoupled.
@@ -220,16 +229,46 @@ export function parseLatestYaml(text: string): LatestYaml | null {
   return { version, files }
 }
 
-/** The verified metadata URL chain (official GitHub first, then mirrors). */
-function latestYamlCandidates(owner: string, repo: string): string[] {
+/** The verified metadata URL chain (mirror first, then official GitHub, then mirror prefixes). */
+export function latestYamlCandidates(owner: string, repo: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/latest/download/latest.yml`
-  return [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+  return [modelscopeReleaseFileUrl('releases/latest/latest.yml'), official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
 }
 
-/** Installer download candidates for one asset (official first, then mirrors). */
-function assetCandidates(owner: string, repo: string, assetUrl: string): string[] {
+/**
+ * ModelScope FilePath URL for one file in the mirror repo. The directory part
+ * is fixed by this module; the filename comes from latest.yml (already trusted
+ * for the GitHub URLs). Each path segment is encoded, which keeps the slashes
+ * literal (the verified URL shape) while a crafted name can neither smuggle
+ * `&`/`#` nor turn a literal `+` into a space.
+ */
+export function modelscopeReleaseFileUrl(relativePath: string): string {
+  const encodedPath = relativePath.split('/').map((segment) => encodeURIComponent(segment)).join('/')
+  return `${MODELSCOPE_ENDPOINT}/api/v1/models/${MODELSCOPE_REPO}/repo?Revision=master&FilePath=${encodedPath}`
+}
+
+/** True when a metadata URL came from the ModelScope mirror. */
+function isModelscopeSource(source: string): boolean {
+  return source.startsWith(`${MODELSCOPE_ENDPOINT}/`)
+}
+
+/** Short diagnostic label for one source URL (no secrets on this chain). */
+function sourceLabel(url: string): string {
+  return isModelscopeSource(url) ? 'modelscope' : url
+}
+
+/**
+ * Installer download candidates for one asset, same-source-first: metadata
+ * served by the mirror makes the mirror lead, with official GitHub and its
+ * prefixes kept as fallbacks; metadata from GitHub keeps the original order.
+ * The sha512 from the metadata still gates every candidate.
+ */
+export function assetCandidates(owner: string, repo: string, assetUrl: string, metadataSource: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/latest/download/${assetUrl}`
-  return [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+  const fallbacks = [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+  return isModelscopeSource(metadataSource)
+    ? [modelscopeReleaseFileUrl(`releases/latest/${assetUrl}`), ...fallbacks]
+    : fallbacks
 }
 
 /** Pick the installer matching the running arch (x64 primary, arm64 explicit). */
@@ -255,6 +294,9 @@ async function sha512Base64(filePath: string): Promise<string> {
   })
   return hash.digest('base64')
 }
+
+/** Actionable suffix for any "every source failed" message (user-visible). */
+export const MANUAL_DOWNLOAD_HINT = `可手动从镜像仓库下载：${MODELSCOPE_RELEASES_URL}`
 
 /** Download a file with progress, trying each candidate until one verifies. */
 async function downloadWithFallback(
@@ -292,7 +334,7 @@ async function downloadWithFallback(
       console.error(`[shell-updater] candidate failed (${url}): ${(err as Error).message}`)
     }
   }
-  throw new Error(`无法从任何源下载更新包：${lastError?.message ?? '未知错误'}`)
+  throw new Error(`无法从任何源下载更新包：${lastError?.message ?? '未知错误'}。${MANUAL_DOWNLOAD_HINT}`)
 }
 
 async function showDownloadError(message: string): Promise<void> {
@@ -300,10 +342,10 @@ async function showDownloadError(message: string): Promise<void> {
     {
       title: APP_NAME,
       message: `应用更新失败：${message}`,
-      detail: '你可以稍后重试，或从下载页手动安装。',
+      detail: '你可以稍后重试，或从镜像仓库手动下载安装包。',
       buttons: [
         { label: '关闭', value: 'close' },
-        { label: '打开下载页', value: 'open', primary: true },
+        { label: '打开镜像下载页', value: 'open', primary: true },
       ],
       cancelValue: 'close',
       enterValue: 'open',
@@ -312,43 +354,55 @@ async function showDownloadError(message: string): Promise<void> {
       type: 'error',
       title: APP_NAME,
       message: `应用更新失败：${message}`,
-      detail: '你可以稍后重试，或从下载页手动安装。',
-      buttons: ['打开下载页', '关闭'],
+      detail: '你可以稍后重试，或从镜像仓库手动下载安装包。',
+      buttons: ['打开镜像下载页', '关闭'],
       defaultId: 1,
       cancelId: 1,
     },
     'open',
   )
-  if (proceed) void shell.openExternal(`https://github.com/${UPDATER_OWNER}/${UPDATER_REPO}/releases/latest`)
+  // The mirror is the one page verifiably reachable without a proxy in
+  // mainland China; the GitHub release page is offered there as well.
+  if (proceed) void shell.openExternal(MODELSCOPE_RELEASES_URL)
 }
 
 const UPDATER_OWNER = resolveArtifactOwner()
 const UPDATER_REPO = resolveArtifactRepo()
 
-/**
- * Fetch latest.yml through the official-first / mirror-fallback chain.
- * @returns the raw YAML text, or null when every source failed.
- */
-async function fetchLatestYamlText(): Promise<string | null> {
-  for (const url of latestYamlCandidates(UPDATER_OWNER, UPDATER_REPO)) {
-    try {
-      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
-      if (res.ok) return await res.text()
-    } catch {
-      // try next base
-    }
-  }
-  return null
+/** Parsed metadata plus the source that served it (drives asset ordering). */
+interface LatestMetadata {
+  yaml: LatestYaml
+  source: string
 }
 
 /**
- * Fetch latest.yml through the metadata chain and parse it.
- * @returns the parsed metadata, or null when unreachable or unparseable.
+ * Fetch latest.yml through the source chain and parse it. A source only wins
+ * when its body parses as metadata, so a mirror answering 200 with a broken
+ * body falls through instead of stalling the chain. Mirrors fail silently for
+ * the user; the winning source and per-source failures go to the shell log.
+ * @returns the parsed metadata and its source, or null when every source failed.
  */
-async function fetchAndParseLatest(): Promise<LatestYaml | null> {
-  const yamlText = await fetchLatestYamlText()
-  if (!yamlText) return null
-  return parseLatestYaml(yamlText)
+export async function fetchAndParseLatest(): Promise<LatestMetadata | null> {
+  for (const url of latestYamlCandidates(UPDATER_OWNER, UPDATER_REPO)) {
+    const label = sourceLabel(url)
+    try {
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
+      if (!res.ok) {
+        console.warn(`[shell-updater] metadata HTTP ${res.status} from ${label}`)
+        continue
+      }
+      const yaml = parseLatestYaml(await res.text())
+      if (!yaml) {
+        console.warn(`[shell-updater] metadata unparseable from ${label}`)
+        continue
+      }
+      console.log(`[shell-updater] metadata source: ${label}`)
+      return { yaml, source: url }
+    } catch (err) {
+      console.warn(`[shell-updater] metadata unreachable from ${label}: ${(err as Error).message}`)
+    }
+  }
+  return null
 }
 
 /** True when the remote version is newer than the running app version. */
@@ -509,8 +563,9 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
   busy = true
   try {
     showUpdateToast(win, '正在检查应用更新…', 'progress', undefined)
-    const yaml = await fetchAndParseLatest()
-    if (!yaml) throw new Error('无法获取更新元数据（latest.yml）或格式无法解析')
+    const meta = await fetchAndParseLatest()
+    if (!meta) throw new Error(`无法获取更新元数据（latest.yml）或格式无法解析。${MANUAL_DOWNLOAD_HINT}`)
+    const yaml = meta.yaml
     // Version is spliced into an installer filename and the pending-install
     // record; constrain it to a safe charset so a crafted metadata value can
     // never break the path or the spawn target (defense in depth for an
@@ -554,7 +609,7 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       return
     }
 
-    await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url), {
+    await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url, meta.source), {
       title: `${APP_NAME} 更新就绪`,
       message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
       detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
@@ -665,35 +720,51 @@ async function downloadAndInstallPackage(
 // (a tagged release carrying the installers + latest.yml), which exists only
 // there — macOS/Linux update through electron-updater.
 
-/** Tagged-release asset download candidates (official first, then mirrors). */
-function releaseAssetCandidates(owner: string, repo: string, tag: string, assetUrl: string): string[] {
-  const official = `https://github.com/${owner}/${repo}/releases/download/${tag}/${assetUrl}`
-  return [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+/** Tagged-release latest.yml candidates (mirror archive → official → mirror prefixes). */
+export function releaseLatestYamlCandidates(owner: string, repo: string, version: string): string[] {
+  const official = `https://github.com/${owner}/${repo}/releases/download/v${version}/latest.yml`
+  return [modelscopeReleaseFileUrl(`releases/archive/${version}/latest.yml`), official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+}
+
+/** Tagged-release installer candidates, mirror archive first when metadata came from the mirror. */
+export function releaseAssetCandidates(owner: string, repo: string, version: string, assetUrl: string, metadataSource: string): string[] {
+  const official = `https://github.com/${owner}/${repo}/releases/download/v${version}/${assetUrl}`
+  const fallbacks = [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+  return isModelscopeSource(metadataSource)
+    ? [modelscopeReleaseFileUrl(`releases/archive/${version}/${assetUrl}`), ...fallbacks]
+    : fallbacks
 }
 
 /**
  * Fetch a tagged release's latest.yml. The asset name is fixed by the release
- * contract, so the deterministic `releases/download/<tag>/latest.yml` URL (with
- * its mirror chain — the API is routinely unreachable in the regions these
- * mirrors exist for) is tried first; the unauthenticated GitHub API stays as a
+ * contract, so the deterministic `Latest.yml` URL — the mirror archive first
+ * (mainland-reachable), then `releases/download/<tag>/latest.yml` with its
+ * prefix chain — is tried first; the unauthenticated GitHub API stays as a
  * fallback for anything that renamed it. The parsed version must agree with
  * the tag: a mismatched file would install a version nobody asked for. Null on
  * any failure (caller reports and stays put).
  */
-async function fetchReleaseLatestYaml(version: string): Promise<LatestYaml | null> {
-  const parse = async (text: string): Promise<LatestYaml | null> => {
+async function fetchReleaseLatestYaml(version: string): Promise<LatestMetadata | null> {
+  const parse = (text: string): LatestYaml | null => {
     const parsed = parseLatestYaml(text)
     return parsed && parsed.version === version ? parsed : null
   }
-  // 1. Deterministic asset URL, official first then mirrors.
-  for (const url of releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, `v${version}`, 'latest.yml')) {
+  // 1. Deterministic asset URL, mirror first then official + mirrors.
+  for (const url of releaseLatestYamlCandidates(UPDATER_OWNER, UPDATER_REPO, version)) {
+    const label = sourceLabel(url)
     try {
       const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
-      if (!res.ok) continue
-      const parsed = await parse(await res.text())
-      if (parsed) return parsed
-    } catch {
-      // try next source
+      if (!res.ok) {
+        console.warn(`[shell-updater] rollback metadata HTTP ${res.status} from ${label}`)
+        continue
+      }
+      const parsed = parse(await res.text())
+      if (parsed) {
+        console.log(`[shell-updater] rollback metadata source: ${label}`)
+        return { yaml: parsed, source: url }
+      }
+    } catch (err) {
+      console.warn(`[shell-updater] rollback metadata unreachable from ${label}: ${(err as Error).message}`)
     }
   }
   // 2. API fallback (asset renamed, deterministic URL missing).
@@ -713,8 +784,8 @@ async function fetchReleaseLatestYaml(version: string): Promise<LatestYaml | nul
       try {
         const meta = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
         if (!meta.ok) continue
-        const parsed = await parse(await meta.text())
-        if (parsed) return parsed
+        const parsed = parse(await meta.text())
+        if (parsed) return { yaml: parsed, source: url }
       } catch {
         // try next source
       }
@@ -754,12 +825,13 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
       return
     }
     showUpdateToast(win, `正在获取 ${APP_NAME} ${previous} 的安装包信息…`, 'progress', undefined)
-    const yaml = await fetchReleaseLatestYaml(previous)
+    const meta = await fetchReleaseLatestYaml(previous)
     clearKernelProgress(win)
-    if (!yaml) {
-      await noticeInFrame(win, 'error', APP_NAME, `无法获取 ${APP_NAME} ${previous} 的更新元数据，请检查网络后重试。`)
+    if (!meta) {
+      await noticeInFrame(win, 'error', APP_NAME, `无法获取 ${APP_NAME} ${previous} 的更新元数据，请检查网络后重试。${MANUAL_DOWNLOAD_HINT}`)
       return
     }
+    const yaml = meta.yaml
     const asset = pickAsset(yaml.files, process.arch)
     if (!asset || !/^[\w.~-]+\.exe$/.test(asset.url)) {
       await noticeInFrame(win, 'error', APP_NAME, `未找到 ${APP_NAME} ${previous} 适用于当前系统的安装包。`)
@@ -793,7 +865,7 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
       win,
       previous,
       asset,
-      releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, `v${previous}`, asset.url),
+      releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, previous, asset.url, meta.source),
       {
         title: `${APP_NAME} 回滚就绪`,
         message: `将关闭当前应用并安装 ${APP_NAME} ${previous}（回滚到上一版本）。`,
@@ -817,8 +889,9 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
 async function checkShellUpdateDev(win: BrowserWindow | null): Promise<void> {
   try {
     showUpdateToast(win, '正在检查应用更新…', 'progress', undefined)
-    const yaml = await fetchAndParseLatest()
-    if (!yaml) throw new Error('无法获取更新元数据（latest.yml）或格式无法解析')
+    const meta = await fetchAndParseLatest()
+    if (!meta) throw new Error(`无法获取更新元数据（latest.yml）或格式无法解析。${MANUAL_DOWNLOAD_HINT}`)
+    const yaml = meta.yaml
     if (!/^[\w.~-]+$/.test(yaml.version)) throw new Error('更新元数据版本格式异常')
     const current = app.getVersion()
     const newer = isNewerThan(yaml.version, current)

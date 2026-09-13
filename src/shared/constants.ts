@@ -18,6 +18,19 @@ export function resolveArtifactRepo(): string {
   const raw = (process.env.DSH_APP_ARTIFACT_REPO ?? '').trim()
   return raw !== '' ? raw : DEFAULT_ARTIFACT_REPO
 }
+
+/**
+ * ModelScope mirror of this repo's GitHub release assets (byte-identical
+ * files, `latest.yml`'s sha512 stays valid). It is the first update source on
+ * Windows because GitHub and its proxies are routinely unreachable from
+ * mainland China. Fixed to the upstream repo on purpose: the artifact
+ * overrides above point at forks, which mirror their own releases separately.
+ */
+export const MODELSCOPE_ENDPOINT = 'https://www.modelscope.cn'
+export const MODELSCOPE_REPO = 'jochenYang/dsh-app'
+
+/** Human-facing mirror page, offered when every update source fails. */
+export const MODELSCOPE_RELEASES_URL = `${MODELSCOPE_ENDPOINT}/models/${MODELSCOPE_REPO}/files`
 /** Host the local dsh web server binds to (loopback only — never 0.0.0.0). */
 export const DEFAULT_HTTP_HOST = '127.0.0.1'
 
