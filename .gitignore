@@ -20,6 +20,10 @@ logs/
 # ---- Local scratch / probes / one-off experiments ----
 scratch/
 
+# ---- Python bytecode (mirror_release.py run locally) ----
+__pycache__/
+*.pyc
+
 # ---- Local agent context cache (context-codebase skill) ----
 repo/
 
