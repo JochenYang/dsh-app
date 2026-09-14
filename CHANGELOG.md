@@ -8,9 +8,10 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
-## [Unreleased]
+## [v0.11.9] - 2026-09-14
 
 ### 中文
+- 打包修复：套件插件的运行时资源此前从未随运行时产物分发——构建只拷贝了 `package.json` 与 `lib/`，于是 PPT 的模板库与 PDF 的内嵌中文字体在安装包里根本不存在（模板面板打开是空的、中文 PDF 会缺字体）。现在按各插件自己声明的 `files` 契约拷贝资源目录，构建日志逐插件打印所拷贝的条目与体积；同时补齐了从未随包分发的 `cordis.patch.yml`。冒烟检查补上防漏断言：模板数量、每套模板的封面预览、PDF 字体可读，以及直接解包核对资源目录——把资源从产物里删掉后冒烟会红，旧故障形态无法再溜过去
 - 会话记忆：收紧写入门槛——单条上限 500→200 字符，超长直接拒绝并要求改写成一行事实；提炼 prompt 增加正反示例（工作日志、协议字段表、逐文件改动清单为反例，协作偏好、无人记录的坑为正例），比纯规则更有效
 - 会话记忆：三条写路径（工具保存、后台提炼、策展合并）机械剥离 commit id——只匹配独立的 7-12 位字母数字混合十六进制串，纯数字（计数/时间戳）与目录名后缀不受影响
 - 会话记忆：超长对话的提炼摘录从「保头丢尾」改为「保尾 + 短头」——决策、结论与用户纠正几乎总在对话尾部，旧截断恰好丢掉最有价值的部分
@@ -19,6 +20,7 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 - 会话记忆：策展新增超预算收缩——超过 30 条或 6KB 的文件收到带具体数字的强制瘦身指令，非固定条目「存疑即删」；收缩后仍超标的文件保持待策展（下一轮继续），空转一轮则记账防止烧循环，失控长大的文件会被逐步压回可用范围
 
 ### English
+- Packaging fix: suite plugins' runtime assets were never shipped with the runtime artifact — the build copied only `package.json` and `lib/`, so the PPT template library and the PDF bundled CJK font simply did not exist inside the installer (the template panel opened empty and Chinese PDFs missed their font). Asset directories are now copied from each plugin's own `files` contract, the build log prints every copied entry with its size, and `cordis.patch.yml` — also never shipped before — now travels with the plugin. The smoke suite gained anti-regression assertions: template count, a cover preview for every template, PDF font readability, and a direct unpack check of the runtime artifact; deleting the assets from the artifact makes smoke fail, so the old failure shape can no longer slip through
 - Memory: tighter write gates — one entry is capped at 200 chars (was 500) and oversized input is rejected with a request to rewrite it as one lean fact; the distill prompt now carries accepted/rejected examples (work logs, protocol field maps and file-by-file change lists rejected; collaboration preferences and undocumented pitfalls accepted), which beats rules alone
 - Memory: commit ids are stripped on every write path (tool save, background distill, curator merge) — only a standalone 7-12 char mixed letter/digit hex run matches, so pure-digit counts, timestamps and directory-slug suffixes pass through
 - Memory: the distill excerpt of an oversized delta now keeps the newest tail plus a short head prefix — decisions, outcomes and user corrections live at the END of a delta, exactly what the old head-keep cut dropped
