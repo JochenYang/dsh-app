@@ -93,6 +93,13 @@ def gha_error(message):
 
 
 def write_summary(lines):
+    """Append to $GITHUB_STEP_SUMMARY and echo to the log.
+
+    The echo is deliberate: `gh run view --log` is how a backfill or a review
+    reads a run, and the rendered summary panel is not reachable that way.
+    """
+    for line in lines:
+        log(f'summary| {line}')
     target = os.environ.get('GITHUB_STEP_SUMMARY')
     if not target:
         return
