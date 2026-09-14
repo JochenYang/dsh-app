@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.11.8] - 2026-09-13
+
+### 中文
+- 应用内更新支持国内镜像：检查更新与下载安装包优先走 ModelScope 镜像（大陆网络无需代理），失败时自动回退到 GitHub 与既有的加速前缀；即使更新元数据能取到、但安装包下载被墙，也会自动改走镜像完成下载（校验值与 GitHub 同源，完整性不受影响）
+- 更新下载单源超时从 10 分钟收敛到 3 分钟（四路候选最坏约 12 分钟而不是 40 分钟），失败时的提示里给出镜像手动下载地址
+- 发布镜像通道改用官方 SDK 上传（其提交自带重试与指数退避），并对镜像作业做串行化，修复此前偶发的"平台拒绝提交"；版本索引改为合并式重建并自校验，避免读改写竞态
+- 更新相关入口的版本号校验收紧，拒绝可疑路径形式
+
+### English
+- In-app updates now use a China-reachable mirror: both the update metadata and the installer download try the ModelScope mirror first and fall back to GitHub and the existing accelerator prefixes; if the metadata resolves but the installer download is blocked, the mirror is still tried last, so the update completes through it (integrity is unchanged because the checksums come from the same release)
+- The per-source download timeout drops from 10 minutes to 3 minutes (four candidates now worst-case around 12 minutes instead of 40), and failure dialogs point at the mirror's manual download page
+- The release mirror uploads through the official SDK (whose commit step retries with exponential backoff) and the job is serialized, fixing the intermittent platform-side commit rejection; the version index is rebuilt by merging and self-checking instead of read-modify-write
+- Version guards on the update entry points are tighter and reject suspicious path forms
+
 ## [v0.11.7] - 2026-09-13
 
 ### 中文
