@@ -28,7 +28,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import path from 'node:path'
@@ -120,6 +120,73 @@ const FFF_NODE_PIN = JSON.parse(readFileSync(path.join(root, 'plugins', '@dsh-ap
 // decide whether a published runtime can be reused, so the two can never
 // disagree about what "the current suite" is.
 const SUITE_VERSION = computeSuiteVersion()
+
+/**
+ * Fallback runtime RESOURCES for a plugin that declares no `files` field. Source,
+ * tests, scripts and node_modules are deliberately absent: they must never reach
+ * the artifact (size and supply-chain surface).
+ */
+const RUNTIME_RESOURCE_FALLBACK = ['lib', 'templates', 'assets', 'cordis.patch.yml', 'README.md']
+
+/** Top-level entries never copied into the runtime, even if `files` lists them. */
+const RUNTIME_RESOURCE_DENYLIST = new Set(['src', 'test', 'tests', 'scripts', 'node_modules', '.git', '.test-dist'])
+
+/**
+ * Runtime resource entries of one plugin package: its own `files` field is the
+ * source of truth, because that is npm's publish contract and it already names
+ * every runtime resource the plugin needs (`templates/`, `assets/`,
+ * `cordis.patch.yml`). READING it here — instead of keeping a second,
+ * hand-written list — is what makes a newly added asset directory ship without
+ * anyone remembering to update the build script. A plugin that declares no
+ * `files` falls back to RUNTIME_RESOURCE_FALLBACK.
+ *
+ * Only the FIRST path segment of an entry is copied: a nested `lib/dist` still
+ * needs the whole `lib/` tree for its relative imports to resolve.
+ * @param pkg - the parsed plugin package.json.
+ * @returns top-level entry names to copy, in declaration order.
+ */
+function runtimeResourceEntries(pkg) {
+  const declared = Array.isArray(pkg.files)
+    ? pkg.files.filter((entry) => typeof entry === 'string' && entry.trim() !== '')
+    : []
+  const names = declared.length > 0
+    ? declared.map((entry) => entry.trim().replace(/^\.\//u, '').replace(/\/+$/u, '').split('/')[0])
+    : RUNTIME_RESOURCE_FALLBACK
+  return [...new Set(names)].filter((entry) => entry !== '' && !RUNTIME_RESOURCE_DENYLIST.has(entry))
+}
+
+/** Recursive byte size of a file or directory; 0 when unreadable. */
+function sizeOf(target) {
+  let total = 0
+  const walk = (current) => {
+    let stats
+    try {
+      stats = statSync(current)
+    } catch {
+      return
+    }
+    if (!stats.isDirectory()) {
+      total += stats.size
+      return
+    }
+    let entries = []
+    try {
+      entries = readdirSync(current)
+    } catch {
+      return
+    }
+    for (const entry of entries) walk(path.join(current, entry))
+  }
+  walk(target)
+  return total
+}
+
+/** Human-readable byte size for the per-plugin copy log. */
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${String(bytes)} B`
+}
 
 function quoteWinArg(value) {
   return `"${value.replace(/"/g, '\\"')}"`
@@ -253,8 +320,8 @@ async function main() {
   //    file: dependencies here — a relative file: path resolves outside the
   //    runtime dir and breaks on a clean CI checkout (and would become a
   //    dangling symlink once tarred). Instead we npm install dsh alone, then
-  //    copy each plugin's built lib/ + package.json into node_modules by hand
-  //    so the runtime is fully self-contained.
+  //    copy each plugin's declared resources into node_modules by hand (step
+  //    2b) so the runtime is fully self-contained.
   for (const name of SUITE_PLUGINS) {
     run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], path.join(root, 'plugins', name.replace('@dsh-app/', '')))
   }
@@ -356,17 +423,42 @@ async function main() {
   }
 
   // 2b. Copy the built suite plugins into the runtime's node_modules so dsh
-  //     can resolve them. Each plugin ships its package.json (for the main
-  //     field) + the lib/ build output; no source or external paths needed.
+  //     can resolve them. Each plugin ships its package.json plus every
+  //     top-level entry its own `files` field declares — the resource set npm
+  //     publish would ship. The old hand-written `lib/` + package.json list is
+  //     what dropped plugin-ppt's templates/ (the PPT template panel came up
+  //     empty) and plugin-pdf's assets/ (the bundled CJK font) while every
+  //     route still answered ok:true. Source, tests and scripts cannot leak in:
+  //     they are never in `files`, and the denylist rejects them regardless.
+  //     `cordis.patch.yml` exists for every plugin that declares
+  //     `dsh.bundle.patch` and is in `files`, so it is copied like any other
+  //     resource (whether the kernel strictly needs it at boot is unverified
+  //     here — no consumer of dsh.bundle.patch ships in this tree).
   const nmScope = path.join(runtimeDir, 'app', 'node_modules', '@dsh-app')
   await mkdir(nmScope, { recursive: true })
   for (const name of SUITE_PLUGINS) {
     const shortName = name.replace('@dsh-app/', '')
     const srcDir = path.join(root, 'plugins', shortName)
     const destDir = path.join(nmScope, shortName)
+    const pkg = JSON.parse(readFileSync(path.join(srcDir, 'package.json'), 'utf8'))
     await mkdir(destDir, { recursive: true })
     await cp(path.join(srcDir, 'package.json'), path.join(destDir, 'package.json'))
-    await cp(path.join(srcDir, 'lib'), path.join(destDir, 'lib'), { recursive: true })
+    // Log every copied top-level entry with its size: a missing asset directory
+    // must be visible in the build output, not just in the shipped artifact.
+    const copied = [`package.json (${formatBytes(sizeOf(path.join(srcDir, 'package.json')))})`]
+    for (const entry of runtimeResourceEntries(pkg)) {
+      const from = path.join(srcDir, entry)
+      if (!existsSync(from)) {
+        // npm ignores a declared-but-absent `files` entry too, so this is a
+        // warning, not a failure; the smoke probe is what turns a missing
+        // runtime resource into a red build.
+        console.warn(`[build-runtime] plugin ${shortName}: declared resource "${entry}" is absent — not copied`)
+        continue
+      }
+      await cp(from, path.join(destDir, entry), { recursive: true })
+      copied.push(`${entry} (${formatBytes(sizeOf(from))})`)
+    }
+    console.log(`[build-runtime] copied ${shortName}: ${copied.join(', ')}`)
   }
 
   // 3. Runtime manifest. No publishedAt here: every byte of the in-archive

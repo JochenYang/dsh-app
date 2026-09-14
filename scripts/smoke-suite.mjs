@@ -16,7 +16,11 @@
  *
  * What is asserted:
  *   1. health: GET / answers 200 within 90 s;
- *   2. every suite plugin's settings routes answer 200 with ok:true;
+ *   2. every suite plugin's settings routes answer 200 with ok:true, PLUS the
+ *      bundled-resource facts a bare ok:true cannot see: the PPT template
+ *      catalog is non-empty and every listed template carries a cover preview,
+ *      the bundled PDF CJK font asset resolves, and (--tgz) the extracted
+ *      artifact really contains plugin-ppt/templates/ and plugin-pdf/assets/;
  *   3. every dual-face plugin's client bundle is served non-empty;
  *   4. the plugin-mcp dynamic-mount chain works end to end: create a stdio
  *      server pointing at scripts/fixtures/minimal-mcp-server.mjs, poll until
@@ -30,7 +34,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, rmSync, statSync, openSync, closeSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -42,6 +46,14 @@ const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
 const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf']
 const FIXTURE = path.join(root, 'scripts', 'fixtures', 'minimal-mcp-server.mjs')
 const MCP_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
+
+/**
+ * Bundled-template floor for the PPT catalog. 30 templates ship today; the
+ * floor is 20 so an intentional trim does not trip the probe, while the
+ * regression that motivated it — templates/ missing from the runtime, the route
+ * answering `ok:true` with an EMPTY list — cannot pass.
+ */
+const PPT_TEMPLATE_FLOOR = 20
 
 // --- args --------------------------------------------------------------------
 
@@ -224,6 +236,41 @@ function firstCookie(headers) {
   return candidates.find(value => /^[^=]+=/.test(value)) ?? candidates[0] ?? ''
 }
 
+/**
+ * Recursive count and byte total under one directory, optionally counting only
+ * entries whose file name matches `match`. An absent or unreadable directory
+ * counts as zero files so the caller's assertion owns the failure message.
+ */
+function dirStats(dir, match = () => true) {
+  let files = 0
+  let bytes = 0
+  const walk = (current) => {
+    let entries
+    try {
+      entries = readdirSync(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const child = path.join(current, entry.name)
+      if (entry.isDirectory()) walk(child)
+      else if (entry.isFile() && match(entry.name)) {
+        files += 1
+        try { bytes += statSync(child).size } catch { /* unreadable file: count it, not its size */ }
+      }
+    }
+  }
+  walk(dir)
+  return { files, bytes }
+}
+
+/** Human-readable byte size for probe detail lines. */
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${String(bytes)} B`
+}
+
 // --- probes ------------------------------------------------------------------
 
 const failures = []
@@ -361,6 +408,26 @@ async function main() {
   if (args.mode === 'tgz') args.extracted = await extractTgz(args.tgz)
   const launch = buildLaunch(args)
 
+  // Artifact completeness (tgz mode): the extracted runtime must carry the
+  // plugins' bundled runtime RESOURCES, not just lib/. This is the most direct
+  // guard against the regression that motivated this probe — an artifact that
+  // dropped plugin-ppt/templates/ still boots and answers ok:true everywhere,
+  // so the file counts are asserted against the extracted tree itself.
+  if (args.mode === 'tgz') {
+    const suiteNm = path.join(args.extracted.dir, 'app', 'node_modules', '@dsh-app')
+    const pptDir = path.join(suiteNm, 'plugin-ppt', 'templates')
+    const pdfDir = path.join(suiteNm, 'plugin-pdf', 'assets')
+    const metas = dirStats(pptDir, name => name === 'metadata.json')
+    const covers = dirStats(pptDir, name => name === '01.jpg')
+    check(`artifact: plugin-ppt/templates ships >= ${String(PPT_TEMPLATE_FLOOR)} template metadata files (${String(metas.files)}, ${formatBytes(metas.bytes)})`,
+      metas.files >= PPT_TEMPLATE_FLOOR, `found ${String(metas.files)} metadata.json under ${pptDir}`)
+    check(`artifact: plugin-ppt/templates ships >= ${String(PPT_TEMPLATE_FLOOR)} cover previews (${String(covers.files)}, ${formatBytes(covers.bytes)})`,
+      covers.files >= PPT_TEMPLATE_FLOOR, `found ${String(covers.files)} pages/01.jpg under ${pptDir}`)
+    const fonts = dirStats(pdfDir, name => /\.(?:ttf|otf)$/iu.test(name))
+    check(`artifact: plugin-pdf/assets ships a bundled CJK font (${String(fonts.files)} file(s), ${formatBytes(fonts.bytes)})`,
+      fonts.files >= 1, `no .ttf/.otf under ${pdfDir}`)
+  }
+
   const home = mkdtempSync(path.join(tmpdir(), 'dsh-smoke-home-'))
   // Replicate the shell's brand-suite seam inside the throwaway home:
   // one link per suite plugin, so the composed loader resolves them.
@@ -412,12 +479,43 @@ async function main() {
       ['/plugins/@dsh-app/plugin-market/api/sources', 'market: sources route'],
       ['/plugins/@dsh-app/plugin-presets/api/presets', 'presets: list route'],
       ['/plugins/@dsh-app/plugin-ppt/api/mode?sessionId=smoke', 'ppt: mode route'],
-      ['/plugins/@dsh-app/plugin-ppt/api/templates', 'ppt: templates route'],
       ['/plugins/@dsh-app/plugin-doc/api/mode?sessionId=smoke', 'doc: mode route'],
       ['/plugins/@dsh-app/plugin-sheet/api/mode?sessionId=smoke', 'sheet: mode route'],
       ['/plugins/@dsh-app/plugin-pdf/api/mode?sessionId=smoke', 'pdf: mode route'],
     ]) {
       await probeRoute(base, route, name)
+    }
+
+    // PPT template catalog: `ok:true` alone is NOT the assertion — a runtime
+    // packaged without plugin-ppt/templates answers ok:true with an EMPTY list,
+    // which is exactly how the blank template panel shipped. Assert the catalog
+    // size and that every listed template carries a cover preview, so the
+    // metadata AND the preview JPGs are proven present on the served path.
+    {
+      const templates = await getJson(base, '/plugins/@dsh-app/plugin-ppt/api/templates')
+      const list = templates.body?.value?.templates
+      const count = Array.isArray(list) ? list.length : 0
+      check(`ppt: templates route lists >= ${String(PPT_TEMPLATE_FLOOR)} templates (30 bundled)`,
+        templates.status === 200 && count >= PPT_TEMPLATE_FLOOR,
+        `HTTP ${templates.status}: ${String(count)} templates — ${templates.text.slice(0, 200)}`)
+      const withCover = Array.isArray(list)
+        ? list.filter(entry => typeof entry?.cover === 'string' && entry.cover.startsWith('data:image/')).length
+        : 0
+      check(`ppt: every listed template carries a cover preview (${String(withCover)}/${String(count)})`,
+        count > 0 && withCover === count,
+        `HTTP ${templates.status}: ${String(withCover)} of ${String(count)} templates have a cover`)
+    }
+
+    // PDF font asset: the bundled CJK subset is read from disk at render time,
+    // so a runtime packaged without plugin-pdf/assets only fails later inside a
+    // render. The diagnostic route resolves the same candidates and reports
+    // whether one is readable.
+    {
+      const font = await getJson(base, '/plugins/@dsh-app/plugin-pdf/api/font-status')
+      const value = font.body?.value
+      check(`pdf: bundled CJK font asset readable (${formatBytes(typeof value?.bytes === 'number' ? value.bytes : 0)})`,
+        font.status === 200 && value?.available === true && (value?.bytes ?? 0) > 0,
+        `HTTP ${font.status}: ${font.text.slice(0, 200)}`)
     }
 
     // Sidebar probe: the git routes demand a live session cwd (scopedCwd),

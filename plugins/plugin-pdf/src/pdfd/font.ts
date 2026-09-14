@@ -56,6 +56,25 @@ export function bundledFontCandidates(): string[] {
   ]
 }
 
+/**
+ * Availability of the bundled font asset, for the read-only diagnostics route.
+ * It reads the same candidate list the renderer resolves through, so a runtime
+ * that shipped without `assets/` is visible here instead of only surfacing
+ * inside a failed pdf_render. Readability is checked, not just existence.
+ * @returns whether a bundled candidate holds bytes, and its size.
+ */
+export async function bundledFontStatus(): Promise<{ available: boolean, bytes: number }> {
+  for (const file of bundledFontCandidates()) {
+    try {
+      const bytes = await readFile(file)
+      if (bytes.byteLength > 0) return { available: true, bytes: bytes.byteLength }
+    } catch {
+      // Absent or unreadable in this layout: try the next candidate.
+    }
+  }
+  return { available: false, bytes: 0 }
+}
+
 /** Single-file CJK fonts commonly present per platform (collections excluded). */
 export function systemFontCandidates(): string[] {
   const windowsRoot = process.env.WINDIR ?? 'C:\\Windows'

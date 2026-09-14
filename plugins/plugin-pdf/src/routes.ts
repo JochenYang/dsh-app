@@ -4,6 +4,10 @@
  *   PUT /mode            — {sessionId, enabled}: turn PDF mode on or off
  *   GET /office-active   — the suite-wide active-format claim, so the capsule
  *                          can stand down when another format supersedes it
+ *   GET /font-status     — read-only check that the bundled CJK font asset is
+ *                          readable (the pdf_render dependency), so a runtime
+ *                          packaged without assets/ fails loudly and early
+ *                          instead of only inside a failed render
  *
  * Same-origin and loopback-Host fences mirror the other suite plugins' routes
  * (each suite plugin bundles standalone, so the fence is duplicated by design
@@ -17,6 +21,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { PdfModeStore } from './mode-store.ts'
 import { claimOfficeActive, readOfficeActive, releaseOfficeActive } from './office-active-store.ts'
+import { bundledFontStatus } from './pdfd/font.ts'
 
 /** Route namespace on the dsh web server (mirrored by the client half). */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-pdf/api'
@@ -178,6 +183,24 @@ export function registerPdfRoutes(webServer: WebServerLike, store: PdfModeStore,
           return
         }
         ok(res, { active: readOfficeActive(activeFile) })
+      },
+    }),
+    // Appended last: existing callers index the routes array by position, and
+    // the mode route must stay first.
+    webServer.register({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/font-status`,
+      handler: (req, res) => {
+        if (!requireSameOrigin(req, res)) return
+        if (req.method !== 'GET') {
+          res.setHeader('Allow', 'GET')
+          fail(res, 405, 'method-not-allowed', 'GET only')
+          return
+        }
+        void bundledFontStatus().then(
+          (value) => ok(res, value),
+          (cause: unknown) => fail(res, 500, 'font-status-error', cause instanceof Error ? cause.message : String(cause)),
+        )
       },
     }),
   ]

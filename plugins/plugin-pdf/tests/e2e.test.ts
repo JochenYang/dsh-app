@@ -186,6 +186,7 @@ test('e2e: apply registers the PDF tools, prompt sections and mode route', async
     assert.deepEqual(host.routes.map(route => route.path), [
       '/plugins/@dsh-app/plugin-pdf/api/mode',
       '/plugins/@dsh-app/plugin-pdf/api/office-active',
+      '/plugins/@dsh-app/plugin-pdf/api/font-status',
     ])
     // The skill installer ran against the temp DSH_HOME.
     await settle()
@@ -250,6 +251,36 @@ test('e2e: PDF mode round-trips through the route and drives the prompt section'
     off.emit('end')
     await settle()
     assert.equal(readPrompt(session), '', 'turning the mode off stops the directive')
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('e2e: font-status route reports the bundled CJK asset as readable', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pdfd-e2e-font-home-'))
+  const savedHome = process.env.DSH_HOME
+  try {
+    process.env.DSH_HOME = home
+    const host = await mountHost()
+    const route = host.routes.find(candidate => candidate.path.endsWith('/font-status'))
+    assert.ok(route !== undefined, 'font-status route registered')
+
+    const get = makeRequest('GET', route.path)
+    const getResponse = makeResponse()
+    route.handler(get, getResponse)
+    await settle()
+    assert.equal(getResponse.status, 200)
+    const value = (JSON.parse(getResponse.body) as { ok: boolean, value: { available: boolean, bytes: number } })
+    assert.equal(value.ok, true)
+    assert.equal(value.value.available, true, 'the bundled font asset must ship beside lib/')
+    assert.ok(value.value.bytes > 0, 'the bundled font asset must be non-empty')
+
+    const post = makeRequest('POST', route.path)
+    const postResponse = makeResponse()
+    route.handler(post, postResponse)
+    assert.equal(postResponse.status, 405, 'the diagnostic is read-only')
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome

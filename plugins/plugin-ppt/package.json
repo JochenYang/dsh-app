@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-ppt",
   "description": "DSH APP PPT suite: the model authors a local PPTD project (.pptd manifest + .page YAML) against bundled layout templates, iterates with the read-only pptd_check (text overflow / occlusion / bounds with file-page-elementId locations), and exports an editable .pptx via pptd_render with native editable charts. A PPT capsule in the shared office-suite bar (container class dshOfficeBar, injected after the composer card) toggles a per-session PPT mode and opens a real cover-preview template panel behind its dropdown; a pick made before any session exists is parked and applied to the session once it starts; natural-language PPT requests run the same workflow on the paper default theme; the dsh-ppt skill pins the workflow.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
