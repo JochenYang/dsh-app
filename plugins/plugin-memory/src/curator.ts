@@ -41,6 +41,7 @@ import {
   normalizeForMatch,
   parseEntries,
   shortSessionId,
+  stripCommitIds,
   stripEntryPrefix,
   todayStamp,
   type MemoryRoot,
@@ -65,6 +66,19 @@ const MAX_INPUT_CHARS = 40_000
  *  several passes, not one destructive sweep). */
 const MAX_CURATE_EDITS = 20
 
+/**
+ * Entry-count target for one memory file. A file ABOVE this (or the char
+ * target below) is over budget: its curate pass is instructed to shrink it,
+ * and a pass that shrinks it without getting under the target does not count
+ * as completed (the next sweep continues the diet). With entries capped at
+ * MAX_ENTRY_CHARS this holds a file to roughly what injection and recall
+ * can actually use.
+ */
+const CURATE_MAX_ENTRIES = 30
+
+/** Character target for one memory file (same over-budget rule). */
+const CURATE_MAX_FILE_CHARS = 6_000
+
 /** Output allowance for one curate answer. Every edit quotes its cited lines
  *  VERBATIM (a Chinese entry runs 300+ characters) on top of the merged text,
  *  so a legitimate multi-edit answer blows past the shared 2k default and gets
@@ -88,9 +102,14 @@ function sessionOf(parent: ParentAgent): CurateSession {
  * user (the memory file) halves — the same split the distiller uses.
  * Pinned entries are listed in a separate section and called out as
  * untouchable: the host rejects any edit citing one, so telling the model
- * up front saves a wasted proposal.
+ * up front saves a wasted proposal. An over-budget file additionally gets
+ * an explicit shrink directive with its concrete numbers.
  */
-export function buildCuratePrompt(input: string, pinned: readonly string[] = []): { system: string, user: string } {
+export function buildCuratePrompt(
+  input: string,
+  pinned: readonly string[] = [],
+  overBudget?: { entries: number, chars: number },
+): { system: string, user: string } {
   const system = [
     'You are the memory curator of an AI coding assistant. Review the memory file below',
     'and propose EDITS that keep it lean and accurate over time.',
@@ -102,11 +121,20 @@ export function buildCuratePrompt(input: string, pinned: readonly string[] = [])
     '- delete: entries that are work logs rather than reusable knowledge — reports of what a',
     '  session did ("X 已完成", "修复全落地", "审查后…"), file-by-file change lists, commit',
     '  ids, task summaries. Keep only what a future session could act on.',
+    '- Keep only entries a future session would ACT on. For a non-pinned entry, when in doubt',
+    '  between keeping and deleting, delete.',
     '- Prefer keeping the SURVIVING entry when one strictly supersedes another: delete the stale one.',
     '- NEVER mention credentials (API keys, tokens, passwords) — not even in a rewrite.',
     ...(pinned.length > 0
       ? ['- Entries listed under "Pinned entries" were pinned by the user and are NEVER edited:',
          '  don\'t cite those lines in a merge or delete — the whole edit is rejected when you do.']
+      : []),
+    ...(overBudget !== undefined
+      ? ['- This file is OVER BUDGET: ' + String(overBudget.entries) + ' entries / '
+         + String(overBudget.chars) + ' chars, targets: ' + String(CURATE_MAX_ENTRIES)
+         + ' entries / ' + String(CURATE_MAX_FILE_CHARS) + ' chars. You MUST propose enough',
+         '  delete/merge edits to bring it under both targets — start with the weakest entries.',
+         '  An empty edits array is acceptable ONLY if every remaining entry is pinned.']
       : []),
     '- Each cited line must appear EXACTLY as written below (verbatim, including the bullet and',
     '  the "- [category] YYYY-MM-DD" prefix). The same line may be cited at most once across all edits.',
@@ -281,6 +309,12 @@ export class MemoryCurator {
       ? `${text.slice(0, MAX_INPUT_CHARS)}\n[note: file tail beyond ${String(MAX_INPUT_CHARS)} chars was omitted in this pass]`
       : text
 
+    // Over-budget detection drives the prompt's shrink directive and the
+    // completion rule below (a still-over file only counts as done when the
+    // pass could not shrink it at all).
+    const entryCount = parseEntries(text).length
+    const overBudget = entryCount > CURATE_MAX_ENTRIES || text.length > CURATE_MAX_FILE_CHARS
+
     // The pinned lines go to the model verbatim so it can leave them alone;
     // applyEdits enforces the same rule regardless of what the model proposes.
     const pinnedKeys = target.store.pinnedSet()
@@ -288,7 +322,11 @@ export class MemoryCurator {
       .filter(entry => pinnedKeys.has(normalizeForMatch(entry.content)))
       .map(entry => entry.raw)
 
-    const { system, user } = buildCuratePrompt(input, pinnedLines)
+    const { system, user } = buildCuratePrompt(
+      input,
+      pinnedLines,
+      overBudget ? { entries: entryCount, chars: text.length } : undefined,
+    )
     const result = await streamJson(resolveLlm(this.ctx), {
       route,
       system,
@@ -318,8 +356,19 @@ export class MemoryCurator {
     // that saw the WHOLE file may mark it: with the input cap active the
     // omitted head was never reviewed and stays due. The hash is of the
     // post-edit file — the content this pass actually leaves behind.
+    // An over-budget file that shrank but is STILL over stays due too —
+    // the next sweep continues the diet; only a no-op pass on an
+    // over-budget file records (a pass that cannot shrink it further must
+    // not burn every cooldown on the same nothing).
     if (text.length <= MAX_INPUT_CHARS) {
-      this.root.recordCurated(target.label, contentHash(target.store.read()))
+      const after = target.store.read()
+      const stillOver = parseEntries(after).length > CURATE_MAX_ENTRIES || after.length > CURATE_MAX_FILE_CHARS
+      if (!overBudget || !stillOver) {
+        this.root.recordCurated(target.label, contentHash(after))
+      } else if (merged + deleted === 0) {
+        this.log.warn(`memory curate: "${target.label}" still over budget after a no-op pass; recording to avoid a burn loop (manual review suggested)`)
+        this.root.recordCurated(target.label, contentHash(after))
+      }
     }
   }
 
@@ -381,9 +430,10 @@ export class MemoryCurator {
         continue
       }
       if (!MEMORY_CATEGORIES.includes(category as MemoryCategory) || content === '') continue
-      // Same prefix-echo hazard as distill proposals (see stripEntryPrefix):
-      // the cited lines carry the prefix, so models copy it into the rewrite.
-      const oneLine = stripEntryPrefix(content).replace(/\s+/gu, ' ').trim()
+      // Same prefix-echo and commit-id hazards as distill proposals (see
+      // stripEntryPrefix / stripCommitIds): the cited lines carry the prefix
+      // and git hashes, and models copy both into the rewrite.
+      const oneLine = stripCommitIds(stripEntryPrefix(content).replace(/\s+/gu, ' ').trim())
       if (oneLine.length === 0 || oneLine.length > MAX_ENTRY_CHARS || containsCredential(oneLine)) continue
       const indices = claim(edit)
       if (indices === undefined) continue

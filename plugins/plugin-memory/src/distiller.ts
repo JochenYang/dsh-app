@@ -27,7 +27,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { resolveLlm, streamJson, type DirectRoute } from './llm-direct.ts'
-import { MAX_ENTRY_CHARS, containsCredential, normalizeForMatch, parseEntries, shortSessionId, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
+import { MAX_ENTRY_CHARS, containsCredential, normalizeForMatch, parseEntries, shortSessionId, stripCommitIds, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /**
@@ -65,6 +65,49 @@ function cappedMemoryText(text: string): string {
 
 /** Cap on a single message's text inside the excerpt (characters). */
 const MAX_MESSAGE_CHARS = 2_000
+
+/** Head prefix kept when the transcript exceeds its budget (characters). */
+const EXCERPT_HEAD_CHARS = 2_000
+
+/** Omission marker between the kept head prefix and the kept tail. */
+const EXCERPT_OMISSION = '[… earlier messages omitted …]'
+
+/**
+ * Fit rendered message lines under a character budget keeping BOTH ends: the
+ * newest tail in full (decisions, corrections and outcomes live at the END
+ * of a delta — dropping the tail is dropping exactly the material worth
+ * distilling), a short head prefix for session-opening context, and an
+ * omission marker where the middle went. The head is capped at a quarter
+ * of the budget as well as EXCERPT_HEAD_CHARS, so a small budget can never
+ * be eaten by the prefix before the tail gets its share. Under budget →
+ * everything, in order. Exported for tests.
+ */
+export function renderExcerpt(lines: readonly string[], budget: number): string {
+  if (lines.length === 0) return ''
+  const widths = lines.map(line => line.length + 1)
+  const total = widths.reduce((sum, width) => sum + width, 0)
+  if (total <= budget) return lines.join('\n')
+  const headCap = Math.min(EXCERPT_HEAD_CHARS, Math.floor(budget / 4))
+  let headEnd = 0
+  let headUsed = 0
+  while (headEnd < lines.length && headUsed + widths[headEnd]! <= headCap) {
+    headUsed += widths[headEnd]!
+    headEnd += 1
+  }
+  const tailBudget = Math.max(0, budget - headUsed - (EXCERPT_OMISSION.length + 1))
+  let tailStart = lines.length
+  let tailUsed = 0
+  while (tailStart > headEnd && tailUsed + widths[tailStart - 1]! <= tailBudget) {
+    tailStart -= 1
+    tailUsed += widths[tailStart]!
+  }
+  // Degenerate budget (below any single line): the newest message outranks
+  // the head, so keep it alone. Unreachable with the real caps (a message is
+  // capped at 2k, the budget is 24k) but safe against a future cap change.
+  if (tailStart === lines.length) return lines[lines.length - 1] ?? ''
+  const head = lines.slice(0, headEnd)
+  return [...head, ...(head.length > 0 ? [EXCERPT_OMISSION] : []), ...lines.slice(tailStart)].join('\n')
+}
 
 /** Fewer new surface messages than this → skip the LLM call entirely. */
 const MIN_NEW_MESSAGES = 2
@@ -141,6 +184,18 @@ export function buildDistillPrompt(transcript: string, cwd: string | undefined, 
     '- a summary of the current task or the session\'s plan;',
     '- restating project code or docs: file paths, API signatures, config values, build commands,',
     '  directory layouts that a future session reads from the repo in one tool call.',
+    '',
+    'Rejected examples (a proposal like these fails the test):',
+    '- "ChatPanel 集成完成：面板放入中间列，修复 streamingIdRef 竞态，fb8b001 已提交" — work log',
+    '  + commit id; the repo and git history carry all of it.',
+    '- "protobuf 字段：1=correlationId 2=clientName 3=method 4=params" — protocol internals a',
+    '  future session reads from the repo in one tool call.',
+    '- "设置页重构定案：schema 增加 protocol 字段，zod 默认 openai，loadSettings 手动补默认值…" —',
+    '  file-by-file implementation detail.',
+    'Accepted examples (durable, a DIFFERENT session would act better):',
+    '- "用户在方案征询时期望一次性给出综合方案确认，不要逐个提问" — collaboration preference.',
+    '- "pnpm 11 不再从 package.json 读 pnpm 配置，构建白名单必须写进 pnpm-workspace.yaml" — a',
+    '  pitfall no repo doc states.',
     '',
     '- An empty entries array is a VALID answer — prefer it over marginal proposals.',
     `- At most ${String(MAX_DISTILL_ENTRIES)} entries; each is ONE concise line in the user's language.`,
@@ -319,7 +374,11 @@ export class MemoryDistiller {
   /** The distill body: gather the delta, consult the model, apply entries. */
   private async runDistill(parent: NonNullable<ReturnType<Context['agents']['get']>>, session: SessionLike, cwd: string | undefined): Promise<void> {
     const sessionId = session.id
-    const lastSeq = this.root.distillSeqOf(sessionId)
+    // Start from whichever cursor is further: the last consumed distill OR
+    // the point where the session last saved its own entry. Material up to
+    // an own-save was already judged by the agent and needs no second,
+    // inferential pass; everything AFTER it has had no opinion yet.
+    const lastSeq = Math.max(this.root.distillSeqOf(sessionId), this.root.ownSaveSeqOf(sessionId))
     const events = session.snapshotEvents()
     const fresh: Array<{ type: string, seq: number, text: string }> = []
     for (const event of events) {
@@ -331,15 +390,6 @@ export class MemoryDistiller {
       ? events[events.length - 1]!.seq
       : lastSeq
 
-    // The session wrote its own entries after the last background pass: stand
-    // down and advance. An agent that has already judged this material worth
-    // keeping does not need a second, inferential opinion on it.
-    if (this.root.savedSinceDistill(sessionId)) {
-      this.log.info(`memory distill for "${sessionId}" skipped: the session already saved its own entries`)
-      this.root.advanceDistill(sessionId, lastEventSeq)
-      return
-    }
-
     // Too little new material: advance progress and skip the LLM call. Both
     // gates must pass — see MIN_NEW_CHARS for why the message count alone is
     // not enough of a filter.
@@ -349,23 +399,17 @@ export class MemoryDistiller {
       return
     }
 
-    // Render the excerpt under both caps.
-    const lines: string[] = []
-    let used = 0
+    // Per-message cap first, then the transcript budget keeping both ends
+    // (see renderExcerpt for why the tail is the part that must survive).
+    const rendered: string[] = []
     for (const message of fresh) {
       const role = message.type === 'user/message' ? 'user' : 'assistant'
-      let text = message.text.length > MAX_MESSAGE_CHARS
+      const text = message.text.length > MAX_MESSAGE_CHARS
         ? `${message.text.slice(0, MAX_MESSAGE_CHARS)}…`
         : message.text
-      if (used + text.length > MAX_TRANSCRIPT_CHARS) {
-        text = text.slice(0, Math.max(0, MAX_TRANSCRIPT_CHARS - used))
-        if (text !== '') lines.push(`[${role}] ${text}`)
-        break
-      }
-      used += text.length
-      lines.push(`[${role}] ${text}`)
+      rendered.push(`[${role}] ${text}`)
     }
-    const transcript = lines.join('\n')
+    const transcript = renderExcerpt(rendered, MAX_TRANSCRIPT_CHARS)
     const { system, user } = buildDistillPrompt(transcript, cwd, this.root)
     await this.runDirect(sessionId, session, cwd, lastEventSeq, system, user, parent)
   }
@@ -437,7 +481,10 @@ export class MemoryDistiller {
       const proposal = raw as ProposedEntry
       // Models echo the file format they see (prefix included); strip it
       // before validating so one logical entry never lands double-prefixed.
-      const content = typeof proposal.content === 'string' ? stripEntryPrefix(proposal.content) : ''
+      // Commit ids ride along the same way (see stripCommitIds).
+      const content = typeof proposal.content === 'string'
+        ? stripCommitIds(stripEntryPrefix(proposal.content))
+        : ''
       const category = MEMORY_CATEGORIES.includes(proposal.category as MemoryCategory)
         ? proposal.category as MemoryCategory
         : undefined

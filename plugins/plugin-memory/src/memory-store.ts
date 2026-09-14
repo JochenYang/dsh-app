@@ -34,8 +34,10 @@ import { basename, join } from 'node:path'
 import type { MemoryCategory, MemoryDistillActivity, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
 /** One saved entry gets at most this many characters; longer input is
  * rejected so the model re-thinks a leaner line instead of bloating the
- * file every session re-reads. */
-export const MAX_ENTRY_CHARS = 500
+ * file every session re-reads. 200 keeps an entry to one actionable fact:
+ * real-world distill junk (protocol field maps, file-by-file change lists)
+ * needs 300+, while a durable fact fits well under 200. */
+export const MAX_ENTRY_CHARS = 200
 
 /** Slug shape the clear route accepts — also the traversal fence. */
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
@@ -108,6 +110,41 @@ function entryContent(line: string): string {
 export function stripEntryPrefix(content: string): string {
   const trimmed = content.trim()
   return ENTRY_PREFIX.test(trimmed) ? trimmed.replace(ENTRY_PREFIX, '').trim() : content
+}
+
+/**
+ * Strip commit-id-shaped tokens from MODEL-PROPOSED content. A candidate is
+ * a 7-12 hex-char run that stands alone — not part of a longer word or a
+ * hyphenated slug like `agent-comm-hub-cf86ffc4` — and mixes letters and
+ * digits: pure digits are counts/timestamps (1048576, unix seconds), pure
+ * letters are ordinary words, and neither is a commit id. The NEVER lists
+ * already forbid work-log entries; this is the mechanical backstop so a
+ * cited id never lands in a file that is re-injected into every future
+ * session. Collapses the double space a strip can leave behind.
+ */
+const COMMIT_ID_CANDIDATE = /(?<![\w-])[0-9a-f]{7,12}(?![\w-])/giu
+
+export function stripCommitIds(content: string): string {
+  const stripped = content.replace(COMMIT_ID_CANDIDATE, (token) =>
+    /[a-f]/iu.test(token) && /\d/u.test(token) ? '' : token)
+  return stripped.replace(/\s{2,}/gu, ' ').trim()
+}
+
+/**
+ * Keyword-filter a memory file for recall: entries whose normalized CONTENT
+ * contains the normalized query (substring, the same rule forget matches
+ * by). An empty query returns every entry. The counts let the model see
+ * what was filtered out instead of mistaking a filtered view for the whole
+ * file.
+ */
+export function filterEntries(text: string, query: string): { matched: string[], total: number } {
+  const entries = parseEntries(text)
+  const needle = normalizeForMatch(query)
+  if (needle === '') return { matched: entries.map(entry => entry.raw), total: entries.length }
+  const matched = entries
+    .filter(entry => normalizeForMatch(entry.content).includes(needle))
+    .map(entry => entry.raw)
+  return { matched, total: entries.length }
 }
 
 /**
@@ -490,16 +527,17 @@ export interface DistillProgress {
   /** Unix epoch ms of the last distill run for this session. */
   at: number
   /**
-   * Own-writes the session has made since the last background pass (absent =
-   * none). The distiller stands down while this is non-zero: material the
-   * agent has already judged worth keeping does not need a second,
-   * inferential pass over the same delta.
+   * Event seq at which this session last saved an entry itself through the
+   * memory_save tool (absent/0 = never). The distiller consumes only events
+   * PAST this point: material up to the save was already judged by the
+   * agent, while everything after it has had no second opinion yet.
    *
-   * A count, deliberately not a timestamp: a save and a distill landing in
-   * the same millisecond are indistinguishable by time, and the comparison
-   * would silently read "already distilled" for a delta that was not.
+   * A seq, deliberately not a count or timestamp: the marker must order
+   * against the event stream to split "already curated" from "still
+   * unjudged", and a save and a distill landing in the same millisecond
+   * are indistinguishable by time.
    */
-  savesSinceDistill?: number
+  savedAtSeq?: number
 }
 
 /** Short display id: the uuid segment's first 8 chars (`session-` prefix
@@ -581,10 +619,9 @@ export class MemoryRoot {
   /** Advance one session's distill progress and persist (with pruning). */
   advanceDistill(sessionId: string, seq: number): void {
     const state = this.readDistillState()
-    const previous = state.sessions[sessionId]
-    // A completed pass consumes the delta, own-writes included: the counter
-    // starts over so the NEXT save can stand the next pass down.
-    state.sessions[sessionId] = { ...previous, seq, at: Date.now(), savesSinceDistill: 0 }
+    // A completed pass consumes the delta, own-save marker included: the
+    // cursor starts over so the NEXT save can mark its own point again.
+    state.sessions[sessionId] = { seq, at: Date.now(), savedAtSeq: 0 }
     // Prune to the newest MAX_TRACKED_SESSIONS by last-run time.
     const ids = Object.keys(state.sessions)
     if (ids.length > MAX_TRACKED_SESSIONS) {
@@ -598,30 +635,31 @@ export class MemoryRoot {
   }
 
   /**
-   * Whether this session wrote its own entries since the last background pass.
-   * The distiller stands down while this is true: an agent that has already
-   * judged the material worth keeping does not need a second, inferential pass
-   * over the same delta. One predicate (rather than fields the caller
-   * compares) so the rule lives with the state it reads.
+   * The event seq at which this session last saved an entry itself, 0 when
+   * it never did. The distiller starts from this cursor (whichever is
+   * further): an agent that has already judged material worth keeping does
+   * not need a second, inferential pass over the same span — but everything
+   * AFTER its save is still fair game. One predicate (rather than fields
+   * the caller compares) so the rule lives with the state it reads.
    */
-  savedSinceDistill(sessionId: string): boolean {
+  ownSaveSeqOf(sessionId: string): number {
     const progress = this.readDistillState().sessions[sessionId]
-    return progress !== undefined && (progress.savesSinceDistill ?? 0) > 0
+    return Math.max(0, Math.floor(progress?.savedAtSeq ?? 0))
   }
 
   /**
-   * Record that the session wrote an entry itself, through the save tool. The
-   * background pass reads this to stand down on material the agent has already
-   * curated by hand. Creates the session record when absent — a session can
-   * save before its first distill ever runs.
+   * Record that the session wrote an entry itself, through the save tool,
+   * at the given event seq (the highest seq keeps winning across repeated
+   * saves). Creates the session record when absent — a session can save
+   * before its first distill ever runs.
    */
-  recordDirectSave(sessionId: string): void {
+  recordDirectSave(sessionId: string, seq: number): void {
     const state = this.readDistillState()
     const previous = state.sessions[sessionId]
     state.sessions[sessionId] = {
       seq: previous?.seq ?? 0,
       at: previous?.at ?? 0,
-      savesSinceDistill: (previous?.savesSinceDistill ?? 0) + 1,
+      savedAtSeq: Math.max(previous?.savedAtSeq ?? 0, Math.max(0, Math.floor(seq))),
     }
     mkdirSync(this.dir, { recursive: true })
     atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)

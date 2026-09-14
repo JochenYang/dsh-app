@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- 会话记忆：收紧写入门槛——单条上限 500→200 字符，超长直接拒绝并要求改写成一行事实；提炼 prompt 增加正反示例（工作日志、协议字段表、逐文件改动清单为反例，协作偏好、无人记录的坑为正例），比纯规则更有效
+- 会话记忆：三条写路径（工具保存、后台提炼、策展合并）机械剥离 commit id——只匹配独立的 7-12 位字母数字混合十六进制串，纯数字（计数/时间戳）与目录名后缀不受影响
+- 会话记忆：超长对话的提炼摘录从「保头丢尾」改为「保尾 + 短头」——决策、结论与用户纠正几乎总在对话尾部，旧截断恰好丢掉最有价值的部分
+- 会话记忆：memory_recall 新增 query 关键词过滤，返回命中行与文件真实条数，过滤视图不再被误当作全量；常驻注入的指引块瘦身约三分之一
+- 会话记忆：会话中途的 memory_save 不再压制整段增量——改为记录保存点事件序号，后台提炼只跳过保存点之前的内容，之后的对话照常获得第二意见
+- 会话记忆：策展新增超预算收缩——超过 30 条或 6KB 的文件收到带具体数字的强制瘦身指令，非固定条目「存疑即删」；收缩后仍超标的文件保持待策展（下一轮继续），空转一轮则记账防止烧循环，失控长大的文件会被逐步压回可用范围
+
+### English
+- Memory: tighter write gates — one entry is capped at 200 chars (was 500) and oversized input is rejected with a request to rewrite it as one lean fact; the distill prompt now carries accepted/rejected examples (work logs, protocol field maps and file-by-file change lists rejected; collaboration preferences and undocumented pitfalls accepted), which beats rules alone
+- Memory: commit ids are stripped on every write path (tool save, background distill, curator merge) — only a standalone 7-12 char mixed letter/digit hex run matches, so pure-digit counts, timestamps and directory-slug suffixes pass through
+- Memory: the distill excerpt of an oversized delta now keeps the newest tail plus a short head prefix — decisions, outcomes and user corrections live at the END of a delta, exactly what the old head-keep cut dropped
+- Memory: memory_recall gains a query keyword filter returning the matched rows and the file's true entry count, so a filtered view is never mistaken for the whole file; the always-injected guidelines block is a third leaner
+- Memory: a mid-session memory_save no longer suppresses the whole delta — it records the save point as an event seq, the background pass skips only the pre-save span, and later conversation still gets its second opinion
+- Memory: the curator now shrinks over-budget files — beyond 30 entries or 6KB it receives a mandatory shrink directive with the concrete numbers and a "when in doubt, delete" rule for non-pinned rows; a file still over after shrinking stays due (the next sweep continues the diet) while a no-op pass records itself to avoid a burn loop, so grown files converge back to a usable size
+
 ## [v0.11.8] - 2026-09-13
 
 ### 中文

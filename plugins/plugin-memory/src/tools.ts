@@ -24,7 +24,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the agents Context merge (ctx.agents) into scope.
 import type {} from '@deepseek-ai/dsh-agent'
-import { MAX_ENTRY_CHARS, containsCredential, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
+import { MAX_ENTRY_CHARS, containsCredential, filterEntries, stripCommitIds, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /** Hard ceiling for recall output; a runaway file must not flood the
@@ -96,8 +96,9 @@ export function registerMemoryTools(
       }
       // Models echo the file's `- [category] date` prefix into `content`;
       // strip it before validating so one logical entry never lands
-      // double-prefixed (see stripEntryPrefix).
-      const content = stripEntryPrefix(String(args.content ?? '').trim())
+      // double-prefixed (see stripEntryPrefix). Commit ids ride along the
+      // same way and are stripped mechanically (see stripCommitIds).
+      const content = stripCommitIds(stripEntryPrefix(String(args.content ?? '').trim()))
       if (content === '') {
         return Promise.resolve({ saved: false, reason: 'empty content' } as unknown as JsonValue)
       }
@@ -142,10 +143,15 @@ export function registerMemoryTools(
       // `ctx.get` (not `ctx.agents`): the tools mount without declaring the
       // agents service, and property access would throw on an undeclared key.
       const agent = exec.agent
-      // Tell the background pass this session curated its own memory: it then
-      // stands down on the same delta rather than inferring a second time over
-      // material the agent has already judged worth keeping.
-      if (agent !== undefined) root.recordDirectSave(agent.id)
+      // Tell the background pass this session curated its own memory UP TO
+      // the current event seq: it then infers only over material still to
+      // come, instead of standing down on everything after the save too.
+      if (agent !== undefined) {
+        const events = (agent.session as { snapshotEvents?: () => ReadonlyArray<{ seq: number }> })
+          .snapshotEvents?.()
+        const seq = events !== undefined && events.length > 0 ? events[events.length - 1]!.seq : 0
+        root.recordDirectSave(agent.id, seq)
+      }
       const agents = ctx.get('agents') as { get(id: SessionId): unknown } | undefined
       const parent = agent === undefined ? undefined : agents?.get(agent.id)
       if (parent !== undefined && agent !== undefined) {
@@ -158,14 +164,22 @@ export function registerMemoryTools(
   const disposeRecall = ctx.tools.register(defineTool({
     name: 'memory_recall',
     description:
-      'Read the persistent memory files in full (the injected copy of each is truncated when the file '
+      'Read the persistent memory files (the injected copy of each is truncated when the file '
       + 'grows large). Default scope "all" returns the global file plus the current project\'s file, '
-      + 'clearly separated — use it to review saved entries before saving a near-duplicate.',
+      + 'clearly separated — use it to review saved entries before saving a near-duplicate. Pass '
+      + 'query to fetch only entries matching a keyword instead of whole files; prefer that when '
+      + 'checking one topic, and review the full file only before saving.',
     parameters: {
       scope: {
         type: 'string',
         enum: [...RECALL_SCOPES],
         description: 'all (default) | global | project',
+      },
+      query: {
+        type: 'string',
+        description: 'Optional keyword filter: only entries whose content matches (normalized, '
+          + 'Chinese-native substring) are returned, with the file\'s total entry count so the '
+          + 'filtered view is never mistaken for the whole file.',
       },
     },
     output: {
@@ -180,14 +194,21 @@ export function registerMemoryTools(
         return Promise.resolve({ reason: 'disabled' } as unknown as JsonValue)
       }
       const scope = args.scope === 'global' || args.scope === 'project' ? args.scope : 'all'
+      const query = typeof args.query === 'string' ? args.query.trim() : ''
       const cwd = execCwd(exec)
       if (scope === 'project' && cwd === undefined) {
         return Promise.resolve({ reason: 'no active workspace' } as unknown as JsonValue)
       }
-      const cap = (text: string): { truncated: boolean, content: string } => ({
-        truncated: text.length > MAX_RECALL_CHARS,
-        content: text.length > MAX_RECALL_CHARS ? text.slice(0, MAX_RECALL_CHARS) : text,
-      })
+      const cap = (text: string): { truncated: boolean, content: string, total: number, matched?: number } => {
+        const { matched, total } = filterEntries(text, query)
+        const joined = matched.join('\n')
+        return {
+          truncated: joined.length > MAX_RECALL_CHARS,
+          content: joined.length > MAX_RECALL_CHARS ? joined.slice(0, MAX_RECALL_CHARS) : joined,
+          ...query === '' ? {} : { matched: matched.length },
+          total,
+        }
+      }
       if (scope === 'global') {
         return Promise.resolve({ global: cap(root.global.read()) } as unknown as JsonValue)
       }

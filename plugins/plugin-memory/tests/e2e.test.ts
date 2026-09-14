@@ -40,23 +40,28 @@ test('e2e: a workspace write lands in the project file and never in the global o
   assert.equal(resolveScope(undefined), 'global')
 })
 
-test('e2e: own-write → stand down → background pass consumes → next save re-arms', () => {
+test('e2e: own-write marks its seq → the background pass covers only what comes after', () => {
   const root = fresh()
   const id = 'session-e2e'
-  assert.equal(root.savedSinceDistill(id), false, 'nothing saved yet')
+  assert.equal(root.ownSaveSeqOf(id), 0, 'nothing saved yet')
 
-  root.recordDirectSave(id)
-  assert.equal(root.savedSinceDistill(id), true, 'the session curated its own memory')
-  root.recordDirectSave(id)
-  assert.equal(root.savedSinceDistill(id), true, 'the rule holds across repeated saves')
+  root.recordDirectSave(id, 5)
+  assert.equal(root.ownSaveSeqOf(id), 5, 'the session curated its own memory up to seq 5')
+  root.recordDirectSave(id, 9)
+  assert.equal(root.ownSaveSeqOf(id), 9, 'the highest save seq wins')
 
-  root.advanceDistill(id, 7)
-  assert.equal(root.savedSinceDistill(id), false, 'a completed pass consumes the delta')
-  assert.equal(root.distillSeqOf(id), 7)
+  root.advanceDistill(id, 12)
+  assert.equal(root.ownSaveSeqOf(id), 0, 'a completed pass consumes the marker')
+  assert.equal(root.distillSeqOf(id), 12)
 
-  root.recordDirectSave(id)
-  assert.equal(root.savedSinceDistill(id), true, 'the next save re-arms the rule')
-  assert.equal(root.distillSeqOf(id), 7, 'and an own-write never rewinds the cursor')
+  root.recordDirectSave(id, 20)
+  assert.equal(root.ownSaveSeqOf(id), 20, 'the next save re-arms the marker')
+  assert.equal(root.distillSeqOf(id), 12, 'and an own-write never rewinds the cursor')
+
+  // The distiller's consumption cursor is the MAX of both: everything from
+  // seq 21 on gets the second, inferential pass — material up to the save
+  // does not, and nothing in between is silently skipped twice.
+  assert.equal(Math.max(root.distillSeqOf(id), root.ownSaveSeqOf(id)), 20)
 })
 
 test('e2e: an over-long pin cannot evict the pins behind it, and nothing unbounded is injected', () => {

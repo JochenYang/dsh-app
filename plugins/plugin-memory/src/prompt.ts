@@ -33,44 +33,34 @@ export const MAX_PROJECT_CHARS = 2_800
  * the user's language as instructed below. The save triggers are worded
  * MODEL-driven ("whenever you observe") — a user-driven wording ("when
  * the user asks") silently drops implicit preferences the user never
- * states and facts the model digs out on its own. */
+ * states and facts the model digs out on its own. Kept lean: this block
+ * rides along with EVERY prompt assembly in every session. */
 const GUIDELINES_TEXT = [
   '## Cross-session memory',
   '',
-  'Persistent memory survives across sessions in two scopes:',
+  'Memory persists across sessions in two scopes:',
   '- GLOBAL: user preferences and habits, valid in every project.',
-  '- PROJECT: decisions, conventions, and lessons of the current workspace only.',
-  'Both current files are injected below; call memory_recall to read them in full.',
+  '- PROJECT: decisions, conventions, and lessons of this workspace only.',
+  'Both current files are injected below (truncated when large); memory_recall reads them in full.',
   '',
   'SAVE proactively via memory_save — do not wait to be asked — whenever you observe:',
-  '- an explicit request to remember something,',
-  '- a durable user preference, stated OR inferred from repeated behavior '
-  + '(the user always wants typecheck run, always answers in Chinese) → scope "global",',
-  '- a settled project decision or convention (architecture choice, closed debate) '
-  + '→ scope "project",',
-  '- a hard-won lesson you or the user surfaced: a root cause you diagnosed, a '
-  + 'non-obvious constraint, a pitfall dug out of logs or docs → scope "project".',
+  '- an explicit request to remember something;',
+  '- a durable user preference, stated or inferred from repeated behavior → scope "global";',
+  '- a settled project decision or a hard-won lesson (root cause, non-obvious constraint, pitfall)',
+  '  → scope "project".',
   '',
-  'CORRECT, never contradict: when the user corrects, retracts, or reverses a '
-  + 'fact that is already saved, call memory_forget to remove the stale entry '
-  + '(match its distinctive text), then memory_save the corrected fact if it '
-  + 'still matters. NEVER answer a correction by appending a contradicting '
-  + 'entry — both lines would be injected into every future session.',
+  'CORRECT, never contradict: when the user corrects or retracts a saved fact, call memory_forget',
+  'on the stale entry first, then memory_save the corrected fact if it still matters — never append',
+  'a contradicting entry (both would be injected into every future session).',
   '',
-  'NEVER save: API keys, tokens, passwords, or any credential — not even when asked;',
-  'ephemeral state derivable within the current session; routine facts the user',
-  'will obviously restate. When genuinely unsure whether something is durable, skip it — do not save guesses.',
+  'NEVER save: credentials (even when asked); work logs — what this conversation implemented,',
+  'fixed, or committed (commit ids, "已完成" reports, file-by-file change lists); task summaries;',
+  'anything a future session reads from the repo in one tool call (paths, API signatures, config',
+  'values, build commands). The test: would a future session in a DIFFERENT conversation act',
+  'better because this line exists? When unsure, skip — do not save guesses.',
   '',
-  'NEVER save work logs: what you implemented, fixed, or committed in this conversation '
-  + '(commit ids, "已完成/已落地" progress reports, file-by-file change lists). The repo and '
-  + 'git history already carry that. Neither save summaries of the current task, nor restate '
-  + 'things a future session reads from the repo in one tool call (file paths, API signatures, '
-  + 'config values, build commands, directory layouts). The test: would a future session in a '
-  + 'DIFFERENT conversation act better because this line exists? If it only describes what this '
-  + 'conversation did, do not save it.',
-  '',
-  'Entry discipline: one line per entry; write in the user\'s language; keep it',
-  'lean — these files are re-read by every future session of their scope.',
+  'One concise line per entry, in the user\'s language — these files are re-read by every future',
+  'session of their scope.',
 ].join('\n')
 
 /** Per-category quota inside the injection budget: every category keeps its

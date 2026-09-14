@@ -15,15 +15,17 @@ import {
   MemoryRoot,
   MemoryStore,
   contentHash,
+  filterEntries,
   normalizeForMatch,
   parseEntries,
   projectSlug,
+  stripCommitIds,
   todayStamp,
 } from '../src/memory-store.ts'
 import { selectBalanced } from '../src/prompt.ts'
-import { MemoryCurator } from '../src/curator.ts'
+import { MemoryCurator, buildCuratePrompt } from '../src/curator.ts'
 import { ROUTE_PREFIX, registerMemoryRoutes } from '../src/routes.ts'
-import { existingNeedles } from '../src/distiller.ts'
+import { existingNeedles, renderExcerpt } from '../src/distiller.ts'
 
 const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), 'dshm-test-')))
 
@@ -584,25 +586,30 @@ test('pin route: an invalid or unknown project slug is rejected before any write
   dispose()
 })
 
-test('savedSinceDistill: a session that curated its own memory stands the background pass down', () => {
+test('ownSaveSeq: a direct save marks its event seq, a completed pass consumes it', () => {
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-save-')))
   const id = 'session-abc'
   // Never saved, never distilled: nothing to stand down from.
-  assert.equal(root.savedSinceDistill(id), false)
+  assert.equal(root.ownSaveSeqOf(id), 0)
 
-  root.recordDirectSave(id)
-  // The session judged its own material worth keeping → skip the second pass.
-  assert.equal(root.savedSinceDistill(id), true)
+  root.recordDirectSave(id, 41)
+  // The session judged its own material up to seq 41 → the background pass
+  // infers only over events PAST that point.
+  assert.equal(root.ownSaveSeqOf(id), 41)
 
-  // A background pass AFTER the save clears the flag...
+  // A later save at a lower seq never rewinds the marker.
+  root.recordDirectSave(id, 30)
+  assert.equal(root.ownSaveSeqOf(id), 41)
+
+  // A background pass AFTER the save clears the marker...
   root.advanceDistill(id, 42)
-  assert.equal(root.savedSinceDistill(id), false)
+  assert.equal(root.ownSaveSeqOf(id), 0)
   // ...and the cursor survives, so the next save does not rewind progress.
   assert.equal(root.distillSeqOf(id), 42)
 
   // A later save re-arms it.
-  root.recordDirectSave(id)
-  assert.equal(root.savedSinceDistill(id), true)
+  root.recordDirectSave(id, 50)
+  assert.equal(root.ownSaveSeqOf(id), 50)
   assert.equal(root.distillSeqOf(id), 42, 'a direct save must not rewind the distill cursor')
 })
 
@@ -610,7 +617,96 @@ test('recordDirectSave: creates the session record before any distill ever ran',
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-save-new-')))
   // A session that saves first must still register: otherwise the background
   // pass would see no record at all and infer over material already curated.
-  root.recordDirectSave('session-fresh')
-  assert.equal(root.savedSinceDistill('session-fresh'), true)
+  root.recordDirectSave('session-fresh', 9)
+  assert.equal(root.ownSaveSeqOf('session-fresh'), 9)
   assert.equal(root.distillSeqOf('session-fresh'), 0)
+})
+
+// --- stripCommitIds ------------------------------------------------------------
+
+test('stripCommitIds: removes mixed hex commit ids; keeps counts, slugs and words', () => {
+  assert.equal(stripCommitIds('修复 fb8b001 已验证'), '修复 已验证')
+  assert.equal(stripCommitIds('commit 37db725 lands'), 'commit lands')
+  assert.equal(stripCommitIds('上限 1048576 tokens'), '上限 1048576 tokens', 'pure digits are counts/timestamps, not ids')
+  assert.equal(stripCommitIds('时间戳 1789031659 丢弃'), '时间戳 1789031659 丢弃', 'a 10-digit unix seconds value is not an id')
+  assert.equal(stripCommitIds('项目 agent-comm-hub-cf86ffc4 的坑'), '项目 agent-comm-hub-cf86ffc4 的坑', 'slug hex is part of a name, not an id')
+  assert.equal(stripCommitIds('deadbeef 值'), 'deadbeef 值', 'a pure-hex-letters word is not an id')
+  assert.equal(stripCommitIds('fb8b001'), '', 'an id-only proposal becomes empty (rejected upstream)')
+  assert.equal(stripCommitIds('无 id 的普通条目'), '无 id 的普通条目', 'clean content passes through untouched')
+})
+
+// --- filterEntries -------------------------------------------------------------
+
+test('filterEntries: keyword filter returns matched rows and the true total', () => {
+  const text = [
+    '- [lesson] 2026-09-01 用 pnpm 跑 typecheck',
+    '- [fact] 2026-09-02 服务器在东京',
+    '- [lesson] 2026-09-03 pnpm 不能装全局',
+    '手写行',
+  ].join('\n')
+  const { matched, total } = filterEntries(text, 'pnpm')
+  assert.equal(total, 4, 'the count covers every parsed entry')
+  assert.equal(matched.length, 2)
+  assert.ok(matched.every(line => line.includes('pnpm')))
+  const all = filterEntries(text, '')
+  assert.equal(all.matched.length, 4, 'empty query returns everything')
+  assert.equal(all.total, 4)
+})
+
+// --- distiller renderExcerpt ---------------------------------------------------
+
+test('renderExcerpt: under budget returns everything in order', () => {
+  const lines = ['[user] a', '[assistant] b', '[user] c']
+  assert.equal(renderExcerpt(lines, 100), lines.join('\n'))
+})
+
+test('renderExcerpt: over budget keeps the newest tail plus a short head, drops the middle', () => {
+  const lines = Array.from({ length: 30 }, (_, i) => `[user] message-${String(i)}-${'x'.repeat(60)}`)
+  const out = renderExcerpt(lines, 1_000)
+  assert.ok(out.includes('[… earlier messages omitted …]'), 'the cut is marked')
+  assert.ok(out.includes(lines[29]!), 'the newest message survives in full')
+  assert.ok(out.includes(lines[0]!), 'a short head prefix survives')
+  assert.ok(!out.includes(lines[15]!), 'the middle is dropped')
+  assert.ok(out.length <= 1_100, 'bounded around the budget')
+})
+
+// --- curator over-budget mode ---------------------------------------------------
+
+test('curator prompt: an over-budget file gets a shrink directive, an in-budget one does not', () => {
+  const { system } = buildCuratePrompt('- [lesson] 2026-09-01 x', [], { entries: 32, chars: 8_000 })
+  assert.match(system, /OVER BUDGET/, 'the directive names the condition')
+  assert.match(system, /32 entries/, 'with the concrete entry count')
+  assert.match(system, /MUST propose enough/, 'shrinking is mandatory, not optional')
+  const { system: normal } = buildCuratePrompt('- [lesson] 2026-09-01 x', [])
+  assert.ok(!/OVER BUDGET/.test(normal), 'an in-budget file gets no directive')
+})
+
+test('curator: a still-over file that shrank stays due; a no-op pass records to avoid a burn loop', async () => {
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-over-')))
+  const lines = Array.from({ length: 32 }, (_, i) => `- [lesson] 2026-09-01 条目${String(i)}`)
+  root.global.replace(lines.join('\n'))
+  let answer = JSON.stringify({ edits: [{ op: 'delete', lines: [lines[0]!] }] })
+  const session = { id: 'session-over', requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) }
+  const parent = { session } as never
+  const ctx = {
+    llm: {
+      stream: async function* () {
+        yield { type: 'text-delta', index: 0, text: answer }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    },
+    agents: { get: () => parent },
+  }
+  const curator = new MemoryCurator(ctx as never, root, console, 0)
+
+  // 32 → 31 entries: shrank but still over target, edits applied → the pass
+  // does NOT count as completed; the next sweep continues the diet.
+  await curator.runAfterDistill(parent, 'session-over' as never)
+  assert.equal(parseEntries(root.global.read()).length, 31)
+  assert.equal(root.curatedHashOf('global'), undefined, 'a still-over file stays due')
+
+  // A no-op pass on a still-over file records instead of retrying forever.
+  answer = '{"edits": []}'
+  await curator.runAfterDistill(parent, 'session-over' as never)
+  assert.equal(root.curatedHashOf('global'), contentHash(root.global.read()), 'the no-op pass records the hash')
 })
