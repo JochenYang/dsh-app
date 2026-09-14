@@ -224,5 +224,78 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn('token-value', cfg.redact('boom token-value boom'))
 
 
+class ApplyPruneTests(unittest.TestCase):
+    """One version per atomic commit: a failure must not block the rest."""
+
+    def setUp(self):
+        self.cfg = mr.Config(
+            endpoint='https://example.invalid',
+            repo='owner/repo',
+            token='token-value',
+            gh_repo='owner/repo',
+            tag='v0.11.0',
+            only_pattern='',
+            keep_versions=1,
+            prune_mode='apply',
+        )
+
+    @staticmethod
+    def entry(version, paths):
+        return {
+            'version': version,
+            'channel': 'stable',
+            'tag': f'v{version}',
+            'prefix': f'releases/archive/{version}/',
+            'paths': paths,
+            'bytes': len(paths),
+        }
+
+    def test_one_failure_does_not_block_the_other_version(self):
+        calls = []
+
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                calls.append(kwargs['file_paths'])
+                if len(calls) == 1:
+                    raise RuntimeError('boom')
+                return {'deleted_files': kwargs['file_paths'], 'failed_files': []}
+
+        outcome = mr.apply_prune(
+            self.cfg,
+            FakeApi(),
+            [self.entry('0.9.0', ['a']), self.entry('0.8.0', ['b'])],
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([item['version'] for item in outcome['deleted']], ['0.8.0'])
+        self.assertEqual([version for version, _ in outcome['failed']], ['0.9.0'])
+        self.assertIn('boom', outcome['failed'][0][1])
+
+    def test_failed_files_from_the_sdk_count_as_a_failure(self):
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                return {'deleted_files': [], 'failed_files': kwargs['file_paths']}
+
+        outcome = mr.apply_prune(self.cfg, FakeApi(), [self.entry('0.9.0', ['a'])])
+        self.assertEqual(outcome['deleted'], [])
+        self.assertEqual(len(outcome['failed']), 1)
+
+    def test_missing_remote_file_drops_the_entry_without_calling_the_sdk(self):
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                raise AssertionError('must not be called for an empty path list')
+
+        outcome = mr.apply_prune(self.cfg, FakeApi(), [self.entry('0.9.0', [])])
+        self.assertEqual([item['version'] for item in outcome['deleted']], ['0.9.0'])
+        self.assertEqual(outcome['failed'], [])
+
+    def test_token_is_redacted_in_a_failure_reason(self):
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                raise RuntimeError('rejected with token-value in the message')
+
+        outcome = mr.apply_prune(self.cfg, FakeApi(), [self.entry('0.9.0', ['a'])])
+        self.assertNotIn('token-value', outcome['failed'][0][1])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
