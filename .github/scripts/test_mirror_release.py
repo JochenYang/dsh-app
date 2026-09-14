@@ -297,5 +297,190 @@ class ApplyPruneTests(unittest.TestCase):
         self.assertNotIn('token-value', outcome['failed'][0][1])
 
 
+class LatestCleanupGuardTests(unittest.TestCase):
+    """The releases/latest/ cleanup has its own, narrower allowlist."""
+
+    def test_accepts_exactly_one_asset_file_below_latest(self):
+        for path in (
+            'releases/latest/latest.yml',
+            'releases/latest/latest-linux-arm64.yml',
+            'releases/latest/DSH-APP-0.11.8-win-x64.exe',
+            'releases/latest/DSH-APP-0.11.8-win-x64.exe.blockmap',
+            'releases/latest/dsh-app_0.11.8_amd64.deb',
+            'releases/latest/DSH.APP-0.11.8-mac.zip.blockmap',
+        ):
+            self.assertTrue(mr.latest_cleanup_allowed(path)[0], path)
+
+    def test_everything_else_is_refused(self):
+        for path in (
+            'releases/latest/0.11.6/DSH-APP-win-x64.exe',
+            'releases/latest/a/b.bin',
+            'releases/latest/../latest.yml',
+            'releases/latest/..',
+            'releases/latest/',
+            'releases/latest/.hidden',
+            'releases/latest',
+            'releases/archive/0.10.0/a.bin',
+            'releases/prerelease/v0.12.0-rc.1/a.bin',
+            'releases/versions.json',
+            '/releases/latest/latest.yml',
+            'releases\\latest\\latest.yml',
+            '',
+        ):
+            self.assertFalse(mr.latest_cleanup_allowed(path)[0], path)
+
+    def test_refusal_reason_is_reported(self):
+        self.assertIn(
+            'not below releases/latest/',
+            mr.latest_cleanup_allowed('releases/archive/0.10.0/a.bin')[1],
+        )
+        self.assertIn(
+            'not subdirectories',
+            mr.latest_cleanup_allowed('releases/latest/a/b.bin')[1],
+        )
+
+
+class LatestCleanupPlanTests(unittest.TestCase):
+    def remote(self):
+        return [
+            {'path': 'releases/latest/DSH-APP-0.11.8-win-x64.exe', 'size': 10},
+            {'path': 'releases/latest/latest.yml', 'size': 1},
+            {'path': 'releases/latest/DSH-APP-0.11.6-win-x64.exe', 'size': 20},
+            {'path': 'releases/latest/DSH-APP-0.11.7-win-x64.exe', 'size': 30},
+            {'path': 'releases/archive/0.11.6/DSH-APP-0.11.6-win-x64.exe', 'size': 20},
+            {'path': 'releases/versions.json', 'size': 1},
+        ]
+
+    def test_whitelisted_names_are_kept_and_history_is_deleted(self):
+        plan = mr.build_latest_cleanup_plan(
+            self.remote(),
+            ['DSH-APP-0.11.8-win-x64.exe', 'latest.yml'],
+        )
+        self.assertEqual(
+            [item['path'] for item in plan['keep']],
+            ['releases/latest/DSH-APP-0.11.8-win-x64.exe', 'releases/latest/latest.yml'],
+        )
+        self.assertEqual(
+            [item['path'] for item in plan['delete']],
+            [
+                'releases/latest/DSH-APP-0.11.6-win-x64.exe',
+                'releases/latest/DSH-APP-0.11.7-win-x64.exe',
+            ],
+        )
+        self.assertEqual(plan['bytes'], 50)
+        self.assertEqual(plan['refusals'], [])
+        self.assertIsNone(plan['skipped'])
+
+    def test_latest_metadata_is_kept_when_it_belongs_to_the_release(self):
+        plan = mr.build_latest_cleanup_plan(self.remote(), ['latest.yml'])
+        self.assertIn('releases/latest/latest.yml', [item['path'] for item in plan['keep']])
+        self.assertNotIn('releases/latest/latest.yml', [item['path'] for item in plan['delete']])
+
+    def test_archive_and_index_paths_are_never_candidates(self):
+        plan = mr.build_latest_cleanup_plan(self.remote(), ['latest.yml'])
+        paths = [item['path'] for item in plan['delete']]
+        self.assertNotIn('releases/archive/0.11.6/DSH-APP-0.11.6-win-x64.exe', paths)
+        self.assertNotIn('releases/versions.json', paths)
+
+    def test_a_rejected_path_is_a_refusal_not_a_deletion(self):
+        remote = [{'path': 'releases/latest/../secret', 'size': 1}]
+        plan = mr.build_latest_cleanup_plan(remote, [])
+        self.assertEqual(plan['delete'], [])
+        self.assertEqual(len(plan['refusals']), 1)
+
+    def test_nothing_stale_yields_no_deletions(self):
+        plan = mr.build_latest_cleanup_plan(
+            [{'path': 'releases/latest/latest.yml', 'size': 1}], ['latest.yml']
+        )
+        self.assertEqual(plan['delete'], [])
+        self.assertEqual(plan['refusals'], [])
+
+    def test_upload_failure_yields_an_empty_plan(self):
+        # Ordering guard: a failed upload/index commit must never strip the
+        # working copy the updater reads first.
+        plan = mr.build_latest_cleanup_plan(self.remote(), ['latest.yml'], upload_ok=False)
+        self.assertEqual(plan['delete'], [])
+        self.assertEqual(plan['keep'], [])
+        self.assertEqual(plan['bytes'], 0)
+        self.assertTrue(plan['skipped'])
+
+
+class LatestCleanupApplyTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = mr.Config(
+            endpoint='https://example.invalid',
+            repo='owner/repo',
+            token='token-value',
+            gh_repo='owner/repo',
+            tag='v0.11.8',
+            only_pattern='',
+            keep_versions=10,
+            prune_mode='apply',
+        )
+
+    @staticmethod
+    def plan(paths):
+        return {
+            'keep': [],
+            'delete': [
+                {'path': path, 'size': index + 1} for index, path in enumerate(paths)
+            ],
+            'bytes': sum(index + 1 for index, _ in enumerate(paths)),
+            'refusals': [],
+            'skipped': None,
+        }
+
+    def test_dry_run_never_calls_delete(self):
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                raise AssertionError('dry-run must not delete anything')
+
+        plan = self.plan(['releases/latest/DSH-APP-0.11.6-win-x64.exe'])
+        self.assertIsNone(mr.run_latest_cleanup(self.cfg, FakeApi(), plan, dry_run=True))
+        self.assertIn(
+            '- Dry run: no file was deleted',
+            mr.summary_latest_lines(plan, dry_run=True),
+        )
+
+    def test_one_commit_deletes_every_stale_file(self):
+        calls = []
+
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                calls.append(kwargs['file_paths'])
+                return {'deleted_files': kwargs['file_paths'], 'failed_files': []}
+
+        paths = ['releases/latest/a.exe', 'releases/latest/b.exe']
+        outcome = mr.run_latest_cleanup(self.cfg, FakeApi(), self.plan(paths), dry_run=False)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], paths)
+        self.assertEqual(outcome['deleted'], paths)
+        self.assertEqual(outcome['failed'], [])
+
+    def test_failed_files_are_recorded_without_aborting(self):
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                return {
+                    'deleted_files': kwargs['file_paths'][1:],
+                    'failed_files': kwargs['file_paths'][:1],
+                }
+
+        paths = ['releases/latest/a.exe', 'releases/latest/b.exe']
+        outcome = mr.run_latest_cleanup(self.cfg, FakeApi(), self.plan(paths), dry_run=False)
+        self.assertEqual(outcome['deleted'], paths[1:])
+        self.assertEqual([path for path, _ in outcome['failed']], paths[:1])
+
+    def test_a_delete_error_is_reported_not_raised(self):
+        class FakeApi:
+            def delete_files(self, **kwargs):
+                raise RuntimeError('boom token-value')
+
+        outcome = mr.run_latest_cleanup(
+            self.cfg, FakeApi(), self.plan(['releases/latest/a.exe']), dry_run=False
+        )
+        self.assertEqual(len(outcome['failed']), 1)
+        self.assertNotIn('token-value', outcome['failed'][0][1])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

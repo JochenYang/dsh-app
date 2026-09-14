@@ -54,23 +54,42 @@ name: publish-mirror
 # also prunes the ModelScope mirror. Stable and prerelease versions are ranked
 # separately by semver and the newest `keep_versions` of each channel are kept;
 # the tag being published is always kept (a backfill of an old tag must not
-# delete what it just uploaded) and releases/latest/ is never touched, since it
-# is the rolling copy the updater reads first. Without this the repo grows by
-# ~2 GB of logical LFS objects per release forever.
+# delete what it just uploaded). Without this the repo grows by ~2 GB of logical
+# LFS objects per release forever.
 #   PRUNE_MODE=apply    (default) delete expired releases/archive/<version>/ and
 #                       releases/prerelease/<tag>/ directories, then rewrite
 #                       releases/versions.json without them — an index entry
 #                       whose assets are gone is a 404 in the user's updater.
 #   PRUNE_MODE=dry-run  print the full delete list (version, path, asset count,
-#                       estimated size) and the index plan; write nothing.
-#   PRUNE_MODE=off      never prune.
-# SAFETY: the delete path is a positive allowlist — only files strictly below
-# releases/archive/ or releases/prerelease/ are ever passed to the SDK. Every
-# other path (releases/latest/, releases/versions.json, the repo root,
-# .gitattributes, any traversal form) is refused with an error and the prune
-# aborts instead of deleting. Each version is deleted in its own atomic commit
-# so one failure cannot block the others, and a failed delete keeps its index
-# entry (no 404) for the next run to retry.
+#                       estimated size), the index plan and the latest cleanup
+#                       plan; write nothing.
+#   PRUNE_MODE=off      never prune versions; the latest cleanup below still runs
+#                       (it is not a retention rule).
+#
+# LATEST CLEANUP: releases/latest/ is the rolling copy the updater reads first,
+# and it is NOT a retention concern, so `keep_versions` does not gate it. After
+# a full stable publish — once every asset upload AND the versions.json commit
+# have succeeded — releases/latest/ is converged to exactly the asset-name set
+# this run uploaded: the files an older release left behind there (including
+# their latest*.yml) are deleted in one commit. Rollback is unaffected because
+# the same files stay in releases/archive/<version>/, and a user browsing
+# "latest" no longer sees installers of retired versions. Skipped for
+# prerelease tags (they never write releases/latest/) and for partial drills
+# (their whitelist would only cover the subset they uploaded). PRUNE_MODE=
+# dry-run reports the stale list without deleting; a single delete failure is
+# recorded in the summary and does not fail the release, but a path the latest
+# guard rejects fails the run.
+#
+# SAFETY: version-retention deletes use a positive allowlist — only files
+# strictly below releases/archive/ or releases/prerelease/ are ever passed to
+# the SDK, and releases/latest/ is refused by it outright. The latest cleanup
+# uses its own, narrower guard: a path must be exactly one file directly below
+# releases/latest/ (no subdirectory, no traversal, no empty or hidden name).
+# Anything else (releases/versions.json, the repo root, .gitattributes, any
+# traversal form) is refused with an error and aborts the prune instead of
+# deleting. Each archived version is deleted in its own atomic commit so one
+# failure cannot block the others, and a failed delete keeps its index entry
+# (no 404) for the next run to retry.
 #
 # Dispatch modes:
 #   mirror   (default) mirror `tag`, then prune by `prune_mode`.
@@ -126,7 +145,7 @@ on:
         default: 10
         type: number
       prune_mode:
-        description: 'Prune: apply = delete expired versions and resync the index; dry-run = report the plan only; off = never prune'
+        description: 'Prune: apply = delete expired versions, resync the index and slim latest; dry-run = report the plans only; off = never prune versions (latest is still slimmed)'
         required: true
         default: apply
         type: choice
@@ -160,9 +179,10 @@ jobs:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
       ONLY_PATTERN: ${{ inputs.only_pattern }}
       # Retention knobs. A release-triggered run has no inputs, so the script
-      # applies its own defaults: keep 10 versions per channel and prune for
-      # real. A dispatch may override either to rehearse (dry-run) or to
-      # disable pruning entirely (off).
+      # applies its own defaults: keep 10 versions per channel, prune for real
+      # and slim releases/latest/ to the assets of this release. A dispatch may
+      # rehearse with dry-run or disable the version prune entirely (off) —
+      # latest is still slimmed either way.
       KEEP_VERSIONS: ${{ inputs.keep_versions }}
       PRUNE_MODE: ${{ inputs.prune_mode }}
     steps:
@@ -227,9 +247,10 @@ jobs:
         if: ${{ env.MODELSCOPE_TOKEN != '' && env.MIRROR_MODE == 'mirror' }}
         run: |
           set -euo pipefail
-          # Upload, index rebuild and retention prune all live in the script:
-          # the safety guards, the reporting and the keep policy are reviewable
-          # (and unit-tested) outside the workflow.
+          # Upload, index rebuild, retention prune and the releases/latest/
+          # cleanup all live in the script: the safety guards, the reporting
+          # and the keep policy are reviewable (and unit-tested) outside the
+          # workflow.
           "$RUNNER_TEMP/ms-env/bin/python3" .github/scripts/mirror_release.py mirror
 
       # mode=diagnose: commit one tiny probe file through the SDK and report

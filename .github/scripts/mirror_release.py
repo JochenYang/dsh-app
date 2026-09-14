@@ -12,12 +12,14 @@ secrets:
     RELEASE_TAG          v-prefixed release tag (mirror/diagnose context)
     ONLY_PATTERN         partial drill: mirror only matching local assets
     KEEP_VERSIONS        prune: versions retained per channel (default 10)
-    PRUNE_MODE           prune: off | dry-run | apply (default apply)
+    PRUNE_MODE           prune: off | dry-run | apply (default apply); dry-run
+                         also turns the latest cleanup into report-only
 
 Subcommands:
 
-    mirror       upload the release assets, rebuild releases/versions.json and
-                 prune expired versions according to PRUNE_MODE
+    mirror       upload the release assets, rebuild releases/versions.json,
+                 prune expired versions and converge releases/latest/ to the
+                 assets of this release, according to PRUNE_MODE
     diagnose     commit a few-byte probe file to test the commit endpoint
     prune-probe  upload -> list -> delete -> confirm 404 on a throwaway path
 
@@ -30,11 +32,21 @@ Layout in the target repo (see AGENTS.md section 10):
 
 The app updater reads versions.json to choose a version to install or roll back
 to, so pruning MUST keep the index in sync: an entry whose assets were deleted
-is a 404 in the user's updater. Deletion therefore only ever targets the two
-version directory prefixes, and the index is rewritten from the same in-memory
-state in the same run. Logical-LFS storage is deduplicated by content sha256,
-so the bytes reported for the delete list overestimate the space actually
-freed.
+is a 404 in the user's updater. Version retention therefore only ever targets
+the two version directory prefixes, and the index is rewritten from the same
+in-memory state in the same run. Logical-LFS storage is deduplicated by content
+sha256, so the bytes reported for the delete list overestimate the space
+actually freed.
+
+releases/latest/ is NOT a retention concern and is deliberately outside the
+version-retention allowlist: it is the rolling copy the updater reads first.
+After a full stable publish, once every asset upload and the index commit have
+succeeded, the mirror converges releases/latest/ to exactly the asset-name set
+this run uploaded, deleting whatever a previous release left behind. That is
+the only deletion this script performs under releases/latest/, it runs through
+its own narrower guard (latest_cleanup_allowed), and it never runs for a
+prerelease tag or a partial drill. archive/prerelease and versions.json are
+untouched by it, so rollback always has the full history.
 """
 
 from __future__ import annotations
@@ -56,9 +68,10 @@ LATEST_PREFIX = 'releases/latest/'
 ARCHIVE_PREFIX = 'releases/archive/'
 PRERELEASE_PREFIX = 'releases/prerelease/'
 PROBE_PREFIX = 'releases/prune-probe/'
-# Positively whitelisted: a delete path is only acceptable under one of these.
-# releases/latest/ is deliberately absent - it is the rolling copy the updater
-# always reads first, and it must never lose files to a retention rule.
+# Positively whitelisted for version retention: a retention delete path is only
+# acceptable under one of these. releases/latest/ is deliberately absent - it is
+# the rolling copy the updater always reads first, and it must never lose files
+# to a retention rule. Its own convergence step uses latest_cleanup_allowed().
 DELETABLE_PREFIXES = (ARCHIVE_PREFIX, PRERELEASE_PREFIX)
 
 DEFAULT_KEEP_VERSIONS = 10
@@ -68,6 +81,9 @@ PRUNE_MODES = ('off', 'dry-run', 'apply')
 # Version directory names we are willing to build a delete path from. Anything
 # else (empty, dotted traversal, absolute, backslash) is refused.
 SAFE_NAME_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z._-]*$')
+# One file name directly below releases/latest/. No leading dot: a hidden file
+# is not a release asset, and the narrowest rule is the safest one here.
+LATEST_NAME_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z._+-]*$')
 SEMVER_RE = re.compile(r'^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.\-]+))?$')
 
 USER_AGENT = 'dsh-app-publish-mirror'
@@ -449,6 +465,169 @@ def deletion_allowed(path, prefixes=DELETABLE_PREFIXES):
     return False, 'outside releases/archive/ and releases/prerelease/'
 
 
+def latest_cleanup_allowed(path):
+    """Guard for one file directly below releases/latest/. Returns (allowed, reason).
+
+    Narrower than deletion_allowed by construction: instead of a prefix match it
+    accepts exactly one file-name component below releases/latest/, so a nested
+    directory, a traversal segment, an absolute path, a backslash, an empty name
+    or a hidden file are all refused. Version retention refuses the whole
+    directory; this guard is the only thing allowed to remove a file from it.
+    """
+    if not isinstance(path, str) or not path:
+        return False, 'empty path'
+    if path.startswith('/') or '\\' in path:
+        return False, 'not a repo-relative posix path'
+    if not path.startswith(LATEST_PREFIX):
+        return False, f'not below {LATEST_PREFIX}'
+    name = path[len(LATEST_PREFIX):]
+    if not name:
+        return False, f'no file name below {LATEST_PREFIX}'
+    if '/' in name:
+        return False, f'{LATEST_PREFIX} holds files, not subdirectories'
+    if name.startswith('.'):
+        return False, f'unexpected name below {LATEST_PREFIX}'
+    if not LATEST_NAME_RE.match(name):
+        return False, f'unsafe file name {name!r}'
+    return True, ''
+
+
+def build_latest_cleanup_plan(remote_files, keep_names, upload_ok=True):
+    """Names under releases/latest/ that are not part of this release.
+
+    ``keep_names`` is exactly the asset-name set this run downloaded from the
+    GitHub Release and uploaded (latest*.yml included), so it needs no separate
+    whitelist. Any other file below releases/latest/ was left behind by an
+    earlier release and is a candidate for removal; a path the narrow guard
+    rejects is a refusal, never a deletion.
+
+    ``upload_ok`` is the ordering guard: without a successful upload and index
+    commit the plan is empty, because deleting the stale-but-working copy before
+    the new one is in place would leave the updater without assets.
+    """
+    if not upload_ok:
+        return {
+            'keep': [],
+            'delete': [],
+            'bytes': 0,
+            'refusals': [],
+            'skipped': 'upload or index commit did not succeed',
+        }
+    keep_names = set(keep_names or ())
+    keep = []
+    delete = []
+    refusals = []
+    for item in remote_files or []:
+        path = (item or {}).get('path') or ''
+        if not path.startswith(LATEST_PREFIX):
+            continue
+        allowed, reason = latest_cleanup_allowed(path)
+        if not allowed:
+            refusals.append((path, reason))
+            continue
+        entry = {'path': path, 'size': item.get('size') or 0}
+        (keep if path[len(LATEST_PREFIX):] in keep_names else delete).append(entry)
+    keep.sort(key=lambda entry: entry['path'])
+    delete.sort(key=lambda entry: entry['path'])
+    return {
+        'keep': keep,
+        'delete': delete,
+        'bytes': sum(entry['size'] for entry in delete),
+        'refusals': refusals,
+        'skipped': None,
+    }
+
+
+def apply_latest_cleanup(cfg, api, plan):
+    """Delete every stale releases/latest/ file in one commit.
+
+    One commit keeps the operation atomic for the updater (it never observes a
+    half-slimmed directory) and the SDK reports per-path failures, which are
+    recorded and left for the next run instead of aborting the release.
+    """
+    outcome = {'deleted': [], 'failed': [], 'bytes': 0}
+    paths = [entry['path'] for entry in plan['delete']]
+    if not paths:
+        return outcome
+    log(
+        f'latest cleanup: deleting {len(paths)} stale file(s) from {LATEST_PREFIX},'
+        f' {human_bytes(plan["bytes"])} of LFS objects'
+    )
+    try:
+        result = api.delete_files(
+            repo_id=cfg.repo,
+            repo_type='model',
+            file_paths=paths,
+            commit_message=f'Slim {LATEST_PREFIX} to {cfg.tag}',
+            revision='master',
+        )
+    except BaseException as exc:  # noqa: BLE001 - reported, release stays green
+        reason = cfg.redact(f'{type(exc).__name__}: {exc}')[:300]
+        gha_warning(f'latest cleanup delete failed: {reason}')
+        outcome['failed'].append((LATEST_PREFIX.rstrip('/'), reason))
+        return outcome
+    failed = list((result or {}).get('failed_files') or [])
+    outcome['deleted'] = list((result or {}).get('deleted_files') or paths)
+    outcome['bytes'] = plan['bytes']
+    outcome['failed'] = [(path, 'reported in failed_files') for path in failed]
+    for path in failed:
+        gha_warning(f'latest cleanup: the SDK could not delete {path}')
+    return outcome
+
+
+def run_latest_cleanup(cfg, api, plan, dry_run):
+    """Report-only under dry-run; otherwise delete. Returns the outcome or None."""
+    if dry_run:
+        log(f'latest cleanup dry-run: {len(plan["delete"])} stale file(s) would be deleted')
+        return None
+    return apply_latest_cleanup(cfg, api, plan)
+
+
+def summary_latest_lines(plan, outcome=None, dry_run=False):
+    """Render the releases/latest/ convergence section of the step summary."""
+    lines = [f'#### Latest cleanup ({"dry-run" if dry_run else "apply"})', '']
+    if plan['skipped']:
+        lines.append(f'- Skipped: {plan["skipped"]} (the working copy stays as it was)')
+        return lines
+    if plan['refusals']:
+        lines.append(f'- REFUSED by the latest whitelist ({len(plan["refusals"])}):')
+        lines += [f'  - `{path}`: {reason}' for path, reason in plan['refusals']]
+        lines.append('- No deletion was attempted; the guard rejected at least one path.')
+        return lines
+
+    lines.append(
+        f'- Kept ({len(plan["keep"])}): the asset names of this release, latest*.yml included'
+    )
+    if not plan['delete']:
+        lines.append(f'- Delete list: none (`{LATEST_PREFIX}` already holds only this release)')
+        return lines
+
+    lines.append(f'- Stale files to remove ({len(plan["delete"])}):')
+    lines += [
+        f'  - `{entry["path"]}` - {human_bytes(entry["size"])}' for entry in plan['delete']
+    ]
+    lines.append(
+        f'- Stale LFS objects: {human_bytes(plan["bytes"])}'
+        ' (sha256 dedup means less is freed)'
+    )
+    lines.append(
+        '- The same files stay in `releases/archive/<version>/`, so rollback is unaffected.'
+    )
+    if dry_run:
+        lines.append('- Dry run: no file was deleted')
+        return lines
+    if outcome is not None:
+        lines.append(f'- Deleted {len(outcome["deleted"])} of {len(plan["delete"])} file(s)')
+        if outcome['failed']:
+            lines.append(f'- WARNING: delete failed for {len(outcome["failed"])} file(s):')
+            lines += [f'  - `{path}`: {reason}' for path, reason in outcome['failed']]
+            lines.append(
+                '- The mirror commit already succeeded; retry with'
+                ' `-f tag=... -f prune_mode=apply`.'
+            )
+    return lines
+
+
 def build_delete_plan(candidates, remote_files, current_tag):
     """Turn retention candidates into delete entries plus a refusal list.
 
@@ -697,10 +876,17 @@ def subcommand_mirror(cfg):
     removed = set()
     prune_failed = False
     refused = []
-    if not partial and cfg.prune_mode != 'off':
-        plan = plan_retention(versions, cfg.keep_versions, cfg.tag)
+    # releases/latest/ is converged after a full stable publish; a prerelease
+    # never writes it, and a partial drill must not, because its whitelist would
+    # only cover the subset it uploaded.
+    latest_cleanup = not partial and not prerelease
+    remote_files = None
+    if not partial and (cfg.prune_mode != 'off' or latest_cleanup):
+        # One inventory serves both the retention prune and the latest cleanup.
         remote_files = fetch_remote_files(api, cfg)
         log(f'remote inventory: {len(remote_files)} file(s)')
+    if not partial and cfg.prune_mode != 'off':
+        plan = plan_retention(versions, cfg.keep_versions, cfg.tag)
         entries, refused = build_delete_plan(plan['candidates'], remote_files, cfg.tag)
         if refused:
             gha_error(f'prune refused {len(refused)} path(s) outside the delete whitelist')
@@ -741,11 +927,45 @@ def subcommand_mirror(cfg):
         log(f'committing {VERSIONS_PATH}: {previous_count} -> {len(versions)} version(s)')
         commit_index(cfg, api, versions, f'Update {VERSIONS_PATH} for {cfg.tag}')
 
+    # Latest cleanup runs only now, after every asset upload AND the index
+    # commit succeeded: the working copy the updater reads first must never be
+    # stripped before the new release is fully in place. It is not a retention
+    # rule, so keep_versions does not gate it; PRUNE_MODE=dry-run only makes it
+    # report; releases/archive/, releases/prerelease/ and versions.json are
+    # never touched.
+    latest_lines = ['#### Latest cleanup: skipped (partial drill)', '']
+    latest_refused = []
+    latest_failed = False
+    if latest_cleanup:
+        keep_names = [item.name for item in files]
+        latest_plan = build_latest_cleanup_plan(remote_files, keep_names)
+        if latest_plan['refusals']:
+            for path, reason in latest_plan['refusals']:
+                gha_error(f'refusing to delete {path}: {reason}')
+            latest_lines = summary_latest_lines(latest_plan)
+            latest_refused = latest_plan['refusals']
+        elif cfg.prune_mode == 'dry-run':
+            latest_lines = summary_latest_lines(latest_plan, dry_run=True)
+            run_latest_cleanup(cfg, api, latest_plan, dry_run=True)
+        else:
+            latest_outcome = run_latest_cleanup(cfg, api, latest_plan, dry_run=False)
+            latest_failed = bool(latest_outcome['failed'])
+            latest_lines = summary_latest_lines(latest_plan, outcome=latest_outcome)
+    elif not partial:
+        latest_lines = [
+            '#### Latest cleanup: skipped (a prerelease never writes releases/latest/)',
+            '',
+        ]
+
     write_summary(
         [f'### ModelScope mirror: OK{" (partial drill)" if partial else ""}', '']
         + [f'- {item}' for item in info]
         + [f'- WARNING: {item}' for item in warnings]
-        + ['', *prune_lines, '', f'- Backfill if this run needs repeating: `{cfg.backfill}`']
+        + [
+            '', *prune_lines,
+            '', *latest_lines,
+            '', f'- Backfill if this run needs repeating: `{cfg.backfill}`',
+        ]
     )
     if refused:
         # A refused delete path means the retention model disagrees with the
@@ -756,11 +976,20 @@ def subcommand_mirror(cfg):
             ' no file was deleted',
             backfill=cfg.backfill,
         )
+    if latest_refused:
+        # The mirror is committed, but the guard refused at least one path below
+        # releases/latest/: the layout is not what the cleanup expects, so fail
+        # loudly instead of deleting something the rule cannot classify.
+        fail(
+            f'latest cleanup refused {len(latest_refused)} path(s) below {LATEST_PREFIX};'
+            ' no stale file was deleted',
+            backfill=cfg.backfill,
+        )
     log(f'OK: {cfg.tag} mirrored to {cfg.repo}')
-    if prune_failed:
-        # The release is already published and the mirror is committed; only
-        # the cleanup needs attention, so keep the run green and say so.
-        gha_warning('prune did not complete; see the step summary')
+    if prune_failed or latest_failed:
+        # The release is already published and the mirror is committed; only the
+        # cleanup needs attention, so keep the run green and say so.
+        gha_warning('prune or latest cleanup did not complete; see the step summary')
 
 
 def subcommand_diagnose(cfg):

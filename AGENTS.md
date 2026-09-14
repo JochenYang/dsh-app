@@ -450,22 +450,45 @@ Every `mode=mirror` run also prunes the mirror, which would otherwise grow by
 roughly 2 GB of deduplicated LFS objects per release forever. The policy is
 `keep_versions` (workflow input, default **10**; stable and prerelease are
 ranked **separately** by semver): the newest 10 stable versions and the newest
-10 prerelease versions stay, the tag being published always stays (a backfill
-of an old tag must not delete what it just uploaded), and `releases/latest/` is
-never touched — it is the rolling copy the updater reads first. `prune_mode`
-selects how far it goes:
+10 prerelease versions stay, and the tag being published always stays (a
+backfill of an old tag must not delete what it just uploaded). `releases/latest/`
+is **not** governed by `keep_versions` — it is the rolling copy the updater
+reads first and its convergence is a separate step (see below). `prune_mode`
+selects how far the version retention goes:
 
 - `apply` (default): delete the expired `releases/archive/<version>/` and
   `releases/prerelease/<tag>/` directories, then rewrite
   `releases/versions.json` without them. An index entry whose assets are gone
   is a 404 in the app updater, so the index is rewritten in the same run; a
   delete that fails keeps its index entry (no 404) and the next run retries it.
-- `dry-run`: print the full delete list (version, path, asset count, estimated
-  size) and the index plan in the run summary, and write nothing.
-- `off`: never prune.
+- `dry-run`: print the full version delete list (version, path, asset count,
+  estimated size), the index plan and the latest-cleanup stale list in the run
+  summary, and write nothing.
+- `off`: never prune versions. The latest cleanup still runs (it is not a
+  retention rule).
 
-Rehearse a window change, and verify the delete capability first on a mirror
-that has never pruned:
+**Latest cleanup (always on for a full stable publish).** Because every release
+used `upload_folder` into `releases/latest/`, older installers accumulated
+there forever — browsing "latest" showed three versions at once, and once an
+old version was pruned from the archive those leftover files were
+unreclaimable LFS objects. After a full stable `mode=mirror` run, **and only
+after every asset upload and the `versions.json` commit have succeeded**, the
+mirror converges `releases/latest/` to exactly the asset-name set that run
+uploaded from the GitHub Release (`latest*.yml` included, since they are
+release assets): every other file directly below `releases/latest/` is deleted
+in one commit. Deletion order matters — a failed upload skips the cleanup, so
+the working copy the updater depends on is never stripped before the new one is
+in place. The cleanup never touches `releases/archive/`,
+`releases/prerelease/` or `releases/versions.json`, so **the archive, not
+`latest`, is the rollback source**: the same files remain in
+`releases/archive/<version>/`. It is skipped for prerelease tags (which never
+write `latest`) and for partial drills (their whitelist covers only the subset
+they uploaded). A per-file delete failure is recorded in the summary and does
+not fail the release; a path the latest guard refuses does fail the run. To
+audit without deleting, dispatch `-f prune_mode=dry-run`.
+
+Rehearse a window change, preview the latest cleanup, and verify the delete
+capability first on a mirror that has never pruned:
 
 ```bash
 gh workflow run publish-mirror.yml -f tag=v0.11.8 -f prune_mode=dry-run
@@ -475,14 +498,19 @@ gh workflow run publish-mirror.yml -f mode=prune-probe
 
 `keep_versions` is a per-run input rather than a repo variable, so the window
 in force is visible in each run's inputs and summary. Safety constraints: the
-delete path is a **positive allowlist** — only files strictly below
-`releases/archive/` or `releases/prerelease/` are ever handed to the SDK, and
-anything else (`releases/latest/`, `releases/versions.json`, the repo root,
+version-retention delete path is a **positive allowlist** — only files strictly
+below `releases/archive/` or `releases/prerelease/` are ever handed to the SDK,
+and anything else (`releases/latest/`, `releases/versions.json`, the repo root,
 `.gitattributes`, traversal forms) is refused with an error and aborts the
-prune instead of deleting; each version is deleted in its own atomic commit so
-one failure cannot block the rest; a failed prune is reported in the summary
-without failing the release (the mirror commit is already done). The upload,
-index and prune logic lives in `.github/scripts/mirror_release.py` (unit tests:
+prune instead of deleting. The latest cleanup uses its own, **narrower** guard:
+a path must be exactly one file directly below `releases/latest/` — no
+subdirectory, no traversal segment, no empty or hidden name — and any other
+shape is refused with an error and fails the run. Each archived version is
+deleted in its own atomic commit so one failure cannot block the rest; the
+latest cleanup deletes its stale set in one commit; a failed delete is reported
+in the summary without failing the release (the mirror commit is already done).
+The upload, index, prune and latest-cleanup logic lives in
+`.github/scripts/mirror_release.py` (unit tests:
 `python .github/scripts/test_mirror_release.py`) — review there, not in YAML.
 `mode=prune-probe` is the capability check for `HubApi.delete_files`: it
 uploads two throwaway files under `releases/prune-probe/<uuid>/`, lists them,
@@ -555,7 +583,11 @@ two copies of the line and nothing comparing them, v0.11.1 bundled a
    paths, assets committed, index size), `SKIPPED` (no `MODELSCOPE_TOKEN`) or
    `FAILED` (reason), each with the backfill command, plus the `Prune` section
    (retained set, delete list, index changes) that records which old versions
-   this run retired. Confirm `releases/latest/` now points at this version.
+   this run retired and the `Latest cleanup` section (kept set, stale files
+   removed) that records which `releases/latest/` leftovers this run dropped.
+   Confirm `releases/latest/` now holds only this version's assets + the four
+   `latest*.yml`, and that `releases/latest/latest.yml` names this version
+   (e.g. `curl -s .../repo?Revision=master&FilePath=releases/latest/latest.yml`).
    Re-mirror a failed run with
    `gh workflow run publish-mirror.yml -f tag=v0.1.6`; if the failure was
    `503 commit publisher unavailable`, run
