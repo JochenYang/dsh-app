@@ -412,13 +412,15 @@ Mirroring to ModelScope is a **separate workflow**,
 `on: release: types: [published]` — the moment the draft is flipped (SOP step
 5) — and never when the app matrix merely finishes, so a version discarded
 during review is never mirrored. It also runs on `workflow_dispatch`
-(`-f tag=v0.11.7`) for backfill and `-f mode=diagnose` for a commit-endpoint
-probe. A failed or skipped mirror cannot roll back the release (different run,
-and the release is already published by then), and the workflow's tag filter
-keeps `runtime-*` releases out.
+(`-f tag=v0.11.7`) for backfill, `-f mode=diagnose` for a commit-endpoint
+probe and `-f mode=prune-probe` to verify the delete path. A failed or skipped
+mirror cannot roll back the release (different run, and the release is already
+published by then), and the workflow's tag filter keeps `runtime-*` releases
+out.
 
 The upload uses the **official ModelScope Python SDK**
-(`modelscope.hub.api.HubApi.upload_folder` / `upload_file`, pinned in
+(`modelscope.hub.api.HubApi.upload_folder` / `upload_file` / `delete_files`,
+pinned in
 `MODELSCOPE_SDK_VERSION`), not the batch -> PUT -> commit path hand-rolled in
 `scripts/publish-modelscope.mjs`: our client retried a rejected commit once
 with no backoff and lost `503 commit publisher unavailable` races, while the
@@ -441,6 +443,52 @@ The first step records `SKIPPED` in `$GITHUB_STEP_SUMMARY` when
 `MODELSCOPE_TOKEN` is unset (the mirror is optional; the release is
 unaffected), and an unset `MODELSCOPE_REPO` falls back to the lowercased GitHub
 `owner/name`.
+
+### Mirror retention (ModelScope)
+
+Every `mode=mirror` run also prunes the mirror, which would otherwise grow by
+roughly 2 GB of deduplicated LFS objects per release forever. The policy is
+`keep_versions` (workflow input, default **10**; stable and prerelease are
+ranked **separately** by semver): the newest 10 stable versions and the newest
+10 prerelease versions stay, the tag being published always stays (a backfill
+of an old tag must not delete what it just uploaded), and `releases/latest/` is
+never touched — it is the rolling copy the updater reads first. `prune_mode`
+selects how far it goes:
+
+- `apply` (default): delete the expired `releases/archive/<version>/` and
+  `releases/prerelease/<tag>/` directories, then rewrite
+  `releases/versions.json` without them. An index entry whose assets are gone
+  is a 404 in the app updater, so the index is rewritten in the same run; a
+  delete that fails keeps its index entry (no 404) and the next run retries it.
+- `dry-run`: print the full delete list (version, path, asset count, estimated
+  size) and the index plan in the run summary, and write nothing.
+- `off`: never prune.
+
+Rehearse a window change, and verify the delete capability first on a mirror
+that has never pruned:
+
+```bash
+gh workflow run publish-mirror.yml -f tag=v0.11.8 -f prune_mode=dry-run
+gh workflow run publish-mirror.yml -f tag=v0.11.8 -f keep_versions=3 -f prune_mode=dry-run
+gh workflow run publish-mirror.yml -f mode=prune-probe
+```
+
+`keep_versions` is a per-run input rather than a repo variable, so the window
+in force is visible in each run's inputs and summary. Safety constraints: the
+delete path is a **positive allowlist** — only files strictly below
+`releases/archive/` or `releases/prerelease/` are ever handed to the SDK, and
+anything else (`releases/latest/`, `releases/versions.json`, the repo root,
+`.gitattributes`, traversal forms) is refused with an error and aborts the
+prune instead of deleting; each version is deleted in its own atomic commit so
+one failure cannot block the rest; a failed prune is reported in the summary
+without failing the release (the mirror commit is already done). The upload,
+index and prune logic lives in `.github/scripts/mirror_release.py` (unit tests:
+`python .github/scripts/test_mirror_release.py`) — review there, not in YAML.
+`mode=prune-probe` is the capability check for `HubApi.delete_files`: it
+uploads two throwaway files under `releases/prune-probe/<uuid>/`, lists them,
+deletes them in one commit and confirms HTTP 404, so the delete path is proven
+for this account and storage mode (one probe file is LFS-tracked by suffix,
+like every real asset) without touching a released version.
 
 When a mirror fails with `503 commit publisher unavailable`, the fastest check
 is a probe commit: `gh workflow run publish-mirror.yml -f mode=diagnose` commits
@@ -505,8 +553,10 @@ two copies of the line and nothing comparing them, v0.11.1 bundled a
    (`releases/latest|archive|prerelease` + `versions.json`) with the official
    Python SDK. Open that run's Summary panel: it records `OK` (target repo,
    paths, assets committed, index size), `SKIPPED` (no `MODELSCOPE_TOKEN`) or
-   `FAILED` (reason), each with the backfill command. Confirm
-   `releases/latest/` now points at this version. Re-mirror a failed run with
+   `FAILED` (reason), each with the backfill command, plus the `Prune` section
+   (retained set, delete list, index changes) that records which old versions
+   this run retired. Confirm `releases/latest/` now points at this version.
+   Re-mirror a failed run with
    `gh workflow run publish-mirror.yml -f tag=v0.1.6`; if the failure was
    `503 commit publisher unavailable`, run
    `gh workflow run publish-mirror.yml -f mode=diagnose` first to check the
