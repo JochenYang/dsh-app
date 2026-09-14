@@ -181,6 +181,16 @@ jobs:
             echo '- Backfill once the secret exists: `gh workflow run publish-mirror.yml -f tag=<tag>`'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The mirror logic is a repository file now (.github/scripts/
+      # mirror_release.py, AGENTS.md §10), so the workspace must be checked out
+      # before any mirrored step. Pin the ref to the default branch on purpose:
+      # an old release tag does not contain this script, and the logic in force
+      # must be the current one, not the tag's snapshot.
+      - uses: actions/checkout@v5
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+
       - name: Download release assets
         if: ${{ env.MODELSCOPE_TOKEN != '' && env.MIRROR_MODE == 'mirror' }}
         run: |
