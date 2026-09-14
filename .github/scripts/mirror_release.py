@@ -827,6 +827,17 @@ def probe_file_status(cfg, path):
         return exc.code, 0
 
 
+def fetch_public_entries(cfg):
+    """Raw repo/files entries; they carry IsLFS, which the SDK listing drops."""
+    url = f'{cfg.endpoint}/api/v1/models/{cfg.repo}/repo/files?Revision=master&Recursive=true'
+    request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        parsed = json.loads(response.read().decode('utf-8'))
+    data = parsed.get('Data', parsed) if isinstance(parsed, dict) else {}
+    entries = data.get('Files') if isinstance(data, dict) else None
+    return entries or []
+
+
 def subcommand_prune_probe(cfg):
     """Prove upload -> list -> delete -> 404 on a throwaway path.
 
@@ -871,6 +882,19 @@ def subcommand_prune_probe(cfg):
     )
     if not all(listed.values()):
         raise MirrorError(f'probe files are not listed after upload: {listed}')
+
+    # The real assets live in logical LFS, so the probe must show that the
+    # delete commit covers an LFS-flagged path too, not just a plain blob.
+    entries = {entry.get('Path'): entry for entry in fetch_public_entries(cfg)}
+    lfs = {path: bool((entries.get(path) or {}).get('IsLFS')) for path in probes}
+    for path, is_lfs in lfs.items():
+        log(f'prune-probe: {path} IsLFS={is_lfs}')
+    steps.append(
+        '- Storage mode: ' + ', '.join(f'`{Path(p).name}`={"LFS" if v else "plain"}' for p, v in lfs.items())
+    )
+    if not lfs.get(f'{probe_dir}/probe.zip'):
+        gha_warning('the .zip probe file is not flagged LFS; the LFS delete path was not exercised')
+        steps.append('- WARNING: the .zip probe file is not flagged LFS on the server')
 
     # 3) delete - the probe path is whitelisted only for this throwaway prefix,
     #    so the production guard stays exactly as strict as the prune step uses.
