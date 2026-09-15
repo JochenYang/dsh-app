@@ -16,21 +16,25 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { SwarmSection } from './client/swarm-section.tsx'
+import { mountNavIconPatch } from './client/nav-icon.ts'
 import { adoptStyles } from './client/styles.ts'
 
 /** The client halves this plugin depends on. */
 export const inject = ['slots']
 
-/** Nav identity of the swarm settings page. */
+/** Nav identity of the swarm settings page. NOTE: the label doubles as the
+ *  nav-icon patch's DOM selector (nav-icon.ts) — rename it in both places. */
 const SECTION_ID = 'dsh-app-swarm'
 const SECTION_LABEL = '并行子代理'
 
 /**
- * Client apply: adopt styles and register the settings section.
+ * Client apply: adopt styles, register the settings section, and patch the
+ * nav icon (the shell only ships a generic gear for unknown section ids).
  * @param ctx - the client root context.
  */
 export function apply(ctx: ClientContext): void {
   adoptStyles()
+  ctx.effect(() => mountNavIconPatch(), 'plugin-swarm: nav icon patch')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,
