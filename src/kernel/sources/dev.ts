@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { KernelManifest } from '../../shared/types'
+import { t } from '../../shared/locale'
 
 /**
  * Dev mode: the "kernel" is a local deepseek-harness checkout on disk.
@@ -12,9 +13,9 @@ export async function readDevManifest(checkoutDir: string, platform?: string, ar
     const raw = await fs.readFile(path.join(checkoutDir, 'package.json'), 'utf8')
     pkg = JSON.parse(raw) as { version?: string }
   } catch {
-    throw new Error(`开发模式内核目录无效：${checkoutDir} 下缺少可读的 package.json，请确认 DSH_APP_DEV_RUNTIME 指向 deepseek-harness 源码根目录`)
+    throw new Error(t('kernel.devManifestUnreadable', { checkout: checkoutDir }))
   }
-  if (!pkg.version) throw new Error(`开发模式内核目录无效：${checkoutDir}/package.json 缺少 version 字段`)
+  if (!pkg.version) throw new Error(t('kernel.devManifestNoVersion', { checkout: checkoutDir }))
   const suiteVersion = process.env.DSH_APP_SUITE_VERSION ?? '0.0.0-dev'
   return {
     dshVersion: pkg.version,

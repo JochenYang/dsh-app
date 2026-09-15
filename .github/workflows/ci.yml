@@ -33,6 +33,17 @@ jobs:
         run: npm ci
       - name: Typecheck shell + kernel
         run: npm run typecheck
+      # Static plugin-graph rules: core packages declared as peers, no packaged
+      # node_modules, dsh peer ranges tracking the followed kernel line, suite
+      # roster matching the plugins on disk. Needs no kernel and no network, so
+      # it belongs in this fast gate rather than in the smoke job.
+      - name: Plugin graph (static)
+        run: npm run check:graph
+      # Root suites cover the shell updater chain and the kernel manager. They
+      # require dist/ (npm test builds first), and until now they only ran by
+      # hand — a broken unit test could sit on main indefinitely.
+      - name: Shell + kernel unit tests
+        run: npm test
       - name: Build suite plugins
         run: |
           # Each plugin owns its dependencies (docx, exceljs, pptxgenjs, ...),
@@ -45,8 +56,15 @@ jobs:
           done
       - name: Plugin unit tests
         run: |
-          (cd plugins/plugin-memory && npm test)
-          (cd plugins/plugin-swarm && npm test)
+          # Every suite that has one, not a fixed pair: eleven suites previously
+          # ran only on a developer's machine, which is how "upstream API drift"
+          # stayed green in CI while failing at runtime. A plugin without a
+          # tests/ directory is skipped, so the loop needs no maintenance list.
+          for dir in plugins/*/; do
+            if [ -d "$dir/tests" ]; then
+              (cd "$dir" && npm test)
+            fi
+          done
 
   smoke:
     name: suite smoke probe (real kernel)
@@ -58,6 +76,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # This job builds a real kernel runtime, and build-runtime.mjs assembles it
+      # with pnpm (asserting ≥10). Pin the version: the runner's preinstalled one
+      # varies with the image, and a release gate must not depend on that.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
       - name: Install dependencies
         run: npm ci
       - name: Build suite plugins

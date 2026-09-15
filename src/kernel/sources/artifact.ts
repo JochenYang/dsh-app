@@ -1,4 +1,8 @@
 import type { KernelManifest } from '../../shared/types'
+import { t } from '../../shared/locale'
+import { MODELSCOPE_ENDPOINT, MODELSCOPE_REPO } from '../../shared/constants'
+import { layerIndexAssetName, parseLayerIndex } from '../layers'
+import type { LayerIndex } from '../layers'
 
 /**
  * Resolves runtime artifacts (kernel tarballs) from GitHub Releases, with a
@@ -9,6 +13,9 @@ import type { KernelManifest } from '../../shared/types'
  *   dsh-runtime-<platform>-<arch>-<version>.tgz
  *   dsh-runtime-<platform>-<arch>-<version>.tgz.sha512
  *   manifest-<platform>-<arch>.json  — the artifact's KernelManifest
+ *   layers-<platform>-<arch>.json    — the split-runtime layer index (optional;
+ *                                      see fetchLayerIndex, plus the layer files
+ *                                      it names, all transported like the tgz)
  *
  * The tgz contains a single top-level directory `runtime/` with:
  *   manifest.json   — KernelManifest for the artifact
@@ -16,27 +23,43 @@ import type { KernelManifest } from '../../shared/types'
  *   app/            — npm-installed dsh profile (package.json + node_modules)
  *
  * Two-phase resolution keeps mirrors from forging integrity:
- *   1. Metadata (.sha512 + manifest-<platform>-<arch>.json) is trusted from
- *      the OFFICIAL release first, fail-closed: an official HTTP answer is
- *      authoritative (a 404 means the artifacts are genuinely not published),
- *      and mirrors supplement metadata only when the official host is
- *      unreachable at the network level. The sha512 obtained here is the
- *      single trusted digest.
+ *   1. Metadata (.sha512 + manifest-<platform>-<arch>.json, and the layer index)
+ *      is trusted from the OFFICIAL release first, fail-closed: an official HTTP
+ *      answer is authoritative (a 404 means the artifacts are genuinely not
+ *      published), and mirrors supplement metadata only when the official host is
+ *      unreachable at the network level. The sha512 obtained here is the single
+ *      trusted digest — and for the split-layer path the index itself is that
+ *      digest source, which is why an index that fails validation is an error
+ *      rather than a silent "no layers".
  *   2. The large tarball is downloaded from an ordered candidate list —
- *      official URL first, then each mirror prefix wrapping that URL — and
- *      EVERY candidate is checked against the phase-1 digest, so a hostile
- *      mirror cannot substitute content even when it serves the bytes.
+ *      official URL first, then each mirror prefix wrapping that URL, then the
+ *      ModelScope mirror copy — and EVERY candidate is checked against the
+ *      phase-1 digest, so a hostile mirror cannot substitute content even when
+ *      it serves the bytes. ModelScope is a transport-only entry: it never
+ *      supplies metadata (see `bases` vs the candidate list in fetchArtifact).
+ *      Layer files use exactly the same candidate list, verified against the
+ *      digest their index carries.
  *
  * Override the mirror chain with DSH_APP_GITHUB_MIRRORS (comma-separated
  * URL prefixes; empty value disables mirrors entirely).
  */
 export interface ArtifactInfo {
-  /** Ordered download candidates (official first, then mirrors). */
+  /** Ordered download candidates (official first, then mirrors, ModelScope last). */
   candidates: string[]
   /** Trusted sha512 (hex) for the tarball, from the phase-1 metadata source. */
   sha512: string
   manifest: KernelManifest
   /** Which base served the metadata (for diagnostics). */
+  source: string
+}
+
+export interface LayerIndexInfo {
+  /**
+   * Validated index: the runtime manifest fields plus the per-layer file names
+   * and their sha512. It is the trust anchor for the split-layer path.
+   */
+  index: LayerIndex
+  /** Which base served the index (for diagnostics). */
   source: string
 }
 
@@ -47,6 +70,18 @@ const DEFAULT_GITHUB_MIRRORS = [
   'https://ghfast.top/',
   'https://gh-proxy.com/',
 ]
+
+/**
+ * ModelScope FilePath URL for one runtime asset, mirroring CI's layout
+ * (`releases/runtime/runtime-<version>/<asset>`). Segment-wise encoding keeps
+ * the slashes literal while a crafted version string can neither smuggle
+ * `&`/`#` into the query nor turn a literal `+` into a space.
+ */
+export function modelscopeRuntimeAssetUrl(version: string, assetName: string): string {
+  const relativePath = `releases/runtime/${RELEASE_TAG_PREFIX}${version}/${assetName}`
+  const encodedPath = relativePath.split('/').map((segment) => encodeURIComponent(segment)).join('/')
+  return `${MODELSCOPE_ENDPOINT}/api/v1/models/${MODELSCOPE_REPO}/repo?Revision=master&FilePath=${encodedPath}`
+}
 
 export function githubMirrorPrefixes(): string[] {
   const raw = process.env.DSH_APP_GITHUB_MIRRORS
@@ -81,6 +116,20 @@ export class GitHubArtifactResolver {
   }
 
   /**
+   * Ordered download candidates for ONE asset of a kernel version: official
+   * release first, then each mirror prefix wrapping that URL, then the
+   * ModelScope copy. Shared by the tarball and the split-layer paths so both
+   * inherit the same transport chain; whatever a candidate serves is still
+   * checked against a digest that came from the phase-1 metadata source.
+   */
+  assetCandidates(version: string, assetName: string): string[] {
+    return [
+      ...this.bases(version).map((base) => `${base}/${assetName}`),
+      modelscopeRuntimeAssetUrl(version, assetName),
+    ]
+  }
+
+  /**
    * Resolve the tarball candidates + trusted digest for a kernel version.
    * Fail-closed metadata rule: the official release is authoritative. Mirror
    * metadata is consulted only when the official host is unreachable at the
@@ -111,11 +160,87 @@ export class GitHubArtifactResolver {
       return null
     }
     return {
-      candidates: bases.map((b) => `${b}/${name}`),
+      // ModelScope is transport-only: the digest above came from the phase-1
+      // metadata chain, so the mirror copy is verified against it like every
+      // other candidate.
+      candidates: this.assetCandidates(version, name),
       sha512: meta.sha512,
       manifest: meta.manifest,
       source,
     }
+  }
+
+  /**
+   * Resolve the split-runtime layer index for a kernel version. Returns null
+   * when the release publishes no index (an older runtime, or the layer assets
+   * are not uploaded yet) — "no layers", which the caller answers by using the
+   * single tarball.
+   *
+   * The metadata discipline of fetchArtifact is unchanged, for a sharper
+   * reason: the index carries the sha512 of every layer, so it IS the trust
+   * anchor of the layer path. The official host is authoritative and
+   * fail-closed (an official HTTP answer, 404 included, is final; mirrors are
+   * consulted only when the official host is unreachable at the network level),
+   * and ModelScope is never asked for it at all.
+   *
+   * An index that arrives but does not validate is THROWN, never downgraded to
+   * null: silently reporting "no layers" would let a broken or hostile index
+   * decide nothing while hiding the fault, and the decision to fall back to the
+   * tarball belongs to the caller, made on evidence.
+   */
+  async fetchLayerIndex(version: string): Promise<LayerIndexInfo | null> {
+    const name = layerIndexAssetName(this.platform, this.arch)
+    const [officialBase, ...mirrorBases] = this.bases(version)
+    const official = await this.fetchIndexOutcome(officialBase, name)
+    let info: LayerIndexInfo | null = official.index ? { index: official.index, source: officialBase } : null
+    // Mirrors only when the official host answered nothing at all; an official
+    // 404 means this release genuinely has no layer set.
+    if (!official.reached) {
+      for (const base of mirrorBases) {
+        const outcome = await this.fetchIndexOutcome(base, name)
+        if (outcome.index) {
+          info = { index: outcome.index, source: base }
+          break
+        }
+        if (outcome.reached) break
+      }
+    }
+    if (!info) {
+      console.warn(`[artifact] no layer index for dsh ${version} on ${this.platform}-${this.arch}`)
+    }
+    return info
+  }
+
+  /**
+   * Fetch and validate one base's layer index. `reached` distinguishes "host
+   * answered HTTP" from "host unreachable" (fetch threw, or a 5xx) with the
+   * same policy as the metadata sidecars, so a sick mirror never ends the chain.
+   * A body that does not validate throws (see fetchLayerIndex).
+   */
+  private async fetchIndexOutcome(
+    base: string,
+    name: string,
+  ): Promise<{ reached: boolean; index: LayerIndex | null }> {
+    const url = `${base}/${name}`
+    let res: Response
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+    } catch (err) {
+      console.warn(`[artifact] layer index fetch failed for ${url}: ${(err as Error).message}`)
+      return { reached: false, index: null }
+    }
+    if (res.status >= 500) {
+      console.warn(`[artifact] layer index unavailable (HTTP ${res.status}) for ${url}`)
+      return { reached: false, index: null }
+    }
+    if (!res.ok) return { reached: true, index: null }
+    let body: unknown
+    try {
+      body = await res.json()
+    } catch (err) {
+      throw new Error(t('kernel.layerIndex.invalidJson', { label: url, detail: (err as Error).message }))
+    }
+    return { reached: true, index: parseLayerIndex(body, url) }
   }
 
   /**

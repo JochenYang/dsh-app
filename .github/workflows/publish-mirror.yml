@@ -41,8 +41,9 @@ name: publish-mirror
 #   run and the release is already published when it starts.
 # - Success / skip / failure plus the backfill command are written to
 #   $GITHUB_STEP_SUMMARY (AGENTS.md §10).
-# - runtime-* releases are published too (they are created as prereleases), and
-#   the tag filter below keeps them out: only v* shell releases are mirrored.
+# - runtime-* releases are published too, and they are mirrored by the separate
+#   `mirror-runtime` job below. They are NOT let into the `mirror` job: see the
+#   RUNTIME MIRROR section for why the two need different preconditions.
 #
 # THE MIRROR LOGIC LIVES IN .github/scripts/mirror_release.py, not in inline
 # heredocs: upload + index rebuild + retention pruning share one config reader,
@@ -65,6 +66,47 @@ name: publish-mirror
 #                       plan; write nothing.
 #   PRUNE_MODE=off      never prune versions; the latest cleanup below still runs
 #                       (it is not a retention rule).
+#
+# RUNTIME MIRROR (tag `runtime-<dshVersion>`): kernel runtime assets are not
+# shell installers, so they are mirrored on their own path and retained by their
+# own window — nothing below is shared with the shell path:
+#   * path    releases/runtime/<tag>/<asset>, which is exactly the URL the app's
+#             ModelScope candidate resolves (src/kernel/sources/artifact.ts).
+#   * index   releases/versions.json is neither read nor written: runtime assets
+#             have no shell index entry, and a runtime mirror must not be able
+#             to drop a shell version from the updater's index.
+#   * latest  releases/latest/ is the shell's rolling copy of installers and is
+#             out of scope for a runtime tag.
+#   * guard   the runtime delete path has its own positive allowlist
+#             (releases/runtime/<tag>/<file>, flat), disjoint from the shell's,
+#             so neither retention rule can delete the other tree. Anything
+#             else, traversal included, aborts the run.
+#   * window  `keep_runtime_versions` (default 3), independent of
+#             `keep_versions`, ranked by semver over the remote directory
+#             listing (there is no index to rank), and the tag being published is
+#             always kept. PRUNE_MODE carries the same three meanings; `off`
+#             deletes nothing at all for runtime (no latest-cleanup half).
+#   * trigger `release: published` fires once, when release.yml's matrix creates
+#             the tag — before most cells have uploaded. So the trigger is a
+#             one-shot: an asset re-uploaded later (--clobber, idempotent re-run
+#             or a repaired cell) does NOT re-trigger the mirror. Backfill it by
+#             hand: `-f tag=runtime-<dshVersion>`.
+#   * full    no runtime is mirrored from a set that is missing any
+#             RUNTIME_PLATFORMS cell, a sidecar or the version suffix: the app
+#             resolves one URL per cell, so a partial mirror is a 404 that looks
+#             healthy. The runtime job waits for the set (a release event fires
+#             too early); the script refuses an incomplete one, which is what an
+#             early dispatch hits.
+#   * layers  release.yml also publishes the split-runtime layer set (five layer
+#             files per cell plus one `layers-<cell>.json` index each) into the
+#             same release; they ride along with the folder upload and are
+#             validated by the script, which refuses an index that names a layer
+#             the release does not carry. They are deliberately NOT part of the
+#             wait loop's required set: the app falls back to the single tarball
+#             when a release has no layers, and every runtime published before
+#             the split has none — requiring them would strand those. The cost
+#             of the race (a mirror that caught the tgz before the layers) is a
+#             client that downloads the whole tarball, never a broken one.
 #
 # LATEST CLEANUP: releases/latest/ is the rolling copy the updater reads first,
 # and it is NOT a retention concern, so `keep_versions` does not gate it. After
@@ -89,7 +131,11 @@ name: publish-mirror
 # traversal form) is refused with an error and aborts the prune instead of
 # deleting. Each archived version is deleted in its own atomic commit so one
 # failure cannot block the others, and a failed delete keeps its index entry
-# (no 404) for the next run to retry.
+# (no 404) for the next run to retry. The runtime delete path is a third,
+# separate allowlist (releases/runtime/): the shell and runtime prefixes are
+# disjoint by construction, so no shell rule can name a runtime asset and no
+# runtime rule can name a shell asset, and a runtime plan is validated in full
+# before the first commit so a poisoned entry cannot follow a real deletion.
 #
 # Dispatch modes:
 #   mirror   (default) mirror `tag`, then prune by `prune_mode`.
@@ -109,7 +155,13 @@ name: publish-mirror
 #            a stable tag this OVERWRITES the matching releases/latest files
 #            (logged and recorded in the summary); prefer a prerelease tag.
 #            A partial drill also skips pruning: the index it did not rewrite
-#            cannot be kept in sync with the deleted directories.
+#            cannot be kept in sync with the deleted directories. On a runtime
+#            tag it skips the runtime retention for the same reason (the subset
+#            uploaded is not the whole version directory).
+#
+# A dispatch works for either tag shape — `-f tag=vX.Y.Z` and
+# `-f tag=runtime-<dshVersion>` both go through the `mirror` job, where the
+# script routes by tag shape; no mode has to be picked.
 #
 # Note: a release published by the workflow's own GITHUB_TOKEN does not trigger
 # workflows, so the draft flip must be performed by a user credential — which
@@ -132,7 +184,7 @@ on:
           - diagnose
           - prune-probe
       tag:
-        description: 'Release tag to mirror (e.g. v0.11.7); required for mode=mirror'
+        description: 'Release tag to mirror (e.g. v0.11.7 for a shell release, runtime-0.1.5-rc.2 for kernel runtime assets); required for mode=mirror'
         required: false
         type: string
       only_pattern:
@@ -143,6 +195,11 @@ on:
         description: 'Prune: versions to keep per channel, stable and prerelease counted separately (default 10)'
         required: false
         default: 10
+        type: number
+      keep_runtime_versions:
+        description: 'Prune (runtime-* tags only): kernel runtime versions to keep, independent of keep_versions (default 3)'
+        required: false
+        default: 3
         type: number
       prune_mode:
         description: 'Prune: apply = delete expired versions, resync the index and slim latest; dry-run = report the plans only; off = never prune versions (latest is still slimmed)'
@@ -184,6 +241,14 @@ jobs:
       # rehearse with dry-run or disable the version prune entirely (off) —
       # latest is still slimmed either way.
       KEEP_VERSIONS: ${{ inputs.keep_versions }}
+      # Only a runtime tag reads these two (see the RUNTIME MIRROR section); they
+      # are set here, not in the runtime job, because a dispatch backfills either
+      # tag shape through THIS job — and the matrix check is what keeps a
+      # mid-matrix backfill from publishing a version with four cells missing.
+      # KEEP THE PLATFORM LIST IN SYNC with the runtime job below, release.yml's
+      # resolve job and the backend matrix in that same file.
+      RUNTIME_PLATFORMS: 'win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64'
+      KEEP_RUNTIME_VERSIONS: ${{ inputs.keep_runtime_versions }}
       PRUNE_MODE: ${{ inputs.prune_mode }}
     steps:
       # The token gate lives here, not in the workflow triggers, so a missing
@@ -271,3 +336,141 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/ms-env/bin/python3" .github/scripts/mirror_release.py prune-probe
+
+  # Kernel runtime assets (releases/runtime/<tag>/) — a separate job, because a
+  # runtime release needs a precondition the shell path never has:
+  # release.yml's six-cell matrix creates the `runtime-<dshVersion>` release
+  # --prerelease (published immediately, so `release: published` fires at that
+  # instant) and keeps uploading assets for tens of minutes afterwards, whereas
+  # a shell release is immutable at the draft-flip moment this workflow hooks.
+  # Mirroring a half-uploaded runtime would publish a mirror whose missing cells
+  # answer 404 while looking healthy — the app resolves one URL per cell — so
+  # this job waits for the full 18-asset set first, and the script independently
+  # refuses a set that is missing any RUNTIME_PLATFORMS cell (which is what
+  # protects the dispatch path through the `mirror` job too). The `mirror` job's
+  # filter is NOT widened: it stays `v*` for a release event, and a runtime
+  # release can never enter it. Dispatch needs no new mode either -
+  # `-f tag=runtime-...` runs the `mirror` job, where the script routes by tag
+  # shape and checks the same matrix.
+  #
+  # Retention uses the script's own defaults for a release-triggered run: keep
+  # the newest 3 runtime versions (KEEP_RUNTIME_VERSIONS) and prune for real.
+  # A dispatch can rehearse or change the window (`-f tag=runtime-...
+  # -f prune_mode=dry-run -f keep_runtime_versions=5`), and it goes through the
+  # `mirror` job above, which is where those inputs are wired.
+  mirror-runtime:
+    name: modelscope mirror (runtime)
+    runs-on: ubuntu-latest
+    # 45 min of waiting for the matrix plus a ~2.5 GB upload; the bound exists so
+    # a stuck run cannot hold the shared concurrency slot for 6 hours.
+    timeout-minutes: 180
+    if: ${{ github.event_name == 'release' && github.event.release && !github.event.release.draft && startsWith(github.event.release.tag_name, 'runtime-') }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+      MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
+      # Pinned deliberately: same SDK version as the shell job (header comment).
+      MODELSCOPE_SDK_VERSION: '1.40.0'
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      # The six cells release.yml builds; the same list is asserted there. Keep
+      # in sync with the `mirror` job's copy (which is what a dispatch uses).
+      RUNTIME_PLATFORMS: 'win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64'
+      # Bounded wait for the asset set. A cell that fails leaves the set
+      # permanently incomplete, which must stay visible (red) instead of being
+      # mirrored as a subset.
+      RUNTIME_WAIT_SECONDS: '2700'
+    steps:
+      - name: Skip mirror (MODELSCOPE_TOKEN not set)
+        if: ${{ env.MODELSCOPE_TOKEN == '' }}
+        run: |
+          set -euo pipefail
+          echo "::notice title=ModelScope runtime mirror skipped::MODELSCOPE_TOKEN is not set; the mirror is optional and the release is unaffected."
+          {
+            echo '### ModelScope mirror (runtime): SKIPPED'
+            echo ''
+            echo '- Reason: `MODELSCOPE_TOKEN` is not configured for this repository.'
+            echo '- Effect: none on the GitHub Release; ModelScope keeps the previous runtime.'
+            echo "- Backfill once the secret exists: \`gh workflow run publish-mirror.yml -f tag=${RELEASE_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v5
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+
+      # Wait, do not guess: only a complete asset set is mirrored. release.yml's
+      # resolve job asserts the same 18 names before it will reuse a runtime, so
+      # "complete" here means the same thing the app needs from the mirror.
+      - name: Wait for the runtime asset set
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#runtime-}"
+          DEADLINE=$(( SECONDS + RUNTIME_WAIT_SECONDS ))
+          echo "waiting for ${RUNTIME_PLATFORMS// /, } assets of ${RELEASE_TAG}"
+          while :; do
+            ASSETS="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            MISSING=""
+            for platform in $RUNTIME_PLATFORMS; do
+              for name in "dsh-runtime-${platform}-${VERSION}.tgz" \
+                          "dsh-runtime-${platform}-${VERSION}.tgz.sha512" \
+                          "manifest-${platform}.json"; do
+                if ! grep -qxF "$name" <<< "$ASSETS"; then
+                  MISSING="${MISSING} ${name}"
+                fi
+              done
+            done
+            if [ -z "$MISSING" ]; then
+              echo "${RELEASE_TAG} is complete (${RUNTIME_PLATFORMS} x 3 assets)"
+              break
+            fi
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error title=Runtime assets incomplete::${RELEASE_TAG} is still missing${MISSING} after ${RUNTIME_WAIT_SECONDS}s; refusing to mirror a partial runtime."
+              {
+                echo '### ModelScope mirror (runtime): FAILED'
+                echo ''
+                echo "- Reason: \`${RELEASE_TAG}\` is still missing assets after ${RUNTIME_WAIT_SECONDS}s:"
+                echo ''
+                for missing in $MISSING; do echo "- \`${missing}\`"; done
+                echo ''
+                echo '- Reading: a runtime release is created by whichever matrix cell wins the'
+                echo '  create race and completed by the other five. An asset that never arrives'
+                echo '  means a failed cell in release.yml — fix that and re-run the matrix, then'
+                echo "  backfill: \`gh workflow run publish-mirror.yml -f tag=${RELEASE_TAG}\`"
+                echo '- Nothing was uploaded and nothing was deleted by this run.'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "still missing${MISSING}; waiting"
+            sleep 60
+          done
+
+      - name: Download release assets
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          echo "Downloading assets of ${RELEASE_TAG} from ${GITHUB_REPOSITORY}"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets --pattern '*'
+          du -sh release-assets
+
+      - name: Install ModelScope SDK
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/ms-env"
+          "$RUNNER_TEMP/ms-env/bin/pip" install -q --disable-pip-version-check \
+            "modelscope==${MODELSCOPE_SDK_VERSION}"
+          "$RUNNER_TEMP/ms-env/bin/python3" -c \
+            "from modelscope import __version__; print('modelscope', __version__)"
+
+      - name: Mirror runtime assets to ModelScope via SDK
+        if: ${{ env.MODELSCOPE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          # The runtime path, the independent retention window and both delete
+          # guards live in the script (mirror_release.py, the "Runtime artifacts"
+          # section), which routes `mirror` by tag shape: this step is the same
+          # subcommand the shell release uses.
+          "$RUNNER_TEMP/ms-env/bin/python3" .github/scripts/mirror_release.py mirror

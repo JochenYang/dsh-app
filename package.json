@@ -18,6 +18,8 @@
     "test": "npm run build && node --test \"test/*.test.mjs\"",
     "verify": "node scripts/smoke-suite.mjs",
     "check:plugins": "node scripts/check-plugin-compat.mjs",
+    "check:graph": "node scripts/check-plugin-graph.mjs",
+    "smoke:package": "node scripts/smoke-package.mjs",
     "dist": "npm run build && node scripts/prepare-bundled-kernel.mjs && electron-builder",
     "dist:win": "npm run build && node scripts/prepare-bundled-kernel.mjs win32 && electron-builder --win",
     "dist:mac": "npm run build && node scripts/prepare-bundled-kernel.mjs darwin && electron-builder --mac",

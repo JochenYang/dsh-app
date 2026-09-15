@@ -176,6 +176,14 @@ jobs:
         with:
           node-version: 22
 
+      # build-runtime.mjs assembles the kernel with pnpm (≥10 is asserted, and a
+      # too-old one fails the build loudly). The runner's preinstalled pnpm
+      # changes with the image, so pin it here rather than inherit whatever the
+      # image happens to carry: an image bump must not be able to fail a release.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
       # build-runtime.mjs imports `tar` from the root package; the runner is a
       # clean checkout, so install root deps before running it.
       - name: Install dependencies
@@ -228,6 +236,32 @@ jobs:
           # last-writer's platform in the shared name.
           cp runtime-dist/manifest.json "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
           gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 "runtime-dist/manifest-${PLATFORM}-${ARCH}.json" --clobber
+
+      # Split the tgz into cacheable layers for the client's incremental path
+      # (a dsh bump then downloads the ~10 MiB `dsh` layer instead of ~96 MiB).
+      # Deliberately AFTER the single tgz is attached: the tgz is the only
+      # artifact an older client can consume and the fallback for every client
+      # when anything here fails, so a split fault must fail the cell — loudly,
+      # on purpose — but never after keeping the tgz out of the release. The
+      # script re-assembles what it emitted and refuses a set that does not
+      # reproduce the input tree.
+      - name: Split runtime into layers
+        shell: bash
+        run: node scripts/split-runtime-layers.mjs runtime-dist/dsh-runtime-*.tgz --out runtime-dist/layers
+
+      - name: Attach layers to release
+        shell: bash
+        env:
+          TAG: runtime-${{ steps.runtime.outputs.dsh_version }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Layer names already carry platform/arch; the INDEX name must too —
+          # six cells build the same layers.json, and a shared name would leave
+          # the last writer's platform in every cell's index. Keep the name in
+          # sync with layerIndexAssetName() in src/kernel/layers.ts.
+          cp runtime-dist/layers/layers.json "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json"
+          gh release upload "$TAG" runtime-dist/layers/*.tgz "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json" --clobber
 
       # Also expose the tgz as a workflow artifact so the app job can bundle it
       # into the installer without re-downloading from the (still-draft) release.
@@ -365,6 +399,14 @@ jobs:
           else
             npx electron-builder --linux --x64 --publish always
           fi
+
+      # Assert what was actually packaged, before anything is published. A
+      # missing asar entry, a stale file left under dist/static, or an installer
+      # without the bundled kernel's adoption metadata all build green and only
+      # surface as a broken first launch. Auto-detects the unpacked output for
+      # this platform/arch (see scripts/smoke-package.mjs).
+      - name: Smoke the packaged app
+        run: node scripts/smoke-package.mjs
 
   # ModelScope mirroring deliberately does NOT live here. The mirror must run
   # only after a human flips the draft to published, and no job in this file can

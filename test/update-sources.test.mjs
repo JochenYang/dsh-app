@@ -11,12 +11,12 @@ import { test } from 'node:test'
 const require = createRequire(import.meta.url)
 const {
   DOWNLOAD_TIMEOUT_MS,
-  MANUAL_DOWNLOAD_HINT,
   assetCandidates,
   downloadWithFallback,
   fetchAndParseLatest,
   isSafeVersion,
   latestYamlCandidates,
+  manualDownloadHint,
   modelscopeReleaseFileUrl,
   parseLatestYaml,
   pickAsset,
@@ -161,8 +161,10 @@ test('every source failing returns null and the error hint points at the mirror 
     globalThis.fetch = realFetch
   }
   assert.equal(MODELSCOPE_RELEASES_URL, `${MODELSCOPE_ENDPOINT}/models/${MODELSCOPE_REPO}/files`)
-  assert.ok(MANUAL_DOWNLOAD_HINT.includes('镜像'), 'hint mentions the mirror')
-  assert.ok(MANUAL_DOWNLOAD_HINT.includes(MODELSCOPE_RELEASES_URL), 'hint carries the mirror address')
+  // The hint is localized, so it is a call now, not a constant; the zh-CN run
+  // (no DSH_APP_LOCALE, no Electron) is what these assertions pin.
+  assert.ok(manualDownloadHint().includes('镜像'), 'hint mentions the mirror')
+  assert.ok(manualDownloadHint().includes(MODELSCOPE_RELEASES_URL), 'hint carries the mirror address')
 })
 
 // ------------------------------------------------- asset download failure path
@@ -188,7 +190,7 @@ test('every asset candidate failing surfaces the mirror manual-download address'
       () => downloadWithFallback(candidates, dest, sha512b64('payload'), () => {}),
       (err) => {
         assert.ok(err.message.includes('无法从任何源下载更新包'), 'reports that every source failed')
-        assert.ok(err.message.includes(MANUAL_DOWNLOAD_HINT), 'carries the actionable hint')
+        assert.ok(err.message.includes(manualDownloadHint()), 'carries the actionable hint')
         assert.ok(err.message.includes(MODELSCOPE_RELEASES_URL), 'names the mirror manual-download address')
         return true
       },

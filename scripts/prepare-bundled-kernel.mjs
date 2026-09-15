@@ -58,10 +58,18 @@ async function main() {
   await copyFile(path.join(runtimeDist, sha), path.join(bundled, 'kernel.tgz.sha512'))
   // The patched manifest (real sha512 integrity) ships alongside so the shell
   // can version-check the bundle at boot without extracting the tarball.
+  // Missing metadata is fatal, not skipped: the boot check requires all three
+  // files, so an installer without manifest.json silently never adopts the
+  // bundled runtime — a same-version suite change would not land and the whole
+  // suite would boot vanilla, which is the incident the check exists for.
   const manifestSrc = path.join(runtimeDist, 'manifest.json')
-  if (existsSync(manifestSrc)) {
-    await copyFile(manifestSrc, path.join(bundled, 'manifest.json'))
+  if (!existsSync(manifestSrc)) {
+    console.error(`Missing ${manifestSrc}.`)
+    console.error('The bundled kernel would ship without adoption metadata. Run `npm run runtime:build`')
+    console.error('(or restore the CI runtime artifact) and retry.')
+    process.exit(1)
   }
+  await copyFile(manifestSrc, path.join(bundled, 'manifest.json'))
 
   console.log(`bundled kernel: ${tgz} -> bundled-kernel/kernel.tgz (+ .sha512 + manifest.json)`)
 }

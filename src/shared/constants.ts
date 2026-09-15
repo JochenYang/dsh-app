@@ -39,6 +39,20 @@ export const KERNEL_ROOT_DIR = 'kernel'
 export const CURRENT_FILE = 'current.json'
 export const STAGING_DIR = 'staging'
 export const TARBALL_FILE = 'runtime.tgz'
+/**
+ * Layer cache (under the kernel root): the split runtime's layer tarballs,
+ * named by their cache key. Never swept as a version directory — it survives
+ * cleanup() so an update only fetches the layers that actually changed.
+ */
+export const LAYERS_DIR = 'layers'
+/** Layer index file shipped beside the layer tarballs. */
+export const LAYER_INDEX_FILE = 'layers.json'
+/**
+ * Subdirectory of `STAGING_DIR` holding in-flight layer downloads. A layer
+ * enters the cache only by an atomic rename out of here, so a half-written or
+ * unverified file can never be mistaken for a cache entry.
+ */
+export const LAYER_STAGING_DIR = 'layers'
 
 /** How often to poll for kernel updates while running. */
 export const KERNEL_CHECK_INTERVAL_MS = 1000 * 60 * 60 * 6 // 6 hours

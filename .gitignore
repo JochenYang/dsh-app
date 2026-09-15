@@ -7,6 +7,7 @@ dist/
 release/
 runtime-dist/
 bundled-kernel/
+runtime-layers/
 plugins/*/lib/
 plugins/*/.test-dist/
 

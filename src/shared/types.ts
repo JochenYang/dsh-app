@@ -14,14 +14,41 @@ export type KernelPhase =
   | 'rollback'
   | 'error'
 
+/**
+ * Splash progress steps, 1-based, in the order static/startup.html lists them:
+ * 1 prepare (check/verify/download), 2 extract, 3 activate, 4 start the server,
+ * 5 open the interface. A step is a property of the MESSAGE, not of the phase —
+ * 'extracting' covers both the tarball and the layer path, and only one of them
+ * reports progress — so the producer states it (see `step`).
+ */
+export type KernelStatusStep = 1 | 2 | 3 | 4 | 5
+
 export interface KernelStatusPayload {
   phase: KernelPhase
-  /** 用户可见文案（zh-CN，由调用方直接展示）。 */
+  /**
+   * User-visible status line, localized by whoever produced it: every producer
+   * (the shell in src/main, the kernel runtime manager in src/kernel) writes its
+   * line through `shared/locale.ts`, in the language of the running process.
+   */
   message: string
   /** 0..1 download/extract progress, or null when indeterminate. */
   progress: number | null
   /** Set when phase === 'error'. */
   error?: string
+  /**
+   * True while the user has paused a download. The phase deliberately stays
+   * 'downloading' (the transfer is suspended, not failed, and no renderer
+   * branches on a paused phase); `paused` is additive, so a renderer that
+   * ignores it keeps showing the frozen progress. Absent on every other status.
+   */
+  paused?: boolean
+  /**
+   * Which splash step this line belongs to (see {@link KernelStatusStep}), when
+   * the producer knows. The splash prefers it over matching the wording, which
+   * only ever worked in zh-CN; absent means "unknown", and the splash then keeps
+   * the step it is on.
+   */
+  step?: KernelStatusStep
 }
 
 /**
@@ -47,6 +74,15 @@ export interface KernelManifest {
    */
   publishedAt?: string
   source: KernelSource
+}
+
+/**
+ * One layer file an install was assembled from: the cache key (file name) plus
+ * the digest it was verified against, kept for provenance.
+ */
+export interface KernelLayerRef {
+  name: string
+  sha512: string
 }
 
 /** Points at the active (and previous, for rollback) kernel directory. */
@@ -75,6 +111,14 @@ export interface CurrentKernel {
    * treating the second as drift downgrades the user's kernel.
    */
   bundledStamp?: string
+  /**
+   * Layer files this install was assembled from, recorded for provenance when
+   * the kernel came from a split-layer install (`installFromLocalLayers`, or the
+   * online layer path). ABSENT on tgz installs and on every record written
+   * before layers existed — readers must treat a missing field as "no layer
+   * provenance", never as a broken record (rollback and load stay unchanged).
+   */
+  layers?: KernelLayerRef[]
 }
 
 export interface UpdateCheckResult {
