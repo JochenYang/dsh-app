@@ -43,7 +43,7 @@ import net from 'node:net'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
-const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf']
+const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch']
 const FIXTURE = path.join(root, 'scripts', 'fixtures', 'minimal-mcp-server.mjs')
 const MCP_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
 
@@ -301,6 +301,44 @@ async function postJson(base, route, body) {
 }
 
 /**
+ * Web search verification: the plugin must load inside the composed tree, its
+ * routes must answer, and a REAL search must come back through `ctx.web` —
+ * the same path the model's `web_search` tool takes. Only Bing is asserted to
+ * return sources: it is the chain's default first engine and the only one of
+ * the six with no rate limit or configuration requirement, so requiring all
+ * six would make this probe flaky for reasons unrelated to the plugin.
+ */
+async function probeWebSearch(base) {
+  const WS = '/plugins/@dsh-app/plugin-websearch/api'
+  const config = await getJson(base, `${WS}/config`)
+  const view = config.body?.value
+  check('websearch: config route answers ok', config.status === 200 && config.body?.ok === true, `HTTP ${config.status}`)
+  check('websearch: ctx.web seam is available', view?.seamAvailable === true)
+  check('websearch: five engines registered',
+    Array.isArray(view?.engines) && view.engines.length === 5,
+    `got ${view?.engines?.length ?? 0}`)
+  check('websearch: provider defaults to the brand chain', view?.file?.provider === 'dsh-app', `got ${view?.file?.provider}`)
+  // Both provider choices must carry an explicit state: a UI that cannot tell
+  // the user a source is unusable lets them select it and fail every search.
+  const providers = view?.providers ?? []
+  check('websearch: both providers report a state',
+    providers.length === 2 && providers.every(p => ['ready', 'unavailable', 'unknown'].includes(p.state)),
+    providers.map(p => `${p.id}=${p.state}`).join(', ') || 'none')
+
+  const probe = await postJson(base, `${WS}/engine/test`, { id: 'bing', query: 'DeepSeek Harness' })
+  const bing = probe.body?.value?.results?.find(row => row.id === 'bing')
+  check('websearch: bing engine returns sources (real network)', bing?.ok === true && (bing?.resultCount ?? 0) > 0,
+    bing?.ok === true ? `${bing.resultCount} sources / ${bing.latencyMs}ms` : (bing?.error ?? 'no result row'))
+
+  const selftest = await postJson(base, `${WS}/selftest`, { query: 'DeepSeek Harness' })
+  const st = selftest.body?.value
+  check('websearch: search through ctx.web resolves to the brand provider',
+    st?.provider === 'dsh-app', `provider=${st?.provider ?? 'none'}`)
+  check('websearch: search through ctx.web returns sources',
+    (st?.resultCount ?? 0) > 0, `${st?.resultCount ?? 0} sources${st?.error === undefined ? '' : ` err=${st.error}`}`)
+}
+
+/**
  * End-to-end dynamic-mount verification: create → poll for mounted+tools →
  * delete → confirm gone. Uses a throwaway serverName so a re-run is clean.
  */
@@ -540,7 +578,7 @@ async function main() {
     const html = index.text
     // Every suite plugin with a dsh.client half (package.json dsh.client +
     // lib/client.js); host-only plugins (brand, fff) are absent by design.
-    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks', '@dsh-app/plugin-ppt', '@dsh-app/plugin-market', '@dsh-app/plugin-presets', '@dsh-app/plugin-doc', '@dsh-app/plugin-sheet', '@dsh-app/plugin-pdf']
+    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks', '@dsh-app/plugin-ppt', '@dsh-app/plugin-market', '@dsh-app/plugin-presets', '@dsh-app/plugin-doc', '@dsh-app/plugin-sheet', '@dsh-app/plugin-pdf', '@dsh-app/plugin-websearch']
     check('client: boot graph lists suite client packages',
       index.status === 200 && suiteClientPackages.every(id => html.includes(id)),
       `HTTP ${index.status}; ids found: ${suiteClientPackages.filter(id => html.includes(id)).join(',') || 'none'}`)
@@ -548,11 +586,13 @@ async function main() {
     check('client: combo bundle URL advertised', typeof combo === 'string')
     if (typeof combo === 'string') {
       check('client: combo bundle includes plugin-mcp', combo.includes('@dsh-app/plugin-mcp/client.js'))
+      check('client: combo bundle includes plugin-websearch', combo.includes('@dsh-app/plugin-websearch/client.js'))
       const served = await getJson(base, combo)
       check('client: combo bundle serves 200', served.status === 200, `HTTP ${served.status} for ${combo.slice(0, 120)}`)
     }
 
     await probeMcpChain(base)
+    await probeWebSearch(base)
 
     // Hooks bridge dynamic-mount chain: create a claude-code bridge pointing
     // at the fixture hooks.json → mounted → disable → delete.

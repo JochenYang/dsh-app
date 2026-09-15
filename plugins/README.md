@@ -1,6 +1,6 @@
 # DSH APP — brand plugin suite
 
-The suite is sixteen dsh plugins that layer on top of upstream dsh **without
+The suite is seventeen dsh plugins that layer on top of upstream dsh **without
 forking it**. This is what keeps the desktop app updateable: when upstream dsh
 releases a new version, the shell swaps the kernel and these plugins keep
 working.
@@ -25,6 +25,7 @@ working.
 | `plugin-doc` | dual | Word documents: `doc_write`/`doc_check`/`doc_render` tools over a validated JSON document project, rendered to an editable `.docx`; Word capsule in the shared office bar |
 | `plugin-sheet` | dual | Excel workbooks: `sheet_write`/`sheet_check`/`sheet_render` tools over a validated JSON workbook project, rendered to an editable `.xlsx` with formulas; Excel capsule in the shared office bar |
 | `plugin-pdf` | dual | PDF mode: `pdf_read` extracts text/metadata from workspace PDFs for the agent, `pdf_write`/`pdf_check`/`pdf_render` produce a paginated, rule-checked PDF with an embedded CJK font subset; PDF capsule in the shared office bar |
+| `plugin-websearch` | dual | web search manager: registers ONE `ctx.web` search provider (`dsh-app`) whose engine chain (Bing / AnySearch / SearXNG / Exa / Parallel) falls back automatically, plus a settings-page section that orders engines, stores keys and switches between the brand chain and the upstream DeepSeek provider — each side showing its own availability so the switch never silently fails. The model-facing `web_search` tool stays upstream's — only the provider behind it changes. Replaces the hand-written `dsh-free-search` + exa/parallel MCP overlay rows |
 
 The roster lives in the places listed below that must stay in sync — `SUITE_PLUGIN_DIRS`
 (src/main/brand-suite.ts), the overlay rows in `dsh-app.patch.yml`,
@@ -39,5 +40,5 @@ kernel contains dsh + the suite in one immutable directory. Once the suite is
 published to npm, switch those references to version ranges.
 
 The loader overlay (`dsh-app.patch.yml`) is copied into userData at server
-start and passed to `dsh web --patch ...`; it inserts all sixteen suite entries
+start and passed to `dsh web --patch ...`; it inserts all seventeen suite entries
 after every bundle layer and the profile's own patch (last write wins).

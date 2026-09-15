@@ -71,6 +71,15 @@
 #   fenced to the kernel's own roster rules; conflicts need an explicit
 #   overwrite confirmation. Failures degrade to per-request errors and never
 #   fail the boot.
+# - websearch: web search manager — registers ONE ctx.web search provider
+#   whose engine chain (Bing / DuckDuckGo / SearXNG / Exa / Parallel) falls
+#   back automatically, plus a settings-page section that orders engines,
+#   stores keys and switches between the brand chain and the upstream
+#   DeepSeek provider. The model-facing web_search tool is upstream's and is
+#   never replaced: only the provider behind it changes. User state lives in
+#   $DSH_HOME/storages/dsh-app-plugin-websearch/config.json (the overlay is
+#   rewritten by the shell on every start). Engine failures are contained per
+#   engine by the chain and never fail the boot.
 
 - insert:
     - id: brand
@@ -166,6 +175,28 @@
 
     - id: pdf
       name: '@dsh-app/plugin-pdf'
+
+    - id: websearch
+      name: '@dsh-app/plugin-websearch'
+
+# Web search seam: point BOTH capabilities at the suite's provider.
+#
+# This row is written as a PAIR on purpose. Patch semantics REPLACE the whole
+# config object rather than merging into it (learned on dsh 0.1.2+), so a row
+# that names only `searchProvider` silently drops `fetchProvider` — the fetch
+# provider then gets re-registered by another layer and the composed tree dies
+# on a duplicate loader entry, taking `web_fetch` down with it.
+#
+# `searchProvider: dsh-app` is the plugin's own engine chain (Bing / DDG /
+# SearXNG / Exa / Parallel with automatic fallback). The upstream DeepSeek
+# provider stays mounted and registered; the settings page switches between
+# the two at runtime by rewriting this field, so a user can compare them
+# without editing this file or restarting. Setting it back to
+# `deepseek-official` here restores the stock behavior.
+- id: web
+  config:
+    searchProvider: dsh-app
+    fetchProvider: http
 
 # Session full-text search: override the base/web-app row's openAt from
 # 'never' to 'first-search' (the sqlite handle is created lazily on the

@@ -53,6 +53,7 @@ export const SUITE_PLUGINS = [
   '@dsh-app/plugin-doc',
   '@dsh-app/plugin-sheet',
   '@dsh-app/plugin-pdf',
+  '@dsh-app/plugin-websearch',
 ]
 
 function readJson(file) {

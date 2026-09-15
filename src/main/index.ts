@@ -7,6 +7,7 @@ import { KernelManager } from '../kernel/manager'
 import { DshServer } from './server'
 import { isSafeModeEnabled, setSafeMode } from './safe-mode'
 import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
+import { detectLocalProxy, isProxyAlive, withDetectedProxy } from './proxy-detect'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
 import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies, updateServerOrigin } from './window'
 import { CLOSE_DIALOG_SCRIPT, type CloseDialogChoice } from './close-dialog'
@@ -40,6 +41,15 @@ let restartAttempts = 0
 let bundledReinstallTried = false
 /** Safe-mode marker read once per run; toggling always relaunches the app. */
 let safeModeActive = false
+/**
+ * The proxy URL injected into the kernel at the last successful start, or
+ * undefined when none was. The watchdog below only ever acts on a proxy THIS
+ * shell injected: a proxy the user exported themselves is their business, and
+ * restarting on its disappearance would fight their setup.
+ */
+let injectedProxyUrl: string | undefined
+/** Interval handle for the proxy watchdog; cleared on quit. */
+let proxyWatchdog: NodeJS.Timeout | undefined
 
 // --------------------------------------------------------------- helpers
 
@@ -55,6 +65,55 @@ function findFreePort(): Promise<number> {
 }
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * How often to re-check that an injected proxy is still listening.
+ *
+ * The proxy is installed into the kernel's undici dispatcher ONCE at boot, so
+ * a proxy that disappears afterwards leaves every outbound request — including
+ * ones that should go direct — pointed at a closed port. Restarting the server
+ * re-runs the boot path, which re-probes and re-decides.
+ *
+ * The interval is a compromise: short enough that a user who closes their VPN
+ * notices quickly, long enough that the probe (a TCP connect to loopback) is
+ * negligible. A missed detection costs one interval of failed requests.
+ *
+ * `DSH_APP_PROXY_WATCHDOG_MS` overrides it, which is how the probe script
+ * exercises the restart path without waiting half a minute.
+ */
+const PROXY_WATCHDOG_INTERVAL_MS = Number(process.env.DSH_APP_PROXY_WATCHDOG_MS ?? 30_000)
+
+/**
+ * Start watching the injected proxy.
+ *
+ * Acts ONLY when this shell injected a proxy and that proxy has stopped
+ * accepting connections. Two cases are deliberately ignored:
+ * - No proxy was injected: there is nothing to invalidate, and the kernel may
+ *   be working fine on a direct connection.
+ * - The user exported their own proxy: it is not ours to second-guess.
+ */
+function startProxyWatchdog(): void {
+  if (proxyWatchdog !== undefined) return
+  proxyWatchdog = setInterval(() => {
+    void (async () => {
+      const url = injectedProxyUrl
+      if (url === undefined || quitting) return
+      if (await isProxyAlive(url)) return
+      logKernel(`[kernel] injected proxy ${url} is no longer listening; restarting server to re-detect`)
+      injectedProxyUrl = undefined
+      await startServerAndOpenWindow()
+    })().catch((error: unknown) => {
+      logKernel(`[kernel] proxy watchdog failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }, PROXY_WATCHDOG_INTERVAL_MS)
+}
+
+/** Stop the watchdog (quit path). */
+function stopProxyWatchdog(): void {
+  if (proxyWatchdog === undefined) return
+  clearInterval(proxyWatchdog)
+  proxyWatchdog = undefined
+}
 
 function broadcastStatus(status: KernelStatusPayload): void {
   // Safe-mode tag: the steady-state labels (tooltip + ready card) must tell
@@ -259,8 +318,26 @@ async function startServerAndOpenWindow(): Promise<void> {
   if (scrubbed.removed.length > 0) {
     logKernel(`[kernel] env scrubbed: ${scrubbed.removed.join(', ')}`)
   }
+  // Proxy auto-detection: a VPN client in TUN/fake-IP mode makes every
+  // hostname resolve into 198.18.0.0/15, which the kernel's fetch provider
+  // refuses as a non-public address. Telling the kernel about a LISTENING
+  // proxy lets it take the proxied branch (the proxy does the DNS, so the
+  // check is skipped by design). Probing first is what keeps the other state
+  // working: with the VPN off, injecting a dead proxy URL would send every
+  // request to a closed port instead.
+  const detectedProxy = await detectLocalProxy()
+  const { env: kernelEnv, injected } = withDetectedProxy(scrubbed.env, detectedProxy)
+  // Record what THIS shell injected so the watchdog can act on it later. A
+  // proxy the user exported is deliberately not recorded: it is not ours to
+  // re-evaluate, and restarting on its disappearance would fight their setup.
+  injectedProxyUrl = injected ? detectedProxy : undefined
+  if (injected) {
+    logKernel(`[kernel] local proxy detected at ${detectedProxy ?? ''}; injecting proxy env`)
+  } else if (detectedProxy === undefined) {
+    logKernel('[kernel] no local proxy listening; kernel runs without proxy env')
+  }
   try {
-    await server.start(kernel.getServerSpec(), port, DEFAULT_HTTP_HOST, overlays, scrubbed.env)
+    await server.start(kernel.getServerSpec(), port, DEFAULT_HTTP_HOST, overlays, kernelEnv)
   } catch (err) {
     await handleServerDown(`启动失败：${(err as Error).message}`)
     return
@@ -307,6 +384,10 @@ async function startServerAndOpenWindow(): Promise<void> {
   void kernel.cleanup()
   broadcastStatus({ phase: 'ready', message: '就绪', progress: null })
   updateTrayMenu()
+  // A healthy start is the only point where watching makes sense: the server
+  // is up, the kernel has a dispatcher, and any proxy this shell injected is
+  // now load-bearing. Starting the watchdog earlier would race the boot.
+  startProxyWatchdog()
 }
 
 async function handleServerDown(reason: string): Promise<void> {
@@ -722,6 +803,7 @@ if (!gotLock) {
 
   app.on('before-quit', () => {
     quitting = true
+    stopProxyWatchdog()
   })
 
   app.on('will-quit', (event) => {

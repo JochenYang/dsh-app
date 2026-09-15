@@ -50,7 +50,7 @@ src/kernel/      Kernel runtime manager: lifecycle, manifest I/O, integrity,
                  version/artifact resolution sources
 src/shared/      Shared constants + types (imported by main + kernel)
 static/          Setup/install window (first-run UI, zh-CN), no framework
-plugins/         Brand plugin suite (16 plugins, see §6) + dsh-app.patch.yml
+plugins/         Brand plugin suite (17 plugins, see §6) + dsh-app.patch.yml
                  (loader overlay)
 scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
                  release-notes generator (gen-release-notes.mjs)
@@ -193,7 +193,7 @@ after boot and via the tray.
 
 ## 6. Brand suite wiring (`plugins/`)
 
-Sixteen dsh plugins ship with the product, layered on upstream **without forking
+Seventeen dsh plugins ship with the product, layered on upstream **without forking
 it**. `plugins/README.md` is the authoritative roster — each plugin's side,
 role and status (including which are still scaffolds). Start there when you
 need the list; the five sites it must stay in sync with are under "Suite
@@ -207,7 +207,7 @@ Two seams are stitched at every server start (`brand-suite.ts`):
    sources are the active kernel's `app/node_modules/@dsh-app/*` (npm-installed
    via `file:` references by `scripts/build-runtime.mjs`).
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into `userData`
-   and passed to `dsh web --patch ...`. It inserts all sixteen suite entries
+   and passed to `dsh web --patch ...`. It inserts all seventeen suite entries
    after every bundle layer and the profile's own patch (last write wins per
    row; the upstream Models settings page stays enabled — the brand shadow
    was retired).
@@ -241,6 +241,101 @@ silently for days behind fail-soft catches. After every kernel-line bump,
 verify each suite plugin's behavior **end-to-end at runtime** (a tiny probe
 plugin can drive a real turn and watch the effect), never trust
 compile-green across the plugin/kernel boundary.
+
+### Web search seam (`plugin-websearch`)
+
+Web search is a **three-layer** stack, and the brand suite only owns the
+bottom one:
+
+```
+tool layer      web_search / web_fetch        @deepseek-ai/dsh-tool-web (upstream, never replaced)
+     ↓
+seam            ctx.web                       @deepseek-ai/dsh-web
+     ↓
+provider layer  dsh-app (brand chain)  ←→  deepseek-official (upstream)
+```
+
+Facts worth knowing before touching it:
+
+- **The model-facing tool never changes.** Adding a search "feature" means
+  registering a provider, not a tool. A new tool would give the model two
+  search tools to choose between and lose the upstream result rendering.
+- **One provider per call.** The seam resolves exactly ONE provider
+  (`ctx.web` selection semantics: configured id → that provider; none
+  configured + several usable → `WEB_PROVIDER_AMBIGUOUS`). Multi-engine
+  fallback therefore lives INSIDE the `dsh-app` provider (`chain.ts`), not in
+  N registered providers.
+- **`web_search`'s request type is `{ query, maxResults }`** — nothing else.
+  There is no `timeRange` or `engine` field. Reading one off the request
+  silently yields `undefined` (the `dsh-free-search` plugin reads both), so a
+  time-filtered or engine-pinned search must be a NEW tool, not a provider
+  feature.
+- **The `- id: web` overlay row is a PAIR.** Patch semantics REPLACE the whole
+  config object (dsh 0.1.2+): naming only `searchProvider` drops
+  `fetchProvider`, which makes another layer re-register `web-fetch-http` and
+  kills the composed tree on a duplicate loader entry. Always write both.
+- **The 原生 switch is a runtime field write**, not an overlay edit: the
+  settings page rewrites `ctx.web.searchProviderId` and persists the choice in
+  `$DSH_HOME/storages/dsh-app-plugin-websearch/config.json`. `deepseek-official`
+  stays registered and untouched, so switching back is instant.
+- **Public SearXNG instances mostly disable the JSON API** (it is off by
+  default upstream). They answer HTTP 200 with the HTML page, so a "success"
+  yields zero results. `searxngInstances` therefore ships EMPTY and the engine
+  reports a configuration error — a self-hosted instance is the intended setup.
+- **Public SearXNG instances are effectively unusable for automation.** ~25
+  were probed: nearly all have the JSON API disabled (it is off by default
+  upstream, since it makes the instance trivially scrapable) and answer the
+  HTML page or an anti-bot interstitial instead, several more are
+  proxy-only from the mainland, and the rest rate-limit hard (429). So
+  `searxngInstances` ships EMPTY and the engine reports a configuration error
+  rather than a silent "0 results" — a self-hosted instance with
+  `search.formats: [json]` is the intended setup.
+- **DuckDuckGo was dropped as an engine** (both `html.` and `lite.`): it is
+  proxy-only from mainland China AND rate-limits with a 202 anti-bot page for
+  hours at a time, so it contributed a guaranteed failure to every chain.
+  AnySearch replaced it — a keyless anonymous JSON API that answers directly
+  from the mainland. Re-adding DDG means re-adding a scraper, its parser
+  tests, and its anti-bot detection together.
+- **The 搜索来源 switch reports each side's real state**, never a bare on/off.
+  The upstream provider's registration is read off the seam's own registry
+  (`searchProviders`, an unexported implementation detail, so the read is
+  guarded and degrades to `unknown`). A kernel whose `web-search-deepseek`
+  row is disabled by a patch layer reports 官方 as 不可用 with the reason —
+  otherwise the user selects it and every search fails with
+  `WEB_PROVIDER_CONFIGURED_MISSING`.
+
+### Proxy handling (TUN/fake-IP clients)
+
+A VPN client in TUN mode hijacks DNS so every hostname resolves into
+`198.18.0.0/15` (RFC 2544). `web-fetch-http` validates resolved addresses to
+keep the agent off internal networks, so it refuses those — **unless the
+request goes through a proxy**, in which case the proxy does the DNS and the
+check is skipped by design (`provider.ts` `proxyRouteFor`). Two consequences
+shape the shell's behaviour:
+
+- **The proxy is installed into undici's global dispatcher ONCE, at kernel
+  boot** (`installProxyFromEnvironment` in `profile-boot.ts`), and never
+  re-checked. A proxy that disappears mid-session therefore leaves EVERY
+  outbound request — including ones that should go direct — pointed at a closed
+  port. Measured: `web_fetch`, `web_search` and a direct public-IP fetch all
+  fail with `fetch failed`.
+- **`src/main/proxy-detect.ts` probes before injecting**, so the "no proxy"
+  state works too. Injecting a dead proxy URL unconditionally is what breaks
+  the opposite case.
+
+The watchdog in `index.ts` closes the loop: every
+`PROXY_WATCHDOG_INTERVAL_MS` it re-probes a proxy THIS SHELL injected, and on
+its disappearance restarts the server, which re-runs detection and comes up
+without the proxy. Verified end-to-end: the log shows `injected proxy … is no
+longer listening; restarting server to re-detect` followed by `no local proxy
+listening`. It never touches a proxy the user exported themselves — that one
+is not the shell's to second-guess — and it treats an unparseable URL or a
+non-loopback host as "alive" so it can never restart over a value it cannot
+evaluate.
+
+Note this is only about whether the proxy *socket accepts connections*. It
+cannot tell whether the proxy is *working* (upstream reachable); a proxy that
+accepts connections but fails every request still fails every request.
 
 ## 7. Build, dev & verification commands
 
@@ -288,14 +383,16 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 > `plugins/plugin-usage/tests/`, `plugins/plugin-hooks/tests/`,
 > `plugins/plugin-mcp/tests/`, `plugins/plugin-archives/tests/`,
 > `plugins/plugin-presets/tests/`, `plugins/plugin-doc/tests/`,
-> `plugins/plugin-sheet/tests/` and `plugins/plugin-pdf/tests/`
+> `plugins/plugin-sheet/tests/`, `plugins/plugin-pdf/tests/` and
+> `plugins/plugin-websearch/tests/`
 > (node:test, `npm test` inside each plugin — `scripts/test.mjs` is the shared
 > esbuild + `node --test` wrapper). The shell/kernel have no test
 > runner; verification is `npm run typecheck` + manual run in dev mode.
 > Manual/probe helpers live in `scripts/`: `probe-mirror.mjs`,
 > `probe-drag.cjs` (**keep its CSS in sync with** `src/main/window.ts`
 > `DESKTOP_CHROME_CSS`), `probe-update-card.cjs`, `probe-shell-update.mjs`,
-> `capture.mjs`.
+> `probe-websearch.mjs` (launches a real kernel with the overlay and drives
+> the web search routes incl. a live search through `ctx.web`), `capture.mjs`.
 
 ## 8. Environment variables
 
@@ -308,8 +405,10 @@ node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins excep
 | `DSH_APP_NPM_REGISTRIES` | `sources/registry.ts` | Comma-separated registry chain replacing the default (`npmjs.org` → `npmmirror.com`) |
 | `NPM_CONFIG_REGISTRY` | `sources/registry.ts` | Single-registry override; npmmirror still appended as fallback |
 | `DSH_APP_GITHUB_MIRRORS` | `sources/artifact.ts` | Comma-separated mirror URL prefixes; empty value disables mirrors |
-| `DSH_APP_SUITE_VERSION` | `scripts/kernel-line.mjs`, `dev.ts` | Brand suite version in the runtime manifest (default: content hash of the sixteen plugin versions) |
+| `DSH_APP_SUITE_VERSION` | `scripts/kernel-line.mjs`, `dev.ts` | Brand suite version in the runtime manifest (default: content hash of the seventeen plugin versions) |
 | `DSH_APP_LOG_DIR` | `server.ts`, `index.ts` | Log directory (default: `<userData>/logs`) |
+| `DSH_APP_PROXY_PORTS` | `proxy-detect.ts` | Comma-separated ports to probe for a local proxy, replacing the default list (7897, 7890, 7891, 10809, 10808, 1080, 8080, 2080). Rarely needed — for a proxy on an unusual port |
+| `DSH_APP_PROXY_WATCHDOG_MS` | `index.ts` | Proxy watchdog interval (default `30000`). The probe script lowers it to exercise the restart path |
 | `DSH_HOME` | `brand-suite.ts` | dsh profiles home (default `~/.dsh`) |
 | `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the followed line's dist-tag at build time, then asserted against the followed spec) |
 
