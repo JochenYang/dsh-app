@@ -1,763 +1,364 @@
 # AGENTS.md — DSH APP (dsh-app)
 
-Guidance for AI coding agents working in this repository. Read this first;
-it assumes you know nothing about the project.
+How to work in this repository. Two companions carry the depth —
+`docs/ARCHITECTURE.md` (layers, security posture, packaging) and
+`plugins/README.md` (the authoritative plugin roster) — and **mechanism-level
+detail lives in the code's own JSDoc**: read a module's header comment before
+changing it. When a comment here and the code disagree, re-read the code.
 
-## 1. Project overview
+## 1. Project shape
 
-DSH APP is a **branded desktop client for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)** — an Electron app
-for Windows / macOS / Linux, aimed at public release. MIT.
+DSH APP is a **branded Electron client for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)** —
+Windows / macOS / Linux, public release, MIT. Three ideas govern every change:
 
-The essential design idea is **"self-contained, no fork"**:
+- **Self-contained, no fork.** The app ships and installs its own versioned
+  dsh kernel under `<userData>/kernel/`; it never detects or uses a system
+  `dsh`. All brand functionality is a plugin suite layered on the upstream
+  kernel. The harness is never forked or patched, so an upstream release is
+  just an ordinary kernel update.
+- **Two decoupled update channels**: the Electron shell, and the kernel
+  (`KernelManager`). An upstream dsh release never requires a new shell build.
+- **Mainland China first.** Every network path (npm registries, GitHub
+  assets, installers, Node dist) has a mirror chain, and the primary
+  shell-update source is the ModelScope mirror rather than GitHub. This
+  constraint shapes more code here than anything else.
 
-- The app **ships and installs its own versioned dsh kernel runtime** under
-  `<userData>/kernel/`. It never depends on (or detects) a system-installed
-  `dsh` CLI.
-- All brand functionality is delivered as a **dsh plugin suite layered on the
-  upstream kernel** (`plugins/`). Upstream `dsh` is never forked or patched,
-  so every upstream release is just an ordinary kernel update.
-- There are **two independent update channels**: the Electron shell
-  (Windows: custom latest.yml detection + mirror download + visible NSIS
-  wizard; macOS/Linux: `electron-updater` → GitHub Releases) and the dsh
-  kernel (`KernelManager` → npm registry + `runtime-<version>` GitHub
-  Release artifacts). They are decoupled: an upstream dsh release never
-  requires a new shell build.
-- Kernel updates are **atomic and reversible**: activation is a single atomic
-  rewrite of `current.json`, keeping the previous version for rollback.
+## 2. Stack & layout
 
-Full architecture: `docs/ARCHITECTURE.md` (authoritative). User-facing
-README: `README.md`.
-
-## 2. Technology stack
-
-- **Electron 33** main process (shell), **TypeScript 5.7**, compiled to
-  **CommonJS / ES2022** via `tsc` (`tsconfig.json`). `"main": "dist/main/index.js"`.
-  Deps are minimal by design: `electron-updater`, `semver`, `tar`.
-- **electron-builder 25** for packaging; **esbuild** for the plugin bundles.
-- The **rendered UI is not this repo's code**: the shell spawns the dsh web
-  server and loads its web UI in a sandboxed `BrowserWindow`. The harness
-  lives in a sibling checkout (`../deepseek-harness`) and is built with
-  **pnpm** (development only — production uses a bundled kernel runtime).
-- Node.js 22+ required for development; `npm` for this repo, `pnpm` for the
-  harness checkout.
-
-## 3. Repository layout
+Electron 33 + TypeScript 5.7, compiled to CommonJS/ES2022 by `tsc`.
+electron-builder 25 packages NSIS (win) / dmg+zip (mac) / AppImage+deb (linux),
+x64 + arm64. esbuild 0.28 bundles the plugin halves; `npm` drives this repo,
+`pnpm` the harness checkout. Node 22+.
 
 ```
-src/main/        Electron shell: boot/lifecycle, window, tray, server spawn,
-                 shell updater, IPC, brand-suite wiring
-src/kernel/      Kernel runtime manager: lifecycle, manifest I/O, integrity,
-                 version/artifact resolution sources
-src/shared/      Shared constants + types (imported by main + kernel)
-static/          Setup/install window (first-run UI, zh-CN), no framework
-plugins/         Brand plugin suite (17 plugins, see §6) + dsh-app.patch.yml
-                 (loader overlay)
-scripts/         copy-static, kernel runtime build, mirror probe + dev probes,
-                 release-notes generator (gen-release-notes.mjs)
-CHANGELOG.md     Bilingual version changelog; feeds release-notes generation
-.github/         CI: release.yml (runtime artifact matrix + app builds)
-docs/            ARCHITECTURE.md
-resources/       App icons
-dist/            tsc + copy output (gitignored, generated)
+src/main/     Electron shell: boot/lifecycle, window, tray, server spawn,
+              shell updater, dialogs, safe mode, env scrub, proxy detection
+src/kernel/   Kernel runtime manager: lifecycle, manifest I/O, integrity,
+              version/artifact resolution sources
+src/shared/   Shared constants + types
+plugins/      Brand suite (17 packages) + dsh-app.patch.yml (loader overlay)
+              + build-lib.mjs (shared esbuild recipe)
+scripts/      Build/release tooling + hand-run probes (none run in CI)
+test/         Root node:test suites (require a prior build)
+static/       Empty today; copy-static.mjs still copies it when present
+resources/    App icons (buildResources; window/tray icon source)
+docs/         ARCHITECTURE.md + planning docs
+.github/      workflows/ + scripts/ (mirror_release.py and its unit tests)
+CHANGELOG.md  Bilingual (中文 first, bullets aligned), incremental; feeds
+              scripts/gen-release-notes.mjs
 ```
 
-### src/main (Electron shell)
+Gitignored — never commit build output: `dist/`, `release/`, `runtime-dist/`,
+`bundled-kernel/`, `plugins/*/lib/`, `plugins/*/.test-dist/`,
+`plugins/*/package-lock.json`, `logs/`, `scratch/`, `repo/`,
+`release-notes.md`, `*.tgz`, `*.log`, `__pycache__/`.
 
-| File | Responsibility |
-|---|---|
-| `index.ts` | Boot, single-instance lock, lifecycle orchestration, crash/rollback/cancel logic, kernel + server wiring |
-| `server.ts` | `DshServer`: spawn/health-check/restart/graceful-shutdown of the dsh child process; log redaction; settled-URL parsing |
-| `window.ts` | `createMainWindow` (sandboxed, desktop chrome injection, title-bar overlay sync, export toast, in-window update status card) |
-| `tray.ts` | System tray menu (open, check kernel/app update, restart server, quit) |
-| `updater.ts` | Shell update channel: Windows custom latest.yml + mirror download + visible NSIS wizard (direct GUI spawn, pending-install record consumed on next boot); macOS/Linux via `electron-updater` |
-| `update-card.ts` | Pure injected update-card script (message + progress bar) shared by kernel and shell update progress |
-| `brand-suite.ts` | Suite seams: plugin symbolic links into `$DSH_HOME` + loader overlay copy |
-
-### src/kernel (runtime manager)
-
-| File | Responsibility |
-|---|---|
-| `manager.ts` | `KernelManager`: init / check-update / download / extract / verify / activate / rollback / cleanup; `getServerSpec()` |
-| `manifest.ts` | `current.json` read/write (atomic tmp+rename), `manifest.json` read helpers |
-| `integrity.ts` | sha512 file hashing + comparison |
-| `sources/registry.ts` | npm registry dist-tag resolution (`stable`/`beta`/`alpha`), registry fallback chain |
-| `sources/artifact.ts` | GitHub Release artifact resolution + mirror fallback chain (sha512-pinned) |
-| `sources/dev.ts` | Dev mode: build a manifest from the local checkout |
-
-## 4. Kernel runtime layout & update flow
-
-```
-<userData>/kernel/
-  current.json            { active, previous, installedAt, manifest }
-  dsh-<v>+suite-<v>/      immutable versioned kernel
-    manifest.json         KernelManifest (dshVersion, suiteVersion, platform, arch, integrity)
-    node/                 Node.js binary
-    app/                  package.json + node_modules (dsh + suite, npm-flattened)
-  staging/                download/extract workspace (cleaned after install)
-```
-
-`current.json` is the single source of activation truth. Update flow:
-
-1. **Resolve** the newest version from the npm registry dist-tag
-   (`@deepseek-ai/dsh`: `stable` = `latest` tag, `beta` = `next` tag for rc
-   builds, `alpha` = `alpha` tag — the same families dsh's own release
-   pipeline publishes). A prerelease current kernel follows the highest
-   version across all prerelease tags (alpha/next/latest).
-2. **Download** the runtime tarball
-   (`dsh-runtime-<platform>-<arch>-<version>.tgz`) from the dedicated
-   `runtime-<dshVersion>` GitHub Release (created published by CI; see §10),
-   with a mirror chain; verify the **trusted sha512** (metadata sidecar
-   fetched from the official host first — mirrors can never substitute
-   content because every candidate is checked against the same digest).
-   Before offering an update, the shell probes whether this artifact exists —
-   a newer npm version without built artifacts reports "安装包尚未发布"
-   instead of failing the update.
-3. **Extract** into `staging/`, validate the inner `manifest.json` and that
-   platform/arch match the current OS.
-4. **Activate** atomically: rewrite `current.json` to
-   `{ active: new, previous: old }`, then restart the server and health-check.
-5. **Rollback**: if the freshly activated kernel fails to become healthy
-   twice in a row, the shell rolls `current.json` back to `previous` once and
-   restarts, then surfaces the error instead of looping.
-6. **Cleanup**: after a healthy boot, drop any versioned dirs that are
-   neither active nor previous, plus `staging/`.
-
-The shell checks for kernel updates every 6 h (`KERNEL_CHECK_INTERVAL_MS`)
-and via the tray menu (both skipped in dev mode); it does not check at
-startup — a missing/broken kernel is simply (re)installed during boot. A
-background check finding a newer kernel does not pop a modal and never
-auto-installs: it shows a persistent bottom-right card (稍后 / 立即更新,
-`src/main/update-card.ts` `KERNEL_UPDATE_CARD_SCRIPT`) that resolves to the
-update flow when the user clicks 立即更新. Shell updates are checked 10 s
-after boot and via the tray.
-
-### Update timing gotcha (learned the hard way)
-
-- npm and GitHub publish on **different clocks**: a new dsh dist-tag goes
-  live on npm before CI finishes building/uploading the 6-cell runtime
-  matrix, so `runtime-<dshVersion>` can lag by ~30 min to hours. A check in
-  that window reports "安装包尚未发布" (artifact pending) — by design the
-  shell never offers an update whose tarball cannot yet download. **No new
-  shell release is ever needed for a kernel update**; users just re-check
-  from the tray.
-- Before diagnosing user reports as network issues, verify the artifact
-  release is complete:
-  `gh api repos/JochenYang/dsh-app/releases/tags/runtime-<v> --jq '.assets[].name'`
-  must list all 6 cells (tgz + .sha512 + `manifest-<platform>-<arch>.json`),
-  and each sidecar sha512 must equal the manifest's `integrity`. A missing
-  cell makes that platform report "artifact pending" while others succeed.
-- Rebuild the runtime + bundled kernel locally when bumping dsh:
-  1. Bump every `@deepseek-ai/dsh-*` devDependency in `package.json` **and in
-     every `plugins/*/package.json`** to the same `^`-coupled line — a stale
-     plugin lockfile dual-instances dsh-llm and breaks plugin typecheck.
-     Root dependency changes use plain `npm install`; plugin-local installs
-     use `npm install --legacy-peer-deps` **inside the plugin dir only**
-     (plain install there re-pulls peers; `--legacy-peer-deps` at the ROOT
-     prunes the peer-only tree from package-lock.json and once broke
-     `npm ci` in every CI job). When switching kernel lines (rc→alpha),
-     delete root `node_modules/` first — stale trees cause ERESOLVE that
-     tempts a root `--legacy-peer-deps`, which writes an incomplete lockfile
-     (missing peer entries) that fails CI's strict `npm ci` on all platforms;
-     a clean strict install resolves the new line fine.
-  2. `node scripts/build-runtime.mjs <platform> <arch> <version>`, then
-     `node scripts/prepare-bundled-kernel.mjs <platform> <arch>`
-     (both outputs are gitignored; CI rebuilds them from the dist-tag).
-     Omit `<version>` to resolve the followed line's dist-tag instead.
-  3. Verify: `npm run typecheck`, then smoke-run the kernel with the bundled
-     node (`<runtime>/app` → `node_modules/@deepseek-ai/dsh/lib/bin.js --version`).
-
-  Step 1 is the only step that moves the kernel line. Which dist-tag a build
-  follows is derived from those devDependencies by `scripts/kernel-line.mjs`,
-  and the resolved version is asserted to satisfy them — so a build that would
-  bundle a kernel from another line fails instead of shipping (see §10 for the
-  incident that replaced). `DSH_APP_CHANNEL` overrides the derivation for a
-  deliberate cross-line build.
-
-## 5. Server process management
-
-- The shell picks a **free port at runtime** (`net.listen(0)`) and pins the
-  host to `127.0.0.1` (loopback passes dsh's trusted-host fence). The
-  `DshServer` also **harvests the real settled URL** from the child's
-  `dsh web:` stdout line, closing the find-free-port race.
-- Health = HTTP 200 on the server root within `90_000` ms (`SERVER_HEALTH_TIMEOUT_MS`).
-- Crash → restart with backoff (1 s, 2 s); repeated failure → kernel rollback,
-  then app exit with an error dialog.
-- Shutdown: SIGTERM → 8 s grace (`SERVER_SHUTDOWN_GRACE_MS`) → SIGKILL; on
-  Windows a shell-mode child is killed via `taskkill /T`.
-- Child stdout/stderr are line-buffered, capped at 2000 chars, **redacted**
-  against credential-looking fragments, tee'd to
-  `$DSH_APP_LOG_DIR/logs/dsh-server-*.log` (defaults to `logs/` under the
-  working directory — that's what the repo-level `logs/` dir is).
-- Tray app behavior: closing the window hides it, `window-all-closed` keeps
-  the app running, quit happens via the tray menu.
-
-## 6. Brand suite wiring (`plugins/`)
-
-Seventeen dsh plugins ship with the product, layered on upstream **without forking
-it**. `plugins/README.md` is the authoritative roster — each plugin's side,
-role and status (including which are still scaffolds). Start there when you
-need the list; the five sites it must stay in sync with are under "Suite
-plugin list sync" below.
-
-Two seams are stitched at every server start (`brand-suite.ts`):
-
-1. **Module resolution**: each plugin is symlinked (junction on Windows) into
-   `$DSH_HOME/profiles/node_modules/@dsh-app/<dir>` (`$DSH_HOME` defaults to
-   `~/.dsh`, overridable). Dev sources are the repo's `plugins/*`; prod
-   sources are the active kernel's `app/node_modules/@dsh-app/*` (npm-installed
-   via `file:` references by `scripts/build-runtime.mjs`).
-2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into `userData`
-   and passed to `dsh web --patch ...`. It inserts all seventeen suite entries
-   after every bundle layer and the profile's own patch (last write wins per
-   row; the upstream Models settings page stays enabled — the brand shadow
-   was retired).
-
-Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
-rollback target) boots vanilla — no links, no overlay, boot is never blocked
-by brand wiring.
-
-### Suite plugin list sync (learned the hard way)
-
-The suite member list lives in **five** places and they must match exactly:
-`plugins/dsh-app.patch.yml` (insert rows), `scripts/kernel-line.mjs`
-(`SUITE_PLUGINS` — also what the suite version hash is derived from),
-`src/main/brand-suite.ts` (`SUITE_PLUGIN_DIRS`), `scripts/smoke-suite.mjs`
-(`SUITE_DIRS`), and the pre-build loop in `.github/workflows/release.yml`.
-Adding an overlay row without its package in
-the build list ships a runtime the loader cannot compose — every suite page
-(settings sections, sidebar dock views) silently disappears behind the
-fail-soft vanilla boot (v0.9.6→v0.9.8 incident: MCP/hooks rows without their
-packages). When adding/removing a suite plugin, update all five sites in the
-same commit, then run `smoke-suite.mjs --tgz` against a fresh local build:
-it fails fast on a missing package instead of a silent vanilla boot.
-
-### Upstream API drift (learned the hard way)
-
-Structural slices plus `as unknown as` casts bypass the type gate: when the
-kernel deletes an API (alpha.4 dropped the `Session.events` getter for
-`snapshotEvents()`), plugin typecheck and unit tests stay green while the
-runtime throws — the memory distiller (and parts of swarm/archives) failed
-silently for days behind fail-soft catches. After every kernel-line bump,
-verify each suite plugin's behavior **end-to-end at runtime** (a tiny probe
-plugin can drive a real turn and watch the effect), never trust
-compile-green across the plugin/kernel boundary.
-
-### Web search seam (`plugin-websearch`)
-
-Web search is a **three-layer** stack, and the brand suite only owns the
-bottom one:
-
-```
-tool layer      web_search / web_fetch        @deepseek-ai/dsh-tool-web (upstream, never replaced)
-     ↓
-seam            ctx.web                       @deepseek-ai/dsh-web
-     ↓
-provider layer  dsh-app (brand chain)  ←→  deepseek-official (upstream)
-```
-
-Facts worth knowing before touching it:
-
-- **The model-facing tool never changes.** Adding a search "feature" means
-  registering a provider, not a tool. A new tool would give the model two
-  search tools to choose between and lose the upstream result rendering.
-- **One provider per call.** The seam resolves exactly ONE provider
-  (`ctx.web` selection semantics: configured id → that provider; none
-  configured + several usable → `WEB_PROVIDER_AMBIGUOUS`). Multi-engine
-  fallback therefore lives INSIDE the `dsh-app` provider (`chain.ts`), not in
-  N registered providers.
-- **`web_search`'s request type is `{ query, maxResults }`** — nothing else.
-  There is no `timeRange` or `engine` field. Reading one off the request
-  silently yields `undefined` (the `dsh-free-search` plugin reads both), so a
-  time-filtered or engine-pinned search must be a NEW tool, not a provider
-  feature.
-- **The `- id: web` overlay row is a PAIR.** Patch semantics REPLACE the whole
-  config object (dsh 0.1.2+): naming only `searchProvider` drops
-  `fetchProvider`, which makes another layer re-register `web-fetch-http` and
-  kills the composed tree on a duplicate loader entry. Always write both.
-- **The 原生 switch is a runtime field write**, not an overlay edit: the
-  settings page rewrites `ctx.web.searchProviderId` and persists the choice in
-  `$DSH_HOME/storages/dsh-app-plugin-websearch/config.json`. `deepseek-official`
-  stays registered and untouched, so switching back is instant.
-- **Public SearXNG instances mostly disable the JSON API** (it is off by
-  default upstream). They answer HTTP 200 with the HTML page, so a "success"
-  yields zero results. `searxngInstances` therefore ships EMPTY and the engine
-  reports a configuration error — a self-hosted instance is the intended setup.
-- **Public SearXNG instances are effectively unusable for automation.** ~25
-  were probed: nearly all have the JSON API disabled (it is off by default
-  upstream, since it makes the instance trivially scrapable) and answer the
-  HTML page or an anti-bot interstitial instead, several more are
-  proxy-only from the mainland, and the rest rate-limit hard (429). So
-  `searxngInstances` ships EMPTY and the engine reports a configuration error
-  rather than a silent "0 results" — a self-hosted instance with
-  `search.formats: [json]` is the intended setup.
-- **DuckDuckGo was dropped as an engine** (both `html.` and `lite.`): it is
-  proxy-only from mainland China AND rate-limits with a 202 anti-bot page for
-  hours at a time, so it contributed a guaranteed failure to every chain.
-  AnySearch replaced it — a keyless anonymous JSON API that answers directly
-  from the mainland. Re-adding DDG means re-adding a scraper, its parser
-  tests, and its anti-bot detection together.
-- **The 搜索来源 switch reports each side's real state**, never a bare on/off.
-  The upstream provider's registration is read off the seam's own registry
-  (`searchProviders`, an unexported implementation detail, so the read is
-  guarded and degrades to `unknown`). A kernel whose `web-search-deepseek`
-  row is disabled by a patch layer reports 官方 as 不可用 with the reason —
-  otherwise the user selects it and every search fails with
-  `WEB_PROVIDER_CONFIGURED_MISSING`.
-
-### Proxy handling (TUN/fake-IP clients)
-
-A VPN client in TUN mode hijacks DNS so every hostname resolves into
-`198.18.0.0/15` (RFC 2544). `web-fetch-http` validates resolved addresses to
-keep the agent off internal networks, so it refuses those — **unless the
-request goes through a proxy**, in which case the proxy does the DNS and the
-check is skipped by design (`provider.ts` `proxyRouteFor`). Two consequences
-shape the shell's behaviour:
-
-- **The proxy is installed into undici's global dispatcher ONCE, at kernel
-  boot** (`installProxyFromEnvironment` in `profile-boot.ts`), and never
-  re-checked. A proxy that disappears mid-session therefore leaves EVERY
-  outbound request — including ones that should go direct — pointed at a closed
-  port. Measured: `web_fetch`, `web_search` and a direct public-IP fetch all
-  fail with `fetch failed`.
-- **`src/main/proxy-detect.ts` probes before injecting**, so the "no proxy"
-  state works too. Injecting a dead proxy URL unconditionally is what breaks
-  the opposite case.
-
-The watchdog in `index.ts` closes the loop: every
-`PROXY_WATCHDOG_INTERVAL_MS` it re-probes a proxy THIS SHELL injected, and on
-its disappearance restarts the server, which re-runs detection and comes up
-without the proxy. Verified end-to-end: the log shows `injected proxy … is no
-longer listening; restarting server to re-detect` followed by `no local proxy
-listening`. It never touches a proxy the user exported themselves — that one
-is not the shell's to second-guess — and it treats an unparseable URL or a
-non-loopback host as "alive" so it can never restart over a value it cannot
-evaluate.
-
-Note this is only about whether the proxy *socket accepts connections*. It
-cannot tell whether the proxy is *working* (upstream reachable); a proxy that
-accepts connections but fails every request still fails every request.
-
-## 7. Build, dev & verification commands
+## 3. Build, dev & verification
 
 Prerequisites (one-time): a sibling `deepseek-harness` checkout
 (`../deepseek-harness`) with `pnpm install` + `pnpm run build:web`, then
-`npm install` in this repo.
+`npm install` here.
 
 ```sh
-# Type check (main shell + kernel). This is the primary compile gate.
-npm run typecheck
+# ── primary gates ──────────────────────────────────────────────────────
+npm run typecheck             # tsc --noEmit; the compile gate
+npm run build                 # tsc -> dist/ + static/overlay/tray icon copy
+npm test                      # root tests (builds first; needs dist/)
 
-# Full build: tsc -> dist/, then copy static/ assets + the brand overlay.
-npm run build
+# ── run ────────────────────────────────────────────────────────────────
+npm start                     # build + launch Electron (production-like)
+npm run dev                   # DSH_APP_DEV=1 + local harness checkout
+#   PowerShell:  $env:DSH_APP_DEV="1"; npm start
+#   Override:    DSH_APP_DEV_RUNTIME=D:/.../deepseek-harness
+#   (PowerShell does NOT support `VAR=1 cmd`; cmd.exe does.)
 
-# Build then launch Electron (production-like path).
-npm start
+# ── package ────────────────────────────────────────────────────────────
+npm run dist:win | dist:mac | dist:linux
 
-# Dev mode (uses the local harness checkout, no downloads). `npm run dev` is
-# the cross-platform one-liner: it sets DSH_APP_DEV=1, probes ../deepseek-harness
-# and ../../deepseek-harness for the checkout, then builds + launches.
-# PowerShell:  $env:DSH_APP_DEV="1"; npm start
-# Override checkout:  $env:DSH_APP_DEV_RUNTIME="D:/.../deepseek-harness"
-# cmd:  set DSH_APP_DEV=1 && npm start   (PowerShell does NOT support VAR=1 cmd)
+# ── kernel runtime artifact (CI does this per OS/arch cell) ────────────
+npm run runtime:build                                   # scripts/build-runtime.mjs
+node scripts/build-runtime.mjs win32 x64 0.1.5-rc.1     # pinned (asserted)
 
-# Package installers (electron-builder).
-npm run dist:win     # NSIS x64+arm64
-npm run dist:mac     # dmg+zip x64+arm64
-npm run dist:linux   # AppImage+deb x64+arm64
-
-# Build a kernel runtime artifact (CI does this per OS/arch).
-node scripts/build-runtime.mjs win32 x64              # resolves the followed line's dist-tag
-node scripts/build-runtime.mjs win32 x64 0.1.5-rc.1   # or pin one explicitly (asserted)
+# ── suite verification against a real kernel ───────────────────────────
+npm run verify                                          # smoke-suite.mjs
+npm run verify -- --tgz runtime-dist/dsh-runtime-linux-x64-*.tgz
+npm run check:plugins -- --kernel <runtime.tgz> --home <real profile dir>
 ```
 
-Plugin builds (CI runs these before `build-runtime`):
+Plugin builds and tests (CI installs + builds every plugin before
+`build-runtime`):
 
 ```sh
-node plugins/plugin-<name>/build.mjs        # esbuild -> lib/ (all plugins except brand)
-(cd plugins/plugin-brand && npm run build)  # tsc -> lib/
-(cd plugins/plugin-memory && npm test)      # node:test suites (esbuild bundles TS -> .test-dist)
-(cd plugins/plugin-archives && npm test)    # same harness: /delete + /prune contract tests
+for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run build); done
+(cd plugins/plugin-brand && npm run build)   # tsc -> lib/ (the one esbuild exception)
+(cd plugins/plugin-memory && npm test)       # node:test via scripts/test.mjs
 ```
 
-> Tests live in `plugins/plugin-memory/tests/`, `plugins/plugin-swarm/tests/`,
-> `plugins/plugin-usage/tests/`, `plugins/plugin-hooks/tests/`,
-> `plugins/plugin-mcp/tests/`, `plugins/plugin-archives/tests/`,
-> `plugins/plugin-presets/tests/`, `plugins/plugin-doc/tests/`,
-> `plugins/plugin-sheet/tests/`, `plugins/plugin-pdf/tests/` and
-> `plugins/plugin-websearch/tests/`
-> (node:test, `npm test` inside each plugin — `scripts/test.mjs` is the shared
-> esbuild + `node --test` wrapper). The shell/kernel have no test
-> runner; verification is `npm run typecheck` + manual run in dev mode.
-> Manual/probe helpers live in `scripts/`: `probe-mirror.mjs`,
-> `probe-drag.cjs` (**keep its CSS in sync with** `src/main/window.ts`
-> `DESKTOP_CHROME_CSS`), `probe-update-card.cjs`, `probe-shell-update.mjs`,
-> `probe-websearch.mjs` (launches a real kernel with the overlay and drives
-> the web search routes incl. a live search through `ctx.web`), `capture.mjs`.
+- Plugin `build.mjs` files are thin wrappers over `plugins/build-lib.mjs`. Each
+  emits `lib/index.js` (host half) and `lib/client.js` (browser half, wrapped
+  in the dsh client-loader closure); framework imports stay external.
+- Plugin tests live in `plugins/plugin-*/tests/*.test.ts` and run through that
+  plugin's own `scripts/test.mjs` (esbuild → `.test-dist/`, then `node --test`).
+  **Thirteen** plugins have suites (archives, doc, hooks, market, mcp, memory,
+  pdf, ppt, presets, sheet, swarm, usage, websearch); `plugin-brand`,
+  `plugin-client-ui`, `plugin-fff`, `plugin-sidebar` have none.
+- **CI runs only `plugin-memory` and `plugin-swarm`** — run the rest locally
+  before a release.
+- Hand-run probes: `scripts/probe-*.mjs` (mirror, shell-update, websearch, fff)
+  and the `probe-*.cjs` DOM-stub probes. `probe-drag.cjs` mirrors
+  `DESKTOP_CHROME_CSS` in `src/main/window.ts` — **keep the two in sync**.
 
-## 8. Environment variables
+### Rebuilding the runtime + bundled kernel
+
+```sh
+node scripts/build-runtime.mjs <platform> <arch> [version]
+node scripts/prepare-bundled-kernel.mjs <platform> <arch>
+```
+
+Both outputs are gitignored; CI rebuilds them. Omit `<version>` to resolve the
+followed line's dist-tag. Before bundling a **new kernel line**, bump every
+`@deepseek-ai/dsh*` dependency in the root `package.json` to one spec (plugins
+follow via their peer/dev deps), then verify with `npm run typecheck` and a
+smoke run of `<runtime>/app` → `node_modules/@deepseek-ai/dsh/lib/bin.js
+--version`.
+
+Dependency-install discipline: root changes use plain `npm install`;
+plugin-local installs use `npm install --legacy-peer-deps` **inside the plugin
+dir only**. `--legacy-peer-deps` at the ROOT prunes the peer-only tree from
+`package-lock.json` and has broken `npm ci` in every CI job. When switching
+kernel lines, delete root `node_modules/` first — a stale tree causes ERESOLVE
+that tempts exactly that mistake.
+
+## 4. Conventions
+
+- **Language**: code comments and technical docs are **English**. User-facing
+  strings are **zh-CN** (status messages, dialogs, tray labels, settings copy).
+  `README.md` (zh-CN) and `README.en.md` are kept in sync with a top-of-file
+  switcher. `CHANGELOG.md` is bilingual, 中文 first, bullets aligned 1:1.
+- **TypeScript**: `strict`; avoid `any`. Shell code is CommonJS + Node
+  resolution; plugins are ESM with `moduleResolution: "Bundler"` and explicit
+  extensions on local imports.
+- **Desktop adaptation stays shell-side**: inject via `executeJavaScript`,
+  stylesheets, and `--patch` overlays only. Never modify harness source.
+- **No native browser dialogs in client UI**: never `window.alert` /
+  `confirm` / `prompt`. Use the in-app modal idiom (mask + centered card,
+  Esc/mask = cancel, Enter = primary); `src/main/in-frame-dialog.ts` is the
+  reference, `plugins/plugin-mcp/src/client/confirm-dialog.tsx` the React port.
+- **Security invariants** (full list in `docs/ARCHITECTURE.md`):
+  - Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, and
+    **no preload** for the remote-origin dsh UI.
+  - Bind `127.0.0.1` only; confine navigation to the local server origin (host
+    **and** port), everything else → `shell.openExternal` (http/https only).
+  - Plugin `/api` routes need a same-origin check **plus** a loopback Host
+    fence (see `plugins/plugin-sidebar/src/trust-fence.ts`).
+  - Kernel downloads are sha512-verified before activation, with metadata from
+    the official host first so mirrors cannot swap content.
+  - Never hardcode secrets. Keys go through dsh's credential store; plugin keys
+    support `$ENV:NAME` and are masked on read.
+  - Redact credential-looking fragments (`api[key|_key]`, `authorization`,
+    `token`, `secret`, `password`) in child logs; cap line length.
+- **Failure paths**: user-facing errors are stable, actionable, zh-CN, and leak
+  no sensitive detail.
+- **Commits**: `<type>(<scope>): <subject>` (`feat:`/`fix:`/`chore:`/`ci:`/
+  `docs:`/`test:`), English imperative subject ≤50 chars, no trailing period.
+  Body: `-` bullets, one change each (2-4 preferred), wrapped at ~72 chars,
+  then a standalone `Verified:` line. No prose paragraphs.
+
+## 5. Process rules (each cost someone a bad day)
+
+- **Gate commands must run bare — never behind a pipe.** `npm run typecheck 2>&1
+  | tail -2 && git commit` commits even when typecheck fails, because `&&` sees
+  `tail`'s exit code. Run the gate, check its result, then commit.
+- **No backticks inside template-literal CSS/scripts.** `DESKTOP_CHROME_CSS`
+  and the injected scripts are backtick literals; a backtick in an embedded
+  comment silently terminates the string and only surfaces as a syntax error at
+  the next typecheck.
+- **Injected `executeJavaScript` promises must not resolve eagerly.** The
+  chrome-sync loop in `src/main/window.ts` re-enters on *every* resolution, so
+  an eagerly-resolving promise becomes a tight main↔renderer round-trip
+  (~5-8k calls/s, ~9% CPU with the window idle). Keep such promises
+  change-triggered. Triage idle burn by per-process CPU first: **GPU ≈ 0%
+  beside non-zero main + renderer means an IPC loop, not rendering.**
+- **The suite roster lives in five places and they must match exactly**:
+  `plugins/dsh-app.patch.yml` (insert rows), `scripts/kernel-line.mjs`
+  (`SUITE_PLUGINS`), `src/main/brand-suite.ts` (`SUITE_PLUGIN_DIRS`),
+  `scripts/smoke-suite.mjs` (`SUITE_DIRS`), and the pre-build loop in
+  `.github/workflows/release.yml`. A row without its package ships a runtime
+  the loader cannot compose — every suite page silently disappears behind the
+  fail-soft vanilla boot. Update all five in one commit, then run
+  `smoke-suite.mjs --tgz` against a fresh build.
+- **Runtime resources are derived from each plugin's own `package.json`
+  `files` field**, never a hand-written list (that list once dropped
+  `plugin-ppt/templates/` and `plugin-pdf/assets/` while every route still
+  answered `ok:true`). `smoke-suite.mjs` asserts the resource facts a bare
+  `ok:true` cannot see.
+- **Upstream API drift**: structural slices plus `as unknown as` casts bypass
+  the type gate — when the kernel deletes an API, plugin typecheck and unit
+  tests stay green while the runtime throws silently. After every kernel-line
+  bump, verify each suite plugin **end-to-end at runtime**
+  (`npm run verify`, `npm run check:plugins`), never trust compile-green across
+  the plugin/kernel boundary.
+- **Proxy: probe before injecting.** A TUN/fake-IP client resolves every
+  hostname into `198.18.0.0/15`, which `web-fetch-http` refuses as non-public
+  unless the hop is proxied. The kernel installs its proxy dispatcher **once at
+  boot**, so a proxy that disappears later points every outbound request —
+  including direct ones — at a closed port. `src/main/proxy-detect.ts` probes
+  first, an explicit user-exported proxy always wins, and the watchdog restarts
+  the server only for a proxy this shell injected.
+- **Web search is a provider, not a tool.** `web_search`/`web_fetch` are
+  upstream's and are never replaced; new capability means registering a
+  `ctx.web` provider. The seam resolves exactly one provider per call, so
+  fallback lives inside the provider. `web_search`'s request type is only
+  `{ query, maxResults }`.
+- **The `- id: web` overlay row is a PAIR.** Patch semantics replace the whole
+  config object, so naming only `searchProvider` drops `fetchProvider`,
+  re-registers `web-fetch-http`, and kills the composed tree on a duplicate
+  loader entry. Always write both.
+
+### Troubleshooting anchors
+
+Numbers and codes that tell "hung" from "still working". Values verified
+against the code; the module beside each holds the full detail.
+
+| Signal | Means | Where |
+|---|---|---|
+| `WEB_PROVIDER_AMBIGUOUS` | several usable search providers registered and none pinned | `ctx.web` seam |
+| `WEB_PROVIDER_CONFIGURED_MISSING` | the pinned provider is not registered (e.g. the upstream row is disabled) | `ctx.web` seam |
+| 90 s (`SERVER_HEALTH_TIMEOUT_MS`) | the server must answer HTTP 200 within this before boot is judged failed | `server.ts` |
+| 8 s (`SERVER_SHUTDOWN_GRACE_MS`) | SIGTERM → SIGKILL grace, then `taskkill /T` on Windows | `server.ts` |
+| `1000 ms × attempt` | crash-restart delay; the counter resets **only** on a ready server, so persistent failure terminates instead of looping | `index.ts` |
+| 6 h (`KERNEL_CHECK_INTERVAL_MS`) | background kernel check — never at startup, never auto-installing | `index.ts` |
+| 10 s after boot | the one automatic shell-update check; afterwards tray only | `index.ts` |
+| 2000 chars / 10 files (`MAX_LOG_LINE` / `MAX_KEPT_LOG_FILES`) | child-log redaction cap and pruning | `server.ts` |
+| ~30 min to hours | npm dist-tag goes live **before** the runtime matrix finishes uploading, so "安装包尚未发布" in that window is expected, not a bug | CI |
+| `scripts/publish-modelscope.mjs`, `scripts/diagnose-modelscope-upload.mjs` | manual mirror drills — CI itself uses the Python SDK in `.github/scripts/` | `scripts/` |
+
+## 6. Environment variables
 
 | Variable | Used in | Meaning |
 |---|---|---|
-| `DSH_APP_DEV=1` | `src/main/index.ts` | Dev mode: use local checkout instead of downloaded kernel |
-| `DSH_APP_DEV_RUNTIME` | `src/main/index.ts` | Override the dev harness checkout path |
-| `DSH_APP_CHANNEL` | `index.ts`, `dev.ts`, `scripts/kernel-line.mjs` | Kernel line: `alpha` → `alpha` dist-tag; `beta` → `next` (rc); anything else = stable (`latest`). At runtime it picks the update channel (default `stable`); at build time it is only an explicit cross-line override — the default comes from `package.json`'s `@deepseek-ai/dsh*` devDependencies |
-| `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `index.ts` | GitHub owner/repo hosting runtime artifacts (defaults to `JochenYang` / `dsh-app`) |
-| `DSH_APP_NPM_REGISTRIES` | `sources/registry.ts` | Comma-separated registry chain replacing the default (`npmjs.org` → `npmmirror.com`) |
-| `NPM_CONFIG_REGISTRY` | `sources/registry.ts` | Single-registry override; npmmirror still appended as fallback |
-| `DSH_APP_GITHUB_MIRRORS` | `sources/artifact.ts` | Comma-separated mirror URL prefixes; empty value disables mirrors |
-| `DSH_APP_SUITE_VERSION` | `scripts/kernel-line.mjs`, `dev.ts` | Brand suite version in the runtime manifest (default: content hash of the seventeen plugin versions) |
-| `DSH_APP_LOG_DIR` | `server.ts`, `index.ts` | Log directory (default: `<userData>/logs`) |
-| `DSH_APP_PROXY_PORTS` | `proxy-detect.ts` | Comma-separated ports to probe for a local proxy, replacing the default list (7897, 7890, 7891, 10809, 10808, 1080, 8080, 2080). Rarely needed — for a proxy on an unusual port |
-| `DSH_APP_PROXY_WATCHDOG_MS` | `index.ts` | Proxy watchdog interval (default `30000`). The probe script lowers it to exercise the restart path |
+| `DSH_APP_DEV=1` | `index.ts` | Dev mode: local harness checkout instead of a downloaded kernel |
+| `DSH_APP_DEV_RUNTIME` | `index.ts` | Explicit dev checkout path (else `../deepseek-harness`) |
+| `DSH_APP_CHANNEL` | `index.ts`, `kernel-line.mjs`, `build-runtime.mjs` | Kernel line: `alpha` → alpha tag, `beta` → `next`, else stable. At runtime it selects the update channel; at build time it is only the explicit cross-line override (skips the spec assertion and warns) |
+| `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `shared/constants.ts` | GitHub owner/repo hosting runtime artifacts |
+| `DSH_APP_SUITE_VERSION` | `kernel-line.mjs`, `sources/dev.ts` | Overrides the content-hash suite version in the runtime manifest |
+| `DSH_APP_NPM_REGISTRIES` | `sources/registry.ts` | Comma-separated registry chain replacing the default |
+| `NPM_CONFIG_REGISTRY` | `sources/registry.ts` | Single-registry override; npmmirror still appended |
+| `DSH_APP_GITHUB_MIRRORS` | `sources/artifact.ts`, `updater.ts` | Comma-separated mirror URL prefixes; empty disables mirrors |
+| `DSH_APP_LOG_DIR` | `server.ts`, `index.ts` | Log directory (default `<userData>`; logs land in `<dir>/logs`) |
+| `DSH_APP_PROXY_PORTS` | `proxy-detect.ts` | Ports to probe, replacing the default list |
+| `DSH_APP_PROXY_WATCHDOG_MS` | `index.ts` | Watchdog interval (default 30000) |
 | `DSH_HOME` | `brand-suite.ts` | dsh profiles home (default `~/.dsh`) |
-| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the followed line's dist-tag at build time, then asserted against the followed spec) |
+| `DSH_VERSION` | `build-runtime.mjs` | Kernel version to bundle (else resolved from the followed dist-tag, then asserted) |
+| `NODE_DIST_MIRROR` | `build-runtime.mjs` | Mirror for the Node archive; `SHASUMS256.txt` still comes from nodejs.org first |
+| `MODELSCOPE_TOKEN` / `MODELSCOPE_REPO` | `publish-mirror.yml`, `mirror_release.py` | Mirror credentials/target; an unset token reports `SKIPPED`. The SDK version is pinned in `MODELSCOPE_SDK_VERSION` |
 
-## 9. Code & contribution conventions
+## 7. Release SOP
 
-- **Language**: code comments and technical docs are **English**
-  (`docs/ARCHITECTURE.md`, JSDoc). **User-facing strings are zh-CN** — status
-  messages, dialogs, and the setup window are Chinese (the product ships for
-  mainland users first; i18n is a follow-up). New UI copy should be zh-CN
-  unless a project decision says otherwise. The repository README ships in
-  both zh-CN (`README.md`) and English (`README.en.md`) with a top-of-file
-  language switcher; keep both in sync and update both on every README change.
-- **TypeScript**: `strict` mode; avoid `any`. Shell code is CommonJS with
-  Node resolution; the client plugin uses `moduleResolution: "Bundler"` and
-  imports local files with explicit `.ts` extensions (`./client/models-store.ts`).
-- **Desktop adaptation must stay shell-side**: inject through
-  `executeJavaScript`/stylesheets and `--patch` overlays only — never modify
-  harness source. Keep the drag-region CSS mirrored in `probe-drag.cjs`.
-- **No native browser dialogs in client UI**: never `window.alert` /
-  `window.confirm` / `window.prompt` — confirmations render the in-app modal
-  idiom instead (mask + centered alias-token card, Esc/mask = cancel, Enter =
-  primary), the same design as the shell's close/update dialogs.
-  `src/main/in-frame-dialog.ts` is the reference implementation; client
-  plugins port it as React (see `plugins/plugin-mcp/src/client/confirm-dialog.tsx`).
-  All copy zh-CN.
-- **Security invariants to preserve** (see `docs/ARCHITECTURE.md` §6):
-  - Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, and
-    **no preload** for the remote-origin dsh UI.
-  - Bind only to `127.0.0.1`; confine navigation to the local server origin,
-    everything else → `shell.openExternal`.
-  - Kernel downloads are **sha512-verified before activation**; keep the
-    metadata-from-official-host-first rule so mirrors can't swap content.
-  - Redact credential-looking fragments (`api[key|_key]`, `authorization`,
-    `token`) in child logs; cap log line length.
-  - Never hardcode secrets. API keys are stored via dsh's own credential
-    store (`credentials.set`), not in plain settings.
-- **Failure paths**: user-facing error messages are stable, actionable,
-  zh-CN, and must not leak sensitive detail.
-- **Gate commands must run bare — never behind a pipe**: `npm run typecheck
-  2>&1 | tail -2 && git commit` commits even when typecheck fails, because
-  `&&` sees `tail`'s exit code, not tsc's. Run the gate first, check
-  `EXIT=$?`/the tool result, and only then commit. (A broken commit from this
-  exact pattern had to be amended once already.)
-- **No backticks inside template-literal CSS/scripts**: `DESKTOP_CHROME_CSS`
-  and the injected scripts are backtick literals — a backtick in a comment
-  or copy silently terminates the string and only surfaces as a syntax error
-  at the next typecheck. Use plain quotes in embedded comments.
-- **Injected `executeJavaScript` promises must not resolve eagerly**: the
-  chrome-sync loop in `src/main/window.ts` awaits `OBSERVER_SCRIPT` and
-  re-enters on *every* resolution, so a promise that resolves on entry once
-  the color is already known becomes a tight main↔renderer round-trip —
-  measured ~5-8k `executeJavaScript` calls/s and ~9% total CPU (4% main +
-  4-5% renderer) with the window sitting idle. Keep such promises
-  change-triggered and let the in-page guard park them (`push()` returns early
-  on an unchanged sample). Triaging idle burn: sample per-process CPU first —
-  **GPU ≈ 0% beside non-zero main + renderer means an IPC loop, not
-  rendering**; then reproduce the loop alone against a blank page to separate
-  it from the harness renderer's own work.
-- **Generated/tracked**: `dist/`, `release/`, `runtime-dist/`,
-  `plugins/*/lib/`, `logs/`, `scratch/`, `*.tgz`, `*.log` are gitignored —
-  don't commit build output.
-- **Commits** follow `<type>(<scope>): <subject>` (e.g. `feat:`, `fix:`) with
-  an English imperative subject; the repo history uses `feat`/`fix` prefixes.
-  The body lists the root cause and each change as bullets (`- `), then
-  closes with a `Verified:` line — no prose paragraphs. Wrap at ~72 chars.
+**Which dsh line a build follows is decided by the root `package.json` alone**:
+`scripts/kernel-line.mjs` reads the single spec all `@deepseek-ai/dsh*` deps
+must share, maps it to a dist-tag, and owns the suite roster + `suiteVersion`
+hash. `build-runtime.mjs` and the workflow's `resolve` job both assert against
+it. Moving the line is therefore **one edit** — bump the root deps, then tag;
+nothing in `release.yml` needs touching.
 
-## 10. Release / deployment
+Shell release, e.g. 0.11.10:
 
-### CI pipeline
-
-`release.yml` triggers on a `v*` tag push (or `workflow_dispatch` with an
-optional `dsh_version` input). Tag pushes run the full pipeline;
-`workflow_dispatch` is the **runtime-only** path (publish kernel artifacts
-for a dsh version without cutting a shell release):
-
-- **resolve**: derives the kernel line from `package.json` (see below),
-  resolves it to a version, and asserts that version satisfies the followed
-  spec. It reuses an existing `runtime-<dshVersion>` release only when all 6
-  cells are present **and** that release's `suiteVersion` matches this tree's
-  — a complete-but-stale runtime, or one whose manifest cannot be read,
-  triggers a rebuild instead. On reuse the app job downloads the assets from
-  the release, so shell-only releases never rebuild an unchanged kernel.
-  Dispatch always builds, and its `dsh_version` input is asserted the same way.
-- **runtime**: a 6-cell matrix (win32/darwin/linux × x64/arm64) builds the
-  suite plugins, then `build-runtime.mjs`, and uploads
-  `dsh-runtime-<os>-<arch>-<ver>.tgz` + `.sha512` + per-cell `manifest.json`
-  to the dedicated **`runtime-<dshVersion>`** release (created **published**
-  if absent — `GitHubArtifactResolver` resolves exactly this tag shape).
-  The release MUST stay flagged **prerelease**: GitHub's `/releases/latest`
-  alias resolves to the newest non-draft, non-prerelease release, so a fresh
-  runtime tag would hijack it (it carries no `latest.yml`) and break the
-  shell app-update check with a metadata 404 — exactly what happened when
-  `runtime-0.1.5-rc.2` outranked `v0.11.4`.
-- **app** (tag pushes only): builds + packages the shell per OS with
-  `electron-builder` and `--publish always`; macOS notarization via
-  `--config.mac.notarize=true` when Apple signing secrets are present.
-
-Mirroring to ModelScope is a **separate workflow**,
-`.github/workflows/publish-mirror.yml`, triggered by
-`on: release: types: [published]` — the moment the draft is flipped (SOP step
-5) — and never when the app matrix merely finishes, so a version discarded
-during review is never mirrored. It also runs on `workflow_dispatch`
-(`-f tag=v0.11.7`) for backfill, `-f mode=diagnose` for a commit-endpoint
-probe and `-f mode=prune-probe` to verify the delete path. A failed or skipped
-mirror cannot roll back the release (different run, and the release is already
-published by then), and the workflow's tag filter keeps `runtime-*` releases
-out.
-
-The upload uses the **official ModelScope Python SDK**
-(`modelscope.hub.api.HubApi.upload_folder` / `upload_file` / `delete_files`,
-pinned in
-`MODELSCOPE_SDK_VERSION`), not the batch -> PUT -> commit path hand-rolled in
-`scripts/publish-modelscope.mjs`: our client retried a rejected commit once
-with no backoff and lost `503 commit publisher unavailable` races, while the
-SDK retries a commit up to 5 times with exponential backoff and honours
-`Retry-After`. Workflow-level `concurrency: publish-mirror`
-(`cancel-in-progress: false`) serializes **every** mirror run repo-wide,
-including manual ones from other branches, so only one multi-GB commit
-pipeline targets the repo at a time — the overlapping backfills were the
-suspected source of the 503 storm. `scripts/publish-modelscope.mjs` and
-`scripts/diagnose-modelscope-upload.mjs` stay for manual/local drills; CI does
-not call them.
-
-`releases/versions.json` is rebuilt from the **published** copy (public `repo`
-API read; a `{Data: ...}` envelope is unwrapped) plus this version, and is
-committed last, so a partial upload never advertises a version whose assets are
-missing. The merge refuses to shrink the entry count — that would mean a lost
-history — and any read failure other than a genuine 404 fails the run instead
-of rebuilding the index from empty (assets can be re-uploaded, history cannot).
-The first step records `SKIPPED` in `$GITHUB_STEP_SUMMARY` when
-`MODELSCOPE_TOKEN` is unset (the mirror is optional; the release is
-unaffected), and an unset `MODELSCOPE_REPO` falls back to the lowercased GitHub
-`owner/name`.
-
-### Mirror retention (ModelScope)
-
-Every `mode=mirror` run also prunes the mirror, which would otherwise grow by
-roughly 2 GB of deduplicated LFS objects per release forever. The policy is
-`keep_versions` (workflow input, default **10**; stable and prerelease are
-ranked **separately** by semver): the newest 10 stable versions and the newest
-10 prerelease versions stay, and the tag being published always stays (a
-backfill of an old tag must not delete what it just uploaded). `releases/latest/`
-is **not** governed by `keep_versions` — it is the rolling copy the updater
-reads first and its convergence is a separate step (see below). `prune_mode`
-selects how far the version retention goes:
-
-- `apply` (default): delete the expired `releases/archive/<version>/` and
-  `releases/prerelease/<tag>/` directories, then rewrite
-  `releases/versions.json` without them. An index entry whose assets are gone
-  is a 404 in the app updater, so the index is rewritten in the same run; a
-  delete that fails keeps its index entry (no 404) and the next run retries it.
-- `dry-run`: print the full version delete list (version, path, asset count,
-  estimated size), the index plan and the latest-cleanup stale list in the run
-  summary, and write nothing.
-- `off`: never prune versions. The latest cleanup still runs (it is not a
-  retention rule).
-
-**Latest cleanup (always on for a full stable publish).** Because every release
-used `upload_folder` into `releases/latest/`, older installers accumulated
-there forever — browsing "latest" showed three versions at once, and once an
-old version was pruned from the archive those leftover files were
-unreclaimable LFS objects. After a full stable `mode=mirror` run, **and only
-after every asset upload and the `versions.json` commit have succeeded**, the
-mirror converges `releases/latest/` to exactly the asset-name set that run
-uploaded from the GitHub Release (`latest*.yml` included, since they are
-release assets): every other file directly below `releases/latest/` is deleted
-in one commit. Deletion order matters — a failed upload skips the cleanup, so
-the working copy the updater depends on is never stripped before the new one is
-in place. The cleanup never touches `releases/archive/`,
-`releases/prerelease/` or `releases/versions.json`, so **the archive, not
-`latest`, is the rollback source**: the same files remain in
-`releases/archive/<version>/`. It is skipped for prerelease tags (which never
-write `latest`) and for partial drills (their whitelist covers only the subset
-they uploaded). A per-file delete failure is recorded in the summary and does
-not fail the release; a path the latest guard refuses does fail the run. To
-audit without deleting, dispatch `-f prune_mode=dry-run`.
-
-Rehearse a window change, preview the latest cleanup, and verify the delete
-capability first on a mirror that has never pruned:
-
-```bash
-gh workflow run publish-mirror.yml -f tag=v0.11.8 -f prune_mode=dry-run
-gh workflow run publish-mirror.yml -f tag=v0.11.8 -f keep_versions=3 -f prune_mode=dry-run
-gh workflow run publish-mirror.yml -f mode=prune-probe
-```
-
-`keep_versions` is a per-run input rather than a repo variable, so the window
-in force is visible in each run's inputs and summary. Safety constraints: the
-version-retention delete path is a **positive allowlist** — only files strictly
-below `releases/archive/` or `releases/prerelease/` are ever handed to the SDK,
-and anything else (`releases/latest/`, `releases/versions.json`, the repo root,
-`.gitattributes`, traversal forms) is refused with an error and aborts the
-prune instead of deleting. The latest cleanup uses its own, **narrower** guard:
-a path must be exactly one file directly below `releases/latest/` — no
-subdirectory, no traversal segment, no empty or hidden name — and any other
-shape is refused with an error and fails the run. Each archived version is
-deleted in its own atomic commit so one failure cannot block the rest; the
-latest cleanup deletes its stale set in one commit; a failed delete is reported
-in the summary without failing the release (the mirror commit is already done).
-The upload, index, prune and latest-cleanup logic lives in
-`.github/scripts/mirror_release.py` (unit tests:
-`python .github/scripts/test_mirror_release.py`) — review there, not in YAML.
-`mode=prune-probe` is the capability check for `HubApi.delete_files`: it
-uploads two throwaway files under `releases/prune-probe/<uuid>/`, lists them,
-deletes them in one commit and confirms HTTP 404, so the delete path is proven
-for this account and storage mode (one probe file is LFS-tracked by suffix,
-like every real asset) without touching a released version.
-
-When a mirror fails with `503 commit publisher unavailable`, the fastest check
-is a probe commit: `gh workflow run publish-mirror.yml -f mode=diagnose` commits
-a few-byte `releases/.probe-<ts>.json` through the SDK. A `FAILED` probe means
-the platform still refuses writes — wait (the storm followed several 2 GB
-backfills inside 20 minutes), then dispatch `-f tag=v0.11.7` to backfill.
-
-### Kernel line (single source of truth)
-
-**Which dsh line a build follows is decided by `package.json` alone.** All 24
-`@deepseek-ai/dsh*` devDependencies must agree on one spec;
-`scripts/kernel-line.mjs` reads that spec, maps it to a dist-tag (`-alpha.` →
-`alpha`, `-rc.`/`-beta.` → `next`, otherwise `latest`), and owns the suite
-plugin roster plus the `suiteVersion` hash derived from it. Both consumers
-assert against the spec:
-
-- `build-runtime.mjs` refuses a version that does not satisfy it — on the
-  dist-tag path **and** on an explicitly pinned `DSH_VERSION` — and labels the
-  artifact by the version actually built, not by the line the tree sits on.
-- the workflow's `resolve` job runs the same assertion before deciding whether
-  to reuse a published runtime.
-
-**Moving the line is therefore one edit**: bump those devDependencies in the
-root and in every `plugins/*/package.json` (§4 step 1), then tag. Nothing in
-`release.yml` needs touching. `DSH_APP_CHANNEL` is the explicit cross-line
-override for a one-off build — it skips the assertion, warns loudly, and still
-labels the artifact by the version built. At runtime the same variable keeps a
-separate meaning: which channel the update check follows.
-
-This replaced a hand-flipped `DSH_APP_CHANNEL: alpha` pin in the workflow. With
-two copies of the line and nothing comparing them, v0.11.1 bundled a
-`0.1.5-alpha.2` kernel beside `^0.1.5-rc.1` code and every CI job was green.
-
-### Release SOP (shell version, e.g. 0.1.6)
-
-1. **Bump + changelog**: set `version` in `package.json`; move the
-   `[Unreleased]` entry in `CHANGELOG.md` to `[v0.1.6]` (bilingual rules
-   below). Commit both.
-2. **Tag + push**: `git tag v0.1.6 && git push origin v0.1.6`. The tag must
+1. **Bump + changelog**: set `version` in `package.json`, move `[Unreleased]`
+   in `CHANGELOG.md` to `[v0.11.10]` (zh/en bullets aligned). Commit both.
+2. **Tag + push**: `git tag v0.11.10 && git push origin v0.11.10`. The tag must
    equal the `package.json` version.
-3. **Wait for CI green**: poll
-   `gh run list --repo JochenYang/dsh-app --workflow release.yml --limit 1`
-   then `gh run view <id> --repo JochenYang/dsh-app`. All jobs
-   (prepare-release + 6 runtime + 4 app) must succeed; the release stays a
-   draft.
-   **Then verify what was built before publishing** — green jobs are still not
-   proof of the right content. Read the runtime job log's
-   `Runtime artifact ready: ...dsh-runtime-<platform>-<arch>-<version>.tgz`
-   line and confirm `<version>` is the kernel you meant to ship. The kernel-line
-   assertion (§ Kernel line) catches a *mismatched* line at the start of the
-   run; a wrong intent — bumping to the wrong dist-tag, say — stays silent.
-   Only then proceed.
-4. **Generate release notes**:
-   `node scripts/gen-release-notes.mjs v0.1.6` → writes `release-notes.md`.
-5. **Publish the draft**:
-   `gh release edit v0.1.6 --repo JochenYang/dsh-app --draft=false --notes-file release-notes.md`.
-   Use your own credentials: a release published by CI's `GITHUB_TOKEN` does
-   not trigger another workflow, so a token-driven publish would silently skip
-   the mirror.
-6. **Verify the mirror**: publishing the draft (step 5) triggers the
-   `publish-mirror` workflow, which mirrors the assets to ModelScope
-   (`releases/latest|archive|prerelease` + `versions.json`) with the official
-   Python SDK. Open that run's Summary panel: it records `OK` (target repo,
-   paths, assets committed, index size), `SKIPPED` (no `MODELSCOPE_TOKEN`) or
-   `FAILED` (reason), each with the backfill command, plus the `Prune` section
-   (retained set, delete list, index changes) that records which old versions
-   this run retired and the `Latest cleanup` section (kept set, stale files
-   removed) that records which `releases/latest/` leftovers this run dropped.
-   Confirm `releases/latest/` now holds only this version's assets + the four
-   `latest*.yml`, and that `releases/latest/latest.yml` names this version
-   (e.g. `curl -s .../repo?Revision=master&FilePath=releases/latest/latest.yml`).
-   Re-mirror a failed run with
-   `gh workflow run publish-mirror.yml -f tag=v0.1.6`; if the failure was
-   `503 commit publisher unavailable`, run
-   `gh workflow run publish-mirror.yml -f mode=diagnose` first to check the
-   endpoint, and use `-f only_pattern=<substr>` for a partial drill (on a
-   stable tag that overwrites the matching `releases/latest` files). A failed
-   mirror never blocks or rolls back the release; a missing `MODELSCOPE_TOKEN`
-   reports `SKIPPED` and is expected, not a failure.
+3. **Wait for CI green**, then **verify what was built before publishing** —
+   green jobs are not proof of the right content. All jobs (prepare-release +
+   6 runtime + 4 app) must succeed; the release stays a draft.
 
-Before publishing a runtime (`workflow_dispatch` / kernel line bump), run the
-plugin compatibility dry-run against a real profile:
-`npm run check:plugins -- --kernel <runtime.tgz> --home <real profile dir>`
-(without `--home` the script uses a temporary DSH_HOME and never writes the real
-`~/.dsh`).
+   ```sh
+   gh run list --repo JochenYang/dsh-app --workflow release.yml --limit 1
+   gh run view <id> --repo JochenYang/dsh-app
+   # the runtime job log must print this line with the kernel you meant to ship:
+   #   Runtime artifact ready: …dsh-runtime-<platform>-<arch>-<version>.tgz
+   ```
 
-### Release notes rules
+   Before diagnosing any "artifact missing" report, confirm the release is
+   complete — all 6 cells present, each sidecar sha512 equal to the manifest's
+   `integrity`:
 
-- **Incremental only**: notes describe what changed *since the last released
-  version* — never a full history or a `vX...vY` compare dump.
-- **Bilingual, Chinese on top**: zh block first and open by default, English
-  folded below it, wrapped in `<details>/<summary>` — GitHub strips JS/CSS in
-  notes, so `<details>` is the native "click to switch" pattern. Let
-  `scripts/gen-release-notes.mjs` assemble this from `CHANGELOG.md`; do not
-  hand-write the HTML.
-- Keep the two languages' bullets aligned (same items, same order); record
-  each public/user-visible change as one bullet per language.
+   ```sh
+   gh api repos/JochenYang/dsh-app/releases/tags/runtime-<v> --jq '.assets[].name'
+   ```
 
-### Failure recovery (learned the hard way)
+   The `runtime-<dshVersion>` release **must stay flagged prerelease**.
+   GitHub's `/releases/latest` alias resolves to the newest non-prerelease
+   release, so a fresh runtime tag would hijack it — and since it carries no
+   `latest.yml`, the shell app-update check dies on a metadata 404. (That is
+   exactly how `runtime-0.1.5-rc.2` once outranked `v0.11.4`.)
+4. **Notes**: `node scripts/gen-release-notes.mjs v0.11.10` → `release-notes.md`.
+5. **Publish the draft**: `gh release edit v0.11.10 --repo JochenYang/dsh-app
+   --draft=false --notes-file release-notes.md`. **Use your own credentials** —
+   a release published by CI's `GITHUB_TOKEN` triggers nothing, silently
+   skipping the mirror.
+6. **Verify the mirror**: publishing triggers `publish-mirror`. Check that
+   run's Summary for `OK` / `SKIPPED` (no token) / `FAILED` (reason + backfill
+   command), plus the `Prune` and `Latest cleanup` sections. Confirm
+   `releases/latest/` holds only this version's assets + the four `latest*.yml`.
+   A failed mirror never blocks or rolls back the release. Re-mirror with
+   `gh workflow run publish-mirror.yml -f tag=v0.11.10`; after a `503 commit
+   publisher unavailable`, run `-f mode=diagnose` first.
+7. **Runtime-only release** (`workflow_dispatch` or a kernel line bump): run
+   `npm run check:plugins -- --kernel <runtime.tgz> --home <real profile dir>`
+   first (without `--home` it uses a temp DSH_HOME and never writes `~/.dsh`).
 
-- **Never re-run the same tag** to "regenerate" a release: electron-builder's
-  publish is not idempotent and fails 422 `already_exists` on
-  installers/`latest-*.yml`. To rebuild: delete the draft release
-  (`gh api -X DELETE repos/JochenYang/dsh-app/releases/<id>`), delete the tag
-  (`git tag -d v0.1.6 && git push origin :refs/tags/v0.1.6`), then re-push.
-- **Runtime tags are different**: `runtime-<dshVersion>` releases are created
-  published and re-uploaded with `--clobber`, so re-running a failed runtime
-  job (or `gh run rerun <run> --failed`) is safe and idempotent — do NOT
-  delete/recreate a runtime tag, just re-upload.
-- A **single failed job** recovers best with `gh run rerun <run> --failed` —
-  but only for environmental flakes. `rerun` re-executes the run's ORIGINAL
-  commit: if the fix is a code change pushed afterwards, rerun rebuilds the
-  bug and fails identically — re-trigger (`workflow_dispatch`) instead so the
-  new run checks out the fixed SHA (verify via `headSha`).
-  Kernel versions in runtime artifacts resolve from the followed line's
-  dist-tag (distinct from the shell version) unless `dsh_version` is supplied;
-  see § Kernel line for how that line is chosen and asserted.
-- **Never run two writers against one runtime tag**: a `workflow_dispatch`
-  re-upload and a tag-push CI both `--clobber` to `runtime-<dshVersion>`,
-  and the loser silently overwrites the winner (once shipped a stale 8-plugin
-  artifact over a fresh 10-plugin one). Before any manual re-upload, confirm
-  no other `release.yml` run is in progress
-  (`gh run list --repo JochenYang/dsh-app --workflow release.yml --status in_progress`),
-  and confirm the fix is pushed (`git log origin/main..HEAD` empty) —
-  dispatch checks out origin/main, not the local worktree, so triggering it
-  from unpushed code rebuilds the bug.
+Mirror internals — upload, index and prune logic — live in
+`.github/scripts/mirror_release.py`, not in the YAML; review changes there.
+Unit tests: `python .github/scripts/test_mirror_release.py`. Retention policy:
+`keep_versions` (default 10, stable and prerelease ranked separately) governs
+`releases/archive/` and `releases/prerelease/`; `releases/latest/` is instead
+converged to exactly what the current release uploaded, so **the archive, not
+`latest`, is the rollback source**. Deletes use a positive allowlist or a
+narrower single-file guard and refuse anything else rather than deleting.
 
-**Remaining pre-release gaps**: macOS signing/notarization and (optional)
-Windows signing secrets must be provided as CI secrets;
-`resources/icon.png` is a placeholder brand icon; the suite plugins are
-bundled via `file:` references and should switch to registry versions once
-published.
+Release notes: incremental only (never a full history), bilingual with the zh
+block open and English folded in `<details>`, generated by the script — never
+hand-written HTML.
 
-## 11. Known TODOs / scaffolds (do not assume finished)
+**Failure recovery**:
 
-- `plugin-brand/src/index.ts`: host services are scaffolds — settings
-  namespace, app-info service, desktop bridge remotes are not yet wired.
-- `plugin-client-ui/src/client.ts`: remaining enhancement slots are commented
-  out (reminder summary, trajectory export, model badges); slot ids still to
-  be verified against the running UI. (The workspace file panel shipped
-  separately as `@dsh-app/plugin-sidebar`.)
+- **Never re-run the same tag** to "regenerate": electron-builder's publish is
+  not idempotent and fails 422 `already_exists`. To rebuild:
+
+  ```sh
+  gh api -X DELETE repos/JochenYang/dsh-app/releases/<id>
+  git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z
+  # then re-tag and push
+  ```
+- **Runtime tags are different** — they are created published and re-uploaded
+  with `--clobber`, so re-running a failed runtime job is safe and idempotent.
+- A single failed job recovers with `gh run rerun <run> --failed`, but **only
+  for environmental flakes**: rerun re-executes the ORIGINAL commit, so a
+  code fix needs a re-trigger (`workflow_dispatch`). Verify via `headSha`.
+- **Never run two writers against one runtime tag** — both `--clobber` and the
+  loser silently overwrites the winner. Before a manual re-upload, confirm no
+  other `release.yml` run is in progress and that the fix is pushed
+  (`git log origin/main..HEAD` empty — dispatch checks out `origin/main`, not
+  your worktree).
+
+## 8. Known TODOs / scaffolds (do not assume finished)
+
+- `plugin-brand`: host services are scaffolds — settings namespace, app-info
+  service and desktop bridge remotes are not wired.
+- `plugin-client-ui`: registers exactly one `settings.section` (advanced Models
+  page, order 11) plus a nav-icon patch and the whale background. The
+  reminder-summary / trajectory-export / model-badge slots mentioned in older
+  notes are **gone from the code** — verify slot ids against the running UI
+  before adding anything.
+- `plugin-sidebar`: no automated test suite for its client components.
+- CI runs only two of the thirteen plugin suites (see §3).
 - First-run UX: kernel download progress is wired; pause/resume and checksum
-  display are not.
-- Optional future: signed manifests + rollback of `$DSH_HOME` settings on
+  display are not (cancellation is a `TODO` in `KernelManager.download`).
+- `docs/ARCHITECTURE.md` lags the code: its plugin roster says ten entries
+  (there are seventeen) and it predates the safe-mode / proxy / websearch work.
+- **Pre-release gaps**: macOS signing/notarization and (optional) Windows
+  signing secrets must be supplied as CI secrets; `resources/icon.png` is still
+  a placeholder brand icon.
+- Optional future: signed kernel manifests; rollback of `$DSH_HOME` settings on
   major-version upgrades.
