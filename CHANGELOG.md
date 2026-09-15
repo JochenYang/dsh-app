@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- 会话记忆重构为「按主题的记忆」：存储从每个作用域一个按日期追加的条目文件，改为一个主题一个纯文本 .md 文件加自动维护的索引；同一主题再次记录会覆盖更新而不是越攒越多，纠正旧记忆一步到位（原来要「先遗忘再保存」两步）。旧记忆启动时自动迁移，原文件保留为 memory.legacy.md 归档，固定的条目跨迁移保留。新写入带重复防护：换个名字重述同一件事会被拦下并指到已有记忆；每次写入后做一次零成本整理（精确重复合并、可疑重叠记录留档），后台策展改为按主题合并/删除/重写，超过 30 个主题或 16KB 时收到带具体数字的强制瘦身指令。设置页改为按主题列出记忆、可展开正文、按名称固定或删除，分类标签中文化
+- 会话记忆接口变化（仅影响自己写自动化调用的人）：memory_save 新增必填的主题名与索引摘要参数，memory_recall 支持按主题名精确读取单条，memory_forget 优先按主题名删除
+
+### English
+- Memory rebuilt around topics: storage moves from one date-stamped append-only file per scope to one plain-text .md file per topic plus a host-maintained index; saving the same topic again rewrites it instead of piling up, and correcting a memory is one step (no more forget-then-save). Existing memories migrate automatically at boot (the old file is kept as memory.legacy.md, pins survive the migration). New writes are duplicate-guarded: restating a fact under a fresh name is rejected with a pointer to the card that covers it; every write triggers a free maintenance pass (exact-duplicate merge, overlap suspects logged), and the background curator now merges/deletes/rewrites by topic with a mandatory shrink directive (with concrete numbers) past 30 topics or 16KB. The settings page lists memories by topic with expandable bodies, pin/delete by name, and localized category labels
+- Memory tool contract change (only affects hand-written automation): memory_save gains required topic and summary parameters, memory_recall reads one card by exact topic, and memory_forget matches topic names first
+
 ## [v0.11.9] - 2026-09-14
 
 ### 中文

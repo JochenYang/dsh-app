@@ -321,6 +321,48 @@ const cssText = `
   overflow-wrap: anywhere;
   white-space: normal;
 }
+/* Click-to-expand main area of a card row: a button reset so the summary,
+   meta line and expanded body stack as plain text. */
+.dshm_entryMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dshm_entryMain:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* Sub-line under the summary: [category] topic · 更新于 date. */
+.dshm_entryMeta {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Expanded card body, separated from the summary by a hairline. */
+.dshm_entryBody {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .dshm_pinBtn {
   flex: none;
   border: 1px solid var(--dsw-alias-border-l2);

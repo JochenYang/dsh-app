@@ -1,5 +1,6 @@
 /**
- * Core unit tests for the memory plugin: pure functions and store behavior.
+ * Core unit tests for the memory plugin: pure functions, the card store,
+ * migration, injection selection, and the light sweep.
  * Run via `npm test` (esbuild bundles TS → .test-dist, node --test runs it).
  *
  * @module @dsh-app/plugin-memory/tests/core
@@ -8,30 +9,35 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  MAX_SUMMARY_CHARS,
+  MAX_TOPIC_BODY_CHARS,
   MemoryRoot,
   MemoryStore,
-  contentHash,
-  filterEntries,
+  contentSimilarity,
+  isValidTopic,
   normalizeForMatch,
-  parseEntries,
+  parseCard,
   projectSlug,
+  renderCard,
+  slugifyTopic,
   stripCommitIds,
-  todayStamp,
+  validateCardInput,
 } from '../src/memory-store.ts'
-import { selectBalanced } from '../src/prompt.ts'
-import { MemoryCurator, buildCuratePrompt } from '../src/curator.ts'
+import { renderCardBlock, renderMemoryText, selectCards } from '../src/prompt.ts'
+import { lightSweep } from '../src/light-sweep.ts'
 import { ROUTE_PREFIX, registerMemoryRoutes } from '../src/routes.ts'
-import { existingNeedles, renderExcerpt } from '../src/distiller.ts'
+import type { MemoryCategory } from '../src/types.ts'
 
 const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), 'dshm-test-')))
+const tmpRoot = (): MemoryRoot => new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-root-')))
 
-const curatorApply = (store: MemoryStore, structured: unknown): { merged: number, deleted: number } => {
-  const curator = new MemoryCurator(null as never, new MemoryRoot(store.dir), console)
-  return (curator as unknown as { applyEdits(s: MemoryStore, u: unknown): { merged: number, deleted: number } }).applyEdits(store, structured)
+/** Save one well-formed card in one call. */
+const save = (store: MemoryStore, name: string, body: string, category: MemoryCategory = 'lesson', summary = ''): void => {
+  store.upsert({ name, category, summary: summary === '' ? `${name} hook` : summary, body })
 }
 
 // --- normalizeForMatch -------------------------------------------------------
@@ -50,504 +56,325 @@ test('normalizeForMatch: kana, Cyrillic and accented Latin survive too (no scrip
   assert.equal(normalizeForMatch('한국어 메모'), '한국어메모')
 })
 
-// --- parseEntries ------------------------------------------------------------
+// --- topic keys ----------------------------------------------------------------
 
-test('parseEntries: standard lines split into category/date/content; hand notes kept verbatim', () => {
-  const entries = parseEntries('- [lesson] 2026-09-01 alpha\n手写注释行\n- [fact] 2026-09-02 beta\n')
-  assert.equal(entries.length, 3)
-  assert.deepEqual(entries[0], { raw: '- [lesson] 2026-09-01 alpha', category: 'lesson', date: '2026-09-01', content: 'alpha' })
-  assert.equal(entries[1].category, undefined)
-  assert.equal(entries[1].content, '手写注释行')
-  assert.equal(parseEntries('').length, 0)
+test('slugifyTopic: kebab-cases, translates nothing, drops CJK', () => {
+  assert.equal(slugifyTopic('Pnpm 11 AllowScripts'), 'pnpm-11-allowscripts')
+  assert.equal(slugifyTopic('release/010 state!'), 'release-010-state')
+  assert.equal(slugifyTopic('中文主题'), '', 'pure-CJK proposals have no ASCII key')
+  assert.equal(slugifyTopic('a'.repeat(80)).length <= 48, true, 'capped at 48 chars')
+  assert.ok(isValidTopic(slugifyTopic('Pnpm 11 AllowScripts')))
+  assert.equal(isValidTopic('../etc'), false)
+  assert.equal(isValidTopic('-lead'), false)
 })
 
-// --- selectBalanced ----------------------------------------------------------
+// --- contentSimilarity ----------------------------------------------------------
 
-test('selectBalanced: per-category quota keeps the newest; budget is not the ceiling', () => {
-  const lines = Array.from({ length: 20 }, (_, i) => `- [lesson] 2026-09-0${String((i % 9) + 1)} lesson-${String(i + 1).padStart(2, '0')}`)
-  const text = lines.join('\n')
-
-  const small = selectBalanced(text, 120, new Set())
-  assert.equal(small.selected.length, 2, 'lesson quota is 2')
-  assert.ok(small.selected[1].includes('lesson-20'), 'newest kept')
-  assert.equal(small.truncated, true)
-
-  const big = selectBalanced(text, 10_000, new Set())
-  assert.equal(big.selected.length, 2, 'quota caps injection regardless of budget')
+test('contentSimilarity: identical is 1, disjoint is 0, reworded lands between', () => {
+  assert.equal(contentSimilarity('用 pnpm 跑 typecheck', '用 pnpm 跑 typecheck'), 1)
+  assert.equal(contentSimilarity('服务器在东京', '用户喜欢用浅色调色板'), 0)
+  const score = contentSimilarity('pnpm 11 白名单必须写进 pnpm-workspace.yaml', 'pnpm 11 的白名单要写进 pnpm-workspace.yaml 文件')
+  assert.ok(score > 0.5 && score < 1, `reworded Chinese scores mid-range, got ${String(score)}`)
+  assert.equal(contentSimilarity('', 'anything'), 0)
 })
 
-test('selectBalanced: multiple categories each keep their own quota', () => {
-  const text = ['preference', 'convention', 'decision', 'fact']
-    .map(cat => Array.from({ length: 4 }, (_, i) => `- [${cat}] 2026-09-0${String(i + 1)} ${cat}-${String(i + 1)}`).join('\n'))
-    .join('\n')
-  const sel = selectBalanced(text, 10_000, new Set())
-  assert.equal(sel.selected.length, 10, '3+3+2+2')
-  assert.ok(sel.selected.some(line => line.includes('preference-2')))
-  assert.ok(!sel.selected.some(line => line.includes('preference-1')))
+// --- card (de)serialization -------------------------------------------------------
+
+test('renderCard/parseCard: round-trip preserves every field', () => {
+  const card = {
+    name: 'pnpm11-allowscripts', category: 'lesson' as const,
+    summary: 'pnpm 11 白名单写进 workspace yaml', created: '2026-09-01', updated: '2026-09-12',
+    body: '正文：allowScripts 数组静默失效。', malformed: false,
+  }
+  const parsed = parseCard(card.name, renderCard(card))
+  assert.deepEqual(parsed, card)
 })
 
-test('selectBalanced: pin ranks first and survives a budget-hogging hand note', () => {
-  const longNote = '手写行'.repeat(200)
-  const text = [longNote, '- [preference] 2026-09-01 pinned-fact', '- [lesson] 2026-09-02 other'].join('\n')
-  const sel = selectBalanced(text, 60, new Set([normalizeForMatch('pinned-fact')]))
-  assert.ok(sel.selected.some(line => line.includes('pinned-fact')), 'pin injected')
+test('parseCard: a hand-edited file without frontmatter degrades to a verbatim malformed card', () => {
+  const parsed = parseCard('hand-note', '随手记的一行，没有 frontmatter')
+  assert.equal(parsed.malformed, true)
+  assert.equal(parsed.body, '随手记的一行，没有 frontmatter')
+  assert.equal(parsed.category, 'fact')
 })
 
-test('selectBalanced: an over-budget pin is clipped into the budget, never dropped or injected whole', () => {
-  const text = '- [preference] 2026-09-01 pinned-fact'
-  const budget = 10
-  const sel = selectBalanced(text, budget, new Set([normalizeForMatch('pinned-fact')]))
-  // A pin MUST reach the prompt — that is the contract — but "whole" used to
-  // mean an over-long hand-written line could grow every new session's system
-  // prompt without bound. It is clipped to the budget with a marked cut.
-  assert.equal(sel.selected.length, 1, 'the pin still reaches the prompt')
-  assert.ok(sel.selected[0]!.length <= budget, 'the injected line fits the budget')
-  assert.match(sel.selected[0]!, /…$/, 'the cut is visible')
-  assert.equal(sel.truncated, true)
+test('parseCard: CRLF line endings (Windows hand edit) still parse as a clean card', () => {
+  const card = {
+    name: 'crlf-card', category: 'lesson' as const, summary: '换行符兼容',
+    created: '2026-09-01', updated: '2026-09-02', body: '正文内容', malformed: false,
+  }
+  const crlf = renderCard(card).replace(/\n/gu, '\r\n')
+  const parsed = parseCard('crlf-card', crlf)
+  assert.equal(parsed.malformed, false)
+  assert.equal(parsed.body, '正文内容')
+  assert.equal(parsed.summary, '换行符兼容')
 })
 
-test('selectBalanced: a pin that does not fit must not evict the pins behind it', () => {
-  // The priority list runs oldest-first, so a plain `break` dropped the NEWEST
-  // pins first — exactly backwards for the entries a user explicitly pinned.
-  const big = `- [preference] 2026-09-01 ${'x'.repeat(200)}`
-  const newest = '- [preference] 2026-09-02 newest-pin'
-  const text = [big, newest].join('\n')
-  const budget = 200
-  const sel = selectBalanced(text, budget, new Set([
-    normalizeForMatch('x'.repeat(200)),
-    normalizeForMatch('newest-pin'),
-  ]))
-  assert.ok(sel.selected.some(line => line.includes('newest-pin')), 'the newest pin survives the older over-long one')
+test('validateCardInput: a credential in the SUMMARY is fenced too (it rides the index)', () => {
+  const base = { name: 'ok-key', category: 'lesson', summary: 'hook', body: 'body' }
+  assert.match(validateCardInput({ ...base, summary: 'api_key: sk-abc123def456' }) ?? '', /credential/)
+  assert.match(validateCardInput({ ...base, body: 'bearer abcdef123' }) ?? '', /credential/)
 })
 
-test('selectBalanced: an unpinned over-budget file returns empty (recall hint applies)', () => {
-  const sel = selectBalanced('- [preference] 2026-09-01 plain-fact', 10, new Set())
-  assert.deepEqual(sel.selected, [])
-  assert.equal(sel.truncated, true)
+test('validateCardInput: names, categories, lengths are fenced', () => {
+  const base = { name: 'ok-key', category: 'lesson', summary: 'hook', body: 'body' }
+  assert.equal(validateCardInput(base), undefined)
+  assert.match(validateCardInput({ ...base, name: '中文键' }) ?? '', /invalid topic key/)
+  assert.match(validateCardInput({ ...base, category: 'nope' }) ?? '', /unknown category/)
+  assert.match(validateCardInput({ ...base, summary: '' }) ?? '', /summary is required/)
+  assert.match(validateCardInput({ ...base, summary: 'x'.repeat(MAX_SUMMARY_CHARS + 1) }) ?? '', /summary too long/)
+  assert.match(validateCardInput({ ...base, body: '' }) ?? '', /empty content/)
+  assert.match(validateCardInput({ ...base, body: 'x'.repeat(MAX_TOPIC_BODY_CHARS + 1) }) ?? '', /content too long/)
 })
 
-// --- MemoryStore: append/hasContent/forget/removeContent ---------------------
+// --- store: upsert / remove / pins ---------------------------------------------
 
-test('append + hasContent: exact-content dedupe, never substring', () => {
+test('upsert: create → update → unchanged, and the index follows', () => {
   const store = tmpStore()
-  store.append('lesson', '用 pnpm 跑 typecheck')
-  assert.equal(store.hasContent('用 pnpm 跑 typecheck'), true)
-  assert.equal(store.hasContent('用 pnpm'), false, 'shorter wording is NOT a duplicate')
-  assert.equal(store.hasContent('用 pnpm 跑 typecheck 和 build'), false)
+  const created = store.upsert({ name: 'release-flow', category: 'convention', summary: '发版流程', body: '先发 draft 再发布' })
+  assert.equal(created.op, 'created')
+  assert.equal(created.card.created, created.card.updated)
+
+  const updated = store.upsert({ name: 'release-flow', category: 'convention', body: '先发 draft，验证后再发布' })
+  assert.equal(updated.op, 'updated')
+  assert.equal(updated.card.summary, '发版流程', 'omitted summary is inherited')
+  assert.equal(updated.card.created, created.card.created, 'created survives updates')
+
+  const noop = store.upsert({ name: 'release-flow', category: 'convention', body: '先发 draft，验证后再发布', summary: '发版流程' })
+  assert.equal(noop.op, 'unchanged', 'a byte-identical save is a no-op')
+
+  const index = store.indexText()
+  assert.ok(index.includes('release-flow'), 'index lists the card')
+  assert.ok(index.includes('发版流程'), 'index carries the summary hook')
+  assert.ok(index.includes('[convention]'), 'index carries the category')
 })
 
-test('forget: substring sweep over content (LLM tool semantics)', () => {
+test('upsert: invalid input throws (callers pre-validate for friendly errors)', () => {
   const store = tmpStore()
-  store.append('lesson', '用 pnpm 跑 typecheck')
-  store.append('lesson', '服务器在东京')
-  const { removed, remaining } = store.forget('pnpm')
-  assert.equal(removed.length, 1)
-  assert.equal(remaining, 1)
-  assert.ok(store.read().includes('服务器在东京'))
+  assert.throws(() => store.upsert({ name: '中文键', category: 'lesson', summary: 'x', body: 'y' }), /invalid topic key/)
 })
 
-test('removeContent: exact row delete (settings-page semantics)', () => {
+test('a pin keyed by topic survives content rewrites; remove drops it', () => {
   const store = tmpStore()
-  store.append('lesson', '用 pnpm')
-  store.append('lesson', '用 pnpm 跑 typecheck')
-  const { removed, remaining } = store.removeContent('用 pnpm')
-  assert.equal(removed.length, 1)
-  assert.equal(remaining, 1)
-  assert.ok(store.read().includes('用 pnpm 跑 typecheck'), 'the longer row survives')
+  save(store, 'release-flow', '先发 draft')
+  assert.equal(store.addPin('release-flow'), true)
+  store.upsert({ name: 'release-flow', category: 'lesson', body: '改写后的正文，完全换了一批字' })
+  assert.equal(store.pinnedSet().has('release-flow'), true, 'pin keyed by topic, not content')
+  assert.ok(store.indexText().includes('📌'), 'the index marks the pin')
+  assert.equal(store.remove('release-flow'), true)
+  assert.equal(store.pinnedSet().size, 0, 'the pin goes with the card')
+  assert.equal(store.indexText(), '', 'the index of an empty scope is empty')
 })
 
-test('forget: a pure-Cyrillic match sweeps the entry (no empty needle)', () => {
+test('addPin: refuses absent cards and double pins', () => {
   const store = tmpStore()
-  store.append('fact', 'Резервное копирование идёт в 3 часа ночи')
-  const { removed, remaining } = store.forget('резервное копирование')
-  assert.equal(removed.length, 1)
-  assert.equal(remaining, 0)
-  assert.equal(store.read(), '')
+  assert.equal(store.addPin('not-there'), false)
+  save(store, 'there', '正文')
+  assert.equal(store.addPin('there'), true)
+  assert.equal(store.addPin('there'), false)
 })
 
-test('hasContent/addPin: pure-kana text is real content, not an empty needle', () => {
+test('forget: exact topic key wins; otherwise a content substring sweeps cards', () => {
   const store = tmpStore()
-  store.append('fact', 'ありがとう ございます')
-  assert.equal(store.hasContent('ありがとう ございます'), true)
-  assert.equal(store.hasContent('ありがとう'), false, 'shorter wording is not a duplicate')
-  assert.equal(store.addPin('ありがとう ございます'), true)
-  assert.equal(store.pinnedSet().has(normalizeForMatch('ありがとう ございます')), true)
+  save(store, 'pnpm-typecheck', '用 pnpm 跑 typecheck')
+  save(store, 'pnpm-build', '用 pnpm 跑 build')
+  save(store, 'tokyo-servers', '服务器在东京')
+  const byKey = store.forget('pnpm-typecheck')
+  assert.deepEqual(byKey.removed, ['pnpm-typecheck'])
+  const byContent = store.forget('pnpm')
+  assert.deepEqual(byContent.removed, ['pnpm-build'], 'substring sweeps summary+body, not the removed key')
+  assert.equal(byContent.remaining, 1)
 })
 
-// --- pin persistence + clear -------------------------------------------------
-
-test('pin: persists in config.json, deduped, removable', () => {
+test('clear: drops cards, index, legacy archive and pins', () => {
   const store = tmpStore()
-  assert.equal(store.addPin('Hello  World!'), true)
-  assert.equal(store.addPin('Hello  World!'), false)
-  assert.equal(store.pinnedSet().has(normalizeForMatch('Hello  World!')), true)
-  assert.equal(store.removePin('hello world!'), true)
-  assert.equal(store.pinnedSet().size, 0)
-})
-
-test('removeContent: the deleted row takes its pin with it, survivors keep theirs', () => {
-  const store = tmpStore()
-  store.append('lesson', '用 pnpm')
-  store.append('lesson', '服务器在东京')
-  store.addPin('用 pnpm')
-  store.addPin('服务器在东京')
-  const { removed } = store.removeContent('用 pnpm')
-  assert.equal(removed.length, 1)
-  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm')), false, 'no dangling pin for the deleted row')
-  assert.equal(store.pinnedSet().has(normalizeForMatch('服务器在东京')), true, 'the surviving row stays pinned')
-})
-
-test('forget: pins follow the swept rows only (substring match, per-row cleanup)', () => {
-  const store = tmpStore()
-  store.append('lesson', '用 pnpm 跑 typecheck')
-  store.append('lesson', '用 pnpm 跑 build')
-  store.addPin('用 pnpm 跑 typecheck')
-  store.addPin('用 pnpm 跑 build')
-  const { removed } = store.forget('typecheck')
-  assert.equal(removed.length, 1)
-  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm 跑 typecheck')), false)
-  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm 跑 build')), true, 'the untouched row stays pinned')
-})
-
-test('a row re-saved after deletion is not auto-pinned by a leftover pin', () => {
-  const store = tmpStore()
-  store.append('lesson', '用 pnpm')
-  store.addPin('用 pnpm')
-  assert.equal(store.removeContent('用 pnpm').removed.length, 1)
-  assert.equal(store.pinnedSet().size, 0, 'the pin went with the row')
-  assert.equal(store.hasContent('用 pnpm'), false, 'nothing left to dedupe against')
-  store.append('lesson', '用 pnpm')
-  // The settings row flag is pinnedSet().has(normalizeForMatch(content)).
-  assert.equal(store.pinnedSet().has(normalizeForMatch('用 pnpm')), false, 'the rewritten row is NOT pinned')
-})
-
-test('clear: drops entries AND pins (full reset)', () => {
-  const store = tmpStore()
-  store.append('lesson', 'one')
+  save(store, 'one', '第一条')
   store.addPin('one')
+  writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-01-01 旧条目\n', 'utf8')
+  store.migrateLegacy()
   store.clear()
-  assert.equal(store.read(), '')
+  assert.equal(store.list().length, 0)
+  assert.equal(store.indexText(), '')
   assert.equal(store.pinnedSet().size, 0)
+  assert.equal(existsSync(join(store.dir, 'memory.legacy.md')), false)
 })
 
-// --- replace -----------------------------------------------------------------
-
-test('replace: crash-safe whole-file rewrite with trailing newline', () => {
+test('hasContent: exact body match, never substring', () => {
   const store = tmpStore()
-  store.replace('a\nb')
-  assert.equal(store.read(), 'a\nb\n')
-  store.replace('')
-  assert.equal(store.read(), '')
-  assert.equal(existsSync(store.filePath), true)
+  save(store, 'pnpm-typecheck', '用 pnpm 跑 typecheck')
+  assert.equal(store.hasContent('用 pnpm 跑 typecheck'), true)
+  assert.equal(store.hasContent('用 pnpm'), false)
 })
 
-// --- projectSlug / projectBySlug ---------------------------------------------
-
-test('projectSlug: deterministic, same basename in two parents never collides', () => {
-  const a = projectSlug('D:/codes/DSH-APP')
-  assert.equal(projectSlug('D:/codes/DSH-APP'), a)
-  assert.notEqual(a, projectSlug('C:/elsewhere/DSH-APP'))
-  assert.match(a, /^dsh-app-[a-f0-9]{8}$/)
-})
-
-test('projectBySlug: resolves a project store via project.json; unknown slug → undefined', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-root-')))
-  assert.equal(root.projectBySlug('nope-nope'), undefined)
-  const store = root.projectFor('D:/codes/DSH-APP')
-  store.append('lesson', '项目条目')
-  const slug = projectSlug('D:/codes/DSH-APP')
-  const resolved = root.projectBySlug(slug)
-  assert.ok(resolved !== undefined)
-  assert.ok(resolved.read().includes('项目条目'))
-  assert.equal(root.projectBySlug('../etc'), undefined, 'traversal fenced')
-})
-
-// --- distiller existingNeedles -----------------------------------------------
-
-test('existingNeedles: exact-content set; short new wording is not eaten', () => {
+test('findSimilar: near-duplicate ranks first, disjoint text stays under the floor', () => {
   const store = tmpStore()
-  store.append('lesson', '用 pnpm 跑 typecheck')
-  const needles = existingNeedles(store)
-  assert.equal(needles.has(normalizeForMatch('用 pnpm 跑 typecheck')), true)
-  assert.equal(needles.has(normalizeForMatch('用 pnpm')), false, 'substring is not a duplicate anymore')
-  store.append('lesson', '手写行')
-  assert.equal(existingNeedles(store).size, 2)
+  save(store, 'pnpm11-allowscripts', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml', 'lesson', 'pnpm 11 白名单')
+  save(store, 'tokyo-servers', '服务器在东京', 'fact', '东京服务器')
+  const hits = store.findSimilar('pnpm 11 的白名单要写进 pnpm-workspace.yaml 文件')
+  assert.equal(hits[0]?.name, 'pnpm11-allowscripts')
+  assert.ok((hits[0]?.score ?? 0) > 0.5)
+  assert.ok(!hits.some(hit => hit.name === 'tokyo-servers'), 'disjoint card stays under the floor')
 })
 
-// --- curator applyEdits -------------------------------------------------------
+// --- migration -------------------------------------------------------------------
 
-test('curator: merge + delete land atomically', () => {
+test('migrateLegacy: entries become cards losslessly; pins remap; the archive is kept', () => {
   const store = tmpStore()
-  store.replace([
-    '- [lesson] 2026-09-01 pnpm 很好',
-    '- [lesson] 2026-09-02 继续用 pnpm',
-    '- [fact] 2026-09-01 服务器在东京',
-  ].join('\n'))
-  const out = curatorApply(store, {
-    edits: [
-      { op: 'merge', lines: ['- [lesson] 2026-09-01 pnpm 很好', '- [lesson] 2026-09-02 继续用 pnpm'], category: 'lesson', content: '用户喜欢用 pnpm' },
-      { op: 'delete', lines: ['- [fact] 2026-09-01 服务器在东京'] },
-    ],
-  })
-  assert.deepEqual(out, { merged: 1, deleted: 1 })
-  assert.equal(readFileSync(store.filePath, 'utf8'), `- [lesson] ${todayStamp()} 用户喜欢用 pnpm\n`)
+  const legacy = [
+    '- [lesson] 2026-09-01 用户在方案征询时期望一次性给出综合方案确认',
+    '- [fact] 2026-09-02 服务器在东京',
+    '- [lesson] 2026-09-03 pnpm 11 不再从 package.json 读配置',
+    '- [lesson] 2026-09-03 pnpm 11 不再从 package.json 读配置',
+    '手写的一行没有前缀',
+  ].join('\n')
+  writeFileSync(join(store.dir, 'memory.md'), `${legacy}\n`, 'utf8')
+  const { migrated, pinsRemapped } = store.migrateLegacy()
+
+  assert.equal(migrated, 5, 'every parseable line becomes a card (identical lines converge on one key)')
+  const cards = store.list()
+  assert.equal(cards.length, 4, 'identical content converges on one legacy key')
+  assert.ok(cards.every(card => card.name.startsWith('legacy-')), 'migrated keys are marked')
+  assert.ok(cards.some(card => card.created === '2026-09-01'), 'legacy date lands in created')
+  assert.ok(cards.some(card => card.category === 'lesson'))
+  assert.ok(!existsSync(join(store.dir, 'memory.md')), 'the timeline file is gone')
+  assert.ok(existsSync(join(store.dir, 'memory.legacy.md')), 'the archive is kept')
+  assert.equal(store.needsMigration(), false)
+  assert.equal(pinsRemapped, 0, 'no legacy pins existed')
+
+  // Re-run is a no-op.
+  assert.deepEqual(store.migrateLegacy(), { migrated: 0, pinsRemapped: 0, pinsDropped: [] })
 })
 
-test('curator: merge to own wording accepted (dedupe exempts replaced lines)', () => {
+test('migrateLegacy: a legacy content-keyed pin lands on the migrated card', () => {
   const store = tmpStore()
-  store.replace([
-    '- [lesson] 2026-09-01 用户喜欢用 pnpm 管理依赖',
-    '- [lesson] 2026-09-02 一直用 pnpm，别用 npm',
-    '- [fact] 2026-09-01 无关的条目',
-  ].join('\n'))
-  const out = curatorApply(store, {
-    edits: [{ op: 'merge', lines: ['- [lesson] 2026-09-01 用户喜欢用 pnpm 管理依赖', '- [lesson] 2026-09-02 一直用 pnpm，别用 npm'], category: 'lesson', content: '用户喜欢用 pnpm 管理依赖' }],
-  })
-  assert.deepEqual(out, { merged: 1, deleted: 0 })
-  assert.equal(readFileSync(store.filePath, 'utf8'), `- [fact] 2026-09-01 无关的条目\n- [lesson] ${todayStamp()} 用户喜欢用 pnpm 管理依赖\n`)
+  writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-09-01 固定我\n- [fact] 2026-09-02 不固定\n', 'utf8')
+  writeFileSync(join(store.dir, 'config.json'), `${JSON.stringify({ pinned: [normalizeForMatch('固定我')] })}\n`, 'utf8')
+  const { migrated, pinsRemapped } = store.migrateLegacy()
+  assert.equal(migrated, 2)
+  assert.equal(pinsRemapped, 1)
+  const pinnedCard = store.list().find(card => card.body === '固定我')
+  assert.ok(pinnedCard !== undefined)
+  assert.ok(store.pinnedSet().has(pinnedCard.name), 'the pin follows the content onto its card')
 })
 
-test('curator: merge duplicating a SURVIVING line is rejected, file untouched', () => {
+test('migrateLegacy: a crash-resume re-run keeps pins already remapped to topic keys', () => {
   const store = tmpStore()
-  store.replace('- [lesson] 2026-09-01 keep me\n- [lesson] 2026-09-01 another\n')
-  const out = curatorApply(store, { edits: [{ op: 'merge', lines: ['- [lesson] 2026-09-01 another'], category: 'lesson', content: 'keep me' }] })
-  assert.deepEqual(out, { merged: 0, deleted: 0 })
-  assert.equal(readFileSync(store.filePath, 'utf8'), '- [lesson] 2026-09-01 keep me\n- [lesson] 2026-09-01 another\n')
+  // Simulate the crash window: a prior run wrote the card AND the topic-keyed
+  // pin, but died before renaming memory.md — so this run re-migrates with
+  // config.pinned already holding a topic key, not normalized content.
+  save(store, 'legacy-ab12cd34', '已迁移的卡')
+  writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-09-01 已迁移的卡\n', 'utf8')
+  writeFileSync(join(store.dir, 'config.json'), `${JSON.stringify({ pinned: ['legacy-ab12cd34'] })}\n`, 'utf8')
+  const { pinsRemapped, pinsDropped } = store.migrateLegacy()
+  assert.equal(pinsRemapped, 1, 'the already-keyed pin is carried over, not dropped')
+  assert.deepEqual(pinsDropped, [])
+  assert.ok(store.pinnedSet().has('legacy-ab12cd34'))
 })
 
-test('curator: ghost citation / double citation / malformed payload rejected', () => {
+test('migrateLegacy: a genuinely unmatched legacy pin is reported, not silently lost', () => {
   const store = tmpStore()
-  store.replace('- [lesson] 2026-09-01 one\n- [lesson] 2026-09-02 two\n')
-  assert.deepEqual(curatorApply(store, { edits: [{ op: 'delete', lines: ['- [lesson] 1999-01-01 nowhere'] }] }), { merged: 0, deleted: 0 })
-  assert.deepEqual(curatorApply(store, {
-    edits: [
-      { op: 'delete', lines: ['- [lesson] 2026-09-01 one'] },
-      { op: 'delete', lines: ['- [lesson] 2026-09-01 one'] },
-    ],
-  }), { merged: 0, deleted: 1 })
-  assert.deepEqual(curatorApply(store, { edits: [] }), { merged: 0, deleted: 0 })
-  assert.deepEqual(curatorApply(store, null), { merged: 0, deleted: 0 })
-  assert.deepEqual(curatorApply(store, { edits: [{ op: 'rewrite', lines: ['- [lesson] 2026-09-02 two'] }] }), { merged: 0, deleted: 0 })
+  writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-09-01 留存条目\n', 'utf8')
+  writeFileSync(join(store.dir, 'config.json'), `${JSON.stringify({ pinned: ['早已不存在的条目内容'] })}\n`, 'utf8')
+  const { pinsRemapped, pinsDropped } = store.migrateLegacy()
+  assert.equal(pinsRemapped, 0)
+  assert.deepEqual(pinsDropped, ['早已不存在的条目内容'])
 })
 
-test('curator: MAX_CURATE_EDITS caps a run of 30 valid merges at 20', () => {
+test('migrateLegacy: credential-looking entries are not carried over', () => {
   const store = tmpStore()
-  const lines = Array.from({ length: 30 }, (_, i) => `- [lesson] 2026-09-01 条目${String(i)}`)
-  store.replace(lines.join('\n'))
-  const out = curatorApply(store, {
-    edits: lines.map(line => ({ op: 'merge', lines: [line], category: 'lesson', content: `新${line.slice(23)}` })),
-  })
-  assert.equal(out.merged, 20, 'cap applies in the merge stage too')
-  const remaining = parseEntries(store.read())
-  assert.equal(remaining.length, 30, '30 originals replaced by 20 merges + 10 untouched')
+  writeFileSync(join(store.dir, 'memory.md'), '- [fact] 2026-09-01 正常条目\n- [fact] 2026-09-02 api_key: sk-abc123def456ghi7\n', 'utf8')
+  const { migrated } = store.migrateLegacy()
+  assert.equal(migrated, 1, 'the credential-looking line is dropped at the gate')
 })
 
-// --- fixture helper used by the MAX test -------------------------------------
-
-test('curator: oversized merge content rejected', () => {
-  const store = tmpStore()
-  store.replace('- [lesson] 2026-09-02 two\n')
-  const out = curatorApply(store, { edits: [{ op: 'merge', lines: ['- [lesson] 2026-09-02 two'], category: 'fact', content: 'x'.repeat(501) }] })
-  assert.deepEqual(out, { merged: 0, deleted: 0 })
-  assert.equal(store.read(), '- [lesson] 2026-09-02 two\n')
+test('migrateAll: covers global and projects, skips clean stores', () => {
+  const root = tmpRoot()
+  writeFileSync(join(root.dir, 'memory.md'), '- [lesson] 2026-09-01 全局旧条目\n', 'utf8')
+  const project = root.projectFor('D:/codes/Demo')
+  mkdirSync(project.dir, { recursive: true })
+  writeFileSync(join(project.dir, 'memory.md'), '- [lesson] 2026-09-01 项目旧条目\n', 'utf8')
+  writeFileSync(join(project.dir, 'project.json'), `${JSON.stringify({ cwd: 'D:/codes/Demo' })}\n`, 'utf8')
+  root.migrateAll()
+  assert.equal(root.global.list().length, 1)
+  assert.equal(root.projectFor('D:/codes/Demo').list().length, 1)
 })
 
-test('curator: an edit citing a pinned line is skipped, the pin stays matched', () => {
+// --- injection selection ----------------------------------------------------------
+
+test('selectCards: per-category quota keeps the most recently updated cards', () => {
   const store = tmpStore()
-  store.replace([
-    '- [lesson] 2026-09-01 用户喜欢 pnpm',
-    '- [lesson] 2026-09-02 继续用 pnpm',
-    '- [fact] 2026-09-01 服务器在东京',
-  ].join('\n'))
-  store.addPin('用户喜欢 pnpm')
-  const out = curatorApply(store, {
-    edits: [
-      { op: 'merge', lines: ['- [lesson] 2026-09-01 用户喜欢 pnpm', '- [lesson] 2026-09-02 继续用 pnpm'], category: 'lesson', content: '用户坚持用 pnpm' },
-      { op: 'delete', lines: ['- [fact] 2026-09-01 服务器在东京'] },
-    ],
-  })
-  assert.deepEqual(out, { merged: 0, deleted: 1 }, 'the pinned merge is skipped, the unpinned delete lands')
-  assert.equal(store.read(), '- [lesson] 2026-09-01 用户喜欢 pnpm\n- [lesson] 2026-09-02 继续用 pnpm\n')
-  assert.equal(store.pinnedSet().size, 1)
-  const survivors = new Set(parseEntries(store.read()).map(entry => normalizeForMatch(entry.content)))
-  for (const pin of store.pinnedSet()) {
-    assert.ok(survivors.has(pin), 'no pin is left without a matching line')
+  for (let i = 1; i <= 5; i += 1) {
+    store.upsert({ name: `lesson-${String(i)}`, category: 'lesson', summary: `s${String(i)}`, body: `第 ${String(i)} 条` })
+    // Force distinct updated stamps so the quota order is deterministic.
+    const card = store.get(`lesson-${String(i)}`)!
+    writeFileSync(join(store.dir, 'topics', `lesson-${String(i)}.md`), renderCard({ ...card, updated: `2026-09-0${String(i)}` }), 'utf8')
   }
+  const sel = selectCards(store.list(), 10_000, new Set())
+  assert.equal(sel.selected.length, 2, 'lesson quota is 2')
+  assert.ok(sel.selected.some(card => card.name === 'lesson-5'), 'newest kept')
+  assert.ok(sel.selected.some(card => card.name === 'lesson-4'))
+  assert.equal(sel.truncated, true)
 })
 
-test('curator: a delete citing only a pinned line leaves file and pin untouched', () => {
+test('selectCards: pinned cards always win, an oversized pin is clipped not dropped', () => {
   const store = tmpStore()
-  store.replace('- [fact] 2026-09-01 服务器在东京\n')
-  store.addPin('服务器在东京')
-  const out = curatorApply(store, { edits: [{ op: 'delete', lines: ['- [fact] 2026-09-01 服务器在东京'] }] })
-  assert.deepEqual(out, { merged: 0, deleted: 0 })
-  assert.equal(store.read(), '- [fact] 2026-09-01 服务器在东京\n')
-  assert.equal(store.pinnedSet().has(normalizeForMatch('服务器在东京')), true)
+  store.upsert({ name: 'big-pin', category: 'preference', summary: '大固定卡', body: 'x'.repeat(MAX_TOPIC_BODY_CHARS) })
+  store.upsert({ name: 'small-pin', category: 'preference', summary: '小固定卡', body: 'short' })
+  const sel = selectCards(store.list(), 120, new Set(['big-pin', 'small-pin']))
+  assert.ok(sel.selected.some(card => card.name === 'small-pin'), 'the small pin reaches the prompt')
+  assert.equal(sel.truncated, true)
 })
 
-// --- curator sweep gating: change detection + cooldown -------------------------
-
-/** A file just above CURATE_MIN_ENTRIES (8 lines). */
-const eightEntries = (): string =>
-  Array.from({ length: 8 }, (_, i) => `- [lesson] 2026-09-0${String((i % 8) + 1)} 条目-${String(i + 1)}`).join('\n')
-
-const selectTargetsOf = (curator: MemoryCurator): { label: string }[] =>
-  (curator as unknown as { selectTargets(): { label: string }[] }).selectTargets()
-
-test('curator: selectTargets skips files unchanged since their last pass', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-cd-')))
-  root.global.replace(eightEntries())
-  const curator = new MemoryCurator(null as never, root, console)
-
-  assert.deepEqual(selectTargetsOf(curator).map(t => t.label), ['global'], 'no hash recorded yet → due')
-
-  root.recordCurated('global', contentHash(root.global.read()))
-  assert.deepEqual(selectTargetsOf(curator), [], 'unchanged file is skipped')
-
-  root.global.append('lesson', '新写的一条')
-  assert.deepEqual(selectTargetsOf(curator).map(t => t.label), ['global'], 'any writer touching the file re-arms it')
-
-  // A project store is gated the same way, keyed by its slug (append, since
-  // it is the write path that creates a fresh project directory).
-  const demo = root.projectFor('D:/codes/Demo')
-  for (let i = 1; i <= 8; i++) demo.append('lesson', `条目-${String(i)}`)
-  const slug = projectSlug('D:/codes/Demo')
-  assert.ok(selectTargetsOf(curator).some(t => t.label === slug), 'changed project store is due')
-  root.recordCurated(slug, contentHash(demo.read()))
-  assert.equal(selectTargetsOf(curator).some(t => t.label === slug), false, 'recorded project store is skipped')
+test('renderCardBlock: malformed cards render verbatim, normal cards get a heading', () => {
+  const normal = parseCard('k', renderCard({ name: 'k', category: 'fact', summary: 's', created: '2026-01-01', updated: '2026-01-02', body: '正文', malformed: false }))
+  assert.ok(renderCardBlock(normal).startsWith('### k [fact]'))
+  const malformed = parseCard('hand', '手改内容')
+  assert.equal(renderCardBlock(malformed), '手改内容')
 })
 
-test('curator: saves inside the cooldown coalesce into one trailing sweep', async () => {
-  const { setTimeout: sleep } = await import('node:timers/promises')
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-cool-')))
-  root.global.replace(eightEntries())
-  // One entry per direct model call, holding the reviewed file text: that is
-  // what proves WHICH target the sweep curated (the subagent channel used to
-  // carry the target in its label).
-  const reviewed: string[] = []
-  const session = {
-    id: 'session-a',
-    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
-  }
-  const parent = { session } as never
-  const ctx = {
-    llm: {
-      stream: async function* (options: { messages: { content?: { text?: string }[] }[] }) {
-        reviewed.push(options.messages.map(m => (m.content ?? []).map(c => c.text ?? '').join('\n')).join('\n'))
-        yield { type: 'text-delta', index: 0, text: '{"edits": []}' }
-        yield { type: 'finish', reason: { kind: 'stop' } }
-      },
-    },
-    agents: { get: () => parent },
-  }
-  const curator = new MemoryCurator(ctx as never, root, console, 60)
-
-  // 1st save: sweeps immediately and records the file hash.
-  await curator.runAfterDistill(parent, 'session-a' as never)
-  assert.equal(reviewed.length, 1, 'first save sweeps right away')
-  assert.match(reviewed[0]!, /条目-1/, 'the sweep curated the global file')
-  assert.equal(root.curatedHashOf('global'), contentHash(root.global.read()), 'completed pass records the hash')
-
-  // 2nd/3rd saves inside the cooldown: no immediate work. The appended
-  // entry stands in for what the distill just wrote — it makes the file
-  // due again for the trailing sweep.
-  root.global.append('lesson', '冷却期内新增的一条')
-  await curator.runAfterDistill(parent, 'session-b' as never)
-  await curator.runAfterDistill(parent, 'session-c' as never)
-  assert.equal(reviewed.length, 1, 'no sweep while inside the cooldown')
-
-  await sleep(200)
-  assert.equal(reviewed.length, 2, 'exactly one trailing sweep at the original deadline')
-  assert.match(reviewed[1]!, /冷却期内新增的一条/, 'the trailing sweep curated the global file')
-
-  // After the cooldown elapses a save sweeps immediately — and since the
-  // trailing pass just consolidated the file, it calls the model not at all.
-  await curator.runAfterDistill(parent, 'session-d' as never)
-  assert.equal(reviewed.length, 2, 'unchanged file: sweep runs, calls nothing')
+test('renderMemoryText: index + cards per scope; project isolation holds', () => {
+  const root = tmpRoot()
+  save(root.global, 'user-lang', '用户偏好中文回复', 'preference', '中文回复')
+  save(root.projectFor('D:/codes/Demo'), 'demo-flow', 'Demo 项目的约定', 'convention', 'Demo 约定')
+  save(root.projectFor('D:/codes/Other'), 'other-secret', '其它项目的卡片', 'fact', '其它')
+  const text = renderMemoryText(root, 'D:/codes/Demo')
+  assert.ok(text.includes('user-lang'), 'global index line injected')
+  assert.ok(text.includes('用户偏好中文回复'), 'global body injected')
+  assert.ok(text.includes('demo-flow'), 'project index line injected')
+  assert.ok(!text.includes('other-secret'), 'another project is structurally absent')
+  const noCwd = renderMemoryText(root, undefined)
+  assert.ok(noCwd.includes('user-lang'))
+  assert.ok(!noCwd.includes('demo-flow'), 'no cwd → no project scope')
 })
 
-test('curator: a direct call feeds its JSON through the host validation', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-direct-curate-')))
-  root.global.replace(`${eightEntries()}\n- [lesson] 2026-09-01 用户用 pnpm\n- [fact] 2026-09-02 用户偏好 pnpm`)
-  const session = {
-    id: 'session-49ce2455-aaaa-bbbb-cccc-ddddeeeeffff',
-    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
-  }
-  const parent = { session } as never
-  const ctx = {
-    llm: {
-      // A fenced answer like a real model's: the contract is prompt-only now,
-      // so the host's tolerant extraction has to do the parsing.
-      stream: async function* () {
-        yield {
-          type: 'text-delta',
-          index: 0,
-          text: '```json\n{"edits": [{"op": "merge", "lines": ["- [lesson] 2026-09-01 用户用 pnpm", "- [fact] 2026-09-02 用户偏好 pnpm"], "category": "preference", "content": "用户用 pnpm"}]}\n```',
-        }
-        yield { type: 'usage', usage: { inputTokens: 700, outputTokens: 40 } }
-        yield { type: 'finish', reason: { kind: 'stop' } }
-      },
-    },
-    agents: { get: () => parent },
-  }
-  const curator = new MemoryCurator(ctx as never, root, console, 60)
+// --- light sweep -------------------------------------------------------------------
 
-  await curator.runAfterDistill(parent, session.id as never)
-
-  const text = root.global.read()
-  assert.equal(text.includes('用户偏好 pnpm'), false, 'the merged pair is replaced')
-  assert.ok(text.includes(`- [preference] ${todayStamp()} 用户用 pnpm`), 'the surviving merge is stamped by the host')
-  assert.equal(root.curatedHashOf('global'), contentHash(text), 'the pass recorded the post-edit hash')
-  const [run] = root.llmAudit()
-  assert.equal(run?.source, 'curate', 'the pass is audited as a curate run')
-  assert.equal(run?.status, 'ok')
-  assert.equal(run?.inputTokens, 700)
-  assert.equal(run?.outputTokens, 40)
-  assert.equal(run?.session, '49ce2455')
+test('lightSweep: exact-duplicate cards merge to the pinned/newest survivor; suspects logged', () => {
+  const root = tmpRoot()
+  const store = root.global
+  // Two keys, identical bodies (a hand-edit accident).
+  save(store, 'dup-a', '完全相同的内容')
+  save(store, 'dup-b', '完全相同的内容')
+  store.addPin('dup-b')
+  // A near-duplicate pair under different keys (similarity suspect).
+  save(store, 'sim-a', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才生效')
+  save(store, 'sim-b', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才可生效')
+  const out = lightSweep(root, 'global', store, console)
+  assert.equal(out.merged, 1)
+  assert.equal(store.get('dup-a'), undefined, 'unpinned duplicate removed')
+  assert.ok(store.get('dup-b') !== undefined, 'the pinned card survives')
+  assert.ok(out.suspects >= 1, 'the near-dup pair is logged as a suspect')
+  assert.ok(root.simSuspects().some(s => s.scope === 'global'))
 })
 
-// --- curator sweep: pinned lines are named to the model and survive ----------
-
-test('curator sweep: a pinned line is listed in the prompt and survives the pass', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-curate-pin-')))
-  root.global.replace(`${eightEntries()}\n- [lesson] 2026-09-01 用户用 pnpm\n- [fact] 2026-09-02 用户偏好 pnpm`)
-  root.global.addPin('用户用 pnpm')
-  const prompts: string[] = []
-  const session = { id: 'session-pin', requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) }
-  const parent = { session } as never
-  const ctx = {
-    llm: {
-      stream: async function* (options: unknown) {
-        prompts.push(JSON.stringify(options))
-        yield {
-          type: 'text-delta',
-          index: 0,
-          text: '{"edits": [{"op": "merge", "lines": ["- [lesson] 2026-09-01 用户用 pnpm", "- [fact] 2026-09-02 用户偏好 pnpm"], "category": "preference", "content": "用户用 pnpm"}]}',
-        }
-        yield { type: 'finish', reason: { kind: 'stop' } }
-      },
-    },
-    agents: { get: () => parent },
-  }
-  const curator = new MemoryCurator(ctx as never, root, console, 60)
-
-  await curator.runAfterDistill(parent, session.id as never)
-
-  assert.match(prompts[0] ?? '', /--- Pinned entries \(user-fixed, never edited\) ---/, 'the model is told which line is pinned')
-  const text = root.global.read()
-  assert.ok(text.includes('- [lesson] 2026-09-01 用户用 pnpm'), 'the pinned line survives the pass')
-  assert.ok(text.includes('- [fact] 2026-09-02 用户偏好 pnpm'), 'the rejected edit is not half-applied')
-  assert.equal(root.global.pinnedSet().has(normalizeForMatch('用户用 pnpm')), true)
-  const survivors = new Set(parseEntries(text).map(entry => normalizeForMatch(entry.content)))
-  for (const pin of root.global.pinnedSet()) {
-    assert.ok(survivors.has(pin), 'no pin is left without a matching line')
-  }
+test('lightSweep: never throws on an empty store', () => {
+  const root = tmpRoot()
+  assert.deepEqual(lightSweep(root, 'global', root.global, console), { merged: 0, suspects: 0 })
 })
 
-// --- settings route: the pin fence still holds -------------------------------
+// --- settings route: the pin fence still holds --------------------------------
 
 test('pin route: an invalid or unknown project slug is rejected before any write', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-pin-route-')))
+  const root = tmpRoot()
   const handlers = new Map<string, (req: unknown, res: unknown) => void>()
   const dispose = registerMemoryRoutes({
     register: (route: { path: string, handler: (req: never, res: never) => void }) => {
@@ -577,52 +404,41 @@ test('pin route: an invalid or unknown project slug is rejected before any write
     return { status, body: payload }
   }
 
-  const invalid = await call({ content: 'x', pinned: true, scope: 'project', slug: '../etc' })
+  const invalid = await call({ topic: 'x', pinned: true, scope: 'project', slug: '../etc' })
   assert.equal(invalid.status, 400, 'traversal slug rejected')
-  const unknown = await call({ content: 'x', pinned: true, scope: 'project', slug: 'nope-nope' })
+  const unknown = await call({ topic: 'x', pinned: true, scope: 'project', slug: 'nope-nope' })
   assert.equal(unknown.status, 400, 'unknown slug rejected')
-  assert.equal(root.global.read(), '', 'no entry was written')
+  assert.equal(root.global.list().length, 0, 'no card was written')
   assert.equal(existsSync(join(root.dir, 'config.json')), false, 'no pin was written')
   dispose()
 })
 
+// --- distill progress markers (unchanged machinery) --------------------------------
+
 test('ownSaveSeq: a direct save marks its event seq, a completed pass consumes it', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-save-')))
+  const root = tmpRoot()
   const id = 'session-abc'
-  // Never saved, never distilled: nothing to stand down from.
   assert.equal(root.ownSaveSeqOf(id), 0)
-
   root.recordDirectSave(id, 41)
-  // The session judged its own material up to seq 41 → the background pass
-  // infers only over events PAST that point.
   assert.equal(root.ownSaveSeqOf(id), 41)
-
-  // A later save at a lower seq never rewinds the marker.
   root.recordDirectSave(id, 30)
-  assert.equal(root.ownSaveSeqOf(id), 41)
-
-  // A background pass AFTER the save clears the marker...
+  assert.equal(root.ownSaveSeqOf(id), 41, 'a lower save never rewinds the marker')
   root.advanceDistill(id, 42)
-  assert.equal(root.ownSaveSeqOf(id), 0)
-  // ...and the cursor survives, so the next save does not rewind progress.
+  assert.equal(root.ownSaveSeqOf(id), 0, 'a completed pass consumes the marker')
   assert.equal(root.distillSeqOf(id), 42)
-
-  // A later save re-arms it.
   root.recordDirectSave(id, 50)
   assert.equal(root.ownSaveSeqOf(id), 50)
   assert.equal(root.distillSeqOf(id), 42, 'a direct save must not rewind the distill cursor')
 })
 
 test('recordDirectSave: creates the session record before any distill ever ran', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-save-new-')))
-  // A session that saves first must still register: otherwise the background
-  // pass would see no record at all and infer over material already curated.
+  const root = tmpRoot()
   root.recordDirectSave('session-fresh', 9)
   assert.equal(root.ownSaveSeqOf('session-fresh'), 9)
   assert.equal(root.distillSeqOf('session-fresh'), 0)
 })
 
-// --- stripCommitIds ------------------------------------------------------------
+// --- stripCommitIds ----------------------------------------------------------------
 
 test('stripCommitIds: removes mixed hex commit ids; keeps counts, slugs and words', () => {
   assert.equal(stripCommitIds('修复 fb8b001 已验证'), '修复 已验证')
@@ -635,78 +451,22 @@ test('stripCommitIds: removes mixed hex commit ids; keeps counts, slugs and word
   assert.equal(stripCommitIds('无 id 的普通条目'), '无 id 的普通条目', 'clean content passes through untouched')
 })
 
-// --- filterEntries -------------------------------------------------------------
+// --- projectSlug / projectBySlug ---------------------------------------------------
 
-test('filterEntries: keyword filter returns matched rows and the true total', () => {
-  const text = [
-    '- [lesson] 2026-09-01 用 pnpm 跑 typecheck',
-    '- [fact] 2026-09-02 服务器在东京',
-    '- [lesson] 2026-09-03 pnpm 不能装全局',
-    '手写行',
-  ].join('\n')
-  const { matched, total } = filterEntries(text, 'pnpm')
-  assert.equal(total, 4, 'the count covers every parsed entry')
-  assert.equal(matched.length, 2)
-  assert.ok(matched.every(line => line.includes('pnpm')))
-  const all = filterEntries(text, '')
-  assert.equal(all.matched.length, 4, 'empty query returns everything')
-  assert.equal(all.total, 4)
+test('projectSlug: deterministic, same basename in two parents never collides', () => {
+  const a = projectSlug('D:/codes/DSH-APP')
+  assert.equal(projectSlug('D:/codes/DSH-APP'), a)
+  assert.notEqual(a, projectSlug('C:/elsewhere/DSH-APP'))
+  assert.match(a, /^dsh-app-[a-f0-9]{8}$/)
 })
 
-// --- distiller renderExcerpt ---------------------------------------------------
-
-test('renderExcerpt: under budget returns everything in order', () => {
-  const lines = ['[user] a', '[assistant] b', '[user] c']
-  assert.equal(renderExcerpt(lines, 100), lines.join('\n'))
-})
-
-test('renderExcerpt: over budget keeps the newest tail plus a short head, drops the middle', () => {
-  const lines = Array.from({ length: 30 }, (_, i) => `[user] message-${String(i)}-${'x'.repeat(60)}`)
-  const out = renderExcerpt(lines, 1_000)
-  assert.ok(out.includes('[… earlier messages omitted …]'), 'the cut is marked')
-  assert.ok(out.includes(lines[29]!), 'the newest message survives in full')
-  assert.ok(out.includes(lines[0]!), 'a short head prefix survives')
-  assert.ok(!out.includes(lines[15]!), 'the middle is dropped')
-  assert.ok(out.length <= 1_100, 'bounded around the budget')
-})
-
-// --- curator over-budget mode ---------------------------------------------------
-
-test('curator prompt: an over-budget file gets a shrink directive, an in-budget one does not', () => {
-  const { system } = buildCuratePrompt('- [lesson] 2026-09-01 x', [], { entries: 32, chars: 8_000 })
-  assert.match(system, /OVER BUDGET/, 'the directive names the condition')
-  assert.match(system, /32 entries/, 'with the concrete entry count')
-  assert.match(system, /MUST propose enough/, 'shrinking is mandatory, not optional')
-  const { system: normal } = buildCuratePrompt('- [lesson] 2026-09-01 x', [])
-  assert.ok(!/OVER BUDGET/.test(normal), 'an in-budget file gets no directive')
-})
-
-test('curator: a still-over file that shrank stays due; a no-op pass records to avoid a burn loop', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-over-')))
-  const lines = Array.from({ length: 32 }, (_, i) => `- [lesson] 2026-09-01 条目${String(i)}`)
-  root.global.replace(lines.join('\n'))
-  let answer = JSON.stringify({ edits: [{ op: 'delete', lines: [lines[0]!] }] })
-  const session = { id: 'session-over', requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) }
-  const parent = { session } as never
-  const ctx = {
-    llm: {
-      stream: async function* () {
-        yield { type: 'text-delta', index: 0, text: answer }
-        yield { type: 'finish', reason: { kind: 'stop' } }
-      },
-    },
-    agents: { get: () => parent },
-  }
-  const curator = new MemoryCurator(ctx as never, root, console, 0)
-
-  // 32 → 31 entries: shrank but still over target, edits applied → the pass
-  // does NOT count as completed; the next sweep continues the diet.
-  await curator.runAfterDistill(parent, 'session-over' as never)
-  assert.equal(parseEntries(root.global.read()).length, 31)
-  assert.equal(root.curatedHashOf('global'), undefined, 'a still-over file stays due')
-
-  // A no-op pass on a still-over file records instead of retrying forever.
-  answer = '{"edits": []}'
-  await curator.runAfterDistill(parent, 'session-over' as never)
-  assert.equal(root.curatedHashOf('global'), contentHash(root.global.read()), 'the no-op pass records the hash')
+test('projectBySlug: resolves a project store via project.json; unknown slug → undefined', () => {
+  const root = tmpRoot()
+  assert.equal(root.projectBySlug('nope-nope'), undefined)
+  save(root.projectFor('D:/codes/DSH-APP'), 'demo-card', '项目卡片')
+  const slug = projectSlug('D:/codes/DSH-APP')
+  const resolved = root.projectBySlug(slug)
+  assert.ok(resolved !== undefined)
+  assert.ok(resolved.get('demo-card') !== undefined)
+  assert.equal(root.projectBySlug('../etc'), undefined, 'traversal fenced')
 })

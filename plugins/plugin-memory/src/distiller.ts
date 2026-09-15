@@ -4,10 +4,10 @@
  * While the in-session `memory_save` tool relies on the model noticing
  * durable facts, this pass makes persistence deterministic: after a session
  * goes quiet for {@link QUIET_MS}, one direct LLM call reviews the
- * conversation delta since the last distill plus the current memory files
- * and proposes NEW entries as structured JSON. The HOST validates every
- * entry (category, length, dedup against existing lines) before it ever
- * reaches a memory file — the model cannot write anything itself.
+ * conversation delta since the last distill plus the current topic cards and
+ * proposes card writes as structured JSON. The HOST validates every proposal
+ * (topic key shape, category, length, credentials, the similarity write gate)
+ * before it ever reaches the store — the model cannot write anything itself.
  *
  * Design points:
  *   - Debounce: every `turn/end` re-arms the quiet timer, so an active
@@ -18,6 +18,10 @@
  *   - Self-exclusion: subagent sessions (`origin: 'subagent'`, i.e. another
  *     plugin's worker) never trigger distills — background maintenance must
  *     not run off work that is not the user's own conversation.
+ *   - Convergence: proposals address cards by their topic KEY. Reusing an
+ *     existing key rewrites that card (upsert), so knowledge about one topic
+ *     converges instead of piling up near-duplicate cards; the write-time
+ *     similarity gate blocks a near-duplicate under a NEW key.
  *   - Fail-soft: any failure logs a warning and leaves progress unchanged,
  *     so the next quiet window retries the same delta.
  *
@@ -27,7 +31,19 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { resolveLlm, streamJson, type DirectRoute } from './llm-direct.ts'
-import { MAX_ENTRY_CHARS, containsCredential, normalizeForMatch, parseEntries, shortSessionId, stripCommitIds, stripEntryPrefix, type MemoryRoot, type MemoryStore } from './memory-store.ts'
+import {
+  MAX_SUMMARY_CHARS,
+  MAX_TOPIC_BODY_CHARS,
+  SIM_DUPLICATE,
+  containsCredential,
+  contentSimilarity,
+  isValidTopic,
+  shortSessionId,
+  slugifyTopic,
+  stripCommitIds,
+  type MemoryRoot,
+  type MemoryStore,
+} from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /**
@@ -46,21 +62,38 @@ const QUIET_MS = 60_000
 /** Cap on the conversation excerpt handed to the model (characters). */
 const MAX_TRANSCRIPT_CHARS = 24_000
 
-/** Cap on each memory file handed to the model (characters). */
+/** Cap on the memory input (index + card bodies) per scope handed to the
+ *  model (characters). Without a cap a grown store overflows the model's
+ *  context on every call; the run fails, progress is never advanced, and the
+ *  next quiet window pays again for the same doomed call. */
 const MAX_MEMORY_INPUT_CHARS = 12_000
 
 /**
- * Trim one memory file for the prompt, keeping the TAIL — the newest entries
- * are the ones a distill must not miss, since the curator is what prunes the
- * old ones. Without a cap a grown file overflows the model's context on every
- * call; the run fails, progress is never advanced, and the next quiet window
- * pays again for the same doomed call. That is the feedback loop the curator
- * exists to prevent, made permanent.
+ * Serialize one store for the distill prompt: the index (what future saves
+ * route by) followed by every card body, so the model can both reuse an
+ * existing topic key and skip already-covered facts. Over the cap the TAIL
+ * of the card list is dropped — the list is sorted least-recently-updated
+ * last per category, and the curator is what consolidates the aging half.
  */
-function cappedMemoryText(text: string): string {
+function memoryInput(store: MemoryStore): string {
+  const cards = store.list()
+  if (cards.length === 0) return '(empty)'
+  const sections: string[] = []
+  for (const card of cards) {
+    sections.push(`### ${card.name} [${card.category}] (updated ${card.updated})\n${card.body}`)
+  }
+  const index = store.indexText()
+  const head = index === '' ? '' : `${index}\n\n`
+  let text = head
+  let included = 0
+  for (const section of sections) {
+    if (text.length + section.length + 1 > MAX_MEMORY_INPUT_CHARS) break
+    text += `${section}\n\n`
+    included += 1
+  }
   const trimmed = text.trim()
-  if (trimmed.length <= MAX_MEMORY_INPUT_CHARS) return trimmed
-  return `[note: older entries beyond ${String(MAX_MEMORY_INPUT_CHARS)} chars omitted]\n${trimmed.slice(-MAX_MEMORY_INPUT_CHARS)}`
+  if (included === sections.length) return trimmed
+  return `[note: ${String(sections.length - included)} card(s) beyond ${String(MAX_MEMORY_INPUT_CHARS)} chars omitted]\n${trimmed}`
 }
 
 /** Cap on a single message's text inside the excerpt (characters). */
@@ -122,21 +155,24 @@ const MIN_NEW_MESSAGES = 2
  */
 const MIN_NEW_CHARS = 4_000
 
-/** Hard cap on entries accepted from one distill run (quality over spam). */
+/** Hard cap on card writes accepted from one distill run (updates + creates;
+ *  quality over spam). */
 const MAX_DISTILL_ENTRIES = 5
 
-/** One candidate entry as proposed by the model (pre-validation). There is no
- *  scope field: the host decides where an entry lands (see resolveScope). */
+/** One candidate card write as proposed by the model (pre-validation). There
+ *  is no scope field: the host decides where a card lands (see resolveScope). */
 interface ProposedEntry {
+  topic?: unknown
+  summary?: unknown
   category?: unknown
   content?: unknown
 }
 
 /**
  * Where one proposal lands. The host decides, not the model: a proposer that
- * sees one conversation has no way to know whether a line holds in EVERY
+ * sees one conversation has no way to know whether a fact holds in EVERY
  * workspace, and asking it to guess is exactly what scattered one session's
- * project learning into the global file. Scope is derived from the one fact
+ * project learning into the global store. Scope is derived from the one fact
  * the host actually has — whether the session had a workspace — and the
  * prompt no longer offers a scope field for the model to fill in.
  * memory_save remains the deliberate path for cross-workspace knowledge.
@@ -147,34 +183,40 @@ export function resolveScope(cwd: string | undefined): 'global' | 'project' {
 
 /**
  * Build the distill prompt as system (task + rules + output contract) and
- * user (memory files + transcript) halves: the direct call maps them to
- * system/user messages.
+ * user (memory index + cards + transcript) halves: the direct call maps them
+ * to system/user messages.
  */
 export function buildDistillPrompt(transcript: string, cwd: string | undefined, root: MemoryRoot): { system: string, user: string } {
-  const globalText = cappedMemoryText(root.global.read())
-  const projectText = cwd === undefined ? '' : cappedMemoryText(root.projectFor(cwd).read())
+  const globalText = memoryInput(root.global)
+  const projectText = cwd === undefined ? '' : memoryInput(root.projectFor(cwd))
   const projectSection = cwd === undefined
-    ? ['--- No workspace for this session: entries land in the GLOBAL memory file ---']
-    : ['--- Current PROJECT memory (this workspace only) ---', projectText === '' ? '(empty)' : projectText]
+    ? ['--- No workspace for this session: cards land in the GLOBAL memory ---']
+    : ['--- Current PROJECT memory (this workspace only) ---', projectText]
   const system = [
     'You are the memory distiller of an AI coding assistant. Review the conversation excerpt below',
-    '(everything said since the last distill) and the current memory files, then propose NEW entries',
+    '(everything said since the last distill) and the current memory cards, then propose card writes',
     'worth persisting for future sessions.',
     '',
     'The test for every candidate: would a future session in a DIFFERENT conversation act better',
-    'because this line exists? A line that only restates what this conversation did fails it.',
+    'because this card exists? A card that only restates what this conversation did fails it.',
     '',
-    'Where entries land (the host decides, not you):',
-    '- A session WITH a workspace stores every entry in that workspace\'s project memory. That is',
+    'Memory is stored as TOPIC CARDS. Each card has a fixed kebab-case "topic" key naming its subject,',
+    'a ≤40-char "summary" hook for the index, a category, and the card text in "content". Saving the',
+    'same topic key again REWRITES that card: when the index below already names the topic your fact',
+    'belongs to, reuse that exact key (the host rewrites the card in place) — do NOT invent a',
+    'near-synonym key for a topic that already has one.',
+    '',
+    'Where cards land (the host decides, not you):',
+    '- A session WITH a workspace stores every card in that workspace\'s project memory. That is',
     '  where its pitfalls, tool quirks, debugging recipes and decisions about its code belong,',
-    '  even when the project file below looks unrelated.',
+    '  even when the project cards below look unrelated.',
     '- Cross-workspace knowledge (reply language and tone, evidence discipline, commit format)',
     '  is recorded through a different path — do not try to address it from here.',
     '',
     'Rules:',
     '- Only durable facts: settled decisions, conventions, user preferences/habits, root causes, pitfalls.',
     '- NEVER propose credentials (API keys, tokens, passwords) — not even if the user shared one.',
-    '- Skip anything already covered by an existing entry (the files below are the source of truth).',
+    '- Skip anything already covered by an existing card (the cards below are the source of truth).',
     '- Skip ephemeral state: search results, temporary paths, tool errors, work derivable from the repo.',
     '',
     'NEVER propose (these are the most common false positives):',
@@ -186,27 +228,31 @@ export function buildDistillPrompt(transcript: string, cwd: string | undefined, 
     '  directory layouts that a future session reads from the repo in one tool call.',
     '',
     'Rejected examples (a proposal like these fails the test):',
-    '- "ChatPanel 集成完成：面板放入中间列，修复 streamingIdRef 竞态，fb8b001 已提交" — work log',
-    '  + commit id; the repo and git history carry all of it.',
-    '- "protobuf 字段：1=correlationId 2=clientName 3=method 4=params" — protocol internals a',
-    '  future session reads from the repo in one tool call.',
-    '- "设置页重构定案：schema 增加 protocol 字段，zod 默认 openai，loadSettings 手动补默认值…" —',
-    '  file-by-file implementation detail.',
+    '- {"topic": "chatpanel-streaming-fix", "summary": "ChatPanel 集成与竞态修复", "category": "fact",',
+    '  "content": "ChatPanel 集成完成：面板放入中间列，修复 streamingIdRef 竞态，fb8b001 已提交"}',
+    '  — work log + commit id; the repo and git history carry all of it.',
+    '- {"topic": "protobuf-field-map", "summary": "protobuf 字段编号表", "category": "fact",',
+    '  "content": "protobuf 字段：1=correlationId 2=clientName 3=method 4=params"}',
+    '  — protocol internals a future session reads from the repo in one tool call.',
     'Accepted examples (durable, a DIFFERENT session would act better):',
-    '- "用户在方案征询时期望一次性给出综合方案确认，不要逐个提问" — collaboration preference.',
-    '- "pnpm 11 不再从 package.json 读 pnpm 配置，构建白名单必须写进 pnpm-workspace.yaml" — a',
-    '  pitfall no repo doc states.',
+    '- {"topic": "user-consult-style", "summary": "方案征询期望一次性给综合方案", "category": "preference",',
+    '  "content": "用户在方案征询时期望一次性给出综合方案确认，不要逐个提问"} — collaboration preference.',
+    '- {"topic": "pnpm-11-workspace-yaml", "summary": "pnpm 11 白名单须写进 workspace yaml", "category": "lesson",',
+    '  "content": "pnpm 11 不再从 package.json 读 pnpm 配置，构建白名单必须写进 pnpm-workspace.yaml"}',
+    '  — a pitfall no repo doc states.',
     '',
     '- An empty entries array is a VALID answer — prefer it over marginal proposals.',
-    `- At most ${String(MAX_DISTILL_ENTRIES)} entries; each is ONE concise line in the user's language.`,
-    '- content holds the entry TEXT only: no "- [category] date" prefix (the host stamps it), no markdown bullets.',
+    `- At most ${String(MAX_DISTILL_ENTRIES)} entries; each entry is ONE card write.`,
+    '- "topic" is ASCII kebab-case (a-z, 0-9, -): translate non-ASCII topic words into English.',
+    '- "summary" states what the card covers in ≤40 chars; it is REQUIRED for a new topic key.',
+    '- "content" holds the card TEXT only (≤400 chars): no dates, no bullets, no markdown headers.',
     '',
     'Answer with JSON ONLY, no prose or fences:',
-    '{"entries": [{"category": "<preference|convention|decision|lesson|fact>", "content": "<one line>"}]}',
+    '{"entries": [{"topic": "<kebab-case-key>", "summary": "<≤40 chars>", "category": "<preference|convention|decision|lesson|fact>", "content": "<card text>"}]}',
   ].join('\n')
   const user = [
-    '--- Current GLOBAL memory (user preferences, all projects) ---',
-    globalText === '' ? '(empty)' : globalText,
+    '--- Current GLOBAL memory (index + cards; user preferences, all projects) ---',
+    globalText,
     '',
     ...projectSection,
     '',
@@ -262,18 +308,6 @@ function messageText(event: { type: string, data: unknown }): string {
   return ''
 }
 
-/** Exact-content set of one store's standard entries. Same dedupe rule as
- *  memory_save's hasContent — never a substring test: "用户用 pnpm" must
- *  survive a stored "用户用 pnpm 跑 typecheck", only identical wording is a
- *  duplicate (near-duplicates in different words are the CURATOR's job). */
-export function existingNeedles(store: MemoryStore): Set<string> {
-  const set = new Set<string>()
-  for (const entry of parseEntries(store.read())) {
-    if (entry.category !== undefined) set.add(normalizeForMatch(entry.content))
-  }
-  return set
-}
-
 /**
  * The background distiller. {@link attach} subscribes to session events and
  * owns the per-session quiet timers; everything below the timer is fail-soft
@@ -292,15 +326,17 @@ export class MemoryDistiller {
     root: MemoryRoot,
     log: ReturnType<Context['logger']>,
     /**
-     * Called (and awaited) after a run persisted ≥1 entry — the curator's
+     * Called (and awaited) after a run persisted ≥1 card — the maintenance
      * trigger seam. Runs in the distill's own background window while the
-     * parent agent is still alive; the curator may defer its sweep into a
-     * cooldown and re-resolve the parent by sessionId at fire time, so the
-     * session id — not just the agent — must cross this seam.
+     * parent agent is still alive and receives the store the cards landed in;
+     * the curator may defer its sweep into a cooldown and re-resolve the
+     * parent by sessionId at fire time, so the session id — not just the
+     * agent — must cross this seam.
      */
     private readonly onSaved?: (
       parent: NonNullable<ReturnType<Context['agents']['get']>>,
       sessionId: SessionId,
+      store: MemoryStore,
     ) => void | Promise<void>,
   ) {
     this.ctx = ctx
@@ -375,7 +411,7 @@ export class MemoryDistiller {
   private async runDistill(parent: NonNullable<ReturnType<Context['agents']['get']>>, session: SessionLike, cwd: string | undefined): Promise<void> {
     const sessionId = session.id
     // Start from whichever cursor is further: the last consumed distill OR
-    // the point where the session last saved its own entry. Material up to
+    // the point where the session last saved its own card. Material up to
     // an own-save was already judged by the agent and needs no second,
     // inferential pass; everything AFTER it has had no opinion yet.
     const lastSeq = Math.max(this.root.distillSeqOf(sessionId), this.root.ownSaveSeqOf(sessionId))
@@ -460,46 +496,76 @@ export class MemoryDistiller {
     // settings page can show what the background pass actually did.
     this.root.recordDistill(sessionId, applied, 'direct', result.inputTokens + result.outputTokens)
     if (applied > 0) {
-      this.log.info(`memory distill: saved ${String(applied)} entr${applied === 1 ? 'y' : 'ies'} from "${sessionId}"`)
-      await this.onSaved?.(parent, sessionId)
+      this.log.info(`memory distill: saved ${String(applied)} card${applied === 1 ? '' : 's'} from "${sessionId}"`)
+      const store = resolveScope(cwd) === 'global' ? this.root.global : this.root.projectFor(cwd as string)
+      await this.onSaved?.(parent, sessionId, store)
     }
   }
 
-  /** Validate proposals against the store; returns how many were appended. */
+  /**
+   * Validate proposals against the store; returns how many cards were written
+   * (created OR updated). The write gate replaces the old exact-line dedupe:
+   *   - the topic key already exists: near-identical content (≥ SIM_DUPLICATE)
+   *     is already covered → skip; otherwise upsert REWRITES the card (the
+   *     knowledge converged, the key stays).
+   *   - a new key: an exact body match or any existing card at ≥ SIM_DUPLICATE
+   *     means the fact is already stored under another key → skip, so a
+   *     reworded duplicate never lands under a fresh name.
+   * Writes hit the disk-backed store immediately, so a card accepted earlier
+   * in THIS run is what later proposals in the same run dedupe against.
+   */
   private applyEntries(structured: unknown, cwd: string | undefined): number {
     if (typeof structured !== 'object' || structured === null) return 0
     const proposals = (structured as { entries?: unknown }).entries
     if (!Array.isArray(proposals)) return 0
 
-    // Dedupe basis: exact-content sets of both stores, plus entries accepted
-    // within THIS run (an accepted entry instantly becomes "existing").
-    const globalSeen = existingNeedles(this.root.global)
-    const projectSeen = cwd === undefined ? new Set<string>() : existingNeedles(this.root.projectFor(cwd))
+    // The host decides the address (see resolveScope): no workspace means the
+    // only store available is the global one.
+    const store = resolveScope(cwd) === 'global' ? this.root.global : this.root.projectFor(cwd as string)
     let applied = 0
     for (const raw of proposals) {
       if (applied >= MAX_DISTILL_ENTRIES) break
       const proposal = raw as ProposedEntry
-      // Models echo the file format they see (prefix included); strip it
-      // before validating so one logical entry never lands double-prefixed.
-      // Commit ids ride along the same way (see stripCommitIds).
-      const content = typeof proposal.content === 'string'
-        ? stripCommitIds(stripEntryPrefix(proposal.content))
-        : ''
+      // A non-ASCII topic word (e.g. pure Chinese) slugifies to '' — reject:
+      // the model was asked to translate, and an unkeyed card has no identity.
+      const topic = typeof proposal.topic === 'string' ? slugifyTopic(proposal.topic) : ''
+      if (!isValidTopic(topic)) continue
       const category = MEMORY_CATEGORIES.includes(proposal.category as MemoryCategory)
         ? proposal.category as MemoryCategory
         : undefined
-      if (content === '' || content.length > MAX_ENTRY_CHARS || category === undefined) continue
-      // A leaked secret must never reach the file, even from the background
+      // Commit ids ride along when the model quotes a work log; strip them
+      // before validating so a cited hash never lands in a re-injected card.
+      const content = typeof proposal.content === 'string' ? stripCommitIds(proposal.content) : ''
+      if (content === '' || content.length > MAX_TOPIC_BODY_CHARS || category === undefined) continue
+      // A leaked secret must never reach the store, even from the background
       // pass (the transcript may contain a pasted key the user shared).
       if (containsCredential(content)) continue
-      // The host decides the address (see resolveScope): no workspace means
-      // the only file available is the global one.
-      const scope = resolveScope(cwd)
-      const needle = normalizeForMatch(content)
-      if (needle === '' || globalSeen.has(needle) || projectSeen.has(needle)) continue
-      const store = scope === 'global' ? this.root.global : this.root.projectFor(cwd as string)
-      store.append(category, content)
-      ;(scope === 'global' ? globalSeen : projectSeen).add(needle)
+      // Overlong summaries are truncated, not rejected: the hook is routing
+      // metadata, the body carries the fact. The summary rides the index into
+      // every session's prompt, so it gets the same commit-id strip and
+      // credential fence as the body.
+      const summary = typeof proposal.summary === 'string'
+        ? stripCommitIds(proposal.summary.trim()).slice(0, MAX_SUMMARY_CHARS)
+        : ''
+      if (containsCredential(summary)) continue
+
+      const existing = store.get(topic)
+      if (existing !== undefined) {
+        // Same key: near-identical content is already covered.
+        if (contentSimilarity(content, existing.body) >= SIM_DUPLICATE) continue
+        // Evolved content rewrites the card; a provided summary replaces the
+        // hook, an omitted one keeps the existing (see MemoryStore.upsert).
+        store.upsert({ name: topic, category, ...(summary === '' ? {} : { summary }), body: content })
+        applied += 1
+        continue
+      }
+      // New key: the summary is the index hook future saves route by, so a
+      // keyless-summary proposal would create an unroutable card.
+      if (summary === '') continue
+      // Cross-key duplicate guard: the same fact under a fresh name.
+      if (store.hasContent(content)) continue
+      if (store.findSimilar(content, SIM_DUPLICATE, 1).length > 0) continue
+      store.upsert({ name: topic, category, summary, body: content })
       applied += 1
     }
     return applied

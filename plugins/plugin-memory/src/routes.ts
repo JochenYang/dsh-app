@@ -1,12 +1,15 @@
 /**
  * Settings-page API under `/plugins/@dsh-app/plugin-memory/api`:
- *   GET  /status        — toggle states + global/project stats + global rows
- *   GET  /entries?slug= — one PROJECT store's rows with pin state
- *   GET  /llm-audit      — recent background-LLM cost rows (newest 20)
+ *   GET  /status        — toggle states + global/project stats + global card
+ *                         rows (summaries only, no bodies)
+ *   GET  /entries?slug= — one store's cards WITH bodies + pin state;
+ *                         no slug (or empty) = the global store
+ *   GET  /llm-audit     — recent background-LLM cost rows (newest 20)
  *   POST /config        — set toggles (body {enabled?, distill?} booleans)
- *   POST /pin           — pin/unpin one row (body {content, pinned, scope?, slug?})
- *   POST /forget        — delete one row by exact content (body {match, scope?, slug?})
- *   POST /clear         — drop entries: {scope:'global'} empties the global file;
+ *   POST /pin           — pin/unpin one card (body {topic, pinned, scope?, slug?})
+ *   POST /forget        — delete cards by topic key or content substring
+ *                         (body {match, scope?, slug?})
+ *   POST /clear         — {scope:'global'} empties the global store;
  *                         {scope:'project', slug} removes that project directory.
  *
  * Same-origin enforced on every route (403 with a body, never a hung
@@ -19,8 +22,8 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { isValidSlug, listProjects, normalizeForMatch, parseEntries, removeProject, type MemoryRoot, type MemoryStore } from './memory-store.ts'
-import { ROUTE_PREFIX, type MemoryEntriesResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
+import { isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
+import { ROUTE_PREFIX, type MemoryCardRow, type MemoryEntriesResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
 
 /** Route namespace on the dsh web server (single source in types.ts, shared
  * with the browser half). Re-exported so existing importers keep working. */
@@ -108,6 +111,19 @@ function fail(res: ServerResponse, status: number, code: string, message: string
   sendJson(res, status, { ok: false, error: { code, message } })
 }
 
+/** Wire row for one card; the status list omits bodies, /entries includes them. */
+function cardRow(card: TopicCard, pinned: ReadonlySet<string>, withBody: boolean): MemoryCardRow {
+  const row: MemoryCardRow = {
+    topic: card.name,
+    category: card.category,
+    summary: card.summary,
+    updated: card.updated,
+    pinned: pinned.has(card.name),
+  }
+  if (withBody) row.body = card.body
+  return row
+}
+
 /** Bounded JSON body read (same discipline as the other route surfaces: drain, never
  * destroy, so the 413 answer actually reaches the client). */
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -138,7 +154,7 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 }
 
 /**
- * Register the six settings-page routes.
+ * Register the settings-page routes.
  * @param webServer - the dsh web server service.
  * @param root - the two-level memory root.
  * @returns disposer removing all routes.
@@ -155,18 +171,17 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
         fail(res, 405, 'method-not-allowed', 'GET only')
         return
       }
-      const { entries, sizeBytes } = root.global.stats()
+      const { cards, sizeBytes } = root.global.stats()
       const pinned = root.global.pinnedSet()
       const status: MemoryStatus = {
         enabled: root.global.isEnabled(),
         distill: root.global.isDistillEnabled(),
-        entries,
+        cards,
         sizeBytes,
-        filePath: root.global.filePath,
-        globalList: parseEntries(root.global.read()).map(entry => ({
-          text: entry.content,
-          pinned: pinned.has(normalizeForMatch(entry.content)),
-        })),
+        storePath: root.global.storePath,
+        // Bodies stay out of the status payload: the settings list shows
+        // summaries, and the entries route serves bodies on demand.
+        globalList: root.global.list().map(card => cardRow(card, pinned, false)),
         projects: listProjects(root.dir),
         activity: root.distillActivity(),
       }
@@ -272,21 +287,17 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
         return
       }
       const slug = req.url === undefined ? null : new URL(req.url, 'http://localhost').searchParams.get('slug')
-      if (slug === null || slug === '') {
-        fail(res, 400, 'bad-request', 'entries requires a project slug (global rows come with /status)')
-        return
-      }
-      const store = root.projectBySlug(slug)
+      // No slug = the global store (the settings page loads global bodies
+      // lazily on row expand). projectBySlug validates the slug shape before
+      // touching the filesystem, so the traversal fence holds.
+      const store = slug === null || slug === '' ? root.global : root.projectBySlug(slug)
       if (store === undefined) {
         fail(res, 400, 'bad-request', 'unknown project slug')
         return
       }
       const pinned = store.pinnedSet()
       const body: MemoryEntriesResponse = {
-        entries: parseEntries(store.read()).map(entry => ({
-          text: entry.content,
-          pinned: pinned.has(normalizeForMatch(entry.content)),
-        })),
+        cards: store.list().map(card => cardRow(card, pinned, true)),
       }
       ok(res, body)
     },
@@ -303,10 +314,10 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       }
       void readJsonBody(req)
         .then(body => {
-          const content = body.content
+          const topic = body.topic
           const pinned = body.pinned
-          if (typeof content !== 'string' || content.trim() === '') {
-            fail(res, 400, 'bad-request', 'content must be a non-empty string')
+          if (typeof topic !== 'string' || !isValidTopic(topic)) {
+            fail(res, 400, 'bad-request', 'topic must be a valid topic key (ASCII kebab-case)')
             return
           }
           if (typeof pinned !== 'boolean') {
@@ -315,7 +326,13 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           }
           const store = resolveStore(root, body, res)
           if (store === undefined) return
-          const changed = pinned ? store.addPin(content) : store.removePin(content)
+          // Pinning a card that does not exist is a client bug — say so
+          // instead of silently recording a dangling pin.
+          if (pinned && store.get(topic) === undefined) {
+            fail(res, 400, 'bad-request', 'unknown topic')
+            return
+          }
+          const changed = pinned ? store.addPin(topic) : store.removePin(topic)
           ok(res, { pinned, changed })
         })
         .catch((error: unknown) => {
@@ -347,11 +364,10 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           }
           const store = resolveStore(root, body, res)
           if (store === undefined) return
-          // The settings-page row delete is EXACT-content (removeContent), not
-          // the LLM tool's substring sweep: removing one row never touches
-          // another row that merely shares a phrase with it.
-          const result = store.removeContent(match)
-          ok(res, { forgotten: result.removed.length, remaining: result.remaining })
+          // The settings-page delete sends the card's topic key (exact match);
+          // the store's substring fallback only fires for hand-typed calls.
+          const result = store.forget(match)
+          ok(res, { forgotten: result.removed.length, removed: result.removed })
         })
         .catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'invalid body'

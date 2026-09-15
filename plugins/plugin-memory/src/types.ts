@@ -1,15 +1,29 @@
 /**
- * Shared shapes of the memory plugin (host ↔ client wire types + entry model).
+ * Shared shapes of the memory plugin (host ↔ client wire types + card model).
  *
  * @module @dsh-app/plugin-memory/types
  */
 
-/** Entry categories the save tool accepts. Small by design: five buckets
+/** Card categories the save tool accepts. Small by design: five buckets
  * cover what actually deserves cross-session persistence, and a closed set
- * keeps the file greppable and the tool schema honest. */
+ * keeps the store greppable and the tool schema honest. */
 export const MEMORY_CATEGORIES = ['preference', 'convention', 'decision', 'lesson', 'fact'] as const
 
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number]
+
+/** One topic card as the settings page lists it. */
+export interface MemoryCardRow {
+  /** Topic key (kebab-case; the card's identity and filename stem). */
+  topic: string
+  category: MemoryCategory
+  /** ≤40-char index hook future saves route by. */
+  summary: string
+  /** `YYYY-MM-DD` of the last content change. */
+  updated: string
+  /** Full body (entries route only; the status list omits it). */
+  body?: string
+  pinned: boolean
+}
 
 /** One project's memory summary in the settings page. */
 export interface MemoryProjectSummary {
@@ -17,7 +31,8 @@ export interface MemoryProjectSummary {
   slug: string
   /** Full workspace path (from project.json; '' when unreadable). */
   cwd: string
-  entries: number
+  /** Topic-card count. */
+  cards: number
   sizeBytes: number
 }
 
@@ -27,7 +42,7 @@ export interface MemoryDistillActivity {
   at: number
   /** Short session id (first 8 hex) the run distilled. */
   session: string
-  /** Entries the run persisted (0 = it ran but nothing new qualified). */
+  /** Cards the run persisted (0 = it ran but nothing new qualified). */
   saved: number
   /** LLM channel that ran the pass (absent for traces before backend tracking). */
   backend?: 'direct' | 'subagent'
@@ -47,9 +62,9 @@ export interface MemoryLlmAuditRun {
   error?: string
 }
 
-/** Response of GET api/entries — one store's rows with pin state. */
+/** Response of GET api/entries — one store's cards with pin state. */
 export interface MemoryEntriesResponse {
-  entries: Array<{ text: string, pinned: boolean }>
+  cards: MemoryCardRow[]
 }
 
 /** Response of GET api/llm-audit — recent background-LLM cost rows. */
@@ -65,14 +80,14 @@ export interface MemoryStatus {
   enabled: boolean
   /** Whether the background distiller pass is active (sub-toggle). */
   distill: boolean
-  /** GLOBAL file entry count. */
-  entries: number
-  /** GLOBAL file size in bytes. */
+  /** GLOBAL card count. */
+  cards: number
+  /** GLOBAL topics/ size in bytes. */
   sizeBytes: number
-  /** GLOBAL memory file path, shown so the user can edit it by hand. */
-  filePath: string
-  /** GLOBAL entries in file order with their pin state (settings list). */
-  globalList: Array<{ text: string, pinned: boolean }>
+  /** GLOBAL topics directory path, shown so the user can edit cards by hand. */
+  storePath: string
+  /** GLOBAL cards in index order with their pin state (settings list). */
+  globalList: MemoryCardRow[]
   /** Per-project summaries, largest first. */
   projects: MemoryProjectSummary[]
   /** Recent background-distill traces, newest first (bounded list). */

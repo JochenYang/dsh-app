@@ -158,25 +158,33 @@ test('buildDistillPrompt offers no scope field to fill in', () => {
   // test pinned that stale rule in place.
   assert.doesNotMatch(system, /"scope"/)
   assert.match(system, /the host decides, not you/i)
-  assert.match(system, /every entry in that workspace's project memory/)
-  // No-workspace sessions must be told where their entries land too, without
+  assert.match(system, /that workspace's project memory/)
+  // No-workspace sessions must be told where their cards land too, without
   // being asked to tag them.
   const none = buildDistillPrompt('[user] hello', undefined, root)
-  assert.match(none.user, /GLOBAL memory file/)
+  assert.match(none.user, /GLOBAL memory/)
   assert.doesNotMatch(none.user, /propose scope/)
 })
 
-test('buildDistillPrompt splits system/user and bans prefixes', () => {
+test('buildDistillPrompt splits system/user and spells out the card contract', () => {
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-prompt-')))
   const { system, user } = buildDistillPrompt('[user] hello', undefined, root)
   assert.match(system, /JSON ONLY/)
-  assert.match(system, /no "- \[category\] date" prefix/)
+  // The topic-card output contract: key, hook, category, body.
+  assert.ok(system.includes('"topic"'))
+  assert.ok(system.includes('"summary"'))
+  assert.ok(system.includes('"category"'))
+  assert.ok(system.includes('"content"'))
+  // Reusing an existing key (upsert) instead of inventing near-synonyms.
+  assert.match(system, /reuse that exact key/i)
+  // The empty answer stays a valid answer.
+  assert.match(system, /empty entries array is a VALID answer/i)
   assert.match(user, /\[user\] hello/)
   assert.match(user, /No workspace/)
 })
 
 test('buildCuratePrompt bans work logs and spells out the JSON contract', () => {
-  const { system, user } = buildCuratePrompt('- [lesson] 2026-09-06 two entries')
+  const { system, user } = buildCuratePrompt('### some-topic [lesson] (updated 2026-09-06)\ntwo cards')
   // The work-log class the curator must delete (the prompt is now the only
   // carrier of the output contract — outputSchema is gone).
   assert.match(system, /work logs/i)
@@ -185,8 +193,13 @@ test('buildCuratePrompt bans work logs and spells out the JSON contract', () => 
   assert.match(system, /Reply with ONE JSON object/)
   assert.ok(system.includes('"edits"'))
   assert.ok(system.includes('preference|convention|decision|lesson|fact'))
-  assert.match(user, /--- Memory file ---/)
-  assert.match(user, /two entries/)
+  // Edits cite cards by topic key, with the three ops named.
+  assert.ok(system.includes('"merge"'))
+  assert.ok(system.includes('"delete"'))
+  assert.ok(system.includes('"rewrite"'))
+  assert.ok(system.includes('"topics"'))
+  assert.match(user, /--- Memory store/)
+  assert.match(user, /two cards/)
 })
 
 function stubLlm(chunks: Array<Record<string, unknown>>): never {

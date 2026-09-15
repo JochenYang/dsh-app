@@ -1,47 +1,55 @@
 /**
  * System-prompt contributions: static saving guidelines + a dynamic section
- * injecting TWO scopes — the global file (every session) and the current
- * project's file (only sessions of that workspace). Other projects' files
+ * injecting TWO scopes — the global cards (every session) and the current
+ * project's cards (only sessions of that workspace). Other projects' cards
  * are physically absent from the assembly; isolation is structural, not
  * prompt-level discipline.
+ *
+ * Per scope the section carries:
+ *   1. the INDEX in full (one line per topic card) — the write-side routing
+ *      map: before saving, the model checks whether a card already covers
+ *      the subject and updates it instead of creating a near-duplicate;
+ *   2. selected card BODIES under the budget (pinned always win, then the
+ *      most recently updated of each category up to a quota — one bucket
+ *      cannot crowd out the others; whatever is dropped stays reachable via
+ *      memory_recall).
  *
  * The section text is a provider evaluated per assembly with the AssembleContext
  * the agent package extends (context.agent?.session.header.cwd), so a
  * memory_save mid-session is visible to the NEXT turn, and the master
  * toggle is honored live.
  *
- * Injection budgets (per-assembly selection: pinned entries always win, then
- * the NEWEST entries of each category up to a quota — one bucket cannot crowd
- * out the others; whatever is dropped stays reachable via memory_recall):
+ * Body budgets (index is always whole — it is the routing map):
  *   global  ≤ {@link MAX_GLOBAL_CHARS}   — preferences stay small by discipline
  *   project ≤ {@link MAX_PROJECT_CHARS}  — the growth valve
  *
  * @module @dsh-app/plugin-memory/prompt
  */
 
-import { normalizeForMatch, parseEntries, type MemoryEntry, type MemoryRoot } from './memory-store.ts'
+import type { MemoryRoot, MemoryStore, TopicCard } from './memory-store.ts'
 import type { MemoryCategory } from './types.ts'
 
-/** Hard ceiling on the injected GLOBAL memory text (characters). */
+/** Hard ceiling on the injected GLOBAL card bodies (characters). */
 export const MAX_GLOBAL_CHARS = 1_200
 
-/** Hard ceiling on the injected PROJECT memory text (characters). */
+/** Hard ceiling on the injected PROJECT card bodies (characters). */
 export const MAX_PROJECT_CHARS = 2_800
 
 /** Guidelines shown to the model whenever memory is enabled. English, to
- * match the harness's own prompt sections; the model writes ENTRIES in
+ * match the harness's own prompt sections; the model writes CARD CONTENT in
  * the user's language as instructed below. The save triggers are worded
- * MODEL-driven ("whenever you observe") — a user-driven wording ("when
- * the user asks") silently drops implicit preferences the user never
- * states and facts the model digs out on its own. Kept lean: this block
- * rides along with EVERY prompt assembly in every session. */
+ * MODEL-driven ("whenever you observe") — a user-driven wording ("when the
+ * user asks") silently drops implicit preferences the user never states and
+ * facts the model digs out on its own. Kept lean: this block rides along
+ * with EVERY prompt assembly in every session. */
 const GUIDELINES_TEXT = [
   '## Cross-session memory',
   '',
-  'Memory persists across sessions in two scopes:',
+  'Memory persists across sessions as TOPIC CARDS in two scopes:',
   '- GLOBAL: user preferences and habits, valid in every project.',
   '- PROJECT: decisions, conventions, and lessons of this workspace only.',
-  'Both current files are injected below (truncated when large); memory_recall reads them in full.',
+  'Each scope injects its INDEX (every topic, one line) plus selected cards below;',
+  'memory_recall reads any card in full.',
   '',
   'SAVE proactively via memory_save — do not wait to be asked — whenever you observe:',
   '- an explicit request to remember something;',
@@ -49,23 +57,24 @@ const GUIDELINES_TEXT = [
   '- a settled project decision or a hard-won lesson (root cause, non-obvious constraint, pitfall)',
   '  → scope "project".',
   '',
-  'CORRECT, never contradict: when the user corrects or retracts a saved fact, call memory_forget',
-  'on the stale entry first, then memory_save the corrected fact if it still matters — never append',
-  'a contradicting entry (both would be injected into every future session).',
+  'ONE TOPIC, ONE CARD: pick a stable ASCII kebab-case topic key for the subject',
+  '(e.g. "pnpm11-allowscripts"). To correct or extend a saved fact, SAVE THE SAME TOPIC',
+  'again with the revised content — the card is rewritten, never duplicated. Check the',
+  'index BEFORE saving: if a card already covers the subject, update it instead of',
+  'creating a near-duplicate (memory_recall reads it first when unsure).',
   '',
   'NEVER save: credentials (even when asked); work logs — what this conversation implemented,',
   'fixed, or committed (commit ids, "已完成" reports, file-by-file change lists); task summaries;',
   'anything a future session reads from the repo in one tool call (paths, API signatures, config',
   'values, build commands). The test: would a future session in a DIFFERENT conversation act',
-  'better because this line exists? When unsure, skip — do not save guesses.',
+  'better because this card exists? When unsure, skip — do not save guesses.',
   '',
-  'One concise line per entry, in the user\'s language — these files are re-read by every future',
-  'session of their scope.',
+  'The body is one concise paragraph in the user\'s language; the summary (≤40 chars) must say',
+  'what the card covers — it is the index line future saves route by.',
 ].join('\n')
 
-/** Per-category quota inside the injection budget: every category keeps its
- *  NEWEST entries so one class cannot crowd out the others (a project today
- *  rarely needs more than this from each bucket). */
+/** Per-category quota inside the body budget: every category keeps its most
+ *  recently updated cards so one class cannot crowd out the others. */
 const CATEGORY_QUOTA: Record<MemoryCategory, number> = {
   preference: 3,
   convention: 3,
@@ -74,107 +83,145 @@ const CATEGORY_QUOTA: Record<MemoryCategory, number> = {
   fact: 2,
 }
 
-/** One injection selection: the picked lines plus whether anything was dropped. */
-interface MemorySelection {
-  selected: string[]
+/** One injection selection: the picked cards plus whether anything was dropped. */
+interface CardSelection {
+  selected: TopicCard[]
   truncated: boolean
 }
 
-/**
- * Pick the injection lines under a character budget:
- *  1. pinned entries always win (the user's hard guarantee — they survive
- *     growth regardless of how the rest is truncated);
- *  2. per category the newest {@link CATEGORY_QUOTA} entries (memory files
- *     are append-only, so the tail holds the fresh facts);
- *  3. non-standard lines (hand edits) are carried verbatim.
- * Budget is accumulated in that priority order (quota overflow only ever
- * drops the oldest picks), while the emitted text keeps file order so the
- * timeline stays readable. What is dropped under the budget stays reachable
- * via memory_recall.
- */
-/** Shortest clipped remainder worth injecting. Below this a pin would be a
- *  fragment carrying no information, so it is skipped rather than emitted. */
-const MIN_PIN_CLIP_CHARS = 40
+/** Shortest clipped remainder worth injecting: a card needs its heading line
+ *  (~50 chars) plus a body fragment to carry any information, so below this a
+ *  pin is skipped rather than emitted as a heading-only stub. */
+const MIN_PIN_CLIP_CHARS = 64
 
-/** Fit one line into `room` characters, marking the cut with an ellipsis. */
-function clipToBudget(line: string, room: number): string {
-  if (line.length <= room) return line
-  return room <= 1 ? line.slice(0, Math.max(0, room)) : `${line.slice(0, room - 1)}…`
+/** Render one card for injection: a heading line the model can cite, then the body. */
+export function renderCardBlock(card: TopicCard): string {
+  if (card.malformed) return card.body
+  return `### ${card.name} [${card.category}] (updated ${card.updated})\n${card.body}`
 }
 
-export function selectBalanced(text: string, budget: number, pinned: Set<string>): MemorySelection {
-  const entries = parseEntries(text)
-  if (entries.length === 0) return { selected: [], truncated: false }
-  const byCategory = new Map<string, MemoryEntry[]>()
-  const pinnedEntries: MemoryEntry[] = []
-  const handNotes: MemoryEntry[] = []
-  for (const entry of entries) {
-    if (pinned.has(normalizeForMatch(entry.content))) {
-      pinnedEntries.push(entry)
-    } else if (entry.category === undefined) {
-      handNotes.push(entry)
+/**
+ * Pick the cards whose bodies fit the budget:
+ *  1. pinned cards always win (the user's hard guarantee — they survive
+ *     growth regardless of how the rest is truncated);
+ *  2. malformed (hand-edited) cards are carried verbatim, like the old
+ *     hand-note lines;
+ *  3. per category the most recently updated {@link CATEGORY_QUOTA} cards.
+ * Budget is accumulated in that priority order with the same per-group
+ * reservation rule as before (a long pin cannot starve the pins behind it).
+ * What is dropped under the budget stays reachable via memory_recall.
+ */
+export function selectCards(cards: readonly TopicCard[], budget: number, pinned: Set<string>): CardSelection {
+  if (cards.length === 0) return { selected: [], truncated: false }
+  const pinnedCards: TopicCard[] = []
+  const handNotes: TopicCard[] = []
+  const byCategory = new Map<MemoryCategory, TopicCard[]>()
+  for (const card of cards) {
+    if (pinned.has(card.name)) {
+      pinnedCards.push(card)
+    } else if (card.malformed) {
+      handNotes.push(card)
     } else {
-      const list = byCategory.get(entry.category) ?? []
-      list.push(entry)
-      byCategory.set(entry.category, list)
+      const list = byCategory.get(card.category) ?? []
+      list.push(card)
+      byCategory.set(card.category, list)
     }
   }
-  // Pinned entries rank FIRST — nothing (not even a long hand note) may ever
-  // crowd them out of the budget; that is what "pin" promises.
-  const priority: MemoryEntry[] = [...pinnedEntries, ...handNotes]
-  for (const [category, list] of byCategory) {
-    const quota = CATEGORY_QUOTA[category as MemoryCategory] ?? 2
-    priority.push(...list.slice(Math.max(0, list.length - quota)))
+  // list() arrives sorted category → updated-desc already, so each bucket's
+  // head IS the freshest; take the quota off the head.
+  const priority: TopicCard[] = [...pinnedCards, ...handNotes]
+  for (const list of byCategory.values()) {
+    const quota = CATEGORY_QUOTA[list[0]!.category] ?? 2
+    priority.push(...list.slice(0, quota))
   }
 
-  // Pins outrank hand notes, and both outrank the category quotas; within each
-  // group every entry has to reach the prompt. Reserve room for the entries
-  // still ahead IN THE SAME GROUP, so a long line cannot swallow the budget and
-  // starve its peers — the list runs oldest-first, so a plain break used to drop
-  // the newest pins first. Across groups nothing is reserved: a pin that needs
-  // the room takes it, which is what ranking first means.
-  const pinnedSet = new Set(pinnedEntries)
-  const picked: Array<{ entry: MemoryEntry, text: string }> = []
+  const pinnedSet = new Set(pinnedCards)
+  const picked: TopicCard[] = []
   let used = 0
   let pinsSeen = 0
   let handsSeen = 0
-  for (const entry of priority) {
-    const isPinned = pinnedSet.has(entry)
-    const isHandNote = !isPinned && entry.category === undefined
+  for (const card of priority) {
+    const isPinned = pinnedSet.has(card)
+    const isHandNote = !isPinned && card.malformed
     if (isPinned) pinsSeen += 1
     if (isHandNote) handsSeen += 1
     const reserve = isPinned
-      ? Math.max(0, pinnedEntries.length - pinsSeen) * MIN_PIN_CLIP_CHARS
+      ? Math.max(0, pinnedCards.length - pinsSeen) * MIN_PIN_CLIP_CHARS
       : isHandNote
         ? Math.max(0, handNotes.length - handsSeen) * MIN_PIN_CLIP_CHARS
         : 0
-    const width = entry.raw.length + 1
+    const width = renderCardBlock(card).length + 1
     if (used + width <= budget - reserve) {
-      picked.push({ entry, text: entry.raw })
+      picked.push(card)
       used += width
       continue
     }
-    // An ordinary entry that no longer fits means the budget is spent: by the
+    // An ordinary card that no longer fits means the budget is spent: by the
     // priority order above, nothing behind it outranks it.
     if (!isPinned && !isHandNote) break
     const room = budget - used - 1 - reserve
     if (room < MIN_PIN_CLIP_CHARS) continue
-    picked.push({ entry, text: clipToBudget(entry.raw, room) })
+    // A pin MUST reach the prompt — that is the contract — but "whole" used to
+    // mean an over-long hand-written card could grow every session's system
+    // prompt without bound. It is clipped to the budget with a marked cut.
+    picked.push({ ...card, body: `${renderCardBlock(card).slice(0, Math.max(0, room - 1))}…`, malformed: true })
     used += room + 1
   }
   if (picked.length === 0) {
-    // Nothing fit at all. The contract still holds as far as the budget allows:
-    // inject the first pin CLIPPED to the budget rather than whole — a
-    // hand-written line can exceed any budget, and a promise that blows up the
-    // context is worse than one that ellipsizes.
-    const fallback = pinnedEntries[0]
-    if (fallback !== undefined) return { selected: [clipToBudget(fallback.raw, budget)], truncated: true }
+    const fallback = pinnedCards[0]
+    if (fallback !== undefined) {
+      const text = renderCardBlock(fallback)
+      return {
+        selected: [{ ...fallback, body: `${text.slice(0, Math.max(0, budget - 1))}…`, malformed: true }],
+        truncated: true,
+      }
+    }
     return { selected: [], truncated: true }
   }
+  // "truncated" means some card was not injected — whether the budget dropped
+  // it or the per-category quota did (quota-dropped cards are exactly what the
+  // recall hint exists for).
+  return { selected: picked, truncated: picked.length < cards.length }
+}
 
-  const order = new Map(entries.map((entry, index) => [entry, index]))
-  picked.sort((a, b) => (order.get(a.entry) ?? 0) - (order.get(b.entry) ?? 0))
-  return { selected: picked.map(pick => pick.text), truncated: picked.length < entries.length }
+/** Index lines injected per scope at most. The index is the write-side
+ *  routing map and rides every assembly in full, so it needs its own ceiling:
+ *  on a kernel without the background passes (no agents/llm services) a store
+ *  only ever grows, and an uncapped index would inflate every system prompt
+ *  linearly. Overflow stays discoverable through memory_recall. */
+const MAX_INDEX_LINES = 50
+
+/** The index text for injection, capped with an explicit overflow note. */
+function cappedIndex(store: MemoryStore): string {
+  const text = store.indexText()
+  const lines = text.split('\n').filter(line => line.startsWith('- '))
+  if (lines.length <= MAX_INDEX_LINES) return text
+  const header = text.split('\n').filter(line => !line.startsWith('- ') && line !== '').join('\n')
+  return [
+    header,
+    '',
+    ...lines.slice(0, MAX_INDEX_LINES),
+    `— …and ${String(lines.length - MAX_INDEX_LINES)} more topics; memory_recall lists them.`,
+  ].join('\n')
+}
+
+/** One scope's injection block: index in full + selected card bodies. */
+function renderScope(store: MemoryStore, heading: string, budget: number): string[] {
+  const cards = store.list()
+  if (cards.length === 0) return []
+  const pinned = store.pinnedSet()
+  const selection = selectCards(cards, budget, pinned)
+  const parts = [`### ${heading} — index`, '', cappedIndex(store)]
+  // renderCardBlock carries malformed cards (and clipped pins, marked
+  // malformed) verbatim — both paths agree, so no special-casing here.
+  const bodies = selection.selected.map(card => renderCardBlock(card))
+  if (bodies.length > 0) {
+    parts.push('', `### ${heading} — cards`, '', bodies.join('\n\n'))
+  }
+  if (selection.truncated) {
+    parts.push('', '— some cards not injected; memory_recall reads them by topic or keyword.')
+  }
+  return parts
 }
 
 /**
@@ -186,30 +233,20 @@ export function selectBalanced(text: string, budget: number, pinned: Set<string>
  */
 export function renderMemoryText(root: MemoryRoot, cwd: string | undefined): string {
   if (!root.global.isEnabled()) return ''
-  const globalPinned = root.global.pinnedSet()
-  const globalText = root.global.read().trim()
   const projectStore = cwd === undefined ? undefined : root.projectFor(cwd)
-  const projectText = projectStore === undefined ? '' : projectStore.read().trim()
   const projectName = cwd === undefined ? '' : cwd.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
 
   const parts: string[] = [GUIDELINES_TEXT]
-  const g = selectBalanced(globalText, MAX_GLOBAL_CHARS, globalPinned)
-  // Each scope pins against its OWN store: a global pin never leaks into a
-  // project file, and project pins (set from the settings page) actually work.
-  const p = selectBalanced(projectText, MAX_PROJECT_CHARS, projectStore === undefined ? new Set<string>() : projectStore.pinnedSet())
+  const globalParts = renderScope(root.global, 'Memory — global', MAX_GLOBAL_CHARS)
+  const projectParts = projectStore === undefined
+    ? []
+    : renderScope(projectStore, `Memory — current project (${projectName})`, MAX_PROJECT_CHARS)
 
-  if (globalText === '' && projectText === '') {
+  if (globalParts.length === 0 && projectParts.length === 0) {
     parts.push('', '## Memory (persisted)', '', '(empty — nothing saved yet)')
     return parts.join('\n')
   }
-
-  if (globalText !== '') {
-    parts.push('', '### Memory — global', '', g.selected.join('\n'))
-    if (g.truncated) parts.push('', '— older entries not injected; memory_recall reads the full file.')
-  }
-  if (projectText !== '') {
-    parts.push('', `### Memory — current project (${projectName})`, '', p.selected.join('\n'))
-    if (p.truncated) parts.push('', '— older entries not injected; memory_recall reads the full file.')
-  }
+  if (globalParts.length > 0) parts.push('', ...globalParts)
+  if (projectParts.length > 0) parts.push('', ...projectParts)
   return parts.join('\n')
 }
