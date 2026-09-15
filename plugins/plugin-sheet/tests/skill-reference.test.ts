@@ -35,11 +35,13 @@ import {
   composerInput,
   removeSkillReference,
   skillDegradation,
-  skillReferenceHint,
   skillReferencePlan,
   stripOfficeTokens,
   stripSkillToken,
 } from '../src/client/skill-prefill.ts'
+// The shipped dictionaries: the chip's turn-on hint is asserted as copy, the
+// way it reaches the capsule through `capsule.skillHint`.
+import { en as localesEn, zh as localesZh } from '../src/client/locales.ts'
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -240,10 +242,15 @@ test('skill reference: composer input is read structurally off the binding', () 
   assert.equal(input?.dispatch, undefined)
 })
 
-test('skill reference: the hint names the mode and the manual token', () => {
-  const hint = skillReferenceHint('Excel')
-  assert.match(hint, /已开启 Excel 模式/)
-  assert.match(hint, new RegExp(SKILL_TOKEN))
+test('skill reference: the hint key names the mode and the manual token', () => {
+  // The capsule renders this entry through its own `t` seat; the plan the
+  // policy resolves is what makes the capsule show it at all.
+  const hint = localesZh['capsule.skillHint']
+  assert.match(hint, /已开启 \{label\} 模式/)
+  assert.match(hint, /\{token\}/)
+  assert.match(localesEn['capsule.skillHint'], /\{label\}/)
+  assert.match(localesEn['capsule.skillHint'], /\{token\}/)
+  assert.equal(SKILL_TOKEN, '/dsh-sheet')
 })
 
 test('skill reference: the client registers the source and no CSS skin remains', () => {

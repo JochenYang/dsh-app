@@ -9,6 +9,12 @@
  * spawn is a known regression class), and an env baseline carrying only
  * PATH + HOME — parent-proc pollution is another known regression class.
  *
+ * Failures answer `{ ok: false, error: { code, message, host } }`: `code` is
+ * the transport-ish category the tab already branches on, `host` is the coded
+ * message it renders in its own language (see `host-text.ts`), and `message`
+ * is the English diagnostic — git's own stderr lands there verbatim, which is
+ * not a sentence a user can read, so every user-facing line is the tab's.
+ *
  * Routes:
  *   GET  /api/git/status?cwd=&sessionId= → porcelain entries + ahead/behind
  *                                          divergence vs the upstream (null
@@ -28,6 +34,7 @@ import { execFile } from 'node:child_process'
 import pathModule from 'node:path'
 import { promisify } from 'node:util'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { HostText } from './host-text.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -49,17 +56,47 @@ export interface GitSessionScope {
   cwdForSession(sessionId: string): string | undefined
 }
 
-/** A request validation failure that should not be reported as a git failure. */
+/**
+ * A request validation failure that should not be reported as a git failure.
+ *
+ * Carries a coded message beside the transport category: the tab renders the
+ * copy (`sidebar.fail.*`) in the active language, and `message` stays an
+ * English diagnostic for logs and for a reader that does not know the code.
+ */
 class GitRequestError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
+  /**
+   * @param status - HTTP status the route answers with.
+   * @param code - transport-ish category the tab branches on.
+   * @param message - English diagnostic (what the old zh-CN sentence became).
+   * @param hostCode - finer message identity when several messages share one
+   *   transport code (the three no-remote variants); defaults to `code`.
+   */
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly hostCode: string = code,
+  ) {
     super(message)
+    this.name = 'GitRequestError'
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return { code: this.hostCode, text: this.message }
   }
 }
 
 /** A network git op exceeded NETWORK_TIMEOUT_MS (client code: git-timeout). */
 class GitTimeoutError extends Error {
   constructor() {
-    super(`网络操作超时（${String(NETWORK_TIMEOUT_MS / 1000)} 秒），请检查网络或远程仓库后重试。`)
+    super(`network operation timed out after ${String(NETWORK_TIMEOUT_MS / 1000)} s`)
+    this.name = 'GitTimeoutError'
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return { code: 'git-timeout', text: this.message }
   }
 }
 
@@ -200,7 +237,7 @@ function isValidBranchName(value: string): boolean {
  * Remote to fall back on when the current branch has no upstream: 'origin'
  * when present, else the sole configured remote. Undefined when there is no
  * usable remote at all (none, or several without an 'origin' to disambiguate)
- * — callers turn that into an actionable zh-CN error instead of letting git
+ * — callers turn that into a coded, actionable error instead of letting git
  * choke on a literal 'origin' repo-spec.
  */
 async function defaultRemote(scoped: string): Promise<string | undefined> {
@@ -262,8 +299,13 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   })
   res.end(JSON.stringify(body))
 }
-function writeError(res: ServerResponse, status: number, code: string, message: string): void {
-  writeJson(res, status, { ok: false, error: { code, message } })
+/**
+ * One failure body. `host` defaults to the plain category + diagnostic pair,
+ * which is right for a message that carries no copy of its own; a message the
+ * tab renders from its dictionary passes its own host text instead.
+ */
+function writeError(res: ServerResponse, status: number, code: string, message: string, host: HostText = { code, text: message }): void {
+  writeJson(res, status, { ok: false, error: { code, message, host } })
 }
 
 /** Read a bounded JSON POST body. */
@@ -408,7 +450,9 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
       else if (op === 'fetch') {
         const remote = await defaultRemote(scoped)
         if (remote === undefined) {
-          throw new GitRequestError(400, 'no-remote', '当前仓库未配置可用的远程（remote），无法同步')
+          throw new GitRequestError(
+            400, 'no-remote', 'no usable remote is configured, so fetching is impossible', 'git.noRemoteSync',
+          )
         }
         await git(scoped, ['fetch', '--prune', remote], { timeoutMs: NETWORK_TIMEOUT_MS })
       } else if (op === 'pull') {
@@ -420,11 +464,15 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
           // (this is what git's own hint suggests) instead of failing.
           const remote = await defaultRemote(scoped)
           if (remote === undefined) {
-            throw new GitRequestError(400, 'no-remote', '当前仓库未配置可用的远程（remote），无法拉取')
+            throw new GitRequestError(
+              400, 'no-remote', 'no usable remote is configured, so pulling is impossible', 'git.noRemotePull',
+            )
           }
           const branch = (await git(scoped, ['branch', '--show-current'])).trim()
           if (branch === '') {
-            throw new GitRequestError(400, 'detached-head', '当前处于分离头指针（detached HEAD）状态，无法拉取')
+            throw new GitRequestError(
+              400, 'detached-head', 'the repository is on a detached HEAD, so pulling is impossible', 'git.detachedPull',
+            )
           }
           out = await git(scoped, ['pull', '--ff-only', remote, branch], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
         }
@@ -438,7 +486,9 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
         } else {
           const remote = await defaultRemote(scoped)
           if (remote === undefined) {
-            throw new GitRequestError(400, 'no-remote', '当前仓库未配置可用的远程（remote），无法推送')
+            throw new GitRequestError(
+              400, 'no-remote', 'no usable remote is configured, so pushing is impossible', 'git.noRemotePush',
+            )
           }
           out = await git(scoped, ['push', '-u', remote, 'HEAD'], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
         }
@@ -449,10 +499,14 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
         value = parseBranchList(await git(scoped, ['branch', '--format=%(refname:short)%00%(HEAD)']))
       } else if (op === 'branch.checkout' || op === 'branch.create') {
         if (name === undefined) {
-          throw new GitRequestError(400, 'bad-request', '缺少分支名')
+          throw new GitRequestError(400, 'bad-request', 'a branch name is required', 'git.branchNameMissing')
         }
         if (!isValidBranchName(name)) {
-          throw new GitRequestError(400, 'bad-request', '无效的分支名（仅支持字母、数字、点、下划线、连字符与斜杠，且不能以 .. 开头）')
+          throw new GitRequestError(
+            400, 'bad-request',
+            'invalid branch name (letters, digits, dot, underscore, hyphen and slash only; no leading "..")',
+            'git.branchNameInvalid',
+          )
         }
         // A dirty worktree that blocks the checkout surfaces as git stderr.
         await git(scoped, op === 'branch.create' ? ['checkout', '-b', name] : ['checkout', name])
@@ -474,16 +528,16 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
     writeError(res, 404, 'not-found', `unknown git route: ${url.pathname}`)
   } catch (error) {
     if (error instanceof GitRequestError) {
-      writeError(res, error.status, error.code, error.message)
+      writeError(res, error.status, error.code, error.message, error.hostText())
       return
     }
     if (error instanceof GitTimeoutError) {
-      writeError(res, 504, 'git-timeout', error.message)
+      writeError(res, 504, 'git-timeout', error.message, error.hostText())
       return
     }
     const raw = error as { code?: string, stdout?: string, stderr?: string, message?: string }
-    // execFile non-zero exit: route the git message to the user verbatim
-    // (it names the actual failure; the client shows it in zh wording).
+    // execFile non-zero exit: git's own message is the diagnostic the tab
+    // shows inside its sentence frame (it names the actual failure).
     // Some failures report through stdout instead of stderr — merge-class
     // conflicts from `git stash pop` print there — so fall back to a
     // bounded stdout excerpt before the bare "command failed" message.

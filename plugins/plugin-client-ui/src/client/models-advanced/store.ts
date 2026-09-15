@@ -21,6 +21,8 @@ import type {
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/dsh-client-ui-settings/client'
+import { wireText } from './messages.ts'
+import type { PageMessage } from './messages.ts'
 
 /** Plain schema callbacks, hidden behind bound functions (no cordis leakage). */
 export type SchemaOps = Pick<
@@ -138,7 +140,7 @@ export function messageOf(error: unknown): string {
 export type WriteOutcome =
   | { kind: 'ok'; namespace: SettingsNamespaceView }
   | { kind: 'conflict' }
-  | { kind: 'failure'; message: string }
+  | { kind: 'failure'; message: PageMessage }
 
 /**
  * One `settings.mutate` against the stored `llm-pi-ai` user layer. Ops are
@@ -156,9 +158,11 @@ export async function writeOps(
     if (response.ok) return { kind: 'ok', namespace: response.value }
     return response.error.code === 'settings/conflict'
       ? { kind: 'conflict' }
-      : { kind: 'failure', message: response.error.message }
+      // The host owns this sentence and writes it in the active locale: the
+      // page shows it verbatim instead of re-wording it.
+      : { kind: 'failure', message: wireText(response.error.message) }
   } catch (error) {
-    return { kind: 'failure', message: messageOf(error) }
+    return { kind: 'failure', message: wireText(messageOf(error)) }
   }
 }
 

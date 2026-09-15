@@ -26,7 +26,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError } from './errors.ts'
+import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
 import {
   PACKAGE_NAME_PATTERN,
   resolveDshBin,
@@ -39,6 +39,23 @@ import {
 
 /** CLI timeout: package-manager runs on cold caches can be slow. */
 const CLI_TIMEOUT_MS = 120_000
+
+/**
+ * The coded message of a failed CLI run: with no output there is nothing to
+ * show but the exit code, and with output the tail IS the diagnostic (it rides
+ * a params slot, never a sentence the host wrote).
+ */
+function commandFailureHost(tail: string, code: number | undefined): HostText {
+  if (tail === '') {
+    const exit = code ?? 'unknown'
+    return {
+      code: 'install.commandFailed',
+      params: { code: exit },
+      text: `the command failed (exit code ${String(exit)})`,
+    }
+  }
+  return { code: 'install.commandFailedLog', params: { log: tail }, text: `the command failed:\n${tail}` }
+}
 
 /** Per-stream capture cap before truncation. */
 const STREAM_CAPTURE_BYTES = 64 * 1024
@@ -205,7 +222,12 @@ export class PluginInstaller {
 
       const timer = setTimeout(() => {
         killTree(child.pid)
-        rejectPromise(new MarketExecutionError('安装/卸载超时（120 秒），已终止命令，请稍后重试', 'timeout'))
+        const seconds = Math.round(CLI_TIMEOUT_MS / 1000)
+        rejectPromise(new MarketExecutionError({
+          code: 'install.timeout',
+          params: { seconds },
+          text: `install/uninstall timed out after ${String(seconds)} seconds; the command was terminated`,
+        }, 'timeout'))
       }, CLI_TIMEOUT_MS)
 
       const finish = (error: Error | undefined, code: number | undefined): void => {
@@ -215,12 +237,13 @@ export class PluginInstaller {
           return
         }
         const blockedBuilds = blockedBuildsOf(combined)
+        // The tail is the CLI's own output — the panel shows it in its log
+        // disclosure, so it rides a message's params as data, never as copy.
         const tail = tailLines(truncated ? `${combined}\n…（输出已截断）` : combined, OUTPUT_TAIL_LINES)
         if (code !== 0) {
-          const message = tail === '' ? `命令失败（退出码 ${code ?? 'unknown'}）` : `命令失败：\n${tail}`
           rejectPromise(blockedBuilds !== null
-            ? new MarketBlockedBuildError(message, blockedBuilds)
-            : new MarketExecutionError(message, 'cli'))
+            ? new MarketBlockedBuildError(commandFailureHost(tail, code), blockedBuilds)
+            : new MarketExecutionError(commandFailureHost(tail, code), 'cli'))
           return
         }
         resolvePromise({ output: tail, blockedBuilds })

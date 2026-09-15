@@ -42,6 +42,23 @@ describe('validateSourceUrl', () => {
   it('rejects oversized URLs', () => {
     assert.equal(validateSourceUrl(`https://example.com/${'a'.repeat(600)}`).ok, false)
   })
+
+  it('answers a coded reason (the panel owns the sentence, not the host)', () => {
+    const codeOf = (raw: unknown): string | undefined => {
+      const check = validateSourceUrl(raw)
+      return check.ok ? undefined : check.reason.code
+    }
+    assert.equal(codeOf(42), 'source.notString')
+    assert.equal(codeOf(''), 'source.empty')
+    assert.equal(codeOf(`https://example.com/${'a'.repeat(600)}`), 'source.tooLong')
+    assert.equal(codeOf('not a url'), 'source.unparsable')
+    assert.equal(codeOf('http://example.com/list'), 'source.notHttps')
+    assert.equal(codeOf('https://user:pass@example.com/l'), 'source.hasCredentials')
+    // The echoed value rides params, so no prose crosses the wire.
+    const check = validateSourceUrl('not a url')
+    assert.deepEqual(check.ok ? undefined : check.params, undefined)
+    assert.equal(check.ok ? '' : check.reason.params?.url, 'not a url')
+  })
 })
 
 describe('parseCatalog', () => {

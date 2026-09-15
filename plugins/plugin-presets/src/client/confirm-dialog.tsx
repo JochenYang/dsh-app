@@ -15,7 +15,8 @@ export interface ConfirmDialogProps {
   title: string
   message: string
   confirmLabel: string
-  cancelLabel?: string
+  /** Cancel label; the caller owns the copy (its own locale namespace). */
+  cancelLabel: string
   busy?: boolean
   onConfirm: () => void
   onClose: () => void
@@ -26,7 +27,7 @@ export interface ConfirmDialogProps {
  * @returns null when closed.
  */
 export function ConfirmDialog({
-  open, title, message, confirmLabel, cancelLabel = '取消', busy = false, onConfirm, onClose,
+  open, title, message, confirmLabel, cancelLabel, busy = false, onConfirm, onClose,
 }: ConfirmDialogProps): ReactNode {
   useEffect(() => {
     if (!open) return

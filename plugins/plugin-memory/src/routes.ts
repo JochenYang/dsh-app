@@ -23,7 +23,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
-import { ROUTE_PREFIX, type MemoryCardRow, type MemoryEntriesResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
+import { ROUTE_PREFIX, type HostText, type MemoryCardRow, type MemoryEntriesResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
 
 /** Route namespace on the dsh web server (single source in types.ts, shared
  * with the browser half). Re-exported so existing importers keep working. */
@@ -72,7 +72,10 @@ function passesFence(req: IncomingMessage): boolean {
 /** Reject cross-origin and non-local callers with an answer, never a hung connection. */
 function requireSameOrigin(req: IncomingMessage, res: ServerResponse): boolean {
   if (sameOrigin(req) && passesFence(req)) return true
-  fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+  // Only a hostile page (or a hand-rolled client) can reach this, never the
+  // settings page: the code is stable but deliberately has no dictionary copy,
+  // so it renders the English diagnostic below.
+  fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
   return false
 }
 
@@ -81,17 +84,17 @@ function requireSameOrigin(req: IncomingMessage, res: ServerResponse): boolean {
 function resolveStore(root: MemoryRoot, body: Record<string, unknown>, res: ServerResponse): MemoryStore | undefined {
   if (body.scope === undefined || body.scope === 'global') return root.global
   if (body.scope !== 'project') {
-    fail(res, 400, 'bad-request', 'scope must be global or project')
+    fail(res, 400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
     return undefined
   }
   const slug = body.slug
   if (typeof slug !== 'string' || !isValidSlug(slug)) {
-    fail(res, 400, 'bad-request', 'project scope requires a valid slug')
+    fail(res, 400, 'bad-request', { code: 'route.slugRequired', text: 'project scope requires a valid slug' })
     return undefined
   }
   const store = root.projectBySlug(slug)
   if (store === undefined) {
-    fail(res, 400, 'bad-request', 'unknown project slug')
+    fail(res, 400, 'bad-request', { code: 'route.projectUnknown', text: 'unknown project slug' })
     return undefined
   }
   return store
@@ -107,8 +110,14 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
-function fail(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { ok: false, error: { code, message } })
+/**
+ * Failure answer. `code` is the transport-ish category (kept for the existing
+ * client checks); `host` is the coded message the UI renders in its own
+ * language. The plain `message` stays an English diagnostic for logs and for a
+ * client that does not know the code yet.
+ */
+function fail(res: ServerResponse, status: number, code: string, host: HostText): void {
+  sendJson(res, status, { ok: false, error: { code, message: host.text ?? host.code, host } })
 }
 
 /** Wire row for one card; the status list omits bodies, /entries includes them. */
@@ -168,7 +177,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       if (!requireSameOrigin(req, res)) return
       if (req.method !== 'GET') {
         res.setHeader('Allow', 'GET')
-        fail(res, 405, 'method-not-allowed', 'GET only')
+        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
         return
       }
       const { cards, sizeBytes } = root.global.stats()
@@ -195,7 +204,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       if (!requireSameOrigin(req, res)) return
       if (req.method !== 'POST') {
         res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', 'POST only')
+        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
         return
       }
       void readJsonBody(req)
@@ -205,11 +214,11 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           const enabled = body.enabled
           const distill = body.distill
           if (enabled !== undefined && typeof enabled !== 'boolean') {
-            fail(res, 400, 'bad-request', 'enabled must be a boolean')
+            fail(res, 400, 'bad-request', { code: 'route.enabledNotBoolean', text: 'enabled must be a boolean' })
             return
           }
           if (distill !== undefined && typeof distill !== 'boolean') {
-            fail(res, 400, 'bad-request', 'distill must be a boolean')
+            fail(res, 400, 'bad-request', { code: 'route.distillNotBoolean', text: 'distill must be a boolean' })
             return
           }
           if (typeof enabled === 'boolean') root.global.setEnabled(enabled)
@@ -222,10 +231,12 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
         .catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'invalid body'
           if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
             return
           }
-          fail(res, 400, 'bad-request', message)
+          // The parse fault is a technical detail: it rides as a param and the
+          // client wraps it in its own sentence.
+          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
         })
     },
   }))
@@ -236,7 +247,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       if (!requireSameOrigin(req, res)) return
       if (req.method !== 'POST') {
         res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', 'POST only')
+        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
         return
       }
       void readJsonBody(req)
@@ -244,35 +255,37 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           if (body.scope === 'project') {
             const slug = body.slug
             if (typeof slug !== 'string' || !isValidSlug(slug)) {
-              fail(res, 400, 'bad-request', 'slug 格式不正确')
+              fail(res, 400, 'bad-request', { code: 'route.slugInvalid', text: 'the slug is malformed' })
               return
             }
             try {
               removeProject(root.dir, slug)
               ok(res, { scope: 'project', slug })
             } catch {
-              fail(res, 500, 'io', '清空项目记忆失败，请稍后重试')
+              fail(res, 500, 'io', { code: 'route.clearProjectFailed', text: 'could not clear the project memory' })
             }
             return
           }
           if (body.scope !== 'global' && body.scope !== undefined) {
-            fail(res, 400, 'bad-request', 'scope 必须是 global 或 project')
+            fail(res, 400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
             return
           }
           try {
             root.global.clear()
             ok(res, { scope: 'global' })
           } catch {
-            fail(res, 500, 'io', '清空全局记忆失败，请稍后重试')
+            fail(res, 500, 'io', { code: 'route.clearGlobalFailed', text: 'could not clear the global memory' })
           }
         })
         .catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'invalid body'
           if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
             return
           }
-          fail(res, 400, 'bad-request', message)
+          // The parse fault is a technical detail: it rides as a param and the
+          // client wraps it in its own sentence.
+          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
         })
     },
   }))
@@ -283,7 +296,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       if (!requireSameOrigin(req, res)) return
       if (req.method !== 'GET') {
         res.setHeader('Allow', 'GET')
-        fail(res, 405, 'method-not-allowed', 'GET only')
+        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
         return
       }
       const slug = req.url === undefined ? null : new URL(req.url, 'http://localhost').searchParams.get('slug')
@@ -292,7 +305,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       // touching the filesystem, so the traversal fence holds.
       const store = slug === null || slug === '' ? root.global : root.projectBySlug(slug)
       if (store === undefined) {
-        fail(res, 400, 'bad-request', 'unknown project slug')
+        fail(res, 400, 'bad-request', { code: 'route.projectUnknown', text: 'unknown project slug' })
         return
       }
       const pinned = store.pinnedSet()
@@ -309,7 +322,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       if (!requireSameOrigin(req, res)) return
       if (req.method !== 'POST') {
         res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', 'POST only')
+        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
         return
       }
       void readJsonBody(req)
@@ -317,11 +330,11 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           const topic = body.topic
           const pinned = body.pinned
           if (typeof topic !== 'string' || !isValidTopic(topic)) {
-            fail(res, 400, 'bad-request', 'topic must be a valid topic key (ASCII kebab-case)')
+            fail(res, 400, 'bad-request', { code: 'route.topicInvalid', text: 'topic must be a valid topic key (ASCII kebab-case)' })
             return
           }
           if (typeof pinned !== 'boolean') {
-            fail(res, 400, 'bad-request', 'pinned must be a boolean')
+            fail(res, 400, 'bad-request', { code: 'route.pinnedNotBoolean', text: 'pinned must be a boolean' })
             return
           }
           const store = resolveStore(root, body, res)
@@ -329,7 +342,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
           // Pinning a card that does not exist is a client bug — say so
           // instead of silently recording a dangling pin.
           if (pinned && store.get(topic) === undefined) {
-            fail(res, 400, 'bad-request', 'unknown topic')
+            fail(res, 400, 'bad-request', { code: 'route.topicUnknown', text: 'unknown topic' })
             return
           }
           const changed = pinned ? store.addPin(topic) : store.removePin(topic)
@@ -338,10 +351,12 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
         .catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'invalid body'
           if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
             return
           }
-          fail(res, 400, 'bad-request', message)
+          // The parse fault is a technical detail: it rides as a param and the
+          // client wraps it in its own sentence.
+          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
         })
     },
   }))
@@ -352,14 +367,14 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       if (!requireSameOrigin(req, res)) return
       if (req.method !== 'POST') {
         res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', 'POST only')
+        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
         return
       }
       void readJsonBody(req)
         .then(body => {
           const match = body.match
           if (typeof match !== 'string' || match.trim() === '') {
-            fail(res, 400, 'bad-request', 'match must be a non-empty string')
+            fail(res, 400, 'bad-request', { code: 'route.matchRequired', text: 'match must be a non-empty string' })
             return
           }
           const store = resolveStore(root, body, res)
@@ -372,10 +387,12 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
         .catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'invalid body'
           if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
             return
           }
-          fail(res, 400, 'bad-request', message)
+          // The parse fault is a technical detail: it rides as a param and the
+          // client wraps it in its own sentence.
+          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
         })
     },
   }))
@@ -386,7 +403,7 @@ export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot)
       if (!requireSameOrigin(req, res)) return
       if (req.method !== 'GET') {
         res.setHeader('Allow', 'GET')
-        fail(res, 405, 'method-not-allowed', 'GET only')
+        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
         return
       }
       const runs = root.llmAudit().slice(0, 20).map(run => ({

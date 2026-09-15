@@ -26,14 +26,19 @@ import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { PostToolDecision, PreToolDecision } from '@deepseek-ai/dsh-tools'
 import type { NativeRule } from './wire.ts'
-import { parseNativeRules } from './wire.ts'
-import type { HooksMountStatus } from './wire.ts'
+import { HooksValidationError, parseNativeRules } from './wire.ts'
+import type { HooksMountStatus, HostText } from './wire.ts'
 
 /** Source stamped on every context message this runtime injects. */
 const NATIVE_SOURCE: MessageSource = { kind: 'plugin', plugin: 'dsh-app-native-hooks' }
 
 /** Overlong matchers are rejected at sync: unbounded patterns are a ReDoS vector. */
 const MAX_MATCHER_CHARS = 500
+
+/** One-line English form of a coded message, for the developer-facing log. */
+function describeMessage(message: HostText): string {
+  return message.text === undefined ? message.code : `${message.code}: ${message.text}`
+}
 
 /** One rule with its matcher compiled once at sync (null = match-all). */
 interface CompiledRule {
@@ -76,23 +81,31 @@ export class NativeHookRuntime {
         // matchers are rejected (the entry reports error, like any bad rule).
         for (const rule of parsed) {
           if (rule.matcher !== undefined && rule.matcher.length > MAX_MATCHER_CHARS) {
-            throw new Error(`matcher 过长（${String(rule.matcher.length)}/${String(MAX_MATCHER_CHARS)} 字符）：${rule.name}`)
+            throw new HooksValidationError('native.matcherTooLong', {
+              length: rule.matcher.length,
+              max: MAX_MATCHER_CHARS,
+              name: rule.name,
+            })
           }
           let test: RegExp | null = null
           if (rule.matcher !== undefined) {
             try {
               test = new RegExp(rule.matcher)
             } catch {
-              throw new Error(`matcher 不是合法正则：${rule.matcher}`)
+              throw new HooksValidationError('native.matcherBadRegex', { matcher: rule.matcher })
             }
           }
           compiled.push({ rule, test })
         }
         statuses.set(entry.id, { state: 'mounted' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        // A rejected rule is a coded message (see HostText); anything else is
+        // the runtime's own diagnostic, which has no sentence to translate.
+        const message = error instanceof HooksValidationError
+          ? error.hostText()
+          : { code: 'mount.failed', text: error instanceof Error ? error.message : String(error) }
         statuses.set(entry.id, { state: 'error', message })
-        this.log(`native hooks: entry ${entry.id} invalid: ${message}`)
+        this.log(`native hooks: entry ${entry.id} invalid: ${describeMessage(message)}`)
       }
     }
     this.compiled = compiled

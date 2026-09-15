@@ -77,7 +77,7 @@ import {
   type CatalogEntry,
   type SourceFetchResult,
 } from './catalog.ts'
-import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError } from './errors.ts'
+import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
 import { repoKeyOf, sameOrigin as sameRepoOrigin } from './identity.ts'
 import type { PluginInstaller } from './installer.ts'
 import { compareVersions, latestVersionOf, latestVersionsOf, validatePackageName } from './npm.ts'
@@ -130,7 +130,7 @@ export interface MarketDeps {
 /** The GET /catalog payload (every mode shares the shape; flags mark the mode). */
 export interface CatalogPayload {
   readonly plugins: readonly CatalogEntry[]
-  readonly failed: ReadonlyArray<{ url: string, reason: string }>
+  readonly failed: ReadonlyArray<{ url: string, reason: HostText }>
   readonly sources: readonly string[]
   /** Snapshot time of the served data (cache write moment, or the fetch moment). */
   readonly cachedAt?: number
@@ -244,14 +244,20 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
+/**
+ * Failure answer. `code` is the transport-ish category (kept for the existing
+ * client checks); `host` is the coded message the panel renders in its own
+ * language. The plain `message` stays an English diagnostic for logs and for a
+ * client that does not know the code yet.
+ */
 function fail(
   res: ServerResponse,
   status: number,
   code: string,
-  message: string,
+  host: HostText,
   extra?: Record<string, unknown>,
 ): void {
-  sendJson(res, status, { ok: false, error: { code, message, ...extra } })
+  sendJson(res, status, { ok: false, error: { code, message: host.text ?? host.code, host, ...extra } })
 }
 
 /** Error-envelope extras for install-chain failures (blocked-builds payload). */
@@ -288,11 +294,20 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
-/** Map one route error to its status + stable client-facing message. */
-function errorStatus(error: unknown): { status: number, code: string, message: string } {
-  if (error instanceof MarketValidationError) return { status: 400, code: 'bad-request', message: error.message }
-  if (error instanceof MarketExecutionError) return { status: 502, code: error.code, message: error.message }
-  return { status: 500, code: 'io', message: `操作失败：${error instanceof Error ? error.message : String(error)}` }
+/** Map one route error to its status + stable coded message. */
+function errorStatus(error: unknown): { status: number, code: string, host: HostText } {
+  if (error instanceof MarketValidationError) return { status: 400, code: 'bad-request', host: error.host }
+  if (error instanceof MarketExecutionError) return { status: 502, code: error.code, host: error.host }
+  const detail = error instanceof Error ? error.message : String(error)
+  return {
+    status: 500,
+    code: 'io',
+    host: {
+      code: 'route.internalError',
+      params: { detail },
+      text: `the operation failed: ${detail}`,
+    },
+  }
 }
 
 /**
@@ -324,9 +339,20 @@ export function wantsUpdates(rawUrl: string | undefined): boolean {
 }
 
 /** Sanitize a client-supplied source list (order-preserving dedupe). */
-export function sanitizeSourceList(raw: unknown): { ok: true, urls: string[] } | { ok: false, reason: string } {
-  if (!Array.isArray(raw)) return { ok: false, reason: 'sources 必须是字符串数组' }
-  if (raw.length > MAX_SOURCES) return { ok: false, reason: `目录源最多 ${MAX_SOURCES} 个` }
+export function sanitizeSourceList(raw: unknown): { ok: true, urls: string[] } | { ok: false, reason: HostText } {
+  if (!Array.isArray(raw)) {
+    return { ok: false, reason: { code: 'source.notArray', text: 'sources must be an array of strings' } }
+  }
+  if (raw.length > MAX_SOURCES) {
+    return {
+      ok: false,
+      reason: {
+        code: 'source.tooMany',
+        params: { max: MAX_SOURCES },
+        text: `at most ${String(MAX_SOURCES)} catalog sources`,
+      },
+    }
+  }
   const urls: string[] = []
   const seen = new Set<string>()
   for (const candidate of raw) {
@@ -345,10 +371,17 @@ const MAX_ALLOW_PACKAGES = 32
 /** Validate + dedupe the whitelist of one /allow-build request. */
 function sanitizePackageList(raw: unknown): string[] {
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new MarketValidationError('packages 必须是非空的包名数组')
+    throw new MarketValidationError({
+      code: 'allowBuild.packagesNotArray',
+      text: 'packages must be a non-empty array of package names',
+    })
   }
   if (raw.length > MAX_ALLOW_PACKAGES) {
-    throw new MarketValidationError(`单次最多放行 ${MAX_ALLOW_PACKAGES} 个包`)
+    throw new MarketValidationError({
+      code: 'allowBuild.tooMany',
+      params: { max: MAX_ALLOW_PACKAGES },
+      text: `at most ${String(MAX_ALLOW_PACKAGES)} packages per request`,
+    })
   }
   const names: string[] = []
   for (const candidate of raw) {
@@ -506,10 +539,10 @@ export const CATALOG_CACHE_TTL_MS = 6 * 60 * 60 * 1000
 /** A source's contribution to a payload (mergeCatalogs applies the caps). */
 function listsOf(results: ReadonlyArray<SourceFetchResult>): {
   lists: CatalogEntry[][]
-  failed: Array<{ url: string, reason: string }>
+  failed: Array<{ url: string, reason: HostText }>
 } {
   const lists: CatalogEntry[][] = []
-  const failed: Array<{ url: string, reason: string }> = []
+  const failed: Array<{ url: string, reason: HostText }> = []
   for (const result of results) {
     if ('entries' in result) lists.push([...result.entries])
     else failed.push({ url: result.url, reason: result.reason })
@@ -534,7 +567,7 @@ function withRepoKeys(entries: readonly CatalogEntry[]): CatalogEntry[] {
 /** Project the persisted cache to a payload, in the CURRENT source order. */
 function cachePayload(cache: CatalogCache, sources: readonly string[], fresh: boolean): CatalogPayload {
   const lists: CatalogEntry[][] = []
-  const failed: Array<{ url: string, reason: string }> = []
+  const failed: Array<{ url: string, reason: HostText }> = []
   for (const url of sources) {
     const state = cache.sources[url]
     if (state === undefined) continue
@@ -637,22 +670,52 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
  * Validate one update request against the installed view + registry latest.
  * Pure so the route keeps only glue: the answer is either the exact target
  * version to install (the install chain re-verifies it against the registry)
- * or a stable zh-CN refusal.
+ * or a stable coded refusal the panel renders.
  * @param pkg - the installed view row for the requested package.
  * @param latest - the registry `latest` for the package (undefined = probe failed).
  */
 export function checkUpdateTarget(
   pkg: InstalledPackageView | undefined,
   latest: string | undefined,
-): { ok: true, version: string } | { ok: false, reason: string } {
-  if (pkg === undefined) return { ok: false, reason: '该插件尚未安装，无法更新' }
-  if (pkg.suite) return { ok: false, reason: '套件插件由桌面壳统一管理，无法在插件市场中更新' }
-  if (pkg.source !== 'registry') {
-    return { ok: false, reason: '本地安装或 Git 安装的插件不走 npm 更新；请在对应来源更新后重新安装' }
+): { ok: true, version: string } | { ok: false, reason: HostText } {
+  if (pkg === undefined) {
+    return {
+      ok: false,
+      reason: { code: 'update.notInstalled', text: 'this plugin is not installed, so it cannot be updated' },
+    }
   }
-  if (latest === undefined) return { ok: false, reason: '暂时无法获取该插件的最新版本，请稍后重试' }
+  if (pkg.suite) {
+    return {
+      ok: false,
+      reason: {
+        code: 'update.suiteManaged',
+        text: 'suite plugins are managed by the desktop shell and cannot be updated in the market',
+      },
+    }
+  }
+  if (pkg.source !== 'registry') {
+    return {
+      ok: false,
+      reason: {
+        code: 'update.localOrGit',
+        text: 'a locally or Git-installed plugin does not update through npm; update it at its own source and reinstall',
+      },
+    }
+  }
+  if (latest === undefined) {
+    return {
+      ok: false,
+      reason: {
+        code: 'update.latestUnknown',
+        text: "the plugin's latest version could not be fetched right now; try again later",
+      },
+    }
+  }
   if (pkg.installedVersion === undefined || compareVersions(latest, pkg.installedVersion) <= 0) {
-    return { ok: false, reason: '当前已是最新版本，无需更新' }
+    return {
+      ok: false,
+      reason: { code: 'update.upToDate', text: 'already on the latest version; nothing to update' },
+    }
   }
   return { ok: true, version: latest }
 }
@@ -674,10 +737,12 @@ export function installGateOf(
   current: InstalledPackageView | undefined,
   incomingRepoKey: string | null,
   force: boolean,
-): { action: 'allow' } | { action: 'refuse', reason: string } | { action: 'confirm', log: string } {
+): { action: 'allow' } | { action: 'refuse', reason: HostText } | { action: 'confirm', log: string } {
   if (current === undefined) return { action: 'allow' }
-  const installedRepo = current.repoKey ?? '未知来源'
-  const incomingRepo = incomingRepoKey ?? '未知来源'
+  // An unprovable side travels as a nested code, not as the word 未知来源: the
+  // sentence is the dictionary's in either language.
+  const installedRepo = current.repoKey ?? 'repo.unknown'
+  const incomingRepo = incomingRepoKey ?? 'repo.unknown'
   if (current.source === 'registry' && sameRepoOrigin(incomingRepoKey, current.repoKey ?? null)) {
     return { action: 'allow' }
   }
@@ -685,8 +750,16 @@ export function installGateOf(
     return {
       action: 'refuse',
       reason: current.source !== 'registry'
-        ? `该插件是本地或 Git 安装的版本（本地：${installedRepo}），本次安装来自 npm（仓库：${incomingRepo}），直接安装会覆盖现有版本；如确认要替换，请在请求中携带 force: true`
-        : `已安装的同名插件来自 ${installedRepo}，与本次安装的来源（${incomingRepo}）不同，是两个不同的插件，安装会替换现有版本；如确认要替换，请在请求中携带 force: true`,
+        ? {
+            code: 'install.confirmLocal',
+            params: { installed: installedRepo, incoming: incomingRepo },
+            text: `this plugin is installed locally or from Git (local: ${current.repoKey ?? 'unknown'}), this install comes from npm (repo: ${incomingRepoKey ?? 'unknown'}), and installing directly would replace the existing version; to replace it, send force: true`,
+          }
+        : {
+            code: 'install.confirmCrossOrigin',
+            params: { installed: installedRepo, incoming: incomingRepo },
+            text: `an installed plugin with the same name comes from ${current.repoKey ?? 'unknown'}, not from this install's source (${incomingRepoKey ?? 'unknown'}); they are two different plugins, and installing replaces the existing version; to replace it, send force: true`,
+          },
     }
   }
   return {
@@ -705,12 +778,12 @@ export function installGateOf(
 export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps, log: (message: string) => void): () => void {
   const guard = (req: IncomingMessage, res: ServerResponse, method: string): boolean => {
     if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', 'cross-origin request')
+      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
       return false
     }
     if (req.method !== method) {
       res.setHeader('Allow', method)
-      fail(res, 405, 'method-not-allowed', `${method} only`)
+      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method }, text: `${method} only` })
       return false
     }
     return true
@@ -737,24 +810,37 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
   const runToggle = (body: Record<string, unknown>): { package: string, entryId: string, enabled: boolean } => {
     const name = validatePackageName(body.package)
     if (name.startsWith('@dsh-app/')) {
-      throw new MarketValidationError('套件插件由桌面壳统一管理，无法在插件市场中启用或停用')
+      throw new MarketValidationError({
+        code: 'toggle.suiteManaged',
+        text: 'suite plugins are managed by the desktop shell and cannot be enabled or disabled in the market',
+      })
     }
     const rawEntryId = body.entryId
     let entryId = name
     if (rawEntryId !== undefined && rawEntryId !== null && rawEntryId !== '') {
       if (typeof rawEntryId !== 'string' || !ENTRY_ID_PATTERN.test(rawEntryId.trim())) {
-        throw new MarketValidationError(`插件标识不合法：「${typeof rawEntryId === 'string' ? rawEntryId.trim() : String(rawEntryId)}」`)
+        const id = typeof rawEntryId === 'string' ? rawEntryId.trim() : String(rawEntryId)
+        throw new MarketValidationError({
+          code: 'entryId.invalid',
+          params: { id },
+          text: `invalid plugin entry id: "${id}"`,
+        })
       }
       entryId = rawEntryId.trim()
     }
-    if (typeof body.enable !== 'boolean') throw new MarketValidationError('enable 必须是布尔值')
+    if (typeof body.enable !== 'boolean') {
+      throw new MarketValidationError({ code: 'toggle.enableNotBoolean', text: 'enable must be a boolean' })
+    }
     const patchPath = join(resolveDshHome(), 'profiles', deps.profile, 'cordis.patch.yml')
     const outcome = toggleManagedDisable(patchPath, entryId, body.enable)
     if (body.enable && outcome.foreign) {
       // The id shows as disabled but the row lives outside the managed block
       // (hand-written). Reporting success here would strand the user in a
       // toggle that never flips — point them at the file instead.
-      throw new MarketValidationError('该插件的停用配置是在补丁文件中手动写入的，无法从这里一键启用；请编辑 profiles 下的 cordis.patch.yml 移除对应 disabled 行')
+      throw new MarketValidationError({
+        code: 'toggle.manualDisable',
+        text: "this plugin's disable entry was written into the patch file by hand, so it cannot be re-enabled from here; edit cordis.patch.yml under profiles and remove the matching disabled row",
+      })
     }
     log(`plugin-market: ${body.enable ? 'enabled' : 'disabled'} entry ${entryId} (${name}) via profile patch`)
     return { package: name, entryId, enabled: body.enable }
@@ -784,10 +870,10 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (16 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
           })
       },
     }),
@@ -814,7 +900,7 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
           .catch(() => {
             // fetchCatalog never rejects across sources; this is a last-resort
             // fence so the panel always gets an envelope.
-            fail(res, 500, 'io', '目录获取失败，请稍后重试')
+            fail(res, 500, 'io', { code: 'route.catalogFailed', text: 'could not fetch the catalog; try again later' })
           })
       },
     }),
@@ -881,7 +967,7 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
           })
           .catch((error: unknown) => {
             const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.message, errorExtras(error))
+            fail(res, mapped.status, mapped.code, mapped.host, errorExtras(error))
           })
       },
     }),
@@ -901,7 +987,10 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
             const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
             const current = readInstalled(profileDir, deps.profile).packages.find(pkg => pkg.name === name)
             if (current !== undefined && current.source !== 'registry') {
-              throw new MarketValidationError('该插件是本地或 Git 安装的版本，无法用 npm 重装来放行构建脚本')
+              throw new MarketValidationError({
+                code: 'allowBuild.localOrGit',
+                text: 'this plugin is installed locally or from Git, so it cannot be reinstalled from npm to allow build scripts',
+              })
             }
             const workspacePath = join(profileDir, 'pnpm-workspace.yaml')
             // The whitelist write is a profile mutation like any install, so
@@ -925,7 +1014,7 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
           .then((value) => { ok(res, value) })
           .catch((error: unknown) => {
             const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.message, errorExtras(error))
+            fail(res, mapped.status, mapped.code, mapped.host, errorExtras(error))
           })
       },
     }),
@@ -945,7 +1034,7 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
           .then((value) => { ok(res, value) })
           .catch((error: unknown) => {
             const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.message)
+            fail(res, mapped.status, mapped.code, mapped.host)
           })
       },
     }),
@@ -961,7 +1050,7 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
           })
           .catch((error: unknown) => {
             const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.message)
+            fail(res, mapped.status, mapped.code, mapped.host)
           })
       },
     }),
@@ -993,7 +1082,7 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
           })
           .catch((error: unknown) => {
             const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.message, errorExtras(error))
+            fail(res, mapped.status, mapped.code, mapped.host, errorExtras(error))
           })
       },
     }),

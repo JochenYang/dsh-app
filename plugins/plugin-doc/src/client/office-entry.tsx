@@ -8,6 +8,10 @@
  * over to, which is why the session selection arrives as an observable (the
  * capsule subscribes to it) instead of as a mount-time prop.
  *
+ * The locale seat arrives the same way and for the same reason: a seat occupant
+ * would get its namespace-bound `t` from the renderer, an injected capsule gets
+ * it from client.ts.
+ *
  * The React root is created once per bar host and survives detachment, so
  * leaving the composer and coming back costs no remount. The container
  * convention itself lives in client/office-bar (see its module docs).
@@ -17,6 +21,7 @@
 
 import { createRoot } from 'react-dom/client'
 import { contributeOfficeCapsule, WORD_FORMAT } from './office-bar.ts'
+import type { LocaleSeat } from './locale-seat.ts'
 import { WordOfficeEntry } from './word-entry.tsx'
 import type { SessionSource } from './word-entry.tsx'
 
@@ -24,12 +29,13 @@ import type { SessionSource } from './word-entry.tsx'
  * Contribute the Word capsule to the office bar and keep it anchored under the
  * composer card.
  * @param sessionSource - observable of the current session selection.
+ * @param locale - the client locale runtime, binding this plugin's namespace.
  * @returns the disposer that unmounts the capsule and stops reconciling.
  */
-export function mountWordOfficeBar(sessionSource: SessionSource): () => void {
+export function mountWordOfficeBar(sessionSource: SessionSource, locale: LocaleSeat): () => void {
   return contributeOfficeCapsule(WORD_FORMAT, (slot) => {
     const root = createRoot(slot)
-    root.render(<WordOfficeEntry sessionSource={sessionSource} />)
+    root.render(<WordOfficeEntry sessionSource={sessionSource} locale={locale} />)
     return () => { root.unmount() }
   })
 }

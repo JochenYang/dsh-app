@@ -23,12 +23,35 @@
 export const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
 
 /**
- * Why the pattern exists — the name becomes the model-facing tool namespace
- * (`mcp__<serverName>__<tool>`). Used in every name-invalid rejection so the
- * error teaches the contract instead of just stating it.
+ * A user-visible message the host cannot localize — and deliberately does not
+ * try to.
+ *
+ * The host is a long-lived child process: its language would be decided at
+ * boot, so switching the UI language would require restarting the kernel. It
+ * therefore never sends prose. It sends a stable code plus the values the
+ * sentence interpolates, and the client — which owns the locale namespace —
+ * renders it. `text` is an ENGLISH diagnostic used only for a code this client
+ * does not know (an older UI beside a newer kernel); it is never a localized
+ * sentence, because matching on one across a boundary is how the kernel-side
+ * failure classifier once misread "tampered" as "network error".
  */
-export function invalidServerNameReason(name: string): string {
-  return `服务器名「${name}」不合法：它会成为工具名（mcp__服务器名__工具名）的命名空间，只能包含 1–32 位字母、数字、下划线、连字符（例如 "figma"）`
+export interface HostText {
+  readonly code: string
+  readonly params?: Readonly<Record<string, string | number>>
+  /** English developer-facing fallback; shown only for an unknown code. */
+  readonly text?: string
+}
+
+/**
+ * The name-invalid rejection. The name becomes the model-facing tool namespace
+ * (`mcp__<serverName>__<tool>`), so the copy behind this code teaches the
+ * contract instead of just stating it. One owner for the code, shared by the
+ * entry validator and the paste/import path.
+ * @param name - the rejected display name.
+ * @returns the coded validation error to throw.
+ */
+export function invalidServerNameError(name: string): McpValidationError {
+  return new McpValidationError('serverName.invalid', { name })
 }
 
 /**
@@ -47,8 +70,30 @@ export function slugifyServerName(name: string): string | undefined {
   return slug !== '' && SERVER_NAME_PATTERN.test(slug) ? slug : undefined
 }
 
-/** Validation failure of a settings-page write (routes map it to 400). */
-export class McpValidationError extends Error {}
+/**
+ * Validation failure of a settings-page write (routes map it to 400).
+ *
+ * Carries a code plus its params rather than a sentence: the client renders the
+ * copy, and `super()` keeps an English developer-facing message for logs. The
+ * client half imports this module directly (the wire format is shared), so an
+ * instance thrown while the user edits JSON classifies exactly like a code
+ * that arrived over the wire.
+ */
+export class McpValidationError extends Error {
+  /**
+   * @param code - stable message code (see the `mcp.host.*` keys).
+   * @param params - values the client's copy interpolates.
+   */
+  constructor(readonly code: string, readonly params?: Readonly<Record<string, string | number>>) {
+    super(`mcp config rejected: ${code}`)
+    this.name = 'McpValidationError'
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return this.params === undefined ? { code: this.code } : { code: this.code, params: this.params }
+  }
+}
 
 /** Transport of one external MCP server (upstream mcp-client contract). */
 export type McpTransport = 'stdio' | 'streamable-http'
@@ -93,8 +138,20 @@ export interface McpServersFile {
 export interface McpMountStatus {
   /** mounted | starting | disabled | error | unavailable (no loader seam). */
   readonly state: 'mounted' | 'starting' | 'disabled' | 'error' | 'unavailable'
-  /** Human-readable detail: mount error, or an `$ENV:` resolution warning. */
-  readonly message?: string
+  /**
+   * Why the entry is not healthy, in the coded shape; see {@link HostText}.
+   * Host-authored, so it never crosses as prose: the one message that is not a
+   * sentence of ours — the loader's own mount failure — rides as the English
+   * `text` of `mount.failed`, because a third-party diagnostic has nothing to
+   * translate.
+   */
+  readonly message?: HostText
+  /**
+   * `$ENV:` resolution warnings of the last mount — one coded message per
+   * reference the mount could not honour. A list, joined by the CLIENT: the
+   * separator between two warnings is part of the language.
+   */
+  readonly warnings?: readonly HostText[]
   /** Live `mcp__<serverName>__*` tool count when the tools registry is readable. */
   readonly toolCount?: number
 }
@@ -109,12 +166,26 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-function asStringRecord(value: unknown, label: string): Record<string, string> | undefined {
+/**
+ * Validate a string→string map (env / headers).
+ * @param value - the raw field.
+ * @param field - field path used in the diagnostic (`env`, `env.FOO`).
+ * @param owner - display name of the external server a pasted definition came
+ *   from, when it came from one. Both this and `field` are params of the
+ *   client's copy, never a sentence assembled here.
+ */
+function asStringRecord(value: unknown, field: string, owner?: string): Record<string, string> | undefined {
   if (value === undefined) return undefined
-  if (!isRecord(value)) throw new McpValidationError(`${label} 必须是字符串键值对`)
+  const badShape = (path: string): McpValidationError => owner === undefined
+    ? new McpValidationError('field.keyValue', { field: path })
+    : new McpValidationError('server.fieldKeyValue', { name: owner, field: path })
+  const badValue = (path: string): McpValidationError => owner === undefined
+    ? new McpValidationError('field.stringValue', { field: path })
+    : new McpValidationError('server.fieldStringValue', { name: owner, field: path })
+  if (!isRecord(value)) throw badShape(field)
   const out: Record<string, string> = {}
   for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry !== 'string') throw new McpValidationError(`${label}.${key} 必须是字符串`)
+    if (typeof entry !== 'string') throw badValue(`${field}.${key}`)
     out[key] = entry
   }
   return out
@@ -132,23 +203,23 @@ export function nextEntryId(servers: readonly McpServerEntry[]): string {
 
 /**
  * Validate one raw entry object into a {@link McpServerEntry}. Throws
- * {@link McpValidationError} with a zh-CN reason — usable both for route
- * writes (400) and for load-time degradation (caught and logged).
+ * {@link McpValidationError} with a code — usable both for route writes (400)
+ * and for load-time degradation (caught and logged).
  * @param existingIds - ids taken by OTHER entries (the entry keeps its own).
  */
 export function validateEntry(raw: unknown, existingIds: ReadonlySet<string>): McpServerEntry {
-  if (!isRecord(raw)) throw new McpValidationError('服务器配置必须是对象')
+  if (!isRecord(raw)) throw new McpValidationError('entry.notObject')
   const id = asString(raw.id)
   if (id === undefined || !/^mcp-\d+$/.test(id) || existingIds.has(id)) {
-    throw new McpValidationError('服务器 id 缺失或不合法')
+    throw new McpValidationError('entry.badId')
   }
   const serverName = asString(raw.serverName)
   if (serverName === undefined || !SERVER_NAME_PATTERN.test(serverName)) {
-    throw new McpValidationError('serverName 只能包含字母、数字、下划线和连字符（1–32 位）')
+    throw new McpValidationError('serverName.pattern')
   }
   const transport = asString(raw.transport)
   if (transport !== 'stdio' && transport !== 'streamable-http') {
-    throw new McpValidationError('transport 必须是 stdio 或 streamable-http')
+    throw new McpValidationError('transport.invalid')
   }
   const entry: {
     id: string
@@ -166,22 +237,22 @@ export function validateEntry(raw: unknown, existingIds: ReadonlySet<string>): M
 
   if (transport === 'stdio') {
     const command = asString(raw.command)?.trim() ?? ''
-    if (command === '') throw new McpValidationError('stdio 服务器必须填写启动命令（command）')
+    if (command === '') throw new McpValidationError('stdio.commandRequired')
     entry.command = command
     if (raw.args !== undefined) {
       if (!Array.isArray(raw.args) || raw.args.some(arg => typeof arg !== 'string')) {
-        throw new McpValidationError('args 必须是字符串数组')
+        throw new McpValidationError('stdio.argsNotArray')
       }
       entry.args = raw.args as string[]
     }
     if (raw.env !== undefined) {
       const env = asStringRecord(raw.env, 'env')
-      if (env === undefined) throw new McpValidationError('env 必须是字符串键值对')
+      if (env === undefined) throw new McpValidationError('field.keyValue', { field: 'env' })
       entry.env = env
     }
     if (raw.cwd !== undefined) {
       const cwd = asString(raw.cwd)
-      if (cwd === undefined || cwd.trim() === '') throw new McpValidationError('cwd 必须是非空字符串')
+      if (cwd === undefined || cwd.trim() === '') throw new McpValidationError('stdio.cwdRequired')
       entry.cwd = cwd.trim()
     }
   } else {
@@ -193,12 +264,12 @@ export function validateEntry(raw: unknown, existingIds: ReadonlySet<string>): M
       parsed = undefined
     }
     if (parsed === undefined || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
-      throw new McpValidationError('streamable-http 服务器必须填写合法的 http(s) URL')
+      throw new McpValidationError('http.urlInvalid')
     }
     entry.url = url
     if (raw.headers !== undefined) {
       const headers = asStringRecord(raw.headers, 'headers')
-      if (headers === undefined) throw new McpValidationError('headers 必须是字符串键值对')
+      if (headers === undefined) throw new McpValidationError('field.keyValue', { field: 'headers' })
       entry.headers = headers
     }
   }
@@ -206,7 +277,7 @@ export function validateEntry(raw: unknown, existingIds: ReadonlySet<string>): M
   if (raw.toolCallTimeoutMs !== undefined) {
     const timeout = raw.toolCallTimeoutMs
     if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) {
-      throw new McpValidationError('toolCallTimeoutMs 必须是正数')
+      throw new McpValidationError('timeout.notPositive')
     }
     entry.toolCallTimeoutMs = Math.floor(timeout)
   }
@@ -217,7 +288,7 @@ export function validateEntry(raw: unknown, existingIds: ReadonlySet<string>): M
 export function assertUniqueServerName(entry: McpServerEntry, servers: readonly McpServerEntry[]): void {
   if (!entry.enabled) return
   const clash = servers.some(other => other.id !== entry.id && other.enabled && other.serverName === entry.serverName)
-  if (clash) throw new McpValidationError(`serverName "${entry.serverName}" 已被其他启用的服务器使用`)
+  if (clash) throw new McpValidationError('serverName.duplicate', { name: entry.serverName })
 }
 
 // ---- external mcpServers JSON ------------------------------------------------
@@ -231,22 +302,23 @@ export interface ParsedExternalServer {
 /**
  * Parse pasted JSON into external server definitions. Accepts the
  * `{"mcpServers": {...}}` wrapper (Claude/Cursor config files) or a bare
- * name→definition map. Throws {@link McpValidationError} with a zh-CN reason.
+ * name→definition map. Throws {@link McpValidationError} with a code — the
+ * JSON parser's own text rides along as an English `detail`.
  */
 export function parseMcpServersJson(text: string): ParsedExternalServer[] {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch (error) {
-    throw new McpValidationError(`JSON 解析失败：${error instanceof Error ? error.message : String(error)}`)
+    throw new McpValidationError('json.parseFailed', { detail: error instanceof Error ? error.message : String(error) })
   }
-  if (!isRecord(parsed)) throw new McpValidationError('JSON 顶层必须是对象')
+  if (!isRecord(parsed)) throw new McpValidationError('json.notObject')
   const map = isRecord(parsed.mcpServers) ? parsed.mcpServers : parsed
   const names = Object.keys(map)
-  if (names.length === 0) throw new McpValidationError('没有找到任何服务器定义')
+  if (names.length === 0) throw new McpValidationError('json.noServers')
   return names.map(name => {
     const def = map[name]
-    if (!isRecord(def)) throw new McpValidationError(`服务器「${name}」的定义必须是对象`)
+    if (!isRecord(def)) throw new McpValidationError('json.serverNotObject', { name })
     return { name, def }
   })
 }
@@ -258,9 +330,9 @@ function normalizeType(def: Raw): string | undefined {
   if (type === 'stdio') return 'stdio'
   if (type === 'http' || type === 'streamable-http' || type === 'streamable_http') return 'streamable-http'
   if (type === 'sse') {
-    throw new McpValidationError('暂不支持 SSE 传输（内核桥仅支持 stdio 与 Streamable HTTP），请改用该服务器的 HTTP 端点')
+    throw new McpValidationError('type.sse')
   }
-  throw new McpValidationError(`不认识的 type：「${type}」（支持 stdio / http）`)
+  throw new McpValidationError('type.unknown', { type })
 }
 
 /**
@@ -270,43 +342,43 @@ function normalizeType(def: Raw): string | undefined {
  */
 export function mapExternalServer(name: string, def: Raw): Raw {
   if (!SERVER_NAME_PATTERN.test(name)) {
-    throw new McpValidationError(invalidServerNameReason(name))
+    throw invalidServerNameError(name)
   }
   const type = normalizeType(def)
   const url = asString(def.url)?.trim()
   const hasCommand = asString(def.command)?.trim() !== '' && def.command !== undefined
   const transport = type ?? (url !== undefined && url !== '' ? 'streamable-http' : hasCommand ? 'stdio' : undefined)
   if (transport === undefined) {
-    throw new McpValidationError(`服务器「${name}」缺少可识别的连接字段（需要 url 或 command）`)
+    throw new McpValidationError('server.noConnectionField', { name })
   }
 
   const out: Raw = { serverName: name, transport }
   if (transport === 'stdio') {
     const command = asString(def.command)?.trim() ?? ''
-    if (command === '') throw new McpValidationError(`服务器「${name}」是 stdio 但缺少 command`)
+    if (command === '') throw new McpValidationError('server.missingCommand', { name })
     out.command = command
     if (def.args !== undefined) {
       if (!Array.isArray(def.args) || def.args.some(arg => typeof arg !== 'string')) {
-        throw new McpValidationError(`服务器「${name}」的 args 必须是字符串数组`)
+        throw new McpValidationError('server.argsNotArray', { name })
       }
       out.args = def.args
     }
-    const env = asStringRecord(def.env, `服务器「${name}」的 env`)
+    const env = asStringRecord(def.env, 'env', name)
     if (env !== undefined) out.env = env
     const cwd = asString(def.cwd)?.trim()
     if (cwd !== undefined && cwd !== '') out.cwd = cwd
   } else {
-    if (url === undefined || url === '') throw new McpValidationError(`服务器「${name}」缺少 url`)
-    if (!/^https?:\/\//.test(url)) throw new McpValidationError(`服务器「${name}」的 url 必须是 http(s) 地址`)
+    if (url === undefined || url === '') throw new McpValidationError('server.missingUrl', { name })
+    if (!/^https?:\/\//.test(url)) throw new McpValidationError('server.urlNotHttp', { name })
     out.url = url
-    const headers = asStringRecord(def.headers, `服务器「${name}」的 headers`)
+    const headers = asStringRecord(def.headers, 'headers', name)
     if (headers !== undefined) out.headers = headers
   }
 
   if (def.toolCallTimeoutMs !== undefined) {
     const timeout = def.toolCallTimeoutMs
     if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) {
-      throw new McpValidationError(`服务器「${name}」的 toolCallTimeoutMs 必须是正数`)
+      throw new McpValidationError('server.timeoutNotPositive', { name })
     }
     out.toolCallTimeoutMs = Math.floor(timeout)
   }

@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-market",
   "description": "DSH APP plugin market: a sidebar footer entry that opens a market panel over catalog sources (https JSON directories) to browse and install/uninstall npm-packaged dsh plugins into the current profile via the kernel's own plugin CLI.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -22,6 +22,7 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-slots"
       ],
@@ -39,6 +40,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-sidebar": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
@@ -48,6 +50,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.1",

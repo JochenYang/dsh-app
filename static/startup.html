@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>DSH APP</title>
+<script>
+/*
+  Startup page (first-launch visibility). Loaded by src/main/startup-window.ts
+  through file:// from inside app.asar; it must stay self-contained — no
+  framework, no external resource, no network.
+
+  State contract with the shell (all pushes arrive through
+  webContents.executeJavaScript; there is no preload and no IPC):
+
+    window.__dshStartupUpdate(view)         view = { stage, message, progress,
+                                                     skeleton, brand, theme,
+                                                     digest?, pausable?, paused? }
+    window.__dshStartupShowFailure(config)  config = { title, detail, actions }
+                                            -> Promise<action id | null>
+
+  Both entry points are defined here, before the markup exists, and QUEUE
+  anything that arrives early; the renderer script at the end of the body
+  installs the handlers and drains the queue. "stage" is 1-based and indexes
+  the <li> list below, which the shell maps its status wording onto. "brand"
+  and "theme" ride every push, exactly like the skeleton, so a page reload
+  reproduces the same row and the same appearance.
+*/
+window.__dshStartup = { view: null, failure: null, onView: null, onFailure: null };
+
+window.__dshStartupUpdate = function (view) {
+  var api = window.__dshStartup;
+  if (api.onView) { api.onView(view); return true; }
+  api.view = view;
+  return false;
+};
+
+window.__dshStartupShowFailure = function (config) {
+  var api = window.__dshStartup;
+  if (api.onFailure) return api.onFailure(config);
+  return new Promise(function (resolve) {
+    api.failure = { config: config, resolve: resolve };
+  });
+};
+</script>
+<style>
+  /*
+    Design tokens copied from the app's own design platform — DeepSeek's
+    `--dsw-alias-*` layer in packages/client/ui-theme/src/styles/design-platform.css
+    (light: `body`, dark: `body[data-ds-dark-theme]`). The splash is a local
+    file with no access to the UI's stylesheet, so the values are inlined here
+    with the token NAME kept as the variable name: a change upstream is a
+    rename-aware diff, and every value below is traceable to that file.
+
+    The one deliberate tweak: the app's `label-caption` (bluish-400, ~2.2:1 on
+    white) is too faint for the version/digest lines, which carry real
+    information — those use `label-secondary` instead.
+  */
+  :root {
+    --dsw-alias-bg-base: rgb(255, 255, 255);
+    --dsw-alias-bg-layer-1: rgb(255, 255, 255);
+    --dsw-alias-bg-layer-2: rgb(44, 44, 46);
+    --dsw-alias-bg-track: rgb(235, 238, 242);
+    --dsw-alias-label-primary: rgb(15, 17, 21);
+    --dsw-alias-label-secondary: rgb(60, 60, 61);
+    --dsw-alias-border-l1: rgba(0, 0, 0, 0.04);
+    --dsw-alias-border-l2: rgba(0, 0, 0, 0.1);
+    --dsw-alias-border-l3: rgba(0, 0, 0, 0.12);
+    --dsw-alias-interactive-bg-hover: rgba(38, 49, 72, 0.06);
+    --dsw-alias-button-info-fill: rgb(65, 118, 230);
+    /* Finished-step marker. Same green in both themes (--dsw-static-green-500). */
+    --dsw-alias-state-success-primary: rgb(34, 197, 94);
+    --dsw-alias-button-primary-fill: rgb(15, 17, 21);
+    --dsw-alias-label-primary-foreground: rgb(255, 255, 255);
+    --dsw-alias-button-info-hover: rgb(86, 134, 254);
+    --dsw-alias-brand-tile-shadow: 0 6px 16px rgba(38, 49, 72, 0.18);
+  }
+  html[data-theme="dark"] {
+    --dsw-alias-bg-base: rgb(21, 21, 23);
+    --dsw-alias-bg-layer-1: rgb(35, 35, 36);
+    --dsw-alias-bg-layer-2: rgb(44, 44, 46);
+    --dsw-alias-bg-track: rgb(44, 44, 46);
+    --dsw-alias-label-primary: rgb(249, 250, 251);
+    --dsw-alias-label-secondary: rgb(207, 211, 214);
+    --dsw-alias-border-l1: rgba(255, 255, 255, 0.06);
+    --dsw-alias-border-l2: rgba(255, 255, 255, 0.12);
+    --dsw-alias-border-l3: rgba(255, 255, 255, 0.16);
+    --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.08);
+    --dsw-alias-button-info-fill: rgb(103, 158, 254);
+    /* Finished-step marker. Same green in both themes (--dsw-static-green-500). */
+    --dsw-alias-state-success-primary: rgb(34, 197, 94);
+    --dsw-alias-button-primary-fill: rgb(249, 250, 251);
+    --dsw-alias-label-primary-foreground: rgb(15, 17, 21);
+    --dsw-alias-button-info-hover: rgb(86, 134, 254);
+    --dsw-alias-brand-tile-shadow: none;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    /* The window has no system title bar: the native window controls float over
+       the top 36px, so the page reserves that strip (as the drag handle below)
+       and starts its own content under it. Matches SPLASH_OVERLAY_HEIGHT. */
+    padding: 0 28px 18px;
+    overflow: auto;
+    background: var(--dsw-alias-bg-base);
+    color: var(--dsw-alias-label-primary);
+    font: 13px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  /* Drag handle: the whole reserved strip moves the window. Controls inside it
+     would need -webkit-app-region: no-drag, and there are none. */
+  #startup-titlebar {
+    height: 36px;
+    flex: none;
+    margin: 0 -28px;
+    /* Stop short of the native window controls (the main window reserves the
+       same width): a drag region underneath them is how the close button ended
+       up showing two stacked tooltips. */
+    padding-right: 140px;
+    -webkit-app-region: drag;
+  }
+
+  /* ---------------------------------------------------------------- brand row
+     44px tile + wordmark + version. The version sits in tabular numerals so
+     two builds' numbers align when compared side by side. */
+  header { display: flex; align-items: center; gap: 14px; }
+  /* The app icon, in both themes: the whale knocked out of the brand-blue
+     tile. The tile colour is the icon's own, sampled from
+     resources/icon-128.png; a per-theme variant was tried and rejected — a
+     brand mark that changes shape between themes reads as two different marks.
+     Inline SVG, so it can never be a missing file. */
+  #startup-logo {
+    width: 44px;
+    height: 44px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    background: rgb(76, 104, 252);
+    color: #fff;
+    box-shadow: var(--dsw-alias-brand-tile-shadow);
+  }
+  #startup-logo svg { width: 27px; height: auto; display: block; }
+  .brand-text { min-width: 0; }
+  #startup-name {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    line-height: 1.2;
+  }
+  #startup-version {
+    margin: 2px 0 0;
+    font-size: 11.5px;
+    color: var(--dsw-alias-label-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  #startup-hint { margin: 12px 0 0; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+
+  /* ---------------------------------------------------------------- progress */
+  main { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  #startup-status { margin: 12px 0 8px; font-size: 14px; font-weight: 500; }
+  #startup-bar {
+    position: relative;
+    height: 4px;
+    margin: 0 0 14px;
+    border-radius: 999px;
+    background: var(--dsw-alias-bg-track);
+    overflow: hidden;
+  }
+  #startup-bar-fill {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--dsw-alias-button-info-fill);
+    transition: width .24s cubic-bezier(.2, .8, .3, 1);
+  }
+  /* Unknown total: a soft sweep rather than a hard block jumping across, so the
+     wait reads as work in progress instead of a stalled measure. */
+  #startup-bar[data-mode="indeterminate"] #startup-bar-fill {
+    width: 34%;
+    background: linear-gradient(90deg,
+      rgba(255, 255, 255, 0) 0%,
+      var(--dsw-alias-button-info-fill) 45%,
+      rgba(255, 255, 255, 0) 100%);
+    animation: startup-sweep 1.5s cubic-bezier(.4, 0, .6, 1) infinite;
+  }
+  html[data-theme="light"] #startup-bar[data-mode="indeterminate"] #startup-bar-fill {
+    background: linear-gradient(90deg,
+      rgba(255, 255, 255, 0) 0%,
+      var(--dsw-alias-button-info-fill) 45%,
+      rgba(255, 255, 255, 0) 100%);
+  }
+
+  /* ------------------------------------------------------------------- steps */
+  #startup-steps {
+    display: grid;
+    gap: 6px;
+    margin: 0 0 12px;
+    padding: 0;
+    list-style: none;
+    font-size: 12px;
+    color: var(--dsw-alias-label-secondary);
+  }
+  #startup-steps li { display: flex; align-items: center; gap: 9px; position: relative; }
+  #startup-steps li::before {
+    content: "";
+    flex: 0 0 auto;
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--dsw-alias-border-l3);
+    border-radius: 50%;
+    transition: background-color .16s ease, border-color .16s ease;
+  }
+  #startup-steps li[data-state="current"] { color: var(--dsw-alias-label-primary); font-weight: 600; }
+  #startup-steps li[data-state="current"]::before {
+    border-color: var(--dsw-alias-button-info-fill);
+    border-top-color: transparent;
+    animation: startup-spin 1s linear infinite;
+  }
+  /* A finished step: the app's success token with a WHITE check drawn on top.
+     The check is a rotated border shape, NOT a background image: the page's CSP
+     is `default-src 'none'`, which blocks image resources — including data:
+     URIs — so an SVG-background check renders as an empty green disc with no
+     error anywhere (found the hard way, from a user's screenshot). White on
+     rgb(34,197,94) measures ~2.2:1, under the 3:1 non-text guideline; that is
+     accepted deliberately — the green disc itself carries the "done" state and
+     the check only confirms it, and white is the reading the product asked for. */
+  #startup-steps li[data-state="done"]::before {
+    background-color: var(--dsw-alias-state-success-primary);
+    border-color: var(--dsw-alias-state-success-primary);
+  }
+  #startup-steps li[data-state="done"]::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 50%;
+    width: 3px;
+    height: 6px;
+    border-right: 1.8px solid #fff;
+    border-bottom: 1.8px solid #fff;
+    transform: translate(-50%, -62%) rotate(45deg);
+  }
+
+  /* ------------------------------------------------------------------ footer */
+  .foot { margin-top: auto; }
+  #startup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  /* The fixed wish, quietest thing on the page: it carries no state and must
+     never push the layout (two lines at most). */
+  #startup-saying {
+    margin: 10px 0 0;
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--dsw-alias-label-secondary);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  #startup-digest {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--dsw-alias-label-secondary);
+    font-variant-numeric: tabular-nums;
+    word-break: break-all;
+  }
+
+  /* ------------------------------------------------------------------ buttons */
+  button {
+    padding: 7px 16px;
+    min-height: 32px;
+    border: 1px solid var(--dsw-alias-border-l2);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--dsw-alias-label-primary);
+    font: inherit;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+  /* The primary pair from the app's own buttons (primitives/Button.module.css):
+     fill and foreground flip together, so the label can never vanish into the fill. */
+  button[data-primary] {
+    background: var(--dsw-alias-button-primary-fill);
+    border-color: var(--dsw-alias-button-primary-fill);
+    color: var(--dsw-alias-label-primary-foreground);
+  }
+  button[data-primary]:hover:not(:disabled) { opacity: .9; }
+  button:disabled { opacity: .5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--dsw-alias-button-info-fill); outline-offset: 2px; }
+
+  /* ------------------------------------------------------------- failure card */
+  #startup-error {
+    margin-top: 4px;
+    padding: 14px 16px;
+    border: 1px solid var(--dsw-alias-border-l2);
+    border-radius: 14px;
+    background: var(--dsw-alias-bg-layer-1);
+    box-shadow: var(--dsw-alias-brand-tile-shadow);
+    animation: startup-rise .18s ease-out;
+  }
+  #startup-error-title { margin: 0 0 6px; font-weight: 600; font-size: 13px; }
+  #startup-error-detail {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: var(--dsw-alias-label-secondary);
+    word-break: break-all;
+    white-space: pre-line;
+  }
+  #startup-error .hint { margin: 10px 0 0; font-size: 11.5px; color: var(--dsw-alias-label-secondary); }
+
+  @keyframes startup-spin { to { transform: rotate(360deg); } }
+  @keyframes startup-sweep {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(320%); }
+  }
+  @keyframes startup-rise {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #startup-steps li::before { transition: none; }
+    #startup-bar-fill { transition: none; }
+    #startup-bar[data-mode="indeterminate"] #startup-bar-fill { width: 60%; animation: none; }
+    #startup-steps li[data-state="current"]::before { animation: none; border-top-color: var(--dsw-alias-button-info-fill); }
+    #startup-error { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="startup-titlebar"></div>
+  <header>
+    <!-- Brand mark: the official whale, inlined as a currentColor vector so it
+         adapts to the theme (the app icon is this glyph on a blue tile). The
+         path is copied verbatim from the harness wordmark
+         (packages/client/ui-primitives/src/BrandWordmark.tsx); a raster tile
+         cannot follow the theme and can go missing when the file does not ship. -->
+    <span id="startup-logo" role="img" aria-label="DSH APP">
+      <svg viewBox="0.14 3.52 23.16 17.05" aria-hidden="true" focusable="false">
+        <path d="M23.0584 4.95203C22.8129 4.83203 22.7074 5.06103 22.5639 5.17704C22.5149 5.21454 22.4734 5.26354 22.4319 5.30854C22.0734 5.69155 21.6543 5.94306 21.1073 5.91306C20.3073 5.86806 19.6243 6.11957 19.0203 6.73158C18.8918 5.97706 18.4652 5.52655 17.8162 5.23754C17.4767 5.08753 17.1332 4.93703 16.8952 4.61052C16.7292 4.37801 16.6837 4.11901 16.6007 3.8635C16.5477 3.70949 16.4952 3.55199 16.3177 3.52549C16.1252 3.49549 16.0497 3.65699 15.9742 3.792C15.6722 4.34401 15.5552 4.95203 15.5667 5.56805C15.5932 6.95359 16.1782 8.05712 17.3407 8.84215C17.4727 8.93215 17.5067 9.02215 17.4652 9.15366C17.3857 9.42416 17.2917 9.68667 17.2087 9.95718C17.1557 10.1297 17.0767 10.1677 16.8917 10.0922C16.2537 9.82568 15.7027 9.43117 15.2156 8.95465C14.3891 8.15513 13.6416 7.2726 12.7096 6.58158C12.4906 6.42007 12.2716 6.27007 12.045 6.12707C11.094 5.20354 12.1696 4.44502 12.4186 4.35501C12.6791 4.26101 12.5091 3.938 11.6675 3.942C10.826 3.9455 10.056 4.22751 9.07446 4.60302C8.93096 4.65952 8.77995 4.70052 8.62545 4.73452C7.73492 4.56552 6.80989 4.52802 5.84386 4.63702C4.02481 4.83953 2.57177 5.69955 1.50373 7.1676C0.220694 8.93215 -0.0813148 10.9372 0.288196 13.0283C0.676708 15.2323 1.80174 17.0569 3.53029 18.4834C5.32285 19.9625 7.38741 20.6875 9.74298 20.5485C11.1735 20.466 12.7661 20.2745 14.5626 18.7539C15.0156 18.9795 15.4912 19.0695 16.2797 19.137C16.8872 19.1935 17.4722 19.107 17.9252 19.013C18.6347 18.8629 18.5857 18.2059 18.3292 18.0854C16.2497 17.1169 16.7062 17.5109 16.2912 17.1919C17.3477 15.9419 18.9618 13.7198 19.4598 10.6942C19.5088 10.3602 19.5713 9.88968 19.5638 9.61917C19.5598 9.45417 19.5978 9.39016 19.7863 9.37116C20.3073 9.31116 20.8128 9.16866 21.2773 8.91315C22.6249 8.17713 23.1684 6.96809 23.2964 5.51905C23.3154 5.29754 23.2924 5.06853 23.0584 4.95203ZM11.3165 17.9954C9.30097 16.4109 8.32344 15.8894 7.91992 15.9119C7.54241 15.9344 7.61042 16.3664 7.69342 16.6479C7.78042 16.9259 7.89342 17.1174 8.05193 17.3614C8.16143 17.5229 8.23694 17.7629 7.94243 17.9434C7.29341 18.3449 6.16487 17.8084 6.11187 17.7819C4.79833 17.0084 3.7003 15.9874 2.92628 14.5908C2.17875 13.2468 1.74474 11.8047 1.67324 10.2657C1.65424 9.89418 1.76374 9.76267 2.13375 9.69517C2.62077 9.60517 3.12278 9.58617 3.6093 9.65767C5.66636 9.95818 7.41741 10.8777 8.88545 12.3348C9.72348 13.1643 10.3575 14.1558 11.0105 15.1243C11.705 16.1529 12.4521 17.1329 13.4036 17.9364C13.7396 18.2179 14.0076 18.4319 14.2641 18.5899C13.4906 18.6764 12.1996 18.6949 11.3165 17.9964V17.9954ZM12.2826 11.7817C12.2826 11.6167 12.4146 11.4852 12.5806 11.4852C12.6181 11.4852 12.6521 11.4927 12.6826 11.5037C12.7241 11.5187 12.7621 11.5412 12.7921 11.5752C12.8451 11.6277 12.8751 11.7027 12.8751 11.7817C12.8751 11.9467 12.7431 12.0782 12.5771 12.0782C12.4111 12.0782 12.2826 11.9467 12.2826 11.7817ZM15.2831 13.3208C15.0906 13.3998 14.8981 13.4673 14.7131 13.4748C14.4261 13.4898 14.1131 13.3733 13.9431 13.2308C13.6791 13.0093 13.4901 12.8853 13.4111 12.4988C13.3771 12.3338 13.3961 12.0782 13.4261 11.9317C13.4941 11.6162 13.4186 11.4137 13.1961 11.2297C13.0151 11.0797 12.7846 11.0382 12.5316 11.0382C12.4371 11.0382 12.3506 10.9967 12.2861 10.9632C12.1806 10.9107 12.0936 10.7792 12.1766 10.6177C12.2031 10.5652 12.3316 10.4377 12.3616 10.4152C12.7051 10.2197 13.1011 10.2837 13.4676 10.4302C13.8071 10.5692 14.0641 10.8242 14.4336 11.1847C14.8111 11.6202 14.8791 11.7402 15.0941 12.0672C15.2641 12.3228 15.4186 12.5853 15.5247 12.8858C15.5887 13.0733 15.5057 13.2268 15.2831 13.3208Z" fill="currentColor"/>
+      </svg>
+    </span>
+    <div class="brand-text">
+      <p id="startup-name">DSH APP</p>
+      <p id="startup-version"></p>
+    </div>
+  </header>
+  <main>
+    <p id="startup-hint" class="hint">首次启动需要准备运行环境，可能需要几十秒。</p>
+    <p id="startup-status" role="status" aria-live="polite">正在启动 DSH APP…</p>
+    <div id="startup-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" data-mode="indeterminate">
+      <span id="startup-bar-fill"></span>
+    </div>
+    <!-- Step labels: index order must match stageForMessage() in startup-window.ts. -->
+    <ol id="startup-steps">
+      <li>准备运行时</li>
+      <li>解压运行时</li>
+      <li>激活运行时</li>
+      <li>启动内核服务</li>
+      <li>打开界面</li>
+    </ol>
+    <div class="foot">
+      <div id="startup-actions">
+        <button id="startup-pause" type="button" hidden></button>
+      </div>
+      <p id="startup-digest" hidden></p>
+      <!-- Static fallback: replaced by the shell's push on the first update. -->
+      <p id="startup-saying">首先您要健康，其次才是其次</p>
+      <section id="startup-error" hidden>
+        <p id="startup-error-title"></p>
+        <p id="startup-error-detail" hidden></p>
+        <div id="startup-error-actions"></div>
+        <p class="hint">可重试启动，或打开日志目录查看最新日志。</p>
+      </section>
+    </div>
+  </main>
+  <script>
+  (function () {
+    var api = window.__dshStartup;
+    var root = document.documentElement;
+    var steps = document.querySelectorAll('#startup-steps li');
+    var status = document.getElementById('startup-status');
+    var bar = document.getElementById('startup-bar');
+    var fill = document.getElementById('startup-bar-fill');
+    var actions = document.getElementById('startup-actions');
+    var errorBox = document.getElementById('startup-error');
+    var errorTitle = document.getElementById('startup-error-title');
+    var errorDetail = document.getElementById('startup-error-detail');
+    var errorActions = document.getElementById('startup-error-actions');
+    var digest = document.getElementById('startup-digest');
+    var saying = document.getElementById('startup-saying');
+    var name = document.getElementById('startup-name');
+    var version = document.getElementById('startup-version');
+    // Skeleton copy targets, addressed structurally so the static markup keeps
+    // its own Chinese fallbacks for the moment before the first injection.
+    var headerHint = document.getElementById('startup-hint');
+    var failureHint = document.querySelector('#startup-error .hint');
+    var pauseButton = document.getElementById('startup-pause');
+    /** Resolver armed by the shell for exactly one click; see awaitPause. */
+    var pendingPause = null;
+    pauseButton.addEventListener('click', function () {
+      if (pendingPause === null) return;
+      var resolve = pendingPause;
+      pendingPause = null;
+      resolve(true);
+    });
+
+    /**
+     * Arm the control for exactly one click. Resolves true when clicked, false
+     * when the boot settles it because the download moved on — the shell AWAITS
+     * this promise, so it must settle on every path or the main process waits
+     * forever for a click that can no longer happen. Visibility and labels come
+     * from the pushed state (see render), never from here: the state is the
+     * single source of truth for what the user sees.
+     */
+    window.__dshStartupAwaitPause = function () {
+      return new Promise(function (resolve) { pendingPause = resolve; });
+    };
+
+    function render(view) {
+      var stage = Math.max(0, Math.min(steps.length, view.stage || 0));
+      for (var i = 0; i < steps.length; i += 1) {
+        var state = stage === 0 ? '' : i + 1 < stage ? 'done' : i + 1 === stage ? 'current' : 'pending';
+        if (state === '') steps[i].removeAttribute('data-state');
+        else steps[i].setAttribute('data-state', state);
+      }
+      status.textContent = view.message || '';
+      // Appearance and brand: pushed like everything else, so a reloaded page
+      // (the replay path) comes back in the same theme with the same version.
+      root.setAttribute('data-theme', view.theme === 'dark' ? 'dark' : 'light');
+      if (view.brand) {
+        if (view.brand.name) name.textContent = view.brand.name;
+        version.textContent = view.brand.version ? 'v' + view.brand.version : '';
+      }
+      // Skeleton copy: the page ships Chinese fallbacks so it renders before
+      // any injection; these replace them with the shell's language.
+      if (view.skeleton) {
+        for (var s = 0; s < steps.length && s < view.skeleton.steps.length; s += 1) {
+          steps[s].textContent = view.skeleton.steps[s];
+        }
+        if (headerHint) headerHint.textContent = view.skeleton.hint;
+        if (failureHint) failureHint.textContent = view.skeleton.failureHint;
+      }
+      // The pause control belongs to the download step only. Its visibility and
+      // label follow the pushed state, so a status change is always reflected
+      // even when no awaiter is parked at that instant.
+      pauseButton.hidden = view.pausable !== true;
+      actions.hidden = view.pausable !== true;
+      pauseButton.textContent = view.paused === true
+        ? (view.skeleton ? view.skeleton.resume : '继续下载')
+        : (view.skeleton ? view.skeleton.pause : '暂停下载');
+      // The shell keeps a promise parked on the control: settling it as "not
+      // applicable" here is what stops that promise from leaking when the
+      // download ends or the boot fails.
+      if (view.pausable !== true && pendingPause !== null) {
+        var settle = pendingPause;
+        pendingPause = null;
+        settle(false);
+      }
+      // Verification note: only ever shown when the shell has something true to
+      // say (a recorded digest for this install), never as a generic badge.
+      digest.textContent = view.digest ? '运行时已校验 · ' + view.digest : '';
+      digest.hidden = !view.digest;
+      if (typeof view.saying === 'string' && view.saying !== '') saying.textContent = view.saying;
+      var progress = view.progress;
+      if (typeof progress === 'number' && isFinite(progress)) {
+        var percent = Math.min(100, Math.max(0, Math.round(progress * 100)));
+        bar.setAttribute('data-mode', 'determinate');
+        bar.setAttribute('aria-valuenow', String(percent));
+        fill.style.width = percent + '%';
+      } else {
+        // Indeterminate: extraction lists the archive before it can report a
+        // denominator, and a frozen bar over that span reads as a hang.
+        bar.setAttribute('data-mode', 'indeterminate');
+        bar.removeAttribute('aria-valuenow');
+        fill.style.width = '';
+      }
+    }
+
+    function showFailure(config) {
+      return new Promise(function (resolve) {
+        errorTitle.textContent = config.title || '';
+        errorDetail.textContent = config.detail || '';
+        errorDetail.hidden = !config.detail;
+        errorActions.textContent = '';
+        var answered = false;
+        var buttons = config.actions || [];
+        buttons.forEach(function (action) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = action.label;
+          if (action.primary) button.setAttribute('data-primary', 'true');
+          button.addEventListener('click', function () {
+            // One answer per card: the injected promise must settle once.
+            if (answered) return;
+            answered = true;
+            for (var i = 0; i < errorActions.children.length; i += 1) {
+              errorActions.children[i].disabled = true;
+            }
+            resolve(action.id);
+          });
+          errorActions.appendChild(button);
+        });
+        errorBox.hidden = false;
+        // The card is the only thing left to act on; the step list and the bar
+        // above it are history, so take the focus to the primary answer.
+        var primary = errorActions.querySelector('button[data-primary]');
+        if (primary) primary.focus();
+      });
+    }
+
+    api.onView = function (view) {
+      // A new progress state means the boot moved on (e.g. the retry after a
+      // failure); the stale failure card must not stay on screen.
+      errorBox.hidden = true;
+      render(view);
+    };
+    api.onFailure = showFailure;
+
+    if (api.view) { var view = api.view; api.view = null; api.onView(view); }
+    if (api.failure) {
+      var pending = api.failure;
+      api.failure = null;
+      showFailure(pending.config).then(pending.resolve);
+    }
+  })();
+  </script>
+</body>
+</html>

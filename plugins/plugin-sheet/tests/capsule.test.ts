@@ -19,14 +19,13 @@ import {
   officeBarPlacement,
   orderOfficeFormats,
 } from '../src/client/office-bar.ts'
-import { capsuleState, SHEET_FORMAT, SHEET_LABEL } from '../src/client/capsule-state.ts'
+import { capsuleState, SHEET_FORMAT } from '../src/client/capsule-state.ts'
 import { pendingMode } from '../src/client/pending-mode.ts'
 import { ROUTE_PREFIX } from '../src/client/api.ts'
 import { ROUTE_PREFIX as HOST_ROUTE_PREFIX } from '../src/routes.ts'
 
 test('office bar: the Excel format is contributed under the shared contract', () => {
   assert.equal(SHEET_FORMAT, 'excel')
-  assert.equal(SHEET_LABEL, 'Excel')
   assert.equal(OFFICE_BAR_CLASS, 'dshOfficeBar')
   assert.equal(OFFICE_SLOT_CLASS, 'dshOfficeFormat')
   assert.equal(OFFICE_FORMAT_ATTR, 'data-office-format')
@@ -55,12 +54,13 @@ test('capsule: a body click flips the mode and the flip target depends on the se
   assert.equal(unbound.enabled, false)
   assert.equal(unbound.label, 'Excel')
   assert.deepEqual(unbound.toggle, { kind: 'park', enabled: true })
-  assert.match(unbound.hint, /会话开始后生效/u)
+  // No session yet: the hint is the parked one (the copy lives in the dictionary).
+  assert.equal(unbound.hintKey, 'capsule.hintOffPending')
 
   const boundOn = capsuleState({ sessionBound: true, enabled: true })
   assert.equal(boundOn.enabled, true)
   assert.deepEqual(boundOn.toggle, { kind: 'persist', enabled: false })
-  assert.equal(boundOn.hint, '点击关闭表格模式')
+  assert.equal(boundOn.hintKey, 'capsule.hintOn')
 
   assert.deepEqual(capsuleState({ sessionBound: true, enabled: false }).toggle, { kind: 'persist', enabled: true })
 })

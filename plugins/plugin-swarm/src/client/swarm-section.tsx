@@ -4,30 +4,120 @@
  * file through the host half's routes; scheduling edits apply to the next
  * swarm call without a restart.
  *
+ * Every string comes from the `dsh-app.swarm` namespace through the `t`
+ * standard seat: the section registers with `locale: NS`, so the renderer
+ * hands the component a namespace-bound translate that reads the active UI
+ * locale at call time and re-renders on a language switch. State carries
+ * dictionary keys — and coded host messages, never rendered sentences — so
+ * banners and notices follow the language too.
+ *
  * @module @dsh-app/plugin-swarm/client/swarm-section
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostText } from '../wire.ts'
+import { NS } from './locales.ts'
+import type { SwarmKey } from './locales.ts'
 
 const ROUTE = '/plugins/@dsh-app/plugin-swarm/api'
+
+/** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
+export type SwarmSectionProps = PropsLocale<typeof NS>
+
+/**
+ * One message the page shows: a dictionary key rendered with plain params, a
+ * render callback for the messages whose params are themselves translated
+ * (the field label in `swarm.error.notNumber`), a coded message the host sent
+ * (rendered through {@link hostMessage}), or text the wire already wrote (a
+ * bare `HTTP 500`). A sentence never enters state, so a language switch
+ * re-renders every message in the active locale.
+ */
+type Notice =
+  | { readonly source: 'key'; readonly key: SwarmKey; readonly params?: Record<string, unknown> }
+  | { readonly source: 'render'; readonly render: (t: TranslateNS<typeof NS>) => string }
+  | { readonly source: 'host'; readonly host: HostText }
+  | { readonly source: 'text'; readonly text: string }
+
+/**
+ * Codes this build renders, mapped to their dictionary keys.
+ *
+ * The host never sends prose for anything the user reads (see `HostText` in
+ * wire.ts): it sends a code plus the values the sentence interpolates, and the
+ * copy lives here. `route.crossOrigin` and `route.methodOnly` are deliberately
+ * absent — only a page that is not this one can trigger them, so they fall
+ * through to the host's English diagnostic rather than shipping a sentence for
+ * a state no user reaches (plugin-websearch made the same call).
+ */
+const HOST_KEYS: Readonly<Record<string, SwarmKey>> = {
+  'config.unknownField': 'swarm.host.unknownField',
+  'config.notBoolean': 'swarm.host.notBoolean',
+  'config.belowMinimum': 'swarm.host.belowMinimum',
+  'route.writeFailed': 'swarm.host.writeFailed',
+  'route.bodyTooLarge': 'swarm.host.bodyTooLarge',
+  'route.invalidBody': 'swarm.host.invalidBody',
+}
+
+/**
+ * Render a coded host message.
+ *
+ * A code this build knows gets the page's own copy with the host's values
+ * interpolated; a code it does not (a newer kernel beside an older UI) keeps
+ * the host's English diagnostic; a host that sent neither degrades to the
+ * page's generic line — never to a blank banner.
+ *
+ * @param host - the host's coded message.
+ * @param t - the page's namespace-bound translate seat.
+ * @returns the display text of the active locale.
+ */
+function hostMessage(host: HostText, t: TranslateNS<typeof NS>): string {
+  const key = HOST_KEYS[host.code]
+  if (key === undefined) return host.text ?? t('swarm.error.generic')
+  return t(key, host.params === undefined ? undefined : { ...host.params })
+}
+
+/**
+ * Classify a failure: the host's coded message when one came with it, the
+ * wire's own text otherwise, and the page's generic line when there is none.
+ */
+function wireNotice(failure: unknown): Notice {
+  if (failure instanceof HostError && failure.host !== undefined) {
+    return { source: 'host', host: failure.host }
+  }
+  const text = failure instanceof Error ? failure.message : String(failure)
+  return text === '' ? { source: 'key', key: 'swarm.error.generic' } : { source: 'text', text }
+}
+
+/**
+ * Render a notice in the active locale.
+ * @param notice - the classified message.
+ * @param t - the page's namespace-bound translate seat.
+ * @returns the display text.
+ */
+function noticeText(notice: Notice, t: TranslateNS<typeof NS>): string {
+  if (notice.source === 'host') return hostMessage(notice.host, t)
+  if (notice.source === 'text') return notice.text
+  if (notice.source === 'render') return notice.render(t)
+  return t(notice.key, notice.params)
+}
 
 /** One numeric field's presentation metadata. */
 interface FieldSpec {
   readonly key: string
-  readonly label: string
-  readonly hint: string
+  readonly labelKey: SwarmKey
+  readonly hintKey: SwarmKey
 }
 
 const NUMERIC_FIELDS: readonly FieldSpec[] = [
-  { key: 'defaultConcurrency', label: '起始并发', hint: '批次开始时的并行子代理数' },
-  { key: 'maxConcurrency', label: '并发上限', hint: '自适应恢复的稳态上限；未指定并发时池子还会向上探测（最高 64）' },
-  { key: 'maxItems', label: '单批任务上限', hint: '一次 swarm 调用最多拆分的子任务数' },
-  { key: 'startStaggerMs', label: '启动间隔 (ms)', hint: '相邻子代理的启动间隔，平滑网关压力' },
-  { key: 'itemMaxRetries', label: '失败重试次数', hint: '子任务遇到限流/断流等瞬时错误时的自动重试次数' },
-  { key: 'itemRetryDelayMs', label: '重试退避 (ms)', hint: '首次重试的等待时间，每次翻倍' },
-  { key: 'perItemOutputLimit', label: '单任务结果截断', hint: '每个子任务回传结果的最大字符数' },
-  { key: 'tokenBudget', label: '批次 token 预算', hint: '0 为不限制；达到预算后停止启动新子任务' },
+  { key: 'defaultConcurrency', labelKey: 'swarm.field.defaultConcurrency', hintKey: 'swarm.field.defaultConcurrency.hint' },
+  { key: 'maxConcurrency', labelKey: 'swarm.field.maxConcurrency', hintKey: 'swarm.field.maxConcurrency.hint' },
+  { key: 'maxItems', labelKey: 'swarm.field.maxItems', hintKey: 'swarm.field.maxItems.hint' },
+  { key: 'startStaggerMs', labelKey: 'swarm.field.startStaggerMs', hintKey: 'swarm.field.startStaggerMs.hint' },
+  { key: 'itemMaxRetries', labelKey: 'swarm.field.itemMaxRetries', hintKey: 'swarm.field.itemMaxRetries.hint' },
+  { key: 'itemRetryDelayMs', labelKey: 'swarm.field.itemRetryDelayMs', hintKey: 'swarm.field.itemRetryDelayMs.hint' },
+  { key: 'perItemOutputLimit', labelKey: 'swarm.field.perItemOutputLimit', hintKey: 'swarm.field.perItemOutputLimit.hint' },
+  { key: 'tokenBudget', labelKey: 'swarm.field.tokenBudget', hintKey: 'swarm.field.tokenBudget.hint' },
 ]
 
 /** The host route's config payload (mirror of SwarmConfigResponse). */
@@ -38,20 +128,27 @@ interface ConfigResponse {
   readonly filePath: string
 }
 
+/** A failure carrying the host's coded message, when one came with it. */
+class HostError extends Error {
+  constructor(readonly host: HostText | undefined, fallback: string) {
+    super(fallback)
+  }
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init })
-  const body = (await response.json()) as { ok: boolean, value?: T, error?: { message?: string } }
+  const body = (await response.json()) as { ok: boolean, value?: T, error?: { message?: string, host?: HostText } }
   if (!response.ok || body.ok !== true) {
-    throw new Error(body.error?.message ?? `HTTP ${response.status}`)
+    throw new HostError(body.error?.host, body.error?.message ?? `HTTP ${response.status}`)
   }
   return body.value as T
 }
 
-export function SwarmSection(): ReactNode {
+export function SwarmSection({ t }: SwarmSectionProps): ReactNode {
   const [config, setConfig] = useState<ConfigResponse | null>(null)
   const [draft, setDraft] = useState<Record<string, string>>({})
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [error, setError] = useState<Notice | undefined>(undefined)
+  const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -65,7 +162,7 @@ export function SwarmSection(): ReactNode {
       setDraft(nextDraft)
       setError(undefined)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(wireNotice(failure))
     }
   }, [])
 
@@ -91,7 +188,7 @@ export function SwarmSection(): ReactNode {
       })
       await load()
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(wireNotice(failure))
       throw failure
     } finally {
       setBusy(false)
@@ -110,14 +207,17 @@ export function SwarmSection(): ReactNode {
       }
       const value = Number(raw)
       if (!Number.isFinite(value)) {
-        setError(`「${field.label}」不是有效数字`)
+        setError({
+          source: 'render',
+          render: (translate) => translate('swarm.error.notNumber', { label: translate(field.labelKey) }),
+        })
         return
       }
       patch[field.key] = value
     }
     try {
       await post(patch)
-      setNotice('已保存，下一次并行任务调用即生效')
+      setNotice({ source: 'key', key: 'swarm.notice.saved' })
     } catch {
       // post() already surfaced the error banner.
     }
@@ -128,12 +228,12 @@ export function SwarmSection(): ReactNode {
     const patch: Record<string, null> = {}
     for (const key of Object.keys(config.overrides)) patch[key] = null
     if (Object.keys(patch).length === 0) {
-      setNotice('当前没有自定义项，全部为默认值')
+      setNotice({ source: 'key', key: 'swarm.notice.noOverrides' })
       return
     }
     try {
       await post(patch)
-      setNotice('已恢复默认值')
+      setNotice({ source: 'key', key: 'swarm.notice.resetAll' })
     } catch {
       // post() already surfaced the error banner.
     }
@@ -144,7 +244,7 @@ export function SwarmSection(): ReactNode {
     const next = !(config.effective.enabled !== false)
     try {
       await post({ enabled: next })
-      setNotice(next ? '已设为启用，重启应用后生效' : '已设为禁用，重启应用后生效')
+      setNotice({ source: 'key', key: next ? 'swarm.notice.enabled' : 'swarm.notice.disabled' })
     } catch {
       // post() already surfaced the error banner.
     }
@@ -155,7 +255,7 @@ export function SwarmSection(): ReactNode {
     const next = !(config.effective.adaptive !== false)
     try {
       await post({ adaptive: next })
-      setNotice(next ? '已开启自适应调度，下一次调用即生效' : '已关闭自适应调度：并发将固定为起始值，下一次调用即生效')
+      setNotice({ source: 'key', key: next ? 'swarm.notice.adaptiveOn' : 'swarm.notice.adaptiveOff' })
     } catch {
       // post() already surfaced the error banner.
     }
@@ -163,29 +263,30 @@ export function SwarmSection(): ReactNode {
 
   const enabled = config !== null && config.effective.enabled !== false
   const adaptive = config !== null && config.effective.adaptive !== false
+  /** `{state}` for the toggle labels; the unknown state reads as pending. */
+  const pending = t('swarm.state.pending')
 
   return (
     <div className="dshs_section">
-      <p className="dshs_title">并行子代理（Swarm）</p>
+      <p className="dshs_title">{t('swarm.title')}</p>
       <p className="dshs_hint">
-        将可并行的任务拆分为多个子代理同时执行。调度参数保存后对下一次调用即时生效；启用/禁用需重启应用。
-        自适应调度开启时，遇到限流会自动降速、恢复后缓慢爬升，并可能在稳定时向上探测网关余量（最高 64）。
+        {t('swarm.intro')}
       </p>
 
-      {error !== undefined ? <div className="dshs_banner" role="alert">{error}</div> : null}
-      {notice !== undefined ? <div className="dshs_noticeOk">{notice}</div> : null}
+      {error !== undefined ? <div className="dshs_banner" role="alert">{noticeText(error, t)}</div> : null}
+      {notice !== undefined ? <div className="dshs_noticeOk">{noticeText(notice, t)}</div> : null}
 
       <div className="dshs_toggleRow">
         <span className="dshs_toggleLabel">
-          启用并行子代理（{config === null ? '…' : enabled ? '已启用' : '已禁用'}）
-          <span className="dshs_toggleHint">禁用后 swarm 工具与 /swarm 命令不再注册，重启应用后生效</span>
+          {t('swarm.toggle.enabled', { state: config === null ? pending : enabled ? t('swarm.state.enabled') : t('swarm.state.disabled') })}
+          <span className="dshs_toggleHint">{t('swarm.toggle.enabled.hint')}</span>
         </span>
         <button
           type="button"
           className="dshs_toggle"
           role="switch"
           aria-checked={enabled}
-          aria-label="启用并行子代理"
+          aria-label={t('swarm.toggle.enabled.aria')}
           disabled={busy || config === null}
           onClick={() => { void onToggleEnabled() }}
         />
@@ -193,15 +294,15 @@ export function SwarmSection(): ReactNode {
 
       <div className="dshs_toggleRow">
         <span className="dshs_toggleLabel">
-          自适应调度（{config === null ? '…' : adaptive ? '已开启' : '已关闭'}）
-          <span className="dshs_toggleHint">失败后并发自动减半、恢复后逐步爬升；关闭后并发固定为起始值</span>
+          {t('swarm.toggle.adaptive', { state: config === null ? pending : adaptive ? t('swarm.state.on') : t('swarm.state.off') })}
+          <span className="dshs_toggleHint">{t('swarm.toggle.adaptive.hint')}</span>
         </span>
         <button
           type="button"
           className="dshs_toggle"
           role="switch"
           aria-checked={adaptive}
-          aria-label="自适应调度"
+          aria-label={t('swarm.toggle.adaptive.aria')}
           disabled={busy || config === null}
           onClick={() => { void onToggleAdaptive() }}
         />
@@ -214,9 +315,9 @@ export function SwarmSection(): ReactNode {
           return (
             <div key={field.key} className="dshs_field">
               <span className="dshs_fieldLabel">
-                {field.label}
+                {t(field.labelKey)}
                 <span className={overridden ? 'dshs_fieldBadge dshs_fieldBadgeCustom' : 'dshs_fieldBadge'}>
-                  {overridden ? '自定义' : `默认 ${String(config?.defaults[field.key] ?? '…')}`}
+                  {overridden ? t('swarm.field.custom') : t('swarm.field.default', { value: config?.defaults[field.key] ?? pending })}
                 </span>
               </span>
               <input
@@ -225,13 +326,13 @@ export function SwarmSection(): ReactNode {
                 min={0}
                 value={draft[field.key] ?? ''}
                 disabled={busy || config === null}
-                aria-label={field.label}
+                aria-label={t(field.labelKey)}
                 onChange={(event) => {
                   const { value } = event.target
                   setDraft(previous => ({ ...previous, [field.key]: value }))
                 }}
               />
-              <span className="dshs_fieldHint">{field.hint}{dirty ? '（未保存）' : ''}</span>
+              <span className="dshs_fieldHint">{t(field.hintKey)}{dirty ? t('swarm.field.unsaved') : ''}</span>
             </div>
           )
         })}
@@ -243,17 +344,17 @@ export function SwarmSection(): ReactNode {
           className="dshs_button dshs_buttonPrimary"
           disabled={busy || config === null || dirtyFields.length === 0}
           onClick={() => { void onSave() }}
-        >保存修改{dirtyFields.length > 0 ? `（${String(dirtyFields.length)} 项）` : ''}</button>
+        >{dirtyFields.length > 0 ? t('swarm.action.saveCount', { count: dirtyFields.length }) : t('swarm.action.save')}</button>
         <button
           type="button"
           className="dshs_button"
           disabled={busy || config === null || Object.keys(config.overrides).length === 0}
           onClick={() => { void onResetAll() }}
-        >全部恢复默认</button>
+        >{t('swarm.action.resetAll')}</button>
       </div>
 
       {config !== null
-        ? <p className="dshs_path" title={config.filePath}>配置文件：{config.filePath}</p>
+        ? <p className="dshs_path" title={config.filePath}>{t('swarm.path', { path: config.filePath })}</p>
         : null}
     </div>
   )

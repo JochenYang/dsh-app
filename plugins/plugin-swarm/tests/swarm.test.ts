@@ -534,10 +534,12 @@ test('writeSwarmUserConfig: validates, merges, persists atomically, and null cle
   assert.equal(cleared.tokenBudget, 500000)
   assert.ok(!('maxConcurrency' in JSON.parse(readFileSync(file, 'utf8')) as object))
 
-  // Unknown fields and invalid values reject the whole write.
-  assert.throws(() => writeSwarmUserConfig(file, { nonsense: 1 }), /未知配置项/)
-  assert.throws(() => writeSwarmUserConfig(file, { maxConcurrency: 0 }), /不合法/)
-  assert.throws(() => writeSwarmUserConfig(file, { adaptive: 'yes' }), /不合法/)
+  // Unknown fields and invalid values reject the whole write, with a stable
+  // code rather than a sentence: the settings page owns the copy (see the
+  // host-message test below).
+  assert.throws(() => writeSwarmUserConfig(file, { nonsense: 1 }), { code: 'config.unknownField', params: { field: 'nonsense' } })
+  assert.throws(() => writeSwarmUserConfig(file, { maxConcurrency: 0 }), { code: 'config.belowMinimum', params: { field: 'maxConcurrency', minimum: 1 } })
+  assert.throws(() => writeSwarmUserConfig(file, { adaptive: 'yes' }), { code: 'config.notBoolean', params: { field: 'adaptive' } })
   // A rejected write leaves the file untouched.
   assert.equal(loadSwarmUserConfig(file, () => {}).tokenBudget, 500000)
 })
@@ -551,6 +553,146 @@ test('sameOrigin: browser Origin matches by host part; malformed Origin rejected
   assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'http://evil.example.com' })), false)
   assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'not a url' })), false)
   assert.equal(sameOrigin(req({ host: '127.0.0.1:3000' })), true, 'non-browser caller (no Origin)')
+})
+
+// --- host-message codes (the settings page owns the copy) ----------------------
+
+/** The Han range: a wire payload must never carry one — the client renders copy. */
+const HAN = /[\u4e00-\u9fff]/
+
+/** The overlay slice the settings page starts from (see index.ts). */
+const OVERLAY = {
+  enabled: true,
+  defaultConcurrency: 4,
+  maxConcurrency: 8,
+  maxItems: 8,
+  startStaggerMs: 800,
+  itemMaxRetries: 2,
+  itemRetryDelayMs: 15000,
+  perItemOutputLimit: 4000,
+  tokenBudget: 0,
+  adaptive: true,
+}
+
+test('SwarmConfigValidationError: the wire form is a code, its params, and an English diagnostic', async () => {
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { SwarmConfigValidationError, writeSwarmUserConfig } = await import('../src/user-config.ts')
+  const file = join(mkdtempSync(join(tmpdir(), 'dshs-test-')), 'config.json')
+
+  const reject = (patch: Record<string, unknown>): InstanceType<typeof SwarmConfigValidationError> => {
+    try {
+      writeSwarmUserConfig(file, patch)
+    } catch (error) {
+      assert.ok(error instanceof SwarmConfigValidationError, 'the write must be rejected by the coded error')
+      return error
+    }
+    throw new Error('expected the write to be rejected')
+  }
+
+  assert.deepEqual(reject({ nonsense: 1 }).hostText(), {
+    code: 'config.unknownField',
+    params: { field: 'nonsense' },
+    text: 'unknown config field "nonsense"',
+  })
+  assert.deepEqual(reject({ adaptive: 'yes' }).hostText(), {
+    code: 'config.notBoolean',
+    params: { field: 'adaptive' },
+    text: '"adaptive" must be a boolean',
+  })
+  assert.deepEqual(reject({ maxItems: 1 }).hostText(), {
+    code: 'config.belowMinimum',
+    params: { field: 'maxItems', minimum: 2 },
+    text: '"maxItems" must be a number >= 2',
+  })
+  // The point of the contract: no Chinese prose crosses to the client, and an
+  // unknown code still has an English diagnostic to fall back to.
+  for (const patch of [{ nonsense: 1 }, { adaptive: 'yes' }, { maxItems: 1 }]) {
+    const host = reject(patch).hostText()
+    assert.ok(!HAN.test(JSON.stringify(host)), 'the wire form must contain no Han characters')
+    assert.ok((host.text ?? '') !== '')
+  }
+})
+
+test('swarm routes: every failure answers a coded host message, never Chinese prose', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { registerSwarmRoutes, ROUTE_PREFIX } = await import('../src/routes.ts')
+
+  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
+  /** Mount the routes over a fake web server and hand back the config POST. */
+  const mountPost = (configPath: string): ((req: unknown, res: unknown) => void) => {
+    const handlers = new Map<string, (req: unknown, res: unknown) => void>()
+    registerSwarmRoutes({
+      register: (route: { path: string, handler: (req: never, res: never) => void }) => {
+        handlers.set(route.path, route.handler as unknown as (req: unknown, res: unknown) => void)
+        return () => {}
+      },
+    }, OVERLAY, configPath)
+    const handler = handlers.get(`${ROUTE_PREFIX}/config`)
+    assert.ok(handler !== undefined, 'the config route must be registered')
+    return handler
+  }
+
+  /** One request/response round trip; the body is emitted as a data chunk. */
+  const call = async (post: (req: unknown, res: unknown) => void, body: string): Promise<{ status: number, text: string }> => {
+    const listeners: Record<string, ((chunk?: unknown) => void)[]> = {}
+    const req = {
+      method: 'POST',
+      headers: { host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' },
+      on: (event: string, listener: (chunk?: unknown) => void) => {
+        ;(listeners[event] ??= []).push(listener)
+        return req
+      },
+      resume: () => {},
+    }
+    const res = {
+      status: 0,
+      body: '',
+      setHeader: (_name: string, _value: string): void => {},
+      writeHead(status: number): void { res.status = status },
+      end(chunk: string): void { res.body = String(chunk) },
+    }
+    post(req, res)
+    // The body arrives on the next microtask (the handler has wired its
+    // listeners by now); one macrotask then drains the promise chain it drives.
+    queueMicrotask(() => {
+      for (const listener of listeners.data ?? []) listener(Buffer.from(body))
+      for (const listener of listeners.end ?? []) listener()
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    return { status: res.status, text: res.body }
+  }
+
+  const rejected = await call(mountPost(join(dir, 'config.json')), JSON.stringify({ nonsense: 1 }))
+  assert.equal(rejected.status, 400)
+  assert.deepEqual(
+    (JSON.parse(rejected.text) as { error: { code: string, host: unknown } }).error,
+    {
+      code: 'bad-request',
+      message: 'unknown config field "nonsense"',
+      host: { code: 'config.unknownField', params: { field: 'nonsense' }, text: 'unknown config field "nonsense"' },
+    },
+  )
+  assert.ok(!HAN.test(rejected.text), 'a rejected write must not answer with a Chinese sentence')
+
+  const unparsable = await call(mountPost(join(dir, 'config.json')), '{not json')
+  assert.equal(unparsable.status, 400)
+  assert.equal((JSON.parse(unparsable.text) as { error: { host: { code: string } } }).error.host.code, 'route.invalidBody')
+  assert.ok(!HAN.test(unparsable.text))
+
+  // A config path whose parent is a FILE: the atomic write throws, and the 500
+  // is a coded message too (it used to be a Chinese sentence). The diagnostic
+  // is the fs error itself — it carries a path, so only the code is asserted.
+  writeFileSync(join(dir, 'blocked'), 'not a directory', 'utf8')
+  const unwritable = await call(mountPost(join(dir, 'blocked', 'config.json')), JSON.stringify({ adaptive: false }))
+  assert.equal(unwritable.status, 500)
+  const unwritableBody = JSON.parse(unwritable.text) as { error: { code: string, host: { code: string, text: string } } }
+  assert.equal(unwritableBody.error.code, 'io')
+  assert.equal(unwritableBody.error.host.code, 'route.writeFailed')
+  assert.ok(unwritableBody.error.host.text !== '', 'the fallback diagnostic must not be empty')
 })
 
 // --- plugin shape guards -------------------------------------------------------

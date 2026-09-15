@@ -7,6 +7,11 @@
  * shell itself renders) and tagged with a plain class a style rule targets.
  * Same mechanism as plugin-mcp's and plugin-client-ui's nav icons.
  *
+ * The label is read through a provider because the section's copy is
+ * localized: the caller passes the namespace-bound translate, so the match
+ * follows the active language, and the observer watches text updates too —
+ * a language switch rewrites the label node in place.
+ *
  * The glyph is a magnifying glass: the section is about searching the web,
  * and a lens reads cleanly at the nav's 16px grid (circle plus a short
  * handle — stroke style matched to the shell's icon set: 1.4 stroke on the 16
@@ -28,16 +33,15 @@ const NAV_ICON_SVG = [
 /** Class tagged onto the nav cell this patch owns. */
 const NAV_CELL_CLASS = 'dshWsNav'
 
-/** The section label this plugin registers (client.ts). */
-const NAV_LABEL = '网络搜索'
-
 /**
  * Tag the web search nav cell and paint the lens glyph. Cheap gate first:
  * without a settings nav in the DOM there is nothing to tag, and chat-view
  * mutations must not pay for a label scan.
+ * @param labels - the section label as currently rendered (read per pass, so
+ * the match follows a language switch).
  * @returns disposer removing the style, the observer, and the tag.
  */
-export function mountNavIconPatch(): () => void {
+export function mountNavIconPatch(labels: () => readonly string[]): () => void {
   const style = document.createElement('style')
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
   style.textContent = [
@@ -52,15 +56,17 @@ export function mountNavIconPatch(): () => void {
 
   const patch = (): void => {
     if (document.querySelector('[class*="navList"]') === null) return
+    const wanted = new Set(labels())
     for (const label of document.querySelectorAll('span[class*="navLabel"]')) {
-      if (label.textContent !== NAV_LABEL) continue
+      const text = label.textContent
+      if (text === null || !wanted.has(text)) continue
       const cell = label.closest('button')
       if (cell !== null) cell.classList.add(NAV_CELL_CLASS)
     }
   }
   patch()
   const observer = new MutationObserver(patch)
-  observer.observe(document.body, { childList: true, subtree: true })
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true })
 
   return () => {
     observer.disconnect()

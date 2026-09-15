@@ -40,6 +40,7 @@ import {
   stripOfficeTokens,
   stripSkillToken,
 } from '../src/client/skill-prefill.ts'
+import { zh as pptZh } from '../src/client/locales.ts'
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -242,8 +243,13 @@ test('skill reference: composer input is read structurally off the binding', () 
 
 test('skill reference: the hint names the mode and the manual token', () => {
   const hint = skillReferenceHint('PPT')
-  assert.match(hint, /已开启 PPT 模式/)
-  assert.match(hint, new RegExp(SKILL_TOKEN))
+  // The policy answers with a dictionary key, never a sentence: the capsule's
+  // `t` seat resolves it, so a language switch cannot leave a stale hint.
+  assert.equal(hint.key, 'capsule.skillHint')
+  assert.deepEqual(hint.params, { label: 'PPT', token: SKILL_TOKEN })
+  const text = pptZh[hint.key].replace('{label}', 'PPT').replace('{token}', SKILL_TOKEN)
+  assert.match(text, /已开启 PPT 模式/)
+  assert.match(text, new RegExp(SKILL_TOKEN))
 })
 
 test('skill reference: the client registers the source and no CSS skin remains', () => {

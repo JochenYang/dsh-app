@@ -15,6 +15,11 @@
  * slot (see client/pending-mode) and enables the mode once a session exists, so
  * a toggle in the hero is not a dead end.
  *
+ * Copy: the capsule is not a seat occupant, so the framework's locale `t` seat
+ * never reaches it — this entry registers the plugin's own namespace
+ * (client/locales) and hands the locale runtime down, from which the mounted
+ * capsule binds its translate (client/locale-seat).
+ *
  * @module @dsh-app/plugin-sheet/client
  */
 
@@ -24,26 +29,50 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // to) into this compilation unit.
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+// Type-only: pulls the locale runtime's Context merge (ctx.locale) and the
+// namespace table (`LocaleNamespaceMap`) into scope.
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { mountSheetOfficeBar } from './client/office-entry.tsx'
+import { NS as SHEET_NS, en as sheetEn, zh as sheetZh } from './client/locales.ts'
+import type { SheetKey } from './client/locales.ts'
 import { createSkillReferenceSource } from './client/skill-reference.ts'
 import type { ReferenceSourceRegistry } from './client/skill-reference.ts'
 import { adoptStyles } from './client/styles.ts'
 
+// The locale namespace table lives in ui-slots: this merge is what makes
+// `ctx.locale.register`/`bind` key-checked — a key missing from (or extra in)
+// either dictionary of the pair fails this package's typecheck.
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Excel-suite capsule copy (label, click hints, pending and chip notices). */
+    [SHEET_NS]: SheetKey
+  }
+}
+
 /** The client halves this plugin depends on. */
-export const inject = ['uiSession']
+export const inject = ['locale', 'uiSession']
 
 /**
- * Client apply: adopt styles and mount the office-bar capsule.
+ * Client apply: adopt styles, register the dictionaries, mount the office-bar
+ * capsule.
  * @param ctx - the client root context.
  */
 export function apply(ctx: ClientContext): void {
   adoptStyles()
 
+  // The capsule's copy resolves through this namespace; the effect disposes the
+  // dictionary pair with this plugin's fiber.
+  ctx.effect(
+    () => ctx.locale.register(SHEET_NS, { zh: sheetZh, en: sheetEn }),
+    'dsh-app plugin-sheet: dictionaries',
+  )
+
   // The bar reconciles itself from the DOM (one observer pass per mutation
   // burst): the composer card belongs to a React root that re-renders on every
-  // keystroke and disappears outside the conversation.
+  // keystroke and disappears outside the conversation. The capsule is not a seat
+  // occupant, so it binds the namespace itself from the runtime handed in here.
   ctx.effect(
-    () => mountSheetOfficeBar(ctx.uiSession.adapter.current),
+    () => mountSheetOfficeBar(ctx.uiSession.adapter.current, ctx.locale),
     'dsh-app plugin-sheet: office-bar capsule',
   )
 

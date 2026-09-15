@@ -15,15 +15,29 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: pulls the locale runtime's Context merge (ctx.locale).
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { MemorySection } from './client/memory-section.tsx'
+import { en, NS, zh } from './client/locales.ts'
+import type { MemoryKey } from './client/locales.ts'
 import { adoptStyles } from './client/styles.ts'
 
+// The locale namespace table lives in ui-slots: this merge is what makes
+// `ctx.locale.register`/`bind` key-checked — a key missing from (or extra in)
+// either dictionary of the pair fails this package's typecheck, and the same
+// union constrains the page's `t` seat.
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Memory settings-page copy. */
+    [NS]: MemoryKey
+  }
+}
+
 /** The client halves this plugin depends on. */
-export const inject = ['slots']
+export const inject = ['slots', 'locale']
 
 /** Nav identity of the memory settings page. */
 const SECTION_ID = 'dsh-app-memory'
-const SECTION_LABEL = '会话记忆'
 
 /**
  * A brain glyph for the settings nav (the shell maps unknown section ids
@@ -43,9 +57,11 @@ const NAV_ICON_SVG = [
 /**
  * Tag the memory nav cell and paint the brain glyph. Label-text
  * selector + MutationObserver, same pattern as the archives/usage icons.
+ * @param labelOf - the section label for the active locale, read at patch
+ * time so a language switch re-tags the cell instead of losing it.
  * @returns disposer removing the style, the observer, and the tags.
  */
-function mountNavIconPatch(): () => void {
+function mountNavIconPatch(labelOf: () => string): () => void {
   const style = document.createElement('style')
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
   style.textContent = [
@@ -59,9 +75,10 @@ function mountNavIconPatch(): () => void {
   document.head.append(style)
   const patch = (): void => {
     if (document.querySelector('[class*="navList"]') === null) return
-    for (const label of document.querySelectorAll('span[class*="navLabel"]')) {
-      if (label.textContent !== SECTION_LABEL) continue
-      const cell = label.closest('button')
+    const label = labelOf()
+    for (const span of document.querySelectorAll('span[class*="navLabel"]')) {
+      if (span.textContent !== label) continue
+      const cell = span.closest('button')
       if (cell !== null) cell.classList.add('dshmNav')
     }
   }
@@ -78,17 +95,30 @@ function mountNavIconPatch(): () => void {
 }
 
 /**
- * Client apply: adopt styles and register the settings section.
+ * Client apply: adopt styles, register the section dictionaries, and register
+ * the settings section.
  * @param ctx - the client root context.
  */
 export function apply(ctx: ClientContext): void {
   adoptStyles()
-  ctx.effect(() => mountNavIconPatch(), 'plugin-memory: nav icon patch')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'plugin-memory: dictionaries')
+  // Read per render, so the nav row follows a language switch without
+  // re-registration — the same contract as the component's `t` seat.
+  const t = ctx.locale.bind(NS)
+  // The nav-icon patch finds its cell by label text, so it must read the
+  // label at patch time rather than capture one language's copy.
+  ctx.effect(() => mountNavIconPatch(() => t('memory.nav')), 'plugin-memory: nav icon patch')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,
-    // After the archives page (17) — a maintenance surface, read-mostly.
-    order: 18,
-    label: () => SECTION_LABEL,
+    // 23 = the tail block: this page and the two archive pages are the
+    // session-data surfaces, and upstream's "archived sessions" is pinned at
+    // 25 — so the trio reads in order (memory → archives → archived). The
+    // agent pages own 19-21 (parallel subagents, agent presets, presets) and
+    // diagnostics 22; see the order table in docs/desktop-optimization-plan.md.
+    order: 23,
+    // `locale:` puts the namespace-bound `t` seat on the component's props.
+    locale: NS,
+    label: () => t('memory.nav'),
   }, MemorySection))
 }

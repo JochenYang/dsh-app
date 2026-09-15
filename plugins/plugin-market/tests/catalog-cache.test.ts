@@ -18,19 +18,23 @@ import { buildCatalogCache, CACHE_FORMAT_VERSION, loadCatalogCache, saveCatalogC
 
 const entry = (pkg: string, name = pkg): CatalogEntry => ({ id: pkg, name, description: `${name} 描述`, package: pkg })
 
+/** A source failure's coded reason (the host's wire shape). */
+const FAILED_REASON = { code: 'catalog.httpStatus', params: { status: 503 }, text: 'HTTP 503' }
+const TIMEOUT_REASON = { code: 'catalog.timeout', params: { seconds: 30 }, text: 'the request timed out after 30 seconds' }
+
 const okSource = (url: string, packages: readonly string[]): SourceFetchResult =>
   ({ url, entries: packages.map(pkg => entry(pkg)) })
-const failedSource = (url: string, reason = 'HTTP 503'): SourceFetchResult => ({ url, reason })
+const failedSource = (url: string, reason = FAILED_REASON): SourceFetchResult => ({ url, reason })
 
 describe('buildCatalogCache', () => {
   it('keeps entry lists and per-source failure rows side by side', () => {
     const cache = buildCatalogCache(1000, [
       okSource('https://a.example.com/l', ['pkg-a1', 'pkg-a2']),
-      failedSource('https://b.example.com/l', '请求超时（30 秒）'),
+      failedSource('https://b.example.com/l', TIMEOUT_REASON),
     ])
     assert.equal(cache.fetchedAt, 1000)
     assert.deepEqual(cache.sources['https://a.example.com/l'], { entries: [entry('pkg-a1'), entry('pkg-a2')] })
-    assert.deepEqual(cache.sources['https://b.example.com/l'], { entries: [], failed: '请求超时（30 秒）' })
+    assert.deepEqual(cache.sources['https://b.example.com/l'], { entries: [], failed: TIMEOUT_REASON })
   })
 
   it('caps the snapshot at the merged-catalog total', () => {
@@ -115,7 +119,7 @@ describe('catalog cache persistence', () => {
       sources: {
         'https://a.example.com/l': { entries: [entry('pkg-a'), { name: 'broken' }, null] },
         'https://b.example.com/l': { entries: [] },
-        'https://c.example.com/l': { entries: [], failed: 'HTTP 503' },
+        'https://c.example.com/l': { entries: [], failed: FAILED_REASON },
         'https://d.example.com/l': 'garbage',
       },
     }), 'utf8')
@@ -123,7 +127,7 @@ describe('catalog cache persistence', () => {
     assert.equal(loaded?.fetchedAt, 42)
     assert.deepEqual(Object.keys(loaded?.sources ?? {}), ['https://a.example.com/l', 'https://c.example.com/l'])
     assert.deepEqual(loaded?.sources['https://a.example.com/l'], { entries: [entry('pkg-a')] })
-    assert.deepEqual(loaded?.sources['https://c.example.com/l'], { entries: [], failed: 'HTTP 503' })
+    assert.deepEqual(loaded?.sources['https://c.example.com/l'], { entries: [], failed: FAILED_REASON })
   })
 })
 
@@ -165,7 +169,7 @@ describe('resolveCatalog (TTL cache flow)', () => {
   it('answers a fresh cache immediately with cached: true and never fetches', async () => {
     // Freshness requires a row for EVERY configured source (URL_B's failure
     // row counts) — a partial snapshot must never pose as complete.
-    const cache = buildCatalogCache(9_000, [okSource(URL_A, ['pkg-a']), failedSource(URL_B, 'HTTP 503')])
+    const cache = buildCatalogCache(9_000, [okSource(URL_A, ['pkg-a']), failedSource(URL_B, FAILED_REASON)])
     const { fetches, run } = harness({ cache, results: [] })
     const { payload, cacheToWrite } = await run()
     assert.deepEqual(fetches, [])
@@ -175,7 +179,7 @@ describe('resolveCatalog (TTL cache flow)', () => {
     assert.equal(payload.cachedAt, 9_000)
     assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a'])
     // The cached failure row keeps the source's last error visible.
-    assert.deepEqual(payload.failed, [{ url: URL_B, reason: 'HTTP 503' }])
+    assert.deepEqual(payload.failed, [{ url: URL_B, reason: FAILED_REASON }])
   })
 
   it('treats a cache that misses a configured source as expired', async () => {
@@ -192,16 +196,16 @@ describe('resolveCatalog (TTL cache flow)', () => {
 
   it('refetches an expired cache, serves fresh, and persists the new snapshot', async () => {
     const cache = buildCatalogCache(10_000 - CATALOG_CACHE_TTL_MS, [okSource(URL_A, ['pkg-old'])])
-    const { fetches, run } = harness({ cache, results: [okSource(URL_A, ['pkg-a']), failedSource(URL_B, 'HTTP 503')] })
+    const { fetches, run } = harness({ cache, results: [okSource(URL_A, ['pkg-a']), failedSource(URL_B, FAILED_REASON)] })
     const { payload, cacheToWrite } = await run()
     assert.deepEqual(fetches, sources)
     assert.equal(payload.stale, undefined)
     assert.equal(payload.cachedAt, 10_000)
     assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a'])
-    assert.deepEqual(payload.failed, [{ url: URL_B, reason: 'HTTP 503' }])
+    assert.deepEqual(payload.failed, [{ url: URL_B, reason: FAILED_REASON }])
     // The failed source keeps a row in the written cache so the failure stays
     // visible on the next cache hit.
-    assert.deepEqual(cacheToWrite?.sources[URL_B], { entries: [], failed: 'HTTP 503' })
+    assert.deepEqual(cacheToWrite?.sources[URL_B], { entries: [], failed: FAILED_REASON })
     assert.deepEqual(cacheToWrite?.sources[URL_A], { entries: [entry('pkg-a')] })
   })
 
@@ -214,7 +218,7 @@ describe('resolveCatalog (TTL cache flow)', () => {
     const { fetches, run } = harness({
       cache,
       now: () => 10_000 + CATALOG_CACHE_TTL_MS + 1,
-      results: [failedSource(URL_A, '请求超时（30 秒）'), failedSource(URL_B, 'HTTP 503')],
+      results: [failedSource(URL_A, TIMEOUT_REASON), failedSource(URL_B, FAILED_REASON)],
     })
     const { payload, cacheToWrite } = await run()
     assert.deepEqual(fetches, sources)
@@ -224,8 +228,8 @@ describe('resolveCatalog (TTL cache flow)', () => {
     assert.equal(payload.cachedAt, 10_000)
     // The rescue carries the CURRENT failure reasons, not the cached ones.
     assert.deepEqual(payload.failed, [
-      { url: URL_A, reason: '请求超时（30 秒）' },
-      { url: URL_B, reason: 'HTTP 503' },
+      { url: URL_A, reason: TIMEOUT_REASON },
+      { url: URL_B, reason: FAILED_REASON },
     ])
     assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a', 'pkg-b', 'pkg-c'])
   })

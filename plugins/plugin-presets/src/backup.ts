@@ -32,7 +32,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSy
 import { readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { strToU8, unzipSync, zipSync, type Zippable } from 'fflate'
-import { PresetPackageError, zipPathSafetyProblem } from './wire.ts'
+import { PresetPackageError, fsErrorCode, zipPathSafetyProblem, type HostText } from './wire.ts'
 import { inflateZipMembersBounded } from './zip.ts'
 
 /** `manifest.json` kind marker of a config backup — anything else is rejected. */
@@ -150,22 +150,30 @@ export interface BackupManifest {
  * of a suite-plugin store directory — a backup carries known shapes only, so
  * an unexpected member is a tampered or foreign archive, not a skip candidate.
  * @param rel - archive path (already through the traversal safety rules).
- * @returns a zh-CN reason when rejected, undefined when restorable.
+ * @returns the coded reason when rejected, undefined when restorable.
  */
-export function backupLayoutProblem(rel: string): string | undefined {
+export function backupLayoutProblem(rel: string): HostText | undefined {
   if (rel === PROFILE_PATCH_REL || rel === PROFILE_PACKAGE_REL || rel === MARKET_SOURCES_REL) {
     return undefined
   }
   if (rel.startsWith(PLUGINS_PREFIX)) {
     const segments = rel.slice(PLUGINS_PREFIX.length).split('/')
-    if (segments.length !== 2) return '插件存储条目必须是 plugins/<目录>/<文件> 两层'
+    if (segments.length !== 2) {
+      return { code: 'backup.storeEntryShape', text: 'a plugin store entry must be exactly plugins/<directory>/<file>' }
+    }
     const [dir, file] = segments as [string, string]
-    if (!PLUGIN_DIR_PATTERN.test(dir)) return `插件存储目录名不合法：「${dir}」`
-    if (!PLUGIN_FILE_WHITELIST.includes(file)) return `插件存储文件不在白名单内：「${file}」`
-    if (isSensitiveFileName(file)) return `插件存储文件疑似包含凭据：「${file}」`
+    if (!PLUGIN_DIR_PATTERN.test(dir)) {
+      return { code: 'backup.storeDirInvalid', params: { dir }, text: `invalid plugin store directory name: "${dir}"` }
+    }
+    if (!PLUGIN_FILE_WHITELIST.includes(file)) {
+      return { code: 'backup.storeFileNotAllowed', params: { file }, text: `the plugin store file is not whitelisted: "${file}"` }
+    }
+    if (isSensitiveFileName(file)) {
+      return { code: 'backup.storeFileSensitive', params: { file }, text: `the plugin store file looks credential-bearing: "${file}"` }
+    }
     return undefined
   }
-  return '路径不属于配置备份的任何已知区块'
+  return { code: 'backup.unknownBlock', text: 'the path belongs to no known section of a configuration backup' }
 }
 
 /** Map one validated archive path to its absolute restore target. */
@@ -202,7 +210,11 @@ export async function collectConfigBackup(home: string, profile: string): Promis
       const data = readFileSync(path)
       const rule = secretScanRuleHit(data)
       if (rule !== undefined) {
-        throw new PresetPackageError('sensitive-content', `配置文件「${rel}」命中疑似凭据内容（规则 ${rule}），已拒绝导出；请移除该文件中的凭据后重试`)
+        throw new PresetPackageError('sensitive-content', {
+          code: 'backup.secretContent',
+          params: { rel, rule },
+          text: `configuration file "${rel}" matched a credential-like pattern (rule ${rule}); the export was refused`,
+        })
       }
       files.push({ rel, data })
     } catch (error) {
@@ -240,11 +252,19 @@ export async function collectConfigBackup(home: string, profile: string): Promis
   }
 
   if (files.length > MAX_BACKUP_FILE_COUNT) {
-    throw new PresetPackageError('too-many-files', `配置备份包含 ${String(files.length)} 个文件，超过单包 ${String(MAX_BACKUP_FILE_COUNT)} 个的上限，无法导出`)
+    throw new PresetPackageError('too-many-files', {
+      code: 'backup.exportTooManyFiles',
+      params: { count: files.length, cap: MAX_BACKUP_FILE_COUNT },
+      text: `the configuration backup has ${String(files.length)} files, over the ${String(MAX_BACKUP_FILE_COUNT)}-file per-package cap; it cannot be exported`,
+    })
   }
   const total = files.reduce((sum, file) => sum + file.data.byteLength, 0)
   if (total > MAX_BACKUP_TOTAL_BYTES) {
-    throw new PresetPackageError('too-large', `配置备份总大小超过 ${String(Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024))}MB 上限，无法导出`)
+    throw new PresetPackageError('too-large', {
+      code: 'backup.exportTooLarge',
+      params: { mb: Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024) },
+      text: `the configuration backup is over the ${String(Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024))} MB total-size cap; it cannot be exported`,
+    })
   }
   return files
 }
@@ -272,7 +292,11 @@ export async function packConfigBackup(home: string, profile: string): Promise<U
   }
   const bytes = zipSync(zipped)
   if (bytes.byteLength > MAX_BACKUP_ZIP_BYTES) {
-    throw new PresetPackageError('too-large', `打包后的配置备份超过 ${String(Math.floor(MAX_BACKUP_ZIP_BYTES / 1024 / 1024))}MB 上限，无法导出`)
+    throw new PresetPackageError('too-large', {
+      code: 'backup.archiveTooLarge',
+      params: { mb: Math.floor(MAX_BACKUP_ZIP_BYTES / 1024 / 1024) },
+      text: `the packed configuration backup is over the ${String(Math.floor(MAX_BACKUP_ZIP_BYTES / 1024 / 1024))} MB cap; it cannot be exported`,
+    })
   }
   return bytes
 }
@@ -290,16 +314,24 @@ function parseBackupManifest(raw: Uint8Array): BackupManifest {
   try {
     parsed = JSON.parse(new TextDecoder().decode(raw)) as RawManifest
   } catch {
-    throw new PresetPackageError('bad-package', 'manifest.json 不是有效的 JSON')
+    throw new PresetPackageError('bad-package', { code: 'manifest.notJson', text: 'manifest.json is not valid JSON' })
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new PresetPackageError('bad-package', 'manifest.json 应该是一个 JSON 对象')
+    throw new PresetPackageError('bad-package', { code: 'manifest.notObject', text: 'manifest.json must be a JSON object' })
   }
   if (parsed.formatVersion !== BACKUP_FORMAT_VERSION) {
-    throw new PresetPackageError('bad-package', `配置备份格式版本不支持（formatVersion=${String(parsed.formatVersion)}，当前支持 ${String(BACKUP_FORMAT_VERSION)}）`)
+    throw new PresetPackageError('bad-package', {
+      code: 'backup.manifestVersion',
+      params: { version: String(parsed.formatVersion), supported: String(BACKUP_FORMAT_VERSION) },
+      text: `unsupported configuration-backup formatVersion ${String(parsed.formatVersion)} (this build supports ${String(BACKUP_FORMAT_VERSION)})`,
+    })
   }
   if (parsed.kind !== BACKUP_KIND) {
-    throw new PresetPackageError('bad-package', `这不是配置备份（kind=${String(parsed.kind)}，应为 ${BACKUP_KIND}）`)
+    throw new PresetPackageError('bad-package', {
+      code: 'backup.manifestKind',
+      params: { kind: String(parsed.kind), expected: BACKUP_KIND },
+      text: `not a configuration backup: kind=${String(parsed.kind)}, expected ${BACKUP_KIND}`,
+    })
   }
   return {
     formatVersion: BACKUP_FORMAT_VERSION,
@@ -330,7 +362,11 @@ export function unpackConfigBackup(data: Uint8Array): BackupFile[] {
     unzipSync(data, {
       filter: (info) => {
         if (declaredSizes.has(info.name)) {
-          throw new PresetPackageError('bad-package', `配置备份包含重复的成员名「${info.name}」，已拒绝`)
+          throw new PresetPackageError('bad-package', {
+            code: 'backup.duplicateMember',
+            params: { name: info.name },
+            text: `the configuration backup contains a duplicate member name "${info.name}"; refused`,
+          })
         }
         names.push(info.name)
         if (!info.name.endsWith('/')) {
@@ -345,13 +381,21 @@ export function unpackConfigBackup(data: Uint8Array): BackupFile[] {
     })
   } catch (error) {
     if (error instanceof PresetPackageError) throw error
-    throw new PresetPackageError('bad-package', '无法读取配置备份：不是有效的 ZIP 数据')
+    throw new PresetPackageError('bad-package', { code: 'backup.notZip', text: 'cannot read the configuration backup: not valid ZIP data' })
   }
   if (totalOriginal > MAX_BACKUP_TOTAL_BYTES) {
-    throw new PresetPackageError('too-large', `配置备份解压后总大小超过 ${String(Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024))}MB 上限，已拒绝`)
+    throw new PresetPackageError('too-large', {
+      code: 'backup.decompressedTooLarge',
+      params: { mb: Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024) },
+      text: `the decompressed configuration backup exceeds the ${String(Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024))} MB cap; refused`,
+    })
   }
   if (payloadCount > MAX_BACKUP_FILE_COUNT) {
-    throw new PresetPackageError('too-many-files', `配置备份包含 ${String(payloadCount)} 个文件，超过单包 ${String(MAX_BACKUP_FILE_COUNT)} 个的上限，已拒绝`)
+    throw new PresetPackageError('too-many-files', {
+      code: 'backup.importTooManyFiles',
+      params: { count: payloadCount, cap: MAX_BACKUP_FILE_COUNT },
+      text: `the configuration backup has ${String(payloadCount)} files, over the ${String(MAX_BACKUP_FILE_COUNT)}-file per-package cap; refused`,
+    })
   }
   // Containment and layout first: every member must be a restorable shape
   // before anything is inflated (the manifest itself is checked after).
@@ -359,16 +403,23 @@ export function unpackConfigBackup(data: Uint8Array): BackupFile[] {
     if (name.endsWith('/') || name === BACKUP_MANIFEST_NAME) continue
     const problem = zipPathSafetyProblem(name) ?? backupLayoutProblem(name)
     if (problem !== undefined) {
-      throw new PresetPackageError('illegal-path', `配置备份内存在不允许的路径「${name}」：${problem}，已拒绝`)
+      throw new PresetPackageError('illegal-path', {
+        code: 'backup.illegalPath',
+        params: { path: name, reason: problem.code },
+        text: `the configuration backup contains a forbidden path "${name}": ${problem.text ?? problem.code}; refused`,
+      })
     }
   }
   // Pass 2 — bounded inflate of the vetted members: every member's actual
   // byte count must equal its declared size, and the running total aborts
   // the moment it crosses the cap (see zip.ts for why unzipSync cannot).
-  const inflated = inflateZipMembersBounded(data, declaredSizes, '配置备份', MAX_BACKUP_TOTAL_BYTES)
+  const inflated = inflateZipMembersBounded(data, declaredSizes, 'backup', MAX_BACKUP_TOTAL_BYTES)
   const manifestRaw = inflated.find(member => member.name === BACKUP_MANIFEST_NAME)?.data
   if (manifestRaw === undefined) {
-    throw new PresetPackageError('bad-package', '配置备份缺少 manifest.json，不是有效的备份包')
+    throw new PresetPackageError('bad-package', {
+      code: 'backup.manifestMissing',
+      text: 'the configuration backup has no manifest.json, so it is not a valid backup package',
+    })
   }
   parseBackupManifest(manifestRaw)
   return inflated
@@ -440,7 +491,11 @@ export function restoreConfigBackup(
   for (const file of files) {
     const problem = backupLayoutProblem(file.rel)
     if (problem !== undefined) {
-      throw new PresetPackageError('illegal-path', `配置备份内存在不允许的路径「${file.rel}」：${problem}，已拒绝`)
+      throw new PresetPackageError('illegal-path', {
+        code: 'backup.illegalPath',
+        params: { path: file.rel, reason: problem.code },
+        text: `the configuration backup contains a forbidden path "${file.rel}": ${problem.text ?? problem.code}; refused`,
+      })
     }
     const target = restoreTargetOf(home, profile, file.rel)
     const existing = readFileSyncIfExists(target)
@@ -455,9 +510,16 @@ export function restoreConfigBackup(
     planned.push({ rel: file.rel, target, data: file.data, replacing: existing !== undefined })
   }
   if (conflicts.length > 0) {
+    // Never rendered: the client turns any 409 into its own overwrite dialog
+    // and reads `details.files` for the list (see the presets section). The
+    // sentence is therefore an English diagnostic, not dictionary copy.
     throw new PresetPackageError(
       'conflict',
-      `以下配置文件已存在且内容不同（${String(conflicts.length)} 个）：${conflicts.slice(0, 5).join('、')}${conflicts.length > 5 ? ' 等' : ''}。如需覆盖请确认覆盖导入`,
+      {
+        code: 'backup.conflict',
+        params: { count: conflicts.length, files: conflicts.slice(0, 5).join(', ') },
+        text: `${String(conflicts.length)} configuration files already exist with different content: ${conflicts.slice(0, 5).join(', ')}; confirm the overwrite to replace them`,
+      },
       { files: conflicts },
     )
   }
@@ -477,7 +539,11 @@ export function restoreConfigBackup(
       writeFileSync(stagedPath, item.data)
     } catch (error) {
       rmSync(stage, { recursive: true, force: true })
-      throw new PresetPackageError('io', `写入配置文件失败（${(error as NodeJS.ErrnoException).code ?? '未知错误'}）`)
+      throw new PresetPackageError('io', {
+        code: 'backup.writeFailed',
+        params: { code: fsErrorCode(error) },
+        text: `cannot write a configuration file (${(error as NodeJS.ErrnoException).code ?? 'unknown'})`,
+      })
     }
   }
 
@@ -507,7 +573,19 @@ export function restoreConfigBackup(
     }
   } catch (error) {
     const restored = rollbackSwap(stage, swapped, setAside)
-    throw new PresetPackageError('io', `写入配置文件失败（${(error as NodeJS.ErrnoException).code ?? '未知错误'}）${restored ? '，已自动还原本次导入的全部变更' : '，部分变更自动还原失败，请检查上述配置文件的当前内容'}`)
+    const code = fsErrorCode(error)
+    const osCode = (error as NodeJS.ErrnoException).code ?? 'unknown'
+    throw new PresetPackageError('io', restored
+      ? {
+          code: 'backup.writeFailedRestored',
+          params: { code },
+          text: `cannot write a configuration file (${osCode}); every change of this import was rolled back`,
+        }
+      : {
+          code: 'backup.writeFailedRollbackFailed',
+          params: { code },
+          text: `cannot write a configuration file (${osCode}); the automatic rollback of some changes failed — check the current content of those files`,
+        })
   }
 
   // Committed: the stage only ever held staging copies and set-aside olds.

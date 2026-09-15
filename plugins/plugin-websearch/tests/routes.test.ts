@@ -28,19 +28,19 @@ describe('buildProviderStatuses', () => {
     })
     const [brand] = buildProviderStatuses(file, true, BRAND_PROVIDER_ID, READY)
     assert.equal(brand.state, 'unavailable')
-    assert.match(brand.reason ?? '', /没有启用的引擎/)
+    assert.equal(brand.reason?.code, 'provider.noEngines')
   })
 
   it('reports the brand chain unavailable when the seam is missing', () => {
     const [brand] = buildProviderStatuses(defaultFile(), false, BRAND_PROVIDER_ID, READY)
     assert.equal(brand.state, 'unavailable')
-    assert.match(brand.reason ?? '', /ctx\.web/)
+    assert.equal(brand.reason?.code, 'provider.noSeam')
   })
 
   it('reports the brand chain unavailable when the plugin is disabled', () => {
     const [brand] = buildProviderStatuses(validateFile({ enabled: false }), true, BRAND_PROVIDER_ID, READY)
     assert.equal(brand.state, 'unavailable')
-    assert.match(brand.reason ?? '', /整体停用/)
+    assert.equal(brand.reason?.code, 'provider.disabled')
   })
 
   it('reports the upstream provider ready when registered and usable', () => {
@@ -58,17 +58,17 @@ describe('buildProviderStatuses', () => {
     // the wrong place.
     const [, missing] = buildProviderStatuses(defaultFile(), true, BRAND_PROVIDER_ID, { registered: false, usable: false })
     assert.equal(missing.state, 'unavailable')
-    assert.match(missing.reason ?? '', /未注册/)
+    assert.equal(missing.reason?.code, 'provider.upstreamUnregistered')
 
     const [, unusable] = buildProviderStatuses(defaultFile(), true, BRAND_PROVIDER_ID, { registered: true, usable: false })
     assert.equal(unusable.state, 'unavailable')
-    assert.match(unusable.reason ?? '', /已注册但不可用/)
+    assert.equal(unusable.reason?.code, 'provider.upstreamUnusable')
   })
 
   it('reports unknown (never a false green) when the registry is unreadable', () => {
     const [, upstream] = buildProviderStatuses(defaultFile(), true, BRAND_PROVIDER_ID, undefined)
     assert.equal(upstream.state, 'unknown')
-    assert.match(upstream.reason ?? '', /无法读取/)
+    assert.equal(upstream.reason?.code, 'provider.upstreamUnknown')
   })
 
   it('marks exactly one provider selected', () => {

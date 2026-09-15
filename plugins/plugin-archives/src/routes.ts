@@ -46,7 +46,7 @@
 import { readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveSkipReason, ArchivedSession } from './types.ts'
+import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveSkipReason, ArchivedSession, HostText } from './types.ts'
 
 /** Route namespace on the dsh web server (inside the plugin's package prefix). */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-archives/api'
@@ -233,9 +233,13 @@ export interface ArchiveRoutesOptions {
   tools: ToolsLike | undefined
 }
 
-/** Group display name: cwd basename, or a placeholder for cwd-less sessions. */
+/**
+ * Group display name: the cwd basename. A cwd-less group gets an EMPTY title
+ * on purpose — a heading is copy, and copy is the client's to write; the client
+ * renders its own line for `cwd === ''` (see the section's group heading).
+ */
 function groupTitle(cwd: string): string {
-  if (cwd === '') return '未记录项目目录'
+  if (cwd === '') return ''
   const name = basename(cwd)
   return name === '' || name === '/' || name === '\\' ? cwd : name
 }
@@ -254,8 +258,14 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
-function fail(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { ok: false, error: { code, message } })
+/**
+ * Failure answer. `code` is the transport-ish category (kept for the existing
+ * client checks); `host` is the coded message the UI renders in its own
+ * language. The plain `message` stays an English diagnostic for logs and for a
+ * client that does not know the code yet.
+ */
+function fail(res: ServerResponse, status: number, code: string, host: HostText): void {
+  sendJson(res, status, { ok: false, error: { code, message: host.text ?? host.code, host } })
 }
 
 /** Same-origin fence: an absent Origin is fine (same-origin fetch sends none). */
@@ -541,35 +551,40 @@ async function pruneStaleArchives(writer: RegistryWriter, options: ArchiveRoutes
 export function registerArchiveRoutes(webServer: WebServerLike, options: ArchiveRoutesOptions): () => void {
   const listHandler = (req: IncomingMessage, res: ServerResponse): void => {
     if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
       return
     }
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET')
-      fail(res, 405, 'method-not-allowed', 'GET only')
+      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
       return
     }
     void listArchives(options)
       .then((value) => { ok(res, value) })
       .catch((error: unknown) => {
-        fail(res, 500, 'list-failed', `读取归档会话失败（${(error as Error).message}）`)
+        const detail = error instanceof Error ? error.message : String(error)
+        fail(res, 500, 'list-failed', {
+          code: 'route.listFailed',
+          params: { detail },
+          text: `could not read archived sessions: ${detail}`,
+        })
       })
   }
   const deleteHandler = (req: IncomingMessage, res: ServerResponse): void => {
     if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
       return
     }
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
-      fail(res, 405, 'method-not-allowed', 'POST only')
+      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
       return
     }
     void readJsonBody(req)
       .then((body) => {
         const ids = (body as { ids?: unknown }).ids
         if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_IDS_PER_CALL || ids.some((id) => typeof id !== 'string')) {
-          fail(res, 400, 'bad-request', '请求体需要非空的 ids 字符串数组')
+          fail(res, 400, 'bad-request', { code: 'route.idsRequired', text: 'the body needs a non-empty array of string ids' })
           return
         }
         // No registry-write capability is required: /delete only removes log
@@ -578,17 +593,22 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
           .then((value) => { ok(res, value) })
       })
       .catch((error: unknown) => {
-        fail(res, 500, 'delete-failed', `删除归档会话失败（${(error as Error).message}）`)
+        const detail = error instanceof Error ? error.message : String(error)
+        fail(res, 500, 'delete-failed', {
+          code: 'route.deleteFailed',
+          params: { detail },
+          text: `could not delete archived sessions: ${detail}`,
+        })
       })
   }
   const pruneHandler = (req: IncomingMessage, res: ServerResponse): void => {
     if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
       return
     }
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
-      fail(res, 405, 'method-not-allowed', 'POST only')
+      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
       return
     }
     // Capability check: the write path is private upstream API — a kernel
@@ -598,7 +618,10 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
     if (typeof writer.enqueueOperation !== 'function'
       || typeof writer.requireState !== 'function'
       || typeof writer.setState !== 'function') {
-      fail(res, 501, 'prune-unsupported', '当前内核版本不支持清理归档记录')
+      fail(res, 501, 'prune-unsupported', {
+        code: 'route.pruneUnsupported',
+        text: 'this kernel version cannot prune archive records',
+      })
       return
     }
     // Same body discipline as /delete (size-capped); prune takes no input,
@@ -607,28 +630,36 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
       .then(() => pruneStaleArchives(writer, options))
       .then((value) => { ok(res, value) })
       .catch((error: unknown) => {
-        fail(res, 500, 'prune-failed', `清理归档记录失败（${error instanceof Error ? error.message : String(error)}）`)
+        const detail = error instanceof Error ? error.message : String(error)
+        fail(res, 500, 'prune-failed', {
+          code: 'route.pruneFailed',
+          params: { detail },
+          text: `could not prune archive records: ${detail}`,
+        })
       })
   }
   const searchHandler = (req: IncomingMessage, res: ServerResponse): void => {
     if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', 'cross-origin or non-local request')
+      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
       return
     }
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET')
-      fail(res, 405, 'method-not-allowed', 'GET only')
+      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
       return
     }
     if (options.sessionQuery === undefined) {
-      fail(res, 503, 'session-query-unavailable', '当前内核未提供会话检索服务（session-query-sqlite 未启用）')
+      fail(res, 503, 'session-query-unavailable', {
+        code: 'route.sessionQueryUnavailable',
+        text: 'this kernel provides no session search service (session-query-sqlite is not enabled)',
+      })
       return
     }
     const url = new URL(req.url ?? '/', 'http://x')
     // Cap the query: the backend scores the full text, so bound what we send.
     const query = (url.searchParams.get('q') ?? '').trim().slice(0, 500)
     if (query === '') {
-      fail(res, 400, 'bad-request', '查询词不能为空')
+      fail(res, 400, 'bad-request', { code: 'route.queryRequired', text: 'the query must not be empty' })
       return
     }
     const limitParam = Number(url.searchParams.get('limit') ?? '20')
@@ -647,7 +678,12 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
         ok(res, { items, agentToolAvailable } satisfies ArchiveSearchResult)
       })
       .catch((error: unknown) => {
-        fail(res, 500, 'search-failed', `会话检索失败（${error instanceof Error ? error.message : String(error)}）`)
+        const detail = error instanceof Error ? error.message : String(error)
+        fail(res, 500, 'search-failed', {
+          code: 'route.searchFailed',
+          params: { detail },
+          text: `session search failed: ${detail}`,
+        })
       })
   }
 

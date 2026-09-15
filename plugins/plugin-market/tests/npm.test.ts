@@ -157,14 +157,17 @@ describe('resolveDshBin', () => {
     assert.equal(resolveDshBin(bin), bin)
   })
 
-  it('stops walking at the filesystem root and throws a zh-CN error', () => {
+  it('stops walking at the filesystem root and throws a coded error', () => {
     assert.throws(() => resolveDshBin(join(tmpdir(), 'no-such-bin-here.js')), MarketValidationError)
     assert.throws(() => resolveDshBin(undefined), MarketValidationError)
-    // The thrown message is client-facing and must not carry absolute paths.
+    // The failure carries a code (the panel owns the sentence) and must not
+    // carry absolute paths.
     let message = ''
     try {
       resolveDshBin(undefined)
     } catch (error) {
+      assert.ok(error instanceof MarketValidationError)
+      assert.equal(error.host.code, 'cli.notFound')
       message = (error as Error).message
     }
     assert.equal(message.includes(tmpdir()), false)

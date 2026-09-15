@@ -141,3 +141,61 @@ describe('sanitizeArchivePath', () => {
     assert.ok(sanitizeArchivePath(long).length <= 80)
   })
 })
+
+describe('coded rejection reasons (host wire contract)', () => {
+  // These reasons cross to the client as codes, not prose: the sentence lives
+  // in the client dictionary, so the code is the stable half of the contract
+  // and a rename here must fail loudly rather than silently change the copy.
+  it('names the entry-whitelist violation', () => {
+    assert.equal(entryNameProblem('')?.code, 'entry.empty')
+    assert.equal(entryNameProblem('Standard')?.code, 'entry.pattern')
+    assert.equal(entryNameProblem('中文')?.code, 'entry.pattern')
+    assert.equal(entryNameProblem('')?.text?.includes('预设'), false)
+  })
+
+  it('names the path-safety violation', () => {
+    assert.equal(zipPathSafetyProblem('')?.code, 'path.empty')
+    assert.equal(zipPathSafetyProblem('a\\b')?.code, 'path.backslash')
+    assert.equal(zipPathSafetyProblem('/etc/passwd')?.code, 'path.absolute')
+    assert.equal(zipPathSafetyProblem('C:/evil')?.code, 'path.absolute')
+    assert.equal(zipPathSafetyProblem('a//b')?.code, 'path.emptySegment')
+    assert.equal(zipPathSafetyProblem('a/../b')?.code, 'path.parentSegment')
+    assert.equal(zipPathSafetyProblem('preset/.hidden')?.code, 'path.hiddenSegment')
+  })
+
+  it('names every manifest rejection, with the values its copy interpolates', () => {
+    const code = (raw: string): string | undefined => {
+      try {
+        parseManifest(strToU8(raw))
+        return undefined
+      } catch (error) {
+        return error instanceof PresetPackageError ? error.host.code : String(error)
+      }
+    }
+    const valid = { formatVersion: 1, kind: 'dsh-preset', entry: 'demo' }
+    assert.equal(code('{nope'), 'manifest.notJson')
+    assert.equal(code('[1,2]'), 'manifest.notObject')
+    assert.equal(code(JSON.stringify({ ...valid, formatVersion: 2 })), 'preset.manifestVersion')
+    assert.equal(code(JSON.stringify({ ...valid, kind: 'other' })), 'preset.manifestKind')
+    assert.equal(code(JSON.stringify({ formatVersion: 1, kind: 'dsh-preset' })), 'preset.manifestEntryMissing')
+    assert.equal(code(JSON.stringify({ ...valid, entry: '../evil' })), 'preset.manifestEntryInvalid')
+  })
+
+  it('carries version/kind/reason as params instead of prose', () => {
+    try {
+      parseManifest(strToU8(JSON.stringify({ formatVersion: 2, kind: 'dsh-preset', entry: 'demo' })))
+      assert.fail('expected a rejection')
+    } catch (error) {
+      assert.ok(error instanceof PresetPackageError)
+      assert.deepEqual(error.host.params, { version: '2', supported: '1' })
+    }
+    try {
+      parseManifest(strToU8(JSON.stringify({ formatVersion: 1, kind: 'dsh-preset', entry: 'A' })))
+      assert.fail('expected a rejection')
+    } catch (error) {
+      assert.ok(error instanceof PresetPackageError)
+      // The nested reason is a code of the client dictionary, never a sentence.
+      assert.deepEqual(error.host.params, { reason: 'entry.pattern' })
+    }
+  })
+})

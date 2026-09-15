@@ -19,6 +19,10 @@
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: pulls the locale runtime's Context merge (ctx.locale, which also
+// carries this plugin's namespace keys through the LocaleNamespaceMap merge
+// below) into this compilation unit.
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the slot utility faces and the ui-session service
 // (ctx.uiSession.adapter, the live session selection this client subscribes to)
 // into this compilation unit.
@@ -27,10 +31,23 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import { mountPdfOfficeBar } from './client/office-entry.tsx'
 import { createSkillReferenceSource } from './client/skill-reference.ts'
 import type { ReferenceSourceRegistry } from './client/skill-reference.ts'
+import { en as pdfEn, NS as PDF_NS, zh as pdfZh } from './client/locales.ts'
+import type { PdfKey } from './client/locales.ts'
 import { adoptStyles } from './client/styles.ts'
 
+// The locale namespace table lives in ui-slots: this merge is what makes
+// `ctx.locale.register`/`bind` key-checked — a key missing from (or extra in)
+// either dictionary of the pair fails this package's typecheck, and the same
+// union constrains the capsule's `t` seat.
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** The PDF capsule's copy (one namespace per plugin, one owner per namespace). */
+    [PDF_NS]: PdfKey
+  }
+}
+
 /** The client halves this plugin depends on. */
-export const inject = ['uiSession']
+export const inject = ['locale', 'uiSession']
 
 /**
  * Client apply: adopt styles and mount the office-bar capsule.
@@ -39,11 +56,19 @@ export const inject = ['uiSession']
 export function apply(ctx: ClientContext): void {
   adoptStyles()
 
+  // The capsule's copy resolves through this namespace; the effect disposes the
+  // dictionary pair with this plugin's fiber.
+  ctx.effect(
+    () => ctx.locale.register(PDF_NS, { zh: pdfZh, en: pdfEn }),
+    'dsh-app plugin-pdf: dictionaries',
+  )
+
   // The bar reconciles itself from the DOM (one observer pass per mutation
   // burst): the composer card belongs to a React root that re-renders on every
-  // keystroke and disappears outside the conversation.
+  // keystroke and disappears outside the conversation. The capsule is not a seat
+  // occupant, so it binds the namespace itself from the runtime handed in here.
   ctx.effect(
-    () => mountPdfOfficeBar(ctx.uiSession.adapter.current),
+    () => mountPdfOfficeBar(ctx.uiSession.adapter.current, ctx.locale),
     'dsh-app plugin-pdf: office-bar capsule',
   )
 

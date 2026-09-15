@@ -16,6 +16,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 // Type-only: pulls the connection Events merge ('connection/reset') into scope.
 import type {} from '@deepseek-ai/dsh-client-connection/client'
+// Type-only: pulls the locale runtime's Context merge (ctx.locale).
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings shell's SlotMap merge (the 'settings.section'
 // entry) and the settingsScope/settingsSchema Context merges.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -23,22 +25,44 @@ import { AdvancedModelsSection } from './client/models-advanced/section.tsx'
 import type { AdvancedModelsInjected } from './client/models-advanced/section.tsx'
 import { AdvancedModelsStore } from './client/models-advanced/store.ts'
 import type { AdvancedModelsState } from './client/models-advanced/store.ts'
+import { DiagnosticsSection } from './client/diagnostics/section.tsx'
+import { en as diagnosticsEn, zh as diagnosticsZh } from './client/diagnostics/locales.ts'
+import type { DiagnosticsKey } from './client/diagnostics/locales.ts'
+import { en as advancedEn, zh as advancedZh } from './client/models-advanced/locales.ts'
+import type { AdvancedModelsKey } from './client/models-advanced/locales.ts'
+import { NS } from './client/namespace.ts'
+import { mountSettingsNav } from './client/settings-nav.ts'
+import { installWorkspaceLaunch } from './client/workspace-launch.ts'
 import { mountWhaleBackground } from './client/whale-background.ts'
 import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/dsh-client-ui-settings/client'
+
+// The locale namespace table lives in ui-slots: this merge is what makes
+// `ctx.locale.register`/`bind` key-checked — a key missing from (or extra in)
+// any dictionary of the pair fails this package's typecheck, and the same
+// union constrains each page's `t` seat. One namespace carries both page
+// dictionaries; their `diag.` / `adv.` key prefixes keep them apart.
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Brand client-plugin copy: the diagnostics page and the Advanced Models page. */
+    [NS]: DiagnosticsKey | AdvancedModelsKey
+  }
+}
 
 // The Advanced Models store talks to the `llm` and `settings` Remote domains
 // directly (provider directory + discovery, settings.mutate), so those nested
 // namespace services must be declared here — Cordis refuses `remote.*` access
 // that is not in this plugin's `inject`.
 export const inject = [
-  'theme', 'slots', 'remote', 'remote.llm', 'remote.settings', 'settingsScope', 'settingsSchema',
+  'theme', 'slots', 'locale', 'remote', 'remote.llm', 'remote.settings', 'settingsScope', 'settingsSchema',
 ]
 
 export const BRAND_THEME_ID = 'dsh-app-brand'
 
-/** Nav identity of the Advanced Models page. */
+/** Nav identity of the Advanced Models page (its label is the `adv.nav` key). */
 const ADVANCED_SECTION_ID = 'model-advanced'
-const ADVANCED_SECTION_LABEL = '模型高级设置'
+
+/** Nav identity of the diagnostics page (its label is the `diag.nav` key). */
+const DIAGNOSTICS_SECTION_ID = 'dsh-app-diagnostics'
 
 /**
  * Brand theme: a dark-first variant built on the alias-token layer.
@@ -85,12 +109,10 @@ const BRAND_TOKENS = {
 } as const
 
 /**
- * A wireframe isometric cube for the settings nav (the shell maps unknown
- * section ids to its generic gear; this overlay swaps ours in by label
- * match). Hexagonal silhouette + three inner edges on the same 16-grid the
- * shell's icon set uses (their glyphs fill ~86% of it; ours ~82% — visually
- * matched); rendered as a CSS mask over currentColor so it follows the
- * nav's active state.
+ * A wireframe isometric cube for the Advanced Models row (upstream maps its own
+ * section ids to icons and falls back to a generic gear for everything else).
+ * Hexagonal silhouette + three inner edges on the same 16-grid the shell's icon
+ * set uses (their glyphs fill ~86% of it; ours ~82% — visually matched).
  */
 const NAV_ICON_SVG = [
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">',
@@ -100,46 +122,35 @@ const NAV_ICON_SVG = [
 ].join('')
 
 /**
- * Tag the Advanced Models nav cell and paint the brand glyph. The nav has no
- * per-id DOM hook (CSS-module class names are stable in name only), so the
- * cell is found by its label text — the same stable-copy contract the shell
- * itself renders — and tagged with a plain class the style rule targets.
+ * A heartbeat line for the Diagnostics row: the same 16-grid and 1.4 stroke as
+ * the rest of the set, and one recognizable gesture at 16 px — the page it
+ * opens is a status readout plus a log tail, which a monitor/wrench glyph
+ * would only muddy at this size.
  */
-function mountNavIconPatch(): () => void {
-  const style = document.createElement('style')
-  const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
-  style.textContent = [
-    'button.dshAmaAdvNav > svg:first-child { display: none; }',
-    'button.dshAmaAdvNav::before {',
-    '  content: ""; width: 16px; height: 16px; flex: none;',
-    `  background-color: currentColor; -webkit-mask-image: ${maskUrl}; mask-image: ${maskUrl};`,
-    '  mask-size: contain; mask-repeat: no-repeat; mask-position: center;',
-    '}',
-  ].join('\n')
-  document.head.append(style)
-  const patch = (): void => {
-    // Cheap gate first: without a settings nav in the DOM there is nothing
-    // to tag, and chat-view mutations must not pay for a label scan.
-    if (document.querySelector('[class*="navList"]') === null) return
-    for (const label of document.querySelectorAll('span[class*="navLabel"]')) {
-      if (label.textContent !== ADVANCED_SECTION_LABEL) continue
-      const cell = label.closest('button')
-      if (cell !== null) cell.classList.add('dshAmaAdvNav')
-    }
-  }
-  patch()
-  const observer = new MutationObserver(patch)
-  observer.observe(document.body, { childList: true, subtree: true })
-  return () => {
-    observer.disconnect()
-    style.remove()
-    for (const cell of document.querySelectorAll('button.dshAmaAdvNav')) {
-      cell.classList.remove('dshAmaAdvNav')
-    }
-  }
-}
+const NAV_ICON_DIAGNOSTICS_SVG = [
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">',
+  '<path d="M1.6 8.6h3.1l1.5-4.4 2.2 7.6 1.6-3.2h4.4"',
+  ' fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  '</svg>',
+].join('')
 
 export function apply(ctx: ClientContext): void {
+  // --- Dictionaries first: every seat below resolves through this namespace,
+  // and the effect disposes the pair with this plugin's fiber. Both page
+  // dictionaries register in one call — one namespace per plugin, one pair
+  // per namespace. ---
+  ctx.effect(
+    () => ctx.locale.register(NS, {
+      zh: { ...diagnosticsZh, ...advancedZh },
+      en: { ...diagnosticsEn, ...advancedEn },
+    }),
+    'dsh-app plugin-client-ui: dictionaries',
+  )
+  // Nav rows are read per render and the settings shell keys its row cache on
+  // the locale revision, so a thunk over this binding follows a language
+  // switch without re-registration — the same contract as the `t` seat.
+  const t = ctx.locale.bind(NS)
+
   // --- Brand theme (selectable in Settings → Appearance). ---
   ctx.theme.register({
     id: BRAND_THEME_ID,
@@ -193,9 +204,33 @@ export function apply(ctx: ClientContext): void {
     // 11 = directly after the official Models page (10); the Plugins page
     // owns 15 and agent-presets 20.
     order: 11,
-    label: () => ADVANCED_SECTION_LABEL,
+    // `locale:` puts the namespace-bound `t` seat on the component's props.
+    locale: NS,
+    label: () => t('adv.nav'),
     inject: injected,
   }, AdvancedModelsSection))
+
+  // --- Diagnostics page: desktop-bridge status, the shell's log directory and
+  // the kernel log tail. Two host routes of plugin-brand, no new transport. ---
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: DIAGNOSTICS_SECTION_ID,
+    // 22 = after the agent band (19-21), before the session-data trio
+    // (23 = memory, 24 = archives, 25 = upstream's archived sessions): the
+    // system-level page belongs at the tail. NOT 14: plugin-websearch already
+    // holds 14, and a tie is only "harmless" while the loader keeps
+    // registration order — a placement hint should not double as an identity.
+    order: 22,
+    // `locale:` puts the namespace-bound `t` seat on the component's props.
+    locale: NS,
+    label: () => t('diag.nav'),
+  }, DiagnosticsSection))
+
+  // --- Launch folder: the shell may be started with a directory (open-with, a
+  // folder dropped on the app icon, a path argument). It cannot register a
+  // workspace itself, so it calls the global this installs — the only seam
+  // available between a preload-less renderer and the shell. ---
+  ctx.effect(() => installWorkspaceLaunch(ctx), 'dsh-app plugin-client-ui: launch folder')
 
   // Pushed invalidations keep an OPEN page fresh without polling; an unopened
   // one stays idle (the section loads itself on first mount). Credential
@@ -211,13 +246,18 @@ export function apply(ctx: ClientContext): void {
       ctx.remote.$on('llm/adapters-updated', refresh),
       ctx.on('connection/reset', refresh),
     ]
-    const disposeIcon = mountNavIconPatch()
+    // Settings rail: the scroll rule the suite's extra rows need, plus real
+    // glyphs for our two pages (upstream would give both the generic gear).
+    const disposeNav = mountSettingsNav([
+      { label: () => t('adv.nav'), cls: 'dshAmaAdvNav', svg: NAV_ICON_SVG },
+      { label: () => t('diag.nav'), cls: 'dshDiagNav', svg: NAV_ICON_DIAGNOSTICS_SVG },
+    ])
     // Brand whale background: Canvas 2D port of the DeepSeek hero digitile
     // whale (assembles on load, swims idly, scatters from the pointer),
     // theme-aware through the live --dsw-alias-* tokens.
     const disposeWhale = mountWhaleBackground()
     return () => {
-      disposeIcon()
+      disposeNav()
       disposeWhale()
       for (const dispose of disposers) dispose()
     }

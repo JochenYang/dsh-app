@@ -75,7 +75,7 @@ export class HooksStore {
           let bridge = validateBridge(candidate, seenIds)
           if (bridge.configSource === 'file') {
             if (!isAbsolute(bridge.configPath)) {
-              throw new HooksValidationError(`configPath 必须是绝对路径：「${bridge.configPath}」`)
+              throw new HooksValidationError('configPath.notAbsolute', { path: bridge.configPath })
             }
           } else {
             // Inline: configPath is the managed file; fill it in if absent
@@ -114,13 +114,13 @@ export class HooksStore {
     let bridge = validateBridge({ ...(raw as Raw), id }, new Set(file.bridges.map(b => b.id)))
     if (bridge.configSource === 'inline') {
       if (bridge.configContent === undefined || bridge.configContent.trim() === '') {
-        throw new HooksValidationError('在线编写模式下，配置内容不能为空')
+        throw new HooksValidationError('config.inlineEmpty')
       }
       this.writeManagedContent(id, bridge.configContent)
       bridge = { ...bridge, configPath: this.managedPath(id) }
     } else {
       if (!isAbsolute(bridge.configPath)) {
-        throw new HooksValidationError(`configPath 必须是绝对路径：「${bridge.configPath}」`)
+        throw new HooksValidationError('configPath.notAbsolute', { path: bridge.configPath })
       }
     }
     // configContent lives in the managed file, not in config.json.
@@ -133,12 +133,12 @@ export class HooksStore {
   update(id: string, raw: unknown): HooksBridge {
     const file = this.load()
     const oldBridge = file.bridges.find(b => b.id === id)
-    if (oldBridge === undefined) throw new HooksValidationError(`Hook 配置 ${id} 不存在`)
+    if (oldBridge === undefined) throw new HooksValidationError('bridge.notFound', { id })
     const otherIds = new Set(file.bridges.filter(b => b.id !== id).map(b => b.id))
     let bridge = validateBridge({ ...(raw as Raw), id }, otherIds)
     if (bridge.configSource === 'inline') {
       if (bridge.configContent === undefined || bridge.configContent.trim() === '') {
-        throw new HooksValidationError('在线编写模式下，配置内容不能为空')
+        throw new HooksValidationError('config.inlineEmpty')
       }
       this.writeManagedContent(id, bridge.configContent)
       bridge = { ...bridge, configPath: this.managedPath(id) }
@@ -146,7 +146,7 @@ export class HooksStore {
       // Switching from inline to file: clean up the old managed file.
       if (oldBridge.configSource === 'inline') this.deleteManagedContent(id)
       if (!isAbsolute(bridge.configPath)) {
-        throw new HooksValidationError(`configPath 必须是绝对路径：「${bridge.configPath}」`)
+        throw new HooksValidationError('configPath.notAbsolute', { path: bridge.configPath })
       }
     }
     const { configContent, ...persisted } = bridge

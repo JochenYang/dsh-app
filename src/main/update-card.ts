@@ -135,12 +135,12 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
  * Persistent "kernel update available" card script (pure, testable).
  *
  * Renders a fixed bottom-right card into the loaded dsh web UI: a heading,
- * the running version, and one button per installable option plus `稍后`.
- * Unlike {@link UPDATE_CARD_SCRIPT} it never auto-hides — a background kernel
- * check surfaces its finding once, and the card stays until the user either
- * acts on it or closes it, so a quiet update is not missed while remaining
- * non-blocking (in contrast to the modal in-frame dialog, which interrupts
- * whatever the user is doing).
+ * the running version, and one button per installable option plus the "later"
+ * button. Unlike {@link UPDATE_CARD_SCRIPT} it never auto-hides — a background
+ * kernel check surfaces its finding once, and the card stays until the user
+ * either acts on it or closes it, so a quiet update is not missed while
+ * remaining non-blocking (in contrast to the modal in-frame dialog, which
+ * interrupts whatever the user is doing).
  *
  * Multiple options cover the multi-line case: the registry check reports the
  * primary line's update plus any other line carrying something newer (e.g.
@@ -149,12 +149,17 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
  *
  * The promise it returns is what the shell's `executeJavaScript` awaits: it
  * resolves with the chosen option's version, or 'later' when the user clicks
- * 稍后, and with 'later' when a re-invocation replaces the card (each
- * invocation is a fresh card; a stale one settles as 'later').
+ * the later button, and with 'later' when a re-invocation replaces the card
+ * (each invocation is a fresh card; a stale one settles as 'later').
+ *
+ * Every user-visible string — title, detail, both button texts — arrives in the
+ * payload, localized by the shell. The script itself stays ASCII-only and has
+ * no translation logic, so no wording can leak into the injected source.
  *
  * Kept in this module for the same reason as UPDATE_CARD_SCRIPT: probe
  * scripts execute it against a DOM stub to verify behavior.
  */
+/** Caller-facing option shape; the label is added by the shell (window.ts). */
 export interface KernelUpdateCardOption {
   version: string
   channel: KernelChannel
@@ -162,16 +167,18 @@ export interface KernelUpdateCardOption {
   primary?: boolean
 }
 
-const KERNEL_CHANNEL_LABEL: Record<KernelChannel, string> = {
-  stable: '正式版',
-  beta: '候选版',
-  alpha: '测试版',
+/** Payload of {@link KERNEL_UPDATE_CARD_SCRIPT}: all copy is pre-localized. */
+export interface KernelUpdateCardPayload {
+  current: string
+  options: ReadonlyArray<{ version: string; label: string; primary?: boolean }>
+  title: string
+  detail: string
+  laterLabel: string
 }
 
-export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; options: KernelUpdateCardOption[] }): string => `(function () {
+export const KERNEL_UPDATE_CARD_SCRIPT = (payload: KernelUpdateCardPayload): string => `(function () {
   'use strict';
   var cfg = ${JSON.stringify(payload)};
-  var CHANNEL_LABEL = ${JSON.stringify(KERNEL_CHANNEL_LABEL)};
   var id = 'dsh-kernel-update-card';
   var KEY = '__dshKernelUpdateCard';
   // A re-invocation must not leave two cards (or one stale promise) behind:
@@ -192,7 +199,12 @@ export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; options: K
   var ink = token('--dsw-alias-label-primary', '#0f172a');
   var inkSecondary = token('--dsw-alias-label-secondary', '#475569');
   var border = token('--dsw-alias-border-l1', 'rgba(15, 23, 42, 0.06)');
-  var brand = token('--dsw-alias-brand-primary', '#3b82f6');
+  // Primary button colour PAIR, straight from the app’s own buttons
+  // (primitives/Button.module.css): the fill is near-black in light and
+  // near-white in dark, so the label must flip with it. Fill plus a hardcoded
+  // white label is what made this button vanish in dark mode.
+  var primaryFill = token('--dsw-alias-button-primary-fill', '#1f2328');
+  var primaryInk = token('--dsw-alias-label-primary-foreground', '#ffffff');
 
   var old = document.getElementById(id);
   if (old && old.parentNode) old.parentNode.removeChild(old);
@@ -210,12 +222,12 @@ export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; options: K
 
   var title = document.createElement('div');
   style(title, 'font-size:13px;font-weight:600;color:' + ink + ';line-height:1.5;');
-  title.textContent = cfg.options.length > 1 ? '发现多个内核更新' : '发现内核更新';
+  title.textContent = cfg.title;
   root.appendChild(title);
 
   var detail = document.createElement('div');
   style(detail, 'font-size:12px;color:' + inkSecondary + ';line-height:1.6;');
-  detail.textContent = '当前版本 dsh ' + cfg.current + '。更新将下载新运行时并重启服务。';
+  detail.textContent = cfg.detail;
   root.appendChild(detail);
 
   function button(spec) {
@@ -226,7 +238,7 @@ export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; options: K
       'cursor:pointer;padding:7px 14px;border-radius:8px;font-size:13px;' +
       'line-height:1.5;font-family:inherit;';
     if (spec.primary) {
-      style(btn, base + 'background:' + brand + ';color:#fff;border:1px solid transparent;font-weight:500;');
+      style(btn, base + 'background:' + primaryFill + ';color:' + primaryInk + ';border:1px solid transparent;font-weight:500;');
     } else {
       style(btn, base + 'background:transparent;color:' + ink + ';border:1px solid ' + border + ';');
     }
@@ -236,14 +248,11 @@ export const KERNEL_UPDATE_CARD_SCRIPT = (payload: { current: string; options: K
 
   var actions = document.createElement('div');
   style(actions, 'display:flex;gap:8px;justify-content:flex-end;margin-top:2px;flex-wrap:wrap;');
-  actions.appendChild(button({ label: '稍后', value: 'later' }));
+  actions.appendChild(button({ label: cfg.laterLabel, value: 'later' }));
   for (var i = 0; i < cfg.options.length; i++) {
     var opt = cfg.options[i];
-    var lineLabel = CHANNEL_LABEL[opt.channel] || opt.channel;
     actions.appendChild(button({
-      label: cfg.options.length > 1
-        ? '更新到 ' + opt.version + '（' + lineLabel + '）'
-        : '立即更新到 ' + opt.version,
+      label: opt.label,
       value: opt.version,
       primary: !!opt.primary,
     }));

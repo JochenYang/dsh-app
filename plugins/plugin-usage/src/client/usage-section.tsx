@@ -9,12 +9,49 @@
  * with edge flip; non-essential tips (footer explainer, standalone-page
  * link, caption subtitles) are deliberately absent.
  *
+ * Every string this page renders comes from the `dsh-app.usage` namespace
+ * through the `t` standard seat: the section registers with `locale: NS`, so
+ * the renderer hands the component — and, through its props, the cards, the
+ * heatmap, the trend chart and the table below — a namespace-bound translate
+ * that reads the active UI locale at call time and re-renders on a language
+ * switch. Failures the HOST reports arrive as codes (see `HostText` in
+ * types.ts) and are rendered through {@link hostMessage}; model names and the
+ * balance figures are data and cross the wire as they are.
+ *
  * @module @dsh-app/plugin-usage/client/usage-section
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { UsageAgg, UsageBalance, UsageBalanceSnapshot, UsageHeatmap, UsageModelAgg, UsageSummary } from '../types.ts'
+import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostText, UsageAgg, UsageBalance, UsageBalanceSnapshot, UsageHeatmap, UsageModelAgg, UsageSummary } from '../types.ts'
+import { NS, type UsageKey } from './locales.ts'
+
+/** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
+export type UsageSectionProps = PropsLocale<typeof NS>
+
+/** The page's namespace-bound translate, handed to the sub-components below. */
+type UsageTranslate = TranslateNS<typeof NS>
+
+/** Heatmap window in weeks (the host route's own default). */
+const HEAT_WEEKS = 26
+
+/** Month-label keys, indexed by `Date.getMonth()` order. */
+const MONTH_KEYS = [
+  'usage.cal.m.1', 'usage.cal.m.2', 'usage.cal.m.3', 'usage.cal.m.4', 'usage.cal.m.5', 'usage.cal.m.6',
+  'usage.cal.m.7', 'usage.cal.m.8', 'usage.cal.m.9', 'usage.cal.m.10', 'usage.cal.m.11', 'usage.cal.m.12',
+] as const satisfies readonly UsageKey[]
+
+/**
+ * Localized month label of a 1-12 month number (the pre-i18n page built it as
+ * the number followed by 月, which is what the zh entries still say).
+ * @param month - calendar month, 1-based.
+ * @param t - the page's namespace-bound translate.
+ * @returns the month label in the active locale.
+ */
+function monthLabel(month: number, t: UsageTranslate): string {
+  return t(MONTH_KEYS[Math.min(MONTH_KEYS.length, Math.max(1, month)) - 1])
+}
 
 /** Wire types the host routes answer with. */
 type SummaryWire = UsageSummary
@@ -74,30 +111,99 @@ function fmtDate(ms: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+/** A failure carrying the host's coded message, when one came with it. */
+class HostError extends Error {
+  constructor(readonly host: HostText | undefined, fallback: string) {
+    super(fallback)
+  }
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store' })
-  const body = (await response.json()) as { ok: boolean; value?: T; error?: { message?: string } }
+  const body = (await response.json()) as { ok: boolean; value?: T; error?: { message?: string; host?: HostText } }
   if (!response.ok || body.ok !== true) {
-    throw new Error(body.error?.message ?? `HTTP ${response.status}`)
+    throw new HostError(body.error?.host, body.error?.message ?? `HTTP ${response.status}`)
   }
   return body.value as T
+}
+
+/**
+ * Codes this build renders, mapped to their dictionary keys.
+ *
+ * The host never sends prose for anything the user reads (see `HostText` in
+ * types.ts): it sends a code plus the values the sentence interpolates, and the
+ * sentence lives here. `method-not-allowed` is deliberately absent — only a
+ * caller that is not this page can trip it, so it falls through to the host's
+ * English diagnostic rather than shipping copy for an unreachable state
+ * (plugin-websearch made the same call).
+ */
+const HOST_KEYS: Readonly<Record<string, UsageKey>> = {
+  disabled: 'usage.host.disabled',
+  'missing-credential': 'usage.host.balanceMissingCredential',
+  'invalid-credential': 'usage.host.balanceInvalidCredential',
+  upstream: 'usage.host.balanceUpstream',
+  'upstream-http': 'usage.host.balanceUpstreamHttp',
+  'upstream-timeout': 'usage.host.balanceUpstreamTimeout',
+  'upstream-network': 'usage.host.balanceUpstreamNetwork',
+}
+
+/**
+ * Render a coded host message.
+ *
+ * A code this build knows gets the page's own copy with the host's values
+ * interpolated; a code it does not (a newer kernel beside an older UI) keeps
+ * the host's English diagnostic; a host that sent neither degrades to the
+ * caller's fallback — never to a blank line.
+ *
+ * @param host - the host's coded message, when one came with the failure.
+ * @param t - the page's namespace-bound translate seat.
+ * @param fallback - text to show when the code is unknown and `text` is absent.
+ * @returns the display text of the active locale.
+ */
+function hostMessage(host: HostText | undefined, t: UsageTranslate, fallback: string): string {
+  if (host === undefined) return fallback
+  const key = HOST_KEYS[host.code]
+  if (key === undefined) return host.text ?? fallback
+  return t(key, host.params === undefined ? undefined : { ...host.params })
+}
+
+/**
+ * A failure the page shows: the host's coded message when one came with it,
+ * plus the wire's own text as the last resort. Held coded rather than rendered
+ * so a language switch re-labels it.
+ */
+interface Failure {
+  readonly host?: HostText
+  readonly message: string
+}
+
+/** Classify a failure into the coded form the banner renders. */
+function failureOf(failure: unknown): Failure {
+  if (failure instanceof HostError) return { host: failure.host, message: failure.message }
+  return { message: failure instanceof Error ? failure.message : String(failure) }
+}
+
+/** The line for one failure: host copy, the host's diagnostic, or a generic one. */
+function failureText(failure: Failure, t: UsageTranslate): string {
+  const line = hostMessage(failure.host, t, failure.message)
+  return line === '' ? t('usage.error.unknown') : line
 }
 
 // ---------------------------------------------------------------------------
 // summary cards
 // ---------------------------------------------------------------------------
 
-function Cards({ totals }: { totals: UsageAgg }): ReactNode {
+function Cards({ totals, t }: { totals: UsageAgg; t: UsageTranslate }): ReactNode {
   const items: Array<[string, string, string]> = [
-    ['请求数', fmtInt(totals.requests), ''],
-    ['总 tokens', fmtTokens(totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens), '输入+输出+缓存读写'],
-    ['输入 tokens（未命中缓存）', fmtTokens(totals.inputTokens), ''],
-    ['输出 tokens', fmtTokens(totals.outputTokens), ''],
-    ['缓存命中率', fmtPct(totals.cacheHitRate), `${fmtTokens(totals.cacheReadTokens)} 读 / ${fmtTokens(totals.inputTokens + totals.cacheWriteTokens)} 未命中`],
-    ['缓存读 tokens', fmtTokens(totals.cacheReadTokens), ''],
-    ['缓存写 tokens', fmtTokens(totals.cacheWriteTokens), ''],
-    ['推理 tokens', fmtTokens(totals.reasoningTokens), ''],
-    ['估算成本', fmtCost(totals.cost), totals.cost > 0 ? '仅 DeepSeek 官方 API · 分时价估算' : '未配置定价'],
+    [t('usage.card.requests'), fmtInt(totals.requests), ''],
+    [t('usage.card.totalTokens'), fmtTokens(totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens), t('usage.card.totalTokensHint')],
+    [t('usage.card.inputTokens'), fmtTokens(totals.inputTokens), ''],
+    [t('usage.card.outputTokens'), fmtTokens(totals.outputTokens), ''],
+    [t('usage.card.cacheHitRate'), fmtPct(totals.cacheHitRate), t('usage.card.cacheHint', { read: fmtTokens(totals.cacheReadTokens), miss: fmtTokens(totals.inputTokens + totals.cacheWriteTokens) })],
+    [t('usage.card.cacheReadTokens'), fmtTokens(totals.cacheReadTokens), ''],
+    [t('usage.card.cacheWriteTokens'), fmtTokens(totals.cacheWriteTokens), ''],
+    [t('usage.card.reasoningTokens'), fmtTokens(totals.reasoningTokens), ''],
+    [t('usage.card.cost'), fmtCost(totals.cost), totals.cost > 0 ? t('usage.card.costHintPriced') : t('usage.card.costHintUnpriced')],
   ]
   return (
     <div className="dshau_cards">
@@ -125,9 +231,9 @@ type BalanceState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'ok'; balance: UsageBalance; at: number }
-  | { status: 'error'; message: string }
+  | { status: 'error'; failure: Failure }
 
-function BalanceCard(): ReactNode {
+function BalanceCard({ t }: { t: UsageTranslate }): ReactNode {
   const [state, setState] = useState<BalanceState>({ status: 'idle' })
   // In-flight guard lives in a ref so `query` keeps a stable identity: a
   // state-depended callback would recreate itself after every transition
@@ -146,7 +252,7 @@ function BalanceCard(): ReactNode {
       // Silent (mount) failures fall back to the neutral placeholder so an
       // unconfigured key never greets the user with a red error.
       if (fresh) {
-        setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+        setState({ status: 'error', failure: failureOf(error) })
       } else {
         setState({ status: 'idle' })
       }
@@ -160,20 +266,22 @@ function BalanceCard(): ReactNode {
 
   const entry = state.status === 'ok' ? (state.balance.balances.find((b) => b.currency === 'CNY') ?? state.balance.balances[0]) : undefined
   const value = state.status === 'loading'
-    ? '查询中…'
+    ? t('usage.balance.querying')
     : entry !== undefined
       ? `${entry.currency === 'CNY' ? '¥' : ''}${entry.total}${entry.currency !== 'CNY' ? ` ${entry.currency}` : ''}`
       : state.status === 'error'
-        ? '查询失败'
+        ? t('usage.balance.failed')
         : '—'
   const sub = state.status === 'ok' && entry !== undefined
-    ? `赠金 ${entry.granted} · 充值 ${entry.toppedUp}`
+    ? t('usage.balance.detail', { granted: entry.granted, toppedUp: entry.toppedUp })
     : state.status === 'error'
-      ? state.message
-      : '点击查询 DeepSeek 官方账户'
+      ? failureText(state.failure, t)
+      : t('usage.balance.idle')
   const subClass = state.status === 'error' ? 'dshau_cardSub dshau_cardSubError' : 'dshau_cardSub'
   const queriedAt = state.status === 'ok'
-    ? ` · ${String(new Date(state.at).getHours()).padStart(2, '0')}:${String(new Date(state.at).getMinutes()).padStart(2, '0')} 查询`
+    ? t('usage.balance.queriedAt', {
+      time: `${String(new Date(state.at).getHours()).padStart(2, '0')}:${String(new Date(state.at).getMinutes()).padStart(2, '0')}`,
+    })
     : ''
 
   return (
@@ -181,7 +289,7 @@ function BalanceCard(): ReactNode {
       className="dshau_card dshau_cardClickable"
       role="button"
       tabIndex={0}
-      aria-label="查询 DeepSeek 官方账户余额"
+      aria-label={t('usage.balance.aria')}
       onClick={() => { void query(true) }}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -190,7 +298,7 @@ function BalanceCard(): ReactNode {
         }
       }}
     >
-      <div className="dshau_cardLabel">API 余额{queriedAt}</div>
+      <div className="dshau_cardLabel">{t('usage.balance.label')}{queriedAt}</div>
       <div className="dshau_cardValue">{value}</div>
       <div className={subClass} title={sub}>{sub}</div>
     </div>
@@ -210,20 +318,23 @@ function cellLevel(value: number, max: number): number {
   return 1
 }
 
-function HeatCalendar({ heat, metric, onTip }: { heat: HeatmapWire; metric: 'tokens' | 'requests'; onTip: (tip: Tip | null) => void }): ReactNode {
+function HeatCalendar({ heat, metric, onTip, t }: { heat: HeatmapWire; metric: 'tokens' | 'requests'; onTip: (tip: Tip | null) => void; t: UsageTranslate }): ReactNode {
   const { cells, weeks } = heat
   const max = cells.reduce((m, cell) => {
     const v = metric === 'tokens' ? cell.totalTokens : cell.requests
     return v > m ? v : m
   }, 0)
-  const dows = ['日', '一', '二', '三', '四', '五', '六']
+  const dows = [
+    t('usage.cal.dow.sun'), t('usage.cal.dow.mon'), t('usage.cal.dow.tue'), t('usage.cal.dow.wed'),
+    t('usage.cal.dow.thu'), t('usage.cal.dow.fri'), t('usage.cal.dow.sat'),
+  ]
   const firstDow = new Date(`${cells[0]!.date}T00:00:00`).getDay()
   const monthLabels: string[] = []
   const monthSpans: number[] = []
   for (let w = 0; w < weeks; w += 1) {
     const date = cells[w * 7]!.date
     const prev = w > 0 ? cells[(w - 1) * 7]!.date : ''
-    monthLabels.push(w === 0 || date.slice(0, 7) !== prev.slice(0, 7) ? `${Number(date.slice(5, 7))}月` : '')
+    monthLabels.push(w === 0 || date.slice(0, 7) !== prev.slice(0, 7) ? monthLabel(Number(date.slice(5, 7)), t) : '')
     monthSpans.push(0)
   }
   let nextLabel = weeks
@@ -234,8 +345,8 @@ function HeatCalendar({ heat, metric, onTip }: { heat: HeatmapWire; metric: 'tok
   }
   const tipText = (cell: HeatmapWire['cells'][number]): string[] => [
     cell.date,
-    `请求 ${cell.requests} · 总 tokens ${fmtTokens(cell.totalTokens)}`,
-    `缓存命中率 ${fmtPct(cell.cacheHitRate)}`,
+    t('usage.cal.tipRequests', { requests: cell.requests, tokens: fmtTokens(cell.totalTokens) }),
+    t('usage.cal.tipHitRate', { rate: fmtPct(cell.cacheHitRate) }),
   ]
   return (
     <div
@@ -284,17 +395,17 @@ function HeatCalendar({ heat, metric, onTip }: { heat: HeatmapWire; metric: 'tok
 // Stack order = bottom → top. Cache-read sits at the bottom because it is the
 // stable base layer (often >90% of tokens); the thin input/output/write bands
 // ride on top where their day-to-day variation stays visible.
-const SEGMENTS: Array<{ key: 'cacheReadTokens' | 'inputTokens' | 'cacheWriteTokens' | 'outputTokens'; label: string; color: string }> = [
-  { key: 'cacheReadTokens', label: '缓存读', color: 'var(--dsw-alias-state-success-primary)' },
-  { key: 'inputTokens', label: '输入', color: 'var(--dsw-alias-brand-primary)' },
-  { key: 'cacheWriteTokens', label: '缓存写', color: 'var(--dsw-alias-state-warn-primary)' },
-  { key: 'outputTokens', label: '输出', color: 'var(--dsw-alias-state-business-primary)' },
+const SEGMENTS: Array<{ key: 'cacheReadTokens' | 'inputTokens' | 'cacheWriteTokens' | 'outputTokens'; labelKey: UsageKey; color: string }> = [
+  { key: 'cacheReadTokens', labelKey: 'usage.seg.cacheRead', color: 'var(--dsw-alias-state-success-primary)' },
+  { key: 'inputTokens', labelKey: 'usage.seg.input', color: 'var(--dsw-alias-brand-primary)' },
+  { key: 'cacheWriteTokens', labelKey: 'usage.seg.cacheWrite', color: 'var(--dsw-alias-state-warn-primary)' },
+  { key: 'outputTokens', labelKey: 'usage.seg.output', color: 'var(--dsw-alias-state-business-primary)' },
 ]
 
-const TREND_METRICS: Array<{ id: TrendMetric; label: string }> = [
-  { id: 'tokens', label: 'Tokens' },
-  { id: 'requests', label: '请求数' },
-  { id: 'cost', label: '成本' },
+const TREND_METRICS: Array<{ id: TrendMetric; labelKey: UsageKey }> = [
+  { id: 'tokens', labelKey: 'usage.metric.tokens' },
+  { id: 'requests', labelKey: 'usage.metric.requests' },
+  { id: 'cost', labelKey: 'usage.metric.cost' },
 ]
 
 /** Smallest round value ≥ value from the 1/2/2.5/5 ladder. */
@@ -343,11 +454,12 @@ function groupWeekly(daily: UsageAgg[]): TrendPoint[] {
   return points
 }
 
-function TrendChart({ daily, range, metric, onTip }: {
+function TrendChart({ daily, range, metric, onTip, t }: {
   daily: UsageAgg[]
   range: number
   metric: TrendMetric
   onTip: (tip: Tip | null) => void
+  t: UsageTranslate
 }): ReactNode {
   const W = 680
   const H = 240
@@ -381,21 +493,31 @@ function TrendChart({ daily, range, metric, onTip }: {
     const lines = metric === 'tokens'
       ? [
         p.range,
-        `请求 ${fmtInt(p.requests)} · 命中率 ${fmtPct(p.cacheHitRate)}`,
-        `输入 ${fmtTokens(p.inputTokens)} · 缓存读 ${fmtTokens(p.cacheReadTokens)}`,
-        `缓存写 ${fmtTokens(p.cacheWriteTokens)} · 输出 ${fmtTokens(p.outputTokens)}`,
-        `成本 ${fmtCost(p.cost)}`,
+        t('usage.tip.requestsHit', { requests: fmtInt(p.requests), rate: fmtPct(p.cacheHitRate) }),
+        t('usage.tip.inputCacheRead', { input: fmtTokens(p.inputTokens), cacheRead: fmtTokens(p.cacheReadTokens) }),
+        t('usage.tip.cacheWriteOutput', { cacheWrite: fmtTokens(p.cacheWriteTokens), output: fmtTokens(p.outputTokens) }),
+        t('usage.tip.cost', { cost: fmtCost(p.cost) }),
       ]
       : metric === 'requests'
-        ? [p.range, `请求 ${fmtInt(p.requests)}`, `命中率 ${fmtPct(p.cacheHitRate)}`, `成本 ${fmtCost(p.cost)}`]
-        : [p.range, `成本 ${fmtCost(p.cost)}`, `请求 ${fmtInt(p.requests)}`, `命中率 ${fmtPct(p.cacheHitRate)}`]
+        ? [
+          p.range,
+          t('usage.tip.requests', { requests: fmtInt(p.requests) }),
+          t('usage.tip.hitRate', { rate: fmtPct(p.cacheHitRate) }),
+          t('usage.tip.cost', { cost: fmtCost(p.cost) }),
+        ]
+        : [
+          p.range,
+          t('usage.tip.cost', { cost: fmtCost(p.cost) }),
+          t('usage.tip.requests', { requests: fmtInt(p.requests) }),
+          t('usage.tip.hitRate', { rate: fmtPct(p.cacheHitRate) }),
+        ]
     onTip({ text: lines, x, y })
   }
 
   const hitY = (rate: number): number => padT + plotH - rate * plotH
 
   return (
-    <svg className="dshau_chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="每日用量趋势">
+    <svg className="dshau_chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={t('usage.trend.aria')}>
       {/* left axis: gridlines + token/request/cost ticks */}
       {[0, 1, 2, 3].map((g) => {
         const gy = padT + (plotH * g) / 3
@@ -483,25 +605,25 @@ function TrendChart({ daily, range, metric, onTip }: {
 }
 
 /** Legend row for the trend chart (segments in tokens mode, line ditto). */
-function TrendLegend({ metric }: { metric: TrendMetric }): ReactNode {
+function TrendLegend({ metric, t }: { metric: TrendMetric; t: UsageTranslate }): ReactNode {
   return (
     <div className="dshau_legend">
       {metric === 'tokens' && SEGMENTS.map((seg) => (
         <span className="dshau_legendItem" key={seg.key}>
           <span className="dshau_legendSwatch" style={{ background: seg.color }} />
-          {seg.label}
+          {t(seg.labelKey)}
         </span>
       ))}
       {metric !== 'tokens' && (
         <span className="dshau_legendItem">
           <span className="dshau_legendSwatch" style={{ background: 'var(--dsw-alias-brand-primary)' }} />
-          {metric === 'requests' ? '请求数' : '成本'}
+          {t(metric === 'requests' ? 'usage.metric.requests' : 'usage.metric.cost')}
         </span>
       )}
       {metric === 'tokens' && (
         <span className="dshau_legendItem">
           <span className="dshau_legendLine" />
-          缓存命中率
+          {t('usage.card.cacheHitRate')}
         </span>
       )}
     </div>
@@ -512,24 +634,24 @@ function TrendLegend({ metric }: { metric: TrendMetric }): ReactNode {
 // per-model table
 // ---------------------------------------------------------------------------
 
-function ModelTable({ models }: { models: UsageModelAgg[] }): ReactNode {
+function ModelTable({ models, t }: { models: UsageModelAgg[]; t: UsageTranslate }): ReactNode {
   if (models.length === 0) {
-    return <div className="dshau_empty">暂无数据</div>
+    return <div className="dshau_empty">{t('usage.models.empty')}</div>
   }
   return (
     <div className="dshau_tableWrap">
       <table className="dshau_table">
         <thead>
           <tr>
-            <th>模型</th>
-            <th>请求</th>
-            <th>输入</th>
-            <th>输出</th>
-            <th>缓存读</th>
-            <th>缓存写</th>
-            <th>命中率</th>
-            <th>成本</th>
-            <th>占比</th>
+            <th>{t('usage.col.model')}</th>
+            <th>{t('usage.col.requests')}</th>
+            <th>{t('usage.col.input')}</th>
+            <th>{t('usage.col.output')}</th>
+            <th>{t('usage.col.cacheRead')}</th>
+            <th>{t('usage.col.cacheWrite')}</th>
+            <th>{t('usage.col.hitRate')}</th>
+            <th>{t('usage.col.cost')}</th>
+            <th>{t('usage.col.share')}</th>
           </tr>
         </thead>
         <tbody>
@@ -563,12 +685,12 @@ function ModelTable({ models }: { models: UsageModelAgg[] }): ReactNode {
 
 const RANGES = [7, 30, 90, 365] as const
 
-export function UsageSection(): ReactNode {
+export function UsageSection({ t }: UsageSectionProps): ReactNode {
   const [range, setRange] = useState<number>(30)
   const [metric, setMetric] = useState<TrendMetric>('tokens')
   const [heatMetric, setHeatMetric] = useState<'tokens' | 'requests'>('tokens')
   const [auto, setAuto] = useState<boolean>(true)
-  const [error, setError] = useState('')
+  const [error, setError] = useState<Failure | null>(null)
   const [summary, setSummary] = useState<SummaryWire | null>(null)
   const [heat, setHeat] = useState<HeatmapWire | null>(null)
   const [tip, setTip] = useState<Tip | null>(null)
@@ -579,13 +701,13 @@ export function UsageSection(): ReactNode {
     try {
       const [nextSummary, nextHeat] = await Promise.all([
         fetchJson<SummaryWire>(`/plugins/@dsh-app/plugin-usage/api/summary?days=${range}`),
-        fetchJson<HeatmapWire>('/plugins/@dsh-app/plugin-usage/api/heatmap?weeks=26'),
+        fetchJson<HeatmapWire>(`/plugins/@dsh-app/plugin-usage/api/heatmap?weeks=${HEAT_WEEKS}`),
       ])
       setSummary(nextSummary)
       setHeat(nextHeat)
-      setError('')
+      setError(null)
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError))
+      setError(failureOf(loadError))
     }
   }, [range])
 
@@ -631,19 +753,19 @@ export function UsageSection(): ReactNode {
   if (disabled === true) {
     return (
       <section className="dshau_section">
-        <div className="dshau_empty">内置用量统计已在用户配置中停用（enabled=false）。将 storages/dsh-app-plugin-usage/config.json 中的 enabled 改为 true 或删除该文件后重启即可恢复。</div>
+        <div className="dshau_empty">{t('usage.disabled')}</div>
       </section>
     )
   }
 
-  const loading = summary === null && heat === null && error === ''
+  const loading = summary === null && heat === null && error === null
   const empty = summary !== null && summary.totals.requests === 0
 
   return (
     <section className="dshau_section" aria-labelledby="dsh-app-usage-title">
       <div className="dshau_header">
-        <h2 id="dsh-app-usage-title" className="dshau_title">用量统计</h2>
-        <div className="dshau_tabs" role="tablist" aria-label="统计区间">
+        <h2 id="dsh-app-usage-title" className="dshau_title">{t('usage.title')}</h2>
+        <div className="dshau_tabs" role="tablist" aria-label={t('usage.tabs.aria')}>
           {RANGES.map((days) => (
             <button
               type="button"
@@ -653,37 +775,39 @@ export function UsageSection(): ReactNode {
               onClick={() => { setRange(days) }}
               key={days}
             >
-              {days}
-              天
+              {t('usage.tabs.days', { days })}
             </button>
           ))}
         </div>
-        <button type="button" className="dshau_secondaryButton" onClick={() => { void load() }}>刷新</button>
+        <button type="button" className="dshau_secondaryButton" onClick={() => { void load() }}>{t('usage.refresh')}</button>
         <label className="dshau_autoToggle">
           <input
             type="checkbox"
             checked={auto}
             onChange={(event) => { setAuto(event.target.checked) }}
           />
-          自动刷新
+          {t('usage.autoRefresh')}
         </label>
       </div>
-      {error !== '' && <div className="dshau_banner">{`加载失败：${error}`}</div>}
+      {error !== null && <div className="dshau_banner">{t('usage.loadFailed', { message: failureText(error, t) })}</div>}
       {loading ? (
-        <div className="dshau_empty">加载中…</div>
+        <div className="dshau_empty">{t('usage.loading')}</div>
       ) : empty ? (
         <>
-          <div className="dshau_empty">暂无用量数据</div>
-          <BalanceCard />
+          <div className="dshau_empty">{t('usage.empty')}</div>
+          <BalanceCard t={t} />
         </>
       ) : (
         <>
-          {summary !== null && <Cards totals={summary.totals} />}
-          <BalanceCard />
+          {summary !== null && <Cards totals={summary.totals} t={t} />}
+          <BalanceCard t={t} />
           <div className="dshau_panel">
             <div className="dshau_panelHeader">
               <h3 className="dshau_panelTitle">
-                {`每日热力（最近 26 周${heat !== null ? ` · ${fmtDate(heat.since)} ~ ${fmtDate(heat.until)}` : ''}）`}
+                {t('usage.cal.title', {
+                  weeks: HEAT_WEEKS,
+                  range: heat !== null ? t('usage.cal.titleRange', { since: fmtDate(heat.since), until: fmtDate(heat.until) }) : '',
+                })}
               </h3>
               <div className="dshau_legend">
                 <span className="dshau_legendItem">
@@ -692,22 +816,22 @@ export function UsageSection(): ReactNode {
                     className="dshau_secondaryButton"
                     onClick={() => { setHeatMetric(heatMetric === 'tokens' ? 'requests' : 'tokens') }}
                   >
-                    {`着色依据：${heatMetric === 'tokens' ? 'Tokens' : '请求数'}`}
+                    {t('usage.cal.colorBy', { metric: t(heatMetric === 'tokens' ? 'usage.metric.tokens' : 'usage.metric.requests') })}
                   </button>
                 </span>
-                <span className="dshau_legendItem">少</span>
+                <span className="dshau_legendItem">{t('usage.cal.less')}</span>
                 {[0, 1, 2, 3, 4].map((level) => (
                   <span className="dshau_legendCell" data-level={level} key={level} />
                 ))}
-                <span className="dshau_legendItem">多</span>
+                <span className="dshau_legendItem">{t('usage.cal.more')}</span>
               </div>
             </div>
-            {heat !== null && <HeatCalendar heat={heat} metric={heatMetric} onTip={setTip} />}
+            {heat !== null && <HeatCalendar heat={heat} metric={heatMetric} onTip={setTip} t={t} />}
           </div>
           <div className="dshau_panel">
             <div className="dshau_panelHeader">
-              <h3 className="dshau_panelTitle">{`每日趋势（近 ${range} 天${range > 60 ? '，按周聚合' : ''}）`}</h3>
-              <div className="dshau_tabs dshau_metricTabs" role="tablist" aria-label="趋势指标">
+              <h3 className="dshau_panelTitle">{t('usage.trend.title', { days: range, weekly: range > 60 ? t('usage.trend.weekly') : '' })}</h3>
+              <div className="dshau_tabs dshau_metricTabs" role="tablist" aria-label={t('usage.metric.aria')}>
                 {TREND_METRICS.map((m) => (
                   <button
                     type="button"
@@ -717,19 +841,19 @@ export function UsageSection(): ReactNode {
                     onClick={() => { setMetric(m.id) }}
                     key={m.id}
                   >
-                    {m.label}
+                    {t(m.labelKey)}
                   </button>
                 ))}
               </div>
-              <TrendLegend metric={metric} />
+              <TrendLegend metric={metric} t={t} />
             </div>
             {summary !== null && (
-              <TrendChart daily={summary.daily} range={range} metric={metric} onTip={setTip} />
+              <TrendChart daily={summary.daily} range={range} metric={metric} onTip={setTip} t={t} />
             )}
           </div>
           <div className="dshau_panel">
-            <h3 className="dshau_panelTitle">{`按模型用量（近 ${range} 天）`}</h3>
-            <ModelTable models={summary?.models ?? []} />
+            <h3 className="dshau_panelTitle">{t('usage.models.title', { days: range })}</h3>
+            <ModelTable models={summary?.models ?? []} t={t} />
           </div>
         </>
       )}

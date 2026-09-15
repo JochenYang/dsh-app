@@ -25,12 +25,19 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
 import type { CatalogEntry, CatalogValue, InstalledPackage, SourcesValue, UpdateValue } from './api.ts'
 import { categoryOptionsOf, entryMatchesQuery } from './catalog-filter.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
+import { type HostText } from '../errors.ts'
+import { NS } from './locales.ts'
+import { hostMessage, sourceReasonOf, type Translate } from './messages.ts'
+
+/** Props delivered by the sidebar slot: column state + this panel's `t` seat. */
+export type MarketFooterActionProps = { wide: boolean } & PropsLocale<typeof NS>
 
 type Tab = 'catalog' | 'installed' | 'sources'
 
@@ -92,18 +99,24 @@ function isLongOutput(output: string): boolean {
 }
 
 /** Humanized cache age for the hint ("3 分钟前"); sub-minute reads as fresh. */
-function cacheAgeText(cachedAt: number): string {
+function cacheAgeText(cachedAt: number, t: Translate): string {
   const minutes = Math.max(0, Math.floor((Date.now() - cachedAt) / 60_000))
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟前`
+  if (minutes < 1) return t('mkt.age.now')
+  if (minutes < 60) return t('mkt.age.minutes', { minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
-  return `${Math.floor(hours / 24)} 天前`
+  if (hours < 24) return t('mkt.age.hours', { hours })
+  return t('mkt.age.days', { days: Math.floor(hours / 24) })
 }
 
-function messageOf(error: unknown): string {
-  if (error instanceof MarketApiError) return error.message
-  return error instanceof Error ? error.message : '请求失败'
+/**
+ * One message's text: an API failure carries the host's coded message, which
+ * this panel renders in its own language (an unknown code falls back to the
+ * host's English diagnostic), while the unknown-error fallback is a key of this
+ * panel's dictionary.
+ */
+function messageOf(error: unknown, t: Translate): string {
+  if (error instanceof MarketApiError) return hostMessage(error.host, t, error.message)
+  return error instanceof Error ? error.message : t('mkt.error.request')
 }
 
 /**
@@ -111,14 +124,14 @@ function messageOf(error: unknown): string {
  * ones start collapsed behind a "查看日志" toggle so a full pnpm log cannot
  * flood the panel.
  */
-function StripOutput({ output }: { output: string }): ReactNode {
+function StripOutput({ output, t }: { output: string, t: Translate }): ReactNode {
   const [expanded, setExpanded] = useState(false)
   const long = isLongOutput(output)
   return (
     <>
       {long ? (
         <button type="button" className="dshMkt-logToggle" onClick={() => setExpanded(flag => !flag)}>
-          {expanded ? '收起日志' : '查看日志'}
+          {expanded ? t('mkt.log.collapse') : t('mkt.log.expand')}
         </button>
       ) : null}
       {!long || expanded ? <pre className="dshMkt-log">{output}</pre> : null}
@@ -134,19 +147,20 @@ function StripOutput({ output }: { output: string }): ReactNode {
  * points at the manual fix instead.
  */
 function BlockedBuildBar({
-  names, retryPackage, busyPackage, onRetry,
+  names, retryPackage, busyPackage, onRetry, t,
 }: {
   names: readonly string[]
   retryPackage: string | undefined
   busyPackage: string | null
   onRetry: (pkg: string, names: readonly string[]) => void
+  t: Translate
 }): ReactNode {
   return (
     <div className="dshMkt-blockedBar">
       <span className="dshMkt-stripText">
         {names.length > 0
-          ? `以下包的构建脚本被拦截，可能影响功能：${names.join('、')}`
-          : '有依赖的构建脚本被拦截但未能识别包名，可在 profile 的 pnpm-workspace.yaml 的 onlyBuiltDependencies 中手动放行。'}
+          ? t('mkt.blocked.names', { names: names.join(t('mkt.names.separator')) })
+          : t('mkt.blocked.unknown')}
       </span>
       {names.length > 0 && retryPackage !== undefined ? (
         <button
@@ -156,7 +170,7 @@ function BlockedBuildBar({
           onClick={() => { onRetry(retryPackage, names) }}
         >
           {busyPackage === retryPackage ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
-          {busyPackage === retryPackage ? ' 放行中…' : '放行并重试'}
+          {busyPackage === retryPackage ? t('mkt.blocked.busy') : t('mkt.blocked.retry')}
         </button>
       ) : null}
     </div>
@@ -186,8 +200,8 @@ function MarketGlyph({ size }: { size: number }): ReactNode {
  * (42px row / 36px rail circle, 16px wide icon / 18px rail icon) so both foot
  * rows read as one control set.
  */
-export function MarketFooterAction(props: { wide: boolean }): ReactNode {
-  const { wide } = props
+export function MarketFooterAction(props: MarketFooterActionProps): ReactNode {
+  const { wide, t } = props
   const [open, setOpen] = useState(false)
   return (
     <>
@@ -196,14 +210,14 @@ export function MarketFooterAction(props: { wide: boolean }): ReactNode {
         className={wide ? 'dshMkt-rowBtn' : 'dshMkt-iconBtn'}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label="插件市场"
-        title="插件市场"
+        aria-label={t('mkt.nav')}
+        title={t('mkt.nav')}
         onClick={() => setOpen(true)}
       >
         <MarketGlyph size={wide ? 16 : 18} />
-        {wide ? <span>插件市场</span> : null}
+        {wide ? <span>{t('mkt.nav')}</span> : null}
       </button>
-      {open ? <MarketPanel onClose={() => setOpen(false)} /> : null}
+      {open ? <MarketPanel onClose={() => setOpen(false)} t={t} /> : null}
     </>
   )
 }
@@ -212,7 +226,7 @@ export function MarketFooterAction(props: { wide: boolean }): ReactNode {
  * The drawer body. Mounts only while open (the entry above unmounts it), so
  * every open starts from fresh data.
  */
-function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
+function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): ReactNode {
   const [tab, setTab] = useState<Tab>('catalog')
   const [strip, setStrip] = useState<Strip | null>(null)
   const [loading, setLoading] = useState(true)
@@ -221,7 +235,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [cacheInfo, setCacheInfo] = useState<ServedCatalogInfo | null>(null)
   const [entries, setEntries] = useState<readonly CatalogEntry[]>([])
-  const [failedSources, setFailedSources] = useState<ReadonlyArray<{ url: string, reason: string }>>([])
+  const [failedSources, setFailedSources] = useState<ReadonlyArray<{ url: string, reason: HostText }>>([])
   /** The catalog request itself failed (kept apart from per-source failures). */
   const [catalogError, setCatalogError] = useState<string | null>(null)
   const [installed, setInstalled] = useState<readonly InstalledPackage[]>([])
@@ -321,13 +335,13 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       const value = await marketApi.installed()
       setInstalled(value.packages)
     } catch (error) {
-      setStrip({ kind: 'error', text: `已安装列表读取失败：${messageOf(error)}` })
+      setStrip({ kind: 'error', text: t('mkt.installed.loadFailed', { message: messageOf(error, t) }) })
       return
     } finally {
       setInstalledLoading(false)
     }
     void loadInstalledUpdates()
-  }, [loadInstalledUpdates])
+  }, [loadInstalledUpdates, t])
 
   /**
    * Force reload: skips the host cache and pays the live fetch. The spinner
@@ -340,11 +354,11 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
     } catch (error) {
       // The request (not a source) failed: the catalog tab shows the reason
       // with a prominent reload, not the top strip alone.
-      setCatalogError(messageOf(error))
+      setCatalogError(messageOf(error, t))
     } finally {
       setLoading(false)
     }
-  }, [applyCatalogValue])
+  }, [applyCatalogValue, t])
 
   useEffect(() => {
     let cancelled = false
@@ -358,14 +372,14 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
         if (cancelled) return
         applyCatalogValue(served)
       } catch (error) {
-        if (!cancelled) setCatalogError(messageOf(error))
+        if (!cancelled) setCatalogError(messageOf(error, t))
       } finally {
         if (!cancelled) setLoading(false)
       }
     })()
     void loadInstalled()
     return () => { cancelled = true }
-  }, [applyCatalogValue, loadInstalled])
+  }, [applyCatalogValue, loadInstalled, t])
 
   // Keys are normalized npm names: a catalog source's casing must never hide
   // a same-name collision.
@@ -391,7 +405,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       setStrip(null)
       return true
     } catch (error) {
-      setStrip({ kind: 'error', text: `保存失败：${messageOf(error)}` })
+      setStrip({ kind: 'error', text: t('mkt.sources.saveFailed', { message: messageOf(error, t) }) })
       return false
     } finally {
       setSavingSources(false)
@@ -433,11 +447,15 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       const result = await marketApi.install(entry.package, undefined, crossOrigin ? true : undefined, entry.repoKey)
       void loadInstalled()
       const replacedNote = result.replacedLocal === true
-        ? '（已替换原来的本地/Git 版本）'
-        : (crossOrigin ? '（已替换原来的同名插件）' : '')
+        ? t('mkt.install.replacedLocal')
+        : (crossOrigin ? t('mkt.install.replacedCrossOrigin') : '')
       setStrip({
         kind: 'ok',
-        text: `已安装 ${entry.package}${result.version === undefined ? '' : `@${result.version}`}，重启应用后生效。${replacedNote}`,
+        text: t('mkt.install.done', {
+          package: entry.package,
+          version: result.version === undefined ? '' : `@${result.version}`,
+          note: replacedNote,
+        }),
         output: result.output,
         ...blockedStripFields(result.blockedBuilds, entry.package),
       })
@@ -445,7 +463,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       const blocked = error instanceof MarketApiError ? error.blockedBuilds : undefined
       setStrip({
         kind: 'error',
-        text: `安装失败：${messageOf(error)}`,
+        text: t('mkt.install.failed', { message: messageOf(error, t) }),
         ...blockedStripFields(blocked, entry.package),
       })
     } finally {
@@ -466,7 +484,10 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       void loadInstalled()
       setStrip({
         kind: 'ok',
-        text: `已放行构建脚本并重新安装 ${pkgName}${result.version === undefined ? '' : `@${result.version}`}，重启应用后生效。`,
+        text: t('mkt.allowBuild.done', {
+          package: pkgName,
+          version: result.version === undefined ? '' : `@${result.version}`,
+        }),
         output: result.output,
         ...blockedStripFields(result.blockedBuilds, pkgName),
       })
@@ -474,7 +495,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       const blocked = error instanceof MarketApiError ? error.blockedBuilds : undefined
       setStrip({
         kind: 'error',
-        text: `放行并重试失败：${messageOf(error)}`,
+        text: t('mkt.allowBuild.failed', { message: messageOf(error, t) }),
         ...blockedStripFields(blocked, pkgName),
       })
     } finally {
@@ -494,7 +515,10 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       void loadInstalled()
       setStrip({
         kind: 'ok',
-        text: `已更新 ${pkg.name}${result.version === undefined ? '' : `@${result.version}`}，重启应用后生效。`,
+        text: t('mkt.update.done', {
+          package: pkg.name,
+          version: result.version === undefined ? '' : `@${result.version}`,
+        }),
         output: result.output,
         ...blockedStripFields(result.blockedBuilds, pkg.name),
       })
@@ -503,7 +527,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       const blocked = error instanceof MarketApiError ? error.blockedBuilds : undefined
       setStrip({
         kind: 'error',
-        text: `更新失败：${messageOf(error)}`,
+        text: t('mkt.update.failed', { message: messageOf(error, t) }),
         ...blockedStripFields(blocked, pkg.name),
       })
       return false
@@ -527,8 +551,11 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
       if (!ok) failed += 1
     }
     setStrip(failed === 0
-      ? { kind: 'ok', text: `已更新 ${targets.length} 个插件，重启应用后生效。` }
-      : { kind: 'error', text: `批量更新结束：${targets.length - failed} 个成功，${failed} 个失败，可逐个重试。` })
+      ? { kind: 'ok', text: t('mkt.updateAll.done', { count: targets.length }) }
+      : {
+        kind: 'error',
+        text: t('mkt.updateAll.partial', { ok: targets.length - failed, failed }),
+      })
   }
 
   const uninstall = async (pkg: InstalledPackage): Promise<void> => {
@@ -538,9 +565,9 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
     try {
       const result = await marketApi.uninstall(pkg.name)
       void loadInstalled()
-      setStrip({ kind: 'ok', text: `已卸载 ${pkg.name}，重启应用后生效。`, output: result.output })
+      setStrip({ kind: 'ok', text: t('mkt.uninstall.done', { package: pkg.name }), output: result.output })
     } catch (error) {
-      setStrip({ kind: 'error', text: `卸载失败：${messageOf(error)}` })
+      setStrip({ kind: 'error', text: t('mkt.uninstall.failed', { message: messageOf(error, t) }) })
     } finally {
       setBusyPackage(null)
     }
@@ -552,9 +579,19 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
     try {
       const value = await marketApi.toggle(pkg.name, pkg.entryId, !pkg.enabled)
       void loadInstalled()
-      setStrip({ kind: 'ok', text: `已${value.enabled ? '启用' : '停用'} ${value.package}，已生效（配置热重载）。` })
+      setStrip({
+        kind: 'ok',
+        text: value.enabled
+          ? t('mkt.toggle.enabled', { package: value.package })
+          : t('mkt.toggle.disabled', { package: value.package }),
+      })
     } catch (error) {
-      setStrip({ kind: 'error', text: `${pkg.enabled ? '停用' : '启用'}失败：${messageOf(error)}` })
+      setStrip({
+        kind: 'error',
+        text: pkg.enabled
+          ? t('mkt.toggle.disableFailed', { message: messageOf(error, t) })
+          : t('mkt.toggle.enableFailed', { message: messageOf(error, t) }),
+      })
     } finally {
       setTogglingPackage(null)
     }
@@ -570,9 +607,12 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
     if (installTarget === null) return ''
     const installed = installedByName.get(normalizeNpmName(installTarget.entry.package))
     const warning = installTarget.crossOrigin && installed !== undefined
-      ? `已安装的同名插件来自不同仓库（本地：${installed.repoKey ?? '未知来源'}），安装将替换它。`
+      ? t('mkt.install.crossOrigin', { repo: installed.repoKey ?? t('mkt.unknownRepo') })
       : ''
-    return `${warning}将安装 ${installTarget.entry.package}（${installTarget.entry.name}）。安装会执行该包随包携带的安装脚本，请确认它来自你信任的软件源。`
+    return `${warning}${t('mkt.install.confirm', {
+      package: installTarget.entry.package,
+      name: installTarget.entry.name,
+    })}`
   }
 
   return (
@@ -585,19 +625,19 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
         type="button"
         className="dshMkt-handle"
         onClick={requestClose}
-        aria-label="收起插件市场"
-        title="收起"
+        aria-label={t('mkt.close.aria')}
+        title={t('mkt.close.title')}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
-      <div className="dshMkt-panel" role="dialog" aria-modal="false" aria-label="插件市场">
+      <div className="dshMkt-panel" role="dialog" aria-modal="false" aria-label={t('mkt.nav')}>
         <div className="dshMkt-head">
-          <h2 className="dshMkt-title">插件市场</h2>
+          <h2 className="dshMkt-title">{t('mkt.nav')}</h2>
         </div>
         <div className="dshMkt-tabs" role="tablist">
-          {([['catalog', '目录'], ['installed', '已安装'], ['sources', '软件源']] as const).map(([key, label]) => (
+          {([['catalog', 'mkt.tab.catalog'], ['installed', 'mkt.tab.installed'], ['sources', 'mkt.tab.sources']] as const).map(([key, labelKey]) => (
             <button
               key={key}
               type="button"
@@ -606,9 +646,9 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
               className={tab === key ? 'dshMkt-tab dshMkt-tabOn' : 'dshMkt-tab'}
               onClick={() => { setTab(key) }}
             >
-              {key === 'installed' ? `${label}（${installed.length}）` : label}
+              {key === 'installed' ? t('mkt.tab.installedCount', { count: installed.length }) : t(labelKey)}
               {key === 'installed' && updateCount > 0 ? (
-                <span className="dshMkt-tabBadge" title={`${updateCount} 个插件有可用更新`}>
+                <span className="dshMkt-tabBadge" title={t('mkt.updates.title', { count: updateCount })}>
                   {updateCount > 99 ? '99+' : updateCount}
                 </span>
               ) : null}
@@ -620,12 +660,12 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
             <div className={strip.kind === 'error' ? 'dshMkt-banner' : 'dshMkt-noticeOk'} role={strip.kind === 'error' ? 'alert' : 'status'}>
               <div className="dshMkt-stripBody">
                 <span className="dshMkt-stripText">{strip.text}</span>
-                <button type="button" className="dshMkt-stripClose" aria-label="关闭提示" onClick={() => { setStrip(null) }}>
+                <button type="button" className="dshMkt-stripClose" aria-label={t('mkt.strip.close')} onClick={() => { setStrip(null) }}>
                   ×
                 </button>
               </div>
               {strip.output !== undefined && strip.output !== ''
-                ? <StripOutput key={strip.output} output={strip.output} />
+                ? <StripOutput key={strip.output} output={strip.output} t={t} />
                 : null}
               {strip.blockedBuilds !== undefined ? (
                 <BlockedBuildBar
@@ -633,6 +673,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
                   retryPackage={strip.retryPackage}
                   busyPackage={busyPackage}
                   onRetry={(pkgName, names) => { void allowAndRetry(pkgName, names) }}
+                  t={t}
                 />
               ) : null}
             </div>
@@ -651,6 +692,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
               onGoSources={() => { setTab('sources') }}
               onInstall={(entry, crossOrigin) => { setInstallTarget({ entry, crossOrigin }) }}
               onUpdate={(pkg) => { void updatePackage(pkg) }}
+              t={t}
             />
           ) : null}
 
@@ -659,16 +701,16 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
               {updateCount > 0 && !updatesDismissed ? (
                 <div className="dshMkt-noticeOk" role="status">
                   <div className="dshMkt-stripBody">
-                    <span className="dshMkt-stripText">{updateCount} 个插件有可用更新</span>
+                    <span className="dshMkt-stripText">{t('mkt.updates.title', { count: updateCount })}</span>
                     <button
                       type="button"
                       className="dshMkt-button dshMkt-buttonPrimary"
                       disabled={busyPackage !== null || togglingPackage !== null}
                       onClick={() => { void updateAll() }}
                     >
-                      全部更新
+                      {t('mkt.updates.all')}
                     </button>
-                    <button type="button" className="dshMkt-stripClose" aria-label="今日不再提醒" onClick={dismissUpdatesBanner}>
+                    <button type="button" className="dshMkt-stripClose" aria-label={t('mkt.updates.dismiss')} onClick={dismissUpdatesBanner}>
                       ×
                     </button>
                   </div>
@@ -684,6 +726,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
                 onToggle={(pkg) => { void togglePackage(pkg) }}
                 onUninstall={(pkg) => { setConfirmTarget(pkg) }}
                 onUpdate={(pkg) => { void updatePackage(pkg) }}
+                t={t}
               />
             </>
           ) : null}
@@ -698,6 +741,7 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
               onAdd={() => { void addSource() }}
               onRemove={(url) => { void removeSource(url) }}
               onRefresh={() => { void refreshCatalog() }}
+              t={t}
             />
           ) : null}
         </div>
@@ -705,9 +749,10 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
 
       <ConfirmDialog
         open={confirmTarget !== null}
-        title="卸载插件"
-        message={confirmTarget === null ? '' : `确定卸载 ${confirmTarget.name} 吗？卸载会同时从挂载层移除，重启应用后生效。`}
-        confirmLabel="卸载"
+        title={t('mkt.uninstall.title')}
+        message={confirmTarget === null ? '' : t('mkt.uninstall.confirm', { package: confirmTarget.name })}
+        confirmLabel={t('mkt.uninstall.action')}
+        cancelLabel={t('mkt.dialog.cancel')}
         tone="dark"
         busy={busyPackage !== null}
         onConfirm={() => { if (confirmTarget !== null) void uninstall(confirmTarget) }}
@@ -716,9 +761,10 @@ function MarketPanel({ onClose }: { onClose: () => void }): ReactNode {
 
       <ConfirmDialog
         open={installTarget !== null}
-        title="安装插件"
+        title={t('mkt.install.title')}
         message={installConfirmMessage()}
-        confirmLabel="安装"
+        confirmLabel={t('mkt.install.action')}
+        cancelLabel={t('mkt.dialog.cancel')}
         busy={busyPackage !== null}
         onConfirm={() => { if (installTarget !== null) void install(installTarget) }}
         onClose={() => { setInstallTarget(null) }}
@@ -732,7 +778,7 @@ interface CatalogTabProps {
   /** Non-null = the catalog request itself failed (distinct from per-source failures). */
   loadError: string | null
   entries: readonly CatalogEntry[]
-  failedSources: ReadonlyArray<{ url: string, reason: string }>
+  failedSources: ReadonlyArray<{ url: string, reason: HostText }>
   installedByName: ReadonlyMap<string, InstalledPackage>
   busyPackage: string | null
   cacheInfo: ServedCatalogInfo | null
@@ -741,6 +787,7 @@ interface CatalogTabProps {
   /** `crossOrigin` marks the same-name-different-repo install (upgraded confirm + force). */
   onInstall: (entry: CatalogEntry, crossOrigin: boolean) => void
   onUpdate: (pkg: InstalledPackage) => void
+  t: Translate
 }
 
 /** Rows rendered per page: large directories stay past 3000 entries. */
@@ -749,15 +796,15 @@ const CLOSE_ANIMATION_MS = 220
 const CATALOG_PAGE_SIZE = 100
 
 /** "作者 · 下载量/ stars · 分类" byline of a catalog card (parts may be absent). */
-function cardByline(entry: CatalogEntry): string {
+function cardByline(entry: CatalogEntry, t: Translate): string {
   const metric = entry.installs30d !== undefined
-    ? `30 天安装 ${entry.installs30d}`
-    : (entry.stars !== undefined ? `★ ${entry.stars}` : undefined)
+    ? t('mkt.card.installs30d', { count: entry.installs30d })
+    : (entry.stars !== undefined ? `★ ${String(entry.stars)}` : undefined)
   return [entry.owner, metric, entry.category].filter(part => part !== undefined).join(' · ')
 }
 
 function CatalogTab({
-  loading, loadError, entries, failedSources, installedByName, busyPackage, cacheInfo, onRefresh, onGoSources, onInstall, onUpdate,
+  loading, loadError, entries, failedSources, installedByName, busyPackage, cacheInfo, onRefresh, onGoSources, onInstall, onUpdate, t,
 }: CatalogTabProps): ReactNode {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('')
@@ -781,7 +828,7 @@ function CatalogTab({
   if (loading) {
     return (
       <div className="dshMkt-empty">
-        <span className="dshMkt-spinner" aria-hidden="true" /> 正在加载目录…
+        <span className="dshMkt-spinner" aria-hidden="true" /> {t('mkt.catalog.loading')}
       </div>
     )
   }
@@ -791,12 +838,12 @@ function CatalogTab({
   if (loadError !== null || (entries.length === 0 && failedSources.length > 0)) {
     return (
       <div className="dshMkt-failBox" role="alert">
-        <p className="dshMkt-failTitle">目录加载失败</p>
+        <p className="dshMkt-failTitle">{t('mkt.catalog.failTitle')}</p>
         {loadError !== null ? <p className="dshMkt-failReason">{loadError}</p> : null}
         {failedSources.map(item => (
-          <p key={item.url} className="dshMkt-failReason">{item.url} — {item.reason}</p>
+          <p key={item.url} className="dshMkt-failReason">{item.url} — {sourceReasonOf(item.reason, t)}</p>
         ))}
-        <button type="button" className="dshMkt-button dshMkt-buttonPrimary" onClick={onRefresh}>重新加载</button>
+        <button type="button" className="dshMkt-button dshMkt-buttonPrimary" onClick={onRefresh}>{t('mkt.reload')}</button>
       </div>
     )
   }
@@ -805,33 +852,35 @@ function CatalogTab({
       {cacheInfo?.snapshot === true ? (
         <div className="dshMkt-noticeOk" role="status">
           <div className="dshMkt-stripBody">
-            <span className="dshMkt-stripText">离线快照 · {entries.length} 条 · 点击重新加载获取最新</span>
+            <span className="dshMkt-stripText">{t('mkt.catalog.snapshot', { count: entries.length })}</span>
           </div>
           <div className="dshMkt-bannerActions">
-            <button type="button" className="dshMkt-button" onClick={onRefresh}>重新加载</button>
+            <button type="button" className="dshMkt-button" onClick={onRefresh}>{t('mkt.reload')}</button>
           </div>
         </div>
       ) : cacheInfo?.stale === true ? (
         <div className="dshMkt-banner" role="alert">
-          目录源暂时不可用，正在显示 {cacheAgeText(cacheInfo.cachedAt ?? Date.now())}的缓存内容。
+          {t('mkt.catalog.stale', { age: cacheAgeText(cacheInfo.cachedAt ?? Date.now(), t) })}
         </div>
       ) : cacheInfo?.cached === true ? (
         <div className="dshMkt-rowBetween">
           <span className="dshMkt-hint">
-            目录缓存于 {cacheAgeText(cacheInfo.cachedAt ?? Date.now())}，超过 6 小时自动更新
-            {cacheInfo.cachedAt !== undefined && Date.now() - cacheInfo.cachedAt > CATALOG_CACHE_STALE_MS ? '（缓存较旧）' : ''}
+            {t('mkt.catalog.cached', { age: cacheAgeText(cacheInfo.cachedAt ?? Date.now(), t) })}
+            {cacheInfo.cachedAt !== undefined && Date.now() - cacheInfo.cachedAt > CATALOG_CACHE_STALE_MS
+              ? t('mkt.catalog.older')
+              : ''}
           </span>
-          <button type="button" className="dshMkt-button" onClick={onRefresh}>重新加载</button>
+          <button type="button" className="dshMkt-button" onClick={onRefresh}>{t('mkt.reload')}</button>
         </div>
       ) : null}
       {failedSources.length > 0 && cacheInfo?.snapshot !== true ? (
         <div className="dshMkt-banner" role="alert">
-          {failedSources.length} 个目录源获取失败：
+          {t('mkt.catalog.sourcesFailed', { count: failedSources.length })}
           {failedSources.map(item => (
-            <div key={item.url}>{item.url} — {item.reason}</div>
+            <div key={item.url}>{item.url} — {sourceReasonOf(item.reason, t)}</div>
           ))}
           <div className="dshMkt-bannerActions">
-            <button type="button" className="dshMkt-button" onClick={onRefresh}>重新加载</button>
+            <button type="button" className="dshMkt-button" onClick={onRefresh}>{t('mkt.reload')}</button>
           </div>
         </div>
       ) : null}
@@ -839,38 +888,38 @@ function CatalogTab({
         <input
           className="dshMkt-input"
           type="search"
-          placeholder="搜索插件或作者…"
-          aria-label="搜索插件或作者"
+          placeholder={t('mkt.search.placeholder')}
+          aria-label={t('mkt.search.aria')}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
         <select
           className="dshMkt-input dshMkt-select"
-          aria-label="按分类筛选"
+          aria-label={t('mkt.category.aria')}
           value={category}
           onChange={(event) => setCategory(event.target.value)}
         >
-          <option value="">全部分类</option>
+          <option value="">{t('mkt.category.all')}</option>
           {categories.map(option => (
-            <option key={option.key} value={option.key}>{option.label}（{option.count}）</option>
+            <option key={option.key} value={option.key}>{t('mkt.category.option', { label: option.label, count: option.count })}</option>
           ))}
         </select>
       </div>
       <div className="dshMkt-rowBetween">
         <span className="dshMkt-hint">
           {filtered.length === entries.length
-            ? `共 ${entries.length} 个插件，来自已配置的目录源`
-            : `筛选后 ${filtered.length} / 共 ${entries.length} 个插件`}
+            ? t('mkt.catalog.total', { count: entries.length })
+            : t('mkt.catalog.filtered', { shown: filtered.length, total: entries.length })}
         </span>
-        <button type="button" className="dshMkt-button" onClick={onRefresh}>刷新</button>
+        <button type="button" className="dshMkt-button" onClick={onRefresh}>{t('mkt.refresh')}</button>
       </div>
       {entries.length === 0 ? (
         <div className="dshMkt-empty">
-          目录为空。
-          <button type="button" className="dshMkt-button" onClick={onGoSources}>去添加目录源</button>
+          {t('mkt.catalog.empty')}
+          <button type="button" className="dshMkt-button" onClick={onGoSources}>{t('mkt.catalog.goSources')}</button>
         </div>
       ) : filtered.length === 0 ? (
-        <div className="dshMkt-empty">没有匹配的插件，换个关键词或分类试试。</div>
+        <div className="dshMkt-empty">{t('mkt.catalog.noMatch')}</div>
       ) : filtered.slice(0, visible).map(entry => {
         const pkg = installedByName.get(normalizeNpmName(entry.package))
         const busy = busyPackage === entry.package
@@ -883,12 +932,10 @@ function CatalogTab({
         const localPkg = state.kind === 'local-git' ? pkg : undefined
         const localBadge = localPkg === undefined
           ? undefined
-          : (localPkg.source === 'git' ? 'Git 版本已安装' : '本地版本已安装')
+          : (localPkg.source === 'git' ? t('mkt.card.gitInstalled') : t('mkt.card.localInstalled'))
         const localTitle = localPkg === undefined
           ? undefined
-          : (localPkg.source === 'git'
-            ? '该插件以 Git 方式安装（依赖指向 git 源），市场不提供覆盖安装；如需更换请在本地更新后重装'
-            : '该插件以本地文件方式安装（依赖指向 file: 路径），市场不提供覆盖安装；如需更换请重新打包安装')
+          : (localPkg.source === 'git' ? t('mkt.card.gitTitle') : t('mkt.card.localTitle'))
         // Updates ride the same-origin path alone: a cross-origin or
         // local/git "update" would replace a different plugin's install.
         const updatable = state.kind === 'same-origin'
@@ -906,7 +953,7 @@ function CatalogTab({
                 <button
                   type="button"
                   className="dshMkt-pkgName dshMkt-linkName"
-                  title="打开仓库主页（系统浏览器）"
+                  title={t('mkt.card.homepage')}
                   onClick={openHomepage}
                 >
                   {entry.name}
@@ -921,19 +968,19 @@ function CatalogTab({
                   <span className="dshMkt-actionPair">
                     <span
                       className="dshMkt-badge dshMkt-badgeWarn"
-                      title="已安装的同名插件来自另一个仓库，和该目录条目不是同一个插件"
+                      title={t('mkt.card.crossOriginTitle')}
                     >
-                      同名不同源
+                      {t('mkt.card.crossOriginBadge')}
                     </span>
                     <button
                       type="button"
                       className="dshMkt-button dshMkt-buttonPrimary"
                       disabled={busyPackage !== null}
-                      title="安装将替换本地已安装的同名插件，需要再次确认"
+                      title={t('mkt.card.forceTitle')}
                       onClick={() => onInstall(entry, true)}
                     >
                       {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
-                      {busy ? ' 安装中…' : '安装'}
+                      {busy ? t('mkt.install.busy') : t('mkt.install.action')}
                     </button>
                   </span>
                 ) : pkg === undefined ? (
@@ -944,26 +991,28 @@ function CatalogTab({
                     onClick={() => onInstall(entry, false)}
                   >
                     {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
-                    {busy ? ' 安装中…' : '安装'}
+                    {busy ? t('mkt.install.busy') : t('mkt.install.action')}
                   </button>
                 ) : updatable ? (
                   <button
                     type="button"
                     className="dshMkt-button dshMkt-buttonPrimary"
                     disabled={busyPackage !== null}
-                    title={pkg.latest !== undefined ? `更新到 ${pkg.latest}（走安装流程）` : '更新到 npm latest（走安装流程）'}
+                    title={pkg.latest !== undefined
+                      ? t('mkt.update.toLatest', { version: pkg.latest })
+                      : t('mkt.update.toNpmLatest')}
                     onClick={() => onUpdate(pkg)}
                   >
                     {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
-                    {busy ? ' 更新中…' : '更新'}
+                    {busy ? t('mkt.update.busy') : t('mkt.update.action')}
                   </button>
                 ) : (
-                  <span className="dshMkt-badge dshMkt-badgeOn">已安装</span>
+                  <span className="dshMkt-badge dshMkt-badgeOn">{t('mkt.installed.badge')}</span>
                 )}
               </span>
             </div>
-            <div className="dshMkt-cardByline">{cardByline(entry)}</div>
-            <p className="dshMkt-desc">{entry.description === '' ? '（暂无描述）' : entry.description}</p>
+            <div className="dshMkt-cardByline">{cardByline(entry, t)}</div>
+            <p className="dshMkt-desc">{entry.description === '' ? t('mkt.card.noDescription') : entry.description}</p>
             <div className="dshMkt-meta">{entry.package}</div>
             <div className="dshMkt-cardTags">
               {entry.category !== undefined ? <span className="dshMkt-badge">{entry.category}</span> : null}
@@ -971,17 +1020,17 @@ function CatalogTab({
                 <span
                   className="dshMkt-badge dshMkt-badgeOff"
                   title={entry.homepage !== undefined
-                    ? `未发布 npm 包，请到 ${entry.homepage} 查看源码`
-                    : '未发布 npm 包，暂不能一键安装'}
+                    ? t('mkt.card.sourceOnlyHome', { homepage: entry.homepage })
+                    : t('mkt.card.sourceOnlyNoHome')}
                 >
-                  仅源码
+                  {t('mkt.card.sourceOnly')}
                 </span>
               ) : null}
               {entry.version !== undefined ? (
-                <span className="dshMkt-badge" title="目录声明的版本（仅供展示，安装时以 npm registry 为准）">v{entry.version}</span>
+                <span className="dshMkt-badge" title={t('mkt.card.versionTitle')}>v{entry.version}</span>
               ) : null}
               {state.kind === 'local-git' && state.sameRepo ? (
-                <span className="dshMkt-badge" title="已安装的本地/Git 版本与该目录条目来自同一仓库">同源</span>
+                <span className="dshMkt-badge" title={t('mkt.card.sameRepoTitle')}>{t('mkt.card.sameRepo')}</span>
               ) : null}
             </div>
           </div>
@@ -990,7 +1039,7 @@ function CatalogTab({
       }
       {filtered.length > visible ? (
         <button type="button" className="dshMkt-button" onClick={() => setVisible(count => count + CATALOG_PAGE_SIZE)}>
-          显示更多（还有 {filtered.length - visible} 个）
+          {t('mkt.catalog.showMore', { count: filtered.length - visible })}
         </button>
       ) : null}
     </>
@@ -1008,15 +1057,16 @@ interface InstalledTabProps {
   onToggle: (pkg: InstalledPackage) => void
   onUninstall: (pkg: InstalledPackage) => void
   onUpdate: (pkg: InstalledPackage) => void
+  t: Translate
 }
 
 function InstalledTab({
-  loading, checkingUpdates, packages, busyPackage, togglingPackage, onRefresh, onToggle, onUninstall, onUpdate,
+  loading, checkingUpdates, packages, busyPackage, togglingPackage, onRefresh, onToggle, onUninstall, onUpdate, t,
 }: InstalledTabProps): ReactNode {
   if (loading) {
     return (
       <div className="dshMkt-empty">
-        <span className="dshMkt-spinner" aria-hidden="true" /> 正在读取已安装列表…
+        <span className="dshMkt-spinner" aria-hidden="true" /> {t('mkt.installed.loading')}
       </div>
     )
   }
@@ -1027,13 +1077,13 @@ function InstalledTab({
     <>
       <div className="dshMkt-rowBetween">
         <span className="dshMkt-hint">
-          停用 / 启用写入 profile 配置并热重载，立即生效；套件插件由桌面壳统一管理
-          {checkingUpdates ? ' · 检查更新中…' : ''}
+          {t('mkt.installed.hint')}
+          {checkingUpdates ? t('mkt.installed.checking') : ''}
         </span>
-        <button type="button" className="dshMkt-button" disabled={actionsBusy} onClick={onRefresh}>刷新</button>
+        <button type="button" className="dshMkt-button" disabled={actionsBusy} onClick={onRefresh}>{t('mkt.refresh')}</button>
       </div>
       {packages.length === 0 ? (
-        <div className="dshMkt-empty">尚未安装任何插件。</div>
+        <div className="dshMkt-empty">{t('mkt.installed.empty')}</div>
       ) : packages.map(pkg => {
         const busy = busyPackage === pkg.name
         const toggling = togglingPackage === pkg.name
@@ -1046,30 +1096,28 @@ function InstalledTab({
           <div key={pkg.name} className="dshMkt-card">
             <div className="dshMkt-cardHead">
               <span className="dshMkt-pkgName">{pkg.name}</span>
-              <span className="dshMkt-badge" title={`依赖声明：${pkg.version}`}>
+              <span className="dshMkt-badge" title={t('mkt.installed.declared', { version: pkg.version })}>
                 {pkg.installedVersion ?? pkg.version}
               </span>
               {updatable && pkg.latest !== undefined && pkg.installedVersion !== undefined ? (
                 <span
                   className="dshMkt-badge dshMkt-badgeUpdate"
-                  title="npm 上已有更新的版本，可一键更新"
+                  title={t('mkt.installed.updateTitle')}
                 >
-                  可更新 v{pkg.installedVersion} → v{pkg.latest}
+                  {t('mkt.installed.updateBadge', { from: pkg.installedVersion, to: pkg.latest })}
                 </span>
               ) : local ? (
                 <span
                   className="dshMkt-badge dshMkt-badgeOn"
-                  title={pkg.source === 'git'
-                    ? 'Git 安装：依赖指向 git 源，市场不提供 npm 更新'
-                    : '本地安装：依赖指向本地路径（file:），市场不提供 npm 更新'}
+                  title={pkg.source === 'git' ? t('mkt.installed.gitTitle') : t('mkt.installed.localTitle')}
                 >
-                  {pkg.source === 'git' ? 'Git 安装' : '本地安装'}
+                  {pkg.source === 'git' ? t('mkt.installed.git') : t('mkt.installed.local')}
                 </span>
               ) : null}
               <span className={pkg.bundled ? 'dshMkt-badge dshMkt-badgeOn' : 'dshMkt-badge dshMkt-badgeOff'}>
-                {pkg.bundled ? '挂载中' : '未挂载'}
+                {pkg.bundled ? t('mkt.installed.mounted') : t('mkt.installed.unmounted')}
               </span>
-              {pkg.suite ? <span className="dshMkt-badge">套件</span> : null}
+              {pkg.suite ? <span className="dshMkt-badge">{t('mkt.installed.suite')}</span> : null}
             </div>
             <div className="dshMkt-cardFoot">
               <button
@@ -1079,25 +1127,27 @@ function InstalledTab({
                 className={pkg.enabled ? 'dshMkt-switch dshMkt-switchOn' : 'dshMkt-switch'}
                 disabled={pkg.suite || actionsBusy}
                 title={pkg.suite
-                  ? '套件插件由桌面壳统一管理'
-                  : (pkg.enabled ? '点击停用（配置热重载，立即生效）' : '点击启用（配置热重载，立即生效）')}
+                  ? t('mkt.installed.suiteTitle')
+                  : (pkg.enabled ? t('mkt.toggle.disableTitle') : t('mkt.toggle.enableTitle'))}
                 onClick={() => onToggle(pkg)}
               >
                 {toggling ? <span className="dshMkt-spinner" aria-hidden="true" /> : (
                   <span className="dshMkt-switchTrack" aria-hidden="true"><span className="dshMkt-switchThumb" /></span>
                 )}
-                {pkg.enabled ? '已启用' : '已停用'}
+                {pkg.enabled ? t('mkt.installed.enabled') : t('mkt.installed.disabled')}
               </button>
               {updatable ? (
                 <button
                   type="button"
                   className="dshMkt-button dshMkt-buttonPrimary"
                   disabled={actionsBusy}
-                  title={pkg.latest !== undefined ? `更新到 ${pkg.latest}（走安装流程）` : '更新到 npm latest（走安装流程）'}
+                  title={pkg.latest !== undefined
+                    ? t('mkt.update.toLatest', { version: pkg.latest })
+                    : t('mkt.update.toNpmLatest')}
                   onClick={() => onUpdate(pkg)}
                 >
                   {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
-                  {busy ? ' 更新中…' : '更新'}
+                  {busy ? t('mkt.update.busy') : t('mkt.update.action')}
                 </button>
               ) : null}
               <button
@@ -1107,7 +1157,7 @@ function InstalledTab({
                 onClick={() => onUninstall(pkg)}
               >
                 {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
-                {busy ? ' 卸载中…' : '卸载'}
+                {busy ? t('mkt.uninstall.busy') : t('mkt.uninstall.action')}
               </button>
             </div>
           </div>
@@ -1126,20 +1176,21 @@ interface SourcesTabProps {
   onAdd: () => void
   onRemove: (url: string) => void
   onRefresh: () => void
+  t: Translate
 }
 
-function SourcesTab({ loading, sources, saving, input, onInput, onAdd, onRemove, onRefresh }: SourcesTabProps): ReactNode {
+function SourcesTab({ loading, sources, saving, input, onInput, onAdd, onRemove, onRefresh, t }: SourcesTabProps): ReactNode {
   if (loading) {
     return (
       <div className="dshMkt-empty">
-        <span className="dshMkt-spinner" aria-hidden="true" /> 正在读取目录源…
+        <span className="dshMkt-spinner" aria-hidden="true" /> {t('mkt.sources.loading')}
       </div>
     )
   }
   return (
     <>
       <p className="dshMkt-hint">
-        目录源是提供插件目录的 https JSON 地址；安装时一律从 npm 官方 registry 下载，目录源只决定列表内容。
+        {t('mkt.sources.intro')}
       </p>
       <div className="dshMkt-row">
         <input
@@ -1147,32 +1198,32 @@ function SourcesTab({ loading, sources, saving, input, onInput, onAdd, onRemove,
           type="url"
           placeholder="https://example.com/plugins.json"
           value={input}
-          aria-label="目录源地址"
+          aria-label={t('mkt.sources.aria')}
           onChange={(event) => onInput(event.target.value)}
           onKeyDown={(event) => { if (event.key === 'Enter') onAdd() }}
         />
         <button type="button" className="dshMkt-button dshMkt-buttonPrimary" disabled={saving || input.trim() === ''} onClick={onAdd}>
-          添加
+          {t('mkt.sources.add')}
         </button>
       </div>
       {sources.length === 0 ? (
-        <div className="dshMkt-empty">尚未添加任何目录源。</div>
+        <div className="dshMkt-empty">{t('mkt.sources.empty')}</div>
       ) : sources.map(url => (
         <div key={url} className="dshMkt-card">
           <div className="dshMkt-rowBetween">
             <span className="dshMkt-sourceUrl">{url}</span>
             <button type="button" className="dshMkt-button dshMkt-buttonDanger" disabled={saving} onClick={() => onRemove(url)}>
-              删除
+              {t('mkt.sources.remove')}
             </button>
           </div>
           {url.includes(PAGED_SOURCE_HOST) ? (
-            <p className="dshMkt-hint">该源显示前 100 个热门插件</p>
+            <p className="dshMkt-hint">{t('mkt.sources.paged')}</p>
           ) : null}
         </div>
       ))}
       <div className="dshMkt-rowBetween">
-        <span className="dshMkt-hint">修改后回到「目录」标签查看最新列表</span>
-        <button type="button" className="dshMkt-button" onClick={onRefresh}>刷新</button>
+        <span className="dshMkt-hint">{t('mkt.sources.hint')}</span>
+        <button type="button" className="dshMkt-button" onClick={onRefresh}>{t('mkt.refresh')}</button>
       </div>
     </>
   )

@@ -16,13 +16,25 @@ import {
   resolveArtifactRepo,
 } from '../shared/constants'
 import { githubMirrorPrefixes } from '../kernel/sources/artifact'
+import { t } from '../shared/locale'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
-import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
+import { noticeThemedDialog, promptThemedDialog, resolveDialogWindow } from './themed-dialog'
 import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
 
 let initialized = false
 let busy = false
+
+/**
+ * macOS/Linux (`electron-updater`) flow state. Those listeners are registered
+ * once at boot, before any window exists and before any check knows whether
+ * the user asked for it, so the check has to be remembered for them: `manual`
+ * selects the skip semantics, the window hosts the progress card, and the
+ * version being downloaded is what the card names.
+ */
+let electronCheckWasManual = false
+let electronCheckWindow: BrowserWindow | null = null
+let electronDownloadVersion: string | null = null
 
 /**
  * Prompt a themed in-window confirmation (in-frame dialog script) with a
@@ -67,7 +79,7 @@ async function noticeInFrame(
     inFrameDialogScript({
       title,
       message,
-      buttons: [{ label: '确定', value: 'ok', primary: true }],
+      buttons: [{ label: t('common.ok'), value: 'ok', primary: true }],
       cancelValue: 'ok',
       enterValue: 'ok',
     }),
@@ -89,6 +101,12 @@ async function noticeInFrame(
  * cannot back those platforms: electron-updater needs a static directory feed
  * while the ModelScope API is query-shaped (`.../repo?FilePath=<path>`).
  *
+ * Both chains share everything the user sees — the three-button
+ * install/skip/cancel prompt, the skip record ({@link readSkippedVersion}),
+ * the prompts and the progress card — so only the transport differs:
+ * electron-updater resolves and downloads the native package itself and
+ * reports through `download-progress`.
+ *
  * The dsh kernel is updated separately by the KernelManager; the two channels
  * stay decoupled.
  */
@@ -100,56 +118,71 @@ export function initShellUpdater(): void {
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
+  /** Progress throttle for the download in flight; reset when one starts. */
+  let lastProgressEmit = 0
+
   autoUpdater.on('update-available', async (info) => {
-    const proceed = await confirmInFrame(
-      {
-        title: `${APP_NAME} 更新可用`,
-        message: `发现新版本 ${APP_NAME}（${info.version}）。`,
-        detail: '现在下载并安装？应用将在完成后重启。',
-        buttons: [
-          { label: '稍后', value: 'later' },
-          { label: '下载', value: 'download', primary: true },
-        ],
-        cancelValue: 'later',
-        enterValue: 'download',
-      },
-      {
-        type: 'info',
-        title: `${APP_NAME} 更新可用`,
-        message: `发现新版本 ${APP_NAME}（${info.version}）。`,
-        detail: '现在下载并安装？应用将在完成后重启。',
-        buttons: ['下载', '稍后'],
-        defaultId: 0,
-        cancelId: 1,
-      },
-      'download',
-    )
-    if (proceed) {
-      try {
-        await autoUpdater.downloadUpdate()
-      } catch (err) {
-        void showDownloadError(`下载失败：${(err as Error).message}`)
-      }
+    const current = app.getVersion()
+    const decision = decideUpdatePrompt(info.version, current, await readSkippedVersion(), electronCheckWasManual)
+    // electron-updater only reports an available update when it is newer, so
+    // 'latest' never happens in practice — it must produce no prompt at all.
+    if (decision === 'latest' || decision === 'silent') return
+    const choice = decision === 'skipped'
+      ? await promptSkippedVersionConfirm(electronCheckWindow, info.version)
+      : await promptUpdateConfirm(electronCheckWindow, current, info.version)
+    if (choice === 'skip') {
+      await recordSkippedVersion(electronCheckWindow, info.version)
+      return
+    }
+    if (choice !== 'install') return
+    electronDownloadVersion = info.version
+    lastProgressEmit = 0
+    try {
+      await autoUpdater.downloadUpdate()
+    } catch (err) {
+      // A cancelled download rejects without emitting 'error', so the card is
+      // dropped here as well as in the listener below.
+      clearElectronDownload()
+      void showDownloadError(t('updater.downloadFailed', { detail: (err as Error).message }))
     }
   })
 
+  autoUpdater.on('download-progress', (progress) => {
+    const version = electronDownloadVersion
+    if (version === null) return
+    const now = Date.now()
+    if (now - lastProgressEmit < 250 && !(progress.total > 0 && progress.transferred >= progress.total)) return
+    lastProgressEmit = now
+    // Same card, same wording and same 0..1 progress contract as the Windows
+    // downloader, which throttles for the identical reason: every callback is
+    // an executeJavaScript hop into the renderer.
+    showKernelProgress(resolveDialogWindow(electronCheckWindow), {
+      phase: 'downloading',
+      message: t('updater.downloading', { app: APP_NAME, version }),
+      progress: progress.total > 0 ? Math.min(1, progress.transferred / progress.total) : null,
+    })
+  })
+
   autoUpdater.on('update-downloaded', async () => {
+    // The transfer is over: nothing may outlive it, and the card would sit on
+    // top of the dialog below.
+    clearElectronDownload()
     const proceed = await confirmInFrame(
       {
-        title: `${APP_NAME} 更新就绪`,
-        message: '更新已下载完成，将在退出时安装。',
+        title: t('updater.readyTitle', { app: APP_NAME }),
+        message: t('updater.readyMessage'),
         buttons: [
-          { label: '稍后', value: 'later' },
-          { label: '立即重启', value: 'restart', primary: true },
+          { label: t('common.later'), value: 'later' },
+          { label: t('updater.restartNow'), value: 'restart', primary: true },
         ],
         cancelValue: 'later',
         enterValue: 'restart',
       },
       {
         type: 'info',
-        title: `${APP_NAME} 更新就绪`,
-        message: '更新已下载完成，将在退出时安装。',
-        buttons: ['立即重启', '稍后'],
+        title: t('updater.readyTitle', { app: APP_NAME }),
+        message: t('updater.readyMessage'),
+        buttons: [t('updater.restartNow'), t('common.later')],
         defaultId: 0,
         cancelId: 1,
       },
@@ -159,8 +192,20 @@ export function initShellUpdater(): void {
   })
 
   autoUpdater.on('error', (_err) => {
-    // The download path above surfaces its own dialog; keep this quiet.
+    // The download path above surfaces its own dialog; keep this quiet, but
+    // never leave a stuck progress card behind a failed download.
+    clearElectronDownload()
   })
+}
+
+/**
+ * Drop the macOS/Linux download state and its progress card. The success, the
+ * failure and the cancelled path all end here — the card is non-blocking but
+ * must never outlive the transfer it describes.
+ */
+function clearElectronDownload(): void {
+  electronDownloadVersion = null
+  clearKernelProgress(resolveDialogWindow(electronCheckWindow))
 }
 
 // ------------------------------------------------------------- latest.yml
@@ -267,7 +312,8 @@ function sourceLabel(url: string): string {
  * GitHub: the mainland failure topology is asymmetric — a small latest.yml
  * often slips through (corporate proxy / brief connectivity) while a ~180 MB
  * installer consistently dies. Without the trailing mirror those users only
- * ever see "请手动下载". Every candidate is gated by the sha512 taken from
+ * ever see the "download manually" hint. Every candidate is gated by the
+ * sha512 taken from
  * that same latest.yml, so a mirror serving a *different* build (lagging or
  * tampered) fails verification and falls through — it can degrade to a
  * slower download, never substitute content. When metadata came from the
@@ -304,8 +350,16 @@ async function sha512Base64(filePath: string): Promise<string> {
   return hash.digest('base64')
 }
 
-/** Actionable suffix for any "every source failed" message (user-visible). */
-export const MANUAL_DOWNLOAD_HINT = `可手动从镜像仓库下载：${MODELSCOPE_RELEASES_URL}`
+/**
+ * Actionable suffix for any "every source failed" message (user-visible).
+ *
+ * A function, not a constant: the hint is localized, and a module-level string
+ * would be resolved while this module loads — before Electron's app is ready,
+ * i.e. before `app.getLocale()` carries an answer.
+ */
+export function manualDownloadHint(): string {
+  return t('updater.manualHint', { url: MODELSCOPE_RELEASES_URL })
+}
 
 /**
  * Per-candidate download timeout. 180 s is generous for a ~180 MB installer
@@ -345,7 +399,10 @@ export async function downloadWithFallback(
       }
       const actual = await sha512Base64(dest)
       if (actual !== expectedSha512) {
-        throw new Error(`完整性校验失败（期望 ${expectedSha512.slice(0, 16)}…，实际 ${actual.slice(0, 16)}…）`)
+        throw new Error(t('updater.integrityFailed', {
+          expected: expectedSha512.slice(0, 16),
+          actual: actual.slice(0, 16),
+        }))
       }
       return url
     } catch (err) {
@@ -353,18 +410,21 @@ export async function downloadWithFallback(
       console.error(`[shell-updater] candidate failed (${url}): ${(err as Error).message}`)
     }
   }
-  throw new Error(`无法从任何源下载更新包：${lastError?.message ?? '未知错误'}。${MANUAL_DOWNLOAD_HINT}`)
+  throw new Error(t('updater.allSourcesFailed', {
+    detail: lastError?.message ?? t('common.unknownError'),
+    hint: manualDownloadHint(),
+  }))
 }
 
 async function showDownloadError(message: string): Promise<void> {
   const proceed = await confirmInFrame(
     {
       title: APP_NAME,
-      message: `应用更新失败：${message}`,
-      detail: '你可以稍后重试，或从镜像仓库手动下载安装包。',
+      message: t('updater.updateFailedMessage', { message }),
+      detail: t('updater.updateFailedDetail'),
       buttons: [
-        { label: '关闭', value: 'close' },
-        { label: '打开镜像下载页', value: 'open', primary: true },
+        { label: t('common.close'), value: 'close' },
+        { label: t('updater.openMirror'), value: 'open', primary: true },
       ],
       cancelValue: 'close',
       enterValue: 'open',
@@ -372,9 +432,9 @@ async function showDownloadError(message: string): Promise<void> {
     {
       type: 'error',
       title: APP_NAME,
-      message: `应用更新失败：${message}`,
-      detail: '你可以稍后重试，或从镜像仓库手动下载安装包。',
-      buttons: ['打开镜像下载页', '关闭'],
+      message: t('updater.updateFailedMessage', { message }),
+      detail: t('updater.updateFailedDetail'),
+      buttons: [t('updater.openMirror'), t('common.close')],
       defaultId: 1,
       cancelId: 1,
     },
@@ -444,6 +504,34 @@ export function isSafeVersion(value: string): boolean {
   return /^\d[\w.~-]*$/.test(value) && !value.includes('..')
 }
 
+/** What an available-update finding should become on screen. */
+export type UpdatePromptDecision =
+  /** Nothing newer than the running version: no prompt. */
+  | 'latest'
+  /** Auto check landing on an explicitly skipped version: stay silent. */
+  | 'silent'
+  /** Manual re-check of a skipped version: name the skip, offer it anyway. */
+  | 'skipped'
+  /** Ordinary finding: ask install / skip / cancel. */
+  | 'prompt'
+
+/**
+ * Platform-independent "should this version be surfaced, and how" decision,
+ * shared by the Windows and the electron-updater flows so both chains follow
+ * one skip semantics (§4.4): an explicitly skipped version stays silent for
+ * automatic checks, but a manual check still surfaces it (with the skip named
+ * and an opt-in to install it anyway). Pure — exercised by the unit tests.
+ * @param latest - the version the update source reports.
+ * @param current - the running app version.
+ * @param skipped - the recorded skip, or null when none.
+ * @param manual - true when the user asked for this check.
+ */
+export function decideUpdatePrompt(latest: string, current: string, skipped: string | null, manual: boolean): UpdatePromptDecision {
+  if (!isNewerThan(latest, current)) return 'latest'
+  if (typeof skipped === 'string' && skipped === latest) return manual ? 'skipped' : 'silent'
+  return 'prompt'
+}
+
 // ------------------------------------------------- skip version / history
 
 /** Record of the update version the user chose to skip (auto-checks go silent). */
@@ -471,6 +559,52 @@ async function writeSkippedVersion(version: string): Promise<void> {
 
 async function clearSkippedVersion(): Promise<void> {
   await fs.rm(skippedVersionFile(), { force: true }).catch(() => undefined)
+}
+
+/**
+ * Frozen user-visible confirmation for a recorded skip (§4.4). One copy for
+ * every platform and both update chains, so the wording cannot drift apart.
+ */
+export function skippedVersionToast(version: string): string {
+  return t('updater.skipToast', { app: APP_NAME, version })
+}
+
+/**
+ * Record the user's skip-this-version choice and confirm it on screen. The
+ * shared
+ * outcome of that button on every platform and both update chains. The host
+ * window is resolved here (not by the caller) so the confirmation is never
+ * silently dropped when the caller's window is gone — the toast renderer
+ * needs a live window, the skip record does not.
+ */
+async function recordSkippedVersion(win: BrowserWindow | null, version: string): Promise<void> {
+  await writeSkippedVersion(version)
+  const target = resolveDialogWindow(win)
+  clearKernelProgress(target)
+  showUpdateToast(target, skippedVersionToast(version), 'success', 3_000)
+}
+
+/**
+ * True when a recorded skip has been superseded: the app now runs the skipped
+ * version itself (or something newer), so the record has no version left to
+ * suppress and must be retired. Windows retires it when the pending-install
+ * record is consumed; macOS/Linux write no such record, so the check that
+ * follows the relaunch asks this instead. Non-semver values only ever retire
+ * on exact equality — never throw. Pure — exercised by the unit tests.
+ * @param skipped - the recorded skip, or null when none.
+ * @param current - the running app version.
+ */
+export function shouldRetireSkippedVersion(skipped: string | null, current: string): boolean {
+  if (typeof skipped !== 'string' || skipped === '') return false
+  if (semver.valid(skipped) !== null && semver.valid(current) !== null) return semver.gte(current, skipped)
+  return skipped === current
+}
+
+/** Retire a superseded skip record (see {@link shouldRetireSkippedVersion}). */
+async function retireSkippedVersionIfRunning(current: string): Promise<void> {
+  if (!shouldRetireSkippedVersion(await readSkippedVersion(), current)) return
+  console.log(`[shell-updater] retiring the skip record for a version already running (${current})`)
+  await clearSkippedVersion()
 }
 
 /** One confirmed version advance, kept for the tray's rollback menu. */
@@ -519,28 +653,28 @@ type UpdateConfirmChoice = 'install' | 'skip' | 'cancel'
  * native fallback maps response indexes to the same outcomes.
  */
 async function promptUpdateConfirm(win: BrowserWindow | null, current: string, version: string): Promise<UpdateConfirmChoice> {
-  const message = `发现新版本 ${APP_NAME}（${version}）。`
-  const detail = `当前 v${current} → v${version}。将下载并静默安装，安装完成后需重新打开应用。`
+  const message = t('updater.availableMessage', { app: APP_NAME, version })
+  const detail = t('updater.availableDetail', { current, version })
   return promptThemedDialog<UpdateConfirmChoice>(
     win,
     inFrameDialogScript({
-      title: `${APP_NAME} 更新可用`,
+      title: t('updater.availableTitle', { app: APP_NAME }),
       message,
       detail,
       buttons: [
-        { label: '立即更新', value: 'install', primary: true },
-        { label: '跳过此版本', value: 'skip' },
-        { label: '取消', value: 'cancel' },
+        { label: t('updater.updateNow'), value: 'install', primary: true },
+        { label: t('updater.skipThisVersion'), value: 'skip' },
+        { label: t('common.cancel'), value: 'cancel' },
       ],
       cancelValue: 'cancel',
       enterValue: 'install',
     }),
     {
       type: 'info',
-      title: `${APP_NAME} 更新可用`,
+      title: t('updater.availableTitle', { app: APP_NAME }),
       message,
       detail,
-      buttons: ['立即更新', '跳过此版本', '取消'],
+      buttons: [t('updater.updateNow'), t('updater.skipThisVersion'), t('common.cancel')],
       defaultId: 0,
       cancelId: 2,
     },
@@ -559,22 +693,22 @@ async function promptUpdateConfirm(win: BrowserWindow | null, current: string, v
 async function promptSkippedVersionConfirm(win: BrowserWindow | null, version: string): Promise<UpdateConfirmChoice> {
   const proceed = await confirmInFrame(
     {
-      title: `${APP_NAME} 更新可用`,
-      message: `检测到 ${APP_NAME} ${version}（你曾跳过此版本）。`,
-      detail: '仍要安装该版本吗？',
+      title: t('updater.availableTitle', { app: APP_NAME }),
+      message: t('updater.skippedMessage', { app: APP_NAME, version }),
+      detail: t('updater.skippedDetail'),
       buttons: [
-        { label: '保持跳过', value: 'cancel' },
-        { label: '仍要安装', value: 'install', primary: true },
+        { label: t('updater.keepSkipped'), value: 'cancel' },
+        { label: t('updater.installAnyway'), value: 'install', primary: true },
       ],
       cancelValue: 'cancel',
       enterValue: 'install',
     },
     {
       type: 'info',
-      title: `${APP_NAME} 更新可用`,
-      message: `检测到 ${APP_NAME} ${version}（你曾跳过此版本）。`,
-      detail: '仍要安装该版本吗？',
-      buttons: ['仍要安装', '保持跳过'],
+      title: t('updater.availableTitle', { app: APP_NAME }),
+      message: t('updater.skippedMessage', { app: APP_NAME, version }),
+      detail: t('updater.skippedDetail'),
+      buttons: [t('updater.installAnyway'), t('updater.keepSkipped')],
       defaultId: 0,
       cancelId: 1,
     },
@@ -589,51 +723,48 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
   if (busy) {
     // A check is already running; manual clicks deserve feedback instead of a
     // silent no-op (auto checks stay quiet).
-    if (manual) showUpdateToast(win, '正在检查应用更新，请稍候…', 'progress', 3_000)
+    if (manual) showUpdateToast(win, t('updater.checkingBusy'), 'progress', 3_000)
     return
   }
   busy = true
   try {
-    showUpdateToast(win, '正在检查应用更新…', 'progress', undefined)
+    showUpdateToast(win, t('updater.checking'), 'progress', undefined)
     const meta = await fetchAndParseLatest()
-    if (!meta) throw new Error(`无法获取更新元数据（latest.yml）或格式无法解析。${MANUAL_DOWNLOAD_HINT}`)
+    if (!meta) throw new Error(t('updater.metadataFailed', { hint: manualDownloadHint() }))
     const yaml = meta.yaml
     // Version is spliced into an installer filename and the pending-install
     // record; constrain it to a safe charset so a crafted metadata value can
     // never break the path or the spawn target (defense in depth for an
     // unsigned latest.yml).
-    if (!isSafeVersion(yaml.version)) throw new Error('更新元数据版本格式异常')
+    if (!isSafeVersion(yaml.version)) throw new Error(t('updater.badVersion'))
 
     const current = app.getVersion()
-    const newer = isNewerThan(yaml.version, current)
-    if (!newer) {
+    const decision = decideUpdatePrompt(yaml.version, current, await readSkippedVersion(), manual)
+    if (decision === 'latest') {
       clearKernelProgress(win)
-      if (manual) void noticeInFrame(win, 'info', APP_NAME, `已是最新版本（${APP_NAME} ${current}）。`)
+      if (manual) void noticeInFrame(win, 'info', APP_NAME, t('updater.upToDate', { app: APP_NAME, current }))
       return
     }
 
     // A version the user explicitly skipped stays silent for auto checks;
-    // only a manual re-check surfaces it (with an opt-in below).
-    const skippedVersion = await readSkippedVersion()
-    if (skippedVersion === yaml.version && !manual) {
+    // only a manual re-check surfaces it (with the opt-in below).
+    if (decision === 'silent') {
       clearKernelProgress(win)
       return
     }
 
     const asset = pickAsset(yaml.files, process.arch)
-    if (!asset) throw new Error('未找到适用于当前系统的安装包')
+    if (!asset) throw new Error(t('updater.noAsset'))
     // Same charset guard for the asset filename (spliced into the download
     // URL and the spawned installer path): a crafted value must fail safely,
     // never inject.
-    if (!/^[\w.~-]+\.exe$/.test(asset.url)) throw new Error('更新包文件名格式异常')
+    if (!/^[\w.~-]+\.exe$/.test(asset.url)) throw new Error(t('updater.badAssetName'))
 
-    const choice = skippedVersion === yaml.version
+    const choice = decision === 'skipped'
       ? await promptSkippedVersionConfirm(win, yaml.version)
       : await promptUpdateConfirm(win, current, yaml.version)
     if (choice === 'skip') {
-      await writeSkippedVersion(yaml.version)
-      clearKernelProgress(win)
-      showUpdateToast(win, `已跳过 ${APP_NAME} ${yaml.version}，之后将不再自动提醒`, 'success', 3_000)
+      await recordSkippedVersion(win, yaml.version)
       return
     }
     if (choice !== 'install') {
@@ -642,9 +773,9 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     }
 
     await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url, meta.source), {
-      title: `${APP_NAME} 更新就绪`,
-      message: `将关闭当前应用并打开 ${APP_NAME} ${yaml.version} 安装向导（与首次安装相同）。`,
-      detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
+      title: t('updater.readyTitle', { app: APP_NAME }),
+      message: t('updater.installPromptMessage', { app: APP_NAME, version: yaml.version }),
+      detail: t('updater.installPromptDetail'),
     })
   } catch (err) {
     console.error('[shell-updater]', (err as Error).message)
@@ -683,13 +814,13 @@ async function downloadAndInstallPackage(
       lastEmit = now
       showKernelProgress(win, {
         phase: 'downloading',
-        message: `正在下载 ${APP_NAME} ${version}…`,
+        message: t('updater.downloading', { app: APP_NAME, version }),
         progress: total > 0 ? Math.min(1, received / total) : null,
       })
     },
   )
   console.log(`[shell-updater] downloaded ${asset.url} from ${downloadedFrom}`)
-  showUpdateToast(win, `${APP_NAME} ${version} 下载完成`, 'success', 3_000)
+  showUpdateToast(win, t('updater.downloadedToast', { app: APP_NAME, version }), 'success', 3_000)
 
   const install = await confirmInFrame(
     {
@@ -697,8 +828,8 @@ async function downloadAndInstallPackage(
       message: installPrompt.message,
       detail: installPrompt.detail,
       buttons: [
-        { label: '稍后', value: 'later' },
-        { label: '立即安装', value: 'install', primary: true },
+        { label: t('common.later'), value: 'later' },
+        { label: t('updater.installNow'), value: 'install', primary: true },
       ],
       cancelValue: 'later',
       enterValue: 'install',
@@ -708,7 +839,7 @@ async function downloadAndInstallPackage(
       title: installPrompt.title,
       message: installPrompt.message,
       detail: installPrompt.detail,
-      buttons: ['立即安装', '稍后'],
+      buttons: [t('updater.installNow'), t('common.later')],
       defaultId: 0,
       cancelId: 1,
     },
@@ -841,13 +972,13 @@ async function fetchReleaseLatestYaml(version: string): Promise<LatestMetadata |
 export async function rollbackShellUpdate(win: BrowserWindow | null = null): Promise<void> {
   if (process.platform !== 'win32') return
   if (process.env.DSH_APP_DEV === '1') {
-    await noticeInFrame(win, 'info', APP_NAME, '开发模式下不支持回滚应用版本（当前运行的是未打包构建）。')
+    await noticeInFrame(win, 'info', APP_NAME, t('updater.rollbackDevUnsupported'))
     return
   }
   if (busy) {
     // Shares the check guard with checkShellUpdateWin32 so a download and a
     // rollback can never interleave.
-    showUpdateToast(win, '正在检查应用更新，请稍候…', 'progress', 3_000)
+    showUpdateToast(win, t('updater.checkingBusy'), 'progress', 3_000)
     return
   }
   busy = true
@@ -858,40 +989,40 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
     // len-2 is the state before it — where a rollback lands.
     const previous = history.length >= 2 ? history[history.length - 2].version : null
     if (previous === null || previous === current || !isSafeVersion(previous)) {
-      await noticeInFrame(win, 'info', APP_NAME, '没有可回滚的历史版本。')
+      await noticeInFrame(win, 'info', APP_NAME, t('updater.noRollbackTarget'))
       return
     }
-    showUpdateToast(win, `正在获取 ${APP_NAME} ${previous} 的安装包信息…`, 'progress', undefined)
+    showUpdateToast(win, t('updater.rollbackFetching', { app: APP_NAME, previous }), 'progress', undefined)
     const meta = await fetchReleaseLatestYaml(previous)
     clearKernelProgress(win)
     if (!meta) {
-      await noticeInFrame(win, 'error', APP_NAME, `无法获取 ${APP_NAME} ${previous} 的更新元数据，请检查网络后重试。${MANUAL_DOWNLOAD_HINT}`)
+      await noticeInFrame(win, 'error', APP_NAME, t('updater.rollbackMetadataFailed', { app: APP_NAME, previous, hint: manualDownloadHint() }))
       return
     }
     const yaml = meta.yaml
     const asset = pickAsset(yaml.files, process.arch)
     if (!asset || !/^[\w.~-]+\.exe$/.test(asset.url)) {
-      await noticeInFrame(win, 'error', APP_NAME, `未找到 ${APP_NAME} ${previous} 适用于当前系统的安装包。`)
+      await noticeInFrame(win, 'error', APP_NAME, t('updater.rollbackNoAsset', { app: APP_NAME, previous }))
       return
     }
     const proceed = await confirmInFrame(
       {
-        title: `${APP_NAME} 回滚到上一版本`,
-        message: `将把 ${APP_NAME} 从 v${current} 回滚到 v${previous}。`,
-        detail: '将下载该版本的安装包并打开安装向导，完成后应用会重新启动。',
+        title: t('updater.rollbackTitle', { app: APP_NAME }),
+        message: t('updater.rollbackMessage', { app: APP_NAME, current, previous }),
+        detail: t('updater.rollbackDetail'),
         buttons: [
-          { label: '取消', value: 'cancel' },
-          { label: '确认回滚', value: 'rollback', primary: true },
+          { label: t('common.cancel'), value: 'cancel' },
+          { label: t('updater.rollbackConfirm'), value: 'rollback', primary: true },
         ],
         cancelValue: 'cancel',
         enterValue: 'rollback',
       },
       {
         type: 'question',
-        title: `${APP_NAME} 回滚到上一版本`,
-        message: `将把 ${APP_NAME} 从 v${current} 回滚到 v${previous}。`,
-        detail: '将下载该版本的安装包并打开安装向导，完成后应用会重新启动。',
-        buttons: ['确认回滚', '取消'],
+        title: t('updater.rollbackTitle', { app: APP_NAME }),
+        message: t('updater.rollbackMessage', { app: APP_NAME, current, previous }),
+        detail: t('updater.rollbackDetail'),
+        buttons: [t('updater.rollbackConfirm'), t('common.cancel')],
         defaultId: 0,
         cancelId: 1,
       },
@@ -904,14 +1035,14 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
       asset,
       releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, previous, asset.url, meta.source),
       {
-        title: `${APP_NAME} 回滚就绪`,
-        message: `将关闭当前应用并安装 ${APP_NAME} ${previous}（回滚到上一版本）。`,
-        detail: '按向导完成安装后，应用会重新启动。安装包将在安装完成后自动删除。',
+        title: t('updater.rollbackReadyTitle', { app: APP_NAME }),
+        message: t('updater.rollbackReadyMessage', { app: APP_NAME, previous }),
+        detail: t('updater.installPromptDetail'),
       },
     )
   } catch (err) {
     clearKernelProgress(win)
-    await noticeInFrame(win, 'error', APP_NAME, `回滚失败：${(err as Error).message}`)
+    await noticeInFrame(win, 'error', APP_NAME, t('updater.rollbackFailed', { detail: (err as Error).message }))
   } finally {
     busy = false
   }
@@ -925,21 +1056,42 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
  */
 async function checkShellUpdateDev(win: BrowserWindow | null): Promise<void> {
   try {
-    showUpdateToast(win, '正在检查应用更新…', 'progress', undefined)
+    showUpdateToast(win, t('updater.checking'), 'progress', undefined)
     const meta = await fetchAndParseLatest()
-    if (!meta) throw new Error(`无法获取更新元数据（latest.yml）或格式无法解析。${MANUAL_DOWNLOAD_HINT}`)
+    if (!meta) throw new Error(t('updater.metadataFailed', { hint: manualDownloadHint() }))
     const yaml = meta.yaml
-    if (!isSafeVersion(yaml.version)) throw new Error('更新元数据版本格式异常')
+    if (!isSafeVersion(yaml.version)) throw new Error(t('updater.badVersion'))
     const current = app.getVersion()
     const newer = isNewerThan(yaml.version, current)
     clearKernelProgress(win)
     await noticeInFrame(win, 'info', APP_NAME, newer
-      ? `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n检测到新版本：v${current} → v${yaml.version}，请从正式安装的副本更新。`
-      : `开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n当前版本 v${current}，远端为同一版本。`)
+      ? t('updater.devCheckNewer', { current, latest: yaml.version })
+      : t('updater.devCheckSame', { current }))
   } catch (err) {
     clearKernelProgress(win)
-    void noticeInFrame(win, 'info', APP_NAME, `开发模式下不支持自动更新应用，且远端版本检查失败：${(err as Error).message}`)
+    void noticeInFrame(win, 'info', APP_NAME, t('updater.devCheckFailed', { detail: (err as Error).message }))
   }
+}
+
+/**
+ * macOS/Linux shell-update check (electron-updater transport). Shares the skip
+ * record, the prompts and the progress card with the Windows flow; only the
+ * transport differs. The listeners registered by {@link initShellUpdater} read
+ * the state stored here.
+ */
+async function checkShellUpdateElectron(manual: boolean, win: BrowserWindow | null): Promise<void> {
+  electronCheckWasManual = manual
+  electronCheckWindow = win
+  // Unlike Windows there is no pending-install record to consume on the next
+  // boot, so a skip that the running version has caught up with is retired
+  // here — before the check that would otherwise report the stale record.
+  await retireSkippedVersionIfRunning(app.getVersion())
+  await autoUpdater.checkForUpdates()
+    .catch(async (err) => {
+      console.error('[shell-updater]', err.message)
+      if (manual) await showDownloadError((err as Error).message)
+    })
+    .then(() => undefined)
 }
 
 /**
@@ -957,12 +1109,7 @@ export function checkShellUpdate(manual = false, win: BrowserWindow | null = nul
   if (process.platform === 'win32') {
     return checkShellUpdateWin32(manual, win)
   }
-  return autoUpdater.checkForUpdates()
-    .catch(async (err) => {
-      console.error('[shell-updater]', err.message)
-      if (manual) await showDownloadError((err as Error).message)
-    })
-    .then(() => undefined)
+  return checkShellUpdateElectron(manual, win)
 }
 
 /**
@@ -1020,5 +1167,5 @@ export async function consumeUpdaterInstallResult(win: BrowserWindow | null = nu
   }
   // The wizard was cancelled or failed: still on the old version.
   console.log(`[shell-updater] update to ${target} did not complete (running ${current})`)
-  void showToastWhenLoaded(win, `上次应用更新未完成（当前仍为 v${current}），可从托盘「检查应用更新」重试`, 'error', 8_000)
+  void showToastWhenLoaded(win, t('updater.previousIncomplete', { current }), 'error', 8_000)
 }

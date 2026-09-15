@@ -118,7 +118,7 @@ export class McpStore {
   update(id: string, raw: unknown): McpServerEntry {
     const file = this.load()
     if (!file.servers.some(server => server.id === id)) {
-      throw new McpValidationError(`服务器 ${id} 不存在`)
+      throw new McpValidationError('server.notFound', { id })
     }
     // validateEntry's existing-id check means OTHER entries: the entry keeps
     // its own id through the edit.

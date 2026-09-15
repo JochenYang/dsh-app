@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-pdf",
   "description": "DSH APP PDF suite: reads workspace PDFs as material (pdf_read) and authors/validates/renders a structured PDF project (*.pdf.json) with pdf_write, read-only pdf_check and pdf_render. A PDF capsule in the shared office-suite bar (container class dshOfficeBar, data-office-format=\"pdf\", injected after the composer card) toggles a per-session PDF mode; the dsh-pdf skill pins the workflow.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -22,6 +22,7 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-slots"
@@ -48,6 +49,7 @@
     "@deepseek-ai/cordis": "^4.0.0",
     "@deepseek-ai/dsh-agent": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-atomic-write": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-session": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
@@ -61,6 +63,7 @@
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "0.1.5-rc.1",
     "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-session": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.1",

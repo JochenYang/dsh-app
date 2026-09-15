@@ -13,6 +13,8 @@
  */
 
 import type { ModelDraft } from './fields.ts'
+import { message, wireText } from './messages.ts'
+import type { PageMessage } from './messages.ts'
 
 /** Data sources in fallback order: the public feed first, then a
  * mainland-reachable gh-proxy mirror of the DSH APP fork. The mirror URL
@@ -48,22 +50,66 @@ export interface ModelsDevProvider {
 /** The feed document, provider-keyed. */
 export type ModelsDevApi = Record<string, Omit<ModelsDevProvider, 'id' | 'models'> & { models?: Record<string, ModelsDevModel> }>
 
+/** Why one feed source could not be used. */
+export interface ModelsDevFetchFailure {
+  /** The source URL that failed. */
+  readonly source: string
+  /** A non-2xx answer, an unparsable body, or a transport error. */
+  readonly reason: 'http' | 'malformed' | 'network'
+  /** HTTP status for `http`, the transport message for `network`. */
+  readonly detail?: string | number
+}
+
+/**
+ * Feed fetch failure. It carries what it takes to explain the dead end — the
+ * source a user can check and why it was unusable — while the sentence itself
+ * comes from the page's dictionary through {@link describeFetchFailure}, so
+ * the wording follows the active locale.
+ */
+export class ModelsDevFetchError extends Error {
+  readonly failure: ModelsDevFetchFailure
+
+  /** @param failure - the source and the reason it was unusable. */
+  constructor(failure: ModelsDevFetchFailure) {
+    super(`models.dev ${failure.source}: ${failure.reason}${failure.detail === undefined ? '' : ` (${String(failure.detail)})`}`)
+    this.name = 'ModelsDevFetchError'
+    this.failure = failure
+  }
+}
+
+/**
+ * Word one failed fetch in the page's dictionary. A transport error keeps the
+ * browser's own message: it names the failure mode better than any fixed copy.
+ * @param failure - the classified failure.
+ * @returns the message the dialog renders.
+ */
+export function describeFetchFailure(failure: ModelsDevFetchFailure): PageMessage {
+  if (failure.reason === 'http') {
+    return message('adv.import.sourceHttp', { source: failure.source, status: String(failure.detail ?? '') })
+  }
+  if (failure.reason === 'malformed') return message('adv.import.sourceMalformed', { source: failure.source })
+  return wireText(failure.detail === undefined ? failure.source : String(failure.detail))
+}
+
 /**
  * Fetch and minimally normalize the feed, trying each source in order until
  * one answers. The first network/CORS/shape failure falls through to the
  * next mirror; only the LAST failure is reported, so the manual fallback
  * message names the source the user can actually check.
  * @returns providers in feed order.
- * @throws the final source's error when every source failed.
+ * @throws {ModelsDevFetchError} carrying the final source's failure when
+ * every source failed.
  */
 export async function fetchModelsDev(): Promise<ModelsDevProvider[]> {
-  let lastError: unknown = new Error('no data source configured')
+  let lastFailure: ModelsDevFetchFailure = {
+    source: MODELS_DEV_SOURCES[0], reason: 'network', detail: 'no data source configured',
+  }
   for (const source of MODELS_DEV_SOURCES) {
     try {
       const response = await fetch(source, { signal: AbortSignal.timeout(15_000) })
-      if (!response.ok) throw new Error(`${source} HTTP ${String(response.status)}`)
+      if (!response.ok) throw new ModelsDevFetchError({ source, reason: 'http', detail: response.status })
       const data: unknown = await response.json()
-      if (typeof data !== 'object' || data === null) throw new Error(`${source} 返回格式异常`)
+      if (typeof data !== 'object' || data === null) throw new ModelsDevFetchError({ source, reason: 'malformed' })
       const providers: ModelsDevProvider[] = []
       for (const [id, entry] of Object.entries(data as ModelsDevApi)) {
         if (typeof entry !== 'object' || entry === null) continue
@@ -71,10 +117,12 @@ export async function fetchModelsDev(): Promise<ModelsDevProvider[]> {
       }
       return providers
     } catch (error) {
-      lastError = error
+      lastFailure = error instanceof ModelsDevFetchError
+        ? error.failure
+        : { source, reason: 'network', detail: error instanceof Error ? error.message : String(error) }
     }
   }
-  throw lastError
+  throw new ModelsDevFetchError(lastFailure)
 }
 
 /**

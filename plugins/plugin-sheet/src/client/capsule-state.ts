@@ -10,14 +10,36 @@
  * once the session starts. Unlike the PPT capsule there is no per-session
  * pick, so the label never changes — the mode itself is the visible state.
  *
+ * The label and the hint stay keys of the plugin's own locale namespace (see
+ * client/locales): this module derives WHICH state the capsule is in and hands
+ * the component a key, so the copy is rendered by the component's translate
+ * seat and a language switch follows it without this module knowing a locale.
+ *
  * @module @dsh-app/plugin-sheet/client/capsule-state
  */
+
+import type { SheetKey } from './locales.ts'
 
 /** Stable format id this capsule contributes to the shared office bar. */
 export const SHEET_FORMAT = 'excel'
 
-/** Format label, the capsule's whole text. */
+/** Format label, the capsule's brand token (identical in every locale). */
 export const SHEET_LABEL = 'Excel'
+
+/**
+ * Hint key of the "mode is on" state: clicking the body turns it off. Keyed
+ * against the dictionary, so a renamed or dropped key is a compile error.
+ */
+const HINT_ON_KEY = 'capsule.hintOn' satisfies SheetKey
+
+/** Hint key of the plain "mode is off" state: clicking the body turns it on. */
+const HINT_OFF_KEY = 'capsule.hintOff' satisfies SheetKey
+
+/**
+ * Hint key of the hero state, where a toggle is parked instead of written: the
+ * session it will be applied to does not exist yet, or its mode has not loaded.
+ */
+const HINT_OFF_PENDING_KEY = 'capsule.hintOffPending' satisfies SheetKey
 
 /** One spreadsheet mode as the capsule reads it, before or after the load. */
 export interface CapsuleMode {
@@ -55,9 +77,15 @@ export interface CapsuleState {
   readonly label: string
   /** What a click on the capsule body does. */
   readonly toggle: CapsuleToggle
-  /** Tooltip / accessible hint for the body click. */
-  readonly hint: string
+  /** Dictionary key of the tooltip / accessible hint for the body click. */
+  readonly hintKey: CapsuleHintKey
 }
+
+/** Dictionary key of the body-click hint, one per {@link capsuleState} branch. */
+export type CapsuleHintKey =
+  | typeof HINT_ON_KEY
+  | typeof HINT_OFF_KEY
+  | typeof HINT_OFF_PENDING_KEY
 
 /**
  * Derive the capsule state: a body click always flips the mode, and where the
@@ -79,10 +107,10 @@ export function capsuleState(state: {
       kind: state.sessionBound ? 'persist' : 'park',
       enabled: !state.enabled,
     },
-    hint: state.enabled
-      ? '点击关闭表格模式'
+    hintKey: state.enabled
+      ? HINT_ON_KEY
       : state.sessionBound && (state.loaded ?? true)
-        ? '点击开启表格模式'
-        : '点击开启表格模式，将在会话开始后生效',
+        ? HINT_OFF_KEY
+        : HINT_OFF_PENDING_KEY,
   }
 }

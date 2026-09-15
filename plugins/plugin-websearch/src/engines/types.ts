@@ -73,7 +73,7 @@ export async function request(
     return await fetch(url, { redirect: 'follow', ...init })
   } catch (error) {
     if (isAbort(error)) throw error
-    throw new Error(`网络请求失败：${describeError(error)}`)
+    throw new Error(`network request failed: ${describeError(error)}`)
   }
 }
 
@@ -91,7 +91,7 @@ export async function requestJson(url: string, init: RequestInit & { readonly si
   try {
     return await response.json()
   } catch {
-    throw new Error('响应不是合法 JSON')
+    throw new Error('response is not valid JSON')
   }
 }
 

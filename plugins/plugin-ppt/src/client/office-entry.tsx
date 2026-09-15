@@ -19,18 +19,19 @@ import { createRoot } from 'react-dom/client'
 import { PPT_FORMAT } from './capsule-state.ts'
 import { contributeOfficeCapsule } from './office-bar.ts'
 import { PptOfficeEntry } from './ppt-entry.tsx'
-import type { SessionSource } from './ppt-entry.tsx'
+import type { CapsuleSeat, SessionSource } from './ppt-entry.tsx'
 
 /**
  * Contribute the PPT capsule to the office bar and keep it anchored under the
  * composer card.
  * @param sessionSource - observable of the current session selection.
+ * @param seat - the capsule's translate function and locale revision source.
  * @returns the disposer that unmounts the capsule and stops reconciling.
  */
-export function mountPptOfficeBar(sessionSource: SessionSource): () => void {
+export function mountPptOfficeBar(sessionSource: SessionSource, seat: CapsuleSeat): () => void {
   return contributeOfficeCapsule(PPT_FORMAT, (slot) => {
     const root = createRoot(slot)
-    root.render(<PptOfficeEntry sessionSource={sessionSource} />)
+    root.render(<PptOfficeEntry sessionSource={sessionSource} seat={seat} />)
     return () => { root.unmount() }
   })
 }

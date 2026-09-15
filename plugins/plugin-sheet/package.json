@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-sheet",
   "description": "DSH APP Excel suite: the model authors a workspace .sheet.json engineering file (one or more sheets with columns, typed rows and A1/R1C1 cell formulas), iterates with the read-only sheet_check (unique non-empty headers, row width, sheet-name legality, formula bounds, row/column and text limits — every issue with its sheet, row and column), and exports an editable .xlsx via sheet_render with a native header style, column widths, number formats, formulas and a frozen header row. An Excel capsule in the shared office-suite bar (container class dshOfficeBar, data-office-format=\"excel\", injected after the composer card) toggles a per-session spreadsheet mode; a toggle made before any session exists is parked and applied to the session once it starts; natural-language spreadsheet requests run the same workflow; the dsh-sheet skill pins the workflow.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -22,6 +22,7 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-slots"
       ],
@@ -44,6 +45,7 @@
     "@deepseek-ai/cordis": "^4.0.0",
     "@deepseek-ai/dsh-agent": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-atomic-write": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-session": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-home-paths": "^0.1.5-rc.1",
@@ -56,6 +58,7 @@
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "0.1.5-rc.1",
     "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-session": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.1",
     "@deepseek-ai/dsh-home-paths": "0.1.5-rc.1",

@@ -12,12 +12,29 @@
  * records (archived ids whose logs are already gone) are counted in the
  * header and pruned through the same confirm-banner flow.
  *
+ * Every user-visible string this page renders comes from the `dsh-app.archives`
+ * namespace through the `t` standard seat: the section registers with
+ * `locale: NS`, so the renderer hands the component — and, through its props,
+ * the group panels below — a namespace-bound translate that reads the active UI
+ * locale at call time and re-renders on a language switch. A failure from the
+ * host arrives as a stable CODE plus the values to interpolate (see `HostText`
+ * in ../types.ts) and is worded by this page's dictionary; session titles, ids
+ * and byte counts are data and stay verbatim.
+ *
  * @module @dsh-app/plugin-archives/client/archives-section
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult } from '../types.ts'
+import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, HostText } from '../types.ts'
+import { NS, type ArchivesKey } from './locales.ts'
+
+/** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
+export type ArchivesSectionProps = PropsLocale<typeof NS>
+
+/** The page's namespace-bound translate, handed to the sub-components below. */
+type ArchivesTranslate = TranslateNS<typeof NS>
 
 /** A destructive action awaiting the user's confirmation. */
 type ConfirmState =
@@ -63,28 +80,106 @@ function rowTitle(id: string, title: string): ReactNode {
   return <span className="dshar_rowTitle dshar_rowTitleUnnamed" title={id}>{short}</span>
 }
 
-const SKIP_REASONS: Record<string, string> = {
-  live: '会话正在进行',
-  'not-archived': '不在归档中',
-  missing: '会话日志已不存在或无法定位',
-  io: '读写失败',
-  unsupported: '当前内核不支持物理删除',
+/**
+ * Group heading: the host's name for the group, or this page's copy when the
+ * group has no project directory. The host sends an EMPTY title for that case
+ * on purpose — a heading is copy, and copy is written in the locale table.
+ */
+function groupHeading(group: ArchiveGroup, t: ArchivesTranslate): string {
+  return group.cwd === '' ? t('archives.group.noCwd') : group.title
+}
+
+/** A failure carrying the host's coded message, when one came with it. */
+class HostError extends Error {
+  constructor(readonly host: HostText | undefined, fallback: string) {
+    super(fallback)
+  }
+}
+
+/** A failed request as this page carries it: the host's coded message when it
+ *  sent one, plus the line to show when there is nothing readable to map. */
+interface Failure {
+  readonly host?: HostText
+  readonly fallback: string
+}
+
+/** Classify a failed request. */
+function asFailure(failure: unknown): Failure {
+  if (failure instanceof HostError) return { host: failure.host, fallback: failure.message }
+  return { fallback: failure instanceof Error ? failure.message : String(failure) }
+}
+
+/**
+ * Render a coded host message.
+ *
+ * The host never sends prose for anything the user reads (see `HostText` in
+ * types.ts): it sends a code plus the values the sentence interpolates, and the
+ * copy lives here. `text` is the host's own English diagnostic, used only for a
+ * code this build does not know — a newer kernel must degrade to a readable
+ * line, never to a blank one.
+ *
+ * @param value - the host message, if it sent one.
+ * @param copy - this build's copy for the codes it knows.
+ * @param fallback - line to show when the host sent nothing at all.
+ * @returns the copy of the active locale.
+ */
+function hostMessage(
+  value: HostText | undefined,
+  copy: Readonly<Record<string, string>>,
+  fallback: string,
+): string {
+  if (value === undefined) return fallback
+  return copy[value.code] ?? value.text ?? fallback
+}
+
+/**
+ * Route-failure copy: every code this plugin's routes can answer with. An
+ * unknown code falls back to the host's English diagnostic.
+ *
+ * The two fence codes (`route.crossOrigin`, `route.methodOnly`) are
+ * deliberately absent: only a hostile page or a hand-rolled client can reach
+ * them, never a button on this page, so they read as the host's English
+ * diagnostic rather than as new copy.
+ */
+function routeErrorCopy(t: ArchivesTranslate, host: HostText | undefined, fallback: string): string {
+  const params = host?.params ?? {}
+  const detail = String(params.detail ?? '')
+  return hostMessage(host, {
+    'route.idsRequired': t('archives.host.idsRequired'),
+    'route.listFailed': t('archives.host.listFailed', { detail }),
+    'route.deleteFailed': t('archives.host.deleteFailed', { detail }),
+    'route.pruneUnsupported': t('archives.host.pruneUnsupported'),
+    'route.pruneFailed': t('archives.host.pruneFailed', { detail }),
+    'route.sessionQueryUnavailable': t('archives.host.sessionQueryUnavailable'),
+    'route.queryRequired': t('archives.host.queryRequired'),
+    'route.searchFailed': t('archives.host.searchFailed', { detail }),
+  }, fallback)
+}
+
+/** Wire skip reasons → this page's dictionary keys (an unknown code shows raw). */
+const SKIP_REASONS: Record<string, ArchivesKey> = {
+  live: 'archives.skip.live',
+  'not-archived': 'archives.skip.notArchived',
+  missing: 'archives.skip.missing',
+  io: 'archives.skip.io',
+  unsupported: 'archives.skip.unsupported',
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init })
-  const body = (await response.json()) as { ok: boolean; value?: T; error?: { message?: string } }
+  const body = (await response.json()) as { ok: boolean; value?: T; error?: { message?: string; host?: HostText } }
   if (!response.ok || body.ok !== true) {
-    throw new Error(body.error?.message ?? `HTTP ${response.status}`)
+    throw new HostError(body.error?.host, body.error?.message ?? `HTTP ${response.status}`)
   }
   return body.value as T
 }
 
 /** One project group panel: collapsible header with meta + delete-all, then session rows. */
-function GroupPanel({ group, busy, onDeleteSessions }: {
+function GroupPanel({ group, busy, onDeleteSessions, t }: {
   group: ArchiveGroup
   busy: boolean
   onDeleteSessions: (group: ArchiveGroup) => void
+  t: ArchivesTranslate
 }): ReactNode {
   const [expanded, setExpanded] = useState(true)
   const toggle = useCallback(() => { setExpanded((value) => !value) }, [])
@@ -108,10 +203,10 @@ function GroupPanel({ group, busy, onDeleteSessions }: {
         onKeyDown={onHeaderKeyDown}
       >
         <span className="dshar_caret" aria-hidden="true" />
-        <span className="dshar_groupTitle">{group.title}</span>
+        <span className="dshar_groupTitle">{groupHeading(group, t)}</span>
         {group.cwd !== '' && <span className="dshar_groupPath" title={group.cwd}>{group.cwd}</span>}
         <span className="dshar_groupMeta">
-          <span>{group.sessions.length} 个会话</span>
+          <span>{t('archives.group.sessions', { count: group.sessions.length })}</span>
           <span>{fmtBytes(group.totalBytes)}</span>
           <button
             type="button"
@@ -119,7 +214,7 @@ function GroupPanel({ group, busy, onDeleteSessions }: {
             disabled={busy}
             onClick={(event) => { event.stopPropagation(); onDeleteSessions(group) }}
           >
-            删除全部
+            {t('archives.deleteAll')}
           </button>
         </span>
       </div>
@@ -135,7 +230,7 @@ function GroupPanel({ group, busy, onDeleteSessions }: {
               disabled={busy}
               onClick={() => { onDeleteSessions({ ...group, sessions: [session] }) }}
             >
-              删除
+              {t('archives.delete')}
             </button>
           </span>
         </div>
@@ -148,9 +243,9 @@ function GroupPanel({ group, busy, onDeleteSessions }: {
  * The settings section: load the grouped listing on mount, confirm-and-delete,
  * plus a cross-session full-text search panel (GET /search?q=...).
  */
-export function ArchivesSection(): ReactNode {
+export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
   const [list, setList] = useState<ArchiveList | null>(null)
-  const [error, setError] = useState('')
+  const [error, setError] = useState<Failure | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [notice, setNotice] = useState<NoticeState | null>(null)
@@ -161,9 +256,9 @@ export function ArchivesSection(): ReactNode {
   const load = useCallback(async () => {
     try {
       setList(await fetchJson<ArchiveList>('/plugins/@dsh-app/plugin-archives/api/list'))
-      setError('')
+      setError(null)
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError))
+      setError(asFailure(loadError))
     }
   }, [])
 
@@ -178,9 +273,9 @@ export function ArchivesSection(): ReactNode {
     setSearchBusy(true)
     try {
       setSearchResults(await fetchJson<{ items: Array<{ id: string; title: string; createdAt: number; cwd: string; snippet: string }>; agentToolAvailable: boolean }>(`/plugins/@dsh-app/plugin-archives/api/search?q=${encodeURIComponent(q)}`))
-      setError('')
+      setError(null)
     } catch (searchError) {
-      setError(searchError instanceof Error ? searchError.message : String(searchError))
+      setError(asFailure(searchError))
     } finally {
       setSearchBusy(false)
     }
@@ -192,10 +287,10 @@ export function ArchivesSection(): ReactNode {
     const ids = group.sessions.map((session) => session.id)
     const bytes = group.sessions.reduce((total, session) => total + session.sizeBytes, 0)
     const label = group.sessions.length === 1 && group.sessions[0].title !== ''
-      ? `“${group.sessions[0].title}”`
-      : `“${group.title}”的 ${ids.length} 个会话`
+      ? t('archives.target.session', { title: group.sessions[0].title })
+      : t('archives.target.group', { title: groupHeading(group, t), count: ids.length })
     setConfirm({ kind: 'delete', ids, label, bytes })
-  }, [])
+  }, [t])
 
   /** Confirm the pending action: POST, surface the outcome, reload. */
   const onConfirm = useCallback(async () => {
@@ -211,52 +306,55 @@ export function ArchivesSection(): ReactNode {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}),
         })
-        setNotice({ kind: 'ok', text: `已清理 ${result.pruned} 条无效归档记录` })
+        setNotice({ kind: 'ok', text: t('archives.notice.pruned', { count: result.pruned }) })
       } else {
         const result = await fetchJson<ArchiveDeleteResult>('/plugins/@dsh-app/plugin-archives/api/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids: confirm.ids }),
         })
-        const parts = [`已删除 ${result.deleted.length} 个会话，释放 ${fmtBytes(result.freedBytes)}`]
+        const parts = [t('archives.notice.deleted', { count: result.deleted.length, bytes: fmtBytes(result.freedBytes) })]
         if (result.deleted.length > 0) {
           // The archive-set records are kept on purpose — dropping them would
           // un-hide the session in the client's stale list snapshot. Say so,
           // since the header's stale-record hint just grew by these ids.
-          parts.push('归档记录已保留，可用上方「清理」移除')
+          parts.push(t('archives.notice.recordsKept'))
         }
         if (result.skipped.length > 0) {
           const counts = new Map<string, number>()
           for (const skip of result.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1)
           const skippedText = [...counts]
-            .map(([reason, count]) => `${SKIP_REASONS[reason] ?? reason} × ${count}`)
-            .join('、')
-          parts.push(`跳过 ${result.skipped.length} 个（${skippedText}）`)
+            // An unknown reason code has no key of its own: show the code raw.
+            .map(([reason, count]) => `${SKIP_REASONS[reason] === undefined ? reason : t(SKIP_REASONS[reason])} × ${count}`)
+            .join(t('archives.notice.join.reasons'))
+          parts.push(t('archives.notice.skipped', { count: result.skipped.length, reasons: skippedText }))
         }
-        setNotice(result.skipped.length > 0 ? { kind: 'warn', text: parts.join('；') } : { kind: 'ok', text: parts[0] })
+        setNotice(result.skipped.length > 0
+          ? { kind: 'warn', text: parts.join(t('archives.notice.join.notices')) }
+          : { kind: 'ok', text: parts[0] })
       }
       setConfirm(null)
       await load()
     } catch (actionError) {
-      const message = actionError instanceof Error ? actionError.message : String(actionError)
+      const failure = asFailure(actionError)
       if (kind === 'prune') {
         // A failed prune (e.g. an older kernel without the write path) must
         // not blank the listing — surface it as a dismissible notice.
-        setNotice({ kind: 'warn', text: message })
+        setNotice({ kind: 'warn', text: routeErrorCopy(t, failure.host, failure.fallback) })
         setConfirm(null)
       } else {
-        setError(message)
+        setError(failure)
       }
     } finally {
       setBusy(false)
     }
-  }, [confirm, load])
+  }, [confirm, load, t])
 
-  if (error !== '') {
+  if (error !== null) {
     return (
       <div className="dshar_section">
-        <h2 className="dshar_title">会话归档</h2>
-        <div className="dshar_notice dshar_noticeWarn">{error}</div>
+        <h2 className="dshar_title">{t('archives.title')}</h2>
+        <div className="dshar_notice dshar_noticeWarn">{routeErrorCopy(t, error.host, error.fallback)}</div>
       </div>
     )
   }
@@ -264,8 +362,8 @@ export function ArchivesSection(): ReactNode {
   if (list === null) {
     return (
       <div className="dshar_section">
-        <h2 className="dshar_title">会话归档</h2>
-        <div className="dshar_empty">正在读取归档会话…</div>
+        <h2 className="dshar_title">{t('archives.title')}</h2>
+        <div className="dshar_empty">{t('archives.loading')}</div>
       </div>
     )
   }
@@ -274,15 +372,15 @@ export function ArchivesSection(): ReactNode {
   return (
     <div className="dshar_section">
       <div className="dshar_header">
-        <h2 className="dshar_title">会话归档</h2>
+        <h2 className="dshar_title">{t('archives.title')}</h2>
         <span className="dshar_sub">
           {empty
-            ? '没有已归档的会话'
-            : `${list.archivedCount} 个会话 · ${fmtBytes(list.totalBytes)} · ${list.groups.length} 个项目`}
+            ? t('archives.sub.empty')
+            : t('archives.sub.summary', { count: list.archivedCount, bytes: fmtBytes(list.totalBytes), projects: list.groups.length })}
         </span>
         {list.staleCount > 0 && (
-          <span className="dshar_staleHint" title="归档记录仍在，但其会话日志已不在磁盘上；清理只会移除这些无效记录">
-            另有 {list.staleCount} 条归档记录无日志
+          <span className="dshar_staleHint" title={t('archives.stale.hint')}>
+            {t('archives.stale.count', { count: list.staleCount })}
             <button
               type="button"
               className="dshar_button"
@@ -292,7 +390,7 @@ export function ArchivesSection(): ReactNode {
                 setConfirm({ kind: 'prune', count: list.staleCount })
               }}
             >
-              清理
+              {t('archives.prune')}
             </button>
           </span>
         )}
@@ -306,19 +404,19 @@ export function ArchivesSection(): ReactNode {
           type="text"
           className="dshar_searchInput"
           value={searchQuery}
-          placeholder="搜索历史会话内容…"
+          placeholder={t('archives.search.placeholder')}
           disabled={searchBusy}
           onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void onSearch() } }}
           onChange={(event) => { setSearchQuery(event.target.value) }}
         />
         <button type="button" className="dshar_button" disabled={searchBusy || searchQuery.trim() === ''} onClick={() => { void onSearch() }}>
-          {searchBusy ? '搜索中…' : '搜索'}
+          {searchBusy ? t('archives.search.busy') : t('archives.search.action')}
         </button>
       </div>
       {searchResults !== null && (
         <div className="dshar_searchResults">
           {searchResults.items.length === 0
-            ? <div className="dshar_empty">未找到匹配的会话。</div>
+            ? <div className="dshar_empty">{t('archives.search.empty')}</div>
             : searchResults.items.map((hit) => (
               <div key={hit.id} className="dshar_searchHit" title={hit.id}>
                 {rowTitle(hit.id, hit.title)}
@@ -330,19 +428,17 @@ export function ArchivesSection(): ReactNode {
               </div>
             ))}
           {!searchResults.agentToolAvailable && (
-            <div className="dshar_notice dshar_noticeWarn">agent 侧的 session_search 工具尚未挂载（该包暂未进入内核运行时，模型无法主动检索历史会话），页面搜索不受影响。</div>
+            <div className="dshar_notice dshar_noticeWarn">{t('archives.search.noAgentTool')}</div>
           )}
         </div>
       )}
 
       {confirm !== null && (
-        <div className="dshar_confirm" role="alertdialog" aria-label={confirm.kind === 'prune' ? '确认清理归档记录' : '确认删除归档会话'}>
+        <div className="dshar_confirm" role="alertdialog" aria-label={confirm.kind === 'prune' ? t('archives.confirm.ariaPrune') : t('archives.confirm.ariaDelete')}>
           {confirm.kind === 'prune' ? (
-            <span>即将清理 {confirm.count} 条无日志的归档记录，仅移除记录本身，不影响任何会话数据。</span>
+            <span>{t('archives.confirm.prune', { count: confirm.count })}</span>
           ) : (
-            <span>
-              即将删除{confirm.label}（约 {fmtBytes(confirm.bytes)}），删除后不可恢复。
-            </span>
+            <span>{t('archives.confirm.delete', { label: confirm.label, bytes: fmtBytes(confirm.bytes) })}</span>
           )}
           <span className="dshar_confirmActions">
             <button
@@ -351,19 +447,21 @@ export function ArchivesSection(): ReactNode {
               disabled={busy}
               onClick={() => { void onConfirm() }}
             >
-              {busy ? (confirm.kind === 'prune' ? '清理中…' : '删除中…') : (confirm.kind === 'prune' ? '确认清理' : '确认删除')}
+              {busy
+                ? (confirm.kind === 'prune' ? t('archives.confirm.pruneBusy') : t('archives.confirm.deleteBusy'))
+                : (confirm.kind === 'prune' ? t('archives.confirm.pruneAction') : t('archives.confirm.deleteAction'))}
             </button>
             <button type="button" className="dshar_button" disabled={busy} onClick={() => { setConfirm(null) }}>
-              取消
+              {t('archives.confirm.cancel')}
             </button>
           </span>
         </div>
       )}
 
       {empty
-        ? <div className="dshar_empty">归档的会话会在这里按项目分组显示，可在此彻底删除以释放磁盘空间。</div>
+        ? <div className="dshar_empty">{t('archives.empty')}</div>
         : list.groups.map((group) => (
-          <GroupPanel key={group.cwd} group={group} busy={busy} onDeleteSessions={onDeleteSessions} />
+          <GroupPanel key={group.cwd} group={group} busy={busy} onDeleteSessions={onDeleteSessions} t={t} />
         ))}
     </div>
   )

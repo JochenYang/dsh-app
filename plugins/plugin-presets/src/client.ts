@@ -19,16 +19,30 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: pulls the locale runtime's Context merge (ctx.locale).
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { PresetsSection } from './client/presets-section.tsx'
+import { en as presetsEn, NS as PRESETS_NS, zh as presetsZh } from './client/locales.ts'
+import type { PresetsKey } from './client/locales.ts'
 import { mountNavIconPatch } from './client/nav-icon.ts'
 import { adoptStyles } from './client/styles.ts'
 
-/** The client halves this plugin depends on. */
-export const inject = ['slots']
+// The locale namespace table lives in ui-slots: this merge is what makes
+// `ctx.locale.register`/`bind` key-checked — a key missing from (or extra in)
+// either dictionary of the pair fails this package's typecheck, and the same
+// union constrains the page's `t` seat.
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Preset-packages page copy (the nav row and the whole settings page). */
+    [PRESETS_NS]: PresetsKey
+  }
+}
 
-/** Nav identity of the preset-packages settings page. */
+/** The client halves this plugin depends on. */
+export const inject = ['slots', 'locale']
+
+/** Nav identity of the preset-packages settings page (its label is `presets.nav`). */
 const SECTION_ID = 'dsh-app-presets'
-const SECTION_LABEL = '预设包'
 
 /**
  * Client apply: adopt styles, swap the nav's generic gear for the sliders
@@ -36,14 +50,28 @@ const SECTION_LABEL = '预设包'
  * @param ctx - the client root context.
  */
 export function apply(ctx: ClientContext): void {
+  // --- Dictionaries first: every seat below resolves through this namespace,
+  // and the effect disposes the pair with this plugin's fiber. ---
+  ctx.effect(
+    () => ctx.locale.register(PRESETS_NS, { zh: presetsZh, en: presetsEn }),
+    'dsh-app plugin-presets: dictionaries',
+  )
+  // The nav row follows the active locale through this thunk, and the icon
+  // patch below matches the same label, so a language switch re-tags the cell
+  // with the shell's re-render — the same contract as the `t` seat.
+  const t = ctx.locale.bind(PRESETS_NS)
+
   adoptStyles()
-  ctx.effect(() => mountNavIconPatch(), 'dsh-app plugin-presets: nav icon patch')
+  ctx.effect(() => mountNavIconPatch(() => t('presets.nav')), 'dsh-app plugin-presets: nav icon patch')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,
-    // Free slot after the suite pages: 12 = MCP, 16 = 用量, 17 = 归档,
-    // 18 = 记忆, 19 = 并行子代理; upstream owns 10/15/20.
+    // 21 = directly after upstream's agent-presets (20): a preset IS an agent
+    // profile, and the two pages read as one block. See the order table in
+    // docs/desktop-optimization-plan.md.
     order: 21,
-    label: () => SECTION_LABEL,
+    // `locale:` puts the namespace-bound `t` seat on the component's props.
+    locale: PRESETS_NS,
+    label: () => t('presets.nav'),
   }, PresetsSection))
 }

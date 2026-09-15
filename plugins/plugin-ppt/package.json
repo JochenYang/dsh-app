@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-ppt",
   "description": "DSH APP PPT suite: the model authors a local PPTD project (.pptd manifest + .page YAML) against bundled layout templates, iterates with the read-only pptd_check (text overflow / occlusion / bounds with file-page-elementId locations), and exports an editable .pptx via pptd_render with native editable charts. A PPT capsule in the shared office-suite bar (container class dshOfficeBar, injected after the composer card) toggles a per-session PPT mode and opens a real cover-preview template panel behind its dropdown; a pick made before any session exists is parked and applied to the session once it starts; natural-language PPT requests run the same workflow on the paper default theme; the dsh-ppt skill pins the workflow.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -22,6 +22,7 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-slots"
@@ -48,6 +49,7 @@
     "@deepseek-ai/cordis": "^4.0.0",
     "@deepseek-ai/dsh-agent": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-atomic-write": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-session": "^0.1.5-rc.1",
@@ -62,6 +64,7 @@
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "0.1.5-rc.1",
     "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-session": "0.1.5-rc.1",

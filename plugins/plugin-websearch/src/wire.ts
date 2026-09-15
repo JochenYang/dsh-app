@@ -75,54 +75,68 @@ export type EngineTier = 'free' | 'key'
 /** Static description of one engine (never persisted — the roster is code). */
 export interface EngineSpec {
   readonly id: EngineId
-  /** zh-CN display name. */
+  /** Display name — a proper noun (Bing, Exa), so it needs no translation. */
   readonly label: string
   readonly tier: EngineTier
-  /** zh-CN one-line description shown under the name. */
-  readonly hint: string
+}
+
+/**
+ * A user-visible message the host cannot localize — and deliberately does not
+ * try to.
+ *
+ * The host is a long-lived child process: its language would be decided at
+ * boot, so switching the UI language would require restarting the kernel. It
+ * therefore never sends prose. It sends a stable code plus the values the
+ * sentence interpolates, and the client — which owns the locale namespace —
+ * renders it. `text` is an ENGLISH diagnostic used only for a code this client
+ * does not know (an older UI beside a newer kernel); it is never a localized
+ * sentence, because matching on one across a boundary is how the kernel-side
+ * failure classifier once misread "tampered" as "network error".
+ */
+export interface HostText {
+  readonly code: string
+  readonly params?: Readonly<Record<string, string | number>>
+  /** English developer-facing fallback; shown only for an unknown code. */
+  readonly text?: string
 }
 
 /** The engine roster. Order here is documentation only; priority is per-user. */
 export const ENGINE_SPECS: readonly EngineSpec[] = [
-  {
-    id: 'bing',
-    label: 'Bing',
-    tier: 'free',
-    hint: '解析 Bing 搜索结果页，速度快；短查询和英文技术查询表现好，中文长查询容易退化成泛化结果',
-  },
-  {
-    id: 'anysearch',
-    label: 'AnySearch',
-    tier: 'free',
-    hint: '匿名 JSON API，返回结构化结果（含摘要）；中文长查询命中率最好，速度约 2-3 秒',
-  },
-  {
-    id: 'searxng',
-    label: 'SearXNG',
-    tier: 'free',
-    hint: '元搜索，聚合多个实例，单个实例失败会自动换下一个',
-  },
-  {
-    id: 'parallel',
-    label: 'Parallel',
-    tier: 'free',
-    hint: '匿名托管的 MCP 端点，实测质量与速度均优于 Exa（约 2 秒），无需密钥（按次计量）',
-  },
-  {
-    id: 'exa',
-    label: 'Exa',
-    tier: 'free',
-    hint: '匿名托管的 MCP 端点，语义检索；实测比 Parallel 慢且命中率略低（约 3 秒）',
-  },
+  { id: 'bing', label: 'Bing', tier: 'free' },
+  { id: 'anysearch', label: 'AnySearch', tier: 'free' },
+  { id: 'searxng', label: 'SearXNG', tier: 'free' },
+  { id: 'parallel', label: 'Parallel', tier: 'free' },
+  { id: 'exa', label: 'Exa', tier: 'free' },
 ]
+
 
 /** Look up one engine's static spec. */
 export function engineSpec(id: string): EngineSpec | undefined {
   return ENGINE_SPECS.find(spec => spec.id === id)
 }
 
-/** Validation failure of a settings-page write (routes map it to 400). */
-export class WebSearchValidationError extends Error {}
+/**
+ * Validation failure of a settings-page write (routes map it to 400).
+ *
+ * Carries a code plus its params rather than a sentence: the client renders
+ * the copy, and `super()` keeps an English developer-facing message for logs
+ * and for the wire's diagnostic field.
+ */
+export class WebSearchValidationError extends Error {
+  /**
+   * @param code - stable message code (see the `ws.host.*` keys).
+   * @param params - values the client's copy interpolates.
+   */
+  constructor(readonly code: string, readonly params?: Readonly<Record<string, string | number>>) {
+    super(`websearch config rejected: ${code}`)
+    this.name = 'WebSearchValidationError'
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return this.params === undefined ? { code: this.code } : { code: this.code, params: this.params }
+  }
+}
 
 /** Fallback strategy when the preferred engine fails. */
 export type ChainMode = 'fallback' | 'rotate'
@@ -206,12 +220,12 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
  * disabling a search path.
  */
 export function validateEngine(raw: unknown, seen: ReadonlySet<string>): EngineEntry {
-  if (!isRecord(raw)) throw new WebSearchValidationError('引擎配置必须是对象')
+  if (!isRecord(raw)) throw new WebSearchValidationError('engine.notObject')
   const id = asString(raw.id)
   if (id === undefined || !(ENGINE_IDS as readonly string[]).includes(id)) {
-    throw new WebSearchValidationError(`不认识的引擎 id：「${String(raw.id)}」`)
+    throw new WebSearchValidationError('engine.unknownId', { id: String(raw.id) })
   }
-  if (seen.has(id)) throw new WebSearchValidationError(`引擎 ${id} 重复出现`)
+  if (seen.has(id)) throw new WebSearchValidationError('engine.duplicate', { id })
   const entry: {
     id: EngineId
     enabled: boolean
@@ -229,17 +243,17 @@ export function validateEngine(raw: unknown, seen: ReadonlySet<string>): EngineE
 
 /**
  * Validate a whole config object into a {@link WebSearchFile}, filling gaps
- * from the defaults. Throws {@link WebSearchValidationError} with a zh-CN
- * reason — used both for route writes (400) and load-time degradation.
+ * from the defaults. Throws {@link WebSearchValidationError} with a code —
+ * used both for route writes (400) and load-time degradation.
  */
 export function validateFile(raw: unknown): WebSearchFile {
   const base = defaultFile()
-  if (!isRecord(raw)) throw new WebSearchValidationError('配置必须是对象')
+  if (!isRecord(raw)) throw new WebSearchValidationError('config.notObject')
 
   const seen = new Set<string>()
   const engines: EngineEntry[] = []
   if (raw.engines !== undefined) {
-    if (!Array.isArray(raw.engines)) throw new WebSearchValidationError('engines 必须是数组')
+    if (!Array.isArray(raw.engines)) throw new WebSearchValidationError('engines.notArray')
     for (const item of raw.engines) {
       const entry = validateEngine(item, seen)
       seen.add(entry.id)
@@ -259,13 +273,13 @@ export function validateFile(raw: unknown): WebSearchFile {
   const mode = asString(raw.mode)
   const searxngInstances: string[] = []
   if (raw.searxngInstances !== undefined) {
-    if (!Array.isArray(raw.searxngInstances)) throw new WebSearchValidationError('searxngInstances 必须是字符串数组')
+    if (!Array.isArray(raw.searxngInstances)) throw new WebSearchValidationError('searxng.notArray')
     for (const item of raw.searxngInstances) {
-      if (typeof item !== 'string') throw new WebSearchValidationError('searxngInstances 必须是字符串数组')
+      if (typeof item !== 'string') throw new WebSearchValidationError('searxng.notArray')
       const trimmed = item.trim()
       if (trimmed === '') continue
       if (!/^https?:\/\//.test(trimmed)) {
-        throw new WebSearchValidationError(`SearXNG 实例地址必须是 http(s) 开头：「${trimmed}」`)
+        throw new WebSearchValidationError('searxng.notHttp', { url: trimmed })
       }
       searxngInstances.push(trimmed)
     }
@@ -291,7 +305,8 @@ export interface EngineStatus {
    * error = last probe failed; unknown = not yet determined.
    */
   readonly state: 'ready' | 'blocked' | 'disabled' | 'error' | 'unknown'
-  readonly message?: string
+  /** Why it cannot run, in the coded shape; see {@link HostText}. */
+  readonly message?: HostText
   /** Latency of the last probe, when one ran. */
   readonly latencyMs?: number
   /** Source count of the last probe. */
@@ -319,8 +334,8 @@ export interface ProviderStatus {
    * this field exists to prevent).
    */
   readonly state: 'ready' | 'unavailable' | 'unknown'
-  /** zh-CN explanation, present whenever the state is not `ready`. */
-  readonly reason?: string
+  /** Coded explanation, present whenever the state is not `ready`. */
+  readonly reason?: HostText
 }
 
 /** The client-facing config view: the file plus per-engine status. */
@@ -363,9 +378,7 @@ export function unmaskEngines(raw: unknown, existing: readonly EngineEntry[]): u
     if (item.apiKey !== VALUE_MASK) return item
     const kept = typeof item.id === 'string' ? stored.get(item.id as EngineId) : undefined
     if (kept === undefined) {
-      throw new WebSearchValidationError(
-        `引擎「${String(item.id)}」的密钥是掩码值：请重新输入真实值，或改用 $ENV:变量名 引用`,
-      )
+      throw new WebSearchValidationError('engine.keyMasked', { id: String(item.id) })
     }
     return { ...item, apiKey: kept }
   })
@@ -405,15 +418,15 @@ export function engineBlockReason(
   entry: EngineEntry,
   resolvedKey: string | undefined,
   searxngInstanceCount = 0,
-): string | undefined {
-  if (!entry.enabled) return '已停用'
+): HostText | undefined {
+  if (!entry.enabled) return { code: 'engine.disabled', params: { id: entry.id } }
   const spec = engineSpec(entry.id)
-  if (spec === undefined) return '未知引擎'
+  if (spec === undefined) return { code: 'engine.unknown', params: { id: entry.id } }
   if (spec.tier === 'key' && (resolvedKey === undefined || resolvedKey === '')) {
-    return `需要 API Key（${spec.label}）`
+    return { code: 'engine.missingKey', params: { label: spec.label } }
   }
   if (entry.id === 'searxng' && searxngInstanceCount === 0) {
-    return '未配置实例：公共 SearXNG 已关闭 JSON API，请在下方填入自建实例地址'
+    return { code: 'engine.missingInstance', params: { label: spec.label } }
   }
   return undefined
 }

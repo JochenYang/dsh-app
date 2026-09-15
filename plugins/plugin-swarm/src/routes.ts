@@ -8,13 +8,16 @@
  * Same-origin enforced on both routes (403 with a body, never a hung
  * connection). Writes are validated field-by-field against the loader's own
  * rules and persisted atomically; scheduling fields apply to the next swarm
- * call with no restart (the tool re-reads the file per execution).
+ * call with no restart (the tool re-reads the file per execution). Every
+ * failure crosses as a coded `HostText` (see wire.ts) — the settings page owns
+ * the wording, in either language.
  *
  * @module @dsh-app/plugin-swarm/routes
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadSwarmUserConfig, SwarmConfigValidationError, writeSwarmUserConfig, type SwarmUserConfig } from './user-config.ts'
+import type { HostText } from './wire.ts'
 
 /** Route namespace on the dsh web server. */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-swarm/api'
@@ -92,8 +95,14 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
-function fail(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { ok: false, error: { code, message } })
+/**
+ * Failure answer. `kind` is the transport-ish category (kept for the existing
+ * client checks); `host` is the coded message the UI renders in its own
+ * language. The plain `message` stays an English diagnostic for logs and for a
+ * client that does not know the code yet.
+ */
+function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
+  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
 /** Bounded JSON body read (same discipline as the memory routes). */
@@ -153,7 +162,9 @@ export function registerSwarmRoutes(webServer: WebServerLike, defaults: SwarmOve
       path: `${ROUTE_PREFIX}/config`,
       handler: (req, res) => {
         if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', 'cross-origin request')
+          // Only a page that is not this one can reach this branch; the message
+          // stays an English diagnostic on purpose (see swarm-section.tsx).
+          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
           return
         }
         if (req.method === 'GET') {
@@ -162,7 +173,7 @@ export function registerSwarmRoutes(webServer: WebServerLike, defaults: SwarmOve
         }
         if (req.method !== 'POST') {
           res.setHeader('Allow', 'GET, POST')
-          fail(res, 405, 'method-not-allowed', 'GET or POST only')
+          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET, POST' }, text: 'GET or POST only' })
           return
         }
         void readJsonBody(req)
@@ -171,9 +182,12 @@ export function registerSwarmRoutes(webServer: WebServerLike, defaults: SwarmOve
               writeSwarmUserConfig(filePath, body)
             } catch (error) {
               if (error instanceof SwarmConfigValidationError) {
-                fail(res, 400, 'bad-request', error.message)
+                fail(res, 400, 'bad-request', error.hostText())
               } else {
-                fail(res, 500, 'io', '写入配置失败，请稍后重试')
+                fail(res, 500, 'io', {
+                  code: 'route.writeFailed',
+                  text: error instanceof Error ? error.message : String(error),
+                })
               }
               return
             }
@@ -182,10 +196,10 @@ export function registerSwarmRoutes(webServer: WebServerLike, defaults: SwarmOve
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (8 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
           })
       },
     }),

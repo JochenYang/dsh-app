@@ -337,8 +337,11 @@ describe('installGateOf (POST /install force gate)', () => {
     const gate = installGateOf(installed(), 'github.com/x/pkg-a', false)
     assert.equal(gate.action, 'refuse')
     if (gate.action !== 'refuse') return
-    assert.ok(gate.reason.includes('github.com/o/pkg-a'))
-    assert.ok(gate.reason.includes('github.com/x/pkg-a'))
+    // The refusal is a code plus the two repo keys: the sentence (and the
+    // force: true instruction) is the panel dictionary's.
+    assert.equal(gate.reason.code, 'install.confirmCrossOrigin')
+    assert.equal(gate.reason.params?.installed, 'github.com/o/pkg-a')
+    assert.equal(gate.reason.params?.incoming, 'github.com/x/pkg-a')
   })
 
   it('treats an unknown side as a different origin', () => {
@@ -350,8 +353,10 @@ describe('installGateOf (POST /install force gate)', () => {
     const gate = installGateOf(installed({ source: 'git', repoKey: 'github.com/o/pkg-a' }), null, false)
     assert.equal(gate.action, 'refuse')
     if (gate.action !== 'refuse') return
-    assert.ok(gate.reason.includes('github.com/o/pkg-a'))
-    assert.ok(gate.reason.includes('未知来源'))
+    assert.equal(gate.reason.code, 'install.confirmLocal')
+    assert.equal(gate.reason.params?.installed, 'github.com/o/pkg-a')
+    // An unprovable side is a nested code, never a Chinese word on the wire.
+    assert.equal(gate.reason.params?.incoming, 'repo.unknown')
   })
 
   it('confirms under force with a log line naming both repos', () => {

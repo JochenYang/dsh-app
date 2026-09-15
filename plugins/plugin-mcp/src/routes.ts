@@ -23,10 +23,10 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { invalidServerNameReason, mapExternalServer, parseMcpServersJson, SERVER_NAME_PATTERN, slugifyServerName } from './wire.ts'
+import { invalidServerNameError, mapExternalServer, parseMcpServersJson, SERVER_NAME_PATTERN, slugifyServerName } from './wire.ts'
 import { McpValidationError, McpStore } from './store.ts'
 import type { McpMountManager } from './mount.ts'
-import type { McpServerEntry } from './wire.ts'
+import type { HostText, McpMountStatus, McpServerEntry } from './wire.ts'
 
 /** Route namespace on the dsh web server. */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
@@ -56,7 +56,7 @@ export interface McpServerView {
   readonly url?: string
   readonly headers?: Readonly<Record<string, string>>
   readonly toolCallTimeoutMs?: number
-  readonly status: { readonly state: string, readonly message?: string, readonly toolCount?: number }
+  readonly status: McpMountStatus
 }
 
 export interface McpServersResponse {
@@ -67,7 +67,7 @@ export interface McpServersResponse {
   /** Import report extras (present only on the /server/import response). */
   readonly imported?: readonly string[]
   readonly renamed?: ReadonlyArray<{ readonly from: string, readonly to: string }>
-  readonly failed?: ReadonlyArray<{ readonly name: string, readonly reason: string }>
+  readonly failed?: ReadonlyArray<{ readonly name: string, readonly reason: HostText }>
 }
 
 /** Same-origin fence (compare host parts; Origin carries the scheme). */
@@ -112,8 +112,14 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
-function fail(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { ok: false, error: { code, message } })
+/**
+ * Failure answer. `kind` is the transport-ish category (kept for the existing
+ * client checks); `host` is the coded message the UI renders in its own
+ * language. The plain `message` stays an English diagnostic for logs and for a
+ * client that does not know the code yet.
+ */
+function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
+  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
 /** Bounded JSON body read (larger cap than swarm: server entries carry env maps). */
@@ -169,13 +175,13 @@ export function unmaskSecretValues(raw: Record<string, unknown>, existing: McpSe
       if (value === VALUE_MASK) {
         const kept = stored?.[key]
         if (kept === undefined) {
-          throw new McpValidationError(`${field}.${key} 是掩码值：请重新输入真实值，或改用 $ENV:VAR 引用`)
+          throw new McpValidationError('secret.masked', { field: `${field}.${key}` })
         }
         resolved[key] = kept
         continue
       }
       if (typeof value !== 'string') {
-        throw new McpValidationError(`${field}.${key} 必须是字符串`)
+        throw new McpValidationError('field.stringValue', { field: `${field}.${key}` })
       }
       resolved[key] = value
     }
@@ -213,10 +219,23 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
   /** Guarded write: refuse when the master switch is off (read-only mode). */
   const guardWrite = (res: ServerResponse): boolean => {
     if (!store.load().enabled) {
-      fail(res, 409, 'disabled', 'MCP 管理已整体停用，请先在配置文件中启用（enabled: true）')
+      fail(res, 409, 'disabled', { code: 'route.disabled' })
       return false
     }
     return true
+  }
+
+  /** Write-store failure: the reason is a technical detail, so the client's
+   * copy owns the sentence and the detail rides as the code's English text. */
+  const writeFailed = (error: unknown): HostText => {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { code: 'route.writeFailed', params: { detail }, text: detail }
+  }
+
+  /** Body-read failure: `invalid body`, or the JSON parser's own text. */
+  const invalidBody = (error: unknown): HostText => {
+    const detail = error instanceof Error ? error.message : 'invalid body'
+    return { code: 'route.invalidBody', params: { detail }, text: detail }
   }
 
   const disposers = [
@@ -225,12 +244,12 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       path: `${ROUTE_PREFIX}/servers`,
       handler: (req, res) => {
         if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', 'cross-origin request')
+          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
           return
         }
         if (req.method !== 'GET') {
           res.setHeader('Allow', 'GET')
-          fail(res, 405, 'method-not-allowed', 'GET only')
+          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
           return
         }
         void respond(res)
@@ -241,12 +260,12 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       path: `${ROUTE_PREFIX}/server/create`,
       handler: (req, res) => {
         if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', 'cross-origin request')
+          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
           return
         }
         if (req.method !== 'POST') {
           res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', 'POST only')
+          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
           return
         }
         void readJsonBody(req)
@@ -257,9 +276,9 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
               await manager.syncOne(entry)
             } catch (error) {
               if (error instanceof McpValidationError) {
-                fail(res, 400, 'bad-request', error.message)
+                fail(res, 400, 'bad-request', error.hostText())
               } else {
-                fail(res, 500, 'io', `写入服务器配置失败：${error instanceof Error ? error.message : String(error)}`)
+                fail(res, 500, 'io', writeFailed(error))
               }
               return
             }
@@ -268,10 +287,10 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (64 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', invalidBody(error))
           })
       },
     }),
@@ -280,12 +299,12 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       path: `${ROUTE_PREFIX}/server/update`,
       handler: (req, res) => {
         if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', 'cross-origin request')
+          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
           return
         }
         if (req.method !== 'POST') {
           res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', 'POST only')
+          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
           return
         }
         void readJsonBody(req)
@@ -294,7 +313,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
             const id = typeof body.id === 'string' ? body.id : ''
             const existing = store.load().servers.find(entry => entry.id === id)
             if (existing === undefined) {
-              fail(res, 404, 'not-found', `服务器 ${id} 不存在`)
+              fail(res, 404, 'not-found', { code: 'server.notFound', params: { id } })
               return
             }
             try {
@@ -302,9 +321,9 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
               await manager.syncOne(entry)
             } catch (error) {
               if (error instanceof McpValidationError) {
-                fail(res, 400, 'bad-request', error.message)
+                fail(res, 400, 'bad-request', error.hostText())
               } else {
-                fail(res, 500, 'io', `写入服务器配置失败：${error instanceof Error ? error.message : String(error)}`)
+                fail(res, 500, 'io', writeFailed(error))
               }
               return
             }
@@ -313,10 +332,10 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (64 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', invalidBody(error))
           })
       },
     }),
@@ -325,12 +344,12 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       path: `${ROUTE_PREFIX}/server/delete`,
       handler: (req, res) => {
         if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', 'cross-origin request')
+          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
           return
         }
         if (req.method !== 'POST') {
           res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', 'POST only')
+          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
           return
         }
         void readJsonBody(req)
@@ -342,7 +361,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
             await respond(res)
           })
           .catch((error: unknown) => {
-            fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid body')
+            fail(res, 400, 'bad-request', invalidBody(error))
           })
       },
     }),
@@ -351,12 +370,12 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
       path: `${ROUTE_PREFIX}/server/import`,
       handler: (req, res) => {
         if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', 'cross-origin request')
+          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
           return
         }
         if (req.method !== 'POST') {
           res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', 'POST only')
+          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
           return
         }
         void readJsonBody(req)
@@ -367,7 +386,9 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
             try {
               parsed = parseMcpServersJson(json)
             } catch (error) {
-              fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid JSON')
+              fail(res, 400, 'bad-request', error instanceof McpValidationError
+                ? error.hostText()
+                : invalidBody(error))
               return
             }
             // Per-server independence: one bad definition fails alone (and is
@@ -377,13 +398,13 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
             // and surfaced in `renamed` so the rename is never silent.
             const imported: string[] = []
             const renamed: Array<{ from: string, to: string }> = []
-            const failed: Array<{ name: string, reason: string }> = []
+            const failed: Array<{ name: string, reason: HostText }> = []
             for (const { name, def } of parsed) {
               try {
                 let serverName = name
                 if (!SERVER_NAME_PATTERN.test(name)) {
                   const slug = slugifyServerName(name)
-                  if (slug === undefined) throw new McpValidationError(invalidServerNameReason(name))
+                  if (slug === undefined) throw invalidServerNameError(name)
                   renamed.push({ from: name, to: slug })
                   serverName = slug
                 }
@@ -391,11 +412,12 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
                 await manager.syncOne(entry)
                 imported.push(serverName)
               } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error)
                 failed.push({
                   name,
                   reason: error instanceof McpValidationError
-                    ? error.message
-                    : `写入失败：${error instanceof Error ? error.message : String(error)}`,
+                    ? error.hostText()
+                    : { code: 'import.writeFailed', params: { detail }, text: detail },
                 })
               }
             }
@@ -404,10 +426,10 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (64 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', invalidBody(error))
           })
       },
     }),

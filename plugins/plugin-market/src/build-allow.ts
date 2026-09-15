@@ -63,7 +63,11 @@ function scalarOf(raw: string): string {
 function assertSafeNames(packages: readonly string[]): void {
   for (const name of packages) {
     if (!SAFE_YAML_SCALAR.test(name)) {
-      throw new MarketValidationError(`包名不能安全写入构建脚本白名单：「${name}」`)
+      throw new MarketValidationError({
+        code: 'buildAllow.unsafeName',
+        params: { name },
+        text: `the package name cannot be written into the build-script whitelist safely: "${name}"`,
+      })
     }
   }
 }

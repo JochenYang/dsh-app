@@ -35,11 +35,11 @@ import {
   composerInput,
   removeSkillReference,
   skillDegradation,
-  skillReferenceHint,
   skillReferencePlan,
   stripOfficeTokens,
   stripSkillToken,
 } from '../src/client/skill-prefill.ts'
+import { en as localesEn, zh as localesZh } from '../src/client/locales.ts'
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -241,9 +241,13 @@ test('skill reference: composer input is read structurally off the binding', () 
 })
 
 test('skill reference: the hint names the mode and the manual token', () => {
-  const hint = skillReferenceHint('Word')
-  assert.match(hint, /已开启 Word 模式/)
-  assert.match(hint, new RegExp(SKILL_TOKEN))
+  // The sentence lives in the namespace dictionary (the capsule renders it
+  // through its `t` seat), so the dictionary is what carries the wording.
+  const hint = localesZh['capsule.skillHint']
+  assert.match(hint, /已开启 \{label\} 模式/)
+  assert.match(hint, /\{token\}/)
+  assert.match(localesEn['capsule.skillHint'], /\{label\}/)
+  assert.match(localesEn['capsule.skillHint'], /\{token\}/)
 })
 
 test('skill reference: the client registers the source and no CSS skin remains', () => {

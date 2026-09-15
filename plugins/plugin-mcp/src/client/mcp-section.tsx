@@ -9,15 +9,26 @@
  * (••••••); a form or JSON view that leaves the mask untouched sends it back
  * and the host keeps the stored value. `$ENV:NAME` references are verbatim.
  *
+ * Every string this page renders comes from the `dsh-app.mcp` namespace
+ * through the `t` standard seat: the section registers with `locale: NS`, so
+ * the renderer hands the component a namespace-bound translate that reads the
+ * active UI locale at call time and re-renders on a language switch. Text the
+ * HOST wrote (route rejections, mount messages, per-server import reasons)
+ * arrives as a code plus its params and renders through the same dictionary —
+ * {@link hostMessage} is the one place that decides how.
+ *
  * @module @dsh-app/plugin-mcp/client/mcp-section
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { entryToExternal, mapExternalServer, parseMcpServersJson, McpValidationError } from '../wire.ts'
+import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import { entryToExternal, mapExternalServer, parseMcpServersJson } from '../wire.ts'
+import type { HostText } from '../wire.ts'
+import { failureOf, failureText, fetchJson, hostListText, hostMessage, PageError } from './api.ts'
+import type { Failure } from './api.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
-
-const ROUTE = '/plugins/@dsh-app/plugin-mcp/api'
+import { NS, type McpKey } from './locales.ts'
 
 /** The host route's payload (mirror of McpServersResponse). */
 interface ServerView {
@@ -32,7 +43,7 @@ interface ServerView {
   readonly url?: string
   readonly headers?: Readonly<Record<string, string>>
   readonly toolCallTimeoutMs?: number
-  readonly status: { readonly state: string, readonly message?: string, readonly toolCount?: number }
+  readonly status: { readonly state: string, readonly message?: HostText, readonly warnings?: readonly HostText[], readonly toolCount?: number }
 }
 
 interface ServersResponse {
@@ -42,16 +53,7 @@ interface ServersResponse {
   readonly servers: readonly ServerView[]
   readonly imported?: readonly string[]
   readonly renamed?: ReadonlyArray<{ readonly from: string, readonly to: string }>
-  readonly failed?: ReadonlyArray<{ readonly name: string, readonly reason: string }>
-}
-
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init })
-  const body = (await response.json()) as { ok: boolean, value?: T, error?: { message?: string } }
-  if (!response.ok || body.ok !== true) {
-    throw new Error(body.error?.message ?? `HTTP ${response.status}`)
-  }
-  return body.value as T
+  readonly failed?: ReadonlyArray<{ readonly name: string, readonly reason: HostText }>
 }
 
 /** Editable form state; every field is a string (textareas included). */
@@ -67,6 +69,69 @@ interface Draft {
   url: string
   headersText: string
   toolCallTimeoutMs: string
+}
+
+/** One rename the host applied while importing (name → valid serverName). */
+interface RenameRow {
+  readonly from: string
+  readonly to: string
+}
+
+/** One server the host refused while importing, with its coded reason. */
+interface FailedRow {
+  readonly name: string
+  readonly reason: HostText
+}
+
+/**
+ * The transient success notice, kept as DATA rather than a rendered sentence:
+ * the banner resolves it through `t` on every render, so a language switch
+ * rewrites the note that is still on screen.
+ */
+type Notice =
+  | { readonly kind: 'created' }
+  | { readonly kind: 'saved' }
+  | { readonly kind: 'imported'; readonly count: number; readonly renamed: readonly RenameRow[] }
+  | { readonly kind: 'enabled'; readonly name: string }
+  | { readonly kind: 'disabled'; readonly name: string }
+  | { readonly kind: 'deleted'; readonly name: string }
+
+/** What the import form reports back once the host answered. */
+interface ImportReport {
+  readonly imported: readonly string[]
+  readonly renamed: readonly RenameRow[]
+  readonly failed: readonly FailedRow[]
+}
+
+/**
+ * Render one success notice in the active locale.
+ * @param notice - the notice this page set.
+ * @param t - the page's namespace-bound translate seat.
+ * @returns the display text.
+ */
+function noticeText(notice: Notice, t: TranslateNS<typeof NS>): string {
+  switch (notice.kind) {
+    case 'created':
+      return t('mcp.notice.created')
+    case 'saved':
+      return t('mcp.notice.saved')
+    case 'enabled':
+      return t('mcp.notice.enabled', { name: notice.name })
+    case 'disabled':
+      return t('mcp.notice.disabled', { name: notice.name })
+    case 'deleted':
+      return t('mcp.notice.deleted', { name: notice.name })
+    case 'imported': {
+      // The rename list is a sentence of its own, and its separator is part of
+      // the language (、 / ,): both stay keys so neither is baked in here.
+      const renamed = notice.renamed.length === 0 ? '' : t('mcp.notice.importRenamed', {
+        names: notice.renamed
+          .map(entry => `${entry.from} → ${entry.to}`)
+          .join(t('mcp.listSeparator')),
+      })
+      return t('mcp.notice.imported', { count: notice.count, renamed })
+    }
+  }
 }
 
 function emptyDraft(): Draft {
@@ -101,14 +166,22 @@ function draftFromView(view: ServerView): Draft {
   }
 }
 
-/** `KEY=VALUE` per line → record; a line without `=` is an error. */
-function parseKeyValue(text: string): { ok: true, value: Record<string, string> } | { ok: false, reason: string } {
+/**
+ * `KEY=VALUE` per line → record; a line without `=` is an error the banner
+ * explains in the active locale.
+ */
+function parseKeyValue(text: string): { ok: true, value: Record<string, string> } | { ok: false, failure: Failure } {
   const out: Record<string, string> = {}
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
     if (trimmed === '') continue
     const eq = trimmed.indexOf('=')
-    if (eq <= 0) return { ok: false, reason: `键值对格式不正确：「${trimmed}」（应为 KEY=VALUE）` }
+    if (eq <= 0) {
+      return {
+        ok: false,
+        failure: { source: 'key', key: 'mcp.error.keyValue', params: { line: trimmed } },
+      }
+    }
     out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim()
   }
   return { ok: true, value: out }
@@ -138,12 +211,18 @@ function draftToExternal(draft: Draft): string {
  * `{"name": {...}}` fragment (the editor's own serialization) or a wrapped
  * `{"mcpServers": {...}}` paste — the latter only when it holds exactly one
  * server, because the edit dialog is one server's editor (use 导入 JSON for
- * bulk). Throws Error with a zh-CN reason.
+ * bulk). Throws {@link PageError} for the one-server gate (this page's own
+ * sentence, a dictionary key); the wire parser's rejections are coded and
+ * classified by {@link failureOf}.
  */
 function draftFromJson(text: string, previous: Draft): Draft {
   const parsed = parseMcpServersJson(text)
   if (parsed.length !== 1) {
-    throw new Error(`编辑模式只对应一个服务器（当前 JSON 含 ${String(parsed.length)} 个）；批量配置请用列表页的「导入 JSON」`)
+    throw new PageError({
+      source: 'key',
+      key: 'mcp.error.jsonSingle',
+      params: { count: parsed.length },
+    })
   }
   const { name, def } = parsed[0]
   const raw = mapExternalServer(name, def) as Record<string, unknown>
@@ -169,7 +248,7 @@ function bodyFromDraft(draft: Draft): Record<string, unknown> {
   // Empty-only gate: the serverName shape is validated server-side
   // (validateEntry → 400 with a zh-CN reason); the client never duplicates it.
   if (name === '') {
-    throw new McpValidationError('请填写服务器名（serverName）')
+    throw new PageError({ source: 'key', key: 'mcp.error.serverNameRequired' })
   }
   const body: Record<string, unknown> = {
     serverName: name,
@@ -180,14 +259,14 @@ function bodyFromDraft(draft: Draft): Record<string, unknown> {
   }
   if (draft.transport === 'stdio') {
     if (draft.command.trim() === '') {
-      throw new McpValidationError('stdio 服务器必须填写启动命令（command）')
+      throw new PageError({ source: 'key', key: 'mcp.error.commandRequired' })
     }
     body.command = draft.command.trim()
     const args = draft.argsText.split('\n').map(line => line.trim()).filter(line => line !== '')
     if (args.length > 0) body.args = args
     if (draft.envText.trim() !== '') {
       const env = parseKeyValue(draft.envText)
-      if (!env.ok) throw new McpValidationError(env.reason)
+      if (!env.ok) throw new PageError(env.failure)
       body.env = env.value
     }
     if (draft.cwd.trim() !== '') body.cwd = draft.cwd.trim()
@@ -196,12 +275,12 @@ function bodyFromDraft(draft: Draft): Record<string, unknown> {
     // Empty-only gate: URL legality is validated server-side (validateEntry →
     // 400); an empty value is rejected here so a blank form never posts.
     if (url === '') {
-      throw new McpValidationError('请填写 streamable-http 服务器的 URL')
+      throw new PageError({ source: 'key', key: 'mcp.error.urlRequired' })
     }
     body.url = url
     if (draft.headersText.trim() !== '') {
       const headers = parseKeyValue(draft.headersText)
-      if (!headers.ok) throw new McpValidationError(headers.reason)
+      if (!headers.ok) throw new PageError(headers.failure)
       body.headers = headers.value
     }
   }
@@ -213,34 +292,43 @@ function bodyFromDraft(draft: Draft): Record<string, unknown> {
   return body
 }
 
-const STATUS_BADGE: Record<string, { label: string, className: string }> = {
-  mounted: { label: '已挂载', className: 'dshMcp-badge dshMcp-badgeOn' },
-  starting: { label: '挂载中', className: 'dshMcp-badge' },
-  disabled: { label: '已停用', className: 'dshMcp-badge dshMcp-badgeOff' },
-  error: { label: '挂载失败', className: 'dshMcp-badge dshMcp-badgeErr' },
-  unavailable: { label: '内核不支持', className: 'dshMcp-badge dshMcp-badgeErr' },
+/** Mount state → its badge copy. Class names stay literal (styling, not copy). */
+const STATUS_BADGE: Record<string, { key: McpKey, className: string }> = {
+  mounted: { key: 'mcp.status.mounted', className: 'dshMcp-badge dshMcp-badgeOn' },
+  starting: { key: 'mcp.status.starting', className: 'dshMcp-badge' },
+  disabled: { key: 'mcp.status.disabled', className: 'dshMcp-badge dshMcp-badgeOff' },
+  error: { key: 'mcp.status.error', className: 'dshMcp-badge dshMcp-badgeErr' },
+  unavailable: { key: 'mcp.status.unavailable', className: 'dshMcp-badge dshMcp-badgeErr' },
 }
 
-export function McpSection(): ReactNode {
+/** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
+export type McpSectionProps = PropsLocale<typeof NS>
+
+/**
+ * Render the MCP settings section.
+ * @param props - the framework-supplied `t` seat of this page's namespace.
+ * @returns the section page; it owns its data, so no inject face is needed.
+ */
+export function McpSection({ t }: McpSectionProps): ReactNode {
   const [data, setData] = useState<ServersResponse | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [editView, setEditView] = useState<'form' | 'json'>('form')
   const [jsonText, setJsonText] = useState('')
   const [importOpen, setImportOpen] = useState(false)
   const [importText, setImportText] = useState('')
-  const [importReport, setImportReport] = useState<{ imported: readonly string[], renamed: ReadonlyArray<{ from: string, to: string }>, failed: ReadonlyArray<{ name: string, reason: string }> } | null>(null)
+  const [importReport, setImportReport] = useState<ImportReport | null>(null)
   const [confirmTarget, setConfirmTarget] = useState<ServerView | null>(null)
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [error, setError] = useState<Failure | undefined>(undefined)
+  const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
-      const value = await fetchJson<ServersResponse>(`${ROUTE}/servers`)
+      const value = await fetchJson<ServersResponse>('/servers')
       setData(value)
       setError(undefined)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(failureOf(failure))
     }
   }, [])
 
@@ -259,7 +347,7 @@ export function McpSection(): ReactNode {
     setBusy(true)
     setNotice(undefined)
     try {
-      const value = await fetchJson<ServersResponse>(`${ROUTE}/${path}`, {
+      const value = await fetchJson<ServersResponse>(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -267,7 +355,7 @@ export function McpSection(): ReactNode {
       setData(value)
       return value
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(failureOf(failure))
       throw failure
     } finally {
       setBusy(false)
@@ -294,7 +382,7 @@ export function McpSection(): ReactNode {
       setEditView('form')
       setError(undefined)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(failureOf(failure))
     }
   }, [draft, jsonText])
 
@@ -309,13 +397,13 @@ export function McpSection(): ReactNode {
           })()
         : bodyFromDraft(draft)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure))
+      setError(failureOf(failure))
       return
     }
     try {
-      await post(draft.id === null ? 'server/create' : 'server/update', draft.id === null ? body : { ...body, id: draft.id })
+      await post(draft.id === null ? '/server/create' : '/server/update', draft.id === null ? body : { ...body, id: draft.id })
       setDraft(null)
-      setNotice(draft.id === null ? '已添加并挂载，工具对当前及新会话即时可用' : '已保存并重新挂载')
+      setNotice(draft.id === null ? { kind: 'created' } : { kind: 'saved' })
     } catch {
       // post() already surfaced the error banner.
     }
@@ -323,16 +411,17 @@ export function McpSection(): ReactNode {
 
   const onImport = useCallback(async () => {
     try {
-      const value = await post('server/import', { json: importText })
-      const report = { imported: value.imported ?? [], renamed: value.renamed ?? [], failed: value.failed ?? [] }
+      const value = await post('/server/import', { json: importText })
+      const report: ImportReport = {
+        imported: value.imported ?? [],
+        renamed: value.renamed ?? [],
+        failed: value.failed ?? [],
+      }
       setImportReport(report)
       if (report.failed.length === 0) {
         setImportOpen(false)
         setImportText('')
-        const renamedNote = report.renamed.length > 0
-          ? `（已自动改名：${report.renamed.map(entry => `${entry.from} → ${entry.to}`).join('、')}）`
-          : ''
-        setNotice(`已导入 ${String(report.imported.length)} 个服务器并挂载${renamedNote}`)
+        setNotice({ kind: 'imported', count: report.imported.length, renamed: report.renamed })
       }
     } catch {
       // post() already surfaced the error banner.
@@ -341,8 +430,8 @@ export function McpSection(): ReactNode {
 
   const onToggle = useCallback(async (view: ServerView) => {
     try {
-      await post('server/update', { ...view, enabled: !view.enabled })
-      setNotice(!view.enabled ? `已启用 ${view.serverName}` : `已停用 ${view.serverName}`)
+      await post('/server/update', { ...view, enabled: !view.enabled })
+      setNotice(!view.enabled ? { kind: 'enabled', name: view.serverName } : { kind: 'disabled', name: view.serverName })
     } catch {
       // post() already surfaced the error banner.
     }
@@ -350,10 +439,10 @@ export function McpSection(): ReactNode {
 
   const onDelete = useCallback(async (view: ServerView) => {
     try {
-      await post('server/delete', { id: view.id })
+      await post('/server/delete', { id: view.id })
       if (draft?.id === view.id) setDraft(null)
       setConfirmTarget(null)
-      setNotice(`已删除 ${view.serverName}`)
+      setNotice({ kind: 'deleted', name: view.serverName })
     } catch {
       // post() already surfaced the error banner.
     }
@@ -368,25 +457,23 @@ export function McpSection(): ReactNode {
 
   return (
     <div className="dshMcp-section">
-      <p className="dshMcp-title">MCP 服务器</p>
-      <p className="dshMcp-hint">
-        把外部 MCP 服务器接入模型：每个服务器的工具会以 mcp__服务器名__工具名 的形式原生出现。
-        stdio 服务器将在本机启动对应命令进程，请确认命令来源可信。保存后立即挂载，无需重启。
-        支持粘贴标准 mcpServers JSON（Claude / Cursor / VS Code 配置同款形状）。注意：工具定义会占用每轮对话的上下文，按需启用。
-      </p>
+      <p className="dshMcp-title">{t('mcp.nav')}</p>
+      <p className="dshMcp-hint">{t('mcp.intro')}</p>
 
-      {error !== undefined ? <div className="dshMcp-banner" role="alert">{error}</div> : null}
-      {notice !== undefined ? <div className="dshMcp-noticeOk">{notice}</div> : null}
+      {error !== undefined ? <div className="dshMcp-banner" role="alert">{failureText(error, t)}</div> : null}
+      {notice !== undefined ? <div className="dshMcp-noticeOk">{noticeText(notice, t)}</div> : null}
       {data !== null && !data.mountAvailable
-        ? <div className="dshMcp-warning">当前内核不支持 MCP 动态挂载：配置可以保存，但服务器不会挂载、工具不可用。</div>
+        ? <div className="dshMcp-warning">{t('mcp.mountUnavailable')}</div>
         : null}
 
       {draft !== null
         ? (
           <form className="dshMcp-form" onSubmit={(event) => { event.preventDefault(); void onSave() }}>
             <div className="dshMcp-formHead">
-              <p className="dshMcp-formTitle">{draft.id === null ? '添加 MCP 服务器' : `编辑 ${draft.serverName}`}</p>
-              <div className="dshMcp-viewToggle" role="tablist" aria-label="编辑视图">
+              <p className="dshMcp-formTitle">
+                {draft.id === null ? t('mcp.form.createTitle') : t('mcp.form.editTitle', { name: draft.serverName })}
+              </p>
+              <div className="dshMcp-viewToggle" role="tablist" aria-label={t('mcp.form.viewAria')}>
                 <button
                   type="button"
                   role="tab"
@@ -394,7 +481,7 @@ export function McpSection(): ReactNode {
                   className={editView === 'form' ? 'dshMcp-viewBtn dshMcp-viewBtnOn' : 'dshMcp-viewBtn'}
                   disabled={busy || editView === 'form'}
                   onClick={switchToForm}
-                >表单</button>
+                >{t('mcp.form.viewForm')}</button>
                 <button
                   type="button"
                   role="tab"
@@ -409,19 +496,19 @@ export function McpSection(): ReactNode {
             {editView === 'json'
               ? (
                 <div className="dshMcp-field">
-                  <span className="dshMcp-label">完整配置</span>
+                  <span className="dshMcp-label">{t('mcp.json.label')}</span>
                   <textarea
                     className="dshMcp-textarea dshMcp-jsonArea"
                     value={jsonText}
                     spellCheck={false}
                     placeholder={'{\n  "figma": {\n    "type": "stdio",\n    "command": "npx",\n    "args": ["-y", "figma-developer-mcp"]\n  }\n}'}
                     disabled={busy}
-                    aria-label="MCP 服务器 JSON 配置"
+                    aria-label={t('mcp.json.aria')}
                     onChange={(event) => { setJsonText(event.target.value) }}
                   />
                   <span className="dshMcp-fieldHint">
-                    支持直接粘贴 {'{"server-name": {...}}'} 或 {'{"mcpServers": {"server-name": {...}}}'}；编辑模式只对应一个服务器，批量请用「导入 JSON」。
-                    {jsonInvalid ? '当前内容解析失败，修正后可保存或切回表单。' : ''}
+                    {t('mcp.json.hint')}
+                    {jsonInvalid ? t('mcp.json.invalid') : ''}
                   </span>
                 </div>
               )
@@ -429,20 +516,20 @@ export function McpSection(): ReactNode {
                 <>
                   <div className="dshMcp-row">
                     <div className="dshMcp-field dshMcp-fieldGrow">
-                      <span className="dshMcp-label">serverName（工具命名空间）</span>
+                      <span className="dshMcp-label">{t('mcp.field.serverName')}</span>
                       <input
                         className="dshMcp-input"
                         value={draft.serverName}
-                        placeholder="例如 github"
+                        placeholder={t('mcp.field.serverNamePlaceholder')}
                         disabled={busy}
-                        aria-label="serverName"
+                        aria-label={t('mcp.field.serverNameAria')}
                         onChange={(event) => { setDraft({ ...draft, serverName: event.target.value }) }}
                       />
-                      <span className="dshMcp-fieldHint">1–32 位字母/数字/下划线/连字符，工具名形如 mcp__服务器名__工具名</span>
+                      <span className="dshMcp-fieldHint">{t('mcp.field.serverNameHint')}</span>
                     </div>
                     <div className="dshMcp-field">
-                      <span className="dshMcp-label">传输方式</span>
-                      <div className="dshMcp-radioGroup" role="radiogroup" aria-label="传输方式">
+                      <span className="dshMcp-label">{t('mcp.field.transport')}</span>
+                      <div className="dshMcp-radioGroup" role="radiogroup" aria-label={t('mcp.field.transport')}>
                         <label>
                           <input
                             type="radio"
@@ -451,7 +538,7 @@ export function McpSection(): ReactNode {
                             disabled={busy}
                             onChange={() => { setDraft({ ...draft, transport: 'stdio' }) }}
                           />
-                          stdio（本机进程）
+                          {t('mcp.field.transportStdio')}
                         </label>
                         <label>
                           <input
@@ -461,7 +548,7 @@ export function McpSection(): ReactNode {
                             disabled={busy}
                             onChange={() => { setDraft({ ...draft, transport: 'streamable-http' }) }}
                           />
-                          Streamable HTTP
+                          {t('mcp.field.transportHttp')}
                         </label>
                       </div>
                     </div>
@@ -472,46 +559,46 @@ export function McpSection(): ReactNode {
                       <>
                         <div className="dshMcp-row">
                           <div className="dshMcp-field dshMcp-fieldGrow">
-                            <span className="dshMcp-label">启动命令</span>
+                            <span className="dshMcp-label">{t('mcp.field.command')}</span>
                             <input
                               className="dshMcp-input"
                               value={draft.command}
-                              placeholder="例如 npx"
+                              placeholder={t('mcp.field.commandPlaceholder')}
                               disabled={busy}
-                              aria-label="启动命令"
+                              aria-label={t('mcp.field.command')}
                               onChange={(event) => { setDraft({ ...draft, command: event.target.value }) }}
                             />
                           </div>
                           <div className="dshMcp-field">
-                            <span className="dshMcp-label">工作目录（可选）</span>
+                            <span className="dshMcp-label">{t('mcp.field.cwd')}</span>
                             <input
                               className="dshMcp-input"
                               value={draft.cwd}
                               disabled={busy}
-                              aria-label="工作目录"
+                              aria-label={t('mcp.field.cwdAria')}
                               onChange={(event) => { setDraft({ ...draft, cwd: event.target.value }) }}
                             />
                           </div>
                         </div>
                         <div className="dshMcp-field">
-                          <span className="dshMcp-label">参数（每行一个）</span>
+                          <span className="dshMcp-label">{t('mcp.field.args')}</span>
                           <textarea
                             className="dshMcp-textarea"
                             value={draft.argsText}
                             placeholder={'-y\n@modelcontextprotocol/server-filesystem\nD:/workspace'}
                             disabled={busy}
-                            aria-label="启动参数"
+                            aria-label={t('mcp.field.argsAria')}
                             onChange={(event) => { setDraft({ ...draft, argsText: event.target.value }) }}
                           />
                         </div>
                         <div className="dshMcp-field">
-                          <span className="dshMcp-label">环境变量（每行 KEY=VALUE；值可写 $ENV:变量名 引用环境变量）</span>
+                          <span className="dshMcp-label">{t('mcp.field.env')}</span>
                           <textarea
                             className="dshMcp-textarea"
                             value={draft.envText}
                             placeholder={'GITHUB_TOKEN=$ENV:GITHUB_TOKEN'}
                             disabled={busy}
-                            aria-label="环境变量"
+                            aria-label={t('mcp.field.envAria')}
                             onChange={(event) => { setDraft({ ...draft, envText: event.target.value }) }}
                           />
                         </div>
@@ -520,24 +607,24 @@ export function McpSection(): ReactNode {
                     : (
                       <>
                         <div className="dshMcp-field">
-                          <span className="dshMcp-label">服务地址</span>
+                          <span className="dshMcp-label">{t('mcp.field.url')}</span>
                           <input
                             className="dshMcp-input"
                             value={draft.url}
                             placeholder="http://127.0.0.1:3000/mcp"
                             disabled={busy}
-                            aria-label="服务地址"
+                            aria-label={t('mcp.field.url')}
                             onChange={(event) => { setDraft({ ...draft, url: event.target.value }) }}
                           />
                         </div>
                         <div className="dshMcp-field">
-                          <span className="dshMcp-label">请求头（每行 KEY=VALUE；值可写 $ENV:变量名 引用环境变量）</span>
+                          <span className="dshMcp-label">{t('mcp.field.headers')}</span>
                           <textarea
                             className="dshMcp-textarea"
                             value={draft.headersText}
                             placeholder={'Authorization=$ENV:MCP_TOKEN'}
                             disabled={busy}
-                            aria-label="请求头"
+                            aria-label={t('mcp.field.headersAria')}
                             onChange={(event) => { setDraft({ ...draft, headersText: event.target.value }) }}
                           />
                         </div>
@@ -546,12 +633,12 @@ export function McpSection(): ReactNode {
 
                   <div className="dshMcp-row">
                     <div className="dshMcp-field">
-                      <span className="dshMcp-label">工具调用超时 ms（可选，默认 60000）</span>
+                      <span className="dshMcp-label">{t('mcp.field.timeout')}</span>
                       <input
                         className="dshMcp-input"
                         value={draft.toolCallTimeoutMs}
                         disabled={busy}
-                        aria-label="工具调用超时"
+                        aria-label={t('mcp.field.timeoutAria')}
                         onChange={(event) => { setDraft({ ...draft, toolCallTimeoutMs: event.target.value }) }}
                       />
                     </div>
@@ -561,28 +648,37 @@ export function McpSection(): ReactNode {
 
             <div className="dshMcp-formActions">
               <button type="submit" className="dshMcp-button dshMcp-buttonPrimary" disabled={busy}>
-                {busy ? '保存中…' : draft.id === null ? '添加并挂载' : '保存并重新挂载'}
+                {busy
+                  ? t('mcp.form.saving')
+                  : draft.id === null ? t('mcp.form.save') : t('mcp.form.saveEdit')}
               </button>
-              <button type="button" className="dshMcp-button" disabled={busy} onClick={() => { setDraft(null); setError(undefined) }}>取消</button>
+              <button
+                type="button"
+                className="dshMcp-button"
+                disabled={busy}
+                onClick={() => { setDraft(null); setError(undefined) }}
+              >{t('mcp.cancel')}</button>
             </div>
           </form>
         )
         : (
           <div className="dshMcp-toolbar">
-            <span className="dshMcp-count">{data === null ? '' : `共 ${String(data.servers.length)} 个服务器`}</span>
+            <span className="dshMcp-count">
+              {data === null ? '' : t('mcp.count', { count: data.servers.length })}
+            </span>
             <div className="dshMcp-toolbarActions">
               <button
                 type="button"
                 className="dshMcp-button"
                 disabled={busy || (data !== null && !data.enabled)}
                 onClick={() => { setImportOpen(true); setImportReport(null); setError(undefined) }}
-              >导入 JSON</button>
+              >{t('mcp.import.action')}</button>
               <button
                 type="button"
                 className="dshMcp-button dshMcp-buttonPrimary"
                 disabled={busy || (data !== null && !data.enabled)}
                 onClick={() => { setDraft(emptyDraft()); setEditView('form'); setError(undefined) }}
-              >添加服务器</button>
+              >{t('mcp.add.action')}</button>
             </div>
           </div>
         )}
@@ -590,56 +686,67 @@ export function McpSection(): ReactNode {
       {importOpen
         ? (
           <form className="dshMcp-form" onSubmit={(event) => { event.preventDefault(); void onImport() }}>
-            <p className="dshMcp-formTitle">从 JSON 导入</p>
+            <p className="dshMcp-formTitle">{t('mcp.import.title')}</p>
             <div className="dshMcp-field">
-              <span className="dshMcp-label">mcpServers 配置</span>
+              <span className="dshMcp-label">{t('mcp.import.label')}</span>
               <textarea
                 className="dshMcp-textarea dshMcp-jsonArea"
                 value={importText}
                 spellCheck={false}
                 disabled={busy}
                 placeholder={'{\n  "mcpServers": {\n    "context7": {\n      "type": "stdio",\n      "command": "npx",\n      "args": ["-y", "@upstash/context7-mcp"]\n    },\n    "exa": { "type": "http", "url": "https://mcp.exa.ai/mcp" }\n  }\n}'}
-                aria-label="mcpServers JSON"
+                aria-label={t('mcp.import.aria')}
                 onChange={(event) => { setImportText(event.target.value) }}
               />
-              <span className="dshMcp-fieldHint">
-                支持粘贴 {'{"server-name": {...}}'} 或带 {"mcpServers"} 包装的完整配置（Claude / Cursor / VS Code 同款形状）。逐条导入，失败的条目不影响其余。
-              </span>
+              <span className="dshMcp-fieldHint">{t('mcp.import.hint')}</span>
             </div>
             {importReport !== null
               ? (
                 <div className="dshMcp-importReport">
                   {importReport.imported.length > 0
-                    ? <div className="dshMcp-noticeOk">已导入：{importReport.imported.join('、')}</div>
+                    ? (
+                      <div className="dshMcp-noticeOk">
+                        {t('mcp.import.imported', {
+                          names: importReport.imported.join(t('mcp.listSeparator')),
+                        })}
+                      </div>
+                    )
                     : null}
                   {importReport.renamed.map(entry => (
                     <div key={entry.to} className="dshMcp-warning">
-                      已自动改名：{entry.from} → {entry.to}（服务器名会成为工具命名空间 mcp__名称__工具名，不能含空格等字符）
+                      {t('mcp.import.renamed', { from: entry.from, to: entry.to })}
                     </div>
                   ))}
                   {importReport.failed.map(entry => (
-                    <div key={entry.name} className="dshMcp-banner">{entry.name}：{entry.reason}</div>
+                    <div key={entry.name} className="dshMcp-banner">
+                      {t('mcp.import.failed', { name: entry.name, reason: hostMessage(entry.reason, t) })}
+                    </div>
                   ))}
                 </div>
               )
               : null}
             <div className="dshMcp-formActions">
               <button type="submit" className="dshMcp-button dshMcp-buttonPrimary" disabled={busy || importText.trim() === ''}>
-                {busy ? '导入中…' : '导入并挂载'}
+                {busy ? t('mcp.import.busy') : t('mcp.import.submit')}
               </button>
-              <button type="button" className="dshMcp-button" disabled={busy} onClick={() => { setImportOpen(false); setImportReport(null) }}>关闭</button>
+              <button
+                type="button"
+                className="dshMcp-button"
+                disabled={busy}
+                onClick={() => { setImportOpen(false); setImportReport(null) }}
+              >{t('mcp.import.close')}</button>
             </div>
           </form>
         )
         : null}
 
       {data !== null && !data.enabled
-        ? <div className="dshMcp-warning">MCP 管理已整体停用（配置文件 enabled: false）：列表只读，如需启用请编辑配置文件后重启。</div>
+        ? <div className="dshMcp-warning">{t('mcp.disabled')}</div>
         : null}
 
       <div className="dshMcp-list">
         {sortedServers.length === 0 && draft === null && !importOpen
-          ? <div className="dshMcp-empty">还没有配置 MCP 服务器。添加一个（如 filesystem、github），或直接粘贴已有的 mcpServers JSON 导入。</div>
+          ? <div className="dshMcp-empty">{t('mcp.empty')}</div>
           : null}
         {sortedServers.map((view) => {
           const badge = STATUS_BADGE[view.status.state] ?? STATUS_BADGE.disabled
@@ -652,10 +759,20 @@ export function McpSection(): ReactNode {
                 <span className="dshMcp-serverName">{view.serverName}</span>
                 <span className="dshMcp-badge">{view.transport === 'stdio' ? 'stdio' : 'http'}</span>
                 <span className={badge.className}>
-                  {badge.label}{view.status.state === 'mounted' && view.status.toolCount !== undefined ? ` · ${String(view.status.toolCount)} 个工具` : ''}
+                  {t(badge.key)}
+                  {view.status.state === 'mounted' && view.status.toolCount !== undefined
+                    ? t('mcp.card.badgeTools', { count: view.status.toolCount })
+                    : ''}
                 </span>
               </div>
-              {view.status.message !== undefined ? <div className="dshMcp-warning">{view.status.message}</div> : null}
+              {/* The host explains an unhealthy entry with a code; the badge's own
+                  copy is the last resort, so an unknown code still shows a line. */}
+              {view.status.message !== undefined
+                ? <div className="dshMcp-warning">{hostMessage(view.status.message, t, t(badge.key))}</div>
+                : null}
+              {view.status.warnings !== undefined && view.status.warnings.length > 0
+                ? <div className="dshMcp-warning">{hostListText(view.status.warnings, t)}</div>
+                : null}
               <div className="dshMcp-meta">{meta}</div>
               <div className="dshMcp-cardActions">
                 <button
@@ -663,25 +780,36 @@ export function McpSection(): ReactNode {
                   className="dshMcp-toggle"
                   role="switch"
                   aria-checked={view.enabled}
-                  aria-label={`启用 ${view.serverName}`}
+                  aria-label={t('mcp.card.toggleAria', { name: view.serverName })}
                   disabled={busy}
                   onClick={() => { void onToggle(view) }}
                 />
-                <button type="button" className="dshMcp-button" disabled={busy} onClick={() => { openEdit(view) }}>编辑</button>
-                <button type="button" className="dshMcp-button dshMcp-buttonDanger" disabled={busy} onClick={() => { setConfirmTarget(view) }}>删除</button>
+                <button
+                  type="button"
+                  className="dshMcp-button"
+                  disabled={busy}
+                  onClick={() => { openEdit(view) }}
+                >{t('mcp.card.edit')}</button>
+                <button
+                  type="button"
+                  className="dshMcp-button dshMcp-buttonDanger"
+                  disabled={busy}
+                  onClick={() => { setConfirmTarget(view) }}
+                >{t('mcp.card.delete')}</button>
               </div>
             </div>
           )
         })}
       </div>
 
-      {data !== null ? <p className="dshMcp-path" title={data.filePath}>配置文件：{data.filePath}</p> : null}
+      {data !== null ? <p className="dshMcp-path" title={data.filePath}>{t('mcp.path', { path: data.filePath })}</p> : null}
 
       <ConfirmDialog
         open={confirmTarget !== null}
-        title={`删除 MCP 服务器「${confirmTarget?.serverName ?? ''}」`}
-        message="该服务器注册的工具将立即从模型侧移除，配置文件中的条目一并删除。"
-        confirmLabel="删除"
+        title={t('mcp.confirm.deleteTitle', { name: confirmTarget?.serverName ?? '' })}
+        message={t('mcp.confirm.deleteMessage')}
+        confirmLabel={t('mcp.confirm.delete')}
+        cancelLabel={t('mcp.cancel')}
         busy={busy}
         onConfirm={() => { if (confirmTarget !== null) void onDelete(confirmTarget) }}
         onClose={() => { setConfirmTarget(null) }}

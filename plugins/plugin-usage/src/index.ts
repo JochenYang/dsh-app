@@ -65,8 +65,8 @@ const BALANCE_TIMEOUT_MS = 10_000
 /**
  * Build the balance fetcher: resolve the user's DeepSeek API key, proxy the
  * official GET /user/balance, and map the payload to the wire shape. Every
- * failure mode becomes a typed BalanceError so the route layer can answer
- * with an actionable zh-CN message.
+ * failure mode becomes a typed BalanceError whose code the settings page
+ * renders in the active UI language (the diagnostic beside it stays English).
  */
 function makeBalanceFetcher(ctx: Context): BalanceFetcher {
   return async (): Promise<UsageBalance> => {
@@ -75,7 +75,7 @@ function makeBalanceFetcher(ctx: Context): BalanceFetcher {
       ? (await credentials.resolve(DEEPSEEK_API_KEY_REF))?.value
       : undefined
     if (apiKey === undefined || apiKey.length === 0) {
-      throw new BalanceError('missing-credential', '未配置 DeepSeek API Key，请先在设置 → 模型页配置')
+      throw new BalanceError('missing-credential', 'no DEEPSEEK_API_KEY credential is configured')
     }
     let response: Response
     try {
@@ -84,14 +84,17 @@ function makeBalanceFetcher(ctx: Context): BalanceFetcher {
         signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
       })
     } catch (error) {
-      const hint = (error as Error).name === 'TimeoutError' ? '请求超时' : '网络错误'
-      throw new BalanceError('upstream', `查询 DeepSeek 余额失败（${hint}），请稍后重试`)
+      const timedOut = (error as Error).name === 'TimeoutError'
+      throw new BalanceError(
+        timedOut ? 'upstream-timeout' : 'upstream-network',
+        timedOut ? 'the balance request timed out' : `the balance request failed: ${(error as Error).message}`,
+      )
     }
     if (response.status === 401) {
-      throw new BalanceError('invalid-credential', 'DeepSeek API Key 无效，请检查设置 → 模型页的配置')
+      throw new BalanceError('invalid-credential', 'the DeepSeek API key was rejected (HTTP 401)')
     }
     if (!response.ok) {
-      throw new BalanceError('upstream', `查询 DeepSeek 余额失败（HTTP ${response.status}），请稍后重试`)
+      throw new BalanceError('upstream-http', `the balance endpoint answered HTTP ${response.status}`, { status: response.status })
     }
     const data = await response.json() as {
       is_available?: unknown

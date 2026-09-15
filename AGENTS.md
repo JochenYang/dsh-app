@@ -34,13 +34,14 @@ x64 + arm64. esbuild 0.28 bundles the plugin halves; `npm` drives this repo,
 src/main/     Electron shell: boot/lifecycle, window, tray, server spawn,
               shell updater, dialogs, safe mode, env scrub, proxy detection
 src/kernel/   Kernel runtime manager: lifecycle, manifest I/O, integrity,
-              version/artifact resolution sources
+              version/artifact sources, split layers (`layers.ts`)
 src/shared/   Shared constants + types
 plugins/      Brand suite (17 packages) + dsh-app.patch.yml (loader overlay)
               + build-lib.mjs (shared esbuild recipe)
-scripts/      Build/release tooling + hand-run probes (none run in CI)
+scripts/      Build/release tooling + hand-run probes (no probe runs in CI;
+              `smoke-package.mjs` and `split-runtime-layers.mjs` do)
 test/         Root node:test suites (require a prior build)
-static/       Empty today; copy-static.mjs still copies it when present
+static/       First-launch splash (`startup.html`), copied to `dist/static`
 resources/    App icons (buildResources; window/tray icon source)
 docs/         ARCHITECTURE.md + planning docs
 .github/      workflows/ + scripts/ (mirror_release.py and its unit tests)
@@ -104,9 +105,16 @@ for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run bu
   `plugin-client-ui`, `plugin-fff`, `plugin-sidebar` have none.
 - **CI runs only `plugin-memory` and `plugin-swarm`** — run the rest locally
   before a release.
-- Hand-run probes: `scripts/probe-*.mjs` (mirror, shell-update, websearch, fff)
-  and the `probe-*.cjs` DOM-stub probes. `probe-drag.cjs` mirrors
+- Hand-run probes: `scripts/probe-*.mjs` / `scripts/probe-*.cjs` (mirror,
+  shell-update, websearch, fff, launch-folder, settings-nav, splash). After a
+  kernel-line bump run `probe-launch-folder.mjs` (workspace service names
+  against the installed kernel); after touching a settings section run
+  `probe-settings-nav.cjs --lang en-US [--sweep]` (nav order, rail scrolling,
+  glyphs, Han-character count of the active pane). `probe-drag.cjs` mirrors
   `DESKTOP_CHROME_CSS` in `src/main/window.ts` — **keep the two in sync**.
+- **A probe that runs inside Electron must pass `windowsHide: true` to every
+  `spawn`** — otherwise each console child (the kernel, `taskkill`) pops a new
+  terminal window onto the user's desktop.
 
 ### Rebuilding the runtime + bundled kernel
 
@@ -131,15 +139,35 @@ that tempts exactly that mistake.
 
 ## 4. Conventions
 
-- **Language**: code comments and technical docs are **English**. User-facing
-  strings are **zh-CN** (status messages, dialogs, tray labels, settings copy).
-  `README.md` (zh-CN) and `README.en.md` are kept in sync with a top-of-file
-  switcher. `CHANGELOG.md` is bilingual, 中文 first, bullets aligned 1:1.
+- **Language**: code comments and technical docs are **English**. Shell copy
+  lives in `src/shared/locale.ts` (zh-CN + en-US): the en table is typed
+  `Record<MessageKey, string>` and `t()` throws on a missing key, so neither a
+  missing translation nor an unfilled param ships silently. Locale =
+  `DSH_APP_LOCALE` > `app.getLocale()` > zh-CN; **zh is frozen copy** (a moved
+  string stays byte-identical). `src/shared/locale.ts` is the only file under
+  `src/` allowed to hold Han characters; each plugin owns its own dictionary.
+  `README.md` / `README.en.md` stay in sync; `CHANGELOG.md` is bilingual
+  (中文 first, bullets aligned).
 - **TypeScript**: `strict`; avoid `any`. Shell code is CommonJS + Node
   resolution; plugins are ESM with `moduleResolution: "Bundler"` and explicit
   extensions on local imports.
+- **Settings sections are one ordered rail.** The `order` values are a shared
+  table (`docs/desktop-optimization-plan.md` §3.1): upstream pins 0/10/15/20/25,
+  ours fill the gaps — **update the table in the same commit as an `order`
+  change, and never reuse a taken value**. `plugin-client-ui`'s
+  `src/client/settings-nav.ts` injects the rail's scroll rule and the two nav
+  glyphs.
+- **Host halves never send user-visible prose.** They send
+  `HostText { code, params?, text? }` (`plugins/plugin-websearch/src/wire.ts`): a
+  stable code the client maps to its dictionary, plus an English diagnostic in
+  `text` for an unknown code. Matching on localized copy across the boundary
+  once made the failure classifier read "tampered" as "network error".
 - **Desktop adaptation stays shell-side**: inject via `executeJavaScript`,
-  stylesheets, and `--patch` overlays only. Never modify harness source.
+  stylesheets, and `--patch` overlays only. Never modify harness source. Three
+  shapes: an injected script (chrome sync, cards, splash), a **page global the
+  shell calls** (`window.__dshAppOpenWorkspace`, see `src/main/workspace-launch.ts`),
+  and the **desktop bridge** (`src/main/desktop-bridge.ts`) for actions that
+  return a value. All three answer status tokens, never copy.
 - **No native browser dialogs in client UI**: never `window.alert` /
   `confirm` / `prompt`. Use the in-app modal idiom (mask + centered card,
   Esc/mask = cancel, Enter = primary); `src/main/in-frame-dialog.ts` is the
@@ -262,6 +290,13 @@ hash. `build-runtime.mjs` and the workflow's `resolve` job both assert against
 it. Moving the line is therefore **one edit** — bump the root deps, then tag;
 nothing in `release.yml` needs touching.
 
+**`suiteVersion` hashes the plugins' `package.json` versions**, not their
+code: a plugin change without a version bump is invisible to it, so CI's
+`resolve` job reuses the published runtime and an installed app keeps the kernel
+it already has. **Any change under `plugins/` needs a patch bump in that
+plugin.** (The root shell version is separate: a shell-only release reuses the
+runtime on purpose.)
+
 Shell release, e.g. 0.11.10:
 
 1. **Bump + changelog**: set `version` in `package.json`, move `[Unreleased]`
@@ -317,6 +352,41 @@ converged to exactly what the current release uploaded, so **the archive, not
 `latest`, is the rollback source**. Deletes use a positive allowlist or a
 narrower single-file guard and refuse anything else rather than deleting.
 
+**Kernel runtime assets** (`runtime-<dshVersion>` tags, mirrored so mainland
+users can fetch a 100 MB kernel without GitHub) are a separate flow behind the
+same subcommand: they land under `releases/runtime/<tag>/`, never touch
+`releases/versions.json` or `releases/latest/`, and prune on their own window
+`keep_runtime_versions` (default **3**, independent of `keep_versions`; the tag
+being published is always kept). Their delete guard is a second, disjoint
+allowlist — exactly `<tag>/<file>` below `releases/runtime/`, no nesting — and
+the whole plan is validated before the first delete, so a leftover runtime
+version cannot shadow a shell asset or vice versa (~2 GB of logical LFS per
+window). The mirror job waits for the runtime matrix to finish uploading
+before it commits and refuses an incomplete cell set.
+
+**Split layers (kernel updates transfer ~10 MiB instead of ~96 MiB).** A runtime
+release also carries the same runtime split into five layers plus one index per
+cell (`layers-<platform>-<arch>.json`): `node` 33.9 + `vendor` 45.5 + `dsh` 9.9 +
+`suite` 6.9 + `meta` ~0 MiB, summing to the single tarball's size. Layer names
+ARE the cache keys — `node`/`vendor`/`meta` are content-addressed (an identical
+rebuild keeps its name, so a client reuses what it already has), `dsh`/`suite`
+are version-addressed. `scripts/split-runtime-layers.mjs` produces them and
+verifies its own output by re-assembling the layers alone and comparing every
+file against the input tree (26 464 files today).
+
+The client **prefers the layer path and falls back to the single tarball** on
+any failure (no index, invalid index, layer 404, digest mismatch, assembly
+error) — the fallback is the byte-identical legacy path, so a broken fast path
+can never stop an install. Layer digests live in the per-cell index, which obeys
+the same metadata rule as the `.sha512` sidecar: official host first and
+fail-closed, proxy mirrors only when the official host is unreachable,
+ModelScope never. Layers are cached under `<userData>/kernel/layers/`; `cleanup()`
+must keep that directory and reclaims only layers the active `current.json`
+record does not reference. Mirror side: layer assets are exempt from the shape
+rules (their names are not version-addressed and they carry no sidecar) but they
+can never satisfy the "an archive is present" requirement, so the completeness
+check still fails on a missing per-cell tgz.
+
 Release notes: incremental only (never a full history), bilingual with the zh
 block open and English folded in `<details>`, generated by the script — never
 hand-written HTML.
@@ -344,10 +414,14 @@ hand-written HTML.
 
 ## 8. Known TODOs / scaffolds (do not assume finished)
 
-- `plugin-brand`: host services are scaffolds — settings namespace, app-info
-  service and desktop bridge remotes are not wired.
-- `plugin-client-ui`: registers exactly one `settings.section` (advanced Models
-  page, order 11) plus a nav-icon patch and the whale background. The
+- `plugin-brand`: **desktop bridge remotes are wired** — trust-fenced host routes
+  (`/plugins/@dsh-app/plugin-brand/api`) forward open-in-folder / notify /
+  save-text-as / pick-directory / open-logs to the shell's loopback bridge, plus
+  an availability probe and the shell's log tail. Still scaffolds: the `brand`
+  settings namespace and the app-info service.
+- `plugin-client-ui`: registers **two** `settings.section`s — advanced Models
+  (order 11) and 诊断/Diagnostics (order 22: bridge status, log directory, kernel
+  log tail) — plus a nav-icon patch and the whale background. The
   reminder-summary / trajectory-export / model-badge slots mentioned in older
   notes are **gone from the code** — verify slot ids against the running UI
   before adding anything.
@@ -355,6 +429,10 @@ hand-written HTML.
 - CI runs only two of the thirteen plugin suites (see §3).
 - First-run UX: kernel download progress is wired; pause/resume and checksum
   display are not (cancellation is a `TODO` in `KernelManager.download`).
+- Split-layer kernel path: `KernelManager.installFromLocalLayers` +
+  `src/kernel/layers.ts` are implemented and tested, but nothing calls them yet —
+  the boot path still installs the single tgz, and no CI job uploads layer
+  assets. `current.json.layers` is written only by that path.
 - `docs/ARCHITECTURE.md` lags the code: its plugin roster says ten entries
   (there are seventeen) and it predates the safe-mode / proxy / websearch work.
 - **Pre-release gaps**: macOS signing/notarization and (optional) Windows

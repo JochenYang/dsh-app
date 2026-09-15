@@ -9,12 +9,76 @@
  *     branch switcher dropdown (checkout + create), and stash push/pop.
  *   - 图谱 (modal): `git log --graph --all --oneline` in a centered dialog —
  *     click a commit row to see its file stat INSIDE the modal.
+ *
+ * Every string this tab renders comes from the `dsh-app.sidebar` namespace
+ * through the `t` standard seat: the view registers with `locale: NS`, so the
+ * renderer hands the component — and, through its props, the diff/detail
+ * helpers below — a namespace-bound translate that reads the active UI locale
+ * at call time and re-renders on a language switch. What the ROUTE writes
+ * crosses the wire as a CODE (see `host-text.ts` in the host half) and is
+ * worded here; what git itself wrote (stdout excerpts, porcelain letters,
+ * commit messages) is a diagnostic and is shown verbatim.
  */
 
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { FsApiError, gitApi } from './api.ts'
-import type { GitActionValue, GitBranchList, GitStatusEntry } from './api.ts'
+import type { GitActionValue, GitBranchList, GitStatusEntry, HostText } from './api.ts'
+import { NS, type SidebarKey } from './locales.ts'
+
+/** The tab's namespace-bound translate, handed to the render helpers below. */
+type SidebarTranslate = TranslateNS<typeof NS>
+
+/**
+ * Render a coded host message.
+ *
+ * The host never sends prose for anything the tab shows: it sends a code plus
+ * the values the copy interpolates (see `host-text.ts` in the host half).
+ * `text` is the host's own English diagnostic and is used only for a code this
+ * build does not know, so a newer kernel beside an older tab degrades to a
+ * readable line rather than to a blank notice.
+ *
+ * @param host - the coded message, when the host sent one.
+ * @param copy - this build's copy for the codes it knows.
+ * @param fallback - line to show when there is no code at all.
+ * @returns the copy of the active locale.
+ */
+function hostMessage(
+  host: HostText | undefined,
+  copy: Readonly<Record<string, string>>,
+  fallback: string,
+): string {
+  if (host === undefined) return fallback
+  return copy[host.code] ?? host.text ?? fallback
+}
+
+/**
+ * Codes whose copy REPLACES the sentence: each already reads as a complete
+ * statement, so wrapping it in `sidebar.fail.detail` would repeat the frame.
+ * Keyed by the wire `code` — the category this tab has always branched on.
+ */
+const STANDALONE_COPY: Readonly<Record<string, SidebarKey>> = {
+  'git-missing': 'sidebar.fail.gitMissing',
+  'git-timeout': 'sidebar.fail.timeout',
+  'forbidden': 'sidebar.fail.forbidden',
+}
+
+/**
+ * Copy for the coded messages the frame sentence (`sidebar.fail.detail`)
+ * wraps. The zh entries are byte-identical to the sentences the host used to
+ * send; only the carrier changed.
+ */
+function detailCopy(t: SidebarTranslate): Readonly<Record<string, string>> {
+  return {
+    'git.noRemoteSync': t('sidebar.fail.noRemoteSync'),
+    'git.noRemotePull': t('sidebar.fail.noRemotePull'),
+    'git.noRemotePush': t('sidebar.fail.noRemotePush'),
+    'git.detachedPull': t('sidebar.fail.detachedPull'),
+    'git.branchNameMissing': t('sidebar.fail.branchNameMissing'),
+    'git.branchNameInvalid': t('sidebar.fail.branchNameInvalid'),
+  }
+}
 
 /** Bounded git stdout a sync action returns, or nothing for other ops. */
 function actionOut(value: unknown): string | undefined {
@@ -27,20 +91,24 @@ function actionOut(value: unknown): string | undefined {
  * Pull/push success wording from git's own verdict: "Already up to date." /
  * "Everything up-to-date" mean nothing actually moved, which deserves a
  * different notice than a real transfer (git's messages are English — the
- * fenced env passes no locale).
+ * fenced env passes no locale). The classifier returns a dictionary key, not
+ * a sentence, so the notice follows the active language.
  */
-function pullNotice(value: unknown): string {
+function pullNotice(value: unknown): SidebarKey {
   const out = actionOut(value)
-  return out !== undefined && /already up to date/iu.test(out) ? '已是最新，无新提交' : '已拉取'
+  return out !== undefined && /already up to date/iu.test(out) ? 'sidebar.pull.upToDate' : 'sidebar.pull.done'
 }
 
-function pushNotice(value: unknown): string {
+function pushNotice(value: unknown): SidebarKey {
   const out = actionOut(value)
-  return out !== undefined && /everything up-to-date/iu.test(out) ? '远程已是最新，无可推送' : '已推送'
+  return out !== undefined && /everything up-to-date/iu.test(out) ? 'sidebar.push.upToDate' : 'sidebar.push.done'
 }
 
-/** Props of {@link GitTab} (view inject face; extra fields ignored). */
-export interface GitTabProps {
+/**
+ * Props of {@link GitTab} (the view inject face plus the framework-supplied
+ * `t` seat of this plugin's namespace; other framework fields are ignored).
+ */
+export type GitTabProps = PropsLocale<typeof NS> & {
   /** Workspace root (the session cwd); undefined with no session. */
   cwd: string | undefined
   /** Host-owned session identity used to bind every Git request. */
@@ -48,8 +116,8 @@ export interface GitTabProps {
 }
 
 /** One diff text as a colored block. */
-function DiffView(props: { text: string, truncated?: boolean }): ReactNode {
-  if (props.text === '') return <p className="dshAsb-hint">无差异（未变更）</p>
+function DiffView(props: { text: string, truncated?: boolean, t: SidebarTranslate }): ReactNode {
+  if (props.text === '') return <p className="dshAsb-hint">{props.t('sidebar.diff.empty')}</p>
   const lines = props.text.split('\n')
   // Unified-diff line numbering: each @@ hunk carries the new/old start
   // lines; + counts against new, - against old, context against both.
@@ -79,7 +147,7 @@ function DiffView(props: { text: string, truncated?: boolean }): ReactNode {
   })
   return (
     <>
-      {props.truncated ? <p className="dshAsbGit-warning">差异较大，仅显示前 500 KB。</p> : null}
+      {props.truncated ? <p className="dshAsbGit-warning">{props.t('sidebar.diff.truncated')}</p> : null}
       <pre className="dshAsbGit-diff">
         {rows.map(row => (
           <div key={row.key} className={row.cls}>
@@ -110,7 +178,7 @@ function ChevronGlyph({ open }: { open: boolean }): ReactNode {
  * @returns the Git surface.
  */
 export function GitTab(props: GitTabProps): ReactNode {
-  const { cwd, sessionId } = props
+  const { cwd, sessionId, t } = props
   const [entries, setEntries] = useState<readonly GitStatusEntry[]>([])
   const [branch, setBranch] = useState('')
   const [detached, setDetached] = useState(false)
@@ -181,11 +249,13 @@ export function GitTab(props: GitTabProps): ReactNode {
 
   const failureText = (failure: unknown): string => {
     if (failure instanceof FsApiError) {
-      if (failure.code === 'git-missing') return '未找到 Git，请先安装 Git 或检查 PATH。'
-      if (failure.code === 'git-timeout') return '网络操作超时，请检查网络或远程仓库后重试。'
-      if (failure.code === 'forbidden') return '当前会话的工作区校验失败，请刷新会话后重试。'
-      const detail = failure.message.trim().replace(/\s+/gu, ' ')
-      return detail === '' ? 'Git 操作失败。' : `Git 操作失败：${detail}`
+      const standalone = STANDALONE_COPY[failure.code]
+      if (standalone !== undefined) return t(standalone)
+      // Everything else is a detail the frame sentence wraps: the host's coded
+      // message when it sent one, its English diagnostic otherwise (a raw git
+      // stderr excerpt is a diagnostic, never copy).
+      const detail = hostMessage(failure.host, detailCopy(t), failure.message).trim().replace(/\s+/gu, ' ')
+      return detail === '' ? t('sidebar.fail.generic') : t('sidebar.fail.detail', { detail })
     }
     if (failure instanceof Error) return failure.message
     return String(failure)
@@ -310,7 +380,7 @@ export function GitTab(props: GitTabProps): ReactNode {
   const checkoutBranch = (name: string): void => {
     if (cwd === undefined || sessionId === undefined) return
     setBranchPanelOpen(false)
-    void run(() => gitApi.action('branch.checkout', cwd, undefined, undefined, sessionId, name), `已切换到 ${name}`)
+    void run(() => gitApi.action('branch.checkout', cwd, undefined, undefined, sessionId, name), t('sidebar.branch.switched', { name }))
   }
 
   const createBranch = (): void => {
@@ -319,7 +389,7 @@ export function GitTab(props: GitTabProps): ReactNode {
     if (name === '') return
     setBranchPanelOpen(false)
     setNewBranchName('')
-    void run(() => gitApi.action('branch.create', cwd, undefined, undefined, sessionId, name), `已创建并切换到 ${name}`)
+    void run(() => gitApi.action('branch.create', cwd, undefined, undefined, sessionId, name), t('sidebar.branch.created', { name }))
   }
 
   // No wire event for repo state; refreshing on mount/cwd and after actions.
@@ -394,7 +464,7 @@ export function GitTab(props: GitTabProps): ReactNode {
     setBranchesError(undefined)
     setNewBranchName('')
     if (sessionId === undefined) {
-      setError('当前会话缺少安全标识，请重新打开该会话。')
+      setError(t('sidebar.fail.noSession'))
       return
     }
     void loadStatus(cwd, sessionId, generation)
@@ -454,10 +524,10 @@ export function GitTab(props: GitTabProps): ReactNode {
     if (cwd === undefined || sessionId === undefined) return
     const requestId = showRequestId.current + 1
     showRequestId.current = requestId
-    setShowFor({ sha, message: '加载中…', stat: '', requestId })
+    setShowFor({ sha, message: t('sidebar.loading'), stat: '', requestId })
     gitApi.show(cwd, sha, sessionId).then(
       result => setShowFor(current => current?.requestId !== requestId ? current : { sha, message: String(result.message ?? ''), stat: String(result.stat ?? ''), requestId }),
-      (failure: unknown) => setShowFor(current => current?.requestId !== requestId ? current : { sha, message: `读取失败：${failureText(failure)}`, stat: '', requestId }),
+      (failure: unknown) => setShowFor(current => current?.requestId !== requestId ? current : { sha, message: t('sidebar.graph.readFailed', { message: failureText(failure) }), stat: '', requestId }),
     )
   }
 
@@ -493,7 +563,7 @@ export function GitTab(props: GitTabProps): ReactNode {
     return (
       <div className="dshAsbGit">
         <style>{GIT_CSS}</style>
-        <p className="dshAsb-hint">打开一个会话后，可在这里查看其工作区的 Git 状态。</p>
+        <p className="dshAsb-hint">{t('sidebar.noSession')}</p>
       </div>
     )
   }
@@ -506,14 +576,14 @@ export function GitTab(props: GitTabProps): ReactNode {
   const behindCount = behind ?? 0
   const currentBranch = branchList?.current ?? null
   const branchLabel = statusLoading
-    ? '正在读取 Git…'
+    ? t('sidebar.branch.loading')
     : error !== undefined
-      ? 'Git 状态不可用'
+      ? t('sidebar.branch.unavailable')
       : detached
-        ? '⎇ 分离头指针'
+        ? t('sidebar.branch.detached')
         : branch === ''
-          ? '（未命名分支）'
-          : `⎇ ${branch}`
+          ? t('sidebar.branch.unnamed')
+          : t('sidebar.branch.named', { branch })
 
   /** Group an entry list by its top-level directory (VS Code SCM tree view). */
   const dirGroups = (list: readonly GitStatusEntry[]): { key: string, files: GitStatusEntry[] }[] => {
@@ -548,13 +618,13 @@ export function GitTab(props: GitTabProps): ReactNode {
         </button>
         {!readonly ? (
           <span className="dshAsbGit-rowActions">
-            <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined} title={cached ? `取消暂存 ${entry.path}` : `暂存 ${entry.path}`} aria-label={cached ? `取消暂存 ${entry.path}` : `暂存 ${entry.path}`}
-              onClick={() => { void run(() => gitApi.action(cached ? 'unstage' : 'stage', cwd, entry.path, undefined, sessionId), cached ? '已取消暂存' : '已暂存') }}>
+            <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined} title={t(cached ? 'sidebar.action.unstage' : 'sidebar.action.stage', { path: entry.path })} aria-label={t(cached ? 'sidebar.action.unstage' : 'sidebar.action.stage', { path: entry.path })}
+              onClick={() => { void run(() => gitApi.action(cached ? 'unstage' : 'stage', cwd, entry.path, undefined, sessionId), t(cached ? 'sidebar.action.unstaged' : 'sidebar.action.staged')) }}>
               {cached ? '−' : '+'}
             </button>
             {canRestore
               ? (
-                <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger" disabled={busy || sessionId === undefined} title={`还原 ${entry.path}`} aria-label={`还原 ${entry.path}`}
+                <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger" disabled={busy || sessionId === undefined} title={t('sidebar.action.restore', { path: entry.path })} aria-label={t('sidebar.action.restore', { path: entry.path })}
                   onClick={() => { setRestoreFor(entry.path) }}>
                   ↺
                 </button>
@@ -607,20 +677,20 @@ export function GitTab(props: GitTabProps): ReactNode {
         <div className="dshAsbGit-commitRow">
           <input
             className="dshAsbGit-input" type="text" value={commitMessage}
-            placeholder="提交信息（提交前可查看全部变更）" aria-label="提交信息"
+            placeholder={t('sidebar.commit.placeholder')} aria-label={t('sidebar.commit.label')}
             onChange={(event) => { setCommitMessage(event.target.value) }}
           />
           <button type="button" className="dshAsbGit-primary" disabled={busy || statusLoading || sessionId === undefined || commitMessage.trim() === '' || staged.length === 0}
-            title="提交已暂存的内容"
+            title={t('sidebar.commit.title')}
             onClick={() => {
-              void run(() => gitApi.action('commit', cwd, undefined, commitMessage, sessionId), '已提交')
+              void run(() => gitApi.action('commit', cwd, undefined, commitMessage, sessionId), t('sidebar.commit.done'))
                 .then(success => { if (success) setCommitMessage('') })
-            }}>{busy ? '…' : '提交'}</button>
+            }}>{busy ? '…' : t('sidebar.commit.action')}</button>
         </div>
         <div className="dshAsbGit-head">
-          <div className="dshAsbGit-seg" role="tablist" aria-label="Git 列表">
+          <div className="dshAsbGit-seg" role="tablist" aria-label={t('sidebar.list.aria')}>
             <button type="button" role="tab" aria-selected={listMode === 'changes'} className={`dshAsbGit-segBtn${listMode === 'changes' ? ' dshAsbGit-segActive' : ''}`}
-              onClick={() => { setListMode('changes'); setDiffFor(undefined) }}>变更（{String(entries.length)}）</button>
+              onClick={() => { setListMode('changes'); setDiffFor(undefined) }}>{t('sidebar.list.changes', { count: entries.length })}</button>
             <button type="button" role="tab" aria-selected={listMode === 'files'} className={`dshAsbGit-segBtn${listMode === 'files' ? ' dshAsbGit-segActive' : ''}`}
               onClick={() => {
                 setListMode('files')
@@ -628,25 +698,25 @@ export function GitTab(props: GitTabProps): ReactNode {
                 if (cwd !== undefined && sessionId !== undefined && repoFiles === undefined && !filesLoading) {
                   void loadRepoFiles(cwd, sessionId, viewGeneration.current)
                 }
-              }}>仓库文件</button>
+              }}>{t('sidebar.list.files')}</button>
             </div>
           <div className="dshAsbGit-tools">
             <button type="button" className="dshAsbGit-link" disabled={busy || statusLoading || sessionId === undefined || unstaged.length === 0}
-              onClick={() => { void run(() => gitApi.action('stage', cwd, undefined, undefined, sessionId), '已暂存全部变更') }}>全部暂存</button>
+              onClick={() => { void run(() => gitApi.action('stage', cwd, undefined, undefined, sessionId), t('sidebar.stageAll.done')) }}>{t('sidebar.stageAll')}</button>
             <button type="button" className="dshAsbGit-link" disabled={busy || statusLoading || sessionId === undefined || staged.length === 0}
-              onClick={() => { void run(() => gitApi.action('unstage', cwd, undefined, undefined, sessionId), '已取消全部暂存') }}>全部取消暂存</button>
-            <button type="button" className="dshAsbGit-link" disabled={busy || filesLoading || statusLoading || sessionId === undefined} aria-label="刷新 Git 状态" title="刷新 Git 状态"
-              onClick={refresh}>刷新</button>
+              onClick={() => { void run(() => gitApi.action('unstage', cwd, undefined, undefined, sessionId), t('sidebar.unstageAll.done')) }}>{t('sidebar.unstageAll')}</button>
+            <button type="button" className="dshAsbGit-link" disabled={busy || filesLoading || statusLoading || sessionId === undefined} aria-label={t('sidebar.refreshAria')} title={t('sidebar.refreshAria')}
+              onClick={refresh}>{t('sidebar.refresh')}</button>
           </div>
         </div>
         {listMode === 'files'
           ? (
             <>
-              <p className="dshAsbGit-hint">仓库跟踪文件——点击查看它与 HEAD 的差异；无变化的文件标注“未变更”。</p>
-              {filesLoading ? <p className="dshAsb-hint">正在读取仓库文件…</p> : null}
-              {filesError !== undefined ? <p className="dshAsb-error" role="alert">{filesError} <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadRepoFiles(cwd, sessionId, viewGeneration.current) }}>重试</button></p> : null}
-              {repoFilesTruncated ? <p className="dshAsbGit-warning">仓库文件较多，仅显示前 20,000 个。</p> : null}
-              {repoFiles !== undefined && repoFiles.length === 0 && filesError === undefined ? <p className="dshAsb-hint">仓库无跟踪文件。</p> : null}
+              <p className="dshAsbGit-hint">{t('sidebar.files.hint')}</p>
+              {filesLoading ? <p className="dshAsb-hint">{t('sidebar.files.loading')}</p> : null}
+              {filesError !== undefined ? <p className="dshAsb-error" role="alert">{filesError} <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadRepoFiles(cwd, sessionId, viewGeneration.current) }}>{t('sidebar.retry')}</button></p> : null}
+              {repoFilesTruncated ? <p className="dshAsbGit-warning">{t('sidebar.files.truncated')}</p> : null}
+              {repoFiles !== undefined && repoFiles.length === 0 && filesError === undefined ? <p className="dshAsb-hint">{t('sidebar.files.empty')}</p> : null}
               {dirGroups((repoFiles ?? []).map<GitStatusEntry>(path => ({
                 path, xy: '  ', indexStatus: ' ', worktreeStatus: ' ', staged: false, untracked: false,
               }))).map(group => (
@@ -656,35 +726,35 @@ export function GitTab(props: GitTabProps): ReactNode {
           )
           : (
             <>
-              {statusLoading && entries.length === 0 && error === undefined ? <p className="dshAsb-hint">正在读取 Git 状态…</p> : null}
-              {error !== undefined ? <p className="dshAsbError-box" role="alert"><span>{error}</span><button type="button" className="dshAsbGit-link" onClick={refresh}>重试</button></p> : null}
+              {statusLoading && entries.length === 0 && error === undefined ? <p className="dshAsb-hint">{t('sidebar.status.loading')}</p> : null}
+              {error !== undefined ? <p className="dshAsbError-box" role="alert"><span>{error}</span><button type="button" className="dshAsbGit-link" onClick={refresh}>{t('sidebar.retry')}</button></p> : null}
               {notice !== undefined ? <p className="dshAsb-notice" role="status">{notice}</p> : null}
               {error === undefined && !(statusLoading && entries.length === 0) ? (
                 <>
                   {dirGroups(unstaged).map(group => (
                     <Fragment key={`u:${group.key}`}>{groupBlock(group, false)}</Fragment>
                   ))}
-                  {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">工作区干净。</p> : null}
-                  {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">已暂存（{String(staged.length)}）</p> : null}
+                  {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">{t('sidebar.status.clean')}</p> : null}
+                  {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">{t('sidebar.status.staged', { count: staged.length })}</p> : null}
                   {dirGroups(staged).map(group => (
                     <Fragment key={`s:${group.key}`}>{groupBlock(group, true)}</Fragment>
                   ))}
-                  {!statusLoading && entries.length > 0 && staged.length === 0 ? <p className="dshAsb-hint">无已暂存变更。</p> : null}
+                  {!statusLoading && entries.length > 0 && staged.length === 0 ? <p className="dshAsb-hint">{t('sidebar.status.noStaged')}</p> : null}
                 </>
               ) : null}
             </>
           )}
       </div>
-      <div className="dshAsbGit-resize" role="separator" aria-orientation="vertical" aria-label="调整面板宽度" onPointerDown={startResize} />
+      <div className="dshAsbGit-resize" role="separator" aria-orientation="vertical" aria-label={t('sidebar.resizeAria')} onPointerDown={startResize} />
       <div className="dshAsbGit-detail">
         {diffFor === undefined
-          ? <p className="dshAsb-hint">点击左侧文件查看预览。</p>
+          ? <p className="dshAsb-hint">{t('sidebar.detail.empty')}</p>
           : (
             <>
               <p className="dshAsbGit-diffPath" title={diffFor.path}>{diffFor.path}</p>
               {diffFor.error !== undefined ? <p className="dshAsb-error">{diffFor.error}</p> : null}
-              {diffFor.text === undefined && diffFor.error === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
-              {diffFor.text !== undefined ? <DiffView text={diffFor.text} truncated={diffFor.truncated} /> : null}
+              {diffFor.text === undefined && diffFor.error === undefined ? <p className="dshAsb-hint">{t('sidebar.loading')}</p> : null}
+              {diffFor.text !== undefined ? <DiffView text={diffFor.text} truncated={diffFor.truncated} t={t} /> : null}
             </>
           )}
       </div>
@@ -695,31 +765,31 @@ export function GitTab(props: GitTabProps): ReactNode {
   const graphModal = graphOpen ? (
     <div className="dshAsbGit-modalMask" role="presentation" onClick={() => { setGraphOpen(false) }}>
       <div
-        className="dshAsbGit-modal" role="dialog" aria-modal="true" aria-label="Git 图谱"
+        className="dshAsbGit-modal" role="dialog" aria-modal="true" aria-label={t('sidebar.graph.title')}
         onClick={(event) => { event.stopPropagation() }}
       >
         <div className="dshAsbGit-modalHead">
-          <span className="dshAsbGit-title">Git 图谱</span>
+          <span className="dshAsbGit-title">{t('sidebar.graph.title')}</span>
           <button type="button" className="dshAsbGit-link" disabled={busy || logLoading || sessionId === undefined}
             onClick={() => {
               if (cwd !== undefined && sessionId !== undefined) void loadLog(cwd, sessionId, viewGeneration.current)
-            }}>刷新</button>
-          <button type="button" className="dshAsbGit-modalClose" aria-label="关闭图谱" onClick={() => { setGraphOpen(false) }}>✕</button>
+            }}>{t('sidebar.refresh')}</button>
+          <button type="button" className="dshAsbGit-modalClose" aria-label={t('sidebar.graph.close')} onClick={() => { setGraphOpen(false) }}>✕</button>
         </div>
         <div className="dshAsbGit-modalBody">
-          {logError !== undefined ? <p className="dshAsbError-box" role="alert"><span>{logError}</span><button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadLog(cwd, sessionId, viewGeneration.current) }}>重试</button></p> : null}
-          {logLoading && logText === undefined && logError === undefined ? <p className="dshAsb-hint">加载中…</p> : null}
-          {logText !== undefined && logText === '' && logError === undefined ? <p className="dshAsb-hint">暂无提交。</p> : null}
+          {logError !== undefined ? <p className="dshAsbError-box" role="alert"><span>{logError}</span><button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadLog(cwd, sessionId, viewGeneration.current) }}>{t('sidebar.retry')}</button></p> : null}
+          {logLoading && logText === undefined && logError === undefined ? <p className="dshAsb-hint">{t('sidebar.loading')}</p> : null}
+          {logText !== undefined && logText === '' && logError === undefined ? <p className="dshAsb-hint">{t('sidebar.graph.empty')}</p> : null}
           {logText !== undefined && logText !== '' ? (
             <div className="dshAsbGraph">
               {showFor !== undefined
                 ? (
                   <div className="dshAsbGit-diffBlock">
-                    <button type="button" className="dshAsbGit-link" onClick={() => { setShowFor(undefined) }}>← 返回图谱</button>
-                    <p className="dshAsbGit-diffPath" title={String(showFor.sha)}>commit {String(showFor.sha).slice(0, 8)}</p>
+                    <button type="button" className="dshAsbGit-link" onClick={() => { setShowFor(undefined) }}>{t('sidebar.graph.back')}</button>
+                    <p className="dshAsbGit-diffPath" title={String(showFor.sha)}>{t('sidebar.graph.commit', { sha: String(showFor.sha).slice(0, 8) })}</p>
                     <pre className="dshAsbGit-commitMsg">{String(showFor.message ?? '')}</pre>
                     {String(showFor.message ?? '').trim().split('\n').length <= 1
-                      ? <p className="dshAsb-hint">（该提交没有正文）</p>
+                      ? <p className="dshAsb-hint">{t('sidebar.graph.noBody')}</p>
                       : null}
                     <pre className="dshAsbGit-graph">{String(showFor.stat ?? '')}</pre>
                   </div>
@@ -732,7 +802,7 @@ export function GitTab(props: GitTabProps): ReactNode {
                       return sha === undefined
                         ? <span key={index} className="dshAsbGraph-plain">{line}</span>
                         : (
-                          <button key={index} type="button" className="dshAsbGraph-line" title="查看提交变更"
+                          <button key={index} type="button" className="dshAsbGraph-line" title={t('sidebar.graph.rowTitle')}
                             onClick={() => {
                               if (cwd !== undefined) {
                                 openCommit(sha)
@@ -755,64 +825,64 @@ export function GitTab(props: GitTabProps): ReactNode {
       {cwd !== undefined ? (
         <div className="dshAsbGit-top">
           <div className="dshAsbGit-branchWrap" ref={branchMenuRef}>
-            <button type="button" className="dshAsbGit-branchBtn" title="切换分支" aria-label="切换分支"
+            <button type="button" className="dshAsbGit-branchBtn" title={t('sidebar.branch.switch')} aria-label={t('sidebar.branch.switch')}
               aria-expanded={branchPanelOpen} disabled={sessionId === undefined} onClick={toggleBranchPanel}>
               <span className="dshAsbGit-branchText" title={branchLabel}>{branchLabel}</span>
-              {aheadCount > 0 ? <span className="dshAsbGit-diverge" title={`领先远程 ${String(aheadCount)} 个提交`}>{`↑${String(aheadCount)}`}</span> : null}
-              {behindCount > 0 ? <span className="dshAsbGit-diverge" title={`落后远程 ${String(behindCount)} 个提交`}>{`↓${String(behindCount)}`}</span> : null}
+              {aheadCount > 0 ? <span className="dshAsbGit-diverge" title={t('sidebar.branch.ahead', { count: aheadCount })}>{`↑${String(aheadCount)}`}</span> : null}
+              {behindCount > 0 ? <span className="dshAsbGit-diverge" title={t('sidebar.branch.behind', { count: behindCount })}>{`↓${String(behindCount)}`}</span> : null}
               <span className="dshAsbGit-branchCaret" aria-hidden>▾</span>
             </button>
             {branchPanelOpen ? (
-              <div className="dshAsbGit-branchMenu" role="dialog" aria-label="切换分支">
-                <p className="dshAsbGit-branchMenuTitle">本地分支</p>
-                {branchesLoading ? <p className="dshAsb-hint">正在读取分支…</p> : null}
+              <div className="dshAsbGit-branchMenu" role="dialog" aria-label={t('sidebar.branch.switch')}>
+                <p className="dshAsbGit-branchMenuTitle">{t('sidebar.branch.local')}</p>
+                {branchesLoading ? <p className="dshAsb-hint">{t('sidebar.branch.reading')}</p> : null}
                 {branchesError !== undefined ? (
                   <p className="dshAsb-error" role="alert">
                     {branchesError}
-                    <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) loadBranches(cwd, sessionId, viewGeneration.current) }}>重试</button>
+                    <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) loadBranches(cwd, sessionId, viewGeneration.current) }}>{t('sidebar.retry')}</button>
                   </p>
                 ) : null}
-                {branchList !== undefined && branchList.branches.length === 0 && branchesError === undefined ? <p className="dshAsb-hint">暂无本地分支。</p> : null}
+                {branchList !== undefined && branchList.branches.length === 0 && branchesError === undefined ? <p className="dshAsb-hint">{t('sidebar.branch.empty')}</p> : null}
                 {(branchList?.branches ?? []).map(name => (
                   <button key={name} type="button"
                     className={`dshAsbGit-branchItem${name === currentBranch ? ' dshAsbGit-branchItemCur' : ''}`}
                     disabled={busy || sessionId === undefined}
-                    title={name === currentBranch ? `当前分支：${name}` : `切换到 ${name}`}
+                    title={name === currentBranch ? t('sidebar.branch.current', { name }) : t('sidebar.branch.switchTo', { name })}
                     onClick={() => { checkoutBranch(name) }}>
                     <span className="dshAsbGit-branchItemMark" aria-hidden>{name === currentBranch ? '✓' : ''}</span>
                     <span className="dshAsbGit-branchItemName">{name}</span>
                   </button>
                 ))}
                 <div className="dshAsbGit-branchCreate">
-                  <input className="dshAsbGit-input" type="text" value={newBranchName} placeholder="新分支名称" aria-label="新分支名称"
+                  <input className="dshAsbGit-input" type="text" value={newBranchName} placeholder={t('sidebar.branch.newName')} aria-label={t('sidebar.branch.newName')}
                     onChange={(event) => { setNewBranchName(event.target.value) }}
                     onKeyDown={(event) => { if (event.key === 'Enter') createBranch() }} />
-                  <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined || newBranchName.trim() === ''} onClick={createBranch}>创建</button>
+                  <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined || newBranchName.trim() === ''} onClick={createBranch}>{t('sidebar.branch.create')}</button>
                 </div>
               </div>
             ) : null}
           </div>
           <div className="dshAsbGit-topActions">
-            <span className="dshAsbGit-syncGroup" role="group" aria-label="远程同步">
+            <span className="dshAsbGit-syncGroup" role="group" aria-label={t('sidebar.sync.group')}>
               <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title="拉取远程更新（仅快进合并）" aria-label="拉取远程更新"
-                onClick={() => { void run(() => gitApi.action('pull', cwd, undefined, undefined, sessionId), pullNotice, 'pull') }}>{pendingOp === 'pull' ? '…' : '拉取'}</button>
+                title={t('sidebar.pull.title')} aria-label={t('sidebar.pull.aria')}
+                onClick={() => { void run(() => gitApi.action('pull', cwd, undefined, undefined, sessionId), value => t(pullNotice(value)), 'pull') }}>{pendingOp === 'pull' ? '…' : t('sidebar.pull.action')}</button>
               <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title="推送本地提交到远程" aria-label="推送本地提交到远程"
-                onClick={() => { void run(() => gitApi.action('push', cwd, undefined, undefined, sessionId), pushNotice, 'push') }}>{pendingOp === 'push' ? '…' : '推送'}</button>
+                title={t('sidebar.push.title')} aria-label={t('sidebar.push.aria')}
+                onClick={() => { void run(() => gitApi.action('push', cwd, undefined, undefined, sessionId), value => t(pushNotice(value)), 'push') }}>{pendingOp === 'push' ? '…' : t('sidebar.push.action')}</button>
               <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title="同步远程状态（不合并）" aria-label="同步远程状态"
-                onClick={() => { void run(() => gitApi.action('fetch', cwd, undefined, undefined, sessionId), '已同步远程状态', 'fetch') }}>{pendingOp === 'fetch' ? '…' : '同步'}</button>
+                title={t('sidebar.fetch.title')} aria-label={t('sidebar.fetch.aria')}
+                onClick={() => { void run(() => gitApi.action('fetch', cwd, undefined, undefined, sessionId), t('sidebar.fetch.done'), 'fetch') }}>{pendingOp === 'fetch' ? '…' : t('sidebar.fetch.action')}</button>
             </span>
-            <span className="dshAsbGit-syncGroup" role="group" aria-label="贮藏">
+            <span className="dshAsbGit-syncGroup" role="group" aria-label={t('sidebar.stash.group')}>
               <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title="将当前修改入栈贮藏（含未跟踪文件）" aria-label="入栈贮藏当前修改"
-                onClick={() => { void run(() => gitApi.action('stash.push', cwd, undefined, undefined, sessionId), '已贮藏当前修改', 'stash.push') }}>{pendingOp === 'stash.push' ? '…' : '入栈'}</button>
+                title={t('sidebar.stash.pushTitle')} aria-label={t('sidebar.stash.pushAria')}
+                onClick={() => { void run(() => gitApi.action('stash.push', cwd, undefined, undefined, sessionId), t('sidebar.stash.pushDone'), 'stash.push') }}>{pendingOp === 'stash.push' ? '…' : t('sidebar.stash.push')}</button>
               <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title="弹出最近一次贮藏" aria-label="弹出最近一次贮藏"
-                onClick={() => { void run(() => gitApi.action('stash.pop', cwd, undefined, undefined, sessionId), '已弹出贮藏', 'stash.pop') }}>{pendingOp === 'stash.pop' ? '…' : '弹出'}</button>
+                title={t('sidebar.stash.popTitle')} aria-label={t('sidebar.stash.popAria')}
+                onClick={() => { void run(() => gitApi.action('stash.pop', cwd, undefined, undefined, sessionId), t('sidebar.stash.popDone'), 'stash.pop') }}>{pendingOp === 'stash.pop' ? '…' : t('sidebar.stash.pop')}</button>
             </span>
-            <button type="button" className="dshAsbGit-ghostBtn" disabled={statusLoading || sessionId === undefined} onClick={openGraph}>◈ 图谱</button>
+            <button type="button" className="dshAsbGit-ghostBtn" disabled={statusLoading || sessionId === undefined} onClick={openGraph}>{t('sidebar.graph.open')}</button>
           </div>
         </div>
       ) : null}
@@ -821,16 +891,16 @@ export function GitTab(props: GitTabProps): ReactNode {
       {restoreFor !== undefined ? (
         <div className="dshAsbGit-modalMask" role="presentation" onClick={() => { if (!busy) setRestoreFor(undefined) }}>
           <div className="dshAsbGit-confirm" role="dialog" aria-modal="true" aria-labelledby="dshAsbGit-restoreTitle" onClick={(event) => { event.stopPropagation() }}>
-            <h2 id="dshAsbGit-restoreTitle">还原文件？</h2>
-            <p>这会丢弃 <code>{restoreFor}</code> 的未暂存修改，且无法从 Git 管理面板恢复。</p>
+            <h2 id="dshAsbGit-restoreTitle">{t('sidebar.restore.title')}</h2>
+            <p>{t('sidebar.restore.before')}<code>{restoreFor}</code>{t('sidebar.restore.after')}</p>
             <div className="dshAsbGit-confirmActions">
-              <button type="button" className="dshAsbGit-reviewBtn" disabled={busy} onClick={() => { setRestoreFor(undefined) }}>取消</button>
+              <button type="button" className="dshAsbGit-reviewBtn" disabled={busy} onClick={() => { setRestoreFor(undefined) }}>{t('sidebar.cancel')}</button>
               <button type="button" className="dshAsbGit-dangerBtn" disabled={busy}
                 onClick={() => {
                   const path = restoreFor
                   setRestoreFor(undefined)
-                  void run(() => gitApi.action('restore', cwd, path, undefined, sessionId), '已还原')
-                }}>确认还原</button>
+                  void run(() => gitApi.action('restore', cwd, path, undefined, sessionId), t('sidebar.action.restored'))
+                }}>{t('sidebar.restore.confirm')}</button>
             </div>
           </div>
         </div>

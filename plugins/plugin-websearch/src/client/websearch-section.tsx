@@ -15,13 +15,27 @@
  * (••••••); a save that leaves the mask untouched sends it back and the host
  * keeps the stored value. `$ENV:NAME` references are verbatim.
  *
+ * Every string this page renders comes from the `dsh-app.websearch` namespace
+ * through the `t` standard seat: the section registers with `locale: NS`, so
+ * the renderer hands the component a namespace-bound translate that reads the
+ * active UI locale at call time and re-renders on a language switch. Text the
+ * HOST wrote (engine labels and hints, availability reasons, route errors) is
+ * shown verbatim. Sentences with inline `<code>` markup are assembled from
+ * `…before`/`…after` key pairs, because `t` returns a plain string and the
+ * term has to stay a real element.
+ *
  * @module @dsh-app/plugin-websearch/client/websearch-section
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { EngineEntry, EngineStatus, WebSearchFile } from '../wire.ts'
+import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { EngineEntry, EngineStatus, HostText, WebSearchFile } from '../wire.ts'
+// Coded host messages: the code → copy tables live in a React-free module so
+// the suite can test them (a .tsx cannot be bundled by the test harness).
+import { hostMessage, providerReasonCopy, routeErrorCopy, statusLabel } from './host-message.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
+import { NS, type WebSearchKey } from './locales.ts'
 
 const ROUTE = '/plugins/@dsh-app/plugin-websearch/api'
 
@@ -30,7 +44,6 @@ interface EngineView {
   readonly id: string
   readonly label: string
   readonly tier: 'free' | 'key'
-  readonly hint: string
   readonly entry: EngineEntry
   readonly status: EngineStatus
 }
@@ -40,7 +53,7 @@ interface ProviderView {
   readonly id: string
   readonly selected: boolean
   readonly state: 'ready' | 'unavailable' | 'unknown'
-  readonly reason?: string
+  readonly reason?: HostText
 }
 
 /** The host route's payload (mirror of the host's buildView). */
@@ -60,7 +73,7 @@ interface ProbeRow {
   readonly ok: boolean
   readonly latencyMs?: number
   readonly resultCount?: number
-  readonly error?: string
+  readonly error?: HostText
 }
 
 interface ProbeResponse {
@@ -80,67 +93,81 @@ interface SelfTestResponse {
   readonly engine?: string
   readonly failedEngines?: readonly string[]
   readonly note?: string
-  readonly error?: string
+  readonly error?: HostText
   readonly chainExhausted?: boolean
+}
+
+/** A failure carrying the host's coded message, when one came with it. */
+class HostError extends Error {
+  constructor(readonly host: HostText | undefined, fallback: string) {
+    super(fallback)
+  }
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init })
-  const body = (await response.json()) as { ok: boolean, value?: T, error?: { message?: string } }
+  const body = (await response.json()) as { ok: boolean, value?: T, error?: { message?: string, host?: HostText } }
   if (!response.ok || body.ok !== true) {
-    throw new Error(body.error?.message ?? `HTTP ${response.status}`)
+    throw new HostError(body.error?.host, body.error?.message ?? `HTTP ${response.status}`)
   }
   return body.value as T
 }
 
-const PROVIDER_LABELS: Readonly<Record<string, string>> = {
-  'dsh-app': '品牌引擎链',
-  'deepseek-official': 'DeepSeek 官方',
+/**
+ * The two provider ids the host can report, as dictionary keys. An unknown id
+ * falls through to the id itself — an unnamed provider is still worth showing.
+ */
+const PROVIDER_KEYS: Readonly<Record<string, WebSearchKey>> = {
+  'dsh-app': 'ws.provider.brand',
+  'deepseek-official': 'ws.provider.official',
 }
 
-/** zh-CN label for one engine status. */
-function statusLabel(status: EngineStatus): { text: string, tone: 'ok' | 'err' | 'muted' } {
-  switch (status.state) {
-    case 'ready':
-      return { text: '就绪', tone: 'ok' }
-    case 'blocked':
-      // Enabled but missing what it needs — the message says whether that is
-      // an API key or a SearXNG instance, so the badge never claims the wrong
-      // remedy.
-      return { text: status.message ?? '缺少必要配置', tone: 'err' }
-    case 'disabled':
-      return { text: '已停用', tone: 'muted' }
-    case 'error':
-      return { text: status.message ?? '上次探测失败', tone: 'err' }
-    default:
-      return { text: '未探测', tone: 'muted' }
-  }
+function providerLabel(id: string, t: TranslateNS<typeof NS>): string {
+  const key = PROVIDER_KEYS[id]
+  return key === undefined ? id : t(key)
 }
 
 /**
  * How long a success notice stays on screen.
  *
  * A save confirmation is transient feedback, not state: leaving it up forever
- * (the previous behaviour) made a stale "引擎开关已保存" sit above the form
- * and read as a current condition. Errors deliberately do NOT auto-dismiss —
- * they describe something the user still has to act on.
+ * (the previous behaviour) made a stale "引擎开关已保存" sit above the form and
+ * read as a current condition. Errors deliberately do NOT auto-dismiss — they
+ * describe something the user still has to act on.
  */
 const NOTICE_TIMEOUT_MS = 3_000
 
 /**
+ * Engine hints, keyed per engine id. The host sends the roster (ids, labels,
+ * tiers) but no copy: a hint is a sentence about a product decision, and it
+ * belongs in the dictionary where a missing key fails this package's build.
+ */
+const ENGINE_HINT_KEYS: Readonly<Record<string, WebSearchKey>> = {
+  bing: 'ws.engine.bing.hint',
+  anysearch: 'ws.engine.anysearch.hint',
+  searxng: 'ws.engine.searxng.hint',
+  parallel: 'ws.engine.parallel.hint',
+  exa: 'ws.engine.exa.hint',
+}
+
+export type WebSearchSectionProps = PropsLocale<typeof NS>
+
+/**
  * The section component.
+ * @param props - the framework-supplied `t` seat of this page's namespace.
  * @returns the rendered settings section.
  */
-export function WebSearchSection(): ReactNode {
+export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
   const [view, setView] = useState<ConfigResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   /**
-   * The current success notice, tagged with a sequence number so that saving
-   * the SAME message twice still restarts the dismiss timer (a plain string
-   * would be a no-op state update and the second save would inherit the first
-   * one's remaining time).
+   * The current success notice as a dictionary KEY, tagged with a sequence
+   * number so that saving the SAME message twice still restarts the dismiss
+   * timer (a plain string would be a no-op state update and the second save
+   * would inherit the first one's remaining time). Holding the key rather than
+   * the rendered text lets a language switch re-render a notice on screen.
    */
-  const [notice, setNotice] = useState<{ text: string, seq: number } | null>(null)
+  const [notice, setNotice] = useState<{ key: WebSearchKey, seq: number } | null>(null)
   const noticeSeq = useRef(0)
   const [busy, setBusy] = useState(false)
   const [probe, setProbe] = useState<ProbeResponse | null>(null)
@@ -152,9 +179,9 @@ export function WebSearchSection(): ReactNode {
   const [confirmSwitch, setConfirmSwitch] = useState<string | null>(null)
 
   /** Show a transient success notice, replacing any previous one. */
-  const showNotice = useCallback((text: string): void => {
+  const showNotice = useCallback((key: WebSearchKey): void => {
     noticeSeq.current += 1
-    setNotice({ text, seq: noticeSeq.current })
+    setNotice({ key, seq: noticeSeq.current })
   }, [])
 
   // Auto-dismiss the success notice. Keyed on the notice object, so a new
@@ -173,14 +200,18 @@ export function WebSearchSection(): ReactNode {
       setInstancesText(next.file.searxngInstances.join('\n'))
       setError(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      // A coded failure (a rejected write, a refused route) gets this page's
+      // copy; anything else keeps its own diagnosis.
+      setError(cause instanceof HostError
+        ? routeErrorCopy(t, cause.host, cause.message)
+        : cause instanceof Error ? cause.message : String(cause))
     }
   }, [])
 
   useEffect(() => { void load() }, [load])
 
   /** Persist the current draft (plus the instance textarea) and refresh. */
-  const save = useCallback(async (next: WebSearchFile, instances: string, message: string): Promise<void> => {
+  const save = useCallback(async (next: WebSearchFile, instances: string, key: WebSearchKey): Promise<void> => {
     setBusy(true)
     setNotice(null)
     try {
@@ -200,9 +231,13 @@ export function WebSearchSection(): ReactNode {
       setDraft(saved.file)
       setInstancesText(saved.file.searxngInstances.join('\n'))
       setError(null)
-      showNotice(message)
+      showNotice(key)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      // A coded failure (a rejected write, a refused route) gets this page's
+      // copy; anything else keeps its own diagnosis.
+      setError(cause instanceof HostError
+        ? routeErrorCopy(t, cause.host, cause.message)
+        : cause instanceof Error ? cause.message : String(cause))
     } finally {
       setBusy(false)
     }
@@ -220,7 +255,7 @@ export function WebSearchSection(): ReactNode {
     const reprioritized = ordered.map((entry, position) => ({ ...entry, priority: position }))
     const next: WebSearchFile = { ...draft, engines: reprioritized }
     setDraft(next)
-    void save(next, instancesText, '引擎顺序已保存')
+    void save(next, instancesText, 'ws.notice.orderSaved')
   }, [draft, instancesText, save])
 
   /** Flip one engine's enable bit, then persist. */
@@ -231,7 +266,7 @@ export function WebSearchSection(): ReactNode {
       engines: draft.engines.map(entry => entry.id === id ? { ...entry, enabled: !entry.enabled } : entry),
     }
     setDraft(next)
-    void save(next, instancesText, '引擎开关已保存')
+    void save(next, instancesText, 'ws.notice.toggleSaved')
   }, [draft, instancesText, save])
 
   /** Edit one engine's key (kept in the draft until Save is pressed). */
@@ -246,7 +281,7 @@ export function WebSearchSection(): ReactNode {
   /** Persist the engine keys the user typed. */
   const saveKeys = useCallback((): void => {
     if (draft === null) return
-    void save(draft, instancesText, '密钥已保存')
+    void save(draft, instancesText, 'ws.notice.keysSaved')
   }, [draft, instancesText, save])
 
   /** Persist the non-engine settings (mode, budget, cache, cap, instances). */
@@ -254,7 +289,7 @@ export function WebSearchSection(): ReactNode {
     if (draft === null) return
     const next: WebSearchFile = { ...draft, ...patch }
     setDraft(next)
-    void save(next, instancesText, '设置已保存')
+    void save(next, instancesText, 'ws.notice.settingsSaved')
   }, [draft, instancesText, save])
 
   /** Run the probe for one engine or all of them. */
@@ -270,7 +305,11 @@ export function WebSearchSection(): ReactNode {
       setProbe(result)
       setError(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      // A coded failure (a rejected write, a refused route) gets this page's
+      // copy; anything else keeps its own diagnosis.
+      setError(cause instanceof HostError
+        ? routeErrorCopy(t, cause.host, cause.message)
+        : cause instanceof Error ? cause.message : String(cause))
     } finally {
       setProbeBusy(false)
     }
@@ -289,7 +328,11 @@ export function WebSearchSection(): ReactNode {
       setSelfTest(result)
       setError(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      // A coded failure (a rejected write, a refused route) gets this page's
+      // copy; anything else keeps its own diagnosis.
+      setError(cause instanceof HostError
+        ? routeErrorCopy(t, cause.host, cause.message)
+        : cause instanceof Error ? cause.message : String(cause))
     } finally {
       setSelfTestBusy(false)
     }
@@ -298,17 +341,16 @@ export function WebSearchSection(): ReactNode {
   if (view === null || draft === null) {
     return (
       <div className="dshWs-section">
-        <h3 className="dshWs-title">网络搜索</h3>
+        <h3 className="dshWs-title">{t('ws.nav')}</h3>
         {error === null
-          ? <p className="dshWs-hint">正在加载…</p>
+          ? <p className="dshWs-hint">{t('ws.loading')}</p>
           : <div className="dshWs-banner">{error}</div>}
       </div>
     )
   }
 
   const ordered = [...draft.engines].sort((a, b) => a.priority - b.priority)
-  const activeLabel = PROVIDER_LABELS[draft.provider] ?? draft.provider
-  const brandActive = draft.provider === 'dsh-app'
+  const activeLabel = providerLabel(draft.provider, t)
 
   /** Switching provider is the one action worth confirming: it changes what
    * every future web_search call does, and the other side may be unusable
@@ -320,38 +362,40 @@ export function WebSearchSection(): ReactNode {
 
   /** The target provider's own verdict, used to make the confirm dialog
    * honest about what the user is about to select. */
-  const providerReason = (id: string): string | undefined =>
-    view.providers.find(item => item.id === id)?.reason
+  const providerReason = (id: string): string | undefined => {
+    const reason = view.providers.find(item => item.id === id)?.reason
+    return reason === undefined ? undefined : providerReasonCopy(t, reason)
+  }
 
   return (
     <div className="dshWs-section">
-      <h3 className="dshWs-title">网络搜索</h3>
+      <h3 className="dshWs-title">{t('ws.nav')}</h3>
       <p className="dshWs-hint">
-        决定 <code>web_search</code> 工具走哪条链路。工具本身是内核自带的，这里只切换它背后的搜索来源。
+        {t('ws.intro.before')} <code>web_search</code> {t('ws.intro.after')}
       </p>
 
       {!view.seamAvailable && (
         <div className="dshWs-warning">
-          当前内核没有 <code>ctx.web</code> 服务，品牌引擎链无法注册；配置仍可编辑，但不会生效。
+          {t('ws.seam.before')} <code>ctx.web</code> {t('ws.seam.after')}
         </div>
       )}
       {error !== null && <div className="dshWs-banner">{error}</div>}
-      {notice !== null && <div className="dshWs-noticeOk">{notice.text}</div>}
+      {notice !== null && <div className="dshWs-noticeOk">{t(notice.key)}</div>}
 
       <div className="dshWs-card">
         <div className="dshWs-cardHead">
-          <h4 className="dshWs-cardTitle">搜索来源</h4>
-          <span className="dshWs-badge">当前：{activeLabel}</span>
+          <h4 className="dshWs-cardTitle">{t('ws.source.title')}</h4>
+          <span className="dshWs-badge">{t('ws.source.current', { label: activeLabel })}</span>
         </div>
-        <div className="dshWs-providerRow" role="radiogroup" aria-label="搜索来源">
+        <div className="dshWs-providerRow" role="radiogroup" aria-label={t('ws.source.aria')}>
           {view.providers.map((provider) => {
-            const label = PROVIDER_LABELS[provider.id] ?? provider.id
+            const label = providerLabel(provider.id, t)
             const dot = provider.state === 'ready'
               ? ' dshWs-providerDotOn'
               : provider.state === 'unavailable' ? ' dshWs-providerDotOff' : ''
             const stateText = provider.state === 'ready'
-              ? '可用'
-              : provider.state === 'unavailable' ? '不可用' : '状态未知'
+              ? t('ws.provider.ready')
+              : provider.state === 'unavailable' ? t('ws.provider.unavailable') : t('ws.provider.unknown')
             return (
               <button
                 key={provider.id}
@@ -365,14 +409,16 @@ export function WebSearchSection(): ReactNode {
                 <span className="dshWs-providerHead">
                   <span className={`dshWs-providerDot${dot}`} aria-hidden="true" />
                   {label}
-                  <span className="dshWs-badge">{provider.selected ? '使用中' : stateText}</span>
+                  <span className="dshWs-badge">
+                    {provider.selected ? t('ws.provider.active') : stateText}
+                  </span>
                 </span>
                 <span className="dshWs-providerMeta">
                   {provider.selected
-                    ? (provider.state === 'ready' ? '当前生效' : provider.reason ?? stateText)
-                    : provider.reason ?? (provider.id === 'dsh-app'
-                      ? '免费引擎优先，失败自动回退，无需密钥'
-                      : '内核自带的 DeepSeek 搜索，需要 DEEPSEEK_API_KEY 且按次计费')}
+                    ? (provider.state === 'ready' ? t('ws.provider.effective') : providerReasonCopy(t, provider.reason) || stateText)
+                    : providerReasonCopy(t, provider.reason) || (provider.id === 'dsh-app'
+                      ? t('ws.provider.brandHint')
+                      : t('ws.provider.officialHint'))}
                 </span>
               </button>
             )
@@ -382,19 +428,18 @@ export function WebSearchSection(): ReactNode {
 
       <div className="dshWs-card">
         <div className="dshWs-cardHead">
-          <h4 className="dshWs-cardTitle">引擎链</h4>
-          <span className="dshWs-badge">按顺序尝试，失败自动回退</span>
+          <h4 className="dshWs-cardTitle">{t('ws.chain.title')}</h4>
+          <span className="dshWs-badge">{t('ws.chain.badge')}</span>
         </div>
-        <p className="dshWs-hint">
-          从上到下依次尝试；靠前的引擎返回结果后即停止，只有失败或空结果才会继续往下走。
-        </p>
+        <p className="dshWs-hint">{t('ws.chain.hint')}</p>
         {ordered.map((entry, index) => {
           const meta = view.engines.find(item => item.id === entry.id)
           const label = meta?.label ?? entry.id
           const tier = meta?.tier ?? 'free'
-          const hint = meta?.hint ?? ''
+          const hintKey = ENGINE_HINT_KEYS[entry.id]
+          const hint = hintKey === undefined ? '' : t(hintKey)
           const status = meta?.status ?? { state: 'unknown' as const }
-          const rendered = statusLabel(status)
+          const rendered = statusLabel(status, t)
           const probeRow = probe?.results.find(row => row.id === entry.id)
           return (
             <div className="dshWs-engineRow" key={entry.id}>
@@ -402,7 +447,7 @@ export function WebSearchSection(): ReactNode {
                 <button
                   type="button"
                   className="dshWs-orderBtn"
-                  aria-label={`上移 ${label}`}
+                  aria-label={t('ws.chain.moveUp', { label })}
                   disabled={busy || index === 0}
                   onClick={() => { move(entry.id, -1) }}
                 >
@@ -411,7 +456,7 @@ export function WebSearchSection(): ReactNode {
                 <button
                   type="button"
                   className="dshWs-orderBtn"
-                  aria-label={`下移 ${label}`}
+                  aria-label={t('ws.chain.moveDown', { label })}
                   disabled={busy || index === ordered.length - 1}
                   onClick={() => { move(entry.id, 1) }}
                 >
@@ -422,7 +467,7 @@ export function WebSearchSection(): ReactNode {
                 <div className="dshWs-engineName">
                   <span>{index + 1}. {label}</span>
                   <span className={`dshWs-badge ${tier === 'free' ? 'dshWs-badgeFree' : 'dshWs-badgeKey'}`}>
-                    {tier === 'free' ? '免费' : '需密钥'}
+                    {tier === 'free' ? t('ws.chain.free') : t('ws.chain.needsKey')}
                   </span>
                   <span className={`dshWs-engineStatus${rendered.tone === 'ok' ? ' dshWs-engineStatusOk' : rendered.tone === 'err' ? ' dshWs-engineStatusErr' : ''}`}>
                     {rendered.text}
@@ -432,16 +477,19 @@ export function WebSearchSection(): ReactNode {
                 {probeRow !== undefined && (
                   <div className={`dshWs-engineStatus${probeRow.ok ? ' dshWs-engineStatusOk' : ' dshWs-engineStatusErr'}`}>
                     {probeRow.ok
-                      ? `探测成功：${String(probeRow.resultCount ?? 0)} 条结果，${String(probeRow.latencyMs ?? 0)} ms`
-                      : `探测失败：${probeRow.error ?? '未知原因'}`}
+                      ? t('ws.chain.probeOk', {
+                          count: probeRow.resultCount ?? 0,
+                          latency: probeRow.latencyMs ?? 0,
+                        })
+                      : t('ws.chain.probeFail', { reason: probeRow.error?.text ?? t('ws.chain.probeReason') })}
                   </div>
                 )}
                 {tier === 'key' && (
                   <input
                     className="dshWs-input"
                     type="text"
-                    placeholder="API Key 或 $ENV:变量名"
-                    aria-label={`${label} 的 API Key`}
+                    placeholder={t('ws.chain.keyPlaceholder')}
+                    aria-label={t('ws.chain.keyAria', { label })}
                     value={entry.apiKey ?? ''}
                     disabled={busy}
                     onChange={(event) => { setKey(entry.id, event.target.value) }}
@@ -455,14 +503,14 @@ export function WebSearchSection(): ReactNode {
                   disabled={probeBusy}
                   onClick={() => { void runProbe(entry.id) }}
                 >
-                  测试
+                  {t('ws.chain.test')}
                 </button>
                 <button
                   type="button"
                   className="dshWs-toggle"
                   role="switch"
                   aria-checked={entry.enabled}
-                  aria-label={`${label} 启用`}
+                  aria-label={t('ws.chain.toggleAria', { label })}
                   disabled={busy}
                   onClick={() => { toggleEngine(entry.id) }}
                 />
@@ -472,29 +520,36 @@ export function WebSearchSection(): ReactNode {
         })}
         <div className="dshWs-row">
           <button type="button" className="dshWs-button" disabled={probeBusy} onClick={() => { void runProbe() }}>
-            {probeBusy ? '测试中…' : '一键测试全部'}
+            {probeBusy ? t('ws.chain.testing') : t('ws.chain.testAll')}
           </button>
           <button type="button" className="dshWs-button" disabled={busy} onClick={saveKeys}>
-            保存密钥
+            {t('ws.chain.saveKeys')}
           </button>
         </div>
         <div className="dshWs-row">
           <button type="button" className="dshWs-button dshWs-buttonPrimary" disabled={selfTestBusy} onClick={() => { void runSelfTest() }}>
-            {selfTestBusy ? '端到端自检中…' : '端到端自检'}
+            {selfTestBusy ? t('ws.chain.selftesting') : t('ws.chain.selftest')}
           </button>
-          <span className="dshWs-fieldHint">走一次真实搜索，验证 web_search 当前到底解析到哪个来源</span>
+          <span className="dshWs-fieldHint">{t('ws.chain.selftestHint')}</span>
         </div>
         {selfTest !== null && (
           <div className="dshWs-probeList">
-            <div className="dshWs-hint">自检查询：「{selfTest.query}」</div>
+            <div className="dshWs-hint">{t('ws.chain.selftestQuery', { query: selfTest.query })}</div>
             {selfTest.error === undefined ? (
               <>
                 <div className="dshWs-probeRow">
-                  <span className="dshWs-probeName">{PROVIDER_LABELS[selfTest.provider ?? ''] ?? selfTest.provider ?? '未知'}</span>
+                  <span className="dshWs-probeName">
+                    {selfTest.provider === undefined
+                      ? t('ws.chain.unknownProvider')
+                      : providerLabel(selfTest.provider, t)}
+                  </span>
                   <span className="dshWs-engineStatusOk">
-                    {String(selfTest.resultCount ?? 0)} 条结果 / {String(selfTest.latencyMs ?? 0)} ms
-                    {selfTest.engine !== undefined ? ` · 实际引擎 ${selfTest.engine}` : ''}
-                    {selfTest.cached === true ? ' · 缓存命中' : ''}
+                    {t('ws.chain.summary', {
+                      count: selfTest.resultCount ?? 0,
+                      latency: selfTest.latencyMs ?? 0,
+                    })}
+                    {selfTest.engine !== undefined ? t('ws.chain.engine', { engine: selfTest.engine }) : ''}
+                    {selfTest.cached === true ? t('ws.chain.cached') : ''}
                   </span>
                 </div>
                 {selfTest.note !== undefined && (
@@ -504,8 +559,8 @@ export function WebSearchSection(): ReactNode {
             ) : (
               <div className="dshWs-probeRow">
                 <span className="dshWs-engineStatusErr">
-                  {selfTest.chainExhausted === true ? '引擎链全部失败：' : '自检失败：'}
-                  {selfTest.error}
+                  {selfTest.chainExhausted === true ? t('ws.chain.chainExhausted') : t('ws.chain.selftestFailed')}
+                  {selfTest.error?.text ?? ''}
                 </span>
               </div>
             )}
@@ -513,14 +568,16 @@ export function WebSearchSection(): ReactNode {
         )}
         {probe !== null && (
           <div className="dshWs-probeList">
-            <div className="dshWs-hint">探测查询：「{probe.query}」</div>
+            <div className="dshWs-hint">{t('ws.chain.probeQuery', { query: probe.query })}</div>
             {probe.results.map(row => (
               <div className="dshWs-probeRow" key={row.id}>
                 <span className="dshWs-probeName">{row.label}</span>
                 <span className={row.ok ? 'dshWs-engineStatusOk' : 'dshWs-engineStatusErr'}>
                   {row.ok
-                    ? `${String(row.resultCount ?? 0)} 条结果 / ${String(row.latencyMs ?? 0)} ms`
-                    : row.error ?? '失败'}
+                    ? t('ws.chain.summary', { count: row.resultCount ?? 0, latency: row.latencyMs ?? 0 })
+                    // Probe failures are diagnostics (an HTTP status, a parse
+                    // fault): show the detail, in the page's own frame copy.
+                    : t('ws.chain.probeFail', { reason: row.error?.text ?? t('ws.chain.probeReason') })}
                 </span>
               </div>
             ))}
@@ -529,8 +586,8 @@ export function WebSearchSection(): ReactNode {
       </div>
 
       <div className="dshWs-card">
-        <h4 className="dshWs-cardTitle">回退策略</h4>
-        <div className="dshWs-segmented" role="group" aria-label="回退策略">
+        <h4 className="dshWs-cardTitle">{t('ws.mode.title')}</h4>
+        <div className="dshWs-segmented" role="group" aria-label={t('ws.mode.aria')}>
           <button
             type="button"
             className={`dshWs-segBtn${draft.mode === 'fallback' ? ' dshWs-segBtnOn' : ''}`}
@@ -538,7 +595,7 @@ export function WebSearchSection(): ReactNode {
             disabled={busy}
             onClick={() => { saveSettings({ mode: 'fallback' }) }}
           >
-            固定顺序
+            {t('ws.mode.fallback')}
           </button>
           <button
             type="button"
@@ -547,17 +604,15 @@ export function WebSearchSection(): ReactNode {
             disabled={busy}
             onClick={() => { saveSettings({ mode: 'rotate' }) }}
           >
-            轮询
+            {t('ws.mode.rotate')}
           </button>
         </div>
         <p className="dshWs-fieldHint">
-          {draft.mode === 'fallback'
-            ? '每次搜索都从第一个可用引擎开始，结果最稳定。'
-            : '每次搜索从下一个引擎开始（循环），把请求摊到多个引擎上，适合免费额度有限的情况。'}
+          {draft.mode === 'fallback' ? t('ws.mode.fallbackHint') : t('ws.mode.rotateHint')}
         </p>
         <div className="dshWs-grid">
           <label className="dshWs-field dshWs-fieldGrow">
-            <span className="dshWs-label">超时预算（毫秒）</span>
+            <span className="dshWs-label">{t('ws.field.timeout')}</span>
             <input
               className="dshWs-input"
               type="number"
@@ -571,7 +626,7 @@ export function WebSearchSection(): ReactNode {
             />
           </label>
           <label className="dshWs-field dshWs-fieldGrow">
-            <span className="dshWs-label">结果上限</span>
+            <span className="dshWs-label">{t('ws.field.maxResults')}</span>
             <input
               className="dshWs-input"
               type="number"
@@ -584,7 +639,7 @@ export function WebSearchSection(): ReactNode {
             />
           </label>
           <label className="dshWs-field dshWs-fieldGrow">
-            <span className="dshWs-label">缓存（分钟，0 关闭）</span>
+            <span className="dshWs-label">{t('ws.field.cache')}</span>
             <input
               className="dshWs-input"
               type="number"
@@ -598,7 +653,7 @@ export function WebSearchSection(): ReactNode {
           </label>
         </div>
         <label className="dshWs-field dshWs-fieldBlock">
-          <span className="dshWs-label">SearXNG 实例（每行一个，留空则跳过该引擎）</span>
+          <span className="dshWs-label">{t('ws.field.instances')}</span>
           <textarea
             className="dshWs-textarea"
             placeholder="https://searx.example.com"
@@ -608,40 +663,41 @@ export function WebSearchSection(): ReactNode {
           />
         </label>
         <p className="dshWs-fieldHint">
-          多数公共 SearXNG 实例未启用 JSON API，请填自建实例（配置里开启 <code>search.formats: [json]</code>）。
+          {t('ws.field.instancesHint.before')} <code>search.formats: [json]</code> {t('ws.field.instancesHint.after')}
         </p>
         <div className="dshWs-row">
           <button type="button" className="dshWs-button" disabled={busy} onClick={() => { saveSettings({}) }}>
-            保存设置
+            {t('ws.save.settings')}
           </button>
         </div>
       </div>
 
-      <p className="dshWs-path">配置文件：{view.filePath}</p>
+      <p className="dshWs-path">{t('ws.path', { path: view.filePath })}</p>
 
       <ConfirmDialog
         open={confirmSwitch !== null}
-        title="切换搜索来源"
+        title={t('ws.confirm.title')}
         message={confirmSwitch === null ? '' : (() => {
           const target = confirmSwitch
-          const label = PROVIDER_LABELS[target] ?? target
+          const label = providerLabel(target, t)
           const reason = providerReason(target)
           const base = target === 'deepseek-official'
-            ? '切换后 web_search 将由 DeepSeek 官方搜索回答，需要有效的 DEEPSEEK_API_KEY，且每次搜索计费。'
-            : '切换后 web_search 将由品牌引擎链回答（免费引擎优先，失败自动回退）。'
+            ? t('ws.confirm.toOfficial')
+            : t('ws.confirm.toBrand')
           // When the host already knows the target cannot work, saying so in
           // the confirmation is the difference between an informed choice and
           // a silent breakage the user discovers at the next search.
-          const warn = reason === undefined ? '' : `\n\n注意：${label} 当前${reason}`
-          return `${base}${warn}\n\n确定切换吗？`
+          const warn = reason === undefined ? '' : `\n\n${t('ws.confirm.warn', { label, reason })}`
+          return `${base}${warn}\n\n${t('ws.confirm.ask')}`
         })()}
-        confirmLabel="切换"
+        confirmLabel={t('ws.confirm.switch')}
+        cancelLabel={t('ws.cancel')}
         busy={busy}
         onConfirm={() => {
           const provider = confirmSwitch
           setConfirmSwitch(null)
           if (provider !== null && draft !== null) {
-            void save({ ...draft, provider }, instancesText, '搜索来源已切换')
+            void save({ ...draft, provider }, instancesText, 'ws.notice.providerSwitched')
           }
         }}
         onClose={() => { setConfirmSwitch(null) }}

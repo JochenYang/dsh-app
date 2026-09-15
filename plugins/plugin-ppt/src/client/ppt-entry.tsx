@@ -32,7 +32,8 @@
  * The capsule renders the active template as text and is memoized on its
  * props, so neither keystroke re-renders nor unrelated bar passes rebuild it.
  *
- * All copy zh-CN; interactive elements are real buttons for keyboard use.
+ * All copy comes from this plugin's own locale namespace (client/locales);
+ * interactive elements are real buttons for keyboard use.
  *
  * @module @dsh-app/plugin-ppt/client/ppt-entry
  */
@@ -40,21 +41,41 @@
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import type { HostObservable, StandardSourceBinding } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostObservable, StandardSourceBinding, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { pptModeApi } from './api.ts'
 import type { ModeUpdate, ModeValue, TemplateView } from './api.ts'
 import { PPT_LABEL, UNLOADED_MODE, capsuleState, resolveCapsuleMode } from './capsule-state.ts'
+import { NS as PPT_NS } from './locales.ts'
+import type { PptKey } from './locales.ts'
 import { useOfficeSupersede } from './office-supersede.ts'
 import { pendingTemplate } from './pending-template.ts'
 import type { PendingPick } from './pending-template.ts'
 import { applySkillReference, removeSkillReference, skillReferenceHint } from './skill-prefill.ts'
+import type { SkillHintNotice } from './skill-prefill.ts'
 
 /** The ui-session binding that follows the current session selection. */
 export type SessionSource = HostObservable<StandardSourceBinding>
 
-/** Shown while a decision waits for the session it will be applied to. */
-const PENDING_NOTICE = '将在会话开始后生效'
+/**
+ * The capsule's copy seat. A slot occupant receives this from the renderer's
+ * standard kit; an injected host is outside that machinery, so the client
+ * entry builds the same pair by hand: the namespace binding (which reads the
+ * active locale at call time) plus the locale revision observable that turns a
+ * language switch into a re-render of the mounted tree.
+ */
+export interface CapsuleSeat {
+  /** Namespace-bound translate of this plugin's own dictionary. */
+  readonly t: TranslateNS<typeof PPT_NS>
+  /** Locale registry snapshot source (`revision` moves on every locale change). */
+  readonly locale: HostObservable<{ revision: number }>
+}
+
+/** The seat's translate function, as the panel and card components take it. */
+type Translate = TranslateNS<typeof PPT_NS>
+
+/** Key of the notice shown while a decision waits for the session it will be applied to. */
+const PENDING_KEY = 'capsule.pending' satisfies PptKey
 
 /** Small inline presentation glyph for the capsule's leading cluster. */
 function DeckIcon(): ReactNode {
@@ -84,6 +105,20 @@ function useSessionBinding(source: SessionSource): StandardSourceBinding {
   )
 }
 
+/**
+ * The capsule's translate function for the active locale. The binding itself
+ * reads the locale at call time, so subscribing to the registry revision is
+ * what turns a language switch into rendered text — the same
+ * (namespace, revision) rule the slot renderer applies to its `t` seat.
+ */
+function useTranslate(seat: CapsuleSeat): Translate {
+  useSyncExternalStore(
+    listener => seat.locale.subscribe(listener),
+    () => seat.locale.getSnapshot().revision,
+  )
+  return seat.t
+}
+
 /** The selected session id, or `undefined` while no session exists. */
 function sessionIdOf(binding: StandardSourceBinding): string | undefined {
   const id: unknown = binding.props.sessionId
@@ -91,14 +126,14 @@ function sessionIdOf(binding: StandardSourceBinding): string | undefined {
 }
 
 /** Picker tabs; categories with no templates are dropped at render time. */
-const TABS: readonly { id: string, label: string }[] = [
-  { id: 'all', label: '全部' },
-  { id: 'business', label: '商务' },
-  { id: 'consulting', label: '咨询' },
-  { id: 'work', label: '工作汇报' },
-  { id: 'academic', label: '学术' },
-  { id: 'editorial', label: '编辑排版' },
-  { id: 'promotion', label: '宣传' },
+const TABS: readonly { id: string, labelKey: PptKey }[] = [
+  { id: 'all', labelKey: 'tab.all' },
+  { id: 'business', labelKey: 'tab.business' },
+  { id: 'consulting', labelKey: 'tab.consulting' },
+  { id: 'work', labelKey: 'tab.work' },
+  { id: 'academic', labelKey: 'tab.academic' },
+  { id: 'editorial', labelKey: 'tab.editorial' },
+  { id: 'promotion', labelKey: 'tab.promotion' },
 ]
 
 /** One template card: real cover preview + name + one-line description. */
@@ -106,9 +141,10 @@ function TemplateCard(props: {
   template: TemplateView
   picked: boolean
   active: boolean
+  t: Translate
   onPick: () => void
 }): ReactNode {
-  const { template, picked, active } = props
+  const { template, picked, active, t } = props
   const classes = picked ? 'dshPptCard dshPptCardPicked' : 'dshPptCard'
   return (
     <button
@@ -120,9 +156,9 @@ function TemplateCard(props: {
       <span className="dshPptCardFrame">
         {template.cover !== undefined
           ? <img className="dshPptCardCover" src={template.cover} alt="" loading="lazy" decoding="async" />
-          : <span className="dshPptCardCover dshPptCardCoverMissing" aria-hidden="true">暂无预览</span>}
+          : <span className="dshPptCardCover dshPptCardCoverMissing" aria-hidden="true">{t('card.noCover')}</span>}
         {(picked || active) && (
-          <span className="dshPptCardBadge">{picked && !active ? '已选择' : '当前使用'}</span>
+          <span className="dshPptCardBadge">{picked && !active ? t('card.picked') : t('card.active')}</span>
         )}
       </span>
       <span className="dshPptCardName">{template.name}</span>
@@ -142,11 +178,12 @@ function TemplatePanel(props: {
   activeId: string | null
   initialPick: string | null
   pending: boolean
+  t: Translate
   onApply: (templateId: string) => void
   onDisable: () => void
   onClose: () => void
 }): ReactNode {
-  const { activeId, pending, onApply, onDisable, onClose } = props
+  const { activeId, pending, t, onApply, onDisable, onClose } = props
   const [tab, setTab] = useState('all')
   const [picked, setPicked] = useState<string | null>(props.initialPick)
   const [templates, setTemplates] = useState<readonly TemplateView[] | undefined>(undefined)
@@ -181,22 +218,22 @@ function TemplatePanel(props: {
         className="dshPptPanel"
         role="dialog"
         aria-modal="true"
-        aria-label="选择 PPT 模板"
+        aria-label={t('panel.title')}
         onClick={(event) => { event.stopPropagation() }}
       >
         <div className="dshPptPanelHeader">
-          <span className="dshPptPanelTitle">选择 PPT 模板</span>
-          <span className="dshPptPanelHint">模板决定配色、字体与版式骨架，内容由你的需求与材料生成</span>
+          <span className="dshPptPanelTitle">{t('panel.title')}</span>
+          <span className="dshPptPanelHint">{t('panel.hint')}</span>
           <button
             type="button"
             className="dshPptPanelButton dshPptPanelClose"
             onClick={onClose}
-            aria-label="关闭模板面板"
+            aria-label={t('panel.closeAria')}
           >
-            关闭
+            {t('panel.close')}
           </button>
         </div>
-        <div className="dshPptTabs" role="tablist" aria-label="模板分类">
+        <div className="dshPptTabs" role="tablist" aria-label={t('panel.tabsAria')}>
           {TABS.filter(definition => countOf(definition.id) > 0).map(definition => (
             <button
               key={definition.id}
@@ -206,17 +243,17 @@ function TemplatePanel(props: {
               className={tab === definition.id ? 'dshPptTab dshPptTabActive' : 'dshPptTab'}
               onClick={() => { setTab(definition.id) }}
             >
-              {definition.label}
+              {t(definition.labelKey)}
               <span className="dshPptTabCount">{countOf(definition.id)}</span>
             </button>
           ))}
         </div>
         <div className="dshPptGrid">
           {templates === undefined && loadError === undefined && (
-            <span className="dshPptPanelStatus" role="status">正在加载模板目录…</span>
+            <span className="dshPptPanelStatus" role="status">{t('panel.loading')}</span>
           )}
           {loadError !== undefined && (
-            <span className="dshPptPanelStatus dshPptPanelStatusError" role="alert">模板目录加载失败：{loadError}</span>
+            <span className="dshPptPanelStatus dshPptPanelStatusError" role="alert">{t('panel.loadFailed', { message: loadError })}</span>
           )}
           {visible.map(template => (
             <TemplateCard
@@ -224,6 +261,7 @@ function TemplatePanel(props: {
               template={template}
               picked={template.id === picked}
               active={template.id === activeId}
+              t={t}
               onPick={() => { setPicked(template.id) }}
             />
           ))}
@@ -236,17 +274,17 @@ function TemplatePanel(props: {
               disabled={pending}
               onClick={onDisable}
             >
-              关闭 PPT 模式
+              {t('panel.disable')}
             </button>
           )}
-          <button type="button" className="dshPptPanelButton" onClick={onClose}>取消</button>
+          <button type="button" className="dshPptPanelButton" onClick={onClose}>{t('panel.cancel')}</button>
           <button
             type="button"
             className="dshPptPanelButton dshPptPanelButtonPrimary"
             disabled={pending || templates === undefined || picked === null}
             onClick={() => { if (picked !== null) onApply(picked) }}
           >
-            使用此模板
+            {t('panel.apply')}
           </button>
         </div>
       </div>
@@ -267,8 +305,12 @@ function TemplatePanel(props: {
  * pick. Turning the mode on never seeds a template: the neutral 常规主题 is the
  * default, and only an explicit pick applies one.
  */
-export const PptOfficeEntry = memo(function PptOfficeEntry(props: { sessionSource: SessionSource }): ReactNode {
+export const PptOfficeEntry = memo(function PptOfficeEntry(props: {
+  sessionSource: SessionSource
+  seat: CapsuleSeat
+}): ReactNode {
   const binding = useSessionBinding(props.sessionSource)
+  const t = useTranslate(props.seat)
   const sessionId = sessionIdOf(binding)
 
   // undefined = not loaded yet; the capsule still renders (inactive state).
@@ -278,12 +320,12 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: { sessionSourc
   const [selected, setSelected] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [notice, setNotice] = useState<PptKey | undefined>(undefined)
   // id → display name, from the light (cover-less) catalog fetch.
   const [names, setNames] = useState<ReadonlyMap<string, string>>(new Map())
   // The only trace of a turn-on that could not seed the skill reference (the
   // draft already held text); it clears itself so it never becomes clutter.
-  const [skillHint, setSkillHint] = useState<{ text: string, seq: number } | undefined>(undefined)
+  const [skillHint, setSkillHint] = useState<{ notice: SkillHintNotice, seq: number } | undefined>(undefined)
   const hintSeq = useRef(0)
 
   // With no session the parked decision *is* the mode, and both the hero and
@@ -318,7 +360,7 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: { sessionSourc
   const announceSkill = useCallback((turningOn: boolean): void => {
     if (applySkillReference(bindingRef.current, turningOn).kind !== 'notice') return
     hintSeq.current += 1
-    setSkillHint({ text: skillReferenceHint(PPT_LABEL), seq: hintSeq.current })
+    setSkillHint({ notice: skillReferenceHint(PPT_LABEL), seq: hintSeq.current })
   }, [])
 
   useEffect(() => {
@@ -394,7 +436,7 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: { sessionSourc
       if (update.enabled) {
         pendingTemplate.set({ template: update.template })
         if (update.template !== null) setSelected(update.template)
-        setNotice(PENDING_NOTICE)
+        setNotice(PENDING_KEY)
       } else {
         pendingTemplate.clear()
         setNotice(undefined)
@@ -486,10 +528,10 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: { sessionSourc
 
   // The hero hint stands only while the decision is still parked: once the
   // session-bound pass consumes it, this capsule is back to no decision.
-  const showNotice = notice !== undefined && parkedPick !== undefined
+  const parkedNotice = notice !== undefined && parkedPick !== undefined ? notice : undefined
   const hint = state.enabled
-    ? `${state.label}；点击关闭，点右侧箭头更换模板`
-    : sessionId === undefined || !loaded ? '点击开启 PPT 模式，将在会话开始时应用' : '点击开启 PPT 模式'
+    ? t('capsule.hintActive', { label: state.label })
+    : sessionId === undefined || !loaded ? t('capsule.hintParked') : t('capsule.hintIdle')
 
   return (
     <>
@@ -509,8 +551,8 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: { sessionSourc
           <button
             type="button"
             className="dshPptCapsuleCaret"
-            title="选择模板"
-            aria-label="选择模板"
+            title={t('capsule.templateAria')}
+            aria-label={t('capsule.templateAria')}
             aria-haspopup="dialog"
             aria-expanded={panelOpen}
             disabled={busy}
@@ -521,13 +563,14 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: { sessionSourc
         )}
       </span>
       {error !== undefined && <span className="dshPptCapsuleError" role="alert">{error}</span>}
-      {showNotice && <span className="dshPptCapsuleNotice" role="status">{notice}</span>}
-      {skillHint !== undefined && <span className="dshPptCapsuleNotice" role="status">{skillHint.text}</span>}
+      {parkedNotice !== undefined && <span className="dshPptCapsuleNotice" role="status">{t(parkedNotice)}</span>}
+      {skillHint !== undefined && <span className="dshPptCapsuleNotice" role="status">{t(skillHint.notice.key, skillHint.notice.params)}</span>}
       {panelOpen && (
         <TemplatePanel
           activeId={resolved.enabled ? resolved.template : null}
           initialPick={selected}
           pending={busy}
+          t={t}
           onApply={applyPicked}
           onDisable={disableMode}
           onClose={closePanel}

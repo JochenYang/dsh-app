@@ -20,7 +20,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { HooksValidationError, HooksStore } from './store.ts'
 import type { HooksMountManager } from './mount.ts'
 import type { NativeHookRuntime } from './native.ts'
-import type { HooksBridge, HooksMountStatus } from './wire.ts'
+import type { HooksBridge, HooksMountStatus, HostText } from './wire.ts'
 
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-hooks/api'
 const MAX_BODY = 16_384
@@ -70,7 +70,14 @@ function sendJson(res: ServerResponse, status: number, body: Record<string, unkn
   res.end(JSON.stringify(body))
 }
 function ok(res: ServerResponse, value: unknown): void { sendJson(res, 200, { ok: true, value }) }
-function fail(res: ServerResponse, status: number, code: string, message: string): void { sendJson(res, status, { ok: false, error: { code, message } }) }
+/**
+ * Failure answer. `kind` is the transport-ish category; `host` is the coded
+ * message the UI renders in its own language, and the plain `message` stays an
+ * English diagnostic for logs and for a client that does not know the code yet.
+ */
+function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
+  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
+}
 
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -105,8 +112,21 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
   }
 
   const guardWrite = (res: ServerResponse): boolean => {
-    if (!store.load().enabled) { fail(res, 409, 'disabled', 'Hooks 管理已整体停用，请先在配置文件中启用（enabled: true）'); return false }
+    if (!store.load().enabled) { fail(res, 409, 'disabled', { code: 'route.disabled' }); return false }
     return true
+  }
+
+  /** Write-store failure: the client's copy owns the sentence, the reason
+   * rides as the code's English text. */
+  const writeFailed = (error: unknown): HostText => {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { code: 'route.writeFailed', params: { detail }, text: detail }
+  }
+
+  /** Body-read failure: `invalid body`, or the JSON parser's own text. */
+  const invalidBody = (error: unknown): HostText => {
+    const detail = error instanceof Error ? error.message : 'invalid body'
+    return { code: 'route.invalidBody', params: { detail }, text: detail }
   }
 
   const disposers = [
@@ -114,8 +134,8 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/hooks`,
       handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
-        if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); fail(res, 405, 'method-not-allowed', 'GET only'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
+        if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' }); return }
         void respond(res)
       },
     }),
@@ -123,8 +143,8 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/bridge/create`,
       handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
-        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', 'POST only'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
+        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' }); return }
         void readJsonBody(req).then(async (body) => {
           if (!guardWrite(res)) return
           try {
@@ -132,15 +152,15 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
             await manager.syncOne(bridge)
             native.sync(store.load().bridges.filter(b => b.dialect === 'native'))
           } catch (error) {
-            if (error instanceof HooksValidationError) fail(res, 400, 'bad-request', error.message)
-            else fail(res, 500, 'io', `写入桥配置失败：${error instanceof Error ? error.message : String(error)}`)
+            if (error instanceof HooksValidationError) fail(res, 400, 'bad-request', error.hostText())
+            else fail(res, 500, 'io', writeFailed(error))
             return
           }
           await respond(res)
         }).catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') { fail(res, 413, 'payload-too-large', 'request body too large (16 KiB cap)'); return }
-          fail(res, 400, 'bad-request', message)
+          if (message === 'payload-too-large') { fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' }); return }
+          fail(res, 400, 'bad-request', invalidBody(error))
         })
       },
     }),
@@ -148,8 +168,8 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/bridge/update`,
       handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
-        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', 'POST only'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
+        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' }); return }
         void readJsonBody(req).then(async (body) => {
           if (!guardWrite(res)) return
           const id = typeof body.id === 'string' ? body.id : ''
@@ -158,15 +178,15 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
             await manager.syncOne(bridge)
             native.sync(store.load().bridges.filter(b => b.dialect === 'native'))
           } catch (error) {
-            if (error instanceof HooksValidationError) fail(res, 400, 'bad-request', error.message)
-            else fail(res, 500, 'io', `写入桥配置失败：${error instanceof Error ? error.message : String(error)}`)
+            if (error instanceof HooksValidationError) fail(res, 400, 'bad-request', error.hostText())
+            else fail(res, 500, 'io', writeFailed(error))
             return
           }
           await respond(res)
         }).catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') { fail(res, 413, 'payload-too-large', 'request body too large (16 KiB cap)'); return }
-          fail(res, 400, 'bad-request', message)
+          if (message === 'payload-too-large') { fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' }); return }
+          fail(res, 400, 'bad-request', invalidBody(error))
         })
       },
     }),
@@ -174,8 +194,8 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
       kind: 'exact',
       path: `${ROUTE_PREFIX}/bridge/delete`,
       handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', 'cross-origin request'); return }
-        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', 'POST only'); return }
+        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
+        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' }); return }
         void readJsonBody(req).then(async (body) => {
           if (!guardWrite(res)) return
           const id = typeof body.id === 'string' ? body.id : ''
@@ -183,7 +203,7 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
           await manager.unmount(id)
           native.sync(store.load().bridges.filter(b => b.dialect === 'native'))
           await respond(res)
-        }).catch((error: unknown) => { fail(res, 400, 'bad-request', error instanceof Error ? error.message : 'invalid body') })
+        }).catch((error: unknown) => { fail(res, 400, 'bad-request', invalidBody(error)) })
       },
     }),
   ]

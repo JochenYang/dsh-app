@@ -42,14 +42,14 @@ interface AnySearchPayload {
  * a payload that is not the documented shape.
  */
 export function parseAnySearch(payload: unknown, limit: number): WebSearchSource[] {
-  if (typeof payload !== 'object' || payload === null) throw new Error('响应不是 JSON 对象')
+  if (typeof payload !== 'object' || payload === null) throw new Error('response is not a JSON object')
   const envelope = payload as AnySearchPayload
   if (envelope.code !== undefined && envelope.code !== 0) {
     const message = typeof envelope.message === 'string' ? envelope.message : String(envelope.code)
-    throw new Error(`AnySearch 返回错误：${message}`)
+    throw new Error(`AnySearch returned an error: ${message}`)
   }
   const results = envelope.data?.results
-  if (!Array.isArray(results)) throw new Error('AnySearch 返回缺少 data.results 字段')
+  if (!Array.isArray(results)) throw new Error('AnySearch response has no data.results')
   const sources: WebSearchSource[] = []
   for (const raw of results as readonly AnySearchResult[]) {
     if (typeof raw.url !== 'string' || raw.url === '') continue
@@ -80,7 +80,7 @@ export function anySearchEngine(): Engine {
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const payload = await response.json().catch(() => {
-        throw new Error('响应不是合法 JSON')
+        throw new Error('response is not valid JSON')
       }) as unknown
       return parseAnySearch(payload, maxResults)
     },

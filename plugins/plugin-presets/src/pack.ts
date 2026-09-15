@@ -33,6 +33,7 @@ import {
   PAYLOAD_PREFIX,
   PRESET_KIND,
   PresetPackageError,
+  fsErrorCode,
   parseManifest,
   sanitizeArchivePath,
   zipPathSafetyProblem,
@@ -59,7 +60,11 @@ export async function walkPresetFiles(dir: string): Promise<WalkedFile[]> {
     try {
       children = await readdir(current, { withFileTypes: true })
     } catch (error) {
-      throw new PresetPackageError('io', `读取预设目录失败（${(error as NodeJS.ErrnoException).code ?? '未知错误'}）`)
+      throw new PresetPackageError('io', {
+        code: 'preset.readDirFailed',
+        params: { code: fsErrorCode(error) },
+        text: `cannot read the preset directory (${(error as NodeJS.ErrnoException).code ?? 'unknown'})`,
+      })
     }
     for (const child of [...children].sort((a, b) => a.name.localeCompare(b.name))) {
       const rel = prefix === '' ? child.name : `${prefix}/${child.name}`
@@ -75,7 +80,11 @@ export async function walkPresetFiles(dir: string): Promise<WalkedFile[]> {
       try {
         size = (await stat(join(current, child.name))).size
       } catch (error) {
-        throw new PresetPackageError('io', `读取预设文件失败（${(error as NodeJS.ErrnoException).code ?? '未知错误'}）`)
+        throw new PresetPackageError('io', {
+          code: 'preset.readFileFailed',
+          params: { code: fsErrorCode(error) },
+          text: `cannot read a preset file (${(error as NodeJS.ErrnoException).code ?? 'unknown'})`,
+        })
       }
       out.push({ rel, size })
     }
@@ -94,11 +103,19 @@ export async function walkPresetFiles(dir: string): Promise<WalkedFile[]> {
 export async function packPresetDir(dir: string, entry: string): Promise<Uint8Array> {
   const walked = await walkPresetFiles(dir)
   if (walked.length > MAX_FILE_COUNT) {
-    throw new PresetPackageError('too-many-files', `预设包含 ${String(walked.length)} 个文件，超过单包 ${String(MAX_FILE_COUNT)} 个的上限，无法导出`)
+    throw new PresetPackageError('too-many-files', {
+      code: 'preset.exportTooManyFiles',
+      params: { count: walked.length, cap: MAX_FILE_COUNT },
+      text: `the preset has ${String(walked.length)} files, over the ${String(MAX_FILE_COUNT)}-file per-package cap; it cannot be exported`,
+    })
   }
   const total = walked.reduce((sum, file) => sum + file.size, 0)
   if (total > MAX_TOTAL_BYTES) {
-    throw new PresetPackageError('too-large', `预设总大小超过 ${String(Math.floor(MAX_TOTAL_BYTES / 1024 / 1024))}MB 上限，无法导出`)
+    throw new PresetPackageError('too-large', {
+      code: 'preset.exportTooLarge',
+      params: { mb: Math.floor(MAX_TOTAL_BYTES / 1024 / 1024) },
+      text: `the preset is over the ${String(Math.floor(MAX_TOTAL_BYTES / 1024 / 1024))} MB total-size cap; it cannot be exported`,
+    })
   }
   const manifest = {
     formatVersion: FORMAT_VERSION,
@@ -113,7 +130,11 @@ export async function packPresetDir(dir: string, entry: string): Promise<Uint8Ar
   }
   const bytes = zipSync(files)
   if (bytes.byteLength > MAX_ZIP_BYTES) {
-    throw new PresetPackageError('too-large', `打包后的预设包超过 ${String(Math.floor(MAX_ZIP_BYTES / 1024 / 1024))}MB 上限，无法导出`)
+    throw new PresetPackageError('too-large', {
+      code: 'preset.archiveTooLarge',
+      params: { mb: Math.floor(MAX_ZIP_BYTES / 1024 / 1024) },
+      text: `the packed preset archive is over the ${String(Math.floor(MAX_ZIP_BYTES / 1024 / 1024))} MB cap; it cannot be exported`,
+    })
   }
   return bytes
 }
@@ -151,7 +172,11 @@ export function unpackPresetZip(data: Uint8Array): UnpackedPreset {
     unzipSync(data, {
       filter: (info) => {
         if (declaredSizes.has(info.name)) {
-          throw new PresetPackageError('bad-package', `预设包含重复的成员名「${info.name}」，已拒绝`)
+          throw new PresetPackageError('bad-package', {
+            code: 'preset.duplicateMember',
+            params: { name: info.name },
+            text: `the preset contains a duplicate member name "${info.name}"; refused`,
+          })
         }
         names.push(info.name)
         if (!info.name.endsWith('/')) {
@@ -164,36 +189,55 @@ export function unpackPresetZip(data: Uint8Array): UnpackedPreset {
     })
   } catch (error) {
     if (error instanceof PresetPackageError) throw error
-    throw new PresetPackageError('bad-package', '无法读取预设包：不是有效的 ZIP 数据')
+    throw new PresetPackageError('bad-package', { code: 'preset.notZip', text: 'cannot read the preset package: not valid ZIP data' })
   }
   if (totalOriginal > MAX_TOTAL_BYTES) {
-    throw new PresetPackageError('too-large', `预设包解压后总大小超过 ${String(Math.floor(MAX_TOTAL_BYTES / 1024 / 1024))}MB 上限，已拒绝`)
+    throw new PresetPackageError('too-large', {
+      code: 'preset.decompressedTooLarge',
+      params: { mb: Math.floor(MAX_TOTAL_BYTES / 1024 / 1024) },
+      text: `the decompressed preset exceeds the ${String(Math.floor(MAX_TOTAL_BYTES / 1024 / 1024))} MB cap; refused`,
+    })
   }
   if (payloadCount > MAX_FILE_COUNT) {
-    throw new PresetPackageError('too-many-files', `预设包含 ${String(payloadCount)} 个文件，超过单包 ${String(MAX_FILE_COUNT)} 个的上限，已拒绝`)
+    throw new PresetPackageError('too-many-files', {
+      code: 'preset.importTooManyFiles',
+      params: { count: payloadCount, cap: MAX_FILE_COUNT },
+      text: `the preset has ${String(payloadCount)} files, over the ${String(MAX_FILE_COUNT)}-file per-package cap; refused`,
+    })
   }
   // Containment first: every member (directories included) must pass the
   // path rules before anything is inflated.
   for (const name of names) {
     const problem = zipPathSafetyProblem(name)
     if (problem !== undefined) {
-      throw new PresetPackageError('illegal-path', `预设包内存在不允许的路径「${sanitizeArchivePath(name)}」：${problem}，已拒绝`)
+      throw new PresetPackageError('illegal-path', {
+        code: 'preset.illegalPath',
+        params: { path: sanitizeArchivePath(name), reason: problem.code },
+        text: `the preset package contains a forbidden path "${sanitizeArchivePath(name)}": ${problem.text ?? problem.code}; refused`,
+      })
     }
   }
   // Pass 2 — bounded inflate of the vetted members: every member's actual
   // byte count must equal its declared size, and the running total aborts
   // the moment it crosses the cap (see zip.ts for why unzipSync cannot).
-  const inflated = inflateZipMembersBounded(data, declaredSizes, '预设包', MAX_TOTAL_BYTES)
+  const inflated = inflateZipMembersBounded(data, declaredSizes, 'preset', MAX_TOTAL_BYTES)
   const manifestRaw = inflated.find(member => member.name === MANIFEST_NAME)?.data
   if (manifestRaw === undefined) {
-    throw new PresetPackageError('bad-package', `预设包缺少 ${MANIFEST_NAME}，不是有效的预设包`)
+    throw new PresetPackageError('bad-package', {
+      code: 'preset.manifestMissing',
+      text: `the preset package has no ${MANIFEST_NAME}, so it is not a valid preset package`,
+    })
   }
   const manifest = parseManifest(manifestRaw)
   const files: UnpackedFile[] = []
   for (const member of inflated) {
     if (member.name === MANIFEST_NAME) continue
     if (!member.name.startsWith(PAYLOAD_PREFIX)) {
-      throw new PresetPackageError('illegal-path', `预设包内存在预设目录之外的文件「${sanitizeArchivePath(member.name)}」，已拒绝`)
+      throw new PresetPackageError('illegal-path', {
+        code: 'preset.outsidePayload',
+        params: { path: sanitizeArchivePath(member.name) },
+        text: `the preset package contains a file outside the preset directory: "${sanitizeArchivePath(member.name)}"; refused`,
+      })
     }
     const rel = member.name.slice(PAYLOAD_PREFIX.length)
     if (rel === '') continue // a bare `preset/` marker carries no data

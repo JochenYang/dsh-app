@@ -23,6 +23,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { MIN_ITEMS } from './expand.ts'
+import type { HostText } from './wire.ts'
 
 /** Validated user overrides; absent fields inherit the overlay config. */
 export interface SwarmUserConfig {
@@ -69,25 +70,62 @@ const FIELD_MINIMUMS: Partial<Record<(typeof NUMERIC_FIELDS)[number], number>> =
   perItemOutputLimit: 1,
 }
 
+/** A rejected field, as the client dictionary and the log line both need it. */
+interface FieldRejection {
+  /** Stable message code (see the `swarm.host.*` keys). */
+  readonly code: 'config.notBoolean' | 'config.belowMinimum'
+  /** Values the client's copy interpolates. */
+  readonly params: Readonly<Record<string, string | number>>
+  /** English developer-facing diagnostic. */
+  readonly text: string
+}
+
 /**
  * Validate one field value.
- * @returns the normalized value, or undefined plus a reason when invalid.
+ * @returns the normalized value, or the coded reason it was rejected.
  */
-function validateField(field: string, value: unknown): { ok: true, value: number | boolean } | { ok: false, reason: string } {
+function validateField(field: string, value: unknown): { ok: true, value: number | boolean } | ({ ok: false } & FieldRejection) {
   if ((BOOLEAN_FIELDS as readonly string[]).includes(field)) {
     return typeof value === 'boolean'
       ? { ok: true, value }
-      : { ok: false, reason: `"${field}" must be a boolean` }
+      : { ok: false, code: 'config.notBoolean', params: { field }, text: `"${field}" must be a boolean` }
   }
   const minimum = FIELD_MINIMUMS[field as (typeof NUMERIC_FIELDS)[number]] ?? 0
   if (typeof value === 'number' && Number.isFinite(value) && value >= minimum) {
     return { ok: true, value: Math.floor(value) }
   }
-  return { ok: false, reason: `"${field}" must be a number >= ${minimum}` }
+  return { ok: false, code: 'config.belowMinimum', params: { field, minimum }, text: `"${field}" must be a number >= ${minimum}` }
 }
 
-/** Validation failure of a settings-page write (routes map it to 400). */
-export class SwarmConfigValidationError extends Error {}
+/**
+ * Validation failure of a settings-page write (routes map it to 400).
+ *
+ * Carries a code plus its params rather than a sentence: the client renders
+ * the copy, and `text` keeps an English developer-facing diagnostic for logs
+ * and for a client that does not know the code.
+ */
+export class SwarmConfigValidationError extends Error {
+  /**
+   * @param code - stable message code (see the `swarm.host.*` keys).
+   * @param text - English developer-facing diagnostic.
+   * @param params - values the client's copy interpolates.
+   */
+  constructor(
+    readonly code: string,
+    readonly text: string,
+    readonly params?: Readonly<Record<string, string | number>>,
+  ) {
+    super(text)
+    this.name = 'SwarmConfigValidationError'
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return this.params === undefined
+      ? { code: this.code, text: this.text }
+      : { code: this.code, params: this.params, text: this.text }
+  }
+}
 
 /** Parse the raw file content into an object, or undefined when unusable. */
 function readRawConfig(path: string, log: (message: string) => void): Record<string, unknown> | undefined {
@@ -128,7 +166,7 @@ export function loadSwarmUserConfig(path: string, log: (message: string) => void
     if (result.ok) {
       out[field] = result.value
     } else {
-      log(`swarm user config: ${result.reason}, ignored`)
+      log(`swarm user config: ${result.text}, ignored`)
     }
   }
   return out
@@ -138,14 +176,14 @@ export function loadSwarmUserConfig(path: string, log: (message: string) => void
  * Merge a settings-page patch into the user config file and persist it
  * atomically. A field set to `null` clears that override (falls back to the
  * overlay value); unknown fields and invalid values reject the whole write
- * with a zh-CN message for the settings UI. Returns the full validated
+ * with a coded message the settings UI renders. Returns the full validated
  * override set after the write.
  */
 export function writeSwarmUserConfig(path: string, patch: Record<string, unknown>): SwarmUserConfig {
   const keys = Object.keys(patch)
   for (const key of keys) {
     if (!SWARM_CONFIG_FIELDS.includes(key)) {
-      throw new SwarmConfigValidationError(`未知配置项：${key}`)
+      throw new SwarmConfigValidationError('config.unknownField', `unknown config field "${key}"`, { field: key })
     }
   }
   const current = readRawConfig(path, () => {}) ?? {}
@@ -156,7 +194,7 @@ export function writeSwarmUserConfig(path: string, patch: Record<string, unknown
     }
     const result = validateField(field, value)
     if (!result.ok) {
-      throw new SwarmConfigValidationError(`配置项 ${field} 的值不合法：${result.reason}`)
+      throw new SwarmConfigValidationError(result.code, result.text, result.params)
     }
     current[field] = result.value
   }

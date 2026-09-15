@@ -2,6 +2,7 @@ import { Menu, Tray, app } from 'electron'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { APP_NAME } from '../shared/constants'
+import { t } from '../shared/locale'
 
 export interface TrayCallbacks {
   onOpen: () => void
@@ -43,28 +44,30 @@ export function createTray(callbacks: TrayCallbacks): Tray {
 /** Build the tray menu, stamping the current kernel version into its label. */
 function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
   const version = callbacks.getCurrentVersion()
-  const kernelLabel = version ? `检查内核更新…（当前 dsh ${version}）` : '检查内核更新…'
+  const kernelLabel = version
+    ? t('tray.checkKernelUpdateWithVersion', { version })
+    : t('tray.checkKernelUpdate')
   return Menu.buildFromTemplate([
-    { label: `打开 ${APP_NAME}`, click: callbacks.onOpen },
+    { label: t('tray.openApp', { app: APP_NAME }), click: callbacks.onOpen },
     { type: 'separator' },
     { label: kernelLabel, click: callbacks.onCheckKernelUpdate },
-    { label: '检查应用更新…', click: callbacks.onCheckAppUpdate },
+    { label: t('tray.checkAppUpdate'), click: callbacks.onCheckAppUpdate },
     { type: 'separator' },
-    { label: '重启服务', click: callbacks.onRestartServer },
+    { label: t('tray.restartServer'), click: callbacks.onRestartServer },
     // Windows-only: rollback drives the custom shell-update chain (tagged
     // release assets + latest.yml + NSIS wizard); macOS/Linux update through
     // electron-updater, which has no per-release asset contract to lean on.
     ...(process.platform === 'win32'
-      ? [{ label: '回滚到上一版本', click: callbacks.onRollbackApp }]
+      ? [{ label: t('tray.rollbackApp'), click: callbacks.onRollbackApp }]
       : []),
     { type: 'separator' },
     // Mutually exclusive by state: toggling safe mode relaunches the app, so
     // the label never needs live-refreshing within one session.
     callbacks.isSafeMode()
-      ? { label: '退出安全模式', click: callbacks.onToggleSafeMode }
-      : { label: '以安全模式重启', click: callbacks.onToggleSafeMode },
+      ? { label: t('tray.exitSafeMode'), click: callbacks.onToggleSafeMode }
+      : { label: t('tray.enterSafeMode'), click: callbacks.onToggleSafeMode },
     { type: 'separator' },
-    { label: '退出', click: () => app.quit() },
+    { label: t('tray.quit'), click: () => app.quit() },
   ])
 }
 

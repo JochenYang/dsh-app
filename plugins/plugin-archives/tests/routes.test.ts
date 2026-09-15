@@ -337,6 +337,46 @@ test('prune: a registry without the write chain answers 501', async () => {
   const reply = await call(handlers.get(`${ROUTE_PREFIX}/prune`)!, request('POST', {}))
   assert.equal(reply.status, 501)
   assert.equal((reply.body as { error: { code: string } }).error.code, 'prune-unsupported')
+  assert.equal((reply.body as { error: { host: { code: string } } }).error.host.code, 'route.pruneUnsupported')
+})
+
+// --- /list: the host sends facts, the page writes the copy --------------------
+
+test('list: a session whose header has no cwd gets an empty group title — that heading is client copy', async () => {
+  const routes = harness({
+    persistence: { list: async () => [{ id: 'session-a', createdAt: 1 }] },
+    registry: { archivedSessionIds: ['session-a'] },
+    sessions: undefined,
+    projectionCache: undefined,
+    sessionQuery: undefined,
+    tools: undefined,
+  })
+
+  const reply = await call(routes.get(`${ROUTE_PREFIX}/list`)!, request('GET'))
+  const value = (reply.body as { value: ArchiveList }).value
+
+  assert.equal(reply.status, 200)
+  assert.deepEqual(
+    value.groups.map(group => ({ cwd: group.cwd, title: group.title })),
+    [{ cwd: '', title: '' }],
+    'no placeholder sentence crosses the wire; the page renders its own line for cwd === ""',
+  )
+})
+
+// --- refusals: a stable code beside the transport one --------------------------
+
+test('routes: a refused request carries a coded host message, not a sentence', async () => {
+  const s = await scenario({ ids: ['session-a'], archived: ['session-a'] })
+
+  const malformed = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, request('POST', { ids: [] }))
+  assert.equal(malformed.status, 400)
+  assert.equal((malformed.body as { error: { host: { code: string } } }).error.host.code, 'route.idsRequired')
+
+  const req = request('POST', { ids: ['session-a'] })
+  ;(req.headers as Record<string, string>).host = 'evil.example'
+  const fenced = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, req)
+  assert.equal(fenced.status, 403)
+  assert.equal((fenced.body as { error: { host: { code: string } } }).error.host.code, 'route.crossOrigin')
 })
 
 // --- fences -----------------------------------------------------------------
@@ -352,6 +392,7 @@ test('routes: a non-loopback Host is refused with an answer, not a hang', async 
   // until its own timeout, unlike every other plugin's route surface.
   assert.equal(reply.status, 403)
   assert.equal((reply.body as { error: { code: string } }).error.code, 'forbidden')
+  assert.equal((reply.body as { error: { host: { code: string } } }).error.host.code, 'route.crossOrigin')
   assert.equal(existsSync(s.logs.get('session-a')!), true)
 })
 

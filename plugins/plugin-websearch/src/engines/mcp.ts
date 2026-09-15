@@ -35,12 +35,12 @@ interface JsonRpcResponse {
  */
 export function parseJsonRpc(text: string): JsonRpcResponse {
   const trimmed = text.trim()
-  if (trimmed === '') throw new Error('响应为空')
+  if (trimmed === '') throw new Error('response is empty')
   if (trimmed.startsWith('{')) {
     try {
       return JSON.parse(trimmed) as JsonRpcResponse
     } catch {
-      throw new Error('响应不是合法 JSON')
+      throw new Error('response is not valid JSON')
     }
   }
   for (const line of trimmed.split('\n')) {
@@ -53,7 +53,7 @@ export function parseJsonRpc(text: string): JsonRpcResponse {
       continue
     }
   }
-  throw new Error('响应中没有可解析的 JSON-RPC 数据帧')
+  throw new Error('response carries no parsable JSON-RPC frame')
 }
 
 /**
@@ -83,16 +83,16 @@ export async function callMcpTool(
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
   const envelope = parseJsonRpc(await response.text())
   if (envelope.error !== undefined) {
-    const message = typeof envelope.error.message === 'string' ? envelope.error.message : '未知错误'
-    throw new Error(`MCP 返回错误：${message}`)
+    const message = typeof envelope.error.message === 'string' ? envelope.error.message : 'unknown error'
+    throw new Error(`MCP returned an error: ${message}`)
   }
   const blocks = envelope.result?.content
-  if (!Array.isArray(blocks)) throw new Error('MCP 响应缺少 content 字段')
+  if (!Array.isArray(blocks)) throw new Error('MCP response has no content field')
   const text = blocks
     .filter(block => block.type === 'text' && typeof block.text === 'string')
     .map(block => block.text as string)
     .join('\n')
-  if (text.trim() === '') throw new Error('MCP 返回空内容')
-  if (envelope.result?.isError === true) throw new Error(`MCP 工具执行失败：${text.slice(0, 200)}`)
+  if (text.trim() === '') throw new Error('MCP returned empty content')
+  if (envelope.result?.isError === true) throw new Error(`MCP tool call failed: ${text.slice(0, 200)}`)
   return text
 }

@@ -45,7 +45,13 @@ const FALLBACKS = {
   ink: '#0f172a',
   inkSecondary: '#475569',
   border: 'rgba(15, 23, 42, 0.06)',
-  brand: '#3b82f6',
+  /**
+   * Primary button, light-mode defaults. The app pairs a fill with a label
+   * (`--dsw-alias-button-primary-fill` + `--dsw-alias-label-primary-foreground`),
+   * and both flip with the theme; a fallback has to keep that pairing.
+   */
+  primaryFill: '#1f2328',
+  primaryInk: '#ffffff',
 }
 
 /** Build the one-shot in-page script for a config. */
@@ -76,7 +82,13 @@ export const inFrameDialogScript = (config: InFrameDialogConfig): string => `(fu
   var ink = token('--dsw-alias-label-primary', ${JSON.stringify(FALLBACKS.ink)});
   var inkSecondary = token('--dsw-alias-label-secondary', ${JSON.stringify(FALLBACKS.inkSecondary)});
   var border = token('--dsw-alias-border-l1', ${JSON.stringify(FALLBACKS.border)});
-  var brand = token('--dsw-alias-brand-primary', ${JSON.stringify(FALLBACKS.brand)});
+  // Primary button colour PAIR, straight from the app’s own buttons
+  // (primitives/Button.module.css): the fill is near-black in light and
+  // near-white in dark, so the label must flip with it. Using brand-primary
+  // with a hardcoded white label is what hid the tray button in dark mode:
+  // white ink on a near-white fill.
+  var primaryFill = token('--dsw-alias-button-primary-fill', ${JSON.stringify(FALLBACKS.primaryFill)});
+  var primaryInk = token('--dsw-alias-label-primary-foreground', ${JSON.stringify(FALLBACKS.primaryInk)});
 
   function style(el, css) { el.style.cssText = css; }
   function button(spec) {
@@ -89,7 +101,7 @@ export const inFrameDialogScript = (config: InFrameDialogConfig): string => `(fu
       'line-height:1.5;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;';
     if (spec.primary) {
       style(btn, base +
-        'background:' + brand + ';color:#fff;border:1px solid transparent;' +
+        'background:' + primaryFill + ';color:' + primaryInk + ';border:1px solid transparent;' +
         'font-weight:500;');
     } else {
       style(btn, base +

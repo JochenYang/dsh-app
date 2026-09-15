@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-presets",
   "description": "DSH APP preset packages: export locally authored agent presets as shareable .dshpreset archives (zip + manifest) and import them back into the user preset root, with entry-whitelist, path-traversal and size/count safety checks.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -22,6 +22,7 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-slots"
@@ -43,6 +44,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
@@ -52,6 +54,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.1",

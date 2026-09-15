@@ -21,7 +21,11 @@
  * and closes itself when another format has superseded it (see
  * client/office-supersede), removing the chip it placed in the draft.
  *
- * All copy zh-CN; the body is a real button for keyboard use.
+ * The capsule is not a seat occupant (the office bar is the suite's own
+ * DOM-injected row), so the framework's locale `t` seat never arrives: the
+ * client entry hands the locale runtime down and the capsule binds this
+ * plugin's namespace itself (see client/locale-seat), rendering every string
+ * through that binding. The body is a real button for keyboard use.
  *
  * @module @dsh-app/plugin-sheet/client/sheet-entry
  */
@@ -32,16 +36,16 @@ import type { HostObservable, StandardSourceBinding } from '@deepseek-ai/dsh-cli
 import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { sheetModeApi } from './api.ts'
 import type { ModeValue } from './api.ts'
-import { SHEET_LABEL, UNLOADED_MODE, capsuleState, resolveCapsuleMode } from './capsule-state.ts'
+import { UNLOADED_MODE, capsuleState, resolveCapsuleMode } from './capsule-state.ts'
+import { useTranslate } from './locale-seat.ts'
+import type { LocaleSeat } from './locale-seat.ts'
 import { useOfficeSupersede } from './office-supersede.ts'
 import { pendingMode } from './pending-mode.ts'
-import { applySkillReference, removeSkillReference, skillReferenceHint } from './skill-prefill.ts'
+import { SKILL_TOKEN } from './skill-reference.ts'
+import { applySkillReference, removeSkillReference } from './skill-prefill.ts'
 
 /** The ui-session binding that follows the current session selection. */
 export type SessionSource = HostObservable<StandardSourceBinding>
-
-/** Shown while a toggle waits for the session it will be applied to. */
-const PENDING_NOTICE = '将在会话开始后生效'
 
 /** Small inline spreadsheet glyph for the capsule's leading cluster. */
 function GridIcon(): ReactNode {
@@ -68,6 +72,16 @@ function sessionIdOf(binding: StandardSourceBinding): string | undefined {
 }
 
 /**
+ * Props of the capsule: the live session binding, plus the locale runtime the
+ * capsule binds its namespace from (there is no framework `t` seat for a
+ * DOM-injected row, so the seat is built here — see client/locale-seat).
+ */
+export interface SheetOfficeEntryProps {
+  readonly sessionSource: SessionSource
+  readonly locale: LocaleSeat
+}
+
+/**
  * The capsule body: mode state, the optimistic toggle and the pending
  * hand-off to the first real session. Memoized so parent renders never rebuild
  * it.
@@ -77,8 +91,12 @@ function sessionIdOf(binding: StandardSourceBinding): string | undefined {
  * mode was stored. The parked value is what the capsule reports until the
  * session-bound pass consumes it and applies it through the same PUT as a live
  * toggle.
+ * @param props - the session source and the locale runtime of this namespace.
  */
-export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: { sessionSource: SessionSource }): ReactNode {
+export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: SheetOfficeEntryProps): ReactNode {
+  // Re-subscribes the capsule to the locale revision, so a language switch
+  // re-renders the copy below even while nothing else about the capsule changes.
+  const t = useTranslate(props.locale)
   const binding = useSessionBinding(props.sessionSource)
   const sessionId = sessionIdOf(binding)
 
@@ -86,10 +104,13 @@ export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: { sessionS
   const [boundMode, setBoundMode] = useState<ModeValue | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  // Whether a hero toggle is still waiting for the session it applies to; the
+  // text itself is read through `t` at render, so a language switch follows.
+  const [notice, setNotice] = useState(false)
   // The only trace of a turn-on that could not seed the skill reference (the
-  // draft already held text); it clears itself so it never becomes clutter.
-  const [skillHint, setSkillHint] = useState<{ text: string, seq: number } | undefined>(undefined)
+  // draft already held text); the sequence is what re-arms the timer below, and
+  // it clears itself so it never becomes clutter.
+  const [skillHint, setSkillHint] = useState<number | undefined>(undefined)
   const hintSeq = useRef(0)
 
   // With no session the parked value *is* the mode, and both the hero and the
@@ -124,7 +145,7 @@ export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: { sessionS
   const announceSkill = useCallback((turningOn: boolean): void => {
     if (applySkillReference(bindingRef.current, turningOn).kind !== 'notice') return
     hintSeq.current += 1
-    setSkillHint({ text: skillReferenceHint(SHEET_LABEL), seq: hintSeq.current })
+    setSkillHint(hintSeq.current)
   }, [])
 
   useEffect(() => {
@@ -146,7 +167,7 @@ export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: { sessionS
     if (fresh) {
       setBoundMode(undefined)
       setError(undefined)
-      setNotice(undefined)
+      setNotice(false)
     }
     const applyParked = (enabled: boolean, previous: boolean): void => {
       setBoundMode({ enabled, updatedAt: null })
@@ -179,7 +200,7 @@ export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: { sessionS
       // session-bound pass instead of pretended, and the capsule reports the
       // parked state until that pass applies it.
       pendingMode.set(next)
-      setNotice(next ? PENDING_NOTICE : undefined)
+      setNotice(next)
       return
     }
     const previous = modeRef.current ?? UNLOADED_MODE
@@ -235,9 +256,10 @@ export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: { sessionS
   })
 
   const state = capsuleState({ sessionBound: sessionId !== undefined, enabled: resolved.enabled, loaded })
+  const hint = t(state.hintKey)
   // The hero hint stands only while the toggle is still parked: once the
   // session-bound pass consumes it, this capsule is back to no parked value.
-  const showNotice = notice !== undefined && parked !== undefined
+  const showNotice = notice && parked !== undefined
 
   return (
     <>
@@ -245,19 +267,23 @@ export const SheetOfficeEntry = memo(function SheetOfficeEntry(props: { sessionS
         <button
           type="button"
           className="dshSheetCapsuleBody"
-          title={state.hint}
-          aria-label={state.hint}
+          title={hint}
+          aria-label={hint}
           aria-pressed={state.enabled}
           disabled={busy}
           onClick={toggle}
         >
           <GridIcon />
-          <span className="dshSheetCapsuleLabel">{state.label}</span>
+          <span className="dshSheetCapsuleLabel">{t('capsule.label')}</span>
         </button>
       </span>
       {error !== undefined && <span className="dshSheetCapsuleError" role="alert">{error}</span>}
-      {showNotice && <span className="dshSheetCapsuleNotice" role="status">{notice}</span>}
-      {skillHint !== undefined && <span className="dshSheetCapsuleNotice" role="status">{skillHint.text}</span>}
+      {showNotice && <span className="dshSheetCapsuleNotice" role="status">{t('capsule.pendingNotice')}</span>}
+      {skillHint !== undefined && (
+        <span className="dshSheetCapsuleNotice" role="status">
+          {t('capsule.skillHint', { label: t('capsule.label'), token: SKILL_TOKEN })}
+        </span>
+      )}
     </>
   )
 })

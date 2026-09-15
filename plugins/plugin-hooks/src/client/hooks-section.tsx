@@ -2,13 +2,33 @@
  * The Hooks settings section: entry cards with live mount status, an
  * add/edit form (dialect-selective fields + file/inline mode toggle), enable
  * toggles, and delete via the in-app ConfirmDialog.
+ *
+ * Every string comes from the `dsh-app.hooks` namespace through the `t`
+ * standard seat: the section registers with `locale: NS`, so the renderer
+ * hands the component a namespace-bound translate that reads the active UI
+ * locale at call time and re-renders on a language switch. The host never sends
+ * prose for anything the user reads (see `HostText` in ../wire.ts) — it sends a
+ * code plus its params and {@link hostMessage} renders this page's copy — so a
+ * local failure stays in state as a {@link Notice} (a dictionary key or a coded
+ * host message) rather than a rendered sentence, and a fallback line follows
+ * the language too.
+ *
  * @module @dsh-app/plugin-hooks/client/hooks-section
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostText } from '../wire.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
+import { NS } from './locales.ts'
+import type { HooksKey } from './locales.ts'
+import { hostMessage, HostError, noticeText, wireNotice } from './messages.ts'
+import type { Notice } from './messages.ts'
 
 const ROUTE = '/plugins/@dsh-app/plugin-hooks/api'
+
+/** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
+export type HooksSectionProps = PropsLocale<typeof NS>
 
 interface BridgeView {
   id: string
@@ -22,7 +42,7 @@ interface BridgeView {
   model?: string
   defaultTimeoutMs?: number
   stderrSummaryMaxChars?: number
-  status: { state: string; message?: string }
+  status: { state: string; message?: HostText }
 }
 interface HooksResponse {
   enabled: boolean
@@ -33,8 +53,14 @@ interface HooksResponse {
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init })
-  const body = (await response.json()) as { ok: boolean; value?: T; error?: { message?: string } }
-  if (!response.ok || body.ok !== true) throw new Error(body.error?.message ?? `HTTP ${response.status}`)
+  const body = (await response.json()) as {
+    ok: boolean
+    value?: T
+    error?: { code?: string; message?: string; host?: HostText }
+  }
+  // The host's coded message is rendered in the active locale; its plain
+  // `message` is the last-resort line when no code came with the answer.
+  if (!response.ok || body.ok !== true) throw new HostError(body.error?.host, body.error?.message ?? `HTTP ${response.status}`)
   return body.value as T
 }
 
@@ -76,25 +102,26 @@ const NATIVE_PLACEHOLDER = JSON.stringify({ rules: [
   { name: '编码规范提醒', on: 'prompt-submit', action: 'context', message: '始终遵循项目的提交规范' },
 ] }, null, 2)
 
-const STATUS_BADGE: Record<string, { label: string; className: string }> = {
-  mounted: { label: '已挂载', className: 'dshHk-badge dshHk-badgeOn' },
-  starting: { label: '挂载中', className: 'dshHk-badge' },
-  disabled: { label: '已停用', className: 'dshHk-badge dshHk-badgeOff' },
-  error: { label: '挂载失败', className: 'dshHk-badge dshHk-badgeErr' },
-  unavailable: { label: '内核不支持', className: 'dshHk-badge dshHk-badgeErr' },
+/** Mount status badge: the dictionary key to show, plus the style class. */
+const STATUS_BADGE: Record<string, { key: HooksKey; className: string }> = {
+  mounted: { key: 'hooks.status.mounted', className: 'dshHk-badge dshHk-badgeOn' },
+  starting: { key: 'hooks.status.starting', className: 'dshHk-badge' },
+  disabled: { key: 'hooks.status.disabled', className: 'dshHk-badge dshHk-badgeOff' },
+  error: { key: 'hooks.status.error', className: 'dshHk-badge dshHk-badgeErr' },
+  unavailable: { key: 'hooks.status.unavailable', className: 'dshHk-badge dshHk-badgeErr' },
 }
 
-export function HooksSection(): ReactNode {
+export function HooksSection({ t }: HooksSectionProps): ReactNode {
   const [data, setData] = useState<HooksResponse | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [confirmTarget, setConfirmTarget] = useState<BridgeView | null>(null)
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  const [error, setError] = useState<Notice | undefined>(undefined)
+  const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
     try { setData(await fetchJson<HooksResponse>(`${ROUTE}/hooks`)); setError(undefined) }
-    catch (f) { setError(f instanceof Error ? f.message : String(f)) }
+    catch (f) { setError(wireNotice(f)) }
   }, [])
   useEffect(() => { void load() }, [load])
   useEffect(() => {
@@ -110,7 +137,7 @@ export function HooksSection(): ReactNode {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       })
       setData(value)
-    } catch (f) { setError(f instanceof Error ? f.message : String(f)); throw f }
+    } catch (f) { setError(wireNotice(f)); throw f }
     finally { setBusy(false) }
   }, [])
 
@@ -124,11 +151,11 @@ export function HooksSection(): ReactNode {
     }
     if (inlineMode) {
       const content = draft.configContent.trim()
-      if (content === '') { setError('配置内容不能为空'); return }
+      if (content === '') { setError({ source: 'key', key: 'hooks.error.contentRequired' }); return }
       body.configContent = draft.configContent
     } else {
       const configPath = draft.configPath.trim()
-      if (configPath === '') { setError('请填写 hooks.json 的绝对路径'); return }
+      if (configPath === '') { setError({ source: 'key', key: 'hooks.error.pathRequired' }); return }
       // Empty-only gate here: the absolute-path shape is validated server-side
       // (validateBridge → 400 with a zh-CN reason, surfaced by post), so the
       // client never duplicates that rule.
@@ -150,12 +177,12 @@ export function HooksSection(): ReactNode {
     try {
       await post(draft.id === null ? 'bridge/create' : 'bridge/update', draft.id === null ? body : { ...body, id: draft.id })
       setDraft(null)
-      setNotice(draft.id === null ? '已添加并挂载' : '已保存并重新挂载')
+      setNotice({ source: 'key', key: draft.id === null ? 'hooks.notice.created' : 'hooks.notice.saved' })
     } catch { /* post surfaced the error */ }
   }, [draft, post])
 
   const onToggle = useCallback(async (view: BridgeView) => {
-    try { await post('bridge/update', { ...view, enabled: !view.enabled }); setNotice(!view.enabled ? '已启用' : '已停用') }
+    try { await post('bridge/update', { ...view, enabled: !view.enabled }); setNotice({ source: 'key', key: !view.enabled ? 'hooks.notice.enabled' : 'hooks.notice.disabled' }) }
     catch { /* post surfaced */ }
   }, [post])
 
@@ -164,7 +191,7 @@ export function HooksSection(): ReactNode {
       await post('bridge/delete', { id: view.id })
       if (draft?.id === view.id) setDraft(null)
       setConfirmTarget(null)
-      setNotice('已删除')
+      setNotice({ source: 'key', key: 'hooks.notice.deleted' })
     } catch { /* post surfaced */ }
   }, [draft, post])
 
@@ -172,137 +199,141 @@ export function HooksSection(): ReactNode {
 
   return (
     <div className="dshHk-section">
-      <p className="dshHk-title">Hooks</p>
+      <p className="dshHk-title">{t('hooks.title')}</p>
       <p className="dshHk-hint">
-        复用已有的 Claude Code / Codex hooks 配置，或直接在此编写：SessionStart、prompt 提交、工具调用前后、Stop 等时机的命令钩子自动生效。
-        命令在本机执行，请确认来源可信。保存后即时挂载。
+        {t('hooks.intro')}
       </p>
-      {error !== undefined ? <div className="dshHk-banner" role="alert">{error}</div> : null}
-      {notice !== undefined ? <div className="dshHk-noticeOk">{notice}</div> : null}
-      {data !== null && !data.mountAvailable ? <div className="dshHk-warning">当前内核不支持动态挂载：配置可保存但不会生效。</div> : null}
+      {error !== undefined ? <div className="dshHk-banner" role="alert">{noticeText(error, t)}</div> : null}
+      {notice !== undefined ? <div className="dshHk-noticeOk">{noticeText(notice, t)}</div> : null}
+      {data !== null && !data.mountAvailable ? <div className="dshHk-warning">{t('hooks.mountUnavailable')}</div> : null}
 
       {draft !== null ? (
         <form className="dshHk-form" onSubmit={(e) => { e.preventDefault(); void onSave() }}>
-          <p className="dshHk-formTitle">{draft.id === null ? '添加 Hook 配置' : '编辑 Hook 配置'}</p>
+          <p className="dshHk-formTitle">{draft.id === null ? t('hooks.form.addTitle') : t('hooks.form.editTitle')}</p>
           <div className="dshHk-row">
             <div className="dshHk-field">
-              <span className="dshHk-label">类型</span>
-              <div className="dshHk-radioGroup" role="radiogroup" aria-label="类型">
-                <label><input type="radio" name="dshHkDialect" checked={draft.dialect === 'native'} disabled={busy} onChange={() => { setDraft({ ...draft, dialect: 'native' }) }} />DSH 原生（推荐）</label>
-                <label><input type="radio" name="dshHkDialect" checked={draft.dialect === 'claude-code'} disabled={busy} onChange={() => { setDraft({ ...draft, dialect: 'claude-code' }) }} />Claude Code 兼容</label>
-                <label><input type="radio" name="dshHkDialect" checked={draft.dialect === 'codex'} disabled={busy} onChange={() => { setDraft({ ...draft, dialect: 'codex' }) }} />Codex 兼容</label>
+              <span className="dshHk-label">{t('hooks.field.dialect')}</span>
+              <div className="dshHk-radioGroup" role="radiogroup" aria-label={t('hooks.field.dialect')}>
+                <label><input type="radio" name="dshHkDialect" checked={draft.dialect === 'native'} disabled={busy} onChange={() => { setDraft({ ...draft, dialect: 'native' }) }} />{t('hooks.dialect.native')}</label>
+                <label><input type="radio" name="dshHkDialect" checked={draft.dialect === 'claude-code'} disabled={busy} onChange={() => { setDraft({ ...draft, dialect: 'claude-code' }) }} />{t('hooks.dialect.claudeCode')}</label>
+                <label><input type="radio" name="dshHkDialect" checked={draft.dialect === 'codex'} disabled={busy} onChange={() => { setDraft({ ...draft, dialect: 'codex' }) }} />{t('hooks.dialect.codex')}</label>
               </div>
-              <span className="dshHk-fieldHint">DSH 原生为应用自有格式，规则更简单直观；兼容格式用于复用已有的 Claude Code / Codex hooks 配置文件。应用只读取/托管配置，不会写入它们的安装目录。</span>
+              <span className="dshHk-fieldHint">{t('hooks.dialect.hint')}</span>
             </div>
           </div>
 
           {draft.dialect !== 'native' && (
             <div className="dshHk-field">
-              <span className="dshHk-label">配置来源</span>
-              <div className="dshHk-radioGroup" role="radiogroup" aria-label="配置来源">
-                <label><input type="radio" name="dshHkSource" checked={draft.configSource === 'file'} disabled={busy} onChange={() => { setDraft({ ...draft, configSource: 'file' }) }} />导入已有配置</label>
-                <label><input type="radio" name="dshHkSource" checked={draft.configSource === 'inline'} disabled={busy} onChange={() => { setDraft({ ...draft, configSource: 'inline' }) }} />手动编写</label>
+              <span className="dshHk-label">{t('hooks.field.source')}</span>
+              <div className="dshHk-radioGroup" role="radiogroup" aria-label={t('hooks.field.source')}>
+                <label><input type="radio" name="dshHkSource" checked={draft.configSource === 'file'} disabled={busy} onChange={() => { setDraft({ ...draft, configSource: 'file' }) }} />{t('hooks.source.file')}</label>
+                <label><input type="radio" name="dshHkSource" checked={draft.configSource === 'inline'} disabled={busy} onChange={() => { setDraft({ ...draft, configSource: 'inline' }) }} />{t('hooks.source.inline')}</label>
               </div>
             </div>
           )}
 
           {draft.dialect === 'native' ? (
             <div className="dshHk-field">
-              <span className="dshHk-label">规则配置</span>
+              <span className="dshHk-label">{t('hooks.field.rules')}</span>
               <textarea className="dshHk-input" style={{ minHeight: '220px', fontFamily: 'ui-monospace,monospace', whiteSpace: 'pre', overflowX: 'auto' }} value={draft.configContent} spellCheck={false} disabled={busy}
                 placeholder={NATIVE_PLACEHOLDER}
                 onChange={(e) => { setDraft({ ...draft, configContent: e.target.value }) }} />
               <span className="dshHk-fieldHint">
-                规则字段：name（名称）、on（时机：pre-tool-use / post-tool-use / prompt-submit / session-start）、matcher（可选正则，匹配工具名）、action（block = 拦截，context = 注入提醒上下文）、message（拦截原因或提醒文本）。
+                {t('hooks.rules.hint')}
               </span>
             </div>
           ) : draft.configSource === 'file' ? (
             <div className="dshHk-field dshHk-fieldGrow">
-              <span className="dshHk-label">配置文件路径</span>
-              <input className="dshHk-input" value={draft.configPath} placeholder="例如 D:/proj/.claude/hooks.json" disabled={busy} onChange={(e) => { setDraft({ ...draft, configPath: e.target.value }) }} />
-              <span className="dshHk-fieldHint">指向你已有的 hooks.json；应用只读取该文件，不修改它。</span>
+              <span className="dshHk-label">{t('hooks.field.configPath')}</span>
+              <input className="dshHk-input" value={draft.configPath} placeholder={t('hooks.configPath.placeholder')} disabled={busy} onChange={(e) => { setDraft({ ...draft, configPath: e.target.value }) }} />
+              <span className="dshHk-fieldHint">{t('hooks.configPath.hint')}</span>
             </div>
           ) : (
             <div className="dshHk-field">
-              <span className="dshHk-label">配置内容</span>
+              <span className="dshHk-label">{t('hooks.field.configContent')}</span>
               <textarea className="dshHk-input" style={{ minHeight: '200px', fontFamily: 'ui-monospace,monospace', whiteSpace: 'pre', overflowX: 'auto' }} value={draft.configContent} spellCheck={false} disabled={busy}
                 placeholder={'{\n  "hooks": {\n    "Stop": [\n      { "hooks": [{ "type": "command", "command": "echo done" }] }\n    ]\n  }\n}'}
                 onChange={(e) => { setDraft({ ...draft, configContent: e.target.value }) }} />
-              <span className="dshHk-fieldHint">直接编写或粘贴 hooks.json 内容；保存后由应用托管，无需手动管理文件。</span>
+              <span className="dshHk-fieldHint">{t('hooks.configContent.hint')}</span>
             </div>
           )}
 
           {draft.dialect === 'claude-code' && (
             <div className="dshHk-row">
               <div className="dshHk-field dshHk-fieldGrow">
-                <span className="dshHk-label">插件根目录（可选）</span>
+                <span className="dshHk-label">{t('hooks.field.pluginRoot')}</span>
                 <input className="dshHk-input" value={draft.pluginRoot} disabled={busy} onChange={(e) => { setDraft({ ...draft, pluginRoot: e.target.value }) }} />
-                <span className="dshHk-fieldHint">命令中引用插件路径时替换为此值</span>
+                <span className="dshHk-fieldHint">{t('hooks.pluginRoot.hint')}</span>
               </div>
               <div className="dshHk-field dshHk-fieldGrow">
-                <span className="dshHk-label">项目目录（可选）</span>
+                <span className="dshHk-label">{t('hooks.field.projectDir')}</span>
                 <input className="dshHk-input" value={draft.projectDir} disabled={busy} onChange={(e) => { setDraft({ ...draft, projectDir: e.target.value }) }} />
-                <span className="dshHk-fieldHint">命令中引用项目路径时替换为此值；默认为会话工作区</span>
+                <span className="dshHk-fieldHint">{t('hooks.projectDir.hint')}</span>
               </div>
             </div>
           )}
           {draft.dialect === 'codex' && (
             <div className="dshHk-field dshHk-fieldGrow">
-              <span className="dshHk-label">模型名（可选）</span>
-              <input className="dshHk-input" value={draft.model} placeholder="例如 deepseek-v4" disabled={busy} onChange={(e) => { setDraft({ ...draft, model: e.target.value }) }} />
-              <span className="dshHk-fieldHint">Codex 事件中 stamp 的模型名</span>
+              <span className="dshHk-label">{t('hooks.field.model')}</span>
+              <input className="dshHk-input" value={draft.model} placeholder={t('hooks.model.placeholder')} disabled={busy} onChange={(e) => { setDraft({ ...draft, model: e.target.value }) }} />
+              <span className="dshHk-fieldHint">{t('hooks.model.hint')}</span>
             </div>
           )}
           <div className="dshHk-row">
             <div className="dshHk-field">
-              <span className="dshHk-label">默认超时 ms（可选）</span>
+              <span className="dshHk-label">{t('hooks.field.timeout')}</span>
               <input className="dshHk-input" value={draft.defaultTimeoutMs} placeholder="600000" disabled={busy} onChange={(e) => { setDraft({ ...draft, defaultTimeoutMs: e.target.value }) }} />
             </div>
             <div className="dshHk-field">
-              <span className="dshHk-label">stderr 摘要上限（可选）</span>
+              <span className="dshHk-label">{t('hooks.field.stderrMax')}</span>
               <input className="dshHk-input" value={draft.stderrSummaryMaxChars} placeholder="500" disabled={busy} onChange={(e) => { setDraft({ ...draft, stderrSummaryMaxChars: e.target.value }) }} />
             </div>
           </div>
           <div className="dshHk-formActions">
-            <button type="submit" className="dshHk-button dshHk-buttonPrimary" disabled={busy}>{busy ? '保存中…' : draft.id === null ? '添加并挂载' : '保存并重新挂载'}</button>
-            <button type="button" className="dshHk-button" disabled={busy} onClick={() => { setDraft(null); setError(undefined) }}>取消</button>
+            <button type="submit" className="dshHk-button dshHk-buttonPrimary" disabled={busy}>{busy ? t('hooks.action.saving') : draft.id === null ? t('hooks.action.create') : t('hooks.action.save')}</button>
+            <button type="button" className="dshHk-button" disabled={busy} onClick={() => { setDraft(null); setError(undefined) }}>{t('hooks.action.cancel')}</button>
           </div>
         </form>
       ) : (
         <div className="dshHk-toolbar">
-          <span className="dshHk-count">{data === null ? '' : `共 ${String(data.bridges.length)} 个配置`}</span>
-          <button type="button" className="dshHk-button dshHk-buttonPrimary" disabled={busy || (data !== null && !data.enabled)} onClick={() => { setDraft(emptyDraft()); setError(undefined) }}>添加 Hook 配置</button>
+          <span className="dshHk-count">{data === null ? '' : t('hooks.count', { count: data.bridges.length })}</span>
+          <button type="button" className="dshHk-button dshHk-buttonPrimary" disabled={busy || (data !== null && !data.enabled)} onClick={() => { setDraft(emptyDraft()); setError(undefined) }}>{t('hooks.action.add')}</button>
         </div>
       )}
 
       <div className="dshHk-list">
-        {sorted.length === 0 && draft === null ? <div className="dshHk-empty">还没有配置 Hook。可以导入已有的 hooks.json，或直接手动编写。</div> : null}
+        {sorted.length === 0 && draft === null ? <div className="dshHk-empty">{t('hooks.empty')}</div> : null}
         {sorted.map((view) => {
           const badge = STATUS_BADGE[view.status.state] ?? STATUS_BADGE.disabled
           return (
             <div key={view.id} className="dshHk-card">
               <div className="dshHk-cardHead">
-                <span className="dshHk-dialect">{view.dialect === 'native' ? 'DSH 原生' : view.dialect}</span>
-                <span className="dshHk-badge">{view.configSource === 'inline' ? '在线编写' : '文件'}</span>
-                <span className={badge.className}>{badge.label}</span>
+                <span className="dshHk-dialect">{view.dialect === 'native' ? t('hooks.dialect.nativeShort') : view.dialect}</span>
+                <span className="dshHk-badge">{view.configSource === 'inline' ? t('hooks.badge.inline') : t('hooks.badge.file')}</span>
+                <span className={badge.className}>{t(badge.key)}</span>
               </div>
-              {view.status.message !== undefined ? <div className="dshHk-warning">{view.status.message}</div> : null}
+              {/* The host explains an unhealthy entry with a code; the badge's own
+                  copy is the last resort, so an unknown code still shows a line. */}
+              {view.status.message !== undefined
+                ? <div className="dshHk-warning">{hostMessage(view.status.message, t, t(badge.key))}</div>
+                : null}
               <div className="dshHk-meta">{view.configPath}</div>
               <div className="dshHk-cardActions">
-                <button type="button" className="dshHk-toggle" role="switch" aria-checked={view.enabled} aria-label="启用/停用" disabled={busy} onClick={() => { void onToggle(view) }} />
-                <button type="button" className="dshHk-button" disabled={busy} onClick={() => { setDraft(draftFromView(view)) }}>编辑</button>
-                <button type="button" className="dshHk-button dshHk-buttonDanger" disabled={busy} onClick={() => { setConfirmTarget(view) }}>删除</button>
+                <button type="button" className="dshHk-toggle" role="switch" aria-checked={view.enabled} aria-label={t('hooks.toggle.aria')} disabled={busy} onClick={() => { void onToggle(view) }} />
+                <button type="button" className="dshHk-button" disabled={busy} onClick={() => { setDraft(draftFromView(view)) }}>{t('hooks.action.edit')}</button>
+                <button type="button" className="dshHk-button dshHk-buttonDanger" disabled={busy} onClick={() => { setConfirmTarget(view) }}>{t('hooks.action.delete')}</button>
               </div>
             </div>
           )
         })}
       </div>
-      {data !== null ? <p className="dshHk-path" title={data.filePath}>配置文件：{data.filePath}</p> : null}
+      {data !== null ? <p className="dshHk-path" title={data.filePath}>{t('hooks.path', { path: data.filePath })}</p> : null}
       <ConfirmDialog
         open={confirmTarget !== null}
-        title="删除 Hook 配置"
-        message="该配置将停止运行，配置文件中的条目一并删除。"
-        confirmLabel="删除"
+        title={t('hooks.confirm.deleteTitle')}
+        message={t('hooks.confirm.deleteMessage')}
+        confirmLabel={t('hooks.confirm.deleteConfirm')}
+        cancelLabel={t('hooks.action.cancel')}
         busy={busy}
         onConfirm={() => { if (confirmTarget !== null) void onDelete(confirmTarget) }}
         onClose={() => { setConfirmTarget(null) }}

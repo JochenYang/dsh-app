@@ -196,7 +196,9 @@ describe('unpack caps and hostile archives', () => {
     assert.throws(
       () => unpackPresetZip(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('实际内容与声明不符'),
+        && error.host.code === 'zip.sizeMismatch'
+        && error.host.params?.subject === 'subject.preset'
+        && error.host.params?.name === 'preset/big.bin',
     )
   })
 
@@ -208,7 +210,9 @@ describe('unpack caps and hostile archives', () => {
     assert.throws(
       () => unpackPresetZip(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('实际内容与声明不符'),
+        && error.host.code === 'zip.sizeMismatch'
+        && error.host.params?.subject === 'subject.preset'
+        && error.host.params?.name === 'preset/a.txt',
     )
   })
 
@@ -220,7 +224,8 @@ describe('unpack caps and hostile archives', () => {
     assert.throws(
       () => unpackPresetZip(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('重复的成员名'),
+        && error.host.code === 'preset.duplicateMember'
+        && error.host.params?.name === 'preset/a.txt',
     )
   })
 
@@ -232,7 +237,9 @@ describe('unpack caps and hostile archives', () => {
     assert.throws(
       () => unpackPresetZip(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('数据描述符'),
+        && error.host.code === 'zip.dataDescriptor'
+        && error.host.params?.subject === 'subject.preset'
+        && error.host.params?.name === 'preset/a.txt',
     )
   })
 })

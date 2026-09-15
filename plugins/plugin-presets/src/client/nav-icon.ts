@@ -29,16 +29,17 @@ const NAV_ICON_SVG = [
 /** Class tagged onto the nav cell this patch owns. */
 const NAV_CELL_CLASS = 'dshPresetsNav'
 
-/** The section label this plugin registers (client.ts). */
-const NAV_LABEL = '预设包'
-
 /**
- * Tag the preset-packages nav cell and paint the sliders glyph. Cheap gate
- * first: without a settings nav in the DOM there is nothing to tag, and
- * chat-view mutations must not pay for a label scan.
+ * Tag the preset-packages nav cell and paint the sliders glyph. The label is
+ * read through the caller's thunk, so the match follows the active locale: the
+ * section's own label is a dictionary key (`presets.nav`, see client.ts) and
+ * the shell re-renders the row on a language switch. Cheap gate first:
+ * without a settings nav in the DOM there is nothing to tag, and chat-view
+ * mutations must not pay for a label scan.
+ * @param labelOf - current label of the section this patch tags.
  * @returns disposer removing the style, the observer, and the tag.
  */
-export function mountNavIconPatch(): () => void {
+export function mountNavIconPatch(labelOf: () => string): () => void {
   const style = document.createElement('style')
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
   style.textContent = [
@@ -54,7 +55,7 @@ export function mountNavIconPatch(): () => void {
   const patch = (): void => {
     if (document.querySelector('[class*="navList"]') === null) return
     for (const label of document.querySelectorAll('span[class*="navLabel"]')) {
-      if (label.textContent !== NAV_LABEL) continue
+      if (label.textContent !== labelOf()) continue
       const cell = label.closest('button')
       if (cell !== null) cell.classList.add(NAV_CELL_CLASS)
     }

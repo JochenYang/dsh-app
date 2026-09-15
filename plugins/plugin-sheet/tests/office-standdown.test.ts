@@ -35,10 +35,10 @@ test('capsule: an unloaded spreadsheet mode renders as the inactive capsule, not
   const state = capsuleState({ sessionBound: true, enabled: unloaded.mode.enabled, loaded: unloaded.loaded })
   assert.equal(state.enabled, false)
   assert.equal(state.label, 'Excel')
-  assert.equal(state.hint, '点击开启表格模式，将在会话开始后生效')
+  assert.equal(state.hintKey, 'capsule.hintOffPending')
   assert.deepEqual(state.toggle, { kind: 'persist', enabled: true })
   // Loaded and bound, the plain turn-on hint stands.
-  assert.equal(capsuleState({ sessionBound: true, enabled: false, loaded: true }).hint, '点击开启表格模式')
+  assert.equal(capsuleState({ sessionBound: true, enabled: false, loaded: true }).hintKey, 'capsule.hintOff')
 
   const loaded = resolveCapsuleMode({ enabled: true, updatedAt: 12 })
   assert.equal(loaded.loaded, true)

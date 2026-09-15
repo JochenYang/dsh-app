@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:f
 import { readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { isPresetDirectory, packPresetDir, unpackPresetZip, walkPresetFiles } from './pack.ts'
-import { COMPOSITION_FILE, PresetPackageError, entryNameProblem } from './wire.ts'
+import { COMPOSITION_FILE, PresetPackageError, entryNameProblem, fsErrorCode } from './wire.ts'
 
 export { PresetPackageError } from './wire.ts'
 
@@ -55,7 +55,11 @@ export class PresetStore {
       children = await readdir(this.rootDir, { withFileTypes: true })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
-      throw new PresetPackageError('io', `读取预设根目录失败（${(error as NodeJS.ErrnoException).code ?? '未知错误'}）`)
+      throw new PresetPackageError('io', {
+        code: 'preset.readRootFailed',
+        params: { code: fsErrorCode(error) },
+        text: `cannot read the preset root directory (${(error as NodeJS.ErrnoException).code ?? 'unknown'})`,
+      })
     }
     const out: PresetSummary[] = []
     for (const child of [...children].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -82,14 +86,22 @@ export class PresetStore {
   async exportZip(entry: string): Promise<Uint8Array> {
     const problem = entryNameProblem(entry)
     if (problem !== undefined) {
-      throw new PresetPackageError('entry-invalid', `预设名不合法：${problem}`)
+      throw new PresetPackageError('entry-invalid', {
+        code: 'preset.entryInvalid',
+        params: { reason: problem.code },
+        text: `invalid preset name: ${problem.text ?? problem.code}`,
+      })
     }
     const target = join(this.rootDir, entry)
     // The whitelist already forbids separators; isPresetDirectory doubles as
     // the existence check and keeps shipped presets (outside this root)
     // permanently out of reach.
     if (!isPresetDirectory(target)) {
-      throw new PresetPackageError('unknown-entry', `预设「${entry}」不存在，或不是可导出的自定义预设（内置预设不可导出）`)
+      throw new PresetPackageError('unknown-entry', {
+        code: 'preset.unknownEntry',
+        params: { entry },
+        text: `preset "${entry}" does not exist, or is not an exportable custom preset (built-in presets cannot be exported)`,
+      })
     }
     return packPresetDir(target, entry)
   }
@@ -109,11 +121,21 @@ export class PresetStore {
     // composition file. Importing a payload without one would report success
     // yet never appear in any list — reject it as a malformed package instead.
     if (!files.some((file) => file.rel === COMPOSITION_FILE)) {
-      throw new PresetPackageError('bad-package', `预设包缺少 ${COMPOSITION_FILE}，导入后无法被内核识别，已拒绝`)
+      throw new PresetPackageError('bad-package', {
+        code: 'preset.compositionMissing',
+        params: { file: COMPOSITION_FILE },
+        text: `the preset package has no ${COMPOSITION_FILE}, so the kernel would not recognize it after import; refused`,
+      })
     }
     const target = join(this.rootDir, entry)
     if (existsSync(target) && !overwrite) {
-      throw new PresetPackageError('conflict', `已存在同名预设「${entry}」。如需替换，请确认覆盖导入`, { entry })
+      // Never rendered: the client turns any 409 into its own overwrite dialog
+      // and reads `details.entry` for the name, so this stays a diagnostic.
+      throw new PresetPackageError('conflict', {
+        code: 'preset.conflict',
+        params: { entry },
+        text: `a preset named "${entry}" already exists; confirm the overwrite to replace it`,
+      }, { entry })
     }
     mkdirSync(this.rootDir, { recursive: true })
     const stage = join(this.rootDir, `.dshpreset-stage-${process.pid}-${randomSuffix()}`)
@@ -134,7 +156,11 @@ export class PresetStore {
       renameSync(stage, target)
       swapped = true
     } catch (error) {
-      throw new PresetPackageError('io', `写入预设目录失败（${(error as NodeJS.ErrnoException).code ?? '未知错误'}）`)
+      throw new PresetPackageError('io', {
+        code: 'preset.writeFailed',
+        params: { code: fsErrorCode(error) },
+        text: `cannot write into the preset directory (${(error as NodeJS.ErrnoException).code ?? 'unknown'})`,
+      })
     } finally {
       if (swapped) {
         // Best-effort cleanup: on Windows a search indexer or antivirus can

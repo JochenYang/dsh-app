@@ -122,10 +122,12 @@ describe('packConfigBackup (content-level secret scan)', () => {
       () => packConfigBackup(home, 'web'),
       (error: unknown) => {
         if (!(error instanceof PresetPackageError) || error.code !== 'sensitive-content') return false
-        // The refusal names the file and the rule, never the matched content.
-        return error.message.includes('plugins/dsh-app-plugin-mcp/servers.json')
-          && error.message.includes('规则 authorization')
-          && !error.message.includes('abcdefghijklmn')
+        // The refusal names the file and the rule (as a stable code plus those
+        // two values), never the matched content.
+        return error.host.code === 'backup.secretContent'
+          && error.host.params?.rel === 'plugins/dsh-app-plugin-mcp/servers.json'
+          && error.host.params?.rule === 'authorization'
+          && !JSON.stringify(error.host).includes('abcdefghijklmn')
       },
     )
   })
@@ -137,7 +139,8 @@ describe('packConfigBackup (content-level secret scan)', () => {
     await assert.rejects(
       () => packConfigBackup(home, 'web'),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'sensitive-content'
-        && error.message.includes('profile/cordis.patch.yml') && error.message.includes('规则 api-key'),
+        && error.host.code === 'backup.secretContent'
+        && error.host.params?.rel === 'profile/cordis.patch.yml' && error.host.params?.rule === 'api-key',
     )
   })
 
@@ -233,7 +236,9 @@ describe('unpackConfigBackup (hostile archives)', () => {
     assert.throws(
       () => unpackConfigBackup(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('实际内容与声明不符'),
+        && error.host.code === 'zip.sizeMismatch'
+        && error.host.params?.subject === 'subject.backup'
+        && error.host.params?.name === 'profile/cordis.patch.yml',
     )
   })
 
@@ -245,7 +250,9 @@ describe('unpackConfigBackup (hostile archives)', () => {
     assert.throws(
       () => unpackConfigBackup(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('实际内容与声明不符'),
+        && error.host.code === 'zip.sizeMismatch'
+        && error.host.params?.subject === 'subject.backup'
+        && error.host.params?.name === 'profile/cordis.patch.yml',
     )
   })
 
@@ -257,7 +264,8 @@ describe('unpackConfigBackup (hostile archives)', () => {
     assert.throws(
       () => unpackConfigBackup(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('重复的成员名'),
+        && error.host.code === 'backup.duplicateMember'
+        && error.host.params?.name === 'profile/cordis.patch.yml',
     )
   })
 
@@ -269,7 +277,9 @@ describe('unpackConfigBackup (hostile archives)', () => {
     assert.throws(
       () => unpackConfigBackup(bytes),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'bad-package'
-        && error.message.includes('数据描述符'),
+        && error.host.code === 'zip.dataDescriptor'
+        && error.host.params?.subject === 'subject.backup'
+        && error.host.params?.name === 'profile/cordis.patch.yml',
     )
   })
 })
@@ -392,7 +402,7 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.throws(
       () => restoreConfigBackup(home, 'web', files, true),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'io'
-        && error.message.includes('已自动还原'),
+        && error.host.code === 'backup.writeFailedRestored',
     )
     // The replaced member came back; the failed member left nothing behind.
     assert.equal(readFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'config.json'), 'utf8'), '{"enabled":true}\n')

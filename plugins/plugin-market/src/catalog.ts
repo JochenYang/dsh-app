@@ -35,7 +35,7 @@
  * @module @dsh-app/plugin-market/catalog
  */
 
-import { MarketExecutionError } from './errors.ts'
+import { MarketExecutionError, type HostText } from './errors.ts'
 import { PACKAGE_NAME_PATTERN } from './npm.ts'
 
 /** The primary directory preset into a fresh store (first run only; user-removable). */
@@ -132,22 +132,27 @@ const MAX_NAME_LENGTH = 214
 /**
  * Validate one user-supplied source URL.
  * @param raw - the client-supplied value.
- * @returns the normalized URL string, or a rejection reason (zh-CN).
+ * @returns the normalized URL string, or a coded rejection reason.
  */
-export function validateSourceUrl(raw: unknown): { ok: true, url: string } | { ok: false, reason: string } {
-  if (typeof raw !== 'string') return { ok: false, reason: '目录源地址必须是字符串' }
+export function validateSourceUrl(raw: unknown): { ok: true, url: string } | { ok: false, reason: HostText } {
+  if (typeof raw !== 'string') return { ok: false, reason: { code: 'source.notString', text: 'a catalog source URL must be a string' } }
   const trimmed = raw.trim()
-  if (trimmed.length === 0) return { ok: false, reason: '目录源地址不能为空' }
-  if (trimmed.length > MAX_URL_LENGTH) return { ok: false, reason: '目录源地址过长' }
+  if (trimmed.length === 0) return { ok: false, reason: { code: 'source.empty', text: 'a catalog source URL cannot be empty' } }
+  if (trimmed.length > MAX_URL_LENGTH) return { ok: false, reason: { code: 'source.tooLong', text: 'the catalog source URL is too long' } }
   let url: URL
   try {
     url = new URL(trimmed)
   } catch {
-    return { ok: false, reason: `目录源地址无法解析：「${trimmed}」` }
+    return {
+      ok: false,
+      reason: { code: 'source.unparsable', params: { url: trimmed }, text: `the catalog source URL cannot be parsed: "${trimmed}"` },
+    }
   }
-  if (url.protocol !== 'https:') return { ok: false, reason: '目录源必须是 https:// 地址' }
+  if (url.protocol !== 'https:') {
+    return { ok: false, reason: { code: 'source.notHttps', text: 'a catalog source must be an https:// URL' } }
+  }
   if (url.username !== '' || url.password !== '') {
-    return { ok: false, reason: '目录源地址不允许携带用户名密码' }
+    return { ok: false, reason: { code: 'source.hasCredentials', text: 'a catalog source URL must not carry a username or password' } }
   }
   return { ok: true, url: url.toString() }
 }
@@ -448,10 +453,16 @@ export function parseCatalog(body: string): CatalogEntry[] {
   try {
     json = JSON.parse(body)
   } catch {
-    throw new MarketExecutionError('目录源返回了无法解析的 JSON', 'catalog')
+    throw new MarketExecutionError(
+      { code: 'catalog.notJson', text: 'the catalog source returned unparsable JSON' },
+      'catalog',
+    )
   }
   if (typeof json !== 'object' || json === null || Array.isArray(json)) {
-    throw new MarketExecutionError('目录源格式不正确（应为 JSON 对象）', 'catalog')
+    throw new MarketExecutionError(
+      { code: 'catalog.notObject', text: 'the catalog source has the wrong shape (expected a JSON object)' },
+      'catalog',
+    )
   }
   return parseCatalogDocument(json)
 }
@@ -480,7 +491,15 @@ export function mergeCatalogs(lists: ReadonlyArray<readonly CatalogEntry[]>): Ca
 /** Result of fetching one source (failures never throw across sources). */
 export type SourceFetchResult =
   | { readonly url: string, readonly entries: readonly CatalogEntry[] }
-  | { readonly url: string, readonly reason: string }
+  | { readonly url: string, readonly reason: HostText }
+
+/** Longest reason detail echoed to the panel; a hostile or huge message is cut. */
+const MAX_REASON_DETAIL = 120
+
+/** One capped reason detail. */
+function reasonDetail(message: string): string {
+  return message.length > MAX_REASON_DETAIL ? `${message.slice(0, MAX_REASON_DETAIL - 3)}…` : message
+}
 
 /**
  * Read the response body enforcing the byte cap DURING the transfer, not
@@ -500,7 +519,15 @@ async function readBodyCapped(response: Response): Promise<string> {
     bytes += value.byteLength
     if (bytes > MAX_BYTES_PER_SOURCE) {
       await reader.cancel().catch(() => undefined)
-      throw new Error(`源响应超过 ${Math.floor(MAX_BYTES_PER_SOURCE / 1_000_000)}MB 上限`)
+      const mb = Math.floor(MAX_BYTES_PER_SOURCE / 1_000_000)
+      throw new MarketExecutionError(
+        {
+          code: 'catalog.responseTooLarge',
+          params: { mb },
+          text: `the source response exceeds the ${String(mb)} MB cap`,
+        },
+        'catalog',
+      )
     }
     text += decoder.decode(value, { stream: true })
   }
@@ -521,15 +548,41 @@ export async function fetchCatalog(url: string): Promise<SourceFetchResult> {
   const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS)
   try {
     const response = await fetch(check.url, { signal: controller.signal, redirect: 'error' })
-    if (!response.ok) return { url, reason: `HTTP ${response.status}` }
+    if (!response.ok) {
+      // A status code reads the same in every locale: code plus diagnostic,
+      // no dictionary copy.
+      return {
+        url,
+        reason: {
+          code: 'catalog.httpStatus',
+          params: { status: response.status },
+          text: `HTTP ${String(response.status)}`,
+        },
+      }
+    }
     return { url, entries: parseCatalog(await readBodyCapped(response)) }
   } catch (error) {
+    // A parse/size failure already speaks in codes; pass its own message on.
+    if (error instanceof MarketExecutionError) return { url, reason: error.host }
     // An abort here is the timeout (the controller has no other trigger), so
     // the raw "This operation was aborted" is replaced with an actionable reason.
-    const message = controller.signal.aborted
-      ? `请求超时（${Math.round(CATALOG_TIMEOUT_MS / 1000)} 秒）`
-      : (error instanceof Error ? error.message : '请求失败')
-    return { url, reason: message.length > 120 ? `${message.slice(0, 117)}…` : message }
+    if (controller.signal.aborted) {
+      const seconds = Math.round(CATALOG_TIMEOUT_MS / 1000)
+      return {
+        url,
+        reason: {
+          code: 'catalog.timeout',
+          params: { seconds },
+          text: `the request timed out after ${String(seconds)} seconds`,
+        },
+      }
+    }
+    const detail = error instanceof Error ? reasonDetail(error.message) : ''
+    return detail === ''
+      ? { url, reason: { code: 'catalog.requestFailed', text: 'the request failed' } }
+      // The detail IS the message (a fetch/network diagnostic), so it rides as
+      // the unknown-code fallback rather than as a sentence of ours.
+      : { url, reason: { code: 'catalog.requestFailedDetail', params: { detail }, text: detail } }
   } finally {
     clearTimeout(timer)
   }

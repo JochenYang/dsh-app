@@ -5,8 +5,8 @@
  * nav has no per-id DOM hook — so the cell is found by its label text (the
  * same stable-copy contract the shell itself renders) and tagged with a plain
  * class a style rule targets. Same mechanism as plugin-websearch's and
- * plugin-memory's nav icons; the label string is the contract, keep it in
- * sync with SECTION_LABEL in client.ts.
+ * plugin-memory's nav icons; the section label is the contract, so the patch
+ * reads it from the caller instead of capturing one language's copy.
  *
  * The glyph is a hub-and-spoke trio — one orchestrator node linked to three
  * worker nodes, the shape of what the section tunes — drawn to the shell's
@@ -31,16 +31,15 @@ const NAV_ICON_SVG = [
 /** Class tagged onto the nav cell this patch owns. */
 const NAV_CELL_CLASS = 'dshSwarmNav'
 
-/** The section label this plugin registers (client.ts SECTION_LABEL). */
-const NAV_LABEL = '并行子代理'
-
 /**
  * Tag the swarm nav cell and paint the hub glyph. Cheap gate first: without a
  * settings nav in the DOM there is nothing to tag, and chat-view mutations
  * must not pay for a label scan.
+ * @param labelOf - the section label for the active locale, read at patch
+ * time so a language switch re-tags the cell instead of losing it.
  * @returns disposer removing the style, the observer, and the tag.
  */
-export function mountNavIconPatch(): () => void {
+export function mountNavIconPatch(labelOf: () => string): () => void {
   const style = document.createElement('style')
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
   style.textContent = [
@@ -55,9 +54,10 @@ export function mountNavIconPatch(): () => void {
 
   const patch = (): void => {
     if (document.querySelector('[class*="navList"]') === null) return
-    for (const label of document.querySelectorAll('span[class*="navLabel"]')) {
-      if (label.textContent !== NAV_LABEL) continue
-      const cell = label.closest('button')
+    const label = labelOf()
+    for (const span of document.querySelectorAll('span[class*="navLabel"]')) {
+      if (span.textContent !== label) continue
+      const cell = span.closest('button')
       if (cell !== null) cell.classList.add(NAV_CELL_CLASS)
     }
   }

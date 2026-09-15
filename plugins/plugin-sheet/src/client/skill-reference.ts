@@ -35,7 +35,11 @@ export const SKILL_TOKEN = `/${SKILL_NAME}`
 /** Trigger-source name; `/` source names are unique ('skill' is the kernel's). */
 export const REFERENCE_SOURCE = 'dsh-office-sheet'
 
-/** Inline label the chip shows in the composer. */
+/**
+ * Inline label the chip shows in the composer. A brand token, not copy: it is
+ * the same word in every locale, so the chip carries it verbatim (the capsule's
+ * own visible label is the `capsule.label` dictionary entry).
+ */
 export const CHIP_LABEL = 'Excel'
 
 /**
@@ -81,8 +85,9 @@ export type ReferenceDispatch = (span: TokenSpanLike) => boolean
 
 /**
  * The chip payload this plugin inserts. `ref` is the skill name so the codec
- * serializes without a second lookup, and `clipboardText` is the literal token
- * so native copy and the draft mirror stay text-compatible.
+ * serializes without a second lookup, `clipboardText` is the literal token so
+ * native copy and the draft mirror stay text-compatible, and `label` is the
+ * format's brand token (see {@link CHIP_LABEL}).
  */
 export function referenceChip(): ReferenceInsertLike {
   return {

@@ -22,7 +22,7 @@
  * @module @dsh-app/plugin-mcp/mount
  */
 
-import type { McpMountStatus, McpServerEntry } from './wire.ts'
+import type { HostText, McpMountStatus, McpServerEntry } from './wire.ts'
 
 /** The kernel plugin every entry mounts as. */
 const KERNEL_PLUGIN = '@deepseek-ai/dsh-mcp-client'
@@ -53,29 +53,30 @@ function describeError(error: unknown): string {
 
 /**
  * Resolve `$ENV:NAME` references at mount time. A missing variable resolves
- * to '' and is reported in the entry's status message (the server will fail
- * to authenticate/connect downstream — failOnStartupError stays false). An
- * INLINE `$ENV:` mention (e.g. `Bearer $ENV:TOKEN`) is NOT a reference; it is
- * kept literal and warned about, because that is almost always a mistake.
+ * to '' and is reported as a coded warning on the entry's status (the server
+ * will fail to authenticate/connect downstream — failOnStartupError stays
+ * false). An INLINE `$ENV:` mention (e.g. `Bearer $ENV:TOKEN`) is NOT a
+ * reference; it is kept literal and warned about, because that is almost
+ * always a mistake.
  */
-function resolveValue(value: string, warnings: string[]): string {
+function resolveValue(value: string, warnings: HostText[]): string {
   const match = ENV_REF.exec(value)
   if (match === null) {
     if (value.includes('$ENV:')) {
-      warnings.push(`仅支持整值 $ENV:VAR 引用，「${value.slice(0, 40)}」已按字面值处理`)
+      warnings.push({ code: 'env.inlineRef', params: { value: value.slice(0, 40) } })
     }
     return value
   }
   const name = match[1]
   const resolved = process.env[name]
   if (resolved === undefined || resolved === '') {
-    warnings.push(`环境变量 ${name} 未设置`)
+    warnings.push({ code: 'env.missing', params: { name } })
     return ''
   }
   return resolved
 }
 
-function resolveMap(map: Readonly<Record<string, string>> | undefined, warnings: string[]): Record<string, string> | undefined {
+function resolveMap(map: Readonly<Record<string, string>> | undefined, warnings: HostText[]): Record<string, string> | undefined {
   if (map === undefined) return undefined
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(map)) out[key] = resolveValue(value, warnings)
@@ -83,7 +84,7 @@ function resolveMap(map: Readonly<Record<string, string>> | undefined, warnings:
 }
 
 /** Build the wire config for one entry (upstream StdioConfig/StreamableHttpConfig shape). */
-function toClientConfig(entry: McpServerEntry, warnings: string[]): Record<string, unknown> {
+function toClientConfig(entry: McpServerEntry, warnings: HostText[]): Record<string, unknown> {
   const config: Record<string, unknown> = {
     serverName: entry.serverName,
     transport: entry.transport,
@@ -111,10 +112,11 @@ interface MountRecord {
   loaderId?: string
   /** Config snapshot of the live entry (skip no-op updates). */
   configKey?: string
-  /** Last mount error, cleared on a successful (re)mount. */
+  /** Last mount error, cleared on a successful (re)mount. Raw loader text: a
+   * third-party diagnostic, never host copy. */
   error?: string
-  /** `$ENV:` resolution warnings of the last mount. */
-  warnings?: string[]
+  /** `$ENV:` resolution warnings of the last mount, as coded messages. */
+  warnings?: HostText[]
 }
 
 /**
@@ -195,7 +197,7 @@ export class McpMountManager {
       return
     }
     const record = this.records.get(entry.id) ?? {}
-    const warnings: string[] = []
+    const warnings: HostText[] = []
     const config = toClientConfig(entry, warnings)
     const configKey = JSON.stringify(config)
     const unchanged = record.loaderId !== undefined && record.configKey === configKey && record.error === undefined
@@ -269,16 +271,18 @@ export class McpMountManager {
   statusFor(entry: McpServerEntry): McpMountStatus {
     if (!entry.enabled) return { state: 'disabled' }
     if (this.loader === undefined) {
-      return { state: 'unavailable', message: '当前内核不支持 MCP 动态挂载，MCP 功能不可用' }
+      return { state: 'unavailable', message: { code: 'mount.unavailable' } }
     }
     const record = this.records.get(entry.id)
     if (record === undefined) return { state: 'starting' }
-    if (record.error !== undefined) return { state: 'error', message: record.error }
+    // The loader's own failure text is a third-party diagnostic (a cordis
+    // error, an ENOENT, an HTTP status): it has no sentence of ours to
+    // translate, so it rides as the English `text` beside its code.
+    if (record.error !== undefined) return { state: 'error', message: { code: 'mount.failed', text: record.error } }
     if (record.loaderId === undefined) return { state: 'starting' }
-    const warning = record.warnings !== undefined && record.warnings.length > 0 ? record.warnings.join('；') : undefined
     return {
       state: 'mounted',
-      message: warning,
+      warnings: record.warnings,
       toolCount: this.countTools(entry.serverName),
     }
   }

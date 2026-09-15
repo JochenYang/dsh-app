@@ -25,6 +25,7 @@
 
 import { SKILL_NAME, SKILL_TOKEN, skillReferenceDispatcher } from './skill-reference.ts'
 import type { ReferenceDispatch } from './skill-reference.ts'
+import type { PptKey } from './locales.ts'
 
 /** The skill this plugin installs; mirrors `SKILL_NAME` in src/skill.ts. */
 export const PREFILL_SKILL = SKILL_NAME
@@ -215,11 +216,26 @@ export function removeSkillReference(binding: ComposerBinding | undefined): bool
   return true
 }
 
+/** Key of the hint shown when the turn-on could not place the skill reference. */
+const SKILL_HINT_KEY = 'capsule.skillHint' satisfies PptKey
+
+/**
+ * One local hint as data: a dictionary key plus its params, resolved by the
+ * caller's `t` seat. Nothing here builds a sentence, so a language switch
+ * cannot leave a stale one behind.
+ */
+export interface SkillHintNotice {
+  /** Key of this plugin's dictionary. */
+  readonly key: typeof SKILL_HINT_KEY
+  /** The capsule label and the literal token the user can type instead. */
+  readonly params: { readonly label: string, readonly token: string }
+}
+
 /**
  * The hint shown when the mode turned on but the reference could not be placed
  * (the draft already held text, so nothing was written).
  * @param label - the format's capsule label.
  */
-export function skillReferenceHint(label: string): string {
-  return `已开启 ${label} 模式；技能引用未能放入输入框，可手动输入 ${SKILL_TOKEN}`
+export function skillReferenceHint(label: string): SkillHintNotice {
+  return { key: SKILL_HINT_KEY, params: { label, token: SKILL_TOKEN } }
 }

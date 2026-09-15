@@ -60,9 +60,9 @@ export interface ChainOutcome {
 export class ChainExhaustedError extends Error {
   constructor(readonly attempts: readonly AttemptRecord[], readonly skipped: readonly string[]) {
     const detail = attempts.length === 0
-      ? '没有可用的搜索引擎'
-      : attempts.map(attempt => `${attempt.id}（${attempt.error ?? '未知原因'}）`).join('；')
-    super(`所有搜索引擎均失败：${detail}`)
+      ? 'no usable search engine'
+      : attempts.map(attempt => `${attempt.id} (${attempt.error ?? 'unknown reason'})`).join('; ')
+    super(`every search engine failed: ${detail}`)
     this.name = 'ChainExhaustedError'
   }
 }
@@ -78,7 +78,7 @@ export class ChainExhaustedError extends Error {
  */
 function composeSignal(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal, dispose: () => void } {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(new Error('搜索超时')), timeoutMs)
+  const timer = setTimeout(() => controller.abort(new Error('search timed out')), timeoutMs)
   const onAbort = (): void => controller.abort(signal?.reason)
   if (signal !== undefined) {
     if (signal.aborted) controller.abort(signal.reason)
@@ -125,10 +125,10 @@ function fallbackNote(attempts: readonly AttemptRecord[], usedEngine: string, sk
   const failed = attempts.filter(attempt => !attempt.ok)
   const parts: string[] = []
   if (failed.length > 0) {
-    parts.push(`Note: ${failed.map(attempt => `${attempt.id} 失败（${attempt.error ?? '未知原因'}）`).join('；')}，已改用 ${usedEngine}。`)
+    parts.push(`Note: ${failed.map(attempt => `${attempt.id} failed (${attempt.error ?? 'unknown reason'})`).join('; ')}, switched to ${usedEngine}.`)
   }
   if (skipped.length > 0) {
-    parts.push(`（超时预算已用尽，未尝试：${skipped.join('、')}）`)
+    parts.push(` (budget exhausted; not tried: ${skipped.join(', ')})`)
   }
   return parts.length === 0 ? undefined : parts.join('')
 }

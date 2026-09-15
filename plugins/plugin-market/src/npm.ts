@@ -44,15 +44,25 @@ const REGISTRY_MAX_BYTES = 1_000_000
  * Validate and normalize a requested package name.
  * @param raw - the client-supplied value (any shape).
  * @returns the trimmed name.
- * @throws MarketValidationError with a zh-CN message when unusable.
+ * @throws MarketValidationError with a coded message when unusable.
  */
 export function validatePackageName(raw: unknown): string {
-  if (typeof raw !== 'string') throw new MarketValidationError('包名必须是字符串')
+  if (typeof raw !== 'string') {
+    throw new MarketValidationError({ code: 'pkg.notString', text: 'the package name must be a string' })
+  }
   const name = raw.trim()
-  if (name.length === 0) throw new MarketValidationError('包名不能为空')
-  if (name.length > MAX_NAME_LENGTH) throw new MarketValidationError('包名过长')
+  if (name.length === 0) {
+    throw new MarketValidationError({ code: 'pkg.empty', text: 'the package name cannot be empty' })
+  }
+  if (name.length > MAX_NAME_LENGTH) {
+    throw new MarketValidationError({ code: 'pkg.tooLong', text: 'the package name is too long' })
+  }
   if (!PACKAGE_NAME_PATTERN.test(name)) {
-    throw new MarketValidationError(`包名格式不合法：「${name}」`)
+    throw new MarketValidationError({
+      code: 'pkg.invalid',
+      params: { name },
+      text: `invalid package name: "${name}"`,
+    })
   }
   return name
 }
@@ -65,10 +75,16 @@ export function validatePackageName(raw: unknown): string {
  */
 export function validateExactVersion(raw: unknown): string | undefined {
   if (raw === undefined || raw === null || raw === '') return undefined
-  if (typeof raw !== 'string') throw new MarketValidationError('版本号必须是字符串')
+  if (typeof raw !== 'string') {
+    throw new MarketValidationError({ code: 'version.notString', text: 'the version must be a string' })
+  }
   const version = raw.trim()
   if (!EXACT_VERSION_PATTERN.test(version)) {
-    throw new MarketValidationError(`版本号必须是精确版本（如 1.2.3），不接受范围或标签：「${version}」`)
+    throw new MarketValidationError({
+      code: 'version.notExact',
+      params: { version },
+      text: `the version must be exact (like 1.2.3); ranges and tags are not accepted: "${version}"`,
+    })
   }
   return version
 }
@@ -82,7 +98,11 @@ export function validateExactVersion(raw: unknown): string | undefined {
 export function validateProfileName(raw: string): string {
   const name = raw.trim()
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)) {
-    throw new MarketValidationError(`profile 名称不合法：「${name}」`)
+    throw new MarketValidationError({
+      code: 'profile.invalid',
+      params: { name },
+      text: `invalid profile name: "${name}"`,
+    })
   }
   return name
 }
@@ -116,16 +136,34 @@ export async function resolveRegistryVersion(name: string, requested?: string): 
     const response = await fetch(url, { signal: controller.signal, redirect: 'error' })
     if (response.status === 404) {
       throw new MarketValidationError(requested === undefined
-        ? `npm 上找不到插件包：「${name}」`
-        : `版本不存在：「${name}@${requested}」`)
+        ? {
+            code: 'registry.notFound',
+            params: { name },
+            text: `no such plugin package on npm: "${name}"`,
+          }
+        : {
+            code: 'registry.versionNotFound',
+            params: { name, version: requested },
+            text: `no such version: "${name}@${requested}"`,
+          })
     }
     if (!response.ok) {
-      throw new MarketExecutionError(`registry 查询失败（HTTP ${response.status}）`, 'registry')
+      throw new MarketExecutionError({
+        code: 'registry.httpFailed',
+        params: { status: response.status },
+        text: `registry lookup failed (HTTP ${String(response.status)})`,
+      }, 'registry')
     }
     body = (await response.text()).slice(0, REGISTRY_MAX_BYTES)
   } catch (error) {
     if (error instanceof MarketValidationError || error instanceof MarketExecutionError) throw error
-    throw new MarketExecutionError(`registry 查询失败：${error instanceof Error ? error.message : '网络错误'}`, 'registry')
+    throw new MarketExecutionError({
+      code: 'registry.lookupFailed',
+      // The nested code keeps the zh sentence's own wording when nothing else
+      // is known; an error's message is a diagnostic and rides verbatim.
+      params: { detail: error instanceof Error ? error.message : 'error.network' },
+      text: `registry lookup failed: ${error instanceof Error ? error.message : 'a network error'}`,
+    }, 'registry')
   } finally {
     clearTimeout(timer)
   }
@@ -133,14 +171,24 @@ export async function resolveRegistryVersion(name: string, requested?: string): 
   try {
     manifest = JSON.parse(body)
   } catch {
-    throw new MarketExecutionError('registry 返回了无法解析的内容', 'registry')
+    throw new MarketExecutionError(
+      { code: 'registry.badResponse', text: 'the registry returned content that could not be parsed' },
+      'registry',
+    )
   }
   const version = (manifest as { version?: unknown } | null)?.version
   if (typeof version !== 'string' || !EXACT_VERSION_PATTERN.test(version)) {
-    throw new MarketExecutionError('registry 返回的版本信息不完整', 'registry')
+    throw new MarketExecutionError(
+      { code: 'registry.incomplete', text: 'the registry returned an incomplete version record' },
+      'registry',
+    )
   }
   if (requested !== undefined && version !== requested) {
-    throw new MarketExecutionError(`registry 返回的版本与请求不一致：${version}`, 'registry')
+    throw new MarketExecutionError({
+      code: 'registry.versionMismatch',
+      params: { version },
+      text: `the registry returned a different version than requested: ${version}`,
+    }, 'registry')
   }
   return version
 }
@@ -328,5 +376,8 @@ export function resolveDshBin(argv1: string | undefined): string {
       dir = parent
     }
   }
-  throw new MarketValidationError('未能定位内核命令行工具，无法安装插件')
+  throw new MarketValidationError({
+    code: 'cli.notFound',
+    text: 'could not locate the kernel CLI, so the plugin cannot be installed',
+  })
 }

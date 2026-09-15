@@ -373,8 +373,9 @@ test('lightSweep: never throws on an empty store', () => {
 
 // --- settings route: the pin fence still holds --------------------------------
 
-test('pin route: an invalid or unknown project slug is rejected before any write', async () => {
-  const root = tmpRoot()
+/** Register the settings routes over one root: the handler map, a caller that
+ *  reports the JSON answer, and the disposer. */
+function settingsRoutes(root: MemoryRoot) {
   const handlers = new Map<string, (req: unknown, res: unknown) => void>()
   const dispose = registerMemoryRoutes({
     register: (route: { path: string, handler: (req: never, res: never) => void }) => {
@@ -382,14 +383,15 @@ test('pin route: an invalid or unknown project slug is rejected before any write
       return () => undefined
     },
   }, root)
-  const pin = handlers.get(`${ROUTE_PREFIX}/pin`)
-  assert.ok(pin !== undefined, 'the pin route is registered')
-
-  const call = async (body: Record<string, unknown>): Promise<{ status: number, body: Record<string, unknown> }> => {
-    const req = Object.assign(new EventEmitter(), {
-      method: 'POST',
-      headers: { host: '127.0.0.1:3080' },
-    })
+  const call = async (
+    path: string,
+    body: Record<string, unknown> | undefined,
+    headers: Record<string, string> = { host: '127.0.0.1:3080' },
+    method = 'POST',
+  ): Promise<{ status: number, body: Record<string, unknown> }> => {
+    const handler = handlers.get(`${ROUTE_PREFIX}/${path}`)
+    assert.ok(handler !== undefined, `the ${path} route is registered`)
+    const req = Object.assign(new EventEmitter(), { method, headers })
     let status = 0
     let payload: Record<string, unknown> = {}
     const res = {
@@ -397,20 +399,73 @@ test('pin route: an invalid or unknown project slug is rejected before any write
       writeHead: (code: number): void => { status = code },
       end: (text: string): void => { payload = JSON.parse(text) as Record<string, unknown> },
     }
-    pin(req as never, res as never)
-    req.emit('data', Buffer.from(JSON.stringify(body)))
-    req.emit('end')
+    handler(req as never, res as never)
+    if (body !== undefined) {
+      req.emit('data', Buffer.from(JSON.stringify(body)))
+      req.emit('end')
+    }
     await new Promise(resolve => setImmediate(resolve))
     return { status, body: payload }
   }
+  return { handlers, call, dispose }
+}
 
-  const invalid = await call({ topic: 'x', pinned: true, scope: 'project', slug: '../etc' })
+/** The coded message of a refusal: what the client maps to its own copy (and
+ *  the English diagnostic it falls back to for a code it does not know). */
+function hostMessage(body: Record<string, unknown>): { code: string, params?: Record<string, unknown>, text?: string } {
+  return (body as { error: { host: { code: string } } }).error.host
+}
+
+test('pin route: an invalid or unknown project slug is rejected before any write', async () => {
+  const root = tmpRoot()
+  const routes = settingsRoutes(root)
+
+  const invalid = await routes.call('pin', { topic: 'x', pinned: true, scope: 'project', slug: '../etc' })
   assert.equal(invalid.status, 400, 'traversal slug rejected')
-  const unknown = await call({ topic: 'x', pinned: true, scope: 'project', slug: 'nope-nope' })
+  assert.equal(hostMessage(invalid.body).code, 'route.slugRequired', 'the refusal is a stable code, not a sentence')
+  const unknown = await routes.call('pin', { topic: 'x', pinned: true, scope: 'project', slug: 'nope-nope' })
   assert.equal(unknown.status, 400, 'unknown slug rejected')
+  assert.equal(hostMessage(unknown.body).code, 'route.projectUnknown')
   assert.equal(root.global.list().length, 0, 'no card was written')
   assert.equal(existsSync(join(root.dir, 'config.json')), false, 'no pin was written')
-  dispose()
+  routes.dispose()
+})
+
+test('settings routes: every refusal carries a code plus the values the client interpolates', async () => {
+  const root = tmpRoot()
+  const routes = settingsRoutes(root)
+
+  const badSlug = await routes.call('clear', { scope: 'project', slug: '../etc' })
+  assert.equal(badSlug.status, 400)
+  assert.equal(hostMessage(badSlug.body).code, 'route.slugInvalid')
+
+  const badScope = await routes.call('clear', { scope: 'somewhere' })
+  assert.equal(badScope.status, 400)
+  assert.equal(hostMessage(badScope.body).code, 'route.scopeRequired')
+
+  const badTopic = await routes.call('pin', { topic: 'not a topic key', pinned: true })
+  assert.equal(badTopic.status, 400)
+  assert.equal(hostMessage(badTopic.body).code, 'route.topicInvalid')
+
+  const badToggle = await routes.call('config', { enabled: 'yes' })
+  assert.equal(badToggle.status, 400)
+  assert.equal(hostMessage(badToggle.body).code, 'route.enabledNotBoolean')
+
+  // The method and fence refusals are coded like the rest. They are reachable
+  // only from a hostile page, so they have no dictionary copy and render the
+  // English diagnostic the code carries.
+  const wrongMethod = await routes.call('config', undefined, { host: '127.0.0.1:3080' }, 'GET')
+  assert.equal(wrongMethod.status, 405)
+  assert.equal(hostMessage(wrongMethod.body).code, 'route.methodOnly')
+  // The param is the method the route ACCEPTS, so the copy reads "only POST".
+  assert.deepEqual(hostMessage(wrongMethod.body).params, { method: 'POST' })
+
+  const crossOrigin = await routes.call('config', { enabled: true }, { host: '127.0.0.1:3080', origin: 'http://evil.example' })
+  assert.equal(crossOrigin.status, 403)
+  assert.equal(hostMessage(crossOrigin.body).code, 'route.crossOrigin')
+
+  assert.equal(root.global.list().length, 0, 'no refusal wrote anything')
+  routes.dispose()
 })
 
 // --- distill progress markers (unchanged machinery) --------------------------------

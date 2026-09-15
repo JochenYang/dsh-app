@@ -30,6 +30,7 @@ import {
   WebSearchValidationError,
   type EngineEntry,
   type EngineStatus,
+  type HostText,
   type ProviderStatus,
   type WebSearchFile,
 } from './wire.ts'
@@ -137,8 +138,14 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
-function fail(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { ok: false, error: { code, message } })
+/**
+ * Failure answer. `kind` is the transport-ish category (kept for the existing
+ * client checks); `host` is the coded message the UI renders in its own
+ * language. The plain `message` stays an English diagnostic for logs and for a
+ * client that does not know the code yet.
+ */
+function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
+  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
 /** Bounded JSON body read. */
@@ -240,11 +247,11 @@ export function buildProviderStatuses(
 ): ProviderStatus[] {
   const enginesReady = activeEngines(file).length > 0
   const brand: ProviderStatus = !seamAvailable
-    ? { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'unavailable', reason: '当前内核没有 ctx.web 服务，品牌引擎链无法注册' }
+    ? { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'unavailable', reason: { code: 'provider.noSeam', text: 'this kernel has no ctx.web service, so the brand chain cannot register' } }
     : !file.enabled
-      ? { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'unavailable', reason: '品牌引擎链已被整体停用（配置 enabled: false）' }
+      ? { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'unavailable', reason: { code: 'provider.disabled', text: 'the brand chain is switched off (enabled: false)' } }
       : !enginesReady
-        ? { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'unavailable', reason: '没有启用的引擎，请至少开启一个' }
+        ? { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'unavailable', reason: { code: 'provider.noEngines', text: 'no engine is enabled' } }
         : { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'ready' }
 
   // The upstream side is answered from the seam's registry when it is
@@ -258,21 +265,21 @@ export function buildProviderStatuses(
       id: UPSTREAM_PROVIDER_ID,
       selected: activeProvider === UPSTREAM_PROVIDER_ID,
       state: 'unknown',
-      reason: '无法读取内核的 provider 注册表，可用性未知；点「端到端自检」可确认',
+      reason: { code: 'provider.upstreamUnknown', text: 'the provider registry could not be read; run the end-to-end self-check' },
     }
   } else if (!upstream.registered) {
     upstreamStatus = {
       id: UPSTREAM_PROVIDER_ID,
       selected: activeProvider === UPSTREAM_PROVIDER_ID,
       state: 'unavailable',
-      reason: '未注册：内核未挂载 web-search-deepseek（可能被 patch 层禁用），选它会导致搜索失败',
+      reason: { code: 'provider.upstreamUnregistered', text: 'web-search-deepseek is not mounted (a patch layer may disable it)' },
     }
   } else if (!upstream.usable) {
     upstreamStatus = {
       id: UPSTREAM_PROVIDER_ID,
       selected: activeProvider === UPSTREAM_PROVIDER_ID,
       state: 'unavailable',
-      reason: '已注册但不可用：通常是没有配置 DeepSeek API Key，或 key 无效',
+      reason: { code: 'provider.upstreamUnusable', text: 'registered but unavailable: usually no DeepSeek API key, or an invalid one' },
     }
   } else {
     upstreamStatus = { id: UPSTREAM_PROVIDER_ID, selected: activeProvider === UPSTREAM_PROVIDER_ID, state: 'ready' }
@@ -291,12 +298,12 @@ export function buildProviderStatuses(
 export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSearchStore, deps: RouteDeps): () => void {
   const guard = (req: IncomingMessage, res: ServerResponse, method: 'GET' | 'POST'): boolean => {
     if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', 'cross-origin request')
+      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
       return false
     }
     if (req.method !== method) {
       res.setHeader('Allow', method)
-      fail(res, 405, 'method-not-allowed', `${method} only`)
+      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method }, text: `${method} only` })
       return false
     }
     return true
@@ -334,9 +341,9 @@ export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSear
               deps.clearCache()
             } catch (error) {
               if (error instanceof WebSearchValidationError) {
-                fail(res, 400, 'bad-request', error.message)
+                fail(res, 400, 'bad-request', error.hostText())
               } else {
-                fail(res, 500, 'io', `写入配置失败：${error instanceof Error ? error.message : String(error)}`)
+                fail(res, 500, 'io', { code: 'route.writeFailed', text: error instanceof Error ? error.message : String(error) })
               }
               return
             }
@@ -345,10 +352,10 @@ export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSear
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (64 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
           })
       },
     }),
@@ -368,7 +375,7 @@ export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSear
               ? file.engines.filter(entry => entry.id === body.id)
               : file.engines.filter(entry => entry.enabled)
             if (targets.length === 0) {
-              fail(res, 400, 'bad-request', '没有可测试的引擎')
+              fail(res, 400, 'bad-request', { code: 'route.noTestableEngine', text: 'no enabled engine to test' })
               return
             }
             // Sequential on purpose: parallel probes against rate-limited free
@@ -391,7 +398,9 @@ export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSear
                   id: entry.id,
                   label: spec?.label ?? entry.id,
                   ok: false,
-                  error: error instanceof Error ? error.message : String(error),
+                  // A probe failure is a diagnostic (HTTP status, parse fault):
+                  // the client wraps it in its own copy and shows the detail.
+                  error: { code: 'engine.probeFailed', text: error instanceof Error ? error.message : String(error) },
                 })
               }
             }
@@ -400,10 +409,10 @@ export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSear
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (64 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
           })
       },
     }),
@@ -426,7 +435,10 @@ export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSear
               ok(res, {
                 query,
                 ok: false,
-                error: error instanceof Error ? error.message : String(error),
+                error: {
+                  code: deps.isChainExhausted(error) ? 'selftest.chainExhausted' : 'selftest.failed',
+                  text: error instanceof Error ? error.message : String(error),
+                },
                 chainExhausted: deps.isChainExhausted(error),
               })
             }
@@ -434,10 +446,10 @@ export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSear
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : 'invalid body'
             if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', 'request body too large (64 KiB cap)')
+              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
               return
             }
-            fail(res, 400, 'bad-request', message)
+            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
           })
       },
     }),

@@ -16,17 +16,76 @@ const MAX_LOG_LINE = 2_000
 /** How many recent server log files to keep on disk. */
 const MAX_KEPT_LOG_FILES = 10
 
+/**
+ * Directory holding this run's logs: `<DSH_APP_LOG_DIR or userData>/logs`.
+ * One definition, because the server log, the kernel log and the shell's
+ * "open logs folder" action must all name the same place.
+ */
+export function resolveLogDir(): string {
+  return path.join(process.env.DSH_APP_LOG_DIR ?? app.getPath('userData'), 'logs')
+}
+
+/**
+ * One health probe: exchange the token for an auth cookie, then check the
+ * session root.
+ *
+ * `dsh web` answers `/?token=...` with `303 See Other` + `Set-Cookie` +
+ * `location: /` — the token authenticates once, the cookie carries the
+ * session. A browser follows this automatically (its cookie jar keeps the
+ * auth cookie for the redirected request). The undici `fetch` used here has
+ * no cookie jar, so a plain `redirect: 'follow'` request lands on the naked
+ * `/` without the cookie and gets `401` — the server is healthy but the probe
+ * can never see `res.ok`. So: take the redirect manually, extract the
+ * `Set-Cookie` header, and retry `/` with that cookie.
+ *
+ * Standalone (and exported) so a real loopback exchange can be exercised
+ * without spawning a kernel: a probe that mishandles this dance reports a
+ * healthy server as unhealthy, and the shell then rolls a good kernel back.
+ * @param url - the settled server URL, token included.
+ * @returns true when the session root answers 200; false when the probe
+ * failed (server busy, still booting, or the exchange failed).
+ */
+export async function probeServerHealth(url: string): Promise<boolean> {
+  try {
+    const exchange = await fetch(url, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(2_000),
+    })
+    if (exchange.ok) return true
+    if (exchange.status !== 303 || exchange.headers.get('location') === null) {
+      return false
+    }
+    // The next hop is the same-origin session root the Location header names;
+    // only loopback-path relative locations are acceptable (never follow a
+    // redirect to another origin).
+    const next = new URL(exchange.headers.get('location')!, exchange.url)
+    if (!isLocalServerUrl(next.toString())) return false
+    const cookie = exchange.headers.get('set-cookie')
+    if (cookie === null) return false
+    const follow = await fetch(next.toString(), {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(2_000),
+      headers: { cookie: /^[^=]+=/.test(cookie) ? cookie.split(';')[0]! : cookie },
+    })
+    return follow.ok
+  } catch {
+    return false
+  }
+}
+
 /** Redact credential-looking fragments before a line reaches logs or events. */
-function redact(line: string): string {
+export function redact(line: string): string {
   return line
     // JSON quoted pairs first: "apiKey": "sk-..." keeps only the key name.
     .replace(/("(?:api[_-]?key|authorization|token|secret|passwd|password)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"')
     .replace(/('(?:api[_-]?key|authorization|token|secret|passwd|password)'\s*:\s*)'[^']*'/gi, "$1'[redacted]'")
     // Query-string token (?token=abc&next=/) keeps only the key name: the bare
-    // rule below would swallow the rest of the URL with \S+.
+    // rule below would swallow the rest of the URL with \S+, so this rule must
+    // land first AND the bare rule must not re-match the value it produced
+    // (hence its lookahead) — otherwise `&next=/x` disappears from the log.
     .replace(/([?&](?:token|api[_-]?key)=)[^&\s]+/gi, '$1[redacted]')
     // Bare key=value / key: value pairs last (key name kept, value dropped).
-    .replace(/(api[_-]?key|authorization|token|secret|passwd|password)(\s*[:=]\s*)\S+/gi, '$1$2[redacted]')
+    .replace(/(api[_-]?key|authorization|token|secret|passwd|password)(\s*[:=]\s*)(?!\[redacted\])\S+/gi, '$1$2[redacted]')
     .slice(0, MAX_LOG_LINE)
 }
 
@@ -200,8 +259,7 @@ export class DshServer {
 
   /** Open a new server log file under the log dir, pruning older ones. */
   private async openLog(): Promise<string> {
-    const base = process.env.DSH_APP_LOG_DIR ?? app.getPath('userData')
-    const dir = path.join(base, 'logs')
+    const dir = resolveLogDir()
     const file = path.join(dir, `dsh-server-${new Date().toISOString().replace(/[:.]/g, '-')}.log`)
     await fs.mkdir(dir, { recursive: true })
     await this.pruneOldLogs(dir)
@@ -244,46 +302,11 @@ export class DshServer {
   }
 
   /**
-   * One health probe: exchange the token for an auth cookie, then check the
-   * session root.
-   *
-   * `dsh web` answers `/?token=...` with `303 See Other` + `Set-Cookie` +
-   * `location: /` — the token authenticates once, the cookie carries the
-   * session. A browser follows this automatically (its cookie jar keeps the
-   * auth cookie for the redirected request). The undici `fetch` used here has
-   * no cookie jar, so a plain `redirect: 'follow'` request lands on the naked
-   * `/` without the cookie and gets `401` — the server is healthy but the
-   * probe can never see `res.ok`. So: take the redirect manually, extract the
-   * `Set-Cookie` header, and retry `/` with that cookie.
-   * @returns true when the session root answers 200; false when the probe
-   * failed (server busy, still booting, or the exchange failed).
+   * One health probe against the settled server URL.
+   * @returns true when the session root answers 200.
    */
   private async probeHealth(): Promise<boolean> {
-    try {
-      const exchange = await fetch(this.url, {
-        redirect: 'manual',
-        signal: AbortSignal.timeout(2_000),
-      })
-      if (exchange.ok) return true
-      if (exchange.status !== 303 || exchange.headers.get('location') === null) {
-        return false
-      }
-      // The next hop is the same-origin session root the Location header names;
-      // only loopback-path relative locations are acceptable (never follow a
-      // redirect to another origin).
-      const next = new URL(exchange.headers.get('location')!, exchange.url)
-      if (!isLocalServerUrl(next.toString())) return false
-      const cookie = exchange.headers.get('set-cookie')
-      if (cookie === null) return false
-      const follow = await fetch(next.toString(), {
-        redirect: 'manual',
-        signal: AbortSignal.timeout(2_000),
-        headers: { cookie: /^[^=]+=/.test(cookie) ? cookie.split(';')[0]! : cookie },
-      })
-      return follow.ok
-    } catch {
-      return false
-    }
+    return probeServerHealth(this.url)
   }
 
   /** Poll the web server root until it answers 200 or the timeout elapses. */

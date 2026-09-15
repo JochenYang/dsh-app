@@ -4,6 +4,8 @@
  * same-origin browser request is.
  */
 
+import { type HostText } from '../errors.ts'
+
 /**
  * The plugin's route prefix on the dsh web server (mirrors the host half;
  * the /api segment keeps clear of the loader-owned client.js bundle route).
@@ -15,6 +17,12 @@ export class MarketApiError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    /**
+     * The host's coded message (see `HostText` in src/errors.ts); the panel
+     * renders it through its own dictionary, falling back to `message` for a
+     * code this build does not know.
+     */
+    readonly host?: HostText,
     /** Package names pnpm skipped builds for (present on blocked-builds failures). */
     readonly blockedBuilds?: readonly string[],
   ) {
@@ -26,7 +34,7 @@ export class MarketApiError extends Error {
 interface MarketEnvelope<T> {
   ok: boolean
   value?: T
-  error?: { code: string, message: string, blockedBuilds?: readonly string[] }
+  error?: { code: string, message: string, host?: HostText, blockedBuilds?: readonly string[] }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -36,6 +44,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new MarketApiError(
       body.error?.code ?? 'unknown',
       body.error?.message ?? `HTTP ${String(response.status)}`,
+      body.error?.host,
       body.error?.blockedBuilds,
     )
   }
@@ -114,7 +123,7 @@ export interface SourcesValue {
 /** GET /catalog payload (flags mark which mode produced it). */
 export interface CatalogValue {
   readonly plugins: readonly CatalogEntry[]
-  readonly failed: ReadonlyArray<{ url: string, reason: string }>
+  readonly failed: ReadonlyArray<{ url: string, reason: HostText }>
   readonly sources: readonly string[]
   /** Snapshot time of the served data (cache write moment, or the fetch moment). */
   readonly cachedAt?: number

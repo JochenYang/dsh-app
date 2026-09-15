@@ -14,7 +14,7 @@
 const assert = require('node:assert')
 const path = require('node:path')
 
-const { CLOSE_DIALOG_SCRIPT } = require(path.join(__dirname, '..', 'dist', 'main', 'close-dialog.js'))
+const { closeDialogScript } = require(path.join(__dirname, '..', 'dist', 'main', 'close-dialog.js'))
 
 // ------------------------------------------------------------- DOM stub
 /** Mimics a browser: assigning style.cssText parses into style.<prop> keys. */
@@ -121,7 +121,7 @@ function resetDom(theme = THEME_FIXTURE) {
 }
 
 function run() {
-  return eval(CLOSE_DIALOG_SCRIPT) // eslint-disable-line no-eval
+  return eval(closeDialogScript()) // eslint-disable-line no-eval
 }
 
 function bodyMask() {

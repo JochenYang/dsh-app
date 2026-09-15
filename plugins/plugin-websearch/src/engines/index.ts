@@ -34,7 +34,7 @@ export function createEngine(id: EngineId, file: WebSearchFile): Engine {
       // Exhaustiveness guard: adding an id to ENGINE_IDS without a case here
       // is a compile error, not a silent "engine never runs".
       const never: never = id
-      throw new Error(`未知引擎：${String(never)}`)
+      throw new Error(`unknown engine: ${String(never)}`)
     }
   }
 }

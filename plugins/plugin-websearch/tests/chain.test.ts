@@ -55,8 +55,8 @@ describe('runChain', () => {
     assert.equal(outcome.attempts[0].error, 'boom')
     // The note names the engine that failed AND the one that answered, so a
     // reader can tell the result came from a fallback.
-    assert.match(outcome.result.content ?? '', /a 失败/)
-    assert.match(outcome.result.content ?? '', /已改用 b/)
+    assert.match(outcome.result.content ?? '', /a failed/)
+    assert.match(outcome.result.content ?? '', /switched to b/)
   })
 
   it('falls through when an engine returns zero results', async () => {
@@ -80,8 +80,8 @@ describe('runChain', () => {
       runChain([fake('a', 'one', calls), fake('b', 'two', calls)], { query: 'q' }, OPTIONS),
       (error: unknown) => {
         assert.ok(error instanceof ChainExhaustedError)
-        assert.match(error.message, /a（one）/)
-        assert.match(error.message, /b（two）/)
+        assert.match(error.message, /a \(one\)/)
+        assert.match(error.message, /b \(two\)/)
         return true
       },
     )
@@ -132,7 +132,7 @@ describe('runChain', () => {
         async run({ signal }): Promise<WebSearchSource[]> {
           calls.push('slow')
           return await new Promise((_resolve, reject) => {
-            signal.addEventListener('abort', () => { reject(new Error('搜索超时')) })
+            signal.addEventListener('abort', () => { reject(new Error('search timed out')) })
           })
         },
       },

@@ -1,4 +1,5 @@
 import { BrowserWindow, dialog } from 'electron'
+import { t } from '../shared/locale'
 
 /**
  * Shared themed-dialog fallback (used by the shell boot flow and the shell
@@ -65,7 +66,7 @@ export async function noticeThemedDialog(
   await promptThemedDialog(
     win,
     script,
-    { type, title, message, buttons: ['确定'], defaultId: 0, cancelId: 0, noLink: true },
+    { type, title, message, buttons: [t('common.ok')], defaultId: 0, cancelId: 0, noLink: true },
     () => undefined,
   )
 }

@@ -33,8 +33,12 @@ function sourceFiles(): string[] {
 
 test('client entry: the office bar is mounted from the session selection and no retired occurrence is claimed', () => {
   const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
-  assert.match(client, /mountPptOfficeBar\(ctx\.uiSession\.adapter\.current\)/)
-  assert.match(client, /export const inject = \['uiSession'\]/)
+  assert.match(client, /mountPptOfficeBar\(ctx\.uiSession\.adapter\.current, seat\)/)
+  assert.match(client, /export const inject = \['locale', 'uiSession'\]/)
+  // The capsule's copy is this plugin's own namespace, registered with (and
+  // disposed by) this client fiber, and the injected tree carries the seat.
+  assert.match(client, /ctx\.locale\.register\(PPT_NS, \{ zh: pptZh, en: pptEn \}\)/)
+  assert.match(client, /t: ctx\.locale\.bind\(PPT_NS\), locale: ctx\.locale/)
   assert.doesNotMatch(client, /slots\.register|slots\.inject/)
   assert.doesNotMatch(client, /conversation\.session\.header/)
   assert.doesNotMatch(client, /conversation\.composer\.dock/)
@@ -80,8 +84,8 @@ test('client entry: the capsule is one toggle with a dropdown and no launcher pa
   assert.match(entry, /removeSkillReference\(bindingRef\.current\)/)
   // No template is ever seeded by the turn-on itself.
   assert.doesNotMatch(entry, /DEFAULT_PICK|dsh-blue-professional/)
-  // The panel keeps the explicit way out.
-  assert.match(entry, /关闭 PPT 模式/)
+  // The panel keeps the explicit way out (its copy rides the dictionary).
+  assert.match(entry, /t\('panel\.disable'\)/)
 })
 
 test('client entry: the built client artifact mounts into the office bar and carries no retired landing site', () => {

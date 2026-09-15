@@ -13,8 +13,7 @@ const NAV_ICON_SVG = [
   '</svg>',
 ].join('')
 const NAV_CELL_CLASS = 'dshHkNav'
-const NAV_LABEL = 'Hooks'
-export function mountNavIconPatch(): () => void {
+export function mountNavIconPatch(labelOf: () => string): () => void {
   const style = document.createElement('style')
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
   style.textContent = [
@@ -28,9 +27,10 @@ export function mountNavIconPatch(): () => void {
   document.head.append(style)
   const patch = (): void => {
     if (document.querySelector('[class*="navList"]') === null) return
-    for (const label of document.querySelectorAll('span[class*="navLabel"]')) {
-      if (label.textContent !== NAV_LABEL) continue
-      label.closest('button')?.classList.add(NAV_CELL_CLASS)
+    const label = labelOf()
+    for (const span of document.querySelectorAll('span[class*="navLabel"]')) {
+      if (span.textContent !== label) continue
+      span.closest('button')?.classList.add(NAV_CELL_CLASS)
     }
   }
   patch()

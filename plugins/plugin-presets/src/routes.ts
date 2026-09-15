@@ -34,7 +34,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { MAX_ZIP_BYTES, PresetPackageError, entryNameProblem } from './wire.ts'
+import { MAX_ZIP_BYTES, PresetPackageError, entryNameProblem, type HostText } from './wire.ts'
 import { MAX_BACKUP_ZIP_BYTES, packConfigBackup, restoreConfigBackup, unpackConfigBackup } from './backup.ts'
 import { PresetStore } from './store.ts'
 import type { PresetSummary } from './store.ts'
@@ -99,8 +99,8 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
-function fail(res: ServerResponse, status: number, code: string, message: string, extra: Record<string, unknown> = {}): void {
-  sendJson(res, status, { ok: false, error: { code, message, ...extra } })
+function fail(res: ServerResponse, status: number, code: string, host: HostText, extra: Record<string, unknown> = {}): void {
+  sendJson(res, status, { ok: false, error: { code, message: host.text ?? host.code, host, ...extra } })
 }
 
 /** HTTP status for a package-level failure code. */
@@ -115,9 +115,9 @@ function statusForCode(code: string): number {
   }
 }
 
-/** Answer a PresetPackageError with its mapped status, message and details. */
+/** Answer a PresetPackageError with its mapped status, coded message and details. */
 function failPackage(res: ServerResponse, error: PresetPackageError): void {
-  fail(res, statusForCode(error.code), error.code, error.message, error.details)
+  fail(res, statusForCode(error.code), error.code, error.hostText(), error.details)
 }
 
 /** Parse the request URL's query (req.url is path?query against any host). */
@@ -150,12 +150,12 @@ function readBinaryBody(req: IncomingMessage, cap: number): Promise<Buffer> {
 /** Same-origin + loopback fence and the method check, shared by both route groups. */
 function guarded(req: IncomingMessage, res: ServerResponse, method: 'GET' | 'POST'): boolean {
   if (!sameOrigin(req) || !passesFence(req)) {
-    fail(res, 403, 'forbidden', 'cross-origin request')
+    fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
     return false
   }
   if (req.method !== method) {
     res.setHeader('Allow', method)
-    fail(res, 405, 'method-not-allowed', `${method} only`)
+    fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method }, text: `${method} only` })
     return false
   }
   return true
@@ -179,7 +179,7 @@ export function registerPresetRoutes(webServer: WebServerLike, store: PresetStor
           .then(presets => ok(res, { root: rootDisplay, presets } satisfies PresetsResponse))
           .catch((error: unknown) => {
             if (error instanceof PresetPackageError) { failPackage(res, error); return }
-            fail(res, 500, 'io', '读取预设列表失败')
+            fail(res, 500, 'io', { code: 'route.listFailed', text: 'cannot read the preset list' })
           })
       },
     }),
@@ -191,7 +191,11 @@ export function registerPresetRoutes(webServer: WebServerLike, store: PresetStor
         const entry = queryOf(req).get('entry') ?? ''
         const problem = entryNameProblem(entry)
         if (problem !== undefined) {
-          fail(res, 400, 'entry-invalid', `预设名不合法：${problem}`)
+          fail(res, 400, 'entry-invalid', {
+            code: 'preset.entryInvalid',
+            params: { reason: problem.code },
+            text: `invalid preset name: ${problem.text ?? problem.code}`,
+          })
           return
         }
         void store.exportZip(entry)
@@ -205,7 +209,7 @@ export function registerPresetRoutes(webServer: WebServerLike, store: PresetStor
           })
           .catch((error: unknown) => {
             if (error instanceof PresetPackageError) { failPackage(res, error); return }
-            fail(res, 500, 'io', '导出预设失败')
+            fail(res, 500, 'io', { code: 'route.exportFailed', text: 'cannot export the preset' })
           })
       },
     }),
@@ -220,11 +224,16 @@ export function registerPresetRoutes(webServer: WebServerLike, store: PresetStor
           .then(({ entry, files }) => { ok(res, { entry, files }) })
           .catch((error: unknown) => {
             if (error instanceof Error && error.message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', `预设包超过 ${String(Math.floor(MAX_ZIP_BYTES / 1024 / 1024))}MB 上限`)
+              const mb = Math.floor(MAX_ZIP_BYTES / 1024 / 1024)
+              fail(res, 413, 'payload-too-large', {
+                code: 'route.presetTooLarge',
+                params: { mb },
+                text: `the preset package exceeds the ${String(mb)} MB cap`,
+              })
               return
             }
             if (error instanceof PresetPackageError) { failPackage(res, error); return }
-            fail(res, 400, 'bad-request', '导入失败：请求内容无法识别')
+            fail(res, 400, 'bad-request', { code: 'route.importUnreadable', text: 'import failed: the request content could not be recognized' })
           })
       },
     }),
@@ -269,7 +278,7 @@ export function registerBackupRoutes(webServer: WebServerLike, deps: BackupRoute
           })
           .catch((error: unknown) => {
             if (error instanceof PresetPackageError) { failPackage(res, error); return }
-            fail(res, 500, 'io', '导出配置备份失败')
+            fail(res, 500, 'io', { code: 'route.backupExportFailed', text: 'cannot export the configuration backup' })
           })
       },
     }),
@@ -292,11 +301,15 @@ export function registerBackupRoutes(webServer: WebServerLike, deps: BackupRoute
           })
           .catch((error: unknown) => {
             if (error instanceof Error && error.message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', `配置备份超过 ${BACKUP_CAP_TEXT} 上限`)
+              fail(res, 413, 'payload-too-large', {
+                code: 'route.backupTooLarge',
+                params: { mb: BACKUP_CAP_TEXT },
+                text: `the configuration backup exceeds the ${BACKUP_CAP_TEXT} cap`,
+              })
               return
             }
             if (error instanceof PresetPackageError) { failPackage(res, error); return }
-            fail(res, 400, 'bad-request', '导入失败：请求内容无法识别')
+            fail(res, 400, 'bad-request', { code: 'route.importUnreadable', text: 'import failed: the request content could not be recognized' })
           })
       },
     }),

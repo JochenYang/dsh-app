@@ -15,8 +15,12 @@
  * it through the same PUT, so a toggle made before the session existed survives.
  *
  * The mode is applied optimistically and reverted on failure, so the capsule
- * never lags behind the click. All copy zh-CN; the capsule body is a real button
- * for keyboard use.
+ * never lags behind the click. The capsule body is a real button for keyboard
+ * use.
+ *
+ * Every word this capsule renders comes from the plugin's own locale namespace
+ * through the {@link useTranslate} seat client.ts hands in: the capsule is not a
+ * slot occupant, so no renderer-synthesized `t` prop exists for it.
  *
  * @module @dsh-app/plugin-pdf/client/pdf-entry
  */
@@ -27,16 +31,16 @@ import type { HostObservable, StandardSourceBinding } from '@deepseek-ai/dsh-cli
 import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { pdfModeApi } from './api.ts'
 import type { ModeValue } from './api.ts'
-import { PDF_LABEL, UNLOADED_MODE, capsuleState, resolveCapsuleMode } from './capsule-state.ts'
+import { UNLOADED_MODE, capsuleState, resolveCapsuleMode } from './capsule-state.ts'
+import { useTranslate } from './locale-seat.ts'
+import type { LocaleSeat } from './locale-seat.ts'
 import { useOfficeSupersede } from './office-supersede.ts'
 import { pendingMode } from './pending-mode.ts'
-import { applySkillReference, removeSkillReference, skillReferenceHint } from './skill-prefill.ts'
+import { applySkillReference, removeSkillReference } from './skill-prefill.ts'
+import { SKILL_TOKEN } from './skill-reference.ts'
 
 /** The ui-session binding that follows the current session selection. */
 export type SessionSource = HostObservable<StandardSourceBinding>
-
-/** Shown while a toggle waits for the session it will be applied to. */
-const PENDING_NOTICE = '将在会话开始后生效'
 
 /** Small inline page glyph for the capsule's leading cluster. */
 function PdfIcon(): ReactNode {
@@ -73,7 +77,11 @@ function sessionIdOf(binding: StandardSourceBinding): string | undefined {
  * The capsule body: mode state, the optimistic toggle and the pending hand-off
  * to the first real session. Memoized so parent renders never rebuild it.
  */
-export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: { sessionSource: SessionSource }): ReactNode {
+export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: {
+  sessionSource: SessionSource
+  locale: LocaleSeat
+}): ReactNode {
+  const t = useTranslate(props.locale)
   const binding = useSessionBinding(props.sessionSource)
   const sessionId = sessionIdOf(binding)
 
@@ -81,10 +89,13 @@ export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: { sessionSourc
   const [boundMode, setBoundMode] = useState<ModeValue | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  // Both notices are held as state and worded at render time, so a language
+  // switch re-words one that is already on screen instead of stranding it.
+  const [pendingNotice, setPendingNotice] = useState(false)
   // The only trace of a turn-on that could not seed the skill reference (the
-  // draft already held text); it clears itself so it never becomes clutter.
-  const [skillHint, setSkillHint] = useState<{ text: string, seq: number } | undefined>(undefined)
+  // draft already held text); it clears itself so it never becomes clutter. The
+  // sequence is what restarts the timer for a repeated hint.
+  const [skillHint, setSkillHint] = useState<{ seq: number } | undefined>(undefined)
   const hintSeq = useRef(0)
 
   // With no session the parked decision *is* the mode, and both the hero and
@@ -116,7 +127,7 @@ export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: { sessionSourc
   const announceSkill = useCallback((turningOn: boolean): void => {
     if (applySkillReference(bindingRef.current, turningOn).kind !== 'notice') return
     hintSeq.current += 1
-    setSkillHint({ text: skillReferenceHint(PDF_LABEL), seq: hintSeq.current })
+    setSkillHint({ seq: hintSeq.current })
   }, [])
 
   useEffect(() => {
@@ -174,7 +185,7 @@ export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: { sessionSourc
       // No session to write a mode to yet: the decision is parked for the
       // session-bound pass instead of pretended.
       pendingMode.set(next)
-      setNotice(next ? PENDING_NOTICE : undefined)
+      setPendingNotice(next)
       return
     }
     const previous = current.enabled
@@ -232,10 +243,10 @@ export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: { sessionSourc
 
   // The hero hint stands only while the toggle is still parked: once the
   // session-bound pass consumes it, this capsule is back to no decision.
-  const showNotice = notice !== undefined && parked !== undefined
+  const showNotice = pendingNotice && parked !== undefined
   const hint = resolved.enabled
-    ? 'PDF 模式已开启；点击关闭'
-    : sessionId === undefined || !loaded ? '点击开启 PDF 模式，将在会话开始时应用' : '点击开启 PDF 模式'
+    ? t('capsule.hintOn')
+    : sessionId === undefined || !loaded ? t('capsule.hintOffPending') : t('capsule.hintOff')
 
   return (
     <>
@@ -249,12 +260,16 @@ export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: { sessionSourc
           onClick={toggle}
         >
           <PdfIcon />
-          <span className="dshPdfCapsuleLabel">PDF</span>
+          <span className="dshPdfCapsuleLabel">{t('capsule.label')}</span>
         </button>
       </span>
       {error !== undefined && <span className="dshPdfCapsuleError" role="alert">{error}</span>}
-      {showNotice && <span className="dshPdfCapsuleNotice" role="status">{notice}</span>}
-      {skillHint !== undefined && <span className="dshPdfCapsuleNotice" role="status">{skillHint.text}</span>}
+      {showNotice && <span className="dshPdfCapsuleNotice" role="status">{t('capsule.pendingNotice')}</span>}
+      {skillHint !== undefined && (
+        <span className="dshPdfCapsuleNotice" role="status">
+          {t('capsule.skillHint', { label: t('capsule.label'), token: SKILL_TOKEN })}
+        </span>
+      )}
     </>
   )
 })

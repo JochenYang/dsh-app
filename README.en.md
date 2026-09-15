@@ -56,6 +56,38 @@ Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
 Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
 rollback target) boots vanilla, never blocked by brand wiring.
 
+## Install (users)
+
+Download the installer for your platform from
+[Releases](https://github.com/JochenYang/dsh-app/releases); for mainland China
+the ModelScope mirror works too — see "Mainland China network adaptation" below.
+
+> **The current builds are not code-signed.** This is a free, community-run
+> project without a signing certificate, so each platform shows its own one-time
+> security prompt. That is expected — follow the steps below and the install
+> completes normally; it does not affect functionality or later updates.
+
+- **Windows**: if "Windows protected your PC" (SmartScreen) appears after
+  double-clicking the installer, click "More info" → "Run anyway", then finish
+  the wizard.
+- **macOS**: if double-clicking the dmg reports an unverified developer, or
+  that the app is damaged, open **System Settings → Privacy & Security** and
+  click **Open Anyway** in the Security section, then confirm. macOS Sequoia
+  (15) and later removed the Control-click → Open bypass, so that route no
+  longer works.
+
+Once installed, you can also **hand the app a folder**:
+
+- Windows: `dsh-app.exe "D:\some-project"`, or drop a folder onto the exe /
+  the desktop shortcut.
+- macOS: `open -a "DSH APP" /path/to/project`.
+
+The folder is registered as a workspace and a session is opened in it (the
+session's `cwd` is that folder). If the app is **already running**, launching it
+this way just **focuses the existing window** and opens the new folder as a
+workspace — no second window. A path that does not exist gets an explanatory
+card instead of silence.
+
 ## Quick start (development)
 
 Requires Node.js 22+ and pnpm. In dev mode the kernel is the local
@@ -165,6 +197,13 @@ title-bar color sync, and a fully localized Chinese UI. Brand functionality
 (sidebar, models page, …) is equally zero-upstream-change via the
 plugin suite above — `--patch` overlays and slot injections. See
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md) for implementation details.
+
+Another desktop-side seam is the **launch folder**: a folder given as a launch
+argument is opened as a workspace through a page global
+(`window.__dshAppOpenWorkspace`, installed by a suite plugin and called by the
+shell via `executeJavaScript`). A kernel without that plugin (a rollback
+target, safe mode) is skipped silently and boots as usual — see
+`src/main/workspace-launch.ts`.
 
 ## Building & distribution
 

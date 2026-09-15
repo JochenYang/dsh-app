@@ -70,12 +70,12 @@ describe('parseAnySearch', () => {
     // only the HTTP status would surface them as a silent "0 results".
     assert.throws(
       () => parseAnySearch({ code: 429, message: 'rate limited' }, 10),
-      /AnySearch 返回错误：rate limited/,
+      /AnySearch returned an error: rate limited/,
     )
   })
 
   it('fails when the envelope has no results array', () => {
-    assert.throws(() => parseAnySearch({ code: 0 }, 10), /缺少 data.results/)
+    assert.throws(() => parseAnySearch({ code: 0 }, 10), /no data\.results/)
   })
 
   it('accepts an empty result list as success', () => {
@@ -100,7 +100,7 @@ describe('parseSearxng', () => {
   it('explains that a non-JSON body means the JSON API is disabled', () => {
     // The public instances answer the HTML page with HTTP 200, so the error
     // must name the real cause instead of "0 results".
-    assert.throws(() => parseSearxng({}, 10), /未启用 JSON API/)
+    assert.throws(() => parseSearxng({}, 10), /JSON API disabled/)
   })
 
   it('accepts an empty result list as success', () => {
@@ -160,11 +160,11 @@ describe('parseParallel', () => {
   })
 
   it('fails loudly when the payload is not JSON (transport contract change)', () => {
-    assert.throws(() => parseParallel('Title: text layout instead', 10), /不是合法 JSON/)
+    assert.throws(() => parseParallel('Title: text layout instead', 10), /did not return valid JSON/)
   })
 
   it('fails when the results field is missing', () => {
-    assert.throws(() => parseParallel('{"search_id":"x"}', 10), /缺少 results 字段/)
+    assert.throws(() => parseParallel('{"search_id":"x"}', 10), /no results field/)
   })
 })
 
@@ -180,10 +180,10 @@ describe('parseJsonRpc', () => {
   })
 
   it('rejects an empty body', () => {
-    assert.throws(() => parseJsonRpc('   '), /响应为空/)
+    assert.throws(() => parseJsonRpc('   '), /response is empty/)
   })
 
   it('rejects a body that carries no JSON-RPC frame', () => {
-    assert.throws(() => parseJsonRpc('event: ping\n\n'), /没有可解析的 JSON-RPC 数据帧/)
+    assert.throws(() => parseJsonRpc('event: ping\n\n'), /no parsable JSON-RPC frame/)
   })
 })

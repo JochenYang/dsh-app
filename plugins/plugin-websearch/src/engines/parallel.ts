@@ -50,11 +50,11 @@ export function parseParallel(text: string, limit: number): WebSearchSource[] {
   try {
     payload = JSON.parse(text)
   } catch {
-    throw new Error('Parallel 返回的不是合法 JSON')
+    throw new Error('Parallel did not return valid JSON')
   }
-  if (typeof payload !== 'object' || payload === null) throw new Error('Parallel 返回结构异常')
+  if (typeof payload !== 'object' || payload === null) throw new Error('Parallel returned an unexpected shape')
   const results = (payload as { readonly results?: unknown }).results
-  if (!Array.isArray(results)) throw new Error('Parallel 返回缺少 results 字段')
+  if (!Array.isArray(results)) throw new Error('Parallel response has no results field')
   const sources: WebSearchSource[] = []
   for (const raw of results as readonly ParallelResult[]) {
     if (typeof raw.url !== 'string' || raw.url === '') continue

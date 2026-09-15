@@ -168,7 +168,11 @@ function blockRows(elements: readonly string[], start: number, end: number): Blo
  */
 export function applyDisableToggle(patchText: string, entryId: string, enable: boolean): string {
   if (!ENTRY_ID_PATTERN.test(entryId)) {
-    throw new MarketValidationError(`插件标识不合法：「${entryId}」`)
+    throw new MarketValidationError({
+      code: 'entryId.invalid',
+      params: { id: entryId },
+      text: `invalid plugin entry id: "${entryId}"`,
+    })
   }
   // Appends adopt the file's line endings; existing bytes are never re-encoded.
   const eol = patchText.includes('\r\n') ? '\r\n' : '\n'

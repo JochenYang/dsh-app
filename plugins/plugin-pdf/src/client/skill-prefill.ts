@@ -214,12 +214,3 @@ export function removeSkillReference(binding: ComposerBinding | undefined): bool
   input.setDraft(cleaned.text)
   return true
 }
-
-/**
- * The hint shown when the mode turned on but the reference could not be placed
- * (the draft already held text, so nothing was written).
- * @param label - the format's capsule label.
- */
-export function skillReferenceHint(label: string): string {
-  return `已开启 ${label} 模式；技能引用未能放入输入框，可手动输入 ${SKILL_TOKEN}`
-}

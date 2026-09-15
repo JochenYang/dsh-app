@@ -150,7 +150,7 @@ export function apply(ctx: Context, config: Config): void {
       const file = store.load()
       const entries = activeEngines(file)
       if (entries.length === 0) {
-        throw new Error('网络搜索未启用：请在「设置 → 网络搜索」中启用至少一个引擎')
+        throw new Error('web search is disabled: enable at least one engine in Settings -> Web search')
       }
       const steps: ChainStep[] = entries.map(entry => ({
         id: entry.id,
@@ -219,14 +219,14 @@ export function apply(ctx: Context, config: Config): void {
     probe: async (id, query) => {
       const file = store.load()
       const entry = file.engines.find(item => item.id === id)
-      if (entry === undefined) throw new Error(`引擎 ${id} 不存在`)
+      if (entry === undefined) throw new Error(`unknown engine: ${id}`)
       const engine = createEngine(entry.id, file)
       const startedAt = Date.now()
       // A probe gets its own generous budget: it exists to diagnose, so
       // reporting "timed out at the shared 25s budget" would conflate the
       // probe with a real search's constraints.
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(new Error('探测超时')), 20_000)
+      const timer = setTimeout(() => controller.abort(new Error('probe timed out')), 20_000)
       try {
         const sources = await engine.run({
           query,
@@ -268,7 +268,7 @@ export function apply(ctx: Context, config: Config): void {
      */
     searchThroughSeam: async (query: string) => {
       if (seam === undefined || typeof seam.search !== 'function') {
-        throw new Error('当前内核没有 ctx.web 服务，无法执行搜索')
+        throw new Error('this kernel has no ctx.web service, so no search can run')
       }
       const file = store.load()
       lastOutcome.set(undefined)

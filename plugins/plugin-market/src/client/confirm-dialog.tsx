@@ -2,7 +2,8 @@
  * In-app confirmation modal — the React port of the shell's in-frame dialog
  * idiom (mask + centered alias-token card, Esc/mask = cancel, Enter on the
  * focused confirm button), the same idiom the other suite sections use.
- * All copy zh-CN.
+ * All copy arrives as props: the caller owns the wording and its locale
+ * namespace (no string is built here).
  *
  * @module @dsh-app/plugin-market/client/confirm-dialog
  */
@@ -16,7 +17,8 @@ export interface ConfirmDialogProps {
   title: string
   message: string
   confirmLabel: string
-  cancelLabel?: string
+  /** Cancel label; the caller owns the copy (its own locale namespace). */
+  cancelLabel: string
   busy?: boolean
   /**
    * Confirm-button tone within the neutral system: 'neutral' (white surface,
@@ -34,7 +36,7 @@ export interface ConfirmDialogProps {
  * @returns null when closed.
  */
 export function ConfirmDialog({
-  open, title, message, confirmLabel, cancelLabel = '取消', busy = false, tone = 'neutral', onConfirm, onClose,
+  open, title, message, confirmLabel, cancelLabel, busy = false, tone = 'neutral', onConfirm, onClose,
 }: ConfirmDialogProps): ReactNode {
   useEffect(() => {
     if (!open) return

@@ -8,8 +8,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ModelDraft } from './fields.ts'
-import { fetchModelsDev, mapProviderModels, searchModels, searchProviders } from './models-dev.ts'
+import { describeFetchFailure, fetchModelsDev, mapProviderModels, searchModels, searchProviders, ModelsDevFetchError } from './models-dev.ts'
 import type { ModelsDevModelHit, ModelsDevProvider } from './models-dev.ts'
+import { messageText, wireText } from './messages.ts'
+import type { PageMessage, Translate } from './messages.ts'
 
 /** Props of {@link ModelsDevImportDialog}. */
 export interface ModelsDevImportDialogProps {
@@ -21,6 +23,8 @@ export interface ModelsDevImportDialogProps {
   onAdopt: (rows: ModelDraft[]) => void
   /** Ids already configured; those rows start unchecked. */
   existingIds: ReadonlySet<string>
+  /** The page's namespace-bound translate seat. */
+  t: Translate
 }
 
 /** One provider row with its mapped models and pick state. */
@@ -30,13 +34,26 @@ interface ProviderDraft {
 }
 
 /**
+ * Classify a failed feed fetch: the feed's own error carries the source and
+ * the reason (worded from the dictionary), anything else is a transport
+ * message shown verbatim.
+ * @param error - whatever the fetch rejected with.
+ * @returns the message the dialog renders.
+ */
+function fetchFailureMessage(error: unknown): PageMessage {
+  return error instanceof ModelsDevFetchError
+    ? describeFetchFailure(error.failure)
+    : wireText(error instanceof Error ? error.message : String(error))
+}
+
+/**
  * The import flow. The feed fetch runs once per open; a network/CORS failure
  * is a dead end for the BUTTON, not the page — the manual form stays usable.
  */
 export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactNode {
-  const { open, onClose, onAdopt, existingIds } = props
+  const { open, onClose, onAdopt, existingIds, t } = props
   const [providers, setProviders] = useState<readonly ModelsDevProvider[] | undefined>(undefined)
-  const [failure, setFailure] = useState<string | undefined>(undefined)
+  const [failure, setFailure] = useState<PageMessage | undefined>(undefined)
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<ProviderDraft | undefined>(undefined)
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
@@ -56,7 +73,7 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
       (error: unknown) => {
         if (stale) return
         setBusy(false)
-        setFailure(error instanceof Error ? error.message : String(error))
+        setFailure(fetchFailureMessage(error))
       },
     )
     return () => { stale = true }
@@ -93,34 +110,34 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
         className="dshAma-modal"
         role="dialog"
         aria-modal="true"
-        aria-label="从 models.dev 导入模型"
+        aria-label={t('adv.import.title')}
         onClick={(event) => { event.stopPropagation() }}
       >
         <div className="dshAma-modalHead">
-          <span className="dshAma-modalTitle">从 models.dev 导入模型</span>
-          <button type="button" className="dshAma-iconButton" aria-label="关闭" onClick={onClose}>✕</button>
+          <span className="dshAma-modalTitle">{t('adv.import.title')}</span>
+          <button type="button" className="dshAma-iconButton" aria-label={t('adv.common.close')} onClick={onClose}>✕</button>
         </div>
         <div className="dshAma-modalBody">
           {failure !== undefined
             ? (
               <div className="dshAma-error">
-                <p>无法访问 models.dev（{failure}）。可能是网络或浏览器跨域限制，可关闭后手动填写字段。</p>
+                <p>{t('adv.import.unreachable', { message: messageText(failure, t) })}</p>
                 <button
                   type="button" className="dshAma-button"
                   onClick={() => { setProviders(undefined); setFailure(undefined) }}
-                >重试</button>
+                >{t('adv.common.retry')}</button>
               </div>
             )
             : busy || providers === undefined
-              ? <p className="dshAma-hint">正在获取 models.dev 目录…</p>
+              ? <p className="dshAma-hint">{t('adv.import.loading')}</p>
               : (
                 <>
                   <input
                     className="dshAma-input"
                     type="text"
                     value={query}
-                    placeholder="搜模型 ID / 显示名 / provider（如 V4.1、deepseek-flash、opencode）"
-                    aria-label="搜索模型或 provider"
+                    placeholder={t('adv.import.searchPlaceholder')}
+                    aria-label={t('adv.import.searchAria')}
                     onChange={(event) => {
                       setQuery(event.target.value)
                       setExpanded(undefined)
@@ -128,11 +145,11 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                     }}
                   />
                   {query.trim() === ''
-                    ? <p className="dshAma-hint">可按显示名搜索（如 V4.1 Flash）。wire ID 与营销名可能不同，例如 V4.1 的 ID 是 deepseek-flash。</p>
+                    ? <p className="dshAma-hint">{t('adv.import.searchHint')}</p>
                     : null}
                   {modelHits.length > 0 ? (
                     <div className="dshAma-candidateBlock">
-                      <p className="dshAma-hint">模型匹配（wire ID 与显示名都搜）：</p>
+                      <p className="dshAma-hint">{t('adv.import.matches')}</p>
                       <ul className="dshAma-candidateList">
                         {modelHits.map(hit => {
                           const key = hitKey(hit)
@@ -152,10 +169,14 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                                   }}
                                 />
                                 <span>
-                                  {name !== '' && name !== hit.modelId ? name + '（' + hit.modelId + '）' : hit.modelId}
+                                  {name !== '' && name !== hit.modelId
+                                    ? t('adv.import.nameWithId', { name, id: hit.modelId })
+                                    : hit.modelId}
                                 </span>
-                                <span className="dshAma-muted"> · {hit.providerId}</span>
-                                {existingIds.has(hit.modelId) ? <span className="dshAma-muted">（已配置）</span> : null}
+                                <span className="dshAma-muted">{t('adv.import.providerSuffix', { provider: hit.providerId })}</span>
+                                {existingIds.has(hit.modelId)
+                                  ? <span className="dshAma-muted">{t('adv.import.configured')}</span>
+                                  : null}
                               </label>
                             </li>
                           )
@@ -174,18 +195,18 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                         <span className="dshAma-providerId">{provider.id}</span>
                         <span className="dshAma-providerMeta">
                           {provider.npm ?? provider.api ?? ''}
-                          {provider.npm === '@ai-sdk/openai-compatible' ? ' · openai-completions 参考' : ''}
+                          {provider.npm === '@ai-sdk/openai-compatible' ? t('adv.import.compatReference') : ''}
                         </span>
                       </button>
                     ))}
                     {query.trim() !== '' && results.length === 0 && modelHits.length === 0
-                      ? <p className="dshAma-hint">没有匹配的 provider 或模型。</p>
+                      ? <p className="dshAma-hint">{t('adv.import.noMatch')}</p>
                       : null}
                   </div>
                   {expanded === undefined ? null : (
                     <div className="dshAma-candidateBlock">
                       <p className="dshAma-hint">
-                        {expanded.provider.id} 的模型（已跳过不支持工具调用的条目；compat 预设请在各行按网关确认）：
+                        {t('adv.import.providerModels', { provider: expanded.provider.id })}
                       </p>
                       <ul className="dshAma-candidateList">
                         {expanded.models.map(model => (
@@ -203,12 +224,14 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                                 }}
                               />
                               <span>{model.id}</span>
-                              {existingIds.has(model.id) ? <span className="dshAma-muted">（已配置）</span> : null}
+                              {existingIds.has(model.id)
+                                ? <span className="dshAma-muted">{t('adv.import.configured')}</span>
+                                : null}
                             </label>
                           </li>
                         ))}
                         {expanded.models.length === 0
-                          ? <p className="dshAma-hint">该 provider 没有可导入的模型（可能均不支持工具调用）。</p>
+                          ? <p className="dshAma-hint">{t('adv.import.providerEmpty')}</p>
                           : null}
                       </ul>
                     </div>
@@ -217,7 +240,7 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
               )}
         </div>
         <div className="dshAma-modalFoot">
-          <button type="button" className="dshAma-button" onClick={onClose}>取消</button>
+          <button type="button" className="dshAma-button" onClick={onClose}>{t('adv.common.cancel')}</button>
           <button
             type="button"
             className="dshAma-button dshAma-buttonPrimary"
@@ -232,7 +255,7 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
               }
               onClose()
             }}
-          >{`采用 ${String(adoptCount)} 个模型`}</button>
+          >{t('adv.import.adopt', { count: adoptCount })}</button>
         </div>
       </div>
     </div>

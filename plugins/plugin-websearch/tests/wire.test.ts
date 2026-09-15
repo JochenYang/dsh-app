@@ -33,14 +33,14 @@ describe('validateFile', () => {
   it('rejects an unknown engine id', () => {
     assert.throws(
       () => validateFile({ engines: [{ id: 'google', enabled: true, priority: 0 }] }),
-      /不认识的引擎 id/,
+      { code: 'engine.unknownId', params: { id: 'google' } },
     )
   })
 
   it('rejects a duplicated engine id', () => {
     assert.throws(
       () => validateFile({ engines: [{ id: 'bing', priority: 0 }, { id: 'bing', priority: 1 }] }),
-      /重复出现/,
+      { code: 'engine.duplicate', params: { id: 'bing' } },
     )
   })
 
@@ -64,7 +64,7 @@ describe('validateFile', () => {
   it('rejects a SearXNG instance without a scheme', () => {
     assert.throws(
       () => validateFile({ searxngInstances: ['searx.example.com'] }),
-      /必须是 http\(s\) 开头/,
+      { code: 'searxng.notHttp', params: { url: 'searx.example.com' } },
     )
   })
 
@@ -145,7 +145,7 @@ describe('activeEngines', () => {
 
 describe('engineBlockReason', () => {
   it('reports a disabled engine', () => {
-    assert.equal(engineBlockReason({ id: 'bing', enabled: false, priority: 0 }, undefined), '已停用')
+    assert.deepEqual(engineBlockReason({ id: 'bing', enabled: false, priority: 0 }, undefined), { code: 'engine.disabled', params: { id: 'bing' } })
   })
 
   it('reports a free engine as runnable', () => {

@@ -37,10 +37,10 @@ interface SearxngPayload {
  * a payload that is not the API shape at all (the HTML-page case above).
  */
 export function parseSearxng(payload: unknown, limit: number): WebSearchSource[] {
-  if (typeof payload !== 'object' || payload === null) throw new Error('响应不是 JSON 对象')
+  if (typeof payload !== 'object' || payload === null) throw new Error('response is not a JSON object')
   const results = (payload as SearxngPayload).results
   if (!Array.isArray(results)) {
-    throw new Error('响应缺少 results 字段（该实例可能未启用 JSON API）')
+    throw new Error('response has no results field (the instance may have the JSON API disabled)')
   }
   const sources: WebSearchSource[] = []
   for (const item of results) {
@@ -65,7 +65,7 @@ export function searxngEngine(instances: readonly string[]): Engine {
     id: 'searxng',
     async run({ query, maxResults, signal }: EngineRequest): Promise<WebSearchSource[]> {
       if (instances.length === 0) {
-        throw new Error('未配置 SearXNG 实例（公共实例多数已禁用 JSON API，请在设置页填入自建实例地址）')
+        throw new Error('no SearXNG instance configured (most public instances disable the JSON API; add your own in the settings page)')
       }
       const failures: string[] = []
       for (const base of instances) {
@@ -82,13 +82,13 @@ export function searxngEngine(instances: readonly string[]): Engine {
           })
           const sources = parseSearxng(payload, maxResults)
           if (sources.length > 0) return sources
-          failures.push(`${trimmed}: 0 条结果`)
+          failures.push(`${trimmed}: 0 results`)
         } catch (error) {
           if (error instanceof Error && error.name === 'AbortError') throw error
           failures.push(`${trimmed}: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
-      throw new Error(`所有 SearXNG 实例均失败（${failures.join('；')}）`)
+      throw new Error(`every SearXNG instance failed (${failures.join('; ')})`)
     },
   }
 }

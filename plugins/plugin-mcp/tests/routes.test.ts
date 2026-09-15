@@ -72,14 +72,18 @@ describe('secret masking round trip', () => {
   it('rejects a mask sentinel with no stored value behind it', () => {
     assert.throws(
       () => unmaskSecretValues({ env: { NEW_TOKEN: VALUE_MASK } }, undefined),
-      McpValidationError,
+      (error: unknown) => error instanceof McpValidationError && error.code === 'secret.masked',
+    )
+    assert.throws(
+      () => unmaskSecretValues({ env: { NEW_TOKEN: VALUE_MASK } }, undefined),
+      (error: unknown) => error instanceof McpValidationError && error.params?.field === 'env.NEW_TOKEN',
     )
   })
 
   it('rejects a non-string value inside a secret map', () => {
     assert.throws(
       () => unmaskSecretValues({ env: { KEY: 42 } }, STORED),
-      McpValidationError,
+      (error: unknown) => error instanceof McpValidationError && error.code === 'field.stringValue',
     )
   })
 

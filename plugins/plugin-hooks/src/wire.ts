@@ -10,8 +10,47 @@
  * @module @dsh-app/plugin-hooks/wire
  */
 
-/** Validation failure of a settings-page write (routes map it to 400). */
-export class HooksValidationError extends Error {}
+/**
+ * A user-visible message the host cannot localize — and deliberately does not
+ * try to.
+ *
+ * The host is a long-lived child process: its language would be decided at
+ * boot, so switching the UI language would require restarting the kernel. It
+ * therefore never sends prose. It sends a stable code plus the values the
+ * sentence interpolates, and the client — which owns the locale namespace —
+ * renders it. `text` is an ENGLISH diagnostic used only for a code this client
+ * does not know (an older UI beside a newer kernel); it is never a localized
+ * sentence, because matching on one across a boundary is how the kernel-side
+ * failure classifier once misread "tampered" as "network error".
+ */
+export interface HostText {
+  readonly code: string
+  readonly params?: Readonly<Record<string, string | number>>
+  /** English developer-facing fallback; shown only for an unknown code. */
+  readonly text?: string
+}
+
+/**
+ * Validation failure of a settings-page write (routes map it to 400).
+ *
+ * Carries a code plus its params rather than a sentence: the client renders the
+ * copy, and `super()` keeps an English developer-facing message for logs.
+ */
+export class HooksValidationError extends Error {
+  /**
+   * @param code - stable message code (see the `hooks.host.*` keys).
+   * @param params - values the client's copy interpolates.
+   */
+  constructor(readonly code: string, readonly params?: Readonly<Record<string, string | number>>) {
+    super(`hooks config rejected: ${code}`)
+    this.name = 'HooksValidationError'
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return this.params === undefined ? { code: this.code } : { code: this.code, params: this.params }
+  }
+}
 
 /** The two compatibility dialects + the DSH-native format. */
 export type BridgeDialect = 'native' | 'claude-code' | 'codex'
@@ -46,45 +85,47 @@ const NATIVE_SUPPORTED: Readonly<Record<NativeRule['on'], readonly NativeRule['a
 
 /**
  * Parse and validate a native-format config body into rules. Throws
- * {@link HooksValidationError} with a zh-CN reason on any invalid rule.
+ * {@link HooksValidationError} with a code on any invalid rule.
  */
 export function parseNativeRules(content: string): NativeRule[] {
   let parsed: unknown
   try { parsed = JSON.parse(content) } catch (error) {
-    throw new HooksValidationError(`原生配置 JSON 解析失败：${error instanceof Error ? error.message : String(error)}`)
+    throw new HooksValidationError('native.jsonParseFailed', {
+      detail: error instanceof Error ? error.message : String(error),
+    })
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new HooksValidationError('原生配置顶层必须是对象')
+    throw new HooksValidationError('native.notObject')
   }
   const rawRules = (parsed as { rules?: unknown }).rules
   if (!Array.isArray(rawRules) || rawRules.length === 0) {
-    throw new HooksValidationError('原生配置需要非空的 rules 数组')
+    throw new HooksValidationError('native.rulesRequired')
   }
   return rawRules.map((raw, index): NativeRule => {
     const label = `rules[${index}]`
-    if (typeof raw !== 'object' || raw === null) throw new HooksValidationError(`${label} 必须是对象`)
+    if (typeof raw !== 'object' || raw === null) throw new HooksValidationError('native.ruleNotObject', { label })
     const rule = raw as Record<string, unknown>
     const name = typeof rule.name === 'string' && rule.name.trim() !== '' ? rule.name.trim() : `${label}`
     const on = rule.on
     if (on !== 'pre-tool-use' && on !== 'post-tool-use' && on !== 'prompt-submit' && on !== 'session-start') {
-      throw new HooksValidationError(`${label}（${name}）的 on 必须是 pre-tool-use / post-tool-use / prompt-submit / session-start`)
+      throw new HooksValidationError('native.onInvalid', { label, name })
     }
     const action = rule.action
     if (action !== 'block' && action !== 'context') {
-      throw new HooksValidationError(`${label}（${name}）的 action 必须是 block 或 context`)
+      throw new HooksValidationError('native.actionInvalid', { label, name })
     }
     if (!(NATIVE_SUPPORTED[on] as readonly string[]).includes(action)) {
-      throw new HooksValidationError(`${label}（${name}）：${on} 事件不支持 ${action} 动作`)
+      throw new HooksValidationError('native.actionUnsupported', { label, name, on, action })
     }
     const message = typeof rule.message === 'string' && rule.message.trim() !== '' ? rule.message : ''
-    if (message === '') throw new HooksValidationError(`${label}（${name}）的 message 不能为空`)
+    if (message === '') throw new HooksValidationError('native.messageRequired', { label, name })
     let matcher: string | undefined
     if (rule.matcher !== undefined) {
       if (typeof rule.matcher !== 'string' || rule.matcher.trim() === '') {
-        throw new HooksValidationError(`${label}（${name}）的 matcher 必须是非空字符串`)
+        throw new HooksValidationError('native.matcherRequired', { label, name })
       }
       try { void new RegExp(rule.matcher) } catch {
-        throw new HooksValidationError(`${label}（${name}）的 matcher 不是合法正则：${rule.matcher}`)
+        throw new HooksValidationError('native.matcherInvalid', { label, name, matcher: rule.matcher })
       }
       matcher = rule.matcher
     }
@@ -126,10 +167,19 @@ export interface HooksConfigFile {
   readonly bridges: readonly HooksBridge[]
 }
 
-/** Mount state (mirrors the mcp manager's vocabulary). */
+/**
+ * Mount state (mirrors the mcp manager's vocabulary).
+ */
 export interface HooksMountStatus {
   readonly state: 'mounted' | 'starting' | 'disabled' | 'error' | 'unavailable'
-  readonly message?: string
+  /**
+   * Why the entry is not healthy, in the coded shape; see {@link HostText}.
+   * Host-authored, so it never crosses as prose: the one message that is not a
+   * sentence of ours — the loader's own failure text (`mount.failed`) — rides
+   * as the English `text` of its code, because a third-party diagnostic has
+   * nothing to translate.
+   */
+  readonly message?: HostText
 }
 
 type Raw = Record<string, unknown>
@@ -154,25 +204,25 @@ export function nextBridgeId(bridges: readonly HooksBridge[]): string {
 
 /**
  * Validate one raw bridge into a {@link HooksBridge}. Throws
- * {@link HooksValidationError} with a zh-CN reason.
+ * {@link HooksValidationError} with a code.
  * @param existingIds - ids taken by OTHER entries.
  */
 export function validateBridge(raw: unknown, existingIds: ReadonlySet<string>): HooksBridge {
-  if (!isRecord(raw)) throw new HooksValidationError('桥配置必须是对象')
+  if (!isRecord(raw)) throw new HooksValidationError('bridge.notObject')
   const id = asString(raw.id)
   if (id === undefined || !/^hook-\d+$/.test(id) || existingIds.has(id)) {
-    throw new HooksValidationError('桥 id 缺失或不合法')
+    throw new HooksValidationError('bridge.badId')
   }
   const dialect = asString(raw.dialect)
   if (dialect !== 'native' && dialect !== 'claude-code' && dialect !== 'codex') {
-    throw new HooksValidationError('dialect 必须是 native、claude-code 或 codex')
+    throw new HooksValidationError('dialect.invalid')
   }
   let configSource = asString(raw.configSource) ?? (dialect === 'native' ? 'inline' : 'file')
   if (dialect === 'native' && configSource === 'file') {
-    throw new HooksValidationError('原生格式请在应用内直接编写（不支持指向外部文件）')
+    throw new HooksValidationError('native.noExternalFile')
   }
   if (configSource !== 'file' && configSource !== 'inline') {
-    throw new HooksValidationError('configSource 必须是 file 或 inline')
+    throw new HooksValidationError('configSource.invalid')
   }
   let configPath = asString(raw.configPath)?.trim() ?? ''
   let configContent: string | undefined
@@ -181,11 +231,11 @@ export function validateBridge(raw: unknown, existingIds: ReadonlySet<string>): 
     // configContent may be absent on load (it lives in the managed file);
     // the route/store layer enforces non-empty on create/update.
     if (configContent !== undefined && configContent.trim() === '') {
-      throw new HooksValidationError('在线编写模式下，配置内容不能为空')
+      throw new HooksValidationError('config.inlineEmpty')
     }
     // configPath is managed by the store; accept an empty value here.
   } else {
-    if (configPath === '') throw new HooksValidationError('configPath 不能为空')
+    if (configPath === '') throw new HooksValidationError('configPath.required')
   }
   const bridge: {
     id: string; dialect: BridgeDialect; enabled: boolean; configSource: 'file' | 'inline'
@@ -206,13 +256,13 @@ export function validateBridge(raw: unknown, existingIds: ReadonlySet<string>): 
     if (model !== undefined && model !== '') bridge.model = model
   } else {
     const model = asString(raw.model)?.trim()
-    if (model !== undefined && model !== '') throw new HooksValidationError('model 只支持 codex 桥')
+    if (model !== undefined && model !== '') throw new HooksValidationError('model.codexOnly')
   }
   for (const field of ['defaultTimeoutMs', 'stderrSummaryMaxChars'] as const) {
     const v = raw[field]
     if (v !== undefined) {
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
-        throw new HooksValidationError(`${field} 必须是正数`)
+        throw new HooksValidationError('field.notPositive', { field })
       }
       bridge[field] = Math.floor(v)
     }

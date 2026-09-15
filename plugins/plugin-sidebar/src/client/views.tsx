@@ -16,6 +16,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { GitTab } from './git-tab.tsx'
+import { NS as SIDEBAR_NS } from './locales.ts'
 
 /** Narrowed sessions service face (list store + binding both exist upstream). */
 interface SessionsService {
@@ -46,6 +47,10 @@ export function registerDockViews(ctx: ClientContext): void {
     name: 'conversation.view',
     id: 'git',
     order: 110,
+    // The tab label is the brand token `Git` (upstream's own ring carries
+    // 对话/审查/轨迹), so it stays out of the dictionary; `locale:` is what
+    // puts the namespace-bound `t` seat on the tab body.
+    locale: SIDEBAR_NS,
     label: () => 'Git',
     inject: (sessionId: SessionId) => ({ sessionId, cwd: cwdFor(sessions, sessionId) }),
   }, GitTab))

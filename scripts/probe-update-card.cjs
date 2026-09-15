@@ -16,6 +16,7 @@ const assert = require('node:assert')
 const path = require('node:path')
 
 const { UPDATE_CARD_SCRIPT, KERNEL_UPDATE_CARD_SCRIPT } = require(path.join(__dirname, '..', 'dist', 'main', 'update-card.js'))
+const { t } = require(path.join(__dirname, '..', 'dist', 'shared', 'locale.js'))
 
 // ------------------------------------------------------------- DOM stub
 /** Mimics a browser: assigning style.cssText parses into style.<prop> keys. */
@@ -204,10 +205,32 @@ console.log('\nprobe-update-card: all assertions passed')
 const getComputedStyleStub = () => ({ getPropertyValue: () => '' })
 global.getComputedStyle = getComputedStyleStub
 
+/**
+ * The card's copy now arrives IN the payload (the strings are localized), so the
+ * stub supplies what the shell passes — taken from the **real locale table**
+ * rather than typed here, so a wording regression in the shell still fails this
+ * probe. What remains the script's own responsibility is rendering it.
+ */
+function kernelCardCopy(payload) {
+  const total = (payload.options ?? []).length
+  const options = (payload.options ?? []).map((option) => ({
+    ...option,
+    label: option.label ?? (total === 1
+      ? t('updateCard.optionNow', { version: option.version })
+      : t('updateCard.optionWithChannel', { version: option.version, channel: t(`channel.${option.channel}`) })),
+  }))
+  return {
+    title: total > 1 ? t('updateCard.titleMulti') : t('updateCard.title'),
+    detail: t('updateCard.detail', { current: payload.current }),
+    laterLabel: t('common.later'),
+    options,
+  }
+}
+
 function runKernelCard(payload) {
   global.document = documentStub
   global.window = windowStub
-  return eval(KERNEL_UPDATE_CARD_SCRIPT(payload)) // eslint-disable-line no-eval
+  return eval(KERNEL_UPDATE_CARD_SCRIPT({ ...payload, ...kernelCardCopy(payload) })) // eslint-disable-line no-eval
 }
 
 ;(async () => {

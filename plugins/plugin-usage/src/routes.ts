@@ -15,12 +15,15 @@
  * namespace means a third-party usage plugin can never collide with these
  * routes — the web server rejects duplicate paths by throwing.
  *
+ * Every failure crosses as a coded `HostText` (see types.ts) carrying an
+ * ENGLISH diagnostic: the settings page owns the wording, in either language.
+ *
  * @module @dsh-app/plugin-usage/routes
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { DAY_MS, heatmap, startOfLocalDay, summarize } from './aggregate.ts'
-import type { UsageBalance, UsageBalanceSnapshot, UsagePrice } from './types.ts'
+import type { HostText, UsageBalance, UsageBalanceSnapshot, UsagePrice } from './types.ts'
 import type { UsageStore } from './store.ts'
 
 /** Route namespace on the dsh web server (inside the plugin's package prefix). */
@@ -33,20 +36,61 @@ export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-usage/api'
  */
 const BALANCE_TTL_MS = 5 * 60_000
 
+/**
+ * The answer of every data route while the user config has the collector off.
+ * Coded, not worded: the settings page renders it in the active UI language.
+ */
+const DISABLED: HostText = {
+  code: 'disabled',
+  text: 'built-in usage collection is disabled by the user config file',
+}
+
 /** Structural slice of the webServer service the routes consume. */
 export interface WebServerLike {
   register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
 }
 
-/** Balance failures the client distinguishes (each with its own zh-CN message). */
-export type BalanceErrorCode = 'missing-credential' | 'invalid-credential' | 'upstream'
+/**
+ * Balance failures the client distinguishes. Kebab-case because these codes
+ * already travel on the wire; each names a failure, not a sentence — the copy
+ * lives in the client dictionary (`usage.host.balance*`).
+ */
+export type BalanceErrorCode =
+  | 'missing-credential'
+  | 'invalid-credential'
+  /** Any other upstream refusal with no more specific code. */
+  | 'upstream'
+  | 'upstream-http'
+  | 'upstream-timeout'
+  | 'upstream-network'
 
-/** Error thrown by the balance fetcher; code decides the route's response. */
+/**
+ * Error thrown by the balance fetcher; code decides the route's response.
+ *
+ * Carries a code plus its params rather than a zh-CN sentence: the client
+ * renders the copy, and `text` keeps an English developer-facing diagnostic
+ * for logs and for a client that does not know the code (see {@link HostText}).
+ */
 export class BalanceError extends Error {
-  readonly code: BalanceErrorCode
-  constructor(code: BalanceErrorCode, message: string) {
-    super(message)
-    this.code = code
+  /**
+   * @param code - stable failure code.
+   * @param text - English developer-facing diagnostic.
+   * @param params - values the client's copy interpolates.
+   */
+  constructor(
+    readonly code: BalanceErrorCode,
+    readonly text: string,
+    readonly params?: Readonly<Record<string, string | number>>,
+  ) {
+    super(text)
+    this.name = 'BalanceError'
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return this.params === undefined
+      ? { code: this.code, text: this.text }
+      : { code: this.code, params: this.params, text: this.text }
   }
 }
 
@@ -77,8 +121,14 @@ function ok(res: ServerResponse, value: unknown): void {
   sendJson(res, 200, { ok: true, value })
 }
 
-function fail(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { ok: false, error: { code, message } })
+/**
+ * Failure answer. `kind` is the transport-ish category the client already
+ * checked; `host` is the coded message the UI renders in its own language. The
+ * plain `message` stays an English diagnostic for logs and for a client that
+ * does not know the code yet.
+ */
+function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
+  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
 /** Same-origin fence (same semantics as the memory/swarm routes): a raw string
@@ -119,7 +169,9 @@ function passesFence(req: IncomingMessage): boolean {
 function requireGet(req: IncomingMessage, res: ServerResponse): boolean {
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET')
-    fail(res, 405, 'method-not-allowed', 'GET only')
+    // Only a caller that is not this page can trip this; the message stays an
+    // English diagnostic on purpose (see usage-section.tsx).
+    fail(res, 405, 'method-not-allowed', { code: 'method-not-allowed', params: { method: 'GET' }, text: 'GET only' })
     return false
   }
   return true
@@ -148,7 +200,7 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
   const summaryHandler = (req: IncomingMessage, res: ServerResponse): void => {
     if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
     if (!options.active || store === null) {
-      fail(res, 503, 'disabled', 'built-in usage collection is disabled by the user config file')
+      fail(res, 503, 'disabled', DISABLED)
       return
     }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -158,7 +210,7 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
   const heatmapHandler = (req: IncomingMessage, res: ServerResponse): void => {
     if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
     if (!options.active || store === null) {
-      fail(res, 503, 'disabled', 'built-in usage collection is disabled by the user config file')
+      fail(res, 503, 'disabled', DISABLED)
       return
     }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -183,7 +235,7 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
     if (balanceInflight !== null) return balanceInflight
     const fetcher = options.fetchBalance
     if (fetcher === undefined) {
-      return Promise.reject(new BalanceError('missing-credential', '未配置 DeepSeek API Key，请先在设置 → 模型页配置'))
+      return Promise.reject(new BalanceError('missing-credential', 'no DeepSeek API key is configured for this kernel'))
     }
     balanceInflight = fetcher().then((balance): UsageBalanceSnapshot => {
       const snapshot = { balance, fetchedAt: Date.now() }
@@ -195,7 +247,7 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
   const balanceHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
     if (!options.active || options.fetchBalance === undefined) {
-      fail(res, 503, 'disabled', 'built-in usage collection is disabled by the user config file')
+      fail(res, 503, 'disabled', DISABLED)
       return
     }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -206,11 +258,16 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
     } catch (error) {
       if (error instanceof BalanceError) {
         // 502 for upstream trouble, 503 when the account side isn't usable here.
-        const status = error.code === 'upstream' ? 502 : 503
-        fail(res, status, error.code, error.message)
+        const credential = error.code === 'missing-credential' || error.code === 'invalid-credential'
+        fail(res, credential ? 503 : 502, error.code, error.hostText())
         return
       }
-      fail(res, 502, 'upstream', '查询余额失败，请稍后重试')
+      // An unexpected throw from an injected fetcher: still a coded answer, with
+      // the thrown message as the English diagnostic.
+      fail(res, 502, 'upstream', {
+        code: 'upstream',
+        text: error instanceof Error ? error.message : String(error),
+      })
     }
   }
   const disposers = [

@@ -91,6 +91,10 @@ describe('McpStore CRUD', () => {
   it('update rejects an unknown id', () => {
     const { store } = handle
     assert.throws(() => store.update('mcp-9', VALID_STDIO), McpValidationError)
+    assert.throws(
+      () => store.update('mcp-9', VALID_STDIO),
+      (error: unknown) => error instanceof McpValidationError && error.code === 'server.notFound' && error.params?.id === 'mcp-9',
+    )
   })
 
   it('create rejects a second ENABLED server with the same serverName but allows a disabled one', () => {

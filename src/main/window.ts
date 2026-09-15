@@ -1,6 +1,7 @@
 import { BrowserWindow, session, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
+import { kernelChannelLabel, t } from '../shared/locale'
 import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
@@ -361,9 +362,9 @@ function installExportToast(win: BrowserWindow): void {
     if (!name.startsWith('dsh-session-') || !name.endsWith('.zip')) return
     item.once('done', (_e, state) => {
       const ok = state === 'completed'
-      const reason = state === 'cancelled' ? '已取消' : state === 'interrupted' ? '已中断' : state
-      const title = ok ? 'Session 导出完成' : 'Session 导出失败'
-      const detail = ok ? `已保存到：${item.getSavePath() || name}` : reason
+      const reason = state === 'cancelled' ? t('export.cancelled') : state === 'interrupted' ? t('export.interrupted') : state
+      const title = ok ? t('export.completedTitle') : t('export.failedTitle')
+      const detail = ok ? t('export.savedTo', { path: item.getSavePath() || name }) : reason
       // Desktop: the download has settled, so the modal's "download started"
       // state is stale. Route through its own close button (React onClick),
       // not a synthetic Escape, so only the export dialog is affected.
@@ -437,12 +438,15 @@ export function showKernelProgress(win: BrowserWindow | null, status: KernelStat
   // `ready` is terminal: drop the stored status so a later did-finish-load
   // reinjection cannot resurrect a stale phase (e.g. "starting") after the
   // server already restarted — that was a stuck-card race on healthy boots.
+  // The phase decides, not the wording: the line is localized, so matching its
+  // text would only ever hold for one language.
   if (status.phase === 'ready') activeKernelStatus = null
   else activeKernelStatus = status
   if (!win || win.isDestroyed()) return
-  // A plain boot "ready" is not an event worth a toast (the tray tooltip still
-  // reflects it); only update flows (e.g. "已激活 dsh X") show a success card.
-  if (status.phase === 'ready' && status.message === '就绪') {
+  // A plain boot "ready" is not an event worth a card (the tray tooltip still
+  // reflects it), and a finished kernel update already painted its success card
+  // from the 'installing' status.
+  if (status.phase === 'ready') {
     clearKernelProgress(win)
     return
   }
@@ -479,10 +483,14 @@ export function showUpdateToast(win: BrowserWindow | null, message: string, tone
 /**
  * Persistent "kernel update available" card for background checks (no toast,
  * no modal). Renders one button per installable option (primary line first)
- * plus 稍后; resolves with the chosen version, or 'later' once the user
- * clicks 稍后. Never auto-hides, so a background finding stays visible until
- * acted on. When the window is gone/unresponsive or the page doesn't answer,
- * it resolves 'later' (a pending rejection) rather than crashing the caller.
+ * plus the localized "later" button; resolves with the chosen version, or
+ * 'later' once the user clicks it. Never auto-hides, so a background finding
+ * stays visible until acted on. When the window is gone/unresponsive or the
+ * page doesn't answer, it resolves 'later' (a pending rejection) rather than
+ * crashing the caller.
+ *
+ * Every label is composed here, so the injected script (update-card.ts) only
+ * carries text and stays free of translation logic.
  */
 export async function showKernelUpdateCard(
   win: BrowserWindow | null,
@@ -490,9 +498,24 @@ export async function showKernelUpdateCard(
   options: KernelUpdateCardOption[],
 ): Promise<string> {
   if (!win || win.isDestroyed()) return 'later'
+  const multiple = options.length > 1
   try {
     const choice = await win.webContents
-      .executeJavaScript(KERNEL_UPDATE_CARD_SCRIPT({ current, options }))
+      .executeJavaScript(KERNEL_UPDATE_CARD_SCRIPT({
+        current,
+        options: options.map((o) => ({
+          version: o.version,
+          // Frozen card wording (§4.4): a single option reads "update now",
+          // several name the channel so the picked line is unambiguous.
+          label: multiple
+            ? t('updateCard.optionWithChannel', { version: o.version, channel: kernelChannelLabel(o.channel) })
+            : t('updateCard.optionNow', { version: o.version }),
+          primary: o.primary,
+        })),
+        title: multiple ? t('updateCard.titleMulti') : t('updateCard.title'),
+        detail: t('updateCard.detail', { current }),
+        laterLabel: t('common.later'),
+      }))
     return typeof choice === 'string' && choice !== '' ? choice : 'later'
   } catch {
     return 'later'

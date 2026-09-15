@@ -10,9 +10,28 @@
  */
 export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-sidebar/api'
 
-/** One sidebar API failure. */
+/**
+ * A user-visible message the host cannot localize.
+ *
+ * Mirrors the host half's `HostText` structurally on purpose: a suite plugin
+ * bundles standalone (esbuild, no cross-plugin imports), so the shape is
+ * repeated rather than imported. The host sends a stable code plus the values
+ * its sentence interpolates; `text` is its ENGLISH diagnostic, used only for a
+ * code this build does not know.
+ */
+export interface HostText {
+  readonly code: string
+  readonly params?: Readonly<Record<string, string | number>>
+  /** English developer-facing fallback; shown only for an unknown code. */
+  readonly text?: string
+}
+
+/**
+ * One sidebar API failure. `code` is the transport-ish category the tab
+ * branches on; `host` is the coded message it renders through its dictionary.
+ */
 export class FsApiError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, readonly host?: HostText) {
     super(message)
   }
 }
@@ -21,7 +40,7 @@ export class FsApiError extends Error {
 interface FsEnvelope<T> {
   ok: boolean
   value?: T
-  error?: { code: string, message: string }
+  error?: { code: string, message: string, host?: HostText }
 }
 
 /** One fenced GET. */
@@ -29,7 +48,11 @@ async function get<T>(path: string): Promise<T> {
   const response = await fetch(path, { credentials: 'same-origin' })
   const body = await response.json() as FsEnvelope<T>
   if (!body.ok || body.value === undefined) {
-    throw new FsApiError(body.error?.code ?? 'unknown', body.error?.message ?? `HTTP ${String(response.status)}`)
+    throw new FsApiError(
+      body.error?.code ?? 'unknown',
+      body.error?.message ?? `HTTP ${String(response.status)}`,
+      body.error?.host,
+    )
   }
   return body.value
 }
@@ -44,7 +67,11 @@ async function post<T>(path: string, body: Record<string, unknown>): Promise<T> 
   })
   const parsed = await response.json() as FsEnvelope<T>
   if (!parsed.ok || parsed.value === undefined) {
-    throw new FsApiError(parsed.error?.code ?? 'unknown', parsed.error?.message ?? `HTTP ${String(response.status)}`)
+    throw new FsApiError(
+      parsed.error?.code ?? 'unknown',
+      parsed.error?.message ?? `HTTP ${String(response.status)}`,
+      parsed.error?.host,
+    )
   }
   return parsed.value
 }

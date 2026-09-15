@@ -19,6 +19,8 @@
  *
  * The decision is DOM- and React-free (the binding is read structurally), so
  * the branch table is unit-testable without the browser-only react externals.
+ * Nothing here holds copy: the `notice` plan is what the capsule renders as its
+ * namespace's `capsule.skillHint` entry.
  *
  * @module @dsh-app/plugin-sheet/client/skill-prefill
  */
@@ -182,7 +184,8 @@ function cleanOfficeDraft(
  * would when the shell refuses the edit.
  * @param binding - the current ui-session binding.
  * @param turningOn - whether this flip turns the mode on.
- * @returns the resolved plan, so the caller can surface the hint for `notice`.
+ * @returns the resolved plan, so the caller can render the `capsule.skillHint`
+ * notice when it is `notice`.
  */
 export function applySkillReference(binding: ComposerBinding | undefined, turningOn: boolean): SkillReferencePlan {
   const input = turningOn ? cleanOfficeDraft(binding, composerInput(binding)) : composerInput(binding)
@@ -213,13 +216,4 @@ export function removeSkillReference(binding: ComposerBinding | undefined): bool
   if (!cleaned.removed) return false
   input.setDraft(cleaned.text)
   return true
-}
-
-/**
- * The hint shown when the mode turned on but the reference could not be placed
- * (the draft already held text, so nothing was written).
- * @param label - the format's capsule label.
- */
-export function skillReferenceHint(label: string): string {
-  return `已开启 ${label} 模式；技能引用未能放入输入框，可手动输入 ${SKILL_TOKEN}`
 }

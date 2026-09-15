@@ -26,6 +26,8 @@ function describeError(error: unknown): string {
 interface MountRecord {
   loaderId?: string
   configKey?: string
+  /** Last mount error, cleared on a successful (re)mount. Raw loader text: a
+   * third-party diagnostic, never host copy. */
   error?: string
 }
 
@@ -116,10 +118,13 @@ export class HooksMountManager {
 
   statusFor(bridge: HooksBridge): HooksMountStatus {
     if (!bridge.enabled) return { state: 'disabled' }
-    if (this.loader === undefined) return { state: 'unavailable', message: '当前内核不支持动态挂载，Hooks 功能不可用' }
+    if (this.loader === undefined) return { state: 'unavailable', message: { code: 'mount.unavailable' } }
     const record = this.records.get(bridge.id)
     if (record === undefined) return { state: 'starting' }
-    if (record.error !== undefined) return { state: 'error', message: record.error }
+    // The loader's own failure text is a third-party diagnostic (a cordis
+    // error, an ENOENT, an HTTP status): it has no sentence of ours to
+    // translate, so it rides as the English `text` beside its code.
+    if (record.error !== undefined) return { state: 'error', message: { code: 'mount.failed', text: record.error } }
     if (record.loaderId === undefined) return { state: 'starting' }
     return { state: 'mounted' }
   }

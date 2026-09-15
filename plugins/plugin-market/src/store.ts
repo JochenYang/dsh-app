@@ -13,6 +13,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { hostDiagnostic, type HostText } from './errors.ts'
 import {
   DEFAULT_SOURCE_URLS,
   MAX_ENTRIES_TOTAL,
@@ -63,7 +64,7 @@ export function loadSources(path: string, log: (message: string) => void): strin
   for (const candidate of candidates) {
     const check = validateSourceUrl(candidate)
     if (!check.ok) {
-      log(`plugin-market sources: dropping an unusable entry: ${check.reason}`)
+      log(`plugin-market sources: dropping an unusable entry: ${hostDiagnostic(check.reason)}`)
       continue
     }
     if (seen.has(check.url)) continue
@@ -91,11 +92,12 @@ export function saveSources(path: string, sources: readonly string[]): void {
 /**
  * One cached source: its last good entry list, or why the last fetch failed
  * (the panel keeps showing the per-source failure instead of silently
- * pretending the source is empty).
+ * pretending the source is empty). The reason is the coded shape, so a cached
+ * failure renders in the active locale just like a fresh one.
  */
 export interface CachedSourceState {
   readonly entries: readonly CatalogEntry[]
-  readonly failed?: string
+  readonly failed?: HostText
 }
 
 /**
@@ -105,8 +107,11 @@ export interface CachedSourceState {
  * label now belongs. A cache whose version is missing or not the current one
  * reads as absent, so the next open refetches the live sources and rebuilds
  * the file instead of rendering degraded rows until the TTL lapses.
+ *
+ * Version 3 made `failed` a coded message (v2 stored the pre-i18n Chinese
+ * sentence); the gate above is exactly what keeps that prose off the panel.
  */
-export const CACHE_FORMAT_VERSION = 2
+export const CACHE_FORMAT_VERSION = 3
 
 /**
  * The persisted catalog snapshot (`catalog-cache.json`) behind the
@@ -130,13 +135,26 @@ function usableEntry(value: unknown): CatalogEntry | undefined {
   return value as CatalogEntry
 }
 
+/** A cached failure reason: the coded shape, or undefined when unusable. */
+function cachedHostTextOf(value: unknown): HostText | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.code !== 'string' || record.code === '') return undefined
+  const params = typeof record.params === 'object' && record.params !== null && !Array.isArray(record.params)
+    ? record.params as Record<string, string | number>
+    : undefined
+  return {
+    code: record.code,
+    ...(params !== undefined ? { params } : {}),
+    ...(typeof record.text === 'string' ? { text: record.text } : {}),
+  }
+}
+
 /** Validated per-source cache row; undefined when the row carries nothing usable. */
 function cachedSourceStateOf(value: unknown): CachedSourceState | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
-  const failed = typeof record.failed === 'string' && record.failed !== ''
-    ? record.failed
-    : undefined
+  const failed = cachedHostTextOf(record.failed)
   const entries: CatalogEntry[] = Array.isArray(record.entries)
     ? record.entries.map(usableEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
     : []

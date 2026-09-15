@@ -7,10 +7,11 @@
  * safety rules (entry whitelist, path containment, manifest shape, size and
  * count caps) have exactly one home and are testable without any filesystem.
  *
- * Error discipline: messages are zh-CN, actionable, and never contain
- * absolute machine paths — archive-relative paths are fine to echo (they
- * describe the untrusted file, not the host), truncated to keep a hostile
- * name from flooding the UI.
+ * Error discipline: every failure carries a stable code plus the values its
+ * sentence interpolates ({@link HostText}); the client — which owns the locale
+ * dictionary — renders it. No copy ever contains an absolute machine path:
+ * archive-relative paths are fine to echo (they describe the untrusted file,
+ * not the host), truncated to keep a hostile name from flooding the UI.
  *
  * @module @dsh-app/plugin-presets/wire
  */
@@ -47,29 +48,80 @@ export const MAX_TOTAL_BYTES = 20 * 1024 * 1024
 /** Hard cap on the number of files in one package (payload files; the manifest is not a preset file). */
 export const MAX_FILE_COUNT = 200
 
+/**
+ * A user-visible message the host cannot localize — and deliberately does not
+ * try to.
+ *
+ * The host is a long-lived child process: its language would be decided at
+ * boot, so switching the UI language would require restarting the kernel. It
+ * therefore never sends prose. It sends a stable code plus the values the
+ * sentence interpolates, and the client — which owns the locale namespace —
+ * renders it. `text` is an ENGLISH diagnostic used only for a code this client
+ * does not know (an older UI beside a newer kernel); it is never a localized
+ * sentence, because matching on one across a boundary is how the kernel-side
+ * failure classifier once misread "tampered" as "network error".
+ *
+ * A composed sentence may put another code of the client's dictionary in a
+ * `params` slot: a nested rejection's reason (the outer copy wraps an inner
+ * one) or the archive a message is about. The client resolves such a value
+ * with the same fallback chain, one level deep; nested codes carry no params
+ * of their own.
+ */
+export interface HostText {
+  readonly code: string
+  readonly params?: Readonly<Record<string, string | number>>
+  /** English developer-facing fallback; shown only for an unknown code. */
+  readonly text?: string
+}
+
+/**
+ * Param value of a filesystem failure that carries no OS error code: a nested
+ * code the client dictionary resolves, so the sentence keeps its own locale's
+ * wording instead of the host leaking an English placeholder into it.
+ */
+export const UNKNOWN_ERROR_CODE = 'error.unknown'
+
+/** The OS error code of a filesystem failure, or {@link UNKNOWN_ERROR_CODE}. */
+export function fsErrorCode(error: unknown): string {
+  return (error as NodeJS.ErrnoException).code ?? UNKNOWN_ERROR_CODE
+}
+
 /** Package-level failure with a stable code the routes map to HTTP statuses. */
 export class PresetPackageError extends Error {
-  readonly code: string
   /** Structured extras (e.g. the conflicting entry) surfaced alongside the message. */
   readonly details: Readonly<Record<string, unknown>>
 
-  constructor(code: string, message: string, details: Readonly<Record<string, unknown>> = {}) {
-    super(message)
+  /**
+   * @param code - domain code the routes map to an HTTP status (`too-large`,
+   *   `conflict`, …). Kept apart from the message code: the first is a
+   *   transport-ish category, the second names a sentence.
+   * @param host - the coded message the client renders (see {@link HostText}).
+   * @param details - structured extras surfaced alongside the message.
+   */
+  constructor(readonly code: string, readonly host: HostText, details: Readonly<Record<string, unknown>> = {}) {
+    super(host.text ?? host.code)
     this.name = 'PresetPackageError'
-    this.code = code
     this.details = details
+  }
+
+  /** The coded message, in the shape every host route speaks. */
+  hostText(): HostText {
+    return this.host
   }
 }
 
 /**
  * Validate an archive/preset entry name against the whitelist.
  * @param entry - candidate entry (preset directory) name.
- * @returns a zh-CN reason when the name is rejected, undefined when valid.
+ * @returns the coded reason when the name is rejected, undefined when valid.
  */
-export function entryNameProblem(entry: string): string | undefined {
-  if (entry === '') return '预设名为空'
+export function entryNameProblem(entry: string): HostText | undefined {
+  if (entry === '') return { code: 'entry.empty', text: 'the preset name is empty' }
   if (!ENTRY_PATTERN.test(entry)) {
-    return '预设名只能使用小写字母、数字以及短横线 -，以字母或数字开头，最长 64 个字符'
+    return {
+      code: 'entry.pattern',
+      text: 'a preset name is lowercase letters, digits and hyphens only, starts with a letter or digit, and is at most 64 characters',
+    }
   }
   return undefined
 }
@@ -79,17 +131,17 @@ export function entryNameProblem(entry: string): string | undefined {
  * `..` segments, backslashes (Windows separator smuggling), dot-leading
  * segments (hidden files / `.ssh`-style surprises) and empty segments.
  * @param name - archive member path as stored (forward slashes).
- * @returns a zh-CN reason when the path is rejected, undefined when safe.
+ * @returns the coded reason when the path is rejected, undefined when safe.
  */
-export function zipPathSafetyProblem(name: string): string | undefined {
-  if (name === '') return '路径为空'
-  if (name.includes('\\')) return '路径包含反斜杠'
-  if (name.startsWith('/')) return '路径是绝对路径'
-  if (/^[a-zA-Z]:/.test(name)) return '路径是绝对路径'
+export function zipPathSafetyProblem(name: string): HostText | undefined {
+  if (name === '') return { code: 'path.empty', text: 'the path is empty' }
+  if (name.includes('\\')) return { code: 'path.backslash', text: 'the path contains a backslash' }
+  if (name.startsWith('/')) return { code: 'path.absolute', text: 'the path is absolute' }
+  if (/^[a-zA-Z]:/.test(name)) return { code: 'path.absolute', text: 'the path is absolute' }
   for (const segment of name.split('/')) {
-    if (segment === '') return '路径包含空段'
-    if (segment === '..') return '路径包含 .. 段'
-    if (segment.startsWith('.')) return '路径段不能以 . 开头'
+    if (segment === '') return { code: 'path.emptySegment', text: 'the path contains an empty segment' }
+    if (segment === '..') return { code: 'path.parentSegment', text: 'the path contains a .. segment' }
+    if (segment.startsWith('.')) return { code: 'path.hiddenSegment', text: 'a path segment starts with a dot' }
   }
   return undefined
 }
@@ -115,25 +167,37 @@ export function parseManifest(raw: Uint8Array): PresetManifest {
   try {
     parsed = JSON.parse(new TextDecoder().decode(raw))
   } catch {
-    throw new PresetPackageError('bad-package', 'manifest.json 不是有效的 JSON')
+    throw new PresetPackageError('bad-package', { code: 'manifest.notJson', text: 'manifest.json is not valid JSON' })
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new PresetPackageError('bad-package', 'manifest.json 应该是一个 JSON 对象')
+    throw new PresetPackageError('bad-package', { code: 'manifest.notObject', text: 'manifest.json must be a JSON object' })
   }
   const record = parsed as Record<string, unknown>
   if (record.formatVersion !== FORMAT_VERSION) {
-    throw new PresetPackageError('bad-package', `预设包格式版本不支持（formatVersion=${String(record.formatVersion)}，当前支持 ${String(FORMAT_VERSION)}）`)
+    throw new PresetPackageError('bad-package', {
+      code: 'preset.manifestVersion',
+      params: { version: String(record.formatVersion), supported: String(FORMAT_VERSION) },
+      text: `unsupported preset formatVersion ${String(record.formatVersion)} (this build supports ${String(FORMAT_VERSION)})`,
+    })
   }
   if (record.kind !== PRESET_KIND) {
-    throw new PresetPackageError('bad-package', `这不是预设包（kind=${String(record.kind)}，应为 ${PRESET_KIND}）`)
+    throw new PresetPackageError('bad-package', {
+      code: 'preset.manifestKind',
+      params: { kind: String(record.kind), expected: PRESET_KIND },
+      text: `not a preset package: kind=${String(record.kind)}, expected ${PRESET_KIND}`,
+    })
   }
   const entry = record.entry
   if (typeof entry !== 'string') {
-    throw new PresetPackageError('bad-package', 'manifest.json 缺少预设名（entry）')
+    throw new PresetPackageError('bad-package', { code: 'preset.manifestEntryMissing', text: 'manifest.json has no entry (preset name)' })
   }
   const problem = entryNameProblem(entry)
   if (problem !== undefined) {
-    throw new PresetPackageError('bad-package', `manifest.json 中的预设名不合法：${problem}`)
+    throw new PresetPackageError('bad-package', {
+      code: 'preset.manifestEntryInvalid',
+      params: { reason: problem.code },
+      text: `the preset name in manifest.json is invalid: ${problem.text ?? problem.code}`,
+    })
   }
   return {
     formatVersion: FORMAT_VERSION,
