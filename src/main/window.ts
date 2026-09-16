@@ -202,27 +202,43 @@ async function syncOverlayOnce(win: BrowserWindow): Promise<void> {
 /**
  * Real-time overlay sync. The loop awaits the page observer: each
  * executeJavaScript call resolves with the next color change, so it blocks
- * quietly while nothing changes; navigation rejects the pending call and the
- * catch-and-retry reinstalls the observer on the fresh document.
+ * quietly while nothing changes.
+ *
+ * The observer lives IN the document, so it dies with the document it was
+ * installed on — and a call still pending when that document navigates away
+ * never settles (the frame it would answer from is gone; nothing rejects it).
+ * The window now loads the splash first and the live UI second, so a single
+ * loop parks on the splash for the rest of the session and the strip keeps
+ * whatever the splash was painted in — observed as a white strip over the dark
+ * UI, modal masks included. Each document therefore gets its own loop, and the
+ * generations before it are retired so a late reply cannot repaint the strip
+ * from the document the user already left.
  */
 function startChromeSync(win: BrowserWindow): void {
-  void syncOverlayOnce(win)
+  let generation = 0
+  const sync = (): void => {
+    const gen = ++generation
+    void syncOverlayOnce(win)
+    void (async () => {
+      while (!win.isDestroyed() && gen === generation) {
+        try {
+          const color = await win.webContents.executeJavaScript(OBSERVER_SCRIPT)
+          if (gen !== generation) return
+          if (typeof color === 'string') applyOverlayColor(win, color)
+        } catch {
+          if (gen !== generation) return
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+      }
+    })()
+  }
   win.on('show', () => void syncOverlayOnce(win))
   win.webContents.on('did-finish-load', () => {
     installDesktopChrome(win)
     reinjectKernelProgress(win)
-    void syncOverlayOnce(win)
+    sync()
   })
-  void (async () => {
-    while (!win.isDestroyed()) {
-      try {
-        const color = await win.webContents.executeJavaScript(OBSERVER_SCRIPT)
-        if (typeof color === 'string') applyOverlayColor(win, color)
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 250))
-      }
-    }
-  })()
+  sync()
 }
 
 /**
