@@ -11,6 +11,7 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 ## [Unreleased]
 
 ### 中文
+- **套件改用自有 profile**：17 个品牌插件从共享的 `profiles/node_modules` 迁入 `$DSH_HOME/profiles/dsh-app/node_modules`，内核改为以 `--profile dsh-app` 启动（首启自动写入该 profile 的清单）。用户自己跑 `dsh` / `dsh web` 不再会看到我们的链接，也不再与它们共用解析根；同时为 0.1.6 的解析模式提前排雷（那种模式会整目录跳过共享回落目录）。旧位置遗留的链接在启动时自动清理
 - **首启不再像卡死**：新增本地启动页（品牌标 + 版本号 + 五步进度 + 下载可暂停/继续 + 失败卡三动作「重试 / 打开日志目录 / 退出」，失败文案按原因分层：摘要不符只建议更换网络，不给「稍后重试」这种错建议）。窗口用与主界面一致的自定义边框，深/浅色跟随界面「外观」设置，底部一句话：首先您要健康，其次才是其次
 - **内核更新改为分层下载**：运行时拆成 node / vendor / dsh / suite 等层并逐层校验与缓存，dsh 升级只需下载变化的那几层（约 10 MB，而不是 100 MB 以上）；层缓存未命中或任何一层失败会自动回退到整包，装不上这种情况不会发生
 - **内核运行时改用 pnpm 组装**：依赖树不再由 npm 的扁平化决定，构建可复现（锁定 overrides、关闭 pnpm 的发布冷静期），并产出逐文件清单
@@ -37,6 +38,7 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 - 网络搜索管理：`- id: web` 覆盖行必须同时写 `searchProvider` 与 `fetchProvider`——patch 语义是整行替换 config，只写前者会导致 `web-fetch-http` 被重新注册，并使整棵插件树因重复条目而启动失败
 
 ### English
+- **The suite now runs under its own dsh profile**: the seventeen brand plugins moved out of the shared `profiles/node_modules` fallback into `$DSH_HOME/profiles/dsh-app/node_modules`, and the kernel boots with `--profile dsh-app` (its profile manifest is written on first run). A user's own `dsh` / `dsh web` runs no longer see our links or share their resolution root, and the layout is already right for 0.1.6's resolver, which skips the shared fallback wholesale; links the old shell left there are cleaned up on boot
 - **First launch no longer looks like a hang**: a local splash window (brand mark + version + five-step progress + a pausable download + a failure card with 重试 / 打开日志目录 / 退出, whose wording is layered by cause — a checksum mismatch only ever suggests changing networks, never "retry later"). It wears the same custom chrome as the main window, follows the 外观 setting for light/dark, and carries one fixed line at its foot: 首先您要健康，其次才是其次
 - **Kernel updates are now layered**: the runtime is split into node / vendor / dsh / suite layers, each verified and cached independently, so a dsh bump downloads only the layers that changed (about 10 MB instead of 100 MB+). Any miss or failure falls back to the single tarball, so an update can never fail for being clever
 - **The kernel runtime is assembled with pnpm**: the dependency tree no longer depends on npm's flattening, the build is reproducible (pinned overrides, pnpm's release cooldown disabled), and every file lands in a manifest

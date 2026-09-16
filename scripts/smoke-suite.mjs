@@ -34,7 +34,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, rmSync, statSync, openSync, closeSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, rmSync, statSync, openSync, closeSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -44,6 +44,10 @@ import net from 'node:net'
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
 const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch']
+
+// Mirrors SUITE_PROFILE / SUITE_PROFILE_BUNDLES in src/shared/constants.ts.
+const SUITE_PROFILE = 'dsh-app'
+const SUITE_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 const FIXTURE = path.join(root, 'scripts', 'fixtures', 'minimal-mcp-server.mjs')
 const MCP_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
 
@@ -110,7 +114,7 @@ function buildLaunch(args) {
     if (!existsSync(nodeBin) || !existsSync(script)) throw new Error(`runtime dir incomplete: ${dir}`)
     return {
       command: nodeBin,
-      args: [script, '--profile', 'web', '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
+      args: [script, '--profile', 'dsh-app', '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
       cwd: path.join(dir, 'app'),
       suiteSource: path.join(dir, 'app', 'node_modules', '@dsh-app'),
       shell: false,
@@ -121,7 +125,7 @@ function buildLaunch(args) {
     // pnpm is a .cmd on Windows: one shell-resolved command line, like the
     // shell's own server.ts dev path.
     return {
-      command: `pnpm dsh web --patch "${OVERLAY}" --host 127.0.0.1 --port ${String(args.port)} --no-open`,
+      command: `pnpm dsh --profile dsh-app --patch "${OVERLAY}" --host 127.0.0.1 --port ${String(args.port)} --no-open`,
       args: [],
       cwd: checkout,
       suiteSource: path.join(root, 'plugins'),
@@ -130,7 +134,7 @@ function buildLaunch(args) {
   }
   return {
     command: 'pnpm',
-    args: ['dsh', 'web', '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
+    args: ['dsh', '--profile', 'dsh-app', '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
     cwd: checkout,
     suiteSource: path.join(root, 'plugins'),
     shell: false,
@@ -467,9 +471,27 @@ async function main() {
   }
 
   const home = mkdtempSync(path.join(tmpdir(), 'dsh-smoke-home-'))
-  // Replicate the shell's brand-suite seam inside the throwaway home:
-  // one link per suite plugin, so the composed loader resolves them.
-  const scope = path.join(home, 'profiles', 'node_modules', '@dsh-app')
+  // Upstream boots a profile only when it carries a manifest, so the shell
+  // writes one before spawning (ensureSuiteProfile in src/main/brand-suite.ts)
+  // — mirror that here, or the kernel dies with `profile "dsh-app" does not
+  // exist`. Build it before the links: the links make the dir non-empty, and
+  // upstream's own initializer refuses a directory it did not create.
+  const profileDir = path.join(home, 'profiles', SUITE_PROFILE)
+  mkdirSync(profileDir, { recursive: true })
+  const profileManifest = path.join(profileDir, 'package.json')
+  if (!existsSync(profileManifest)) {
+    writeFileSync(profileManifest, `${JSON.stringify({
+      name: `dsh-profile-${SUITE_PROFILE}`,
+      private: true,
+      dependencies: {},
+      dsh: { profile: { bundles: SUITE_PROFILE_BUNDLES, patchReload: 'live' } },
+    }, undefined, 2)}\n`)
+  }
+  // Replicate the shell's brand-suite seam inside the throwaway home: one link
+  // per suite plugin in the SUITE profile's own node_modules (profile name and
+  // scope path must match src/shared/constants.ts SUITE_PROFILE and
+  // src/main/brand-suite.ts), so the composed loader resolves them.
+  const scope = path.join(home, 'profiles', 'dsh-app', 'node_modules', '@dsh-app')
   mkdirSync(scope, { recursive: true })
   for (const dir of SUITE_DIRS) {
     const target = path.join(launch.suiteSource, dir)

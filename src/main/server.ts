@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { ServerSpec } from '../shared/types'
-import { DEFAULT_HTTP_HOST, SERVER_HEALTH_POLL_MS, SERVER_HEALTH_TIMEOUT_MS, SERVER_SHUTDOWN_GRACE_MS } from '../shared/constants'
+import { DEFAULT_HTTP_HOST, SERVER_HEALTH_POLL_MS, SERVER_HEALTH_TIMEOUT_MS, SERVER_SHUTDOWN_GRACE_MS, SUITE_PROFILE } from '../shared/constants'
 
 export interface ServerEvents {
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void
@@ -238,7 +238,14 @@ export class DshServer {
     // Brand-suite loader overlays (plugins/dsh-app.patch.yml): applied after
     // every bundle layer, last write wins per row. Host/port are controlled
     // values; overlay paths come from userData (see brand-suite.ts).
+    //
+    // The suite runs under its own profile (SUITE_PROFILE), never the shared
+    // `web` one: the plugins resolve from that profile's node_modules (see
+    // brand-suite.ts) and a user's own `dsh` / `dsh web` runs stay untouched.
+    // `dsh web` is the hard alias of `--profile web`, so the command is the
+    // top-level form with an explicit profile instead.
     const patchArgs = extraPatches.flatMap((overlay) => ['--patch', overlay])
+    const profileArgs = ['--profile', SUITE_PROFILE]
     if (spec.kind === 'pnpm') {
       // Dev mode: run the local checkout's dsh CLI via pnpm.
       // On Windows, pnpm is a .cmd shim that cannot be spawned without a
@@ -247,13 +254,13 @@ export class DshServer {
       if (process.platform === 'win32') {
         const patchFragment = patchArgs.map((token) => this.quoteForShell(token)).join(' ')
         const overlays = patchFragment !== '' ? `${patchFragment} ` : ''
-        return { command: `pnpm dsh web ${overlays}--host ${host} --port ${port} --no-open`, args: [], shell: true }
+        return { command: `pnpm dsh ${profileArgs.join(' ')} ${overlays}--host ${host} --port ${port} --no-open`, args: [], shell: true }
       }
-      return { command: 'pnpm', args: ['dsh', 'web', ...patchArgs, '--host', host, '--port', String(port), '--no-open'] }
+      return { command: 'pnpm', args: ['dsh', ...profileArgs, ...patchArgs, '--host', host, '--port', String(port), '--no-open'] }
     }
     return {
       command: spec.nodePath,
-      args: [spec.scriptPath, '--profile', 'web', ...patchArgs, '--host', host, '--port', String(port), '--no-open'],
+      args: [spec.scriptPath, ...profileArgs, ...patchArgs, '--host', host, '--port', String(port), '--no-open'],
     }
   }
 

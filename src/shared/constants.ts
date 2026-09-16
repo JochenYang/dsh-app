@@ -3,6 +3,31 @@
 export const APP_ID = 'com.dshapp.desktop'
 export const APP_NAME = 'DSH APP'
 
+/**
+ * dsh profile the brand suite runs under.
+ *
+ * The suite owns a profile of its own instead of sharing the `web` profile a
+ * user's own `dsh web` run uses: the plugins resolve from this profile's
+ * node_modules (a local candidate in every resolution mode upstream has),
+ * and nothing of ours lands in the shared `profiles/node_modules` fallback,
+ * which 0.1.6's runtime-mode resolver skips entirely.
+ */
+export const SUITE_PROFILE = 'dsh-app'
+
+/**
+ * Bundle layers the suite's profile is initialized with.
+ *
+ * Upstream refuses to boot a profile that has no `package.json` (`profile
+ * "dsh-app" does not exist`), and its `--from-default-profile` refuses a
+ * directory that already holds anything — which ours does, because the plugin
+ * links are written there before the spawn. The shell therefore writes the
+ * profile manifest itself, mirroring upstream's own `initProfile`: the shipped
+ * `web` template's bundle list (`PROFILE_TEMPLATES.web` in app-boot) and its
+ * `patchReload: live`. If upstream retargets that template, this list has to
+ * follow — the suite smoke run fails loudly when the composed layers are wrong.
+ */
+export const SUITE_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] as const
+
 /** GitHub owner/repo hosting kernel runtime + shell update artifacts. */
 export const DEFAULT_ARTIFACT_OWNER = 'JochenYang'
 export const DEFAULT_ARTIFACT_REPO = 'dsh-app'

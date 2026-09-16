@@ -47,13 +47,17 @@ const SCAN_RULES = [
 ]
 
 function usage() {
-  console.error(`用法: node scripts/check-plugin-compat.mjs --kernel <内核目录|runtime.tgz> [--home <目录>] [--timeout <秒>] [--port <端口>]`)
+  console.error(`用法: node scripts/check-plugin-compat.mjs --kernel <内核目录|runtime.tgz> [--home <目录>] [--profile <名字>] [--timeout <秒>] [--port <端口>]`)
 }
 
 function parseArgs(argv) {
   const args = {
     timeout: 20,
     port: 30000 + Math.floor(Math.random() * 15001),
+    // 默认就是外壳自己的 profile（src/shared/constants.ts SUITE_PROFILE）。
+    // 0.1.6 之前的外壳把插件铺在共享的 profiles/node_modules，用那个布局的
+    // home 复检时传 --profile web。
+    profile: 'dsh-app',
   }
   for (let i = 0; i < argv.length; i++) {
     const eq = argv[i].indexOf('=')
@@ -63,6 +67,7 @@ function parseArgs(argv) {
     switch (key) {
       case '--kernel': args.kernel = value; break
       case '--home': args.home = value; break
+      case '--profile': args.profile = value; break
       case '--timeout': args.timeout = Number(value); break
       case '--port': args.port = Number(value); break
       default: failUsage(`未知参数: ${key}`)
@@ -151,11 +156,11 @@ function killTree(pid) {
 
 // 短启动内核：收集 stdout+stderr 全部行，竞速 就绪/超时/退出 三种结局。
 // 返回 { result, exited }；流缓冲的半行由调用方在收尾时 flush。
-function runKernel(binJs, homeDir, port, timeoutMs, lines, flushers) {
+function runKernel(binJs, homeDir, profile, port, timeoutMs, lines, flushers) {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
-      [binJs, '--profile', 'web', '--host', '127.0.0.1', '--port', String(port), '--no-open'],
+      [binJs, '--profile', profile, '--host', '127.0.0.1', '--port', String(port), '--no-open'],
       {
         env: { ...process.env, DSH_HOME: homeDir },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -245,7 +250,7 @@ async function main() {
     else fs.mkdirSync(homeDir, { recursive: true })
 
     const startedAt = Date.now()
-    const { child: proc, result } = await runKernel(binJs, homeDir, args.port, args.timeout * 1000, lines, flushers)
+    const { child: proc, result } = await runKernel(binJs, homeDir, args.profile, args.port, args.timeout * 1000, lines, flushers)
     child = proc
     // 收尾：无论结局先整树杀，再给流一点时间 flush 残留输出
     killTree(child.pid)

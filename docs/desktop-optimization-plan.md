@@ -361,8 +361,9 @@ query 规则注释声称能保住 `&next=/x`，实际被其后的裸规则吃掉
 ### 2.5 插件出 npm 包 → 任务 7（可选）
 
 - **现状**：17 个 `@dsh-app/*` 无 `private`、无 `publishConfig`（即未发布），随 kernel tgz 一起发。
-- **做法**：发到 npm；kernel 不再携带插件；由 shell 在 `$DSH_HOME/profiles/node_modules/@dsh-app`
-  按需安装。加载层已就绪（`brand-suite.ts:76-87,134-198` 本就是符号链接机制）。
+- **做法**：发到 npm；kernel 不再携带插件；由 shell 在自有 profile
+  `$DSH_HOME/profiles/dsh-app/node_modules/@dsh-app` 按需安装。加载层已就绪
+  （`brand-suite.ts` 本就是符号链接机制，profile 名见 `src/shared/constants.ts` 的 `SUITE_PROFILE`）。
 - **风险**：首次启动需要网络。
 - **验收**：断网首次启动仍可用（保留内置兜底）。
 - **不回归**：在线装 / 卸插件不触碰 kernel 目录。

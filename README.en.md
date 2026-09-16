@@ -44,14 +44,18 @@ capabilities:
 
 Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
 
-1. **Module resolution**: the ten suite plugins are linked into
-   `$DSH_HOME/profiles/node_modules/@dsh-app/` (junction on Windows); dev uses
+1. **Module resolution**: the suite plugins are linked into their **own profile**,
+   `$DSH_HOME/profiles/dsh-app/node_modules/@dsh-app/` (junction on Windows; the
+   profile name lives in `src/shared/constants.ts` as `SUITE_PROFILE`); dev uses
    this repo's `plugins/*`, production the active kernel's
-   `app/node_modules/@dsh-app/*`.
+   `app/node_modules/@dsh-app/*`. The shared `profiles/node_modules` fallback is
+   no longer used — 0.1.6's runtime resolution mode skips it wholesale, and it is
+   also the resolution root of the user's own `dsh` / `dsh web` runs. Links a
+   pre-0.1.6 shell left there are removed on boot.
 2. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into userData and
-   injected via `dsh web --patch` — ten suite plugin entries applied after
-   the official bundle layers (last write wins, no upstream profile template
-   changes).
+   injected on the kernel command line (`dsh --profile dsh-app --patch <file>`)
+   — suite entries applied after the official bundle layers (last write wins, no
+   upstream profile template changes).
 
 Both seams **degrade gracefully**: a kernel without the suite plugins (e.g. a
 rollback target) boots vanilla, never blocked by brand wiring.

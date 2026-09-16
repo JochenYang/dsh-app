@@ -39,9 +39,12 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 
 套件接线（每次 server 启动自动完成，`src/main/brand-suite.ts`）：
 
-1. **模块解析**：十个套件插件链接进 `$DSH_HOME/profiles/node_modules/@dsh-app/`（Windows 为 junction）；
+1. **模块解析**：套件插件链接进**自有 profile** `$DSH_HOME/profiles/dsh-app/node_modules/@dsh-app/`
+   （Windows 为 junction，profile 名见 `src/shared/constants.ts` 的 `SUITE_PROFILE`）；
    开发源是仓库 `plugins/*`，生产源是激活内核里的 `app/node_modules/@dsh-app/*`。
-2. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经 `dsh web --patch` 注入十个套件插件条目
+   不再使用共享的 `profiles/node_modules`（0.1.6 的 runtime 解析模式会整目录跳过它，
+   且那里同时是用户自己 `dsh`/`dsh web` 的解析根）；旧位置遗留的链接在启动时清理。
+2. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经命令行 `dsh --profile dsh-app --patch <文件>` 注入
    （应用在官方 bundle 层之后，last write wins，无需改上游 profile 模板）。
 
 两条接缝均**优雅降级**：内核缺少套件插件（例如回滚目标）时原样启动、无阻塞。

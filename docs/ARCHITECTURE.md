@@ -47,17 +47,22 @@ background and reports through the in-window update card and the tray.
 
 Two seams are stitched at every server start (`src/main/brand-suite.ts`):
 
-1. **Module resolution** — `$DSH_HOME/profiles/node_modules/@dsh-app/<plugin>` is
-   a junction (Windows) / symlink to the real package: dev = this repo's
-   `plugins/*`, prod = the active kernel's npm-flattened
-   `app/node_modules/@dsh-app/*`. `SUITE_PLUGIN_DIRS` lists
-   `plugin-brand`, `plugin-client-ui`, `plugin-sidebar`, `plugin-swarm`,
-   `plugin-usage`, `plugin-archives`, `plugin-memory`, `plugin-fff`,
-   `plugin-mcp`, `plugin-hooks` (`brand-suite.ts:48`).
+1. **Module resolution** — the suite runs under its own profile: one junction
+   (Windows) / symlink per plugin under
+   `$DSH_HOME/profiles/dsh-app/node_modules/@dsh-app/<plugin>` (name from
+   `SUITE_PROFILE`, `src/shared/constants.ts`) points at the real package:
+   dev = this repo's `plugins/*`, prod = the active kernel's npm-flattened
+   `app/node_modules/@dsh-app/*`. `SUITE_PLUGIN_DIRS` (`brand-suite.ts:48`)
+   lists every member; `plugins/README.md` is the roster. The private profile
+   replaces the shared `profiles/node_modules` fallback, which 0.1.6's
+   runtime-mode resolver skips wholesale and where the suite also shared a
+   resolution root with the user's own `dsh` / `dsh web` runs. Links a
+   pre-0.1.6 shell left in that fallback are retired on boot
+   (`removeLegacySuiteLinks`).
 2. **Loader overlay** — `plugins/dsh-app.patch.yml` is copied into userData and
-   passed via `dsh web --patch`; it inserts the ten plugin entries after the
-   official bundle layers (last write wins), so no upstream profile template is
-   touched.
+   passed on the kernel command line (`dsh --profile dsh-app --patch <file>`);
+   it inserts the suite entries after the official bundle layers (last write
+   wins), so no upstream profile template is touched.
 
 Both seams **degrade gracefully**: missing suite plugins (e.g. a rollback
 target kernel) boot vanilla — no links, no overlay, boot is never blocked.
