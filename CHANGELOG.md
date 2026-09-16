@@ -11,16 +11,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 ## [Unreleased]
 
 ### 中文
-- **套件改用自有 profile**：17 个品牌插件从共享的 `profiles/node_modules` 迁入 `$DSH_HOME/profiles/dsh-app/node_modules`，内核改为以 `--profile dsh-app` 启动（首启自动写入该 profile 的清单）。用户自己跑 `dsh` / `dsh web` 不再会看到我们的链接，也不再与它们共用解析根；同时为 0.1.6 的解析模式提前排雷（那种模式会整目录跳过共享回落目录）。旧位置遗留的链接在启动时自动清理
-- **首启不再像卡死**：新增本地启动页（品牌标 + 版本号 + 五步进度 + 下载可暂停/继续 + 失败卡三动作「重试 / 打开日志目录 / 退出」，失败文案按原因分层：摘要不符只建议更换网络，不给「稍后重试」这种错建议）。窗口用与主界面一致的自定义边框，深/浅色跟随界面「外观」设置，底部一句话：首先您要健康，其次才是其次
-- **内核更新改为分层下载**：运行时拆成 node / vendor / dsh / suite 等层并逐层校验与缓存，dsh 升级只需下载变化的那几层（约 10 MB，而不是 100 MB 以上）；层缓存未命中或任何一层失败会自动回退到整包，装不上这种情况不会发生
-- **内核运行时改用 pnpm 组装**：依赖树不再由 npm 的扁平化决定，构建可复现（锁定 overrides、关闭 pnpm 的发布冷静期），并产出逐文件清单
-- **桌面能力：启动文件夹直达**：把文件夹拖到应用图标（或 `dsh-app.exe D:\某个项目`）即把该文件夹开成工作区并开会话；应用已在运行时第二次启动只聚焦现有窗口、复用空白会话，不会开第二个窗口
-- **设置页新增「诊断」**：桌面功能状态、内核日志尾部、一键打开日志目录，以及导出纯文本诊断包（不含密钥与会话内容，且按界面语言生成）
-- **界面语言全量中英双语**：外壳（启动页、托盘、对话框、更新提示）与全部套件插件页跟随系统语言，也可用 `DSH_APP_LOCALE` 强制；网络搜索等页面的英文界面不再残留中文（宿主只回状态码，文案由界面渲染）
-- **设置导航更好用**：列表可在小窗口滚动（此前最后四项够不着）、顺序按语义分带（模型 → 集成 → 生态 → 子代理 → 系统 → 会话数据）、「诊断」有了专属图标，不再是通用齿轮
-- **深色主题两处可读性缺陷**：关闭弹窗与更新提示卡的主按钮此前是白字白底（深色下看不见），改用与主界面一致的成对颜色令牌
-- **工程护栏**：新增打包产物冒烟（asar 关键条目 / 静态资源 / 内置内核三件套）、插件依赖图静态校验，CI 覆盖全部插件测试套件
+- 套件改用自有 profile：内核改为以 `--profile dsh-app` 启动，你在终端里的 `dsh` / `dsh web` 继续用 `web`，两边的插件世界互不干扰。首次运行后台建好新 profile 并把你手写的 patch 层（禁用行、MCP 行）带过去；第三方插件不搬，改在应用内的插件市场里重装——市场里会直接出现「旧 profile 还有 N 个插件未安装 / 全部安装」的入口，一键按原规格装到当前 profile（npm 区间、本地 tarball、GitHub、https 包都支持）。旧 profile 一个字节不动，随时可回去。会话、设置、凭据、workspace 与插件 storages 都与 profile 无关，不受影响；生效的 profile 通过 `DSH_APP_PROFILE` 传给内核，市场与预设总是装到应用真正读取的那个
+- 首启不再像卡死：新增本地启动页（品牌标 + 版本号 + 五步进度 + 下载可暂停/继续 + 失败卡三动作「重试 / 打开日志目录 / 退出」，失败文案按原因分层：摘要不符只建议更换网络，不给「稍后重试」这种错建议）。窗口用与主界面一致的自定义边框，深/浅色跟随界面「外观」设置，底部一句话：首先您要健康，其次才是其次
+- 内核更新改为分层下载：运行时拆成 node / vendor / dsh / suite 等层并逐层校验与缓存，dsh 升级只需下载变化的那几层（约 10 MB，而不是 100 MB 以上）；层缓存未命中或任何一层失败会自动回退到整包，装不上这种情况不会发生
+- 内核运行时改用 pnpm 组装：依赖树不再由 npm 的扁平化决定，构建可复现（锁定 overrides、关闭 pnpm 的发布冷静期），并产出逐文件清单
+- 桌面能力：启动文件夹直达：把文件夹拖到应用图标（或 `dsh-app.exe D:\某个项目`）即把该文件夹开成工作区并开会话；应用已在运行时第二次启动只聚焦现有窗口、复用空白会话，不会开第二个窗口
+- 设置页新增「诊断」：桌面功能状态、内核日志尾部、一键打开日志目录，以及导出纯文本诊断包（不含密钥与会话内容，且按界面语言生成）
+- 界面语言全量中英双语：外壳（启动页、托盘、对话框、更新提示）与全部套件插件页跟随系统语言，也可用 `DSH_APP_LOCALE` 强制；网络搜索等页面的英文界面不再残留中文（宿主只回状态码，文案由界面渲染）
+- 设置导航更好用：列表可在小窗口滚动（此前最后四项够不着）、顺序按语义分带（模型 → 集成 → 生态 → 子代理 → 系统 → 会话数据）、「诊断」有了专属图标，不再是通用齿轮
+- 深色主题两处可读性缺陷：关闭弹窗与更新提示卡的主按钮此前是白字白底（深色下看不见），改用与主界面一致的成对颜色令牌
+- 工程护栏：新增打包产物冒烟（asar 关键条目 / 静态资源 / 内置内核三件套）、插件依赖图静态校验，CI 覆盖全部插件测试套件
 - Windows 应用更新维持原样：差分下载实测只省约 44%，换取的是每台机器常驻一个完整安装包与更复杂的下载链，权衡后放弃
 - 文档：README 中英各加「下载与安装」章节（Windows SmartScreen / macOS Sequoia「仍要打开」一步到位），并补齐内核分层、诊断页、启动页的说明
 - 并行子代理：设置页左侧导航从通用齿轮图标换为「一拖三」调度节点的专属图标（沿用网络搜索、会话记忆等插件的导航图标约定），不影响设置项本身
@@ -38,16 +38,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 - 网络搜索管理：`- id: web` 覆盖行必须同时写 `searchProvider` 与 `fetchProvider`——patch 语义是整行替换 config，只写前者会导致 `web-fetch-http` 被重新注册，并使整棵插件树因重复条目而启动失败
 
 ### English
-- **The suite now runs under its own dsh profile**: the seventeen brand plugins moved out of the shared `profiles/node_modules` fallback into `$DSH_HOME/profiles/dsh-app/node_modules`, and the kernel boots with `--profile dsh-app` (its profile manifest is written on first run). A user's own `dsh` / `dsh web` runs no longer see our links or share their resolution root, and the layout is already right for 0.1.6's resolver, which skips the shared fallback wholesale; links the old shell left there are cleaned up on boot
-- **First launch no longer looks like a hang**: a local splash window (brand mark + version + five-step progress + a pausable download + a failure card with 重试 / 打开日志目录 / 退出, whose wording is layered by cause — a checksum mismatch only ever suggests changing networks, never "retry later"). It wears the same custom chrome as the main window, follows the 外观 setting for light/dark, and carries one fixed line at its foot: 首先您要健康，其次才是其次
-- **Kernel updates are now layered**: the runtime is split into node / vendor / dsh / suite layers, each verified and cached independently, so a dsh bump downloads only the layers that changed (about 10 MB instead of 100 MB+). Any miss or failure falls back to the single tarball, so an update can never fail for being clever
-- **The kernel runtime is assembled with pnpm**: the dependency tree no longer depends on npm's flattening, the build is reproducible (pinned overrides, pnpm's release cooldown disabled), and every file lands in a manifest
-- **Desktop: launch a folder straight into a workspace**: drop a folder on the app icon (or run `dsh-app.exe D:\some-project`) and it opens as a workspace with a session. Launching again while the app is running only focuses the existing window and reuses the blank session — never a second window
-- **New 诊断 settings page**: desktop-feature status, the kernel log tail, a button that opens the log directory, and a plain-text diagnostics package export (no keys, no session content, written in the UI's language)
-- **The whole UI is bilingual**: the shell (splash, tray, dialogs, update prompts) and every suite plugin page follow the system language, overridable with `DSH_APP_LOCALE`; English pages such as Web search no longer show Chinese (the host sends status codes, the page renders the copy)
-- **The settings rail is usable**: the list scrolls in a short window (its last four rows used to be unreachable), the order is grouped by intent (model → integrations → ecosystem → subagents → system → session data), and 诊断 has its own glyph instead of the generic gear
-- **Two dark-theme readability defects**: the close dialog's and the update card's primary buttons were white-on-white (invisible in dark mode); both now use the main UI's paired colour tokens
-- **Engineering guards**: a packaged-artifact smoke test (asar entries / static assets / bundled kernel), a static plugin-dependency-graph check, and CI coverage for every plugin test suite
+- The suite now boots its own profile: the kernel runs `--profile dsh-app`, while your own `dsh` / `dsh web` runs keep `web` — the two plugin worlds no longer touch each other. On first run the shell creates that profile in the background and carries your hand-written patch layer over (disables, MCP rows); third-party packages are not carried — the in-app market grows a "N plugins from the previous profile are not installed here / install all" entry that reinstalls them into the current profile at their declared specs (npm ranges, local tarballs, GitHub and https packages included). The old profile is untouched, so you can always go back. Sessions, settings, credentials, workspaces and plugin storages are profile-independent and unaffected; the profile in force is exported as `DSH_APP_PROFILE`, so the market and presets install into the profile the app actually reads
+- First launch no longer looks like a hang: a local splash window (brand mark + version + five-step progress + a pausable download + a failure card with 重试 / 打开日志目录 / 退出, whose wording is layered by cause — a checksum mismatch only ever suggests changing networks, never "retry later"). It wears the same custom chrome as the main window, follows the 外观 setting for light/dark, and carries one fixed line at its foot: 首先您要健康，其次才是其次
+- Kernel updates are now layered: the runtime is split into node / vendor / dsh / suite layers, each verified and cached independently, so a dsh bump downloads only the layers that changed (about 10 MB instead of 100 MB+). Any miss or failure falls back to the single tarball, so an update can never fail for being clever
+- The kernel runtime is assembled with pnpm: the dependency tree no longer depends on npm's flattening, the build is reproducible (pinned overrides, pnpm's release cooldown disabled), and every file lands in a manifest
+- Desktop: launch a folder straight into a workspace: drop a folder on the app icon (or run `dsh-app.exe D:\some-project`) and it opens as a workspace with a session. Launching again while the app is running only focuses the existing window and reuses the blank session — never a second window
+- New 诊断 settings page: desktop-feature status, the kernel log tail, a button that opens the log directory, and a plain-text diagnostics package export (no keys, no session content, written in the UI's language)
+- The whole UI is bilingual: the shell (splash, tray, dialogs, update prompts) and every suite plugin page follow the system language, overridable with `DSH_APP_LOCALE`; English pages such as Web search no longer show Chinese (the host sends status codes, the page renders the copy)
+- The settings rail is usable: the list scrolls in a short window (its last four rows used to be unreachable), the order is grouped by intent (model → integrations → ecosystem → subagents → system → session data), and 诊断 has its own glyph instead of the generic gear
+- Two dark-theme readability defects: the close dialog's and the update card's primary buttons were white-on-white (invisible in dark mode); both now use the main UI's paired colour tokens
+- Engineering guards: a packaged-artifact smoke test (asar entries / static assets / bundled kernel), a static plugin-dependency-graph check, and CI coverage for every plugin test suite
 - Windows app updates stay as they were: measured differential download saved only about 44%, at the cost of a resident full installer on every machine and a more complex download chain, so it was dropped
 - Docs: README (both languages) gained a Download & install section (Windows SmartScreen / macOS Sequoia "Open Anyway" in one pass), plus notes on kernel layers, the diagnostics page and the splash
 - Parallel subagents: the settings-page nav icon changes from the generic gear to a dedicated one-orchestrator-three-workers glyph (same convention as the search and memory sections); the settings themselves are unchanged

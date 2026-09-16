@@ -125,6 +125,70 @@ export interface MarketDeps {
    * resolver. Injectable so tests never touch the network.
    */
   readonly latestVersions?: (names: readonly string[]) => Promise<Record<string, string | undefined>>
+  /**
+   * Profile a package can be inherited from (the one the shell booted before
+   * it had a profile of its own). Read by `/legacy`; see
+   * `effectiveLegacyProfile` in index.ts.
+   */
+  readonly legacyProfile: string
+}
+
+/** The GET /legacy payload. */
+export interface LegacyPayload {
+  /** The profile the list was read from. */
+  readonly profile: string
+  /** Declared there, absent here — what an inherit installs. */
+  readonly missing: ReadonlyArray<{ readonly name: string, readonly spec: string }>
+  /** How many of its declared packages are already installed here. */
+  readonly present: number
+}
+
+/**
+ * Diff the previous profile's declared dependencies against what this profile
+ * has installed: that difference is exactly what the panel offers to inherit
+ * after the shell moved the suite to a profile of its own.
+ *
+ * A missing or unreadable old profile reads as "nothing to inherit" rather
+ * than an error — a fresh install has no `web` profile at all. Suite packages
+ * are skipped: the shell owns their lifecycle and the old profile never
+ * declared them.
+ *
+ * @param deps - route dependencies (profiles + the installed reader).
+ * @returns the payload `/legacy` answers with.
+ */
+function legacyView(deps: MarketDeps): LegacyPayload {
+  const home = resolveDshHome()
+  // Same profile on both sides means there is nothing to inherit — the
+  // packages are already the ones in force. That is the pre-switch state: the
+  // shell still boots the old profile while the marker is absent, and diffing
+  // a profile against itself reported whatever it declares but has not
+  // installed as "missing from the previous profile".
+  if (deps.legacyProfile === deps.profile) {
+    return { profile: deps.legacyProfile, missing: [], present: 0 }
+  }
+  let declared: Record<string, string> = {}
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(home, 'profiles', deps.legacyProfile, 'package.json'), 'utf8'),
+    ) as { dependencies?: Record<string, string> }
+    declared = manifest.dependencies ?? {}
+  } catch {
+    /* no old profile, or one without a manifest: nothing to inherit */
+  }
+  const installedHere = new Set(
+    readInstalled(join(home, 'profiles', deps.profile), deps.profile).packages.map((pkg) => pkg.name),
+  )
+  const missing: Array<{ name: string, spec: string }> = []
+  let present = 0
+  for (const [name, spec] of Object.entries(declared).sort(([a], [b]) => a.localeCompare(b))) {
+    if (name.startsWith('@dsh-app/')) continue
+    if (installedHere.has(name)) {
+      present += 1
+      continue
+    }
+    missing.push({ name, spec })
+  }
+  return { profile: deps.legacyProfile, missing, present }
 }
 
 /** The GET /catalog payload (every mode shares the shape; flags mark the mode). */
@@ -934,11 +998,27 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
     }),
     webServer.register({
       kind: 'exact',
+      path: `${ROUTE_PREFIX}/legacy`,
+      handler: (req, res) => {
+        if (!guard(req, res, 'GET')) return
+        ok(res, legacyView(deps))
+      },
+    }),
+    webServer.register({
+      kind: 'exact',
       path: `${ROUTE_PREFIX}/install`,
       handler: (req, res) => {
         if (!guard(req, res, 'POST')) return
         void readJsonBody(req)
           .then((body) => {
+            // An inherited dependency (see /legacy) arrives as name + spec: the
+            // old profile may have declared a local tarball, a github shorthand
+            // or an https tarball, none of which has a registry identity to
+            // resolve into a name@version pair. installSpec validates and picks
+            // the right pnpm argument shape.
+            if (typeof body.spec === 'string' && body.spec.trim() !== '') {
+              return deps.installer.installSpec(body.package, body.spec).then(result => ({ result, replacedLocal: false }))
+            }
             const name = validatePackageName(body.package)
             // Same-name guard: the npm name is not an identity — the
             // normalized repo key is. The panel sends the catalog entry's

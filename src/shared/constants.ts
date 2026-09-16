@@ -4,27 +4,28 @@ export const APP_ID = 'com.dshapp.desktop'
 export const APP_NAME = 'DSH APP'
 
 /**
- * dsh profile the brand suite runs under.
+ * dsh profile the brand suite boots under.
  *
- * The suite owns a profile of its own instead of sharing the `web` profile a
- * user's own `dsh web` run uses: the plugins resolve from this profile's
- * node_modules (a local candidate in every resolution mode upstream has),
- * and nothing of ours lands in the shared `profiles/node_modules` fallback,
- * which 0.1.6's runtime-mode resolver skips entirely.
+ * The suite owns a profile of its own — upstream's desktop does the same
+ * (a reserved profile, its own bundle list, its own package-manager state,
+ * shared data layer). A user's own `dsh` / `dsh web` runs keep `web`, and our
+ * plugin market follows the profile actually booted via `DSH_APP_PROFILE`, so
+ * the two plugin worlds never disagree about where installs land.
+ *
+ * Data is untouched by this: sessions, settings, credentials, workspaces and
+ * plugin storages are resolved from `$DSH_HOME` and are profile-independent.
  */
 export const SUITE_PROFILE = 'dsh-app'
 
+/** Profile the suite booted before it had one of its own (pre-migration). */
+export const LEGACY_PROFILE = 'web'
+
 /**
- * Bundle layers the suite's profile is initialized with.
- *
- * Upstream refuses to boot a profile that has no `package.json` (`profile
- * "dsh-app" does not exist`), and its `--from-default-profile` refuses a
- * directory that already holds anything — which ours does, because the plugin
- * links are written there before the spawn. The shell therefore writes the
- * profile manifest itself, mirroring upstream's own `initProfile`: the shipped
- * `web` template's bundle list (`PROFILE_TEMPLATES.web` in app-boot) and its
- * `patchReload: live`. If upstream retargets that template, this list has to
- * follow — the suite smoke run fails loudly when the composed layers are wrong.
+ * Bundle layers a fresh suite profile is seeded with: the shipped `web`
+ * template's list (`PROFILE_TEMPLATES.web` in app-boot). Migration copies the
+ * user's own dependencies on top and lets `dsh plugin install` reconcile the
+ * rest. If upstream retargets that template, this list has to follow — the
+ * suite smoke run fails loudly when the composed layers are wrong.
  */
 export const SUITE_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] as const
 

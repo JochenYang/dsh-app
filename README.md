@@ -39,15 +39,20 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 
 套件接线（每次 server 启动自动完成，`src/main/brand-suite.ts`）：
 
-1. **模块解析**：套件插件链接进**自有 profile** `$DSH_HOME/profiles/dsh-app/node_modules/@dsh-app/`
-   （Windows 为 junction，profile 名见 `src/shared/constants.ts` 的 `SUITE_PROFILE`）；
+1. **模块解析**：套件插件链接进共享回落目录 `$DSH_HOME/profiles/node_modules/@dsh-app/`（Windows 为 junction）——
+   该目录从任何 profile 都能解析到，且不会被任何 profile 的 pnpm 清理；
    开发源是仓库 `plugins/*`，生产源是激活内核里的 `app/node_modules/@dsh-app/*`。
-   不再使用共享的 `profiles/node_modules`（0.1.6 的 runtime 解析模式会整目录跳过它，
-   且那里同时是用户自己 `dsh`/`dsh web` 的解析根）；旧位置遗留的链接在启动时清理。
-2. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经命令行 `dsh --profile dsh-app --patch <文件>` 注入
+2. **套件自有 profile**：内核以 `--profile dsh-app` 启动，你在终端里的 `dsh` / `dsh web` 仍用 `web`。
+   首次运行会在后台建好新 profile 并把你手写的 patch 层（禁用行、MCP 行）带过去；
+   **第三方包不搬**——它们在应用内的插件市场里重装到新 profile，因为市场才懂 pnpm 的发布冷静期策略、
+   构建脚本放行和失效规格这些事（搬整棵树的两种做法都实测过并被否决：复制会被 Windows 的
+   `.pnpm` 符号链接权限卡住，按 lockfile 重装会撞 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`）。
+   建好并落 marker 后下次启动才切换；失败则继续用 `web` 启动并在下次重试。生效的 profile 通过
+   `DSH_APP_PROFILE` 传给内核，所以插件市场与预设总是装到应用真正读取的那个 profile。
+3. **加载器覆盖**：`plugins/dsh-app.patch.yml` 拷入 userData，经命令行 `--patch` 注入
    （应用在官方 bundle 层之后，last write wins，无需改上游 profile 模板）。
 
-两条接缝均**优雅降级**：内核缺少套件插件（例如回滚目标）时原样启动、无阻塞。
+每一环都**优雅降级**：内核缺少套件插件（例如回滚目标）时原样启动、无阻塞。
 
 ## 下载与安装（用户）
 

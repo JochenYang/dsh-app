@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { ServerSpec } from '../shared/types'
-import { DEFAULT_HTTP_HOST, SERVER_HEALTH_POLL_MS, SERVER_HEALTH_TIMEOUT_MS, SERVER_SHUTDOWN_GRACE_MS, SUITE_PROFILE } from '../shared/constants'
+import { DEFAULT_HTTP_HOST, LEGACY_PROFILE, SERVER_HEALTH_POLL_MS, SERVER_HEALTH_TIMEOUT_MS, SERVER_SHUTDOWN_GRACE_MS } from '../shared/constants'
 
 export interface ServerEvents {
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void
@@ -149,8 +149,12 @@ export class DshServer {
    *   process's env (the env-scrub result lands here). When omitted the
    *   child inherits the shell env unchanged — identical to the pre-scrub
    *   behavior.
+   * @param profile - dsh profile to boot (see suite-profile.ts). It is also
+   *   exported to the child as `DSH_APP_PROFILE`, which is how the suite's own
+   *   plugins (plugin-market, plugin-presets) know where installs belong: the
+   *   app must never install into `web` while it boots another profile.
    */
-  async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST, extraPatches: readonly string[] = [], envOverride?: NodeJS.ProcessEnv): Promise<void> {
+  async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST, extraPatches: readonly string[] = [], envOverride?: NodeJS.ProcessEnv, profile: string = LEGACY_PROFILE): Promise<void> {
     await this.stop()
     this.stopping = false
     this.starting = true
@@ -159,7 +163,7 @@ export class DshServer {
 
     let healthy = false
     try {
-      const { command, args, shell } = this.buildCommand(spec, port, host, extraPatches)
+      const { command, args, shell } = this.buildCommand(spec, port, host, extraPatches, profile)
       this.shellMode = shell === true
       this.logFile = await this.openLog()
       this.events.onLog?.(`spawn ${shell ? command : `${command} ${args.join(' ')}`}`)
@@ -168,13 +172,13 @@ export class DshServer {
         ? spawn(command, {
             shell: true,
             cwd: spec.cwd,
-            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1' },
+            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
         : spawn(command, args, {
             cwd: spec.cwd,
-            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1' },
+            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
@@ -234,18 +238,18 @@ export class DshServer {
     return /[\s"]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value
   }
 
-  private buildCommand(spec: ServerSpec, port: number, host: string, extraPatches: readonly string[]): { command: string; args: string[]; shell?: boolean } {
+  private buildCommand(spec: ServerSpec, port: number, host: string, extraPatches: readonly string[], profile: string): { command: string; args: string[]; shell?: boolean } {
     // Brand-suite loader overlays (plugins/dsh-app.patch.yml): applied after
     // every bundle layer, last write wins per row. Host/port are controlled
-    // values; overlay paths come from userData (see brand-suite.ts).
+    // values; overlay paths come from userData (see brand-suite.ts). `profile`
+    // is one of the two names suite-profile.ts can return, never user input.
     //
-    // The suite runs under its own profile (SUITE_PROFILE), never the shared
-    // `web` one: the plugins resolve from that profile's node_modules (see
-    // brand-suite.ts) and a user's own `dsh` / `dsh web` runs stay untouched.
-    // `dsh web` is the hard alias of `--profile web`, so the command is the
-    // top-level form with an explicit profile instead.
+    // Both branches take the top-level form with an explicit `--profile`:
+    // `dsh web` is the hard alias of `--profile web` and the web subcommand
+    // refuses a parent-level `--profile`, so the alias can only ever address
+    // the shared legacy profile.
     const patchArgs = extraPatches.flatMap((overlay) => ['--patch', overlay])
-    const profileArgs = ['--profile', SUITE_PROFILE]
+    const profileArgs = ['--profile', profile]
     if (spec.kind === 'pnpm') {
       // Dev mode: run the local checkout's dsh CLI via pnpm.
       // On Windows, pnpm is a .cmd shim that cannot be spawned without a

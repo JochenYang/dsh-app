@@ -28,7 +28,7 @@ import type { ReactNode } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
-import type { CatalogEntry, CatalogValue, InstalledPackage, SourcesValue, UpdateValue } from './api.ts'
+import type { CatalogEntry, CatalogValue, InstalledPackage, LegacyValue, SourcesValue, UpdateValue } from './api.ts'
 import { categoryOptionsOf, entryMatchesQuery } from './catalog-filter.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
@@ -239,6 +239,12 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
   /** The catalog request itself failed (kept apart from per-source failures). */
   const [catalogError, setCatalogError] = useState<string | null>(null)
   const [installed, setInstalled] = useState<readonly InstalledPackage[]>([])
+  /** Packages the previous profile declares and this one lacks (see /legacy). */
+  const [legacy, setLegacy] = useState<LegacyValue | null>(null)
+  /** Session-local dismissal of the inherit row. */
+  const [legacyHidden, setLegacyHidden] = useState(false)
+  /** Progress of a running inherit batch (`null` when idle). */
+  const [legacyBusy, setLegacyBusy] = useState<{ readonly done: number, readonly total: number, readonly name: string } | null>(null)
   const [sources, setSources] = useState<readonly string[]>([])
   const [sourceInput, setSourceInput] = useState('')
   const [busyPackage, setBusyPackage] = useState<string | null>(null)
@@ -334,6 +340,9 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
       // list paints without waiting on any registry request.
       const value = await marketApi.installed()
       setInstalled(value.packages)
+      // Same paint, non-fatal: the inherit row is an offer, never a fact the
+      // rest of the panel depends on.
+      void marketApi.legacy().then(setLegacy).catch(() => undefined)
     } catch (error) {
       setStrip({ kind: 'error', text: t('mkt.installed.loadFailed', { message: messageOf(error, t) }) })
       return
@@ -434,6 +443,36 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
   /** Blocked-builds fields of a result/error, for the strip's warning bar. */
   const blockedStripFields = (blockedBuilds: readonly string[] | undefined, retryPackage: string) =>
     (blockedBuilds !== undefined ? { blockedBuilds, retryPackage } : {})
+
+  /**
+   * Install every package the previous profile declares but this one lacks.
+   *
+   * Sequential on purpose: the host serializes installs regardless, and
+   * per-package progress is easier to act on than one opaque run. A failure
+   * does not abort the batch — the strip names what did not make it and the row
+   * stays, so a retry is one click. Specs go over verbatim, so local tarballs,
+   * github shorthands and https tarballs work the same as registry ranges.
+   */
+  const inheritLegacy = async (): Promise<void> => {
+    const targets = legacy?.missing ?? []
+    if (targets.length === 0) return
+    setStrip(null)
+    const failed: string[] = []
+    for (const [index, pkg] of targets.entries()) {
+      setLegacyBusy({ done: index, total: targets.length, name: pkg.name })
+      try {
+        await marketApi.inherit(pkg.name, pkg.spec)
+      } catch {
+        failed.push(pkg.name)
+      }
+    }
+    setLegacyBusy(null)
+    const succeeded = targets.length - failed.length
+    setStrip(failed.length === 0
+      ? { kind: 'ok', text: t('mkt.inherit.done', { count: String(succeeded) }) }
+      : { kind: 'error', text: t('mkt.inherit.failed', { count: String(failed.length), names: failed.join(', ') }) })
+    void loadInstalled()
+  }
 
   const install = async (target: { readonly entry: CatalogEntry, readonly crossOrigin: boolean }): Promise<void> => {
     const { entry, crossOrigin } = target
@@ -722,10 +761,15 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
                 packages={installed}
                 busyPackage={busyPackage}
                 togglingPackage={togglingPackage}
+                legacy={legacy}
+                legacyBusy={legacyBusy}
+                legacyHidden={legacyHidden}
                 onRefresh={() => { void loadInstalled() }}
                 onToggle={(pkg) => { void togglePackage(pkg) }}
                 onUninstall={(pkg) => { setConfirmTarget(pkg) }}
                 onUpdate={(pkg) => { void updatePackage(pkg) }}
+                onInherit={() => { void inheritLegacy() }}
+                onDismissLegacy={() => { setLegacyHidden(true) }}
                 t={t}
               />
             </>
@@ -1053,15 +1097,24 @@ interface InstalledTabProps {
   packages: readonly InstalledPackage[]
   busyPackage: string | null
   togglingPackage: string | null
+  /** Packages the previous profile declares and this one lacks, or null. */
+  legacy: LegacyValue | null
+  /** Progress of a running inherit batch (null when idle). */
+  legacyBusy: { readonly done: number, readonly total: number, readonly name: string } | null
+  /** Session-local dismissal of the inherit row. */
+  legacyHidden: boolean
   onRefresh: () => void
   onToggle: (pkg: InstalledPackage) => void
   onUninstall: (pkg: InstalledPackage) => void
   onUpdate: (pkg: InstalledPackage) => void
+  onInherit: () => void
+  onDismissLegacy: () => void
   t: Translate
 }
 
 function InstalledTab({
-  loading, checkingUpdates, packages, busyPackage, togglingPackage, onRefresh, onToggle, onUninstall, onUpdate, t,
+  loading, checkingUpdates, packages, busyPackage, togglingPackage,
+  legacy, legacyBusy, legacyHidden, onRefresh, onToggle, onUninstall, onUpdate, onInherit, onDismissLegacy, t,
 }: InstalledTabProps): ReactNode {
   if (loading) {
     return (
@@ -1073,6 +1126,7 @@ function InstalledTab({
   // One mutation at a time across the panel: the installer queue serializes
   // server-side, these flags keep the UI honest about it.
   const actionsBusy = busyPackage !== null || togglingPackage !== null
+  const inheritable = legacy !== null && !legacyHidden && legacy.missing.length > 0
   return (
     <>
       <div className="dshMkt-rowBetween">
@@ -1082,6 +1136,35 @@ function InstalledTab({
         </span>
         <button type="button" className="dshMkt-button" disabled={actionsBusy} onClick={onRefresh}>{t('mkt.refresh')}</button>
       </div>
+      {/* The suite boots its own profile now; whatever the previous one
+          declared and this one lacks is offered here, one click for all of
+          it. Specs install verbatim, so local/git/https dependencies work
+          like registry ranges. */}
+      {inheritable ? (
+        <div className="dshMkt-inherit">
+          <span className="dshMkt-inheritText">
+            {legacyBusy === null
+              ? t('mkt.inherit.title', { profile: legacy.profile, count: String(legacy.missing.length) })
+              : t('mkt.inherit.busy', {
+                  name: legacyBusy.name,
+                  done: String(legacyBusy.done + 1),
+                  total: String(legacyBusy.total),
+                })}
+            <span className="dshMkt-hint">{t('mkt.inherit.hint')}</span>
+          </span>
+          <button
+            type="button"
+            className="dshMkt-buttonPrimary"
+            disabled={legacyBusy !== null || actionsBusy}
+            onClick={onInherit}
+          >
+            {t('mkt.inherit.action', { count: String(legacy.missing.length) })}
+          </button>
+          <button type="button" className="dshMkt-button" disabled={legacyBusy !== null} onClick={onDismissLegacy}>
+            {t('mkt.inherit.dismiss')}
+          </button>
+        </div>
+      ) : null}
       {packages.length === 0 ? (
         <div className="dshMkt-empty">{t('mkt.installed.empty')}</div>
       ) : packages.map(pkg => {

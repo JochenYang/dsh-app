@@ -54,9 +54,8 @@ function parseArgs(argv) {
   const args = {
     timeout: 20,
     port: 30000 + Math.floor(Math.random() * 15001),
-    // 默认就是外壳自己的 profile（src/shared/constants.ts SUITE_PROFILE）。
-    // 0.1.6 之前的外壳把插件铺在共享的 profiles/node_modules，用那个布局的
-    // home 复检时传 --profile web。
+    // 默认就是套件自己的 profile（src/shared/constants.ts SUITE_PROFILE）。
+    // 迁移之前的外壳跑在 web 上，用那种 home 复检时传 --profile web。
     profile: 'dsh-app',
   }
   for (let i = 0; i < argv.length; i++) {

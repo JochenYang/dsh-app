@@ -177,8 +177,7 @@ export interface AllowBuildValue {
 }
 
 /** POST /toggle payload. */
-export interface ToggleValue {
-  readonly package: string
+export interface ToggleValue {  readonly package: string
   readonly entryId: string
   /** The state AFTER the toggle. */
   readonly enabled: boolean
@@ -188,6 +187,16 @@ export interface ToggleValue {
 export const PAGED_SOURCE_HOST = 'deepseek1024.com'
 
 /** The market API face. */
+/** GET /legacy payload: what the previous profile declares and this one lacks. */
+export interface LegacyValue {
+  /** The profile the list was read from. */
+  readonly profile: string
+  /** Declared there, absent here — what an inherit installs. */
+  readonly missing: readonly { readonly name: string, readonly spec: string }[]
+  /** How many of its packages are already installed here. */
+  readonly present: number
+}
+
 export const marketApi = {
   sources(): Promise<SourcesValue> {
     return request<SourcesValue>(`${ROUTE_PREFIX}/sources`)
@@ -211,6 +220,26 @@ export const marketApi = {
    */
   installed(updates = false): Promise<InstalledValue> {
     return request<InstalledValue>(`${ROUTE_PREFIX}/installed${updates ? '?updates=1' : ''}`)
+  },
+  /**
+   * Packages the previous profile declares that this one lacks — the list the
+   * panel offers to inherit after the shell moved the suite to a profile of
+   * its own (see suite-profile.ts in the shell).
+   */
+  legacy(): Promise<LegacyValue> {
+    return request<LegacyValue>(`${ROUTE_PREFIX}/legacy`)
+  },
+  /**
+   * Install one inherited dependency (name + the spec the old profile
+   * declared). The host validates the spec's shape, prefixes the name for a
+   * bare range and hands the result to pnpm.
+   */
+  inherit(pkg: string, spec: string): Promise<InstallValue> {
+    return request<InstallValue>(`${ROUTE_PREFIX}/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ package: pkg, spec }),
+    })
   },
   /**
    * Install `pkg` from the registry. `force` confirms a same-name replacement

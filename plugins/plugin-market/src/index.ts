@@ -52,6 +52,17 @@ export function effectiveProfile(configProfile: string): string {
 }
 
 /**
+ * Profile a package can be inherited from: the one the shell booted before it
+ * had a profile of its own, exported as `DSH_APP_LEGACY_PROFILE`. A kernel
+ * started without that variable (a user running `dsh` by hand) falls back to
+ * `web`, which is also where it would have installed its own plugins.
+ */
+export function effectiveLegacyProfile(): string {
+  const raw = (process.env.DSH_APP_LEGACY_PROFILE ?? '').trim()
+  return raw === '' ? 'web' : validateProfileName(raw)
+}
+
+/**
  * Host apply: register the market routes. The plugin owns no kernel seams —
  * a boot never fails because of it.
  * @param ctx - the host plugin context.
@@ -63,6 +74,7 @@ export function apply(ctx: Context, config: Config): void {
     ? config.storePath
     : join(resolveDshHome(), 'storages', 'dsh-app-plugin-market')
   const profile = effectiveProfile(config.profile)
+  const legacyProfile = effectiveLegacyProfile()
   const installer = new PluginInstaller(profile, process.argv[1], spawn, (message) => log.warn(message))
 
   ctx.effect(() => registerMarketRoutes(ctx.webServer, {
@@ -70,7 +82,8 @@ export function apply(ctx: Context, config: Config): void {
     catalogCachePath: join(dir, 'catalog-cache.json'),
     installer,
     profile,
+    legacyProfile,
   }, (message) => log.warn(message)), 'plugin-market: api routes')
 
-  log.info(`plugin market: sources at ${join(dir, 'sources.json')} (profile ${profile})`)
+  log.info(`plugin market: sources at ${join(dir, 'sources.json')} (profile ${profile}, inheriting from ${legacyProfile})`)
 }

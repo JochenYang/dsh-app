@@ -89,6 +89,73 @@ export function validateExactVersion(raw: unknown): string | undefined {
   return version
 }
 
+/** Cap on a spec inherited from another profile's manifest. */
+const MAX_SPEC_LENGTH = 300
+
+/**
+ * Shapes {@link validateSpec} hands to pnpm, and nothing else: a caret/tilde
+ * range or a bare exact version, a local `.tgz`, an https `.tgz`, or a github
+ * shorthand with an optional ref.
+ */
+const VERSION_RANGE_PATTERN = /^[\^~]?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+const LOCAL_TARBALL_PATTERN = /^(?:file|link):[A-Za-z]:?[\\/][^\s"?<>|]+\.tgz$/i
+const REMOTE_TARBALL_PATTERN = /^https:\/\/[^\s"?<>|]+\.tgz$/i
+const GITHUB_SHORTHAND_PATTERN = /^github:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._/-]+)?$/
+
+/**
+ * Validate a dependency spec inherited from another profile's manifest.
+ *
+ * Unlike {@link validateExactVersion} this deliberately accepts non-registry
+ * shapes, because that is what a profile manifest carries: a version range, a
+ * local tarball, a github shorthand, an https tarball. Anything else — an npm
+ * alias, a `link:` into the source tree, a bare URL, a path without `.tgz` —
+ * is refused rather than handed to pnpm.
+ *
+ * @param raw - the spec from the old profile (any shape).
+ * @returns the trimmed spec.
+ * @throws MarketValidationError when the shape is not one we recognize.
+ */
+export function validateSpec(raw: unknown): string {
+  if (typeof raw !== 'string') {
+    throw new MarketValidationError({ code: 'spec.notString', text: 'the dependency spec must be a string' })
+  }
+  const spec = raw.trim()
+  if (spec.length === 0 || spec.length > MAX_SPEC_LENGTH) {
+    throw new MarketValidationError({
+      code: 'spec.length',
+      params: { spec },
+      text: `the dependency spec must be 1-${String(MAX_SPEC_LENGTH)} characters: "${spec}"`,
+    })
+  }
+  const accepted = VERSION_RANGE_PATTERN.test(spec)
+    || LOCAL_TARBALL_PATTERN.test(spec)
+    || REMOTE_TARBALL_PATTERN.test(spec)
+    || GITHUB_SHORTHAND_PATTERN.test(spec)
+  if (!accepted) {
+    throw new MarketValidationError({
+      code: 'spec.unsupported',
+      params: { spec },
+      text: `unsupported dependency spec (a range, file:.tgz, github:owner/repo or an https .tgz is accepted): "${spec}"`,
+    })
+  }
+  return spec
+}
+
+/**
+ * Whether a spec is a bare version range (as opposed to a spec that carries
+ * its own identity: `file:`, `github:`, `https:`).
+ *
+ * The distinction decides the pnpm argument: `pnpm add ^0.5.1` is invalid and
+ * needs the package name in front, while `pnpm add file:...tgz` must not have
+ * one.
+ *
+ * @param spec - a spec already accepted by {@link validateSpec}.
+ * @returns true for a caret/tilde/bare version range.
+ */
+export function isVersionRangeSpec(spec: string): boolean {
+  return VERSION_RANGE_PATTERN.test(spec)
+}
+
 /**
  * Validate the profile name used in CLI argv. It comes from the environment,
  * not the client — this is hygiene so a broken env cannot bend the command.

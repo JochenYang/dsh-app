@@ -203,7 +203,11 @@ const cssText = `
   background: #fff;
   transition: transform 120ms ease;
 }
-.dshWs-toggle[aria-checked="true"]::after { transform: translateX(16px); }
+/* The ON track is brand-primary — a near-white SURFACE in the dsh dark theme,
+   not an accent — so the knob must not stay hardcoded white (white on white
+   made every enabled engine read as off). Same pairing as the suite's other
+   switches: the knob takes the layer colour. */
+.dshWs-toggle[aria-checked="true"]::after { transform: translateX(16px); background: var(--dsw-alias-bg-layer-1, #fff); }
 .dshWs-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
 .dshWs-grid {
   display: flex;

@@ -26,7 +26,8 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
-import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
+import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
+import { activeBootProfile, startSuiteProfileMigration } from './suite-profile'
 import { initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
 import type { KernelChannel, KernelStatusPayload } from '../shared/types'
 
@@ -516,6 +517,13 @@ async function startServerAndOpenWindow(): Promise<void> {
   const overlays = safeModeActive
     ? []
     : await prepareBrandSuite(isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir()))
+  // Profile decision + one-time migration (suite-profile.ts): the suite boots
+  // its own profile once it is ready, the shared `web` one until then. The
+  // migration copies that profile across in the background — this boot is
+  // unaffected, and a failure just means we boot `web` again next time.
+  const spec = kernel.getServerSpec()
+  const profile = activeBootProfile()
+  if (profile !== SUITE_PROFILE) startSuiteProfileMigration((line) => logKernel(line))
   // Environment scrub (opt-in): a missing config removes nothing, so the
   // default boot spawns the kernel with an unchanged inherited env. Names
   // are logged, never values — the removed list cannot leak credentials.
@@ -577,7 +585,7 @@ async function startServerAndOpenWindow(): Promise<void> {
       : { DSH_APP_KERNEL_VERSION: activeKernel.dshVersion, DSH_APP_KERNEL_CHANNEL: activeKernel.channel }),
   }
   try {
-    await server.start(kernel.getServerSpec(), port, DEFAULT_HTTP_HOST, overlays, kernelEnv)
+    await server.start(spec, port, DEFAULT_HTTP_HOST, overlays, kernelEnv, profile)
   } catch (err) {
     await handleServerDown(t('status.serverStartFailed', { detail: (err as Error).message }))
     return

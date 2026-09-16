@@ -529,8 +529,28 @@ const cssText = `
   word-break: break-all;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
-.dshMkt-empty {
-  padding: 18px 12px;
+/* Inherit row: offers the packages the previous profile declares and this one
+   lacks — shown after the shell moved the suite to a profile of its own. */
+.dshMkt-inherit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dshMkt-inheritText {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+}
+.dshMkt-empty {  padding: 18px 12px;
   border: 1px dashed var(--dsw-alias-border-l2);
   border-radius: 10px;
   color: var(--dsw-alias-label-secondary);

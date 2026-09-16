@@ -45,26 +45,36 @@ background and reports through the in-window update card and the tray.
 
 ## 3. Brand suite wiring
 
-Two seams are stitched at every server start (`src/main/brand-suite.ts`):
+Three pieces are stitched at every server start (`src/main/brand-suite.ts`,
+`src/main/suite-profile.ts`):
 
-1. **Module resolution** — the suite runs under its own profile: one junction
-   (Windows) / symlink per plugin under
-   `$DSH_HOME/profiles/dsh-app/node_modules/@dsh-app/<plugin>` (name from
-   `SUITE_PROFILE`, `src/shared/constants.ts`) points at the real package:
-   dev = this repo's `plugins/*`, prod = the active kernel's npm-flattened
-   `app/node_modules/@dsh-app/*`. `SUITE_PLUGIN_DIRS` (`brand-suite.ts:48`)
-   lists every member; `plugins/README.md` is the roster. The private profile
-   replaces the shared `profiles/node_modules` fallback, which 0.1.6's
-   runtime-mode resolver skips wholesale and where the suite also shared a
-   resolution root with the user's own `dsh` / `dsh web` runs. Links a
-   pre-0.1.6 shell left in that fallback are retired on boot
-   (`removeLegacySuiteLinks`).
-2. **Loader overlay** — `plugins/dsh-app.patch.yml` is copied into userData and
-   passed on the kernel command line (`dsh --profile dsh-app --patch <file>`);
-   it inserts the suite entries after the official bundle layers (last write
-   wins), so no upstream profile template is touched.
+1. **Module resolution** — `$DSH_HOME/profiles/node_modules/@dsh-app/<plugin>` is
+   a junction (Windows) / symlink to the real package: dev = this repo's
+   `plugins/*`, prod = the active kernel's npm-flattened
+   `app/node_modules/@dsh-app/*`. `SUITE_PLUGIN_DIRS` lists every member
+   (`plugins/README.md` is the roster). The links stay in that shared fallback
+   on purpose: it resolves from any profile (Node's parent walk reaches it) and
+   it is the one directory no profile's pnpm run prunes.
+2. **Profile** — the suite boots its own profile, `dsh-app`
+   (`SUITE_PROFILE` in `src/shared/constants.ts`); a user's own `dsh` /
+   `dsh web` runs keep `web`. On first run the shell creates that profile from
+   the shipped template's bundle list and carries the user's own patch layer
+   across (hand-written disables, MCP rows); third-party packages are NOT
+   carried — the in-app market reinstalls them into the new profile, because it
+   is the component that already handles pnpm's supply-chain policy,
+   build-script approval and specs that no longer resolve (carrying the tree was
+   measured and rejected: copying hits `EPERM` on pnpm's `.pnpm` symlinks on
+   Windows, reinstalling hits `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`). The
+   work runs in the background and the boot switches only once a marker records
+   success; a failure keeps booting `web` and retries next launch. The profile
+   in force is exported to the child as `DSH_APP_PROFILE`, so plugin-market and
+   plugin-presets install into the profile the app reads.
+3. **Loader overlay** — `plugins/dsh-app.patch.yml` is copied into userData and
+   passed on the kernel command line (`dsh --profile <name> --patch <file>`); it
+   inserts the suite entries after the official bundle layers (last write wins),
+   so no upstream profile template is touched.
 
-Both seams **degrade gracefully**: missing suite plugins (e.g. a rollback
+Every piece **degrades gracefully**: missing suite plugins (e.g. a rollback
 target kernel) boot vanilla — no links, no overlay, boot is never blocked.
 
 Client-side composition (all zero-upstream-change):

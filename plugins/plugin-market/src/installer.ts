@@ -34,6 +34,8 @@ import {
   validateExactVersion,
   validatePackageName,
   validateProfileName,
+  isVersionRangeSpec,
+  validateSpec,
   tailLines,
 } from './npm.ts'
 
@@ -149,6 +151,28 @@ export class PluginInstaller {
       const { output, blockedBuilds } = await this.runCli(['add', `${name}@${exact}`])
       this.log(`plugin-market: installed ${name}@${exact} into profile ${this.profile}`)
       return { version: exact, output, ...(blockedBuilds !== null ? { blockedBuilds } : {}) }
+    })
+  }
+
+  /**
+   * Install one inherited package verbatim: the spec is taken from the old
+   * profile's manifest, so it may be a version range, a local tarball, a
+   * github shorthand or an https tarball — the shapes a profile realistically
+   * declares. pnpm decides what each means; the market only refuses shapes it
+   * does not recognize.
+   * @param spec - raw dependency spec (validated here).
+   * @returns the CLI output tail.
+   */
+  async installSpec(pkg: unknown, spec: unknown): Promise<CliRunResult> {
+    const name = validatePackageName(pkg)
+    const validated = validateSpec(spec)
+    // A bare range has no identity of its own — `pnpm add ^0.5.1` is invalid —
+    // while a file:/github:/https: spec must not be prefixed with a name.
+    const argument = isVersionRangeSpec(validated) ? `${name}@${validated}` : validated
+    return this.enqueue(async () => {
+      const { output, blockedBuilds } = await this.runCli(['add', argument])
+      this.log(`plugin-market: installed ${argument} into profile ${this.profile}`)
+      return { version: validated, output, ...(blockedBuilds !== null ? { blockedBuilds } : {}) }
     })
   }
 

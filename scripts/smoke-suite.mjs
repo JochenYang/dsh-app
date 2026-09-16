@@ -46,6 +46,10 @@ const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
 const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch']
 
 // Mirrors SUITE_PROFILE / SUITE_PROFILE_BUNDLES in src/shared/constants.ts.
+// The suite boots its own profile; the throwaway home below has no legacy
+// profile to migrate from, so this probe mirrors the post-migration state: the
+// profile manifest plus the module links the shell keeps in the shared
+// fallback (that directory resolves for every profile).
 const SUITE_PROFILE = 'dsh-app'
 const SUITE_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 const FIXTURE = path.join(root, 'scripts', 'fixtures', 'minimal-mcp-server.mjs')
@@ -114,7 +118,7 @@ function buildLaunch(args) {
     if (!existsSync(nodeBin) || !existsSync(script)) throw new Error(`runtime dir incomplete: ${dir}`)
     return {
       command: nodeBin,
-      args: [script, '--profile', 'dsh-app', '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
+      args: [script, '--profile', SUITE_PROFILE, '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
       cwd: path.join(dir, 'app'),
       suiteSource: path.join(dir, 'app', 'node_modules', '@dsh-app'),
       shell: false,
@@ -123,9 +127,10 @@ function buildLaunch(args) {
   const checkout = args.devCheckout ?? findDevCheckout()
   if (process.platform === 'win32') {
     // pnpm is a .cmd on Windows: one shell-resolved command line, like the
-    // shell's own server.ts dev path.
+    // shell's own server.ts dev path. Top-level `--profile`, never the `web`
+    // subcommand alias: that alias cannot address another profile.
     return {
-      command: `pnpm dsh --profile dsh-app --patch "${OVERLAY}" --host 127.0.0.1 --port ${String(args.port)} --no-open`,
+      command: `pnpm dsh --profile ${SUITE_PROFILE} --patch "${OVERLAY}" --host 127.0.0.1 --port ${String(args.port)} --no-open`,
       args: [],
       cwd: checkout,
       suiteSource: path.join(root, 'plugins'),
@@ -134,7 +139,7 @@ function buildLaunch(args) {
   }
   return {
     command: 'pnpm',
-    args: ['dsh', '--profile', 'dsh-app', '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
+    args: ['dsh', '--profile', SUITE_PROFILE, '--patch', OVERLAY, '--host', '127.0.0.1', '--port', String(args.port), '--no-open'],
     cwd: checkout,
     suiteSource: path.join(root, 'plugins'),
     shell: false,
@@ -471,11 +476,9 @@ async function main() {
   }
 
   const home = mkdtempSync(path.join(tmpdir(), 'dsh-smoke-home-'))
-  // Upstream boots a profile only when it carries a manifest, so the shell
-  // writes one before spawning (ensureSuiteProfile in src/main/brand-suite.ts)
-  // — mirror that here, or the kernel dies with `profile "dsh-app" does not
-  // exist`. Build it before the links: the links make the dir non-empty, and
-  // upstream's own initializer refuses a directory it did not create.
+  // The shell's migration materializes the profile manifest before the first
+  // boot of the suite profile (upstream refuses a profile without one); a
+  // throwaway home has nothing to migrate, so write it directly.
   const profileDir = path.join(home, 'profiles', SUITE_PROFILE)
   mkdirSync(profileDir, { recursive: true })
   const profileManifest = path.join(profileDir, 'package.json')
@@ -488,10 +491,10 @@ async function main() {
     }, undefined, 2)}\n`)
   }
   // Replicate the shell's brand-suite seam inside the throwaway home: one link
-  // per suite plugin in the SUITE profile's own node_modules (profile name and
-  // scope path must match src/shared/constants.ts SUITE_PROFILE and
-  // src/main/brand-suite.ts), so the composed loader resolves them.
-  const scope = path.join(home, 'profiles', 'dsh-app', 'node_modules', '@dsh-app')
+  // per suite plugin, in the SHARED fallback the shell uses (it resolves for
+  // every profile, and no profile's pnpm run can prune it). Scope path and
+  // profile name must match src/main/brand-suite.ts and src/shared/constants.ts.
+  const scope = path.join(home, 'profiles', 'node_modules', '@dsh-app')
   mkdirSync(scope, { recursive: true })
   for (const dir of SUITE_DIRS) {
     const target = path.join(launch.suiteSource, dir)
@@ -515,7 +518,7 @@ async function main() {
       cwd: launch.cwd,
       shell: launch.shell,
       stdio: ['ignore', logFd, logFd],
-      env: { ...process.env, DSH_HOME: home },
+      env: { ...process.env, DSH_HOME: home, DSH_APP_PROFILE: SUITE_PROFILE },
     })
     child.on('exit', (code) => {
       if (child.stopping !== true && code !== null && code !== 0) {
