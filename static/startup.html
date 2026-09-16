@@ -100,6 +100,7 @@ window.__dshStartupShowFailure = function (config) {
   body {
     display: flex;
     flex-direction: column;
+    align-items: center;
     /* The window has no system title bar: the native window controls float over
        the top 36px, so the page reserves that strip (as the drag handle below)
        and starts its own content under it. Matches SPLASH_OVERLAY_HEIGHT. */
@@ -127,42 +128,61 @@ window.__dshStartupShowFailure = function (config) {
   /* ---------------------------------------------------------------- brand row
      44px tile + wordmark + version. The version sits in tabular numerals so
      two builds' numbers align when compared side by side. */
-  header { display: flex; align-items: center; gap: 14px; }
+  /* The content column: sized for the WINDOW it now lives in (the main window,
+     not the retired 460x430 splash) and centred both ways, so the wait reads as
+     one deliberate block rather than a strip pinned to the top left. The width
+     is the readable measure of the progress list, not the viewport. */
+  /* Splash composition for the MAIN window (1280x800, resizable): the block is
+     centred, centred-aligned and unbordered. A bounded card here read as a
+     modal dialog pasted into an empty window (user review); a splash screen is
+     what this page actually is, so it is built like one — a large brand mark,
+     then the state, then the steps. */
+  .shell {
+    width: 100%;
+    max-width: 460px;
+    margin: auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 0 0 auto;
+    text-align: center;
+  }
+  header { display: flex; flex-direction: column; align-items: center; gap: 16px; }
   /* The app icon, in both themes: the whale knocked out of the brand-blue
      tile. The tile colour is the icon's own, sampled from
      resources/icon-128.png; a per-theme variant was tried and rejected — a
      brand mark that changes shape between themes reads as two different marks.
      Inline SVG, so it can never be a missing file. */
   #startup-logo {
-    width: 44px;
-    height: 44px;
+    width: 72px;
+    height: 72px;
     flex: none;
     display: grid;
     place-items: center;
-    border-radius: 10px;
+    border-radius: 16px;
     background: rgb(76, 104, 252);
     color: #fff;
     box-shadow: var(--dsw-alias-brand-tile-shadow);
   }
-  #startup-logo svg { width: 27px; height: auto; display: block; }
+  #startup-logo svg { width: 44px; height: auto; display: block; }
   .brand-text { min-width: 0; }
   #startup-name {
     margin: 0;
-    font-size: 15px;
+    font-size: 19px;
     font-weight: 600;
     letter-spacing: .04em;
     line-height: 1.2;
   }
   #startup-version {
-    margin: 2px 0 0;
-    font-size: 11.5px;
+    margin: 3px 0 0;
+    font-size: 12px;
     color: var(--dsw-alias-label-secondary);
     font-variant-numeric: tabular-nums;
   }
   #startup-hint { margin: 12px 0 0; font-size: 12px; color: var(--dsw-alias-label-secondary); }
 
   /* ---------------------------------------------------------------- progress */
-  main { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  main { display: flex; flex-direction: column; }
   #startup-status { margin: 12px 0 8px; font-size: 14px; font-weight: 500; }
   #startup-bar {
     position: relative;
@@ -201,6 +221,10 @@ window.__dshStartupShowFailure = function (config) {
   #startup-steps {
     display: grid;
     gap: 6px;
+    width: fit-content;
+    margin-left: auto;
+    margin-right: auto;
+    text-align: left;
     margin: 0 0 12px;
     padding: 0;
     list-style: none;
@@ -248,7 +272,7 @@ window.__dshStartupShowFailure = function (config) {
   }
 
   /* ------------------------------------------------------------------ footer */
-  .foot { margin-top: auto; }
+  .foot { margin-top: 4px; }
   #startup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
   /* The fixed wish, quietest thing on the page: it carries no state and must
      never push the layout (two lines at most). */
@@ -334,6 +358,7 @@ window.__dshStartupShowFailure = function (config) {
 </head>
 <body>
   <div id="startup-titlebar"></div>
+  <div class="shell">
   <header>
     <!-- Brand mark: the official whale, inlined as a currentColor vector so it
          adapts to the theme (the app icon is this glyph on a blue tile). The
@@ -379,6 +404,7 @@ window.__dshStartupShowFailure = function (config) {
       </section>
     </div>
   </main>
+  </div>
   <script>
   (function () {
     var api = window.__dshStartup;

@@ -169,8 +169,10 @@ function readTheme(): ThemePalette {
   // Dark themes keep the whale a LOW-contrast texture: the upstream dark
   // palette is near-black (bg rgb(21,21,23)) with a slightly lighter
   // sidebar (rgb(27,27,28)) — a bright tile wall there clashes hard with
-  // the quiet sidebar. 0.45 reads as a subtle inked watermark instead.
-  const baseAlpha = dark ? 0.45 : 0.66
+  // the quiet sidebar. Raised from 0.45 after review: at that level the mark
+  // read as "missing" rather than as a watermark in a dark room, which is the
+  // opposite of what a brand mark is for. Light keeps its 0.66.
+  const baseAlpha = dark ? 0.58 : 0.66
   const lightShadeFloor = 0.55
 
   // Precompute the per-(vLight, glow) fill colors: tiles only ever paint one

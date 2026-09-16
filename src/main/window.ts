@@ -443,6 +443,11 @@ export function showKernelProgress(win: BrowserWindow | null, status: KernelStat
   if (status.phase === 'ready') activeKernelStatus = null
   else activeKernelStatus = status
   if (!win || win.isDestroyed()) return
+  // The loading page states the same thing in its own state line and step list,
+  // so a card on top of it is a duplicate (reported twice, from a screenshot).
+  // The status is still STORED above: once the real UI loads, a reload brings
+  // the card back — which is what makes the tray's "restart server" visible.
+  if (isShowingLoadingPage(win)) return
   // A plain boot "ready" is not an event worth a card (the tray tooltip still
   // reflects it), and a finished kernel update already painted its success card
   // from the 'installing' status.
@@ -462,8 +467,27 @@ export function showKernelProgress(win: BrowserWindow | null, status: KernelStat
     .catch(() => undefined)
 }
 
-/** Re-inject the active status after a page reload (server restart mid-update). */
+/**
+ * Re-inject the active status after a page reload.
+ *
+ * Two callers matter and they want different things:
+ *
+ * - the REAL UI reloading (a kernel update restarted the server, or the tray's
+ *   restart): the card must come back, because it is the only place that says
+ *   "the kernel is being updated" / "the server is restarting" — a tray action
+ *   with no visible effect would look broken;
+ * - the LOADING PAGE finishing its load (the window is created before the
+ *   kernel, so this fires on every boot): nothing to re-inject. That page shows
+ *   the same status itself, in its own state line and step list, and an extra
+ *   card at the top of it is a duplicate — measured on screen, twice.
+ *
+ * The document's own URL decides, which is the same signal the shell uses to
+ * tell the two apart everywhere else (`isShowingLoadingPage` in index.ts).
+ *
+ * @param win - the window whose document just finished loading.
+ */
 function reinjectKernelProgress(win: BrowserWindow): void {
+  if (isShowingLoadingPage(win)) return
   const status = activeKernelStatus
   if (!status || TERMINAL_PHASES.has(status.phase)) return
   showKernelProgress(win, status)
@@ -565,6 +589,62 @@ function openExternalSafe(target: string): void {
  * browser. A hostname-only check would let any 127.0.0.1:<other-port> page
  * (e.g. a local dev server) load inside the app window.
  */
+/**
+ * The loading page, loaded by the main window before the kernel is up. Same
+ * file the standalone splash used (static/startup.html → dist/static), so its
+ * state contract with startup-window.ts is unchanged.
+ */
+const SPLASH_PAGE = path.join(__dirname, '..', 'static', 'startup.html')
+
+/** Window background while the splash is up; the page paints the same value. */
+const DEFAULT_BG = '#ffffff'
+
+/**
+ * Windows currently showing the loading page.
+ *
+ * An explicit flag rather than a look at the document URL: the shell broadcasts
+ * its first status moments after creating the window, while the document is
+ * still `about:blank`, so a URL test let an injection through that then landed
+ * in whichever document committed next — the splash (measured, twice).
+ * `createMainWindow` marks the window, `loadAppIntoWindow` clears it.
+ */
+const loadingPageWindows = new WeakSet<BrowserWindow>()
+
+/**
+ * Mark a window as showing the loading page.
+ *
+ * A shell-level concept rather than a detail of `createMainWindow`: the window
+ * created for the boot shows the splash, and anything else that ever hosts that
+ * page must say so the same way (a second host would otherwise re-introduce the
+ * duplicate card this flag exists to prevent).
+ *
+ * @param win - the window about to load the loading page.
+ */
+export function markLoadingPage(win: BrowserWindow): void {
+  loadingPageWindows.add(win)
+}
+
+/** Whether a window is still showing the loading page. */
+export function isShowingLoadingPage(win: BrowserWindow | null): boolean {
+  return win !== null && loadingPageWindows.has(win)
+}
+
+/**
+ * Forget the overlay colour this window was last set to.
+ *
+ * The loading page paints the chrome from the SHELL's theme preference (it has
+ * no page to read one from); the live UI paints it from the page's own palette,
+ * through the chrome-sync loop. The sync loop skips a colour it believes is
+ * already applied, so without this the splash's colour would stick — a white
+ * strip over a dark app, which is exactly what a user saw after a hand-off.
+ * Clearing the cache makes the next sample authoritative.
+ *
+ * @param win - the window whose overlay colour must be re-read.
+ */
+export function resetOverlayColor(win: BrowserWindow): void {
+  appliedChromeColors.delete(win)
+}
+
 /** Live server origin of each window; see {@link updateServerOrigin}. */
 const windowOrigins = new WeakMap<BrowserWindow, { value: string }>()
 
@@ -586,9 +666,28 @@ export function updateServerOrigin(win: BrowserWindow, url: string): void {
   }
 }
 
-export function createMainWindow(url: string): BrowserWindow {
+/**
+ * Create the main window with the loading page in it.
+ *
+ * The window appears immediately and shows the LOCAL splash page; the caller
+ * navigates it to the real URL once the kernel answers (see the window-first
+ * boot in index.ts). This is the upstream desktop's own shape: the wait belongs
+ * to a window that is already on screen, not to a second, smaller window that
+ * then has to hand over. It also keeps the boot honest — everything the splash
+ * used to report (staged progress, failures, retry) now happens in the window
+ * the user will keep using.
+ *
+ * The navigation guard starts with NO allowed origin: the splash is a local
+ * file, and a URL that arrives before the kernel is healthy must not be
+ * treated as in-app. `updateServerOrigin` arms it when the real URL is loaded.
+ */
+export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, show: false })
   win.once('ready-to-show', () => win.show())
+  // The splash installs the same state handlers the standalone window did, so
+  // the shell keeps driving it through updateStartupWindow/showStartupFailure.
+  markLoadingPage(win)
+  void win.loadFile(SPLASH_PAGE)
 
   // Real-time overlay sync: an injected page observer pushes the effective
   // strip color the moment it changes (theme switch, modal mask open/close,
@@ -601,13 +700,9 @@ export function createMainWindow(url: string): BrowserWindow {
   // rather than a plain local because a kernel update restarts the server on a
   // fresh port and reloads this same window: without a way to update it, every
   // same-origin navigation after the restart looks external and gets pushed to
-  // the system browser. An unparsable URL leaves it empty — no origin allowed.
+  // the system browser. It starts EMPTY — the window is created before the
+  // kernel has a URL, and loadAppIntoWindow arms it.
   const origin = { value: '' }
-  try {
-    origin.value = new URL(url).origin
-  } catch {
-    // leave empty — navigation falls back to external
-  }
   windowOrigins.set(win, origin)
 
   win.webContents.setWindowOpenHandler(({ url: target }) => {
@@ -625,6 +720,9 @@ export function createMainWindow(url: string): BrowserWindow {
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (event, target) => {
+    // The splash is a file:// document: navigating to it (or reloading it) is
+    // the shell's own doing, never an external link.
+    if (target.startsWith('file:')) return
     let allowed = false
     try {
       allowed = origin.value !== '' && new URL(target).origin === origin.value
@@ -637,7 +735,23 @@ export function createMainWindow(url: string): BrowserWindow {
     }
   })
 
-  void win.loadURL(url)
   return win
+}
+
+/**
+ * Navigate the main window from the splash to the live UI.
+ *
+ * Separate from creation because the two happen seconds apart: the window is
+ * shown first (with the splash), and this is called once the kernel is healthy.
+ * The origin is armed HERE, in the same call — a guard that allowed the live
+ * origin before that URL existed would have been pre-authorizing a page.
+ *
+ * @param win - the main window.
+ * @param url - the server's settled URL.
+ */
+export function loadAppIntoWindow(win: BrowserWindow, url: string): void {
+  loadingPageWindows.delete(win)
+  updateServerOrigin(win, url)
+  void win.loadURL(url)
 }
 

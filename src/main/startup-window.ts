@@ -19,6 +19,7 @@
  * Deliberately nothing else: the splash must not be able to talk to anything.
  */
 import { app, BrowserWindow, nativeTheme } from 'electron'
+import { isShowingLoadingPage, resetOverlayColor } from './window'
 import path from 'node:path'
 import type { KernelStatusPayload, KernelStatusStep } from '../shared/types'
 import { t, ZH_KERNEL_STATUS_STEP_KEYWORDS } from '../shared/locale'
@@ -36,14 +37,6 @@ const SPLASH_WIDTH = 460
 const SPLASH_HEIGHT = 430
 
 /**
- * Chrome metrics. The splash wears the same custom chrome as the main window —
- * a hidden system frame plus the native window-control overlay — so the two
- * windows cannot look like two different products. The page reserves this strip
- * and makes it draggable; see `static/startup.html`.
- */
-const SPLASH_OVERLAY_HEIGHT = 36
-
-/**
  * Window background per theme. These are the resolved values of the UI's own
  * `--dsw-alias-bg-base` (see static/startup.html, which carries the same pair
  * with their token names): the window paints before the page does, and a
@@ -51,11 +44,6 @@ const SPLASH_OVERLAY_HEIGHT = 36
  */
 const SPLASH_BG_LIGHT = '#ffffff'
 const SPLASH_BG_DARK = '#151517'
-
-/** Symbol colour for the overlay's buttons: dark on a light strip, light on dark. */
-function overlaySymbolFor(theme: ThemeMode): string {
-  return theme === 'dark' ? '#e0e0e0' : '#1a1a1a'
-}
 
 /** How long to wait for the page before showing the window regardless. */
 const SPLASH_SHOW_FALLBACK_MS = 2_000
@@ -164,11 +152,47 @@ interface StartupFailure {
 }
 
 /**
- * Splash window, or null once it is gone. The main window's lifecycle is
- * deliberately untouched by this module: only the window created here is
- * ever shown or closed here.
+ * The window hosting the loading page — the MAIN window, on the normal boot.
+ *
+ * This module no longer creates a window of its own: the main window opens
+ * showing the local page (see `window.ts`), which is where the wait belongs.
+ * `attachSplashToWindow` binds this module to it, and the standalone
+ * `createStartupWindow` stays for the one path that still wants a separate
+ * window (a boot with no main window available yet, e.g. a third-party shell).
  */
 let splash: BrowserWindow | null = null
+
+/**
+ * Bind this module to a window that already shows the loading page.
+ *
+ * @param win - the window (the main window, on the normal boot).
+ * @param opts - `ownsWindow` = close it on hand-off (the standalone splash
+ * did own its window; the main window obviously must survive).
+ */
+export function attachSplashToWindow(win: BrowserWindow, opts: { ownsWindow?: boolean } = {}): void {
+  splash = win
+  ownsWindow = opts.ownsWindow === true
+  pageReady = false
+  currentStage = 1
+  stopThemeWatch = watchSystemTheme()
+  applyWindowTheme()
+  win.on('closed', () => {
+    if (splash === win) splash = null
+    pageReady = false
+    stopThemeWatch?.()
+    stopThemeWatch = null
+  })
+  win.webContents.on('did-start-loading', () => { pageReady = false })
+  win.webContents.on('did-finish-load', () => {
+    if (splash !== win) return
+    pageReady = true
+    if (lastView !== null) push(lastView)
+  })
+  push({ stage: currentStage, message: t('splash.starting'), progress: null })
+}
+
+/** Whether hand-off should close the bound window (standalone splash does). */
+let ownsWindow = false
 
 /** Latest view pushed; replayed on did-finish-load so no state is missed. */
 let lastView: StartupView | null = null
@@ -348,16 +372,39 @@ function applyThemePreference(): ThemeMode {
  * buttons. Both have to follow a live theme switch, or the buttons float on a
  * strip that no longer matches the page under it.
  */
+/**
+ * Re-read the theme preference and repaint the LOADING PAGE's own chrome.
+ *
+ * Only ever touches a window that is still showing the splash: once the live UI
+ * is loaded into that window, its appearance belongs to the page (and to the
+ * chrome-sync loop), which is what this shell did before the window-first boot.
+ */
+function refreshTheme(): void {
+  if (!isShowingLoadingPage(splash)) return
+  applyThemePreference()
+  applyWindowTheme()
+  if (lastView !== null) push(lastView)
+}
+
+/**
+ * Paint the window's own background for the current theme.
+ *
+ * Background only, and deliberately NOT the title-bar overlay: the strip has a
+ * single owner — the page's own sampler in window.ts (`startChromeSync`), which
+ * reads whatever is actually painted under the window controls and applies it.
+ * The shell writing that strip as well is what broke it: two writers, two
+ * caches, and the loser's colour stuck (a white strip over a dark app, even
+ * behind modal masks). The splash page paints its own themed background, so the
+ * sampler follows the splash for free — no shell-side theme knowledge needed.
+ *
+ * The window `backgroundColor` is different: it shows before the page paints
+ * (and behind it), so it cannot be sampled and must be set here.
+ */
 function applyWindowTheme(): void {
   const win = splash
   if (win === null || win.isDestroyed()) return
-  const background = currentTheme === 'dark' ? SPLASH_BG_DARK : SPLASH_BG_LIGHT
-  win.setBackgroundColor(background)
-  win.setTitleBarOverlay({
-    color: background,
-    symbolColor: overlaySymbolFor(currentTheme),
-    height: SPLASH_OVERLAY_HEIGHT,
-  })
+  if (!isShowingLoadingPage(win)) return
+  win.setBackgroundColor(currentTheme === 'dark' ? SPLASH_BG_DARK : SPLASH_BG_LIGHT)
 }
 
 /**
@@ -407,15 +454,15 @@ export function createStartupWindow(): void {
     show: false,
     title: BRAND_NAME,
     backgroundColor: currentTheme === 'dark' ? SPLASH_BG_DARK : SPLASH_BG_LIGHT,
-    // Same custom chrome as the main window: no system title bar, but the
-    // native window controls stay (an overlay strip the page reserves and
-    // paints to match). A framed splash next to our frameless main window
-    // reads as two different applications.
+    // Custom chrome like the main window: no system title bar, native controls
+    // kept, and the strip is left to the page's own sampler (window.ts) — this
+    // module sets the initial colours only, because a window cannot be created
+    // without them.
     titleBarStyle: 'hidden',
     titleBarOverlay: {
       color: currentTheme === 'dark' ? SPLASH_BG_DARK : SPLASH_BG_LIGHT,
-      symbolColor: overlaySymbolFor(currentTheme),
-      height: SPLASH_OVERLAY_HEIGHT,
+      symbolColor: currentTheme === 'dark' ? '#e0e0e0' : '#1a1a1a',
+      height: 36,
     },
     icon: path.join(__dirname, '..', '..', 'resources', 'icon.png'),
     webPreferences: {
@@ -498,14 +545,29 @@ export function updateStartupWindow(status: KernelStatusPayload): void {
  * instead of leaving a gap with nothing on screen.
  */
 export function handoffToMainWindow(win: BrowserWindow): void {
-  if (splash === null || splash.isDestroyed()) return
-  currentStage = 5
-  push({ stage: currentStage, message: t('splash.openingUi'), progress: null })
-  if (win.isVisible()) {
-    closeStartupWindow()
-    return
+  // The loading page is done. For the standalone splash that means a last
+  // repaint before it closes; for a window that now hosts the live UI it means
+  // the OPPOSITE: forget the colour we painted, so the page's own chrome sync
+  // takes over (and is not skipped as "already applied").
+  if (ownsWindow) refreshTheme()
+  else resetOverlayColor(win)
+  if (ownsWindow && splash !== null && !splash.isDestroyed()) {
+    currentStage = 5
+    push({ stage: currentStage, message: t('splash.openingUi'), progress: null })
+    if (win.isVisible()) {
+      closeStartupWindow()
+    } else {
+      win.once('ready-to-show', () => closeStartupWindow())
+    }
   }
-  win.once('ready-to-show', () => closeStartupWindow())
+  // Hosting the main window: it stays, and this module simply stops driving the
+  // page once the real UI has been loaded into it (the caller navigates first).
+  splash = null
+  pageReady = false
+  lastView = null
+  lastSkeleton = null
+  stopThemeWatch?.()
+  stopThemeWatch = null
 }
 
 /** Close the splash window (no-op once it is gone). */

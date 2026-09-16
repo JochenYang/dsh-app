@@ -10,8 +10,8 @@ import { isSafeModeEnabled, setSafeMode } from './safe-mode'
 import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
 import { detectLocalProxy, isProxyAlive, withDetectedProxy } from './proxy-detect'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
-import { createMainWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies, updateServerOrigin } from './window'
-import { createStartupWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
+import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies, updateServerOrigin } from './window'
+import { attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
 import { startDesktopBridge, type DesktopBridge } from './desktop-bridge'
 import {
   deliverWorkspaceLaunch,
@@ -135,10 +135,11 @@ function broadcastStatus(status: KernelStatusPayload): void {
   setTrayTooltip(status.phase === 'ready'
     ? `DSH APP — dsh ${kernel.getCurrent()?.manifest.dshVersion ?? ''}${tag}`
     : `DSH APP — ${status.message}${tag}`)
+  // The card itself stays off the loading page (see showKernelProgress: one
+  // status surface at a time); this call still runs so the status is recorded
+  // for the hand-off and for a later reload of the real UI.
   showKernelProgress(mainWindow, status.phase === 'ready' && safeModeActive ? { ...status, message: `${status.message}${tag}` } : status)
-  // Splash mirror: during boot there is no main window and no in-window card,
-  // so the splash is the only surface that can show this status. It is a no-op
-  // once the main window is up (the splash is closed by then).
+  // Splash mirror: no-op once the page has handed over to the real UI.
   updateStartupWindow(status)
   if (status.phase === 'error') void offerStartupRecovery(status.message, status.error)
 }
@@ -463,6 +464,45 @@ async function openQueuedWorkspace(): Promise<void> {
   )
 }
 
+/**
+ * One-time lifecycle wiring for the main window.
+ *
+ * Called from wherever the window is created — boot() on the normal path, or
+ * this file's restart branch when the window was destroyed while the server was
+ * down. Idempotent by construction: it is called once per window instance, and
+ * the window itself is created in exactly one place per boot.
+ *
+ * @param win - the freshly created main window.
+ */
+function attachMainWindowHandlers(win: BrowserWindow): void {
+  win.on('close', (event) => {
+    // Tray app: closing the window may either hide it (keep running in the
+    // tray) or quit the app — the user picks once, per close. The dialog is
+    // shown on every close so quitting is never a silent surprise; while the
+    // dialog is open the close is prevented, and the choice decides.
+    //
+    // A close while the loading page is still up means the kernel never became
+    // reachable: there is no page to host that dialog, and promptCloseChoice
+    // falls back to a native box, so the choice is still the user's.
+    if (quitting) return
+    event.preventDefault()
+    void promptCloseChoice(win).then((choice) => {
+      if (choice === 'tray') {
+        // The dialog outlives the window in rare races (window closed while
+        // the prompt is open); hide only a live window.
+        if (!win.isDestroyed()) win.hide()
+      } else if (choice === 'quit') {
+        quitting = true
+        app.quit()
+      }
+      // 'cancel' (or the dialog being unanswerable): keep the window open.
+    })
+  })
+  win.on('closed', () => {
+    mainWindow = null
+  })
+}
+
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
   // Ring reset: failure classification must reflect THIS startup attempt only.
@@ -491,17 +531,14 @@ async function startServerAndOpenWindow(): Promise<void> {
   // check is skipped by design). Probing first is what keeps the other state
   // working: with the VPN off, injecting a dead proxy URL would send every
   // request to a closed port instead.
-  const detectedProxy = await detectLocalProxy()
-  const { env: proxyEnv, injected } = withDetectedProxy(scrubbed.env, detectedProxy)
-  // Record what THIS shell injected so the watchdog can act on it later. A
-  // proxy the user exported is deliberately not recorded: it is not ours to
-  // re-evaluate, and restarting on its disappearance would fight their setup.
-  injectedProxyUrl = injected ? detectedProxy : undefined
-  if (injected) {
-    logKernel(`[kernel] local proxy detected at ${detectedProxy ?? ''}; injecting proxy env`)
-  } else if (detectedProxy === undefined) {
-    logKernel('[kernel] no local proxy listening; kernel runs without proxy env')
-  }
+  //
+  // Started HERE but awaited below, next to the spawn: the probe walks eight
+  // ports on two hosts and answers in tens of milliseconds only when a proxy
+  // is listening — with none running every port waits out its connect. On the
+  // critical path that delay landed between the splash and the spawn, where
+  // the user is already watching. Below, it overlaps the suite wiring and the
+  // env scrub, which are themselves asynchronous file work.
+  const proxyProbe = detectLocalProxy()
   // Native actions (reveal a folder, notify, save-as, pick a directory) live in
   // this process, and the kernel child reaches them through the bridge's
   // endpoint + token. Started here so a server that crashed and restarted finds
@@ -517,6 +554,18 @@ async function startServerAndOpenWindow(): Promise<void> {
   // read is OMITTED rather than sent empty, so the report can say "unknown"
   // instead of printing a blank version. `channel` is a literal union, so it
   // needs no empty check of its own.
+  const detectedProxy = await proxyProbe
+  const { env: proxyEnv, injected } = withDetectedProxy(scrubbed.env, detectedProxy)
+  // Record what THIS shell injected so the watchdog can act on it later. A
+  // proxy the user exported is deliberately not recorded: it is not ours to
+  // re-evaluate, and restarting on its disappearance would fight their setup.
+  injectedProxyUrl = injected ? detectedProxy : undefined
+  if (injected) {
+    logKernel(`[kernel] local proxy detected at ${detectedProxy ?? ''}; injecting proxy env`)
+  } else if (detectedProxy === undefined) {
+    logKernel('[kernel] no local proxy listening; kernel runs without proxy env')
+  }
+
   const activeKernel = kernel.getCurrent()?.manifest
   const shellVersion = app.getVersion()
   const kernelEnv = {
@@ -539,42 +588,28 @@ async function startServerAndOpenWindow(): Promise<void> {
   // (431 → white screen). Clear stale ones before the window loads.
   await clearStaleAuthCookies()
   if (!mainWindow) {
-    mainWindow = createMainWindow(url)
-    mainWindow.on('close', (event) => {
-      // Tray app: closing the window may either hide it (keep running in the
-      // tray) or quit the app — the user picks once, per close. The dialog is
-      // shown on every close so quitting is never a silent surprise; while the
-      // dialog is open the close is prevented, and the choice decides.
-      if (quitting) return
-      event.preventDefault()
-      const win = mainWindow
-      void promptCloseChoice(win).then((choice) => {
-        if (choice === 'tray') {
-          // The dialog outlives the window in rare races (window closed while
-          // the prompt is open); hide only a live window.
-          if (win !== null && !win.isDestroyed()) win.hide()
-        } else if (choice === 'quit') {
-          quitting = true
-          app.quit()
-        }
-        // 'cancel' (or the dialog being unanswerable): keep the window open.
-      })
-    })
-    mainWindow.on('closed', () => {
-      mainWindow = null
-    })
+    // Only reachable when the window was destroyed while the server was down
+    // (the tray's "restart server" path). The normal boot creates it far
+    // earlier, with the loading page — see boot().
+    mainWindow = createMainWindow()
+    attachMainWindowHandlers(mainWindow)
+  } else if (isShowingLoadingPage(mainWindow)) {
+    // Still on the loading page: this is the normal first boot. Arm the origin
+    // and navigate — the window is already on screen and visible.
+    loadAppIntoWindow(mainWindow, url)
+    mainWindow.show()
   } else {
-    // The server may have restarted on a fresh port (kernel update or crash
-    // recovery); retarget the navigation guard before reloading, otherwise
-    // every same-origin link in the reloaded page is pushed to the browser.
+    // The server restarted on a fresh port (kernel update or crash recovery)
+    // while the UI was up: retarget the guard and reload, otherwise every
+    // same-origin link in the reloaded page is pushed to the browser.
     updateServerOrigin(mainWindow, url)
     void mainWindow.loadURL(url)
     mainWindow.show()
   }
-  // Splash → main window. Only the splash created by this shell is closed, and
-  // only once the real window is on screen; mainWindow's own lifecycle (close
-  // dialog, 'closed' handler, reuse across server restarts) is untouched.
-  if (mainWindow !== null) handoffToMainWindow(mainWindow)
+  // The loading page is gone now; the standalone splash (if one was ever
+  // created) is closed and unhooked. Nothing else about mainWindow's lifecycle
+  // — the close dialog, the 'closed' handler, reuse across restarts — changes.
+  handoffToMainWindow(mainWindow)
   // A folder argument opens as a workspace once the page can answer; the
   // delivery retries while the client plugin is still loading, so calling it
   // here (rather than on a load event) loses nothing. Both branches above are
@@ -831,11 +866,19 @@ async function boot(): Promise<void> {
   // here rather than at module scope so `app.getAppPath()` is settled and the
   // argv is the one this process was really started with.
   queueWorkspaceArg(process.argv, workspaceArgContext(process.cwd()))
-  // First-launch visibility, first thing: everything below (kernel adoption,
-  // first install, server spawn) is unchanged, but on a cold start it runs for
-  // tens of seconds before any other window exists — the splash is the only
-  // feedback the user gets until the main window opens.
-  createStartupWindow()
+  // Window FIRST, before any kernel work: it opens showing the local loading
+  // page, and startServerAndOpenWindow() later navigates it to the live UI.
+  // This is the shape the upstream desktop app uses, and it is why it feels
+  // instant — the wait happens behind a window the user is already looking at,
+  // instead of in front of one. Measured on this machine, the kernel is up in
+  // ~8 s (bare node start 44 ms, CLI load 81 ms, the rest is plugin-tree
+  // composition), so what the user perceives is decided here.
+  mainWindow = createMainWindow()
+  attachMainWindowHandlers(mainWindow)
+  // The loading page lives in the main window now: bind the splash module to it
+  // so status pushes, the pause control, the failure card and the digest all
+  // land where they used to.
+  attachSplashToWindow(mainWindow)
   // Read once per run: entering/leaving safe mode relaunches the app, so the
   // in-process flag cannot drift from the on-disk marker mid-session.
   safeModeActive = await isSafeModeEnabled()
