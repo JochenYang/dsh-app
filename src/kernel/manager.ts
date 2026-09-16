@@ -1125,12 +1125,25 @@ export class KernelManager {
       return { kind: 'pnpm', cwd: this.opts.devCheckoutDir! }
     }
     const dir = this.getCurrentDir()
-    const nodePath = path.join(dir, 'node', this.opts.platform === 'win32' ? 'node.exe' : 'node')
+    const scriptPath = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    const cwd = path.join(dir, 'app')
+    // Electron ships its own Node. When that one is at least as new as the
+    // binary this runtime bundles, the kernel runs on Electron's and the
+    // bundled binary earns nothing — the same trade the upstream desktop
+    // makes. A runtime whose manifest predates the `node` field reads as
+    // "unknown" and keeps its own binary, so older kernels are unaffected.
+    const bundled = this.current?.manifest.node
+    if (bundled !== undefined
+      && semver.valid(bundled) !== null
+      && semver.valid(process.versions.node) !== null
+      && semver.gte(process.versions.node, bundled)) {
+      return { kind: 'node', nodePath: process.execPath, electronNode: true, scriptPath, cwd }
+    }
     return {
       kind: 'node',
-      nodePath,
-      scriptPath: path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
-      cwd: path.join(dir, 'app'),
+      nodePath: path.join(dir, 'node', this.opts.platform === 'win32' ? 'node.exe' : 'node'),
+      scriptPath,
+      cwd,
     }
   }
 

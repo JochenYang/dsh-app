@@ -803,6 +803,12 @@ async function main() {
     channel: CHANNEL,
     platform,
     arch,
+    // The node binary this runtime bundles. The shell compares it with the
+    // Node inside Electron: when Electron's is at least as new, the kernel
+    // runs on Electron's own node and this binary is dead weight. Runtimes
+    // built before the field existed read as "unknown", which keeps the
+    // bundled binary — an older kernel keeps working unchanged.
+    node: process.version.replace(/^v/, ''),
     integrity: '', // filled after tarring
     source: 'artifact',
   }

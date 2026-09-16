@@ -34,7 +34,6 @@
     "tar": "^6.2.1"
   },
   "devDependencies": {
-    "@ff-labs/fff-node": "^0.10.6",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-agent": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-api-remotes": "^0.1.5-rc.2",
@@ -59,12 +58,13 @@
     "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-workspace": "^0.1.5-rc.2",
+    "@ff-labs/fff-node": "^0.10.6",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.1",
     "@types/semver": "^7.5.8",
     "@types/tar": "^6.1.13",
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8",
+    "electron": "^44.4.1",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   }

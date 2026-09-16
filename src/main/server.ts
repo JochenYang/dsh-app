@@ -168,17 +168,18 @@ export class DshServer {
       this.logFile = await this.openLog()
       this.events.onLog?.(`spawn ${shell ? command : `${command} ${args.join(' ')}`}`)
 
+      const electronNodeEnv = spec.kind === 'node' && spec.electronNode === true ? { ELECTRON_RUN_AS_NODE: '1' } : {}
       const child = shell
         ? spawn(command, {
             shell: true,
             cwd: spec.cwd,
-            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE },
+            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE, ...electronNodeEnv },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
         : spawn(command, args, {
             cwd: spec.cwd,
-            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE },
+            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE, ...electronNodeEnv },
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })

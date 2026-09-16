@@ -74,6 +74,16 @@ export interface KernelManifest {
    */
   publishedAt?: string
   source: KernelSource
+  /**
+   * Version of the node binary this runtime bundles (e.g. `22.23.2`).
+   *
+   * The shell runs the kernel on Electron's own node when Electron's version
+   * is at least as new, which makes the bundled binary unnecessary — one
+   * runtime download without it. ABSENT on runtimes built before the field
+   * existed: that reads as "unknown" and keeps the bundled binary, so an older
+   * kernel keeps running exactly as it did.
+   */
+  node?: string
 }
 
 /**
@@ -148,4 +158,14 @@ export interface UpdateCheckResult {
 /** How to spawn the dsh server for the active kernel. */
 export type ServerSpec =
   | { kind: 'pnpm'; cwd: string }
-  | { kind: 'node'; nodePath: string; scriptPath: string; cwd: string }
+  | {
+    kind: 'node'
+    nodePath: string
+    scriptPath: string
+    cwd: string
+    /**
+     * The runtime's own node binary is not being used: this is Electron's
+     * executable, which has to be told to behave as node (see server.ts).
+     */
+    electronNode?: true
+  }
