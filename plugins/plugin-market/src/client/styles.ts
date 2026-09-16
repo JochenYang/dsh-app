@@ -437,7 +437,14 @@ const cssText = `
   background: #ffffff;
   transition: transform 0.15s;
 }
-.dshMkt-switchOn .dshMkt-switchThumb { transform: translateX(12px); }
+.dshMkt-switchOn .dshMkt-switchThumb {
+  transform: translateX(12px);
+  /* The ON track is brand-primary, which the dsh dark theme maps to a
+     near-white surface (not an accent) — a white thumb on it is invisible.
+     The knob takes the layer colour instead, exactly like the memory
+     plugin's toggle: near-black knob on the light track, white on the dark. */
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+}
 .dshMkt-button {
   padding: 5px 12px;
   border: 1px solid var(--dsw-alias-border-l2);

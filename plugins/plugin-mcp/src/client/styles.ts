@@ -212,7 +212,7 @@ const cssText = `
   background: #fff;
   transition: transform 120ms ease;
 }
-.dshMcp-toggle[aria-checked="true"]::after { transform: translateX(16px); }
+.dshMcp-toggle[aria-checked="true"]::after { transform: translateX(16px); background: var(--dsw-alias-bg-layer-1, #fff); }
 .dshMcp-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
 .dshMcp-form {
   display: flex;

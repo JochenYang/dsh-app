@@ -31,7 +31,7 @@ const cssText = `
 .dshHk-toggle { position:relative; width:36px; height:20px; flex:none; border:none; border-radius:999px; background:rgba(148,163,184,0.4); cursor:pointer; transition:background 120ms ease; }
 .dshHk-toggle[aria-checked="true"] { background:var(--dsw-alias-brand-primary); }
 .dshHk-toggle::after { content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:#fff; transition:transform 120ms ease; }
-.dshHk-toggle[aria-checked="true"]::after { transform:translateX(16px); }
+.dshHk-toggle[aria-checked="true"]::after { transform:translateX(16px); background:var(--dsw-alias-bg-layer-1,#fff); }
 .dshHk-toggle:disabled { opacity:0.5; cursor:not-allowed; }
 .dshHk-form { display:flex; flex-direction:column; gap:10px; padding:12px; border:1px solid var(--dsw-alias-border-l2); border-radius:10px; background:var(--dsw-alias-bg-layer-1); }
 .dshHk-formTitle { margin:0; font-size:13px; font-weight:650; color:var(--dsw-alias-label-primary); }
