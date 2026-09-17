@@ -95,7 +95,7 @@ function scopeLabel(root: MemoryRoot, store: MemoryStore): string {
  * @param ctx - the host plugin context.
  * @param config - validated plugin config.
  */
-export function apply(ctx: Context, config: Config): void {
+export async function apply(ctx: Context, config: Config): Promise<void> {
   const log = ctx.logger(name)
   const dir = config.storePath !== '' ? config.storePath : join(resolveDshHome(), 'storages', 'dsh-app-plugin-memory')
   const root = new MemoryRoot(dir)
@@ -103,7 +103,7 @@ export function apply(ctx: Context, config: Config): void {
   // Boot migration: convert any legacy memory.md timeline into topic cards.
   // Deterministic (no model), idempotent, and the legacy file is kept as
   // memory.legacy.md; a failure leaves the store untouched for the next boot.
-  root.migrateAll(log)
+  await root.migrateAll(log)
 
   if (!root.global.isEnabled()) {
     log.info(`memory plugin: disabled by user config (${join(dir, 'config.json')})`)
@@ -124,13 +124,13 @@ export function apply(ctx: Context, config: Config): void {
   // late-bound holder: a kernel without those services still gets the free
   // light sweep, and memory_save keeps working.
   let requestCurate: ((parent: NonNullable<ReturnType<Context['agents']['get']>>, sessionId: SessionId) => void) | undefined
-  const onSaved = (
+  const onSaved = async (
     parent: NonNullable<ReturnType<Context['agents']['get']>>,
     sessionId: SessionId,
     store: MemoryStore,
-  ): void => {
+  ): Promise<void> => {
     // Free maintenance first (no model): exact-dup merge + suspects + index.
-    lightSweep(root, scopeLabel(root, store), store, log)
+    await lightSweep(root, scopeLabel(root, store), store, log)
     requestCurate?.(parent, sessionId)
   }
   ctx.effect(() => registerMemoryTools(ctx, root, onSaved), 'plugin-memory: llm tools')
@@ -148,8 +148,8 @@ export function apply(ctx: Context, config: Config): void {
     // the affected store: the light sweep runs inline; the heavy sweep runs
     // in the distill's own window, with further saves inside the cooldown
     // coalescing into one trailing sweep that re-resolves the session by id.
-    const distiller = new MemoryDistiller(memCtx, root, log, (parent, sessionId, store) => {
-      lightSweep(root, scopeLabel(root, store), store, log)
+    const distiller = new MemoryDistiller(memCtx, root, log, async (parent, sessionId, store) => {
+      await lightSweep(root, scopeLabel(root, store), store, log)
       return curator.runAfterDistill(parent, sessionId)
     })
     requestCurate = (parent, sessionId) => { void curator.runAfterDistill(parent, sessionId) }

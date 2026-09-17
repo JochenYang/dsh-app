@@ -209,7 +209,7 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
             return fail(400, 'bad-request', { code: 'route.slugInvalid', text: 'the slug is malformed' })
           }
           try {
-            removeProject(root.dir, slug)
+            await removeProject(root.dir, slug)
             return ok({ scope: 'project', slug })
           } catch {
             return fail(500, 'io', { code: 'route.clearProjectFailed', text: 'could not clear the project memory' })
@@ -219,7 +219,7 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
           return fail(400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
         }
         try {
-          root.global.clear()
+          await root.global.clear()
           return ok({ scope: 'global' })
         } catch {
           return fail(500, 'io', { code: 'route.clearGlobalFailed', text: 'could not clear the global memory' })
@@ -274,7 +274,7 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
         if (pinned && store.get(topic) === undefined) {
           return fail(400, 'bad-request', { code: 'route.topicUnknown', text: 'unknown topic' })
         }
-        const changed = pinned ? store.addPin(topic) : store.removePin(topic)
+        const changed = pinned ? await store.addPin(topic) : await store.removePin(topic)
         return ok({ pinned, changed })
       },
     }),
@@ -298,7 +298,7 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
         if (store instanceof Response) return store
         // The settings-page delete sends the card's topic key (exact match);
         // the store's substring fallback only fires for hand-typed calls.
-        const result = store.forget(match)
+        const result = await store.forget(match)
         return ok({ forgotten: result.removed.length, removed: result.removed })
       },
     }),

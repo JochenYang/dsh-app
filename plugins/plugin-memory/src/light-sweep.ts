@@ -33,12 +33,12 @@ function survivor(cards: readonly TopicCard[], pinned: ReadonlySet<string>): Top
  * Run the light sweep over one store. Never throws — maintenance must not
  * break the write that triggered it.
  */
-export function lightSweep(
+export async function lightSweep(
   root: MemoryRoot,
   label: string,
   store: MemoryStore,
   log: { info(msg: string): void, warn(msg: string): void },
-): { merged: number, suspects: number } {
+): Promise<{ merged: number, suspects: number }> {
   try {
     const cards = store.list().filter(card => !card.malformed)
     const pinned = store.pinnedSet()
@@ -57,7 +57,7 @@ export function lightSweep(
       if (group.length < 2) continue
       const keep = survivor(group, pinned)
       for (const card of group) {
-        if (card.name !== keep.name && store.remove(card.name)) merged += 1
+        if (card.name !== keep.name && await store.remove(card.name)) merged += 1
       }
       if (group.length > 1) {
         log.info(`memory light sweep: ${label} merged ${String(group.length)} exact-duplicate cards into "${keep.name}"`)
@@ -85,7 +85,7 @@ export function lightSweep(
     }
 
     // 3. Index parity after possible hand edits.
-    store.reindex()
+    await store.reindex()
     return { merged, suspects }
   } catch (error) {
     log.warn(`memory light sweep for ${label} failed (write unaffected): ${String(error)}`)

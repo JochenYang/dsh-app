@@ -404,7 +404,7 @@ export class MemoryCurator {
       this.log.warn(`memory curate for "${target.label}" direct call ${result.status} (${result.error ?? 'no detail'})`)
       return
     }
-    const { merged, deleted, rewritten } = this.applyEdits(target.store, result.parsed)
+    const { merged, deleted, rewritten } = await this.applyEdits(target.store, result.parsed)
     const touched = merged + deleted + rewritten
     if (touched > 0) {
       const parts = [
@@ -444,7 +444,7 @@ export class MemoryCurator {
    * immediately, so "surviving" is simply the store's current state minus
    * the keys the edit itself cites.
    */
-  private applyEdits(store: MemoryStore, structured: unknown): { merged: number, deleted: number, rewritten: number } {
+  private async applyEdits(store: MemoryStore, structured: unknown): Promise<{ merged: number, deleted: number, rewritten: number }> {
     if (typeof structured !== 'object' || structured === null) return { merged: 0, deleted: 0, rewritten: 0 }
     const edits = (structured as { edits?: unknown }).edits
     if (!Array.isArray(edits)) return { merged: 0, deleted: 0, rewritten: 0 }
@@ -500,7 +500,7 @@ export class MemoryCurator {
       if (keys === undefined) continue
       keys.forEach(key => cited.add(key))
       for (const key of keys) {
-        if (store.remove(key)) deleted += 1
+        if (await store.remove(key)) deleted += 1
       }
       applied += 1
     }
@@ -528,7 +528,7 @@ export class MemoryCurator {
         const summary = edit.summary === undefined ? undefined : cleanSummary(edit.summary)
         if (summary === undefined && edit.summary !== undefined) continue
         cited.add(keys[0]!)
-        store.upsert({ name: card.name, category: card.category, ...(summary === undefined ? {} : { summary }), body })
+        await store.upsert({ name: card.name, category: card.category, ...(summary === undefined ? {} : { summary }), body })
         applied += 1
         rewritten += 1
         continue
@@ -575,9 +575,9 @@ export class MemoryCurator {
         !card.malformed && !absorbed.has(card.name) && normalizeForMatch(card.body) === needle)
       if (duplicates) continue
       keys.forEach(key => cited.add(key))
-      store.upsert({ name: targetKey, category, ...(summary === '' ? {} : { summary }), body })
+      await store.upsert({ name: targetKey, category, ...(summary === '' ? {} : { summary }), body })
       for (const key of keys) {
-        if (key !== targetKey) store.remove(key)
+        if (key !== targetKey) await store.remove(key)
       }
       applied += 1
       merged += 1

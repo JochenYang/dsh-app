@@ -21,11 +21,11 @@ import { renderMemoryText, selectCards } from '../src/prompt.ts'
 
 const fresh = (): MemoryRoot => new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-e2e-')))
 
-test('e2e: a workspace write lands in the project scope and never in the global one', () => {
+test('e2e: a workspace write lands in the project scope and never in the global one', async () => {
   const root = fresh()
   const cwd = 'D:/codes/some-project'
-  root.projectFor(cwd).upsert({ name: 'project-knowledge', category: 'lesson', summary: '项目知识', body: 'project-scoped knowledge' })
-  root.global.upsert({ name: 'user-pref', category: 'preference', summary: '偏好', body: 'cross-workspace preference' })
+  await root.projectFor(cwd).upsert({ name: 'project-knowledge', category: 'lesson', summary: '项目知识', body: 'project-scoped knowledge' })
+  await root.global.upsert({ name: 'user-pref', category: 'preference', summary: '偏好', body: 'cross-workspace preference' })
 
   const projectTopics = join(root.dir, 'projects', projectSlug(cwd), 'topics')
   assert.ok(existsSync(join(projectTopics, 'project-knowledge.md')), 'the workspace write created its card file')
@@ -40,12 +40,12 @@ test('e2e: a workspace write lands in the project scope and never in the global 
   assert.equal(resolveScope(undefined), 'global')
 })
 
-test('e2e: legacy store migrates at boot and keeps working as cards', () => {
+test('e2e: legacy store migrates at boot and keeps working as cards', async () => {
   const root = fresh()
   writeFileSync(join(root.dir, 'memory.md'), '- [preference] 2026-09-01 用户偏好中文回复\n- [lesson] 2026-09-02 pnpm 11 白名单写进 workspace yaml\n', 'utf8')
   writeFileSync(join(root.dir, 'config.json'), `${JSON.stringify({ pinned: [normalizeForMatch('用户偏好中文回复')] })}\n`, 'utf8')
 
-  root.migrateAll()
+  await root.migrateAll()
   assert.equal(existsSync(join(root.dir, 'memory.md')), false, 'the timeline file is gone')
   assert.equal(existsSync(join(root.dir, 'memory.legacy.md')), true, 'the archive survives')
   const cards = root.global.list()
@@ -79,10 +79,10 @@ test('e2e: own-write marks its seq → the background pass covers only what come
   assert.equal(Math.max(root.distillSeqOf(id), root.ownSaveSeqOf(id)), 20)
 })
 
-test('e2e: an over-long pinned card cannot evict the pins behind it, and nothing unbounded is injected', () => {
+test('e2e: an over-long pinned card cannot evict the pins behind it, and nothing unbounded is injected', async () => {
   const root = fresh()
-  root.global.upsert({ name: 'big-pin', category: 'preference', summary: '大固定卡', body: 'x'.repeat(380) })
-  root.global.upsert({ name: 'newer-pin', category: 'preference', summary: '新固定卡', body: '短小正文' })
+  await root.global.upsert({ name: 'big-pin', category: 'preference', summary: '大固定卡', body: 'x'.repeat(380) })
+  await root.global.upsert({ name: 'newer-pin', category: 'preference', summary: '新固定卡', body: '短小正文' })
   const cards = root.global.list()
   const sel = selectCards(cards, 260, new Set(['big-pin', 'newer-pin']))
   assert.ok(sel.selected.some(card => card.name === 'newer-pin'), 'the newer pin survives')
@@ -90,22 +90,22 @@ test('e2e: an over-long pinned card cannot evict the pins behind it, and nothing
   assert.ok(injected.length <= 300, 'the injected bodies stay bounded around the budget')
 })
 
-test('e2e: cyrillic and kana content stays matchable end to end', () => {
+test('e2e: cyrillic and kana content stays matchable end to end', async () => {
   const cyrillic = 'резервное копирование'
   const kana = 'ありがとう ございます'
   assert.equal(normalizeForMatch(cyrillic), 'резервноекопирование')
   assert.equal(normalizeForMatch(kana), 'ありがとうございます')
 
   const root = fresh()
-  root.global.upsert({ name: 'backup-window', category: 'lesson', summary: '备份窗口', body: cyrillic })
+  await root.global.upsert({ name: 'backup-window', category: 'lesson', summary: '备份窗口', body: cyrillic })
   assert.equal(root.global.hasContent(cyrillic), true)
   assert.equal(root.global.hasContent(kana), false, 'different content is still different')
   assert.equal(root.global.search('копирование').length, 1, 'search matches normalized content')
 })
 
-test('e2e: the distill prompt carries no scope field and shows the index', () => {
+test('e2e: the distill prompt carries no scope field and shows the index', async () => {
   const root = fresh()
-  root.global.upsert({ name: 'user-pref', category: 'preference', summary: '全局偏好', body: 'a global preference' })
+  await root.global.upsert({ name: 'user-pref', category: 'preference', summary: '全局偏好', body: 'a global preference' })
   const { system, user } = buildDistillPrompt('[user] hello', 'D:/proj', root)
   assert.ok(!system.includes('"scope"'), 'no scope field for the model to fill in')
   assert.ok(/host decides/i.test(system), 'the prompt says who decides')

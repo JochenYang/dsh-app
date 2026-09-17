@@ -92,7 +92,7 @@ export function registerMemoryTools(
     parent: NonNullable<ReturnType<Context['agents']['get']>>,
     sessionId: SessionId,
     store: MemoryStore,
-  ) => void,
+  ) => void | Promise<void>,
 ): () => void {
   const disposeSave = ctx.tools.register(defineTool({
     name: 'memory_save',
@@ -144,7 +144,7 @@ export function registerMemoryTools(
         text: JSON.stringify(value),
       }],
     },
-    execute(args, exec: ToolRunContext): Promise<JsonValue> {
+    async execute(args, exec: ToolRunContext): Promise<JsonValue> {
       if (!root.global.isEnabled()) {
         return Promise.resolve({ saved: false, reason: 'disabled' } as unknown as JsonValue)
       }
@@ -206,7 +206,7 @@ export function registerMemoryTools(
           } as unknown as JsonValue)
         }
         const related = similar.filter(hit => hit.score >= SIM_RELATED && hit.score < SIM_DUPLICATE).map(hit => hit.name)
-        const { op } = store.upsert({ name: topic, category: category as MemoryCategory, summary, body: content })
+        const { op } = await store.upsert({ name: topic, category: category as MemoryCategory, summary, body: content })
         return Promise.resolve(finishSave({ saved: true, op, topic, scope, ...(related.length > 0 ? { related } : {}) } as Record<string, unknown>, store, exec) as unknown as JsonValue)
       }
       // Update path: same key rewrites the card; the summary is inherited
@@ -222,7 +222,7 @@ export function registerMemoryTools(
       if (invalid !== undefined) {
         return Promise.resolve({ saved: false, reason: invalid } as unknown as JsonValue)
       }
-      const { op } = store.upsert({
+      const { op } = await store.upsert({
         name: topic,
         category: category as MemoryCategory,
         ...(summary !== '' ? { summary } : {}),
@@ -234,7 +234,7 @@ export function registerMemoryTools(
 
   /** Shared tail of the save paths: own-save marker + background trigger
    *  only when the store actually changed. */
-  function finishSave(result: Record<string, unknown>, store: MemoryStore, exec: ToolRunContext): Record<string, unknown> {
+  async function finishSave(result: Record<string, unknown>, store: MemoryStore, exec: ToolRunContext): Promise<Record<string, unknown>> {
     if (result.op === 'unchanged') return result
     // The direct path consolidates too: without this, a project whose cards
     // all arrive through memory_save (never through a distill run) could grow
@@ -251,7 +251,7 @@ export function registerMemoryTools(
     const agents = ctx.get('agents') as { get(id: SessionId): unknown } | undefined
     const parent = agent === undefined ? undefined : agents?.get(agent.id)
     if (parent !== undefined && agent !== undefined) {
-      onSaved?.(parent as NonNullable<ReturnType<Context['agents']['get']>>, agent.id, store)
+      await onSaved?.(parent as NonNullable<ReturnType<Context['agents']['get']>>, agent.id, store)
     }
     return result
   }
@@ -363,7 +363,7 @@ export function registerMemoryTools(
         text: JSON.stringify(value),
       }],
     },
-    execute(args, exec: ToolRunContext): Promise<JsonValue> {
+    async execute(args, exec: ToolRunContext): Promise<JsonValue> {
       if (!root.global.isEnabled()) {
         return Promise.resolve({ forgotten: 0, reason: 'disabled' } as unknown as JsonValue)
       }
@@ -386,7 +386,7 @@ export function registerMemoryTools(
           : [['global', root.global], ['project', root.projectFor(cwd as string)]]
       const perScope: Record<string, { forgotten: number, remaining: number, removed: string[] }> = {}
       for (const [label, store] of targets) {
-        const { removed, remaining } = store.forget(match)
+        const { removed, remaining } = await store.forget(match)
         perScope[label] = { forgotten: removed.length, remaining, removed }
       }
       return Promise.resolve({ forgotten: targets.reduce((sum, [label]) => sum + perScope[label]!.forgotten, 0), scopes: perScope } as unknown as JsonValue)

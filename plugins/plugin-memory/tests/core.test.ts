@@ -35,8 +35,8 @@ const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), '
 const tmpRoot = (): MemoryRoot => new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-root-')))
 
 /** Save one well-formed card in one call. */
-const save = (store: MemoryStore, name: string, body: string, category: MemoryCategory = 'lesson', summary = ''): void => {
-  store.upsert({ name, category, summary: summary === '' ? `${name} hook` : summary, body })
+const save = async (store: MemoryStore, name: string, body: string, category: MemoryCategory = 'lesson', summary = ''): Promise<void> => {
+  await store.upsert({ name, category, summary: summary === '' ? `${name} hook` : summary, body })
 }
 
 // --- normalizeForMatch -------------------------------------------------------
@@ -127,18 +127,18 @@ test('validateCardInput: names, categories, lengths are fenced', () => {
 
 // --- store: upsert / remove / pins ---------------------------------------------
 
-test('upsert: create → update → unchanged, and the index follows', () => {
+test('upsert: create → update → unchanged, and the index follows', async () => {
   const store = tmpStore()
-  const created = store.upsert({ name: 'release-flow', category: 'convention', summary: '发版流程', body: '先发 draft 再发布' })
+  const created = await store.upsert({ name: 'release-flow', category: 'convention', summary: '发版流程', body: '先发 draft 再发布' })
   assert.equal(created.op, 'created')
   assert.equal(created.card.created, created.card.updated)
 
-  const updated = store.upsert({ name: 'release-flow', category: 'convention', body: '先发 draft，验证后再发布' })
+  const updated = await store.upsert({ name: 'release-flow', category: 'convention', body: '先发 draft，验证后再发布' })
   assert.equal(updated.op, 'updated')
   assert.equal(updated.card.summary, '发版流程', 'omitted summary is inherited')
   assert.equal(updated.card.created, created.card.created, 'created survives updates')
 
-  const noop = store.upsert({ name: 'release-flow', category: 'convention', body: '先发 draft，验证后再发布', summary: '发版流程' })
+  const noop = await store.upsert({ name: 'release-flow', category: 'convention', body: '先发 draft，验证后再发布', summary: '发版流程' })
   assert.equal(noop.op, 'unchanged', 'a byte-identical save is a no-op')
 
   const index = store.indexText()
@@ -147,67 +147,67 @@ test('upsert: create → update → unchanged, and the index follows', () => {
   assert.ok(index.includes('[convention]'), 'index carries the category')
 })
 
-test('upsert: invalid input throws (callers pre-validate for friendly errors)', () => {
+test('upsert: invalid input throws (callers pre-validate for friendly errors)', async () => {
   const store = tmpStore()
-  assert.throws(() => store.upsert({ name: '中文键', category: 'lesson', summary: 'x', body: 'y' }), /invalid topic key/)
+  await assert.rejects(async () => store.upsert({ name: '中文键', category: 'lesson', summary: 'x', body: 'y' }), /invalid topic key/)
 })
 
-test('a pin keyed by topic survives content rewrites; remove drops it', () => {
+test('a pin keyed by topic survives content rewrites; remove drops it', async () => {
   const store = tmpStore()
-  save(store, 'release-flow', '先发 draft')
-  assert.equal(store.addPin('release-flow'), true)
-  store.upsert({ name: 'release-flow', category: 'lesson', body: '改写后的正文，完全换了一批字' })
+  await save(store, 'release-flow', '先发 draft')
+  assert.equal(await store.addPin('release-flow'), true)
+  await store.upsert({ name: 'release-flow', category: 'lesson', body: '改写后的正文，完全换了一批字' })
   assert.equal(store.pinnedSet().has('release-flow'), true, 'pin keyed by topic, not content')
   assert.ok(store.indexText().includes('📌'), 'the index marks the pin')
-  assert.equal(store.remove('release-flow'), true)
+  assert.equal(await store.remove('release-flow'), true)
   assert.equal(store.pinnedSet().size, 0, 'the pin goes with the card')
   assert.equal(store.indexText(), '', 'the index of an empty scope is empty')
 })
 
-test('addPin: refuses absent cards and double pins', () => {
+test('addPin: refuses absent cards and double pins', async () => {
   const store = tmpStore()
-  assert.equal(store.addPin('not-there'), false)
-  save(store, 'there', '正文')
-  assert.equal(store.addPin('there'), true)
-  assert.equal(store.addPin('there'), false)
+  assert.equal(await store.addPin('not-there'), false)
+  await save(store, 'there', '正文')
+  assert.equal(await store.addPin('there'), true)
+  assert.equal(await store.addPin('there'), false)
 })
 
-test('forget: exact topic key wins; otherwise a content substring sweeps cards', () => {
+test('forget: exact topic key wins; otherwise a content substring sweeps cards', async () => {
   const store = tmpStore()
-  save(store, 'pnpm-typecheck', '用 pnpm 跑 typecheck')
-  save(store, 'pnpm-build', '用 pnpm 跑 build')
-  save(store, 'tokyo-servers', '服务器在东京')
-  const byKey = store.forget('pnpm-typecheck')
+  await save(store, 'pnpm-typecheck', '用 pnpm 跑 typecheck')
+  await save(store, 'pnpm-build', '用 pnpm 跑 build')
+  await save(store, 'tokyo-servers', '服务器在东京')
+  const byKey = await store.forget('pnpm-typecheck')
   assert.deepEqual(byKey.removed, ['pnpm-typecheck'])
-  const byContent = store.forget('pnpm')
+  const byContent = await store.forget('pnpm')
   assert.deepEqual(byContent.removed, ['pnpm-build'], 'substring sweeps summary+body, not the removed key')
   assert.equal(byContent.remaining, 1)
 })
 
-test('clear: drops cards, index, legacy archive and pins', () => {
+test('clear: drops cards, index, legacy archive and pins', async () => {
   const store = tmpStore()
-  save(store, 'one', '第一条')
-  store.addPin('one')
+  await save(store, 'one', '第一条')
+  await store.addPin('one')
   writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-01-01 旧条目\n', 'utf8')
-  store.migrateLegacy()
-  store.clear()
+  await store.migrateLegacy()
+  await store.clear()
   assert.equal(store.list().length, 0)
   assert.equal(store.indexText(), '')
   assert.equal(store.pinnedSet().size, 0)
   assert.equal(existsSync(join(store.dir, 'memory.legacy.md')), false)
 })
 
-test('hasContent: exact body match, never substring', () => {
+test('hasContent: exact body match, never substring', async () => {
   const store = tmpStore()
-  save(store, 'pnpm-typecheck', '用 pnpm 跑 typecheck')
+  await save(store, 'pnpm-typecheck', '用 pnpm 跑 typecheck')
   assert.equal(store.hasContent('用 pnpm 跑 typecheck'), true)
   assert.equal(store.hasContent('用 pnpm'), false)
 })
 
-test('findSimilar: near-duplicate ranks first, disjoint text stays under the floor', () => {
+test('findSimilar: near-duplicate ranks first, disjoint text stays under the floor', async () => {
   const store = tmpStore()
-  save(store, 'pnpm11-allowscripts', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml', 'lesson', 'pnpm 11 白名单')
-  save(store, 'tokyo-servers', '服务器在东京', 'fact', '东京服务器')
+  await save(store, 'pnpm11-allowscripts', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml', 'lesson', 'pnpm 11 白名单')
+  await save(store, 'tokyo-servers', '服务器在东京', 'fact', '东京服务器')
   const hits = store.findSimilar('pnpm 11 的白名单要写进 pnpm-workspace.yaml 文件')
   assert.equal(hits[0]?.name, 'pnpm11-allowscripts')
   assert.ok((hits[0]?.score ?? 0) > 0.5)
@@ -216,7 +216,7 @@ test('findSimilar: near-duplicate ranks first, disjoint text stays under the flo
 
 // --- migration -------------------------------------------------------------------
 
-test('migrateLegacy: entries become cards losslessly; pins remap; the archive is kept', () => {
+test('migrateLegacy: entries become cards losslessly; pins remap; the archive is kept', async () => {
   const store = tmpStore()
   const legacy = [
     '- [lesson] 2026-09-01 用户在方案征询时期望一次性给出综合方案确认',
@@ -226,7 +226,7 @@ test('migrateLegacy: entries become cards losslessly; pins remap; the archive is
     '手写的一行没有前缀',
   ].join('\n')
   writeFileSync(join(store.dir, 'memory.md'), `${legacy}\n`, 'utf8')
-  const { migrated, pinsRemapped } = store.migrateLegacy()
+  const { migrated, pinsRemapped } = await store.migrateLegacy()
 
   assert.equal(migrated, 5, 'every parseable line becomes a card (identical lines converge on one key)')
   const cards = store.list()
@@ -240,14 +240,14 @@ test('migrateLegacy: entries become cards losslessly; pins remap; the archive is
   assert.equal(pinsRemapped, 0, 'no legacy pins existed')
 
   // Re-run is a no-op.
-  assert.deepEqual(store.migrateLegacy(), { migrated: 0, pinsRemapped: 0, pinsDropped: [] })
+  assert.deepEqual(await store.migrateLegacy(), { migrated: 0, pinsRemapped: 0, pinsDropped: [] })
 })
 
-test('migrateLegacy: a legacy content-keyed pin lands on the migrated card', () => {
+test('migrateLegacy: a legacy content-keyed pin lands on the migrated card', async () => {
   const store = tmpStore()
   writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-09-01 固定我\n- [fact] 2026-09-02 不固定\n', 'utf8')
   writeFileSync(join(store.dir, 'config.json'), `${JSON.stringify({ pinned: [normalizeForMatch('固定我')] })}\n`, 'utf8')
-  const { migrated, pinsRemapped } = store.migrateLegacy()
+  const { migrated, pinsRemapped } = await store.migrateLegacy()
   assert.equal(migrated, 2)
   assert.equal(pinsRemapped, 1)
   const pinnedCard = store.list().find(card => card.body === '固定我')
@@ -255,54 +255,54 @@ test('migrateLegacy: a legacy content-keyed pin lands on the migrated card', () 
   assert.ok(store.pinnedSet().has(pinnedCard.name), 'the pin follows the content onto its card')
 })
 
-test('migrateLegacy: a crash-resume re-run keeps pins already remapped to topic keys', () => {
+test('migrateLegacy: a crash-resume re-run keeps pins already remapped to topic keys', async () => {
   const store = tmpStore()
   // Simulate the crash window: a prior run wrote the card AND the topic-keyed
   // pin, but died before renaming memory.md — so this run re-migrates with
   // config.pinned already holding a topic key, not normalized content.
-  save(store, 'legacy-ab12cd34', '已迁移的卡')
+  await save(store, 'legacy-ab12cd34', '已迁移的卡')
   writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-09-01 已迁移的卡\n', 'utf8')
   writeFileSync(join(store.dir, 'config.json'), `${JSON.stringify({ pinned: ['legacy-ab12cd34'] })}\n`, 'utf8')
-  const { pinsRemapped, pinsDropped } = store.migrateLegacy()
+  const { pinsRemapped, pinsDropped } = await store.migrateLegacy()
   assert.equal(pinsRemapped, 1, 'the already-keyed pin is carried over, not dropped')
   assert.deepEqual(pinsDropped, [])
   assert.ok(store.pinnedSet().has('legacy-ab12cd34'))
 })
 
-test('migrateLegacy: a genuinely unmatched legacy pin is reported, not silently lost', () => {
+test('migrateLegacy: a genuinely unmatched legacy pin is reported, not silently lost', async () => {
   const store = tmpStore()
   writeFileSync(join(store.dir, 'memory.md'), '- [lesson] 2026-09-01 留存条目\n', 'utf8')
   writeFileSync(join(store.dir, 'config.json'), `${JSON.stringify({ pinned: ['早已不存在的条目内容'] })}\n`, 'utf8')
-  const { pinsRemapped, pinsDropped } = store.migrateLegacy()
+  const { pinsRemapped, pinsDropped } = await store.migrateLegacy()
   assert.equal(pinsRemapped, 0)
   assert.deepEqual(pinsDropped, ['早已不存在的条目内容'])
 })
 
-test('migrateLegacy: credential-looking entries are not carried over', () => {
+test('migrateLegacy: credential-looking entries are not carried over', async () => {
   const store = tmpStore()
   writeFileSync(join(store.dir, 'memory.md'), '- [fact] 2026-09-01 正常条目\n- [fact] 2026-09-02 api_key: sk-abc123def456ghi7\n', 'utf8')
-  const { migrated } = store.migrateLegacy()
+  const { migrated } = await store.migrateLegacy()
   assert.equal(migrated, 1, 'the credential-looking line is dropped at the gate')
 })
 
-test('migrateAll: covers global and projects, skips clean stores', () => {
+test('migrateAll: covers global and projects, skips clean stores', async () => {
   const root = tmpRoot()
   writeFileSync(join(root.dir, 'memory.md'), '- [lesson] 2026-09-01 全局旧条目\n', 'utf8')
   const project = root.projectFor('D:/codes/Demo')
   mkdirSync(project.dir, { recursive: true })
   writeFileSync(join(project.dir, 'memory.md'), '- [lesson] 2026-09-01 项目旧条目\n', 'utf8')
   writeFileSync(join(project.dir, 'project.json'), `${JSON.stringify({ cwd: 'D:/codes/Demo' })}\n`, 'utf8')
-  root.migrateAll()
+  await root.migrateAll()
   assert.equal(root.global.list().length, 1)
   assert.equal(root.projectFor('D:/codes/Demo').list().length, 1)
 })
 
 // --- injection selection ----------------------------------------------------------
 
-test('selectCards: per-category quota keeps the most recently updated cards', () => {
+test('selectCards: per-category quota keeps the most recently updated cards', async () => {
   const store = tmpStore()
   for (let i = 1; i <= 5; i += 1) {
-    store.upsert({ name: `lesson-${String(i)}`, category: 'lesson', summary: `s${String(i)}`, body: `第 ${String(i)} 条` })
+    await store.upsert({ name: `lesson-${String(i)}`, category: 'lesson', summary: `s${String(i)}`, body: `第 ${String(i)} 条` })
     // Force distinct updated stamps so the quota order is deterministic.
     const card = store.get(`lesson-${String(i)}`)!
     writeFileSync(join(store.dir, 'topics', `lesson-${String(i)}.md`), renderCard({ ...card, updated: `2026-09-0${String(i)}` }), 'utf8')
@@ -314,10 +314,10 @@ test('selectCards: per-category quota keeps the most recently updated cards', ()
   assert.equal(sel.truncated, true)
 })
 
-test('selectCards: pinned cards always win, an oversized pin is clipped not dropped', () => {
+test('selectCards: pinned cards always win, an oversized pin is clipped not dropped', async () => {
   const store = tmpStore()
-  store.upsert({ name: 'big-pin', category: 'preference', summary: '大固定卡', body: 'x'.repeat(MAX_TOPIC_BODY_CHARS) })
-  store.upsert({ name: 'small-pin', category: 'preference', summary: '小固定卡', body: 'short' })
+  await store.upsert({ name: 'big-pin', category: 'preference', summary: '大固定卡', body: 'x'.repeat(MAX_TOPIC_BODY_CHARS) })
+  await store.upsert({ name: 'small-pin', category: 'preference', summary: '小固定卡', body: 'short' })
   const sel = selectCards(store.list(), 120, new Set(['big-pin', 'small-pin']))
   assert.ok(sel.selected.some(card => card.name === 'small-pin'), 'the small pin reaches the prompt')
   assert.equal(sel.truncated, true)
@@ -330,11 +330,11 @@ test('renderCardBlock: malformed cards render verbatim, normal cards get a headi
   assert.equal(renderCardBlock(malformed), '手改内容')
 })
 
-test('renderMemoryText: index + cards per scope; project isolation holds', () => {
+test('renderMemoryText: index + cards per scope; project isolation holds', async () => {
   const root = tmpRoot()
-  save(root.global, 'user-lang', '用户偏好中文回复', 'preference', '中文回复')
-  save(root.projectFor('D:/codes/Demo'), 'demo-flow', 'Demo 项目的约定', 'convention', 'Demo 约定')
-  save(root.projectFor('D:/codes/Other'), 'other-secret', '其它项目的卡片', 'fact', '其它')
+  await save(root.global, 'user-lang', '用户偏好中文回复', 'preference', '中文回复')
+  await save(root.projectFor('D:/codes/Demo'), 'demo-flow', 'Demo 项目的约定', 'convention', 'Demo 约定')
+  await save(root.projectFor('D:/codes/Other'), 'other-secret', '其它项目的卡片', 'fact', '其它')
   const text = renderMemoryText(root, 'D:/codes/Demo')
   assert.ok(text.includes('user-lang'), 'global index line injected')
   assert.ok(text.includes('用户偏好中文回复'), 'global body injected')
@@ -347,17 +347,17 @@ test('renderMemoryText: index + cards per scope; project isolation holds', () =>
 
 // --- light sweep -------------------------------------------------------------------
 
-test('lightSweep: exact-duplicate cards merge to the pinned/newest survivor; suspects logged', () => {
+test('lightSweep: exact-duplicate cards merge to the pinned/newest survivor; suspects logged', async () => {
   const root = tmpRoot()
   const store = root.global
   // Two keys, identical bodies (a hand-edit accident).
-  save(store, 'dup-a', '完全相同的内容')
-  save(store, 'dup-b', '完全相同的内容')
-  store.addPin('dup-b')
+  await save(store, 'dup-a', '完全相同的内容')
+  await save(store, 'dup-b', '完全相同的内容')
+  await store.addPin('dup-b')
   // A near-duplicate pair under different keys (similarity suspect).
-  save(store, 'sim-a', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才生效')
-  save(store, 'sim-b', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才可生效')
-  const out = lightSweep(root, 'global', store, console)
+  await save(store, 'sim-a', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才生效')
+  await save(store, 'sim-b', 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才可生效')
+  const out = await lightSweep(root, 'global', store, console)
   assert.equal(out.merged, 1)
   assert.equal(store.get('dup-a'), undefined, 'unpinned duplicate removed')
   assert.ok(store.get('dup-b') !== undefined, 'the pinned card survives')
@@ -365,9 +365,9 @@ test('lightSweep: exact-duplicate cards merge to the pinned/newest survivor; sus
   assert.ok(root.simSuspects().some(s => s.scope === 'global'))
 })
 
-test('lightSweep: never throws on an empty store', () => {
+test('lightSweep: never throws on an empty store', async () => {
   const root = tmpRoot()
-  assert.deepEqual(lightSweep(root, 'global', root.global, console), { merged: 0, suspects: 0 })
+  assert.deepEqual(await lightSweep(root, 'global', root.global, console), { merged: 0, suspects: 0 })
 })
 
 // --- settings routes: the exact-Fetch registration ----------------------------
@@ -546,10 +546,10 @@ test('projectSlug: deterministic, same basename in two parents never collides', 
   assert.match(a, /^dsh-app-[a-f0-9]{8}$/)
 })
 
-test('projectBySlug: resolves a project store via project.json; unknown slug → undefined', () => {
+test('projectBySlug: resolves a project store via project.json; unknown slug → undefined', async () => {
   const root = tmpRoot()
   assert.equal(root.projectBySlug('nope-nope'), undefined)
-  save(root.projectFor('D:/codes/DSH-APP'), 'demo-card', '项目卡片')
+  await save(root.projectFor('D:/codes/DSH-APP'), 'demo-card', '项目卡片')
   const slug = projectSlug('D:/codes/DSH-APP')
   const resolved = root.projectBySlug(slug)
   assert.ok(resolved !== undefined)

@@ -264,7 +264,7 @@ export function registerBackupRoutes(connectionFetch: HostConnectionFetch, deps:
         const overwrite = ['1', 'true'].includes(queryOf(request).get('overwrite') ?? '')
         try {
           const data = await readBinaryBody(request, MAX_BACKUP_ZIP_BYTES)
-          const outcome = restoreConfigBackup(deps.home, deps.profile, unpackConfigBackup(data), overwrite)
+          const outcome = await restoreConfigBackup(deps.home, deps.profile, unpackConfigBackup(data), overwrite)
           return ok({
             written: outcome.written,
             unchanged: outcome.unchanged,

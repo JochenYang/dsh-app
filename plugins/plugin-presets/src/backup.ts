@@ -28,10 +28,11 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { strToU8, unzipSync, zipSync, type Zippable } from 'fflate'
+import { removeTree } from './remove-tree.ts'
 import { PresetPackageError, fsErrorCode, zipPathSafetyProblem, type HostText } from './wire.ts'
 import { inflateZipMembersBounded } from './zip.ts'
 
@@ -476,13 +477,13 @@ function backupStamp(now: () => Date): string {
  *   and `overwrite` is false, `illegal-path` on a layout violation, `io` on
  *   write failures (after best-effort rollback).
  */
-export function restoreConfigBackup(
+export async function restoreConfigBackup(
   home: string,
   profile: string,
   files: readonly BackupFile[],
   overwrite: boolean,
   now: () => Date = () => new Date(),
-): RestoreOutcome {
+): Promise<RestoreOutcome> {
   // Per-member verdict: identical targets are skipped, absent targets are
   // plain writes, and differing targets need the explicit overwrite.
   const planned: Array<{ rel: string, target: string, data: Uint8Array, replacing: boolean }> = []
@@ -538,7 +539,7 @@ export function restoreConfigBackup(
       mkdirSync(dirname(stagedPath), { recursive: true })
       writeFileSync(stagedPath, item.data)
     } catch (error) {
-      rmSync(stage, { recursive: true, force: true })
+      await removeTree(stage)
       throw new PresetPackageError('io', {
         code: 'backup.writeFailed',
         params: { code: fsErrorCode(error) },
@@ -572,7 +573,7 @@ export function restoreConfigBackup(
       swapped.push(item.target)
     }
   } catch (error) {
-    const restored = rollbackSwap(stage, swapped, setAside)
+    const restored = await rollbackSwap(stage, swapped, setAside)
     const code = fsErrorCode(error)
     const osCode = (error as NodeJS.ErrnoException).code ?? 'unknown'
     throw new PresetPackageError('io', restored
@@ -589,7 +590,7 @@ export function restoreConfigBackup(
   }
 
   // Committed: the stage only ever held staging copies and set-aside olds.
-  rmSync(stage, { recursive: true, force: true })
+  await removeTree(stage)
   for (const item of planned) report.push({ path: item.rel, action: 'written' })
   return { files: report, backups, written: planned.length, unchanged: skipped.length }
 }
@@ -599,11 +600,11 @@ export function restoreConfigBackup(
  * first (a rename home needs the path free), then the set-aside old files
  * move back, then the stage dies. Answers whether every step succeeded.
  */
-function rollbackSwap(stage: string, swapped: readonly string[], setAside: ReadonlyArray<{ rel: string, target: string }>): boolean {
+async function rollbackSwap(stage: string, swapped: readonly string[], setAside: ReadonlyArray<{ rel: string, target: string }>): Promise<boolean> {
   let complete = true
   for (const target of [...swapped].reverse()) {
     try {
-      rmSync(target, { force: true })
+      await removeTree(target)
     } catch {
       complete = false
     }
@@ -616,7 +617,7 @@ function rollbackSwap(stage: string, swapped: readonly string[], setAside: Reado
     }
   }
   try {
-    rmSync(stage, { recursive: true, force: true })
+    await removeTree(stage)
   } catch {
     complete = false
   }

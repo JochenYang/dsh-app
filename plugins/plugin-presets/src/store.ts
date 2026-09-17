@@ -17,10 +17,11 @@
  * @module @dsh-app/plugin-presets/store
  */
 
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { isPresetDirectory, packPresetDir, unpackPresetZip, walkPresetFiles } from './pack.ts'
+import { removeTree } from './remove-tree.ts'
 import { COMPOSITION_FILE, PresetPackageError, entryNameProblem, fsErrorCode } from './wire.ts'
 
 export { PresetPackageError } from './wire.ts'
@@ -169,14 +170,14 @@ export class PresetStore {
         // throwing away an already-successful import.
         if (movedOld) {
           try {
-            rmSync(backup, { recursive: true, force: true })
+            await removeTree(backup)
           } catch { /* keep the backup for manual recovery */ }
         }
       } else {
         // Same best-effort contract; never let cleanup mask the precise
         // PresetPackageError the caller is about to receive.
         try {
-          rmSync(stage, { recursive: true, force: true })
+          await removeTree(stage)
         } catch { /* keep the stage for manual recovery */ }
         // Restore the old preset so a failed swap loses nothing; if the
         // restore itself fails, keep the backup dot-directory (invisible to

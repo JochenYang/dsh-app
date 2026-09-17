@@ -490,7 +490,7 @@ export class MemoryDistiller {
       this.log.warn(`memory distill for "${sessionId}" direct call ${result.status} (${result.error ?? 'no detail'}); progress kept`)
       return
     }
-    const applied = this.applyEntries(result.parsed, cwd)
+    const applied = await this.applyEntries(result.parsed, cwd)
     this.root.advanceDistill(sessionId, lastEventSeq)
     // Leave a durable trace (time, target session, saved count) so the
     // settings page can show what the background pass actually did.
@@ -514,7 +514,7 @@ export class MemoryDistiller {
    * Writes hit the disk-backed store immediately, so a card accepted earlier
    * in THIS run is what later proposals in the same run dedupe against.
    */
-  private applyEntries(structured: unknown, cwd: string | undefined): number {
+  private async applyEntries(structured: unknown, cwd: string | undefined): Promise<number> {
     if (typeof structured !== 'object' || structured === null) return 0
     const proposals = (structured as { entries?: unknown }).entries
     if (!Array.isArray(proposals)) return 0
@@ -555,7 +555,7 @@ export class MemoryDistiller {
         if (contentSimilarity(content, existing.body) >= SIM_DUPLICATE) continue
         // Evolved content rewrites the card; a provided summary replaces the
         // hook, an omitted one keeps the existing (see MemoryStore.upsert).
-        store.upsert({ name: topic, category, ...(summary === '' ? {} : { summary }), body: content })
+        await store.upsert({ name: topic, category, ...(summary === '' ? {} : { summary }), body: content })
         applied += 1
         continue
       }
@@ -565,7 +565,7 @@ export class MemoryDistiller {
       // Cross-key duplicate guard: the same fact under a fresh name.
       if (store.hasContent(content)) continue
       if (store.findSimilar(content, SIM_DUPLICATE, 1).length > 0) continue
-      store.upsert({ name: topic, category, summary, body: content })
+      await store.upsert({ name: topic, category, summary, body: content })
       applied += 1
     }
     return applied

@@ -42,9 +42,10 @@
 
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, join } from 'node:path'
+import { removeTree } from './remove-tree.ts'
 import type { MemoryCategory, MemoryDistillActivity, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
 import { MEMORY_CATEGORIES } from './types.ts'
 
@@ -353,9 +354,9 @@ export function validateCardInput(input: { name: string, category: string, summa
 }
 
 /**
- * Card-backed memory store over one scope directory. All methods throw on I/O
- * failure; callers (tool execute / route handlers) translate that into
- * user-facing errors.
+ * Card-backed memory store over one scope directory. Writes are asynchronous —
+ * each returns a promise that rejects on I/O failure, which the callers (tool
+ * execute / route handlers) translate into user-facing errors.
  */
 export class MemoryStore {
   readonly dir: string
@@ -418,10 +419,10 @@ export class MemoryStore {
    * Create or rewrite one card (the ONLY write path besides migration).
    * `op` reports what happened: created | updated (body/summary/category
    * changed, `updated` bumped) | unchanged (byte-identical, no bump, so a
-   * no-op save does not re-arm the curator). Throws on invalid input —
+   * no-op save does not re-arm the curator). Rejects on invalid input —
    * callers pre-validate with {@link validateCardInput} for friendly errors.
    */
-  upsert(input: { name: string, category: MemoryCategory, summary?: string, body: string }): { op: 'created' | 'updated' | 'unchanged', card: TopicCard } {
+  async upsert(input: { name: string, category: MemoryCategory, summary?: string, body: string }): Promise<{ op: 'created' | 'updated' | 'unchanged', card: TopicCard }> {
     const existing = this.get(input.name)
     const summary = input.summary !== undefined && input.summary !== '' ? input.summary : existing?.summary ?? ''
     const invalid = validateCardInput({ name: input.name, category: input.category, summary, body: input.body })
@@ -443,29 +444,29 @@ export class MemoryStore {
     mkdirSync(this.topicsDirPath, { recursive: true })
     atomicWrite(join(this.topicsDirPath, `${input.name}.md`), renderCard(card))
     this.stampProject()
-    this.reindex()
+    await this.reindex()
     return { op: existing === undefined ? 'created' : 'updated', card }
   }
 
   /** Delete one card and its pin; rebuilds the index. False when absent. */
-  remove(name: string): boolean {
+  async remove(name: string): Promise<boolean> {
     if (!isValidTopic(name)) return false
     const path = join(this.topicsDirPath, `${name}.md`)
     if (!existsSync(path)) return false
-    rmSync(path)
+    await removeTree(path)
     // Drop the pin BEFORE the index rebuild: a crash may leave a card without
     // its pin (visible, harmless), never an index/pin pointing at a ghost.
-    this.removePin(name)
-    this.reindex()
+    await this.removePin(name)
+    await this.reindex()
     return true
   }
 
   /** Drop every card, the index, the legacy archive and every pin (full reset). */
-  clear(): void {
-    if (existsSync(this.topicsDirPath)) rmSync(this.topicsDirPath, { recursive: true, force: true })
-    if (existsSync(this.indexPath)) rmSync(this.indexPath)
-    if (existsSync(this.legacyPath)) rmSync(this.legacyPath)
-    if (existsSync(this.legacyMdPath)) rmSync(this.legacyMdPath)
+  async clear(): Promise<void> {
+    if (existsSync(this.topicsDirPath)) await removeTree(this.topicsDirPath)
+    if (existsSync(this.indexPath)) await removeTree(this.indexPath)
+    if (existsSync(this.legacyPath)) await removeTree(this.legacyPath)
+    if (existsSync(this.legacyMdPath)) await removeTree(this.legacyMdPath)
     this.writeConfig({ pinned: [] })
   }
 
@@ -504,7 +505,7 @@ export class MemoryStore {
    * Remove cards by topic key (exact) or content/summary substring; returns
    * the removed keys. Rebuilds the index once at the end.
    */
-  forget(match: string): { removed: string[], remaining: number } {
+  async forget(match: string): Promise<{ removed: string[], remaining: number }> {
     const direct = this.get(match)
     let doomed: TopicCard[] = []
     if (direct !== undefined) {
@@ -517,10 +518,10 @@ export class MemoryStore {
       }
     }
     for (const card of doomed) {
-      rmSync(join(this.topicsDirPath, `${card.name}.md`), { force: true })
-      this.removePin(card.name)
+      await removeTree(join(this.topicsDirPath, `${card.name}.md`))
+      await this.removePin(card.name)
     }
-    if (doomed.length > 0) this.reindex()
+    if (doomed.length > 0) await this.reindex()
     return { removed: doomed.map(card => card.name), remaining: this.list().length }
   }
 
@@ -534,32 +535,32 @@ export class MemoryStore {
   }
 
   /** Pin a card by topic key; false when already pinned or the card is absent. */
-  addPin(name: string): boolean {
+  async addPin(name: string): Promise<boolean> {
     if (!isValidTopic(name) || this.get(name) === undefined) return false
     const pins = [...this.pinnedSet()]
     if (pins.includes(name)) return false
     this.writeConfig({ pinned: [...pins, name] })
-    this.reindex()
+    await this.reindex()
     return true
   }
 
   /** Unpin a card by topic key; false when it was not pinned. */
-  removePin(name: string): boolean {
+  async removePin(name: string): Promise<boolean> {
     const pins = [...this.pinnedSet()]
     if (!pins.includes(name)) return false
     this.writeConfig({ pinned: pins.filter(p => p !== name) })
-    if (existsSync(this.indexPath)) this.reindex()
+    if (existsSync(this.indexPath)) await this.reindex()
     return true
   }
 
   // --- index -----------------------------------------------------------------
 
   /** Rebuild index.md from the live cards (host-owned; hand edits overwritten). */
-  reindex(): void {
+  async reindex(): Promise<void> {
     const cards = this.list()
     const pinned = this.pinnedSet()
     if (cards.length === 0) {
-      if (existsSync(this.indexPath)) rmSync(this.indexPath)
+      if (existsSync(this.indexPath)) await removeTree(this.indexPath)
       return
     }
     const text = [
@@ -618,7 +619,7 @@ export class MemoryStore {
    * Identical entries converge on one card (same hash key). Idempotent in
    * effect: a crash mid-way re-runs cleanly since upsert overwrites by key.
    */
-  migrateLegacy(): { migrated: number, pinsRemapped: number, pinsDropped: string[] } {
+  async migrateLegacy(): Promise<{ migrated: number, pinsRemapped: number, pinsDropped: string[] }> {
     if (!this.needsMigration()) return { migrated: 0, pinsRemapped: 0, pinsDropped: [] }
     const raw = readFileSync(this.legacyPath, 'utf8')
     const { fixed } = repairDoublePrefix(raw)
@@ -667,8 +668,8 @@ export class MemoryStore {
     }
     if (this.sourceCwd !== undefined) this.stampProject()
     this.writeConfig({ pinned: [...newPins], storeVersion: 2 })
-    this.reindex()
-    if (existsSync(this.legacyMdPath)) rmSync(this.legacyMdPath)
+    await this.reindex()
+    if (existsSync(this.legacyMdPath)) await removeTree(this.legacyMdPath)
     renameSync(this.legacyPath, this.legacyMdPath)
     return { migrated, pinsRemapped: newPins.size, pinsDropped }
   }
@@ -781,9 +782,9 @@ export function listProjects(rootDir: string): ProjectSummary[] {
 /** Remove one project directory entirely (scoped clear). Rejects malformed
  * slugs before touching the filesystem (traversal fence, defense in depth
  * behind the route's own check). */
-export function removeProject(rootDir: string, slug: string): void {
+export async function removeProject(rootDir: string, slug: string): Promise<void> {
   if (!isValidSlug(slug)) throw new Error(`invalid project slug: ${slug}`)
-  rmSync(join(rootDir, 'projects', slug), { recursive: true, force: true })
+  await removeTree(join(rootDir, 'projects', slug))
 }
 
 /** How many sessions the distill-progress map keeps before the oldest
@@ -895,7 +896,7 @@ export class MemoryRoot {
   }
 
   /** Migrate every store whose legacy timeline file is still present (boot). */
-  migrateAll(log?: { info(msg: string): void }): void {
+  async migrateAll(log?: { info(msg: string): void }): Promise<void> {
     const stores: Array<[string, MemoryStore]> = [['global', this.global]]
     for (const project of listProjects(this.dir)) {
       // projectBySlug (not projectFor) so projects with a missing/stale
@@ -906,7 +907,7 @@ export class MemoryRoot {
     for (const [label, store] of stores) {
       if (!store.needsMigration()) continue
       try {
-        const { migrated, pinsRemapped, pinsDropped } = store.migrateLegacy()
+        const { migrated, pinsRemapped, pinsDropped } = await store.migrateLegacy()
         log?.info(`memory migration: ${label} → ${String(migrated)} topic cards (${String(pinsRemapped)} pins remapped)`)
         if (pinsDropped.length > 0) {
           log?.info(`memory migration: ${label} dropped ${String(pinsDropped.length)} unmatched legacy pin(s)`)

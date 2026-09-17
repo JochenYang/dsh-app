@@ -285,7 +285,7 @@ describe('unpackConfigBackup (hostile archives)', () => {
 })
 
 describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
-  it('restores into a fresh home and reports every written member', () => {
+  it('restores into a fresh home and reports every written member', async () => {
     const source = scratchHome('restore-src')
     writeHome(source)
     const files = unpackConfigBackup(zipSync({
@@ -295,7 +295,7 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
       'plugins/dsh-app-plugin-foo/config.json': strToU8('{"enabled":true}\n'),
     }))
     const home = scratchHome('restore-target')
-    const outcome = restoreConfigBackup(home, 'web', files, false)
+    const outcome = await restoreConfigBackup(home, 'web', files, false)
     assert.equal(outcome.written, 3)
     assert.equal(outcome.unchanged, 0)
     assert.deepEqual(outcome.backups, [])
@@ -303,7 +303,7 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.ok(existsSync(join(home, 'profiles', 'web', 'cordis.patch.yml')))
   })
 
-  it('skips members whose target already has identical content', () => {
+  it('skips members whose target already has identical content', async () => {
     const source = scratchHome('unchanged-src')
     writeHome(source)
     const files = unpackConfigBackup(zipSync({
@@ -313,12 +313,12 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     const home = scratchHome('unchanged-target')
     mkdirSync(join(home, 'storages', 'dsh-app-plugin-market'), { recursive: true })
     writeFileSync(join(home, 'storages', 'dsh-app-plugin-market', 'sources.json'), '{"sources":[]}\n', 'utf8')
-    const outcome = restoreConfigBackup(home, 'web', files, false)
+    const outcome = await restoreConfigBackup(home, 'web', files, false)
     assert.equal(outcome.written, 0)
     assert.equal(outcome.unchanged, 1)
   })
 
-  it('refuses differing targets without overwrite, naming every conflict', () => {
+  it('refuses differing targets without overwrite, naming every conflict', async () => {
     const source = scratchHome('conflict-src')
     writeHome(source)
     const files = unpackConfigBackup(zipSync({
@@ -328,8 +328,8 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     }))
     const home = scratchHome('conflict-target')
     writeHome(home) // same shapes, different content
-    assert.throws(
-      () => restoreConfigBackup(home, 'web', files, false),
+    await assert.rejects(
+      async () => restoreConfigBackup(home, 'web', files, false),
       (error: unknown) => {
         if (!(error instanceof PresetPackageError) || error.code !== 'conflict') return false
         const files = error.details.files as readonly string[]
@@ -342,7 +342,7 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.equal(readFileSync(join(home, 'storages', 'dsh-app-plugin-market', 'sources.json'), 'utf8'), '{"sources":[]}\n')
   })
 
-  it('overwrites differing targets with overwrite=true and backs up the patch layer', () => {
+  it('overwrites differing targets with overwrite=true and backs up the patch layer', async () => {
     const source = scratchHome('overwrite-src')
     writeHome(source)
     const files = unpackConfigBackup(zipSync({
@@ -352,7 +352,7 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     }))
     const home = scratchHome('overwrite-target')
     writeHome(home)
-    const outcome = restoreConfigBackup(home, 'web', files, true, () => new Date('2026-09-13T08:09:07.000Z'))
+    const outcome = await restoreConfigBackup(home, 'web', files, true, () => new Date('2026-09-13T08:09:07.000Z'))
     assert.equal(outcome.written, 2)
     assert.equal(readFileSync(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'utf8'), 'rows:\n  - id: restored\n')
     assert.equal(readFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'config.json'), 'utf8'), '{"enabled":false}\n')
@@ -363,7 +363,7 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.equal(readFileSync(join(home, 'profiles', 'web', sidecars[0]!), 'utf8'), 'rows:\n  - id: keep\n')
   })
 
-  it('does not create a patch sidecar when the patch layer is new', () => {
+  it('does not create a patch sidecar when the patch layer is new', async () => {
     const source = scratchHome('freshpatch-src')
     const files = unpackConfigBackup(zipSync({
       'manifest.json': VALID_MANIFEST,
@@ -371,23 +371,23 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     }))
     const home = scratchHome('freshpatch-target')
     mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
-    const outcome = restoreConfigBackup(home, 'web', files, true)
+    const outcome = await restoreConfigBackup(home, 'web', files, true)
     assert.equal(outcome.written, 1)
     assert.deepEqual(outcome.backups, [])
   })
 
-  it('leaves no staging directory behind after a successful restore', () => {
+  it('leaves no staging directory behind after a successful restore', async () => {
     const files = unpackConfigBackup(zipSync({
       'manifest.json': VALID_MANIFEST,
       'profile/cordis.patch.yml': strToU8('rows: []\n'),
     }))
     const home = scratchHome('stage-cleanup-target')
-    const outcome = restoreConfigBackup(home, 'web', files, true)
+    const outcome = await restoreConfigBackup(home, 'web', files, true)
     assert.equal(outcome.written, 1)
     assert.deepEqual(readdirSync(home).filter(name => name.startsWith('.config-import-stage-')), [])
   })
 
-  it('rolls the swap back when a later member cannot be restored', () => {
+  it('rolls the swap back when a later member cannot be restored', async () => {
     const home = scratchHome('rollback-target')
     mkdirSync(join(home, 'storages', 'dsh-app-plugin-foo'), { recursive: true })
     writeFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'config.json'), '{"enabled":true}\n', 'utf8')
@@ -399,8 +399,8 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
       'plugins/dsh-app-plugin-foo/config.json': strToU8('{"enabled":false}\n'),
       'plugins/dsh-app-plugin-baz/config.json': strToU8('{}\n'),
     }))
-    assert.throws(
-      () => restoreConfigBackup(home, 'web', files, true),
+    await assert.rejects(
+      async () => restoreConfigBackup(home, 'web', files, true),
       (error: unknown) => error instanceof PresetPackageError && error.code === 'io'
         && error.host.code === 'backup.writeFailedRestored',
     )

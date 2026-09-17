@@ -81,7 +81,7 @@ test('memory_save: create → update → unchanged, firing the trigger only on c
 
 test('memory_save: creating a near-duplicate under a NEW key is rejected with a pointer', async () => {
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-dup-')))
-  root.global.upsert({ name: 'pnpm11-allowscripts', category: 'lesson', summary: 'pnpm 11 白名单', body: 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才生效' })
+  await root.global.upsert({ name: 'pnpm11-allowscripts', category: 'lesson', summary: 'pnpm 11 白名单', body: 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才生效' })
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const save = saveTool(tools)
@@ -172,8 +172,8 @@ interface RecallResult { global?: RecallScopeView, project?: RecallScopeView, re
 
 test('memory_recall: topic fetch, keyword filter, and full-scope listing', async () => {
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-recall-')))
-  root.global.upsert({ name: 'pnpm-typecheck', category: 'lesson', summary: 'pnpm 跑检查', body: '用 pnpm 跑 typecheck' })
-  root.global.upsert({ name: 'tokyo-servers', category: 'fact', summary: '东京服务器', body: '服务器在东京' })
+  await root.global.upsert({ name: 'pnpm-typecheck', category: 'lesson', summary: 'pnpm 跑检查', body: '用 pnpm 跑 typecheck' })
+  await root.global.upsert({ name: 'tokyo-servers', category: 'fact', summary: '东京服务器', body: '服务器在东京' })
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const recall = tools.get('memory_recall') as { execute(args: unknown, exec: unknown): Promise<RecallResult> }
@@ -197,8 +197,8 @@ test('memory_recall: topic fetch, keyword filter, and full-scope listing', async
 
 test('memory_forget: topic key deletes one card; text sweeps by content', async () => {
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-forget-')))
-  root.global.upsert({ name: 'pnpm-typecheck', category: 'lesson', summary: 'pnpm 跑检查', body: '用 pnpm 跑 typecheck' })
-  root.global.upsert({ name: 'tokyo-servers', category: 'fact', summary: '东京服务器', body: '服务器在东京' })
+  await root.global.upsert({ name: 'pnpm-typecheck', category: 'lesson', summary: 'pnpm 跑检查', body: '用 pnpm 跑 typecheck' })
+  await root.global.upsert({ name: 'tokyo-servers', category: 'fact', summary: '东京服务器', body: '服务器在东京' })
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const forget = tools.get('memory_forget') as { execute(args: unknown, exec: unknown): Promise<{ forgotten: number, scopes?: Record<string, { removed: string[] }> }> }
