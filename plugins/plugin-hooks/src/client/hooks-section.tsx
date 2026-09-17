@@ -25,7 +25,12 @@ import type { HooksKey } from './locales.ts'
 import { hostMessage, HostError, noticeText, wireNotice } from './messages.ts'
 import type { Notice } from './messages.ts'
 
-const ROUTE = '/plugins/@dsh-app/plugin-hooks/api'
+/**
+ * The plugin's route prefix on the shared Connection `/api` channel (mirrors
+ * the host half; the registry admits no `@` in a path segment, so the npm
+ * scope travels as `dsh-app`).
+ */
+const ROUTE = '/api/plugins/dsh-app/plugin-hooks'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type HooksSectionProps = PropsLocale<typeof NS>

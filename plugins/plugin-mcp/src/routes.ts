@@ -1,5 +1,6 @@
 /**
- * Settings-page API under `/plugins/@dsh-app/plugin-mcp/api`:
+ * Settings-page API on the shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-mcp`:
  *   GET  /servers        — sanitized entries + mount status + the file path
  *   POST /server/create  — validate + persist + dynamically mount
  *   POST /server/update  — validate + persist + remount (or unmount when disabled)
@@ -8,13 +9,17 @@
  *                          never abort the batch; invalid display-name keys
  *                          are auto-slugged and reported as `renamed`
  *
- * Every route enforces same-origin (403 with a body, never a hung
- * connection). Reads MASK env/header literal values (never returned to the
- * client); an update carrying the mask sentinel keeps the stored value.
- * Dynamic mount/re-unmount runs inline so the UI reflects reality; a mount
- * failure is reported in the entry's status, never as a failed save.
+ * Trust is the carrier's: the Connection transport applies its Host/Origin
+ * fence and browser authentication before a route handler runs (see
+ * `ConnectionFetchRoute.fetch`), so a route never re-checks them — and the
+ * registry admits GET/HEAD/POST only, so a request with another method falls
+ * through to the shared channel's 404 instead of reaching a handler. Reads
+ * MASK env/header literal values (never returned to the client); an update
+ * carrying the mask sentinel keeps the stored value. Dynamic mount/re-unmount
+ * runs inline so the UI reflects reality; a mount failure is reported in the
+ * entry's status, never as a failed save.
  *
- * Isolation note: the small HTTP helpers below intentionally mirror
+ * Isolation note: the small transport helpers below intentionally mirror
  * plugin-hooks' routes.ts instead of being shared — each suite plugin bundles
  * standalone (esbuild, no cross-plugin runtime imports), so a shared util
  * would be a new package for ~30 lines.
@@ -22,26 +27,22 @@
  * @module @dsh-app/plugin-mcp/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { invalidServerNameError, mapExternalServer, parseMcpServersJson, SERVER_NAME_PATTERN, slugifyServerName } from './wire.ts'
 import { McpValidationError, McpStore } from './store.ts'
 import type { McpMountManager } from './mount.ts'
 import type { HostText, McpMountStatus, McpServerEntry } from './wire.ts'
 
-/** Route namespace on the dsh web server. */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
+/**
+ * Route namespace on the shared Connection `/api` channel (mirrors the client
+ * half). The registry admits only path segments matching `[A-Za-z0-9_$.-]`, so
+ * the npm scope's `@` cannot appear in the URL: `@dsh-app/plugin-mcp` travels
+ * as `dsh-app/plugin-mcp`.
+ */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-mcp'
 
 /** Mask sentinel for secret-ish values on reads; on writes it means "keep". */
 export const VALUE_MASK = '••••••'
-
-/** Structural slice of the webServer service (no full dep on its types). */
-interface WebServerLike {
-  register(route: {
-    kind: 'exact'
-    path: string
-    handler: (req: IncomingMessage, res: ServerResponse) => void
-  }): () => void
-}
 
 /** The client-facing view of one entry: fields + mount status, values masked. */
 export interface McpServerView {
@@ -70,46 +71,18 @@ export interface McpServersResponse {
   readonly failed?: ReadonlyArray<{ readonly name: string, readonly reason: HostText }>
 }
 
-/** Same-origin fence (compare host parts; Origin carries the scheme). */
-export function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined) return true
-  try {
-    return new URL(origin).host === req.headers.host
-  } catch {
-    return false
-  }
+/** Cap on one request body (larger than swarm's: server entries carry env maps). */
+const MAX_BODY_BYTES = 65_536
+
+function sendJson(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
 }
 
-/**
- * Loopback-host fence: admit only requests whose Host names this machine's
- * loopback interface, so a rebinding/cross-site request carrying an
- * attacker's Host is refused even when it forges a matching Origin.
- */
-function passesFence(req: IncomingMessage): boolean {
-  const raw = req.headers.host
-  if (typeof raw !== 'string' || raw === '') return false
-  let hostname: string
-  try {
-    hostname = new URL(`http://${raw}`).hostname
-  } catch {
-    return false
-  }
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  const octets = hostname.split('.')
-  return octets.length === 4
-    && octets[0] === '127'
-    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-}
-
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
-  res.setHeader('Content-Type', 'application/json')
-  res.writeHead(status)
-  res.end(JSON.stringify(body))
-}
-
-function ok(res: ServerResponse, value: unknown): void {
-  sendJson(res, 200, { ok: true, value })
+function ok(value: unknown): Response {
+  return sendJson(200, { ok: true, value })
 }
 
 /**
@@ -118,36 +91,23 @@ function ok(res: ServerResponse, value: unknown): void {
  * language. The plain `message` stays an English diagnostic for logs and for a
  * client that does not know the code yet.
  */
-function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
-  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
+function fail(status: number, kind: string, host: HostText): Response {
+  return sendJson(status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
-/** Bounded JSON body read (larger cap than swarm: server entries carry env maps). */
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let size = 0
-    const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > 65_536) {
-        // Drain instead of destroy: the socket stays alive so the 413 answer
-        // actually reaches the client.
-        reject(new Error('payload-too-large'))
-        req.resume()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      try {
-        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        resolve(typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {})
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error('invalid JSON body'))
-      }
-    })
-    req.on('error', reject)
-  })
+/**
+ * Bounded JSON body read. The carrier has already buffered the body (the route
+ * declares `requestBody: 'buffered'`) under the channel's own cap; this much
+ * smaller route limit is checked before parsing so an oversized body can never
+ * reach the store.
+ */
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const declared = Number(request.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const text = await request.text()
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const parsed: unknown = JSON.parse(text)
+  return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
 }
 
 /** Values the client must never see in plaintext: mask literal env/header values. */
@@ -190,15 +150,33 @@ export function unmaskSecretValues(raw: Record<string, unknown>, existing: McpSe
   return out
 }
 
+/** Body-read failure: `invalid body`, or the JSON parser's own text. */
+function invalidBody(error: unknown): HostText {
+  const detail = error instanceof Error ? error.message : 'invalid body'
+  return { code: 'route.invalidBody', params: { detail }, text: detail }
+}
+
+/** Body-read rejection: the 64 KiB cap answers 413, anything else 400. */
+function bodyRejection(error: unknown): Response {
+  if (error instanceof Error && error.message === 'payload-too-large') {
+    return fail(413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
+  }
+  return fail(400, 'bad-request', invalidBody(error))
+}
+
 /**
- * Register the MCP manager routes.
- * @param webServer - the dsh web server service.
+ * Register the MCP manager routes on the Connection exact-Fetch registry.
+ * @param connectionFetch - the registry (`ctx.connection.fetch`).
  * @param store - the servers.json store.
  * @param manager - the dynamic mount manager.
  * @returns disposer removing the routes.
  */
-export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, manager: McpMountManager): () => void {
-  const respond = async (res: ServerResponse, extra: Record<string, unknown> = {}): Promise<void> => {
+export function registerMcpRoutes(
+  connectionFetch: HostConnectionFetch,
+  store: McpStore,
+  manager: McpMountManager,
+): () => Promise<void> {
+  const respond = async (extra: Record<string, unknown> = {}): Promise<Response> => {
     const file = store.load()
     const servers: McpServerView[] = []
     for (const entry of file.servers) {
@@ -207,7 +185,7 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
         status: manager.statusFor(entry),
       })
     }
-    ok(res, {
+    return ok({
       enabled: file.enabled,
       filePath: store.filePath,
       mountAvailable: manager.available,
@@ -216,14 +194,10 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
     } satisfies McpServersResponse)
   }
 
-  /** Guarded write: refuse when the master switch is off (read-only mode). */
-  const guardWrite = (res: ServerResponse): boolean => {
-    if (!store.load().enabled) {
-      fail(res, 409, 'disabled', { code: 'route.disabled' })
-      return false
-    }
-    return true
-  }
+  /** Guarded write: the master switch off answers 409 (read-only mode). */
+  const guardWrite = (): Response | undefined => (store.load().enabled
+    ? undefined
+    : fail(409, 'disabled', { code: 'route.disabled' }))
 
   /** Write-store failure: the reason is a technical detail, so the client's
    * copy owns the sentence and the detail rides as the code's English text. */
@@ -232,207 +206,151 @@ export function registerMcpRoutes(webServer: WebServerLike, store: McpStore, man
     return { code: 'route.writeFailed', params: { detail }, text: detail }
   }
 
-  /** Body-read failure: `invalid body`, or the JSON parser's own text. */
-  const invalidBody = (error: unknown): HostText => {
-    const detail = error instanceof Error ? error.message : 'invalid body'
-    return { code: 'route.invalidBody', params: { detail }, text: detail }
+  /** Validation rejection vs a store failure, both for the same mutate step. */
+  const writeRejection = (error: unknown): Response => (error instanceof McpValidationError
+    ? fail(400, 'bad-request', error.hostText())
+    : fail(500, 'io', writeFailed(error)))
+
+  /** One entry write: a body read, the master-switch guard, then the mutation. */
+  const create = async (request: Request): Promise<Response> => {
+    let body: Record<string, unknown>
+    try {
+      body = await readJsonBody(request)
+    } catch (error) {
+      return bodyRejection(error)
+    }
+    const denied = guardWrite()
+    if (denied !== undefined) return denied
+    try {
+      const entry = store.create(body)
+      await manager.syncOne(entry)
+    } catch (error) {
+      return writeRejection(error)
+    }
+    return await respond()
+  }
+
+  /** One entry rewrite: the stored entry supplies the values behind the mask. */
+  const update = async (request: Request): Promise<Response> => {
+    let body: Record<string, unknown>
+    try {
+      body = await readJsonBody(request)
+    } catch (error) {
+      return bodyRejection(error)
+    }
+    const denied = guardWrite()
+    if (denied !== undefined) return denied
+    const id = typeof body.id === 'string' ? body.id : ''
+    const existing = store.load().servers.find(entry => entry.id === id)
+    if (existing === undefined) {
+      return fail(404, 'not-found', { code: 'server.notFound', params: { id } })
+    }
+    try {
+      const entry = store.update(id, unmaskSecretValues(body, existing))
+      await manager.syncOne(entry)
+    } catch (error) {
+      return writeRejection(error)
+    }
+    return await respond()
+  }
+
+  /** One entry removal: the file is the truth, the loader instance follows. */
+  const remove = async (request: Request): Promise<Response> => {
+    let body: Record<string, unknown>
+    try {
+      body = await readJsonBody(request)
+    } catch (error) {
+      return fail(400, 'bad-request', invalidBody(error))
+    }
+    const denied = guardWrite()
+    if (denied !== undefined) return denied
+    const id = typeof body.id === 'string' ? body.id : ''
+    store.remove(id)
+    await manager.unmount(id)
+    return await respond()
+  }
+
+  /** Bulk import: per-server independence, with the rename report attached. */
+  const importServers = async (request: Request): Promise<Response> => {
+    let body: Record<string, unknown>
+    try {
+      body = await readJsonBody(request)
+    } catch (error) {
+      return bodyRejection(error)
+    }
+    const denied = guardWrite()
+    if (denied !== undefined) return denied
+    const json = typeof body.json === 'string' ? body.json : ''
+    let parsed
+    try {
+      parsed = parseMcpServersJson(json)
+    } catch (error) {
+      return fail(400, 'bad-request', error instanceof McpValidationError ? error.hostText() : invalidBody(error))
+    }
+    // Per-server independence: one bad definition fails alone (and is
+    // reported), the rest of the batch still imports and mounts.
+    // Display-name keys that violate the serverName contract are
+    // auto-slugged ("Framelink MCP for Figma" → "Framelink_MCP_for_Figma")
+    // and surfaced in `renamed` so the rename is never silent.
+    const imported: string[] = []
+    const renamed: Array<{ from: string, to: string }> = []
+    const failed: Array<{ name: string, reason: HostText }> = []
+    for (const { name, def } of parsed) {
+      try {
+        let serverName = name
+        if (!SERVER_NAME_PATTERN.test(name)) {
+          const slug = slugifyServerName(name)
+          if (slug === undefined) throw invalidServerNameError(name)
+          renamed.push({ from: name, to: slug })
+          serverName = slug
+        }
+        const entry = store.create(mapExternalServer(serverName, def))
+        await manager.syncOne(entry)
+        imported.push(serverName)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        failed.push({
+          name,
+          reason: error instanceof McpValidationError
+            ? error.hostText()
+            : { code: 'import.writeFailed', params: { detail }, text: detail },
+        })
+      }
+    }
+    return await respond({ imported, renamed, failed })
   }
 
   const disposers = [
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/servers`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
-          return
-        }
-        if (req.method !== 'GET') {
-          res.setHeader('Allow', 'GET')
-          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
-          return
-        }
-        void respond(res)
-      },
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => await respond(),
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/server/create`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
-          return
-        }
-        if (req.method !== 'POST') {
-          res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-          return
-        }
-        void readJsonBody(req)
-          .then(async (body) => {
-            if (!guardWrite(res)) return
-            try {
-              const entry = store.create(body)
-              await manager.syncOne(entry)
-            } catch (error) {
-              if (error instanceof McpValidationError) {
-                fail(res, 400, 'bad-request', error.hostText())
-              } else {
-                fail(res, 500, 'io', writeFailed(error))
-              }
-              return
-            }
-            await respond(res)
-          })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'invalid body'
-            if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
-              return
-            }
-            fail(res, 400, 'bad-request', invalidBody(error))
-          })
-      },
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: create,
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/server/update`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
-          return
-        }
-        if (req.method !== 'POST') {
-          res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-          return
-        }
-        void readJsonBody(req)
-          .then(async (body) => {
-            if (!guardWrite(res)) return
-            const id = typeof body.id === 'string' ? body.id : ''
-            const existing = store.load().servers.find(entry => entry.id === id)
-            if (existing === undefined) {
-              fail(res, 404, 'not-found', { code: 'server.notFound', params: { id } })
-              return
-            }
-            try {
-              const entry = store.update(id, unmaskSecretValues(body, existing))
-              await manager.syncOne(entry)
-            } catch (error) {
-              if (error instanceof McpValidationError) {
-                fail(res, 400, 'bad-request', error.hostText())
-              } else {
-                fail(res, 500, 'io', writeFailed(error))
-              }
-              return
-            }
-            await respond(res)
-          })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'invalid body'
-            if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
-              return
-            }
-            fail(res, 400, 'bad-request', invalidBody(error))
-          })
-      },
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: update,
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/server/delete`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
-          return
-        }
-        if (req.method !== 'POST') {
-          res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-          return
-        }
-        void readJsonBody(req)
-          .then(async (body) => {
-            if (!guardWrite(res)) return
-            const id = typeof body.id === 'string' ? body.id : ''
-            store.remove(id)
-            await manager.unmount(id)
-            await respond(res)
-          })
-          .catch((error: unknown) => {
-            fail(res, 400, 'bad-request', invalidBody(error))
-          })
-      },
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: remove,
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/server/import`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) {
-          fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
-          return
-        }
-        if (req.method !== 'POST') {
-          res.setHeader('Allow', 'POST')
-          fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-          return
-        }
-        void readJsonBody(req)
-          .then(async (body) => {
-            if (!guardWrite(res)) return
-            const json = typeof body.json === 'string' ? body.json : ''
-            let parsed
-            try {
-              parsed = parseMcpServersJson(json)
-            } catch (error) {
-              fail(res, 400, 'bad-request', error instanceof McpValidationError
-                ? error.hostText()
-                : invalidBody(error))
-              return
-            }
-            // Per-server independence: one bad definition fails alone (and is
-            // reported), the rest of the batch still imports and mounts.
-            // Display-name keys that violate the serverName contract are
-            // auto-slugged ("Framelink MCP for Figma" → "Framelink_MCP_for_Figma")
-            // and surfaced in `renamed` so the rename is never silent.
-            const imported: string[] = []
-            const renamed: Array<{ from: string, to: string }> = []
-            const failed: Array<{ name: string, reason: HostText }> = []
-            for (const { name, def } of parsed) {
-              try {
-                let serverName = name
-                if (!SERVER_NAME_PATTERN.test(name)) {
-                  const slug = slugifyServerName(name)
-                  if (slug === undefined) throw invalidServerNameError(name)
-                  renamed.push({ from: name, to: slug })
-                  serverName = slug
-                }
-                const entry = store.create(mapExternalServer(serverName, def))
-                await manager.syncOne(entry)
-                imported.push(serverName)
-              } catch (error) {
-                const detail = error instanceof Error ? error.message : String(error)
-                failed.push({
-                  name,
-                  reason: error instanceof McpValidationError
-                    ? error.hostText()
-                    : { code: 'import.writeFailed', params: { detail }, text: detail },
-                })
-              }
-            }
-            await respond(res, { imported, renamed, failed })
-          })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'invalid body'
-            if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
-              return
-            }
-            fail(res, 400, 'bad-request', invalidBody(error))
-          })
-      },
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: importServers,
     }),
   ]
-  return () => { for (const dispose of disposers) dispose() }
+  return async () => { for (const dispose of disposers) await dispose() }
 }

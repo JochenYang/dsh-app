@@ -1,10 +1,10 @@
 /**
  * Wire-level suite for plugin-brand's diagnostics FACT route.
  *
- * The route is served by a real `node:http` server through the registration
- * seam and reads a real log file from a temp directory, so the allowlist, the
- * fences and the log-section shapes are exercised on the wire rather than by
- * calling a builder directly.
+ * The route is dispatched through the Connection exact-Fetch harness (see
+ * `./host-harness.ts`) and reads a real log file from a temp directory, so the
+ * allowlist and the log-section shapes are exercised on the request objects a
+ * route sees rather than by calling a builder directly.
  *
  * The host no longer assembles the package: it publishes the FACTS and the page
  * renders them in the UI's own language (`plugin-client-ui/src/client/diagnostics/report.ts`).
@@ -25,7 +25,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, test } from 'node:test'
-import { BRIDGE_TOKEN_ENV, BRIDGE_URL_ENV } from '../src/bridge-client.ts'
+import { SHELL_ACTIONS_ENV } from '../src/shell-actions.ts'
 import {
   exportFileName,
   KERNEL_CHANNEL_ENV,
@@ -34,7 +34,7 @@ import {
 } from '../src/diagnostics-facts.ts'
 import { LOG_DIR_ENV } from '../src/log-tail.ts'
 import { ROUTE_PREFIX, UNSUPPORTED_HOST } from '../src/routes.ts'
-import { parseRaw, rawRequest, startHost, type Host, type JsonAnswer } from './host-harness.ts'
+import { startHost, type Host, type JsonAnswer } from './host-harness.ts'
 
 /**
  * The unsupported answer's body, in the coded shape: the client renders
@@ -51,8 +51,7 @@ const TAIL_MARKERS = ['日志尾标记一', '日志尾标记二']
 
 /** Every variable this suite writes; the original values come back in `after`. */
 const WATCHED_ENV = [
-  BRIDGE_URL_ENV,
-  BRIDGE_TOKEN_ENV,
+  SHELL_ACTIONS_ENV,
   LOG_DIR_ENV,
   SHELL_VERSION_ENV,
   KERNEL_VERSION_ENV,
@@ -83,21 +82,20 @@ async function tempDir(prefix: string): Promise<string> {
 }
 
 /**
- * Publish a bridge the way the shell does.
+ * Publish the shell's action route the way the shell does.
  *
- * The route only asks WHETHER a bridge exists on this path (the write happens
- * on `/desktop/save-text-as`), so coordinates that were never dialled are
- * enough — and the token below is exactly what must never appear in a payload.
+ * The route only asks WHETHER such a route exists on this path (the write
+ * happens in the page, through `/desktop/save-text-as` and then the shell), so
+ * a base URL that is never dialled is enough — and this value is exactly what
+ * must never appear in a payload.
  */
 function publishBridge(): void {
-  process.env[BRIDGE_URL_ENV] = 'http://127.0.0.1:1/'
-  process.env[BRIDGE_TOKEN_ENV] = 'token-that-must-never-be-exported'
+  process.env[SHELL_ACTIONS_ENV] = 'dsh-app://app/__dsh-app/action'
 }
 
-/** Simulate a run with no bridge at all (dev, or a shell that could not bind). */
+/** Simulate a run with no such route (a bare `dsh`, or an older shell). */
 function unsetBridge(): void {
-  delete process.env[BRIDGE_URL_ENV]
-  delete process.env[BRIDGE_TOKEN_ENV]
+  delete process.env[SHELL_ACTIONS_ENV]
 }
 
 /** A log directory holding one server log, plus the versions the shell publishes. */
@@ -113,10 +111,9 @@ async function publishEnv(logDir: string | null): Promise<void> {
   process.env[KERNEL_CHANNEL_ENV] = 'beta'
 }
 
-/** POST /diagnostics/export against the real host server. */
+/** POST /diagnostics/export through the Connection Fetch harness. */
 async function exportFacts(host: Host, headers: Record<string, string> = {}): Promise<JsonAnswer> {
-  const response = await fetch(`${host.url}${ROUTE_PREFIX}/diagnostics/export`, { method: 'POST', headers })
-  return { status: response.status, body: await response.json() as Record<string, unknown> }
+  return host.call(`${ROUTE_PREFIX}/diagnostics/export`, { method: 'POST', headers })
 }
 
 test('export publishes the facts the page writes the package from', async () => {
@@ -140,11 +137,12 @@ test('export publishes the facts the page writes the package from', async () => 
     assert.equal(log.file, path.join(logDir, LOG_NAME))
     assert.deepEqual(log.lines, TAIL_MARKERS, 'the tail travels verbatim, in order')
 
-    // The load-bearing privacy claim: nothing on this path reads the bridge
-    // token, so the serialized payload cannot contain it. Asserted rather than
-    // argued, and the message never prints the value.
-    assert.equal(JSON.stringify(answer.body).includes(process.env[BRIDGE_TOKEN_ENV] ?? '\u0000'), false,
-      'the bridge token is not exportable')
+    // The load-bearing privacy claim: nothing on this path reads anything but
+    // the allowlist, so the serialized payload cannot contain another
+    // environment value (the shell's own action URL included). Asserted rather
+    // than argued, and the message never prints the value.
+    assert.equal(JSON.stringify(answer.body).includes(process.env[SHELL_ACTIONS_ENV] ?? '\u0000'), false,
+      'an unallowlisted environment value is not exportable')
   } finally {
     unsetBridge()
     await host.close()
@@ -200,7 +198,7 @@ test('a log directory holding no kernel log reports the reason, not an error', a
   }
 })
 
-test('no bridge environment answers unsupported, never an error', async () => {
+test('no shell action route answers unsupported, never an error', async () => {
   await publishEnv(await tempDir('dsh-brand-facts-'))
   const host = await startHost()
   unsetBridge()
@@ -213,60 +211,30 @@ test('no bridge environment answers unsupported, never an error', async () => {
   }
 })
 
-test('export refuses a cross-site Origin', async () => {
+test('trust is the carrier\'s: a foreign Origin reaches the route unfenced', async () => {
   await publishEnv(await tempDir('dsh-brand-facts-'))
   publishBridge()
   const host = await startHost()
   try {
+    // The Connection carrier applies its Host/Origin fence and browser
+    // authentication BEFORE a handler runs. A route must not re-check them: on
+    // the desktop pipe the URL scheme is `dsh-app://app` and there is no Host
+    // header to inspect, so a second fence here would 403 every real request.
     const answer = await exportFacts(host, { origin: 'https://evil.example' })
-    assert.equal(answer.status, 403)
-    assert.equal(answer.body.ok, false)
+    assert.equal(answer.status, 200)
+    assert.equal(answer.body.ok, true)
   } finally {
     unsetBridge()
     await host.close()
   }
 })
 
-test('export refuses a non-loopback Host and admits a loopback one', async () => {
-  await publishEnv(await tempDir('dsh-brand-facts-'))
-  publishBridge()
-  const host = await startHost()
-  try {
-    const request = `POST ${ROUTE_PREFIX}/diagnostics/export HTTP/1.1`
-    const headers = ['Content-Type: application/json', 'Content-Length: 2', 'Connection: close']
-    const foreign = parseRaw(await rawRequest(host.port, [
-      request,
-      'Host: dsh.example',
-      ...headers,
-      '',
-      '{}',
-    ].join('\r\n')))
-    assert.equal(foreign.status, 403)
-    assert.equal(foreign.body.ok, false)
-
-    const loopback = parseRaw(await rawRequest(host.port, [
-      request,
-      `Host: 127.0.0.1:${String(host.port)}`,
-      ...headers,
-      '',
-      '{}',
-    ].join('\r\n')))
-    assert.equal(loopback.status, 200)
-    assert.equal(loopback.body.ok, true)
-    assert.equal(typeof loopback.body.name, 'string')
-  } finally {
-    unsetBridge()
-    await host.close()
-  }
-})
-
-test('export answers 405 for a GET and names the method that works', async () => {
+test('export answers the channel 404 for a GET (the route is POST only)', async () => {
   await publishEnv(await tempDir('dsh-brand-facts-'))
   const host = await startHost()
   try {
-    const response = await fetch(`${host.url}${ROUTE_PREFIX}/diagnostics/export`)
-    assert.equal(response.status, 405)
-    assert.equal(response.headers.get('allow'), 'POST')
+    const answer = await host.call(`${ROUTE_PREFIX}/diagnostics/export`)
+    assert.equal(answer.status, 404)
   } finally {
     await host.close()
   }

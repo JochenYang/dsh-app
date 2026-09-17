@@ -5,6 +5,10 @@
  * src/types.ts). Run via `npm test` (esbuild bundles TS → .test-dist, node
  * --test runs it).
  *
+ * The transport under test is the Connection exact-Fetch registry, so a case
+ * registers its routes into a fake registry and calls the captured Fetch
+ * handler with a real `Request` — no HTTP server and no socket are involved.
+ *
  * @module @dsh-app/plugin-usage/tests/routes
  */
 
@@ -21,6 +25,12 @@ interface Answer {
   readonly text: string
 }
 
+/** One registered exact route: the methods it owns and its Fetch handler. */
+interface RegisteredRoute {
+  readonly methods: readonly string[]
+  readonly fetch: (request: Request) => Promise<Response>
+}
+
 /** The body shape every route answers a failure with. */
 interface FailureBody {
   readonly ok: boolean
@@ -32,47 +42,32 @@ interface FailureBody {
 }
 
 /**
- * Mount the routes over a fake web server and return the handler per path.
+ * Mount the routes over a fake exact-Fetch registry and return them per path.
  * The store is null on purpose: only summary/heatmap read it, and every case
  * here exercises a path that fails before the store matters.
  */
-function mountRoutes(options: UsageRoutesOptions): Map<string, (req: unknown, res: unknown) => void> {
-  const handlers = new Map<string, (req: unknown, res: unknown) => void>()
+function mountRoutes(options: UsageRoutesOptions): Map<string, RegisteredRoute> {
+  const routes = new Map<string, RegisteredRoute>()
   registerUsageRoutes({
-    register: (route: { path: string, handler: (req: never, res: never) => void }) => {
-      handlers.set(route.path, route.handler as unknown as (req: unknown, res: unknown) => void)
-      return () => {}
+    register: (route: { path: string, methods: readonly string[], fetch: (request: Request) => Promise<Response> }) => {
+      routes.set(route.path, { methods: route.methods, fetch: route.fetch })
+      return Promise.resolve()
     },
-  }, null, options)
-  return handlers
+  } as never, null, options)
+  return routes
 }
 
-/** One registered route handler, asserted present. */
-function route(handlers: Map<string, (req: unknown, res: unknown) => void>, path: string): (req: unknown, res: unknown) => void {
-  const handler = handlers.get(`${ROUTE_PREFIX}/${path}`)
-  assert.ok(handler !== undefined, `the /${path} route must be registered`)
-  return handler
+/** One registered route, asserted present. */
+function route(routes: Map<string, RegisteredRoute>, path: string): RegisteredRoute {
+  const registered = routes.get(`${ROUTE_PREFIX}/${path}`)
+  assert.ok(registered !== undefined, `the /${path} route must be registered`)
+  return registered
 }
 
-/** One GET round trip; the handler answers from a promise chain. */
-async function call(handler: (req: unknown, res: unknown) => void, method: string): Promise<Answer> {
-  const req = {
-    method,
-    url: '/',
-    headers: { host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' },
-  }
-  const res = {
-    status: 0,
-    body: '',
-    setHeader: (_name: string, _value: string): void => {},
-    writeHead(status: number): void { res.status = status },
-    end(chunk: string): void { res.body = String(chunk) },
-  }
-  handler(req, res)
-  // Every handler is synchronous or settles within one macrotask (no upstream
-  // call is made here: the fetchers reject immediately).
-  await new Promise(resolve => setTimeout(resolve, 0))
-  return { status: res.status, text: res.body }
+/** One round trip through a captured Fetch handler. */
+async function call(registered: RegisteredRoute, method: string, url = '/'): Promise<Answer> {
+  const response = await registered.fetch(new Request(new URL(url, 'dsh-app://app'), { method }))
+  return { status: response.status, text: await response.text() }
 }
 
 test('BalanceError: the wire form is a code, its params, and an English diagnostic', () => {
@@ -136,16 +131,13 @@ test('data routes answer the coded disabled message while the collector is off',
   }
 })
 
-test('a non-GET request is refused with a coded method-not-allowed answer', async () => {
-  const handlers = mountRoutes({ active: false })
+test('a route owns GET only: another method falls through to the shared channel', async () => {
+  const routes = mountRoutes({ active: false })
+  for (const path of ['status', 'summary', 'heatmap', 'balance']) {
+    assert.deepEqual(route(routes, path).methods, ['GET'], `/${path} must own GET and nothing else`)
+  }
 
-  const statusAnswer = await call(route(handlers, 'status'), 'GET')
+  const statusAnswer = await call(route(routes, 'status'), 'GET')
   assert.equal(statusAnswer.status, 200)
   assert.deepEqual(JSON.parse(statusAnswer.text), { ok: true, value: { active: false, reason: 'disabled-by-user-config' } })
-
-  const refused = await call(route(handlers, 'status'), 'POST')
-  assert.equal(refused.status, 405)
-  const body = JSON.parse(refused.text) as FailureBody
-  assert.equal(body.error.host.code, 'method-not-allowed')
-  assert.deepEqual(body.error.host.params, { method: 'GET' })
 })

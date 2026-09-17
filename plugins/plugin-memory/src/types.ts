@@ -114,7 +114,9 @@ export interface MemoryStatus {
   activity: MemoryDistillActivity[]
 }
 
-/** Route namespace on the dsh web server (`/plugins/<pkg>/api` discipline).
- * Lives here (not in routes.ts) so the browser half references the same
- * constant without importing host-only modules. */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-memory/api'
+/** Route namespace on the shared Connection `/api` channel. The registry admits
+ * only path segments matching `[A-Za-z0-9_$.-]`, so the npm scope's `@` cannot
+ * appear in the URL: `@dsh-app/plugin-memory` travels as
+ * `dsh-app/plugin-memory`. Lives here (not in routes.ts) so the browser half
+ * references the same constant without importing host-only modules. */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-memory'

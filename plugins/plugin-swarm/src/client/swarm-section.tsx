@@ -21,7 +21,9 @@ import type { HostText } from '../wire.ts'
 import { NS } from './locales.ts'
 import type { SwarmKey } from './locales.ts'
 
-const ROUTE = '/plugins/@dsh-app/plugin-swarm/api'
+// Mirrors ROUTE_PREFIX in the host half; the Connection registry admits no
+// `@` in a path segment, so the npm scope travels as `dsh-app`.
+const ROUTE = '/api/plugins/dsh-app/plugin-swarm'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type SwarmSectionProps = PropsLocale<typeof NS>
@@ -45,10 +47,10 @@ type Notice =
  *
  * The host never sends prose for anything the user reads (see `HostText` in
  * wire.ts): it sends a code plus the values the sentence interpolates, and the
- * copy lives here. `route.crossOrigin` and `route.methodOnly` are deliberately
- * absent — only a page that is not this one can trigger them, so they fall
- * through to the host's English diagnostic rather than shipping a sentence for
- * a state no user reaches (plugin-websearch made the same call).
+ * copy lives here. The old `route.crossOrigin` / `route.methodOnly` codes are
+ * gone with the HTTP fence: the Connection carrier owns trust, and an unowned
+ * method falls through to the shared channel's own 404, so neither code can
+ * come back (plugin-websearch made the same call).
  */
 const HOST_KEYS: Readonly<Record<string, SwarmKey>> = {
   'config.unknownField': 'swarm.host.unknownField',

@@ -1,14 +1,16 @@
 /**
  * Typed client for the sidebar dock's host git routes.
- * Same-origin fetch against the dsh web server; the host fence admits
- * loopback-Host requests, which every same-origin browser request is.
+ * Same-origin fetch against the Connection `/api` channel the window's own
+ * origin serves; the carrier's trust fence and browser authentication run
+ * before the route handler.
  */
 
 /**
- * The plugin's route prefix on the dsh web server (mirrors the host half;
- * the /api segment keeps clear of the loader-owned client.js bundle route).
+ * The plugin's route prefix on the shared `/api` channel (mirrors the host
+ * half; the Connection registry admits no `@` in a path segment, so the npm
+ * scope travels as `dsh-app`).
  */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-sidebar/api'
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-sidebar'
 
 /**
  * A user-visible message the host cannot localize.

@@ -544,17 +544,6 @@ test('writeSwarmUserConfig: validates, merges, persists atomically, and null cle
   assert.equal(loadSwarmUserConfig(file, () => {}).tokenBudget, 500000)
 })
 
-test('sameOrigin: browser Origin matches by host part; malformed Origin rejected; missing Origin allowed', async () => {
-  const { sameOrigin } = await import('../src/routes.ts')
-  const req = (headers: Record<string, string>): import('node:http').IncomingMessage =>
-    ({ headers }) as import('node:http').IncomingMessage
-
-  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' })), true)
-  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'http://evil.example.com' })), false)
-  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000', origin: 'not a url' })), false)
-  assert.equal(sameOrigin(req({ host: '127.0.0.1:3000' })), true, 'non-browser caller (no Origin)')
-})
-
 // --- host-message codes (the settings page owns the copy) ----------------------
 
 /** The Han range: a wire payload must never carry one — the client renders copy. */
@@ -622,13 +611,17 @@ test('swarm routes: every failure answers a coded host message, never Chinese pr
   const { registerSwarmRoutes, ROUTE_PREFIX } = await import('../src/routes.ts')
 
   const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
-  /** Mount the routes over a fake web server and hand back the config POST. */
-  const mountPost = (configPath: string): ((req: unknown, res: unknown) => void) => {
-    const handlers = new Map<string, (req: unknown, res: unknown) => void>()
+  /**
+   * Mount the route over a fake Connection exact-Fetch registry and hand back
+   * the captured Fetch handler. Registration returns an async disposer, like
+   * the real registry.
+   */
+  const mount = (configPath: string): ((request: Request) => Promise<Response>) => {
+    const handlers = new Map<string, (request: Request) => Promise<Response>>()
     registerSwarmRoutes({
-      register: (route: { path: string, handler: (req: never, res: never) => void }) => {
-        handlers.set(route.path, route.handler as unknown as (req: unknown, res: unknown) => void)
-        return () => {}
+      register: (route: { path: string, fetch: (request: Request) => Promise<Response> }) => {
+        handlers.set(route.path, route.fetch)
+        return Promise.resolve(async () => { handlers.delete(route.path) })
       },
     }, OVERLAY, configPath)
     const handler = handlers.get(`${ROUTE_PREFIX}/config`)
@@ -636,37 +629,20 @@ test('swarm routes: every failure answers a coded host message, never Chinese pr
     return handler
   }
 
-  /** One request/response round trip; the body is emitted as a data chunk. */
-  const call = async (post: (req: unknown, res: unknown) => void, body: string): Promise<{ status: number, text: string }> => {
-    const listeners: Record<string, ((chunk?: unknown) => void)[]> = {}
-    const req = {
+  /** One request round trip through the captured route. */
+  const call = async (
+    fetchRoute: (request: Request) => Promise<Response>,
+    body: string,
+  ): Promise<{ status: number, text: string }> => {
+    const response = await fetchRoute(new Request(`dsh-app://app${ROUTE_PREFIX}/config`, {
       method: 'POST',
-      headers: { host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' },
-      on: (event: string, listener: (chunk?: unknown) => void) => {
-        ;(listeners[event] ??= []).push(listener)
-        return req
-      },
-      resume: () => {},
-    }
-    const res = {
-      status: 0,
-      body: '',
-      setHeader: (_name: string, _value: string): void => {},
-      writeHead(status: number): void { res.status = status },
-      end(chunk: string): void { res.body = String(chunk) },
-    }
-    post(req, res)
-    // The body arrives on the next microtask (the handler has wired its
-    // listeners by now); one macrotask then drains the promise chain it drives.
-    queueMicrotask(() => {
-      for (const listener of listeners.data ?? []) listener(Buffer.from(body))
-      for (const listener of listeners.end ?? []) listener()
-    })
-    await new Promise(resolve => setTimeout(resolve, 0))
-    return { status: res.status, text: res.body }
+      headers: { 'content-type': 'application/json' },
+      body,
+    }))
+    return { status: response.status, text: await response.text() }
   }
 
-  const rejected = await call(mountPost(join(dir, 'config.json')), JSON.stringify({ nonsense: 1 }))
+  const rejected = await call(mount(join(dir, 'config.json')), JSON.stringify({ nonsense: 1 }))
   assert.equal(rejected.status, 400)
   assert.deepEqual(
     (JSON.parse(rejected.text) as { error: { code: string, host: unknown } }).error,
@@ -678,7 +654,7 @@ test('swarm routes: every failure answers a coded host message, never Chinese pr
   )
   assert.ok(!HAN.test(rejected.text), 'a rejected write must not answer with a Chinese sentence')
 
-  const unparsable = await call(mountPost(join(dir, 'config.json')), '{not json')
+  const unparsable = await call(mount(join(dir, 'config.json')), '{not json')
   assert.equal(unparsable.status, 400)
   assert.equal((JSON.parse(unparsable.text) as { error: { host: { code: string } } }).error.host.code, 'route.invalidBody')
   assert.ok(!HAN.test(unparsable.text))
@@ -687,7 +663,7 @@ test('swarm routes: every failure answers a coded host message, never Chinese pr
   // is a coded message too (it used to be a Chinese sentence). The diagnostic
   // is the fs error itself — it carries a path, so only the code is asserted.
   writeFileSync(join(dir, 'blocked'), 'not a directory', 'utf8')
-  const unwritable = await call(mountPost(join(dir, 'blocked', 'config.json')), JSON.stringify({ adaptive: false }))
+  const unwritable = await call(mount(join(dir, 'blocked', 'config.json')), JSON.stringify({ adaptive: false }))
   assert.equal(unwritable.status, 500)
   const unwritableBody = JSON.parse(unwritable.text) as { error: { code: string, host: { code: string, text: string } } }
   assert.equal(unwritableBody.error.code, 'io')

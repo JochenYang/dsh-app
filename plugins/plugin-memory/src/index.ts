@@ -44,8 +44,8 @@ import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the tools Context merge (ctx.tools) into scope.
 import type {} from '@deepseek-ai/dsh-tools'
 // Type-only: pulls the systemPrompt Context merge (ctx.systemPrompt) and the
@@ -62,7 +62,14 @@ import { registerMemoryRoutes } from './routes.ts'
 import { registerMemoryTools } from './tools.ts'
 
 export const name = 'plugin-memory'
-export const inject = ['webServer', 'tools', 'systemPrompt']
+
+/**
+ * The settings routes ride the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['connection', 'tools', 'systemPrompt']
 
 /** Config: storage location. */
 export interface Config {
@@ -100,7 +107,7 @@ export function apply(ctx: Context, config: Config): void {
 
   if (!root.global.isEnabled()) {
     log.info(`memory plugin: disabled by user config (${join(dir, 'config.json')})`)
-    ctx.effect(() => registerMemoryRoutes(ctx.webServer, root), 'plugin-memory: settings routes (disabled)')
+    ctx.effect(() => registerMemoryRoutes(ctx.connection.fetch, root), 'plugin-memory: settings routes (disabled)')
     return
   }
 
@@ -127,7 +134,7 @@ export function apply(ctx: Context, config: Config): void {
     requestCurate?.(parent, sessionId)
   }
   ctx.effect(() => registerMemoryTools(ctx, root, onSaved), 'plugin-memory: llm tools')
-  ctx.effect(() => registerMemoryRoutes(ctx.webServer, root), 'plugin-memory: settings routes')
+  ctx.effect(() => registerMemoryRoutes(ctx.connection.fetch, root), 'plugin-memory: settings routes')
 
   // The background passes need the agents + llm services; on a kernel
   // without them (e.g. a rollback target) the plugin still mounts everything

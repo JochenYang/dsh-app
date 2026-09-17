@@ -8,7 +8,6 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
 import { mkdtempSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -371,43 +370,43 @@ test('lightSweep: never throws on an empty store', () => {
   assert.deepEqual(lightSweep(root, 'global', root.global, console), { merged: 0, suspects: 0 })
 })
 
-// --- settings route: the pin fence still holds --------------------------------
+// --- settings routes: the exact-Fetch registration ----------------------------
 
-/** Register the settings routes over one root: the handler map, a caller that
- *  reports the JSON answer, and the disposer. */
+/** One registered route as the test registry holds it. */
+interface RegisteredRoute {
+  readonly methods: readonly string[]
+  readonly requestBody: string
+  readonly fetch: (request: Request) => Promise<Response>
+}
+
+/** Register the settings routes over one root: the exact-Fetch registry, a
+ *  caller that reports the JSON answer, and the disposer. */
 function settingsRoutes(root: MemoryRoot) {
-  const handlers = new Map<string, (req: unknown, res: unknown) => void>()
+  const routes = new Map<string, RegisteredRoute>()
   const dispose = registerMemoryRoutes({
-    register: (route: { path: string, handler: (req: never, res: never) => void }) => {
-      handlers.set(route.path, route.handler as unknown as (req: unknown, res: unknown) => void)
-      return () => undefined
+    register: (route: RegisteredRoute) => {
+      assert.equal(routes.has(route.path), false, `${route.path} is registered once`)
+      routes.set(route.path, route)
+      return () => Promise.resolve()
     },
-  }, root)
+  } as never, root)
   const call = async (
     path: string,
     body: Record<string, unknown> | undefined,
-    headers: Record<string, string> = { host: '127.0.0.1:3080' },
     method = 'POST',
   ): Promise<{ status: number, body: Record<string, unknown> }> => {
-    const handler = handlers.get(`${ROUTE_PREFIX}/${path}`)
-    assert.ok(handler !== undefined, `the ${path} route is registered`)
-    const req = Object.assign(new EventEmitter(), { method, headers })
-    let status = 0
-    let payload: Record<string, unknown> = {}
-    const res = {
-      setHeader: (): void => undefined,
-      writeHead: (code: number): void => { status = code },
-      end: (text: string): void => { payload = JSON.parse(text) as Record<string, unknown> },
-    }
-    handler(req as never, res as never)
-    if (body !== undefined) {
-      req.emit('data', Buffer.from(JSON.stringify(body)))
-      req.emit('end')
-    }
-    await new Promise(resolve => setImmediate(resolve))
-    return { status, body: payload }
+    const route = routes.get(`${ROUTE_PREFIX}/${path}`)
+    assert.ok(route !== undefined, `the ${path} route is registered`)
+    assert.ok(route.methods.includes(method), `the ${path} route owns ${method}`)
+    const response = await route.fetch(new Request(`https://localhost${ROUTE_PREFIX}/${path}`, {
+      method,
+      ...(body === undefined
+        ? {}
+        : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+    }))
+    return { status: response.status, body: await response.json() as Record<string, unknown> }
   }
-  return { handlers, call, dispose }
+  return { routes, call, dispose }
 }
 
 /** The coded message of a refusal: what the client maps to its own copy (and
@@ -428,7 +427,7 @@ test('pin route: an invalid or unknown project slug is rejected before any write
   assert.equal(hostMessage(unknown.body).code, 'route.projectUnknown')
   assert.equal(root.global.list().length, 0, 'no card was written')
   assert.equal(existsSync(join(root.dir, 'config.json')), false, 'no pin was written')
-  routes.dispose()
+  void routes.dispose()
 })
 
 test('settings routes: every refusal carries a code plus the values the client interpolates', async () => {
@@ -451,21 +450,53 @@ test('settings routes: every refusal carries a code plus the values the client i
   assert.equal(badToggle.status, 400)
   assert.equal(hostMessage(badToggle.body).code, 'route.enabledNotBoolean')
 
-  // The method and fence refusals are coded like the rest. They are reachable
-  // only from a hostile page, so they have no dictionary copy and render the
-  // English diagnostic the code carries.
-  const wrongMethod = await routes.call('config', undefined, { host: '127.0.0.1:3080' }, 'GET')
-  assert.equal(wrongMethod.status, 405)
-  assert.equal(hostMessage(wrongMethod.body).code, 'route.methodOnly')
-  // The param is the method the route ACCEPTS, so the copy reads "only POST".
-  assert.deepEqual(hostMessage(wrongMethod.body).params, { method: 'POST' })
+  // A route claims the methods it owns and nothing else: the registry never
+  // hands a route a method it did not claim, so a GET can never reach the
+  // mutating handlers (it falls through to the shared channel's own 404).
+  assert.deepEqual(routes.routes.get(`${ROUTE_PREFIX}/config`)?.methods, ['POST'])
+  assert.deepEqual(routes.routes.get(`${ROUTE_PREFIX}/status`)?.methods, ['GET'])
+  assert.deepEqual(routes.routes.get(`${ROUTE_PREFIX}/entries`)?.methods, ['GET'])
 
-  const crossOrigin = await routes.call('config', { enabled: true }, { host: '127.0.0.1:3080', origin: 'http://evil.example' })
-  assert.equal(crossOrigin.status, 403)
-  assert.equal(hostMessage(crossOrigin.body).code, 'route.crossOrigin')
+  // Every path stays inside the registry's segment grammar. An `@` (the npm
+  // scope) is refused at registration and would take the whole route set down
+  // with it, so the shape is asserted here instead of discovered on a boot.
+  for (const path of routes.routes.keys()) {
+    assert.ok(path.startsWith('/api/plugins/dsh-app/plugin-memory/'), `${path} stays below the /api channel`)
+    for (const segment of path.split('/').filter(part => part !== '')) {
+      assert.match(segment, /^[A-Za-z0-9_$.-]+$/u, `${path} has no segment outside the allowed alphabet`)
+    }
+  }
 
   assert.equal(root.global.list().length, 0, 'no refusal wrote anything')
-  routes.dispose()
+  void routes.dispose()
+})
+
+test('settings routes: an unparseable or oversized body is refused before it reaches the store', async () => {
+  const root = tmpRoot()
+  const routes = settingsRoutes(root)
+
+  // Over the 8 KiB cap: refused on the declared length, before parsing — and
+  // the toggle inside it never lands.
+  const oversized = await routes.call('config', { enabled: false, pad: 'x'.repeat(9_000) })
+  assert.equal(oversized.status, 413)
+  assert.equal(hostMessage(oversized.body).code, 'route.bodyTooLarge')
+  assert.equal(root.global.isEnabled(), true, 'the oversized body was not applied')
+  assert.equal(existsSync(join(root.dir, 'config.json')), false, 'nothing was written')
+
+  // Not JSON at all: the parse fault is a technical detail the client wraps in
+  // its own sentence, so it travels as a param.
+  const config = routes.routes.get(`${ROUTE_PREFIX}/config`)
+  assert.ok(config !== undefined)
+  const malformed = await config.fetch(new Request(`https://localhost${ROUTE_PREFIX}/config`, {
+    method: 'POST',
+    body: 'not json',
+  }))
+  assert.equal(malformed.status, 400)
+  const malformedBody = await malformed.json() as Record<string, unknown>
+  assert.equal(hostMessage(malformedBody).code, 'route.invalidBody')
+  assert.equal(typeof hostMessage(malformedBody).params?.detail, 'string')
+
+  void routes.dispose()
 })
 
 // --- distill progress markers (unchanged machinery) --------------------------------

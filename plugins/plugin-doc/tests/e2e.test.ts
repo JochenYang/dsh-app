@@ -1,8 +1,9 @@
 /**
  * End-to-end host chain: the built bundle's `apply` is mounted against a fake
- * host context (tools registry, prompt sections, web server routes, logger), the
- * Word-mode route and the prompt provider are exercised for real, and the full
- * doc_write → doc_check → doc_render chain runs against a real workspace. The
+ * host context (tools registry, prompt sections, Connection Fetch routes,
+ * logger), the Word-mode route and the prompt provider are exercised for real,
+ * and the full doc_write → doc_check → doc_render chain runs against a real
+ * workspace. The
  * produced .docx is unzipped and asserted to be a valid OOXML package holding
  * the document's Chinese text.
  *
@@ -37,66 +38,18 @@ interface FakeTool {
   execute(args: Record<string, unknown>, exec: FakeExec): Promise<Record<string, unknown>>
 }
 
+/** One captured Connection exact-Fetch route. */
 interface FakeRoute {
-  kind: string
   path: string
-  handler(req: unknown, res: unknown): void
+  methods: readonly string[]
+  requestBody: string
+  fetch(request: Request): Promise<Response>
 }
 
 interface FakeSection {
   name: string
   order: number
   text: string | ((context: unknown) => string)
-}
-
-/** A request double: the route attaches its listeners, the test then emits. */
-interface FakeRequest {
-  method: string
-  url: string
-  headers: Record<string, string>
-  on(event: string, callback: (chunk?: unknown) => void): FakeRequest
-  emit(event: string, chunk?: unknown): void
-  resume(): void
-}
-
-interface FakeResponse {
-  status: number
-  body: string
-  headers: Record<string, string>
-  setHeader(name: string, value: string): void
-  writeHead(status: number): void
-  end(body: string): void
-}
-
-function makeRequest(method: string, url: string): FakeRequest {
-  const listeners = new Map<string, ((chunk?: unknown) => void)[]>()
-  const request: FakeRequest = {
-    method,
-    url,
-    headers: { host: '127.0.0.1:8080' },
-    on(event, callback) {
-      const existing = listeners.get(event) ?? []
-      existing.push(callback)
-      listeners.set(event, existing)
-      return request
-    },
-    emit(event, chunk) {
-      for (const callback of listeners.get(event) ?? []) callback(chunk)
-    },
-    resume() { /* nothing to drain in the double */ },
-  }
-  return request
-}
-
-function makeResponse(): FakeResponse {
-  return {
-    status: 0,
-    body: '',
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value },
-    writeHead(status) { this.status = status },
-    end(body) { this.body = body },
-  }
 }
 
 interface FakeHost {
@@ -125,10 +78,12 @@ async function mountHost(): Promise<FakeHost> {
         return () => {}
       },
     },
-    webServer: {
-      register(route: FakeRoute) {
-        routes.push(route)
-        return () => {}
+    connection: {
+      fetch: {
+        register(route: FakeRoute) {
+          routes.push(route)
+          return Promise.resolve(async () => undefined)
+        },
       },
     },
   }
@@ -168,9 +123,11 @@ test('e2e: apply registers the Word tools, prompt sections and mode route', asyn
     assert.equal(sectionText(mode, {}), '')
     assert.equal(sectionText(mode, { agent: { session: { header: { id: 'nobody' } } } }), '')
     assert.deepEqual(host.routes.map(route => route.path), [
-      '/plugins/@dsh-app/plugin-doc/api/mode',
-      '/plugins/@dsh-app/plugin-doc/api/office-active',
+      '/api/plugins/dsh-app/plugin-doc/mode',
+      '/api/plugins/dsh-app/plugin-doc/office-active',
     ])
+    // GET/HEAD/POST only: the registry admits no PUT, so the toggle is a POST.
+    assert.deepEqual(host.routes.map(route => [...route.methods]), [['GET', 'POST'], ['GET']])
     // The skill installer ran against the temp DSH_HOME.
     await settle()
     assert.ok(existsSync(join(home, 'skills', 'dsh-word', 'SKILL.md')), 'dsh-word skill installed')
@@ -199,14 +156,14 @@ test('e2e: Word mode round-trips through the route and drives the prompt section
 
     assert.equal(readPrompt(session), '', 'mode starts off')
 
-    const put = makeRequest('PUT', route.path)
-    const putResponse = makeResponse()
-    route.handler(put, putResponse)
-    put.emit('data', Buffer.from(JSON.stringify({ sessionId: session, enabled: true })))
-    put.emit('end')
-    await settle()
-    assert.equal(putResponse.status, 200)
-    assert.equal((JSON.parse(putResponse.body) as { value: { enabled: boolean } }).value.enabled, true)
+    const post = (body: unknown): Promise<Response> => route.fetch(new Request(`http://dsh-app.local${route.path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }))
+    const toggle = await post({ sessionId: session, enabled: true })
+    assert.equal(toggle.status, 200)
+    assert.equal((await toggle.json() as { value: { enabled: boolean } }).value.enabled, true)
     assert.match(readPrompt(session), /doc_write/u, 'enabled session gets the workflow directive')
     assert.equal(
       (JSON.parse(readFileSync(modeFile, 'utf8')) as Record<string, { enabled: boolean }>)[session]?.enabled,
@@ -214,27 +171,17 @@ test('e2e: Word mode round-trips through the route and drives the prompt section
       'the toggle persisted to the DSH_HOME store',
     )
 
-    const get = makeRequest('GET', `${route.path}?sessionId=${session}`)
-    const getResponse = makeResponse()
-    route.handler(get, getResponse)
-    assert.equal((JSON.parse(getResponse.body) as { value: { enabled: boolean } }).value.enabled, true)
+    const read = await route.fetch(new Request(`http://dsh-app.local${route.path}?sessionId=${session}`))
+    assert.equal(read.status, 200)
+    assert.equal((await read.json() as { value: { enabled: boolean } }).value.enabled, true)
 
     // A bad payload is refused and leaves the state alone.
-    const bad = makeRequest('PUT', route.path)
-    const badResponse = makeResponse()
-    route.handler(bad, badResponse)
-    bad.emit('data', Buffer.from(JSON.stringify({ sessionId: session, enabled: 'yes' })))
-    bad.emit('end')
-    await settle()
-    assert.equal(badResponse.status, 400)
+    const bad = await post({ sessionId: session, enabled: 'yes' })
+    assert.equal(bad.status, 400)
     assert.match(readPrompt(session), /doc_write/u)
 
-    const off = makeRequest('PUT', route.path)
-    const offResponse = makeResponse()
-    route.handler(off, offResponse)
-    off.emit('data', Buffer.from(JSON.stringify({ sessionId: session, enabled: false })))
-    off.emit('end')
-    await settle()
+    const off = await post({ sessionId: session, enabled: false })
+    assert.equal(off.status, 200)
     assert.equal(readPrompt(session), '', 'turning the mode off stops the directive')
     assert.equal(
       (JSON.parse(readFileSync(modeFile, 'utf8')) as Record<string, unknown>)[session],

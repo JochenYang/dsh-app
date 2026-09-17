@@ -1,31 +1,45 @@
 /**
- * Wire-level suite for plugin-brand's desktop bridge routes.
+ * Wire-level suite for plugin-brand's desktop action routes.
  *
- * Nothing here is mocked except the Electron dialogs: a real
- * `startDesktopBridge` (the same module the shell runs) listens on loopback, the
- * plugin's routes are served by a real `node:http` server through the
- * registration seam, and every call arrives over the network. That way the
- * fences, the bearer token, the status mapping and the JSON shapes are all
- * exercised on the wire.
+ * The Connection exact-Fetch registry (`./host-harness.ts`) dispatches every
+ * request the way the shared `/api` channel does, so paths, methods, status
+ * codes and JSON shapes are exercised on the request objects a route sees.
  *
- * The bridge's own fence proves something no assertion here can see directly:
- * it refuses any request that carries an `Origin` header, so every `ok: true`
- * answer below also proves the outbound call sends none.
+ * Three groups are covered here:
  *
- * Tests in one file run sequentially, so the shared `process.env` bridge
- * variables are safe; each test restores them through `withBridge`/`unsetBridge`.
- * No assertion ever references the token value.
+ *   - the two KERNEL-performed actions, driven through fake seams (the real ones
+ *     spawn Explorer or open an OS dialog): `open-in-folder` reveals a path
+ *     through `ctx.sessionController`, `pick-directory` through
+ *     `ctx.directoryPicker`'s native capability. What this suite pins is the
+ *     mapping — which body reaches the seam, and what each outcome turns into.
+ *   - the three SHELL-performed actions, which cannot be forwarded from this
+ *     process at all (their route lives on the `dsh-app` scheme, which only
+ *     Electron resolves). What the routes own is the answer: a validated
+ *     payload, the exact URL the CLIENT must call, or `unsupported` when the
+ *     environment has no such route — including when the published value points
+ *     somewhere that is not the app's own origin.
+ *   - availability (`/status`), which is the same question the page's badge
+ *     asks.
  *
- * The host stand-in lives in `./host-harness.ts`, shared with the log-tail
- * suite.
+ * Nobody fences these routes here: the Connection carrier applies its Host/Origin
+ * check and browser authentication before a handler runs, so the routes must NOT
+ * re-check them (see the module header of `../src/routes.ts`). The fence that
+ * belongs to the shell's route is tested where it lives — `test/shell-actions.test.mjs`
+ * in the app shell.
+ *
+ * Tests in one file run sequentially, so the shared `process.env` variable is
+ * safe; each test restores it.
  */
 
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
-import { startDesktopBridge, type DesktopBridge, type DesktopBridgeHandlers } from '../../../src/main/desktop-bridge.ts'
-import { BRIDGE_TOKEN_ENV, BRIDGE_URL_ENV } from '../src/bridge-client.ts'
+import { SHELL_ACTIONS_ENV } from '../src/shell-actions.ts'
+import type { DirectoryPicker, SessionOpener } from '../src/native-actions.ts'
 import { ROUTE_PREFIX, UNSUPPORTED_HOST } from '../src/routes.ts'
-import { parseRaw, rawRequest, startHost, type Host, type JsonAnswer } from './host-harness.ts'
+import { startHost, type FakeNativeSeams, type Host, type JsonAnswer } from './host-harness.ts'
+
+/** What the shell publishes: its action route's base URL. */
+const ACTION_BASE = 'dsh-app://app/__dsh-app/action'
 
 /**
  * The unsupported answer's body, in the coded shape: the client renders
@@ -46,416 +60,317 @@ function hostOf(body: Record<string, unknown>): Record<string, unknown> {
   return host as Record<string, unknown>
 }
 
-/** Shell-side recorder: what the bridge was asked to do, and what it answers. */
-interface Recorder {
-  handlers: DesktopBridgeHandlers
-  calls: Array<{ action: string; body: Record<string, unknown> }>
-  /** Mutable shell-side answers a test can drive (cancel, fail). */
-  shell: { saved: string | null; picked: string | null; failure: Error | null }
+/** A fake `ctx.sessionController`, recording the reveal it was asked for. */
+interface OpenerFake {
+  seam: SessionOpener
+  calls: Array<{ path: string; action?: 'reveal' }>
+  /** Flip to make the host report that it has no desktop. */
+  hasDesktop: boolean
+  /** Set to fail the native call. */
+  failure: Error | null
 }
 
-function recorder(): Recorder {
-  const calls: Recorder['calls'] = []
-  const shell: Recorder['shell'] = { saved: 'D:/out/report.md', picked: 'D:/codes', failure: null }
-  const guard = (): void => {
-    if (shell.failure !== null) throw shell.failure
-  }
-  return {
-    calls,
-    shell,
-    handlers: {
-      openInFolder: (path) => {
-        guard()
-        calls.push({ action: 'open-in-folder', body: { path } })
-        return Promise.resolve()
-      },
-      notify: (title, body) => {
-        guard()
-        calls.push({ action: 'notify', body: { title, body } })
-        return Promise.resolve()
-      },
-      saveTextAs: (name, content) => {
-        guard()
-        calls.push({ action: 'save-text-as', body: { name, content } })
-        return Promise.resolve(shell.saved)
-      },
-      pickDirectory: () => {
-        guard()
-        calls.push({ action: 'pick-directory', body: {} })
-        return Promise.resolve(shell.picked)
-      },
-      openLogs: () => {
-        guard()
-        calls.push({ action: 'open-logs', body: {} })
-        return Promise.resolve()
+function openerFake(): OpenerFake {
+  const fake: OpenerFake = {
+    calls: [],
+    hasDesktop: true,
+    failure: null,
+    seam: {
+      canOpenWorkspacePath: () => fake.hasDesktop,
+      openWorkspacePath: (request) => {
+        if (fake.failure !== null) return Promise.reject(fake.failure)
+        fake.calls.push({ path: request.path, ...(request.action === undefined ? {} : { action: request.action }) })
+        return Promise.resolve({ opened: true })
       },
     },
   }
+  return fake
 }
 
-const savedUrl = process.env[BRIDGE_URL_ENV]
-const savedToken = process.env[BRIDGE_TOKEN_ENV]
+/** A fake `ctx.directoryPicker` with one capability, recording the signal. */
+interface PickerFake {
+  seam: DirectoryPicker
+  picks: number
+  /** The capability kind the fake reports. */
+  kind: string
+  /** What one pick answers; null means the operator cancelled. */
+  answer: string | null
+  failure: Error | null
+}
+
+function pickerFake(kind = 'native'): PickerFake {
+  const fake: PickerFake = {
+    picks: 0,
+    kind,
+    answer: 'D:/codes',
+    failure: null,
+    seam: {
+      capability: () => ({
+        kind: fake.kind,
+        pick: () => {
+          fake.picks += 1
+          if (fake.failure !== null) return Promise.reject(fake.failure)
+          return Promise.resolve(fake.answer)
+        },
+      }),
+    },
+  }
+  return fake
+}
+
+const savedEnv = process.env[SHELL_ACTIONS_ENV]
 
 after(() => {
-  if (savedUrl === undefined) delete process.env[BRIDGE_URL_ENV]
-  else process.env[BRIDGE_URL_ENV] = savedUrl
-  if (savedToken === undefined) delete process.env[BRIDGE_TOKEN_ENV]
-  else process.env[BRIDGE_TOKEN_ENV] = savedToken
+  if (savedEnv === undefined) delete process.env[SHELL_ACTIONS_ENV]
+  else process.env[SHELL_ACTIONS_ENV] = savedEnv
 })
 
-/** Start a real bridge and publish its coordinates the way the shell does. */
-async function withBridge(handlers: DesktopBridgeHandlers): Promise<DesktopBridge> {
-  const bridge = await startDesktopBridge(handlers)
-  assert.ok(bridge !== null, 'the loopback bridge should bind')
-  process.env[BRIDGE_URL_ENV] = bridge.url
-  process.env[BRIDGE_TOKEN_ENV] = bridge.token
-  return bridge
+/** Publish the action route the way the shell does. */
+function publishShellActions(): void {
+  process.env[SHELL_ACTIONS_ENV] = ACTION_BASE
 }
 
-/** Simulate a run with no bridge at all (dev, or a shell that could not bind). */
-function unsetBridge(): void {
-  delete process.env[BRIDGE_URL_ENV]
-  delete process.env[BRIDGE_TOKEN_ENV]
+/** Simulate a run with no such route (a bare `dsh`, or an older shell). */
+function unpublishShellActions(): void {
+  delete process.env[SHELL_ACTIONS_ENV]
 }
 
 async function post(
   host: Host,
-  action: string,
+  path: string,
   body: unknown,
   headers: Record<string, string> = {},
 ): Promise<JsonAnswer> {
-  const response = await fetch(`${host.url}${ROUTE_PREFIX}/desktop/${action}`, {
+  return host.call(`${ROUTE_PREFIX}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
   })
-  return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
 
-async function getStatus(host: Host): Promise<JsonAnswer> {
-  const response = await fetch(`${host.url}${ROUTE_PREFIX}/status`)
-  return { status: response.status, body: await response.json() as Record<string, unknown> }
-}
-
-test('status reports a configured bridge, and none without the environment', async () => {
+test('status reports whether the shell published a desktop action route', async () => {
   const host = await startHost()
-  const bridge = await withBridge(recorder().handlers)
+  publishShellActions()
   try {
-    assert.deepEqual(await getStatus(host), { status: 200, body: { ok: true, bridge: true } })
+    assert.deepEqual(await host.call(`${ROUTE_PREFIX}/status`), { status: 200, body: { ok: true, bridge: true } })
   } finally {
-    await bridge.close()
     await host.close()
   }
 
-  unsetBridge()
+  unpublishShellActions()
   const bare = await startHost()
   try {
-    assert.deepEqual(await getStatus(bare), { status: 200, body: { ok: true, bridge: false } })
+    assert.deepEqual(await bare.call(`${ROUTE_PREFIX}/status`), { status: 200, body: { ok: true, bridge: false } })
   } finally {
     await bare.close()
   }
 })
 
-test('open-in-folder forwards the path to the shell', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
+test('open-in-folder reveals the path through the kernel seam', async () => {
+  const fake = openerFake()
+  const host = await startHost({ opener: fake.seam })
   try {
-    const answer = await post(host, 'open-in-folder', { path: 'D:/codes/DSH-APP' })
+    const answer = await post(host, '/desktop/open-in-folder', { path: 'D:/codes/DSH-APP' })
     assert.equal(answer.status, 200)
     assert.deepEqual(answer.body, { ok: true })
-    assert.deepEqual(rec.calls, [{ action: 'open-in-folder', body: { path: 'D:/codes/DSH-APP' } }])
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('notify forwards the title and body', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const answer = await post(host, 'notify', { title: '导出完成', body: '文件已保存' })
-    assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body, { ok: true })
-    assert.deepEqual(rec.calls, [{ action: 'notify', body: { title: '导出完成', body: '文件已保存' } }])
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('save-text-as forwards the payload and returns the saved path', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const answer = await post(host, 'save-text-as', { name: 'report.md', content: '# 报告\n' })
-    assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body, { ok: true, path: 'D:/out/report.md' })
-    assert.deepEqual(rec.calls, [{ action: 'save-text-as', body: { name: 'report.md', content: '# 报告\n' } }])
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('save-text-as reports a cancelled dialog as a success with no path', async () => {
-  const rec = recorder()
-  rec.shell.saved = null
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const answer = await post(host, 'save-text-as', { name: 'report.md', content: '' })
-    assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body, { ok: true, path: null })
-    assert.equal('unsupported' in answer.body, false)
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('pick-directory returns the chosen path, and null when cancelled', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    assert.deepEqual(await post(host, 'pick-directory', {}), { status: 200, body: { ok: true, path: 'D:/codes' } })
-    rec.shell.picked = null
-    assert.deepEqual(await post(host, 'pick-directory', {}), { status: 200, body: { ok: true, path: null } })
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('open-logs forwards an empty body', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    assert.deepEqual(await post(host, 'open-logs', {}), { status: 200, body: { ok: true } })
-    assert.deepEqual(rec.calls, [{ action: 'open-logs', body: {} }])
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('a cross-site Origin is refused by the fence', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const answer = await post(host, 'open-logs', {}, { origin: 'https://evil.example' })
-    assert.equal(answer.status, 403)
-    assert.equal(answer.body.ok, false)
-    assert.deepEqual(rec.calls, [], 'a refused request never reaches the shell')
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test("the app's own page is admitted (Origin equal to the request Host)", async () => {
-  // The dsh UI is served from the local server and posts from the Electron
-  // window, so this same-origin form MUST pass — that is half the fence.
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const answer = await post(host, 'open-logs', {}, { origin: host.url })
-    assert.deepEqual(answer, { status: 200, body: { ok: true } })
-    assert.equal(rec.calls.length, 1)
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('a non-loopback Host is refused by the fence', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const body = '{}'
-    const response = await rawRequest(host.port, [
-      `POST ${ROUTE_PREFIX}/desktop/open-logs HTTP/1.1`,
-      'Host: dsh.example',
-      'Content-Type: application/json',
-      `Content-Length: ${body.length}`,
-      'Connection: close',
-      '',
-      body,
-    ].join('\r\n'))
-    const answer = parseRaw(response)
-    assert.equal(answer.status, 403)
-    assert.equal(answer.body.ok, false)
-    assert.deepEqual(rec.calls, [])
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('a loopback Host is admitted (the fence is not a blanket refusal)', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const body = '{}'
-    const response = await rawRequest(host.port, [
-      `POST ${ROUTE_PREFIX}/desktop/open-logs HTTP/1.1`,
-      `Host: 127.0.0.1:${host.port}`,
-      'Content-Type: application/json',
-      `Content-Length: ${body.length}`,
-      'Connection: close',
-      '',
-      body,
-    ].join('\r\n'))
-    assert.deepEqual(parseRaw(response), { status: 200, body: { ok: true } })
-  } finally {
-    unsetBridge()
-    await bridge.close()
-    await host.close()
-  }
-})
-
-test('no bridge environment answers unsupported, never an error', async () => {
-  const host = await startHost()
-  unsetBridge()
-  try {
-    const answer = await post(host, 'save-text-as', { name: 'a.md', content: 'x' })
-    assert.equal(answer.status, 200, 'unsupported is not a failure status')
-    assert.deepEqual(answer.body, UNSUPPORTED_BODY)
+    // `reveal`, not a plain open: the gesture means "select it in its folder".
+    assert.deepEqual(fake.calls, [{ path: 'D:/codes/DSH-APP', action: 'reveal' }])
   } finally {
     await host.close()
   }
 })
 
-test('a shell that does not offer the action (501) degrades to unsupported', async () => {
-  const host = await startHost()
-  // A dev shell with only some handlers: the bridge answers 501 for the rest.
-  const bridge = await withBridge({ openLogs: () => Promise.resolve() })
+test('open-in-folder is unsupported where the kernel has no desktop opener', async () => {
+  const fake = openerFake()
+  fake.hasDesktop = false
+  const host = await startHost({ opener: fake.seam })
   try {
-    const answer = await post(host, 'pick-directory', {})
-    assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body, UNSUPPORTED_BODY)
+    assert.deepEqual(await post(host, '/desktop/open-in-folder', { path: 'D:/codes' }), { status: 200, body: UNSUPPORTED_BODY })
+    assert.deepEqual(fake.calls, [])
   } finally {
-    unsetBridge()
-    await bridge.close()
     await host.close()
+  }
+
+  // A composition without the service at all reads the same way: this is what
+  // keeps `inject: ['connection']` enough for the whole plugin to activate.
+  const vanilla = await startHost()
+  try {
+    assert.deepEqual(await post(vanilla, '/desktop/open-in-folder', { path: 'D:/codes' }), { status: 200, body: UNSUPPORTED_BODY })
+  } finally {
+    await vanilla.close()
   }
 })
 
-test('a listening-but-dead bridge reports a failure, not unsupported', async () => {
-  const host = await startHost()
-  // Coordinates that point at a closed port: the env exists, nothing answers.
-  process.env[BRIDGE_URL_ENV] = 'http://127.0.0.1:1'
-  process.env[BRIDGE_TOKEN_ENV] = 'unused-in-this-test'
+test('a failing native call is a coded failure, not unsupported', async () => {
+  const fake = openerFake()
+  fake.failure = new Error('explorer refused the path')
+  const host = await startHost({ opener: fake.seam })
   try {
-    const answer = await post(host, 'open-logs', {})
+    const answer = await post(host, '/desktop/open-in-folder', { path: 'D:/missing' })
     assert.equal(answer.status, 502)
-    assert.equal(answer.body.ok, false)
-    assert.equal(answer.body.unsupported, false, 'transport death is not "environment unsupported"')
-    // The page words this in its own language from the code, so the code is
-    // the assertion — the English diagnostic is only a fallback.
-    assert.equal(hostOf(answer.body).code, 'bridge.unreachable')
-    assert.equal(typeof answer.body.error, 'string')
-  } finally {
-    unsetBridge()
-    await host.close()
-  }
-})
-
-test('a failing native action carries the shell message as coded data', async () => {
-  const rec = recorder()
-  const shellMessage = '无法打开：目标路径不存在'
-  rec.shell.failure = new Error(shellMessage)
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    const answer = await post(host, 'open-in-folder', { path: 'D:/missing' })
-    assert.equal(answer.status, 502)
-    assert.equal(answer.body.ok, false)
-    // The sentence the shell wrote travels as a PARAM (this process cannot
-    // translate it); the code is what the page keys its own copy on.
+    assert.equal(answer.body.unsupported, false, 'a failed spawn is not "environment unsupported"')
     assert.deepEqual(hostOf(answer.body), {
-      code: 'bridge.nativeFailed',
-      params: { detail: shellMessage },
-      text: 'the native action failed (HTTP 500)',
+      code: 'native.failed',
+      params: { detail: 'explorer refused the path' },
+      text: 'the native action failed: explorer refused the path',
     })
   } finally {
-    unsetBridge()
-    await bridge.close()
     await host.close()
   }
 })
 
-test('invalid input is refused before the bridge is called', async () => {
-  const rec = recorder()
-  const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
+test('pick-directory answers the chosen path, and null when cancelled', async () => {
+  const fake = pickerFake()
+  const host = await startHost({ picker: fake.seam })
   try {
-    const empty = await post(host, 'open-in-folder', { path: '' })
+    assert.deepEqual(await post(host, '/desktop/pick-directory', {}), { status: 200, body: { ok: true, path: 'D:/codes' } })
+    fake.answer = null
+    assert.deepEqual(await post(host, '/desktop/pick-directory', {}), { status: 200, body: { ok: true, path: null } })
+    assert.equal(fake.picks, 2)
+  } finally {
+    await host.close()
+  }
+})
+
+test('pick-directory is unsupported for a browse backend and with no picker at all', async () => {
+  const browse = pickerFake('browse')
+  const host = await startHost({ picker: browse.seam })
+  try {
+    // The in-app browser is the client's own surface; this route only serves the
+    // OS chooser, so it must say so instead of picking something else.
+    assert.deepEqual(await post(host, '/desktop/pick-directory', {}), { status: 200, body: UNSUPPORTED_BODY })
+    assert.equal(browse.picks, 0)
+  } finally {
+    await host.close()
+  }
+
+  const vanilla = await startHost()
+  try {
+    assert.deepEqual(await post(vanilla, '/desktop/pick-directory', {}), { status: 200, body: UNSUPPORTED_BODY })
+  } finally {
+    await vanilla.close()
+  }
+})
+
+test('the three shell-performed actions answer the coordinates the client must call', async () => {
+  publishShellActions()
+  const host = await startHost()
+  try {
+    for (const [action, body] of [
+      ['open-logs', {}],
+      ['notify', { title: '导出完成', body: '文件已保存' }],
+      ['save-text-as', { name: 'report.md', content: '# 报告\n' }],
+    ]) {
+      const answer = await post(host, `/desktop/${action}`, body)
+      assert.equal(answer.status, 200, action)
+      assert.deepEqual(answer.body, {
+        ok: true,
+        delegate: { url: `${ACTION_BASE}/${action}`, method: 'POST' },
+      })
+      // Nothing here may claim the action was performed.
+      assert.equal('path' in answer.body, false, action)
+      assert.equal('unsupported' in answer.body, false, action)
+    }
+  } finally {
+    await host.close()
+  }
+})
+
+test('a shell seam that is not the app origin is refused, not obeyed', async () => {
+  // The page sends the user's text to whatever this value names, so a value
+  // pointing anywhere else must read as "no desktop actions".
+  process.env[SHELL_ACTIONS_ENV] = 'https://evil.example/collect'
+  const host = await startHost()
+  try {
+    assert.deepEqual(await host.call(`${ROUTE_PREFIX}/status`), { status: 200, body: { ok: true, bridge: false } })
+    assert.deepEqual(await post(host, '/desktop/notify', { title: 't', body: 'b' }), { status: 200, body: UNSUPPORTED_BODY })
+    assert.deepEqual(await post(host, '/desktop/save-text-as', { name: 'a.md', content: 'x' }), { status: 200, body: UNSUPPORTED_BODY })
+  } finally {
+    unpublishShellActions()
+    await host.close()
+  }
+})
+
+test('no shell seam at all answers unsupported, never an error', async () => {
+  const host = await startHost()
+  unpublishShellActions()
+  try {
+    const answer = await post(host, '/desktop/save-text-as', { name: 'a.md', content: 'x' })
+    assert.equal(answer.status, 200, 'unsupported is not a failure status')
+    assert.deepEqual(answer.body, UNSUPPORTED_BODY)
+    assert.deepEqual(await post(host, '/desktop/open-logs', {}), { status: 200, body: UNSUPPORTED_BODY })
+  } finally {
+    await host.close()
+  }
+})
+
+test('invalid input is refused before any action runs', async () => {
+  publishShellActions()
+  const fake = openerFake()
+  const host = await startHost({ opener: fake.seam })
+  try {
+    const empty = await post(host, '/desktop/open-in-folder', { path: '' })
     assert.equal(empty.status, 400)
     assert.equal(empty.body.unsupported, false)
 
-    const missing = await post(host, 'notify', { title: '标题' })
+    const missing = await post(host, '/desktop/notify', { title: '标题' })
     assert.equal(missing.status, 400)
 
-    const tooLong = await post(host, 'notify', { title: 'x'.repeat(201), body: '正文' })
+    const tooLong = await post(host, '/desktop/notify', { title: 'x'.repeat(201), body: '正文' })
     assert.equal(tooLong.status, 400)
 
-    const notJson = await fetch(`${host.url}${ROUTE_PREFIX}/desktop/open-logs`, {
+    const longName = await post(host, '/desktop/save-text-as', { name: 'x'.repeat(129), content: 'x' })
+    assert.equal(longName.status, 400, 'the name cap is the shell route’s own cap')
+
+    // A raw, malformed body (not routed through the JSON-stringifying helper).
+    const notJson = await host.call(`${ROUTE_PREFIX}/desktop/open-logs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{',
     })
     assert.equal(notJson.status, 400)
-    assert.deepEqual(hostOf(await notJson.json() as Record<string, unknown>), {
+    assert.deepEqual(hostOf(notJson.body), {
       code: 'route.invalidJson',
       text: 'request body is not valid JSON',
     })
 
-    const wrongMethod = await fetch(`${host.url}${ROUTE_PREFIX}/desktop/open-logs`)
-    assert.equal(wrongMethod.status, 405)
-    assert.equal(wrongMethod.headers.get('allow'), 'POST')
-    assert.deepEqual(hostOf(await wrongMethod.json() as Record<string, unknown>), {
-      code: 'route.methodOnly',
-      params: { method: 'POST' },
-      text: 'POST only',
+    // The route cap is checked from the declared length, so an oversized body is
+    // refused without buffering it.
+    const oversized = await host.call(`${ROUTE_PREFIX}/desktop/open-logs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': String(9 * 1024 * 1024) },
+      body: '{}',
     })
+    assert.equal(oversized.status, 413)
+    assert.equal(hostOf(oversized.body).code, 'route.bodyTooLarge')
 
-    assert.deepEqual(rec.calls, [], 'no invalid request reaches the shell')
+    assert.deepEqual(fake.calls, [], 'no invalid request reaches a kernel seam')
   } finally {
-    unsetBridge()
-    await bridge.close()
+    unpublishShellActions()
+    await host.close()
+  }
+})
+
+test('an unknown path, an unknown method and the old web-server prefix are the channel 404', async () => {
+  const fake = openerFake()
+  const host = await startHost({ opener: fake.seam })
+  try {
+    // The registry owns methods: a GET on a POST-only route never reaches the
+    // route body (the shared channel answers its own 404).
+    assert.equal((await host.call(`${ROUTE_PREFIX}/desktop/open-in-folder`)).status, 404)
+    assert.equal((await host.call(`${ROUTE_PREFIX}/nope`)).status, 404)
+    // The web-server namespace is gone with the web server: the client must call
+    // the `/api` prefix (plugin-client-ui still points at the old one).
+    assert.equal((await host.call('/plugins/@dsh-app/plugin-brand/api/status')).status, 404)
+    assert.deepEqual(fake.calls, [])
+  } finally {
     await host.close()
   }
 })
 
 test('the registered routes are removed by the returned disposer', async () => {
-  const rec = recorder()
   const host = await startHost()
-  const bridge = await withBridge(rec.handlers)
-  try {
-    assert.equal(host.registered(), 8, 'status + log tail + export + five actions')
-  } finally {
-    unsetBridge()
-    await bridge.close()
-  }
+  assert.equal(host.registered(), 8, 'status + log tail + export + five actions')
   await host.close()
   assert.equal(host.registered(), 0)
 })

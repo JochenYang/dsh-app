@@ -14,7 +14,7 @@
  * prop: one capsule serves the hero and every session it hands over to. With no
  * session selected the toggle parks its value in the shared pending slot and
  * the capsule reports that state honestly — the first session-bound pass
- * applies it through the same PUT, so a toggle made before the session existed
+ * applies it through the same POST, so a toggle made before the session existed
  * survives.
  *
  * The suite is mutually exclusive: the capsule polls the shared active claim
@@ -89,7 +89,7 @@ export interface SheetOfficeEntryProps {
  * The session id is read reactively; when it is absent the capsule stands for
  * the new-session hero and the toggle parks its value instead of pretending a
  * mode was stored. The parked value is what the capsule reports until the
- * session-bound pass consumes it and applies it through the same PUT as a live
+ * session-bound pass consumes it and applies it through the same POST as a live
  * toggle.
  * @param props - the session source and the locale runtime of this namespace.
  */

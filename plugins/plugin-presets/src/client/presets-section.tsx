@@ -22,7 +22,12 @@ import { hostMessage, type Translate } from './messages.ts'
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type PresetsSectionProps = PropsLocale<typeof NS>
 
-const ROUTE = '/plugins/@dsh-app/plugin-presets/api'
+/**
+ * The plugin's route prefix on the shared Connection `/api` channel (mirrors
+ * the host half; the registry admits no `@` in a path segment, so the npm
+ * scope travels as `dsh-app`).
+ */
+const ROUTE = '/api/plugins/dsh-app/plugin-presets'
 
 /** Mirror of the host cap for an instant client-side answer (preset package). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024

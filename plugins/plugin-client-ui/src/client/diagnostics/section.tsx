@@ -1,14 +1,16 @@
 /**
- * The 诊断 settings section (order 14): what the app can tell about its own
+ * The 诊断 settings section (order 22): what the app can tell about its own
  * runtime without leaving the page.
  *
  * Four cards, in the order a support question arrives:
- * 1. **桌面桥** — whether the shell injected its native-action endpoint for
- *    this session. Unavailable is a normal state (dev runs, an older shell),
- *    so it reads as a status line, never as an error dialog.
+ * 1. **桌面功能** — whether this environment can perform a desktop action at
+ *    all (the shell published its route, see plugin-brand's `/status`).
+ *    Unavailable is a normal state (a bare `dsh` run, an older shell), so it
+ *    reads as a status line, never as an error dialog.
  * 2. **打开日志目录** — the shell reveals `<userData>/logs` in the OS file
- *    manager. When the bridge is missing the button is disabled WITH the reason
- *    next to it: a greyed control nobody can explain is worse than no control.
+ *    manager. When desktop features are missing the button is disabled WITH the
+ *    reason next to it: a greyed control nobody can explain is worse than no
+ *    control.
  * 3. **导出诊断包** — the shell saves one plain-text file (versions + log tail)
  *    wherever the user points the native dialog. A cancelled dialog stays
  *    silent: the user already knows they cancelled, and a red line would claim
@@ -18,8 +20,8 @@
  *    shell's child process, and a poll would show a page that moves while the
  *    user reads it.
  *
- * The lines arrive already redacted (the shell redacts before writing), and
- * this page never asks for, shows or copies a token.
+ * The lines arrive already redacted (the shell redacts before writing), and this
+ * page never asks for, shows or copies a credential.
  *
  * Every string here comes from the `dsh-app.client-ui` namespace through the
  * `t` standard seat: the section registers with `locale: NS`, so the renderer
@@ -55,8 +57,8 @@ const NOTICE_TIMEOUT_MS = 4_000
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type DiagnosticsSectionProps = PropsLocale<typeof NS>
 
-/** Bridge availability as the page shows it. */
-type BridgeState =
+/** Desktop-feature availability as the page shows it. */
+type DesktopState =
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly available: boolean }
   | { readonly kind: 'failed'; readonly notice: RouteNotice }
@@ -117,25 +119,25 @@ function nowStamp(): string {
  * @returns the section page; it owns its data, so no inject face is needed.
  */
 export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
-  const [bridge, setBridge] = useState<BridgeState>({ kind: 'loading' })
+  const [desktop, setDesktop] = useState<DesktopState>({ kind: 'loading' })
   const [tail, setTail] = useState<TailState>({ kind: 'loading' })
   const [open, setOpen] = useState<OpenState>({ kind: 'idle' })
   const [save, setSave] = useState<ExportState>({ kind: 'idle' })
   const logRef = useRef<HTMLPreElement | null>(null)
 
-  const loadBridge = useCallback(async (): Promise<void> => {
+  const loadDesktop = useCallback(async (): Promise<void> => {
     // The badge and the button read this state, which is the ONLY feedback a
     // re-check produces. Without it a local fetch answers so fast that the
     // control looks dead (reported from real use).
-    setBridge({ kind: 'loading' })
+    setDesktop({ kind: 'loading' })
     const outcome = await fetchBrandStatus()
     if (outcome.kind === 'ok') {
-      setBridge({ kind: 'ready', available: outcome.body.bridge === true })
+      setDesktop({ kind: 'ready', available: outcome.body.bridge === true })
       return
     }
     // `unsupported` on the status route means the plugin is not registered at
     // all — from this page's point of view the same as no answer.
-    setBridge({
+    setDesktop({
       kind: 'failed',
       notice: outcome.kind === 'unsupported' ? UNREACHABLE_NOTICE : outcome.notice,
     })
@@ -161,9 +163,9 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   }, [])
 
   useEffect(() => {
-    void loadBridge()
+    void loadDesktop()
     void loadTail()
-  }, [loadBridge, loadTail])
+  }, [loadDesktop, loadTail])
 
   // The newest lines are the interesting ones: pin the view to the end after
   // every load, unless there is nothing to scroll.
@@ -202,10 +204,10 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   }, [save])
 
   const openBlocked = open.kind === 'unsupported'
-    || (bridge.kind === 'ready' && !bridge.available)
+    || (desktop.kind === 'ready' && !desktop.available)
   const openHint = open.kind === 'unsupported'
     ? noticeText(open.notice, t)
-    : bridge.kind === 'ready' && !bridge.available
+    : desktop.kind === 'ready' && !desktop.available
       ? t('diag.open.blocked')
       : undefined
 
@@ -240,10 +242,10 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   }, [t])
 
   const exportBlocked = save.kind === 'unsupported'
-    || (bridge.kind === 'ready' && !bridge.available)
+    || (desktop.kind === 'ready' && !desktop.available)
   const exportHint = save.kind === 'unsupported'
     ? noticeText(save.notice, t)
-    : bridge.kind === 'ready' && !bridge.available
+    : desktop.kind === 'ready' && !desktop.available
       ? t('diag.export.blocked')
       : undefined
 
@@ -258,29 +260,29 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
         <div className="dshDiag-cardHead">
           <span className="dshDiag-cardTitle">{t('diag.bridge.title')}</span>
           <span
-            className={bridge.kind === 'ready' && bridge.available
+            className={desktop.kind === 'ready' && desktop.available
               ? 'dshDiag-badge dshDiag-badgeOk'
               : 'dshDiag-badge dshDiag-badgeMuted'}
             role="status"
           >
-            {bridge.kind === 'loading'
+            {desktop.kind === 'loading'
               ? t('diag.bridge.checking')
-              : bridge.kind === 'ready'
-                ? bridge.available ? t('diag.bridge.available') : t('diag.bridge.unavailable')
-                : noticeText(bridge.notice, t)}
+              : desktop.kind === 'ready'
+                ? desktop.available ? t('diag.bridge.available') : t('diag.bridge.unavailable')
+                : noticeText(desktop.notice, t)}
           </span>
           <button
-            type="button" className="dshDiag-button" disabled={bridge.kind === 'loading'}
-            onClick={() => { void loadBridge() }}
+            type="button" className="dshDiag-button" disabled={desktop.kind === 'loading'}
+            onClick={() => { void loadDesktop() }}
           >{t('diag.bridge.recheck')}</button>
         </div>
         <p className="dshDiag-hint">
-          {bridge.kind === 'ready' && bridge.available
+          {desktop.kind === 'ready' && desktop.available
             ? t('diag.bridge.hintAvailable')
-            : bridge.kind === 'ready'
+            : desktop.kind === 'ready'
               ? t('diag.bridge.hintMissing')
-              : bridge.kind === 'failed'
-                ? t('diag.bridge.hintFailed', { message: noticeText(bridge.notice, t) })
+              : desktop.kind === 'failed'
+                ? t('diag.bridge.hintFailed', { message: noticeText(desktop.notice, t) })
                 : t('diag.bridge.hintLoading')}
         </p>
         <div className="dshDiag-actions">

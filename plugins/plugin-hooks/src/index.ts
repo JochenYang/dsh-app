@@ -22,14 +22,22 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { HooksMountManager } from './mount.ts'
 import { NativeHookRuntime } from './native.ts'
 import { registerHooksRoutes } from './routes.ts'
 import { HooksStore } from './store.ts'
 
 export const name = 'plugin-hooks'
-export const inject = ['webServer']
+
+/**
+ * The hooks settings API rides the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['connection']
 
 export interface Config { storePath: string }
 export const Config: z<Config> = z.object({ storePath: z.string().default('') })
@@ -63,6 +71,6 @@ export function apply(ctx: Context, config: Config): void {
     return () => { void manager.disposeAll().catch(() => undefined) }
   }, 'plugin-hooks: dynamic mounts')
 
-  ctx.effect(() => registerHooksRoutes(ctx.webServer, store, manager, native), 'plugin-hooks: api routes')
+  ctx.effect(() => registerHooksRoutes(ctx.connection.fetch, store, manager, native), 'plugin-hooks: api routes')
   log.info(`hooks store: ${store.filePath}`)
 }

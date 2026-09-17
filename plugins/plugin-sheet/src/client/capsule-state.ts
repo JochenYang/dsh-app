@@ -5,7 +5,7 @@
  * react externals.
  *
  * The click target is part of the state, not the view: with a session the
- * toggle persists through PUT /mode; without one (the new-session hero) it
+ * toggle persists through POST /mode; without one (the new-session hero) it
  * waits in the shared pending slot and the session-bound occurrence applies it
  * once the session starts. Unlike the PPT capsule there is no per-session
  * pick, so the label never changes — the mode itself is the visible state.
@@ -66,7 +66,7 @@ export function resolveCapsuleMode(mode: CapsuleMode | undefined): { readonly mo
 export type CapsuleToggle =
   /** No session yet: park the pick for the session-bound occurrence. */
   | { readonly kind: 'park', readonly enabled: boolean }
-  /** Session-bound: one PUT /mode persists the flipped value. */
+  /** Session-bound: one POST /mode persists the flipped value. */
   | { readonly kind: 'persist', readonly enabled: boolean }
 
 /** Everything the capsule renders or acts on, derived from the mode state. */

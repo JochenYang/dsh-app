@@ -418,6 +418,13 @@ const hostRequire = createRequire(import.meta.url)
  * @throws MarketValidationError when neither strategy resolves.
  */
 export function resolveDshBin(argv1: string | undefined): string {
+  // The shell knows where the active kernel's CLI lives — in dev it is the
+  // harness checkout's built `apps/cli`, which neither the sibling lookup nor
+  // the ancestor walk below can find (the plugins run from this repo, the CLI
+  // lives in another tree). It exports the absolute path, so prefer it and
+  // keep the heuristics for a kernel started by anything else.
+  const fromShell = process.env.DSH_APP_DSH_BIN
+  if (typeof fromShell === 'string' && fromShell !== '' && existsSync(fromShell)) return fromShell
   try {
     const manifest = hostRequire.resolve('@deepseek-ai/dsh/package.json')
     return join(dirname(manifest), 'lib', 'bin.js')

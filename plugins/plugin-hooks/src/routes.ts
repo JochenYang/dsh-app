@@ -1,33 +1,44 @@
 /**
- * Settings-page API under `/plugins/@dsh-app/plugin-hooks/api`:
+ * Settings-page API on the shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-hooks`:
  *   GET  /hooks          — sanitized bridges + mount status + file path
  *   POST /bridge/create  — validate + persist + dynamically mount
  *   POST /bridge/update  — validate + persist + remount (or unmount when disabled)
  *   POST /bridge/delete  — persist + unmount
  *
- * Same-origin fence on all routes; body cap 16 KiB. No secret masking needed
- * (bridges carry file paths only, no credentials).
+ * Trust is the carrier's: the Connection transport applies its Host/Origin
+ * fence and browser authentication before a route handler runs (see
+ * `ConnectionFetchRoute.fetch`), so no route re-checks them — the same-origin
+ * and loopback-Host guards this module used to run against the web server are
+ * gone with it. Every route owns its exact path (the registry admits no
+ * parameter segment, so arguments ride the body) and its methods; another
+ * method of the same path falls through to the shared channel's own 404 rather
+ * than a route body. Body cap 16 KiB. No secret masking needed (bridges carry
+ * file paths only, no credentials).
  *
- * Isolation note: the small HTTP helpers below (sameOrigin, sendJson, ok/fail,
- * readJsonBody) intentionally mirror plugin-mcp's routes.ts instead of being
+ * Isolation note: the small transport helpers below (sendJson, ok/fail,
+ * readJsonBody) intentionally mirror plugin-market's routes.ts instead of being
  * shared — each suite plugin bundles standalone (esbuild, no cross-plugin
  * runtime imports), so a shared util would be a new package for ~30 lines.
  *
  * @module @dsh-app/plugin-hooks/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { HooksValidationError, HooksStore } from './store.ts'
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import type { HooksMountManager } from './mount.ts'
 import type { NativeHookRuntime } from './native.ts'
 import type { HooksBridge, HooksMountStatus, HostText } from './wire.ts'
 
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-hooks/api'
-const MAX_BODY = 16_384
+/**
+ * Route namespace on the shared Connection `/api` channel. The registry admits
+ * only path segments matching `[A-Za-z0-9_$.-]`, so the npm scope's `@` cannot
+ * appear in the URL: `@dsh-app/plugin-hooks` travels as `dsh-app/plugin-hooks`.
+ */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-hooks'
 
-interface WebServerLike {
-  register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
-}
+/** Cap on one request body: a bridge definition is small. */
+const MAX_BODY = 16_384
 
 interface BridgeView extends Omit<HooksBridge, 'enabled'> {
   enabled: boolean
@@ -41,80 +52,74 @@ interface HooksResponse {
   bridges: readonly BridgeView[]
 }
 
-export function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined) return true
-  try { return new URL(origin).host === req.headers.host } catch { return false }
+function sendJson(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
 }
-
-/**
- * Loopback-host fence: admit only requests whose Host names this machine's
- * loopback interface, so a rebinding/cross-site request carrying an
- * attacker's Host is refused even when it forges a matching Origin.
- */
-function passesFence(req: IncomingMessage): boolean {
-  const raw = req.headers.host
-  if (typeof raw !== 'string' || raw === '') return false
-  let hostname: string
-  try { hostname = new URL(`http://${raw}`).hostname } catch { return false }
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  const octets = hostname.split('.')
-  return octets.length === 4
-    && octets[0] === '127'
-    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-}
-
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
-  res.setHeader('Content-Type', 'application/json')
-  res.writeHead(status)
-  res.end(JSON.stringify(body))
-}
-function ok(res: ServerResponse, value: unknown): void { sendJson(res, 200, { ok: true, value }) }
+function ok(value: unknown): Response { return sendJson(200, { ok: true, value }) }
 /**
  * Failure answer. `kind` is the transport-ish category; `host` is the coded
  * message the UI renders in its own language, and the plain `message` stays an
  * English diagnostic for logs and for a client that does not know the code yet.
  */
-function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
-  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
+function fail(status: number, kind: string, host: HostText): Response {
+  return sendJson(status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let size = 0
-    const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > MAX_BODY) { reject(new Error('payload-too-large')); req.resume(); return }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      try {
-        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        resolve(typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {})
-      } catch (error) { reject(error instanceof Error ? error : new Error('invalid JSON body')) }
-    })
-    req.on('error', reject)
-  })
+/**
+ * Bounded JSON body read. The carrier has already buffered the body (the route
+ * declares `requestBody: 'buffered'`) under the channel's own cap; this much
+ * smaller route limit is checked before parsing.
+ */
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const declared = Number(request.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > MAX_BODY) throw new Error('payload-too-large')
+  const text = await request.text()
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY) throw new Error('payload-too-large')
+  const parsed: unknown = JSON.parse(text)
+  return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
 }
 
-export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore, manager: HooksMountManager, native: NativeHookRuntime): () => void {
+/** Body-read failure: `invalid body`, or the JSON parser's own text. */
+function bodyFailure(error: unknown): Response {
+  const detail = error instanceof Error ? error.message : 'invalid body'
+  if (detail === 'payload-too-large') {
+    return fail(413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' })
+  }
+  return fail(400, 'bad-request', { code: 'route.invalidBody', params: { detail }, text: detail })
+}
+
+/**
+ * Register the hooks routes on the Connection exact-Fetch registry.
+ * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
+ * @param store - the persisted bridge store.
+ * @param manager - the compatibility-bridge mount manager.
+ * @param native - the native rule runtime.
+ * @returns disposer removing the routes.
+ */
+export function registerHooksRoutes(
+  connectionFetch: HostConnectionFetch,
+  store: HooksStore,
+  manager: HooksMountManager,
+  native: NativeHookRuntime,
+): () => Promise<void> {
   /** Status dispatch: native entries report from the native runtime, compatibility bridges from the mount manager. */
   const statusFor = (bridge: HooksBridge): HooksMountStatus =>
     bridge.dialect === 'native'
       ? native.statusFor(bridge.id) ?? { state: 'starting' }
       : manager.statusFor(bridge)
 
-  const respond = async (res: ServerResponse): Promise<void> => {
+  const respond = (): Response => {
     const file = store.load()
     const bridges: BridgeView[] = file.bridges.map(b => ({ ...b, status: statusFor(b) }))
-    ok(res, { enabled: file.enabled, filePath: store.filePath, mountAvailable: manager.available, bridges } satisfies HooksResponse)
+    return ok({ enabled: file.enabled, filePath: store.filePath, mountAvailable: manager.available, bridges } satisfies HooksResponse)
   }
 
-  const guardWrite = (res: ServerResponse): boolean => {
-    if (!store.load().enabled) { fail(res, 409, 'disabled', { code: 'route.disabled' }); return false }
-    return true
-  }
+  /** The 409 answer for a write while the whole plugin is disabled, or null when the write may proceed. */
+  const guardWrite = (): Response | null =>
+    store.load().enabled ? null : fail(409, 'disabled', { code: 'route.disabled' })
 
   /** Write-store failure: the client's copy owns the sentence, the reason
    * rides as the code's English text. */
@@ -123,89 +128,54 @@ export function registerHooksRoutes(webServer: WebServerLike, store: HooksStore,
     return { code: 'route.writeFailed', params: { detail }, text: detail }
   }
 
-  /** Body-read failure: `invalid body`, or the JSON parser's own text. */
-  const invalidBody = (error: unknown): HostText => {
-    const detail = error instanceof Error ? error.message : 'invalid body'
-    return { code: 'route.invalidBody', params: { detail }, text: detail }
+  /** One create/update/delete step: read the body, enforce the enable gate, apply, answer with the new state. */
+  const mutate = async (request: Request, apply: (body: Record<string, unknown>) => Promise<void>): Promise<Response> => {
+    let body: Record<string, unknown>
+    try { body = await readJsonBody(request) } catch (error) { return bodyFailure(error) }
+    const blocked = guardWrite()
+    if (blocked !== null) return blocked
+    try {
+      await apply(body)
+      native.sync(store.load().bridges.filter(b => b.dialect === 'native'))
+    } catch (error) {
+      if (error instanceof HooksValidationError) return fail(400, 'bad-request', error.hostText())
+      return fail(500, 'io', writeFailed(error))
+    }
+    return respond()
   }
 
   const disposers = [
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/hooks`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
-        if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' }); return }
-        void respond(res)
-      },
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => respond(),
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/bridge/create`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
-        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' }); return }
-        void readJsonBody(req).then(async (body) => {
-          if (!guardWrite(res)) return
-          try {
-            const bridge = store.create(body)
-            await manager.syncOne(bridge)
-            native.sync(store.load().bridges.filter(b => b.dialect === 'native'))
-          } catch (error) {
-            if (error instanceof HooksValidationError) fail(res, 400, 'bad-request', error.hostText())
-            else fail(res, 500, 'io', writeFailed(error))
-            return
-          }
-          await respond(res)
-        }).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') { fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' }); return }
-          fail(res, 400, 'bad-request', invalidBody(error))
-        })
-      },
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => mutate(request, async (body) => { await manager.syncOne(store.create(body)) }),
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/bridge/update`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
-        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' }); return }
-        void readJsonBody(req).then(async (body) => {
-          if (!guardWrite(res)) return
-          const id = typeof body.id === 'string' ? body.id : ''
-          try {
-            const bridge = store.update(id, body)
-            await manager.syncOne(bridge)
-            native.sync(store.load().bridges.filter(b => b.dialect === 'native'))
-          } catch (error) {
-            if (error instanceof HooksValidationError) fail(res, 400, 'bad-request', error.hostText())
-            else fail(res, 500, 'io', writeFailed(error))
-            return
-          }
-          await respond(res)
-        }).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') { fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' }); return }
-          fail(res, 400, 'bad-request', invalidBody(error))
-        })
-      },
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => mutate(request, async (body) => {
+        const id = typeof body.id === 'string' ? body.id : ''
+        await manager.syncOne(store.update(id, body))
+      }),
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/bridge/delete`,
-      handler: (req, res) => {
-        if (!sameOrigin(req) || !passesFence(req)) { fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' }); return }
-        if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' }); return }
-        void readJsonBody(req).then(async (body) => {
-          if (!guardWrite(res)) return
-          const id = typeof body.id === 'string' ? body.id : ''
-          store.remove(id)
-          await manager.unmount(id)
-          native.sync(store.load().bridges.filter(b => b.dialect === 'native'))
-          await respond(res)
-        }).catch((error: unknown) => { fail(res, 400, 'bad-request', invalidBody(error)) })
-      },
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => mutate(request, async (body) => {
+        const id = typeof body.id === 'string' ? body.id : ''
+        store.remove(id)
+        await manager.unmount(id)
+      }),
     }),
   ]
-  return () => { for (const d of disposers) d() }
+  return async () => { for (const dispose of disposers) await dispose() }
 }

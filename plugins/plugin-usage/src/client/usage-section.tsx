@@ -30,6 +30,13 @@ import { NS, type UsageKey } from './locales.ts'
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type UsageSectionProps = PropsLocale<typeof NS>
 
+/**
+ * The plugin's host route prefix on the shared Connection `/api` channel
+ * (mirrors the host half; the carrier's registry admits no `@` in a path
+ * segment, so the npm scope travels as `dsh-app`).
+ */
+const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-usage'
+
 /** The page's namespace-bound translate, handed to the sub-components below. */
 type UsageTranslate = TranslateNS<typeof NS>
 
@@ -246,7 +253,7 @@ function BalanceCard({ t }: { t: UsageTranslate }): ReactNode {
     inFlight.current = true
     setState({ status: 'loading' })
     try {
-      const snapshot = await fetchJson<UsageBalanceSnapshot>(`/plugins/@dsh-app/plugin-usage/api/balance${fresh ? '?fresh=1' : ''}`)
+      const snapshot = await fetchJson<UsageBalanceSnapshot>(`${ROUTE_PREFIX}/balance${fresh ? '?fresh=1' : ''}`)
       setState({ status: 'ok', balance: snapshot.balance, at: snapshot.fetchedAt })
     } catch (error) {
       // Silent (mount) failures fall back to the neutral placeholder so an
@@ -700,8 +707,8 @@ export function UsageSection({ t }: UsageSectionProps): ReactNode {
   const load = useCallback(async () => {
     try {
       const [nextSummary, nextHeat] = await Promise.all([
-        fetchJson<SummaryWire>(`/plugins/@dsh-app/plugin-usage/api/summary?days=${range}`),
-        fetchJson<HeatmapWire>(`/plugins/@dsh-app/plugin-usage/api/heatmap?weeks=${HEAT_WEEKS}`),
+        fetchJson<SummaryWire>(`${ROUTE_PREFIX}/summary?days=${range}`),
+        fetchJson<HeatmapWire>(`${ROUTE_PREFIX}/heatmap?weeks=${HEAT_WEEKS}`),
       ])
       setSummary(nextSummary)
       setHeat(nextHeat)
@@ -716,7 +723,7 @@ export function UsageSection({ t }: UsageSectionProps): ReactNode {
   // case /status answers active:false and the section shows the notice.
   useEffect(() => {
     let cancelled = false
-    fetchJson<{ active: boolean }>('/plugins/@dsh-app/plugin-usage/api/status')
+    fetchJson<{ active: boolean }>(`${ROUTE_PREFIX}/status`)
       .then((status) => {
         if (cancelled) return
         if (status.active) {

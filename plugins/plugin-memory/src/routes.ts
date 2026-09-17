@@ -1,5 +1,6 @@
 /**
- * Settings-page API under `/plugins/@dsh-app/plugin-memory/api`:
+ * Settings-page API on the shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-memory`:
  *   GET  /status        — toggle states + global/project stats + global card
  *                         rows (summaries only, no bodies)
  *   GET  /entries?slug= — one store's cards WITH bodies + pin state;
@@ -12,102 +13,64 @@
  *   POST /clear         — {scope:'global'} empties the global store;
  *                         {scope:'project', slug} removes that project directory.
  *
- * Same-origin enforced on every route (403 with a body, never a hung
- * connection); the slug is pattern-validated before it ever reaches the
- * filesystem (traversal fence). Writes act on the root the tools, injection,
- * and distiller share, so a toggle flip here is honored by the next prompt
- * assembly / distill window with no restart.
+ * Trust is the carrier's: the Connection transport applies its Host/Origin fence
+ * and browser authentication before a route handler runs (see
+ * `ConnectionFetchRoute.fetch`), and the desktop host's pipe transport has no
+ * stranger origin to fence at all — so a route never re-checks them. Every route
+ * owns one exact path and its methods; a parameter rides the query string, never
+ * a path segment, and another method of that same path falls through to the
+ * shared channel's own 404 instead of a route body. The slug is pattern-validated
+ * before it ever reaches the filesystem (traversal fence). Writes act on the root
+ * the tools, injection, and distiller share, so a toggle flip here is honored by
+ * the next prompt assembly / distill window with no restart.
  *
  * @module @dsh-app/plugin-memory/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
 import { ROUTE_PREFIX, type HostText, type MemoryCardRow, type MemoryEntriesResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
 
-/** Route namespace on the dsh web server (single source in types.ts, shared
- * with the browser half). Re-exported so existing importers keep working. */
+/** Route namespace on the shared `/api` channel (single source in types.ts,
+ * shared with the browser half). Re-exported so existing importers keep
+ * working. */
 export { ROUTE_PREFIX }
 
-/** Structural slice of the webServer service (no full dep on its types). */
-interface WebServerLike {
-  register(route: { path: string, handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
-}
-
-/** Browser Origin carries the scheme (`http://host:port`), so a raw string
- *  compare against the Host header can never pass for browser requests —
- *  compare the host parts. A missing Origin is a non-browser caller (curl,
- *  in-process): allowed. Exported for tests. */
-export function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined) return true
-  try {
-    return new URL(origin).host === req.headers.host
-  } catch {
-    return false
-  }
-}
+/** Body cap. The settings payloads are a handful of scalars: anything larger is
+ * a caller that is not this page. */
+const MAX_BODY_BYTES = 8_192
 
 /**
- * Loopback-host fence: admit only requests whose Host names this machine's
- * loopback interface, so a rebinding/cross-site request carrying an
- * attacker's Host is refused even when it forges a matching Origin.
+ * Resolve the target store of a scoped write body (pin/forget).
+ * @param root - the two-level memory root.
+ * @param body - the request payload.
+ * @returns the store to write to, or the refusal to answer with.
  */
-function passesFence(req: IncomingMessage): boolean {
-  const raw = req.headers.host
-  if (typeof raw !== 'string' || raw === '') return false
-  let hostname: string
-  try {
-    hostname = new URL(`http://${raw}`).hostname
-  } catch {
-    return false
-  }
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  const octets = hostname.split('.')
-  return octets.length === 4
-    && octets[0] === '127'
-    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-}
-
-/** Reject cross-origin and non-local callers with an answer, never a hung connection. */
-function requireSameOrigin(req: IncomingMessage, res: ServerResponse): boolean {
-  if (sameOrigin(req) && passesFence(req)) return true
-  // Only a hostile page (or a hand-rolled client) can reach this, never the
-  // settings page: the code is stable but deliberately has no dictionary copy,
-  // so it renders the English diagnostic below.
-  fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
-  return false
-}
-
-/** Resolve the target store of a scoped write body (pin/forget); answers the
- *  400 itself and returns undefined on a bad scope or unknown slug. */
-function resolveStore(root: MemoryRoot, body: Record<string, unknown>, res: ServerResponse): MemoryStore | undefined {
+function resolveStore(root: MemoryRoot, body: Record<string, unknown>): MemoryStore | Response {
   if (body.scope === undefined || body.scope === 'global') return root.global
   if (body.scope !== 'project') {
-    fail(res, 400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
-    return undefined
+    return fail(400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
   }
   const slug = body.slug
   if (typeof slug !== 'string' || !isValidSlug(slug)) {
-    fail(res, 400, 'bad-request', { code: 'route.slugRequired', text: 'project scope requires a valid slug' })
-    return undefined
+    return fail(400, 'bad-request', { code: 'route.slugRequired', text: 'project scope requires a valid slug' })
   }
   const store = root.projectBySlug(slug)
   if (store === undefined) {
-    fail(res, 400, 'bad-request', { code: 'route.projectUnknown', text: 'unknown project slug' })
-    return undefined
+    return fail(400, 'bad-request', { code: 'route.projectUnknown', text: 'unknown project slug' })
   }
   return store
 }
 
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
-  res.setHeader('Content-Type', 'application/json')
-  res.writeHead(status)
-  res.end(JSON.stringify(body))
+function sendJson(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
 }
 
-function ok(res: ServerResponse, value: unknown): void {
-  sendJson(res, 200, { ok: true, value })
+function ok(value: unknown): Response {
+  return sendJson(200, { ok: true, value })
 }
 
 /**
@@ -116,8 +79,8 @@ function ok(res: ServerResponse, value: unknown): void {
  * language. The plain `message` stays an English diagnostic for logs and for a
  * client that does not know the code yet.
  */
-function fail(res: ServerResponse, status: number, code: string, host: HostText): void {
-  sendJson(res, status, { ok: false, error: { code, message: host.text ?? host.code, host } })
+function fail(status: number, code: string, host: HostText): Response {
+  return sendJson(status, { ok: false, error: { code, message: host.text ?? host.code, host } })
 }
 
 /** Wire row for one card; the status list omits bodies, /entries includes them. */
@@ -133,296 +96,235 @@ function cardRow(card: TopicCard, pinned: ReadonlySet<string>, withBody: boolean
   return row
 }
 
-/** Bounded JSON body read (same discipline as the other route surfaces: drain, never
- * destroy, so the 413 answer actually reaches the client). */
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let size = 0
-    const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > 8_192) {
-        // Drain instead of destroy: the socket stays alive so the 413 answer
-        // actually reaches the client.
-        reject(new Error('payload-too-large'))
-        req.resume()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      try {
-        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        resolve(typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {})
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error('invalid JSON body'))
-      }
-    })
-    req.on('error', reject)
-  })
+/**
+ * Bounded JSON body read. The carrier has already buffered the bytes (every
+ * route declares `requestBody: 'buffered'`) under the channel's own, much larger
+ * cap; this route limit is checked before parsing — a declared `content-length`
+ * first so an oversized body is refused without decoding it, then the decoded
+ * text for a request that declared no length at all (or lied about it).
+ *
+ * @param request - the buffered request.
+ * @returns the parsed payload; `{}` for any non-object JSON.
+ */
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const declared = Number(request.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const text = await request.text()
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const parsed: unknown = JSON.parse(text)
+  return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
 }
 
 /**
- * Register the settings-page routes.
- * @param webServer - the dsh web server service.
+ * Map a body-read failure onto its answer: 413 past the cap, 400 for anything
+ * unparseable. The parse fault is a technical detail, so it rides as a param and
+ * the client wraps it in its own sentence.
+ *
+ * @param error - the rejection from {@link readJsonBody}.
+ */
+function bodyFailure(error: unknown): Response {
+  const message = error instanceof Error ? error.message : 'invalid body'
+  if (message === 'payload-too-large') {
+    return fail(413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
+  }
+  return fail(400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
+}
+
+/**
+ * Register the settings-page routes on the Connection exact-Fetch registry.
+ *
+ * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
  * @param root - the two-level memory root.
  * @returns disposer removing all routes.
  */
-export function registerMemoryRoutes(webServer: WebServerLike, root: MemoryRoot): () => void {
-  const disposers: Array<() => void> = []
+export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root: MemoryRoot): () => Promise<void> {
+  const disposers = [
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/status`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => {
+        const { cards, sizeBytes } = root.global.stats()
+        const pinned = root.global.pinnedSet()
+        const status: MemoryStatus = {
+          enabled: root.global.isEnabled(),
+          distill: root.global.isDistillEnabled(),
+          cards,
+          sizeBytes,
+          storePath: root.global.storePath,
+          // Bodies stay out of the status payload: the settings list shows
+          // summaries, and the entries route serves bodies on demand.
+          globalList: root.global.list().map(card => cardRow(card, pinned, false)),
+          projects: listProjects(root.dir),
+          activity: root.distillActivity(),
+        }
+        return ok(status)
+      },
+    }),
 
-  disposers.push(webServer.register({
-    path: `${ROUTE_PREFIX}/status`,
-    handler: (req, res) => {
-      if (!requireSameOrigin(req, res)) return
-      if (req.method !== 'GET') {
-        res.setHeader('Allow', 'GET')
-        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
-        return
-      }
-      const { cards, sizeBytes } = root.global.stats()
-      const pinned = root.global.pinnedSet()
-      const status: MemoryStatus = {
-        enabled: root.global.isEnabled(),
-        distill: root.global.isDistillEnabled(),
-        cards,
-        sizeBytes,
-        storePath: root.global.storePath,
-        // Bodies stay out of the status payload: the settings list shows
-        // summaries, and the entries route serves bodies on demand.
-        globalList: root.global.list().map(card => cardRow(card, pinned, false)),
-        projects: listProjects(root.dir),
-        activity: root.distillActivity(),
-      }
-      ok(res, status)
-    },
-  }))
-
-  disposers.push(webServer.register({
-    path: `${ROUTE_PREFIX}/config`,
-    handler: (req, res) => {
-      if (!requireSameOrigin(req, res)) return
-      if (req.method !== 'POST') {
-        res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-        return
-      }
-      void readJsonBody(req)
-        .then(body => {
-          // Accept either toggle, both, or neither (a no-op body is still
-          // answered with the current state — the UI reloads from it).
-          const enabled = body.enabled
-          const distill = body.distill
-          if (enabled !== undefined && typeof enabled !== 'boolean') {
-            fail(res, 400, 'bad-request', { code: 'route.enabledNotBoolean', text: 'enabled must be a boolean' })
-            return
-          }
-          if (distill !== undefined && typeof distill !== 'boolean') {
-            fail(res, 400, 'bad-request', { code: 'route.distillNotBoolean', text: 'distill must be a boolean' })
-            return
-          }
-          if (typeof enabled === 'boolean') root.global.setEnabled(enabled)
-          if (typeof distill === 'boolean') root.global.setDistillEnabled(distill)
-          ok(res, {
-            enabled: root.global.isEnabled(),
-            distill: root.global.isDistillEnabled(),
-          })
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/config`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        // Accept either toggle, both, or neither (a no-op body is still
+        // answered with the current state — the UI reloads from it).
+        const enabled = body.enabled
+        const distill = body.distill
+        if (enabled !== undefined && typeof enabled !== 'boolean') {
+          return fail(400, 'bad-request', { code: 'route.enabledNotBoolean', text: 'enabled must be a boolean' })
+        }
+        if (distill !== undefined && typeof distill !== 'boolean') {
+          return fail(400, 'bad-request', { code: 'route.distillNotBoolean', text: 'distill must be a boolean' })
+        }
+        if (typeof enabled === 'boolean') root.global.setEnabled(enabled)
+        if (typeof distill === 'boolean') root.global.setDistillEnabled(distill)
+        return ok({
+          enabled: root.global.isEnabled(),
+          distill: root.global.isDistillEnabled(),
         })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
-            return
-          }
-          // The parse fault is a technical detail: it rides as a param and the
-          // client wraps it in its own sentence.
-          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
-        })
-    },
-  }))
+      },
+    }),
 
-  disposers.push(webServer.register({
-    path: `${ROUTE_PREFIX}/clear`,
-    handler: (req, res) => {
-      if (!requireSameOrigin(req, res)) return
-      if (req.method !== 'POST') {
-        res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-        return
-      }
-      void readJsonBody(req)
-        .then(body => {
-          if (body.scope === 'project') {
-            const slug = body.slug
-            if (typeof slug !== 'string' || !isValidSlug(slug)) {
-              fail(res, 400, 'bad-request', { code: 'route.slugInvalid', text: 'the slug is malformed' })
-              return
-            }
-            try {
-              removeProject(root.dir, slug)
-              ok(res, { scope: 'project', slug })
-            } catch {
-              fail(res, 500, 'io', { code: 'route.clearProjectFailed', text: 'could not clear the project memory' })
-            }
-            return
-          }
-          if (body.scope !== 'global' && body.scope !== undefined) {
-            fail(res, 400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
-            return
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/clear`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        if (body.scope === 'project') {
+          const slug = body.slug
+          if (typeof slug !== 'string' || !isValidSlug(slug)) {
+            return fail(400, 'bad-request', { code: 'route.slugInvalid', text: 'the slug is malformed' })
           }
           try {
-            root.global.clear()
-            ok(res, { scope: 'global' })
+            removeProject(root.dir, slug)
+            return ok({ scope: 'project', slug })
           } catch {
-            fail(res, 500, 'io', { code: 'route.clearGlobalFailed', text: 'could not clear the global memory' })
+            return fail(500, 'io', { code: 'route.clearProjectFailed', text: 'could not clear the project memory' })
           }
-        })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
-            return
-          }
-          // The parse fault is a technical detail: it rides as a param and the
-          // client wraps it in its own sentence.
-          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
-        })
-    },
-  }))
+        }
+        if (body.scope !== 'global' && body.scope !== undefined) {
+          return fail(400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
+        }
+        try {
+          root.global.clear()
+          return ok({ scope: 'global' })
+        } catch {
+          return fail(500, 'io', { code: 'route.clearGlobalFailed', text: 'could not clear the global memory' })
+        }
+      },
+    }),
 
-  disposers.push(webServer.register({
-    path: `${ROUTE_PREFIX}/entries`,
-    handler: (req, res) => {
-      if (!requireSameOrigin(req, res)) return
-      if (req.method !== 'GET') {
-        res.setHeader('Allow', 'GET')
-        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
-        return
-      }
-      const slug = req.url === undefined ? null : new URL(req.url, 'http://localhost').searchParams.get('slug')
-      // No slug = the global store (the settings page loads global bodies
-      // lazily on row expand). projectBySlug validates the slug shape before
-      // touching the filesystem, so the traversal fence holds.
-      const store = slug === null || slug === '' ? root.global : root.projectBySlug(slug)
-      if (store === undefined) {
-        fail(res, 400, 'bad-request', { code: 'route.projectUnknown', text: 'unknown project slug' })
-        return
-      }
-      const pinned = store.pinnedSet()
-      const body: MemoryEntriesResponse = {
-        cards: store.list().map(card => cardRow(card, pinned, true)),
-      }
-      ok(res, body)
-    },
-  }))
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/entries`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        const slug = new URL(request.url).searchParams.get('slug')
+        // No slug = the global store (the settings page loads global bodies
+        // lazily on row expand). projectBySlug validates the slug shape before
+        // touching the filesystem, so the traversal fence holds.
+        const store = slug === null || slug === '' ? root.global : root.projectBySlug(slug)
+        if (store === undefined) {
+          return fail(400, 'bad-request', { code: 'route.projectUnknown', text: 'unknown project slug' })
+        }
+        const pinned = store.pinnedSet()
+        const body: MemoryEntriesResponse = {
+          cards: store.list().map(card => cardRow(card, pinned, true)),
+        }
+        return ok(body)
+      },
+    }),
 
-  disposers.push(webServer.register({
-    path: `${ROUTE_PREFIX}/pin`,
-    handler: (req, res) => {
-      if (!requireSameOrigin(req, res)) return
-      if (req.method !== 'POST') {
-        res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-        return
-      }
-      void readJsonBody(req)
-        .then(body => {
-          const topic = body.topic
-          const pinned = body.pinned
-          if (typeof topic !== 'string' || !isValidTopic(topic)) {
-            fail(res, 400, 'bad-request', { code: 'route.topicInvalid', text: 'topic must be a valid topic key (ASCII kebab-case)' })
-            return
-          }
-          if (typeof pinned !== 'boolean') {
-            fail(res, 400, 'bad-request', { code: 'route.pinnedNotBoolean', text: 'pinned must be a boolean' })
-            return
-          }
-          const store = resolveStore(root, body, res)
-          if (store === undefined) return
-          // Pinning a card that does not exist is a client bug — say so
-          // instead of silently recording a dangling pin.
-          if (pinned && store.get(topic) === undefined) {
-            fail(res, 400, 'bad-request', { code: 'route.topicUnknown', text: 'unknown topic' })
-            return
-          }
-          const changed = pinned ? store.addPin(topic) : store.removePin(topic)
-          ok(res, { pinned, changed })
-        })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
-            return
-          }
-          // The parse fault is a technical detail: it rides as a param and the
-          // client wraps it in its own sentence.
-          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
-        })
-    },
-  }))
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/pin`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        const topic = body.topic
+        const pinned = body.pinned
+        if (typeof topic !== 'string' || !isValidTopic(topic)) {
+          return fail(400, 'bad-request', { code: 'route.topicInvalid', text: 'topic must be a valid topic key (ASCII kebab-case)' })
+        }
+        if (typeof pinned !== 'boolean') {
+          return fail(400, 'bad-request', { code: 'route.pinnedNotBoolean', text: 'pinned must be a boolean' })
+        }
+        const store = resolveStore(root, body)
+        if (store instanceof Response) return store
+        // Pinning a card that does not exist is a client bug — say so
+        // instead of silently recording a dangling pin.
+        if (pinned && store.get(topic) === undefined) {
+          return fail(400, 'bad-request', { code: 'route.topicUnknown', text: 'unknown topic' })
+        }
+        const changed = pinned ? store.addPin(topic) : store.removePin(topic)
+        return ok({ pinned, changed })
+      },
+    }),
 
-  disposers.push(webServer.register({
-    path: `${ROUTE_PREFIX}/forget`,
-    handler: (req, res) => {
-      if (!requireSameOrigin(req, res)) return
-      if (req.method !== 'POST') {
-        res.setHeader('Allow', 'POST')
-        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-        return
-      }
-      void readJsonBody(req)
-        .then(body => {
-          const match = body.match
-          if (typeof match !== 'string' || match.trim() === '') {
-            fail(res, 400, 'bad-request', { code: 'route.matchRequired', text: 'match must be a non-empty string' })
-            return
-          }
-          const store = resolveStore(root, body, res)
-          if (store === undefined) return
-          // The settings-page delete sends the card's topic key (exact match);
-          // the store's substring fallback only fires for hand-typed calls.
-          const result = store.forget(match)
-          ok(res, { forgotten: result.removed.length, removed: result.removed })
-        })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') {
-            fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
-            return
-          }
-          // The parse fault is a technical detail: it rides as a param and the
-          // client wraps it in its own sentence.
-          fail(res, 400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
-        })
-    },
-  }))
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/forget`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        const match = body.match
+        if (typeof match !== 'string' || match.trim() === '') {
+          return fail(400, 'bad-request', { code: 'route.matchRequired', text: 'match must be a non-empty string' })
+        }
+        const store = resolveStore(root, body)
+        if (store instanceof Response) return store
+        // The settings-page delete sends the card's topic key (exact match);
+        // the store's substring fallback only fires for hand-typed calls.
+        const result = store.forget(match)
+        return ok({ forgotten: result.removed.length, removed: result.removed })
+      },
+    }),
 
-  disposers.push(webServer.register({
-    path: `${ROUTE_PREFIX}/llm-audit`,
-    handler: (req, res) => {
-      if (!requireSameOrigin(req, res)) return
-      if (req.method !== 'GET') {
-        res.setHeader('Allow', 'GET')
-        fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
-        return
-      }
-      const runs = root.llmAudit().slice(0, 20).map(run => ({
-        at: run.at,
-        source: run.source,
-        session: run.session,
-        status: run.status,
-        inputTokens: run.inputTokens,
-        outputTokens: run.outputTokens,
-        durationMs: run.durationMs,
-        ...(run.error === undefined ? {} : { error: run.error }),
-      }))
-      const body: MemoryLlmAuditResponse = {
-        runs,
-        totalTokens: runs.reduce((sum, run) => sum + run.inputTokens + run.outputTokens, 0),
-      }
-      ok(res, body)
-    },
-  }))
-
-  return () => { for (const dispose of disposers) dispose() }
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/llm-audit`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => {
+        const runs = root.llmAudit().slice(0, 20).map(run => ({
+          at: run.at,
+          source: run.source,
+          session: run.session,
+          status: run.status,
+          inputTokens: run.inputTokens,
+          outputTokens: run.outputTokens,
+          durationMs: run.durationMs,
+          ...(run.error === undefined ? {} : { error: run.error }),
+        }))
+        const body: MemoryLlmAuditResponse = {
+          runs,
+          totalTokens: runs.reduce((sum, run) => sum + run.inputTokens + run.outputTokens, 0),
+        }
+        return ok(body)
+      },
+    }),
+  ]
+  return async () => { for (const dispose of disposers) await dispose() }
 }

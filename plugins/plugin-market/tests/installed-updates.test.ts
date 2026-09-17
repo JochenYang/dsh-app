@@ -2,33 +2,32 @@
  * GET /installed two-phase contract tests. The default answer is the local
  * facts alone and must never touch the registry prober; `?updates=1` opts
  * into the probe and layers latest/updateAvailable onto the same response
- * shape. Uses a captured route handler + injected prober, so no network and
- * no HTTP server are involved.
+ * shape. Uses a captured Connection exact-Fetch route + injected prober, so no
+ * network and no HTTP server are involved.
  *
  * @module plugin-market/tests/installed-updates
  */
 
 import { strict as assert } from 'node:assert'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import type { PluginInstaller } from '../src/installer.ts'
 import { registerMarketRoutes, ROUTE_PREFIX, wantsUpdates, type MarketDeps } from '../src/routes.ts'
 
-/** The captured /installed handler and the payload it last answered. */
+/** The captured /installed route and the payload it last answered. */
 interface Harness {
   readonly get: (url: string) => Promise<{ status: number, body: { ok: boolean, value?: Record<string, unknown> } }>
   readonly probeCalls: Array<readonly string[]>
 }
 
 function harness(probe: (names: readonly string[]) => Promise<Record<string, string | undefined>>): Harness {
-  let installedHandler: ((req: IncomingMessage, res: ServerResponse) => void) | undefined
-  const webServer = {
-    register(route: { kind: 'exact', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void }) {
-      if (route.path === `${ROUTE_PREFIX}/installed`) installedHandler = route.handler
-      return () => undefined
+  let installedFetch: ((request: Request) => Promise<Response>) | undefined
+  const connectionFetch = {
+    register(route: { path: string, fetch: (request: Request) => Promise<Response> }) {
+      if (route.path === `${ROUTE_PREFIX}/installed`) installedFetch = route.fetch
+      return Promise.resolve()
     },
   }
   const probeCalls: Array<readonly string[]> = []
@@ -37,28 +36,19 @@ function harness(probe: (names: readonly string[]) => Promise<Record<string, str
     catalogCachePath: join(tmpdir(), 'unused-catalog-cache.json'),
     installer: {} as PluginInstaller,
     profile: 'web',
+    legacyProfile: 'web',
     latestVersions: (names) => {
       probeCalls.push([...names])
       return probe(names)
     },
   }
-  registerMarketRoutes(webServer, deps, () => undefined)
+  registerMarketRoutes(connectionFetch as never, deps, () => undefined)
 
   return {
     probeCalls,
     get: async (url: string) => {
-      let status = 0
-      let payload = ''
-      const res = {
-        setHeader: () => undefined,
-        writeHead: (code: number) => { status = code },
-        end: (body?: string) => { payload = body ?? '' },
-      } as unknown as ServerResponse
-      const req = { method: 'GET', url, headers: { host: '127.0.0.1:4567' } } as unknown as IncomingMessage
-      installedHandler!(req, res)
-      // The probe path answers on a later microtask; give it a turn to settle.
-      await new Promise(resolvePromise => setTimeout(resolvePromise, 0))
-      return { status, body: JSON.parse(payload) as { ok: boolean, value?: Record<string, unknown> } }
+      const response = await installedFetch!(new Request(`dsh-app://app${url}`))
+      return { status: response.status, body: await response.json() as { ok: boolean, value?: Record<string, unknown> } }
     },
   }
 }

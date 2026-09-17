@@ -25,8 +25,8 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the web seam Context merge (ctx.web) + provider types.
 import type {} from '@deepseek-ai/dsh-web'
 import { ChainExhaustedError, runChainCached, SearchCache, type ChainStep } from './chain.ts'
@@ -36,7 +36,14 @@ import { WebSearchStore } from './store.ts'
 import { activeEngines, BRAND_PROVIDER_ID, UPSTREAM_PROVIDER_ID, type EngineEntry, type WebSearchFile } from './wire.ts'
 
 export const name = 'plugin-websearch'
-export const inject = ['webServer']
+
+/**
+ * The settings page rides the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['connection']
 
 /** Config: storage location. */
 export interface Config {
@@ -214,7 +221,7 @@ export function apply(ctx: Context, config: Config): void {
   // switch even when the overlay says `dsh-app`.
   applyProviderChoice(store.load())
 
-  ctx.effect(() => registerWebSearchRoutes(ctx.webServer, store, {
+  ctx.effect(() => registerWebSearchRoutes(ctx.connection.fetch, store, {
     applyProviderChoice,
     probe: async (id, query) => {
       const file = store.load()

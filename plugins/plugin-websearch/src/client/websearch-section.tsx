@@ -37,7 +37,12 @@ import { hostMessage, providerReasonCopy, routeErrorCopy, statusLabel } from './
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS, type WebSearchKey } from './locales.ts'
 
-const ROUTE = '/plugins/@dsh-app/plugin-websearch/api'
+/**
+ * The host half's route prefix on the shared Connection `/api` channel. Mirrors
+ * `ROUTE_PREFIX` in ../routes.ts; the registry admits no `@` in a path segment,
+ * so the npm scope travels as `dsh-app`.
+ */
+const ROUTE = '/api/plugins/dsh-app/plugin-websearch'
 
 /** One engine row as the host serializes it. */
 interface EngineView {

@@ -228,3 +228,27 @@
 
 - id: ui-schedule
   disabled: false
+
+# Experimental Agent Teams — deliberately OFF for every profile of this app.
+#
+# The row belongs to the upstream bundle @deepseek-ai/dsh-experimental-agent-
+# team-web-profile (its cordis.patch.yml inserts `ui-agent-team` ->
+# @deepseek-ai/dsh-experimental-client-ui-agent-team). At 0.1.6-alpha.1 that
+# entry does not activate — its published client half fails against the loader
+# shipped in the same version, and the client boot audit reports it as `failed`
+# — and a client-side plugin failure is not a warning here: that audit rejects
+# the page, so the window is stuck on "Failed to load plugins" with nothing
+# else reachable. Measured 2026-09-17 with the row present:
+#   Failed to load plugins
+#   @deepseek-ai/dsh-experimental-client-ui-agent-team
+#   web boot: 1 entry did not activate
+#   @deepseek-ai/dsh-experimental-client-ui-agent-team: failed
+# A profile that lists the bundle composes exactly this row, and `dsh plugin`
+# re-appends the bundle from its dependency on the next install, so the state
+# can come back without anyone editing this file. Vetoed here because this
+# overlay is applied after every bundle layer and is rewritten on each start —
+# the disable survives a re-install, and dropping the row (or overriding it
+# with `disabled: false` in the home layer, which applies last) is all it takes
+# to turn Agent Teams back on once upstream republishes the package.
+- id: ui-agent-team
+  disabled: true

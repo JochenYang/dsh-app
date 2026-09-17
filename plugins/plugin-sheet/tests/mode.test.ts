@@ -1,23 +1,22 @@
 /**
  * Spreadsheet-mode persistence and the mode route contract: the store's
  * on/off round-trip through mode.json (including the shapes that must read as
- * "off" instead of as an accidental activation), and the route's fence, method
- * guard and payload validation over a fake server and mocked req/res.
+ * "off" instead of as an accidental activation), and the Connection exact-Fetch
+ * route's declared surface, method ownership and payload validation over a fake
+ * Fetch registry and real Request/Response objects.
  *
  * @module @dsh-app/plugin-sheet/tests/mode
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { SheetModeStore } from '../src/mode-store.ts'
 import { OFFICE_ACTIVE_FORMAT } from '../src/office-format.ts'
 import { officeActiveFilePath, readOfficeActive } from '../src/office-active-store.ts'
-import { registerSheetRoutes, ROUTE_PREFIX, sameOrigin } from '../src/routes.ts'
+import { registerSheetRoutes, ROUTE_PREFIX } from '../src/routes.ts'
 
 /** One temp store file plus its shared active file, removed when done. */
 function tempStore(): { store: SheetModeStore, file: string, activeFile: string, done: () => void } {
@@ -120,49 +119,35 @@ test('mode store: prune drops entries older than the max age', async () => {
 
 // --- routes ------------------------------------------------------------------
 
-type Handler = (req: IncomingMessage, res: ServerResponse) => void
+/** One captured Connection exact-Fetch route. */
+interface CapturedRoute {
+  readonly path: string
+  readonly methods: readonly string[]
+  readonly requestBody: string
+  fetch(request: Request): Promise<Response>
+}
 
-/** Fake WebServerLike capturing registrations by path. */
-function fakeServer(): {
-  register(route: { kind: 'exact', path: string, handler: Handler }): () => void
-  handler(path: string): Handler
+/** Fake Connection exact-Fetch registry capturing registrations by path. */
+function fakeConnection(): {
+  fetch: { register(route: CapturedRoute): () => Promise<void> }
+  route(path: string): CapturedRoute
   count(): number
 } {
-  const routes = new Map<string, Handler>()
+  const routes = new Map<string, CapturedRoute>()
   return {
-    register(route) {
-      routes.set(route.path, route.handler)
-      return () => { routes.delete(route.path) }
+    fetch: {
+      register(route: CapturedRoute) {
+        routes.set(route.path, route)
+        return async () => { routes.delete(route.path) }
+      },
     },
-    handler(path) {
-      const handler = routes.get(path)
-      assert.ok(handler !== undefined, `route ${path} registered`)
-      return handler
+    route(path) {
+      const route = routes.get(path)
+      assert.ok(route !== undefined, `route ${path} registered`)
+      return route
     },
     count: () => routes.size,
   }
-}
-
-interface ReqOpts {
-  method?: string
-  url?: string
-  headers?: Record<string, string | undefined>
-  body?: unknown
-}
-
-function makeReq(opts: ReqOpts = {}): IncomingMessage & { emitBody(): void } {
-  const req = new EventEmitter() as unknown as IncomingMessage & { emitBody(): void }
-  Object.assign(req, {
-    method: opts.method ?? 'GET',
-    url: opts.url ?? '/',
-    headers: opts.headers ?? { host: '127.0.0.1:3080' },
-    resume: () => {},
-  })
-  req.emitBody = () => {
-    if (opts.body !== undefined) req.emit('data', Buffer.from(JSON.stringify(opts.body)))
-    req.emit('end')
-  }
-  return req
 }
 
 interface Envelope {
@@ -171,124 +156,90 @@ interface Envelope {
   error?: { code: string, message: string }
 }
 
-interface CapturedResponse {
-  status(): number
-  json(): Envelope
-  /** Resolves when the handler finishes the response (no timing guesswork). */
-  ended: Promise<void>
+interface Answer {
+  status: number
+  contentType: string | null
+  body: Envelope
 }
 
-function makeRes(): ServerResponse & CapturedResponse {
-  const state = { status: 0, raw: '' }
-  let settle: () => void = () => {}
-  const ended = new Promise<void>((resolve) => { settle = resolve })
-  const res = {
-    setHeader: () => {},
-    writeHead: (code: number) => { state.status = code },
-    end: (payload?: unknown) => {
-      if (payload !== undefined) state.raw += String(payload)
-      settle()
-    },
+/** Drive one captured route the way the carrier does: an absolute URL and a method. */
+async function call(route: CapturedRoute, url: string, init: RequestInit = {}): Promise<Answer> {
+  const response = await route.fetch(new Request(`dsh-app://app${url}`, init))
+  return {
+    status: response.status,
+    contentType: response.headers.get('content-type'),
+    body: await response.json() as Envelope,
   }
-  const captured: CapturedResponse = {
-    status: () => state.status,
-    json: () => JSON.parse(state.raw) as Envelope,
-    ended,
-  }
-  return Object.assign(res as unknown as ServerResponse, captured) as ServerResponse & CapturedResponse
 }
 
-test('mode route: PUT toggles, GET reads, unknown sessions read as off', async () => {
+test('mode route: POST toggles, GET reads, unknown sessions read as off', async () => {
   const { store, activeFile, done } = tempStore()
   try {
-    const server = fakeServer()
-    registerSheetRoutes(server, store, activeFile)
-    assert.equal(server.count(), 2)
-    const handler = server.handler(`${ROUTE_PREFIX}/mode`)
+    const connection = fakeConnection()
+    registerSheetRoutes(connection.fetch as never, store, activeFile)
+    assert.equal(connection.count(), 2)
+    const mode = `${ROUTE_PREFIX}/mode`
 
-    const on = makeRes()
-    const onReq = makeReq({ method: 'PUT', body: { sessionId: 's1', enabled: true } })
-    handler(onReq, on)
-    onReq.emitBody()
-    await on.ended
-    assert.equal(on.status(), 200)
+    const on = await call(connection.route(mode), mode, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's1', enabled: true }),
+    })
+    assert.equal(on.status, 200)
+    assert.equal(on.contentType, 'application/json')
     assert.equal(store.enabledOf('s1'), true)
-    assert.equal((on.json().value as { enabled: boolean }).enabled, true)
+    assert.equal((on.body.value as { enabled: boolean }).enabled, true)
     assert.equal(readOfficeActive(activeFile)?.format, OFFICE_ACTIVE_FORMAT)
 
-    const get = makeRes()
-    handler(makeReq({ url: `${ROUTE_PREFIX}/mode?sessionId=s1` }), get)
-    await get.ended
-    assert.equal((get.json().value as { enabled: boolean }).enabled, true)
+    const read = await call(connection.route(mode), `${mode}?sessionId=s1`)
+    assert.equal((read.body.value as { enabled: boolean }).enabled, true)
 
-    const unknown = makeRes()
-    handler(makeReq({ url: `${ROUTE_PREFIX}/mode?sessionId=nobody` }), unknown)
-    await unknown.ended
-    assert.equal(unknown.status(), 200)
-    assert.equal((unknown.json().value as { enabled: boolean }).enabled, false)
+    const unknown = await call(connection.route(mode), `${mode}?sessionId=nobody`)
+    assert.equal(unknown.status, 200)
+    assert.equal((unknown.body.value as { enabled: boolean }).enabled, false)
 
-    const off = makeRes()
-    const offReq = makeReq({ method: 'PUT', body: { sessionId: 's1', enabled: false } })
-    handler(offReq, off)
-    offReq.emitBody()
-    await off.ended
+    const off = await call(connection.route(mode), mode, {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 's1', enabled: false }),
+    })
+    assert.equal(off.status, 200)
     assert.equal(store.enabledOf('s1'), false)
     // Turning off releases our own claim but keeps the claim readable.
     assert.equal(readOfficeActive(activeFile)?.format, null)
 
-    const active = makeRes()
-    server.handler(`${ROUTE_PREFIX}/office-active`)(makeReq({ url: `${ROUTE_PREFIX}/office-active` }), active)
-    await active.ended
-    assert.equal(active.status(), 200)
-    assert.deepEqual((active.json().value as { active: unknown }).active, readOfficeActive(activeFile))
+    const activePath = `${ROUTE_PREFIX}/office-active`
+    const active = await call(connection.route(activePath), activePath)
+    assert.equal(active.status, 200)
+    assert.deepEqual((active.body.value as { active: unknown }).active, readOfficeActive(activeFile))
   } finally {
     done()
   }
 })
 
-test('mode route: bad payloads, wrong methods and cross-origin calls are refused', async () => {
+test('mode route: bad payloads and oversized bodies are refused', async () => {
   const { store, activeFile, done } = tempStore()
   try {
-    const server = fakeServer()
-    registerSheetRoutes(server, store, activeFile)
-    const handler = server.handler(`${ROUTE_PREFIX}/mode`)
+    const connection = fakeConnection()
+    registerSheetRoutes(connection.fetch as never, store, activeFile)
+    const mode = `${ROUTE_PREFIX}/mode`
+    const post = (body: string): Promise<Answer> => call(connection.route(mode), mode, { method: 'POST', body })
 
-    const missingSession = makeRes()
-    const missingSessionReq = makeReq({ method: 'PUT', body: { enabled: true } })
-    handler(missingSessionReq, missingSession)
-    missingSessionReq.emitBody()
-    await missingSession.ended
-    assert.equal(missingSession.status(), 400)
+    const missingSession = await post(JSON.stringify({ enabled: true }))
+    assert.equal(missingSession.status, 400)
+    assert.equal(missingSession.body.ok, false)
+    assert.equal(missingSession.body.error?.code, 'bad-request')
 
-    const badEnabled = makeRes()
-    const badEnabledReq = makeReq({ method: 'PUT', body: { sessionId: 's1', enabled: 'yes' } })
-    handler(badEnabledReq, badEnabled)
-    badEnabledReq.emitBody()
-    await badEnabled.ended
-    assert.equal(badEnabled.status(), 400)
+    const badEnabled = await post(JSON.stringify({ sessionId: 's1', enabled: 'yes' }))
+    assert.equal(badEnabled.status, 400)
 
-    const noSession = makeRes()
-    handler(makeReq({ url: `${ROUTE_PREFIX}/mode` }), noSession)
-    await noSession.ended
-    assert.equal(noSession.status(), 400)
+    const notJson = await post('not json at all')
+    assert.equal(notJson.status, 400)
 
-    const wrongMethod = makeRes()
-    handler(makeReq({ method: 'DELETE' }), wrongMethod)
-    assert.equal(wrongMethod.status(), 405)
+    const oversized = await post(JSON.stringify({ sessionId: 's1', enabled: true, padding: 'x'.repeat(9_000) }))
+    assert.equal(oversized.status, 413)
 
-    const crossOrigin = makeRes()
-    handler(makeReq({
-      url: `${ROUTE_PREFIX}/mode?sessionId=s1`,
-      headers: { host: '127.0.0.1:3080', origin: 'http://evil.example' },
-    }), crossOrigin)
-    assert.equal(crossOrigin.status(), 403)
-
-    const rebound = makeRes()
-    handler(makeReq({
-      url: `${ROUTE_PREFIX}/mode?sessionId=s1`,
-      headers: { host: 'evil.example' },
-    }), rebound)
-    assert.equal(rebound.status(), 403)
+    const noSession = await call(connection.route(mode), mode)
+    assert.equal(noSession.status, 400)
 
     assert.equal(store.enabledOf('s1'), false)
   } finally {
@@ -296,10 +247,26 @@ test('mode route: bad payloads, wrong methods and cross-origin calls are refused
   }
 })
 
-test('mode route: sameOrigin semantics match the suite fence', () => {
-  const req = (headers: Record<string, string | undefined>): IncomingMessage =>
-    ({ headers } as unknown as IncomingMessage)
-  assert.equal(sameOrigin(req({ origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' })), true)
-  assert.equal(sameOrigin(req({ origin: undefined, host: '127.0.0.1:3080' })), true)
-  assert.equal(sameOrigin(req({ origin: 'http://evil.example', host: '127.0.0.1:3080' })), false)
+test('mode routes: exact paths, owned methods, and no `@` in the URL', async () => {
+  const { store, activeFile, done } = tempStore()
+  try {
+    const connection = fakeConnection()
+    const dispose = registerSheetRoutes(connection.fetch as never, store, activeFile)
+    const mode = connection.route(`${ROUTE_PREFIX}/mode`)
+    const active = connection.route(`${ROUTE_PREFIX}/office-active`)
+
+    // The toggle travels as POST: the registry owns GET/HEAD/POST, so a PUT
+    // would fall through to the shared channel's own 404.
+    assert.deepEqual([...mode.methods], ['GET', 'POST'])
+    assert.deepEqual([...active.methods], ['GET'])
+    assert.equal(mode.requestBody, 'buffered')
+    assert.equal(active.requestBody, 'buffered')
+    assert.equal(ROUTE_PREFIX, '/api/plugins/dsh-app/plugin-sheet')
+    assert.ok(!ROUTE_PREFIX.includes('@'), 'the registry admits no @ in a path segment')
+
+    await dispose()
+    assert.equal(connection.count(), 0)
+  } finally {
+    done()
+  }
 })

@@ -11,11 +11,11 @@
  *
  * What travels is an explicit ALLOWLIST — the three version variables the shell
  * publishes, the log directory it published, and the tail of the newest server
- * log. Nothing is enumerated from `process.env`, so the bridge token and every
- * other value in this process's environment are structurally unable to appear:
- * this module never sees them. The log lines were redacted by the shell at
- * write time (see `log-tail.ts`), and the tail is handed in as an argument for
- * the same reason — nothing here reads a file or an environment variable.
+ * log. Nothing is enumerated from `process.env`, so the shell's action URL and
+ * every other value in this process's environment are structurally unable to
+ * appear: this module never sees them. The log lines were redacted by the shell
+ * at write time (see `log-tail.ts`), and the tail is handed in as an argument
+ * for the same reason — nothing here reads a file or an environment variable.
  *
  * @module @dsh-app/plugin-brand/diagnostics-facts
  */

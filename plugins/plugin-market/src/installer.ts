@@ -16,17 +16,24 @@
  *   4. stdout/stderr are captured (capped) and the tail is returned for the
  *      panel's log disclosure; the full text is scanned for pnpm's
  *      build-scripts-blocked signal so the panel can offer the whitelist +
- *      retry path (see blockedBuildsOf / build-allow.ts).
+ *      retry path (see blockedBuildsOf / build-allow.ts) and for its
+ *      release-age policy failures, which this class clears itself by
+ *      recording the rejected versions and re-running the command ONCE
+ *      (see release-age.ts).
  *
  * Serialization: every install/remove is queued behind an in-process promise
  * chain, so concurrent panel actions can never run two package-manager
- * mutations against one profile at the same time.
+ * mutations against one profile at the same time — the release-age recovery's
+ * manifest write included.
  *
  * @module @dsh-app/plugin-market/installer
  */
 
 import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
+import { allowReleaseAges, pinnedDependenciesOf, releaseAgeViolationsOf } from './release-age.ts'
 import {
   PACKAGE_NAME_PATTERN,
   resolveDshBin,
@@ -119,6 +126,18 @@ export interface CliRunResult {
    * be extracted from the message); undefined = nothing was blocked.
    */
   readonly blockedBuilds?: readonly string[]
+}
+
+/** One finished CLI invocation, successful or not (see runOnce). */
+interface CliRunOutcome {
+  /** Process exit code. */
+  readonly code: number
+  /** Tail of combined stdout/stderr, for the panel's log disclosure. */
+  readonly output: string
+  /** The untruncated capture, for signal scanning. */
+  readonly raw: string
+  /** Blocked build scripts, or null when the output carried no such signal. */
+  readonly blockedBuilds: readonly string[] | null
 }
 
 type SpawnLike = typeof spawn
@@ -218,11 +237,58 @@ export class PluginInstaller {
    * install logs and would not survive the tail cut. A blocked signal turns a
    * non-zero exit into MarketBlockedBuildError so the panel can offer the
    * allow-and-retry path instead of a bare failure.
+   *
+   * A pnpm release-age policy failure is instead recovered here: the rejected
+   * versions are recorded as exclusions (the same fix pnpm applies on its own
+   * install path) and the command runs once more (see release-age.ts). The
+   * retry's outcome is the one reported, so a second failure surfaces its own
+   * output rather than the stale first one.
    */
-  private runCli(args: readonly string[]): Promise<{ output: string, blockedBuilds: readonly string[] | null }> {
+  private async runCli(args: readonly string[]): Promise<{ output: string, blockedBuilds: readonly string[] | null }> {
+    let outcome = await this.runOnce(args)
+    if (outcome.code !== 0) {
+      const violations = releaseAgeViolationsOf(outcome.raw)
+      if (violations !== null && this.excludeReleaseAgeBlocks(violations)) outcome = await this.runOnce(args)
+    }
+    if (outcome.code !== 0) {
+      throw outcome.blockedBuilds !== null
+        ? new MarketBlockedBuildError(commandFailureHost(outcome.output, outcome.code), outcome.blockedBuilds)
+        : new MarketExecutionError(commandFailureHost(outcome.output, outcome.code), 'cli')
+    }
+    return { output: outcome.output, blockedBuilds: outcome.blockedBuilds }
+  }
+
+  /**
+   * Record the versions pnpm's release-age policy rejected and answer whether
+   * a retry can be useful.
+   *
+   * The listing forms name every rejected version; the unhandled-guardrail
+   * form names only a count, and there the profile manifest's exact-version
+   * dependencies are the candidate set (they are what the resolution is forced
+   * to pick). An empty or already-listed set means a second run would fail
+   * identically, so the caller keeps the original failure.
+   *
+   * @param violations - versions named by the failed run (possibly none).
+   * @returns true when the exclusion list gained entries.
+   */
+  private excludeReleaseAgeBlocks(violations: readonly string[]): boolean {
+    const dir = join(resolveDshHome(), 'profiles', validateProfileName(this.profile))
+    const entries = violations.length > 0 ? violations : pinnedDependenciesOf(join(dir, 'package.json'))
+    if (entries.length === 0) return false
+    if (!allowReleaseAges(join(dir, 'pnpm-workspace.yaml'), entries)) return false
+    this.log(`plugin-market: release-age policy blocked the run; excluded ${entries.join(', ')} in profile ${this.profile}`)
+    return true
+  }
+
+  /**
+   * One CLI invocation. A non-zero exit is data (the caller decides between
+   * the blocked-builds path, the release-age retry, and a reported failure);
+   * only a spawn error or the timeout rejects.
+   */
+  private runOnce(args: readonly string[]): Promise<CliRunOutcome> {
     const profile = validateProfileName(this.profile)
     const bin = resolveDshBin(this.argv1)
-    return new Promise<{ output: string, blockedBuilds: readonly string[] | null }>((resolvePromise, rejectPromise) => {
+    return new Promise<CliRunOutcome>((resolvePromise, rejectPromise) => {
       const child = this.spawnImpl(process.execPath, [bin, 'plugin', '--profile', profile, ...args], {
         windowsHide: true,
         env: { ...process.env },
@@ -264,13 +330,7 @@ export class PluginInstaller {
         // The tail is the CLI's own output — the panel shows it in its log
         // disclosure, so it rides a message's params as data, never as copy.
         const tail = tailLines(truncated ? `${combined}\n…（输出已截断）` : combined, OUTPUT_TAIL_LINES)
-        if (code !== 0) {
-          rejectPromise(blockedBuilds !== null
-            ? new MarketBlockedBuildError(commandFailureHost(tail, code), blockedBuilds)
-            : new MarketExecutionError(commandFailureHost(tail, code), 'cli'))
-          return
-        }
-        resolvePromise({ output: tail, blockedBuilds })
+        resolvePromise({ code: code ?? -1, output: tail, raw: combined, blockedBuilds })
       }
 
       child.on('error', (error: Error) => finish(error, undefined))

@@ -30,6 +30,13 @@ import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, HostText } from '../types.ts'
 import { NS, type ArchivesKey } from './locales.ts'
 
+/**
+ * The plugin's route prefix on the shared Connection `/api` channel (mirrors
+ * the host half; the Connection registry admits no `@` in a path segment, so
+ * the npm scope travels as `dsh-app`).
+ */
+const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-archives'
+
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type ArchivesSectionProps = PropsLocale<typeof NS>
 
@@ -136,10 +143,10 @@ function hostMessage(
  * Route-failure copy: every code this plugin's routes can answer with. An
  * unknown code falls back to the host's English diagnostic.
  *
- * The two fence codes (`route.crossOrigin`, `route.methodOnly`) are
- * deliberately absent: only a hostile page or a hand-rolled client can reach
- * them, never a button on this page, so they read as the host's English
- * diagnostic rather than as new copy.
+ * The old fence codes are gone with the fences themselves: the Connection
+ * carrier applies its Host/Origin trust check and its method dispatch before a
+ * route handler runs, so a rejected call answers the channel's own status
+ * without a coded message from this plugin.
  */
 function routeErrorCopy(t: ArchivesTranslate, host: HostText | undefined, fallback: string): string {
   const params = host?.params ?? {}
@@ -255,7 +262,7 @@ export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
 
   const load = useCallback(async () => {
     try {
-      setList(await fetchJson<ArchiveList>('/plugins/@dsh-app/plugin-archives/api/list'))
+      setList(await fetchJson<ArchiveList>(`${ROUTE_PREFIX}/list`))
       setError(null)
     } catch (loadError) {
       setError(asFailure(loadError))
@@ -272,7 +279,7 @@ export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
     if (q === '') return
     setSearchBusy(true)
     try {
-      setSearchResults(await fetchJson<{ items: Array<{ id: string; title: string; createdAt: number; cwd: string; snippet: string }>; agentToolAvailable: boolean }>(`/plugins/@dsh-app/plugin-archives/api/search?q=${encodeURIComponent(q)}`))
+      setSearchResults(await fetchJson<{ items: Array<{ id: string; title: string; createdAt: number; cwd: string; snippet: string }>; agentToolAvailable: boolean }>(`${ROUTE_PREFIX}/search?q=${encodeURIComponent(q)}`))
       setError(null)
     } catch (searchError) {
       setError(asFailure(searchError))
@@ -301,14 +308,14 @@ export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
     setBusy(true)
     try {
       if (confirm.kind === 'prune') {
-        const result = await fetchJson<ArchivePruneResult>('/plugins/@dsh-app/plugin-archives/api/prune', {
+        const result = await fetchJson<ArchivePruneResult>(`${ROUTE_PREFIX}/prune`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}),
         })
         setNotice({ kind: 'ok', text: t('archives.notice.pruned', { count: result.pruned }) })
       } else {
-        const result = await fetchJson<ArchiveDeleteResult>('/plugins/@dsh-app/plugin-archives/api/delete', {
+        const result = await fetchJson<ArchiveDeleteResult>(`${ROUTE_PREFIX}/delete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids: confirm.ids }),

@@ -30,14 +30,21 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { McpMountManager } from './mount.ts'
 import { registerMcpRoutes } from './routes.ts'
 import { McpStore } from './store.ts'
 
 export const name = 'plugin-mcp'
-export const inject = ['webServer']
+
+/**
+ * The manager rides the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['connection']
 
 /** Config: storage location. */
 export interface Config {
@@ -83,7 +90,7 @@ export function apply(ctx: Context, config: Config): void {
     }
   }, 'plugin-mcp: dynamic mounts')
 
-  ctx.effect(() => registerMcpRoutes(ctx.webServer, store, manager), 'plugin-mcp: api routes')
+  ctx.effect(() => registerMcpRoutes(ctx.connection.fetch, store, manager), 'plugin-mcp: api routes')
 
   log.info(`mcp store: ${store.filePath}`)
 }

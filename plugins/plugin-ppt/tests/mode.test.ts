@@ -1,24 +1,22 @@
 /**
  * PptModeStore persistence with legacy-theme migration, plus the mode,
- * office-active and template-route contracts (fence, method guard, payload
- * validation, cover previews) over a fake web server and mocked req/res
- * objects.
+ * office-active and template-route contracts (payload validation, cover
+ * previews) over a captured Connection exact-Fetch route — no HTTP server and
+ * no carrier trust checks (those belong to the transport) are involved.
  *
  * @module @dsh-app/plugin-ppt/tests/mode
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { PptModeStore, migrateLegacyTheme } from '../src/mode-store.ts'
 import { parseOfficeActive, shouldSelfDisable } from '../src/office-active.ts'
 import { OFFICE_ACTIVE_FORMAT } from '../src/office-format.ts'
 import { claimOfficeActive, officeActiveFilePath, readOfficeActive, releaseOfficeActive } from '../src/office-active-store.ts'
-import { ROUTE_PREFIX, registerPptRoutes, sameOrigin, templateViews } from '../src/routes.ts'
+import { ROUTE_PREFIX, registerPptRoutes, templateViews } from '../src/routes.ts'
 import { allTemplates, DEFAULT_TEMPLATE_ID } from '../src/templates.ts'
 
 // --- store -------------------------------------------------------------------
@@ -198,45 +196,28 @@ test('office active store: claim is monotonic and release only clears our own cl
 
 // --- routes ------------------------------------------------------------------
 
-type Handler = (req: IncomingMessage, res: ServerResponse) => void
+/** One captured Connection exact-Fetch route. */
+interface CapturedRoute {
+  readonly methods: readonly string[]
+  readonly requestBody: string
+  readonly fetch: (request: Request) => Promise<Response>
+}
 
-/** Fake WebServerLike capturing registrations by path. */
-function fakeServer() {
-  const routes = new Map<string, Handler>()
+/** Fake HostConnectionFetch capturing registrations by path. */
+function fakeConnectionFetch() {
+  const routes = new Map<string, CapturedRoute>()
   return {
-    register(route: { kind: 'exact', path: string, handler: Handler }): () => void {
-      routes.set(route.path, route.handler)
-      return () => routes.delete(route.path)
+    register(route: { path: string, methods: readonly string[], requestBody: string, fetch: (request: Request) => Promise<Response> }): () => Promise<void> {
+      routes.set(route.path, { methods: route.methods, requestBody: route.requestBody, fetch: route.fetch })
+      return async () => { routes.delete(route.path) }
     },
-    handler(path: string): Handler {
-      const handler = routes.get(path)
-      assert.ok(handler !== undefined, `route ${path} registered`)
-      return handler
+    route(path: string): CapturedRoute {
+      const route = routes.get(path)
+      assert.ok(route !== undefined, `route ${path} registered`)
+      return route
     },
     count: () => routes.size,
   }
-}
-
-interface ReqOpts {
-  method?: string
-  url?: string
-  headers?: Record<string, string | undefined>
-  body?: unknown
-}
-
-function makeReq(opts: ReqOpts = {}): IncomingMessage & { emitBody(): void } {
-  const req = new EventEmitter() as unknown as IncomingMessage & { emitBody(): void }
-  Object.assign(req, {
-    method: opts.method ?? 'GET',
-    url: opts.url ?? '/',
-    headers: opts.headers ?? { host: '127.0.0.1:3080' },
-    resume: () => {},
-  })
-  req.emitBody = () => {
-    if (opts.body !== undefined) req.emit('data', Buffer.from(JSON.stringify(opts.body)))
-    req.emit('end')
-  }
-  return req
 }
 
 interface Envelope {
@@ -245,47 +226,38 @@ interface Envelope {
   error?: { code: string, message: string }
 }
 
-interface CapturedResponse {
-  status(): number
-  json(): Envelope
-  /** Resolves when the handler finishes the response (no timing guesswork). */
-  ended: Promise<void>
+/** The window's own origin: the carrier hands the route a same-origin request. */
+const ORIGIN = 'dsh-app://app'
+
+function get(registry: ReturnType<typeof fakeConnectionFetch>, path: string): Promise<Response> {
+  // The registry keys routes by their exact path; the query string rides the
+  // request URL only.
+  return registry.route(path.split('?')[0]).fetch(new Request(`${ORIGIN}${path}`))
 }
 
-function makeRes(): ServerResponse & CapturedResponse {
-  const state = { status: 0, raw: '' }
-  let settle: () => void = () => {}
-  const ended = new Promise<void>((resolve) => { settle = resolve })
-  const res = {
-    setHeader: () => {},
-    writeHead: (code: number) => { state.status = code },
-    end: (payload?: unknown) => {
-      if (payload !== undefined) state.raw += String(payload)
-      settle()
-    },
-  }
-  // Method accessors (not getters): Object.assign would snapshot a getter's
-  // current value, freezing the captured status.
-  const captured: CapturedResponse = {
-    status: () => state.status,
-    json: () => JSON.parse(state.raw) as Envelope,
-    ended,
-  }
-  return Object.assign(res as unknown as ServerResponse, captured) as ServerResponse & CapturedResponse
+function post(registry: ReturnType<typeof fakeConnectionFetch>, path: string, body: unknown): Promise<Response> {
+  return registry.route(path).fetch(new Request(`${ORIGIN}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }))
+}
+
+async function envelope(response: Response): Promise<Envelope> {
+  return await response.json() as Envelope
 }
 
 test('mode routes: GET /templates serves every bundled template with a cover preview', async () => {
   const { store, activeFile, done } = tempStore()
   try {
-    const server = fakeServer()
-    registerPptRoutes(server, store, activeFile)
-    assert.equal(server.count(), 3)
+    const registry = fakeConnectionFetch()
+    registerPptRoutes(registry, store, activeFile)
+    assert.equal(registry.count(), 3)
+    assert.deepEqual(registry.route(`${ROUTE_PREFIX}/templates`).methods, ['GET'])
 
-    const res = makeRes()
-    server.handler(`${ROUTE_PREFIX}/templates`)(makeReq({ url: `${ROUTE_PREFIX}/templates` }), res)
-    await res.ended
-    assert.equal(res.status(), 200)
-    const value = res.json().value as { templates: { id: string, category: string, cover: string, pageCount: number }[] }
+    const response = await get(registry, `${ROUTE_PREFIX}/templates`)
+    assert.equal(response.status, 200)
+    const value = (await envelope(response)).value as { templates: { id: string, category: string, cover: string, pageCount: number }[] }
     const bundled = await allTemplates()
     assert.equal(value.templates.length, bundled.length)
     for (const row of value.templates) {
@@ -305,62 +277,52 @@ test('templateViews: covers=0 keeps the light payload cover-less', async () => {
   for (const row of light) assert.equal(row.cover, undefined)
 })
 
-test('mode routes: PUT enables with or without a template, GET reads, off clears', async () => {
+test('mode routes: POST /mode enables with or without a template, GET reads, off clears', async () => {
   const { store, activeFile, done } = tempStore()
   try {
-    const server = fakeServer()
-    registerPptRoutes(server, store, activeFile)
-    const handler = server.handler(`${ROUTE_PREFIX}/mode`)
+    const registry = fakeConnectionFetch()
+    registerPptRoutes(registry, store, activeFile)
+    assert.deepEqual(registry.route(`${ROUTE_PREFIX}/mode`).methods, ['GET', 'POST'])
 
-    const on = makeRes()
-    const onReq = makeReq({ method: 'PUT', body: { sessionId: 's1', enabled: true, template: 'dsh-signal' } })
-    handler(onReq, on)
-    onReq.emitBody()
-    await on.ended
-    assert.equal(on.status(), 200)
+    const on = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-signal' })
+    assert.equal(on.status, 200)
     assert.equal(store.templateOf('s1'), 'dsh-signal')
     assert.deepEqual(readOfficeActive(activeFile)?.format, 'ppt')
 
-    const get = makeRes()
-    handler(makeReq({ url: `${ROUTE_PREFIX}/mode?sessionId=s1` }), get)
-    await get.ended
-    const value = get.json().value as { enabled: boolean, template: string | null }
+    const read = await get(registry, `${ROUTE_PREFIX}/mode?sessionId=s1`)
+    assert.equal(read.status, 200)
+    const value = (await envelope(read)).value as { enabled: boolean, template: string | null }
     assert.equal(value.enabled, true)
     assert.equal(value.template, 'dsh-signal')
 
     // Enabling without a template is on 常规主题, not off.
-    const neutral = makeRes()
-    const neutralReq = makeReq({ method: 'PUT', body: { sessionId: 's1', enabled: true, template: null } })
-    handler(neutralReq, neutral)
-    neutralReq.emitBody()
-    await neutral.ended
-    assert.equal(neutral.status(), 200)
+    const neutral = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: null })
+    assert.equal(neutral.status, 200)
     assert.equal(store.isEnabled('s1'), true)
     assert.equal(store.templateOf('s1'), null)
 
-    const off = makeRes()
-    const offReq = makeReq({ method: 'PUT', body: { sessionId: 's1', enabled: false, template: null } })
-    handler(offReq, off)
-    offReq.emitBody()
-    await off.ended
+    const off = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: false, template: null })
+    assert.equal(off.status, 200)
     assert.equal(store.isEnabled('s1'), false)
     assert.equal(readOfficeActive(activeFile)?.format, null)
     assert.equal(readOfficeActive(activeFile)?.sessionId, 's1')
 
-    const unknown = makeRes()
-    const unknownReq = makeReq({ method: 'PUT', body: { sessionId: 's1', enabled: true, template: 'neon-dreams' } })
-    handler(unknownReq, unknown)
-    unknownReq.emitBody()
-    await unknown.ended
-    assert.equal(unknown.status(), 400)
+    const unknown = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'neon-dreams' })
+    assert.equal(unknown.status, 400)
     assert.equal(store.isEnabled('s1'), false)
 
-    const missingEnabled = makeRes()
-    const missingReq = makeReq({ method: 'PUT', body: { sessionId: 's1', template: null } })
-    handler(missingReq, missingEnabled)
-    missingReq.emitBody()
-    await missingEnabled.ended
-    assert.equal(missingEnabled.status(), 400)
+    const missingEnabled = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', template: null })
+    assert.equal(missingEnabled.status, 400)
+
+    const missingSession = await get(registry, `${ROUTE_PREFIX}/mode`)
+    assert.equal(missingSession.status, 400)
+
+    const oversized = await registry.route(`${ROUTE_PREFIX}/mode`).fetch(new Request(`${ORIGIN}${ROUTE_PREFIX}/mode`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's1', enabled: true, template: null, pad: 'x'.repeat(16_384) }),
+    }))
+    assert.equal(oversized.status, 413)
   } finally {
     done()
   }
@@ -369,57 +331,31 @@ test('mode routes: PUT enables with or without a template, GET reads, off clears
 test('mode routes: the shared active claim is readable and a foreign claim survives our off', async () => {
   const { store, activeFile, done } = tempStore()
   try {
-    const server = fakeServer()
-    registerPptRoutes(server, store, activeFile)
-    const handler = server.handler(`${ROUTE_PREFIX}/office-active`)
+    const registry = fakeConnectionFetch()
+    registerPptRoutes(registry, store, activeFile)
+    assert.deepEqual(registry.route(`${ROUTE_PREFIX}/office-active`).methods, ['GET'])
 
-    const empty = makeRes()
-    handler(makeReq({ url: `${ROUTE_PREFIX}/office-active` }), empty)
-    await empty.ended
-    assert.equal(empty.status(), 200)
-    assert.equal((empty.json().value as { active: unknown }).active, null)
+    const empty = await get(registry, `${ROUTE_PREFIX}/office-active`)
+    assert.equal(empty.status, 200)
+    assert.equal((await envelope(empty)).value?.active, null)
 
     writeFileSync(activeFile, JSON.stringify({ format: 'pdf', sessionId: 's9', updatedAt: 5_000 }), 'utf8')
-    const foreign = makeRes()
-    handler(makeReq({ url: `${ROUTE_PREFIX}/office-active` }), foreign)
-    await foreign.ended
-    assert.deepEqual((foreign.json().value as { active: unknown }).active, { format: 'pdf', sessionId: 's9', updatedAt: 5_000 })
-
-    const wrongMethod = makeRes()
-    handler(makeReq({ method: 'PUT' }), wrongMethod)
-    assert.equal(wrongMethod.status(), 405)
+    const foreign = await get(registry, `${ROUTE_PREFIX}/office-active`)
+    assert.deepEqual((await envelope(foreign)).value?.active, { format: 'pdf', sessionId: 's9', updatedAt: 5_000 })
   } finally {
     done()
   }
 })
 
-test('mode routes: wrong method and cross-origin calls are refused', () => {
+test('mode routes: the disposer unregisters every route and drops the state it carries', async () => {
   const { store, activeFile, done } = tempStore()
   try {
-    const server = fakeServer()
-    registerPptRoutes(server, store, activeFile)
-    const handler = server.handler(`${ROUTE_PREFIX}/mode`)
-
-    const wrongMethod = makeRes()
-    handler(makeReq({ method: 'DELETE' }), wrongMethod)
-    assert.equal(wrongMethod.status(), 405)
-
-    const crossOrigin = makeRes()
-    handler(makeReq({
-      url: `${ROUTE_PREFIX}/mode?sessionId=s1`,
-      headers: { host: '127.0.0.1:3080', origin: 'http://evil.example' },
-    }), crossOrigin)
-    assert.equal(crossOrigin.status(), 403)
-    assert.equal(store.isEnabled('s1'), false)
+    const registry = fakeConnectionFetch()
+    const dispose = registerPptRoutes(registry, store, activeFile)
+    assert.equal(registry.count(), 3)
+    await dispose()
+    assert.equal(registry.count(), 0)
   } finally {
     done()
   }
-})
-
-test('mode routes: sameOrigin semantics match the suite fence', () => {
-  const req = (headers: Record<string, string | undefined>): IncomingMessage =>
-    ({ headers } as unknown as IncomingMessage)
-  assert.equal(sameOrigin(req({ origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' })), true)
-  assert.equal(sameOrigin(req({ origin: undefined, host: '127.0.0.1:3080' })), true)
-  assert.equal(sameOrigin(req({ origin: 'http://evil.example', host: '127.0.0.1:3080' })), false)
 })

@@ -1,15 +1,18 @@
 /**
- * Settings-page API under `/plugins/@dsh-app/plugin-websearch/api`:
+ * Settings-page API on the shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-websearch`:
  *   GET  /config        — the masked config + per-engine status + active provider
- *   POST /config        — validate + persist + re-point the live provider
+ *   POST /config/save   — validate + persist + re-point the live provider
  *   POST /engine/test   — probe ONE engine (or all of them) with a real query
+ *   POST /selftest      — run one search through `ctx.web.search` itself
  *
- * Every route enforces same-origin plus a loopback-host fence (403 with a
- * body, never a hung connection). Reads MASK literal apiKey values (never
- * returned to the client); an update carrying the mask sentinel keeps the
- * stored value.
+ * Trust is the carrier's: the Connection transport applies its Host/Origin
+ * fence and browser authentication before a route handler runs (see
+ * `ConnectionFetchRoute.fetch`), so a route never re-checks them. Reads MASK
+ * literal apiKey values (never returned to the client); an update carrying the
+ * mask sentinel keeps the stored value.
  *
- * Isolation note: the small HTTP helpers below intentionally mirror
+ * Isolation note: the transport helpers below intentionally mirror
  * plugin-mcp's routes.ts instead of being shared — each suite plugin bundles
  * standalone (esbuild, no cross-plugin runtime imports), so a shared util
  * would be a new package for ~40 lines.
@@ -17,7 +20,7 @@
  * @module @dsh-app/plugin-websearch/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { WebSearchStore } from './store.ts'
 import {
   activeEngines,
@@ -35,17 +38,16 @@ import {
   type WebSearchFile,
 } from './wire.ts'
 
-/** Route namespace on the dsh web server. */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-websearch/api'
+/**
+ * Route namespace on the shared Connection `/api` channel. The registry admits
+ * only path segments matching `[A-Za-z0-9_$.-]`, so the npm scope's `@` cannot
+ * appear in the URL: `@dsh-app/plugin-websearch` travels as
+ * `dsh-app/plugin-websearch`.
+ */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-websearch'
 
-/** Structural slice of the webServer service (no full dep on its types). */
-interface WebServerLike {
-  register(route: {
-    kind: 'exact'
-    path: string
-    handler: (req: IncomingMessage, res: ServerResponse) => void
-  }): () => void
-}
+/** Cap on one request body: config saves and probe requests are small. */
+const MAX_BODY_BYTES = 65_536
 
 /** A single engine probe's outcome. */
 export interface ProbeResult {
@@ -96,46 +98,15 @@ export interface RouteDeps {
   }>
 }
 
-/** Same-origin fence (compare host parts; Origin carries the scheme). */
-export function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined) return true
-  try {
-    return new URL(origin).host === req.headers.host
-  } catch {
-    return false
-  }
+function sendJson(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
 }
 
-/**
- * Loopback-host fence: admit only requests whose Host names this machine's
- * loopback interface, so a rebinding/cross-site request carrying an
- * attacker's Host is refused even when it forges a matching Origin.
- */
-function passesFence(req: IncomingMessage): boolean {
-  const raw = req.headers.host
-  if (typeof raw !== 'string' || raw === '') return false
-  let hostname: string
-  try {
-    hostname = new URL(`http://${raw}`).hostname
-  } catch {
-    return false
-  }
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  const octets = hostname.split('.')
-  return octets.length === 4
-    && octets[0] === '127'
-    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-}
-
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
-  res.setHeader('Content-Type', 'application/json')
-  res.writeHead(status)
-  res.end(JSON.stringify(body))
-}
-
-function ok(res: ServerResponse, value: unknown): void {
-  sendJson(res, 200, { ok: true, value })
+function ok(value: unknown): Response {
+  return sendJson(200, { ok: true, value })
 }
 
 /**
@@ -144,36 +115,23 @@ function ok(res: ServerResponse, value: unknown): void {
  * language. The plain `message` stays an English diagnostic for logs and for a
  * client that does not know the code yet.
  */
-function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
-  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
+function fail(status: number, kind: string, host: HostText): Response {
+  return sendJson(status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
-/** Bounded JSON body read. */
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let size = 0
-    const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > 65_536) {
-        // Drain instead of destroy: the socket stays alive so the 413 answer
-        // actually reaches the client.
-        reject(new Error('payload-too-large'))
-        req.resume()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      try {
-        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        resolve(typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {})
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error('invalid JSON body'))
-      }
-    })
-    req.on('error', reject)
-  })
+/**
+ * Bounded JSON body read. The carrier has already buffered the body (every
+ * route declares `requestBody: 'buffered'`) under the channel's own cap; this
+ * smaller route limit is checked before parsing, so an oversized body can
+ * never reach the store.
+ */
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const declared = Number(request.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const text = await request.text()
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const parsed: unknown = JSON.parse(text)
+  return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
 }
 
 /**
@@ -182,8 +140,8 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
  * fires a probe at six engines. Live latency arrives from `/engine/test`.
  *
  * @param seamAvailable - whether `ctx.web` exists AND this plugin's provider
- * is registered. Passed in rather than assumed: the banner it drives is the
- * only signal that the chain cannot run at all.
+ *   is registered. Passed in rather than assumed: the banner it drives is the
+ *   only signal that the chain cannot run at all.
  */
 export function buildView(
   store: WebSearchStore,
@@ -289,172 +247,154 @@ export function buildProviderStatuses(
 }
 
 /**
- * Register the web search routes.
- * @param webServer - the dsh web server service.
+ * Register the web search routes on the Connection exact-Fetch registry.
+ *
+ * Every route owns its exact path (nothing here takes a path parameter) and
+ * its methods; another method of the same path falls through to the shared
+ * channel's own 404 rather than a route body.
+ *
+ * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
  * @param store - the config store.
  * @param deps - host callbacks (provider switch + engine probe).
  * @returns disposer removing the routes.
  */
-export function registerWebSearchRoutes(webServer: WebServerLike, store: WebSearchStore, deps: RouteDeps): () => void {
-  const guard = (req: IncomingMessage, res: ServerResponse, method: 'GET' | 'POST'): boolean => {
-    if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
-      return false
-    }
-    if (req.method !== method) {
-      res.setHeader('Allow', method)
-      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method }, text: `${method} only` })
-      return false
-    }
-    return true
+export function registerWebSearchRoutes(
+  connectionFetch: HostConnectionFetch,
+  store: WebSearchStore,
+  deps: RouteDeps,
+): () => Promise<void> {
+  const respond = (): Response => {
+    const file = store.load()
+    return ok(buildView(store, deps.seamAvailable(), file.provider, deps.resolveKey, deps.upstreamStatus()))
   }
 
-  const respond = (res: ServerResponse): void => {
-    const file = store.load()
-    ok(res, buildView(store, deps.seamAvailable(), file.provider, deps.resolveKey, deps.upstreamStatus()))
+  /** Map one body-read/validation failure onto its status + coded message. */
+  const bodyFailure = (error: unknown): Response => {
+    const message = error instanceof Error ? error.message : 'invalid body'
+    if (message === 'payload-too-large') {
+      return fail(413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
+    }
+    return fail(400, 'bad-request', { code: 'route.invalidBody', text: message })
   }
 
   const disposers = [
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/config`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'GET')) return
-        respond(res)
-      },
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => respond(),
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/config/save`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then((body) => {
-            const existing = store.load()
-            try {
-              // The client sends the whole config back; engine keys that came
-              // down masked are re-attached from the stored copy here, so a
-              // save that did not touch a key never destroys it.
-              const merged = { ...body, engines: unmaskEngines(body.engines, existing.engines) }
-              const file = store.save(merged)
-              deps.applyProviderChoice(file)
-              deps.clearCache()
-            } catch (error) {
-              if (error instanceof WebSearchValidationError) {
-                fail(res, 400, 'bad-request', error.hostText())
-              } else {
-                fail(res, 500, 'io', { code: 'route.writeFailed', text: error instanceof Error ? error.message : String(error) })
-              }
-              return
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request)
+          const existing = store.load()
+          try {
+            // The client sends the whole config back; engine keys that came
+            // down masked are re-attached from the stored copy here, so a
+            // save that did not touch a key never destroys it.
+            const merged = { ...body, engines: unmaskEngines(body.engines, existing.engines) }
+            const file = store.save(merged)
+            deps.applyProviderChoice(file)
+            deps.clearCache()
+          } catch (error) {
+            if (error instanceof WebSearchValidationError) {
+              return fail(400, 'bad-request', error.hostText())
             }
-            respond(res)
-          })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'invalid body'
-            if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
-              return
-            }
-            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
-          })
+            return fail(500, 'io', { code: 'route.writeFailed', text: error instanceof Error ? error.message : String(error) })
+          }
+          return respond()
+        } catch (error) {
+          return bodyFailure(error)
+        }
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/engine/test`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then(async (body) => {
-            const query = typeof body.query === 'string' && body.query.trim() !== ''
-              ? body.query.trim()
-              : 'DeepSeek Harness'
-            const file = store.load()
-            // `id` absent = test every enabled engine (the "一键自检" button).
-            const targets = typeof body.id === 'string' && body.id !== ''
-              ? file.engines.filter(entry => entry.id === body.id)
-              : file.engines.filter(entry => entry.enabled)
-            if (targets.length === 0) {
-              fail(res, 400, 'bad-request', { code: 'route.noTestableEngine', text: 'no enabled engine to test' })
-              return
-            }
-            // Sequential on purpose: parallel probes against rate-limited free
-            // engines would have them trip each other's quota and report
-            // failures that a real (sequential) search would never see.
-            const results: Record<string, unknown>[] = []
-            for (const entry of targets) {
-              const spec = engineSpec(entry.id)
-              try {
-                const probe = await deps.probe(entry.id, query)
-                results.push({
-                  id: entry.id,
-                  label: spec?.label ?? entry.id,
-                  ok: true,
-                  latencyMs: probe.latencyMs,
-                  resultCount: probe.resultCount,
-                })
-              } catch (error) {
-                results.push({
-                  id: entry.id,
-                  label: spec?.label ?? entry.id,
-                  ok: false,
-                  // A probe failure is a diagnostic (HTTP status, parse fault):
-                  // the client wraps it in its own copy and shows the detail.
-                  error: { code: 'engine.probeFailed', text: error instanceof Error ? error.message : String(error) },
-                })
-              }
-            }
-            ok(res, { query, results, provider: file.provider, brandProviderId: BRAND_PROVIDER_ID })
-          })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'invalid body'
-            if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
-              return
-            }
-            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
-          })
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        const query = typeof body.query === 'string' && body.query.trim() !== ''
+          ? body.query.trim()
+          : 'DeepSeek Harness'
+        const file = store.load()
+        // `id` absent = test every enabled engine (the "一键自检" button).
+        const targets = typeof body.id === 'string' && body.id !== ''
+          ? file.engines.filter(entry => entry.id === body.id)
+          : file.engines.filter(entry => entry.enabled)
+        if (targets.length === 0) {
+          return fail(400, 'bad-request', { code: 'route.noTestableEngine', text: 'no enabled engine to test' })
+        }
+        // Sequential on purpose: parallel probes against rate-limited free
+        // engines would have them trip each other's quota and report
+        // failures that a real (sequential) search would never see.
+        const results: Record<string, unknown>[] = []
+        for (const entry of targets) {
+          const spec = engineSpec(entry.id)
+          try {
+            const probe = await deps.probe(entry.id, query)
+            results.push({
+              id: entry.id,
+              label: spec?.label ?? entry.id,
+              ok: true,
+              latencyMs: probe.latencyMs,
+              resultCount: probe.resultCount,
+            })
+          } catch (error) {
+            results.push({
+              id: entry.id,
+              label: spec?.label ?? entry.id,
+              ok: false,
+              // A probe failure is a diagnostic (HTTP status, parse fault):
+              // the client wraps it in its own copy and shows the detail.
+              error: { code: 'engine.probeFailed', text: error instanceof Error ? error.message : String(error) },
+            })
+          }
+        }
+        return ok({ query, results, provider: file.provider, brandProviderId: BRAND_PROVIDER_ID })
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/selftest`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then(async (body) => {
-            const query = typeof body.query === 'string' && body.query.trim() !== ''
-              ? body.query.trim()
-              : 'DeepSeek Harness'
-            try {
-              const outcome = await deps.searchThroughSeam(query)
-              ok(res, { query, ...outcome })
-            } catch (error) {
-              // A self-test that cannot run is a result, not a server error:
-              // the message is what the user needs to read.
-              ok(res, {
-                query,
-                ok: false,
-                error: {
-                  code: deps.isChainExhausted(error) ? 'selftest.chainExhausted' : 'selftest.failed',
-                  text: error instanceof Error ? error.message : String(error),
-                },
-                chainExhausted: deps.isChainExhausted(error),
-              })
-            }
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        const query = typeof body.query === 'string' && body.query.trim() !== ''
+          ? body.query.trim()
+          : 'DeepSeek Harness'
+        try {
+          const outcome = await deps.searchThroughSeam(query)
+          return ok({ query, ...outcome })
+        } catch (error) {
+          // A self-test that cannot run is a result, not a server error:
+          // the message is what the user needs to read.
+          return ok({
+            query,
+            ok: false,
+            error: {
+              code: deps.isChainExhausted(error) ? 'selftest.chainExhausted' : 'selftest.failed',
+              text: error instanceof Error ? error.message : String(error),
+            },
+            chainExhausted: deps.isChainExhausted(error),
           })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'invalid body'
-            if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
-              return
-            }
-            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
-          })
+        }
       },
     }),
   ]
-  return () => {
-    for (const dispose of disposers) dispose()
-  }
+  return async () => { for (const dispose of disposers) await dispose() }
 }

@@ -1,7 +1,8 @@
 /**
- * Market API under `/plugins/@dsh-app/plugin-market/api`:
+ * Market API on the shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-market`:
  *   GET  /sources          — the saved catalog source URLs
- *   PUT  /sources          — replace the source list (validated https, deduped)
+ *   POST /sources          — replace the source list (validated https, deduped)
  *   GET  /catalog          — TTL cache: a catalog-cache.json inside the 6 h
  *                            window answers instantly (`cached: true`); an
  *                            expired/missing cache fetches every source
@@ -51,13 +52,15 @@
  *                            outdated, then re-run the install chain at the
  *                            registry's latest version
  *
- * Every route enforces same-origin and the loopback-Host fence (403 with a
- * body, never a hung connection). Install/remove/update run serialized (see
- * installer.ts) so concurrent panel actions can never interleave profile
- * mutations. Reads expose only package facts — no absolute paths beyond the
- * suite-conventional profile name, no registry/auth internals.
+ * Trust is the carrier's: the Connection transport applies its Host/Origin
+ * fence and browser authentication before a route handler runs (see
+ * `ConnectionFetchRoute.fetch`), so a route never re-checks them. Install/
+ * remove/update run serialized (see installer.ts) so concurrent panel actions
+ * can never interleave profile mutations. Reads expose only package facts — no
+ * absolute paths beyond the suite-conventional profile name, no registry/auth
+ * internals.
  *
- * Isolation note: the HTTP helpers below intentionally mirror the other
+ * Isolation note: the transport helpers below intentionally mirror the other
  * suite plugins' routes instead of being shared — each suite plugin bundles
  * standalone (esbuild, no cross-plugin runtime imports), so a shared util
  * would be a new package for ~40 lines.
@@ -65,10 +68,10 @@
  * @module @dsh-app/plugin-market/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import {
   fetchCatalog,
   mergeCatalogs,
@@ -98,17 +101,12 @@ import {
 } from './store.ts'
 import { loadSnapshot, type SnapshotFallback } from './snapshot.ts'
 
-/** Route namespace on the dsh web server. */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-market/api'
-
-/** Structural slice of the webServer service (no full dep on its types). */
-interface WebServerLike {
-  register(route: {
-    kind: 'exact'
-    path: string
-    handler: (req: IncomingMessage, res: ServerResponse) => void
-  }): () => void
-}
+/**
+ * Route namespace on the shared Connection `/api` channel. The registry admits
+ * only path segments matching `[A-Za-z0-9_$.-]`, so the npm scope's `@` cannot
+ * appear in the URL: `@dsh-app/plugin-market` travels as `dsh-app/plugin-market`.
+ */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-market'
 
 /** Collaborators the routes need; injectable for tests. */
 export interface MarketDeps {
@@ -266,46 +264,18 @@ export interface InstalledPackageView {
   readonly updateAvailable?: boolean
 }
 
-/** Same-origin fence (compare host parts; Origin carries the scheme). */
-export function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined) return true
-  try {
-    return new URL(origin).host === req.headers.host
-  } catch {
-    return false
-  }
+/** Cap on one request body: sources lists and install requests are small. */
+const MAX_BODY_BYTES = 16_384
+
+function sendJson(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
 }
 
-/**
- * Loopback-host fence: admit only requests whose Host names this machine's
- * loopback interface, so a rebinding/cross-site request carrying an
- * attacker's Host is refused even when it forges a matching Origin.
- */
-function passesFence(req: IncomingMessage): boolean {
-  const raw = req.headers.host
-  if (typeof raw !== 'string' || raw === '') return false
-  let hostname: string
-  try {
-    hostname = new URL(`http://${raw}`).hostname
-  } catch {
-    return false
-  }
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  const octets = hostname.split('.')
-  return octets.length === 4
-    && octets[0] === '127'
-    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-}
-
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
-  res.setHeader('Content-Type', 'application/json')
-  res.writeHead(status)
-  res.end(JSON.stringify(body))
-}
-
-function ok(res: ServerResponse, value: unknown): void {
-  sendJson(res, 200, { ok: true, value })
+function ok(value: unknown): Response {
+  return sendJson(200, { ok: true, value })
 }
 
 /**
@@ -315,13 +285,12 @@ function ok(res: ServerResponse, value: unknown): void {
  * client that does not know the code yet.
  */
 function fail(
-  res: ServerResponse,
   status: number,
   code: string,
   host: HostText,
   extra?: Record<string, unknown>,
-): void {
-  sendJson(res, status, { ok: false, error: { code, message: host.text ?? host.code, host, ...extra } })
+): Response {
+  return sendJson(status, { ok: false, error: { code, message: host.text ?? host.code, host, ...extra } })
 }
 
 /** Error-envelope extras for install-chain failures (blocked-builds payload). */
@@ -330,32 +299,19 @@ function errorExtras(error: unknown): Record<string, unknown> | undefined {
   return undefined
 }
 
-/** Bounded JSON body read (sources lists and install requests are small). */
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    let size = 0
-    const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > 16_384) {
-        // Drain instead of destroy: the socket stays alive so the 413 answer
-        // actually reaches the client.
-        rejectPromise(new Error('payload-too-large'))
-        req.resume()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      try {
-        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        resolvePromise(typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {})
-      } catch (error) {
-        rejectPromise(error instanceof Error ? error : new Error('invalid JSON body'))
-      }
-    })
-    req.on('error', rejectPromise)
-  })
+/**
+ * Bounded JSON body read. The carrier has already buffered the body (the route
+ * declares `requestBody: 'buffered'`) under the channel's own cap; this much
+ * smaller route limit is checked before parsing so an oversized body can never
+ * become an install request.
+ */
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const declared = Number(request.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const text = await request.text()
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw new Error('payload-too-large')
+  const parsed: unknown = JSON.parse(text)
+  return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
 }
 
 /** Map one route error to its status + stable coded message. */
@@ -833,26 +789,22 @@ export function installGateOf(
 }
 
 /**
- * Register the market routes.
- * @param webServer - the dsh web server service.
+ * Register the market routes on the Connection exact-Fetch registry.
+ *
+ * Every route owns its exact path (a parameter rides the query string, never a
+ * path segment) and its methods; another method of the same path falls through
+ * to the shared channel's own 404 rather than a route body.
+ *
+ * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
  * @param deps - collaborators (paths, installer, profile).
  * @param log - diagnostic logger.
  * @returns disposer removing the routes.
  */
-export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps, log: (message: string) => void): () => void {
-  const guard = (req: IncomingMessage, res: ServerResponse, method: string): boolean => {
-    if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin request' })
-      return false
-    }
-    if (req.method !== method) {
-      res.setHeader('Allow', method)
-      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method }, text: `${method} only` })
-      return false
-    }
-    return true
-  }
-
+export function registerMarketRoutes(
+  connectionFetch: HostConnectionFetch,
+  deps: MarketDeps,
+  log: (message: string) => void,
+): () => Promise<void> {
   /** Cache writes are an optimization: a failed write degrades to a log line, never a failed response. */
   const persistCache = (cache: CatalogCache): void => {
     try {
@@ -911,77 +863,64 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
   }
 
   const disposers = [
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/sources`,
-      handler: (req, res) => {
-        if (req.method === 'GET') {
-          if (!guard(req, res, 'GET')) return
-          ok(res, { sources: loadSources(deps.sourcesPath, log) })
-          return
+      methods: ['GET', 'POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        if (request.method === 'GET') return ok({ sources: loadSources(deps.sourcesPath, log) })
+        try {
+          const body = await readJsonBody(request)
+          const check = sanitizeSourceList(body.sources)
+          if (!check.ok) return fail(400, 'bad-request', check.reason)
+          saveSources(deps.sourcesPath, check.urls)
+          return ok({ sources: check.urls })
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'invalid body'
+          if (message === 'payload-too-large') {
+            return fail(413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' })
+          }
+          return fail(400, 'bad-request', { code: 'route.invalidBody', text: message })
         }
-        if (!guard(req, res, 'PUT')) return
-        void readJsonBody(req)
-          .then((body) => {
-            const check = sanitizeSourceList(body.sources)
-            if (!check.ok) {
-              fail(res, 400, 'bad-request', check.reason)
-              return
-            }
-            saveSources(deps.sourcesPath, check.urls)
-            ok(res, { sources: check.urls })
-          })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'invalid body'
-            if (message === 'payload-too-large') {
-              fail(res, 413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (16 KiB cap)' })
-              return
-            }
-            fail(res, 400, 'bad-request', { code: 'route.invalidBody', text: message })
-          })
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/catalog`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'GET')) return
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
         const sources = loadSources(deps.sourcesPath, log)
-        void resolveCatalog({
-          sources,
-          // ?refresh=1 is the panel's force reload: skip the cache and pay the
-          // live fetch even when a fresh snapshot exists.
-          refresh: wantsRefresh(req.url),
-          fetchSource: fetchCatalog,
-          readCache: () => loadCatalogCache(deps.catalogCachePath, log),
-          loadSnapshot,
-          now: Date.now,
-        })
-          .then((resolution) => {
-            if (resolution.cacheToWrite !== null) persistCache(resolution.cacheToWrite)
-            ok(res, resolution.payload)
+        try {
+          const resolution = await resolveCatalog({
+            sources,
+            // ?refresh=1 is the panel's force reload: skip the cache and pay
+            // the live fetch even when a fresh snapshot exists.
+            refresh: wantsRefresh(request.url),
+            fetchSource: fetchCatalog,
+            readCache: () => loadCatalogCache(deps.catalogCachePath, log),
+            loadSnapshot,
+            now: Date.now,
           })
-          .catch(() => {
-            // fetchCatalog never rejects across sources; this is a last-resort
-            // fence so the panel always gets an envelope.
-            fail(res, 500, 'io', { code: 'route.catalogFailed', text: 'could not fetch the catalog; try again later' })
-          })
+          if (resolution.cacheToWrite !== null) persistCache(resolution.cacheToWrite)
+          return ok(resolution.payload)
+        } catch {
+          // fetchCatalog never rejects across sources; this is a last-resort
+          // fence so the panel always gets an envelope.
+          return fail(500, 'io', { code: 'route.catalogFailed', text: 'could not fetch the catalog; try again later' })
+        }
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/installed`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'GET')) return
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
         const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
         const view = readInstalled(profileDir, deps.profile)
         // First paint: the default answer is the local facts alone (manifest
         // deps, node_modules versions, suite/entry/enabled state, patch layer)
         // — a disk read that never waits on the registry.
-        if (!wantsUpdates(req.url)) {
-          ok(res, view)
-          return
-        }
+        if (!wantsUpdates(request.url)) return ok(view)
         // `?updates=1` layers the update facts on top: the 5-minute in-memory
         // cache keeps repeat opens off the registry, the probe batch is
         // concurrency-capped and per-probe timed out (see npm.ts), a failed
@@ -991,33 +930,35 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
         // only let the panel offer an update that overwrites the local
         // version with the npm release).
         const probe = deps.latestVersions ?? latestVersionsOf
-        void probe(view.packages.filter(pkg => !pkg.suite && pkg.source === 'registry').map(pkg => pkg.name))
-          .then((latest) => { ok(res, withUpdateFacts(view, latest)) })
-          .catch(() => { ok(res, view) })
+        try {
+          const latest = await probe(view.packages.filter(pkg => !pkg.suite && pkg.source === 'registry').map(pkg => pkg.name))
+          return ok(withUpdateFacts(view, latest))
+        } catch {
+          return ok(view)
+        }
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/legacy`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'GET')) return
-        ok(res, legacyView(deps))
-      },
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => ok(legacyView(deps)),
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/install`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then((body) => {
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request)
+          const { result, replacedLocal } = await (async () => {
             // An inherited dependency (see /legacy) arrives as name + spec: the
             // old profile may have declared a local tarball, a github shorthand
             // or an https tarball, none of which has a registry identity to
             // resolve into a name@version pair. installSpec validates and picks
             // the right pnpm argument shape.
             if (typeof body.spec === 'string' && body.spec.trim() !== '') {
-              return deps.installer.installSpec(body.package, body.spec).then(result => ({ result, replacedLocal: false }))
+              return { result: await deps.installer.installSpec(body.package, body.spec), replacedLocal: false }
             }
             const name = validatePackageName(body.package)
             // Same-name guard: the npm name is not an identity — the
@@ -1034,138 +975,128 @@ export function registerMarketRoutes(webServer: WebServerLike, deps: MarketDeps,
             if (gate.action === 'refuse') throw new MarketValidationError(gate.reason)
             if (gate.action === 'confirm') log(gate.log)
             const replacedLocal = gate.action === 'confirm' && current !== undefined && current.source !== 'registry'
-            return deps.installer.install(name, body.version).then(result => ({ result, replacedLocal }))
+            return { result: await deps.installer.install(name, body.version), replacedLocal }
+          })()
+          return ok({
+            installed: true,
+            version: result.version,
+            output: result.output,
+            ...(replacedLocal ? { replacedLocal: true } : {}),
+            ...(result.blockedBuilds !== undefined ? { blockedBuilds: result.blockedBuilds } : {}),
           })
-          .then(({ result, replacedLocal }) => {
-            ok(res, {
-              installed: true,
-              version: result.version,
-              output: result.output,
-              ...(replacedLocal ? { replacedLocal: true } : {}),
-              ...(result.blockedBuilds !== undefined ? { blockedBuilds: result.blockedBuilds } : {}),
-            })
-          })
-          .catch((error: unknown) => {
-            const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.host, errorExtras(error))
-          })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host, errorExtras(error))
+        }
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/allow-build`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then(async (body) => {
-            const name = validatePackageName(body.package)
-            const allowed = sanitizePackageList(body.packages)
-            // The retry reinstalls from npm, so a local/git install must never
-            // be its target — the same guard as /install, without a force
-            // escape: allow-build retries a blocked npm install, which a
-            // locally installed version can never have been.
-            const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
-            const current = readInstalled(profileDir, deps.profile).packages.find(pkg => pkg.name === name)
-            if (current !== undefined && current.source !== 'registry') {
-              throw new MarketValidationError({
-                code: 'allowBuild.localOrGit',
-                text: 'this plugin is installed locally or from Git, so it cannot be reinstalled from npm to allow build scripts',
-              })
-            }
-            const workspacePath = join(profileDir, 'pnpm-workspace.yaml')
-            // The whitelist write is a profile mutation like any install, so
-            // it runs under the installer's own mutex. The retry is chained
-            // AFTER the exclusive section rather than nested inside it — the
-            // mutex is not reentrant, and install() enqueues on it too.
-            await deps.installer.exclusive(async () => {
-              if (allowBuilds(workspacePath, allowed)) {
-                log(`plugin-market: allowed build scripts for ${allowed.join(', ')} in profile ${deps.profile}`)
-              }
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request)
+          const name = validatePackageName(body.package)
+          const allowed = sanitizePackageList(body.packages)
+          // The retry reinstalls from npm, so a local/git install must never
+          // be its target — the same guard as /install, without a force
+          // escape: allow-build retries a blocked npm install, which a
+          // locally installed version can never have been.
+          const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
+          const current = readInstalled(profileDir, deps.profile).packages.find(pkg => pkg.name === name)
+          if (current !== undefined && current.source !== 'registry') {
+            throw new MarketValidationError({
+              code: 'allowBuild.localOrGit',
+              text: 'this plugin is installed locally or from Git, so it cannot be reinstalled from npm to allow build scripts',
             })
-            const result = await deps.installer.install(name)
-            return {
-              allowed,
-              installed: true,
-              version: result.version,
-              output: result.output,
-              ...(result.blockedBuilds !== undefined ? { blockedBuilds: result.blockedBuilds } : {}),
+          }
+          const workspacePath = join(profileDir, 'pnpm-workspace.yaml')
+          // The whitelist write is a profile mutation like any install, so
+          // it runs under the installer's own mutex. The retry is chained
+          // AFTER the exclusive section rather than nested inside it — the
+          // mutex is not reentrant, and install() enqueues on it too.
+          await deps.installer.exclusive(async () => {
+            if (allowBuilds(workspacePath, allowed)) {
+              log(`plugin-market: allowed build scripts for ${allowed.join(', ')} in profile ${deps.profile}`)
             }
           })
-          .then((value) => { ok(res, value) })
-          .catch((error: unknown) => {
-            const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.host, errorExtras(error))
+          const result = await deps.installer.install(name)
+          return ok({
+            allowed,
+            installed: true,
+            version: result.version,
+            output: result.output,
+            ...(result.blockedBuilds !== undefined ? { blockedBuilds: result.blockedBuilds } : {}),
           })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host, errorExtras(error))
+        }
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/toggle`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then((body) => {
-            // Read-modify-write on the patch file is serialized so concurrent
-            // panel switches can never interleave (mirrors the installer queue).
-            const next = toggleChain.then(() => runToggle(body), () => runToggle(body))
-            toggleChain = next.catch(() => undefined)
-            return next
-          })
-          .then((value) => { ok(res, value) })
-          .catch((error: unknown) => {
-            const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.host)
-          })
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request)
+          // Read-modify-write on the patch file is serialized so concurrent
+          // panel switches can never interleave (mirrors the installer queue).
+          const next = toggleChain.then(() => runToggle(body), () => runToggle(body))
+          toggleChain = next.catch(() => undefined)
+          return ok(await next)
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
+        }
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/uninstall`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then((body) => deps.installer.uninstall(body.package))
-          .then((result) => {
-            ok(res, { installed: false, output: result.output })
-          })
-          .catch((error: unknown) => {
-            const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.host)
-          })
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request)
+          const result = await deps.installer.uninstall(body.package)
+          return ok({ installed: false, output: result.output })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
+        }
       },
     }),
-    webServer.register({
-      kind: 'exact',
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/update`,
-      handler: (req, res) => {
-        if (!guard(req, res, 'POST')) return
-        void readJsonBody(req)
-          .then(async (body) => {
-            const name = validatePackageName(body.package)
-            // Update = install at the registry's latest, but only after the
-            // server-side gate confirms the package really is installed and
-            // outdated — the panel's badge is a hint, never the authority.
-            const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
-            const installed = readInstalled(profileDir, deps.profile)
-            const current = installed.packages.find(pkg => pkg.name === name)
-            const check = checkUpdateTarget(current, await latestVersionOf(name))
-            if (!check.ok) throw new MarketValidationError(check.reason)
-            return deps.installer.install(name, check.version)
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request)
+          const name = validatePackageName(body.package)
+          // Update = install at the registry's latest, but only after the
+          // server-side gate confirms the package really is installed and
+          // outdated — the panel's badge is a hint, never the authority.
+          const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
+          const installed = readInstalled(profileDir, deps.profile)
+          const current = installed.packages.find(pkg => pkg.name === name)
+          const check = checkUpdateTarget(current, await latestVersionOf(name))
+          if (!check.ok) throw new MarketValidationError(check.reason)
+          const result = await deps.installer.install(name, check.version)
+          return ok({
+            updated: true,
+            version: result.version,
+            output: result.output,
+            ...(result.blockedBuilds !== undefined ? { blockedBuilds: result.blockedBuilds } : {}),
           })
-          .then((result) => {
-            ok(res, {
-              updated: true,
-              version: result.version,
-              output: result.output,
-              ...(result.blockedBuilds !== undefined ? { blockedBuilds: result.blockedBuilds } : {}),
-            })
-          })
-          .catch((error: unknown) => {
-            const mapped = errorStatus(error)
-            fail(res, mapped.status, mapped.code, mapped.host, errorExtras(error))
-          })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host, errorExtras(error))
+        }
       },
     }),
   ]
-  return () => { for (const dispose of disposers) dispose() }
+  return async () => { for (const dispose of disposers) await dispose() }
 }

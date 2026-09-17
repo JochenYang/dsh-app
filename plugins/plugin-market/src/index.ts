@@ -23,14 +23,20 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { PluginInstaller } from './installer.ts'
 import { validateProfileName } from './npm.ts'
 import { registerMarketRoutes } from './routes.ts'
 
 export const name = 'plugin-market'
-export const inject = ['webServer']
+
+/**
+ * The market rides the Connection exact-Fetch registry (`ctx.connection.fetch`).
+ * The web server is deliberately NOT injected: the desktop host disables its
+ * `webserver` row, so a plugin that waits for it never activates at all.
+ */
+export const inject = ['connection']
 
 /** Config: storage location + profile override. */
 export interface Config {
@@ -63,8 +69,8 @@ export function effectiveLegacyProfile(): string {
 }
 
 /**
- * Host apply: register the market routes. The plugin owns no kernel seams —
- * a boot never fails because of it.
+ * Host apply: register the market routes on the Connection transport. A route
+ * registration failure is the plugin's own and never fails the boot.
  * @param ctx - the host plugin context.
  * @param config - validated plugin config.
  */
@@ -77,7 +83,7 @@ export function apply(ctx: Context, config: Config): void {
   const legacyProfile = effectiveLegacyProfile()
   const installer = new PluginInstaller(profile, process.argv[1], spawn, (message) => log.warn(message))
 
-  ctx.effect(() => registerMarketRoutes(ctx.webServer, {
+  ctx.effect(() => registerMarketRoutes(ctx.connection.fetch, {
     sourcesPath: join(dir, 'sources.json'),
     catalogCachePath: join(dir, 'catalog-cache.json'),
     installer,

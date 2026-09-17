@@ -1,8 +1,9 @@
 /**
  * DSH APP session archive manager — host half.
  *
- * Serves the archive manager's four routes (list/delete/prune/search) under
- * `/plugins/@dsh-app/plugin-archives/api`. The archive set comes from the
+ * Serves the archive manager's four routes (list/delete/prune/search) on the
+ * shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-archives`. The archive set comes from the
  * workspace registry (`archivedSessionIds` — upstream archiving hides a
  * session from every grouping surface but never touches its stored log),
  * session metadata from `sessionPersistence.list()`, titles from the
@@ -30,8 +31,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the sessionPersistence Context merge into scope.
 import type {} from '@deepseek-ai/dsh-session-persistence'
 // Type-only: pulls the workspaceRegistry Context merge into scope.
@@ -45,18 +46,27 @@ import {
 } from './routes.ts'
 
 export const name = 'plugin-archives'
-export const inject = ['webServer', 'sessionPersistence', 'workspaceRegistry']
+
+/**
+ * The archive manager rides the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['connection', 'sessionPersistence', 'workspaceRegistry']
 
 /** Config: none yet — the manager is a fixed-surface maintenance tool. */
 export interface Config {}
 export const Config: z<Config> = z.object({})
 
 /**
- * Host apply: mount the archive manager's API routes.
+ * Host apply: mount the archive manager's API routes on the Connection
+ * transport. A route registration failure is the plugin's own and never fails
+ * the boot.
  * @param ctx - the host plugin context.
  */
 export function apply(ctx: Context): void {
-  ctx.effect(() => registerArchiveRoutes(ctx.webServer, {
+  ctx.effect(() => registerArchiveRoutes(ctx.connection.fetch, {
     persistence: ctx.sessionPersistence,
     registry: ctx.workspaceRegistry,
     // Optional services degrade to feature loss, never boot failure: without

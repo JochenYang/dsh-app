@@ -85,5 +85,5 @@ test('pending slot: a hero toggle is consumed exactly once by the session-bound 
 
 test('client and host halves agree on the route prefix', () => {
   assert.equal(ROUTE_PREFIX, HOST_ROUTE_PREFIX)
-  assert.equal(ROUTE_PREFIX, '/plugins/@dsh-app/plugin-sheet/api')
+  assert.equal(ROUTE_PREFIX, '/api/plugins/dsh-app/plugin-sheet')
 })

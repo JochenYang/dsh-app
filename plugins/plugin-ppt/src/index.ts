@@ -43,8 +43,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 // Type-only: pulls the tools Context merge (ctx.tools) into scope.
 import type {} from '@deepseek-ai/dsh-tools'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the systemPrompt Context merge (ctx.systemPrompt) and the
 // AssembleContext.agent augmentation into scope.
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -82,7 +82,14 @@ import {
 import { resolveInWorkspace, workspaceRootOf } from './workspace.ts'
 
 export const name = 'plugin-ppt'
-export const inject = ['tools', 'webServer', 'systemPrompt']
+
+/**
+ * The mode routes ride the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['tools', 'connection', 'systemPrompt']
 
 /** PPT-mode system-prompt section order (upstream convention: 100–199). */
 const PROMPT_SECTION_ORDER = 119
@@ -540,7 +547,7 @@ export function apply(ctx: Context): void {
     ),
   }), 'plugin-ppt: ppt-mode prompt section')
 
-  ctx.effect(() => registerPptRoutes(ctx.webServer, modeStore, activeFile), 'plugin-ppt: mode routes')
+  ctx.effect(() => registerPptRoutes(ctx.connection.fetch, modeStore, activeFile), 'plugin-ppt: mode routes')
 
   ctx.effect(() => {
     // Fire-and-forget: the skill file outlives this fiber, so the effect owns

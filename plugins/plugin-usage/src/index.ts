@@ -3,7 +3,7 @@
  *
  * Captures per-request token accounting from the `session/event` firehose,
  * backfills history from persisted session logs, aggregates on demand, and
- * serves four GET endpoints under `/plugins/@dsh-app/plugin-usage/api`
+ * serves four GET endpoints under `/api/plugins/dsh-app/plugin-usage`
  * (status/summary/heatmap/balance) for the settings-page client half.
  *
  * Coexistence with third-party usage plugins: both read the same immutable
@@ -29,8 +29,8 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the session Events merge ('session/event') into scope.
 import type {} from '@deepseek-ai/dsh-session'
 // Type-only: pulls the sessionPersistence Context merge into scope.
@@ -44,7 +44,14 @@ import { loadUserConfig } from './user-config.ts'
 import type { UsageBalance, UsagePrice } from './types.ts'
 
 export const name = 'plugin-usage'
-export const inject = ['webServer', 'sessionPersistence']
+
+/**
+ * The usage half rides the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['connection', 'sessionPersistence']
 
 /**
  * Credential ref of the official DeepSeek provider route (`deepseek-official`
@@ -151,7 +158,7 @@ export function apply(ctx: Context, config: Config): void {
   const userConfig = loadUserConfig(join(dir, 'config.json'), (message) => log.warn(message))
   if (!userConfig.enabled) {
     log.info(`usage plugin: disabled by user config (${join(dir, 'config.json')})`)
-    ctx.effect(() => registerUsageRoutes(ctx.webServer, null, { active: false }), 'plugin-usage: status routes (disabled)')
+    ctx.effect(() => registerUsageRoutes(ctx.connection.fetch, null, { active: false }), 'plugin-usage: status routes (disabled)')
     return
   }
   const store = new UsageStore({ dir, log: (message) => log.warn(message) })
@@ -180,5 +187,5 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => () => { store.dispose() }, 'plugin-usage: store')
 
   const pricing = mergePricing([...config.pricing, ...userConfig.pricing])
-  ctx.effect(() => registerUsageRoutes(ctx.webServer, store, { pricing, active: true, fetchBalance: makeBalanceFetcher(ctx) }), 'plugin-usage: api routes')
+  ctx.effect(() => registerUsageRoutes(ctx.connection.fetch, store, { pricing, active: true, fetchBalance: makeBalanceFetcher(ctx) }), 'plugin-usage: api routes')
 }

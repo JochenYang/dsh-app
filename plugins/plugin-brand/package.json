@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-brand",
-  "description": "DSH APP brand host plugin: trust-fenced host routes under /plugins/@dsh-app/plugin-brand/api that forward native desktop actions (open-in-folder, notify, save-text-as, pick-directory, open-logs) to the shell's loopback desktop bridge, expose the shell's log tail for the diagnostics page, and report bridge availability. The brand settings namespace and the app-info service are still TODOs (see src/index.ts).",
-  "version": "0.2.1",
+  "description": "DSH APP brand host plugin: host routes under /api/plugins/dsh-app/plugin-brand on the Connection exact-Fetch transport that perform the desktop actions (open-in-folder and pick-directory through the kernel's own native seams; notify, save-text-as and open-logs by the shell, whose action route the client calls directly), expose the shell's log tail and the diagnostics facts for the diagnostics page, and report action availability. The brand settings namespace and the app-info service are still TODOs (see src/index.ts).",
+  "version": "0.2.3",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -27,12 +27,12 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-connection": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-settings": "^0.1.5-rc.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-connection": "0.1.5-rc.2",
     "@deepseek-ai/dsh-settings": "0.1.5-rc.1",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.2"

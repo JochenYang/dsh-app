@@ -1,21 +1,32 @@
 /**
  * The diagnostics page's view of plugin-brand's host routes.
  *
- * Every call goes over the normal dsh API seam (`fetch` against the server
- * that served this page), so there is no preload, no IPC and no second
- * transport. The brand routes answer with their own envelope — `{ ok: true,
- * … }`, `{ ok: false, unsupported: true, … }` or `{ ok: false, error }` —
- * rather than the remotes `{ ok, value }` wrapper, and the three cases stay
- * distinct all the way to the caller: "this environment cannot do it" is a
- * normal state the page explains, not an error the page throws.
+ * Every call goes over the normal dsh API seam (`fetch` against the server that
+ * served this page), so there is no preload, no IPC and no second transport —
+ * with one deliberate exception: the three actions the SHELL performs
+ * (`open-logs`, `notify`, `save-text-as`) live on the app's own origin, which is
+ * this page's origin too, so this module calls them DIRECTLY with the URL the
+ * host hands back. The kernel child cannot make that call (a custom scheme is
+ * resolved by Electron's network stack, not by Node), which is why the call is
+ * the page's job; the shell fences it by stamping the initiator (see
+ * `src/main/shell-actions.ts` in the app).
+ *
+ * The brand routes answer with their own envelope — `{ ok: true, … }`,
+ * `{ ok: false, unsupported: true, … }` or `{ ok: false, error }` — rather than
+ * the remotes `{ ok, value }` wrapper, and the three cases stay distinct all the
+ * way to the caller: "this environment cannot do it" is a normal state the page
+ * explains, not an error the page throws.
  *
  * Messages cross this boundary as a {@link RouteNotice}: the host's user-facing
  * messages arrive as a coded {@link HostText} (it never sends prose — see
  * plugin-brand's `src/host-text.ts`), and this page's dictionary owns the
- * wording. Text the wire carries verbatim is only ever a diagnostic, and this
- * module's own fallbacks are dictionary keys the page resolves through its `t`
- * seat. Nothing here builds a sentence, so the transport stays free of both
- * React and locale state.
+ * wording. The shell's action route is the one writer that localizes ITS own
+ * half (`shared/locale.ts`): it answers a stable code plus its own sentence, and
+ * this page keys its copy on the code, falling back to that sentence for a code
+ * this build does not know. Text the wire carries verbatim is only ever a
+ * diagnostic, and this module's own fallbacks are dictionary keys the page
+ * resolves through its `t` seat. Nothing here builds a sentence, so the
+ * transport stays free of both React and locale state.
  *
  * @module @dsh-app/plugin-client-ui/client/diagnostics/api
  */
@@ -23,13 +34,24 @@
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS, type DiagnosticsKey } from './locales.ts'
 
-/** plugin-brand's route prefix (its host half owns these paths). */
-export const BRAND_API = '/plugins/@dsh-app/plugin-brand/api'
+/**
+ * plugin-brand's route prefix (its host half owns these paths; the Connection
+ * carrier serves the suite's plugins under `/api/plugins/dsh-app/<plugin>`).
+ */
+export const BRAND_API = '/api/plugins/dsh-app/plugin-brand'
+
+/**
+ * The only origin the shell's action route can live on. The host validates the
+ * URL it publishes; this page re-checks it before sending anything, so a value
+ * that was tampered with in between cannot turn the user's diagnostics file into
+ * a request to somewhere else.
+ */
+const SHELL_ACTION_ORIGIN = 'dsh-app://app/'
 
 /** Lines read per tail request — the route's own default. */
 export const TAIL_LINES = 200
 
-/** Key of the local answer for "this environment has no desktop bridge". */
+/** Key of the local answer for "this environment has no desktop actions". */
 const UNSUPPORTED_KEY = 'diag.message.unsupported' satisfies DiagnosticsKey
 
 /** Key of the local answer shown when the host server cannot be reached at all. */
@@ -60,9 +82,28 @@ interface RouteEnvelope {
   readonly host?: HostText
 }
 
-/** `GET /status`: whether the shell injected a bridge for this session. */
+/** `GET /status`: whether this environment can perform desktop actions at all. */
 export interface BrandStatus extends RouteEnvelope {
+  /** True when the shell published its desktop action route for this session. */
   readonly bridge?: boolean
+}
+
+/**
+ * `POST /desktop/<action>` for the three actions the SHELL performs: the host's
+ * answer names where the page must send them.
+ */
+export interface DelegateAnswer extends RouteEnvelope {
+  readonly delegate?: { readonly url?: string, readonly method?: string }
+}
+
+/**
+ * What the shell's action route answers. `ok` plus a path (null when the user
+ * cancelled) on success; a stable code plus the shell's own sentence on failure.
+ */
+export interface ShellActionAnswer extends RouteEnvelope {
+  readonly code?: string
+  readonly message?: string
+  readonly path?: string | null
 }
 
 /** `GET /diagnostics/log-tail`: one log file's tail. */
@@ -121,8 +162,8 @@ export const UNREACHABLE_NOTICE: RouteNotice = { source: 'key', key: UNREACHABLE
 function hostMessage(host: HostText, t: TranslateNS<typeof NS>): string {
   const params = host.params ?? {}
   const copy: Readonly<Record<string, string>> = {
-    // The host's "no desktop bridge" is exactly the condition this page's own
-    // unsupported answer describes, so both render the same sentence.
+    // The host's "no desktop actions here" is exactly the condition this page's
+    // own unsupported answer describes, so both render the same sentence.
     'route.unsupported': t('diag.message.unsupported'),
     'route.trustFence': t('diag.host.trustFence'),
     'route.methodOnly': t('diag.host.methodOnly', { method: String(params.method ?? '') }),
@@ -131,14 +172,18 @@ function hostMessage(host: HostText, t: TranslateNS<typeof NS>): string {
     'log.fileMissing': t('diag.host.logFileMissing'),
     'route.bodyTooLarge': t('diag.host.bodyTooLarge'),
     'route.invalidJson': t('diag.host.invalidJson'),
-    'bridge.badRequest': t('diag.host.bridgeBadRequest'),
-    'bridge.rejected': t('diag.host.bridgeRejected'),
-    'bridge.failed': t('diag.host.bridgeFailed'),
-    'bridge.timeout': t('diag.host.bridgeTimeout'),
-    'bridge.unreachable': t('diag.host.bridgeUnreachable'),
-    // The shell's own message — it localizes its own half — is the actionable
-    // detail, so it arrives as a param and this page only frames it.
-    'bridge.nativeFailed': t('diag.host.nativeDetail', { detail: String(params.detail ?? '') }),
+    // The kernel's own native actions (open-in-folder, pick-directory) answer
+    // with the native layer's sentence as a param — it is the actionable detail
+    // and this page only frames it.
+    'native.failed': t('diag.host.nativeDetail', { detail: String(params.detail ?? '') }),
+    'native.timeout': t('diag.host.actionTimeout', { seconds: String(params.seconds ?? '') }),
+    // The shell's action route (its codes are its own locale keys).
+    'shellAction.forbidden': t('diag.host.actionForbidden'),
+    'shellAction.unknown': t('diag.host.actionUnknown'),
+    'shellAction.method': t('diag.host.actionMethod'),
+    'shellAction.params': t('diag.host.actionParams'),
+    'shellAction.tooLarge': t('diag.host.bodyTooLarge'),
+    'shellAction.failed': t('diag.host.actionFailed'),
   }
   return copy[host.code] ?? host.text ?? ''
 }
@@ -232,7 +277,84 @@ export async function callBrandRoute<T extends RouteEnvelope>(
   return { kind: 'ok', body }
 }
 
-/** `GET /status` — the desktop bridge availability probe. */
+/**
+ * Call one action on the SHELL's route — the page is the caller because this
+ * route lives in the page's own origin.
+ *
+ * @param url - the URL the host handed back (already checked to be the app's).
+ * @param body - the action's JSON body, shaped exactly like the plugin route's.
+ * @returns the outcome; never throws — a route that does not answer is `failed`.
+ */
+async function callShellAction<T extends ShellActionAnswer>(url: string, body: unknown): Promise<RouteOutcome<T>> {
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    })
+  } catch {
+    return { kind: 'failed', notice: UNREACHABLE_NOTICE }
+  }
+  let answer: ShellActionAnswer
+  try {
+    answer = await response.json() as ShellActionAnswer
+  } catch {
+    return { kind: 'failed', notice: { source: 'text', text: `HTTP ${String(response.status)}` } }
+  }
+  if (!response.ok || answer.ok !== true) {
+    // The shell localizes its own half and answers a stable code with it: this
+    // page renders its copy for a code it knows, and the shell's sentence for
+    // one it does not (see {@link hostMessage}).
+    const code = typeof answer.code === 'string' ? answer.code : ''
+    const text = typeof answer.message === 'string' && answer.message !== ''
+      ? answer.message
+      : `HTTP ${String(response.status)}`
+    return { kind: 'failed', notice: { source: 'host', host: { code, text } } }
+  }
+  return { kind: 'ok', body: answer as T }
+}
+
+/**
+ * The coordinates the host handed back, or the outcome that refused them.
+ * Narrowed to the URL alone, so no caller can be tempted to call something the
+ * checks below did not pass.
+ */
+type DelegateOutcome =
+  | { readonly kind: 'ok'; readonly url: string }
+  | { readonly kind: 'unsupported'; readonly notice: RouteNotice }
+  | { readonly kind: 'failed'; readonly notice: RouteNotice }
+
+/**
+ * Ask the host where one shell-performed action lives, and refuse an answer that
+ * points anywhere but the app.
+ *
+ * The host validates the URL it publishes; this page re-checks the origin before
+ * sending anything to it, so a value tampered with in between cannot turn the
+ * user's diagnostics text into a request to somewhere else.
+ *
+ * @param pathname - the plugin route below {@link BRAND_API}.
+ * @param body - the action's fields, validated by the host.
+ * @returns the URL to call, or the outcome that refuses it.
+ */
+async function delegateAction(pathname: string, body: unknown): Promise<DelegateOutcome> {
+  const answer = await callBrandRoute<DelegateAnswer>(pathname, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (answer.kind !== 'ok') return answer
+  const url = answer.body.delegate?.url
+  if (typeof url !== 'string' || !url.startsWith(SHELL_ACTION_ORIGIN)) {
+    // A host that answered `ok` without usable coordinates is not followable:
+    // guessing a path is exactly what this seam's fence exists to prevent.
+    return { kind: 'failed', notice: UNREACHABLE_NOTICE }
+  }
+  return { kind: 'ok', url }
+}
+
+/** `GET /status` — the desktop-action availability probe. */
 export function fetchBrandStatus(): Promise<RouteOutcome<BrandStatus>> {
   return callBrandRoute<BrandStatus>('/status')
 }
@@ -242,15 +364,19 @@ export function fetchLogTail(lines: number = TAIL_LINES): Promise<RouteOutcome<L
   return callBrandRoute<LogTail>(`/diagnostics/log-tail?lines=${String(lines)}`)
 }
 
-/** `POST /desktop/open-logs` — ask the shell to reveal its log directory. */
-export function openLogDirectory(): Promise<RouteOutcome<RouteEnvelope>> {
+/**
+ * Ask the shell to reveal its log directory.
+ *
+ * Two hops, one gesture: the host confirms the environment has a shell action
+ * route (and answers `unsupported` when it does not), then this page calls that
+ * route — which is the only place the action can be performed from.
+ */
+export async function openLogDirectory(): Promise<RouteOutcome<RouteEnvelope>> {
+  const delegate = await delegateAction('/desktop/open-logs', {})
+  if (delegate.kind !== 'ok') return delegate
   // The action routes read a JSON body, so an empty object is the request: a
-  // body-less POST would be refused as malformed before reaching the shell.
-  return callBrandRoute<RouteEnvelope>('/desktop/open-logs', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}',
-  })
+  // body-less POST would be refused as malformed before reaching the action.
+  return callShellAction<RouteEnvelope>(delegate.url, {})
 }
 
 /**
@@ -265,22 +391,20 @@ export function fetchExportFacts(): Promise<RouteOutcome<ExportFactsAnswer>> {
 }
 
 /**
- * `POST /desktop/save-text-as` — ask the shell to write `content` where the
- * user points a native save dialog.
+ * Ask the shell to write `content` where the user points a native save dialog.
  *
- * The host validates both fields against the shell's own caps before forwarding
- * them, so an over-long name or body is refused with a coded message rather
- * than traveling one hop further to fail there.
+ * The host validates both fields against the shell's own caps first, so an
+ * over-long name or body is refused with a coded message rather than traveling
+ * one hop further to fail there; the shell re-validates and, more importantly,
+ * decides the path — from the dialog alone.
  *
  * @param name - suggested file name (no directory part).
  * @param content - the file body.
  * @returns `path` is null when the user cancelled — a normal outcome the page
  * stays quiet about, not a failure.
  */
-export function saveTextAs(name: string, content: string): Promise<RouteOutcome<SaveAnswer>> {
-  return callBrandRoute<SaveAnswer>('/desktop/save-text-as', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name, content }),
-  })
+export async function saveTextAs(name: string, content: string): Promise<RouteOutcome<SaveAnswer>> {
+  const delegate = await delegateAction('/desktop/save-text-as', { name, content })
+  if (delegate.kind !== 'ok') return delegate
+  return callShellAction<SaveAnswer>(delegate.url, { name, content })
 }

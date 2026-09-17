@@ -1,11 +1,11 @@
 /**
  * End-to-end host chain: the built bundle's `apply` is mounted against a fake
- * host context (tools registry, prompt sections, web server routes, logger), the
- * PDF-mode route and the prompt provider are exercised for real, and the full
- * pdf_write → pdf_check → pdf_render → pdf_read chain runs against a real
- * workspace. The rendered PDF is fed back through the read tool, so the export
- * is proven to be readable selectable text rather than assumed from a byte
- * count.
+ * host context (tools registry, prompt sections, Connection exact-Fetch routes,
+ * logger), the PDF-mode route and the prompt provider are exercised for real,
+ * and the full pdf_write → pdf_check → pdf_render → pdf_read chain runs against
+ * a real workspace. The rendered PDF is fed back through the read tool, so the
+ * export is proven to be readable selectable text rather than assumed from a
+ * byte count.
  *
  * The bundle under test is `lib/index.js` (the artifact the kernel loads), so
  * this also pins the ESM require handoff the bundled dependencies need and the
@@ -34,65 +34,16 @@ interface FakeTool {
 }
 
 interface FakeRoute {
-  kind: string
   path: string
-  handler(req: unknown, res: unknown): void
+  methods: readonly string[]
+  requestBody: string
+  fetch(request: Request): Promise<Response>
 }
 
 interface FakeSection {
   name: string
   order: number
   text: string | ((context: unknown) => string)
-}
-
-/** A request double: the route attaches its listeners, the test then emits. */
-interface FakeRequest {
-  method: string
-  url: string
-  headers: Record<string, string>
-  on(event: string, callback: (chunk?: unknown) => void): FakeRequest
-  emit(event: string, chunk?: unknown): void
-  resume(): void
-}
-
-interface FakeResponse {
-  status: number
-  body: string
-  headers: Record<string, string>
-  setHeader(name: string, value: string): void
-  writeHead(status: number): void
-  end(body: string): void
-}
-
-function makeRequest(method: string, url: string): FakeRequest {
-  const listeners = new Map<string, ((chunk?: unknown) => void)[]>()
-  const request: FakeRequest = {
-    method,
-    url,
-    headers: { host: '127.0.0.1:8080' },
-    on(event, callback) {
-      const existing = listeners.get(event) ?? []
-      existing.push(callback)
-      listeners.set(event, existing)
-      return request
-    },
-    emit(event, chunk) {
-      for (const callback of listeners.get(event) ?? []) callback(chunk)
-    },
-    resume() { /* nothing to drain in the double */ },
-  }
-  return request
-}
-
-function makeResponse(): FakeResponse {
-  return {
-    status: 0,
-    body: '',
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value },
-    writeHead(status) { this.status = status },
-    end(body) { this.body = body },
-  }
 }
 
 interface FakeHost {
@@ -121,16 +72,30 @@ async function mountHost(): Promise<FakeHost> {
         return () => {}
       },
     },
-    webServer: {
-      register(route: FakeRoute) {
-        routes.push(route)
-        return () => {}
+    connection: {
+      fetch: {
+        register(route: FakeRoute) {
+          routes.push(route)
+          return Promise.resolve()
+        },
       },
     },
   }
   const mod = await import(pathToFileURL(libEntry).href) as { apply(context: unknown): void }
   mod.apply(ctx)
   return { tools, routes, sections }
+}
+
+/**
+ * One request against a captured route, through the carrier's own contract: the
+ * handler receives a Fetch `Request` and answers a `Response`.
+ */
+async function callRoute(
+  route: FakeRoute,
+  init?: RequestInit,
+): Promise<{ status: number, body: Record<string, unknown> }> {
+  const response = await route.fetch(new Request(`dsh-app://app${route.path}`, init))
+  return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
 
 /** A prompt section's text for one assembly context ('' when it is a string). */
@@ -184,10 +149,14 @@ test('e2e: apply registers the PDF tools, prompt sections and mode route', async
     assert.equal(sectionText(mode, {}), '')
     assert.equal(sectionText(mode, { agent: { session: { header: { id: 'nobody' } } } }), '')
     assert.deepEqual(host.routes.map(route => route.path), [
-      '/plugins/@dsh-app/plugin-pdf/api/mode',
-      '/plugins/@dsh-app/plugin-pdf/api/office-active',
-      '/plugins/@dsh-app/plugin-pdf/api/font-status',
+      '/api/plugins/dsh-app/plugin-pdf/mode',
+      '/api/plugins/dsh-app/plugin-pdf/office-active',
+      '/api/plugins/dsh-app/plugin-pdf/font-status',
     ])
+    // The registry scopes methods per route: the mode write is the only verb
+    // beyond a read, and the route carries no path parameter.
+    assert.deepEqual(host.routes.map(route => route.methods), [['GET', 'POST'], ['GET'], ['GET']])
+    assert.deepEqual(host.routes.map(route => route.requestBody), ['buffered', 'buffered', 'buffered'])
     // The skill installer ran against the temp DSH_HOME.
     await settle()
     assert.ok(existsSync(join(home, 'skills', 'dsh-pdf', 'SKILL.md')), 'dsh-pdf skill installed')
@@ -214,14 +183,14 @@ test('e2e: PDF mode round-trips through the route and drives the prompt section'
 
     assert.equal(readPrompt(session), '', 'mode starts off')
 
-    const put = makeRequest('PUT', route.path)
-    const putResponse = makeResponse()
-    route.handler(put, putResponse)
-    put.emit('data', Buffer.from(JSON.stringify({ sessionId: session, enabled: true })))
-    put.emit('end')
+    const enabled = await callRoute(route, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: session, enabled: true }),
+    })
     await settle()
-    assert.equal(putResponse.status, 200)
-    assert.equal((JSON.parse(putResponse.body) as { value: { enabled: boolean } }).value.enabled, true)
+    assert.equal(enabled.status, 200)
+    assert.equal((enabled.body as { value: { enabled: boolean } }).value.enabled, true)
     assert.match(readPrompt(session), /pdf_write/u, 'enabled session gets the workflow directive')
     assert.equal(
       (JSON.parse(readFileSync(modeFile, 'utf8')) as Record<string, { enabled: boolean }>)[session]?.enabled,
@@ -229,27 +198,28 @@ test('e2e: PDF mode round-trips through the route and drives the prompt section'
       'the toggle persisted to the DSH_HOME store',
     )
 
-    const get = makeRequest('GET', `${route.path}?sessionId=${session}`)
-    const getResponse = makeResponse()
-    route.handler(get, getResponse)
-    assert.equal((JSON.parse(getResponse.body) as { value: { enabled: boolean } }).value.enabled, true)
+    const read = await callRoute(route, { method: 'GET' })
+    assert.equal(read.body.ok, false, 'the read requires a session id')
+
+    const queried = await callRoute({ ...route, path: `${route.path}?sessionId=${session}` })
+    assert.equal((queried.body as { value: { enabled: boolean } }).value.enabled, true)
 
     // A bad payload is refused and leaves the state alone.
-    const bad = makeRequest('PUT', route.path)
-    const badResponse = makeResponse()
-    route.handler(bad, badResponse)
-    bad.emit('data', Buffer.from(JSON.stringify({ sessionId: session, enabled: 'yes' })))
-    bad.emit('end')
-    await settle()
-    assert.equal(badResponse.status, 400)
+    const bad = await callRoute(route, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: session, enabled: 'yes' }),
+    })
+    assert.equal(bad.status, 400)
     assert.match(readPrompt(session), /pdf_write/u)
 
-    const off = makeRequest('PUT', route.path)
-    const offResponse = makeResponse()
-    route.handler(off, offResponse)
-    off.emit('data', Buffer.from(JSON.stringify({ sessionId: session, enabled: false })))
-    off.emit('end')
+    const off = await callRoute(route, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: session, enabled: false }),
+    })
     await settle()
+    assert.equal(off.status, 200)
     assert.equal(readPrompt(session), '', 'turning the mode off stops the directive')
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
@@ -267,20 +237,17 @@ test('e2e: font-status route reports the bundled CJK asset as readable', async (
     const route = host.routes.find(candidate => candidate.path.endsWith('/font-status'))
     assert.ok(route !== undefined, 'font-status route registered')
 
-    const get = makeRequest('GET', route.path)
-    const getResponse = makeResponse()
-    route.handler(get, getResponse)
+    const get = await callRoute(route, { method: 'GET' })
     await settle()
-    assert.equal(getResponse.status, 200)
-    const value = (JSON.parse(getResponse.body) as { ok: boolean, value: { available: boolean, bytes: number } })
+    assert.equal(get.status, 200)
+    const value = get.body as { ok: boolean, value: { available: boolean, bytes: number } }
     assert.equal(value.ok, true)
     assert.equal(value.value.available, true, 'the bundled font asset must ship beside lib/')
     assert.ok(value.value.bytes > 0, 'the bundled font asset must be non-empty')
 
-    const post = makeRequest('POST', route.path)
-    const postResponse = makeResponse()
-    route.handler(post, postResponse)
-    assert.equal(postResponse.status, 405, 'the diagnostic is read-only')
+    // The diagnostic is read-only, so the registry owns GET alone; any other
+    // verb never reaches this handler (the shared channel answers its own 404).
+    assert.deepEqual(route.methods, ['GET'])
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome

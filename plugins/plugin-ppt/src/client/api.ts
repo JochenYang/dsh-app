@@ -1,7 +1,7 @@
 /**
  * Typed client for the PPT-mode host routes. Same-origin fetch against the
- * dsh web server; the host fence admits loopback-Host requests, which every
- * same-origin browser request is.
+ * Connection `/api` channel the window's own origin serves; the carrier's
+ * trust fence and browser authentication run before the route handler.
  *
  * @module @dsh-app/plugin-ppt/client/api
  */
@@ -11,10 +11,11 @@ import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { notifyOfficeActiveChanged } from './office-active-event.ts'
 
 /**
- * The plugin's route prefix on the dsh web server (mirrors the host half;
- * the /api segment keeps clear of the loader-owned client.js bundle route).
+ * The plugin's route prefix on the shared `/api` channel (mirrors the host
+ * half; the Connection registry admits no `@` in a path segment, so the npm
+ * scope travels as `dsh-app`).
  */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-ppt/api'
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-ppt'
 
 /** One PPT-mode API failure. */
 export class PptApiError extends Error {
@@ -60,7 +61,7 @@ export interface ModeValue {
   readonly updatedAt: number | null
 }
 
-/** PUT /mode body: turn the mode on with a template (or none), or off. */
+/** POST /mode body: turn the mode on with a template (or none), or off. */
 export interface ModeUpdate {
   readonly enabled: boolean
   readonly template: string | null
@@ -71,9 +72,13 @@ export const pptModeApi = {
   mode(sessionId: string): Promise<ModeValue> {
     return request<ModeValue>(`${ROUTE_PREFIX}/mode?sessionId=${encodeURIComponent(sessionId)}`)
   },
+  /**
+   * Toggle the mode. POST because the Connection exact-Fetch registry admits
+   * GET/HEAD/POST only — a PUT would fall through to the shared channel's 404.
+   */
   setMode(sessionId: string, update: ModeUpdate): Promise<ModeValue> {
     return request<ModeValue>(`${ROUTE_PREFIX}/mode`, {
-      method: 'PUT',
+      method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ sessionId, ...update }),
     }).then((value) => {

@@ -1,8 +1,10 @@
 /**
  * Host API routes for the archive manager.
  *
- * Four endpoints under the plugin's route namespace on the dsh web server
- * (`/plugins/@dsh-app/plugin-archives/api`):
+ * Four endpoints on the shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-archives` (the registry admits only
+ * `[A-Za-z0-9_$.-]` in a path segment, so the npm scope's `@` travels as
+ * `dsh-app`):
  *   GET  /list   — archived sessions grouped by project (cwd), with sizes
  *                  and projection-cached titles
  *   POST /delete — remove the archived sessions' log artifact directories
@@ -35,32 +37,26 @@
  * on the next reload. Keeping the record holds the session hidden; with its
  * log gone the record is stale, which is exactly what /prune reclaims.
  *
- * The namespace deliberately lives inside the loader-owned `/plugins/<pkg>`
- * prefix with an `/api` segment (same discipline as plugin-usage): the
- * package root belongs to the client-modules system, and an independent
- * namespace means no third-party plugin can collide with these routes.
+ * Trust is the carrier's: the Connection transport applies its Host/Origin
+ * fence and browser authentication before a route handler runs (see
+ * `ConnectionFetchRoute.fetch`), so a route never re-checks them.
  *
  * @module @dsh-app/plugin-archives/routes
  */
 
 import { readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveSkipReason, ArchivedSession, HostText } from './types.ts'
 
-/** Route namespace on the dsh web server (inside the plugin's package prefix). */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-archives/api'
+/** Route namespace on the shared Connection `/api` channel. */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-archives'
 
 /** Upper bound on a /delete request body (the ids array is tiny; refuse spam). */
 const MAX_BODY_BYTES = 1_000_000
 
 /** Upper bound on ids accepted per /delete call. */
 const MAX_IDS_PER_CALL = 1000
-
-/** Structural slice of the webServer service the routes consume. */
-export interface WebServerLike {
-  register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
-}
 
 /** The persisted-session header fields the routes consume. */
 export interface SessionHeaderLike {
@@ -244,18 +240,19 @@ function groupTitle(cwd: string): string {
   return name === '' || name === '/' || name === '\\' ? cwd : name
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const bytes = Buffer.from(JSON.stringify(body))
-  res.setHeader('Content-Type', 'application/json; charset=utf-8')
-  res.setHeader('Content-Length', String(bytes.length))
-  res.setHeader('Cache-Control', 'no-store')
-  res.setHeader('X-Content-Type-Options', 'nosniff')
-  res.writeHead(status)
-  res.end(bytes)
+function sendJson(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    },
+  })
 }
 
-function ok(res: ServerResponse, value: unknown): void {
-  sendJson(res, 200, { ok: true, value })
+function ok(value: unknown): Response {
+  return sendJson(200, { ok: true, value })
 }
 
 /**
@@ -264,65 +261,26 @@ function ok(res: ServerResponse, value: unknown): void {
  * language. The plain `message` stays an English diagnostic for logs and for a
  * client that does not know the code yet.
  */
-function fail(res: ServerResponse, status: number, code: string, host: HostText): void {
-  sendJson(res, status, { ok: false, error: { code, message: host.text ?? host.code, host } })
-}
-
-/** Same-origin fence: an absent Origin is fine (same-origin fetch sends none). */
-function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined || origin === '') return true
-  const host = req.headers.host
-  if (host === undefined) return false
-  return origin === `http://${host}` || origin === `https://${host}`
+function fail(status: number, code: string, host: HostText): Response {
+  return sendJson(status, { ok: false, error: { code, message: host.text ?? host.code, host } })
 }
 
 /**
- * Loopback-host fence (behavioral parity with plugin-sidebar's trust fence):
- * admit only requests whose Host names this machine's loopback interface,
- * so a rebinding/cross-site request carrying an attacker's Host is refused
- * even when it forges an Origin. Reads ONLY the Host header.
+ * Bounded JSON body read. The carrier has already buffered the body (the route
+ * declares `requestBody: 'buffered'`) under the channel's own cap; this much
+ * smaller route limit is checked before parsing so an oversized body can never
+ * become a deletion request.
  */
-function passesFence(req: IncomingMessage): boolean {
-  const raw = req.headers.host
-  if (typeof raw !== 'string' || raw === '') return false
-  let hostname: string
+async function readJsonBody(request: Request): Promise<unknown> {
+  const declared = Number(request.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Error('body too large')
+  const text = await request.text()
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw new Error('body too large')
   try {
-    hostname = new URL(`http://${raw}`).hostname
-  } catch {
-    return false
+    return JSON.parse(text)
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('unparsable body')
   }
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  // 127.0.0.0/8 in full, validated per octet (a bare \d{1,3} pattern would
-  // admit 127.999.999.999, which names no local interface).
-  const octets = hostname.split('.')
-  return octets.length === 4
-    && octets[0] === '127'
-    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-}
-/** Read and JSON-parse a request body, enforcing the size cap. */
-function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    let received = 0
-    req.on('data', (chunk: Buffer) => {
-      received += chunk.length
-      if (received > MAX_BODY_BYTES) {
-        reject(new Error('body too large'))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error('unparsable body'))
-      }
-    })
-    req.on('error', reject)
-  })
 }
 
 /** Build the grouped listing of archived sessions. */
@@ -543,74 +501,48 @@ async function pruneStaleArchives(writer: RegistryWriter, options: ArchiveRoutes
 }
 
 /**
- * Register the four API routes.
- * @param webServer - the dsh web server service.
+ * Register the four API routes on the Connection exact-Fetch registry.
+ *
+ * Every route owns its exact path and its methods; another method of the same
+ * path falls through to the shared channel's own 404 rather than a route body.
+ *
+ * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
  * @param options - route-layer dependencies.
  * @returns a disposer removing all of them.
  */
-export function registerArchiveRoutes(webServer: WebServerLike, options: ArchiveRoutesOptions): () => void {
-  const listHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
-      return
-    }
-    if (req.method !== 'GET') {
-      res.setHeader('Allow', 'GET')
-      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
-      return
-    }
-    void listArchives(options)
-      .then((value) => { ok(res, value) })
-      .catch((error: unknown) => {
-        const detail = error instanceof Error ? error.message : String(error)
-        fail(res, 500, 'list-failed', {
-          code: 'route.listFailed',
-          params: { detail },
-          text: `could not read archived sessions: ${detail}`,
-        })
+export function registerArchiveRoutes(connectionFetch: HostConnectionFetch, options: ArchiveRoutesOptions): () => Promise<void> {
+  const listFetch = async (): Promise<Response> => {
+    try {
+      return ok(await listArchives(options))
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return fail(500, 'list-failed', {
+        code: 'route.listFailed',
+        params: { detail },
+        text: `could not read archived sessions: ${detail}`,
       })
+    }
   }
-  const deleteHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
-      return
-    }
-    if (req.method !== 'POST') {
-      res.setHeader('Allow', 'POST')
-      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-      return
-    }
-    void readJsonBody(req)
-      .then((body) => {
-        const ids = (body as { ids?: unknown }).ids
-        if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_IDS_PER_CALL || ids.some((id) => typeof id !== 'string')) {
-          fail(res, 400, 'bad-request', { code: 'route.idsRequired', text: 'the body needs a non-empty array of string ids' })
-          return
-        }
-        // No registry-write capability is required: /delete only removes log
-        // artifacts and leaves the archive set to /prune.
-        return deleteArchives(options, ids as string[])
-          .then((value) => { ok(res, value) })
+  const deleteFetch = async (request: Request): Promise<Response> => {
+    try {
+      const body = await readJsonBody(request)
+      const ids = (body as { ids?: unknown }).ids
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_IDS_PER_CALL || ids.some((id) => typeof id !== 'string')) {
+        return fail(400, 'bad-request', { code: 'route.idsRequired', text: 'the body needs a non-empty array of string ids' })
+      }
+      // No registry-write capability is required: /delete only removes log
+      // artifacts and leaves the archive set to /prune.
+      return ok(await deleteArchives(options, ids as string[]))
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return fail(500, 'delete-failed', {
+        code: 'route.deleteFailed',
+        params: { detail },
+        text: `could not delete archived sessions: ${detail}`,
       })
-      .catch((error: unknown) => {
-        const detail = error instanceof Error ? error.message : String(error)
-        fail(res, 500, 'delete-failed', {
-          code: 'route.deleteFailed',
-          params: { detail },
-          text: `could not delete archived sessions: ${detail}`,
-        })
-      })
+    }
   }
-  const pruneHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
-      return
-    }
-    if (req.method !== 'POST') {
-      res.setHeader('Allow', 'POST')
-      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'POST' }, text: 'POST only' })
-      return
-    }
+  const pruneFetch = async (request: Request): Promise<Response> => {
     // Capability check: the write path is private upstream API — a kernel
     // that reshaped the registry must fail loudly (501) instead of risking
     // a corrupted domain state.
@@ -618,82 +550,69 @@ export function registerArchiveRoutes(webServer: WebServerLike, options: Archive
     if (typeof writer.enqueueOperation !== 'function'
       || typeof writer.requireState !== 'function'
       || typeof writer.setState !== 'function') {
-      fail(res, 501, 'prune-unsupported', {
+      return fail(501, 'prune-unsupported', {
         code: 'route.pruneUnsupported',
         text: 'this kernel version cannot prune archive records',
       })
-      return
     }
     // Same body discipline as /delete (size-capped); prune takes no input,
     // so the body is drained and ignored.
-    void readJsonBody(req)
-      .then(() => pruneStaleArchives(writer, options))
-      .then((value) => { ok(res, value) })
-      .catch((error: unknown) => {
-        const detail = error instanceof Error ? error.message : String(error)
-        fail(res, 500, 'prune-failed', {
-          code: 'route.pruneFailed',
-          params: { detail },
-          text: `could not prune archive records: ${detail}`,
-        })
+    try {
+      await readJsonBody(request)
+      return ok(await pruneStaleArchives(writer, options))
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return fail(500, 'prune-failed', {
+        code: 'route.pruneFailed',
+        params: { detail },
+        text: `could not prune archive records: ${detail}`,
       })
+    }
   }
-  const searchHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req)) {
-      fail(res, 403, 'forbidden', { code: 'route.crossOrigin', text: 'cross-origin or non-local request' })
-      return
-    }
-    if (req.method !== 'GET') {
-      res.setHeader('Allow', 'GET')
-      fail(res, 405, 'method-not-allowed', { code: 'route.methodOnly', params: { method: 'GET' }, text: 'GET only' })
-      return
-    }
+  const searchFetch = async (request: Request): Promise<Response> => {
     if (options.sessionQuery === undefined) {
-      fail(res, 503, 'session-query-unavailable', {
+      return fail(503, 'session-query-unavailable', {
         code: 'route.sessionQueryUnavailable',
         text: 'this kernel provides no session search service (session-query-sqlite is not enabled)',
       })
-      return
     }
-    const url = new URL(req.url ?? '/', 'http://x')
+    const url = new URL(request.url)
     // Cap the query: the backend scores the full text, so bound what we send.
     const query = (url.searchParams.get('q') ?? '').trim().slice(0, 500)
     if (query === '') {
-      fail(res, 400, 'bad-request', { code: 'route.queryRequired', text: 'the query must not be empty' })
-      return
+      return fail(400, 'bad-request', { code: 'route.queryRequired', text: 'the query must not be empty' })
     }
     const limitParam = Number(url.searchParams.get('limit') ?? '20')
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(50, Math.floor(limitParam)) : 20
-    void options.sessionQuery.searchSessions({ query, limit })
-      .then((page) => {
-        const items = page.items.map((hit) => ({
-          id: String(hit.header.id ?? ''),
-          title: typeof hit.header.title === 'string' ? hit.header.title : '',
-          createdAt: typeof hit.header.createdAt === 'number' ? hit.header.createdAt : 0,
-          cwd: typeof hit.header.cwd === 'string' ? hit.header.cwd : '',
-          snippet: typeof hit.bestMatch?.snippet === 'string' ? hit.bestMatch.snippet : '',
-        }))
-        const agentToolAvailable = options.tools !== undefined
-          && options.tools.schemas().some((schema) => schema.name === 'session_search')
-        ok(res, { items, agentToolAvailable } satisfies ArchiveSearchResult)
+    try {
+      const page = await options.sessionQuery.searchSessions({ query, limit })
+      const items = page.items.map((hit) => ({
+        id: String(hit.header.id ?? ''),
+        title: typeof hit.header.title === 'string' ? hit.header.title : '',
+        createdAt: typeof hit.header.createdAt === 'number' ? hit.header.createdAt : 0,
+        cwd: typeof hit.header.cwd === 'string' ? hit.header.cwd : '',
+        snippet: typeof hit.bestMatch?.snippet === 'string' ? hit.bestMatch.snippet : '',
+      }))
+      const agentToolAvailable = options.tools !== undefined
+        && options.tools.schemas().some((schema) => schema.name === 'session_search')
+      return ok({ items, agentToolAvailable } satisfies ArchiveSearchResult)
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return fail(500, 'search-failed', {
+        code: 'route.searchFailed',
+        params: { detail },
+        text: `session search failed: ${detail}`,
       })
-      .catch((error: unknown) => {
-        const detail = error instanceof Error ? error.message : String(error)
-        fail(res, 500, 'search-failed', {
-          code: 'route.searchFailed',
-          params: { detail },
-          text: `session search failed: ${detail}`,
-        })
-      })
+    }
   }
 
   const disposers = [
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/list`, handler: listHandler }),
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/delete`, handler: deleteHandler }),
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/prune`, handler: pruneHandler }),
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/search`, handler: searchHandler }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/list`, methods: ['GET'], requestBody: 'buffered', fetch: listFetch }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/delete`, methods: ['POST'], requestBody: 'buffered', fetch: deleteFetch }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/prune`, methods: ['POST'], requestBody: 'buffered', fetch: pruneFetch }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/search`, methods: ['GET'], requestBody: 'buffered', fetch: searchFetch }),
   ]
-  return () => {
-    for (const dispose of disposers) dispose()
+  return async () => {
+    for (const dispose of disposers) await dispose()
   }
 }

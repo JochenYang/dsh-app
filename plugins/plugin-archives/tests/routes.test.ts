@@ -8,77 +8,68 @@
  * pops back into the sidebar until the next reload. The record instead stays
  * behind as a stale record that /list reports and /prune reclaims.
  *
+ * The routes are exercised through a captured Connection exact-Fetch registry
+ * (no HTTP server and no carrier): trust and method dispatch belong to the
+ * carrier, which runs before a handler, so these tests cover what this plugin
+ * owns — path, methods, and the Fetch-shaped answer.
+ *
  * @module @dsh-app/plugin-archives/tests/routes
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
-import type { IncomingMessage } from 'node:http'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import {
   registerArchiveRoutes,
   ROUTE_PREFIX,
   type ArchiveRoutesOptions,
-  type WebServerLike,
 } from '../src/routes.ts'
 import type { ArchiveDeleteResult, ArchiveList } from '../src/types.ts'
 
 // --- harness -----------------------------------------------------------------
 
-type Handler = (req: IncomingMessage, res: unknown) => void
+type FetchHandler = (request: Request) => Promise<Response>
 
-/** Capture the registered handlers keyed by path (no HTTP server involved). */
+/** One captured exact-Fetch route: its declared methods and its handler. */
+interface CapturedRoute {
+  readonly methods: readonly string[]
+  readonly fetch: FetchHandler
+}
+
+/** Capture the registered exact-Fetch routes keyed by path. */
 function harness(options: ArchiveRoutesOptions) {
-  const handlers = new Map<string, Handler>()
-  const webServer: WebServerLike = {
-    register(route) {
-      handlers.set(route.path, route.handler as unknown as Handler)
-      return () => { handlers.delete(route.path) }
+  const routes = new Map<string, CapturedRoute>()
+  const connectionFetch = {
+    register(route: ConnectionFetchRoute): () => Promise<void> {
+      routes.set(route.path, { methods: route.methods, fetch: route.fetch })
+      return async () => { routes.delete(route.path) }
     },
   }
-  registerArchiveRoutes(webServer, options)
-  return handlers
+  registerArchiveRoutes(connectionFetch, options)
+  return routes
 }
 
-/** Minimal IncomingMessage stand-in: only the fields the routes read. */
-function request(method: string, body?: unknown, url = '/'): IncomingMessage {
-  const req = new EventEmitter() as unknown as IncomingMessage & EventEmitter
-  Object.assign(req, {
+/** A Fetch request against the plugin's namespace, with an optional JSON body. */
+function request(method: string, body?: unknown, url = '/'): Request {
+  return new Request(`dsh-app://app${url}`, {
     method,
-    url,
-    headers: { host: '127.0.0.1:1' },
-    destroy: () => { /* the size cap is not exercised here */ },
+    ...(body === undefined
+      ? {}
+      : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   })
-  if (body !== undefined) {
-    setImmediate(() => {
-      req.emit('data', Buffer.from(JSON.stringify(body)))
-      req.emit('end')
-    })
-  }
-  return req
 }
 
-/** Minimal ServerResponse stand-in; resolves with the serialized reply.
- * A fenced request is answered with nothing at all, so the wait is bounded
- * and reports `status: 0` instead of hanging the suite. */
-function call(handler: Handler, req: IncomingMessage): Promise<{ status: number; body: Record<string, unknown> }> {
-  return new Promise((resolve) => {
-    let status = 0
-    const timer = setTimeout(() => { resolve({ status: 0, body: {} }) }, 150)
-    const res = {
-      setHeader: () => { /* headers are not asserted */ },
-      writeHead: (code: number) => { status = code },
-      end: (bytes?: Buffer) => {
-        clearTimeout(timer)
-        resolve({ status, body: JSON.parse(bytes === undefined ? '{}' : bytes.toString('utf8')) as Record<string, unknown> })
-      },
-    }
-    handler(req, res)
-  })
+/** Dispatch one request through a captured route and decode the JSON envelope. */
+async function call(
+  route: CapturedRoute,
+  req: Request,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await route.fetch(req)
+  return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
 
 /** Registry stub that counts every write-side call. */
@@ -369,37 +360,26 @@ test('routes: a refused request carries a coded host message, not a sentence', a
   const s = await scenario({ ids: ['session-a'], archived: ['session-a'] })
 
   const malformed = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, request('POST', { ids: [] }))
+
   assert.equal(malformed.status, 400)
   assert.equal((malformed.body as { error: { host: { code: string } } }).error.host.code, 'route.idsRequired')
-
-  const req = request('POST', { ids: ['session-a'] })
-  ;(req.headers as Record<string, string>).host = 'evil.example'
-  const fenced = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, req)
-  assert.equal(fenced.status, 403)
-  assert.equal((fenced.body as { error: { host: { code: string } } }).error.host.code, 'route.crossOrigin')
-})
-
-// --- fences -----------------------------------------------------------------
-
-test('routes: a non-loopback Host is refused with an answer, not a hang', async () => {
-  const s = await scenario({ ids: ['session-a'], archived: ['session-a'] })
-  const req = request('POST', { ids: ['session-a'] })
-  ;(req.headers as Record<string, string>).host = 'evil.example'
-
-  const reply = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, req)
-
-  // Answered, never left hanging: a fenced caller used to hold the socket
-  // until its own timeout, unlike every other plugin's route surface.
-  assert.equal(reply.status, 403)
-  assert.equal((reply.body as { error: { code: string } }).error.code, 'forbidden')
-  assert.equal((reply.body as { error: { host: { code: string } } }).error.host.code, 'route.crossOrigin')
   assert.equal(existsSync(s.logs.get('session-a')!), true)
 })
 
-test('routes: probe-level sanity — the four paths are registered', async () => {
+// --- registration: the carrier's exact-Fetch contract --------------------------
+
+test('routes: each path owns exactly the methods and body mode it declares', async () => {
   const s = await scenario({ ids: [], archived: [] })
+
   assert.deepEqual(
-    [...s.routes.keys()].sort(),
-    [`${ROUTE_PREFIX}/delete`, `${ROUTE_PREFIX}/list`, `${ROUTE_PREFIX}/prune`, `${ROUTE_PREFIX}/search`].sort(),
+    [...s.routes].map(([path, route]) => [path, [...route.methods]]),
+    [
+      // Path order is registration order; the carrier matches paths exactly
+      // and lets a method it does not own fall through to the channel's 404.
+      [`${ROUTE_PREFIX}/list`, ['GET']],
+      [`${ROUTE_PREFIX}/delete`, ['POST']],
+      [`${ROUTE_PREFIX}/prune`, ['POST']],
+      [`${ROUTE_PREFIX}/search`, ['GET']],
+    ],
   )
 })

@@ -1,9 +1,9 @@
 /**
  * Wire-level suite for plugin-brand's diagnostics log-tail route.
  *
- * The route under test is served by a real `node:http` server (see
- * `./host-harness.ts`) and reads real files from a temp directory, so the
- * listing, the backward read and the fences are all exercised end to end.
+ * The route under test is dispatched through the Connection exact-Fetch harness
+ * (see `./host-harness.ts`) and reads real files from a temp directory, so the
+ * listing, the backward read and the status mapping are all exercised end to end.
  *
  * The load-bearing assertion is not the returned text but what it COST: the
  * reader is handed a filesystem seam that counts bytes, and a log far larger
@@ -20,10 +20,10 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, test } from 'node:test'
-import { BRIDGE_TOKEN_ENV, BRIDGE_URL_ENV } from '../src/bridge-client.ts'
+import { SHELL_ACTIONS_ENV } from '../src/shell-actions.ts'
 import { DEFAULT_TAIL_LINES, LOG_DIR_ENV, MAX_TAIL_LINES, parseTailLines, readLogTail, type LogFileHandle, type LogFileIo } from '../src/log-tail.ts'
 import { ROUTE_PREFIX, UNSUPPORTED_HOST } from '../src/routes.ts'
-import { parseRaw, rawRequest, startHost, type JsonAnswer } from './host-harness.ts'
+import { startHost, type Host, type JsonAnswer } from './host-harness.ts'
 
 /**
  * The unsupported answer's body, in the coded shape: the client renders
@@ -62,13 +62,13 @@ async function tempDir(): Promise<string> {
 }
 
 const savedLogDir = process.env[LOG_DIR_ENV]
-const savedBridgeToken = process.env[BRIDGE_TOKEN_ENV]
+const savedShellActions = process.env[SHELL_ACTIONS_ENV]
 
 after(() => {
   if (savedLogDir === undefined) delete process.env[LOG_DIR_ENV]
   else process.env[LOG_DIR_ENV] = savedLogDir
-  if (savedBridgeToken === undefined) delete process.env[BRIDGE_TOKEN_ENV]
-  else process.env[BRIDGE_TOKEN_ENV] = savedBridgeToken
+  if (savedShellActions === undefined) delete process.env[SHELL_ACTIONS_ENV]
+  else process.env[SHELL_ACTIONS_ENV] = savedShellActions
 })
 
 /**
@@ -94,14 +94,13 @@ function countingIo(): { io: LogFileIo, bytesRead(): number } {
   return { io: { open: realOpen }, bytesRead: () => total }
 }
 
-/** GET one path against the real host server. */
-async function get(host: { url: string }, pathname: string, headers: Record<string, string> = {}): Promise<JsonAnswer> {
-  const response = await fetch(`${host.url}${ROUTE_PREFIX}${pathname}`, { headers })
-  return { status: response.status, body: await response.json() as Record<string, unknown> }
+/** GET one path through the Connection Fetch harness. */
+async function get(host: Host, pathname: string, headers: Record<string, string> = {}): Promise<JsonAnswer> {
+  return host.call(`${ROUTE_PREFIX}${pathname}`, { headers })
 }
 
 /** The `/diagnostics/log-tail` answer, with `lines` optional. */
-function tail(host: { url: string }, lines?: string): Promise<JsonAnswer> {
+function tail(host: Host, lines?: string): Promise<JsonAnswer> {
   return get(host, `/diagnostics/log-tail${lines === undefined ? '' : `?lines=${lines}`}`)
 }
 
@@ -257,83 +256,48 @@ test('parseTailLines defaults, clamps and refuses', () => {
   assert.equal(parseTailLines('0'), undefined)
 })
 
-test('log-tail is not a token leak: the bridge secret never reaches the answer', async () => {
+test('log-tail is not a leak: an unrelated environment value never reaches the answer', async () => {
   const dir = await tempDir()
   await writeFile(path.join(dir, logName('2030-01-01T00-00-00-000Z')), 'line\n')
   process.env[LOG_DIR_ENV] = dir
-  process.env[BRIDGE_TOKEN_ENV] = 'probe-token-that-must-not-surface'
+  process.env[SHELL_ACTIONS_ENV] = 'probe-token-that-must-not-surface'
   const host = await startHost()
   try {
     const answer = await tail(host, '5')
     assert.equal(answer.body.ok, true)
     assert.equal(JSON.stringify(answer.body).includes('probe-token-that-must-not-surface'), false)
   } finally {
-    delete process.env[BRIDGE_TOKEN_ENV]
+    delete process.env[SHELL_ACTIONS_ENV]
     delete process.env[LOG_DIR_ENV]
     await host.close()
   }
 })
 
-test('log-tail refuses a cross-site Origin', async () => {
+test('trust is the carrier\'s: a foreign Origin reaches the route, reading the log', async () => {
   const dir = await tempDir()
   await writeFile(path.join(dir, logName('2030-01-01T00-00-00-000Z')), 'line\n')
   process.env[LOG_DIR_ENV] = dir
   const host = await startHost()
   try {
+    // The carrier fences and authenticates before a handler runs; a second fence
+    // here would 403 every real request on the desktop pipe (no Host header).
     const answer = await get(host, '/diagnostics/log-tail', { origin: 'https://evil.example' })
-    assert.equal(answer.status, 403)
-    assert.equal(answer.body.ok, false)
-    assert.equal('lines' in answer.body, false, 'a refused request reads nothing')
+    assert.equal(answer.status, 200)
+    assert.equal(answer.body.ok, true)
   } finally {
     delete process.env[LOG_DIR_ENV]
     await host.close()
   }
 })
 
-test('log-tail admits the app own page and refuses a non-loopback Host', async () => {
+test('log-tail answers the channel 404 for a POST (the route is GET only)', async () => {
   const dir = await tempDir()
   await writeFile(path.join(dir, logName('2030-01-01T00-00-00-000Z')), 'line\n')
   process.env[LOG_DIR_ENV] = dir
   const host = await startHost()
   try {
-    const sameOrigin = await get(host, '/diagnostics/log-tail', { origin: host.url })
-    assert.equal(sameOrigin.status, 200)
-
-    const request = `GET ${ROUTE_PREFIX}/diagnostics/log-tail HTTP/1.1`
-    const foreign = parseRaw(await rawRequest(host.port, [
-      request,
-      'Host: dsh.example',
-      'Connection: close',
-      '',
-      '',
-    ].join('\r\n')))
-    assert.equal(foreign.status, 403)
-    assert.equal(foreign.body.ok, false)
-
-    const loopback = parseRaw(await rawRequest(host.port, [
-      request,
-      `Host: 127.0.0.1:${String(host.port)}`,
-      'Connection: close',
-      '',
-      '',
-    ].join('\r\n')))
-    assert.equal(loopback.status, 200)
-    assert.equal(loopback.body.ok, true)
-  } finally {
-    delete process.env[LOG_DIR_ENV]
-    await host.close()
-  }
-})
-
-test('log-tail answers 405 for a POST and names the method that works', async () => {
-  const dir = await tempDir()
-  await writeFile(path.join(dir, logName('2030-01-01T00-00-00-000Z')), 'line\n')
-  process.env[LOG_DIR_ENV] = dir
-  const host = await startHost()
-  try {
-    const response = await fetch(`${host.url}${ROUTE_PREFIX}/diagnostics/log-tail`, { method: 'POST' })
-    assert.equal(response.status, 405)
-    assert.equal(response.headers.get('allow'), 'GET')
+    const answer = await host.call(`${ROUTE_PREFIX}/diagnostics/log-tail`, { method: 'POST' })
+    assert.equal(answer.status, 404)
   } finally {
     delete process.env[LOG_DIR_ENV]
     await host.close()

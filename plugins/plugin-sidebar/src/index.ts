@@ -1,9 +1,11 @@
 /**
  * DSH APP sidebar dock — host half.
  *
- * Registers the plugin's trust-fenced HTTP routes on the dsh web server
- * (`/plugins/@dsh-app/plugin-sidebar/*`) backing the Git tab. The file
- * tree tab was retired with its fs routes: the upstream sidebar ships
+ * Registers the plugin's Git routes on the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`, paths below `/api/plugins/dsh-app/plugin-sidebar`),
+ * which is the only host seam the desktop form carries: the host disables the
+ * `webserver` row, so a plugin that injects it never activates at all. The
+ * file tree tab was retired with its fs routes: the upstream sidebar ships
  * file management natively.
  *
  * Stability discipline: the host half keeps ZERO global side effects — no
@@ -13,28 +15,18 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the host session service (ctx.sessions) into scope.
 import type {} from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import { handleGitRequest } from './git-routes.ts'
-import { passesFence } from './trust-fence.ts'
-
-/**
- * The plugin's route prefix on the dsh web server. It lives under an /api
- * segment INSIDE the plugin's plugin-route namespace: the plain
- * `/plugins/<pkg>/client.js` path (and anything else the client-modules
- * system serves at the package root) belongs to the loader — a prefix route
- * at the package root would shadow it and break the client half's boot.
- */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-sidebar/api'
+import { registerGitRoutes } from './git-routes.ts'
 
 /** The cordis services this host half consumes. */
-export const inject = ['webServer', 'sessions']
+export const inject = ['connection', 'sessions']
 
 /**
- * Register the fenced host routes.
+ * Apply: register the git face on the Connection transport.
  * @param ctx - the host plugin context.
  */
 export function apply(ctx: Context): void {
@@ -47,24 +39,5 @@ export function apply(ctx: Context): void {
   const gitScope = {
     cwdForSession: (sessionId: string): string | undefined => sessionStore.get(sessionId as SessionId)?.header.cwd,
   }
-  const dispose = ctx.webServer.register({
-    kind: 'prefix',
-    path: ROUTE_PREFIX,
-    handler: (req, res) => {
-      if (!passesFence(req)) {
-        res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-        res.end(JSON.stringify({ ok: false, error: { code: 'forbidden', message: 'request failed the loopback trust fence' } }))
-        return
-      }
-      const url = new URL(req.url ?? '/', `http://${typeof req.headers.host === 'string' ? req.headers.host : '127.0.0.1'}`)
-      const gitPrefix = `${ROUTE_PREFIX}/git`
-      if (url.pathname === gitPrefix || url.pathname.startsWith(`${gitPrefix}/`)) {
-        void handleGitRequest(req, res, url, gitScope)
-        return
-      }
-      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
-      res.end(JSON.stringify({ ok: false, error: { code: 'not-found', message: 'unknown sidebar api path' } }))
-    },
-  })
-  ctx.effect(() => dispose, 'plugin-sidebar: dispose git routes')
+  ctx.effect(() => registerGitRoutes(ctx.connection.fetch, gitScope), 'plugin-sidebar: dispose git routes')
 }

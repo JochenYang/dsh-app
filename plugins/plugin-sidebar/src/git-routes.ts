@@ -1,5 +1,7 @@
 /**
- * Host-side git routes for the sidebar dock (Git tab).
+ * Host-side git routes for the sidebar dock (Git tab), registered on the
+ * Connection exact-Fetch registry the desktop host carries over its byte
+ * pipes.
  *
  * One `git` binary spawned per request, never a library and no retained
  * state — the client owns nothing; repo identity comes from the host-resolved
@@ -15,25 +17,37 @@
  * is the English diagnostic — git's own stderr lands there verbatim, which is
  * not a sentence a user can read, so every user-facing line is the tab's.
  *
- * Routes:
- *   GET  /api/git/status?cwd=&sessionId= → porcelain entries + ahead/behind
+ * Routes (each one an EXACT path below the plugin namespace; a parameter
+ * always rides the query string, never a path segment, and the registry
+ * admits GET/HEAD/POST only):
+ *   GET  /git/status?cwd=&sessionId= → porcelain entries + ahead/behind
  *                                          divergence vs the upstream (null
  *                                          without one), grouped client-side
- *   GET  /api/git/diff?cwd=&sessionId=&path=&cached=0|1 → unified diff (or the
- *                                          whole repo diff when path is absent)
- *   GET  /api/git/log?cwd=&sessionId=   → `git log --graph --all --oneline` tail
- *   POST /api/git/action {cwd, sessionId, op, path?, message?, name?}
+ *   GET  /git/ls?cwd=&sessionId=         → tracked files, capped
+ *   GET  /git/show?cwd=&sessionId=&sha=  → commit message + files stat
+ *   GET  /git/diff?cwd=&sessionId=&path=&cached=0|1&untracked=0|1 → unified
+ *                                          diff (or the whole repo diff when
+ *                                          path is absent)
+ *   GET  /git/log?cwd=&sessionId=        → `git log --graph --all --oneline`
+ *   POST /git/action {cwd, sessionId, op, path?, message?, name?}
  *        op: 'stage' | 'unstage' | 'restore' | 'commit' | 'fetch' | 'pull' |
  *            'push' | 'branch.list' | 'branch.checkout' | 'branch.create' |
  *            'stash.push' | 'stash.pop'
  *        (fetch/pull/push are network ops and carry a hard 120 s deadline;
  *        name is the branch operand of the branch.* ops)
+ *
+ * Trust is the carrier's: the Connection transport applies its Host/Origin
+ * fence and browser authentication before a route handler runs, so these
+ * routes hold no fence of their own. The loopback-Host check the old
+ * web-server registration needed has no counterpart in the desktop form —
+ * the window's own `dsh-app://app` origin delivers every request there, so
+ * there is no untrusted origin left to distinguish.
  */
 
 import { execFile } from 'node:child_process'
 import pathModule from 'node:path'
 import { promisify } from 'node:util'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { ConnectionFetchMethod, HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import type { HostText } from './host-text.js'
 
 const execFileAsync = promisify(execFile)
@@ -51,9 +65,54 @@ const MAX_ERROR_CHARS = 1_000
 const MAX_SYNC_OUT_CHARS = 1_000
 const DEFAULT_STASH_MESSAGE = 'dsh-sidebar auto stash'
 
+/**
+ * Route namespace on the shared Connection `/api` channel. The registry admits
+ * only path segments matching `[A-Za-z0-9_$.-]`, so the npm scope's `@` cannot
+ * appear in the URL: `@dsh-app/plugin-sidebar` travels as
+ * `dsh-app/plugin-sidebar`. Mirrored by the client half's own constant.
+ */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-sidebar'
+
+/** One git route's own URL segment, after the plugin prefix. */
+type GitRouteName = 'status' | 'ls' | 'show' | 'diff' | 'log' | 'action'
+
+/** The git routes this plugin owns, one exact Fetch route each. */
+const GIT_ROUTES: readonly { readonly name: GitRouteName, readonly methods: readonly ConnectionFetchMethod[] }[] = [
+  { name: 'status', methods: ['GET'] },
+  { name: 'ls', methods: ['GET'] },
+  { name: 'show', methods: ['GET'] },
+  { name: 'diff', methods: ['GET'] },
+  { name: 'log', methods: ['GET'] },
+  { name: 'action', methods: ['POST'] },
+]
+
 /** The host resolves the session id against the real session store. */
 export interface GitSessionScope {
   cwdForSession(sessionId: string): string | undefined
+}
+
+/**
+ * Register the git face on the Connection exact-Fetch registry.
+ *
+ * Registration is also the method gate: a route owns its methods, so a request
+ * with another method on the same path falls through to the shared channel's
+ * own 404 rather than reaching a handler at all.
+ *
+ * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
+ * @param scope - session-cwd resolver backing the request fence.
+ * @returns disposer removing every route.
+ */
+export function registerGitRoutes(
+  connectionFetch: HostConnectionFetch,
+  scope: GitSessionScope,
+): () => Promise<void> {
+  const disposers = GIT_ROUTES.map(route => connectionFetch.register({
+    path: `${ROUTE_PREFIX}/git/${route.name}`,
+    methods: route.methods,
+    requestBody: 'buffered',
+    fetch: request => handleGitRequest(route.name, request, scope),
+  }))
+  return async () => { for (const dispose of disposers) await dispose() }
 }
 
 /**
@@ -290,44 +349,62 @@ function scopedCwd(scope: GitSessionScope, requestedCwd: string | null, sessionI
   return sessionCwd
 }
 
-/** JSON envelope helpers (charset discipline mirrors the fs routes). */
-function writeJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
+/** JSON envelope helpers (charset discipline preserved from the web-server era). */
+function sendJson(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    },
   })
-  res.end(JSON.stringify(body))
 }
+
+/** One success body. */
+function ok(value: unknown): Response {
+  return sendJson(200, { ok: true, value })
+}
+
 /**
  * One failure body. `host` defaults to the plain category + diagnostic pair,
  * which is right for a message that carries no copy of its own; a message the
  * tab renders from its dictionary passes its own host text instead.
  */
-function writeError(res: ServerResponse, status: number, code: string, message: string, host: HostText = { code, text: message }): void {
-  writeJson(res, status, { ok: false, error: { code, message, host } })
+function fail(status: number, code: string, message: string, host: HostText = { code, text: message }): Response {
+  return sendJson(status, { ok: false, error: { code, message, host } })
 }
 
-/** Read a bounded JSON POST body. */
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = []
-  let total = 0
-  for await (const chunk of req) {
-    const buffer = Buffer.from(chunk)
-    total += buffer.length
-    if (total > 1024 * 1024) throw new Error('request body too large')
-    chunks.push(buffer)
-  }
-  const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+/** Cap on one request body: a git action carries paths and messages, nothing bulkier. */
+const MAX_BODY_BYTES = 1024 * 1024
+
+/**
+ * Bounded JSON body read. The carrier has already buffered the body (the route
+ * declares `requestBody: 'buffered'`); this much smaller route limit is checked
+ * before parsing so an oversized body can never become a git action.
+ */
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const declared = Number(request.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Error('request body too large')
+  const text = await request.text()
+  if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw new Error('request body too large')
+  const parsed: unknown = JSON.parse(text)
   return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
 }
 
-/** Dispatch one git request under the plugin's fenced prefix. */
-export async function handleGitRequest(req: IncomingMessage, res: ServerResponse, url: URL, scope: GitSessionScope): Promise<void> {
-  const route = url.pathname.split('/').pop()
+/**
+ * Dispatch one already method-gated git request.
+ *
+ * @param route - the exact route the carrier matched.
+ * @param request - the Fetch-shaped request (query parameters carry every operand).
+ * @param scope - session-cwd resolver backing the request fence.
+ * @returns the route's JSON envelope.
+ */
+export async function handleGitRequest(route: GitRouteName, request: Request, scope: GitSessionScope): Promise<Response> {
+  const url = new URL(request.url)
   try {
     // --- GET routes ------------------------------------------------------
-    if (req.method === 'GET' && route === 'status') {
+    if (route === 'status') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
       const out = await git(cwd, ['status', '--porcelain=v1', '-z', '-uall'])
       let branch = ''
@@ -351,34 +428,30 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
       } catch {
         // keep null/null
       }
-      writeJson(res, 200, { ok: true, value: { cwd, branch, detached, ahead, behind, entries: parsePorcelain(out) } })
-      return
+      return ok({ cwd, branch, detached, ahead, behind, entries: parsePorcelain(out) })
     }
-    if (req.method === 'GET' && route === 'ls') {
+    if (route === 'ls') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
       const out = await git(cwd, ['ls-files', '-z'])
       const allFiles = out.split('\u0000').filter(line => line !== '')
       const truncated = allFiles.length > MAX_REPO_FILES
-      writeJson(res, 200, { ok: true, value: { files: truncated ? allFiles.slice(0, MAX_REPO_FILES) : allFiles, truncated } })
-      return
+      return ok({ files: truncated ? allFiles.slice(0, MAX_REPO_FILES) : allFiles, truncated })
     }
-    if (req.method === 'GET' && route === 'show') {
+    if (route === 'show') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
       const sha = url.searchParams.get('sha') ?? ''
       // Parameterized (no shell), still validate: only plain hex SHAs.
       if (!/^[0-9a-f]{4,40}$/.test(sha)) {
-        writeError(res, 400, 'bad-request', 'invalid sha')
-        return
+        return fail(400, 'bad-request', 'invalid sha')
       }
       // Two structured halves: the full message (title + body) and the
       // files-touched stat. Splitting keeps the client rendering distinct
       // sections instead of one opaque blob.
       const message = await git(cwd, ['log', '-1', '--format=%B', sha])
       const stat = await git(cwd, ['show', '--format=', '--stat', sha])
-      writeJson(res, 200, { ok: true, value: { message, stat } })
-      return
+      return ok({ message, stat })
     }
-    if (req.method === 'GET' && route === 'diff') {
+    if (route === 'diff') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
       const path = url.searchParams.get('path')
       const cached = url.searchParams.get('cached') === '1'
@@ -408,24 +481,21 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
         out = raw.stdout
       }
       const truncated = out.length > MAX_DIFF_CHARS
-      writeJson(res, 200, { ok: true, value: { text: truncated ? out.slice(0, MAX_DIFF_CHARS) : out, truncated } })
-      return
+      return ok({ text: truncated ? out.slice(0, MAX_DIFF_CHARS) : out, truncated })
     }
-    if (req.method === 'GET' && route === 'log') {
+    if (route === 'log') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
       const out = await git(cwd, ['log', '--graph', '--all', '--oneline', '--decorate', '-40'])
-      writeJson(res, 200, { ok: true, value: { text: out } })
-      return
+      return ok({ text: out })
     }
     // --- POST action route ----------------------------------------------
-    if (req.method === 'POST' && route === 'action') {
-      const body = await readJsonBody(req)
+    if (route === 'action') {
+      const body = await readJsonBody(request)
       const cwd = typeof body.cwd === 'string' ? body.cwd : ''
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId : null
       const op = typeof body.op === 'string' ? body.op : ''
       if (cwd === '' || op === '') {
-        writeError(res, 400, 'bad-request', 'cwd and op are required')
-        return
+        return fail(400, 'bad-request', 'cwd and op are required')
       }
       const scoped = scopedCwd(scope, cwd, sessionId)
       const path = typeof body.path === 'string' && body.path !== '' ? body.path : undefined
@@ -519,21 +589,20 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
         await git(scoped, ['stash', 'push', '-u', '-m', message ?? DEFAULT_STASH_MESSAGE])
       } else if (op === 'stash.pop') await git(scoped, ['stash', 'pop'])
       else {
-        writeError(res, 400, 'bad-request', `unsupported git action: ${op}`)
-        return
+        return fail(400, 'bad-request', `unsupported git action: ${op}`)
       }
-      writeJson(res, 200, { ok: true, value })
-      return
+      return ok(value)
     }
-    writeError(res, 404, 'not-found', `unknown git route: ${url.pathname}`)
+    // Not reachable through the registry (every name it can compose has a
+    // branch above): a route name added without one answers 404 instead of
+    // leaving the request unanswered.
+    return fail(404, 'not-found', `unknown git route: ${route}`)
   } catch (error) {
     if (error instanceof GitRequestError) {
-      writeError(res, error.status, error.code, error.message, error.hostText())
-      return
+      return fail(error.status, error.code, error.message, error.hostText())
     }
     if (error instanceof GitTimeoutError) {
-      writeError(res, 504, 'git-timeout', error.message, error.hostText())
-      return
+      return fail(504, 'git-timeout', error.message, error.hostText())
     }
     const raw = error as { code?: string, stdout?: string, stderr?: string, message?: string }
     // execFile non-zero exit: git's own message is the diagnostic the tab
@@ -541,12 +610,12 @@ export async function handleGitRequest(req: IncomingMessage, res: ServerResponse
     // Some failures report through stdout instead of stderr — merge-class
     // conflicts from `git stash pop` print there — so fall back to a
     // bounded stdout excerpt before the bare "command failed" message.
-    const message = raw.stderr !== undefined && raw.stderr !== ''
+    const detail = raw.stderr !== undefined && raw.stderr !== ''
       ? raw.stderr
       : raw.stdout !== undefined && raw.stdout !== ''
         ? raw.stdout.slice(0, MAX_ERROR_CHARS)
         : raw.message ?? 'git failed'
     const code = raw.code === 'ENOENT' ? 'git-missing' : 'git-error'
-    writeError(res, code === 'git-missing' ? 500 : 400, code, message)
+    return fail(code === 'git-missing' ? 500 : 400, code, detail)
   }
 }

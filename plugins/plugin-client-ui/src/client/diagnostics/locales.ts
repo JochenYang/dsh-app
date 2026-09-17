@@ -82,10 +82,11 @@ export const zh = {
   'diag.message.unsupported': '当前环境不支持该操作',
   'diag.message.unreachable': '无法连接',
 
-  // Copy of the coded messages plugin-brand's host routes answer with. The
-  // host never sends a sentence (see HostText), so these are the strings the
-  // page displays; each zh entry is byte-identical to the prose the host used
-  // to send, which is why the wording looks odd for an English-keyed table.
+  // Copy of the coded messages plugin-brand's host routes answer with, plus the
+  // shell's own action codes. The host never sends a sentence (see HostText), so
+  // these are the strings the page displays; each zh entry is byte-identical to
+  // the prose the host used to send, which is why the wording looks odd for an
+  // English-keyed table.
   'diag.host.trustFence': '请求未通过本机信任围栏',
   'diag.host.methodOnly': '仅支持 {method} 请求',
   'diag.host.linesInvalid': '行数需要是正整数',
@@ -93,12 +94,13 @@ export const zh = {
   'diag.host.logFileMissing': '日志目录中没有内核日志文件',
   'diag.host.bodyTooLarge': '请求体过大',
   'diag.host.invalidJson': '请求体不是合法的 JSON',
-  'diag.host.bridgeBadRequest': '请求内容不合法，请检查后重试',
-  'diag.host.bridgeRejected': '桌面功能拒绝了这次请求，请重启 DSH APP 后重试',
-  'diag.host.bridgeFailed': '桌面操作失败，请重试',
-  'diag.host.bridgeTimeout': '等待桌面功能响应超时，请重试',
-  'diag.host.bridgeUnreachable': '桌面功能无响应，请重启 DSH APP 后重试',
   'diag.host.nativeDetail': '{detail}',
+  'diag.host.actionTimeout': '等待桌面功能响应超时，请重试',
+  'diag.host.actionForbidden': '桌面功能拒绝了这次请求，请重启 DSH APP 后重试',
+  'diag.host.actionUnknown': '出现未知的桌面动作，请检查应用与内核版本是否匹配',
+  'diag.host.actionMethod': '桌面动作的请求方式不正确',
+  'diag.host.actionParams': '请求内容不合法，请检查后重试',
+  'diag.host.actionFailed': '桌面操作未完成，请重试',
 } as const
 
 /** English dictionary, key-identical to the Chinese source of truth. */
@@ -168,12 +170,13 @@ export const en: Record<DiagnosticsKey, string> = {
   'diag.host.logFileMissing': 'The log directory holds no kernel log file',
   'diag.host.bodyTooLarge': 'The request body is too large',
   'diag.host.invalidJson': 'The request body is not valid JSON',
-  'diag.host.bridgeBadRequest': 'A desktop feature refused the request content; check it and retry',
-  'diag.host.bridgeRejected': 'A desktop feature refused the request; restart DSH APP and retry',
-  'diag.host.bridgeFailed': 'The desktop feature failed; retry',
-  'diag.host.bridgeTimeout': 'Timed out waiting for the desktop feature; retry',
-  'diag.host.bridgeUnreachable': 'The desktop feature is not answering; restart DSH APP and retry',
   'diag.host.nativeDetail': '{detail}',
+  'diag.host.actionTimeout': 'Timed out waiting for the desktop feature; retry',
+  'diag.host.actionForbidden': 'A desktop feature refused the request; restart DSH APP and retry',
+  'diag.host.actionUnknown': 'An unknown desktop action was requested; check that the app and the kernel match',
+  'diag.host.actionMethod': 'The desktop action was requested the wrong way',
+  'diag.host.actionParams': 'The request content is invalid; check it and retry',
+  'diag.host.actionFailed': 'The desktop action did not complete; retry',
 }
 
 /** Key domain of the `dsh-app.client-ui` namespace (zh is the source of truth). */

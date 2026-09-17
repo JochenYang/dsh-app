@@ -2,9 +2,9 @@
  * The coded wire message this plugin's routes answer with.
  *
  * The module exists so both halves of the contract have one definition to
- * point at: the routes and the bridge client BUILD these, and the consuming
- * client (the 诊断 settings page of plugin-client-ui) renders them. Nothing
- * here imports node builtins or framework types — it is the shape alone.
+ * point at: the routes BUILD these, and the consuming client (the 诊断 settings
+ * page of plugin-client-ui) renders them. Nothing here imports node builtins or
+ * framework types — it is the shape alone.
  *
  * @module @dsh-app/plugin-brand/host-text
  */

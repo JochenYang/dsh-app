@@ -33,11 +33,12 @@ export type Notice =
  * convention is the code with its namespace dot folded into the key
  * (`bridge.badId` → `hooks.host.bridgeBadId`).
  *
- * Two kinds of code are deliberately absent: `route.crossOrigin` /
- * `route.methodOnly`, which only a cross-site or protocol-violating caller can
- * trigger, and `mount.failed`, whose whole message is the kernel loader's
- * opaque diagnostic — for all three the host's English `text` IS the message,
- * and {@link hostMessage} renders it, never a blank.
+ * One kind of code is deliberately absent: `mount.failed`, whose whole message
+ * is the kernel loader's opaque diagnostic — for it the host's English `text`
+ * IS the message, and {@link hostMessage} renders it, never a blank. (The
+ * `route.crossOrigin` / `route.methodOnly` codes went with the web-server
+ * guards: trust and method ownership are the Connection carrier's now, and it
+ * answers its own 404 before a route body is involved.)
  */
 const HOST_KEYS: Readonly<Record<string, HooksKey>> = {
   'bridge.notObject': 'hooks.host.bridgeNotObject',

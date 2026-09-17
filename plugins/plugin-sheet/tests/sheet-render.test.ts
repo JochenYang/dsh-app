@@ -51,7 +51,7 @@ function fakeHost(): { ctx: unknown, tools: Map<string, RegisteredTool> } {
         return () => { tools.delete(definition.name) }
       },
     },
-    webServer: { register: () => () => {} },
+    connection: { fetch: { register: () => async () => {} } },
     systemPrompt: { section: () => () => {} },
   }
   return { ctx, tools }

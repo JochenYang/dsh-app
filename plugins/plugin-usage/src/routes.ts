@@ -1,19 +1,24 @@
 /**
  * Host API routes for the usage plugin.
  *
- * Four GET endpoints under the plugin's route namespace on the dsh web
- * server (`/plugins/@dsh-app/plugin-usage/api`):
+ * Four GET endpoints on the shared Connection `/api` channel, under
+ * `/api/plugins/dsh-app/plugin-usage`:
  *   /status   — liveness signal ({active, reason?})
  *   /summary  — totals + per-day series + per-model table (?days=N)
  *   /heatmap  — calendar cells (?weeks=N)
  *   /balance  — proxied DeepSeek official balance (GET /user/balance),
  *               TTL-cached; ?fresh=1 bypasses the cache (manual re-query)
  *
- * The namespace deliberately lives inside the loader-owned `/plugins/<pkg>`
- * prefix with an `/api` segment (same discipline as plugin-sidebar): the
- * package root belongs to the client-modules system, and an independent
- * namespace means a third-party usage plugin can never collide with these
- * routes — the web server rejects duplicate paths by throwing.
+ * The transport is the desktop host's Connection registry
+ * (`ctx.connection.fetch`), not the dsh web server: the host disables its
+ * `webserver` row, so a plugin that injects `webServer` never activates at
+ * all. An exact path per endpoint keeps the namespace independent, so a
+ * third-party usage plugin can never collide with these routes — the registry
+ * rejects a duplicate path by throwing.
+ *
+ * Trust is the carrier's: the Connection transport applies its Host/Origin
+ * fence and browser authentication before a route handler runs (see
+ * `ConnectionFetchRoute.fetch`), so a route never re-checks them.
  *
  * Every failure crosses as a coded `HostText` (see types.ts) carrying an
  * ENGLISH diagnostic: the settings page owns the wording, in either language.
@@ -21,13 +26,17 @@
  * @module @dsh-app/plugin-usage/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { DAY_MS, heatmap, startOfLocalDay, summarize } from './aggregate.ts'
 import type { HostText, UsageBalance, UsageBalanceSnapshot, UsagePrice } from './types.ts'
 import type { UsageStore } from './store.ts'
 
-/** Route namespace on the dsh web server (inside the plugin's package prefix). */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-usage/api'
+/**
+ * Route namespace on the shared Connection `/api` channel. The registry admits
+ * only path segments matching `[A-Za-z0-9_$.-]`, so the npm scope's `@` cannot
+ * appear in the URL: `@dsh-app/plugin-usage` travels as `dsh-app/plugin-usage`.
+ */
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-usage'
 
 /**
  * How long a successful balance fetch stays reusable. The balance only moves
@@ -43,11 +52,6 @@ const BALANCE_TTL_MS = 5 * 60_000
 const DISABLED: HostText = {
   code: 'disabled',
   text: 'built-in usage collection is disabled by the user config file',
-}
-
-/** Structural slice of the webServer service the routes consume. */
-export interface WebServerLike {
-  register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
 }
 
 /**
@@ -107,18 +111,20 @@ export interface UsageRoutesOptions {
   fetchBalance?: BalanceFetcher
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const bytes = Buffer.from(JSON.stringify(body))
-  res.setHeader('Content-Type', 'application/json; charset=utf-8')
-  res.setHeader('Content-Length', String(bytes.length))
-  res.setHeader('Cache-Control', 'no-store')
-  res.setHeader('X-Content-Type-Options', 'nosniff')
-  res.writeHead(status)
-  res.end(bytes)
+function sendJson(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      // Read-only report data: never cached, never sniffed.
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    },
+  })
 }
 
-function ok(res: ServerResponse, value: unknown): void {
-  sendJson(res, 200, { ok: true, value })
+function ok(value: unknown): Response {
+  return sendJson(200, { ok: true, value })
 }
 
 /**
@@ -127,54 +133,8 @@ function ok(res: ServerResponse, value: unknown): void {
  * plain `message` stays an English diagnostic for logs and for a client that
  * does not know the code yet.
  */
-function fail(res: ServerResponse, status: number, kind: string, host: HostText): void {
-  sendJson(res, status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
-}
-
-/** Same-origin fence (same semantics as the memory/swarm routes): a raw string
- * compare against the Host header can never pass for browser requests because
- * Origin carries the scheme — compare the host parts instead. A missing Origin
- * is a non-browser caller (curl, in-process): allowed. */
-function sameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined || origin === '') return true
-  try {
-    return new URL(origin).host === req.headers.host
-  } catch {
-    return false
-  }
-}
-
-/**
- * Loopback-host fence: admit only requests whose Host names this machine's
- * loopback interface, so a rebinding/cross-site request carrying an
- * attacker's Host is refused even when it forges a matching Origin.
- */
-function passesFence(req: IncomingMessage): boolean {
-  const raw = req.headers.host
-  if (typeof raw !== 'string' || raw === '') return false
-  let hostname: string
-  try {
-    hostname = new URL(`http://${raw}`).hostname
-  } catch {
-    return false
-  }
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  const octets = hostname.split('.')
-  return octets.length === 4
-    && octets[0] === '127'
-    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-}
-
-function requireGet(req: IncomingMessage, res: ServerResponse): boolean {
-  if (req.method !== 'GET') {
-    res.setHeader('Allow', 'GET')
-    // Only a caller that is not this page can trip this; the message stays an
-    // English diagnostic on purpose (see usage-section.tsx).
-    fail(res, 405, 'method-not-allowed', { code: 'method-not-allowed', params: { method: 'GET' }, text: 'GET only' })
-    return false
-  }
-  return true
+function fail(status: number, kind: string, host: HostText): Response {
+  return sendJson(status, { ok: false, error: { code: kind, message: host.text ?? host.code, host } })
 }
 
 function readInt(url: URL, key: string, fallback: number, max: number): number {
@@ -186,38 +146,39 @@ function readInt(url: URL, key: string, fallback: number, max: number): number {
 }
 
 /**
- * Register the four API routes.
- * @param webServer - the dsh web server service.
+ * Register the four API routes on the Connection exact-Fetch registry.
+ *
+ * Every route owns its exact path and its method (`GET`); a request with any
+ * other method continues through the shared channel's own dispatch instead of
+ * reaching this handler.
+ *
+ * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
  * @param store - the usage store; null in user-disabled mode (data routes 503).
  * @param options - route-layer options.
- * @returns a disposer removing all of them.
+ * @returns an asynchronous disposer removing all of them.
  */
-export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore | null, options: UsageRoutesOptions): () => void {
-  const statusHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
-    ok(res, options.active ? { active: true } : { active: false, reason: 'disabled-by-user-config' })
-  }
-  const summaryHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
+export function registerUsageRoutes(
+  connectionFetch: HostConnectionFetch,
+  store: UsageStore | null,
+  options: UsageRoutesOptions,
+): () => Promise<void> {
+  const statusHandler = async (): Promise<Response> =>
+    ok(options.active ? { active: true } : { active: false, reason: 'disabled-by-user-config' })
+  const summaryHandler = async (request: Request): Promise<Response> => {
     if (!options.active || store === null) {
-      fail(res, 503, 'disabled', DISABLED)
-      return
+      return fail(503, 'disabled', DISABLED)
     }
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    const days = readInt(url, 'days', 30, 366)
-    ok(res, summarize(store.all(), days, options.pricing ?? []))
+    const days = readInt(new URL(request.url, 'http://localhost'), 'days', 30, 366)
+    return ok(summarize(store.all(), days, options.pricing ?? []))
   }
-  const heatmapHandler = (req: IncomingMessage, res: ServerResponse): void => {
-    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
+  const heatmapHandler = async (request: Request): Promise<Response> => {
     if (!options.active || store === null) {
-      fail(res, 503, 'disabled', DISABLED)
-      return
+      return fail(503, 'disabled', DISABLED)
     }
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    const weeks = readInt(url, 'weeks', 26, 104)
+    const weeks = readInt(new URL(request.url, 'http://localhost'), 'weeks', 26, 104)
     const today = startOfLocalDay(Date.now())
     const since = today - (weeks * 7 - 1) * DAY_MS
-    ok(res, {
+    return ok({
       weeks,
       since,
       until: today + DAY_MS - 1,
@@ -244,39 +205,35 @@ export function registerUsageRoutes(webServer: WebServerLike, store: UsageStore 
     }).finally(() => { balanceInflight = null })
     return balanceInflight
   }
-  const balanceHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    if (!sameOrigin(req) || !passesFence(req) || !requireGet(req, res)) return
+  const balanceHandler = async (request: Request): Promise<Response> => {
     if (!options.active || options.fetchBalance === undefined) {
-      fail(res, 503, 'disabled', DISABLED)
-      return
+      return fail(503, 'disabled', DISABLED)
     }
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    const fresh = url.searchParams.get('fresh') === '1'
+    const fresh = new URL(request.url, 'http://localhost').searchParams.get('fresh') === '1'
     try {
       const cacheHit = !fresh && balanceCached !== null && Date.now() - balanceCached.fetchedAt < BALANCE_TTL_MS
-      ok(res, cacheHit ? balanceCached : await runBalanceFetch())
+      return ok(cacheHit ? balanceCached : await runBalanceFetch())
     } catch (error) {
       if (error instanceof BalanceError) {
         // 502 for upstream trouble, 503 when the account side isn't usable here.
         const credential = error.code === 'missing-credential' || error.code === 'invalid-credential'
-        fail(res, credential ? 503 : 502, error.code, error.hostText())
-        return
+        return fail(credential ? 503 : 502, error.code, error.hostText())
       }
       // An unexpected throw from an injected fetcher: still a coded answer, with
       // the thrown message as the English diagnostic.
-      fail(res, 502, 'upstream', {
+      return fail(502, 'upstream', {
         code: 'upstream',
         text: error instanceof Error ? error.message : String(error),
       })
     }
   }
   const disposers = [
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/status`, handler: statusHandler }),
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/summary`, handler: summaryHandler }),
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/heatmap`, handler: heatmapHandler }),
-    webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/balance`, handler: (req, res) => { void balanceHandler(req, res) } }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/status`, methods: ['GET'], requestBody: 'buffered', fetch: statusHandler }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/summary`, methods: ['GET'], requestBody: 'buffered', fetch: summaryHandler }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/heatmap`, methods: ['GET'], requestBody: 'buffered', fetch: heatmapHandler }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/balance`, methods: ['GET'], requestBody: 'buffered', fetch: balanceHandler }),
   ]
-  return () => {
-    for (const dispose of disposers) dispose()
+  return async () => {
+    for (const dispose of disposers) await dispose()
   }
 }

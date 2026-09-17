@@ -2,12 +2,12 @@
  * The MCP page's view of its host half's routes, plus the failure currency the
  * page renders.
  *
- * Every call goes over the normal dsh API seam (`fetch` against the server
- * that served this page), so there is no preload, no IPC and no second
- * transport. The host never sends prose for anything the user reads (see
- * `HostText` in ../wire.ts): it sends a stable code plus the values its
- * sentence interpolates, and {@link hostMessage} renders this page's copy for
- * it. A failure is therefore a {@link Failure}: a key of this page's
+ * Every call goes over the normal dsh API seam (`fetch` against the Connection
+ * `/api` channel the window's own origin serves), so there is no preload, no
+ * IPC and no second transport. The host never sends prose for anything the user
+ * reads (see `HostText` in ../wire.ts): it sends a stable code plus the values
+ * its sentence interpolates, and {@link hostMessage} renders this page's copy
+ * for it. A failure is therefore a {@link Failure}: a key of this page's
  * dictionary, a coded message that renders through that same dictionary, or
  * text written elsewhere (a bare `HTTP 500`) shown as it arrived. Nothing here
  * builds a sentence, so the transport stays free of both React and locale
@@ -20,19 +20,21 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { McpValidationError, type HostText } from '../wire.ts'
 import { NS, type McpKey } from './locales.ts'
 
-/** This plugin's route prefix (its host half owns these paths). */
-export const ROUTE = '/plugins/@dsh-app/plugin-mcp/api'
+/**
+ * This plugin's route prefix (its host half owns these paths). The Connection
+ * registry admits no `@` in a path segment, so the npm scope travels as
+ * `dsh-app`.
+ */
+export const ROUTE = '/api/plugins/dsh-app/plugin-mcp'
 
 /**
  * Copy for the host codes this build knows, keyed by the code itself. The
  * convention is the code with its namespace dot folded into the key
  * (`entry.badId` → `mcp.host.entryBadId`).
  *
- * Two kinds of code are deliberately absent. `route.crossOrigin` /
- * `route.methodOnly` can only be triggered by a cross-site or
- * protocol-violating caller, and `mount.failed` carries the kernel loader's
- * opaque diagnostic as its whole message — for all three the host's English
- * `text` IS the message, and {@link hostMessage} renders it, never a blank.
+ * One kind of code is deliberately absent: `mount.failed` carries the kernel
+ * loader's opaque diagnostic as its whole message, so the host's English `text`
+ * IS the message and {@link hostMessage} renders it, never a blank.
  */
 const HOST_KEYS: Readonly<Record<string, McpKey>> = {
   'entry.notObject': 'mcp.host.entryNotObject',

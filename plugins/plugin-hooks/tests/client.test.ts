@@ -41,7 +41,7 @@ describe('hostMessage', () => {
 
   it('falls back to the host English diagnostic for a code this build does not know', () => {
     assert.equal(hostMessage({ code: 'mount.failed', text: 'ENOENT: D:/x/hooks.json' }, t), 'ENOENT: D:/x/hooks.json')
-    assert.equal(hostMessage({ code: 'route.crossOrigin', text: 'cross-origin request' }, t), 'cross-origin request')
+    assert.equal(hostMessage({ code: 'hooks.futureGate', text: 'bridge rejected by a newer kernel' }, t), 'bridge rejected by a newer kernel')
   })
 
   it('never renders blank: the caller\'s generic line, then the code itself', () => {

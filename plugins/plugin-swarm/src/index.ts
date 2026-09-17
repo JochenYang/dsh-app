@@ -36,12 +36,12 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 // Type-only: pulls the ctx merges (tools / subagents / commands /
-// systemPrompt / webServer) into scope without runtime imports.
+// systemPrompt / connection) into scope without runtime imports.
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { projectOutputItems, runSwarmBatch, type SwarmBatchOutcome, type SwarmItemOutcome } from './orchestrator.ts'
 import { MIN_ITEMS, expandTasks } from './expand.ts'
 import type { SwarmToolArgs } from './expand.ts'
@@ -49,12 +49,17 @@ import { loadSwarmUserConfig } from './user-config.ts'
 import { registerSwarmRoutes } from './routes.ts'
 
 export const name = 'plugin-swarm'
-// webServer is a hard inject like the other suite plugins with settings
-// routes (memory/usage/archives): this product's host is always `dsh web`,
-// so the service is guaranteed to exist.
-// `agents` backs the settle-time child-session reads (usage/failure detail);
-// an undeclared access throws cordis "without inject" and fails every item.
-export const inject = ['tools', 'subagents', 'commands', 'systemPrompt', 'webServer', 'agents']
+
+/**
+ * The settings route rides the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ *
+ * `agents` backs the settle-time child-session reads (usage/failure detail);
+ * an undeclared access throws cordis "without inject" and fails every item.
+ */
+export const inject = ['tools', 'subagents', 'commands', 'systemPrompt', 'connection', 'agents']
 
 /** Prompt order directly after the single-delegation policy section. */
 const SWARM_SECTION_ORDER = 116.6
@@ -274,10 +279,10 @@ export function apply(ctx: Context, baseConfig: Config): void {
     ...loadSwarmUserConfig(configPath, message => ctx.logger.warn(message)),
   })
 
-  // The settings routes mount even when the tool is disabled, so the page
+  // The settings route mounts even when the tool is disabled, so the page
   // can re-enable the plugin (a re-enable needs a restart either way).
   ctx.effect(
-    () => registerSwarmRoutes(ctx.webServer, {
+    () => registerSwarmRoutes(ctx.connection.fetch, {
       enabled: true,
       defaultConcurrency: baseConfig.defaultConcurrency,
       maxConcurrency: baseConfig.maxConcurrency,

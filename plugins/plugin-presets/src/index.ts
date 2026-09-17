@@ -27,14 +27,21 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { dshHomeDisplay, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-// Type-only: pulls the webServer Context merge (ctx.webServer) into scope.
-import type {} from '@deepseek-ai/dsh-host-webserver'
+// Type-only: pulls the connection Context merge (ctx.connection) into scope.
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { effectiveBackupProfile } from './backup.ts'
 import { registerBackupRoutes, registerPresetRoutes } from './routes.ts'
 import { PresetStore } from './store.ts'
 
 export const name = 'plugin-presets'
-export const inject = ['webServer']
+
+/**
+ * The presets page rides the Connection exact-Fetch registry
+ * (`ctx.connection.fetch`). The web server is deliberately NOT injected: the
+ * desktop host disables its `webserver` row, so a plugin that waits for it
+ * never activates at all.
+ */
+export const inject = ['connection']
 
 /** Config: managed preset root override. */
 export interface Config {
@@ -63,8 +70,8 @@ export function apply(ctx: Context, config: Config): void {
   // fails over a backup route.
   const profile = effectiveBackupProfile(process.env.DSH_APP_PROFILE)
 
-  ctx.effect(() => registerPresetRoutes(ctx.webServer, store, rootDisplay), 'plugin-presets: api routes')
-  ctx.effect(() => registerBackupRoutes(ctx.webServer, { home: resolveDshHome(), profile }), 'plugin-presets: config-backup routes')
+  ctx.effect(() => registerPresetRoutes(ctx.connection.fetch, store, rootDisplay), 'plugin-presets: api routes')
+  ctx.effect(() => registerBackupRoutes(ctx.connection.fetch, { home: resolveDshHome(), profile }), 'plugin-presets: config-backup routes')
 
   log.info(`preset packages root: ${rootDisplay !== '' ? rootDisplay : root}; config backup profile: ${profile}`)
 }

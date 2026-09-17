@@ -1,16 +1,17 @@
 /**
  * Typed client for the market's host routes. Same-origin fetch against the
- * dsh web server; the host fence admits loopback-Host requests, which every
- * same-origin browser request is.
+ * Connection `/api` channel the window's own origin serves; the carrier's
+ * trust fence and browser authentication run before the route handler.
  */
 
 import { type HostText } from '../errors.ts'
 
 /**
- * The plugin's route prefix on the dsh web server (mirrors the host half;
- * the /api segment keeps clear of the loader-owned client.js bundle route).
+ * The plugin's route prefix on the shared `/api` channel (mirrors the host
+ * half; the Connection registry admits no `@` in a path segment, so the npm
+ * scope travels as `dsh-app`).
  */
-export const ROUTE_PREFIX = '/plugins/@dsh-app/plugin-market/api'
+export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-market'
 
 /** One market API failure. */
 export class MarketApiError extends Error {
@@ -115,7 +116,7 @@ export interface InstalledPackage {
   readonly updateAvailable?: boolean
 }
 
-/** GET /sources + PUT /sources payloads. */
+/** GET /sources + POST /sources payloads. */
 export interface SourcesValue {
   readonly sources: string[]
 }
@@ -201,9 +202,14 @@ export const marketApi = {
   sources(): Promise<SourcesValue> {
     return request<SourcesValue>(`${ROUTE_PREFIX}/sources`)
   },
+  /**
+   * Replace the source list. POST because the Connection exact-Fetch registry
+   * admits GET/HEAD/POST only — a PUT would fall through to the shared
+   * channel's 404.
+   */
   saveSources(urls: readonly string[]): Promise<SourcesValue> {
     return request<SourcesValue>(`${ROUTE_PREFIX}/sources`, {
-      method: 'PUT',
+      method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ sources: urls }),
     })
