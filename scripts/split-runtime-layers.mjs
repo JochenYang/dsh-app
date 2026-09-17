@@ -22,11 +22,12 @@
 // layers reproduce the input byte-for-byte.
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync } from 'node:fs'
-import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { classifyTreeEntry, TREE_ENTRY_DIR, TREE_ENTRY_FILE, TREE_ENTRY_LINK } from './lib/tree-entry.mjs'
 
 const require = createRequire(import.meta.url)
 const tar = require('tar')
@@ -135,7 +136,7 @@ async function main() {
 }
 
 /**
- * Re-assemble the layers ALONE into a fresh directory and compare every file
+ * Re-assemble the layers ALONE into a fresh directory and compare every entry
  * against the input tree. Deliberately uses nothing but the emitted files: an
  * earlier revision kept the manifest out of every layer and only passed this
  * check because it stitched in a temporary tarball, which would have shipped a
@@ -149,33 +150,56 @@ async function verify(sourceDir, outDir, layers) {
     await tar.x({ file: path.join(outDir, layer.name), cwd: reassembled })
   }
 
-  const [expected, actual] = await Promise.all([hashTree(path.join(sourceDir, 'runtime')), hashTree(path.join(reassembled, 'runtime'))])
-  const missing = [...expected.keys()].filter((key) => !actual.has(key))
-  const extra = [...actual.keys()].filter((key) => !expected.has(key))
-  const differing = [...expected.keys()].filter((key) => actual.has(key) && actual.get(key) !== expected.get(key))
+  const [expected, actual] = await Promise.all([treeDigest(path.join(sourceDir, 'runtime')), treeDigest(path.join(reassembled, 'runtime'))])
+  const missing = [...expected.hashes.keys()].filter((key) => !actual.hashes.has(key))
+  const extra = [...actual.hashes.keys()].filter((key) => !expected.hashes.has(key))
+  const differing = [...expected.hashes.keys()].filter((key) => actual.hashes.has(key) && actual.hashes.get(key) !== expected.hashes.get(key))
   if (missing.length > 0 || extra.length > 0 || differing.length > 0) {
     throw new Error(
       `layer re-assembly differs from the input tree: ${missing.length} missing, ${extra.length} extra, ${differing.length} differing`
       + `\nexamples: ${[...missing, ...extra, ...differing].slice(0, 5).join(', ')}`,
     )
   }
-  console.log(`verify  ok — ${expected.size} files reproduced exactly`)
+  // The Windows wording stays what it always was — a Windows tree holds no
+  // links — and a POSIX one says how many it verified.
+  console.log(`verify  ok — ${expected.counts.files} files reproduced exactly${expected.counts.links === 0 ? '' : ` (+ ${expected.counts.links} links)`}`)
   await rm(reassembled, { recursive: true, force: true })
 }
 
-/** Map of path (relative to the runtime root) -> sha256, for whole-tree comparison. */
-async function hashTree(dir) {
-  const result = new Map()
+/**
+ * Whole-tree comparison of one directory: path (relative to the runtime root)
+ * -> sha256 for a regular file, -> `link -> <target>` for a symlink.
+ *
+ * A link has no bytes of its own but must still survive the split, and skipping
+ * it (as this walk used to) made the check blind to the one difference a POSIX
+ * and a Windows tree of the same runtime disagree about: pnpm lays out
+ * `node_modules/.bin` with links on POSIX and with real `.cmd`/`.ps1` files on
+ * Windows. So each side carries the links it finds and the comparison covers
+ * them.
+ * @returns `{ hashes, counts }` — the map above plus how many of each kind.
+ */
+async function treeDigest(dir) {
+  const hashes = new Map()
+  const counts = { files: 0, links: 0 }
   async function walk(current) {
-    const entries = await readdir(current, { withFileTypes: true })
-    for (const entry of entries) {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
       const full = path.join(current, entry.name)
-      if (entry.isDirectory()) await walk(full)
-      else if (entry.isFile()) result.set(path.relative(dir, full).split(path.sep).join('/'), await sha256File(full))
+      const kind = classifyTreeEntry(entry)
+      if (kind === TREE_ENTRY_DIR) { await walk(full); continue }
+      const key = path.relative(dir, full).split(path.sep).join('/')
+      if (kind === TREE_ENTRY_FILE) {
+        hashes.set(key, await sha256File(full))
+        counts.files += 1
+        continue
+      }
+      if (kind === TREE_ENTRY_LINK) {
+        hashes.set(key, `link -> ${await readlink(full)}`)
+        counts.links += 1
+      }
     }
   }
   if (existsSync(dir)) await walk(dir)
-  return result
+  return { hashes, counts }
 }
 
 await main().catch((error) => {

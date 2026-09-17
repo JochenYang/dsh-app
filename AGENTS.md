@@ -448,7 +448,12 @@ ARE the cache keys — `node`/`vendor`/`meta` are content-addressed (an identica
 rebuild keeps its name, so a client reuses what it already has), `dsh`/`suite`
 are version-addressed. `scripts/split-runtime-layers.mjs` produces them and
 verifies its own output by re-assembling the layers alone and comparing every
-file against the input tree (26 464 files today).
+file and link against the input tree (26 464 files today). Which of the two a
+tree holds is a property of the build host, not of the runtime: pnpm leaves
+symlinks in `node_modules/.bin` on POSIX and real `.cmd`/`.ps1` files on
+Windows, so the inventory and this comparison both record what they met —
+`scripts/lib/tree-entry.mjs` is the classification they share, and it is what
+makes a POSIX-only shape testable from Windows.
 
 The client **prefers the layer path and falls back to the single tarball** on
 any failure (no index, invalid index, layer 404, digest mismatch, assembly

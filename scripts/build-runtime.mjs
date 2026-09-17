@@ -47,11 +47,12 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { c as createTar, t as listTar, x as extractTar } from 'tar'
+import { collectTreeEntries } from './lib/tree-entry.mjs'
 import {
   assertFollowedVersion,
   assertValidVersion,
@@ -1027,7 +1028,8 @@ function assertLockfileCore(lockfileText, hostPackageName) {
 
 /**
  * Per-file inventory of the assembled runtime: relative path, byte size, sha256
- * and the executable bit, sorted by path.
+ * and the executable bit, sorted by path — plus the symlinks, as a group of
+ * their own (`{ path, target }`, target relative to the link's directory).
  *
  * It is written INSIDE the archive (runtime/app/runtime-files.json) so it travels
  * with every artifact the way the user receives it — through the release tarball
@@ -1036,6 +1038,14 @@ function assertLockfileCore(lockfileText, hostPackageName) {
  * copy lands next to the tarball for release-time audits that must not unpack
  * 100 MB.
  *
+ * The links are separate from the files because `files` means exactly one thing
+ * to the readers of this inventory: a regular file, with a size and a hash, both
+ * of which a link lacks. pnpm's `.bin` shims are links on POSIX and real
+ * `.cmd`/`.ps1` files on Windows, so their presence is a property of the build
+ * host, not of the runtime — recording them keeps the inventory a faithful
+ * description of either artifact instead of a Windows-only one (see
+ * scripts/lib/tree-entry.mjs).
+ *
  * Content is a pure function of the tree (no timestamps), so two builds of one
  * version must produce identical inventories — the reproducibility check §2.4
  * asks for — and it records the exec bits a Windows build host cannot test.
@@ -1043,41 +1053,8 @@ function assertLockfileCore(lockfileText, hostPackageName) {
  * @returns the inventory object written.
  */
 async function writeFileInventory(runtimeDir, manifest) {
-  const self = path.join('app', 'runtime-files.json')
-  const files = []
-  async function walk(current, relative) {
-    for (const entry of (await readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
-      const next = relative === '' ? entry.name : `${relative}/${entry.name}`
-      const full = path.join(current, entry.name)
-      if (entry.isDirectory()) { await walk(full, next); continue }
-      // A symlink (or junction) cannot travel inside the tarball as a working
-      // reference: the artifact must be self-contained, so an unexpected one
-      // fails the build instead of silently shipping a dangling entry.
-      if (!entry.isFile()) throw new Error(`runtime tree holds a non-file entry: ${next} (is it a symlink?)`)
-      if (next === self) continue
-      const stats = await stat(full)
-      // A shared inode becomes a tar hard-link entry, which GNU tar refuses to
-      // extract when the target appears later in the stream (pnpm's default
-      // store hardlinks do exactly that). The install copies instead; if a future
-      // change brings links back, fail here rather than ship a tarball only
-      // node-tar can read.
-      if (stats.nlink > 1) {
-        throw new Error(`runtime tree holds a hard-linked file: ${next} (nlink=${stats.nlink}) — the artifact must be independent files`)
-      }
-      const hash = createHash('sha256')
-      for await (const chunk of createReadStream(full)) hash.update(chunk)
-      files.push({
-        path: next,
-        size: stats.size,
-        // Git-style mode: the exec bit is the only permission that survives
-        // packaging, and the kernel's node/node[.exe] must keep it.
-        mode: (stats.mode & 0o111) === 0 ? '100644' : '100755',
-        sha256: hash.digest('hex'),
-      })
-    }
-  }
-  await walk(runtimeDir, '')
-  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  const self = 'app/runtime-files.json'
+  const { files, links } = await collectTreeEntries(runtimeDir, { skip: [self] })
   const inventory = {
     dshVersion: manifest.dshVersion,
     suiteVersion: manifest.suiteVersion,
@@ -1086,6 +1063,11 @@ async function writeFileInventory(runtimeDir, manifest) {
     algorithm: 'sha256',
     fileCount: files.length,
     files,
+    // Always present, even at zero: a reader (and the layer splitter's own
+    // comparison) must not have to guess whether a missing group means "none"
+    // or "an inventory written by an older build".
+    linkCount: links.length,
+    links,
   }
   await writeFile(path.join(runtimeDir, self), JSON.stringify(inventory, null, 2))
   return inventory
@@ -1319,17 +1301,18 @@ async function main() {
   //    after tarring for the artifact resolver / release metadata.
   await writeFile(path.join(runtimeDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
 
-  // 5. Per-file inventory (path, size, sha256, exec bit) — written inside the
-  //    archive so it reaches users the same way the artifact does, plus a copy
-  //    beside the tarball for release-time audits that must not unpack 100 MB.
-  //    It is a pure function of the tree, so it is also the reproducibility
-  //    check: two builds of one version must produce the same list.
+  // 5. Per-file inventory (path, size, sha256, exec bit) plus its links —
+  //    written inside the archive so it reaches users the same way the artifact
+  //    does, plus a copy beside the tarball for release-time audits that must
+  //    not unpack 100 MB. It is a pure function of the tree, so it is also the
+  //    reproducibility check: two builds of one version must produce the same
+  //    list.
   const inventory = await writeFileInventory(runtimeDir, manifest)
   await writeFile(
     path.join(root, 'runtime-dist', `runtime-files-${platform}-${arch}.json`),
     `${JSON.stringify(inventory, null, 2)}\n`,
   )
-  console.log(`[build-runtime] inventory: ${inventory.fileCount} files listed in runtime/app/runtime-files.json`)
+  console.log(`[build-runtime] inventory: ${inventory.fileCount} files, ${inventory.linkCount} links listed in runtime/app/runtime-files.json`)
 
   // 6. Tar the runtime directory (single top-level dir: runtime/).
   //    Reproducible archive: `portable` strips uid/gid/uname/gname/atime/ctime
