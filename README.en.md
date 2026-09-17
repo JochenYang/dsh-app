@@ -131,11 +131,11 @@ $env:DSH_APP_DEV="1"; npm start
 set DSH_APP_DEV=1 && npm start
 ```
 
-In dev mode the shell spawns `pnpm dsh web` inside the local checkout (random
-free port) — no downloads, no kernel artifacts. Dev startup is much slower than
-production: pnpm + tsx on-the-fly transpilation of all TypeScript sources is the
-main cost; production spawns the pre-compiled `lib/bin.js` and is ready in
-seconds.
+In dev mode the shell uses the local checkout in place of a downloaded kernel:
+the same desktop host child process (entry taken from
+`apps/desktop-host/lib/index.js`, with `allowLinkedProfile` letting the linked
+workspace profile boot) — no downloads, no kernel artifacts. Neither mode binds
+a port, and both load `dsh-app://app`.
 
 ### Point at another checkout
 
@@ -147,7 +147,7 @@ $env:DSH_APP_DEV="1"; $env:DSH_APP_DEV_RUNTIME="D:/codes/DSH-APP/deepseek-harnes
 
 | Item | Dev mode | Production |
 |---|---|---|
-| Kernel source | local checkout (`pnpm dsh web`, tsx on the fly) | preinstalled runtime under `userData/kernel/` (direct node binary) |
+| Kernel source | local checkout (desktop host child process) | preinstalled runtime under `userData/kernel/` (direct node binary) |
 | Startup time | slow (order of 10 s) | fast (order of 2 s) |
 | Update checks | skipped (pinned to checkout) | every 6 h auto + manual via tray |
 

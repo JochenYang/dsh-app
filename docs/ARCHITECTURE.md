@@ -88,12 +88,15 @@ Client-side composition (all zero-upstream-change):
   model-level editors over llm-pi-ai providers, companion-route migration,
   models.dev prefill with gh-proxy mirror fallback.
 
-Host side (fenced routes): everything under
-`/plugins/@dsh-app/plugin-sidebar/api` (`git-routes.ts`) runs through a loopback
-Host fence, `execFile` with argument arrays, an env baseline of PATH + HOME
-only, `windowsHide`, and reads via `sessions.binding(sessionId)` (never the
-"most recent session" — blank sessions sort wrong). Every other suite plugin's
-`/api` routes carry the same loopback fence.
+Host side (suite routes on the Connection carrier): every suite plugin registers
+its routes with `ctx.connection.fetch.register` and they answer under
+`/api/plugins/dsh-app/<plugin>/<name>` — a path segment may not contain `@`, and
+only GET/HEAD/POST are admitted. The carrier (see §2) applies its Host/Origin
+fence and browser authentication before a handler runs, so a route carries no
+fence of its own. `plugin-sidebar`'s git routes (`git-routes.ts`) still use
+`execFile` with argument arrays, an env baseline of PATH + HOME only,
+`windowsHide`, and reads via `sessions.binding(sessionId)` (never the
+"most recent session" — blank sessions sort wrong).
 
 ## 4. Kernel runtime layout
 
@@ -159,10 +162,11 @@ asserted in both the build and CI — see `AGENTS.md` §10.
 
 ## 6. Server process management
 
-- Dynamic free port (`net.listen(0)`), passed as `--port`; host pinned to
-  `127.0.0.1` (loopback passes the dsh trusted-host fence with no extra flags).
-- Health = HTTP 200 on the server root within 90 s (`SERVER_HEALTH_TIMEOUT_MS`,
-  `shared/constants.ts:34`).
+- No port is bound. The kernel runs as a child process whose web surface travels
+  over fd3/fd4 byte pipes (`src/main/desktop-host.ts`); the window loads
+  `dsh-app://app/index.html`, served only by forwarding to that child.
+- Health = the child reports `{type:'ready'}` on the IPC channel within 90 s
+  (`HOST_READY_TIMEOUT_MS`).
 - Crash → restart with backoff; repeated failure → kernel rollback. A crash
   during startup is reported once (through the rejected `start()`), not twice.
 - Shutdown: SIGTERM → 8 s grace → SIGKILL; logs tee'd to
@@ -172,11 +176,11 @@ asserted in both the build and CI — see `AGENTS.md` §10.
 ## 7. Security posture
 
 - Main window: `contextIsolation`, `sandbox`, no preload, `nodeIntegration:false`.
-- Navigation confined to the server's own origin; everything else →
-  `shell.openExternal`. The origin is retargeted when a kernel update restarts
-  the server on a new port.
-- Plugin `/api` routes: same-origin check **plus** a loopback Host fence, so a
-  DNS-rebinding request cannot reach them by presenting a matching Origin.
+- Navigation confined to `dsh-app://app`; everything else → `shell.openExternal`
+  (http/https only). The splash's own `file:` document is the one exception.
+- Plugin `/api` routes are fenced by the Connection carrier (Host/Origin check
+  **plus** browser authentication before a handler runs), so a DNS-rebinding
+  request cannot reach them by presenting a matching Origin.
 - Kernel downloads verified by sha512 before activation (integrity from the
   release asset sidecar; can be upgraded to signed manifests later).
 

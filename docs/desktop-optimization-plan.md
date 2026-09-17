@@ -64,7 +64,8 @@ pnpm 补上 4 个插件 peer）. 体积 100 834 761 → 101 266 666 B（+0.4%，
 mac/linux/arm64 产物与 exec 位；CI 实跑。
 ✅ **C1/C3 桌面桥打通（诊断中心 MVP）** —— shell 侧 `desktop-bridge.ts`（loopback + bearer token +
 Host/Origin 围栏 + 体量上限，13 例，含用**原始 socket** 手写请求验证 Host 围栏——`fetch` 不允许设 `Host`）；
-启动链接线（`ensureDesktopBridge` + env 注入 + 退出先关桥）；`plugin-brand` 暴露 trust-fenced host 路由
+启动链接线（`ensureDesktopBridge` + env 注入 + 退出先关桥——注意 A1 后桥已改为**不启动**）；
+`plugin-brand` 在 Connection exact-Fetch 通道上暴露 host 路由
 （五动作 + 可用性探测 + **日志尾**，30 例，其中用注入的 fs seam **量出「只读了 64 KiB」**而非只看返回对不对）；
 `plugin-client-ui` 新增「诊断」设置页（桥状态 / 打开日志目录 / 日志尾，order 22——
 原本与 plugin-websearch 的 14 撞号，我挪开了）。
@@ -391,7 +392,8 @@ Electron 主进程里；内核是**子进程**，渲染层是**远程源页面�
 - 路由 `POST /bridge/<action>`，首批动作：`open-in-folder(path)`、`notify(title, body)`、
   `save-text-as(name, content) → path`、`pick-directory() → path`、`open-logs`。
 - **围栏（缺一不可）**：① 只绑 loopback；② 校验 `Authorization: Bearer <token>`；
-  ③ 校验 `Host` 是 loopback 形态（照 `plugins/plugin-sidebar/src/trust-fence.ts` 的既有写法）；
+  ③ 校验 `Host` 是 loopback 形态（原参照的 `plugins/plugin-sidebar/src/trust-fence.ts`
+  已随迁移删除，此处沿用同一套判据自行实现）；
   ④ 不设 CORS，浏览器的页面**无法**直接调用它；⑤ 每个动作有超时，失败给稳定可行动的 zh-CN 文案。
 - 插件侧：`plugin-brand` 注册一个 host 服务，客户端经**正常 dsh API seam** 调用（不新增专用 IPC、
   不碰 preload）。服务不可用时（未注入 env，例如 dev 或旧 shell）**优雅降级**：动作返回「当前环境不支持」
@@ -581,11 +583,12 @@ browser」——**UI 的语言由 UI 自己的设置/浏览器语言决定，与
 
 ### 4.2 进程契约
 
-- **生产**：`<内核>/node/node[.exe] …/@deepseek-ai/dsh/lib/bin.js --profile web [--patch …]
-  --host 127.0.0.1 --port <动态> --no-open`，cwd = `<内核>/app`；**dev**：`pnpm dsh web`
-  （Windows 经 shell）。`manager.ts:549-562`、`server.ts:178-199`
-- **端口**：先 `127.0.0.1:0` 预探测，再以 stdout 的 `dsh web: <url>` 收割真实 URL
-  （只接受 `127.0.0.1` http）。`server.ts:37-55,231-244`
+- **生产**：`<内核>/node/node[.exe] <desktop host entry>`，`runtimeDir` = `<内核>/app`；
+  **dev**：同一个子进程，entry 取本地 checkout 的 `apps/desktop-host/lib/index.js`。
+  宿主**不接受** `--patch`，套件行写在 booted profile 自己的 patch 层里。
+  `desktop-host.ts`、`index.ts:209-230`
+- **无端口**：不绑任何端口，web 面走 fd3/fd4 字节管道（IPC 通道只传 `ready` 与
+  `shutdown`）；窗口加载 `dsh-app://app`。`desktop-host.ts`
 - **环境注入**：`DSH_APP_DESKTOP=1` + scrub 后的 env + 探测到的本地代理。`server.ts:112-121`
 - **健康判定**：303 → 取 `Set-Cookie` → `/` 返回 200；90 s 超时、200 ms 轮询。
   `server.ts:261-298`、`constants.ts:47`
@@ -761,8 +764,9 @@ DOM stub（`probe-update-card.cjs:20-70`）。缺：fake registry、kernel / ele
 2. 改版本目录命名 → `current.json` / 回滚找不到 `previous`。
 3. 改 `bundledStamp` 或 `resources/kernel/manifest.json` 结构 → 每次启动重装，或漏采纳内置包。
 4. 安装中触发清理，或放松 sha512 校验 → 下载被删 / 镜像可掉包。
-5. 改 `dsh web:` 就绪行或 URL 形状 → URL 收割失败，窗口指向死端口。
-6. 改 spawn 参数 / host / 端口 → 启动失败，或自动开出外部浏览器。
+5. 改 `dsh-app://` 协议注册或到子进程的转发 → 窗口白屏（该 scheme 必须在 `app.ready`
+   之前注册为 privileged，且只服务那一个子进程）。
+6. 改 spawn 的 stdio 布局或 fd3/fd4 帧格式 → 子进程起不来，或响应管道停止排空而卡死。
 7. 改更新文案 / 按钮 / 跳过语义 → 用户按记忆点击落空。
 8. 改 `latest.yml` 解析、`-win-<arch>.exe` 命名或 base64 sha512 约定 → Windows 更新与
    托盘回滚失败。

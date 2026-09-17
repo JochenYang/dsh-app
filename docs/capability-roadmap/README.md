@@ -58,8 +58,10 @@ dev-process-tooling 的套件冒烟探针 ── 建议先于 P0-P3 落地（否
    `plugins/plugin-client-ui/src/client.ts:188`），order 分配避开上游
    （11=模型高级设置已占用，15=Plugins，20=agent-presets）：
    **12=MCP 服务器，13=Hooks，14=诊断**。
-4. **Host routes**：`/plugins/@dsh-app/plugin-<name>/api/*`，全部过 Host fence
-   （loopback 校验，参照 `plugins/plugin-sidebar/src/trust-fence.ts`）。
+4. **Host routes**：`/api/plugins/dsh-app/plugin-<name>/*`，注册在 Connection 的
+   exact-Fetch 通道上（`ctx.connection.fetch.register`；只收 GET/HEAD/POST，路径段里
+   不带 `@`）。围栏由 Connection 载体自身提供（Host/Origin 校验 + 浏览器认证），
+   插件不再自带 fence。
 5. **降级纪律**：内核缺对应服务时只挂状态路由、boot 不受影响（套件既有稳定性纪律）。
 
 ## 范围外（本期不做）

@@ -13,7 +13,7 @@
 | **内置页面**（Built-in Pages） | 文件树/预览、编辑、终端、Git、子代理任务。**侧边对话已裁定砍掉**（第 2 轮，"没必要"）；内嵌浏览器远期 | ✅ |
 | **三方注册**（Third-party Registration） | 其它 dsh 插件经 `ctx.dshAppSidebar` 服务（registerTab / registerFileViewer）注册侧边栏页面与文件预览器 | ✅（形态学参考同类开源方案） |
 | **文件树 / 预览 / 编辑** | 浏览工作区目录 → 只读查看（高亮/图片/MD）→ 可写保存，三层递进 | ✅ |
-| **信任边界**（Trust Fence） | host 路由的浏览器信任围栏（Host 头 loopback 校验）+ 写文件的工作区路径约束 | 🟡（命名沿用参考项目，实现期确认） |
+| **信任边界**（Trust Fence） | host 路由的浏览器信任围栏（由 Connection 载体提供：Host/Origin 校验 + 浏览器认证，插件不再自建）+ 写文件的工作区路径约束 | ✅（迁移后由载体承担） |
 | **双面插件**（Dual-face Plugin） | 同时有 host 半（Node：fs/pty/git）与 client 半（React UI）的单包 dsh 插件，模式同同类开源方案（已验证） | ✅ |
 
 ## 命名映射（Naming）
@@ -22,7 +22,7 @@
 |---|---|---|
 | 侧边栏底座插件 | `@dsh-app/plugin-sidebar`（`plugins/plugin-sidebar/`） | 🟡 |
 | 三方注册服务 | `ctx.dshAppSidebar`（`registerTab` / `registerFileViewer`） | 🟡 |
-| host 能力路由前缀 | `/plugins/@dsh-app/plugin-sidebar/*`（fenced） | 🟡 |
+| host 能力路由前缀 | `/api/plugins/dsh-app/plugin-sidebar/*`（Connection exact-Fetch 通道） | ✅ |
 | 面板 UI class 前缀 | `dshAsb-` | 🟡 |
 | 需求文档目录 | `docs/sidebar-dock/` | ✅ |
 
@@ -40,7 +40,7 @@
 
 ### ADR-3：host+client 双面插件，能力不经内核 wire API
 - 内核 wire API 无终端/Git/文件写入；host 半直接用 Node 能力（node-pty / spawn git / fs）经自注册 fenced 路由暴露。
-- 不 fork 内核、不旁路内核安全模型（自带 trust-fence，等价复刻 dsh 网关围栏）。
+- 不 fork 内核、不旁路内核安全模型（围栏由 Connection 载体承担，插件不自建）。
 
 ## 访谈进度（已收敛）
 

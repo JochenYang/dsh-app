@@ -5,7 +5,7 @@
 ## 0. 架构基线（各阶段共用）
 
 - 新插件 `@dsh-app/plugin-sidebar`：**host+client 双面单包**（`dsh.plugin.json`：host main + client main），接线走 brand-suite symlink（与 plugin-brand/plugin-client-ui 同模式），随 suite 打包进 runtime。
-- host 侧：自注册 fenced HTTP 路由（前缀 `/plugins/@dsh-app/plugin-sidebar/...`，复刻 dsh 网关 trust-fence：Host 头 loopback 校验）暴露 fs / pty / git 能力。
+- host 侧：在 Connection 的 exact-Fetch 通道自注册路由（`ctx.connection.fetch.register`，前缀 `/api/plugins/dsh-app/plugin-sidebar/...`，只收 GET/HEAD/POST），暴露 fs / pty / git 能力；围栏由 Connection 载体提供（Host/Origin 校验 + 浏览器认证），插件不再自带 fence。
 - client 侧：cordis slot/服务挂载 + React UI；注册服务 `ctx.dshAppSidebar`（registerTab / registerFileViewer）。
 - 验证管线沿用 [[plugin-client-ui-verify-pipeline]]：`tsc --noEmit && esbuild → 覆盖部署到已装内核 → electron probe`。
 
@@ -14,7 +14,7 @@
 ### M1 — 底座 + 文件树/预览 + 注册服务最小面（P0/P1）
 | 项 | 内容 |
 |---|---|
-| host | fs 路由：目录树（懒加载分片）、文件读取（大小上限 + 二进制嗅探）；trust-fence |
+| host | fs 路由：目录树（懒加载分片）、文件读取（大小上限 + 二进制嗅探）；围栏由 Connection 载体提供 |
 | client | 底座容器（右侧面板 + 图标列 + 拖宽 + 会话隔离持久化）；文件树页；预览器：文本（高亮）/图片/Markdown；`registerTab`/`registerFileViewer` 最小服务面 |
 | 侦察前置 | conversation 包布局与 slot 面（主面板挂载点选型：优先官方 slot，次选稳定 DOM 锚点） |
 | 验收 | SPEC §4 底座/文件树/预览/三方注册四组断言 + probe |
@@ -57,6 +57,6 @@ M1 →（M2 ∥ M3 可并行，但建议先 M2 排雷）→ M4 → M5。M1 的�
 ## 测试策略
 
 - 每阶段：`tsc --noEmit` + esbuild + electron probe（渲染/交互/写链路真实落盘后还原）；
-- host 路由：trust-fence 正反用例（loopback 过 / 非 loopback 拒）；路径逃逸用例；
+- host 路由：路由注册正反用例（合法路径/方法过，越权拒）；路径逃逸用例；
 - 卸载语义：插件禁用后无残留 DOM/路由（probe 断言）；
 - 参考项目痛点回归：待用户提供 bug 清单后转化为断言（SPEC 开放问题 #1）。

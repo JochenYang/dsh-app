@@ -29,7 +29,7 @@ DSH APP（dsh 桌面客户端）的用户在会话中需要 IDE 式辅助面：�
 ## 3. 技术约束与架构决策
 
 1. **载体**：新插件 `@dsh-app/plugin-sidebar`（host+client 双面单包，`dsh.plugin.json` 声明 host main + client main），经 brand-suite symlink 接线，随 suite 打包。
-2. **host 侧能力自建**：文件读写（node fs）、终端（node-pty）、Git（spawn git）不依赖内核 wire API。host 能力经 `ctx.webServer.register({ kind: 'prefix', path, handler })` 自注册 **fenced HTTP 路由**暴露；围栏复刻 dsh 网关浏览器信任围栏（Host 头 loopback 校验，防 DNS rebinding）。
+2. **host 侧能力自建**：文件读写（node fs）、终端（node-pty）、Git（spawn git）不依赖内核 wire API。host 能力经 `ctx.connection.fetch.register` 注册到 Connection 的 exact-Fetch 通道（前缀 `/api/plugins/dsh-app/plugin-sidebar/...`，只收 GET/HEAD/POST）；围栏由 Connection 载体提供（Host/Origin 校验 + 浏览器认证，防 DNS rebinding），插件不再自建。
 3. **node-pty 原生构建**：进 runtime CI 构建链（build-runtime.mjs 依赖 + 各平台矩阵），用户机零构建。
 4. **UI/文案**：zh-CN；视觉走品牌主题 token（--dsw-alias-*），不硬编码色值。
 5. **不污染官方**：三方注册走我们自己的 ctx 服务，官方 slot 表零改动；设置页挂载用 settings.section（官方开放扩展点）。
@@ -63,7 +63,7 @@ DSH APP（dsh 桌面客户端）的用户在会话中需要 IDE 式辅助面：�
 
 ### 4.6 行为与稳定性
 - [ ] **启用插件后 resume 任意历史会话无报错**（host 半不得污染全局 cordis 上下文/作用域组合）（回归 #R2）
-- [ ] **通过 127.0.0.1 与 localhost 访问均正常（含浏览器发不带端口 Origin 的场景），fence 不误伤**（回归 #R8）
+- [ ] **host 路由经 Connection 通道访问正常，围栏不误伤合法请求**（回归 #R8）
 - [ ] **一切自动打开行为默认关闭、且设置页逐项有开关；自动聚焦的目标页与设置项一致**（回归 #R9/#R10）
 - [ ] **移动端/窄窗口（<768px）不自动弹出遮挡聊天的抽屉**（回归 #R9）
 - [ ] **图标列图标统一 16px 规格，尺寸零漂移**（回归 #R11）
@@ -86,7 +86,7 @@ DSH APP（dsh 桌面客户端）的用户在会话中需要 IDE 式辅助面：�
 | R5 | Markdown 保存后预览不刷新 | 保存事件驱动预览失效重渲染 |
 | R6 | Windows 下 spawn git 不带 windowsHide 致控制台周期性闪烁 | spawn 纪律（§3.7）+ 长跑 probe |
 | R7 | Windows 服务（无控制台）下 node-pty AttachConsole 反复崩 | ConPTY 显式会话/降级路径；平台限制如实标注 |
-| R8 | 127.0.0.1 访问全部 403（fence 对无端口 Origin 误伤） | fence 用例覆盖 127.0.0.1/localhost/带端口/不带端口 Origin |
+| R8 | 127.0.0.1 访问全部 403（fence 对无端口 Origin 误伤） | 不适用：窗口走 `dsh-app://app`、不绑端口，围栏改由 Connection 载体承担，该前提已消失（记法同 R12） |
 | R9 | 自动打开默认开、无开关；移动端抽屉遮挡聊天 | 自动行为默认关 + 设置逐项开关 + 窄屏断言 |
 | R10 | 自动触发打开的是错误页面 | 聚焦目标 = 设置项身份断言 |
 | R11 | 图标大小不一致；分屏后新预览不进预览组 | 16px 规格统一；预览进组断言 |

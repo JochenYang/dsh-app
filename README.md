@@ -107,9 +107,10 @@ $env:DSH_APP_DEV="1"; npm start
 set DSH_APP_DEV=1 && npm start
 ```
 
-开发模式下外壳会在本地 checkout 里 spawn `pnpm dsh web`（随机空闲端口），
-不下载、不产生内核产物。dev 启动比生产版慢很多：pnpm + tsx 即时转译全部 TypeScript
-源码是主要开销；生产版直接 spawn 预编译的 `lib/bin.js`，秒级就绪。
+开发模式下外壳用本地 checkout 顶替内核：走同一个 desktop host 子进程
+（entry 取 `apps/desktop-host/lib/index.js`，`allowLinkedProfile` 让链接式
+profile 得以启动），不下载、不产生内核产物。dev 与生产都不绑端口，窗口都加载
+`dsh-app://app`。
 
 ### 指定其他 checkout
 
@@ -121,7 +122,7 @@ $env:DSH_APP_DEV="1"; $env:DSH_APP_DEV_RUNTIME="D:/codes/DSH-APP/deepseek-harnes
 
 | 项目 | 开发模式 | 生产模式 |
 |---|---|---|
-| 内核来源 | 本地 checkout（`pnpm dsh web`，tsx 即时编译） | `userData/kernel/` 预装运行时（直连 node 二进制） |
+| 内核来源 | 本地 checkout（desktop host 子进程） | `userData/kernel/` 预装运行时（直连 node 二进制） |
 | 启动速度 | 慢（10 秒级） | 快（2 秒级） |
 | 更新检查 | 跳过（钉在 checkout） | 每 6h 自动 + 托盘手动 |
 

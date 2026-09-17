@@ -25,14 +25,15 @@ Windows / macOS / Linux, public release, MIT. Three ideas govern every change:
 
 ## 2. Stack & layout
 
-Electron 33 + TypeScript 5.7, compiled to CommonJS/ES2022 by `tsc`.
+Electron 44 + TypeScript 5.7, compiled to CommonJS/ES2022 by `tsc`.
 electron-builder 25 packages NSIS (win) / dmg+zip (mac) / AppImage+deb (linux),
 x64 + arm64. esbuild 0.28 bundles the plugin halves; `npm` drives this repo,
 `pnpm` the harness checkout. Node 22+.
 
 ```
-src/main/     Electron shell: boot/lifecycle, window, tray, server spawn,
-              shell updater, dialogs, safe mode, env scrub, proxy detection
+src/main/     Electron shell: boot/lifecycle, window, tray, desktop-host
+              transport (`dsh-app://` + pipes), host lifecycle, shell updater,
+              dialogs, safe mode, env scrub, proxy detection
 src/kernel/   Kernel runtime manager: lifecycle, manifest I/O, integrity,
               version/artifact sources, split layers (`layers.ts`)
 src/shared/   Shared constants + types
@@ -110,8 +111,10 @@ for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run bu
   kernel-line bump run `probe-launch-folder.mjs` (workspace service names
   against the installed kernel); after touching a settings section run
   `probe-settings-nav.cjs --lang en-US [--sweep]` (nav order, rail scrolling,
-  glyphs, Han-character count of the active pane). `probe-drag.cjs` mirrors
-  `DESKTOP_CHROME_CSS` in `src/main/window.ts` — **keep the two in sync**.
+  glyphs, Han-character count of the active pane). The `probe-*.cjs` UI probes
+  boot their own `dsh web --patch` harness — they exercise the kernel UI, not
+  this shell. `probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
+  `src/main/window.ts` — **keep the two in sync**.
 - **A probe that runs inside Electron must pass `windowsHide: true` to every
   `spawn`** — otherwise each console child (the kernel, `taskkill`) pops a new
   terminal window onto the user's desktop.
@@ -129,6 +132,19 @@ followed line's dist-tag. Before bundling a **new kernel line**, bump every
 follow via their peer/dev deps), then verify with `npm run typecheck` and a
 smoke run of `<runtime>/app` → `node_modules/@deepseek-ai/dsh/lib/bin.js
 --version`.
+
+The runtime carries three things the shell needs besides the kernel CLI:
+`@deepseek-ai/dsh-web-frontend` (published per line — `latest` still points at
+0.0.1-rc.5 from an older line, so it is pinned to the shipped version), the
+private `@deepseek-ai/dsh-desktop-host` (never published, so `build-runtime.mjs`
+takes its source from the tag of the line it ships — a worktree of a git
+checkout, else a shallow clone of `DSH_APP_HOST_REPO_URL` — installs and builds
+that one app, and packs it; `DSH_APP_HOST_CHECKOUT` / `DSH_APP_HOST_PACKAGE`
+remain the escape hatches), and the host's own runtime dependency closure,
+derived from that tarball's manifest. `build-runtime.mjs` refuses a host whose
+version differs from the kernel it would ship beside, and resolves the packed
+host's `workspace:` dependency specs first — pnpm cannot install them outside a
+workspace, so `npm pack` output alone dies with `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`.
 
 Dependency-install discipline: root changes use plain `npm install`;
 plugin-local installs use `npm install --legacy-peer-deps` **inside the plugin
@@ -163,22 +179,37 @@ that tempts exactly that mistake.
   `text` for an unknown code. Matching on localized copy across the boundary
   once made the failure classifier read "tampered" as "network error".
 - **Desktop adaptation stays shell-side**: inject via `executeJavaScript`,
-  stylesheets, and `--patch` overlays only. Never modify harness source. Three
-  shapes: an injected script (chrome sync, cards, splash), a **page global the
-  shell calls** (`window.__dshAppOpenWorkspace`, see `src/main/workspace-launch.ts`),
-  and the **desktop bridge** (`src/main/desktop-bridge.ts`) for actions that
-  return a value. All three answer status tokens, never copy.
+  stylesheets, and profile patch rows only. Never modify harness source. Two
+  shapes in use: an injected script (chrome sync, cards, splash), and a **page
+  global the shell calls** (`window.__dshAppOpenWorkspace`, see
+  `src/main/workspace-launch.ts`). All of them answer status tokens, never copy.
 - **No native browser dialogs in client UI**: never `window.alert` /
   `confirm` / `prompt`. Use the in-app modal idiom (mask + centered card,
   Esc/mask = cancel, Enter = primary); `src/main/in-frame-dialog.ts` is the
   reference, `plugins/plugin-mcp/src/client/confirm-dialog.tsx` the React port.
 - **Security invariants** (full list in `docs/ARCHITECTURE.md`):
+  - **The app binds no port.** The kernel runs as a child process whose web
+    surface travels over fd3/fd4 byte pipes (`src/main/desktop-host.ts`), and the
+    window loads `dsh-app://app/index.html` — a scheme that must be registered
+    as privileged **before** `app.ready` and served only by forwarding to that
+    child (every other host in the scheme → 404, no host → 503).
   - Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, and
-    **no preload** for the remote-origin dsh UI.
-  - Bind `127.0.0.1` only; confine navigation to the local server origin (host
-    **and** port), everything else → `shell.openExternal` (http/https only).
-  - Plugin `/api` routes need a same-origin check **plus** a loopback Host
-    fence (see `plugins/plugin-sidebar/src/trust-fence.ts`).
+    **no preload** for the dsh-app UI.
+  - Confine navigation to `dsh-app://app` (the splash's `file:` document is the
+    shell's own); everything else → `shell.openExternal` (http/https only).
+  - **An app-origin document never goes into a sandbox frame.** The shell's
+    action route trusts the top frame's stamped initiator alone
+    (`src/main/shell-actions.ts`), and a sandboxed iframe reports the app's URL
+    while running in an opaque origin — so never hand a document served from
+    `dsh-app://app` to a frame.
+  - Plugin `/api` routes are fenced by the Connection carrier (Host/Origin
+    check **plus** browser authentication before a handler runs); a suite route
+    carries no fence of its own. A suite plugin's host half registers with
+    `ctx.connection.fetch.register(...)` and answers
+    `/api/plugins/dsh-app/<plugin>/<name>` — no `@` in a path segment,
+    GET/HEAD/POST only. The host keeps its `webserver` row disabled, so a
+    plugin that injects `webServer` never activates and a stale
+    `/plugins/@dsh-app/…/api` URL 404s.
   - Kernel downloads are sha512-verified before activation, with metadata from
     the official host first so mirrors cannot swap content.
   - Never hardcode secrets. Keys go through dsh's credential store; plugin keys
@@ -197,6 +228,32 @@ that tempts exactly that mistake.
 - **Gate commands must run bare — never behind a pipe.** `npm run typecheck 2>&1
   | tail -2 && git commit` commits even when typecheck fails, because `&&` sees
   `tail`'s exit code. Run the gate, check its result, then commit.
+- **`fs.rmSync(dir, { recursive: true })` follows a directory junction** — under
+  Electron's Node (44.4.1 / Node 24.21; the async `fs.rm` does not). Measured: a
+  scratch home whose `profiles/node_modules` held junctions into an extracted
+  runtime, removed with `rmSync`, emptied that runtime's own package
+  directories. So a profile must never hold a link that NAMES the runtime tree:
+  the 0.1.5 line's kernel tree is mirrored into the profile as HARDLINKS
+  (`suite-profile.ts`, `mirrorRuntimeIntoProfile`) for exactly that reason, and
+  any scratch/home cleanup of a profile-like directory uses a link-safe walker
+  (`scratch/safe-rm.mjs`). The junction shape was tried first and rejected after
+  reproducing the wipe twice.
+- **The host child runs a real Node, never Electron's own.** The profile
+  resolver loads `node-addon-require-builtin`, whose fingerprint table names
+  Electron versions exactly — 44.4.1 is not in it, so an `ELECTRON_RUN_AS_NODE`
+  child dies with `unsupported Electron runtime fingerprint` before composing
+  anything. Production uses the runtime's bundled `node/`, dev the machine's own
+  (`DSH_APP_NODE_BINARY`); `src/main/desktop-host.ts` only sets
+  `ELECTRON_RUN_AS_NODE` when the executable really is Electron.
+- **A suite plugin must be linked into the BOOTED PROFILE's
+  `node_modules/@dsh-app`.** The host installs the harness resolver in enforcing
+  mode; for a bare specifier it collects candidates from the profile's own
+  `node_modules` walk and stops at the shared fallback position, which resolves
+  only through the installation closure table. The shared
+  `$DSH_HOME/profiles/node_modules` link alone yields
+  `17 entries did not activate` and a silently vanilla UI — `brand-suite.ts`
+  writes both scopes, and a pnpm install in the profile may prune the
+  profile-local one, which is why it is re-linked on every start.
 - **No backticks inside template-literal CSS/scripts.** `DESKTOP_CHROME_CSS`
   and the injected scripts are backtick literals; a backtick in an embedded
   comment silently terminates the string and only surfaces as a syntax error at
@@ -252,12 +309,16 @@ against the code; the module beside each holds the full detail.
 |---|---|---|
 | `WEB_PROVIDER_AMBIGUOUS` | several usable search providers registered and none pinned | `ctx.web` seam |
 | `WEB_PROVIDER_CONFIGURED_MISSING` | the pinned provider is not registered (e.g. the upstream row is disabled) | `ctx.web` seam |
-| 90 s (`SERVER_HEALTH_TIMEOUT_MS`) | the server must answer HTTP 200 within this before boot is judged failed | `server.ts` |
-| 8 s (`SERVER_SHUTDOWN_GRACE_MS`) | SIGTERM → SIGKILL grace, then `taskkill /T` on Windows | `server.ts` |
-| `1000 ms × attempt` | crash-restart delay; the counter resets **only** on a ready server, so persistent failure terminates instead of looping | `index.ts` |
+| 90 s (`HOST_READY_TIMEOUT_MS`) | the host child must report `{type:'ready'}` on the IPC channel within this before boot is judged failed | `server.ts`, constants |
+| 8 s (`HOST_SHUTDOWN_GRACE_MS`) then 5 s per signal (`HOST_SIGNAL_GRACE_MS`) | `shutdown` message + closed request pipe → SIGTERM → `taskkill /T` on Windows | `desktop-host.ts` |
+| `unsupported Electron runtime fingerprint` | the host was started with Electron's own Node; the profile resolver's addon refuses it — the child runs the runtime's bundled Node | `index.ts` (`hostRuntime`) |
+| `unsupported internal option "<dir>"` | the child was handed an argv shape it does not know: hosts up to 0.1.5 take `[entry, projectDir]`, 0.1.6 and later `[entry, runtimeDir, projectDir]`. The shell maps the shape from the host package's `version` and, for an unmapped one, starts on the current shape and falls back once | `desktop-host.ts` (`hostArgShape`, `DshHost.start`) |
+| `installed package "@deepseek-ai/dsh" has no manifest` / `profile bundle … resolved outside the desktop profile` | a host up to 0.1.5 resolves the profile's kernel packages out of the PROFILE's own `node_modules`, not out of the runtime it was handed. The shell mirrors the runtime's `node_modules` into the profile (hardlinks, `mirrored <n> kernel entries` in the log) for that line only, and drops it again when the app moves to 0.1.6+ | `desktop-host.ts` (`hostProfileAnchor`), `suite-profile.ts` (`mirrorRuntimeIntoProfile`) |
+| `N entries did not activate` | the host's enforcing profile resolver could not find a row's package: a suite plugin must be linked into the **booted profile's** `node_modules/@dsh-app`, not only the shared fallback | `brand-suite.ts` |
+| `1000 ms × attempt` | crash-restart delay; the counter resets **only** on a ready host, so persistent failure terminates instead of looping | `index.ts` |
 | 6 h (`KERNEL_CHECK_INTERVAL_MS`) | background kernel check — never at startup, never auto-installing | `index.ts` |
 | 10 s after boot | the one automatic shell-update check; afterwards tray only | `index.ts` |
-| 2000 chars / 10 files (`MAX_LOG_LINE` / `MAX_KEPT_LOG_FILES`) | child-log redaction cap and pruning | `server.ts` |
+| 2000 chars / 10 files (`MAX_LOG_LINE` / `MAX_KEPT_LOG_FILES`) | child-log redaction cap and pruning | `redact.ts` / `server.ts` |
 | ~30 min to hours | npm dist-tag goes live **before** the runtime matrix finishes uploading, so "安装包尚未发布" in that window is expected, not a bug | CI |
 | `scripts/publish-modelscope.mjs`, `scripts/diagnose-modelscope-upload.mjs` | manual mirror drills — CI itself uses the Python SDK in `.github/scripts/` | `scripts/` |
 
@@ -267,6 +328,12 @@ against the code; the module beside each holds the full detail.
 |---|---|---|
 | `DSH_APP_DEV=1` | `index.ts` | Dev mode: local harness checkout instead of a downloaded kernel |
 | `DSH_APP_DEV_RUNTIME` | `index.ts` | Explicit dev checkout path (else `../deepseek-harness`) |
+| `DSH_APP_NODE_BINARY` | `index.ts` | Dev-mode Node that runs the host child (else `node` from PATH); production uses the runtime's bundled `node/node[.exe]` |
+| `DSH_APP_HOST_CHECKOUT` | `build-runtime.mjs` | Already-built checkout to pack the private `@deepseek-ai/dsh-desktop-host` from, instead of taking the source from the tag; its `apps/desktop-host/lib/index.js` is required |
+| `DSH_APP_HOST_PACKAGE` | `build-runtime.mjs` | Prebuilt host tarball instead of building one (pack it with `pnpm pack`, which resolves `workspace:` specs) |
+| `DSH_APP_HOST_REPO` | `build-runtime.mjs` | Git checkout the host's source is taken from at `dsh-v<DSH_VERSION>` (else a sibling `../deepseek-harness` / `../../deepseek-harness`) |
+| `DSH_APP_HOST_REPO_URL` | `build-runtime.mjs` | Clone URL used only when no local checkout exists (default upstream); empty disables cloning |
+| `DSH_APP_HOST_TAG` | `build-runtime.mjs` | Tag the host's source is taken from (default `dsh-v<DSH_VERSION>`) |
 | `DSH_APP_CHANNEL` | `index.ts`, `kernel-line.mjs`, `build-runtime.mjs` | Kernel line: `alpha` → alpha tag, `beta` → `next`, else stable. At runtime it selects the update channel; at build time it is only the explicit cross-line override (skips the spec assertion and warns) |
 | `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `shared/constants.ts` | GitHub owner/repo hosting runtime artifacts |
 | `DSH_APP_SUITE_VERSION` | `kernel-line.mjs`, `sources/dev.ts` | Overrides the content-hash suite version in the runtime manifest |
@@ -414,29 +481,44 @@ hand-written HTML.
 
 ## 8. Known TODOs / scaffolds (do not assume finished)
 
-- `plugin-brand`: **desktop bridge remotes are wired** — trust-fenced host routes
-  (`/plugins/@dsh-app/plugin-brand/api`) forward open-in-folder / notify /
-  save-text-as / pick-directory / open-logs to the shell's loopback bridge, plus
-  an availability probe and the shell's log tail. Still scaffolds: the `brand`
-  settings namespace and the app-info service.
+- **Desktop actions ride the shell's own protocol route.** They are served by
+  `src/main/shell-actions.ts` under `dsh-app://app/__dsh-app/action/<name>`
+  (open-logs / notify / save-text-as), inside the origin the window is already
+  loaded from — so no port is bound, and the kernel child is not involved in the
+  call. `plugin-brand`'s three routes for those actions cannot forward to it
+  (a Node child has no `dsh-app` scheme), so they validate the payload and hand
+  the CLIENT the coordinates; `plugin-client-ui`'s diagnostics page makes the
+  call. The retired `desktop-bridge.ts` (loopback + bearer token) is gone with
+  its `DSH_APP_BRIDGE_*` variables. Fence: cross-origin reach is refused by
+  Chromium itself (the scheme is deliberately not CORS-enabled), and the shell
+  stamps every request below that prefix via
+  `session.webRequest.onBeforeSendHeaders` with the TOP frame's URL, the
+  `webContents` id and a per-process secret — a subframe is left unstamped and
+  refused. `Origin` and `Referer` never reach a `protocol.handle` request, so
+  `webRequest` is the only witness of the initiator: `origin`/`sec-fetch-site` are
+  read by nothing, and a worker's request never reaches the hook at all (measured
+  — the page's own headers arrive untouched, which is what the secret closes).
+  Only an `application/json` body is read (see the module header).
+- `plugin-brand`: host routes (`/api/plugins/dsh-app/plugin-brand`) perform
+  open-in-folder and pick-directory through the KERNEL's own seams
+  (`sessionController`, `directoryPicker`), answer coordinates for the three
+  shell actions, and serve the availability probe, the log tail and the
+  diagnostics facts. Scaffolds: the `brand` settings namespace and the app-info
+  service.
 - `plugin-client-ui`: registers **two** `settings.section`s — advanced Models
-  (order 11) and 诊断/Diagnostics (order 22: bridge status, log directory, kernel
-  log tail) — plus a nav-icon patch and the whale background. The
-  reminder-summary / trajectory-export / model-badge slots mentioned in older
-  notes are **gone from the code** — verify slot ids against the running UI
-  before adding anything.
+  (order 11) and 诊断/Diagnostics (order 22: desktop-feature status, log
+  directory, kernel log tail) — plus a nav-icon patch and the whale background.
+  Its diagnostics page is the caller of the shell's action route. Slot ids come
+  and go — verify them against the running UI before adding anything.
 - `plugin-sidebar`: no automated test suite for its client components.
 - CI runs only two of the thirteen plugin suites (see §3).
 - First-run UX: kernel download progress is wired; pause/resume and checksum
   display are not (cancellation is a `TODO` in `KernelManager.download`).
-- Split-layer kernel path: `KernelManager.installFromLocalLayers` +
-  `src/kernel/layers.ts` are implemented and tested, but nothing calls them yet —
-  the boot path still installs the single tgz, and no CI job uploads layer
-  assets. `current.json.layers` is written only by that path.
 - `docs/ARCHITECTURE.md` lags the code: its plugin roster says ten entries
-  (there are seventeen) and it predates the safe-mode / proxy / websearch work.
+  (there are seventeen) and it does not cover the safe-mode / proxy / websearch
+  work.
 - **Pre-release gaps**: macOS signing/notarization and (optional) Windows
-  signing secrets must be supplied as CI secrets; `resources/icon.png` is still
-  a placeholder brand icon.
+  signing secrets must be supplied as CI secrets; `resources/icon.png` is a
+  placeholder brand icon.
 - Optional future: signed kernel manifests; rollback of `$DSH_HOME` settings on
   major-version upgrades.

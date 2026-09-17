@@ -127,7 +127,8 @@ MCP（Model Context Protocol）是给 agent 接入外部工具服务器的事实
 ### 3.3 数据流
 
 ```
-设置页 (client) ──POST/PUT/DELETE──> /plugins/@dsh-app/plugin-mcp/api/servers (host, fenced)
+设置页 (client) ──GET /servers，POST /server/{create,update,delete,import}──>
+        /api/plugins/dsh-app/plugin-mcp/*（host 路由，围栏由 Connection 载体统一施加）
                                         │ 校验（serverName 合法性、传输字段完整性、去重）
                                         ▼
                               $DSH_HOME/storages/dsh-app-plugin-mcp/servers.json
