@@ -17,11 +17,12 @@
  */
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, symlinkSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { removeTree } from './lib/remove-tree.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'dist', 'main', 'dsh-app.patch.yml')
@@ -399,15 +400,19 @@ async function main() {
         console.log(warn.slice(-15).join('\n'))
       }
     }
-    await rm(logDir, { recursive: true, force: true }).catch(() => undefined)
+    await removeTree(logDir).catch(() => undefined)
     // NEVER delete a home this probe did not create. `--real-home` points
     // dshHome at the user's actual ~/.dsh, and an unconditional rm here
     // deleted it once (2026-09-15) — unrecoverable, since rm bypasses the
     // recycle bin. The guard is on the DELETE, not just on the writes: the
     // writes were already fenced, which is exactly why the omission here was
     // easy to miss.
+    //
+    // The walker, not a plain recursive delete: this home holds the @dsh-app
+    // junctions built above, and a recursive delete that follows one empties the
+    // plugin package it points at (scripts/lib/remove-tree.mjs).
     if (ownsHome) {
-      await rm(dshHome, { recursive: true, force: true }).catch(() => undefined)
+      await removeTree(dshHome).catch(() => undefined)
     }
   }
 

@@ -40,6 +40,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
+import { removeTree } from './lib/remove-tree.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
@@ -761,10 +762,14 @@ async function main() {
     stopChild(child)
     if (logFd !== undefined) closeSync(logFd)
     // Wait for the kill to land BEFORE removing the tree: a detached timer
-    // would leak the temp dir whenever the process exits first (and Windows
-    // rmSync fails EBUSY while the child still holds the log files open).
+    // would leak the temp dir whenever the process exits first (and the delete
+    // fails EBUSY on Windows while the child still holds the log files open).
     await waitExit(child)
-    try { rmSync(home, { recursive: true, force: true }) } catch { /* best effort */ }
+    // The home is NOT a plain tree: it holds the @dsh-app junction links built
+    // above, pointing at the runtime (or the dev checkout). A sync recursive
+    // delete follows a junction and would empty those plugin packages — exactly
+    // the wipe this walker exists to prevent (scripts/lib/remove-tree.mjs).
+    try { await removeTree(home) } catch { /* best effort */ }
     if (args.mode === 'tgz' && args.extracted !== undefined) {
       rmSync(path.dirname(args.extracted.dir), { recursive: true, force: true })
     }

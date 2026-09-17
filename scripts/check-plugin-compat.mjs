@@ -24,6 +24,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { removeTree } from './lib/remove-tree.mjs'
 
 // 内核入口相对内核根目录的固定位置，与 runtime 产物布局一致
 const KERNEL_BIN = path.join('app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -293,7 +294,9 @@ async function main() {
     if (child && child.pid && child.exitCode === null && child.signalCode === null) killTree(child.pid)
     for (const dir of tempDirs) {
       try {
-        fs.rmSync(dir, { recursive: true, force: true })
+        // 临时 home / 解压树都可能被写入指向别处的链接（包管理器、之前的内核
+        // 版本都会），同步递归删除会穿过链接把目标清空，所以走 link-safe 走查
+        await removeTree(dir)
       } catch (err) {
         console.error(`警告: 临时目录清理失败 ${dir}: ${err?.message ?? err}`)
       }

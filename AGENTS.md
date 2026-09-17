@@ -228,16 +228,25 @@ that tempts exactly that mistake.
 - **Gate commands must run bare — never behind a pipe.** `npm run typecheck 2>&1
   | tail -2 && git commit` commits even when typecheck fails, because `&&` sees
   `tail`'s exit code. Run the gate, check its result, then commit.
-- **`fs.rmSync(dir, { recursive: true })` follows a directory junction** — under
-  Electron's Node (44.4.1 / Node 24.21; the async `fs.rm` does not). Measured: a
-  scratch home whose `profiles/node_modules` held junctions into an extracted
-  runtime, removed with `rmSync`, emptied that runtime's own package
+- **A delete of anything that can hold a link goes through
+  `scripts/lib/remove-tree.mjs` (`removeTree`) — never a sync recursive call.**
+  Reason: `fs.rmSync(dir, { recursive: true })` follows a directory junction
+  under Electron's Node (44.4.1 / Node 24.21; the async `fs.rm` does not, and
+  plain Node 24.18.0 does not — the app itself runs the Electron runtime).
+  Measured: a scratch home whose `profiles/node_modules` held junctions into an
+  extracted runtime, removed with `rmSync`, emptied that runtime's own package
   directories. So a profile must never hold a link that NAMES the runtime tree:
   the 0.1.5 line's kernel tree is mirrored into the profile as HARDLINKS
   (`suite-profile.ts`, `mirrorRuntimeIntoProfile`) for exactly that reason, and
-  any scratch/home cleanup of a profile-like directory uses a link-safe walker
-  (`scratch/safe-rm.mjs`). The junction shape was tried first and rejected after
-  reproducing the wipe twice.
+  any scratch/home cleanup of a profile-like directory uses the walker. The
+  junction shape was tried first and rejected after reproducing the wipe twice.
+  `test/recursive-delete-guard.test.mjs` keeps this honest: every sync recursive
+  delete in `src/`, `scripts/`, `test/` and `plugins/` must be on its audited
+  list (count + reason), and the walker's own regression and its contrast run
+  beside it. Plugin source itself holds none: a plugin that deletes its own
+  store tree carries a private copy of the walker
+  (`plugins/plugin-memory/src/remove-tree.ts`, `plugins/plugin-presets/src/remove-tree.ts`)
+  and deletes asynchronously through it.
 - **The host child runs a real Node, never Electron's own.** The profile
   resolver loads `node-addon-require-builtin`, whose fingerprint table names
   Electron versions exactly — 44.4.1 is not in it, so an `ELECTRON_RUN_AS_NODE`
