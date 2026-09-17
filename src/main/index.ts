@@ -1,18 +1,18 @@
-import { app, BrowserWindow, Notification, dialog, shell } from 'electron'
-import net from 'node:net'
+import { app, BrowserWindow, dialog, Notification, session, shell } from 'electron'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
 import { decideBundledAdoption, type BundledManifestFields } from '../kernel/bundled'
 import { DshServer, resolveLogDir } from './server'
+import { APP_URL, desktopHostEntry, hostPackageVersion, hostProfileAnchor, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
+import { createShellActionHandler, installShellActionStamps, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
 import { isSafeModeEnabled, setSafeMode } from './safe-mode'
 import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
-import { detectLocalProxy, isProxyAlive, withDetectedProxy } from './proxy-detect'
+import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from './proxy-detect'
 import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
-import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded, clearStaleAuthCookies, updateServerOrigin } from './window'
+import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
-import { startDesktopBridge, type DesktopBridge } from './desktop-bridge'
 import {
   deliverWorkspaceLaunch,
   queueWorkspaceArg,
@@ -26,12 +26,16 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
-import { KERNEL_CHECK_INTERVAL_MS, DEFAULT_HTTP_HOST, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
-import { activeBootProfile, startSuiteProfileMigration } from './suite-profile'
+import { KERNEL_CHECK_INTERVAL_MS, LEGACY_PROFILE, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
+import { dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
 import type { KernelChannel, KernelStatusPayload } from '../shared/types'
 
 // ---------------------------------------------------------------- config
+
+// Claim the private scheme before Electron is ready — the harness UI is loaded
+// from it, which is only allowed for a scheme registered as privileged up front.
+registerDshAppScheme()
 
 const isDev = process.env.DSH_APP_DEV === '1'
 const devCheckoutDir =
@@ -65,17 +69,6 @@ let injectedProxyUrl: string | undefined
 let proxyWatchdog: NodeJS.Timeout | undefined
 
 // --------------------------------------------------------------- helpers
-
-function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer()
-    srv.on('error', reject)
-    srv.listen(0, '127.0.0.1', () => {
-      const address = srv.address() as net.AddressInfo
-      srv.close(() => resolve(address.port))
-    })
-  })
-}
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -187,56 +180,103 @@ async function offerStartupRecovery(message: string, detail?: string): Promise<v
   }
 }
 
-/** The desktop bridge; started lazily on the first server start, one per run. */
-let desktopBridge: DesktopBridge | null = null
+/**
+ * Where the desktop host lives for the active kernel, and what runs it.
+ *
+ * Node, not Electron: the host's profile resolution loads the
+ * `node-addon-require-builtin` native addon, which only accepts runtime
+ * fingerprints it knows — and Electron 44.4.1's V8 build is not one of them
+ * (the addon names 44.0.0 exactly), so an Electron-as-node child dies with
+ * "unsupported Electron runtime fingerprint" before it composes anything. Every
+ * runtime ships the Node it was built and tested with, which is what the child
+ * runs on; the upstream desktop makes the same choice when the runtime's Node
+ * is available.
+ *
+ * Production: the installed runtime's own `app/` tree — the directory the
+ * kernel manager activated, whose node_modules carries `@deepseek-ai/dsh`, the
+ * web frontend and the host package itself.
+ *
+ * Which line that host belongs to decides one more thing about the start, read
+ * off its version ({@link hostProfileAnchor}): a 0.1.5-and-earlier host anchors
+ * the profile on the profile's OWN node_modules, so the shell mirrors this
+ * runtime tree into it ({@link mirrorRuntimeIntoProfile}) — inside the profile,
+ * as hardlinks, which is why no `--allow-linked-profile` permission is needed; a
+ * 0.1.6-and-later one anchors on this runtime tree and needs neither.
+ *
+ * Dev: a checkout resolves its packages per app instead of into one installed
+ * tree, so the runtime is the desktop-host app inside the checkout — the one
+ * directory whose node_modules holds both `@deepseek-ai/dsh` (apps/cli) and
+ * `@deepseek-ai/dsh-web-frontend`. `allowLinkedProfile` is what lets the host
+ * compose a profile whose bundles resolve outside that tree rather than
+ * refusing it as a foreign package. The checkout ships no Node binary, so the
+ * machine's own runs the host (`DSH_APP_NODE_BINARY` overrides it).
+ *
+ * @returns the executable, runtime tree, host entry and permissions to start
+ *   with, plus where that host line anchors the profile.
+ * @throws when the pieces are not there — the message is the actionable one the
+ *   failure card shows.
+ */
+function hostRuntime(): {
+  executable: string
+  runtimeDir: string
+  entry: string
+  allowLinkedProfile: boolean
+  /** Undefined when the host package's version maps to nothing (see hostProfileAnchor). */
+  profileAnchor: HostProfileAnchor | undefined
+} {
+  const nodeBinary = process.platform === 'win32' ? 'node.exe' : 'node'
+  if (!isDev) {
+    const dir = kernel.getCurrentDir()
+    const executable = path.join(dir, 'node', nodeBinary)
+    if (!existsSync(executable)) throw new Error(t('hostFailure.nodeMissing', { path: executable }))
+    const runtimeDir = path.join(dir, 'app')
+    const profileAnchor = hostProfileAnchor(hostPackageVersion(runtimeDir))
+    return {
+      executable,
+      runtimeDir,
+      entry: desktopHostEntry(runtimeDir),
+      allowLinkedProfile: false,
+      profileAnchor,
+    }
+  }
+  const checkout = devCheckoutDir
+  if (checkout === undefined) throw new Error(t('hostFailure.devHostMissing', { checkout: '../deepseek-harness' }))
+  const executable = (process.env.DSH_APP_NODE_BINARY ?? '').trim() || 'node'
+  const appDir = path.join(checkout, 'apps', 'desktop-host')
+  if (existsSync(path.join(appDir, 'lib', 'index.js'))) {
+    return {
+      executable,
+      runtimeDir: appDir,
+      entry: path.join(appDir, 'lib', 'index.js'),
+      allowLinkedProfile: true,
+      profileAnchor: hostProfileAnchor(hostPackageVersion(appDir)),
+    }
+  }
+  // A prepared checkout root looks like an installed tree (node_modules with
+  // the host package in it); use it when the app was never built in place.
+  const entry = desktopHostEntry(checkout)
+  if (existsSync(entry)) {
+    return {
+      executable,
+      runtimeDir: checkout,
+      entry,
+      allowLinkedProfile: true,
+      profileAnchor: hostProfileAnchor(hostPackageVersion(checkout)),
+    }
+  }
+  throw new Error(t('hostFailure.devHostMissing', { checkout }))
+}
 
 /**
- * Start the desktop bridge: the channel kernel-side plugins use to ask the shell
- * for NATIVE actions (reveal a folder, notify, save-as, pick a directory). Those
- * capabilities exist only in this process, while the plugins run in the kernel
- * child — see desktop-bridge.ts for the fences that keep a listening socket on
- * loopback from being a way in.
- *
- * A bridge that cannot bind is deliberately not a boot failure: the environment
- * variables stay unset, the plugin's actions report the bridge as unsupported,
- * and every
- * other behaviour is exactly as before.
+ * The desktop action seam (shell-actions.ts) is the ONLY channel through which
+ * a page in the harness UI can make the shell do something native — reveal the
+ * log folder, raise a notification, save a text file. It rides the `dsh-app`
+ * scheme's own origin instead of a loopback listener, which is what this phase
+ * of the app is built on: no port is ever bound, and the kernel child is not
+ * involved in the call at all. `installDshAppProtocol` hands it every request
+ * below its prefix before anything is forwarded to the host, so it keeps working
+ * while the kernel is down.
  */
-async function ensureDesktopBridge(): Promise<void> {
-  if (desktopBridge !== null) return
-  desktopBridge = await startDesktopBridge({
-    openInFolder: async (target) => {
-      const failure = await shell.openPath(target)
-      if (failure !== '') throw new Error(t('bridge.openFailed', { detail: failure }))
-    },
-    notify: async (title, body) => {
-      new Notification({ title, body }).show()
-    },
-    saveTextAs: async (name, content) => {
-      const result = await dialog.showSaveDialog({ defaultPath: name })
-      if (result.canceled || result.filePath === undefined) return null
-      await writeFile(result.filePath, content, 'utf8')
-      return result.filePath
-    },
-    pickDirectory: async () => {
-      const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
-      return result.canceled ? null : (result.filePaths[0] ?? null)
-    },
-    openLogs: async () => {
-      try {
-        mkdirSync(resolveLogDir(), { recursive: true })
-      } catch {
-        // Best effort; openPath below reports its own failure.
-      }
-      const failure = await shell.openPath(resolveLogDir())
-      if (failure !== '') throw new Error(t('bridge.openLogsFailed', { detail: failure }))
-    },
-  })
-  // The URL is loopback and safe to log; the token never is.
-  logKernel(desktopBridge === null
-    ? '[bridge] desktop bridge unavailable; native actions will report unsupported'
-    : `[bridge] desktop bridge listening on ${desktopBridge.url}`)
-}
 
 // ------------------------------------------------------ server diagnostics
 
@@ -251,23 +291,23 @@ function recordServerLog(line: string): void {
   if (serverLogRing.length > SERVER_LOG_RING_MAX) serverLogRing.shift()
 }
 
-type ServerFailureKind = 'plugin-tree' | 'port' | 'module' | 'other'
+type ServerFailureKind = 'plugin-tree' | 'module' | 'other'
 
-/** The shell's own command echo (emitted through the same onLog channel). */
-const SPAWN_ECHO_LOG = /^spawn /
+/** The shell's own echo of how the host was started (same onLog channel). */
+const HOST_ECHO_LOG = /^dsh host: /
 
 /**
- * Classify a startup failure from the server's recent output lines. The
- * command echo is excluded: it always contains "--patch" and would poison
- * the patch-conflict match on every failure. Prescribed match order: a
- * plugin-tree conflict is the one kind with a first-class recovery action
- * (safe mode), so it outranks the more specific but action-less signatures.
+ * Classify a startup failure from the host's recent output lines. The shell's
+ * own echo is excluded: it names the entry, the runtime and the profile, and a
+ * path containing "patch" would poison the patch-conflict match on every
+ * failure. Prescribed match order: a plugin-tree conflict is the one kind with
+ * a first-class recovery action (safe mode), so it outranks the more specific
+ * but action-less signatures.
  */
 function classifyRecentServerFailure(): ServerFailureKind {
-  const lines = serverLogRing.filter((line) => !SPAWN_ECHO_LOG.test(line))
-  if (lines.some((line) => /fail the whole plugin tree|patch|insert|invalid config/i.test(line))) return 'plugin-tree'
-  if (lines.some((line) => /EADDRINUSE/i.test(line))) return 'port'
-  if (lines.some((line) => /Cannot find module/i.test(line))) return 'module'
+  const lines = serverLogRing.filter((line) => !HOST_ECHO_LOG.test(line))
+  if (lines.some((line) => /fail the whole plugin tree|patch|insert|invalid config|duplicate/i.test(line))) return 'plugin-tree'
+  if (lines.some((line) => /Cannot find module|ERR_MODULE_NOT_FOUND/i.test(line))) return 'module'
   return 'other'
 }
 
@@ -279,8 +319,6 @@ function serverFailureAdvice(kind: ServerFailureKind): string {
   switch (kind) {
     case 'plugin-tree':
       return t('serverFailure.pluginTree')
-    case 'port':
-      return t('serverFailure.port')
     case 'module':
       return t('serverFailure.module')
     default:
@@ -504,26 +542,87 @@ function attachMainWindowHandlers(win: BrowserWindow): void {
   })
 }
 
+/**
+ * One log line for the profile-seeding outcome. Log-only (never rendered), so
+ * it stays out of the locale tables and is written in English.
+ */
+function suiteProfileLogLine(outcome: MigrationOutcome): string {
+  if (outcome.status === 'failed') {
+    return `[suite-profile] could not seed "${SUITE_PROFILE}": ${outcome.detail ?? 'unknown error'}`
+  }
+  if (outcome.status === 'seeded') {
+    return `[suite-profile] "${SUITE_PROFILE}" profile created${outcome.carriedPatch ? ' (your patch layer carried over)' : ''}`
+      + `; the ${String(outcome.legacyPackages)} package(s) declared on "${LEGACY_PROFILE}" stay there — reinstall them from the plugin market`
+  }
+  return `[suite-profile] "${SUITE_PROFILE}" profile already present`
+}
+
+/**
+ * One log line for the profile-as-installed-tree step. Log-only (English), and
+ * it names the version that asked for the work: without that, a profile holding
+ * a copy of the kernel reads as something a user should be puzzled by.
+ */
+function kernelTreeLogLine(outcome: KernelTreeOutcome, version: string | undefined): string {
+  const host = version === undefined ? 'the host' : `host ${version}`
+  if (outcome.status === 'failed') {
+    return `[suite-profile] ${host} resolves the profile as an installed tree, but its kernel packages could not be mirrored into the profile: ${outcome.detail ?? 'unknown error'}; the host start reports the consequence`
+  }
+  if (outcome.status === 'already') {
+    return `[suite-profile] ${host} anchors the profile on its own node_modules (${String(outcome.entries)} kernel entries present, unchanged)`
+  }
+  return `[suite-profile] ${host} anchors the profile on its own node_modules; mirrored ${String(outcome.entries)} kernel entries (${String(outcome.files)} files) into it`
+}
+
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
   // Ring reset: failure classification must reflect THIS startup attempt only.
   serverLogRing.length = 0
   broadcastStatus({ phase: 'starting', message: t('status.startingServer'), progress: null, step: 4 })
-  const port = await findFreePort()
-  // Brand suite wiring: profile-dir module links + the loader overlay that
-  // inserts the brand rows. An older kernel without the suite plugins boots
-  // vanilla (empty array). Safe mode skips the suite overlay entirely — the
-  // kernel boots the official bundle plus the user's own profile layers only.
-  const overlays = safeModeActive
-    ? []
-    : await prepareBrandSuite(isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir()))
-  // Profile decision + one-time migration (suite-profile.ts): the suite boots
-  // its own profile once it is ready, the shared `web` one until then. The
-  // migration copies that profile across in the background — this boot is
-  // unaffected, and a failure just means we boot `web` again next time.
-  const spec = kernel.getServerSpec()
-  const profile = activeBootProfile()
-  if (profile !== SUITE_PROFILE) startSuiteProfileMigration((line) => logKernel(line))
+  // The profile has to exist before the host composes it, and the suite rows
+  // are part of that profile's own patch layer now (the host takes no --patch
+  // argument). Seeding an absent profile happens here, in front of the start:
+  // the host refuses to boot without a manifest, so "not ready yet" is not a
+  // state this boot can fall back from.
+  const profile = await ensureSuiteProfile()
+  if (profile.outcome !== null) logKernel(suiteProfileLogLine(profile.outcome))
+  if (!profile.ready) logKernel('[suite-profile] the suite profile could not be seeded; the host start reports the reason below')
+  // Brand suite wiring: profile-dir module links, and the suite rows plus the
+  // user's home layer written into the profile's patch file. An older kernel
+  // without the suite plugins boots vanilla. Safe mode drops the shipped rows
+  // and keeps only what is the user's own.
+  const suiteRows = await prepareBrandSuite(
+    isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir()),
+    { profileDir: profile.dir, suite: !safeModeActive },
+  )
+  if (!suiteRows) logKernel('[brand-suite] booting without the suite rows')
+  let host: ReturnType<typeof hostRuntime>
+  try {
+    host = hostRuntime()
+  } catch (err) {
+    await handleServerDown(t('status.serverStartFailed', { detail: (err as Error).message }))
+    return
+  }
+  // The host line that reads the profile as an INSTALLED tree (0.1.5 and
+  // earlier) resolves `@deepseek-ai/dsh` and every bundle out of the profile's
+  // own node_modules, so that directory is given the runtime's kernel tree
+  // before the start — the seeding above gives a manifest, and this gives the
+  // packages the anchor resolves against, as files INSIDE the profile, so no
+  // link of the profile's ever names the runtime tree. Idempotent, and
+  // deliberately not fatal: a failure here leaves the host to fail with its own
+  // message, which is what the failure card reports. A 0.1.6-and-later host
+  // anchors on the runtime tree itself: it needs no mirror, and a leftover one
+  // from an earlier line would shadow the plugins this kernel ships.
+  if (host.profileAnchor === 'profile') {
+    const outcome = await mirrorRuntimeIntoProfile(host.runtimeDir, profile.dir)
+    logKernel(kernelTreeLogLine(outcome, hostPackageVersion(host.runtimeDir)))
+  } else {
+    const dropped = await dropRuntimeMirror(profile.dir)
+    if (dropped.status === 'removed') {
+      logKernel(`[suite-profile] dropped the kernel mirror of an earlier line (${String(dropped.entries)} entries)`)
+    } else if (dropped.status === 'failed') {
+      logKernel(`[suite-profile] the kernel mirror of an earlier line could not be dropped: ${dropped.detail ?? 'unknown error'}`)
+    }
+  }
   // Environment scrub (opt-in): a missing config removes nothing, so the
   // default boot spawns the kernel with an unchanged inherited env. Names
   // are logged, never values — the removed list cannot leak credentials.
@@ -540,20 +639,14 @@ async function startServerAndOpenWindow(): Promise<void> {
   // working: with the VPN off, injecting a dead proxy URL would send every
   // request to a closed port instead.
   //
-  // Started HERE but awaited below, next to the spawn: the probe walks eight
+  // Started HERE but awaited below, next to the start: the probe walks eight
   // ports on two hosts and answers in tens of milliseconds only when a proxy
   // is listening — with none running every port waits out its connect. On the
-  // critical path that delay landed between the splash and the spawn, where
+  // critical path that delay landed between the splash and the start, where
   // the user is already watching. Below, it overlaps the suite wiring and the
   // env scrub, which are themselves asynchronous file work.
   const proxyProbe = detectLocalProxy()
-  // Native actions (reveal a folder, notify, save-as, pick a directory) live in
-  // this process, and the kernel child reaches them through the bridge's
-  // endpoint + token. Started here so a server that crashed and restarted finds
-  // a bridge already listening; a bridge that could not bind simply contributes
-  // no variables and the plugin reports the bridge as unsupported.
-  await ensureDesktopBridge()
-  // The log dir rides along because the diagnostics page reads the server log
+  // The log dir rides along because the diagnostics page reads the host log
   // tail through the plugin, and the child cannot derive that path: the default
   // is this app's userData, which only the shell knows. The versions ride along
   // for the same reason — the diagnostics EXPORT names which shell built which
@@ -576,44 +669,64 @@ async function startServerAndOpenWindow(): Promise<void> {
 
   const activeKernel = kernel.getCurrent()?.manifest
   const shellVersion = app.getVersion()
+  // The profile that was actually booted, for the plugins that install into it
+  // (the market, preset export) — they must never install into `web` while the
+  // app runs another profile.
+  // Absolute path of the kernel CLI (see DSH_APP_DSH_BIN below). Dev runs the
+  // checkout's built CLI; a packaged install has it inside the active kernel.
+  const dshBin = ((): string => {
+    if (isDev && devCheckoutDir !== undefined) return path.join(devCheckoutDir, 'apps', 'cli', 'lib', 'bin.js')
+    try {
+      return path.join(kernel.getCurrentDir(), 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    } catch {
+      return ''
+    }
+  })()
+
   const kernelEnv = {
-    ...(desktopBridge === null ? proxyEnv : { ...proxyEnv, ...desktopBridge.env }),
+    ...proxyEnv,
+    DSH_APP_DESKTOP: '1',
+    DSH_APP_PROFILE: SUITE_PROFILE,
+    DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE,
+    // Absolute path of the kernel CLI the suite's own installers drive
+    // (`dsh plugin --profile <p> add/remove …`). They resolve it from their own
+    // location otherwise, which works in a packaged runtime (the CLI is a
+    // sibling in `app/node_modules`) but not in dev, where the plugins live in
+    // this repo and the CLI in the harness checkout.
+    ...(existsSync(dshBin) ? { DSH_APP_DSH_BIN: dshBin } : {}),
     DSH_APP_LOG_DIR: resolveLogDir(),
+    // Tells the kernel-side suite that this shell serves the desktop action
+    // route, and where: the plugin hands the page that base URL, and a shell
+    // that does not set it reports "no desktop actions" instead of a dead link.
+    [SHELL_ACTIONS_ENV]: SHELL_ACTIONS_BASE,
     ...(shellVersion === '' ? {} : { DSH_APP_SHELL_VERSION: shellVersion }),
     ...(activeKernel === undefined || activeKernel.dshVersion === ''
       ? {}
       : { DSH_APP_KERNEL_VERSION: activeKernel.dshVersion, DSH_APP_KERNEL_CHANNEL: activeKernel.channel }),
   }
   try {
-    await server.start(spec, port, DEFAULT_HTTP_HOST, overlays, kernelEnv, profile)
+    // `profileAnchor` is the shell's own reading of the host line; only the
+    // transport's own options travel to the start.
+    const { profileAnchor: _anchor, ...hostOptions } = host
+    await server.start({ ...hostOptions, projectDir: profile.dir, env: kernelEnv, proxyBootstrap: hasProxyEnv(kernelEnv) })
   } catch (err) {
     await handleServerDown(t('status.serverStartFailed', { detail: (err as Error).message }))
     return
   }
-  const url = server.serverUrl
-  // dsh seeds a fresh auth cookie per start; the persistent session otherwise
-  // accumulates them until the Cookie header trips the server's 16 KB cap
-  // (431 → white screen). Clear stale ones before the window loads.
-  await clearStaleAuthCookies()
   if (!mainWindow) {
-    // Only reachable when the window was destroyed while the server was down
+    // Only reachable when the window was destroyed while the host was down
     // (the tray's "restart server" path). The normal boot creates it far
     // earlier, with the loading page — see boot().
     mainWindow = createMainWindow()
     attachMainWindowHandlers(mainWindow)
-  } else if (isShowingLoadingPage(mainWindow)) {
-    // Still on the loading page: this is the normal first boot. Arm the origin
-    // and navigate — the window is already on screen and visible.
-    loadAppIntoWindow(mainWindow, url)
-    mainWindow.show()
-  } else {
-    // The server restarted on a fresh port (kernel update or crash recovery)
-    // while the UI was up: retarget the guard and reload, otherwise every
-    // same-origin link in the reloaded page is pushed to the browser.
-    updateServerOrigin(mainWindow, url)
-    void mainWindow.loadURL(url)
-    mainWindow.show()
   }
+  // Both remaining cases end on the live UI: a window still on the loading page
+  // is handed over, one already showing the UI (kernel update, crash recovery,
+  // tray restart) is reloaded. The URL is the same in every case — the UI lives
+  // at one fixed origin, so there is no port for a restart to change.
+  if (isShowingLoadingPage(mainWindow)) loadAppIntoWindow(mainWindow)
+  else void mainWindow.loadURL(APP_URL)
+  mainWindow.show()
   // The loading page is gone now; the standalone splash (if one was ever
   // created) is closed and unhooked. Nothing else about mainWindow's lifecycle
   // — the close dialog, the 'closed' handler, reuse across restarts — changes.
@@ -914,10 +1027,44 @@ async function boot(): Promise<void> {
   server = new DshServer({
     onExit: (code, signal) => void handleServerDown(t('status.serverExited', { code: code ?? '?', signal: signal ?? '?' })),
     onLog: (line) => {
-      console.log('[server]', line)
+      console.log('[host]', line)
       recordServerLog(line)
     },
   })
+  // The window's `dsh-app://app/…` requests are served from whatever host is
+  // running; with none running the page gets a 503 rather than an open socket
+  // that answers to anything else on the machine. The shell's own action route
+  // is registered with it: it answers in this process, before any forward, and
+  // therefore keeps working while the kernel is down (see `shell-actions.ts`).
+  const shellActions = createShellActionHandler({
+    logDir: resolveLogDir,
+    windowId: () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents.id),
+    openPath: async (target) => {
+      // The folder must exist before the file manager can reveal it: on a fresh
+      // install the log directory may not have been written yet.
+      try {
+        mkdirSync(target, { recursive: true })
+      } catch {
+        // Best effort: openPath below reports its own failure.
+      }
+      return shell.openPath(target)
+    },
+    notify: (title, body) => { new Notification({ title, body }).show() },
+    saveAs: async (suggestedName) => {
+      // A bare name is joined to Documents by this shell: the dialog starts
+      // somewhere predictable, and the path it RETURNS is the only write target.
+      const options = { defaultPath: path.join(app.getPath('documents'), suggestedName) }
+      const win = mainWindow
+      const result = win === null || win.isDestroyed()
+        ? await dialog.showSaveDialog(options)
+        : await dialog.showSaveDialog(win, options)
+      return result.canceled || result.filePath === '' ? null : result.filePath
+    },
+    writeFile: (file, text) => writeFile(file, text, 'utf8'),
+    log: (line) => { logKernel(line) },
+  })
+  installShellActionStamps(session.defaultSession)
+  installDshAppProtocol(() => (server.isRunning ? server : null), shellActions)
 
   // Create the tray before any server/kernel work so it persists even when
   // the server fails to start (reinstall/retry loops). Otherwise the user
@@ -1058,21 +1205,15 @@ if (!gotLock) {
   })
 
   app.on('will-quit', (event) => {
-    // Drop the bridge first: it is a listening socket, and a quit path that
-    // keeps it open while the server drains would leave the port bound.
-    const stopBridge = async (): Promise<void> => {
-      const bridge = desktopBridge
-      desktopBridge = null
-      await bridge?.close()
-    }
     if (server?.isRunning) {
+      // The host must be gone before the process exits — a live child would
+      // keep the piped request/response descriptors (and any process it spawned)
+      // alive after the window is gone.
       event.preventDefault()
-      void stopBridge().then(() => server!.stop()).finally(() => {
+      void server!.stop().catch(() => undefined).finally(() => {
         destroyTray()
         app.exit(0)
       })
-    } else {
-      void stopBridge()
     }
   })
 

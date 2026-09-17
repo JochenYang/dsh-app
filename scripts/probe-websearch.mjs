@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'dist', 'main', 'dsh-app.patch.yml')
-const ROUTE = '/plugins/@dsh-app/plugin-websearch/api'
+const ROUTE = '/api/plugins/dsh-app/plugin-websearch'
 
 /** Suite plugin dirs (mirror of SUITE_PLUGIN_DIRS / SUITE_DIRS). */
 const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch']

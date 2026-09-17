@@ -1,0 +1,149 @@
+// Guards on the shell's own text handling:
+//   - redact(): a credential fragment must never reach a log file, an event or
+//     the diagnostics the shell shows the user.
+//   - the suite patch layer: the desktop host takes no `--patch` argument, so
+//     the profile's cordis.patch.yml IS the composition the app boots. The
+//     merge of shipped rows, rows the profile already carried and the user's
+//     home layer has to be idempotent — a regeneration that keeps re-appending
+//     or that drops the user's rows would corrupt the plugin tree silently.
+//   - carried rows the profile cannot load: a row naming an uninstalled package
+//     must not reach the loader (measured: "1 entry did not activate", which the
+//     client's own boot audit turns into a page that never loads), and the row
+//     must survive the skip so the user can install the package and re-enable it.
+// Run after the build: node --test test/   (or: npm test)
+import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import os from 'node:os'
+import path from 'node:path'
+import { test } from 'node:test'
+
+const require = createRequire(import.meta.url)
+const { redact, MAX_LOG_LINE } = require('../dist/main/redact.js')
+const { composeSuitePatch, filterUnresolvableRows, parseSuitePatch } = require('../dist/main/brand-suite.js')
+
+test('redact keeps the key name and drops the value in every shape we see', () => {
+  // JSON pairs (the shape dsh prints in its own diagnostics).
+  assert.equal(redact('{"apiKey": "sk-1234567890"}'), '{"apiKey": "[redacted]"}')
+  assert.equal(redact("{'authorization': 'Bearer abc.def'}"), "{'authorization': '[redacted]'}")
+  // Query strings: the bare rule below would otherwise swallow the whole URL.
+  assert.equal(redact('GET /?token=abc123&next=/x'), 'GET /?token=[redacted]&next=/x')
+  // Bare key=value and key: value.
+  assert.equal(redact('api_key=secret-value rest'), 'api_key=[redacted] rest')
+  assert.equal(redact('password: hunter2'), 'password: [redacted]')
+  // Case-insensitive, and the credential name itself survives for debugging.
+  assert.match(redact('TOKEN=abc'), /^TOKEN=\[redacted\]$/u)
+})
+
+test('redact leaves ordinary output alone', () => {
+  assert.equal(redact('kernel activated dsh-0.1.5-rc.2+suite-98b0d32e'), 'kernel activated dsh-0.1.5-rc.2+suite-98b0d32e')
+  assert.equal(redact(''), '')
+  assert.ok(redact('a normal log line about tokens being loaded').includes('tokens being loaded'))
+  assert.notEqual(redact('dsh host: /tmp/dsh-host/lib/index.js'), undefined)
+})
+
+test('redact caps a single line', () => {
+  const capped = redact('x'.repeat(MAX_LOG_LINE * 2))
+  assert.equal(capped.length, MAX_LOG_LINE)
+})
+
+const SHIPPED = '- insert:\n    - id: brand\n      name: "@dsh-app/plugin-brand"\n'
+const HOME = '- id: mcp\n  config: {}\n'
+
+test('the generated patch carries the shipped rows, the home layer and a preserved section', () => {
+  const text = composeSuitePatch({ suite: SHIPPED, preserved: '', home: HOME })
+  assert.ok(text.includes('@dsh-app/plugin-brand'))
+  assert.ok(text.includes('- id: mcp'))
+  // Empty sections leave their marker without a body.
+  assert.match(text, /# @@dsh-app-rows:preserved\n# @@dsh-app-rows:home\n/u)
+})
+
+test('regenerating an unchanged patch is byte-identical (idempotent merge)', () => {
+  const first = composeSuitePatch({ suite: SHIPPED, preserved: '', home: HOME })
+  const second = composeSuitePatch({ suite: SHIPPED, preserved: parseSuitePatch(first).preserved, home: HOME })
+  assert.equal(second, first)
+
+  // And once more with a preserved body, which is where a naive append would
+  // duplicate rows on every start.
+  const withRows = composeSuitePatch({ suite: SHIPPED, preserved: '- id: keep\n  config: {}\n', home: HOME })
+  const again = composeSuitePatch({ suite: SHIPPED, preserved: parseSuitePatch(withRows).preserved, home: HOME })
+  assert.equal(again, withRows)
+  assert.equal(again.match(/- id: keep/gu).length, 1)
+})
+
+test('a pre-A1 profile patch file is preserved verbatim on the first generation', () => {
+  const previous = '- id: web\n  config:\n    searchProvider: dsh-app\n'
+  const generated = composeSuitePatch({ suite: SHIPPED, preserved: parseSuitePatch(previous).preserved, home: HOME })
+  assert.ok(generated.includes(previous.trim()))
+  assert.equal(parseSuitePatch(generated).preserved, previous.trim())
+})
+
+test('safe mode drops the shipped rows and keeps the user ones', () => {
+  const text = composeSuitePatch({ suite: '', preserved: '', home: HOME })
+  assert.ok(!text.includes('@dsh-app/plugin-brand'))
+  assert.ok(text.includes('- id: mcp'))
+})
+
+// ------------------------------------------------- carried-row resolvability
+
+/** A throwaway profile under a fake $DSH_HOME layout. */
+function fixtureProfile() {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-patch-'))
+  const profileDir = path.join(home, 'profiles', 'dsh-app')
+  mkdirSync(profileDir, { recursive: true })
+  const install = (packageName, into = path.join(profileDir, 'node_modules')) => {
+    const dir = path.join(into, ...packageName.split('/'))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'package.json'), `${JSON.stringify({ name: packageName, version: '0.0.1' })}\n`)
+  }
+  return { profileDir, install }
+}
+
+test('a carried row whose package this profile has is kept verbatim', () => {
+  const { profileDir, install } = fixtureProfile()
+  install('@deepseek-ai/dsh-mcp-client')
+  const row = "- insert:\n    - id: mcp-context7\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: context7\n"
+  const filtered = filterUnresolvableRows(row, profileDir)
+  assert.equal(filtered.text, row)
+  assert.deepEqual(filtered.skipped, [])
+})
+
+test('the kernel-provided packages count as resolvable through the shared fallback', () => {
+  const { profileDir, install } = fixtureProfile()
+  // $DSH_HOME/profiles/node_modules is where the harness links the kernel's own
+  // closure — a package the profile never installed still resolves.
+  install('@deepseek-ai/dsh-schedule', path.join(profileDir, '..', 'node_modules'))
+  const row = "- insert:\n    - id: schedule\n      name: '@deepseek-ai/dsh-schedule'\n"
+  assert.deepEqual(filterUnresolvableRows(row, profileDir).skipped, [])
+})
+
+test('a carried row naming an uninstalled package is commented out and reported', () => {
+  const { profileDir } = fixtureProfile()
+  const row = "- insert:\n    - id: ghost\n      name: '@deepseek-ai/dsh-not-installed'\n      config:\n        keep: this\n"
+  const filtered = filterUnresolvableRows(row, profileDir)
+  assert.deepEqual(filtered.skipped, ['@deepseek-ai/dsh-not-installed'])
+  assert.equal(filtered.text, `# [dsh-app] NOT LOADED: "@deepseek-ai/dsh-not-installed" does not resolve from this profile.\n${row.split('\n').filter((line) => line !== '').map((line) => `# ${line}`).join('\n')}\n`)
+  // The row is recoverable: the shell's own reader still hands it back intact.
+  assert.equal(parseSuitePatch(filtered.text).preserved, filtered.text.trim())
+})
+
+test('a config key called name is not read as a package entry', () => {
+  const { profileDir } = fixtureProfile()
+  // No sibling `id:` at that indent, so this is a plugin's own config value —
+  // dropping the row over it would silently remove a user's configuration.
+  const row = "- id: usage-heatmap\n  config:\n    name: not-a-package-name\n"
+  const filtered = filterUnresolvableRows(row, profileDir)
+  assert.equal(filtered.text, row)
+  assert.deepEqual(filtered.skipped, [])
+  // A row without any entry keeps its place too (a plain enable/disable override).
+  assert.equal(filterUnresolvableRows('- id: web-search-deepseek\n  disabled: true\n', profileDir).text, '- id: web-search-deepseek\n  disabled: true\n')
+})
+
+test('filtering is idempotent: a commented row is not a row any more', () => {
+  const { profileDir } = fixtureProfile()
+  const row = "- insert:\n    - id: ghost\n      name: '@deepseek-ai/dsh-not-installed'\n"
+  const once = filterUnresolvableRows(row, profileDir)
+  const twice = filterUnresolvableRows(composeSuitePatch({ suite: '', preserved: once.text, home: '' }), profileDir)
+  assert.deepEqual(twice.skipped, [])
+  assert.equal(twice.text.match(/NOT LOADED/gu)?.length, 1)
+})

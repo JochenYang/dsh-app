@@ -1,7 +1,8 @@
-import { BrowserWindow, session, shell } from 'electron'
+import { BrowserWindow, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
 import { kernelChannelLabel, t } from '../shared/locale'
+import { APP_ORIGIN, APP_URL } from './desktop-host'
 import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
@@ -10,29 +11,6 @@ const OVERLAY_HEIGHT = 36
 const WINDOW_CONTROLS_WIDTH = 140
 /** Last overlay color applied per window, so identical samples are no-ops. */
 const appliedChromeColors = new WeakMap<BrowserWindow, string>()
-
-/**
- * Clear stale dsh web auth cookies for this host. dsh sets a fresh
- * `dsh-auth-<random>` cookie on every server start (random port, random
- * cookie name, host-only → domain 127.0.0.1, port ignored). Electron's
- * persistent session keeps every one of them, so they pile up across
- * restarts; once the Cookie header exceeds the Node http maxHeaderSize
- * (16 KB) the server answers 431 and the app white-screens. Remove every
- * old dsh-auth-* cookie before the window loads the new server, so only the
- * current one survives. Best-effort: cleanup must never block the window.
- */
-export async function clearStaleAuthCookies(): Promise<void> {
-  try {
-    const ses = session.defaultSession
-    const cookies = await ses.cookies.get({ domain: '127.0.0.1' })
-    for (const cookie of cookies) {
-      if (!cookie.name.startsWith('dsh-auth-')) continue
-      await ses.cookies.remove(`http://127.0.0.1${cookie.path ?? '/'}`, cookie.name)
-    }
-  } catch {
-    // Best-effort cleanup; never block the window over cookies.
-  }
-}
 
 /** Parse 'rgb(r, g, b)' / 'rgba(...)' into [r, g, b]; null when unparseable. */
 function parseRgb(color: string): [number, number, number] | null {
@@ -140,6 +118,22 @@ const SAMPLE_SCRIPT = `(function () {${SAMPLE_FN} return sample(); })()`
  * executeJavaScript ping-pong (measured ~5k round-trips/s, ~9% total CPU
  * across main + renderer, GPU idle at 0%). `push()` self-guards on an
  * unchanged sample, and that guard is what parks the loop.
+ *
+ * Every change gets TWO looks, and both are load-bearing:
+ *
+ * - the next animation frame, the fast path while the page paints;
+ * - a 250 ms timer, the backstop. It is also the second look a CSS transition
+ *   needs: the frame right after a class flip still shows the pre-transition
+ *   geometry, so a panel sliding in over the sample point (the market drawer)
+ *   is sampled while it is still off-screen. The sample then equals the
+ *   recorded one, `push()` returns early, and NO further mutation ever comes —
+ *   the strip kept the page colour over the drawer (measured). The timer also
+ *   clears `scheduled`, which used to be cleared only inside the frame
+ *   callback: frame callbacks stop while the window is occluded or hidden
+ *   (Chromium throttles a non-visible page), so a single skipped frame latched
+ *   the flag true and the observer went deaf for the rest of the document's
+ *   life — the strip froze on a stale colour, the window was restored, and
+ *   nothing (theme switch, modal mask, drawer) ever moved it again.
  */
 const OBSERVER_SCRIPT = `(function () {
   ${SAMPLE_FN}
@@ -158,7 +152,9 @@ const OBSERVER_SCRIPT = `(function () {
     const schedule = () => {
       if (scheduled) return;
       scheduled = true;
-      (window.requestAnimationFrame || ((cb) => setTimeout(cb, 16)))(() => { scheduled = false; push(); });
+      const raf = window.requestAnimationFrame;
+      if (typeof raf === 'function') raf(push);
+      setTimeout(() => { scheduled = false; push(); }, 250);
     };
     const mo = new MutationObserver(schedule);
     mo.observe(document.documentElement, {
@@ -170,6 +166,8 @@ const OBSERVER_SCRIPT = `(function () {
     window.addEventListener('resize', schedule);
     window.addEventListener('scroll', schedule, { capture: true, passive: true });
     document.addEventListener('visibilitychange', schedule);
+    document.addEventListener('transitionend', schedule, true);
+    document.addEventListener('animationend', schedule, true);
   }
   return new Promise((resolve) => {
     state.pending = resolve;
@@ -668,41 +666,21 @@ export function resetOverlayColor(win: BrowserWindow): void {
   appliedChromeColors.delete(win)
 }
 
-/** Live server origin of each window; see {@link updateServerOrigin}. */
-const windowOrigins = new WeakMap<BrowserWindow, { value: string }>()
-
-/**
- * Retarget a window's navigation guard at a new server origin. The shell must
- * call this before reloading a window after the server restarted on a
- * different port — a kernel update does exactly that. The guard captures the
- * origin when the window is created, so without this update every
- * same-origin navigation in the reloaded page is classified as external and
- * handed to the system browser.
- */
-export function updateServerOrigin(win: BrowserWindow, url: string): void {
-  const origin = windowOrigins.get(win)
-  if (origin === undefined) return
-  try {
-    origin.value = new URL(url).origin
-  } catch {
-    origin.value = ''
-  }
-}
-
 /**
  * Create the main window with the loading page in it.
  *
  * The window appears immediately and shows the LOCAL splash page; the caller
- * navigates it to the real URL once the kernel answers (see the window-first
+ * navigates it to the harness UI once the host is ready (see the window-first
  * boot in index.ts). This is the upstream desktop's own shape: the wait belongs
  * to a window that is already on screen, not to a second, smaller window that
  * then has to hand over. It also keeps the boot honest — everything the splash
  * used to report (staged progress, failures, retry) now happens in the window
  * the user will keep using.
  *
- * The navigation guard starts with NO allowed origin: the splash is a local
- * file, and a URL that arrives before the kernel is healthy must not be
- * treated as in-app. `updateServerOrigin` arms it when the real URL is loaded.
+ * The navigation guard allows exactly one in-app origin, {@link APP_ORIGIN},
+ * for the window's whole life: the UI's URL no longer contains a port that a
+ * kernel update could change, so there is nothing to re-arm. The splash is a
+ * file:// document and is allowed through as the shell's own doing.
  */
 export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, show: false })
@@ -719,21 +697,11 @@ export function createMainWindow(): BrowserWindow {
 
   installExportToast(win)
 
-  // Origin of the dsh server this window may navigate within. Held in a box
-  // rather than a plain local because a kernel update restarts the server on a
-  // fresh port and reloads this same window: without a way to update it, every
-  // same-origin navigation after the restart looks external and gets pushed to
-  // the system browser. It starts EMPTY — the window is created before the
-  // kernel has a URL, and loadAppIntoWindow arms it.
-  const origin = { value: '' }
-  windowOrigins.set(win, origin)
-
   win.webContents.setWindowOpenHandler(({ url: target }) => {
     // Same-origin window.open (e.g. the Models settings page opening a
     // sub-view) should open inside the app, not be kicked to the browser.
     try {
-      const parsed = new URL(target)
-      if (origin.value !== '' && parsed.origin === origin.value) {
+      if (new URL(target).origin === APP_ORIGIN) {
         return { action: 'allow', overrideBrowserWindowOptions: MAIN_WINDOW_OPTS }
       }
     } catch {
@@ -748,7 +716,7 @@ export function createMainWindow(): BrowserWindow {
     if (target.startsWith('file:')) return
     let allowed = false
     try {
-      allowed = origin.value !== '' && new URL(target).origin === origin.value
+      allowed = new URL(target).origin === APP_ORIGIN
     } catch {
       // not a valid URL — treat as external
     }
@@ -765,16 +733,12 @@ export function createMainWindow(): BrowserWindow {
  * Navigate the main window from the splash to the live UI.
  *
  * Separate from creation because the two happen seconds apart: the window is
- * shown first (with the splash), and this is called once the kernel is healthy.
- * The origin is armed HERE, in the same call — a guard that allowed the live
- * origin before that URL existed would have been pre-authorizing a page.
+ * shown first (with the splash), and this is called once the host is ready.
  *
  * @param win - the main window.
- * @param url - the server's settled URL.
  */
-export function loadAppIntoWindow(win: BrowserWindow, url: string): void {
+export function loadAppIntoWindow(win: BrowserWindow): void {
   loadingPageWindows.delete(win)
-  updateServerOrigin(win, url)
-  void win.loadURL(url)
+  void win.loadURL(APP_URL)
 }
 

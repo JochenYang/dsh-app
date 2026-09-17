@@ -1,24 +1,35 @@
+/**
+ * The kernel child as the shell sees it: the desktop host transport
+ * (desktop-host.ts) plus the diagnostics the shell owns around it.
+ *
+ * There is no listening socket any more — "server" here means the host process
+ * the window's `dsh-app://app/…` requests are forwarded to. What this module
+ * keeps is everything the shell needs to report about that process: one log
+ * file per run under `<DSH_APP_LOG_DIR or userData>/logs`, credential-redacted
+ * lines, and the exit event the crash/restart path listens to. Readiness is the
+ * child's own `ready` message rather than a health probe, so a half-composed
+ * plugin tree can no longer look healthy from the outside.
+ */
 import { app } from 'electron'
-import { spawn, type ChildProcess } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { ServerSpec } from '../shared/types'
-import { DEFAULT_HTTP_HOST, LEGACY_PROFILE, SERVER_HEALTH_POLL_MS, SERVER_HEALTH_TIMEOUT_MS, SERVER_SHUTDOWN_GRACE_MS } from '../shared/constants'
+import { DshHost, type DshHostOptions } from './desktop-host'
+import { redact } from './redact'
 
 export interface ServerEvents {
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void
   onLog?: (line: string) => void
 }
 
-/** Cap a diagnostic line so a runaway child cannot grow logs unbounded. */
-const MAX_LOG_LINE = 2_000
+/** One start's inputs: where the host lives and which profile it boots. */
+export type DshServerSpec = Omit<DshHostOptions, 'onLog' | 'onExit'>
 
-/** How many recent server log files to keep on disk. */
+/** How many recent host log files to keep on disk. */
 const MAX_KEPT_LOG_FILES = 10
 
 /**
  * Directory holding this run's logs: `<DSH_APP_LOG_DIR or userData>/logs`.
- * One definition, because the server log, the kernel log and the shell's
+ * One definition, because the host log, the kernel log and the shell's
  * "open logs folder" action must all name the same place.
  */
 export function resolveLogDir(): string {
@@ -26,250 +37,75 @@ export function resolveLogDir(): string {
 }
 
 /**
- * One health probe: exchange the token for an auth cookie, then check the
- * session root.
- *
- * `dsh web` answers `/?token=...` with `303 See Other` + `Set-Cookie` +
- * `location: /` — the token authenticates once, the cookie carries the
- * session. A browser follows this automatically (its cookie jar keeps the
- * auth cookie for the redirected request). The undici `fetch` used here has
- * no cookie jar, so a plain `redirect: 'follow'` request lands on the naked
- * `/` without the cookie and gets `401` — the server is healthy but the probe
- * can never see `res.ok`. So: take the redirect manually, extract the
- * `Set-Cookie` header, and retry `/` with that cookie.
- *
- * Standalone (and exported) so a real loopback exchange can be exercised
- * without spawning a kernel: a probe that mishandles this dance reports a
- * healthy server as unhealthy, and the shell then rolls a good kernel back.
- * @param url - the settled server URL, token included.
- * @returns true when the session root answers 200; false when the probe
- * failed (server busy, still booting, or the exchange failed).
- */
-export async function probeServerHealth(url: string): Promise<boolean> {
-  try {
-    const exchange = await fetch(url, {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(2_000),
-    })
-    if (exchange.ok) return true
-    if (exchange.status !== 303 || exchange.headers.get('location') === null) {
-      return false
-    }
-    // The next hop is the same-origin session root the Location header names;
-    // only loopback-path relative locations are acceptable (never follow a
-    // redirect to another origin).
-    const next = new URL(exchange.headers.get('location')!, exchange.url)
-    if (!isLocalServerUrl(next.toString())) return false
-    const cookie = exchange.headers.get('set-cookie')
-    if (cookie === null) return false
-    const follow = await fetch(next.toString(), {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(2_000),
-      headers: { cookie: /^[^=]+=/.test(cookie) ? cookie.split(';')[0]! : cookie },
-    })
-    return follow.ok
-  } catch {
-    return false
-  }
-}
-
-/** Redact credential-looking fragments before a line reaches logs or events. */
-export function redact(line: string): string {
-  return line
-    // JSON quoted pairs first: "apiKey": "sk-..." keeps only the key name.
-    .replace(/("(?:api[_-]?key|authorization|token|secret|passwd|password)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"')
-    .replace(/('(?:api[_-]?key|authorization|token|secret|passwd|password)'\s*:\s*)'[^']*'/gi, "$1'[redacted]'")
-    // Query-string token (?token=abc&next=/) keeps only the key name: the bare
-    // rule below would swallow the rest of the URL with \S+, so this rule must
-    // land first AND the bare rule must not re-match the value it produced
-    // (hence its lookahead) — otherwise `&next=/x` disappears from the log.
-    .replace(/([?&](?:token|api[_-]?key)=)[^&\s]+/gi, '$1[redacted]')
-    // Bare key=value / key: value pairs last (key name kept, value dropped).
-    .replace(/(api[_-]?key|authorization|token|secret|passwd|password)(\s*[:=]\s*)(?!\[redacted\])\S+/gi, '$1$2[redacted]')
-    .slice(0, MAX_LOG_LINE)
-}
-
-/**
- * Accept only a 127.0.0.1 HTTP URL: the settled server address must be the
- * harness's own local web UI, never an external origin.
- */
-function isLocalServerUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:'
-      && url.hostname === '127.0.0.1'
-      && url.username === ''
-      && url.password === ''
-      && url.port !== ''
-  } catch {
-    return false
-  }
-}
-
-/** Extract the settled server URL from a line emitted by `dsh web`. */
-function extractServerUrl(line: string): string | undefined {
-  const match = /(?:^|\s)dsh web:\s+(http:\/\/[^\s]+)/.exec(line)
-  if (match?.[1] === undefined || !isLocalServerUrl(match[1])) return undefined
-  return match[1]
-}
-
-/**
- * Manages the local dsh web server child process: spawn, health-check,
- * crash detection, and graceful shutdown.
+ * Manages the desktop host child: start, crash detection, log capture, and
+ * graceful shutdown.
  */
 export class DshServer {
-  private child: ChildProcess | null = null
+  private host: DshHost | null = null
   private stopping = false
-  /** True from spawn until the health check settles. An exit inside that
-   * window reaches the caller through start()'s rejection instead of onExit —
-   * firing both counted one crash twice, which skipped the backoff retry and
-   * jumped straight to rollback/exit. */
-  private starting = false
-  /** Exit seen while starting, handed to onExit only when start() succeeded
-   * (an unhealthy start already reported it via the rejection). */
-  private deferredExit: { code: number | null, signal: NodeJS.Signals | null } | null = null
-  private shellMode = false
-  private url = ''
   private logFile: string | null = null
-  /** Incremental line-split buffers (one per child stream). */
-  private lineBuffers = new Map<NodeJS.ReadableStream, string>()
 
   constructor(private readonly events: ServerEvents = {}) {}
 
   get isRunning(): boolean {
-    return this.child !== null && !this.child.killed
-  }
-
-  get serverUrl(): string {
-    return this.url
+    return this.host?.isRunning === true
   }
 
   /**
-   * @param envOverride - base environment for the child, replacing this
-   *   process's env (the env-scrub result lands here). When omitted the
-   *   child inherits the shell env unchanged — identical to the pre-scrub
-   *   behavior.
-   * @param profile - dsh profile to boot (see suite-profile.ts). It is also
-   *   exported to the child as `DSH_APP_PROFILE`, which is how the suite's own
-   *   plugins (plugin-market, plugin-presets) know where installs belong: the
-   *   app must never install into `web` while it boots another profile.
+   * Start the host for the active kernel and profile.
+   *
+   * A start that never reaches readiness rejects with the child's own last
+   * words; the shell's failure path (rollback, bundled reinstall, give-up
+   * dialog) is driven by that rejection and by `onExit` afterwards — never both
+   * for the same crash.
+   *
+   * @param spec - entry, runtime tree, profile, environment, dev linkage.
    */
-  async start(spec: ServerSpec, port: number, host: string = DEFAULT_HTTP_HOST, extraPatches: readonly string[] = [], envOverride?: NodeJS.ProcessEnv, profile: string = LEGACY_PROFILE): Promise<void> {
+  async start(spec: DshServerSpec): Promise<void> {
     await this.stop()
     this.stopping = false
-    this.starting = true
-    this.deferredExit = null
-    this.url = `http://${host}:${port}`
-
-    let healthy = false
-    try {
-      const { command, args, shell } = this.buildCommand(spec, port, host, extraPatches, profile)
-      this.shellMode = shell === true
-      this.logFile = await this.openLog()
-      this.events.onLog?.(`spawn ${shell ? command : `${command} ${args.join(' ')}`}`)
-
-      const electronNodeEnv = spec.kind === 'node' && spec.electronNode === true ? { ELECTRON_RUN_AS_NODE: '1' } : {}
-      const child = shell
-        ? spawn(command, {
-            shell: true,
-            cwd: spec.cwd,
-            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE, ...electronNodeEnv },
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
-          })
-        : spawn(command, args, {
-            cwd: spec.cwd,
-            env: { ...(envOverride ?? process.env), DSH_APP_DESKTOP: '1', DSH_APP_PROFILE: profile, DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE, ...electronNodeEnv },
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
-          })
-      this.child = child
-
-      const onChunk = (stream: NodeJS.ReadableStream) => (d: Buffer) => {
-        const pending = `${this.lineBuffers.get(stream) ?? ''}${d.toString('utf8')}`
-        const parts = pending.split(/\r?\n/)
-        this.lineBuffers.set(stream, parts.pop() ?? '')
-        for (const line of parts) this.handleLine(line)
-      }
-      child.stdout?.on('data', onChunk(child.stdout))
-      child.stderr?.on('data', onChunk(child.stderr))
-      child.on('error', (err) => this.events.onLog?.(`server error: ${err.message}`))
-      child.on('exit', (code, signal) => {
-        for (const [stream, rest] of this.lineBuffers) {
-          if (rest !== '') this.handleLine(rest)
-          this.lineBuffers.delete(stream)
-        }
-        if (this.child === child) this.child = null
+    this.logFile = await this.openLog()
+    const host = new DshHost({
+      ...spec,
+      onLog: (line) => { this.handleLine(line) },
+      onExit: (code, signal) => {
         if (this.stopping) return
-        if (this.starting) {
-          this.deferredExit = { code, signal }
-          return
-        }
         this.events.onExit?.(code, signal)
-      })
+      },
+    })
+    this.host = host
+    this.handleLine(`dsh host: ${spec.entry} (runtime ${spec.runtimeDir}, profile ${spec.projectDir})`)
+    try {
+      await host.start()
+    } catch (error) {
+      this.host = null
+      await host.stop().catch(() => undefined)
+      throw error
+    }
+    this.handleLine(`dsh host dsh ${host.dshVersion ?? '?'} ready`)
+  }
 
-      await this.waitForHealth()
-      healthy = true
+  /** Forward one `dsh-app://app/…` request to the running host. */
+  fetch(request: Request): Promise<Response> {
+    const host = this.host
+    if (host === null) return Promise.reject(new Error('dsh host is not running'))
+    return host.fetch(request)
+  }
+
+  /** Stop the host: shutdown message, then signals, then the tree kill. */
+  async stop(): Promise<void> {
+    const host = this.host
+    if (host === null) return
+    this.stopping = true
+    try {
+      await host.stop()
     } finally {
-      this.starting = false
-      const deferred = this.takeDeferredExit()
-      // Only a HEALTHY start defers nothing: the process came up and then died
-      // inside this window, so the caller learns about it exactly once, here.
-      if (healthy && deferred !== null && !this.stopping) {
-        this.events.onExit?.(deferred.code, deferred.signal)
-      }
+      this.host = null
+      this.stopping = false
     }
   }
 
-  /**
-   * Take (and clear) an exit observed while start() was in flight. Reading the
-   * field through a method is deliberate: inside start() the exit callback is
-   * the only writer control-flow analysis can see, so the field narrows to its
-   * `null` initializer and a null check on it collapses to `never`. Across a
-   * method boundary the declared type is used instead.
-   */
-  private takeDeferredExit(): { code: number | null, signal: NodeJS.Signals | null } | null {
-    const pending = this.deferredExit
-    this.deferredExit = null
-    return pending
-  }
-
-  /** Quote a shell fragment for cmd.exe when it carries whitespace or quotes. */
-  private quoteForShell(value: string): string {
-    return /[\s"]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value
-  }
-
-  private buildCommand(spec: ServerSpec, port: number, host: string, extraPatches: readonly string[], profile: string): { command: string; args: string[]; shell?: boolean } {
-    // Brand-suite loader overlays (plugins/dsh-app.patch.yml): applied after
-    // every bundle layer, last write wins per row. Host/port are controlled
-    // values; overlay paths come from userData (see brand-suite.ts). `profile`
-    // is one of the two names suite-profile.ts can return, never user input.
-    //
-    // Both branches take the top-level form with an explicit `--profile`:
-    // `dsh web` is the hard alias of `--profile web` and the web subcommand
-    // refuses a parent-level `--profile`, so the alias can only ever address
-    // the shared legacy profile.
-    const patchArgs = extraPatches.flatMap((overlay) => ['--patch', overlay])
-    const profileArgs = ['--profile', profile]
-    if (spec.kind === 'pnpm') {
-      // Dev mode: run the local checkout's dsh CLI via pnpm.
-      // On Windows, pnpm is a .cmd shim that cannot be spawned without a
-      // shell, so build one command line and let Node run it through the
-      // system shell (host/port are controlled values: no injection surface).
-      if (process.platform === 'win32') {
-        const patchFragment = patchArgs.map((token) => this.quoteForShell(token)).join(' ')
-        const overlays = patchFragment !== '' ? `${patchFragment} ` : ''
-        return { command: `pnpm dsh ${profileArgs.join(' ')} ${overlays}--host ${host} --port ${port} --no-open`, args: [], shell: true }
-      }
-      return { command: 'pnpm', args: ['dsh', ...profileArgs, ...patchArgs, '--host', host, '--port', String(port), '--no-open'] }
-    }
-    return {
-      command: spec.nodePath,
-      args: [spec.scriptPath, ...profileArgs, ...patchArgs, '--host', host, '--port', String(port), '--no-open'],
-    }
-  }
-
-  /** Open a new server log file under the log dir, pruning older ones. */
+  /** Open a new host log file under the log dir, pruning older ones. */
   private async openLog(): Promise<string> {
     const dir = resolveLogDir()
     const file = path.join(dir, `dsh-server-${new Date().toISOString().replace(/[:.]/g, '-')}.log`)
@@ -279,7 +115,7 @@ export class DshServer {
   }
 
   /**
-   * Keep only the most recent server log files so a long-lived install cannot
+   * Keep only the most recent host log files so a long-lived install cannot
    * grow the log dir unbounded. Best-effort: never fail the start over logs.
    */
   private async pruneOldLogs(dir: string): Promise<void> {
@@ -293,68 +129,12 @@ export class DshServer {
     }
   }
 
-  /**
-   * One complete child-output line: redact, forward, and harvest the settled
-   * server URL when `dsh web` prints it (trusts the child's own report over
-   * the pre-allocated port, closing the find-free-port race).
-   */
+  /** One complete child-output line: redact, forward, append to this run's log. */
   private handleLine(line: string): void {
     const safe = redact(line)
     this.events.onLog?.(safe)
     if (this.logFile) {
       void fs.appendFile(this.logFile, `${safe}\n`).catch(() => undefined)
     }
-    const url = extractServerUrl(line)
-    if (url && !this.stopping && url !== this.url) {
-      this.url = url
-      // The settled URL carries ?token=…: log it redacted (key name only),
-      // never the credential.
-      this.events.onLog?.(`server url settled: ${redact(url)}`)
-    }
   }
-
-  /**
-   * One health probe against the settled server URL.
-   * @returns true when the session root answers 200.
-   */
-  private async probeHealth(): Promise<boolean> {
-    return probeServerHealth(this.url)
-  }
-
-  /** Poll the web server root until it answers 200 or the timeout elapses. */
-  private async waitForHealth(): Promise<void> {
-    const deadline = Date.now() + SERVER_HEALTH_TIMEOUT_MS
-    while (Date.now() < deadline) {
-      if (this.stopping || !this.child) throw new Error('server process exited during startup')
-      if (await this.probeHealth()) return
-      await new Promise((r) => setTimeout(r, SERVER_HEALTH_POLL_MS))
-    }
-    throw new Error(`dsh server did not become healthy within ${SERVER_HEALTH_TIMEOUT_MS / 1000}s`)
-  }
-
-  /** Graceful stop: SIGTERM, then SIGKILL after the grace period. */
-  async stop(): Promise<void> {
-    const child = this.child
-    if (!child) return
-    this.stopping = true
-    if (process.platform === 'win32' && this.shellMode) {
-      // The shell (cmd.exe) does not forward signals; kill the whole tree.
-      await new Promise<void>((resolve) => {
-        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
-        killer.on('exit', () => resolve())
-      })
-    } else {
-      child.kill('SIGTERM')
-      const exited = await Promise.race([
-        new Promise<boolean>((resolve) => child.once('exit', () => resolve(true))),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), SERVER_SHUTDOWN_GRACE_MS)),
-      ])
-      if (!exited) {
-        child.kill('SIGKILL')
-        await new Promise<void>((resolve) => child.once('exit', () => resolve()))
-      }
-    }
-    this.child = null
-  }
-
 }

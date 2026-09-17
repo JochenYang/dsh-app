@@ -127,6 +127,28 @@ export async function detectLocalProxy(): Promise<string | undefined> {
 }
 
 /**
+ * Whether an environment carries a proxy the kernel's launcher would accept.
+ *
+ * The shell spawns the host directly rather than through the `dsh` CLI's profile
+ * boot, and no other path installs the outbound proxy policy (see
+ * `hostProxyBootstrapUrl`). This is the condition that decides whether that
+ * bootstrap rides along: a proxy present in the child's environment, whether the
+ * shell detected it or the user exported it.
+ *
+ * Both cases are read because Windows keeps the authored case while POSIX does
+ * not, and the kernel resolves lowercase first.
+ *
+ * @param env - the environment the host child is about to be spawned with.
+ * @returns true when at least one proxy variable holds a non-blank value.
+ */
+export function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {
+  return PROXY_ENV_NAMES.some((name) => {
+    const value = env[name] ?? env[name.toLowerCase()]
+    return value !== undefined && value.trim() !== ''
+  })
+}
+
+/**
  * The environment to spawn the kernel with.
  *
  * An explicit proxy in the parent environment always wins — a user who set one

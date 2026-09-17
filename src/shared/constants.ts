@@ -57,8 +57,6 @@ export const MODELSCOPE_REPO = 'jochenYang/dsh-app'
 
 /** Human-facing mirror page, offered when every update source fails. */
 export const MODELSCOPE_RELEASES_URL = `${MODELSCOPE_ENDPOINT}/models/${MODELSCOPE_REPO}/files`
-/** Host the local dsh web server binds to (loopback only — never 0.0.0.0). */
-export const DEFAULT_HTTP_HOST = '127.0.0.1'
 
 /** Directory (under app userData) that holds versioned kernel runtimes. */
 export const KERNEL_ROOT_DIR = 'kernel'
@@ -83,9 +81,14 @@ export const LAYER_STAGING_DIR = 'layers'
 /** How often to poll for kernel updates while running. */
 export const KERNEL_CHECK_INTERVAL_MS = 1000 * 60 * 60 * 6 // 6 hours
 
-/** How long to wait for the dsh web server to answer before declaring failure. */
-export const SERVER_HEALTH_TIMEOUT_MS = 90_000
-export const SERVER_HEALTH_POLL_MS = 200
+/** How long to wait for the desktop host to report its composition active. */
+export const HOST_READY_TIMEOUT_MS = 90_000
 
-/** Grace period before force-killing the dsh server child on shutdown. */
-export const SERVER_SHUTDOWN_GRACE_MS = 8_000
+/**
+ * Grace period after `{type:'shutdown'}` plus closing the request pipe, before
+ * the host is signalled. It has to cover a full plugin-tree dispose.
+ */
+export const HOST_SHUTDOWN_GRACE_MS = 8_000
+
+/** Grace period per signal (SIGTERM, then the tree kill) while stopping. */
+export const HOST_SIGNAL_GRACE_MS = 5_000

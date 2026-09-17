@@ -233,17 +233,19 @@ test('load() reports a broken install as "no kernel" so the caller reinstalls', 
   assert.equal(await fresh.load(), null)
 })
 
-test('getServerSpec points at the bundled node and dsh entry point', async (t) => {
+test('the installed kernel carries the runtime tree the shell boots from', async (t) => {
   const h = await harness(t, 'dsh-kernel-spec-')
   const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
   await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
 
-  const spec = h.manager.getServerSpec()
+  // A1 onward the shell starts the desktop host out of this tree (Electron's own
+  // Node is the child's executable, told to behave as node), so what has to hold
+  // after an install is that the tree is where the manager says and carries the
+  // kernel entry inside `app/`.
   const dir = path.join(h.root, 'dsh-1.0.0+suite-s1')
-  assert.equal(spec.kind, 'node')
-  assert.equal(spec.nodePath, path.join(dir, 'node', NODE_BINARY))
-  assert.equal(spec.scriptPath, path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
-  assert.equal(spec.cwd, path.join(dir, 'app'))
+  assert.equal(h.manager.getCurrentDir(), dir)
+  assert.ok(existsSync(path.join(dir, 'node', NODE_BINARY)))
+  assert.ok(existsSync(path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')))
 })
 
 test('a bundle without a shipped manifest installs but records no adoption stamp', async (t) => {

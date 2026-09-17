@@ -30,13 +30,23 @@
  * so no @dsh-app package can resolve from the registry; switch them to registry
  * versions once they are published.
  *
+ * Two more packages the desktop shell needs are part of the same tree:
+ *   - @deepseek-ai/dsh-web-frontend — published per kernel line (mind the
+ *     `latest` dist-tag: it still points at 0.0.1-rc.5, an older line), pinned
+ *     to DSH_VERSION like every other @deepseek-ai/dsh* package;
+ *   - @deepseek-ai/dsh-desktop-host — PRIVATE (never published), so this build
+ *     obtains its source, builds it and packs it (see packDesktopHost): from a
+ *     checkout or a git repository at the tag of the kernel line being built,
+ *     or from a prebuilt tarball. The shell starts this package as the kernel
+ *     child, so a runtime without it cannot boot at all.
+ *
  * Assembly is pnpm ≥ 10 with the hoisted linker (see "pnpm assembly" above
  * main()): a lockfile is generated first and asserted to hold no
  * registry-resolved core package, then installed from that frozen lockfile.
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import path from 'node:path'
@@ -394,6 +404,441 @@ const SUITE_SCOPE = '@dsh-app/'
 const KERNEL_PACKAGE = /^@deepseek-ai\/dsh(?:-|$)/u
 
 /**
+ * The private host the shell starts the kernel with. Not on npm (`private:
+ * true`), so it travels as a locally packed tarball (see packDesktopHost).
+ */
+const DESKTOP_HOST_PACKAGE = '@deepseek-ai/dsh-desktop-host'
+
+/** The host app inside a harness checkout: the directory that becomes the package. */
+const DESKTOP_HOST_APP_DIR = 'apps/desktop-host'
+
+/**
+ * Upstream repository, cloned only when no local checkout of it exists. The
+ * host is private, so CI has to obtain its source from the tag of the kernel
+ * line it ships — this is where it comes from.
+ */
+const DEFAULT_HOST_REPO_URL = 'https://github.com/deepseek-ai/deepseek-harness.git'
+
+/**
+ * The web frontend the host serves as the UI. Published per kernel line like
+ * every other kernel package — note the `latest` dist-tag still resolves to
+ * 0.0.1-rc.5 from an older line, which is why this is pinned to DSH_VERSION
+ * rather than to a tag.
+ */
+const WEB_FRONTEND_PACKAGE = '@deepseek-ai/dsh-web-frontend'
+
+/**
+ * Registry every install in this build resolves from. Pinned explicitly rather
+ * than inherited: pnpm reads the user config (~/.npmrc) and has no --userconfig
+ * equivalent, so a machine-level `registry=` would silently change what the
+ * artifact contains. An explicit NPM_CONFIG_REGISTRY still wins (mirror builds).
+ * @returns the registry URL to pass to pnpm.
+ */
+function registryUrl() {
+  return (process.env.NPM_CONFIG_REGISTRY ?? process.env.npm_config_registry ?? '').trim()
+    || 'https://registry.npmjs.org/'
+}
+
+/** Tag naming a kernel version in the upstream repository (dsh-v0.1.5-rc.2). */
+function hostTag() {
+  return (process.env.DSH_APP_HOST_TAG ?? '').trim() || `dsh-v${DSH_VERSION}`
+}
+
+/** A checkout or a worktree keeps `.git` as a directory or a file. */
+function isGitRepo(dir) {
+  return existsSync(path.join(dir, '.git'))
+}
+
+/** Absolute path of a binary the checkout's own install placed in node_modules/.bin. */
+function checkoutBin(checkoutDir, name) {
+  const binDir = path.join(checkoutDir, 'node_modules', '.bin')
+  for (const candidate of process.platform === 'win32' ? [`${name}.cmd`, `${name}.exe`, name] : [name]) {
+    const full = path.join(binDir, candidate)
+    if (existsSync(full)) return full
+  }
+  throw new Error(`${name} is missing from ${binDir} — the host checkout's install did not complete`)
+}
+
+/** True when `repoDir` holds the tag (annotated tags resolve through ^{commit}). */
+function hasTag(repoDir, tag) {
+  try {
+    capture('git', ['rev-parse', '--verify', `refs/tags/${tag}^{commit}`], repoDir)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Install and build the private desktop host inside a checkout of the kernel
+ * line, and return its app directory.
+ *
+ * Scope is deliberate: the workspace install is narrowed to the host project
+ * and its dependency closure plus the workspace root (whose devDependencies
+ * are the toolchain — typescript, tsdown), and only `apps/desktop-host` is
+ * built. `tsc -b` then compiles the project references that app's tsconfig
+ * declares (~30 workspace projects) from source, and `tsdown` bundles its
+ * `lib/types` into the `lib/index.js` the runtime ships.
+ *
+ * `--ignore-scripts`: no dependency lifecycle script contributes to tsc/tsdown
+ * output — the ones this monorepo ships build native addons and bundler
+ * binaries, which would only add build time and platform-specific failure
+ * modes to a step that compiles TypeScript. `--frozen-lockfile`: the checkout
+ * is a tag, so the lockfile is the resolution upstream released and this build
+ * has no business re-resolving it.
+ *
+ * @param checkoutDir - checkout of the kernel line's tag.
+ * @returns the app directory, holding a built lib/index.js.
+ */
+async function buildDesktopHostApp(checkoutDir) {
+  const appDir = path.join(checkoutDir, DESKTOP_HOST_APP_DIR)
+  const manifestPath = path.join(appDir, 'package.json')
+  if (!existsSync(manifestPath)) {
+    throw new Error(`${checkoutDir} holds no ${DESKTOP_HOST_APP_DIR}/package.json — the host source must be a checkout of the harness repository`)
+  }
+  // Checked before the install: without it a checkout of the wrong line is only
+  // caught after minutes of building, by the version assertion at pack time.
+  const declared = JSON.parse(readFileSync(manifestPath, 'utf8')).version
+  if (declared !== DSH_VERSION) {
+    throw new Error(
+      `host source at ${checkoutDir} is ${declared}, but this runtime ships dsh ${DSH_VERSION} — `
+      + `the host must come from the same kernel line (tag ${hostTag()})`,
+    )
+  }
+  await run(pnpmBin(), [
+    'install', '--frozen-lockfile', '--ignore-scripts', '--registry', registryUrl(),
+    '--filter', `${DESKTOP_HOST_PACKAGE}...`,
+    // The workspace root project: it owns the devDependencies the build below
+    // runs (typescript, tsdown), and it is what a `--filter` install otherwise
+    // leaves out.
+    '--filter', '.',
+  ], checkoutDir)
+  await run(checkoutBin(checkoutDir, 'tsc'), ['-b', path.join(DESKTOP_HOST_APP_DIR, 'tsconfig.json')], checkoutDir)
+  await run(checkoutBin(checkoutDir, 'tsdown'), [], appDir)
+  if (!existsSync(path.join(appDir, 'lib', 'index.js'))) {
+    throw new Error(`building ${DESKTOP_HOST_APP_DIR} in ${checkoutDir} produced no lib/index.js`)
+  }
+  return appDir
+}
+
+/**
+ * A built checkout of the private desktop host for this kernel line.
+ *
+ * Three ways in, tried in this order:
+ *
+ *   1. `DSH_APP_HOST_CHECKOUT` — a checkout whose app is ALREADY built.
+ *      Nothing is installed or compiled in a tree the caller chose, so a
+ *      missing lib/index.js is an error naming the commands that produce it.
+ *   2. A git repository (`DSH_APP_HOST_REPO`, else a sibling
+ *      `../deepseek-harness` or `../../deepseek-harness`): a detached worktree
+ *      at the kernel line's tag, created in the build work dir, installed and
+ *      built there, removed again. Taking the source from that tag is the point
+ *      of this path — packing a 0.1.6 checkout against 0.1.5-rc.2 dependencies
+ *      is what made an earlier attempt fail in the lockfile stage on
+ *      `@deepseek-ai/dsh-settings>=0.1.6 <0.2.0-0`.
+ *   3. No repository: a shallow clone of that tag from `DSH_APP_HOST_REPO_URL`
+ *      (default upstream). This is the CI shape and the only network path; a
+ *      workstation with a sibling checkout never fetches anything.
+ *
+ * @param workRoot - build work dir the disposable checkout lands in.
+ * @returns the checkout directory, a label for the build log, and the disposer
+ *   that removes whatever this call created.
+ */
+async function prepareDesktopHostSource(workRoot) {
+  const explicit = (process.env.DSH_APP_HOST_CHECKOUT ?? '').trim()
+  if (explicit !== '') {
+    const dir = path.resolve(explicit)
+    if (!existsSync(path.join(dir, DESKTOP_HOST_APP_DIR, 'package.json'))) {
+      throw new Error(`DSH_APP_HOST_CHECKOUT=${dir} holds no ${DESKTOP_HOST_APP_DIR}/ — it must be a checkout of the harness repository`)
+    }
+    if (!existsSync(path.join(dir, DESKTOP_HOST_APP_DIR, 'lib', 'index.js'))) {
+      throw new Error(
+        `cannot pack ${DESKTOP_HOST_PACKAGE}: ${path.join(dir, DESKTOP_HOST_APP_DIR)} has no built lib/index.js — `
+        + 'build it first (pnpm install, then tsc -b apps/desktop-host/tsconfig.json and tsdown inside apps/desktop-host), '
+        + "or leave DSH_APP_HOST_CHECKOUT unset to let this script take the source from the kernel line's tag",
+      )
+    }
+    return { dir, origin: `checkout ${dir}`, dispose: async () => {} }
+  }
+  const configured = (process.env.DSH_APP_HOST_REPO ?? '').trim()
+  // The same two candidates the shell's own dev mode and scripts/smoke-suite.mjs
+  // look for: the checkout sits beside this repo on some machines and one level
+  // further up on others.
+  const siblings = [path.resolve(root, '..', 'deepseek-harness'), path.resolve(root, '..', '..', 'deepseek-harness')]
+  const repo = configured !== '' ? path.resolve(configured) : siblings.find((dir) => isGitRepo(dir)) ?? siblings[0]
+  if (isGitRepo(repo)) {
+    const tag = hostTag()
+    if (!hasTag(repo, tag)) {
+      console.log(`[build-runtime] ${repo} does not hold ${tag} yet — fetching the tag`)
+      run('git', ['fetch', '--depth', '1', 'origin', 'tag', tag], repo)
+    }
+    if (!hasTag(repo, tag)) {
+      throw new Error(`${repo} has no tag ${tag} — it must hold the kernel line this runtime ships (git fetch origin tag ${tag})`)
+    }
+    const dir = path.join(workRoot, 'host-src')
+    await rm(dir, { recursive: true, force: true })
+    // A crashed earlier build leaves the worktree registered while its
+    // directory is already gone; prune first so `worktree add` never refuses a
+    // path it cannot clean up itself.
+    try { capture('git', ['worktree', 'prune'], repo) } catch { /* housekeeping only */ }
+    run('git', ['worktree', 'add', '--detach', dir, tag], repo)
+    return {
+      dir,
+      origin: `${repo} worktree at ${tag}`,
+      dispose: async () => {
+        await rm(dir, { recursive: true, force: true })
+        try { capture('git', ['worktree', 'prune'], repo) } catch { /* the checkout is already gone */ }
+      },
+    }
+  }
+  if (configured !== '') {
+    throw new Error(`DSH_APP_HOST_REPO=${repo} is not a git checkout — point it at a clone of the harness repository`)
+  }
+  if (existsSync(repo)) {
+    // The default sibling exists but is not version-controlled: it cannot be
+    // turned into a worktree at the tag, and reading it in place would take the
+    // host from whatever revision happens to sit there. Say so rather than
+    // silently cloning a second copy.
+    throw new Error(
+      `${repo} is not a git checkout, so its host source cannot be tied to kernel tag ${hostTag()} — `
+      + 'point DSH_APP_HOST_CHECKOUT at it if its app is already built, or DSH_APP_HOST_REPO at a git clone',
+    )
+  }
+  const url = (process.env.DSH_APP_HOST_REPO_URL ?? DEFAULT_HOST_REPO_URL).trim()
+  if (url === '') {
+    throw new Error(
+      `no checkout of the harness repository at ${repo} and DSH_APP_HOST_REPO_URL is empty — `
+      + `the private ${DESKTOP_HOST_PACKAGE} has no registry source, so set DSH_APP_HOST_REPO, DSH_APP_HOST_CHECKOUT or DSH_APP_HOST_PACKAGE`,
+    )
+  }
+  const dir = path.join(workRoot, 'host-src')
+  await rm(dir, { recursive: true, force: true })
+  await mkdir(workRoot, { recursive: true })
+  // Shallow and blobless: only this tag's tree is needed, and the harness
+  // repository carries years of history.
+  run('git', ['clone', '--filter=blob:none', '--depth', '1', '--branch', hostTag(), url, dir], workRoot)
+  return {
+    dir,
+    origin: `${url} at ${hostTag()}`,
+    dispose: async () => { await rm(dir, { recursive: true, force: true }) },
+  }
+}
+
+/**
+ * Directories a checkout's pnpm-workspace.yaml `packages:` globs select.
+ *
+ * Hand-parsed for the same reason the lockfile is: the list is two-space
+ * indented `- <glob>` lines with comments between entries, and the alternative
+ * is a YAML parser in the build toolchain. Globs are expanded one path segment
+ * at a time; a single wildcard segment is the whole of the syntax the harness
+ * uses (`vendor`, `packages`, `apps` each hold one level of projects).
+ * Negations are skipped: nothing here needs to subtract from the list.
+ * @param checkoutDir - checkout root holding pnpm-workspace.yaml.
+ */
+function workspaceProjectDirs(checkoutDir) {
+  const file = path.join(checkoutDir, 'pnpm-workspace.yaml')
+  if (!existsSync(file)) return []
+  const globs = []
+  let inPackages = false
+  for (const line of readFileSync(file, 'utf8').split(/\r?\n/u)) {
+    if (/^packages:/u.test(line)) { inPackages = true; continue }
+    if (!inPackages || line.trim() === '' || /^\s*#/u.test(line)) continue
+    const match = /^[ \t]+-[ \t]*['"]?([^'"\s]+)['"]?[ \t]*$/u.exec(line)
+    if (match === null) break // the next top-level key ends the list
+    if (!match[1].startsWith('!')) globs.push(match[1])
+  }
+  const dirs = []
+  for (const glob of globs) {
+    let current = [checkoutDir]
+    for (const segment of glob.replace(/^\.\//u, '').replace(/\/+$/u, '').split('/')) {
+      const next = []
+      for (const dir of current) {
+        if (segment === '*' || segment === '') {
+          let entries = []
+          try { entries = readdirSync(dir, { withFileTypes: true }) } catch { continue }
+          for (const entry of entries) {
+            if (segment === '') next.push(path.join(dir, entry.name))
+            else if (entry.isDirectory() && !entry.name.startsWith('.')) next.push(path.join(dir, entry.name))
+          }
+          continue
+        }
+        const full = path.join(dir, segment)
+        // Absent: an optional group directory in someone else's layout.
+        if (existsSync(full)) next.push(full)
+      }
+      current = next
+    }
+    dirs.push(...current)
+  }
+  return dirs
+}
+
+/**
+ * name → version for every workspace project a checkout declares.
+ *
+ * Only `workspace:` dependency specs need this (see
+ * concretizeHostWorkspaceSpecs): the protocol means "the version of the package
+ * at that path in this workspace", so the workspace's own manifests are the
+ * only source that answers it.
+ * @param checkoutDir - checkout root holding pnpm-workspace.yaml.
+ */
+function workspacePackageVersions(checkoutDir) {
+  const versions = new Map()
+  for (const dir of workspaceProjectDirs(checkoutDir)) {
+    const manifestPath = path.join(dir, 'package.json')
+    if (!existsSync(manifestPath)) continue
+    const pkg = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    if (typeof pkg.name === 'string' && typeof pkg.version === 'string') versions.set(pkg.name, pkg.version)
+  }
+  return versions
+}
+
+/**
+ * Replace the `workspace:` dependency specs of the packed host with the
+ * versions they stand for.
+ *
+ * `npm pack` copies the field verbatim, and pnpm refuses a tarball whose
+ * dependencies use the workspace protocol — the tarball belongs to no
+ * workspace, so resolution dies with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND ("no
+ * package named @deepseek-ai/cordis is present in the workspace"). The host is
+ * the one package here that reaches the runtime as a tarball while declaring
+ * workspace specs, so this is where they have to be made concrete.
+ *
+ * `@deepseek-ai/dsh*` are pinned to DSH_VERSION: the kernel moves as one line
+ * and the assembly's `overrides` already pin exactly this value. Everything
+ * else keeps the protocol's meaning — `workspace:^x.y.z` → `^x.y.z` of the
+ * package in the source checkout — which for the vendored Cordis packages is
+ * the version this line publishes on npm.
+ *
+ * Only the packed copy is rewritten: the checkout keeps its manifest, and the
+ * entry list is reused, so the archive keeps the shape `npm pack` produced.
+ * @param tarball - tarball produced by `npm pack`, replaced in place.
+ * @param manifest - the packed manifest, already read by the caller.
+ * @param versions - name → version of the source checkout's workspace projects.
+ * @returns the rewritten `<name>@<spec>` pairs, for the build log.
+ */
+async function concretizeHostWorkspaceSpecs(tarball, manifest, versions) {
+  const specs = {}
+  for (const [name, spec] of Object.entries(manifest.dependencies ?? {})) {
+    if (typeof spec !== 'string' || !spec.startsWith('workspace:')) continue
+    if (KERNEL_PACKAGE.test(name)) { specs[name] = DSH_VERSION; continue }
+    const version = versions.get(name)
+    if (version === undefined) {
+      throw new Error(
+        `${DESKTOP_HOST_PACKAGE} declares ${name}: ${spec}, which pnpm cannot resolve outside a workspace — `
+        + (versions.size === 0
+          ? 'the tarball came from DSH_APP_HOST_PACKAGE and no checkout was available to resolve it; '
+            + 'either pack the host with `pnpm pack` (it rewrites the protocol to concrete ranges), '
+            + 'or drop DSH_APP_HOST_PACKAGE so this build takes the source from the kernel line\'s tag'
+          : `the host checkout declares no workspace package named ${name}`),
+      )
+    }
+    specs[name] = spec === 'workspace:*' ? version : `${spec.slice('workspace:'.length)}${version}`
+  }
+  if (Object.keys(specs).length === 0) return []
+  const entries = await tarEntries(tarball)
+  const staging = `${tarball}.specs`
+  await rm(staging, { recursive: true, force: true })
+  await mkdir(staging, { recursive: true })
+  try {
+    await extractTar({ file: tarball, cwd: staging })
+    const manifestPath = path.join(staging, 'package', 'package.json')
+    const shipped = JSON.parse(await readFile(manifestPath, 'utf8'))
+    for (const [name, spec] of Object.entries(specs)) shipped.dependencies[name] = spec
+    await writeFile(manifestPath, `${JSON.stringify(shipped, null, 2)}\n`)
+    await rm(tarball, { force: true })
+    await createTar({ gzip: true, file: tarball, cwd: staging, portable: true, mtime: new Date(0) }, entries)
+  } finally {
+    await rm(staging, { recursive: true, force: true })
+  }
+  return Object.entries(specs).map(([name, spec]) => `${name}@${spec}`)
+}
+
+/**
+ * Pack the private desktop host for this runtime.
+ *
+ * The package cannot be installed by name, so the build either takes a tarball
+ * someone already built (`DSH_APP_HOST_PACKAGE`) or packs one from a checkout
+ * of the SAME kernel line (see prepareDesktopHostSource for where that checkout
+ * comes from). Either way the packed manifest must name the version this
+ * runtime ships — the host composes the kernel installed beside it, and a
+ * mismatched pair fails at runtime with an opaque service error instead of
+ * here — and its `workspace:` specs are resolved to concrete versions, because
+ * pnpm cannot install them at all.
+ *
+ * @param destDir - directory to pack into (the pnpm project's pkgs/).
+ * @param workRoot - build work dir a disposable host checkout is created in.
+ * @returns the file: spec for the runtime's dependencies, plus the runtime
+ *   dependency names the host's own manifest declares.
+ */
+async function packDesktopHost(destDir, workRoot) {
+  const prebuilt = (process.env.DSH_APP_HOST_PACKAGE ?? '').trim()
+  let tarball
+  // Empty for the prebuilt path: there is no checkout, so a workspace: spec in
+  // a foreign tarball is unresolvable and reported as such.
+  let versions = new Map()
+  let origin = 'DSH_APP_HOST_PACKAGE'
+  if (prebuilt !== '') {
+    if (!existsSync(prebuilt)) {
+      throw new Error(`DSH_APP_HOST_PACKAGE points at ${prebuilt}, which does not exist`)
+    }
+    // Copy it in so every spec this build records is `file:pkgs/<name>`, like
+    // the suite plugins — the tarball then lives beside the other pack outputs
+    // for the whole build.
+    const target = path.join(destDir, path.basename(prebuilt))
+    if (path.resolve(target) !== path.resolve(prebuilt)) await cp(prebuilt, target)
+    tarball = target
+  } else {
+    const source = await prepareDesktopHostSource(workRoot)
+    origin = source.origin
+    console.log(`[build-runtime] host source: ${source.origin}`)
+    try {
+      const appDir = await buildDesktopHostApp(source.dir)
+      const packed = JSON.parse(capture(npmBin(), ['pack', '--json', '--pack-destination', destDir], appDir))
+      const filename = packed?.[0]?.filename
+      if (typeof filename !== 'string') throw new Error(`npm pack produced no file name for ${DESKTOP_HOST_PACKAGE}`)
+      tarball = path.join(destDir, filename)
+      versions = workspacePackageVersions(source.dir)
+    } finally {
+      // The worktree is this build's to clean up, whether the pack succeeded or
+      // threw: nothing outside the work dir may keep pointing at it.
+      await source.dispose()
+    }
+  }
+  // Read the packed manifest (the tarball, not the checkout): that is the copy
+  // the runtime will install, and npm pack rewrites nothing inside it.
+  const staging = `${tarball}.manifest`
+  await rm(staging, { recursive: true, force: true })
+  await mkdir(staging, { recursive: true })
+  let manifest
+  try {
+    await extractTar({ file: tarball, cwd: staging, entries: ['package/package.json'] })
+    manifest = JSON.parse(await readFile(path.join(staging, 'package', 'package.json'), 'utf8'))
+  } finally {
+    await rm(staging, { recursive: true, force: true })
+  }
+  if (manifest.name !== DESKTOP_HOST_PACKAGE) {
+    throw new Error(`packed host tarball names ${JSON.stringify(manifest.name)}, expected ${DESKTOP_HOST_PACKAGE}`)
+  }
+  if (manifest.version !== DSH_VERSION) {
+    throw new Error(
+      `packed host is ${manifest.version} but this runtime ships ${DSH_VERSION} — `
+      + `pack the host from a checkout of the same kernel line (from ${origin}, expected tag ${hostTag()})`,
+    )
+  }
+  const rewritten = await concretizeHostWorkspaceSpecs(tarball, manifest, versions)
+  const dependencies = Object.keys(manifest.dependencies ?? {}).filter((name) => KERNEL_PACKAGE.test(name))
+  console.log(
+    `[build-runtime] packed desktop host ${manifest.version}: ${formatBytes(statSync(tarball).size)}`
+    + ` (runtime dependencies: ${dependencies.join(', ')})`,
+  )
+  if (rewritten.length > 0) {
+    console.log(`[build-runtime] host workspace specs resolved: ${rewritten.join(', ')}`)
+  }
+  return { spec: `file:pkgs/${path.basename(tarball)}`, dependencies }
+}
+
+/**
  * Pack one suite plugin with `npm pack`. The tarball holds exactly what
  * `npm publish` would ship, because the plugin's own `files` field is npm's
  * publish contract — the same source the previous hand-written copy loop read.
@@ -503,7 +948,7 @@ function tarEntries(file) {
  * @param lockfileText - contents of the generated pnpm-lock.yaml.
  * @returns counts for the build log.
  */
-function assertLockfileCore(lockfileText) {
+function assertLockfileCore(lockfileText, hostPackageName) {
   const entries = []
   let inPackages = false
   for (const line of lockfileText.split(/\r?\n/u)) {
@@ -533,11 +978,25 @@ function assertLockfileCore(lockfileText) {
         )
       }
       missing.delete(entry.name)
-    } else if (KERNEL_PACKAGE.test(entry.name) && entry.version !== DSH_VERSION) {
-      throw new Error(
-        `lockfile resolved ${entry.name}@${entry.version}, but this runtime ships dsh ${DSH_VERSION}`
-        + ' — two kernel versions in one tree is the double-instance bug, refusing to assemble',
-      )
+    } else if (KERNEL_PACKAGE.test(entry.name)) {
+      // The private desktop host is the one kernel-shaped package that cannot
+      // come from the registry: it must be the tarball this build packed, and
+      // its own version was already asserted against DSH_VERSION at pack time.
+      if (entry.name === hostPackageName) {
+        if (!entry.version.startsWith('file:')) {
+          throw new Error(
+            `lockfile resolved the private ${entry.name} from the registry (${entry.version})`
+            + ' — the pack tarball did not reach the dependency graph, refusing to assemble',
+          )
+        }
+        continue
+      }
+      if (entry.version !== DSH_VERSION) {
+        throw new Error(
+          `lockfile resolved ${entry.name}@${entry.version}, but this runtime ships dsh ${DSH_VERSION}`
+          + ' — two kernel versions in one tree is the double-instance bug, refusing to assemble',
+        )
+      }
     }
   }
   if (missing.size > 0) {
@@ -666,6 +1125,12 @@ async function main() {
   for (const name of SUITE_PLUGINS) {
     suiteSpecs[name] = await packPlugin(name.replace('@dsh-app/', ''), pkgsDir)
   }
+  // The host the shell starts the kernel with, plus the UI it serves. Both have
+  // to be in the tree or the packaged app cannot boot at all — the node/ binary
+  // beside them is no longer the kernel's entry point. The host is built from
+  // the kernel line's own tag (prepareDesktopHostSource), so this step is what
+  // makes a release from an older line fail instead of shipping a mixed pair.
+  const host = await packDesktopHost(pkgsDir, work)
 
   const appPkg = {
     name: 'dsh-app-runtime',
@@ -673,6 +1138,16 @@ async function main() {
     version: DSH_VERSION,
     dependencies: {
       '@deepseek-ai/dsh': DSH_VERSION,
+      // The web frontend the host serves as the UI, pinned to this kernel line.
+      [WEB_FRONTEND_PACKAGE]: DSH_VERSION,
+      // Everything the host imports at run time, derived from its own manifest:
+      // most of it already arrives transitively through `@deepseek-ai/dsh`, but
+      // the host's own closure is what the runtime must guarantee, and deriving
+      // it here means a package it starts needing joins the tree automatically.
+      ...Object.fromEntries(host.dependencies
+        .filter((name) => name !== '@deepseek-ai/dsh')
+        .map((name) => [name, DSH_VERSION])),
+      [DESKTOP_HOST_PACKAGE]: host.spec,
       // fff-node ships the platform-specific FFF binary into the runtime so
       // plugin-fff's external require resolves from app/node_modules.
       '@ff-labs/fff-node': FFF_NODE_PIN,
@@ -731,6 +1206,10 @@ async function main() {
     'overrides:',
     `  '@deepseek-ai/dsh': '${DSH_VERSION}'`,
     `  '@deepseek-ai/dsh-*': '${DSH_VERSION}'`,
+    // The exact key outranks the wildcard for the private host: that package is
+    // not on npm, so a wildcard resolution would fail the install (loudly, but
+    // only after the whole download).
+    `  '${DESKTOP_HOST_PACKAGE}': '${host.spec}'`,
     ...SUITE_PLUGINS.map((name) => `  '${name}': '${suiteSpecs[name]}'`),
     '',
   ].join('\n'))
@@ -741,9 +1220,9 @@ async function main() {
   // artifact contains. An explicit NPM_CONFIG_REGISTRY still wins (mirror
   // builds), matching what the empty --userconfig file did for npm. npm's
   // --no-audit/--no-fund have no pnpm counterpart and are not needed: pnpm
-  // audits nothing during install and has no funding message.
-  const registry = (process.env.NPM_CONFIG_REGISTRY ?? process.env.npm_config_registry ?? '').trim()
-    || 'https://registry.npmjs.org/'
+  // audits nothing during install and has no funding message. registryUrl()
+  // holds the same rule for the host install above.
+  const registry = registryUrl()
   // --package-import-method=copy: pnpm's default hardlinks the store into
   // node_modules, and two packages shipping identical bytes (a shared LICENSE,
   // a duplicated .d.ts) then become ONE inode. node-tar records the second
@@ -759,7 +1238,7 @@ async function main() {
   //     BEFORE anything is downloaded, so a registry-resolved core package
   //     fails the build instead of shipping.
   const lockfilePath = path.join(projectDir, 'pnpm-lock.yaml')
-  const locked = assertLockfileCore(await readFile(lockfilePath, 'utf8'))
+  const locked = assertLockfileCore(await readFile(lockfilePath, 'utf8'), DESKTOP_HOST_PACKAGE)
   console.log(`[build-runtime] lockfile ok: ${locked.total} packages (${locked.file} file:, ${locked.registry} registry), no @dsh-app package from the registry`)
 
   // 2b. Install exactly what was asserted. --frozen-lockfile makes a lockfile

@@ -53,7 +53,7 @@ const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugi
 const SUITE_PROFILE = 'dsh-app'
 const SUITE_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 const FIXTURE = path.join(root, 'scripts', 'fixtures', 'minimal-mcp-server.mjs')
-const MCP_PREFIX = '/plugins/@dsh-app/plugin-mcp/api'
+const MCP_PREFIX = '/api/plugins/dsh-app/plugin-mcp'
 
 /**
  * Bundled-template floor for the PPT catalog. 30 templates ship today; the
@@ -318,7 +318,7 @@ async function postJson(base, route, body) {
  * six would make this probe flaky for reasons unrelated to the plugin.
  */
 async function probeWebSearch(base) {
-  const WS = '/plugins/@dsh-app/plugin-websearch/api'
+  const WS = '/api/plugins/dsh-app/plugin-websearch'
   const config = await getJson(base, `${WS}/config`)
   const view = config.body?.value
   check('websearch: config route answers ok', config.status === 200 && config.body?.ok === true, `HTTP ${config.status}`)
@@ -491,21 +491,29 @@ async function main() {
     }, undefined, 2)}\n`)
   }
   // Replicate the shell's brand-suite seam inside the throwaway home: one link
-  // per suite plugin, in the SHARED fallback the shell uses (it resolves for
-  // every profile, and no profile's pnpm run can prune it). Scope path and
-  // profile name must match src/main/brand-suite.ts and src/shared/constants.ts.
-  const scope = path.join(home, 'profiles', 'node_modules', '@dsh-app')
-  mkdirSync(scope, { recursive: true })
+  // per suite plugin in BOTH scopes the shell writes — the profile the kernel
+  // actually boots, and the shared fallback. The profile-local link is the one
+  // that matters: the host's enforcing profile resolver collects candidates
+  // from the booted profile's own node_modules walk, so the shared fallback
+  // alone leaves every suite entry inactive ("17 entries did not activate")
+  // while the client bundles still load. Scope paths and profile name must
+  // match src/main/brand-suite.ts and src/shared/constants.ts.
+  const { symlinkSync } = await import('node:fs')
+  const scopes = [
+    path.join(home, 'profiles', SUITE_PROFILE, 'node_modules', '@dsh-app'),
+    path.join(home, 'profiles', 'node_modules', '@dsh-app'),
+  ]
   for (const dir of SUITE_DIRS) {
     const target = path.join(launch.suiteSource, dir)
     if (!existsSync(path.join(target, 'package.json'))) {
       throw new Error(`suite plugin missing at ${target} (built? runtime complete?)`)
     }
-    mkdirSync(path.dirname(path.join(scope, dir)), { recursive: true })
-    // node's symlinkSync('junction') works on Windows without elevation and
-    // avoids cmd.exe argument re-quoting on paths with spaces.
-    const { symlinkSync } = await import('node:fs')
-    symlinkSync(target, path.join(scope, dir), 'junction')
+    for (const scope of scopes) {
+      // node's symlinkSync('junction') works on Windows without elevation and
+      // avoids cmd.exe argument re-quoting on paths with spaces.
+      mkdirSync(scope, { recursive: true })
+      symlinkSync(target, path.join(scope, dir), 'junction')
+    }
   }
 
   const logPath = path.join(home, 'smoke-server.log')
@@ -531,20 +539,27 @@ async function main() {
     const base = new URL(session.url).origin
     console.log(`smoke: server healthy at ${base}, probing suite surfaces`)
 
+    // The loader's activation verdict, echoed before the route probes: with a
+    // suite entry inactive every route below answers 404, and the reason is in
+    // this one line (the count plus the failing entry names).
+    const activation = readFileSync(logPath, 'utf8').split(/\r?\n/u)
+      .filter((line) => /did not activate/.test(line) || /failed to import/.test(line))
+    for (const line of activation) console.log(`smoke: kernel said: ${line}`)
+
     for (const [route, name] of [
-      ['/plugins/@dsh-app/plugin-usage/api/status', 'usage: status route'],
-      ['/plugins/@dsh-app/plugin-memory/api/status', 'memory: status route'],
-      ['/plugins/@dsh-app/plugin-archives/api/list', 'archives: list route'],
-      ['/plugins/@dsh-app/plugin-archives/api/search?q=probe', 'archives: search route'],
-      ['/plugins/@dsh-app/plugin-swarm/api/config', 'swarm: config route'],
+      ['/api/plugins/dsh-app/plugin-usage/status', 'usage: status route'],
+      ['/api/plugins/dsh-app/plugin-memory/status', 'memory: status route'],
+      ['/api/plugins/dsh-app/plugin-archives/list', 'archives: list route'],
+      ['/api/plugins/dsh-app/plugin-archives/search?q=probe', 'archives: search route'],
+      ['/api/plugins/dsh-app/plugin-swarm/config', 'swarm: config route'],
       [`${MCP_PREFIX}/servers`, 'mcp: servers route'],
-      ['/plugins/@dsh-app/plugin-hooks/api/hooks', 'hooks: hooks route'],
-      ['/plugins/@dsh-app/plugin-market/api/sources', 'market: sources route'],
-      ['/plugins/@dsh-app/plugin-presets/api/presets', 'presets: list route'],
-      ['/plugins/@dsh-app/plugin-ppt/api/mode?sessionId=smoke', 'ppt: mode route'],
-      ['/plugins/@dsh-app/plugin-doc/api/mode?sessionId=smoke', 'doc: mode route'],
-      ['/plugins/@dsh-app/plugin-sheet/api/mode?sessionId=smoke', 'sheet: mode route'],
-      ['/plugins/@dsh-app/plugin-pdf/api/mode?sessionId=smoke', 'pdf: mode route'],
+      ['/api/plugins/dsh-app/plugin-hooks/hooks', 'hooks: hooks route'],
+      ['/api/plugins/dsh-app/plugin-market/sources', 'market: sources route'],
+      ['/api/plugins/dsh-app/plugin-presets/presets', 'presets: list route'],
+      ['/api/plugins/dsh-app/plugin-ppt/mode?sessionId=smoke', 'ppt: mode route'],
+      ['/api/plugins/dsh-app/plugin-doc/mode?sessionId=smoke', 'doc: mode route'],
+      ['/api/plugins/dsh-app/plugin-sheet/mode?sessionId=smoke', 'sheet: mode route'],
+      ['/api/plugins/dsh-app/plugin-pdf/mode?sessionId=smoke', 'pdf: mode route'],
     ]) {
       await probeRoute(base, route, name)
     }
@@ -555,7 +570,7 @@ async function main() {
     // size and that every listed template carries a cover preview, so the
     // metadata AND the preview JPGs are proven present on the served path.
     {
-      const templates = await getJson(base, '/plugins/@dsh-app/plugin-ppt/api/templates')
+      const templates = await getJson(base, '/api/plugins/dsh-app/plugin-ppt/templates')
       const list = templates.body?.value?.templates
       const count = Array.isArray(list) ? list.length : 0
       check(`ppt: templates route lists >= ${String(PPT_TEMPLATE_FLOOR)} templates (30 bundled)`,
@@ -574,7 +589,7 @@ async function main() {
     // render. The diagnostic route resolves the same candidates and reports
     // whether one is readable.
     {
-      const font = await getJson(base, '/plugins/@dsh-app/plugin-pdf/api/font-status')
+      const font = await getJson(base, '/api/plugins/dsh-app/plugin-pdf/font-status')
       const value = font.body?.value
       check(`pdf: bundled CJK font asset readable (${formatBytes(typeof value?.bytes === 'number' ? value.bytes : 0)})`,
         font.status === 200 && value?.available === true && (value?.bytes ?? 0) > 0,
@@ -587,7 +602,7 @@ async function main() {
     // host half is mounted, fenced, and validating; any 404/500 would mean the
     // routes never registered.
     {
-      const sidebar = await getJson(base, '/plugins/@dsh-app/plugin-sidebar/api/git/status')
+      const sidebar = await getJson(base, '/api/plugins/dsh-app/plugin-sidebar/git/status')
       check('sidebar: git routes mounted (paramless status rejects 400)',
         sidebar.status === 400 && sidebar.body !== null && sidebar.body.ok === false,
         `HTTP ${sidebar.status}: ${sidebar.text.slice(0, 200)}`)
@@ -622,7 +637,7 @@ async function main() {
     // Hooks bridge dynamic-mount chain: create a claude-code bridge pointing
     // at the fixture hooks.json → mounted → disable → delete.
     const HOOKS_FIXTURE = path.join(root, 'scripts', 'fixtures', 'hooks-claude-code.json')
-    const HOOKS_ROUTE = '/plugins/@dsh-app/plugin-hooks/api'
+    const HOOKS_ROUTE = '/api/plugins/dsh-app/plugin-hooks'
     const hookCreated = await postJson(base, `${HOOKS_ROUTE}/bridge/create`, {
       dialect: 'claude-code',
       enabled: true,
@@ -701,9 +716,12 @@ async function main() {
           // surface as an error status naming the offense — never mount, and
           // never fail the create call itself (rule validation lives in
           // native.sync, so create stores the entry and the status reports it).
-          for (const [label, rules, match, messageWant] of [
-            ['unknown event', [{ name: 'smoke-bad-on', on: 'session-end', action: 'context', message: 'x' }], 'session-end', '的 on'],
-            ['unsupported action', [{ name: 'smoke-bad-action', on: 'session-start', action: 'block', message: 'x' }], 'session-start', '不支持'],
+          // The host half never sends prose: the offense arrives as a coded
+          // HostText whose params name the rule, and the client owns the
+          // sentence, so the assertion is the code plus those params.
+          for (const [label, rules, match, wantCode, wantParams] of [
+            ['unknown event', [{ name: 'smoke-bad-on', on: 'session-end', action: 'context', message: 'x' }], 'session-end', 'native.onInvalid', { name: 'smoke-bad-on' }],
+            ['unsupported action', [{ name: 'smoke-bad-action', on: 'session-start', action: 'block', message: 'x' }], 'session-start', 'native.actionUnsupported', { name: 'smoke-bad-action', on: 'session-start', action: 'block' }],
           ]) {
             const badCreated = await postJson(base, `${HOOKS_ROUTE}/bridge/create`, {
               dialect: 'native',
@@ -720,9 +738,11 @@ async function main() {
                 `status: ${JSON.stringify(badBridge?.status)}`)
               // The error names the offense (event predicate / unsupported pair),
               // proving the rule was validated rather than silently dropped.
+              const message = badBridge?.status?.message
               check(`hooks: native ${label} error names the offense`,
-                typeof badBridge?.status?.message === 'string' && badBridge.status.message.includes(messageWant),
-                `message: ${JSON.stringify(badBridge?.status?.message)}`)
+                message?.code === wantCode
+                  && Object.entries(wantParams).every(([key, value]) => message?.params?.[key] === value),
+                `message: ${JSON.stringify(message)}`)
               if (badBridge?.id !== undefined) await postJson(base, `${HOOKS_ROUTE}/bridge/delete`, { id: badBridge.id })
             }
           }

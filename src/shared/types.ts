@@ -154,18 +154,3 @@ export interface UpdateCheckResult {
    */
   reason?: string
 }
-
-/** How to spawn the dsh server for the active kernel. */
-export type ServerSpec =
-  | { kind: 'pnpm'; cwd: string }
-  | {
-    kind: 'node'
-    nodePath: string
-    scriptPath: string
-    cwd: string
-    /**
-     * The runtime's own node binary is not being used: this is Electron's
-     * executable, which has to be told to behave as node (see server.ts).
-     */
-    electronNode?: true
-  }

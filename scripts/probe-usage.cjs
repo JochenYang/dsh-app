@@ -47,9 +47,9 @@ app.whenReady().then(async () => {
           return { http: r.status, body: await r.json() }
         } catch (e) { return { error: String(e) } }
       }
-      const status = await get('/plugins/@dsh-app/plugin-usage/api/status')
-      const summary = await get('/plugins/@dsh-app/plugin-usage/api/summary?days=30')
-      const heat = await get('/plugins/@dsh-app/plugin-usage/api/heatmap?weeks=26')
+      const status = await get('/api/plugins/dsh-app/plugin-usage/status')
+      const summary = await get('/api/plugins/dsh-app/plugin-usage/summary?days=30')
+      const heat = await get('/api/plugins/dsh-app/plugin-usage/heatmap?weeks=26')
       return {
         status: status.body && status.body.value,
         summaryTotals: summary.body && summary.body.value && summary.body.value.totals,

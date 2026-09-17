@@ -279,12 +279,6 @@ test('assembly produces the tgz layout, records layer provenance, and caches eve
   assert.ok(existsSync(path.join(dir, 'app', 'package.json')), 'the meta layer landed')
   assert.ok(!existsSync(path.join(h.root, 'staging')), 'staging never survives an activation')
 
-  const spec = h.manager.getServerSpec()
-  assert.equal(spec.kind, 'node')
-  assert.equal(spec.nodePath, path.join(dir, 'node', NODE_BINARY))
-  assert.equal(spec.scriptPath, path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
-  assert.equal(spec.cwd, path.join(dir, 'app'))
-
   const onDisk = h.readCurrent()
   assert.deepEqual(
     onDisk.layers.map((layer) => layer.name),
@@ -411,7 +405,8 @@ test('a current.json without a layers field still loads and rolls back', async (
   assert.ok(loaded)
   assert.equal(loaded.active, 'dsh-2.0.0+suite-s2')
   assert.equal(loaded.layers, undefined, 'a missing field is "no provenance", not a broken record')
-  assert.equal(fresh.getServerSpec().nodePath, path.join(h.root, loaded.active, 'node', NODE_BINARY))
+  assert.ok(existsSync(path.join(h.root, loaded.active, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')),
+    'the loaded kernel still resolves its runtime tree')
 
   const rolled = await fresh.rollback()
   assert.ok(rolled)

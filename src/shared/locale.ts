@@ -104,7 +104,6 @@ const ZH_CN = {
   // ------------------------------------------------ server-boot give-up card
   'serverFailure.summary': 'dsh 服务无法启动。{advice}',
   'serverFailure.pluginTree': '疑似套件插件加载失败（patch 冲突或配置无效）。可尝试以安全模式重启，跳过套件插件后排查。',
-  'serverFailure.port': '服务端口被占用。请确认没有另一个 DSH APP 实例正在运行，然后重试。',
   'serverFailure.module': '内核缺少模块文件，安装可能不完整。可从托盘菜单执行「检查内核更新」重装内核。',
   'serverFailure.other': '可查看安装目录 logs 文件夹中最新的 dsh-server 日志定位原因。',
   'serverFailure.safeModeDetail': '以安全模式重启将跳过套件插件，仅加载官方内核与你自己的配置。',
@@ -114,10 +113,18 @@ const ZH_CN = {
   'devMode.workspaceHint': '开发模式使用本地 deepseek-harness 工作区；若刚拉取上游代码，请先在该目录执行 pnpm install && pnpm run build',
   'devMode.workspaceHintAt': '开发模式使用本地工作区 {checkout}；若刚拉取上游代码，请先在该目录执行 pnpm install && pnpm run build',
 
-  // ------------------------------------------------------- desktop bridge
-  'bridge.unsupported': '当前环境不支持该操作',
-  'bridge.openFailed': '无法打开：{detail}',
-  'bridge.openLogsFailed': '无法打开日志目录：{detail}',
+  // ------------------------------------------------------- desktop host
+  'hostFailure.nodeMissing': '运行时缺少 Node 可执行文件 {path}，内核安装不完整。可从托盘菜单执行「检查内核更新」重装内核。',
+  'hostFailure.devHostMissing': '开发模式工作区 {checkout} 未构建桌面宿主。请先在该目录执行 pnpm install && pnpm run build（或在 apps/desktop-host 下执行 tsc -b 与 tsdown）。',
+
+  // -------------------------------------------------  shell action seam
+  'shellAction.forbidden': '请求未通过本机信任围栏',
+  'shellAction.unknown': '未知的桌面动作',
+  'shellAction.method': '仅支持 POST 请求',
+  'shellAction.contentType': '仅支持 application/json 请求',
+  'shellAction.params': '请求参数不合法',
+  'shellAction.tooLarge': '请求内容过大',
+  'shellAction.failed': '该桌面操作未能完成',
 
   // ---------------------------------------------------------- launch folder
   'workspace.openFailedTitle': '无法打开文件夹',
@@ -345,7 +352,6 @@ const EN_US: Record<MessageKey, string> = {
   // ------------------------------------------------ server-boot give-up card
   'serverFailure.summary': 'The dsh server could not start. {advice}',
   'serverFailure.pluginTree': 'The brand plugin suite appears to have failed to load (patch conflict or invalid config). Restarting in safe mode skips the suite plugins so you can narrow it down.',
-  'serverFailure.port': 'The server port is already in use. Make sure another DSH APP instance is not running, then retry.',
   'serverFailure.module': 'The kernel is missing module files, so the installation may be incomplete. Run "Check for kernel updates" from the tray menu to reinstall it.',
   'serverFailure.other': 'Check the newest dsh-server log in the logs folder of the installation directory to find the cause.',
   'serverFailure.safeModeDetail': 'Restarting in safe mode skips the suite plugins and loads only the official kernel plus your own configuration.',
@@ -355,10 +361,18 @@ const EN_US: Record<MessageKey, string> = {
   'devMode.workspaceHint': 'Dev mode runs the local deepseek-harness workspace; after pulling upstream code, run pnpm install && pnpm run build in that directory first',
   'devMode.workspaceHintAt': 'Dev mode runs the local workspace {checkout}; after pulling upstream code, run pnpm install && pnpm run build in that directory first',
 
-  // ------------------------------------------------------- desktop bridge
-  'bridge.unsupported': 'This action is not supported in the current environment',
-  'bridge.openFailed': 'Could not open: {detail}',
-  'bridge.openLogsFailed': 'Could not open the log folder: {detail}',
+  // ------------------------------------------------------- desktop host
+  'hostFailure.nodeMissing': 'The runtime is missing its Node executable at {path}, so the kernel installation is incomplete. Run "Check for kernel updates" from the tray menu to reinstall it.',
+  'hostFailure.devHostMissing': 'The dev workspace {checkout} has not built the desktop host. Run pnpm install && pnpm run build in that directory first (or tsc -b and tsdown inside apps/desktop-host).',
+
+  // -------------------------------------------------  shell action seam
+  'shellAction.forbidden': 'The request did not pass the local trust fence',
+  'shellAction.unknown': 'Unknown desktop action',
+  'shellAction.method': 'POST only',
+  'shellAction.contentType': 'application/json only',
+  'shellAction.params': 'Invalid request parameters',
+  'shellAction.tooLarge': 'The request body is too large',
+  'shellAction.failed': 'The desktop action did not complete',
 
   // ---------------------------------------------------------- launch folder
   'workspace.openFailedTitle': 'Could not open folder',
