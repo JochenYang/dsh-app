@@ -99,8 +99,13 @@ jobs:
             DSH_VERSION="$(node scripts/kernel-line.mjs --resolve)"
           fi
           echo "dsh_version=$DSH_VERSION" >> "$GITHUB_OUTPUT"
-          # All 6 cells × (tgz + sha512 + per-cell manifest) must be present;
-          # anything missing (or no release at all) means a full rebuild.
+          # All 6 cells × (tgz + sha512 + per-cell manifest + layer index) must
+          # be present; anything missing (or no release at all) means a full
+          # rebuild. The layer index is required for the same reason a sidecar
+          # is: its ABSENCE is invisible to the client, which is documented to
+          # fall back to the single tarball, so a release published without
+          # layers would be reused forever and every kernel update would keep
+          # paying the full ~96 MiB download with nothing red anywhere.
           TAG="runtime-$DSH_VERSION"
           if ! ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null)"; then
             echo "no $TAG release; building" >&2
@@ -108,7 +113,7 @@ jobs:
             exit 0
           fi
           for p in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
-            for name in "dsh-runtime-${p}-${DSH_VERSION}.tgz" "dsh-runtime-${p}-${DSH_VERSION}.tgz.sha512" "manifest-${p}.json"; do
+            for name in "dsh-runtime-${p}-${DSH_VERSION}.tgz" "dsh-runtime-${p}-${DSH_VERSION}.tgz.sha512" "manifest-${p}.json" "layers-${p}.json"; do
               if ! grep -qxF "$name" <<< "$ASSETS"; then
                 echo "missing $name on $TAG; building" >&2
                 echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
@@ -169,12 +174,31 @@ jobs:
             platform: linux
             arch: arm64
     runs-on: ${{ matrix.os }}
+    env:
+      # Where the PRIVATE @deepseek-ai/dsh-desktop-host's source comes from: the
+      # upstream repository at the tag of the kernel line being built. The tag
+      # is not a free variable — build-runtime.mjs derives `dsh-v<dshVersion>`
+      # from the version this cell resolved and asserts the packed host's own
+      # version against it, so a source from another line fails the build.
+      # The repository variable only moves the CLONE SOURCE (a domestic mirror
+      # or a private fork); the default upstream stays in place when it is
+      # unset. The `||` is load-bearing: an EMPTY DSH_APP_HOST_REPO_URL means
+      # "cloning disabled" to build-runtime.mjs and fails the cell, so an unset
+      # variable must never be forwarded as an empty string.
+      # A private mirror needs a credential: keep it out of this URL (the clone
+      # command line is logged) and give git a credential helper or an
+      # `url.<...>.insteadOf` rewrite in a step instead.
+      DSH_APP_HOST_REPO_URL: ${{ vars.DSH_APP_HOST_REPO_URL || 'https://github.com/deepseek-ai/deepseek-harness.git' }}
+      # Tag override for a mirror whose tags are named differently. Empty — the
+      # default when the variable is unset — falls back to `dsh-v<dshVersion>`.
+      DSH_APP_HOST_TAG: ${{ vars.DSH_APP_HOST_TAG }}
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          cache: npm
 
       # build-runtime.mjs assembles the kernel with pnpm (≥10 is asserted, and a
       # too-old one fails the build loudly). The runner's preinstalled pnpm
@@ -183,6 +207,29 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 11.7.0
+
+      # Building the host the shell starts the kernel with means a second,
+      # much larger install inside the harness checkout (its workspace closure
+      # plus the tsc/tsdown toolchain), and six cells run it. The pnpm store is
+      # content-addressed, so a restored entry can never stand in for different
+      # bytes; per-runner keying keeps a Linux store from serving a macOS or
+      # Windows cell, and the prefix restore-keys keep the bulk warm across a
+      # kernel-line bump, where only the moved packages are fetched.
+      - name: pnpm store path
+        id: pnpm-store
+        shell: bash
+        run: |
+          # `tr -d '\r'`: a Windows pnpm answers with CRLF, and a cache path
+          # with a stray CR would miss on every run — silently.
+          echo "path=$(pnpm store path --silent | tr -d '\r')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ matrix.arch }}-${{ needs.resolve.outputs.dsh_version }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ matrix.arch }}-${{ needs.resolve.outputs.dsh_version }}-
+            pnpm-store-${{ runner.os }}-${{ matrix.arch }}-
 
       # build-runtime.mjs imports `tar` from the root package; the runner is a
       # clean checkout, so install root deps before running it.

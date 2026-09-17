@@ -70,6 +70,17 @@ jobs:
     name: suite smoke probe (real kernel)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Same host-source wiring as release.yml's runtime matrix: this job also
+      # builds a real runtime, and the PRIVATE @deepseek-ai/dsh-desktop-host has
+      # no registry source, so its code comes from the harness repository at the
+      # kernel line's own tag (`dsh-v<dshVersion>`, derived and then asserted by
+      # build-runtime.mjs). The repository variable only moves the clone source
+      # (a domestic mirror or a private fork); `||` keeps the default in place
+      # because an EMPTY value means "cloning disabled" and fails the build.
+      # Keep the two workflows in step — see release.yml for the cache steps.
+      DSH_APP_HOST_REPO_URL: ${{ vars.DSH_APP_HOST_REPO_URL || 'https://github.com/deepseek-ai/deepseek-harness.git' }}
+      DSH_APP_HOST_TAG: ${{ vars.DSH_APP_HOST_TAG }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

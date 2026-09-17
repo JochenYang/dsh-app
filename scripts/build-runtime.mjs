@@ -203,6 +203,18 @@ function quoteWinArg(value) {
 }
 
 /**
+ * Strip the userinfo of a URL before it is logged.
+ *
+ * DSH_APP_HOST_REPO_URL is the one argument in this build that can carry a
+ * credential (a private mirror has no other channel), and a CI log is durable
+ * and widely readable: the clone URL must never reach it verbatim. Only the
+ * display is affected — the command itself still receives the full URL.
+ */
+function redactCredentials(value) {
+  return value.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/giu, '$1***@')
+}
+
+/**
  * npm executable for child processes. On Windows this must be absolute
  * (beside the running node): a bare `npm.cmd` lets cmd.exe prefer a
  * same-named shim under the cwd (see run()), and the same hijack applies
@@ -259,7 +271,7 @@ function assertPnpm() {
 }
 
 function run(cmd, args, cwd) {
-  console.log(`$ ${cmd} ${args.join(' ')}`)
+  console.log(`$ ${cmd} ${args.map(redactCredentials).join(' ')}`)
   const opts = { cwd, stdio: 'inherit', env: childEnv() }
   // Windows runners: Node 22.12+ no longer wraps .cmd via cmd.exe implicitly
   // (CVE-2024-27980 mitigation), so shell is required; pass one joined line
@@ -614,12 +626,19 @@ async function prepareDesktopHostSource(workRoot) {
   const dir = path.join(workRoot, 'host-src')
   await rm(dir, { recursive: true, force: true })
   await mkdir(workRoot, { recursive: true })
-  // Shallow and blobless: only this tag's tree is needed, and the harness
-  // repository carries years of history.
-  run('git', ['clone', '--filter=blob:none', '--depth', '1', '--branch', hostTag(), url, dir], workRoot)
+  // One tag, no history, no other refs: the harness repository carries years of
+  // history and nothing outside this tag's tree is ever read. `--no-tags` earns
+  // its place because `--depth` bounds COMMITS, not refs — measured: without it
+  // the clone also carries every tag of the remote (pointing at unfetched
+  // commits); with it, exactly the one tag this build asked for. The blob filter
+  // costs nothing here (at depth 1 the tree's blobs are all needed for the
+  // checkout), and a server that does not support it answers "filtering not
+  // recognized by server, ignoring" and a plain shallow clone — so a mirror
+  // behind DSH_APP_HOST_REPO_URL cannot be broken by it.
+  run('git', ['clone', '--filter=blob:none', '--depth', '1', '--no-tags', '--branch', hostTag(), url, dir], workRoot)
   return {
     dir,
-    origin: `${url} at ${hostTag()}`,
+    origin: `${redactCredentials(url)} at ${hostTag()}`,
     dispose: async () => { await rm(dir, { recursive: true, force: true }) },
   }
 }

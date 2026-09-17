@@ -332,8 +332,8 @@ against the code; the module beside each holds the full detail.
 | `DSH_APP_HOST_CHECKOUT` | `build-runtime.mjs` | Already-built checkout to pack the private `@deepseek-ai/dsh-desktop-host` from, instead of taking the source from the tag; its `apps/desktop-host/lib/index.js` is required |
 | `DSH_APP_HOST_PACKAGE` | `build-runtime.mjs` | Prebuilt host tarball instead of building one (pack it with `pnpm pack`, which resolves `workspace:` specs) |
 | `DSH_APP_HOST_REPO` | `build-runtime.mjs` | Git checkout the host's source is taken from at `dsh-v<DSH_VERSION>` (else a sibling `../deepseek-harness` / `../../deepseek-harness`) |
-| `DSH_APP_HOST_REPO_URL` | `build-runtime.mjs` | Clone URL used only when no local checkout exists (default upstream); empty disables cloning |
-| `DSH_APP_HOST_TAG` | `build-runtime.mjs` | Tag the host's source is taken from (default `dsh-v<DSH_VERSION>`) |
+| `DSH_APP_HOST_REPO_URL` | `build-runtime.mjs`, `release.yml` / `ci.yml` (`vars.DSH_APP_HOST_REPO_URL`) | Clone URL used only when no local checkout exists (default upstream); empty disables cloning. The workflows keep a non-empty default, so an unset variable moves nothing |
+| `DSH_APP_HOST_TAG` | `build-runtime.mjs`, `release.yml` / `ci.yml` (`vars.DSH_APP_HOST_TAG`) | Tag the host's source is taken from (default `dsh-v<DSH_VERSION>`; empty falls back to it) |
 | `DSH_APP_CHANNEL` | `index.ts`, `kernel-line.mjs`, `build-runtime.mjs` | Kernel line: `alpha` → alpha tag, `beta` → `next`, else stable. At runtime it selects the update channel; at build time it is only the explicit cross-line override (skips the spec assertion and warns) |
 | `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` | `shared/constants.ts` | GitHub owner/repo hosting runtime artifacts |
 | `DSH_APP_SUITE_VERSION` | `kernel-line.mjs`, `sources/dev.ts` | Overrides the content-hash suite version in the runtime manifest |
