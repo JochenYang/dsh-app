@@ -1,7 +1,9 @@
 // Kernel artifact resolution: the tarball may be transported by the ModelScope
 // mirror, while the trusted digest chain stays official-first. These tests pin
 // that separation — it is the invariant that lets a mirror serve 100 MB without
-// ever being able to substitute content.
+// ever being able to substitute content. They also pin the TRANSPORT order:
+// official → the ModelScope copy → the public proxies, because the mirror is a
+// file this project publishes while the proxies are third-party transports.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
@@ -19,6 +21,8 @@ const PLATFORM = 'win32'
 const ARCH = 'x64'
 const NAME = `dsh-runtime-${PLATFORM}-${ARCH}-${VERSION}.tgz`
 const OFFICIAL_BASE = `https://github.com/${OWNER}/${REPO}/releases/download/runtime-${VERSION}`
+const PAYLOAD_NAME = `office-payload-${PLATFORM}-${ARCH}-${VERSION}.tgz`
+const PAYLOAD_MANIFEST = `office-payload-${PLATFORM}-${ARCH}.json`
 const MANIFEST = {
   dshVersion: VERSION, suiteVersion: 'suite-1', channel: 'beta',
   platform: PLATFORM, arch: ARCH, integrity: '', source: 'artifact',
@@ -51,19 +55,61 @@ function resolver() {
   return new GitHubArtifactResolver(OWNER, REPO, PLATFORM, ARCH)
 }
 
-test('tarball candidates are official-first and end with the ModelScope copy', async () => {
+test('tarball candidates are official-first, then the ModelScope copy, then the proxies', async () => {
   const stub = stubFetch()
   try {
     const info = await resolver().fetchArtifact(VERSION)
     assert.ok(info)
     assert.deepEqual(info.candidates, [
       `${OFFICIAL_BASE}/${NAME}`,
-      ...githubMirrorPrefixes().map((prefix) => `${prefix}${OFFICIAL_BASE}/${NAME}`),
       modelscopeRuntimeAssetUrl(VERSION, NAME),
+      ...githubMirrorPrefixes().map((prefix) => `${prefix}${OFFICIAL_BASE}/${NAME}`),
     ])
     assert.equal(info.candidates.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
     assert.equal(info.sha512, OFFICIAL_SHA)
     assert.equal(info.source, OFFICIAL_BASE, 'metadata still comes from the official host')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('the office payload travels the same order: official, ModelScope copy, then proxies', async () => {
+  const stub = stubFetch((target) => {
+    if (target === `${OFFICIAL_BASE}/${PAYLOAD_NAME}.sha512`) return new Response(`${OFFICIAL_SHA}\n`, { status: 200 })
+    if (target === `${OFFICIAL_BASE}/${PAYLOAD_MANIFEST}`) return new Response(JSON.stringify(MANIFEST), { status: 200 })
+    return undefined
+  })
+  try {
+    const info = await resolver().fetchOfficePayload(VERSION, '0.0.1')
+    assert.ok(info)
+    assert.deepEqual(info.candidates, [
+      `${OFFICIAL_BASE}/${PAYLOAD_NAME}`,
+      modelscopeRuntimeAssetUrl(VERSION, PAYLOAD_NAME),
+      ...githubMirrorPrefixes().map((prefix) => `${prefix}${OFFICIAL_BASE}/${PAYLOAD_NAME}`),
+    ])
+    assert.equal(info.sha512, OFFICIAL_SHA)
+    assert.equal(info.source, OFFICIAL_BASE)
+  } finally {
+    stub.restore()
+  }
+})
+
+test('a payload digest served by the mirror still comes from the official host', async () => {
+  const stub = stubFetch((target) => {
+    // A mirror that would happily serve a DIFFERENT digest for the same asset.
+    if (target.startsWith(MODELSCOPE_ENDPOINT)) return new Response(`${MIRROR_SHA}\n`, { status: 200 })
+    if (target === `${OFFICIAL_BASE}/${PAYLOAD_NAME}.sha512`) return new Response(`${OFFICIAL_SHA}\n`, { status: 200 })
+    if (target === `${OFFICIAL_BASE}/${PAYLOAD_MANIFEST}`) return new Response(JSON.stringify(MANIFEST), { status: 200 })
+    return undefined
+  })
+  try {
+    const info = await resolver().fetchOfficePayload(VERSION, '0.0.1')
+    assert.ok(info)
+    assert.equal(info.sha512, OFFICIAL_SHA)
+    assert.ok(
+      stub.calls.every((url) => !url.startsWith(MODELSCOPE_ENDPOINT)),
+      'the ModelScope copy is a transport entry only — it must not be consulted while resolving metadata',
+    )
   } finally {
     stub.restore()
   }

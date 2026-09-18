@@ -17,8 +17,8 @@
  * put across kernel updates and rollbacks.
  *
  * What guarantees it: the artifact is resolved through the SAME release
- * metadata chain the kernel uses (official host first and fail-closed, mirrors
- * as transport only, ModelScope last — `GitHubArtifactResolver`), verified
+ * metadata chain the kernel uses (official host first and fail-closed, proxies
+ * as transport only — `GitHubArtifactResolver`), verified
  * against the sha512 of that phase-1 metadata, extracted into a staging
  * directory under the payload root, validated (its own manifest must describe
  * this target and the required files must be there), and only then renamed into

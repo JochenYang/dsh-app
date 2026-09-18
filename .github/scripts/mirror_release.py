@@ -130,6 +130,14 @@ LAYER_ASSET_RE = re.compile(
     r'^(?:(?:node|vendor|meta|suite)-|dsh-(?!runtime-))[0-9A-Za-z][0-9A-Za-z._+-]*\.tgz$'
 )
 LAYER_INDEX_RE = re.compile(r'^layers-[0-9A-Za-z][0-9A-Za-z._+-]*\.json$')
+# Office-payload assets, published in the same release as the runtime tarball:
+# the engine tarball (version-addressed like the runtime's), its sidecar, and
+# the cell's metadata JSON. Validated by runtime_payload_problems, exempt from
+# the single-tarball shape rules for the same reason the layer files are — the
+# `.json` carries neither a dsh version nor a `.tgz.sha512` of its own.
+OFFICE_PAYLOAD_ASSET_RE = re.compile(
+    r'^office-payload-[0-9A-Za-z][0-9A-Za-z._+-]*\.(?:tgz|tgz\.sha512|json)$'
+)
 
 # One file name directly below releases/latest/. No leading dot: a hidden file
 # is not a release asset, and the narrowest rule is the safest one here.
@@ -888,13 +896,19 @@ def apply_prune(cfg, api, entries):
 # under its own window (KEEP_RUNTIME_VERSIONS), and the tag being published is
 # always kept.
 #
-# A runtime release carries two shapes of asset: the single tarball with its
-# sidecar and manifest (the fallback every client can always use) and, since the
-# split-runtime work, the layer set - five layer files plus `layers-<cell>.json`
-# per matrix cell. Both are flat files in the same directory, so the upload, the
-# retention window and the delete guard treat them identically; only the
-# completeness check distinguishes them (runtime_asset_problems for the tarball,
-# runtime_layer_problems for the layer set, which is optional per release).
+# A runtime release carries three shapes of asset: the single tarball with its
+# sidecar and manifest (the fallback every client can always use), since the
+# split-runtime work the layer set - five layer files plus `layers-<cell>.json`
+# per matrix cell - and, since the office engine left the runtime, the per-cell
+# office payload (its version-addressed tarball, that tarball's sidecar and the
+# cell's metadata JSON). All are flat files in the same directory, so the
+# upload, the retention window and the delete guard treat them identically; only
+# the completeness check distinguishes them (runtime_asset_problems for the
+# tarball, runtime_layer_problems for the optional layer set,
+# runtime_payload_problems for the payload - which is all-or-nothing across the
+# cells, and the release's own per-cell manifests are what says a payload was
+# built at all: one cell arriving without it is a half upload whose office
+# conversion would 404 forever).
 def is_runtime_tag(tag):
     """True for a `runtime-<dshVersion>` kernel release tag."""
     return str(tag).lower().startswith(RUNTIME_TAG_PREFIX)
@@ -1140,16 +1154,17 @@ def runtime_asset_problems(names, version, platforms=None):
       release for tens of minutes - would publish a mirror whose missing cells
       answer 404 while looking healthy, and nothing would ever repair it.
 
-    Split-layer assets ride along in the same release and are EXEMPT from both
-    rules: their names are content- or suite-addressed rather than
-    version-addressed, they carry no sidecar (the per-cell index carries their
-    digests), and a release published before layers existed has none. They are
-    validated by runtime_layer_problems, and on their own they never satisfy the
+    Split-layer and office-payload assets ride along in the same release and are
+    EXEMPT from both rules: their names are not the single tarball's (the layer
+    files are content/suite-addressed and carry no sidecar; the payload's
+    metadata JSON carries no dsh version), and a release published before either
+    existed has none. They are validated by runtime_layer_problems and
+    runtime_payload_problems, and on their own neither ever satisfies the
     "an archive is present" requirement.
     """
     names = list(names or ())
     present = set(names)
-    single = [name for name in names if not is_layer_asset(name)]
+    single = [name for name in names if not is_layer_asset(name) and not is_payload_asset(name)]
     archives = [name for name in single if name.endswith('.tgz')]
     sidecars = [name for name in single if name.endswith('.tgz.sha512')]
     manifests = [
@@ -1180,6 +1195,103 @@ def runtime_asset_problems(names, version, platforms=None):
 def is_layer_asset(name):
     """True for a split-runtime layer file or a per-cell layer index."""
     return bool(LAYER_ASSET_RE.match(name) or LAYER_INDEX_RE.match(name))
+
+
+def is_payload_asset(name):
+    """True for one of a cell's three office-payload assets."""
+    return bool(OFFICE_PAYLOAD_ASSET_RE.match(name))
+
+
+def read_payload_declarations(assets_dir, names):
+    """The cells whose per-cell manifest declares an `officePayload` block.
+
+    The runtime manifest IS the release's own statement about what it carries:
+    `build-runtime.mjs` writes the block whenever it built a payload, and
+    uploads the block and the artifacts in the same cell step. Reading the
+    declarations therefore makes "this release owes an engine per cell" a fact
+    of the release instead of an inference from which files happened to arrive —
+    which is what lets a release whose payload upload failed for EVERY cell be
+    refused rather than mirrored quietly. An unreadable body contributes
+    nothing; the caller's shape checks catch what that implies.
+    """
+    cells = set()
+    for name in names or ():
+        if not name.startswith('manifest-') or not name.endswith('.json'):
+            continue
+        try:
+            body = json.loads((Path(assets_dir) / name).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if isinstance(body, dict) and isinstance(body.get('officePayload'), dict):
+            cells.add(name[len('manifest-'):-len('.json')])
+    return cells
+
+
+def runtime_payload_problems(names, version, platforms=None, declared=None):
+    """Problems with the office-payload assets of a runtime release set.
+
+    The payload is the LibreOffice engine the runtime no longer carries: the
+    shell downloads it once per content version, when a user converts a
+    document, and resolves exactly one URL per cell - so a mirror that carries
+    the runtime tarball but not the payload leaves that cell's office
+    conversion permanently unavailable. That is invisible from the runtime
+    install (the tree boots fine without an engine) and invisible to every
+    other check here, which is why it gets its own predicate.
+
+    The rules, in two layers:
+
+    * shape (always) - every payload tarball and sidecar carries THIS version
+      (the mirror path is derived from the tag, so an artifact built for another
+      kernel version would be published under this one's path), every tarball
+      has its `.sha512` sidecar, and no sidecar is orphaned. The metadata JSON
+      carries no version by design (the tag names the kernel), so only its
+      presence per cell is checked.
+    * matrix (when `platforms` is known, or `declared` names any cell) - the
+      payload is ALL-OR-NOTHING across the cells. `declared` is what the
+      release's own manifests say (read_payload_declarations): a cell that
+      declares an engine owes all three assets, and because one release is one
+      build, a declaration ANYWHERE means every cell in the matrix owes them.
+      Without this a release whose payload upload failed would mirror with a
+      hole the app turns into a permanent 404 for that platform, and nothing
+      would ever repair it. A release that declares NO payload and carries none
+      is not a problem: a line without the office provider needs none, and every
+      runtime published before the payload existed carries none - requiring one
+      would strand exactly those old releases on the backfill path.
+    """
+    names = [name for name in (names or ()) if is_payload_asset(name)]
+    present = set(names)
+    archives = [name for name in names if name.endswith('.tgz')]
+    sidecars = [name for name in names if name.endswith('.tgz.sha512')]
+    problems = []
+    for name in archives + sidecars:
+        if not name.endswith((f'-{version}.tgz', f'-{version}.tgz.sha512')):
+            problems.append(f'{name} does not carry the version {version}')
+    for name in archives:
+        if f'{name}.sha512' not in sidecars:
+            problems.append(f'{name} has no .sha512 sidecar')
+    # A sidecar with no archive is half an upload, not a payload: it is refused
+    # rather than mirrored as a file nothing can ever verify against.
+    for name in sidecars:
+        if name[: -len('.sha512')] not in present:
+            problems.append(f'{name} has no matching archive')
+    # Which cells owe a payload: whatever the release's own manifests declare,
+    # or — when none is readable — every cell once any payload asset is present.
+    # A declaration ANYWHERE means every matrix cell owes one: one release is
+    # one build, so a cell without the block would be the odd one out.
+    required = set(declared or ())
+    if not required and present:
+        required = set(platforms or ())
+    if required and platforms:
+        required |= set(platforms)
+    for platform in sorted(required):
+        for name in (
+            f'office-payload-{platform}-{version}.tgz',
+            f'office-payload-{platform}-{version}.tgz.sha512',
+            f'office-payload-{platform}.json',
+        ):
+            if name not in present:
+                problems.append(f'missing {name}')
+    return problems
 
 
 def read_layer_indexes(assets_dir, names):
@@ -1361,6 +1473,12 @@ def subcommand_mirror_runtime(cfg):
 
     names = [item.name for item in files]
     problems = runtime_asset_problems(names, version, cfg.runtime_platforms)
+    problems += runtime_payload_problems(
+        names,
+        version,
+        cfg.runtime_platforms,
+        read_payload_declarations(assets_dir, names),
+    )
     problems += runtime_layer_problems(
         names,
         read_layer_indexes(assets_dir, names),

@@ -96,7 +96,16 @@ name: publish-mirror
 #             resolves one URL per cell, so a partial mirror is a 404 that looks
 #             healthy. The runtime job waits for the set (a release event fires
 #             too early); the script refuses an incomplete one, which is what an
-#             early dispatch hits.
+#             early dispatch hits. The office payload counts as part of that
+#             set: the runtime no longer carries the engine, so a mirror without
+#             it answers every document conversion with "not installed" while
+#             the kernel install looks perfectly healthy. The script reads the
+#             per-cell manifests to decide who owes one (a manifest that
+#             declares an `officePayload` block means every cell does), so an
+#             engine-less release — a line without the office provider, or any
+#             runtime published before the payload existed — is still mirrored,
+#             while a release whose payload upload failed is refused even when
+#             NO cell arrived with one.
 #   * layers  release.yml also publishes the split-runtime layer set (five layer
 #             files per cell plus one `layers-<cell>.json` index each) into the
 #             same release; they ride along with the folder upload and are
@@ -345,13 +354,14 @@ jobs:
   # a shell release is immutable at the draft-flip moment this workflow hooks.
   # Mirroring a half-uploaded runtime would publish a mirror whose missing cells
   # answer 404 while looking healthy — the app resolves one URL per cell — so
-  # this job waits for the full 18-asset set first, and the script independently
-  # refuses a set that is missing any RUNTIME_PLATFORMS cell (which is what
-  # protects the dispatch path through the `mirror` job too). The `mirror` job's
-  # filter is NOT widened: it stays `v*` for a release event, and a runtime
-  # release can never enter it. Dispatch needs no new mode either -
-  # `-f tag=runtime-...` runs the `mirror` job, where the script routes by tag
-  # shape and checks the same matrix.
+  # this job waits for the full 36-asset set first (six cells × the runtime
+  # tarball, its sidecar, the cell manifest and the office payload's three
+  # assets), and the script independently refuses a set that is missing any
+  # RUNTIME_PLATFORMS cell (which is what protects the dispatch path through the
+  # `mirror` job too). The `mirror` job's filter is NOT widened: it stays `v*`
+  # for a release event, and a runtime release can never enter it. Dispatch needs
+  # no new mode either - `-f tag=runtime-...` runs the `mirror` job, where the
+  # script routes by tag shape and checks the same matrix.
   #
   # Retention uses the script's own defaults for a release-triggered run: keep
   # the newest 3 runtime versions (KEEP_RUNTIME_VERSIONS) and prune for real.
@@ -399,8 +409,10 @@ jobs:
           ref: ${{ github.event.repository.default_branch || 'main' }}
 
       # Wait, do not guess: only a complete asset set is mirrored. release.yml's
-      # resolve job asserts the same 18 names before it will reuse a runtime, so
-      # "complete" here means the same thing the app needs from the mirror.
+      # resolve job asserts the same names — plus the per-cell `layers-<cell>.json`
+      # — before it will reuse a runtime, so "complete" here means the same thing
+      # the app needs from the mirror, including the office payload trio per cell
+      # (the app resolves one URL per cell exactly like it does for the tarball).
       - name: Wait for the runtime asset set
         if: ${{ env.MODELSCOPE_TOKEN != '' }}
         run: |
@@ -415,14 +427,17 @@ jobs:
             for platform in $RUNTIME_PLATFORMS; do
               for name in "dsh-runtime-${platform}-${VERSION}.tgz" \
                           "dsh-runtime-${platform}-${VERSION}.tgz.sha512" \
-                          "manifest-${platform}.json"; do
+                          "manifest-${platform}.json" \
+                          "office-payload-${platform}-${VERSION}.tgz" \
+                          "office-payload-${platform}-${VERSION}.tgz.sha512" \
+                          "office-payload-${platform}.json"; do
                 if ! grep -qxF "$name" <<< "$ASSETS"; then
                   MISSING="${MISSING} ${name}"
                 fi
               done
             done
             if [ -z "$MISSING" ]; then
-              echo "${RELEASE_TAG} is complete (${RUNTIME_PLATFORMS} x 3 assets)"
+              echo "${RELEASE_TAG} is complete (${RUNTIME_PLATFORMS} x 6 assets)"
               break
             fi
             if [ "$SECONDS" -ge "$DEADLINE" ]; then

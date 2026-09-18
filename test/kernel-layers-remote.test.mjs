@@ -201,12 +201,12 @@ function resolver() {
 
 // ------------------------------------------------------------ pure resolution
 
-test('layer asset candidates are official-first and end with the ModelScope copy', () => {
+test('layer asset candidates are official-first, then the ModelScope copy, then the proxies', () => {
   const name = `node-abcdef123456-${PLATFORM}-${ARCH}.tgz`
   assert.deepEqual(resolver().assetCandidates(VERSION, name), [
     `${OFFICIAL_BASE}/${name}`,
-    ...mirrorBases().map((base) => `${base}/${name}`),
     modelscopeRuntimeAssetUrl(VERSION, name),
+    ...mirrorBases().map((base) => `${base}/${name}`),
   ])
 })
 
@@ -338,7 +338,16 @@ test('a layer whose bytes do not match the index is fetched from the next candid
 
     assert.equal(current.active, `dsh-${VERSION}+suite-${SUITE}`)
     assert.ok(stub.calls.includes(`${OFFICIAL_BASE}/${vendor.name}`), 'the official copy was tried first')
-    assert.ok(stub.calls.includes(`${mirrorBases()[0]}/${vendor.name}`), 'and rejected in favour of the next candidate')
+    // The next candidate is the ModelScope copy, not a public proxy: a file the
+    // project itself published outranks a third-party transport.
+    assert.ok(
+      stub.calls.includes(modelscopeRuntimeAssetUrl(VERSION, vendor.name)),
+      'and rejected in favour of the ModelScope copy',
+    )
+    assert.ok(
+      !stub.calls.includes(`${mirrorBases()[0]}/${vendor.name}`),
+      'a proxy is only reached when the mirror could not serve the bytes',
+    )
     assert.equal(sha512Hex(readFileSync(path.join(h.cacheDir, vendor.name))), vendor.sha512, 'only verified bytes reach the cache')
     assert.deepEqual(
       stub.calls.filter((url) => url.endsWith(`/${node.name}`)),

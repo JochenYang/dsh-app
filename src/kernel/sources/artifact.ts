@@ -32,19 +32,19 @@ import type { LayerIndex } from '../layers'
  *      digest source, which is why an index that fails validation is an error
  *      rather than a silent "no layers".
  *   2. The large tarball is downloaded from an ordered candidate list —
- *      official URL first, then each mirror prefix wrapping that URL, then the
- *      ModelScope mirror copy — and EVERY candidate is checked against the
- *      phase-1 digest, so a hostile mirror cannot substitute content even when
- *      it serves the bytes. ModelScope is a transport-only entry: it never
+ *      official URL first, then the ModelScope mirror copy, then each public
+ *      proxy prefix — and EVERY candidate is checked against the phase-1
+ *      digest, so a hostile mirror cannot substitute content even when it
+ *      serves the bytes. ModelScope is a transport-only entry: it never
  *      supplies metadata (see `bases` vs the candidate list in fetchArtifact).
- *      Layer files use exactly the same candidate list, verified against the
- *      digest their index carries.
+ *      Layer files and the office payload use exactly the same candidate list,
+ *      verified against the digest their own metadata carries.
  *
  * Override the mirror chain with DSH_APP_GITHUB_MIRRORS (comma-separated
  * URL prefixes; empty value disables mirrors entirely).
  */
 export interface ArtifactInfo {
-  /** Ordered download candidates (official first, then mirrors, ModelScope last). */
+  /** Ordered download candidates (official first, then the ModelScope copy, then the public proxies). */
   candidates: string[]
   /** Trusted sha512 (hex) for the tarball, from the phase-1 metadata source. */
   sha512: string
@@ -101,7 +101,7 @@ export interface OfficePayloadInfo {
   source: string
 }
 
-/** Default mirror prefixes, tried after the official URL. */
+/** Default proxy prefixes, tried after the official URL and the ModelScope copy. */
 const DEFAULT_GITHUB_MIRRORS = [
   'https://ghfast.top/',
   'https://gh-proxy.com/',
@@ -145,34 +145,50 @@ export class GitHubArtifactResolver {
     return `dsh-runtime-${this.platform}-${this.arch}-${version}.tgz`
   }
 
-  /** Official base first, then each mirror prefix wrapping the official URL. */
+  /**
+   * Metadata bases: the official release first, then each proxy prefix wrapping
+   * that URL. Metadata is a small request the official host answers even where
+   * the multi-hundred-MB bytes do not travel, so the proxy chain stays here.
+   * The BYTES use a different order — see `assetCandidates`.
+   */
   private bases(version: string): string[] {
     const official = this.baseUrl(version)
     return [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
   }
 
   /**
-   * Ordered download candidates for ONE asset of a kernel version: official
-   * release first, then each mirror prefix wrapping that URL, then the
-   * ModelScope copy. Shared by the tarball and the split-layer paths so both
-   * inherit the same transport chain; whatever a candidate serves is still
-   * checked against a digest that came from the phase-1 metadata source.
+   * Ordered download candidates for ONE asset of a kernel version: the official
+   * release first, then the ModelScope copy, then each public proxy prefix
+   * wrapping the official URL. Shared by the tarball, the split-layer path and
+   * the office payload so all three inherit the same transport chain; whatever
+   * a candidate serves is still checked against a digest that came from the
+   * phase-1 metadata source.
+   *
+   * Why the ModelScope copy outranks the public proxies: it is a file this
+   * project publishes and verifies at upload time, while ghfast.top and
+   * gh-proxy.com are third-party transports measured to be unstable. A user
+   * waits on this download once per artifact version (the office engine is
+   * ~115 MiB), so the stable host goes first and the proxies stay as the last
+   * resort for the case where the mirror has not been backfilled yet.
    */
   assetCandidates(version: string, assetName: string): string[] {
+    const official = this.baseUrl(version)
     return [
-      ...this.bases(version).map((base) => `${base}/${assetName}`),
+      `${official}/${assetName}`,
       modelscopeRuntimeAssetUrl(version, assetName),
+      ...githubMirrorPrefixes().map((prefix) => `${prefix}${official}/${assetName}`),
     ]
   }
 
   /**
    * Resolve the office payload candidates + trusted digest for a kernel version.
    *
-   * The release tag, the phase-1 metadata chain and the candidate order are the
-   * runtime's, unchanged: official host authoritative and fail-closed, mirrors
-   * consulted only when it is unreachable at the network level, ModelScope as
-   * transport only. A second trust rule for the same kind of artifact is
-   * exactly what this reuses `fetchMetadataOutcome` to avoid.
+   * The release tag and the phase-1 metadata chain are the runtime's,
+   * unchanged: official host authoritative and fail-closed, proxies consulted
+   * only when it is unreachable at the network level. The candidate order is
+   * the runtime's too — official, then the ModelScope copy, then the proxies
+   * (see `assetCandidates`). A second trust rule for the same kind of artifact
+   * is exactly what this reuses `fetchMetadataOutcome` to avoid.
    *
    * Two versions meet here and both matter: `dshVersion` names the release
    * (every asset of a runtime release is version-addressed), `payloadVersion`

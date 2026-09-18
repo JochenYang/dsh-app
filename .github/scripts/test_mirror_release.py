@@ -42,6 +42,21 @@ def runtime_asset_names(version, platforms=('win32-x64', 'linux-x64')):
     return names
 
 
+def runtime_payload_names(version, platforms=('win32-x64', 'linux-x64')):
+    """The office-payload trio of each cell (tarball, sidecar, metadata JSON)."""
+    names = []
+    for platform in platforms:
+        names.append(f'office-payload-{platform}-{version}.tgz')
+        names.append(f'office-payload-{platform}-{version}.tgz.sha512')
+        names.append(f'office-payload-{platform}.json')
+    return names
+
+
+def runtime_release_names(version, platforms=('win32-x64', 'linux-x64')):
+    """Everything a current runtime release carries: the tarball trio plus the payload trio."""
+    return runtime_asset_names(version, platforms) + runtime_payload_names(version, platforms)
+
+
 def runtime_inventory(*versions, platforms=('win32-x64', 'linux-x64')):
     """Fake remote listing of releases/runtime/runtime-<version>/<asset>."""
     files = []
@@ -617,6 +632,173 @@ class RuntimeAssetShapeTests(unittest.TestCase):
         problems = mr.runtime_asset_problems(list(assets), '0.1.5-rc.2')
         self.assertTrue(any('no *.tgz asset' in problem for problem in problems))
 
+    def test_payload_assets_are_exempt_from_the_single_tarball_rules(self):
+        # The payload tarball carries the dsh version, so without the exemption
+        # it would satisfy "a *.tgz is present" with no sidecar of its own kind
+        # and the cell manifest would be reported as missing.
+        names = runtime_payload_names('0.1.5-rc.2', ('win32-x64',))
+        problems = mr.runtime_asset_problems(names, '0.1.5-rc.2')
+        self.assertTrue(any('no *.tgz asset' in problem for problem in problems))
+        self.assertEqual(
+            [problem for problem in problems if 'does not carry the version' in problem], []
+        )
+        # A full release set (tarball trio + payload trio per cell) is clean.
+        full = runtime_release_names('0.1.5-rc.2', ('win32-x64', 'linux-x64'))
+        self.assertEqual(mr.runtime_asset_problems(full, '0.1.5-rc.2'), [])
+
+
+class RuntimePayloadAssetTests(unittest.TestCase):
+    """The office-payload half of the runtime completeness check."""
+
+    def test_a_complete_payload_set_has_no_problems(self):
+        for platforms in (None, ('win32-x64', 'linux-x64'), RUNTIME_PLATFORMS):
+            with self.subTest(platforms=platforms):
+                cells = platforms or ('win32-x64', 'linux-x64')
+                self.assertEqual(
+                    mr.runtime_payload_problems(
+                        runtime_payload_names('0.1.6-alpha.2', cells),
+                        '0.1.6-alpha.2',
+                        platforms,
+                    ),
+                    [],
+                )
+
+    def test_no_payload_at_all_is_not_a_problem(self):
+        # Every runtime published before the payload existed carries none, and a
+        # line without the office provider needs none: requiring one would strand
+        # those old releases on the backfill path.
+        self.assertEqual(
+            mr.runtime_payload_problems(runtime_asset_names('0.1.5-rc.2'), '0.1.5-rc.2', RUNTIME_PLATFORMS),
+            [],
+        )
+
+    def test_a_missing_payload_sidecar_is_a_problem(self):
+        names = [
+            name for name in runtime_payload_names('0.1.6-alpha.2', ('win32-x64',))
+            if not name.endswith('.tgz.sha512')
+        ]
+        problems = mr.runtime_payload_problems(names, '0.1.6-alpha.2')
+        self.assertTrue(any('no .sha512 sidecar' in problem for problem in problems))
+
+    def test_a_missing_payload_cell_fails_the_matrix(self):
+        # One cell carrying the payload and another not is a half upload: the
+        # missing cell's office conversion would 404 forever while the runtime
+        # mirror looks healthy.
+        names = runtime_payload_names('0.1.6-alpha.2', ('win32-x64',))
+        problems = mr.runtime_payload_problems(names, '0.1.6-alpha.2', RUNTIME_PLATFORMS)
+        self.assertEqual(len(problems), 15)
+        self.assertTrue(all(problem.startswith('missing office-payload-linux')
+                            or problem.startswith('missing office-payload-darwin')
+                            or problem.startswith('missing office-payload-win32-arm64')
+                            for problem in problems))
+
+    def test_a_missing_cell_metadata_json_fails_the_matrix(self):
+        names = runtime_payload_names('0.1.6-alpha.2', RUNTIME_PLATFORMS)
+        names.remove('office-payload-linux-x64.json')
+        problems = mr.runtime_payload_problems(names, '0.1.6-alpha.2', RUNTIME_PLATFORMS)
+        self.assertEqual(problems, ['missing office-payload-linux-x64.json'])
+
+    def test_a_payload_of_another_version_is_a_problem(self):
+        names = runtime_payload_names('0.1.5-rc.2', ('win32-x64',))
+        problems = mr.runtime_payload_problems(names, '0.1.6-alpha.2')
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(all('does not carry the version' in problem for problem in problems))
+
+    def test_an_orphan_sidecar_is_a_problem(self):
+        names = [
+            name for name in runtime_payload_names('0.1.6-alpha.2', ('win32-x64',))
+            if not name.endswith('.tgz')
+        ]
+        problems = mr.runtime_payload_problems(names, '0.1.6-alpha.2', ('win32-x64',))
+        self.assertTrue(any('no matching archive' in problem for problem in problems))
+
+    def test_the_runtime_tarball_is_not_mistaken_for_a_payload(self):
+        for name in (
+            'dsh-runtime-win32-x64-0.1.6-alpha.2.tgz',
+            'dsh-runtime-win32-x64-0.1.6-alpha.2.tgz.sha512',
+            'manifest-win32-x64.json',
+            'layers-win32-x64.json',
+            'node-18d5f7fa5f61-darwin-x64.tgz',
+        ):
+            self.assertFalse(mr.is_payload_asset(name), name)
+        for name in runtime_payload_names('0.1.6-alpha.2', ('win32-x64',)):
+            self.assertTrue(mr.is_payload_asset(name), name)
+
+
+class RuntimePayloadDeclarationTests(unittest.TestCase):
+    """What the release's own per-cell manifests say it owes."""
+
+    def dir_with(self, bodies):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        directory = Path(tmp.name)
+        for name, body in bodies.items():
+            (directory / name).write_text(body, encoding='utf-8')
+        return directory
+
+    def test_a_declaring_manifest_names_its_cell(self):
+        declared = mr.read_payload_declarations(
+            self.dir_with({
+                'manifest-win32-x64.json': json.dumps({
+                    'dshVersion': '0.1.6-alpha.2',
+                    'officePayload': {'version': '0.0.1', 'engine': 'win32-x64'},
+                }),
+                'manifest-linux-x64.json': json.dumps({'dshVersion': '0.1.6-alpha.2'}),
+            }),
+            ['manifest-win32-x64.json', 'manifest-linux-x64.json'],
+        )
+        self.assertEqual(declared, {'win32-x64'})
+
+    def test_an_unreadable_manifest_contributes_nothing(self):
+        # The shape checks catch what a broken body implies; this reader must
+        # not turn a parse failure into a spurious declaration.
+        for body in ('{ not json', 'null', '[]', '{"officePayload": "yes"}'):
+            with self.subTest(body=body):
+                declared = mr.read_payload_declarations(
+                    self.dir_with({'manifest-win32-x64.json': body}),
+                    ['manifest-win32-x64.json'],
+                )
+                self.assertEqual(declared, set())
+
+    def test_a_declaration_anywhere_requires_every_cell_in_the_matrix(self):
+        # One release is one build: the cell whose payload upload failed must be
+        # refused even when five other cells arrive, and even when the failing
+        # cell's manifest is the unreadable one.
+        names = runtime_payload_names('0.1.6-alpha.2', RUNTIME_PLATFORMS)
+        for name in list(names):
+            if 'linux-arm64' in name:
+                names.remove(name)
+        problems = mr.runtime_payload_problems(
+            names, '0.1.6-alpha.2', RUNTIME_PLATFORMS, {'win32-x64'},
+        )
+        self.assertEqual(len(problems), 3)
+        self.assertTrue(all('office-payload-linux-arm64' in problem for problem in problems))
+
+    def test_a_declaration_is_enough_even_with_no_payload_uploaded_at_all(self):
+        # The upload failed for EVERY cell: nothing is present to infer from, so
+        # only the release's own declaration can catch it. This is the state
+        # release.yml's resolve job also refuses to reuse.
+        problems = mr.runtime_payload_problems(
+            runtime_asset_names('0.1.6-alpha.2', RUNTIME_PLATFORMS),
+            '0.1.6-alpha.2',
+            RUNTIME_PLATFORMS,
+            set(RUNTIME_PLATFORMS),
+        )
+        self.assertEqual(len(problems), len(RUNTIME_PLATFORMS) * 3)
+
+    def test_no_declaration_and_no_payload_is_still_accepted(self):
+        # A line without the office provider: its manifests carry no block and
+        # the release carries no payload. Requiring one would strand it.
+        self.assertEqual(
+            mr.runtime_payload_problems(
+                runtime_asset_names('0.1.5-rc.2', RUNTIME_PLATFORMS),
+                '0.1.5-rc.2',
+                RUNTIME_PLATFORMS,
+                set(),
+            ),
+            [],
+        )
+
 
 class RuntimeLayerAssetTests(unittest.TestCase):
     """The split-layer half of the runtime completeness check."""
@@ -1030,7 +1212,12 @@ class RuntimeMirrorFlowTests(unittest.TestCase):
         self.assets.mkdir()
         self.version = '0.1.5-rc.2'
         self.tag = f'runtime-{self.version}'
-        self.write_assets(runtime_asset_names(self.version, RUNTIME_PLATFORMS))
+        # A current runtime release: the tarball trio AND the office-payload
+        # trio per cell, which is what release.yml publishes and therefore what
+        # every full-mirror test below has to be complete against. The per-cell
+        # manifests declare a payload, exactly as build-runtime.mjs writes them.
+        self.write_assets(runtime_release_names(self.version, RUNTIME_PLATFORMS))
+        self.write_manifests(set(RUNTIME_PLATFORMS))
         self.summary = self.root / 'summary.md'
         self.summary.write_text('', encoding='utf-8')
         previous = os.getcwd()
@@ -1040,6 +1227,16 @@ class RuntimeMirrorFlowTests(unittest.TestCase):
     def write_assets(self, names):
         for name in names:
             (self.assets / name).write_text('x', encoding='utf-8')
+
+    def write_manifests(self, declaring):
+        """Write per-cell manifests; `declaring` names the cells that declare a payload."""
+        for platform in RUNTIME_PLATFORMS:
+            body = {'dshVersion': self.version, 'platform': platform.split('-')[0],
+                    'arch': platform.split('-')[1]}
+            if platform in declaring:
+                body['officePayload'] = {'version': '0.0.1', 'platform': platform.split('-')[0],
+                                         'arch': platform.split('-')[1], 'engine': platform}
+            (self.assets / f'manifest-{platform}.json').write_text(json.dumps(body), encoding='utf-8')
 
     def write_asset_map(self, assets):
         """Write real bodies — an index has to be readable JSON to pass."""
@@ -1237,6 +1434,84 @@ class RuntimeMirrorFlowTests(unittest.TestCase):
         self.assertEqual(api.deletes, [])
         self.assertIn('partial drill', self.summary_text())
         self.assertIn('only_pattern', self.summary_text())
+
+    def test_a_release_carrying_the_office_payload_mirrors_it_with_the_tarball(self):
+        self.write_assets(runtime_payload_names(self.version, RUNTIME_PLATFORMS))
+        api = self.api()
+        self.run_flow(api, runtime_inventory(self.version, platforms=RUNTIME_PLATFORMS))
+        self.assertEqual(api.uploads, [f'releases/runtime/{self.tag}'], 'the payload rides the same folder upload')
+        uploaded = {item.name for item in self.assets.iterdir()}
+        self.assertIn(f'office-payload-win32-x64-{self.version}.tgz', uploaded)
+        self.assertIn('office-payload-win32-x64.json', uploaded)
+
+    def test_a_payload_missing_one_cell_is_refused_before_uploading(self):
+        # Five cells carry the engine, the sixth does not: mirroring it would
+        # leave that cell's office conversion a permanent 404 while the runtime
+        # install looks healthy. The manifests of all six declare a payload, so
+        # the release's own statement is what refuses it.
+        for name in list(self.assets.iterdir()):
+            if name.name.startswith('office-payload-linux-arm64'):
+                name.unlink()
+        api = self.api()
+        with self.assertRaises(mr.MirrorError) as raised:
+            self.run_flow(api, runtime_inventory(self.version, platforms=RUNTIME_PLATFORMS))
+        self.assertIn('office-payload-linux-arm64', str(raised.exception))
+        self.assertEqual(api.uploads, [], 'nothing is uploaded from a set the client cannot fully resolve')
+
+    def test_the_last_cells_payload_missing_is_refused_too(self):
+        # The whole payload set absent while the manifests still declare one:
+        # nothing is present to infer the gap from, so only the declaration can
+        # see it. release.yml's resolve job refuses to reuse this state, and the
+        # mirror must not publish it either.
+        for name in list(self.assets.iterdir()):
+            if name.name.startswith('office-payload'):
+                name.unlink()
+        api = self.api()
+        with self.assertRaises(mr.MirrorError) as raised:
+            self.run_flow(api, runtime_inventory(self.version, platforms=RUNTIME_PLATFORMS))
+        self.assertIn('office-payload-win32-x64', str(raised.exception))
+        self.assertEqual(len(str(raised.exception).split('missing office-payload')), 19)
+        self.assertEqual(api.uploads, [])
+
+    def test_a_payload_missing_one_sidecar_is_refused_before_uploading(self):
+        (self.assets / f'office-payload-darwin-x64-{self.version}.tgz.sha512').unlink()
+        api = self.api()
+        with self.assertRaises(mr.MirrorError) as raised:
+            self.run_flow(api, runtime_inventory(self.version, platforms=RUNTIME_PLATFORMS))
+        self.assertIn('no .sha512 sidecar', str(raised.exception))
+        self.assertEqual(api.uploads, [])
+
+    def test_a_payload_missing_one_cell_metadata_json_is_refused_before_uploading(self):
+        (self.assets / 'office-payload-win32-x64.json').unlink()
+        api = self.api()
+        with self.assertRaises(mr.MirrorError) as raised:
+            self.run_flow(api, runtime_inventory(self.version, platforms=RUNTIME_PLATFORMS))
+        self.assertIn('missing office-payload-win32-x64.json', str(raised.exception))
+        self.assertEqual(api.uploads, [])
+
+    def test_a_release_without_any_payload_still_mirrors(self):
+        # No payload asset at all AND no manifest declaring one is what a runtime
+        # from a line without the office provider (or any release published
+        # before the payload existed) looks like. Backfilling such an old tag
+        # must keep working.
+        for name in list(self.assets.iterdir()):
+            if name.name.startswith('office-payload'):
+                name.unlink()
+        self.write_manifests(set())
+        api = self.api()
+        self.run_flow(api, runtime_inventory(self.version, platforms=RUNTIME_PLATFORMS))
+        self.assertEqual(api.uploads, [f'releases/runtime/{self.tag}'])
+
+    def test_a_partial_drill_may_carry_a_payload_subset(self):
+        # A drill is incomplete by design: it uploads what it was asked for and
+        # skips retention, instead of being refused like a full mirror.
+        for name in list(self.assets.iterdir()):
+            if 'win32-x64' not in name.name:
+                name.unlink()
+        api = self.api()
+        self.run_flow(api, runtime_inventory('0.1.1', self.version), only_pattern='win32-x64')
+        self.assertEqual(api.deletes, [])
+        self.assertIn('partial drill', self.summary_text())
 
     def test_an_empty_asset_directory_is_refused(self):
         for name in list(self.assets.iterdir()):
