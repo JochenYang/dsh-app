@@ -25,6 +25,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Spinner } from './spinner.tsx'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
@@ -169,7 +170,7 @@ function BlockedBuildBar({
           disabled={busyPackage !== null}
           onClick={() => { onRetry(retryPackage, names) }}
         >
-          {busyPackage === retryPackage ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
+          {busyPackage === retryPackage ? <Spinner /> : null}
           {busyPackage === retryPackage ? t('mkt.blocked.busy') : t('mkt.blocked.retry')}
         </button>
       ) : null}
@@ -872,7 +873,7 @@ function CatalogTab({
   if (loading) {
     return (
       <div className="dshMkt-empty">
-        <span className="dshMkt-spinner" aria-hidden="true" /> {t('mkt.catalog.loading')}
+        <Spinner /> {t('mkt.catalog.loading')}
       </div>
     )
   }
@@ -1023,7 +1024,7 @@ function CatalogTab({
                       title={t('mkt.card.forceTitle')}
                       onClick={() => onInstall(entry, true)}
                     >
-                      {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
+                      {busy ? <Spinner /> : null}
                       {busy ? t('mkt.install.busy') : t('mkt.install.action')}
                     </button>
                   </span>
@@ -1034,7 +1035,7 @@ function CatalogTab({
                     disabled={busyPackage !== null}
                     onClick={() => onInstall(entry, false)}
                   >
-                    {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
+                    {busy ? <Spinner /> : null}
                     {busy ? t('mkt.install.busy') : t('mkt.install.action')}
                   </button>
                 ) : updatable ? (
@@ -1047,7 +1048,7 @@ function CatalogTab({
                       : t('mkt.update.toNpmLatest')}
                     onClick={() => onUpdate(pkg)}
                   >
-                    {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
+                    {busy ? <Spinner /> : null}
                     {busy ? t('mkt.update.busy') : t('mkt.update.action')}
                   </button>
                 ) : (
@@ -1119,7 +1120,7 @@ function InstalledTab({
   if (loading) {
     return (
       <div className="dshMkt-empty">
-        <span className="dshMkt-spinner" aria-hidden="true" /> {t('mkt.installed.loading')}
+        <Spinner /> {t('mkt.installed.loading')}
       </div>
     )
   }
@@ -1214,7 +1215,7 @@ function InstalledTab({
                   : (pkg.enabled ? t('mkt.toggle.disableTitle') : t('mkt.toggle.enableTitle'))}
                 onClick={() => onToggle(pkg)}
               >
-                {toggling ? <span className="dshMkt-spinner" aria-hidden="true" /> : (
+                {toggling ? <Spinner /> : (
                   <span className="dshMkt-switchTrack" aria-hidden="true"><span className="dshMkt-switchThumb" /></span>
                 )}
                 {pkg.enabled ? t('mkt.installed.enabled') : t('mkt.installed.disabled')}
@@ -1229,7 +1230,7 @@ function InstalledTab({
                     : t('mkt.update.toNpmLatest')}
                   onClick={() => onUpdate(pkg)}
                 >
-                  {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
+                  {busy ? <Spinner /> : null}
                   {busy ? t('mkt.update.busy') : t('mkt.update.action')}
                 </button>
               ) : null}
@@ -1239,7 +1240,7 @@ function InstalledTab({
                 disabled={actionsBusy}
                 onClick={() => onUninstall(pkg)}
               >
-                {busy ? <span className="dshMkt-spinner" aria-hidden="true" /> : null}
+                {busy ? <Spinner /> : null}
                 {busy ? t('mkt.uninstall.busy') : t('mkt.uninstall.action')}
               </button>
             </div>
@@ -1266,7 +1267,7 @@ function SourcesTab({ loading, sources, saving, input, onInput, onAdd, onRemove,
   if (loading) {
     return (
       <div className="dshMkt-empty">
-        <span className="dshMkt-spinner" aria-hidden="true" /> {t('mkt.sources.loading')}
+        <Spinner /> {t('mkt.sources.loading')}
       </div>
     )
   }

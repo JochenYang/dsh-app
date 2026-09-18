@@ -575,13 +575,13 @@ const cssText = `
 }
 .dshMkt-spinner {
   display: inline-block;
+  /* The label's own size: an inline busy ring must not grow a 12px button line.
+   * The mark itself is drawn by spinner.tsx (an SVG arc); this only places and
+   * turns it. */
   width: 12px;
   height: 12px;
-  border: 2px solid currentColor;
-  border-top-color: transparent;
-  border-radius: 50%;
   animation: dshMkt-spin 0.8s linear infinite;
-  vertical-align: -1px;
+  vertical-align: -2px;
 }
 @keyframes dshMkt-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
