@@ -1,6 +1,11 @@
 /**
- * The dsh desktop host: the kernel as a CHILD PROCESS whose web surface travels
- * as framed bytes over pipes instead of a loopback HTTP socket.
+ * The dsh desktop host: the kernel as a CHILD PROCESS this shell forwards the
+ * window's requests to. Two transports have served that surface across the 0.1
+ * line, and the host package's own version decides which one is spoken
+ * ({@link hostTransport}).
+ *
+ * The FRAMES transport (up to `0.1.6-alpha.1`) exports the web surface as
+ * framed bytes over pipes instead of a loopback HTTP socket.
  *
  * Why the pipes: a listening socket on 127.0.0.1 is reachable by every process
  * on the machine and by anything that guesses the port, it forces the shell to
@@ -10,6 +15,14 @@
  * server did (`/api/…`, the web frontend's assets, the plugin client bundles,
  * the streaming transport) and exports them over byte pipes, so this process is
  * the only client and no port is ever bound.
+ *
+ * The WEB transport (`0.1.6-alpha.2` and later) went the other way: the child
+ * binds its own loopback port, reports an authenticated URL over IPC, and this
+ * shell forwards to it with a cookie bought once at startup — see
+ * `host-web.ts`, which owns the exchange, the forward and the index rendering.
+ * The window still loads `dsh-app://app/index.html`; the loopback port is the
+ * child's, not ours, and it is reachable by anything on the machine, which is
+ * the price of that line's contract.
  *
  * Wire shape (upstream `@deepseek-ai/dsh-desktop-host`, protocol version 3):
  *
@@ -39,16 +52,25 @@
  *     tree, so `<projectDir>/node_modules/@deepseek-ai/dsh` must be there and
  *     the bundle layers must resolve inside it. See {@link hostProfileAnchor}.
  *
+ * Wire shape of the FRAMES transport's successor (protocol `url`), for contrast:
+ * the child is spawned with `stdio: ['ignore','pipe','pipe','ipc']`, takes its
+ * runtime, profile, office primary-runtime path and profile resolution mode as
+ * positional arguments after `--expose-internals`, and answers `ready` with the
+ * authenticated URL plus the index injection table instead of a version.
+ *
  * The module deliberately holds no Electron state beyond the protocol
  * registration, which is why the whole transport is testable without a window.
  */
 import { protocol } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { cp, mkdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
+import semver from 'semver'
 import { HOST_READY_TIMEOUT_MS, HOST_SHUTDOWN_GRACE_MS, HOST_SIGNAL_GRACE_MS } from '../shared/constants'
+import { authenticateHostWeb, forwardHostWebRequest, parseHostInjections, type HostIndexInjection, type HostWebSession } from './host-web'
 import { redact } from './redact'
 
 /** Custom scheme the renderer loads the harness UI from. */
@@ -87,6 +109,27 @@ export type HostArgShape = 'runtime-and-project' | 'project-only'
  *     anchor's guards.
  */
 export type HostProfileAnchor = 'runtime' | 'profile'
+
+/**
+ * How this shell reaches the child's web surface.
+ *
+ *   - `frames` — the request/response byte pipes on fd3/fd4 (0.1.5 through
+ *     0.1.6-alpha.1), where one Fetch call becomes one framed stream;
+ *   - `web` — the child's own authenticated loopback URL (0.1.6-alpha.2 and
+ *     later), where one Fetch call becomes one HTTP request (see `host-web.ts`).
+ */
+export type HostTransport = 'frames' | 'web'
+
+/** Transport assumed when the host package's version cannot be mapped. */
+const DEFAULT_HOST_TRANSPORT: HostTransport = 'frames'
+
+/**
+ * Version at which the host's web surface moved from the framed pipes to an
+ * authenticated loopback URL. The move happened inside the 0.1.6 alpha line,
+ * between `-alpha.1` and `-alpha.2`, which is why the comparison is a full
+ * semver one rather than a patch-level number.
+ */
+const WEB_TRANSPORT_VERSION = '0.1.6-alpha.2'
 
 /** Shape tried first when the host's version cannot be mapped. */
 const DEFAULT_HOST_ARG_SHAPE: HostArgShape = 'runtime-and-project'
@@ -140,14 +183,31 @@ const RESPONSE_FRAME_DATA = 2
 const RESPONSE_FRAME_END = 3
 const RESPONSE_FRAME_ERROR = 4
 
-/** The child's half of the protocol: the two messages that are not Fetch bytes. */
+/**
+ * The child's half of the IPC channel, across both transports: the fields of a
+ * `ready` belong to the transport the shell started the child on (the frames
+ * one reports a protocol version and the dsh version, the web one a URL and the
+ * index injection table), and `handleMessage` refuses whichever pair does not
+ * match. `shutdown-complete` and `update-tasks` are the web transport's own
+ * messages — the first is upstream's teardown acknowledgement, the second its
+ * update handoff, which this shell's updater does not use.
+ */
 type HostEvent = {
   readonly type: 'ready'
-  readonly protocolVersion: number
-  readonly dshVersion: string
+  readonly protocolVersion?: number
+  readonly dshVersion?: string
+  readonly url?: string
+  readonly injections?: unknown
 } | {
   readonly type: 'fatal'
   readonly message: string
+} | {
+  readonly type: 'shutdown-complete'
+} | {
+  readonly type: 'update-tasks'
+  readonly requestId: number
+  readonly active: boolean
+  readonly error?: string
 }
 
 /** One decoded response-pipe frame. */
@@ -218,6 +278,23 @@ export interface DshHostOptions {
    * "resolved outside the desktop profile" check refuses without this flag.
    */
   allowLinkedProfile?: boolean
+  /**
+   * Whether the runtime tree is a workspace checkout rather than an installed
+   * runtime. The web transport hands the answer to the child as its profile
+   * resolution mode (`link`, then; `runtime` for an installed tree), which is
+   * what lets a checkout's packages resolve per app instead of failing the
+   * "must live inside this runtime" check.
+   */
+  checkoutRuntime?: boolean
+  /**
+   * Office assets directory the web transport mirrors into {@link userDataDir}
+   * (see {@link prepareOfficePayload} — the child refuses to compose without a
+   * payload beside the primary-runtime path it is handed). Unused by the frames
+   * transport, which is handed no such argument.
+   */
+  officeSkillsSource?: string
+  /** Shell data directory (`<userData>`); the web transport materializes the office payload under it. */
+  userDataDir?: string
   /** Ride along {@link hostProxyBootstrap} — set when `env` carries a proxy (see `hasProxyEnv`). */
   proxyBootstrap?: boolean
   /** Raw child output lines (stdout + stderr), one per call. */
@@ -308,6 +385,46 @@ export function hostProfileAnchor(version: string | undefined): HostProfileAncho
 }
 
 /**
+ * The transport a host package version speaks, or undefined when this shell has
+ * no mapping for it.
+ *
+ * A prerelease belongs to its own line's contract, so this one is a real semver
+ * comparison rather than a patch-level number: `0.1.6-alpha.1` is still on the
+ * framed pipes, `0.1.6-alpha.2` (and every stable `0.1.6` after it) binds its
+ * own loopback URL. Parsing is loose so a `v`-prefixed or space-padded manifest
+ * still answers, and undefined — not a guess — is what an unparseable version
+ * gets: the caller then assumes the frames contract.
+ *
+ * @param version - the host package's version, or undefined when unreadable.
+ * @returns the transport, or undefined for an unmapped version.
+ */
+export function hostTransport(version: string | undefined): HostTransport | undefined {
+  if (version === undefined) return undefined
+  const parsed = semver.parse(version, { loose: true })
+  if (parsed === null) return undefined
+  return semver.gte(parsed, WEB_TRANSPORT_VERSION) ? 'web' : 'frames'
+}
+
+/**
+ * The transport to start with, plus the log line saying which one it is.
+ *
+ * Only a mapped WEB version announces itself: the frames transport is what this
+ * shell has always spoken, and the argv-shape line next to it already names the
+ * host package when anything looks odd. An unmapped version keeps today's
+ * behaviour — frames, with the argv fallback to discover the shape.
+ *
+ * @param version - the host package's version, or undefined when unreadable.
+ * @returns the transport, and the line to log before the spawn (when there is one).
+ */
+function decideTransport(version: string | undefined): { transport: HostTransport; log: string | undefined } {
+  const transport = hostTransport(version)
+  if (transport === undefined || transport === DEFAULT_HOST_TRANSPORT) {
+    return { transport: DEFAULT_HOST_TRANSPORT, log: undefined }
+  }
+  return { transport, log: `dsh host: web transport (host package ${String(version)})` }
+}
+
+/**
  * Whether a host package version belongs to the line that takes the runtime tree
  * in argv and anchors the profile on it, or undefined when unmapped.
  */
@@ -353,6 +470,110 @@ function shapeArgs(shape: HostArgShape, options: DshHostOptions): string[] {
   return shape === 'runtime-and-project'
     ? [options.entry, options.runtimeDir, options.projectDir, ...linked]
     : [options.entry, options.projectDir, ...linked]
+}
+
+/**
+ * The web transport's flags and positional arguments.
+ *
+ * The shape is the child's own, fixed by its release: `--expose-internals`
+ * before the entry, then the runtime tree, the profile, the primary-runtime
+ * path and the profile resolution mode. The two slots after the profile have no
+ * flag form of their own, so nothing else may be inserted before them; the
+ * package-manager pair the child also understands is deliberately omitted,
+ * because the in-app market drives the kernel CLI itself.
+ *
+ * `--allow-linked-profile` has no counterpart here either: a checkout runtime is
+ * what `link` says, and an extra argument would land in a positional slot.
+ *
+ * @param options - the start's inputs.
+ * @param primaryRuntime - the office payload path (see {@link prepareOfficePayload}).
+ * @returns the argument list, empty of Node flags except the one the child requires.
+ */
+function webShapeArgs(options: DshHostOptions, primaryRuntime: string): string[] {
+  return [
+    '--expose-internals',
+    options.entry,
+    options.runtimeDir,
+    options.projectDir,
+    primaryRuntime,
+    options.checkoutRuntime === true ? 'link' : 'runtime',
+  ]
+}
+
+/**
+ * Directory the office payload is materialized under, inside the shell's data
+ * directory. The child's own default is `<runtimeDir>/../runtime`, a layout an
+ * installed runtime artifact does not have today, so the shell owns a copy.
+ */
+const OFFICE_PAYLOAD_ROOT = 'dsh-app-office'
+
+/** Payload directory name the child derives its asset root from. */
+const OFFICE_PAYLOAD_DIR = 'office-skills'
+
+/**
+ * Leaf the child's `primaryRuntime` argument ends in.
+ *
+ * The child derives `assetRoot = join(dirname(argv[4]), 'office-skills')`, so
+ * this leaf makes the payload directory a SIBLING of the argument —
+ * `<root>/primary-runtime` beside `<root>/office-skills`, the layout upstream's
+ * own runtime uses. Naming it inside the payload directory instead puts the name
+ * twice in the derived asset root and the skill fails its boot check on
+ * `<root>/office-skills/office-skills/scripts/check_office.py`.
+ *
+ * The leaf itself is never read and does not have to exist.
+ */
+const OFFICE_PRIMARY_RUNTIME_LEAF = 'primary-runtime'
+
+/**
+ * Whether the materialized payload is absent or older than its source.
+ *
+ * Modification times are the whole staleness rule on purpose: the payload is a
+ * directory of skills copied from a runtime tree that only changes when the
+ * runtime does, and a content digest would cost a full read of it on every
+ * start to answer the same question.
+ */
+async function officePayloadStale(source: string, target: string): Promise<boolean> {
+  const [from, to] = await Promise.all([
+    stat(source).catch(() => null),
+    stat(target).catch(() => null),
+  ])
+  if (from === null) return false
+  return to === null || from.mtimeMs > to.mtimeMs
+}
+
+/**
+ * Materialize the office payload the child's primary-runtime slot points beside,
+ * and answer the leaf path to hand it.
+ *
+ * The payload is not optional for this transport: the child composes the office
+ * skill plugin with `assetRoot = join(dirname(argv[4]), 'office-skills')`, and
+ * that plugin THROWS at boot unless `<assetRoot>/scripts/check_office.py`
+ * exists — so a host started without one dies on its own, several seconds in,
+ * reported as a kernel crash. Failing here instead names the payload and where
+ * it was looked for; on the shipping runtime that payload is a build-side gap
+ * (the artifact carries no `runtime/office-skills` yet), which is exactly what
+ * the message has to say.
+ *
+ * @param source - the payload to mirror (dev: the checkout's `skill-office`
+ *   assets; production: `<runtimeDir>/../runtime/office-skills`), or undefined
+ *   when the caller named none.
+ * @param dataDir - the shell's data directory, the materialization root.
+ * @returns the primary-runtime path to pass as the child's fourth positional.
+ * @throws when either input is missing, or when the source is not a payload.
+ */
+async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined): Promise<string> {
+  if (source === undefined || dataDir === undefined) {
+    throw new Error(`dsh host: the web transport needs an office payload (a directory holding scripts/check_office.py); ${source === undefined ? 'none was named' : 'no shell data directory was named'} for ${source}`)
+  }
+  if (!existsSync(path.join(source, 'scripts', 'check_office.py'))) {
+    throw new Error(`dsh host: the office payload ${source} is missing or incomplete (it must hold scripts/check_office.py); the runtime has to ship it beside its own tree`)
+  }
+  const target = path.join(dataDir, OFFICE_PAYLOAD_ROOT, OFFICE_PAYLOAD_DIR)
+  if (await officePayloadStale(source, target)) {
+    await mkdir(path.dirname(target), { recursive: true })
+    await cp(source, target, { recursive: true })
+  }
+  return path.join(dataDir, OFFICE_PAYLOAD_ROOT, OFFICE_PRIMARY_RUNTIME_LEAF)
 }
 
 /**
@@ -420,6 +641,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isHeaders(value: unknown): value is readonly [string, string][] {
   return Array.isArray(value) && value.every((header) => Array.isArray(header) && header.length === 2
     && typeof header[0] === 'string' && typeof header[1] === 'string')
+}
+
+/**
+ * The two byte pipes the frames transport needs, or a failure naming them.
+ *
+ * @param child - the freshly spawned child.
+ * @returns the request writer and the response reader.
+ * @throws when the spawn exposed no such pair, after killing the child: without
+ *   both halves it can never answer a request.
+ */
+function framePipes(child: ChildProcess): { request: Writable; response: Readable } {
+  const request = child.stdio[REQUEST_PIPE_FD]
+  const response = child.stdio[RESPONSE_PIPE_FD]
+  if (!(request instanceof Writable) || !(response instanceof Readable)) {
+    child.kill('SIGTERM')
+    throw new Error('dsh host did not expose the required byte pipes and IPC channel')
+  }
+  return { request, response }
 }
 
 function assertStreamId(streamId: number): void {
@@ -593,6 +832,12 @@ export class DshHost implements DshAppTarget {
   private ready = false
   private stopping = false
   private version: string | undefined
+  /** Decided at start, from the host package's own version (see {@link hostTransport}). */
+  private transport: HostTransport = DEFAULT_HOST_TRANSPORT
+  /** Web transport: what the child reported, before the exchange below. */
+  private webReady: { url: string; injections: HostIndexInjection[] } | undefined
+  /** Web transport: where the child is and how to reach it; undefined until authenticated. */
+  private webSession: HostWebSession | undefined
   private stderrTail = ''
   private failureReported = false
   private exitPromise: Promise<void> | undefined
@@ -618,11 +863,11 @@ export class DshHost implements DshAppTarget {
   /**
    * Spawn the host and wait until it reports its composition active.
    *
-   * The child's argv shape is read off the host package's own version. A version
-   * this shell has no mapping for starts on the current shape and falls back to
-   * the other one when the child refuses it — that refusal is the child's own
-   * `unsupported internal option`, answered before it composes anything, so a
-   * host line the shell has never seen still boots.
+   * Both the argv shape and the transport are read off the host package's own
+   * version. A version this shell has no mapping for starts on the current shape
+   * and falls back to the other one when the child refuses it — that refusal is
+   * the child's own `unsupported internal option`, answered before it composes
+   * anything, so a host line the shell has never seen still boots.
    *
    * @returns once the host answers requests.
    */
@@ -631,9 +876,13 @@ export class DshHost implements DshAppTarget {
       await this.readyPromise
       return
     }
-    const decision = decideArgShape(hostPackageVersion(this.options.runtimeDir))
+    const version = hostPackageVersion(this.options.runtimeDir)
+    const decision = decideArgShape(version)
+    const transport = decideTransport(version)
+    this.transport = transport.transport
     let shape = decision.shape
     this.options.onLog?.(decision.log)
+    if (transport.log !== undefined) this.options.onLog?.(transport.log)
     for (let attempt = 0; ; attempt += 1) {
       const spawnedAt = Date.now()
       try {
@@ -641,7 +890,11 @@ export class DshHost implements DshAppTarget {
         return
       } catch (error) {
         const message = errorOf(error, 'dsh host failed to start').message
-        if (decision.mapped || attempt > 0 || Date.now() - spawnedAt > HOST_SHAPE_RETRY_WINDOW_MS
+        // The web transport's positional shape is fixed by its release and has
+        // no counterpart to fall back to: the startAttempt log line already
+        // names the argv it used, and the failure is reported as it stands.
+        if (this.transport !== 'frames'
+          || decision.mapped || attempt > 0 || Date.now() - spawnedAt > HOST_SHAPE_RETRY_WINDOW_MS
           || !HOST_SHAPE_REJECTION.test(message)) {
           throw error
         }
@@ -663,6 +916,7 @@ export class DshHost implements DshAppTarget {
    */
   private async startAttempt(shape: HostArgShape): Promise<void> {
     const { executable, projectDir, env, proxyBootstrap } = this.options
+    const web = this.transport === 'web'
     // Runtime and package-manager overrides are removed rather than inherited:
     // NODE_OPTIONS can inject a require hook into the child, NODE_PATH can
     // shadow the runtime's own packages, and the npm/pnpm variables a `npm run`
@@ -676,26 +930,32 @@ export class DshHost implements DshAppTarget {
     // the variable, and the shell deliberately ships a real one for the child
     // (see the DshHost note in index.ts about the profile resolver's addon).
     if (/^electron/iu.test(path.basename(executable))) childEnv.ELECTRON_RUN_AS_NODE = '1'
-    const child = spawn(executable, [
-      ...hostProxyFlags(proxyBootstrap === true),
-      ...shapeArgs(shape, this.options),
-    ], {
+    // Both payloads the spawn depends on are resolved before it: the office
+    // payload the web child needs to compose at all, and the argv itself. A
+    // failure here is a start failure with a reason, never a child that dies
+    // several seconds later with its own.
+    const args = web
+      ? webShapeArgs(this.options, await prepareOfficePayload(this.options.officeSkillsSource, this.options.userDataDir))
+      : shapeArgs(shape, this.options)
+    if (web) {
+      // The one shape this shell cannot vary, echoed so a child that refuses it
+      // leaves the arguments it refused in the log.
+      this.options.onLog?.(`dsh host: web argv ${JSON.stringify(args)}`)
+    }
+    const child = spawn(executable, [...hostProxyFlags(proxyBootstrap === true), ...args], {
       cwd: projectDir,
       env: childEnv,
       // Index positions ARE the descriptors: 3 request pipe, 4 response pipe,
-      // 5 the IPC channel Node wires up itself.
-      stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ipc'],
+      // 5 the IPC channel Node wires up itself. The web transport has no pipes;
+      // the IPC channel is there from the start because the child may send a
+      // `fatal` long before it reports anything else.
+      stdio: web ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ipc'],
       windowsHide: true,
     })
-    const requestPipe = child.stdio[REQUEST_PIPE_FD]
-    const responsePipe = child.stdio[RESPONSE_PIPE_FD]
-    if (!(requestPipe instanceof Writable) || !(responsePipe instanceof Readable)) {
-      child.kill('SIGTERM')
-      throw new Error('dsh host did not expose the required byte pipes and IPC channel')
-    }
+    const pipes = web ? undefined : framePipes(child)
     this.child = child
-    this.requestPipe = requestPipe
-    this.responsePipe = responsePipe
+    this.requestPipe = pipes?.request
+    this.responsePipe = pipes?.response
     // Every handler below belongs to THIS child, and a retried attempt's
     // predecessor can still emit after its replacement is live — a closing pipe
     // or a last log line — which would otherwise fail the new attempt with the
@@ -722,18 +982,20 @@ export class DshHost implements DshAppTarget {
     child.stdout?.on('data', forward(child.stdout))
     child.stderr?.on('data', forward(child.stderr))
 
-    responsePipe.on('data', (chunk: Buffer) => { if (live()) this.acceptResponseBytes(chunk) })
-    responsePipe.once('end', () => {
-      if (!live()) return
-      try {
-        this.decoder.finish()
-        this.fail(new Error('dsh host response pipe ended'))
-      } catch (error) {
-        this.fail(errorOf(error, 'dsh host response pipe failed'))
-      }
-    })
-    requestPipe.once('error', (error: Error) => { if (live()) this.fail(error) })
-    responsePipe.once('error', (error: Error) => { if (live()) this.fail(error) })
+    if (pipes !== undefined) {
+      pipes.response.on('data', (chunk: Buffer) => { if (live()) this.acceptResponseBytes(chunk) })
+      pipes.response.once('end', () => {
+        if (!live()) return
+        try {
+          this.decoder.finish()
+          this.fail(new Error('dsh host response pipe ended'))
+        } catch (error) {
+          this.fail(errorOf(error, 'dsh host response pipe failed'))
+        }
+      })
+      pipes.request.once('error', (error: Error) => { if (live()) this.fail(error) })
+      pipes.response.once('error', (error: Error) => { if (live()) this.fail(error) })
+    }
     child.on('message', (message: unknown) => {
       if (!live()) return
       if (!isHostEvent(message)) {
@@ -769,10 +1031,47 @@ export class DshHost implements DshAppTarget {
         HOST_READY_TIMEOUT_MS,
         `dsh host did not become ready within ${String(HOST_READY_TIMEOUT_MS / 1000)}s`,
       )
+      if (web) await this.openWebSession()
     } catch (error) {
       await this.stop().catch(() => undefined)
       throw error
     }
+  }
+
+  /**
+   * Trade the URL the child reported for a session cookie, and keep the boot
+   * rows that came with it.
+   *
+   * Both halves are start conditions: a host whose URL cannot be authenticated
+   * answers every forwarded request with a refusal, so the start fails here
+   * rather than at the first page load. The URL itself is never kept or logged
+   * — it carries a spent token, and only its origin is worth a line.
+   */
+  private async openWebSession(): Promise<void> {    const ready = this.webReady
+    if (ready === undefined) throw new Error('dsh host: the web transport reported ready without a URL')
+    const auth = await withDeadline(
+      authenticateHostWeb(ready.url),
+      HOST_READY_TIMEOUT_MS,
+      `dsh host did not answer its own authentication URL within ${String(HOST_READY_TIMEOUT_MS / 1000)}s`,
+    )
+    this.webSession = { ...auth, injections: ready.injections, appOrigin: APP_ORIGIN }
+    this.options.onLog?.(`dsh host: web transport ready at ${auth.origin}`)
+  }
+
+  /**
+   * The host origin and cookie the window's OWN connections must carry.
+   *
+   * The client streams over a WebSocket straight to the host (the transport row
+   * this shell injects names it), so that handshake — not just the proxied
+   * requests — has to be authenticated. The session rewrite that does it
+   * (`host-stream-auth.ts`) reads the pair from here.
+   *
+   * @returns the origin and cookie once the web transport is ready, else
+   *   undefined (the frames transport has neither).
+   */
+  webTarget(): { origin: string; cookie: string } | undefined {
+    const session = this.webSession
+    return session === undefined ? undefined : { origin: session.origin, cookie: session.cookie }
   }
 
   /**
@@ -796,6 +1095,8 @@ export class DshHost implements DshAppTarget {
     this.ready = false
     this.stopping = false
     this.version = undefined
+    this.webReady = undefined
+    this.webSession = undefined
     this.stderrTail = ''
     this.failureReported = false
     this.exitPromise = undefined
@@ -813,6 +1114,7 @@ export class DshHost implements DshAppTarget {
    * @returns the host's response; its body streams until the child ends it.
    */
   async fetch(request: Request): Promise<Response> {
+    if (this.transport === 'web') return this.fetchWeb(request)
     const child = this.child
     if (child === undefined || !child.connected || this.requestPipe === undefined || !this.ready) {
       throw new Error('dsh host is not running')
@@ -848,6 +1150,29 @@ export class DshHost implements DshAppTarget {
     })
   }
 
+  /**
+   * Forward one request over the web transport.
+   *
+   * There is no per-request stream to track here: the child is an HTTP server,
+   * so a request is one `fetch` call, and cancellation rides the request's own
+   * abort signal. The cookie and the boot rows come from the start's exchange
+   * (see {@link openWebSession}).
+   *
+   * @param request - the protocol request, body included.
+   * @returns the child's response, index document rewritten.
+   */
+  private async fetchWeb(request: Request): Promise<Response> {
+    const child = this.child
+    const session = this.webSession
+    // Liveness here is the PROCESS, not the IPC channel: this transport's
+    // requests travel over the child's own listener, which stays answerable
+    // even if the channel closed.
+    if (child === undefined || child.exitCode !== null || child.killed || session === undefined || !this.ready) {
+      throw new Error('dsh host is not running')
+    }
+    return forwardHostWebRequest(request, session)
+  }
+
   /** Request teardown and wait for the child to be gone. */
   async stop(): Promise<void> {
     const child = this.child
@@ -863,7 +1188,8 @@ export class DshHost implements DshAppTarget {
     }
     // Destroying the parent's write end is what releases the child's pending
     // Windows pipe read: without it a stopped reader keeps it parked on read()
-    // and the process never exits.
+    // and the process never exits. The web transport has no such pipe — its
+    // child closes its own listener and exits — so this is a no-op there.
     this.requestPipe?.destroy()
     if (!await exitsWithin(exited, HOST_SHUTDOWN_GRACE_MS)) {
       child.kill('SIGTERM')
@@ -877,6 +1203,8 @@ export class DshHost implements DshAppTarget {
     this.child = undefined
     this.requestPipe = undefined
     this.responsePipe = undefined
+    this.webReady = undefined
+    this.webSession = undefined
   }
 
   /**
@@ -1076,9 +1404,36 @@ export class DshHost implements DshAppTarget {
     if (this.blockedResponses.size === 0) this.responsePipe?.resume()
   }
 
+  /**
+   * One IPC message from the child, read against the transport it was started
+   * on: the two transports' `ready` messages share a type tag and nothing else,
+   * and accepting the wrong one would leave the shell forwarding to a surface
+   * that is not there.
+   */
   private handleMessage(message: HostEvent): void {
     switch (message.type) {
       case 'ready':
+        if (this.transport === 'web') {
+          if (message.url === undefined) {
+            this.fail(new Error('dsh host reported the framed protocol while it was started on the web transport'))
+            return
+          }
+          let injections: HostIndexInjection[]
+          try {
+            injections = parseHostInjections(message.injections)
+          } catch (error) {
+            this.fail(errorOf(error, 'dsh host reported an unusable injection table'))
+            return
+          }
+          this.webReady = { url: message.url, injections }
+          this.ready = true
+          this.settleReady()
+          return
+        }
+        if (message.protocolVersion === undefined) {
+          this.fail(new Error('dsh host reported the web transport while it was started on the framed pipes'))
+          return
+        }
         if (message.protocolVersion !== HOST_PROTOCOL_VERSION) {
           this.fail(new Error(`dsh host speaks protocol ${String(message.protocolVersion)}, this shell speaks ${String(HOST_PROTOCOL_VERSION)}`))
           return
@@ -1089,6 +1444,13 @@ export class DshHost implements DshAppTarget {
         return
       case 'fatal':
         this.fail(new Error(redact(message.message)))
+        return
+      case 'shutdown-complete':
+      case 'update-tasks':
+        // The web transport's own handshake extras. The shutdown acknowledgement
+        // needs no bookkeeping (stop() waits for the process itself, which is
+        // what proves the teardown), and the update-task control is upstream's
+        // update handoff — this shell's updater replaces the app, not the host.
         return
       default:
         message satisfies never
@@ -1116,9 +1478,17 @@ function isHostEvent(message: unknown): message is HostEvent {
   if (!isRecord(message) || typeof message.type !== 'string') return false
   switch (message.type) {
     case 'ready':
-      return typeof message.protocolVersion === 'number' && typeof message.dshVersion === 'string'
+      // Either transport's ready: `handleMessage` reads the pair the shell
+      // started this child on, and refuses the other one by name.
+      return (typeof message.protocolVersion === 'number' && typeof message.dshVersion === 'string')
+        || typeof message.url === 'string'
     case 'fatal':
       return typeof message.message === 'string'
+    case 'shutdown-complete':
+      return true
+    case 'update-tasks':
+      return Number.isSafeInteger(message.requestId) && typeof message.active === 'boolean'
+        && (message.error === undefined || typeof message.error === 'string')
     default:
       return false
   }

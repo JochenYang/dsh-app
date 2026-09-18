@@ -5,12 +5,13 @@ import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
 import { decideBundledAdoption, type BundledManifestFields } from '../kernel/bundled'
 import { DshServer, resolveLogDir } from './server'
-import { APP_URL, desktopHostEntry, hostPackageVersion, hostProfileAnchor, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
+import { APP_URL, desktopHostEntry, hostPackageVersion, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
 import { createShellActionHandler, installShellActionStamps, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
+import { installHostStreamAuth } from './host-stream-auth'
 import { isSafeModeEnabled, setSafeMode } from './safe-mode'
 import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
 import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from './proxy-detect'
-import { devSuiteSources, prepareBrandSuite, prodSuiteSources } from './brand-suite'
+import { devSuiteSources, homeRowsInProfilePatch, prepareBrandSuite, prodSuiteSources } from './brand-suite'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
 import {
@@ -28,6 +29,7 @@ import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, LEGACY_PROFILE, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
+import { alignWindowStateWithLine } from './client-state'
 import { initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
 import type { KernelChannel, KernelStatusPayload } from '../shared/types'
 
@@ -223,6 +225,10 @@ function hostRuntime(): {
   allowLinkedProfile: boolean
   /** Undefined when the host package's version maps to nothing (see hostProfileAnchor). */
   profileAnchor: HostProfileAnchor | undefined
+  /** Office payload to mirror for the web transport (see DshHostOptions). */
+  officeSkillsSource: string
+  /** Whether the runtime tree is a checkout; the web transport passes it as the profile resolution mode. */
+  checkoutRuntime: boolean
 } {
   const nodeBinary = process.platform === 'win32' ? 'node.exe' : 'node'
   if (!isDev) {
@@ -237,12 +243,20 @@ function hostRuntime(): {
       entry: desktopHostEntry(runtimeDir),
       allowLinkedProfile: false,
       profileAnchor,
+      // The layout the upstream desktop host expects beside its runtime tree. A
+      // released DSH APP runtime carries no office payload yet, so a host line
+      // that needs one fails the start with the path it looked for.
+      officeSkillsSource: path.join(runtimeDir, '..', 'runtime', 'office-skills'),
+      checkoutRuntime: false,
     }
   }
   const checkout = devCheckoutDir
   if (checkout === undefined) throw new Error(t('hostFailure.devHostMissing', { checkout: '../deepseek-harness' }))
   const executable = (process.env.DSH_APP_NODE_BINARY ?? '').trim() || 'node'
   const appDir = path.join(checkout, 'apps', 'desktop-host')
+  // The office skills ship inside the workspace checkout as a package of their
+  // own; the child wants the payload directory beside its primary-runtime slot.
+  const officeSkillsSource = path.join(checkout, 'packages', 'skill', 'skill-office', 'assets')
   if (existsSync(path.join(appDir, 'lib', 'index.js'))) {
     return {
       executable,
@@ -250,6 +264,8 @@ function hostRuntime(): {
       entry: path.join(appDir, 'lib', 'index.js'),
       allowLinkedProfile: true,
       profileAnchor: hostProfileAnchor(hostPackageVersion(appDir)),
+      officeSkillsSource,
+      checkoutRuntime: true,
     }
   }
   // A prepared checkout root looks like an installed tree (node_modules with
@@ -262,6 +278,8 @@ function hostRuntime(): {
       entry,
       allowLinkedProfile: true,
       profileAnchor: hostProfileAnchor(hostPackageVersion(checkout)),
+      officeSkillsSource,
+      checkoutRuntime: true,
     }
   }
   throw new Error(t('hostFailure.devHostMissing', { checkout }))
@@ -590,9 +608,20 @@ async function startServerAndOpenWindow(): Promise<void> {
   // user's home layer written into the profile's patch file. An older kernel
   // without the suite plugins boots vanilla. Safe mode drops the shipped rows
   // and keeps only what is the user's own.
+  //
+  // Which composer will read that file decides the home rows: the desktop host
+  // (`profile-boot`) reads only this file, so they have to be copied in; the
+  // kernel's own boot on the web transport also loads `$DSH_HOME` as a layer, and
+  // a copy there is a second row with the same id — the whole tree then fails
+  // with `duplicate loader entry id` (measured on 0.1.6-alpha.2, whose kernel
+  // boot composes the home layer itself).
+  const suiteHomeRows = homeRowsInProfilePatch({
+    isDev,
+    transport: hostTransport(hostPackageVersion(path.join(kernel.getCurrentDir(), 'app'))) ?? 'frames',
+  })
   const suiteRows = await prepareBrandSuite(
     isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir()),
-    { profileDir: profile.dir, suite: !safeModeActive },
+    { profileDir: profile.dir, suite: !safeModeActive, homeRows: suiteHomeRows },
   )
   if (!suiteRows) logKernel('[brand-suite] booting without the suite rows')
   let host: ReturnType<typeof hostRuntime>
@@ -612,16 +641,26 @@ async function startServerAndOpenWindow(): Promise<void> {
   // message, which is what the failure card reports. A 0.1.6-and-later host
   // anchors on the runtime tree itself: it needs no mirror, and a leftover one
   // from an earlier line would shadow the plugins this kernel ships.
+  const hostVersion = hostPackageVersion(host.runtimeDir)
   if (host.profileAnchor === 'profile') {
     const outcome = await mirrorRuntimeIntoProfile(host.runtimeDir, profile.dir)
-    logKernel(kernelTreeLogLine(outcome, hostPackageVersion(host.runtimeDir)))
+    logKernel(kernelTreeLogLine(outcome, hostVersion))
   } else {
-    const dropped = await dropRuntimeMirror(profile.dir)
+    const dropped = await dropRuntimeMirror(profile.dir, host.runtimeDir)
     if (dropped.status === 'removed') {
       logKernel(`[suite-profile] dropped the kernel mirror of an earlier line (${String(dropped.entries)} entries)`)
     } else if (dropped.status === 'failed') {
       logKernel(`[suite-profile] the kernel mirror of an earlier line could not be dropped: ${dropped.detail ?? 'unknown error'}`)
     }
+  }
+  // The window's view state belongs to the client build of THIS line — see
+  // client-state.ts. Aligned before the window is handed the UI, because the
+  // client reads its storage as it boots.
+  const clientState = await alignWindowStateWithLine({ session: session.defaultSession, userDataDir, version: hostVersion })
+  if (clientState.status === 'cleared') {
+    logKernel(`[window] kernel line moved ${clientState.previous ?? 'unknown'} → ${clientState.line ?? 'unknown'}; the window's stored client state was reset`)
+  } else if (clientState.status === 'skipped' && clientState.detail !== undefined) {
+    logKernel(`[window] the window's stored client state was left as it is: ${clientState.detail}`)
   }
   // Environment scrub (opt-in): a missing config removes nothing, so the
   // default boot spawns the kernel with an unchanged inherited env. Names
@@ -706,9 +745,16 @@ async function startServerAndOpenWindow(): Promise<void> {
   }
   try {
     // `profileAnchor` is the shell's own reading of the host line; only the
-    // transport's own options travel to the start.
+    // transport's own options travel to the start. `userDataDir` is where the
+    // web transport materializes the office payload it must hand the child.
     const { profileAnchor: _anchor, ...hostOptions } = host
-    await server.start({ ...hostOptions, projectDir: profile.dir, env: kernelEnv, proxyBootstrap: hasProxyEnv(kernelEnv) })
+    await server.start({
+      ...hostOptions,
+      userDataDir,
+      projectDir: profile.dir,
+      env: kernelEnv,
+      proxyBootstrap: hasProxyEnv(kernelEnv),
+    })
   } catch (err) {
     await handleServerDown(t('status.serverStartFailed', { detail: (err as Error).message }))
     return
@@ -1064,6 +1110,16 @@ async function boot(): Promise<void> {
     log: (line) => { logKernel(line) },
   })
   installShellActionStamps(session.defaultSession)
+  // The client's own stream WebSocket goes straight to the host's loopback
+  // origin (the transport row this shell injects names it), so the session — not
+  // the protocol handler — is where that handshake gets the host cookie and an
+  // origin the host accepts. Installed once: the target and the window are read
+  // per request, so a kernel switch needs no reinstall.
+  installHostStreamAuth(
+    session.defaultSession,
+    () => server.webTarget(),
+    () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents.id),
+  )
   installDshAppProtocol(() => (server.isRunning ? server : null), shellActions)
 
   // Create the tray before any server/kernel work so it persists even when

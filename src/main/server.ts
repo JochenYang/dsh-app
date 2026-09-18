@@ -82,7 +82,11 @@ export class DshServer {
       await host.stop().catch(() => undefined)
       throw error
     }
-    this.handleLine(`dsh host dsh ${host.dshVersion ?? '?'} ready`)
+    // A host that reported no dsh version is the web transport's: its `ready`
+    // carries the URL and the boot rows instead, and the version that belongs in
+    // this log is the active kernel's, which the shell names separately.
+    const version = host.dshVersion
+    this.handleLine(version === undefined ? 'dsh host ready (web transport)' : `dsh host dsh ${version} ready`)
   }
 
   /** Forward one `dsh-app://app/…` request to the running host. */
@@ -90,6 +94,14 @@ export class DshServer {
     const host = this.host
     if (host === null) return Promise.reject(new Error('dsh host is not running'))
     return host.fetch(request)
+  }
+
+  /**
+   * The web transport's origin and cookie, once the host reported them.
+   * @returns see {@link DshHost.webTarget}; undefined for the frames transport.
+   */
+  webTarget(): { origin: string; cookie: string } | undefined {
+    return this.host?.webTarget()
   }
 
   /** Stop the host: shutdown message, then signals, then the tree kill. */

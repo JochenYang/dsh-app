@@ -284,6 +284,40 @@ const PATCH_SUITE_MARK = '# @@dsh-app-rows:suite\n'
 const PATCH_PRESERVED_MARK = '# @@dsh-app-rows:preserved\n'
 const PATCH_HOME_MARK = '# @@dsh-app-rows:home\n'
 
+/**
+ * Placeholder written instead of the home rows when the composer reads the home
+ * layer itself. It sits under the home marker so the file still says where the
+ * user's rows apply, and so the next start's `parseSuitePatch` keeps working.
+ */
+const PATCH_HOME_OMITTED = [
+  '# The home layer $DSH_HOME/cordis.patch.yml is NOT copied here on this kernel:',
+  '# this line boots through the kernel\'s own composer, which loads that file as a',
+  '# layer itself — a copy beside it reaches the loader as a second row with the',
+  '# same id and the plugin tree fails with "duplicate loader entry id". Your rows',
+  '# still apply; edit them in the home layer.',
+  '',
+].join('\n')
+
+/**
+ * Whether the generated profile patch has to carry the home layer's rows.
+ *
+ * It does for every composer that reads ONLY this file — the desktop host
+ * (`profile-boot`), which is what the frames lines and a dev checkout run:
+ * without the copy the user's own rows (their MCP servers, a pinned search
+ * provider) would simply be absent from the desktop UI.
+ *
+ * It must NOT for the kernel's own boot on the web transport (`dsh-app-boot`):
+ * that composer loads `$DSH_HOME/cordis.patch.yml` as a layer itself, so the copy
+ * is a duplicate row id and the tree fails to load — measured on 0.1.6-alpha.2,
+ * where a profile carrying both could not start a host at all.
+ *
+ * @param options.isDev - the host runs from a checkout.
+ * @param options.transport - the host's transport (see `hostTransport`).
+ */
+export function homeRowsInProfilePatch(options: { isDev: boolean; transport: 'frames' | 'web' }): boolean {
+  return options.isDev || options.transport === 'frames'
+}
+
 /** Render the generated patch file from its three sections. */
 export function composeSuitePatch(sections: { suite: string; preserved: string; home: string }): string {
   const block = (mark: string, text: string): string => `${mark}${text.trim() === '' ? '' : `${text.trimEnd()}\n`}`
@@ -452,7 +486,7 @@ export function filterUnresolvableRows(text: string, profileDir: string): { text
  * @param options - `suite: false` (safe mode) drops the shipped rows and keeps
  *   only what is the user's own.
  */
-export async function writeSuitePatchFile(profileDir: string, options: { suite: boolean }): Promise<void> {
+export async function writeSuitePatchFile(profileDir: string, options: { suite: boolean; homeRows?: boolean }): Promise<void> {
   let suite = ''
   if (options.suite) {
     suite = await readOptionalFile(path.join(__dirname, 'dsh-app.patch.yml'))
@@ -466,7 +500,10 @@ export async function writeSuitePatchFile(profileDir: string, options: { suite: 
   // every skip is reported: a user who reads the log learns which row was left
   // out and why, and the file itself carries the reason beside the dead row.
   const carried = filterUnresolvableRows(parseSuitePatch(existing).preserved, profileDir)
-  const home = filterUnresolvableRows(await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME)), profileDir)
+  const copyHome = options.homeRows !== false
+  const home = copyHome
+    ? filterUnresolvableRows(await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME)), profileDir)
+    : { text: PATCH_HOME_OMITTED, skipped: [] }
   for (const specifier of [...carried.skipped, ...home.skipped]) {
     console.warn(`[brand-suite] patch row skipped: "${specifier}" does not resolve from ${profileDir}; the row stays in ${PROFILE_PATCH_FILENAME} commented out`)
   }
@@ -492,7 +529,7 @@ export async function writeSuitePatchFile(profileDir: string, options: { suite: 
  */
 export async function prepareBrandSuite(
   sources: readonly SuitePluginSource[],
-  options: { profileDir: string; suite: boolean },
+  options: { profileDir: string; suite: boolean; homeRows?: boolean },
 ): Promise<boolean> {
   let suite = options.suite
   try {
@@ -512,7 +549,7 @@ export async function prepareBrandSuite(
     suite = false
   }
   try {
-    await writeSuitePatchFile(options.profileDir, { suite })
+    await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows })
     return suite
   } catch (err) {
     console.error('[brand-suite] patch layer could not be written:', err)

@@ -40,6 +40,15 @@
  *     or from a prebuilt tarball. The shell starts this package as the kernel
  *     child, so a runtime without it cannot boot at all.
  *
+ * One payload the host needs is neither a package nor optional:
+ *   - the Office skills (packages/skill/skill-office/assets in a harness
+ *     checkout), staged beside the kernel tree as `runtime/office-skills` (see
+ *     stageOfficePayload). The host derives its skill asset root from its
+ *     primary-runtime argument — `join(dirname(<kernelDir>/app), 'office-skills')`
+ *     — and @deepseek-ai/dsh-skill-office THROWS at boot when
+ *     `<assetRoot>/scripts/check_office.py` is absent, so a runtime shipped
+ *     without it dies a few seconds into the first start.
+ *
  * Assembly is pnpm ≥ 10 with the hoisted linker (see "pnpm assembly" above
  * main()): a lockfile is generated first and asserted to hold no
  * registry-resolved core package, then installed from that frozen lockfile.
@@ -425,6 +434,20 @@ const DESKTOP_HOST_PACKAGE = '@deepseek-ai/dsh-desktop-host'
 /** The host app inside a harness checkout: the directory that becomes the package. */
 const DESKTOP_HOST_APP_DIR = 'apps/desktop-host'
 
+/** The Office skills inside a harness checkout — the payload the host reads beside itself. */
+const OFFICE_PAYLOAD_ASSETS = ['packages', 'skill', 'skill-office', 'assets']
+
+/**
+ * Where that payload lands inside the built runtime tree.
+ *
+ * The shell hands the host `primaryRuntime = <kernelDir>/app` and
+ * @deepseek-ai/dsh-skill-office takes its asset root from
+ * `join(dirname(primaryRuntime), 'office-skills')`, so the directory has to sit
+ * at `<kernelDir>/runtime/office-skills` — a path nothing else in the runtime
+ * occupies, because the kernel tree itself is `<kernelDir>/app`.
+ */
+const OFFICE_PAYLOAD_DIR = 'runtime/office-skills'
+
 /**
  * Upstream repository, cloned only when no local checkout of it exists. The
  * host is private, so CI has to obtain its source from the tag of the kernel
@@ -455,6 +478,80 @@ function registryUrl() {
 /** Tag naming a kernel version in the upstream repository (dsh-v0.1.5-rc.2). */
 function hostTag() {
   return (process.env.DSH_APP_HOST_TAG ?? '').trim() || `dsh-v${DSH_VERSION}`
+}
+
+/**
+ * Where a checkout of the harness repository may already sit on this machine.
+ *
+ * The same two candidates the shell's own dev mode and scripts/smoke-suite.mjs
+ * look for: the checkout sits beside this repo on some machines and one level
+ * further up on others. CI has neither and clones instead (see
+ * prepareDesktopHostSource), so an absent candidate is not an error by itself.
+ */
+function harnessCheckoutCandidates() {
+  return [path.resolve(root, '..', 'deepseek-harness'), path.resolve(root, '..', '..', 'deepseek-harness')]
+}
+
+/**
+ * The checkout the office payload is read from when the host itself arrived as
+ * a prebuilt tarball (DSH_APP_HOST_PACKAGE) — that path resolves no checkout of
+ * the kernel line's tag, so the payload needs one of its own.
+ *
+ * No worktree and no clone here: the payload is four files, and a caller who
+ * brought a prebuilt host is deliberately avoiding what cloning costs. An
+ * explicit DSH_APP_HOST_CHECKOUT or DSH_APP_HOST_REPO wins; otherwise the first
+ * sibling checkout that actually holds the payload.
+ */
+function officePayloadCheckout() {
+  const explicit = (process.env.DSH_APP_HOST_CHECKOUT ?? '').trim()
+  if (explicit !== '') return path.resolve(explicit)
+  const configured = (process.env.DSH_APP_HOST_REPO ?? '').trim()
+  if (configured !== '') return path.resolve(configured)
+  const siblings = harnessCheckoutCandidates()
+  return siblings.find((dir) => existsSync(path.join(dir, ...OFFICE_PAYLOAD_ASSETS))) ?? siblings[0]
+}
+
+/**
+ * Stage the Office skills a harness checkout carries into the runtime tree.
+ *
+ * The payload is not optional for a runtime of this line: the host composes
+ * @deepseek-ai/dsh-skill-office with
+ * `assetRoot = join(dirname(primaryRuntime), 'office-skills')`, and that plugin
+ * THROWS at boot unless `<assetRoot>/scripts/check_office.py` exists. Dev mode
+ * reads it from the checkout it runs from; a shipped artifact has nothing but
+ * its own tree to read, so the copy is a build-side duty.
+ *
+ * No separate inventory step is needed: writeFileInventory walks the whole
+ * runtime tree, so every staged file lands in runtime/app/runtime-files.json —
+ * and, through the same paths, in the layer split (split-runtime-layers.mjs
+ * carries this directory in its meta layer, the one layer that is not scoped to
+ * a package tree).
+ *
+ * @param runtimeDir - the runtime tree being assembled (the kernel dir).
+ * @param checkoutDir - a harness checkout of the kernel line being built.
+ * @returns the staged payload directory.
+ * @throws when the checkout does not carry the payload: skipping it would only
+ *   move the failure to a user's machine, several seconds into the first boot.
+ */
+async function stageOfficePayload(runtimeDir, checkoutDir) {
+  const source = path.join(checkoutDir, ...OFFICE_PAYLOAD_ASSETS)
+  if (!existsSync(path.join(source, 'scripts', 'check_office.py'))) {
+    throw new Error(
+      `no office payload at ${source}: the desktop host refuses to start unless <primaryRuntime>/../office-skills `
+      + `holds scripts/check_office.py, so a runtime for this line must ship one — point DSH_APP_HOST_CHECKOUT `
+      + `(or DSH_APP_HOST_REPO) at a checkout of dsh ${DSH_VERSION}`,
+    )
+  }
+  const target = path.join(runtimeDir, OFFICE_PAYLOAD_DIR)
+  await rm(target, { recursive: true, force: true })
+  await cp(source, target, { recursive: true })
+  // Asserted at the destination too: this is the path the child derives, and a
+  // misplaced payload is indistinguishable from a missing one at boot.
+  if (!existsSync(path.join(target, 'scripts', 'check_office.py'))) {
+    throw new Error(`the staged office payload at ${target} holds no scripts/check_office.py`)
+  }
+  console.log(`[build-runtime] office payload: ${source} -> ${OFFICE_PAYLOAD_DIR}`)
+  return target
 }
 
 /** A checkout or a worktree keeps `.git` as a directory or a file. */
@@ -574,10 +671,7 @@ async function prepareDesktopHostSource(workRoot) {
     return { dir, origin: `checkout ${dir}`, dispose: async () => {} }
   }
   const configured = (process.env.DSH_APP_HOST_REPO ?? '').trim()
-  // The same two candidates the shell's own dev mode and scripts/smoke-suite.mjs
-  // look for: the checkout sits beside this repo on some machines and one level
-  // further up on others.
-  const siblings = [path.resolve(root, '..', 'deepseek-harness'), path.resolve(root, '..', '..', 'deepseek-harness')]
+  const siblings = harnessCheckoutCandidates()
   const repo = configured !== '' ? path.resolve(configured) : siblings.find((dir) => isGitRepo(dir)) ?? siblings[0]
   if (isGitRepo(repo)) {
     const tag = hostTag()
@@ -786,12 +880,17 @@ async function concretizeHostWorkspaceSpecs(tarball, manifest, versions) {
  * here — and its `workspace:` specs are resolved to concrete versions, because
  * pnpm cannot install them at all.
  *
+ * The office payload the same host refuses to start without is staged here too
+ * (see stageOfficePayload): it belongs to the kernel line, so it has to come
+ * from the same checkout the host was packed from.
+ *
  * @param destDir - directory to pack into (the pnpm project's pkgs/).
  * @param workRoot - build work dir a disposable host checkout is created in.
+ * @param runtimeDir - the runtime tree being assembled, the payload's destination.
  * @returns the file: spec for the runtime's dependencies, plus the runtime
  *   dependency names the host's own manifest declares.
  */
-async function packDesktopHost(destDir, workRoot) {
+async function packDesktopHost(destDir, workRoot, runtimeDir) {
   const prebuilt = (process.env.DSH_APP_HOST_PACKAGE ?? '').trim()
   let tarball
   // Empty for the prebuilt path: there is no checkout, so a workspace: spec in
@@ -808,12 +907,18 @@ async function packDesktopHost(destDir, workRoot) {
     const target = path.join(destDir, path.basename(prebuilt))
     if (path.resolve(target) !== path.resolve(prebuilt)) await cp(prebuilt, target)
     tarball = target
+    // This path brings no checkout of the kernel line, so the payload has to be
+    // resolved on its own (see officePayloadCheckout).
+    await stageOfficePayload(runtimeDir, officePayloadCheckout())
   } else {
     const source = await prepareDesktopHostSource(workRoot)
     origin = source.origin
     console.log(`[build-runtime] host source: ${source.origin}`)
     try {
       const appDir = await buildDesktopHostApp(source.dir)
+      // Before the disposer runs: the checkout is the only place the payload
+      // exists, and a worktree is removed with it.
+      await stageOfficePayload(runtimeDir, source.dir)
       const packed = JSON.parse(capture(npmBin(), ['pack', '--json', '--pack-destination', destDir], appDir))
       const filename = packed?.[0]?.filename
       if (typeof filename !== 'string') throw new Error(`npm pack produced no file name for ${DESKTOP_HOST_PACKAGE}`)
@@ -1131,7 +1236,8 @@ async function main() {
   // beside them is no longer the kernel's entry point. The host is built from
   // the kernel line's own tag (prepareDesktopHostSource), so this step is what
   // makes a release from an older line fail instead of shipping a mixed pair.
-  const host = await packDesktopHost(pkgsDir, work)
+  // The office payload the host reads beside itself is staged in the same call.
+  const host = await packDesktopHost(pkgsDir, work, runtimeDir)
 
   const appPkg = {
     name: 'dsh-app-runtime',

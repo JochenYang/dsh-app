@@ -34,8 +34,19 @@ const tar = require('tar')
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
-/** Files that belong to no package scope but are still required to boot. */
-const META_ENTRIES = ['runtime/manifest.json', 'runtime/app/package.json']
+/**
+ * Entries that belong to no package scope but are still required to boot: the
+ * manifest, the app's package.json (it carries `type: module`, which module
+ * resolution depends on) and the Office payload the desktop host reads beside
+ * the kernel tree — `<kernelDir>/runtime/office-skills`, staged there by
+ * scripts/build-runtime.mjs because the skill throws at boot without it.
+ *
+ * The payload rides the meta layer because no other layer reaches it (each of
+ * node/vendor/dsh/suite is scoped to one directory tree) and because meta is
+ * content-addressed: a changed payload renames the layer and the client
+ * re-fetches it, while an unchanged one keeps the name it already has.
+ */
+const META_ENTRIES = ['runtime/manifest.json', 'runtime/app/package.json', 'runtime/runtime']
 
 /** Layer definitions: what goes in, and where it unpacks inside the runtime. */
 const LAYER_SPECS = [
@@ -43,9 +54,9 @@ const LAYER_SPECS = [
   { kind: 'vendor', entries: ['runtime/app'], excludePackageScopes: true },
   { kind: 'dsh', entries: ['runtime/app/node_modules/@deepseek-ai'] },
   { kind: 'suite', entries: ['runtime/app/node_modules/@dsh-app'] },
-  // The manifest and the app's package.json (the latter carries `type: module`,
-  // which module resolution depends on). Without this layer the emitted set
-  // cannot reproduce the tree on its own.
+  // Everything the other four layers do not reach, see META_ENTRIES. Without
+  // this layer the emitted set cannot reproduce the tree on its own: the
+  // manifest would be missing and so would the office skills.
   { kind: 'meta', entries: META_ENTRIES },
 ]
 

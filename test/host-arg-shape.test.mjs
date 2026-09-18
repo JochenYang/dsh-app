@@ -1,17 +1,21 @@
-// The host child's argv shape: which positional arguments a given
-// @deepseek-ai/dsh-desktop-host line takes, and what happens when the shell
-// cannot tell. The two shapes are the ends of the range this shell ships
-// against — 0.1.5-rc.2 takes the profile directory alone, 0.1.6-alpha.1 takes
-// the runtime tree as well — so a wrong guess is a hard boot failure
-// ("unsupported internal option"), and the refused-then-retried fallback is
-// what keeps an unmapped version from being a dead app.
+// The host child's argv shape and transport: which positional arguments a given
+// @deepseek-ai/dsh-desktop-host line takes, how the shell reaches its web
+// surface, and what happens when the shell cannot tell. The two shapes are the
+// ends of the range this shell ships against — 0.1.5-rc.2 takes the profile
+// directory alone, 0.1.6-alpha.1 takes the runtime tree as well — so a wrong
+// guess is a hard boot failure ("unsupported internal option"), and the
+// refused-then-retried fallback is what keeps an unmapped version from being a
+// dead app. The transport moved between 0.1.6-alpha.1 and -alpha.2, from the
+// framed byte pipes to the child's own authenticated URL.
 //
 // The fallback is exercised against a fake host that enforces the old line's
 // contract and refuses the new shape the way the real one does, because no
-// single real runtime can prove both sides of the discovery.
+// single real runtime can prove both sides of the discovery. The web transport
+// is exercised against a fake host that binds a real loopback listener, so the
+// exchange, the forward and the index rendering all run for real.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -25,6 +29,7 @@ const {
   hostArgShape,
   hostPackageVersion,
   hostProfileAnchor,
+  hostTransport,
 } = require('../dist/main/desktop-host.js')
 
 /**
@@ -79,6 +84,54 @@ if (process.env.FAKE_HOST_CONTRACT === 'fail-other') {
 }
 `
 
+/**
+ * Fake host child of the WEB transport line (0.1.6-alpha.2 and later): it takes
+ * the fixed positional contract, binds its own loopback listener, trades the
+ * launch URL for a cookie, and serves one index document — which is what the
+ * shell's forward path is exercised against. A contract it does not get is
+ * refused exactly as the real host refuses it.
+ */
+const FAKE_WEB_HOST = `
+const http = require('node:http')
+const argv = process.argv.slice(2)
+const problems = []
+if (!process.execArgv.includes('--expose-internals')) problems.push('missing --expose-internals')
+if (argv.length !== 4) problems.push('positional count ' + String(argv.length))
+if (argv[3] !== 'link' && argv[3] !== 'runtime') problems.push('resolution ' + String(argv[3]))
+if (process.env.FAKE_WEB_CONTRACT === 'refuse') problems.push('unsupported internal option ' + JSON.stringify(argv[1] || ''))
+if (problems.length > 0) {
+  process.send({ type: 'fatal', message: 'dsh desktop: ' + problems.join('; ') })
+  setTimeout(() => { process.exit(1) }, 10)
+} else {
+  const server = http.createServer((request, response) => {
+    if ((request.url || '').startsWith('/?token=')) {
+      response.writeHead(303, { 'set-cookie': 'dsh=fake-session; Path=/; HttpOnly', location: '/' })
+      response.end()
+      return
+    }
+    if (new URL(request.url, 'http://x').pathname === '/index.html') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.end('<html><head></head><body>fake web index</body></html>')
+      return
+    }
+    response.writeHead(404)
+    response.end()
+  })
+  server.listen(0, '127.0.0.1', () => {
+    process.send({
+      type: 'ready',
+      url: 'http://127.0.0.1:' + String(server.address().port) + '/?token=fake-token',
+      injections: process.env.FAKE_WEB_INJECTIONS === 'missing'
+        ? undefined
+        : [{ kind: 'global', name: '__DSH_BOOT__', value: { entries: [] } }],
+    })
+  })
+  process.on('message', (message) => {
+    if (message && message.type === 'shutdown') { server.close(); process.exit(0) }
+  })
+}
+`
+
 /** A runtime tree whose host package reports `version` and enforces `contract`. */
 function fakeRuntime(version, contract) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-arg-shape-'))
@@ -89,18 +142,55 @@ function fakeRuntime(version, contract) {
   return { root, contract, projectDir: mkdtempSync(path.join(os.tmpdir(), 'dsh-arg-shape-profile-')) }
 }
 
+/**
+ * A runtime tree whose host speaks the web transport, plus the office payload
+ * its fourth positional has to point beside and the shell data directory that
+ * payload is materialized under.
+ */
+function fakeWebRuntime(version, contract = 'accept', env = {}) {
+  const runtime = fakeRuntime(version, undefined)
+  const officeSource = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-assets-'))
+  mkdirSync(path.join(officeSource, 'scripts'), { recursive: true })
+  writeFileSync(path.join(officeSource, 'scripts', 'check_office.py'), '# fake office check\n')
+  writeFileSync(path.join(desktopHostDir(runtime.root), 'lib', 'index.js'), FAKE_WEB_HOST)
+  return {
+    ...runtime,
+    officeSource,
+    dataDir: mkdtempSync(path.join(os.tmpdir(), 'dsh-web-data-')),
+    env: { FAKE_WEB_CONTRACT: contract, ...env },
+  }
+}
+
 /** Start a fake host through the real transport, collecting its log lines. */
-async function start(runtime, logs = []) {
+async function start(runtime, logs = [], options = {}) {
   const host = new DshHost({
     executable: process.execPath,
     entry: desktopHostEntry(runtime.root),
     runtimeDir: runtime.root,
     projectDir: runtime.projectDir,
-    env: { ...process.env, FAKE_HOST_CONTRACT: runtime.contract },
+    env: { ...process.env, FAKE_HOST_CONTRACT: runtime.contract, ...runtime.env },
     onLog: (line) => { logs.push(line) },
+    ...options,
   })
   await host.start()
   return { host, logs, shapes: () => shapes(logs) }
+}
+
+/** The start's inputs for a web runtime, with the payload it needs. */
+function webStartOptions(runtime) {
+  return {
+    officeSkillsSource: runtime.officeSource,
+    userDataDir: runtime.dataDir,
+    checkoutRuntime: true,
+    allowLinkedProfile: true,
+  }
+}
+
+/** One shell log line, by the prefix that names it. */
+function line(logs, prefix) {
+  const found = logs.find((entry) => entry.startsWith(prefix))
+  assert.ok(found !== undefined, `the shell must log "${prefix}" (got ${JSON.stringify(logs)})`)
+  return found
 }
 
 /** The shell's own lines saying which argv shape it used, in order. */
@@ -139,6 +229,22 @@ test('the version comes from the runtime tree, or from the app directory itself'
   // manifest answers, but only when it really is the host package.
   assert.equal(hostPackageVersion(path.join(installed.root, 'node_modules', '@deepseek-ai', 'dsh-desktop-host')), '0.1.5-rc.2')
   assert.equal(hostPackageVersion(path.dirname(installed.root)), undefined)
+})
+
+test('the transport follows the host package version at its own boundary', () => {
+  // The move happened inside the 0.1.6 alpha line, so a prerelease is what
+  // decides — not the patch level the argv shape moved at.
+  assert.equal(hostTransport('0.1.5-rc.2'), 'frames')
+  assert.equal(hostTransport('0.1.6-alpha.1'), 'frames')
+  assert.equal(hostTransport('0.1.6-alpha.2'), 'web')
+  assert.equal(hostTransport('0.1.6'), 'web')
+  assert.equal(hostTransport('0.1.7'), 'web')
+  assert.equal(hostTransport('1.0.0'), 'web')
+  // A loose parse still answers a `v` prefix, and an unreadable version is not
+  // a guess: the caller then keeps today's frames contract.
+  assert.equal(hostTransport('v0.1.6-alpha.2'), 'web')
+  assert.equal(hostTransport('local'), undefined)
+  assert.equal(hostTransport(undefined), undefined)
 })
 
 test('a mapped version boots the shape it takes', async () => {
@@ -217,4 +323,85 @@ test('a failure that is not about the shape is reported, never retried', async (
   const unmapped = fakeRuntime('local', 'fail-other')
   await assert.rejects(start(unmapped, unmappedLogs), /composition did not provide connection/u)
   assert.equal(shapes(unmappedLogs).length, 1)
+})
+
+test('a web-transport version starts on the child URL contract, office payload and all', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2')
+  const logs = []
+  const run = await start(runtime, logs, webStartOptions(runtime))
+  try {
+    assert.match(line(logs, 'dsh host: argv shape'), /argv shape runtime-and-project \(host package 0\.1\.6-alpha\.2\)/u)
+    assert.match(line(logs, 'dsh host: web transport'), /web transport \(host package 0\.1\.6-alpha\.2\)/u)
+
+    // The shape is fixed, so the arguments it used are logged: a child that
+    // refuses them leaves nothing else to read.
+    const argv = JSON.parse(line(logs, 'dsh host: web argv').slice('dsh host: web argv '.length))
+    const primaryRuntime = path.join(runtime.dataDir, 'dsh-app-office', 'primary-runtime')
+    assert.deepEqual(argv, [
+      '--expose-internals',
+      desktopHostEntry(runtime.root),
+      runtime.root,
+      runtime.projectDir,
+      primaryRuntime,
+      'link',
+    ])
+    // The invariant the child depends on, not the literal: its asset root is
+    // `dirname(argv[4])/office-skills`, so the payload must sit BESIDE the
+    // argument — naming the leaf inside the payload puts the name twice in the
+    // derived root and the skill fails its boot check on a path that cannot exist.
+    const assetRoot = path.join(path.dirname(primaryRuntime), 'office-skills')
+    assert.equal(path.basename(assetRoot), 'office-skills')
+    assert.equal(
+      readFileSync(path.join(assetRoot, 'scripts', 'check_office.py'), 'utf8'),
+      '# fake office check\n',
+    )
+    // No shape fallback is possible on this transport.
+    assert.equal(run.shapes().length, 1)
+
+    // The URL contract reports no dsh version, and the token it carries is a
+    // credential: it may never reach a log line.
+    assert.equal(run.host.dshVersion, undefined)
+    assert.match(line(logs, 'dsh host: web transport ready at'), /^dsh host: web transport ready at http:\/\/127\.0\.0\.1:\d+$/u)
+    assert.equal(logs.some((entry) => entry.includes('token=fake-token')), false)
+
+    // The whole path runs against the fake child: authenticate, forward, and
+    // render the boot rows into the index document it served raw.
+    const response = await run.host.fetch(new Request('http://dsh-app.local/index.html'))
+    assert.equal(response.status, 200)
+    const html = await response.text()
+    assert.match(html, /fake web index/u)
+    assert.ok(html.includes('globalThis["__DSH_BOOT__"] = {"entries":[]}'), 'the boot row reaches the document')
+    assert.ok(html.includes('globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()'), 'the client gate is created')
+  } finally {
+    await run.host.stop()
+  }
+})
+
+test('a web-transport child that refuses its fixed argv is reported, never retried', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2', 'refuse')
+  const logs = []
+  await assert.rejects(start(runtime, logs, webStartOptions(runtime)), /unsupported internal option/u)
+  assert.equal(shapes(logs).length, 1)
+  assert.ok(logs.some((entry) => entry.startsWith('dsh host: web argv')), 'the refused arguments are in the log')
+})
+
+test('a web-transport start without its office payload fails before the spawn', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2')
+  const logs = []
+  await assert.rejects(
+    start(runtime, logs, { ...webStartOptions(runtime), officeSkillsSource: path.join(runtime.officeSource, 'gone') }),
+    /office payload .* is missing or incomplete/u,
+  )
+  await assert.rejects(
+    start(runtime, [], { ...webStartOptions(runtime), userDataDir: undefined }),
+    /no shell data directory was named/u,
+  )
+  // No child ever reported ready, so nothing was started and nothing to stop.
+  assert.equal(logs.some((entry) => entry.includes('web transport ready')), false)
+})
+
+test('a web-transport ready without an injection table fails the start', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2', 'accept', { FAKE_WEB_INJECTIONS: 'missing' })
+  const logs = []
+  await assert.rejects(start(runtime, logs, webStartOptions(runtime)), /without an index injection table/u)
 })
