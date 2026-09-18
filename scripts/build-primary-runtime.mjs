@@ -286,12 +286,30 @@ function listZipEntries(archive) {
 
 /**
  * Expand a zip archive into a directory.
+ *
+ * Windows goes through .NET rather than `Expand-Archive`: that cmdlet refuses an
+ * archive whose path does not end in `.zip` (the download cache names files by
+ * digest, so it does not), and the calling step must overwrite entries because
+ * several wheels expand into ONE site-packages directory — `-Force` covers that
+ * but nothing in `Expand-Archive` covers the name. Measured on a windows-latest
+ * runner, where the old fallback failed the whole cell; `unzip` is not present
+ * there either.
+ *
  * @param archive - absolute path of the archive.
  * @param destination - directory to expand into (created by the tool at need).
  */
 function extractZip(archive, destination) {
   if (process.platform === 'win32') {
-    powershell(`Expand-Archive -LiteralPath ${psQuote(archive)} -DestinationPath ${psQuote(destination)} -Force`)
+    const script = 'Add-Type -AssemblyName System.IO.Compression.FileSystem; '
+      + `$zip = [IO.Compression.ZipFile]::OpenRead(${psQuote(archive)}); `
+      + 'try { foreach ($entry in $zip.Entries) { '
+      + `$target = Join-Path ${psQuote(destination)} $entry.FullName; `
+      + 'if ($entry.Name -eq "") { continue } '
+      + '$dir = Split-Path -Parent $target; '
+      + 'if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }; '
+      + '[IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true) } } '
+      + 'finally { $zip.Dispose() }'
+    powershell(script)
     return
   }
   execFileSync('unzip', ['-q', '-o', archive, '-d', destination], { stdio: 'inherit' })
