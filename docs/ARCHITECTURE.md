@@ -137,7 +137,8 @@ runtime at all — see below.
 The engine is ~115 MiB compressed, only needed when a document is converted, and
 identical for every kernel that wants the same kit — so it travels in a second
 release artifact (`office-payload-<platform>-<arch>-<dshVersion>.tgz`, resolved
-by the same official-first metadata chain as the runtime) and is installed on
+by the same official-first metadata chain and the same official → ModelScope →
+proxies transport order as the runtime) and is installed on
 demand from the 诊断 settings row. The runtime keeps a loader shim at
 `app/node_modules/@deepseek-ai/libreoffice-kit` because
 `@deepseek-ai/dsh-office-to-pdf` imports that specifier **statically at module
@@ -162,7 +163,8 @@ check (every 6 h + manual; never at startup)
   → npm registry dist-tags (@deepseek-ai/dsh): latest | next (rc) | alpha
   → newer? → prompt
 download runtime artifact (GitHub Release asset, per platform/arch)
-  → sha512 verify (sidecar .sha512 asset)
+  → candidates: official release → ModelScope copy → public proxies, sha512
+    verified against the official sidecar on EVERY candidate
 extract staging → validate inner manifest + platform/arch match
   → rename into versioned dir
 activate: write current.json { active: new, previous: old }

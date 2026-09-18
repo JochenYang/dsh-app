@@ -29,7 +29,10 @@
  * market, which installs its own packages inside `@deepseek-ai` (see
  * {@link removeOwnedEntry}), and a package the profile's own lockfile records is
  * the market's outright — neither step overwrites nor deletes it (see
- * {@link lockfileOwnedNames}).
+ * {@link lockfileOwnedNames}). A removal additionally has to be WITNESSED: the
+ * runtime tree the marker was taken from is the only record of what the mirror
+ * wrote, so a name that tree does not carry is left in place rather than guessed
+ * away (see {@link mirrorWitnessGap}).
  *
  * Third-party packages declared on the old profile are deliberately NOT carried
  * over: the in-app market reinstalls them into the new profile, and it is the
@@ -198,6 +201,14 @@ export const PROFILE_KERNEL_MARKER = '.dsh-app-kernel.json'
 /** The profile's own package-manager state; see {@link lockfileOwnedNames}. */
 const PROFILE_LOCKFILE = 'pnpm-lock.yaml'
 
+/** One name a removal step declined to touch, and why (see {@link mirrorWitnessGap}). */
+export interface KeptEntry {
+  /** The marker name, at the granularity the marker recorded. */
+  readonly name: string
+  /** English diagnostic, for the caller's log line. */
+  readonly reason: string
+}
+
 /** What one mirror step did, for the caller's log line. */
 export interface KernelTreeOutcome {
   /**
@@ -211,6 +222,12 @@ export interface KernelTreeOutcome {
   entries: number
   /** Files hardlinked (or copied, where the volumes differ) in this run. */
   files: number
+  /**
+   * Names the step would have removed but left in place, each because the tree
+   * the marker recorded could not witness it ({@link mirrorWitnessGap}). The
+   * caller logs one line per entry; empty in the normal case.
+   */
+  kept: readonly KeptEntry[]
   /** Failure detail, for the log. */
   detail?: string
 }
@@ -368,6 +385,42 @@ async function ownedRemovals(name: string, sources: readonly (string | undefined
     }
   }
   return []
+}
+
+/**
+ * Why a marker name may NOT be touched, or undefined when the mirror can be
+ * PROVEN to have written it.
+ *
+ * The marker is a claim, not evidence: it records what a mirror of some past
+ * start intended to own, and the tree it names is the only remaining witness of
+ * what it actually wrote. Two ways that claim goes stale:
+ *
+ *   - the runtime it mirrored was cleaned up, so a marker that was told about a
+ *     mirror on a line the user has since dropped cannot prove anything at all
+ *     about the copy now in the profile;
+ *   - the tree is there and simply does not carry the name, which means the
+ *     marker is describing something else's installation — a package manager
+ *     may have replaced the mirror's copy after the marker was written, which
+ *     the lockfile fence catches only while the lockfile is readable.
+ *
+ * A name that fails this check is left where it is. That is the deliberate
+ * direction of the error: a leftover kernel package shadows this line's copy
+ * only in the case the marker already proves a mirror happened, while a deleted
+ * user package cannot be recovered by anything the shell runs.
+ *
+ * @param name - one path from a marker, at the granularity the marker recorded.
+ * @param mirroredFrom - the recorded runtime's `node_modules`, or undefined
+ *   when there is no marker at all.
+ * @returns the English reason to leave the name alone, or undefined to remove
+ *   it.
+ */
+async function mirrorWitnessGap(name: string, mirroredFrom: string | undefined): Promise<string | undefined> {
+  if (mirroredFrom === undefined) return 'the marker records no runtime to check it against'
+  if (await statOrUndefined(ownedTarget(mirroredFrom, name)) !== undefined) return undefined
+  const tree = await statOrUndefined(mirroredFrom)
+  return tree === undefined
+    ? `the runtime it was mirrored from is gone (${path.dirname(mirroredFrom)})`
+    : 'the runtime it was mirrored from does not carry it'
 }
 
 /**
@@ -559,7 +612,7 @@ export async function mirrorRuntimeIntoProfile(runtimeDir: string, profileDir: s
   try {
     const owned = await ownedPaths(source)
     if (owned.length === 0) {
-      return { status: 'failed', entries: 0, files: 0, detail: `${source} carries no packages` }
+      return { status: 'failed', entries: 0, files: 0, kept: [], detail: `${source} carries no packages` }
     }
     // A name the profile's own lockfile accounts for is the market's
     // installation: its copy is the one that stays, and it is not pruned below
@@ -572,7 +625,7 @@ export async function mirrorRuntimeIntoProfile(runtimeDir: string, profileDir: s
       const absent = await Promise.all(
         mirrorable.map(async (name) => (await statOrUndefined(ownedTarget(target, name))) === undefined),
       )
-      if (!absent.some(Boolean)) return { status: 'already', entries: mirrorable.length, files: marker.files }
+      if (!absent.some(Boolean)) return { status: 'already', entries: mirrorable.length, files: marker.files, kept: [] }
     }
     await fs.mkdir(target, { recursive: true })
     let files = 0
@@ -583,11 +636,19 @@ export async function mirrorRuntimeIntoProfile(runtimeDir: string, profileDir: s
     // Entries an earlier mirror owned and this runtime no longer carries: the
     // kernel dropped them, and a stale copy would keep resolving. A name that
     // is only in the marker goes through the same narrowing as a drop, so what
-    // the market installed inside a scope is never the price of a stale entry.
+    // the market installed inside a scope is never the price of a stale entry —
+    // and through the same witness check, so a marker this tree cannot back up
+    // is not acted on either ({@link mirrorWitnessGap}).
     const current = new Set(mirrorable)
     const mirroredFrom = marker === undefined ? undefined : path.join(marker.runtime, 'node_modules')
+    const kept: KeptEntry[] = []
     for (const name of marker?.names ?? []) {
       if (current.has(name) || accounted.has(name)) continue
+      const reason = await mirrorWitnessGap(name, mirroredFrom)
+      if (reason !== undefined) {
+        kept.push({ name, reason })
+        continue
+      }
       for (const removal of await ownedRemovals(name, [mirroredFrom, source])) {
         if (current.has(removal) || accounted.has(removal)) continue
         await removeOwnedEntry(target, removal)
@@ -599,9 +660,9 @@ export async function mirrorRuntimeIntoProfile(runtimeDir: string, profileDir: s
       files,
       at: new Date().toISOString(),
     }, undefined, 2)}\n`, 'utf8')
-    return { status: 'mirrored', entries: mirrorable.length, files }
+    return { status: 'mirrored', entries: mirrorable.length, files, kept }
   } catch (error) {
-    return { status: 'failed', entries: 0, files: 0, detail: (error as Error).message }
+    return { status: 'failed', entries: 0, files: 0, kept: [], detail: (error as Error).message }
   }
 }
 
@@ -617,9 +678,16 @@ export async function mirrorRuntimeIntoProfile(runtimeDir: string, profileDir: s
  * marker claims but the profile's own lockfile records, which by then is the
  * market's copy of a package the runtime also carries ({@link lockfileOwnedNames}).
  *
+ * What the marker claims is checked against the tree it was taken from
+ * ({@link mirrorWitnessGap}) before anything leaves: a name that tree does not
+ * carry was never written by the mirror this marker describes, and a name whose
+ * tree is gone has nothing left to prove it at all. Each such name is reported
+ * in {@link KernelTreeOutcome.kept} instead.
+ *
  * @param profileDir - the profile to clean.
- * @param runtimeDir - the runtime tree to consult for a name an older marker
- *   recorded as a scope directory (see {@link ownedRemovals}).
+ * @param runtimeDir - the runtime tree running now; consulted with the recorded
+ *   one so a scope-directory name from an older marker can be narrowed (see
+ *   {@link ownedRemovals}).
  * @returns `removed` when a mirror was there and is gone, `already` otherwise.
  */
 export async function dropRuntimeMirror(profileDir: string, runtimeDir?: string): Promise<KernelTreeOutcome> {
@@ -627,7 +695,7 @@ export async function dropRuntimeMirror(profileDir: string, runtimeDir?: string)
   const target = path.join(profileDir, 'node_modules')
   try {
     const marker = await readKernelMarker(markerPath)
-    if (marker === undefined) return { status: 'already', entries: 0, files: 0 }
+    if (marker === undefined) return { status: 'already', entries: 0, files: 0, kept: [] }
     // Same fence as the mirror: a name the profile's own lockfile accounts for
     // is the market's install, and a marker that claims it was written before
     // that install replaced it (see lockfileOwnedNames).
@@ -635,8 +703,14 @@ export async function dropRuntimeMirror(profileDir: string, runtimeDir?: string)
     const mirroredFrom = path.join(marker.runtime, 'node_modules')
     const fallback = runtimeDir === undefined ? undefined : path.join(runtimeDir, 'node_modules')
     let entries = 0
+    const kept: KeptEntry[] = []
     for (const name of marker.names) {
       if (accounted.has(name)) continue
+      const reason = await mirrorWitnessGap(name, mirroredFrom)
+      if (reason !== undefined) {
+        kept.push({ name, reason })
+        continue
+      }
       for (const removal of await ownedRemovals(name, [mirroredFrom, fallback])) {
         if (accounted.has(removal)) continue
         await removeOwnedEntry(target, removal)
@@ -644,8 +718,8 @@ export async function dropRuntimeMirror(profileDir: string, runtimeDir?: string)
       }
     }
     await fs.rm(markerPath, { force: true })
-    return { status: 'removed', entries, files: marker.files }
+    return { status: 'removed', entries, files: marker.files, kept }
   } catch (error) {
-    return { status: 'failed', entries: 0, files: 0, detail: (error as Error).message }
+    return { status: 'failed', entries: 0, files: 0, kept: [], detail: (error as Error).message }
   }
 }

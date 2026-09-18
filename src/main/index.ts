@@ -19,7 +19,7 @@ import { installHostStreamAuth } from './host-stream-auth'
 import { isSafeModeEnabled, setSafeMode } from './safe-mode'
 import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
 import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from './proxy-detect'
-import { devSuiteSources, homeRowsInProfilePatch, prepareBrandSuite, prodSuiteSources } from './brand-suite'
+import { devSuiteSources, homeRowsInProfilePatch, prepareBrandSuite, prodSuiteSources, resolveDshHome } from './brand-suite'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
 import {
@@ -37,6 +37,7 @@ import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
+import { healLogLine, healProfileDependencies } from './profile-heal'
 import { alignWindowStateWithLine } from './client-state'
 import { initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
 import type { KernelChannel, KernelStatusPayload } from '../shared/types'
@@ -263,7 +264,7 @@ function hostRuntime(): {
   /** Whether the runtime tree is a checkout; the web transport passes it as the profile resolution mode. */
   checkoutRuntime: boolean
 } {
-  const nodeBinary = process.platform === 'win32' ? 'node.exe' : 'node'
+  const nodeBinary = NODE_BINARY_NAME
   if (!isDev) {
     const dir = kernel.getCurrentDir()
     const executable = path.join(dir, 'node', nodeBinary)
@@ -285,7 +286,7 @@ function hostRuntime(): {
   }
   const checkout = devCheckoutDir
   if (checkout === undefined) throw new Error(t('hostFailure.devHostMissing', { checkout: '../deepseek-harness' }))
-  const executable = (process.env.DSH_APP_NODE_BINARY ?? '').trim() || 'node'
+  const executable = machineNodeBinary()
   const appDir = path.join(checkout, 'apps', 'desktop-host')
   // The office skills ship inside the workspace checkout as a package of their
   // own; the child wants the payload directory beside its primary-runtime slot.
@@ -624,6 +625,98 @@ function kernelTreeLogLine(outcome: KernelTreeOutcome, version: string | undefin
   return `[suite-profile] ${host} anchors the profile on its own node_modules; mirrored ${String(outcome.entries)} kernel entries (${String(outcome.files)} files) into it`
 }
 
+/**
+ * One log line per name a mirror step declined to remove, because the runtime
+ * the marker recorded could not witness the mirror having written it. Log-only
+ * (English), and deliberately one line per name: the residue is a kernel package
+ * that may shadow this line's copy, so the reason has to be readable, not
+ * batched into a count (see {@link mirrorWitnessGap}).
+ */
+function logKeptEntries(outcome: KernelTreeOutcome): void {
+  for (const kept of outcome.kept) {
+    logKernel(`[suite-profile] left ${kept.name} in the profile: ${kept.reason}`)
+  }
+}
+
+/**
+ * Name of the Node binary inside a runtime tree.
+ */
+const NODE_BINARY_NAME = process.platform === 'win32' ? 'node.exe' : 'node'
+
+/**
+ * The machine's Node, for a dev checkout (which ships no binary of its own) and
+ * as the fallback wherever the runtime's is not there.
+ */
+function machineNodeBinary(): string {
+  return (process.env.DSH_APP_NODE_BINARY ?? '').trim() || 'node'
+}
+
+/**
+ * The Node that must run anything from the active runtime — the host child, and
+ * the kernel CLI this shell drives for profile work.
+ *
+ * Never `process.execPath`: the child is started by an Electron process, and
+ * Electron's own Node refuses to run the harness (`unsupported Electron runtime
+ * fingerprint`). A packaged install runs the runtime's own binary; dev runs the
+ * machine's.
+ */
+function hostNodeBinary(): string {
+  if (!isDev) {
+    try {
+      const executable = path.join(kernel.getCurrentDir(), 'node', NODE_BINARY_NAME)
+      if (existsSync(executable)) return executable
+    } catch {
+      // No active kernel: fall through to the machine's node.
+    }
+  }
+  return machineNodeBinary()
+}
+
+/**
+ * Absolute path of the active kernel's CLI entry, or '' when there is none.
+ *
+ * Dev runs the checkout's built CLI; a packaged install has it inside the
+ * active kernel. Both the environment handed to the kernel child
+ * (`DSH_APP_DSH_BIN`, which the market and the shell's own repair step resolve)
+ * and the repair step itself ask this question, so they answer it the same way.
+ */
+function kernelCliPath(): string {
+  if (isDev && devCheckoutDir !== undefined) return path.join(devCheckoutDir, 'apps', 'cli', 'lib', 'bin.js')
+  try {
+    return path.join(kernel.getCurrentDir(), 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * The profile's next host start is preceded by a repair step when the profile
+ * itself cannot boot: a declared dependency that does not resolve makes the
+ * host refuse the whole boot (`cannot resolve profile bundle …`), and the
+ * failure card's actions all boot the same profile again. The step runs the
+ * profile's own package manager through the kernel CLI — the same invocation
+ * the market installs through — and is deliberately non-fatal: whatever it
+ * answers, the host start below reports its own outcome.
+ *
+ * Silent when the profile declares everything it has, which is every normal
+ * boot (see {@link healProfileDependencies}).
+ */
+async function healProfileBeforeStart(profileDir: string): Promise<void> {
+  const bin = kernelCliPath()
+  if (bin === '' || !existsSync(bin)) return
+  const outcome = await healProfileDependencies({
+    profileDir,
+    profileName: SUITE_PROFILE,
+    // The CLI resolves `--profile` through $DSH_HOME (never cwd), so it is the
+    // home this profile lives under — the same one ensureSuiteProfile used.
+    dshHome: resolveDshHome(),
+    bin,
+    // A real Node, never Electron's own — see hostNodeBinary.
+    node: hostNodeBinary(),
+  })
+  const line = healLogLine(outcome, profileDir)
+  if (line !== null) logKernel(line)
+}
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
   // Ring reset: failure classification must reflect THIS startup attempt only.
@@ -637,6 +730,11 @@ async function startServerAndOpenWindow(): Promise<void> {
   const profile = await ensureSuiteProfile()
   if (profile.outcome !== null) logKernel(suiteProfileLogLine(profile.outcome))
   if (!profile.ready) logKernel('[suite-profile] the suite profile could not be seeded; the host start reports the reason below')
+  // A profile whose own manifest declares a package that is not installed is a
+  // profile the host refuses to boot, and nothing in the app could repair it:
+  // the repair runs the profile's package manager before the start. Non-fatal
+  // and silent in the normal case — see healProfileBeforeStart.
+  await healProfileBeforeStart(profile.dir)
   // Brand suite wiring: profile-dir module links, and the suite rows plus the
   // user's home layer written into the profile's patch file. An older kernel
   // without the suite plugins boots vanilla. Safe mode drops the shipped rows
@@ -678,6 +776,7 @@ async function startServerAndOpenWindow(): Promise<void> {
   if (host.profileAnchor === 'profile') {
     const outcome = await mirrorRuntimeIntoProfile(host.runtimeDir, profile.dir)
     logKernel(kernelTreeLogLine(outcome, hostVersion))
+    logKeptEntries(outcome)
   } else {
     const dropped = await dropRuntimeMirror(profile.dir, host.runtimeDir)
     if (dropped.status === 'removed') {
@@ -685,6 +784,7 @@ async function startServerAndOpenWindow(): Promise<void> {
     } else if (dropped.status === 'failed') {
       logKernel(`[suite-profile] the kernel mirror of an earlier line could not be dropped: ${dropped.detail ?? 'unknown error'}`)
     }
+    logKeptEntries(dropped)
   }
   // The window's view state belongs to the client build of THIS line — see
   // client-state.ts. Aligned before the window is handed the UI, because the
@@ -746,14 +846,7 @@ async function startServerAndOpenWindow(): Promise<void> {
   // app runs another profile.
   // Absolute path of the kernel CLI (see DSH_APP_DSH_BIN below). Dev runs the
   // checkout's built CLI; a packaged install has it inside the active kernel.
-  const dshBin = ((): string => {
-    if (isDev && devCheckoutDir !== undefined) return path.join(devCheckoutDir, 'apps', 'cli', 'lib', 'bin.js')
-    try {
-      return path.join(kernel.getCurrentDir(), 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-    } catch {
-      return ''
-    }
-  })()
+  const dshBin = kernelCliPath()
 
   // The office payload directory the runtime's loader shim loads the engine
   // from. Published whether or not it is installed yet: the shim reads it per

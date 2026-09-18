@@ -136,6 +136,7 @@ test('the market keeps its packages inside a kernel scope, on a drop and on a re
   const blind = await dropRuntimeMirror(profile)
   assert.equal(blind.status, 'removed')
   assert.equal(blind.entries, 0)
+  assert.deepEqual(blind.kept.map((entry) => entry.name), ['@deepseek-ai'])
   assert.equal(readFileSync(path.join(market, 'package.json'), 'utf8'), '{"name":"@deepseek-ai/dsh-toolkit"}\n')
   assert.equal(existsSync(path.join(profile, 'node_modules', '@deepseek-ai', 'dsh')), true)
 
@@ -174,6 +175,108 @@ test('a legacy marker is narrowed against the tree it mirrored, not the one runn
   assert.equal(existsSync(path.join(profile, 'node_modules', 'yaml')), false)
   // Nothing of the market's went with it, and the scope it lives in survives.
   assert.equal(readFileSync(path.join(market, 'package.json'), 'utf8'), '{"name":"@deepseek-ai/dsh-toolkit"}\n')
+})
+
+test('a marker naming a package the recorded runtime does not carry leaves it alone', async () => {
+  // The marker is a claim about what a mirror wrote; the tree it names is the
+  // only witness of whether that is true. A package the recorded runtime does
+  // not carry was never written by that mirror, so removing the profile's copy
+  // would take whatever put it there — the market's install, or the user's own.
+  const runtime = fakeRuntime()
+  const profile = fakeProfile()
+  await mirrorRuntimeIntoProfile(runtime, profile)
+  const user = path.join(profile, 'node_modules', 'dsh-toolkit')
+  mkdirSync(user, { recursive: true })
+  writeFileSync(path.join(user, 'package.json'), '{"name":"dsh-toolkit","origin":"profile"}\n')
+  writeFileSync(
+    path.join(profile, PROFILE_KERNEL_MARKER),
+    `${JSON.stringify({ runtime: realpathSync(runtime), names: ['dsh-toolkit', 'yaml'], files: 3, at: '' })}\n`,
+  )
+
+  const dropped = await dropRuntimeMirror(profile, runtime)
+  assert.equal(dropped.status, 'removed')
+  // `yaml` is witnessed by the recorded runtime and goes; `dsh-toolkit` is not.
+  assert.equal(dropped.entries, 1)
+  assert.deepEqual(dropped.kept.map((entry) => entry.name), ['dsh-toolkit'])
+  assert.match(dropped.kept[0].reason, /does not carry it/u)
+  assert.equal(readFileSync(path.join(user, 'package.json'), 'utf8'), '{"name":"dsh-toolkit","origin":"profile"}\n')
+  assert.equal(existsSync(path.join(profile, 'node_modules', 'yaml')), false)
+  assert.equal(existsSync(path.join(profile, PROFILE_KERNEL_MARKER)), false)
+})
+
+test('a marker whose recorded runtime is gone removes nothing and does not throw', async () => {
+  // The measured shape of the 0.12.1 loss: the kernel a profile mirrored was
+  // cleaned up, and the marker left behind names packages that no longer have a
+  // witness anywhere. Every name is kept — a leftover kernel copy is
+  // recoverable, and nothing else in the profile is.
+  const runtime = fakeRuntime()
+  const profile = fakeProfile()
+  await mirrorRuntimeIntoProfile(runtime, profile)
+  const gone = path.join(os.tmpdir(), 'dsh-kernel-cleaned-up', String(Date.now()))
+  writeFileSync(
+    path.join(profile, PROFILE_KERNEL_MARKER),
+    `${JSON.stringify({ runtime: gone, names: ['@deepseek-ai/dsh', 'yaml'], files: 3, at: '' })}\n`,
+  )
+
+  const dropped = await dropRuntimeMirror(profile)
+  assert.equal(dropped.status, 'removed')
+  assert.equal(dropped.entries, 0)
+  assert.deepEqual(dropped.kept.map((entry) => entry.name).sort(), ['@deepseek-ai/dsh', 'yaml'])
+  assert.match(dropped.kept[0].reason, /is gone/u)
+  assert.equal(existsSync(path.join(profile, 'node_modules', '@deepseek-ai', 'dsh')), true)
+  assert.equal(existsSync(path.join(profile, 'node_modules', 'yaml')), true)
+  // The marker still goes: it describes a mirror this shell can no longer act
+  // on, and keeping it would only repeat the same blind drop next start.
+  assert.equal(existsSync(path.join(profile, PROFILE_KERNEL_MARKER)), false)
+})
+
+test('a re-mirror leaves a stale marker entry its own tree cannot witness', async () => {
+  // Same rule on the mirror path: the prune of entries an earlier mirror owned
+  // is where a name the CURRENT runtime does not carry is decided, and a name
+  // the RECORDED one does not carry either is not this shell's to take.
+  const runtime = fakeRuntime()
+  const profile = fakeProfile()
+  const user = path.join(profile, 'node_modules', 'dsh-toolkit')
+  mkdirSync(user, { recursive: true })
+  writeFileSync(path.join(user, 'package.json'), '{"name":"dsh-toolkit","origin":"profile"}\n')
+  writeFileSync(
+    path.join(profile, PROFILE_KERNEL_MARKER),
+    `${JSON.stringify({ runtime: realpathSync(runtime), names: ['dsh-toolkit'], files: 0, at: '' })}\n`,
+  )
+  const mirrored = await mirrorRuntimeIntoProfile(runtime, profile)
+  assert.equal(mirrored.status, 'mirrored')
+  assert.deepEqual(mirrored.kept.map((entry) => entry.name), ['dsh-toolkit'])
+  assert.equal(readFileSync(path.join(user, 'package.json'), 'utf8'), '{"name":"dsh-toolkit","origin":"profile"}\n')
+  // And the marker no longer claims it, so nothing later takes it either.
+  assert.deepEqual(
+    JSON.parse(readFileSync(path.join(profile, PROFILE_KERNEL_MARKER), 'utf8')).names.includes('dsh-toolkit'),
+    false,
+  )
+})
+
+test('the lockfile fence still wins over a witnessed marker name', async () => {
+  // Both fences in one shape: the runtime the marker records really does carry
+  // `iconv-lite`, so the witness check passes — and the profile's own lockfile
+  // says pnpm installed it there, which is the stronger claim. It stays, and
+  // `kept` stays empty: it was the lockfile that saved it, not the witness.
+  const runtime = runtimeOverMarketInstall()
+  const profile = profileWithMarketInstall()
+  const mirrored = await mirrorRuntimeIntoProfile(runtime, profile)
+  assert.equal(mirrored.status, 'mirrored')
+  writeFileSync(
+    path.join(profile, PROFILE_KERNEL_MARKER),
+    `${JSON.stringify({ runtime: realpathSync(runtime), names: ['yaml', 'iconv-lite'], files: 2, at: '' })}\n`,
+  )
+  const dropped = await dropRuntimeMirror(profile, runtime)
+  assert.equal(dropped.status, 'removed')
+  assert.equal(dropped.entries, 1)
+  assert.deepEqual(dropped.kept, [])
+  assert.equal(existsSync(path.join(profile, 'node_modules', 'yaml')), false)
+  assert.equal(existsSync(path.join(profile, 'node_modules', 'iconv-lite')), true)
+  assert.equal(
+    readFileSync(path.join(profile, 'node_modules', 'iconv-lite', 'package.json'), 'utf8'),
+    '{"name":"iconv-lite","origin":"profile"}\n',
+  )
 })
 
 test('a delete of the profile directory leaves the runtime intact', async () => {

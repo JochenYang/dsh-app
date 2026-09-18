@@ -601,8 +601,10 @@ browser」——**UI 的语言由 UI 自己的设置/浏览器语言决定，与
 
 - **npm**：`npmjs.org` → `npmmirror.com`（env 可覆盖）。`registry.ts:10-20`
 - **内核元数据**：GitHub 官方 **fail-closed**——只有官方**网络层不可达**时才用镜像
-  （`ghfast.top`、`gh-proxy.com`）；tarball 则官方 → 镜像逐个验 sha512。
-  `artifact.ts:46-58,91-119`、`manager.ts:299-322`
+  （`ghfast.top`、`gh-proxy.com`）；tarball / layer / office payload 则官方 → **ModelScope 副本**
+  → 公共代理，逐个验 sha512（ModelScope 是自己发布并校验过的文件，公共代理是不稳定的第三方
+  传输，故排在其后）。
+  `artifact.ts:46-58,147-175`、`manager.ts:299-322`
 - **Windows shell 更新**：`latest.yml` 走 ModelScope → GitHub → 镜像前缀；资产下载**同源先行**，
   镜像只兜底；sha512 取自 `latest.yml`。`updater.ts:233-281`
 - **macOS/Linux**：`electron-updater`，失败只有对话框 + 镜像页。`updater.ts:95-164,950-966`
@@ -629,7 +631,8 @@ browser」——**UI 的语言由 UI 自己的设置/浏览器语言决定，与
 2. **staging 必清**；激活前 `rm -rf` 目标目录；同名重激活时 `previous` 不自指。
    `manager.ts:340-387,398`
 3. **安装中禁止 cleanup**；dev 模式不碰生产内核目录。`manager.ts:517-530`
-4. **镜像不可替换内容**：digest 只来自官方元数据。`artifact.ts:18-31`
+4. **镜像不可替换内容**：digest 只来自官方元数据；字节的传输顺序为「官方 → ModelScope
+   副本 → 公共代理」（镜像只做传输，且排在不稳定的第三方代理之前）。`artifact.ts:25-52,147-175`
 5. **两条更新链解耦**：内核更新永不要求新的 shell 发布。
 6. **主窗口无 preload、sandbox、零 IPC**（`window.ts:77-83`）。新页面不得为此开路；
    需要本地页时用「主进程写静态文件 + `file://`」。

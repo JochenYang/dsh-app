@@ -164,7 +164,10 @@ peer-only tree and breaks `npm ci`); when switching kernel lines delete root
     `/api/plugins/dsh-app/<plugin>/<name>` (no `@` in a segment, GET/HEAD/POST
     only); the host's `webserver` row stays disabled.
   - Kernel downloads: sha512-verified before activation, metadata from the
-    official host first so mirrors cannot swap content.
+    official host first so mirrors cannot swap content. Transport order for the
+    bytes is official → the ModelScope copy → the public proxies
+    (`assetCandidates`): the mirror is a file the project itself publishes,
+    while ghfast.top / gh-proxy.com are third-party transports.
   - Never hardcode secrets: dsh's credential store; plugin keys support
     `$ENV:NAME` and are masked on read.
   - Redact credential-looking fragments (`api[key|_key]`, `authorization`,
@@ -194,7 +197,14 @@ peer-only tree and breaks `npm ci`); when switching kernel lines delete root
 - **A mirror into the profile owns PACKAGES, not a shared scope directory** —
   `@deepseek-ai` is shared with the market; a scope directory goes only with its
   last package; profile-lockfile names are the market's (`lockfileOwnedNames`);
-  a bare `@scope` from an older shell narrows against `marker.runtime`.
+  a bare `@scope` from an older shell narrows against `marker.runtime`. A removal
+  must also be WITNESSED by that recorded runtime's own `node_modules`: a name it
+  does not carry, or a runtime that is gone, is left in place (`mirrorWitnessGap`)
+  — residue is recoverable, a deleted user package is not. A profile whose own
+  manifest declares a package that is not installed is repaired before the host
+  starts (`profile-heal.ts`), through the kernel CLI's `plugin install` with
+  `DSH_HOME` pinned — the CLI resolves `--profile` as `$DSH_HOME/profiles/<name>`,
+  never from its cwd.
 - **The window's client state belongs to the kernel LINE that wrote it** —
   `client-state.ts` clears local storage on a line change (a per-line partition
   cannot work: fixed at window creation).
@@ -335,7 +345,14 @@ allowlist validated before the first delete. Layers: five + one index per cell;
 names are the cache keys (`node`/`vendor`/`meta` content-addressed, `dsh`/`suite`
 version-addressed); the client prefers layers and falls back to the tarball;
 digests official-first/fail-closed/ModelScope-never; `cleanup()` keeps
-`<userData>/kernel/layers/` and drops only unreferenced layers.
+`<userData>/kernel/layers/` and drops only unreferenced layers. The office
+payload is part of the runtime set the mirror requires: the script reads each
+cell's manifest and demands all three payload assets for every cell once any
+manifest declares an `officePayload` block (so an engine-less release still
+mirrors, but a failed payload upload does not), and both the workflow's wait loop
+and `release.yml`'s resolve assertion name the same trio — a mirror without it
+leaves that cell's office conversion a permanent 404 while the runtime install
+looks healthy.
 
 **Failure recovery**: never re-run a tag — electron-builder's publish is not
 idempotent (422 `already_exists`); delete release + tag, then re-tag:
