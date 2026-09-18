@@ -8,6 +8,19 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- 修复 0.12.1 起所有桌面动作失效（打开日志目录、另存为、办公组件…都回「桌面功能拒绝了这次请求」）：0.1.6-alpha.2 那次新增的「客户端流握手认证」又注册了一个会话请求钩子，而 Electron **每个会话只保留最后一个 `onBeforeSendHeaders` 监听器**（在 44.4.1 上实测：被前一个过滤器命中的请求，两个钩子的头都没写），于是它把整套桌面动作的盖章钩子顶掉了；现在两类钩子合成**一个**监听器、按 URL 分派（`installSessionHeaderRules`），并补了测试锁死「只能有一个监听器」这一性质
+
+### English
+- Fixed every desktop action failing since 0.12.1 (open-logs, save-as, the office row all answered
+  "desktop refused this request"): the stream-handshake auth added with 0.1.6-alpha.2 registered a
+  SECOND session request hook, and Electron keeps only the LAST `onBeforeSendHeaders` listener per
+  session (measured on 44.4.1: a request matched by the first filter arrived with neither hook's
+  headers) — so it silently disabled the stamp hook every desktop action depends on. Both jobs are
+  now rules behind one install (`installSessionHeaderRules`), with a test pinning that property
+
 ## [v0.12.2] - 2026-09-18
 
 ### 中文

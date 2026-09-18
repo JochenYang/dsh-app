@@ -20,8 +20,8 @@
  * than rewritten. A host that is not ready, or a different loopback port (a
  * stray proxy, another local service), is left exactly as the browser sent it.
  */
-import type { Session } from 'electron'
 import { APP_ORIGIN } from './desktop-host'
+import type { SessionHeaderRule } from './session-hooks'
 
 /** The host origin and cookie a handshake must carry, or undefined before ready. */
 export interface HostStreamTarget {
@@ -48,30 +48,33 @@ function lowercased(headers: Record<string, string>): Record<string, string> {
  * @param windowId - the main window's `webContents` id, undefined when there is
  *   no window.
  */
-export function installHostStreamAuth(
-  session: Pick<Session, 'webRequest'>,
+export function hostStreamAuthRule(
   target: () => HostStreamTarget | undefined,
   windowId: () => number | undefined,
-): void {
-  session.webRequest.onBeforeSendHeaders({ urls: ['ws://127.0.0.1/*'] }, (details, callback) => {
-    const host = target()
-    const owner = windowId()
-    if (host === undefined || owner === undefined || details.webContentsId !== owner) {
-      callback({})
-      return
-    }
-    const requested = new URL(details.url)
-    if (requested.host !== new URL(host.origin).host) {
-      callback({})
-      return
-    }
-    const headers = lowercased(details.requestHeaders)
-    if (headers.origin !== APP_ORIGIN) {
-      callback({ cancel: true })
-      return
-    }
-    callback({
-      requestHeaders: { ...headers, origin: host.origin, cookie: host.cookie, 'sec-fetch-site': 'same-origin' },
-    })
-  })
+): SessionHeaderRule {
+  return {
+    urls: ['ws://127.0.0.1/*'],
+    handle: (details, callback) => {
+      const host = target()
+      const owner = windowId()
+      if (host === undefined || owner === undefined || details.webContentsId !== owner) {
+        callback({})
+        return true
+      }
+      const requested = new URL(details.url)
+      if (requested.host !== new URL(host.origin).host) {
+        callback({})
+        return true
+      }
+      const headers = lowercased(details.requestHeaders)
+      if (headers.origin !== APP_ORIGIN) {
+        callback({ cancel: true })
+        return true
+      }
+      callback({
+        requestHeaders: { ...headers, origin: host.origin, cookie: host.cookie, 'sec-fetch-site': 'same-origin' },
+      })
+      return true
+    },
+  }
 }

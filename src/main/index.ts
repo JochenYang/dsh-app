@@ -14,8 +14,9 @@ import {
 } from '../kernel/bundled'
 import { DshServer, resolveLogDir } from './server'
 import { APP_URL, desktopHostEntry, hostPackageVersion, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
-import { createShellActionHandler, installShellActionStamps, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
-import { installHostStreamAuth } from './host-stream-auth'
+import { createShellActionHandler, shellActionStampRule, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
+import { hostStreamAuthRule } from './host-stream-auth'
+import { installSessionHeaderRules } from './session-hooks'
 import { isSafeModeEnabled, setSafeMode } from './safe-mode'
 import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
 import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from './proxy-detect'
@@ -1404,17 +1405,19 @@ async function boot(): Promise<void> {
     officePayload,
     log: (line) => { logKernel(line) },
   })
-  installShellActionStamps(session.defaultSession)
-  // The client's own stream WebSocket goes straight to the host's loopback
-  // origin (the transport row this shell injects names it), so the session — not
-  // the protocol handler — is where that handshake gets the host cookie and an
-  // origin the host accepts. Installed once: the target and the window are read
-  // per request, so a kernel switch needs no reinstall.
-  installHostStreamAuth(
-    session.defaultSession,
-    () => server.webTarget(),
-    () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents.id),
-  )
+  // BOTH session jobs go through ONE install. Electron keeps only the last
+  // `onBeforeSendHeaders` listener per session (measured on 44.4.1), so two
+  // independent registrations silently disable the earlier one — that is how the
+  // stream/auth hook took every desktop action down to `no initiator stamp`.
+  // The rules are ordered the way the jobs read: action requests first, then the
+  // client's own stream handshakes.
+  installSessionHeaderRules(session.defaultSession, [
+    shellActionStampRule(),
+    hostStreamAuthRule(
+      () => server.webTarget(),
+      () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents.id),
+    ),
+  ])
   installDshAppProtocol(() => (server.isRunning ? server : null), shellActions)
 
   // Create the tray before any server/kernel work so it persists even when

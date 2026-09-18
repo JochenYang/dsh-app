@@ -21,7 +21,7 @@ const require = createRequire(import.meta.url)
 const {
   createShellActionHandler,
   initiatorVerdict,
-  installShellActionStamps,
+  shellActionStampRule,
   isSafeFileName,
   INITIATOR_HEADER,
   SHELL_ACTION_PREFIX,
@@ -29,6 +29,7 @@ const {
   STAMP_HEADER,
   WINDOW_HEADER,
 } = require('../dist/main/shell-actions.js')
+const { installSessionHeaderRules } = require('../dist/main/session-hooks.js')
 
 const APP = 'dsh-app://app'
 const PAGE = `${APP}/index.html`
@@ -64,14 +65,14 @@ function deps(overrides = {}) {
  */
 function stampSession() {
   const state = {}
-  installShellActionStamps({
+  installSessionHeaderRules({
     webRequest: {
       onBeforeSendHeaders: (filter, listener) => {
         state.filter = filter
         state.listener = listener
       },
     },
-  })
+  }, [shellActionStampRule()])
   assert.equal(typeof state.listener, 'function', 'the hook is installed')
   return state
 }

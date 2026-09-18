@@ -187,6 +187,13 @@ peer-only tree and breaks `npm ci`); when switching kernel lines delete root
   that NAMES the runtime tree (the kernel tree is mirrored in as HARDLINKS);
   `test/recursive-delete-guard.test.mjs` audits every sync recursive delete, and
   plugin store deletes use a private walker copy.
+- **Session header hooks go through `installSessionHeaderRules`** — Electron keeps
+  only the LAST `onBeforeSendHeaders` listener per session (measured on 44.4.1: a
+  request matched by the first filter arrives with neither hook's headers), so a
+  second `install*` call silently disables the first. The shell has two such jobs
+  (stamp its own action requests, authenticate the client's stream handshake) and
+  both are RULES behind one install; a rule declines a request it does not own by
+  returning false. Adding a third registration is a bug by construction.
 - **The host child runs a real Node, never Electron's own** — an
   `ELECTRON_RUN_AS_NODE` child dies with `unsupported Electron runtime
   fingerprint`.

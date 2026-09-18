@@ -8,7 +8,8 @@ import { createRequire } from 'node:module'
 import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
-const { installHostStreamAuth } = require('../dist/main/host-stream-auth.js')
+const { hostStreamAuthRule } = require('../dist/main/host-stream-auth.js')
+const { installSessionHeaderRules } = require('../dist/main/session-hooks.js')
 const { APP_ORIGIN } = require('../dist/main/desktop-host.js')
 
 /** A session stand-in that keeps the handler it was given. */
@@ -34,7 +35,11 @@ const TARGET = { origin: HOST, cookie: 'dsh=abc123' }
 
 test('the window’s own handshake to the host carries the cookie and the host origin', () => {
   const session = fakeSession()
-  installHostStreamAuth(session, () => TARGET, () => 7)
+  installSessionHeaderRules(session, [hostStreamAuthRule(() => TARGET, () => 7)])
+  // ONE listener, whatever rules are composed into it: Electron keeps only the
+  // last `onBeforeSendHeaders` per session (measured on 44.4.1), so a second
+  // registration would silently disable this rule.
+  assert.equal(session.installed.length, 1)
   const { filter, handler } = session.installed[0]
   // The pattern is what keeps this off every other socket on the machine.
   assert.deepEqual(filter, { urls: ['ws://127.0.0.1/*'] })
@@ -56,7 +61,7 @@ test('the window’s own handshake to the host carries the cookie and the host o
 
 test('a handshake from any other origin is cancelled, not rewritten', () => {
   const session = fakeSession()
-  installHostStreamAuth(session, () => TARGET, () => 7)
+  installSessionHeaderRules(session, [hostStreamAuthRule(() => TARGET, () => 7)])
   const { handler } = session.installed[0]
   const answer = call(handler, {
     url: 'ws://127.0.0.1:19387/api/gateway/stream',
@@ -75,7 +80,7 @@ test('another window, another port or a host that is not ready is left alone', (
   ]
   for (const item of cases) {
     const session = fakeSession()
-    installHostStreamAuth(session, item.target, item.windowId)
+    installSessionHeaderRules(session, [hostStreamAuthRule(item.target, item.windowId)])
     const answer = call(session.installed[0].handler, {
       url: item.url,
       webContentsId: item.webContentsId,
@@ -89,7 +94,7 @@ test('the target and the window are read per handshake, so a kernel switch needs
   const session = fakeSession()
   let target
   let windowId = 7
-  installHostStreamAuth(session, () => target, () => windowId)
+  installSessionHeaderRules(session, [hostStreamAuthRule(() => target, () => windowId)])
   const { handler } = session.installed[0]
   const details = { url: 'ws://127.0.0.1:19387/x', webContentsId: 7, requestHeaders: { origin: APP_ORIGIN } }
   assert.deepEqual(call(handler, details), {}, 'nothing installed yet')

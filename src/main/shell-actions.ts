@@ -67,6 +67,7 @@
 import { randomBytes } from 'node:crypto'
 import type { Session, WebFrameMain } from 'electron'
 import { APP_ORIGIN, type DshAppRoute } from './desktop-host'
+import type { SessionHeaderRule } from './session-hooks'
 import type { OfficePayloadStatus } from '../kernel/office-payload'
 import { t, type MessageKey } from '../shared/locale'
 
@@ -247,10 +248,39 @@ function topFrameUrl(details: InitiatorRequest): string | null {
  *
  * @param session - the session the app window lives in (chromium's default).
  */
-export function installShellActionStamps(session: Session): void {
-  session.webRequest.onBeforeSendHeaders(
-    { urls: [`${APP_ORIGIN}${SHELL_ACTION_PREFIX}*`] },
-    (details, callback) => {
+/** Filter this shell's action requests answer on. */
+export function shellActionStampFilter(): readonly string[] {
+  return [`${APP_ORIGIN}${SHELL_ACTION_PREFIX}*`]
+}
+
+/**
+ * The stamp rule: the app window's own action requests, stamped with the frame
+ * facts only the shell can see.
+ *
+ * Registered through `session-hooks.ts` and never on its own — Electron keeps
+ * one `onBeforeSendHeaders` listener per session, so a second registration
+ * silently disables this one (measured on 44.4.1; the stream-auth rule did
+ * exactly that to every desktop action).
+ *
+ * The values are written AFTER the page's own headers, so a page-supplied copy is
+ * replaced rather than trusted — measured: a request carrying
+ * `x-dsh-app-initiator: dsh-app://evil` reaches the handler stamped with its real
+ * frame URL. Only a request from the window's top frame is stamped, and it also
+ * carries {@link STAMP_HEADER}: a subframe leaves with an empty pair and no
+ * secret, which {@link initiatorVerdict} refuses.
+ *
+ * Requests no frame issued — a worker's (measured: `webRequest` reports no
+ * frame for one, and the page's own headers arrive untouched, so the page CAN
+ * present the pair itself) — are exactly why the secret exists: it is the one
+ * value a caller cannot write for itself.
+ */
+export function shellActionStampRule(): SessionHeaderRule {
+  return {
+    urls: shellActionStampFilter(),
+    handle: (details, callback) => {
+      // Self-check rather than assumed filter: this rule is one of several behind
+      // one listener, so it must answer for its own URL and decline the rest.
+      if (!details.url.startsWith(`${APP_ORIGIN}${SHELL_ACTION_PREFIX}`)) return false
       const headers: Record<string, string> = {}
       for (const [name, value] of Object.entries(details.requestHeaders)) {
         const lower = name.toLowerCase()
@@ -265,8 +295,9 @@ export function installShellActionStamps(session: Session): void {
       headers[WINDOW_HEADER] = top === null ? '-1' : String(details.webContentsId ?? -1)
       if (top !== null) headers[STAMP_HEADER] = STAMP_SECRET
       callback({ requestHeaders: headers })
+      return true
     },
-  )
+  }
 }
 
 /** The verdict on one request's stamped initiator. */
