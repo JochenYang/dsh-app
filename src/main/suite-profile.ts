@@ -24,7 +24,12 @@
  * `hostProfileAnchor`), because that line resolves `@deepseek-ai/dsh` and every
  * bundle out of the profile rather than out of the runtime it was handed. A
  * manifest alone is enough for 0.1.6 and later; {@link dropRuntimeMirror} takes
- * the mirror away again when the app moves onto such a line.
+ * the mirror away again when the app moves onto such a line. Both steps own
+ * their entries at PACKAGE granularity: a scope directory is shared with the
+ * market, which installs its own packages inside `@deepseek-ai` (see
+ * {@link removeOwnedEntry}), and a package the profile's own lockfile records is
+ * the market's outright — neither step overwrites nor deletes it (see
+ * {@link lockfileOwnedNames}).
  *
  * Third-party packages declared on the old profile are deliberately NOT carried
  * over: the in-app market reinstalls them into the new profile, and it is the
@@ -190,6 +195,9 @@ export async function ensureSuiteProfile(): Promise<SuiteProfileStatus> {
 /** Marker inside the profile recording the runtime tree its node_modules mirrors. */
 export const PROFILE_KERNEL_MARKER = '.dsh-app-kernel.json'
 
+/** The profile's own package-manager state; see {@link lockfileOwnedNames}. */
+const PROFILE_LOCKFILE = 'pnpm-lock.yaml'
+
 /** What one mirror step did, for the caller's log line. */
 export interface KernelTreeOutcome {
   /**
@@ -211,7 +219,12 @@ export interface KernelTreeOutcome {
 interface KernelMarker {
   /** Real path of the runtime tree the mirror was taken from. */
   readonly runtime: string
-  /** Top-level entries the mirror owns inside the profile's node_modules. */
+  /**
+   * The paths the mirror owns inside the profile's node_modules, at PACKAGE
+   * granularity: `@scope/name` for a scoped package, a bare `name` otherwise.
+   * A marker written before ownership stopped at packages records a bare
+   * `@scope` directory instead — see {@link ownedRemovals}.
+   */
   readonly names: readonly string[]
   /** Files the mirror wrote, for diagnostics. */
   readonly files: number
@@ -283,6 +296,106 @@ async function ensureDirectory(target: string): Promise<void> {
   await fs.mkdir(target, { recursive: true })
 }
 
+/** Join one owned path (`@scope/name` or `name`) onto a node_modules directory. */
+function ownedTarget(nodeModulesDir: string, name: string): string {
+  return path.join(nodeModulesDir, ...name.split('/'))
+}
+
+/** Ensure every level above an owned path exists as a REAL directory. */
+async function ensureOwnedParent(nodeModulesDir: string, name: string): Promise<void> {
+  const parts = name.split('/')
+  parts.pop()
+  let current = nodeModulesDir
+  for (const part of parts) {
+    current = path.join(current, part)
+    await ensureDirectory(current)
+  }
+}
+
+/** Remove a directory that is real and empty; leave anything else alone. */
+async function pruneEmptyDirectory(target: string): Promise<void> {
+  const stats = await statOrUndefined(target)
+  if (stats === undefined || !stats.isDirectory() || stats.isSymbolicLink()) return
+  try {
+    await fs.rmdir(target)
+  } catch {
+    // Not empty — the market installs into scopes too — or busy: leave it.
+  }
+}
+
+/**
+ * Remove one owned path, plus a scope directory the removal emptied.
+ *
+ * The scope is shared ground: the kernel ships packages in `@deepseek-ai` and
+ * the in-app market installs its own packages under whatever scope their
+ * publisher chose (`@deepseek-ai/dsh-toolkit` is one that really ships that
+ * way). A scope therefore only goes away once its last package does.
+ */
+async function removeOwnedEntry(nodeModulesDir: string, name: string): Promise<void> {
+  await removeWithoutLinks(ownedTarget(nodeModulesDir, name))
+  const slash = name.indexOf('/')
+  if (slash === -1) return
+  await pruneEmptyDirectory(path.join(nodeModulesDir, name.slice(0, slash)))
+}
+
+/**
+ * The paths a marker name may be removed as.
+ *
+ * A name that already stops at a package is itself. A BARE `@scope` name only
+ * exists in markers written before ownership did, and removing that path
+ * wholesale takes the market's packages with the kernel's — a profile whose
+ * manifest still declares them cannot boot (`cannot resolve profile bundle ...`).
+ * Such a name is narrowed to the packages the MIRRORED tree carries inside that
+ * scope, which is exactly what the mirror wrote there: narrowing against the
+ * tree running now leaves behind every package the old line had and this one does
+ * not, and a leftover kernel package shadows this line's own.
+ *
+ * @param name - the recorded name.
+ * @param sources - candidate runtime `node_modules` directories, most specific
+ *   first; undefined entries are skipped. With none left a scope entry is left
+ *   alone: a stale kernel copy is recoverable, a deleted user package is not.
+ * @returns the paths to remove; empty when the name is not this shell's to take.
+ */
+async function ownedRemovals(name: string, sources: readonly (string | undefined)[]): Promise<string[]> {
+  if (name.includes('/') || !name.startsWith('@')) return [name]
+  for (const source of sources) {
+    if (source === undefined) continue
+    try {
+      const entries = await fs.readdir(path.join(source, name), { withFileTypes: true })
+      return entries.map((entry) => `${name}/${entry.name}`)
+    } catch {
+      // Not there — the kernel it mirrored was cleaned up. Try the next source.
+    }
+  }
+  return []
+}
+
+/**
+ * The entries of a runtime's `node_modules` a mirror takes ownership of.
+ *
+ * Ownership stops one level inside a scope directory, at the package: see
+ * {@link removeOwnedEntry} for why the scope itself is never owned.
+ *
+ * @param nodeModulesDir - the runtime's `node_modules`.
+ * @returns relative paths, `@scope/name` for a scoped package.
+ */
+async function ownedPaths(nodeModulesDir: string): Promise<string[]> {
+  const owned: string[] = []
+  for (const entry of await fs.readdir(nodeModulesDir, { withFileTypes: true })) {
+    // `.bin` is npm's own shim directory for the runtime's private layout; it is
+    // not resolution-relevant and its scripts name absolute runtime paths.
+    if (entry.name === '.bin') continue
+    if (entry.name.startsWith('@') && entry.isDirectory() && !entry.isSymbolicLink()) {
+      for (const inner of await fs.readdir(path.join(nodeModulesDir, entry.name), { withFileTypes: true })) {
+        owned.push(`${entry.name}/${inner.name}`)
+      }
+      continue
+    }
+    owned.push(entry.name)
+  }
+  return owned.sort()
+}
+
 /**
  * One mirrored tree: hardlink `source`'s files into `target`, creating the
  * directories the shape needs and replacing whatever else occupies a name the
@@ -320,6 +433,97 @@ async function mirrorTree(source: string, target: string): Promise<number> {
 }
 
 /**
+ * The package name a lockfile key names.
+ *
+ * `@scope/name@1.2.3` and `name@1.2.3` both name the directory the package
+ * occupies, which is what ownership is recorded in, so everything from the
+ * version separator on is dropped — including a peer-dependency suffix
+ * (`name@1.2.3(peer@4.5.6)`) and an alias (`name@npm:other@1.2.3`), which would
+ * otherwise end up inside the name.
+ *
+ * @param key - one lockfile key, unquoted.
+ * @returns the name, or undefined when the key is not `name@version`.
+ */
+function packageNameFromKey(key: string): string | undefined {
+  const separator = key.startsWith('@') ? key.indexOf('@', 1) : key.indexOf('@')
+  if (separator <= 0 || separator === key.length - 1) return undefined
+  const name = key.slice(0, separator)
+  if (name.includes(' ') || name.endsWith('/')) return undefined
+  return name
+}
+
+/**
+ * The package names a profile's own lockfile accounts for.
+ *
+ * The mirror's ownership has to stop at them. pnpm's `nodeLinker: hoisted` puts
+ * the profile's own dependencies at the top of the profile's `node_modules` —
+ * the very level a mirror writes to — so one name can be both the market's
+ * installation and a package the runtime carries. It is the market's: the
+ * lockfile is that install's record, the mirror is a fallback for a host line
+ * that needs kernel packages there, and a fallback does not overwrite or delete
+ * the state it found. Measured: dropping a mirror removed
+ * `<profile>/node_modules/iconv-lite`, which a market-installed `dsh-better-edit`
+ * resolves (`Cannot find package 'iconv-lite' imported from
+ * .../dsh-better-edit/lib/encoding.js` on the next production boot; dev boots
+ * hid it because the checkout's own tree satisfied the parent walk).
+ *
+ * Read textually on purpose: the shape is stable — two-space indented
+ * `name@version:` keys inside `packages:`/`snapshots:`, quoted when the name is
+ * scoped, with `{}` as an inline value where the entry carries nothing else
+ * (pnpm writes a leaf package that way, so a parse that insisted on a bare
+ * colon would miss exactly the packages most likely to be shared) — and no YAML
+ * parser belongs on a boot path. Anything unrecognized accounts for NOTHING,
+ * which is the behaviour before this fence existed, so a lockfile this cannot
+ * read costs a kernel package its overwrite but never a user package its
+ * existence.
+ *
+ * @param text - the lockfile's contents.
+ * @returns the names it records; empty when the text is not a usable lockfile.
+ */
+export function lockfileOwnedNames(text: string): Set<string> {
+  const names = new Set<string>()
+  let section = ''
+  for (const line of text.split(/\r?\n/u)) {
+    if (/^\S/u.test(line)) {
+      // A top-level key. Only `packages:`/`snapshots:` hold package keys:
+      // `importers:` holds workspace paths, and the dependency maps under it
+      // carry versions as VALUES, so none of those lines is a package key.
+      section = /^([A-Za-z]+):\s*$/u.exec(line)?.[1] ?? ''
+      continue
+    }
+    if (section !== 'packages' && section !== 'snapshots') continue
+    // The key ends at the first colon that leaves only an empty or
+    // whitespace-indented tail, which keeps a `:` inside a spec (`foo@npm:bar@1.2.3`,
+    // a tarball URL) where it belongs. Deeper indentation is a nested map.
+    const raw = /^ {2}(\S.*?):(?:\s.*)?$/u.exec(line)?.[1]
+    if (raw === undefined) continue
+    // pnpm quotes a key it would otherwise have to read as an alias — every
+    // scoped name, and any name that is its own YAML syntax.
+    const key = (raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"'))
+      ? raw.slice(1, -1)
+      : raw
+    const name = packageNameFromKey(key)
+    if (name !== undefined) names.add(name)
+  }
+  return names
+}
+
+/**
+ * The names a profile's lockfile accounts for; empty when it has none.
+ *
+ * Absent is the normal state of a profile the market has not installed into, and
+ * an unreadable one is not this shell's to fail on — both account for nothing,
+ * i.e. the fence-free behaviour (see {@link lockfileOwnedNames}).
+ */
+async function accountedNames(profileDir: string): Promise<Set<string>> {
+  try {
+    return lockfileOwnedNames(await fs.readFile(path.join(profileDir, PROFILE_LOCKFILE), 'utf8'))
+  } catch {
+    return new Set<string>()
+  }
+}
+
+/**
  * Give a profile the kernel tree a pre-0.1.6 host anchors on.
  *
  * Those hosts read the profile as an INSTALLED tree rather than as a manifest:
@@ -340,7 +544,9 @@ async function mirrorTree(source: string, target: string): Promise<number> {
  * Ownership fence: a top-level entry the runtime tree does not carry and this
  * shell never mirrored — a plugin the market installed, pnpm's own state — is
  * never touched. A name the runtime DOES carry belongs to the kernel, and there
- * the runtime's copy wins.
+ * the runtime's copy wins — unless the profile's own lockfile records it, which
+ * means the market installed it there and its copy is the one that stays (see
+ * {@link lockfileOwnedNames}).
  *
  * @param runtimeDir - the runtime tree whose `node_modules` is the source.
  * @param profileDir - the profile to make self-contained.
@@ -351,34 +557,49 @@ export async function mirrorRuntimeIntoProfile(runtimeDir: string, profileDir: s
   const target = path.join(profileDir, 'node_modules')
   const markerPath = path.join(profileDir, PROFILE_KERNEL_MARKER)
   try {
-    // `.bin` is npm's own shim directory for the runtime's private layout; it is
-    // not resolution-relevant and its scripts name absolute runtime paths.
-    const names = (await fs.readdir(source)).filter((name) => name !== '.bin').sort()
-    if (names.length === 0) {
+    const owned = await ownedPaths(source)
+    if (owned.length === 0) {
       return { status: 'failed', entries: 0, files: 0, detail: `${source} carries no packages` }
     }
+    // A name the profile's own lockfile accounts for is the market's
+    // installation: its copy is the one that stays, and it is not pruned below
+    // either. See lockfileOwnedNames for the case that measured this.
+    const accounted = await accountedNames(profileDir)
+    const mirrorable = owned.filter((name) => !accounted.has(name))
     const runtime = await fs.realpath(runtimeDir)
     const marker = await readKernelMarker(markerPath)
     if (marker !== undefined && marker.runtime === runtime) {
-      const absent = await Promise.all(names.map(async (name) => (await statOrUndefined(path.join(target, name))) === undefined))
-      if (!absent.some(Boolean)) return { status: 'already', entries: names.length, files: marker.files }
+      const absent = await Promise.all(
+        mirrorable.map(async (name) => (await statOrUndefined(ownedTarget(target, name))) === undefined),
+      )
+      if (!absent.some(Boolean)) return { status: 'already', entries: mirrorable.length, files: marker.files }
     }
     await fs.mkdir(target, { recursive: true })
     let files = 0
-    for (const name of names) files += await mirrorTree(path.join(source, name), path.join(target, name))
+    for (const name of mirrorable) {
+      await ensureOwnedParent(target, name)
+      files += await mirrorTree(ownedTarget(source, name), ownedTarget(target, name))
+    }
     // Entries an earlier mirror owned and this runtime no longer carries: the
-    // kernel dropped them, and a stale copy would keep resolving.
-    const current = new Set(names)
+    // kernel dropped them, and a stale copy would keep resolving. A name that
+    // is only in the marker goes through the same narrowing as a drop, so what
+    // the market installed inside a scope is never the price of a stale entry.
+    const current = new Set(mirrorable)
+    const mirroredFrom = marker === undefined ? undefined : path.join(marker.runtime, 'node_modules')
     for (const name of marker?.names ?? []) {
-      if (!current.has(name)) await removeWithoutLinks(path.join(target, name))
+      if (current.has(name) || accounted.has(name)) continue
+      for (const removal of await ownedRemovals(name, [mirroredFrom, source])) {
+        if (current.has(removal) || accounted.has(removal)) continue
+        await removeOwnedEntry(target, removal)
+      }
     }
     await fs.writeFile(markerPath, `${JSON.stringify({
       runtime,
-      names,
+      names: mirrorable,
       files,
       at: new Date().toISOString(),
     }, undefined, 2)}\n`, 'utf8')
-    return { status: 'mirrored', entries: names.length, files }
+    return { status: 'mirrored', entries: mirrorable.length, files }
   } catch (error) {
     return { status: 'failed', entries: 0, files: 0, detail: (error as Error).message }
   }
@@ -390,20 +611,40 @@ export async function mirrorRuntimeIntoProfile(runtimeDir: string, profileDir: s
  * A host that anchors on the runtime tree resolves every kernel package there,
  * so a mirror left in the profile is not read for kernel code — but the suite
  * plugins live in that same tree, and a stale copy would be the one the loader
- * finds. Removing exactly the entries the marker proves this shell created keeps
- * a kernel-line change from booting the previous line's plugin code.
+ * finds. Removing exactly the paths the marker proves this shell created keeps
+ * a kernel-line change from booting the previous line's plugin code, and stops
+ * at the package so the market's own installs survive it — including a name the
+ * marker claims but the profile's own lockfile records, which by then is the
+ * market's copy of a package the runtime also carries ({@link lockfileOwnedNames}).
  *
  * @param profileDir - the profile to clean.
+ * @param runtimeDir - the runtime tree to consult for a name an older marker
+ *   recorded as a scope directory (see {@link ownedRemovals}).
  * @returns `removed` when a mirror was there and is gone, `already` otherwise.
  */
-export async function dropRuntimeMirror(profileDir: string): Promise<KernelTreeOutcome> {
+export async function dropRuntimeMirror(profileDir: string, runtimeDir?: string): Promise<KernelTreeOutcome> {
   const markerPath = path.join(profileDir, PROFILE_KERNEL_MARKER)
+  const target = path.join(profileDir, 'node_modules')
   try {
     const marker = await readKernelMarker(markerPath)
     if (marker === undefined) return { status: 'already', entries: 0, files: 0 }
-    for (const name of marker.names) await removeWithoutLinks(path.join(profileDir, 'node_modules', name))
+    // Same fence as the mirror: a name the profile's own lockfile accounts for
+    // is the market's install, and a marker that claims it was written before
+    // that install replaced it (see lockfileOwnedNames).
+    const accounted = await accountedNames(profileDir)
+    const mirroredFrom = path.join(marker.runtime, 'node_modules')
+    const fallback = runtimeDir === undefined ? undefined : path.join(runtimeDir, 'node_modules')
+    let entries = 0
+    for (const name of marker.names) {
+      if (accounted.has(name)) continue
+      for (const removal of await ownedRemovals(name, [mirroredFrom, fallback])) {
+        if (accounted.has(removal)) continue
+        await removeOwnedEntry(target, removal)
+        entries += 1
+      }
+    }
     await fs.rm(markerPath, { force: true })
-    return { status: 'removed', entries: marker.names.length, files: marker.files }
+    return { status: 'removed', entries, files: marker.files }
   } catch (error) {
     return { status: 'failed', entries: 0, files: 0, detail: (error as Error).message }
   }
