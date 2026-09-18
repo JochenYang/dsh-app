@@ -228,7 +228,7 @@ suffixed manifest (`sources/artifact.ts`).
 
 Which kernel line a build follows is decided by `package.json` alone (the
 `@deepseek-ai/dsh*` dependencies), resolved by `scripts/kernel-line.mjs` and
-asserted in both the build and CI — see `AGENTS.md` §10.
+asserted in both the build and CI — see `AGENTS.md` §7.
 
 ## 6. Server process management
 

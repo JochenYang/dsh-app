@@ -150,7 +150,7 @@ peer-only tree and breaks `npm ci`); when switching kernel lines delete root
     fd3/fd4 byte pipes; the window loads `dsh-app://app/index.html`, a scheme
     registered privileged **before** `app.ready` and served only by forwarding to
     that child (other host → 404, no host → 503). A 0.1.6-alpha.2+ host binds its
-    own loopback port instead (§8).
+    own loopback port instead (§5).
   - Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, **no
     preload**.
   - Navigate only within `dsh-app://app` (the splash's `file:` document is the
