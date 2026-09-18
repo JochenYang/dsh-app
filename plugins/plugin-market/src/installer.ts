@@ -17,23 +17,19 @@
  *      panel's log disclosure; the full text is scanned for pnpm's
  *      build-scripts-blocked signal so the panel can offer the whitelist +
  *      retry path (see blockedBuildsOf / build-allow.ts) and for its
- *      release-age policy failures, which this class clears itself by
- *      recording the rejected versions and re-running the command ONCE
- *      (see release-age.ts).
+ *      release-age policy failures, which this class clears itself by re-running
+ *      the command ONCE with the policy lifted for that run (see release-age.ts).
  *
  * Serialization: every install/remove is queued behind an in-process promise
  * chain, so concurrent panel actions can never run two package-manager
- * mutations against one profile at the same time — the release-age recovery's
- * manifest write included.
+ * mutations against one profile at the same time.
  *
  * @module @dsh-app/plugin-market/installer
  */
 
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
-import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
-import { allowReleaseAges, pinnedDependenciesOf, releaseAgeViolationsOf } from './release-age.ts'
+import { RELEASE_AGE_OVERRIDE, isReleaseAgeFailure } from './release-age.ts'
 import {
   PACKAGE_NAME_PATTERN,
   resolveDshBin,
@@ -238,17 +234,20 @@ export class PluginInstaller {
    * non-zero exit into MarketBlockedBuildError so the panel can offer the
    * allow-and-retry path instead of a bare failure.
    *
-   * A pnpm release-age policy failure is instead recovered here: the rejected
-   * versions are recorded as exclusions (the same fix pnpm applies on its own
-   * install path) and the command runs once more (see release-age.ts). The
+   * A pnpm release-age policy failure is instead recovered here: the command
+   * runs once more with the policy lifted for that run (see release-age.ts). The
    * retry's outcome is the one reported, so a second failure surfaces its own
    * output rather than the stale first one.
    */
   private async runCli(args: readonly string[]): Promise<{ output: string, blockedBuilds: readonly string[] | null }> {
     let outcome = await this.runOnce(args)
-    if (outcome.code !== 0) {
-      const violations = releaseAgeViolationsOf(outcome.raw)
-      if (violations !== null && this.excludeReleaseAgeBlocks(violations)) outcome = await this.runOnce(args)
+    if (outcome.code !== 0 && isReleaseAgeFailure(outcome.raw)) {
+      // The policy rejected the run before it did anything (see release-age.ts):
+      // run the same command once with the policy lifted for this run only. No
+      // version is recorded anywhere, so the next command starts under the
+      // cooldown again.
+      this.log(`plugin-market: the release-age policy blocked the run; retrying once with it lifted (profile ${this.profile})`)
+      outcome = await this.runOnce([RELEASE_AGE_OVERRIDE, ...args])
     }
     if (outcome.code !== 0) {
       throw outcome.blockedBuilds !== null
@@ -256,28 +255,6 @@ export class PluginInstaller {
         : new MarketExecutionError(commandFailureHost(outcome.output, outcome.code), 'cli')
     }
     return { output: outcome.output, blockedBuilds: outcome.blockedBuilds }
-  }
-
-  /**
-   * Record the versions pnpm's release-age policy rejected and answer whether
-   * a retry can be useful.
-   *
-   * The listing forms name every rejected version; the unhandled-guardrail
-   * form names only a count, and there the profile manifest's exact-version
-   * dependencies are the candidate set (they are what the resolution is forced
-   * to pick). An empty or already-listed set means a second run would fail
-   * identically, so the caller keeps the original failure.
-   *
-   * @param violations - versions named by the failed run (possibly none).
-   * @returns true when the exclusion list gained entries.
-   */
-  private excludeReleaseAgeBlocks(violations: readonly string[]): boolean {
-    const dir = join(resolveDshHome(), 'profiles', validateProfileName(this.profile))
-    const entries = violations.length > 0 ? violations : pinnedDependenciesOf(join(dir, 'package.json'))
-    if (entries.length === 0) return false
-    if (!allowReleaseAges(join(dir, 'pnpm-workspace.yaml'), entries)) return false
-    this.log(`plugin-market: release-age policy blocked the run; excluded ${entries.join(', ')} in profile ${this.profile}`)
-    return true
   }
 
   /**
