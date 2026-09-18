@@ -330,6 +330,22 @@ export class KernelManager {
   // -------------------------------------------------------------- install
 
   /**
+   * The version the configured channel resolves to right now, or null when the
+   * question cannot be answered (registry unreachable, or dev mode, where the
+   * kernel is a local checkout no channel points at).
+   *
+   * Separate from installLatest, which resolves again as part of installing:
+   * this answers WITHOUT downloading anything, so the boot path can compare it
+   * with the kernel bundled in the shell before choosing either (see
+   * preferredKernel in kernel/bundled.ts).
+   */
+  async resolveChannelVersion(): Promise<string | null> {
+    if (this.opts.source === 'dev') return null
+    const info = await fetchRegistryInfo(this.opts.channel)
+    return info?.version ?? null
+  }
+
+  /**
    * Install (or update to) a kernel version. Downloads the runtime artifact,
    * verifies its integrity, extracts to a versioned directory, and atomically
    * activates it. Returns the new CurrentKernel.
