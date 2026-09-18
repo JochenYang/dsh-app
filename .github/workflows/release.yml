@@ -99,13 +99,17 @@ jobs:
             DSH_VERSION="$(node scripts/kernel-line.mjs --resolve)"
           fi
           echo "dsh_version=$DSH_VERSION" >> "$GITHUB_OUTPUT"
-          # All 6 cells × (tgz + sha512 + per-cell manifest + layer index) must
-          # be present; anything missing (or no release at all) means a full
-          # rebuild. The layer index is required for the same reason a sidecar
-          # is: its ABSENCE is invisible to the client, which is documented to
-          # fall back to the single tarball, so a release published without
-          # layers would be reused forever and every kernel update would keep
-          # paying the full ~96 MiB download with nothing red anywhere.
+          # All 6 cells × (tgz + sha512 + per-cell manifest + layer index + the
+          # office payload's three assets) must be present; anything missing (or
+          # no release at all) means a full rebuild. The layer index is required
+          # for the same reason a sidecar is: its ABSENCE is invisible to the
+          # client, which is documented to fall back to the single tarball, so a
+          # release published without layers would be reused forever and every
+          # kernel update would keep paying the full ~96 MiB download with
+          # nothing red anywhere. The office payload is required for a sharper
+          # version of that: the runtime no longer carries the engine, so a
+          # release without it leaves office conversion permanently unavailable
+          # while the runtime install looks perfectly healthy.
           TAG="runtime-$DSH_VERSION"
           if ! ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null)"; then
             echo "no $TAG release; building" >&2
@@ -113,7 +117,7 @@ jobs:
             exit 0
           fi
           for p in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
-            for name in "dsh-runtime-${p}-${DSH_VERSION}.tgz" "dsh-runtime-${p}-${DSH_VERSION}.tgz.sha512" "manifest-${p}.json" "layers-${p}.json"; do
+            for name in "dsh-runtime-${p}-${DSH_VERSION}.tgz" "dsh-runtime-${p}-${DSH_VERSION}.tgz.sha512" "manifest-${p}.json" "layers-${p}.json" "office-payload-${p}-${DSH_VERSION}.tgz" "office-payload-${p}-${DSH_VERSION}.tgz.sha512" "office-payload-${p}.json"; do
               if ! grep -qxF "$name" <<< "$ASSETS"; then
                 echo "missing $name on $TAG; building" >&2
                 echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
@@ -266,6 +270,12 @@ jobs:
       # The release MUST be flagged --prerelease: otherwise GitHub's
       # /releases/latest alias resolves to the newest runtime tag (it has no
       # latest.yml) and the shell's app-update check 404s (Sep 2026 incident).
+      #
+      # The office payload rides the SAME release. It is version-addressed by
+      # the dsh version (its own content version lives inside the manifest), so
+      # the shell resolves it from the kernel's release tag alone, exactly like
+      # the runtime tarball. Its sidecar name is per cell for the same reason
+      # the runtime manifest is: six parallel cells must not clobber one name.
       - name: Attach runtime to release
         shell: bash
         env:
@@ -283,6 +293,13 @@ jobs:
           # last-writer's platform in the shared name.
           cp runtime-dist/manifest.json "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
           gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 "runtime-dist/manifest-${PLATFORM}-${ARCH}.json" --clobber
+          # The office payload (the LibreOffice engine the runtime no longer
+          # carries): uploaded here, with the cell that built it. Its absence is
+          # invisible to the runtime install — the tree boots fine without an
+          # engine — and would surface only as "document conversion is not
+          # installed" for every user of that cell, which is why the resolve job
+          # requires these three assets before it reuses a release.
+          gh release upload "$TAG" runtime-dist/office-payload-*.tgz runtime-dist/office-payload-*.tgz.sha512 "runtime-dist/office-payload-${PLATFORM}-${ARCH}.json" --clobber
 
       # Split the tgz into cacheable layers for the client's incremental path
       # (a dsh bump then downloads the ~10 MiB `dsh` layer instead of ~96 MiB).

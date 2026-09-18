@@ -116,8 +116,8 @@ const AUDIT = [
   },
   {
     match: 'test/*.test.mjs',
-    count: 19,
-    why: 'root suites: every call removes an os.tmpdir scratch root that test just created (the mirror test also deletes a hardlink-only profile mirror on purpose) — no link out of any of them',
+    count: 20,
+    why: 'root suites: every call removes an os.tmpdir scratch root that test just created (the mirror test also deletes a hardlink-only profile mirror on purpose, and the office-payload suite removes its mkdtemp userData/fixture roots at process exit) — no link out of any of them',
   },
   {
     match: 'plugins/*/tests/**',

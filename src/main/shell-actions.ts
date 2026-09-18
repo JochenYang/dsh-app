@@ -1,8 +1,8 @@
 /**
- * The shell's own action seam: the three native capabilities a document in the
+ * The shell's own action seam: the native capabilities a document in the
  * harness UI cannot perform for itself — reveal the log directory, raise a
- * system notification, and save a text file where the user points a native
- * dialog.
+ * system notification, save a text file where the user points a native dialog,
+ * and install/observe the on-demand office payload.
  *
  * Why it is NOT a second loopback server (the retired `desktop-bridge.ts`): a
  * listening socket is reachable by every process on the machine. This seam
@@ -51,8 +51,8 @@
  *     cannot read the headers of the requests it makes. A request that arrives
  *     without it never passed the hook, whatever it claims.
  *
- * Everything else is allowlist and shape: three action names, POST only (so a
- * stray navigation or prefetch cannot fire a native action), an
+ * Everything else is allowlist and shape: the action names below, POST only (so
+ * a stray navigation or prefetch cannot fire a native action), an
  * `application/json` body (a `no-cors` caller can only smuggle JSON as
  * `text/plain`, so anything else is a 415), per-field type and
  * length caps, and one byte cap on the body. The write target of `save-text-as`
@@ -67,6 +67,7 @@
 import { randomBytes } from 'node:crypto'
 import type { Session, WebFrameMain } from 'electron'
 import { APP_ORIGIN, type DshAppRoute } from './desktop-host'
+import type { OfficePayloadStatus } from '../kernel/office-payload'
 import { t, type MessageKey } from '../shared/locale'
 
 /**
@@ -105,8 +106,22 @@ const STAMP_SECRET = randomBytes(32).toString('hex')
 /** Every header this module stamps. A page-supplied copy of any of them is dropped. */
 const STAMP_HEADERS = [INITIATOR_HEADER, WINDOW_HEADER, STAMP_HEADER]
 
-/** The action names this seam performs. Anything else is a 404. */
-export const SHELL_ACTIONS = ['open-logs', 'notify', 'save-text-as'] as const
+/**
+ * The action names this seam performs. Anything else is a 404.
+ *
+ * The three office-payload actions are one operation split by what a caller
+ * asks for — show the state, start the download, stop it — because each is a
+ * separate gesture in the row and none of them reads a body: the shell already
+ * knows which kernel is active and therefore which payload it needs.
+ */
+export const SHELL_ACTIONS = [
+  'open-logs',
+  'notify',
+  'save-text-as',
+  'office-payload-state',
+  'office-payload-download',
+  'office-payload-cancel',
+] as const
 
 /** One of {@link SHELL_ACTIONS}. */
 export type ShellAction = (typeof SHELL_ACTIONS)[number]
@@ -153,8 +168,26 @@ export interface ShellActionDeps {
   saveAs(suggestedName: string): Promise<string | null>
   /** Write the saved file. */
   writeFile(file: string, text: string): Promise<void>
+  /**
+   * The office payload, when this shell has one to talk to. Absent only in
+   * tests and in a shell built without the kernel manager; the three
+   * `office-payload-*` actions then answer `shellAction.failed` instead of
+   * pretending the feature exists.
+   */
+  officePayload?: OfficePayloadSeam
   /** One shell log line (English, log-only). */
   log?(line: string): void
+}
+
+/**
+ * The office-payload operations this seam needs. Typed structurally against
+ * `OfficePayloadManager` (`src/kernel/office-payload.ts`), so this module holds
+ * no opinion about how the payload is fetched and stays drivable by a fake.
+ */
+export interface OfficePayloadSeam {
+  status(): Promise<OfficePayloadStatus>
+  download(): Promise<OfficePayloadStatus>
+  cancel(): Promise<OfficePayloadStatus>
 }
 
 /** Whether a string names one of {@link SHELL_ACTIONS}. */
@@ -390,6 +423,27 @@ async function dispatch(action: ShellAction, request: Request, deps: ShellAction
       await deps.writeFile(target, content)
       deps.log?.(`[shell-action] save-text-as wrote ${target}`)
       return sendJson(200, { ok: true, path: target })
+    }
+    case 'office-payload-state':
+    case 'office-payload-download':
+    case 'office-payload-cancel': {
+      // The body is deliberately not read, like open-logs: which payload this
+      // kernel needs is the shell's own knowledge (the active kernel manifest),
+      // so a caller cannot ask for one version and get another.
+      const payload = deps.officePayload
+      if (payload === undefined) {
+        deps.log?.(`[shell-action] ${action}: no office payload in this shell`)
+        return fail(500, 'shellAction.failed')
+      }
+      const status = action === 'office-payload-download'
+        ? await payload.download()
+        : action === 'office-payload-cancel'
+          ? await payload.cancel()
+          : await payload.status()
+      // Only the state is logged (phase, version, size-free): a failure message
+      // can name a path, and the log is shared with the diagnostics export.
+      deps.log?.(`[shell-action] ${action}: supported=${String(status.supported)} phase=${status.phase} required=${status.required ?? '-'} installed=${status.installed ?? '-'}`)
+      return sendJson(200, { ok: true, payload: status })
     }
     default:
       action satisfies never

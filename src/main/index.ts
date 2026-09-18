@@ -1,9 +1,17 @@
 import { app, BrowserWindow, dialog, Notification, session, shell } from 'electron'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
-import { decideBundledAdoption, type BundledManifestFields } from '../kernel/bundled'
+import { OfficePayloadManager } from '../kernel/office-payload'
+import {
+  bundledKernelChannel,
+  bundledTarball,
+  decideBundledAdoption,
+  findBundledKernel,
+  isNewerKernel,
+  preferredKernel,
+} from '../kernel/bundled'
 import { DshServer, resolveLogDir } from './server'
 import { APP_URL, desktopHostEntry, hostPackageVersion, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
 import { createShellActionHandler, installShellActionStamps, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
@@ -27,7 +35,7 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
-import { KERNEL_CHECK_INTERVAL_MS, LEGACY_PROFILE, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
+import { KERNEL_CHECK_INTERVAL_MS, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { alignWindowStateWithLine } from './client-state'
 import { initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
@@ -43,17 +51,42 @@ const isDev = process.env.DSH_APP_DEV === '1'
 const devCheckoutDir =
   process.env.DSH_APP_DEV_RUNTIME ??
   (isDev ? path.resolve(process.cwd(), '..', 'deepseek-harness') : undefined)
-const channel =
-  process.env.DSH_APP_CHANNEL === 'alpha' ? 'alpha'
-  : process.env.DSH_APP_CHANNEL === 'beta' ? 'beta'
-  : 'stable'
+/**
+ * The kernel bundled into THIS build, read once: the channel default below and
+ * every install decision (first run, update offer, server-failure reinstall)
+ * ask the same files, and none of them may see a different answer.
+ */
+const bundledKernel = findBundledKernel()
+const envChannel = process.env.DSH_APP_CHANNEL ?? ''
+/**
+ * Kernel line this run follows. An explicit DSH_APP_CHANNEL always wins (it is
+ * the documented cross-line escape hatch); with none set the answer comes from
+ * the kernel the build actually ships, so a shell packaged from the alpha line
+ * installs alpha instead of whatever `stable` points at — the mismatch that let
+ * a newer bundled runtime be passed over for an older download.
+ */
+const channel: KernelChannel =
+  envChannel === 'alpha' ? 'alpha'
+  : envChannel === 'beta' ? 'beta'
+  : envChannel !== '' ? 'stable'
+  : bundledKernelChannel(bundledKernel?.manifest ?? null)
 const artifactOwner = resolveArtifactOwner()
 const artifactRepo = resolveArtifactRepo()
+console.log(
+  `[kernel] channel ${channel} (${envChannel !== '' ? 'DSH_APP_CHANNEL' : `bundled ${bundledKernel?.manifest?.dshVersion ?? 'none'}`})`,
+)
 
 // ------------------------------------------------------------------ state
 
 let kernel: KernelManager
 let server: DshServer
+/**
+ * The on-demand office payload (the LibreOffice engine the runtime no longer
+ * ships). Built beside the kernel manager because both read the ACTIVE kernel's
+ * manifest: which payload is required is a property of the kernel in force, and
+ * the manager resolves it per call so a kernel update changes the answer.
+ */
+let officePayload: OfficePayloadManager
 let mainWindow: BrowserWindow | null = null
 let quitting = false
 let restartAttempts = 0
@@ -722,6 +755,17 @@ async function startServerAndOpenWindow(): Promise<void> {
     }
   })()
 
+  // The office payload directory the runtime's loader shim loads the engine
+  // from. Published whether or not it is installed yet: the shim reads it per
+  // conversion, so a payload downloaded while the kernel runs is picked up
+  // without a restart — and a kernel that declares no payload sets nothing, so
+  // the shim's own actionable refusal is what the user gets.
+  const officePayloadDir = officePayload.expectedDir()
+  // A payload that carries a Python set is what the host's own
+  // `load_workspace_dependencies` tool installs; without one the child keeps the
+  // fixed leaf beside the office skills (and the tool reports the path it
+  // looked for, exactly as it always has).
+  const officePrimaryRuntime = await officePayload.primaryRuntimeDir()
   const kernelEnv = {
     ...proxyEnv,
     DSH_APP_DESKTOP: '1',
@@ -738,6 +782,7 @@ async function startServerAndOpenWindow(): Promise<void> {
     // route, and where: the plugin hands the page that base URL, and a shell
     // that does not set it reports "no desktop actions" instead of a dead link.
     [SHELL_ACTIONS_ENV]: SHELL_ACTIONS_BASE,
+    ...(officePayloadDir === null ? {} : { [OFFICE_PAYLOAD_ENV]: officePayloadDir }),
     ...(shellVersion === '' ? {} : { DSH_APP_SHELL_VERSION: shellVersion }),
     ...(activeKernel === undefined || activeKernel.dshVersion === ''
       ? {}
@@ -746,11 +791,14 @@ async function startServerAndOpenWindow(): Promise<void> {
   try {
     // `profileAnchor` is the shell's own reading of the host line; only the
     // transport's own options travel to the start. `userDataDir` is where the
-    // web transport materializes the office payload it must hand the child.
+    // web transport materializes the office skills it must hand the child, and
+    // `officePrimaryRuntime` is where a Python-carrying office payload landed
+    // (absent: the fixed leaf beside those skills).
     const { profileAnchor: _anchor, ...hostOptions } = host
     await server.start({
       ...hostOptions,
       userDataDir,
+      officePrimaryRuntime: officePrimaryRuntime ?? undefined,
       projectDir: profile.dir,
       env: kernelEnv,
       proxyBootstrap: hasProxyEnv(kernelEnv),
@@ -824,13 +872,12 @@ async function handleServerDown(reason: string): Promise<void> {
     // giving up — this recovers users who upgraded over a bad v0.1.1 kernel.
     // Tried at most once per run: if the reinstall still crashes we fall
     // through to the give-up branch below.
-    const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
-    const bundledSha = `${bundledTgz}.sha512`
-    if (!bundledReinstallTried && existsSync(bundledTgz) && existsSync(bundledSha)) {
+    const bundled = bundledTarball(bundledKernel)
+    if (!bundledReinstallTried && bundled !== null) {
       bundledReinstallTried = true
       try {
         console.log('[kernel] server failed and no rollback available; reinstalling bundled kernel')
-        await kernel.installFromLocalTarball(bundledTgz, bundledSha)
+        await kernel.installFromLocalTarball(bundled.tarball, bundled.sha512)
         await startServerAndOpenWindow()
         return
       } catch (err) {
@@ -850,24 +897,126 @@ async function handleServerDown(reason: string): Promise<void> {
 
 // --------------------------------------------------------------- kernel
 
+/** Report a kernel that could not be installed: status card plus a visible dialog. */
+function reportInstallFailure(err: unknown): void {
+  const detail = (err as Error).message
+  broadcastStatus({ phase: 'error', message: t('status.installFailed'), progress: null, error: detail })
+  // broadcastStatus only paints an update card and the tray tooltip. On a
+  // first run there is no window to paint, so the user was left with a dead
+  // app and no explanation; the themed dialog falls back to a native one
+  // when the window is absent.
+  void promptNoticeThemed(mainWindow, 'error', 'DSH APP', t('kernelUpdate.installFailed', { detail }))
+}
+
 async function installKernel(): Promise<void> {
   try {
     await kernel.installLatest('installing')
     await startServerAndOpenWindow()
   } catch (err) {
-    const detail = (err as Error).message
-    broadcastStatus({ phase: 'error', message: t('status.installFailed'), progress: null, error: detail })
-    // broadcastStatus only paints an update card and the tray tooltip. On a
-    // first run there is no window to paint, so the user was left with a dead
-    // app and no explanation; the themed dialog falls back to a native one
-    // when the window is absent.
-    void promptNoticeThemed(mainWindow, 'error', 'DSH APP', t('kernelUpdate.installFailed', { detail }))
+    reportInstallFailure(err)
   }
+}
+
+/**
+ * Install the runtime bundled inside this build; the online install is the
+ * fallback when the build ships none or the bundle cannot produce a kernel.
+ */
+async function installBundledKernel(): Promise<void> {
+  const files = isDev ? null : bundledTarball(bundledKernel)
+  if (files === null) {
+    await installKernel()
+    return
+  }
+  try {
+    await kernel.installFromLocalTarball(files.tarball, files.sha512)
+    await startServerAndOpenWindow()
+  } catch (err) {
+    // Activation can succeed and still throw afterwards (activateTarball's
+    // staging cleanup loses a race with a file lock). Re-read the on-disk
+    // state before calling this a failed install: a kernel that is already
+    // active must never be replaced by a network reinstall — that both
+    // discards a good install and fails outright on an offline machine.
+    const installed = await kernel.load().catch(() => null)
+    if (installed) {
+      console.warn(`[kernel] bundled install threw but ${installed.active} is active; starting it`)
+      await startServerAndOpenWindow()
+    } else {
+      console.error(`bundled kernel install failed: ${(err as Error).message}; falling back to online install`)
+      await installKernel()
+    }
+  }
+}
+
+/**
+ * First run (or a broken install): install the newer of the two kernels this
+ * build could boot.
+ *
+ * The bundle used to win outright, which pinned a fresh install to the kernel
+ * that shipped with the shell even when the followed line had moved on; and
+ * when the bundle was absent the channel alone decided, which installed an
+ * OLDER kernel than the one sitting in the app's own resources whenever the two
+ * disagreed. preferredKernel answers the question once, and each branch falls
+ * back to the other so a first run fails only when neither a download nor the
+ * bundle can produce a kernel.
+ */
+async function installBootKernel(): Promise<void> {
+  const bundledVersion = isDev ? null : bundledKernel?.manifest?.dshVersion ?? null
+  if (bundledVersion !== null) {
+    // The comparison needs the channel's answer, and on a first run the splash
+    // is the only surface: say what the wait is for instead of leaving it blank.
+    broadcastStatus({ phase: 'checking', message: t('kernel.status.checkKernelUpdate'), progress: null, step: 1 })
+  }
+  const resolved = bundledVersion === null ? null : await kernel.resolveChannelVersion()
+  const preferred = preferredKernel({ bundled: bundledVersion, resolved })
+  if (preferred !== null && preferred.source === 'resolved') {
+    console.log(`[kernel] channel ${channel} resolves dsh ${preferred.version}, newer than the bundled ${bundledVersion ?? 'none'}; installing it`)
+    try {
+      await kernel.installVersion(preferred.version)
+      await startServerAndOpenWindow()
+      return
+    } catch (err) {
+      // Includes the "artifact not published yet" case: the release is on the
+      // registry but its runtime has not been uploaded, so the bundled kernel
+      // is what can actually boot — and the shell ships on purpose, so the
+      // artifact being pending is never a first-run failure.
+      console.error(`[kernel] dsh ${preferred.version} install failed: ${(err as Error).message}; using the bundled kernel instead`)
+    }
+  }
+  await installBundledKernel()
 }
 
 /** Guards against overlapping checks: the 6 h timer and a tray click can land
  * together, and both would drive a registry probe for the same answer. */
 let kernelCheckBusy = false
+
+/** One installable kernel the update prompt (card or dialog) can offer. */
+interface KernelUpdateOption {
+  version: string
+  channel: KernelChannel
+  /** The line's own update: the default button, and Enter's answer. */
+  primary?: boolean
+  /** Install the runtime bundled into this build instead of downloading. */
+  bundled?: boolean
+}
+
+/**
+ * The bundled kernel as an installable option, or null when this build ships
+ * none or the bundle is not newer than what is already installed (the only
+ * reason to offer it).
+ *
+ * Installing it needs no network and no artifact probe — the tarball and its
+ * sidecar are in this build — so it stays offerable exactly when the online
+ * path cannot deliver: a release published on the registry whose runtime
+ * artifact is still uploading.
+ */
+function bundledKernelOption(installedVersion: string | null): { version: string; channel: KernelChannel; bundled: true } | null {
+  if (isDev || bundledTarball(bundledKernel) === null) return null
+  const manifest = bundledKernel?.manifest ?? null
+  const version = manifest?.dshVersion
+  if (version === undefined || installedVersion === null) return null
+  if (!isNewerKernel(version, installedVersion)) return null
+  return { version, channel: bundledKernelChannel(manifest), bundled: true }
+}
 
 async function checkKernelUpdate(manual: boolean): Promise<void> {
   if (kernelCheckBusy) return
@@ -887,18 +1036,34 @@ async function checkKernelUpdateInner(manual: boolean): Promise<void> {
     // the reassuring-but-wrong "the kernel is already the newest version" while
     // blocking recovery.
     if (manual && result.reason === 'no kernel installed') {
-      await installKernel()
+      await installBootKernel()
       return
     }
     // Installable options: the primary line's update (if any) first, then
     // one button per other line carrying something newer. Every entry passed
     // the artifact probe in checkForUpdate, so all of them install directly.
-    const options: Array<{ version: string; channel: KernelChannel; primary?: boolean }> = []
+    const options: KernelUpdateOption[] = []
+    // The kernel bundled into this build is a third candidate, and it can be
+    // the newest of them: the shell ships on its own schedule, so its bundle is
+    // routinely ahead of the registry line AND ahead of the installed kernel —
+    // which is exactly the state that used to leave the user with "artifact
+    // pending" and no way to reach the runtime already sitting in their app.
+    // It installs from disk, so it needs no probe.
+    const bundledOption = bundledKernelOption(result.current)
     if (result.available && result.latest) {
-      options.push({ version: result.latest, channel: result.channel, primary: true })
+      const pick = preferredKernel({ bundled: bundledOption?.version ?? null, resolved: result.latest })
+      if (pick !== null && pick.source === 'bundled' && bundledOption !== null) {
+        console.log(`[kernel] bundled dsh ${bundledOption.version} is newer than the offered ${result.latest}; offering the bundled kernel`)
+        options.push({ ...bundledOption, primary: true })
+      } else {
+        options.push({ version: result.latest, channel: result.channel, primary: true })
+      }
+    } else if (bundledOption !== null) {
+      options.push({ ...bundledOption, primary: true })
     }
     for (const alt of result.alternatives ?? []) {
       if (alt.version === result.latest) continue
+      if (options.some((option) => option.version === alt.version)) continue
       options.push({ version: alt.version, channel: alt.channel })
     }
     if (options.length === 0) {
@@ -930,7 +1095,8 @@ async function checkKernelUpdateInner(manual: boolean): Promise<void> {
       // toast this stays visible until acted on, so a quiet channel cannot be
       // missed mid-work; the user decides when to restart the server.
       const choice = await showKernelUpdateCard(mainWindow, result.current ?? t('common.unknown'), options)
-      if (choice !== 'later') await applyKernelUpdate(choice)
+      const option = options.find((o) => o.version === choice)
+      if (option) await applyKernelUpdate(option)
       return
     }
     const primaryVersion = options.find((o) => o.primary)?.version ?? options[0].version
@@ -969,15 +1135,21 @@ async function checkKernelUpdateInner(manual: boolean): Promise<void> {
         return null
       },
     )
-    if (picked) await applyKernelUpdate(picked)
+    if (picked) {
+      const option = options.find((o) => o.version === picked)
+      if (option) await applyKernelUpdate(option)
+    }
   } catch (err) {
     if (manual) void promptNoticeThemed(mainWindow, 'error', 'DSH APP', t('kernelUpdate.checkFailed', { detail: (err as Error).message }))
   }
 }
 
-async function applyKernelUpdate(version: string): Promise<void> {
+async function applyKernelUpdate(option: KernelUpdateOption): Promise<void> {
   try {
-    const installed = await kernel.installVersion(version)
+    const files = bundledTarball(bundledKernel)
+    const installed = option.bundled && files !== null
+      ? await kernel.installFromLocalTarball(files.tarball, files.sha512)
+      : await kernel.installVersion(option.version)
     broadcastStatus({ phase: 'installing', message: t('status.kernelActivated', { version: installed.manifest.dshVersion }), progress: null })
     await startServerAndOpenWindow()
     // The server restart's own starting→ready cycle clears the card, so the
@@ -1070,6 +1242,32 @@ async function boot(): Promise<void> {
     logKernel(`[kernel] ${wantPaused ? 'pause' : 'resume'} requested from the splash: ${changed ? 'applied' : 'ignored (state already matched)'}`)
   })
 
+  // The office payload: which version is required comes from the ACTIVE kernel
+  // manifest, read per call, so a kernel update (or a rollback) changes the
+  // answer without a restart. A kernel that declares none — dev mode, or a
+  // runtime built before the field existed — reports `supported: false`, and
+  // nothing is ever fetched on its behalf.
+  officePayload = new OfficePayloadManager({
+    userDataDir,
+    platform: process.platform,
+    arch: process.arch,
+    owner: artifactOwner,
+    repo: artifactRepo,
+    target: () => {
+      const manifest = kernel.getCurrent()?.manifest
+      const ref = manifest?.officePayload
+      if (manifest === undefined || ref === undefined) return null
+      return {
+        dshVersion: manifest.dshVersion,
+        payloadVersion: ref.version,
+        platform: manifest.platform,
+        arch: manifest.arch,
+        engine: ref.engine,
+      }
+    },
+    log: logKernel,
+  })
+
   server = new DshServer({
     onExit: (code, signal) => void handleServerDown(t('status.serverExited', { code: code ?? '?', signal: signal ?? '?' })),
     onLog: (line) => {
@@ -1107,6 +1305,10 @@ async function boot(): Promise<void> {
       return result.canceled || result.filePath === '' ? null : result.filePath
     },
     writeFile: (file, text) => writeFile(file, text, 'utf8'),
+    // The payload seam: three actions on the same route, no new origin and no
+    // new port. The page reaches them the way it reaches every other shell
+    // action — through plugin-brand's `/desktop/<action>` coordinates.
+    officePayload,
     log: (line) => { logKernel(line) },
   })
   installShellActionStamps(session.defaultSession)
@@ -1150,15 +1352,13 @@ async function boot(): Promise<void> {
     // silently booting the whole suite vanilla. The decision itself —
     // including why the tarball sha512 is deliberately not the comparison
     // key — lives in decideBundledAdoption.
-    const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
-    const bundledSha = `${bundledTgz}.sha512`
-    const bundledManifestPath = path.join(process.resourcesPath, 'kernel', 'manifest.json')
-    if (!isDev && existsSync(bundledTgz) && existsSync(bundledSha) && existsSync(bundledManifestPath)) {
+    const bundled = bundledTarball(bundledKernel)
+    const bundledManifest = bundledKernel?.manifest ?? null
+    if (!isDev && bundled !== null && bundledManifest !== null) {
       try {
-        const bundledManifest = JSON.parse(readFileSync(bundledManifestPath, 'utf8')) as BundledManifestFields
         if (decideBundledAdoption(bundledManifest, current).adopt) {
           console.log('[kernel] bundled runtime not adopted yet; activating')
-          await kernel.installFromLocalTarball(bundledTgz, bundledSha)
+          await kernel.installFromLocalTarball(bundled.tarball, bundled.sha512)
         }
       } catch (err) {
         console.error(`[kernel] bundled content check failed: ${(err as Error).message}`)
@@ -1166,36 +1366,11 @@ async function boot(): Promise<void> {
     }
     await startServerAndOpenWindow()
   } else {
-    // First run / broken install. Prefer the tarball bundled inside the app's
-    // resources (shipped with the installer) so the user need not download the
-    // kernel; only fall back to the online install when no bundle is present.
-    // The order of these steps is unchanged: the main window still opens only
-    // once the server is healthy — the splash created in boot() reports the
-    // wait and is closed by the hand-off in startServerAndOpenWindow().
-    const bundledTgz = path.join(process.resourcesPath, 'kernel', 'kernel.tgz')
-    const bundledSha = `${bundledTgz}.sha512`
-    if (!isDev && existsSync(bundledTgz) && existsSync(bundledSha)) {
-      try {
-        await kernel.installFromLocalTarball(bundledTgz, bundledSha)
-        await startServerAndOpenWindow()
-      } catch (err) {
-        // Activation can succeed and still throw afterwards (activateTarball's
-        // staging cleanup loses a race with a file lock). Re-read the on-disk
-        // state before calling this a failed install: a kernel that is already
-        // active must never be replaced by a network reinstall — that both
-        // discards a good install and fails outright on an offline machine.
-        const installed = await kernel.load().catch(() => null)
-        if (installed) {
-          console.warn(`[kernel] bundled install threw but ${installed.active} is active; starting it`)
-          await startServerAndOpenWindow()
-        } else {
-          console.error(`bundled kernel install failed: ${(err as Error).message}; falling back to online install`)
-          await installKernel()
-        }
-      }
-    } else {
-      await installKernel()
-    }
+    // First run / broken install (see installBootKernel). The order of these
+    // steps is unchanged: the main window still opens only once the server is
+    // healthy — the splash created in boot() reports the wait and is closed by
+    // the hand-off in startServerAndOpenWindow().
+    await installBootKernel()
   }
 
   initShellUpdater()

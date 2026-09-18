@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-brand",
-  "description": "DSH APP brand host plugin: host routes under /api/plugins/dsh-app/plugin-brand on the Connection exact-Fetch transport that perform the desktop actions (open-in-folder and pick-directory through the kernel's own native seams; notify, save-text-as and open-logs by the shell, whose action route the client calls directly), expose the shell's log tail and the diagnostics facts for the diagnostics page, and report action availability. The brand settings namespace and the app-info service are still TODOs (see src/index.ts).",
-  "version": "0.2.3",
+  "description": "DSH APP brand host plugin: host routes under /api/plugins/dsh-app/plugin-brand on the Connection exact-Fetch transport that perform the desktop actions (open-in-folder and pick-directory through the kernel's own native seams; notify, save-text-as, open-logs and the office-payload state/download/cancel actions by the shell, whose action route the client calls directly), expose the shell's log tail and the diagnostics facts for the diagnostics page, and report action availability. The brand settings namespace and the app-info service are still TODOs (see src/index.ts).",
+  "version": "0.2.4",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

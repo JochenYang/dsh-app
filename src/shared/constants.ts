@@ -78,6 +78,34 @@ export const LAYER_INDEX_FILE = 'layers.json'
  */
 export const LAYER_STAGING_DIR = 'layers'
 
+/**
+ * Directory (under app userData) the office payload is installed into. Already
+ * used by the desktop host wiring for the office skills it materializes beside
+ * the primary-runtime slot — the engine payload lands in the same tree, under
+ * {@link OFFICE_PAYLOAD_DIR}.
+ */
+export const OFFICE_ROOT_DIR = 'dsh-app-office'
+
+/**
+ * Leaf holding the installed payload versions: `<userData>/dsh-app-office/payload/<version>/`.
+ * Versioned rather than fixed because the payload is content-addressed by the
+ * kit (see scripts/lib/office-payload.mjs) and shared by every kernel that
+ * needs the same one — a kernel update re-uses what is already there.
+ */
+export const OFFICE_PAYLOAD_DIR = 'payload'
+
+/** Directory inside an installed payload that holds the kit and its engine. */
+export const OFFICE_PAYLOAD_MODULES_DIR = 'node_modules'
+
+/** Directory a carried Python set occupies inside an installed payload. */
+export const OFFICE_PRIMARY_RUNTIME_LEAF = 'primary-runtime'
+
+/** The payload's own metadata file. */
+export const OFFICE_PAYLOAD_MANIFEST_FILE = 'manifest.json'
+
+/** Environment variable naming the payload directory for the kernel child. */
+export const OFFICE_PAYLOAD_ENV = 'DSH_APP_OFFICE_PAYLOAD'
+
 /** How often to poll for kernel updates while running. */
 export const KERNEL_CHECK_INTERVAL_MS = 1000 * 60 * 60 * 6 // 6 hours
 

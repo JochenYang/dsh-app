@@ -127,9 +127,33 @@ export interface ExportFactsAnswer extends RouteEnvelope {
   readonly log?: { readonly kind?: string, readonly file?: string, readonly lines?: readonly string[], readonly reason?: string }
 }
 
-/** `POST /desktop/save-text-as`: where the file landed, null when cancelled. */
+/**
+ * `POST /desktop/save-text-as`: where the file landed, null when cancelled.
+ */
 export interface SaveAnswer extends RouteEnvelope {
   readonly path?: string | null
+}
+
+/**
+ * One shell answer about the office payload (state, download, cancel).
+ *
+ * The shell owns the shape — see `OfficePayloadStatus` in
+ * `src/kernel/office-payload.ts`: `supported` says whether this kernel declares
+ * a payload at all, `required` is the version it needs, `installed` the version
+ * on disk that satisfies it, and `phase`/`progress` carry the download.
+ */
+export interface OfficePayloadState {
+  readonly supported?: boolean
+  readonly required?: string | null
+  readonly installed?: string | null
+  readonly phase?: 'idle' | 'downloading' | 'installing' | 'failed'
+  readonly progress?: number | null
+  readonly error?: { readonly code?: string, readonly message?: string } | null
+}
+
+/** `POST /desktop/office-payload-*`: the payload's state. */
+export interface OfficePayloadAnswer extends RouteEnvelope {
+  readonly payload?: OfficePayloadState
 }
 
 /**
@@ -184,6 +208,13 @@ function hostMessage(host: HostText, t: TranslateNS<typeof NS>): string {
     'shellAction.params': t('diag.host.actionParams'),
     'shellAction.tooLarge': t('diag.host.bodyTooLarge'),
     'shellAction.failed': t('diag.host.actionFailed'),
+    // The office-payload actions (`office-payload-state|download|cancel`). Their
+    // codes are the shell's locale keys; these are the same conditions in this
+    // page's own wording, and the shell's sentence is the fallback.
+    'officePayload.artifactMissing': t('diag.payload.errorMissing'),
+    'officePayload.manifestMismatch': t('diag.payload.errorMismatch'),
+    'officePayload.downloadFailed': t('diag.payload.errorDownload'),
+    'officePayload.installFailed': t('diag.payload.errorInstall'),
   }
   return copy[host.code] ?? host.text ?? ''
 }
@@ -407,4 +438,38 @@ export async function saveTextAs(name: string, content: string): Promise<RouteOu
   const delegate = await delegateAction('/desktop/save-text-as', { name, content })
   if (delegate.kind !== 'ok') return delegate
   return callShellAction<SaveAnswer>(delegate.url, { name, content })
+}
+
+/**
+ * One office-payload action: ask the host where the shell performs it, then
+ * call that URL. Shared by the three wrappers below, which differ only in the
+ * action name — the shell decides everything else (which payload this kernel
+ * needs, whether it is installed, whether a transfer is running).
+ *
+ * @param action - the shell action name below `/desktop/`.
+ * @returns the payload state, or the outcome that refused the call.
+ */
+async function officePayloadAction(action: string): Promise<RouteOutcome<OfficePayloadAnswer>> {
+  const delegate = await delegateAction(`/desktop/${action}`, {})
+  if (delegate.kind !== 'ok') return delegate
+  return callShellAction<OfficePayloadAnswer>(delegate.url, {})
+}
+
+/** `POST /desktop/office-payload-state` — the row's read, never touches the network. */
+export function fetchOfficePayload(): Promise<RouteOutcome<OfficePayloadAnswer>> {
+  return officePayloadAction('office-payload-state')
+}
+
+/**
+ * `POST /desktop/office-payload-download` — start (or join) the download. It
+ * returns the immediate state; the transfer reports through further
+ * {@link fetchOfficePayload} calls, because it is ~115 MiB.
+ */
+export function downloadOfficePayload(): Promise<RouteOutcome<OfficePayloadAnswer>> {
+  return officePayloadAction('office-payload-download')
+}
+
+/** `POST /desktop/office-payload-cancel` — stop the transfer in flight. */
+export function cancelOfficePayload(): Promise<RouteOutcome<OfficePayloadAnswer>> {
+  return officePayloadAction('office-payload-cancel')
 }

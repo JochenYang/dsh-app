@@ -101,6 +101,30 @@ export const zh = {
   'diag.host.actionMethod': '桌面动作的请求方式不正确',
   'diag.host.actionParams': '请求内容不合法，请检查后重试',
   'diag.host.actionFailed': '桌面操作未完成，请重试',
+
+  // --- Office components: the LibreOffice engine the kernel converts office
+  // documents with, downloaded on demand instead of shipped inside every kernel
+  // runtime (see src/kernel/office-payload.ts in the app).
+  'diag.payload.title': '办公组件',
+  'diag.payload.checking': '读取中…',
+  'diag.payload.installed': '已安装 v{version}',
+  'diag.payload.missing': '未安装',
+  'diag.payload.downloading': '下载中 {percent}%',
+  'diag.payload.installing': '正在安装…',
+  'diag.payload.failed': '未安装（上次失败）',
+  'diag.payload.unsupported': '当前内核不需要',
+  'diag.payload.required': '当前内核需要 v{version}',
+  'diag.payload.hint': '办公组件是 Office 文档转 PDF 预览所需的 LibreOffice 引擎（约 115 MiB）。它不随内核更新重复下载，安装一次即可长期使用，内核回滚也不会删除它。',
+  'diag.payload.hintMissing': '未安装时，文档预览会提示「办公文档转换引擎尚未安装」并失败。点下面的按钮下载安装，装好后直接重试转换即可，不需要重启应用。',
+  'diag.payload.hintUnsupported': '当前内核未声明办公组件（开发运行或旧内核），无需下载。',
+  'diag.payload.download': '下载',
+  'diag.payload.retry': '重试',
+  'diag.payload.cancel': '取消下载',
+  'diag.payload.cancelling': '正在取消…',
+  'diag.payload.errorMissing': '办公组件还没有发布到更新源，请稍后重试。',
+  'diag.payload.errorMismatch': '办公组件产物与当前内核不匹配，请在托盘菜单重新安装内核后再试。',
+  'diag.payload.errorDownload': '下载办公组件失败，请检查网络与代理后重试。',
+  'diag.payload.errorInstall': '安装办公组件失败，请重试；若反复失败，可打开日志目录查看内核日志。',
 } as const
 
 /** English dictionary, key-identical to the Chinese source of truth. */
@@ -177,6 +201,28 @@ export const en: Record<DiagnosticsKey, string> = {
   'diag.host.actionMethod': 'The desktop action was requested the wrong way',
   'diag.host.actionParams': 'The request content is invalid; check it and retry',
   'diag.host.actionFailed': 'The desktop action did not complete; retry',
+
+  // --- Office components; see the zh block for the contract. ---
+  'diag.payload.title': 'Office components',
+  'diag.payload.checking': 'Reading…',
+  'diag.payload.installed': 'Installed v{version}',
+  'diag.payload.missing': 'Not installed',
+  'diag.payload.downloading': 'Downloading {percent}%',
+  'diag.payload.installing': 'Installing…',
+  'diag.payload.failed': 'Not installed (the last attempt failed)',
+  'diag.payload.unsupported': 'Not needed by this kernel',
+  'diag.payload.required': 'This kernel needs v{version}',
+  'diag.payload.hint': 'The office components are the LibreOffice engine document previews convert office files with (~115 MiB). It is not re-downloaded with kernel updates: install it once and every kernel uses it, including a rollback.',
+  'diag.payload.hintMissing': 'While it is missing, a document preview fails with "the office conversion engine is not installed". Use the button below to download and install it, then retry the conversion — no restart needed.',
+  'diag.payload.hintUnsupported': 'This kernel declares no office components (a dev run, or an older kernel); there is nothing to download.',
+  'diag.payload.download': 'Download',
+  'diag.payload.retry': 'Retry',
+  'diag.payload.cancel': 'Cancel download',
+  'diag.payload.cancelling': 'Cancelling…',
+  'diag.payload.errorMissing': 'The office components are not published to the update source yet; retry later.',
+  'diag.payload.errorMismatch': 'The office payload does not match this kernel; reinstall the kernel from the tray menu and retry.',
+  'diag.payload.errorDownload': 'Downloading the office components failed; check your network and proxy, then retry.',
+  'diag.payload.errorInstall': 'Installing the office components failed; retry, and open the log directory if it keeps failing.',
 }
 
 /** Key domain of the `dsh-app.client-ui` namespace (zh is the source of truth). */

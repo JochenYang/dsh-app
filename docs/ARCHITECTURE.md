@@ -115,6 +115,46 @@ fence of its own. `plugin-sidebar`'s git routes (`git-routes.ts`) still use
 are immutable once installed; activation is one atomic file rewrite, so a bad
 boot can always point back at `previous`.
 
+`app/node_modules` holds only what this artifact's platform/arch can load:
+`build-runtime.mjs` drops build and diagnostic files plus the payload for other
+platforms before the inventory and the tarball are written (AGENTS.md §3). The
+one exclusion that goes further is the LibreOffice engine, which is not in the
+runtime at all — see below.
+
+### 4.1 The office payload (the engine that is NOT in the runtime)
+
+```
+<userData>/dsh-app-office/
+  office-skills/            materialized from <kernelDir>/runtime/office-skills
+                            (the four skill files the host's boot check needs)
+  payload/<payloadVersion>/ the installed engine: manifest.json + node_modules
+                            (@deepseek-ai/libreoffice-kit, its closure and the
+                            target's `…-kit-<platform>-<arch>` engine)
+  payload/.staging-*/       in-flight download/extract, removed on success or
+                            failure; a version becomes visible by one rename
+```
+
+The engine is ~115 MiB compressed, only needed when a document is converted, and
+identical for every kernel that wants the same kit — so it travels in a second
+release artifact (`office-payload-<platform>-<arch>-<dshVersion>.tgz`, resolved
+by the same official-first metadata chain as the runtime) and is installed on
+demand from the 诊断 settings row. The runtime keeps a loader shim at
+`app/node_modules/@deepseek-ai/libreoffice-kit` because
+`@deepseek-ai/dsh-office-to-pdf` imports that specifier **statically at module
+scope**: without it the provider fails to load, which is a plugin-tree fault
+rather than "the engine is not installed". The shim loads the real kit out of
+`DSH_APP_OFFICE_PAYLOAD` at call time (`scripts/runtime-stubs/libreoffice-kit`),
+so a payload installed while the kernel runs takes effect without a restart, and
+an absent one produces an actionable refusal instead of a mystery failure.
+
+The install directory is named for the payload's CONTENT version (kit version,
+plus the Python version when a Python set is carried), never the dsh version:
+that is what makes a kernel update — or a rollback — reuse what is already on
+disk. The exception is the release ASSET name, which carries the dsh version
+because every asset of a runtime release is version-addressed (the mirror's own
+completeness check reads it that way). `src/kernel/office-payload.ts` owns
+resolve/verify/extract/swap/prune; nothing downloads automatically.
+
 ## 5. Update flow (kernel channel)
 
 ```
@@ -133,6 +173,36 @@ after healthy boot: cleanup (drop non-active/non-previous dirs + staging)
 
 Rollback is automatic and bounded: a kernel that fails to become healthy twice
 is rolled back once, then the app surfaces the error rather than looping.
+
+**Office payload (a second, on-demand download)**: the runtime manifest may
+carry an `officePayload` record (version, platform, arch, engine, python). When
+it does, the 诊断 settings row can fetch
+`office-payload-<platform>-<arch>-<dshVersion>.tgz` from the same release tag
+through the same metadata chain, verify it against the sidecar sha512, validate
+its inner manifest against the record, and swap it into
+`<userData>/dsh-app-office/payload/<version>` with one rename
+(`src/kernel/office-payload.ts`). It is never fetched at boot and never
+automatically: a kernel that declares no payload (dev mode, an older runtime)
+reports so instead. Because the install directory is keyed on the payload's
+content version, a kernel update or rollback reuses the engine already on disk;
+a new kit version installs the new payload and prunes the old one.
+
+**Channel and the bundled kernel** (`src/kernel/bundled.ts`): the line a run
+follows defaults to the bundled kernel's own `channel` — read from
+`resources/kernel/manifest.json` when packaged, else the repo's
+`bundled-kernel/manifest.json` — and only falls back to `stable` when no
+manifest is readable. `DSH_APP_CHANNEL` still overrides it.
+
+The two kernels a shell can install are resolved independently (the shell ships
+whenever it ships; a registry line moves on its own cadence), so neither is
+newer by construction. `preferredKernel({ bundled, resolved })` decides which
+one a boot install uses — the bundle when it is newer or equal (no download for
+bytes already on disk), the channel's version when that is newer (today's
+download flow, including the "artifact pending" answer when the runtime is not
+published yet), and each branch falls back to the other so a first run fails
+only when neither can produce a kernel. The update offer treats the bundle as a
+third candidate the same way, and can offer it on its own when the channel's
+release has no artifact yet.
 
 **Bundled-runtime adoption** (`index.ts` boot, when an install already exists):
 `resources/kernel/` ships the runtime tarball, its sha512 sidecar AND a
@@ -217,8 +287,12 @@ asserted in both the build and CI — see `AGENTS.md` §10.
   release (created published), which `GitHubArtifactResolver` resolves; kernel
   updates are thus decoupled from shell releases. The same release carries the
   platform-suffixed `manifest-<platform>-<arch>.json` (one per matrix cell,
-  no shared-name clobber races). An existing release is reused only when it is
-  complete AND its suite version matches the tree's.
+  no shared-name clobber races) and the office payload of that cell
+  (`office-payload-<platform>-<arch>-<dshVersion>.tgz`, its `.sha512` and
+  `office-payload-<platform>-<arch>.json`) — the engine is deliberately not
+  inside the runtime, so the release is incomplete without it. An existing
+  release is reused only when it is complete (all seven assets per cell) AND its
+  suite version matches the tree's.
 - Signing: macOS notarization requires Apple credentials (CI secrets); Windows
   signing optional (SmartScreen without it); Linux unsigned.
 
@@ -233,5 +307,9 @@ asserted in both the build and CI — see `AGENTS.md` §10.
   plugin is verified through tsc + esbuild + headless dsh server API smokes.
 - First-run UX: kernel download progress is wired into the in-window update
   card; pause/resume and checksum display are not.
+- Office payload: not bundled with the installer, so a first run with no network
+  converts no documents until the 诊断 row downloads the engine; the Python set
+  the office skills need is wired end to end but nothing in this repo produces
+  one (`DSH_APP_PRIMARY_RUNTIME` stages it when a caller has it).
 - Optional: signed manifests + rollback of `$DSH_HOME` settings on major
   version cross-grades.

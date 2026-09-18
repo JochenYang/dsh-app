@@ -256,6 +256,84 @@ test('open-logs reveals the directory the shell owns', async () => {
   assert.deepEqual(calls.filter((entry) => entry[0] === 'openPath'), [['openPath', 'C:/logs']])
 })
 
+/** The office-payload seam, recorded; the shell forwards its own state verbatim. */
+const PAYLOAD_STATE = {
+  supported: true,
+  required: '0.0.1',
+  installed: null,
+  phase: 'idle',
+  progress: null,
+  error: null,
+}
+
+test('the office-payload actions answer the state, start the download and cancel it', async () => {
+  const calls = []
+  const { value } = deps({
+    officePayload: {
+      status: async () => { calls.push('status'); return PAYLOAD_STATE },
+      download: async () => { calls.push('download'); return { ...PAYLOAD_STATE, phase: 'downloading', progress: 0 } },
+      cancel: async () => { calls.push('cancel'); return PAYLOAD_STATE },
+    },
+  })
+  const handler = createShellActionHandler(value)
+  assert.deepEqual(await call(handler, request('office-payload-state', {})), {
+    status: 200,
+    body: { ok: true, payload: PAYLOAD_STATE },
+  })
+  assert.deepEqual(await call(handler, request('office-payload-download', {})), {
+    status: 200,
+    body: { ok: true, payload: { ...PAYLOAD_STATE, phase: 'downloading', progress: 0 } },
+  })
+  assert.deepEqual(await call(handler, request('office-payload-cancel', {})), {
+    status: 200,
+    body: { ok: true, payload: PAYLOAD_STATE },
+  })
+  assert.deepEqual(calls, ['status', 'download', 'cancel'])
+})
+
+test('the payload actions take no body, and a shell without the seam says so', async () => {
+  // The client cannot ask for a different payload version than this kernel
+  // runs: the shell reads that from the active manifest, so the body is not
+  // read at all — a request with an unparsable one still answers.
+  const { value } = deps({
+    officePayload: {
+      status: async () => PAYLOAD_STATE,
+      download: async () => PAYLOAD_STATE,
+      cancel: async () => PAYLOAD_STATE,
+    },
+  })
+  const handler = createShellActionHandler(value)
+  const noBody = new Request(`${APP}${SHELL_ACTION_ROUTE}office-payload-state`, {
+    method: 'POST',
+    headers: { ...STAMPS, 'content-type': 'text/plain' },
+    body: 'not json at all',
+  })
+  assert.equal((await call(handler, noBody)).status, 200)
+
+  // Without the seam there is no payload to talk about; the refusal must not
+  // read as "not installed", which a caller would try to fix by downloading.
+  const bare = createShellActionHandler(deps().value)
+  const answer = await call(bare, request('office-payload-download', {}))
+  assert.equal(answer.status, 500)
+  assert.equal(answer.body.code, 'shellAction.failed')
+  assert.equal(answer.body.payload, undefined)
+})
+
+test('a payload seam that throws is a coded failure, not a leaked detail', async () => {
+  const { value } = deps({
+    officePayload: {
+      status: async () => { throw new Error('ENOENT: D:/secret/office-payload') },
+      download: async () => PAYLOAD_STATE,
+      cancel: async () => PAYLOAD_STATE,
+    },
+  })
+  const handler = createShellActionHandler(value)
+  const answer = await call(handler, request('office-payload-state', {}))
+  assert.equal(answer.status, 500)
+  assert.equal(answer.body.code, 'shellAction.failed')
+  assert.equal(JSON.stringify(answer.body).includes('secret'), false)
+})
+
 test('a failed open reports a stable code and keeps the platform text in the log', async () => {
   const { value } = deps()
   value.openPath = async () => 'shell: no association for C:/logs'

@@ -84,6 +84,67 @@ export interface KernelManifest {
    * kernel keeps running exactly as it did.
    */
   node?: string
+  /**
+   * The office payload this kernel needs, when the runtime was built with one
+   * (see `scripts/build-runtime.mjs` / `scripts/lib/office-payload.mjs`).
+   *
+   * The LibreOffice engine is the one part of the runtime that does not ship
+   * inside the runtime artifact: it is ~115 MiB compressed, only needed when a
+   * document is converted, and shared by every kernel that wants the same kit
+   * version. This field is how a shell resolves and installs it on demand, and
+   * it carries the fields a foreign payload can be refused on BEFORE any bytes
+   * are downloaded.
+   *
+   * ABSENT on runtimes built before the field existed (and in dev mode), which
+   * reads as "this kernel knows nothing about an office payload" — the
+   * diagnostics row says so instead of offering a download that cannot resolve.
+   */
+  officePayload?: KernelOfficePayloadRef
+}
+
+/**
+ * What one kernel expects of the office payload artifact: the payload's own
+ * content version (the directory name it is installed under) plus what it must
+ * contain. The artifact's RELEASE asset name carries the dsh version instead —
+ * see `scripts/lib/office-payload.mjs` for why the two differ.
+ */
+export interface KernelOfficePayloadRef {
+  /** Payload content version (`<kitVersion>` or `<kitVersion>-py<python>`). */
+  version: string
+  platform: string
+  arch: string
+  /** Engine suffix the payload must carry (e.g. `win32-x64`, `wasm`). */
+  engine: string
+  /** Python version of a carried Python set, or null when there is none. */
+  python: string | null
+}
+
+/**
+ * The office payload artifact's own metadata (`manifest.json` inside the
+ * archive; the release sidecar copy additionally carries `integrity` and
+ * `publishedAt`). Written by `scripts/build-runtime.mjs`, read and validated by
+ * `src/kernel/office-payload.ts` — the reader refuses anything this shape does
+ * not describe.
+ */
+export interface KernelOfficePayloadManifest {
+  /** Content identity; the install directory is named after this. */
+  payloadVersion: string
+  /** Kernel version whose release carries the artifact. */
+  dshVersion: string
+  platform: string
+  arch: string
+  components: {
+    /** Kit (API package) version. */
+    kit: string
+    /** Engine suffix carried, or null when the payload has no engine. */
+    engine: string | null
+    /** Python version of a carried Python set, or null. */
+    python: string | null
+  }
+  source?: string
+  /** sha512 of the tarball — release sidecar copy only. */
+  integrity?: string
+  publishedAt?: string
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { KernelManifest } from '../../shared/types'
+import type { KernelManifest, KernelOfficePayloadManifest } from '../../shared/types'
 import { t } from '../../shared/locale'
 import { MODELSCOPE_ENDPOINT, MODELSCOPE_REPO } from '../../shared/constants'
 import { layerIndexAssetName, parseLayerIndex } from '../layers'
@@ -65,6 +65,42 @@ export interface LayerIndexInfo {
 
 const RELEASE_TAG_PREFIX = 'runtime-'
 
+/**
+ * Release asset name of the office payload tarball of one cell.
+ *
+ * KEEP IN SYNC with `scripts/lib/office-payload.mjs` (`officePayloadAssetName`
+ * there): the build writes the name the shell resolves, and they are two
+ * module systems (the shell is CommonJS, the build scripts are ESM), so the
+ * literal is repeated. `test/office-payload.test.mjs` drives both with one
+ * fixture, which is what actually holds them together.
+ *
+ * The name carries the dsh version (every asset of a runtime release is
+ * version-addressed, and the mirror's completeness check reads it that way);
+ * the payload's OWN version rides inside the manifest it points at. See the
+ * build-side module header for why the two must not be the same thing.
+ */
+export function officePayloadAssetName(platform: string, arch: string, dshVersion: string): string {
+  return `office-payload-${platform}-${arch}-${dshVersion}.tgz`
+}
+
+/** Release asset name of the payload's metadata sidecar (platform-suffixed, like the runtime's). */
+export function officePayloadManifestName(platform: string, arch: string): string {
+  return `office-payload-${platform}-${arch}.json`
+}
+
+/**
+ * The payload metadata a kernel resolves before it downloads anything: the
+ * trusted digest, the ordered candidates and the manifest the artifact must
+ * agree with (version, target, engine).
+ */
+export interface OfficePayloadInfo {
+  candidates: string[]
+  sha512: string
+  manifest: KernelOfficePayloadManifest
+  /** Which base served the metadata (for diagnostics). */
+  source: string
+}
+
 /** Default mirror prefixes, tried after the official URL. */
 const DEFAULT_GITHUB_MIRRORS = [
   'https://ghfast.top/',
@@ -130,6 +166,56 @@ export class GitHubArtifactResolver {
   }
 
   /**
+   * Resolve the office payload candidates + trusted digest for a kernel version.
+   *
+   * The release tag, the phase-1 metadata chain and the candidate order are the
+   * runtime's, unchanged: official host authoritative and fail-closed, mirrors
+   * consulted only when it is unreachable at the network level, ModelScope as
+   * transport only. A second trust rule for the same kind of artifact is
+   * exactly what this reuses `fetchMetadataOutcome` to avoid.
+   *
+   * Two versions meet here and both matter: `dshVersion` names the release
+   * (every asset of a runtime release is version-addressed), `payloadVersion`
+   * names the FILE inside it (the payload's own content identity). The returned
+   * manifest is validated by the caller against what the active kernel demands.
+   *
+   * @param dshVersion - kernel version whose release carries the payload.
+   * @param payloadVersion - content version of the payload being resolved.
+   */
+  async fetchOfficePayload(dshVersion: string, payloadVersion: string): Promise<OfficePayloadInfo | null> {
+    const name = officePayloadAssetName(this.platform, this.arch, dshVersion)
+    // Payload assets are addressed by content version, not by dsh version, so
+    // the sidecar name carries neither: the tag already names the kernel.
+    const shaName = `${name}.sha512`
+    const manifestName = officePayloadManifestName(this.platform, this.arch)
+    const [officialBase, ...mirrorBases] = this.bases(dshVersion)
+    const official = await this.fetchMetadataOutcome(officialBase, shaName, manifestName)
+    let meta = official.meta
+    let source = officialBase
+    if (!official.reached) {
+      for (const base of mirrorBases) {
+        const outcome = await this.fetchMetadataOutcome(base, shaName, manifestName)
+        if (outcome.meta) {
+          meta = outcome.meta
+          source = base
+          break
+        }
+        if (outcome.reached) break
+      }
+    }
+    if (!meta) {
+      console.warn(`[artifact] no office payload metadata for dsh ${dshVersion} on ${this.platform}-${this.arch}`)
+      return null
+    }
+    return {
+      candidates: this.assetCandidates(dshVersion, name),
+      sha512: meta.sha512,
+      manifest: meta.manifest as unknown as KernelOfficePayloadManifest,
+      source,
+    }
+  }
+
+  /**
    * Resolve the tarball candidates + trusted digest for a kernel version.
    * Fail-closed metadata rule: the official release is authoritative. Mirror
    * metadata is consulted only when the official host is unreachable at the
@@ -141,12 +227,12 @@ export class GitHubArtifactResolver {
     const name = this.assetName(version)
     const bases = this.bases(version)
     const [officialBase, ...mirrorBases] = bases
-    const official = await this.fetchMetadataOutcome(officialBase, name)
+    const official = await this.fetchMetadataOutcome(officialBase, `${name}.sha512`, `manifest-${this.platform}-${this.arch}.json`)
     let meta = official.meta
     let source = officialBase
     if (!official.reached) {
       for (const base of mirrorBases) {
-        const outcome = await this.fetchMetadataOutcome(base, name)
+        const outcome = await this.fetchMetadataOutcome(base, `${name}.sha512`, `manifest-${this.platform}-${this.arch}.json`)
         if (outcome.meta) {
           meta = outcome.meta
           source = base
@@ -284,21 +370,32 @@ export class GitHubArtifactResolver {
    * from "host unreachable" (fetch threw, or a 5xx mirror-side failure).
    * A 5xx counts as unreachable — same policy as probeArtifact — so a sick
    * mirror never produces a final "missing" verdict for the whole chain.
+   *
+   * The two asset names are parameters because two artifacts ride this chain
+   * with different names: the runtime's `<name>.sha512` plus the
+   * platform-suffixed manifest, and the office payload's own pair. The POLICY
+   * (official-first, fail-closed, mirrors only when unreachable) is the part
+   * that must never be duplicated; the names are data.
+   *
+   * @param base - release base URL (official or a mirror prefix of it).
+   * @param shaName - asset name of the `.sha512` sidecar.
+   * @param manifestName - asset name of the JSON manifest sidecar.
    */
   private async fetchMetadataOutcome(
     base: string,
-    name: string,
+    shaName: string,
+    manifestName: string,
   ): Promise<{ reached: boolean; meta: { sha512: string; manifest: KernelManifest } | null }> {
     try {
       const [shaRes, manifestRes] = await Promise.all([
-        fetch(`${base}/${name}.sha512`, { signal: AbortSignal.timeout(15_000) }),
+        fetch(`${base}/${shaName}`, { signal: AbortSignal.timeout(15_000) }),
         // Platform-suffixed name: every runtime cell uploads its own copy, so
         // the shared-name asset never suffers a last-writer platform mismatch
         // (nor a --clobber race between the parallel cells).
-        fetch(`${base}/manifest-${this.platform}-${this.arch}.json`, { signal: AbortSignal.timeout(15_000) }),
+        fetch(`${base}/${manifestName}`, { signal: AbortSignal.timeout(15_000) }),
       ])
       if (shaRes.status >= 500 || manifestRes.status >= 500) {
-        console.warn(`[artifact] metadata unavailable (HTTP ${shaRes.status}/${manifestRes.status}) for ${base}/${name}`)
+        console.warn(`[artifact] metadata unavailable (HTTP ${shaRes.status}/${manifestRes.status}) for ${base}/${shaName}`)
         return { reached: false, meta: null }
       }
       if (!shaRes.ok || !manifestRes.ok) return { reached: true, meta: null }
@@ -306,7 +403,7 @@ export class GitHubArtifactResolver {
       const manifest = (await manifestRes.json()) as KernelManifest
       return { reached: true, meta: { sha512, manifest } }
     } catch (err) {
-      console.warn(`[artifact] metadata fetch failed for ${base}/${name}: ${(err as Error).message}`)
+      console.warn(`[artifact] metadata fetch failed for ${base}/${shaName}: ${(err as Error).message}`)
       return { reached: false, meta: null }
     }
   }

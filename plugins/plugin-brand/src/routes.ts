@@ -34,12 +34,19 @@
  *   POST /desktop/notify           `{ title, body }`    → 200 `{ ok: true, delegate: { url, method } }`
  *   POST /desktop/save-text-as     `{ name, content }`  → 200 `{ ok: true, delegate: { url, method } }`
  *   POST /desktop/open-logs        `{}`                 → 200 `{ ok: true, delegate: { url, method } }`
- *     — the SHELL performs these three, but this process cannot call it: the
+ *   POST /desktop/office-payload-state    `{}`          → 200 `{ ok: true, delegate: { url, method } }`
+ *   POST /desktop/office-payload-download `{}`          → 200 `{ ok: true, delegate: { url, method } }`
+ *   POST /desktop/office-payload-cancel   `{}`          → 200 `{ ok: true, delegate: { url, method } }`
+ *     — the SHELL performs these six, but this process cannot call it: the
  *       route is on the `dsh-app` scheme, which only Electron resolves. So these
  *       routes validate the payload and hand the client the exact coordinates
  *       (`client/diagnostics/api.ts` then calls that URL, which is the seam's
  *       real fence: the shell stamps the initiator and refuses anything that did
  *       not come from the app's own page). See `shell-actions.ts`.
+ *       The three payload actions answer `{ ok: true, payload: { supported,
+ *       required, installed, phase, progress, error } }` — the settings row
+ *       renders that shape, and the download itself reports through repeated
+ *       state calls (a payload is ~115 MiB).
  *   GET  /diagnostics/log-tail?lines=N
  *     → 200 `{ ok: true, path: string, lines: string[] }` — the tail of the
  *       NEWEST server log in the directory the shell injected, at most N lines
@@ -127,11 +134,23 @@ interface FieldSpec {
 }
 
 /**
- * The three actions the SHELL performs, addressed by its own route. `open-in-folder`
+ * The actions the SHELL performs, addressed by its own route. `open-in-folder`
  * and `pick-directory` are not here: the kernel performs both itself (see
  * `native-actions.ts`), so there is nothing to delegate.
+ *
+ * The three `office-payload-*` names are one feature split by gesture — show
+ * the state, start the download, stop it. None of them takes a field: which
+ * payload version is needed is the shell's own knowledge (the active kernel
+ * manifest), so the client cannot ask for a different one than this kernel runs.
  */
-const DELEGATED_ACTIONS = ['notify', 'save-text-as', 'open-logs'] as const satisfies readonly ShellAction[]
+const DELEGATED_ACTIONS = [
+  'notify',
+  'save-text-as',
+  'open-logs',
+  'office-payload-state',
+  'office-payload-download',
+  'office-payload-cancel',
+] as const satisfies readonly ShellAction[]
 
 /** One of {@link DELEGATED_ACTIONS}. */
 type DelegatedAction = (typeof DELEGATED_ACTIONS)[number]
@@ -156,6 +175,12 @@ const DELEGATED_FIELDS: Record<DelegatedAction, readonly FieldSpec[]> = {
     { name: 'content', label: '文本内容', max: 8 * 1024 * 1024, allowEmpty: true },
   ],
   'open-logs': [],
+  // The payload actions carry no field at all: the shell reads which payload
+  // this kernel needs from the active manifest, so there is nothing for a
+  // caller to pass and nothing to validate.
+  'office-payload-state': [],
+  'office-payload-download': [],
+  'office-payload-cancel': [],
 }
 
 /** The only desktop action whose body carries a path. */

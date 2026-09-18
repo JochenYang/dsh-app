@@ -39,12 +39,15 @@ import {
   saveTextAs,
   fetchBrandStatus,
   fetchLogTail,
+  fetchOfficePayload,
+  downloadOfficePayload,
+  cancelOfficePayload,
   noticeText,
   openLogDirectory,
   TAIL_LINES,
   UNREACHABLE_NOTICE,
 } from './api.ts'
-import type { RouteNotice } from './api.ts'
+import type { RouteNotice, OfficePayloadState } from './api.ts'
 import { NS } from './locales.ts'
 import { buildReportText, reportFileName } from './report.ts'
 
@@ -90,6 +93,25 @@ type ExportState =
   | { readonly kind: 'unsupported'; readonly notice: RouteNotice }
   | { readonly kind: 'failed'; readonly notice: RouteNotice }
 
+/**
+ * The office components as the page shows them: the shell's own state, plus the
+ * two things this page adds — a notice for a call that did not answer, and the
+ * cancel gesture.
+ */
+type PayloadState =
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'ready'; readonly state: OfficePayloadState }
+  | { readonly kind: 'unsupported'; readonly notice: RouteNotice }
+  | { readonly kind: 'failed'; readonly notice: RouteNotice }
+  /** A cancel was requested; shown until the shell answers with a new state. */
+  | { readonly kind: 'cancelling' }
+
+/**
+ * How often the row re-reads the state while a download runs. Long enough not
+ * to hammer two hops, short enough that the percentage moves like a download.
+ */
+const PAYLOAD_POLL_MS = 1_000
+
 /** Longest path shown before {@link shortenPath} trims its middle. */
 const PATH_DISPLAY_MAX = 96
 
@@ -123,6 +145,7 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   const [tail, setTail] = useState<TailState>({ kind: 'loading' })
   const [open, setOpen] = useState<OpenState>({ kind: 'idle' })
   const [save, setSave] = useState<ExportState>({ kind: 'idle' })
+  const [payload, setPayload] = useState<PayloadState>({ kind: 'loading' })
   const logRef = useRef<HTMLPreElement | null>(null)
 
   const loadDesktop = useCallback(async (): Promise<void> => {
@@ -162,10 +185,39 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
     setTail({ kind: 'failed', notice: outcome.notice })
   }, [])
 
+  /**
+   * Read the office-components state. A `phase` in flight is the only thing the
+   * row polls for; every other state is static until the user acts.
+   */
+  const loadPayload = useCallback(async (): Promise<void> => {
+    const outcome = await fetchOfficePayload()
+    if (outcome.kind === 'ok') {
+      setPayload({ kind: 'ready', state: outcome.body.payload ?? {} })
+      return
+    }
+    if (outcome.kind === 'unsupported') {
+      setPayload({ kind: 'unsupported', notice: outcome.notice })
+      return
+    }
+    setPayload({ kind: 'failed', notice: outcome.notice })
+  }, [])
+
   useEffect(() => {
     void loadDesktop()
     void loadTail()
-  }, [loadDesktop, loadTail])
+    void loadPayload()
+  }, [loadDesktop, loadTail, loadPayload])
+
+  // While a transfer runs, the row re-reads the state on a timer: the shell
+  // reports progress through state, not through a push, so this is what makes
+  // the percentage move. The interval stops as soon as the phase settles.
+  const payloadPhase = payload.kind === 'ready' ? payload.state.phase ?? 'idle' : 'idle'
+  const payloadRunning = payloadPhase === 'downloading' || payloadPhase === 'installing'
+  useEffect(() => {
+    if (!payloadRunning) return undefined
+    const timer = setInterval(() => { void loadPayload() }, PAYLOAD_POLL_MS)
+    return () => { clearInterval(timer) }
+  }, [payloadRunning, loadPayload])
 
   // The newest lines are the interesting ones: pin the view to the end after
   // every load, unless there is nothing to scroll.
@@ -186,6 +238,38 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
       return
     }
     setOpen({ kind: 'failed', notice: outcome.notice })
+  }, [])
+
+  /**
+   * Start (or join) the office-payload download. The answer is the immediate
+   * state — the transfer itself is observed by the polling effect above — so
+   * this only has to render what came back.
+   */
+  const startPayloadDownload = useCallback(async (): Promise<void> => {
+    const outcome = await downloadOfficePayload()
+    if (outcome.kind === 'ok') {
+      setPayload({ kind: 'ready', state: outcome.body.payload ?? {} })
+      return
+    }
+    if (outcome.kind === 'unsupported') {
+      setPayload({ kind: 'unsupported', notice: outcome.notice })
+      return
+    }
+    setPayload({ kind: 'failed', notice: outcome.notice })
+  }, [])
+
+  const cancelPayloadDownload = useCallback(async (): Promise<void> => {
+    setPayload({ kind: 'cancelling' })
+    const outcome = await cancelOfficePayload()
+    if (outcome.kind === 'ok') {
+      setPayload({ kind: 'ready', state: outcome.body.payload ?? {} })
+      return
+    }
+    if (outcome.kind === 'unsupported') {
+      setPayload({ kind: 'unsupported', notice: outcome.notice })
+      return
+    }
+    setPayload({ kind: 'failed', notice: outcome.notice })
   }, [])
 
   // Transient success notices (log folder opened, package exported) clear
@@ -249,6 +333,47 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
       ? t('diag.export.blocked')
       : undefined
 
+  // ------------------------------------------------- office components row
+  // Everything the row shows is derived here: the shell's structured state
+  // (supported / required / installed / phase / progress / error) plus this
+  // page's own transport failures, so the JSX below stays a rendering of one
+  // decided value per line.
+  const payloadState = payload.kind === 'ready' ? payload.state : undefined
+  const payloadSupported = payloadState !== undefined && payloadState.supported !== false
+  const payloadInstalled = payloadState?.installed ?? null
+  const payloadRequired = payloadState?.required ?? null
+  const payloadInstalledNow = payloadInstalled !== null && payloadInstalled === payloadRequired
+  const payloadBusy = payloadPhase === 'downloading' || payloadPhase === 'installing'
+  const payloadFailed = payloadPhase === 'failed'
+
+  const payloadStatus = ((): string => {
+    if (payload.kind === 'loading') return t('diag.payload.checking')
+    if (payload.kind === 'cancelling') return t('diag.payload.cancelling')
+    if (payload.kind === 'unsupported' || payload.kind === 'failed') return noticeText(payload.notice, t)
+    if (!payloadSupported) return t('diag.payload.unsupported')
+    if (payloadPhase === 'downloading') {
+      return t('diag.payload.downloading', { percent: Math.round((payloadState?.progress ?? 0) * 100) })
+    }
+    if (payloadPhase === 'installing') return t('diag.payload.installing')
+    if (payloadInstalledNow) return t('diag.payload.installed', { version: payloadInstalled })
+    return payloadFailed ? t('diag.payload.failed') : t('diag.payload.missing')
+  })()
+
+  // The shell's failure detail: its own sentence for a code this build knows
+  // (see `api.ts`), otherwise the shell's text verbatim.
+  const payloadError = payloadState?.error ?? null
+  const payloadErrorText = payloadError === null
+    ? ''
+    : noticeText({ source: 'host', host: { code: payloadError.code ?? '', text: payloadError.message ?? '' } }, t)
+
+  const payloadHint = payload.kind === 'unsupported' || payload.kind === 'failed'
+    ? undefined
+    : !payloadSupported
+      ? t('diag.payload.hintUnsupported')
+      : payloadInstalledNow
+        ? t('diag.payload.hint')
+        : t('diag.payload.hintMissing')
+
   return (
     <section className="dshDiag-root" aria-label={t('diag.nav')}>
       <style>{DIAGNOSTICS_CSS}</style>
@@ -297,6 +422,42 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
             : null}
         </div>
         {openHint === undefined ? null : <p className="dshDiag-hint dshDiag-hintBlocked">{openHint}</p>}
+      </div>
+
+      <div className="dshDiag-card">
+        <div className="dshDiag-cardHead">
+          <span className="dshDiag-cardTitle">{t('diag.payload.title')}</span>
+          <span
+            className={payloadInstalledNow ? 'dshDiag-badge dshDiag-badgeOk' : 'dshDiag-badge dshDiag-badgeMuted'}
+            role="status"
+          >
+            {payloadStatus}
+          </span>
+          {payload.kind === 'ready' && payloadBusy
+            ? (
+              <button
+                type="button" className="dshDiag-button" onClick={() => { void cancelPayloadDownload() }}
+              >{t('diag.payload.cancel')}</button>
+            )
+            : payload.kind === 'cancelling'
+              ? <span className="dshDiag-hint">{t('diag.payload.cancelling')}</span>
+              // Installed: the badge already says so, and a disabled "Download"
+              // next to it would read as "this cannot be downloaded" rather than
+              // as "there is nothing to do".
+              : payloadSupported && payload.kind === 'ready' && !payloadInstalledNow
+                ? (
+                  <button
+                    type="button" className="dshDiag-button dshDiag-buttonPrimary"
+                    onClick={() => { void startPayloadDownload() }}
+                  >{payloadFailed ? t('diag.payload.retry') : t('diag.payload.download')}</button>
+                )
+                : null}
+        </div>
+        {payloadSupported && payloadRequired !== null
+          ? <p className="dshDiag-path" title={payloadRequired}>{t('diag.payload.required', { version: payloadRequired })}</p>
+          : null}
+        {payloadErrorText === '' ? null : <p className="dshDiag-error" role="status">{payloadErrorText}</p>}
+        {payloadHint === undefined ? null : <p className="dshDiag-hint">{payloadHint}</p>}
       </div>
 
       <div className="dshDiag-card">

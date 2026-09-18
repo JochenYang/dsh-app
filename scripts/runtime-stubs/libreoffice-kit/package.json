@@ -1,0 +1,12 @@
+{
+  "name": "@deepseek-ai/libreoffice-kit",
+  "version": "0.0.1",
+  "description": "Loader shim shipped by dsh-app in place of the LibreOffice kit: it loads the real kit out of the separately downloaded office payload, and refuses with an actionable error while that payload is absent.",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  }
+}
