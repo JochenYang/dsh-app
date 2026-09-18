@@ -1,14 +1,14 @@
 # Changelog
 
 DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**的增量变更（不含历史全量），
-与 GitHub Release 的 release notes 保持一致。发布流程见 `AGENTS.md` §10。
+与 GitHub Release 的 release notes 保持一致。发布流程见 `AGENTS.md` §7。
 
 发布时把 `[Unreleased]` 改为具体版本号（如 `[v0.1.7]`），然后运行
 `node scripts/gen-release-notes.mjs v0.1.7` 生成双语 notes。
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
-## [Unreleased]
+## [v0.12.1] - 2026-09-18
 
 ### 中文
 - 办公文档转换引擎不再打进内核运行时，改为按需下载一份：运行时只是「内核 + 套件」，LibreOffice 引擎（`@deepseek-ai/libreoffice-kit` 加它按平台发布的 `…-kit-<platform>-<arch>` 引擎包，解包 334.5 MB）改由第二个产物 `office-payload-<platform>-<arch>-<dshVersion>.tgz` 携带，与运行时产物同一次发布、同一套解析规则（官方 host 优先、mirrors 只做传输、sha512 校验）。win32-x64 运行时因此从 197.2 MiB 降到 80.8 MiB（解包 568.3 → 243.2 MiB，文件数 13,888 → 11,833），payload 产物 118.5 MiB；内核更新不再重复搬运这 100 多 MiB，而真正需要转换文档的用户只下载一次。运行时的 `app/node_modules/@deepseek-ai/libreoffice-kit` 位置改放一个几百字节的加载垫片（`scripts/runtime-stubs/libreoffice-kit`）：办公转换插件是**模块顶层静态 import** 这个包名，直接删包会让它整个加载失败（表现为插件树激活失败，而不是「引擎没装」），垫片在调用时才从已安装的载荷目录（内核子进程启动时注入的 `DSH_APP_OFFICE_PAYLOAD`）加载真正的 kit，未安装时以 `unavailable` 类别抛出可操作的中文提示（指向「设置 → 诊断 → 办公组件」的下载按钮）；载荷可在内核运行期间安装，装完立刻生效、无需重启
