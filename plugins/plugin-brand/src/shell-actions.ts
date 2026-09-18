@@ -1,11 +1,11 @@
 /**
  * The kernel side of the shell's desktop action seam.
  *
- * The shell performs three native actions the kernel has no seam for — reveal
- * the log directory, raise a system notification, and save a text file where the
- * user points a native dialog — and it PUBLISHES the base URL of its route as
- * {@link SHELL_ACTIONS_ENV} when it serves one (`src/main/shell-actions.ts` in
- * the app).
+ * The shell performs native actions the kernel has no seam for — reveal the log
+ * directory, raise a system notification, save a text file where the user points
+ * a native dialog, and install/observe the on-demand office payload — and it
+ * PUBLISHES the base URL of its route as {@link SHELL_ACTIONS_ENV} when it
+ * serves one (`src/main/shell-actions.ts` in the app).
  *
  * This process cannot call that route itself: it lives on the `dsh-app` scheme,
  * which only Electron's own network stack resolves — a child Node process has no
@@ -39,7 +39,13 @@ const APP_SCHEME = 'dsh-app:'
 const APP_HOST = 'app'
 
 /** The actions the shell's route performs. */
-export type ShellAction = 'notify' | 'save-text-as' | 'open-logs'
+export type ShellAction =
+  | 'notify'
+  | 'save-text-as'
+  | 'open-logs'
+  | 'office-payload-state'
+  | 'office-payload-download'
+  | 'office-payload-cancel'
 
 /** Read one environment variable, tolerating an unset value. */
 function envValue(name: string): string {

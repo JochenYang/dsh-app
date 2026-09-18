@@ -252,7 +252,7 @@ test('pick-directory is unsupported for a browse backend and with no picker at a
   }
 })
 
-test('the three shell-performed actions answer the coordinates the client must call', async () => {
+test('the shell-performed actions answer the coordinates the client must call', async () => {
   publishShellActions()
   const host = await startHost()
   try {
@@ -260,6 +260,11 @@ test('the three shell-performed actions answer the coordinates the client must c
       ['open-logs', {}],
       ['notify', { title: '导出完成', body: '文件已保存' }],
       ['save-text-as', { name: 'report.md', content: '# 报告\n' }],
+      // The office-payload trio takes no field at all: which payload version is
+      // needed is the shell's own knowledge (the active kernel manifest).
+      ['office-payload-state', {}],
+      ['office-payload-download', {}],
+      ['office-payload-cancel', {}],
     ]) {
       const answer = await post(host, `/desktop/${action}`, body)
       assert.equal(answer.status, 200, action)
@@ -370,7 +375,7 @@ test('an unknown path, an unknown method and the old web-server prefix are the c
 
 test('the registered routes are removed by the returned disposer', async () => {
   const host = await startHost()
-  assert.equal(host.registered(), 8, 'status + log tail + export + five actions')
+  assert.equal(host.registered(), 11, 'status + log tail + export + eight actions')
   await host.close()
   assert.equal(host.registered(), 0)
 })

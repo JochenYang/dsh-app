@@ -293,6 +293,15 @@ export interface DshHostOptions {
    * transport, which is handed no such argument.
    */
   officeSkillsSource?: string
+  /**
+   * Primary-runtime path to hand the child as its fourth positional argument,
+   * when the installed office payload carries one (a Python set). Absent means
+   * the fixed leaf beside the office skills (see {@link prepareOfficePayload}),
+   * which is also what every install without a Python set has always used — the
+   * child's own `load_workspace_dependencies` tool then fails with the path it
+   * looked for, exactly as before.
+   */
+  officePrimaryRuntime?: string
   /** Shell data directory (`<userData>`); the web transport materializes the office payload under it. */
   userDataDir?: string
   /** Ride along {@link hostProxyBootstrap} — set when `env` carries a proxy (see `hasProxyEnv`). */
@@ -558,10 +567,14 @@ async function officePayloadStale(source: string, target: string): Promise<boole
  *   assets; production: `<runtimeDir>/../runtime/office-skills`), or undefined
  *   when the caller named none.
  * @param dataDir - the shell's data directory, the materialization root.
+ * @param primaryRuntime - the payload's own primary-runtime directory, when the
+ *   installed office payload carries one. Given, it is what the child is handed:
+ *   the host's `load_workspace_dependencies` tool installs THAT tree, so a
+ *   payload that carries Python is what makes the office skills run.
  * @returns the primary-runtime path to pass as the child's fourth positional.
  * @throws when either input is missing, or when the source is not a payload.
  */
-async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined): Promise<string> {
+async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined, primaryRuntime?: string): Promise<string> {
   if (source === undefined || dataDir === undefined) {
     throw new Error(`dsh host: the web transport needs an office payload (a directory holding scripts/check_office.py); ${source === undefined ? 'none was named' : 'no shell data directory was named'} for ${source}`)
   }
@@ -573,7 +586,7 @@ async function prepareOfficePayload(source: string | undefined, dataDir: string 
     await mkdir(path.dirname(target), { recursive: true })
     await cp(source, target, { recursive: true })
   }
-  return path.join(dataDir, OFFICE_PAYLOAD_ROOT, OFFICE_PRIMARY_RUNTIME_LEAF)
+  return primaryRuntime ?? path.join(dataDir, OFFICE_PAYLOAD_ROOT, OFFICE_PRIMARY_RUNTIME_LEAF)
 }
 
 /**
@@ -935,7 +948,11 @@ export class DshHost implements DshAppTarget {
     // failure here is a start failure with a reason, never a child that dies
     // several seconds later with its own.
     const args = web
-      ? webShapeArgs(this.options, await prepareOfficePayload(this.options.officeSkillsSource, this.options.userDataDir))
+      ? webShapeArgs(this.options, await prepareOfficePayload(
+        this.options.officeSkillsSource,
+        this.options.userDataDir,
+        this.options.officePrimaryRuntime,
+      ))
       : shapeArgs(shape, this.options)
     if (web) {
       // The one shape this shell cannot vary, echoed so a child that refuses it

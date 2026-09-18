@@ -86,6 +86,39 @@ the **Office skills payload** at `<kernelDir>/runtime/office-skills` — a 0.1.6
 host will not boot without `<assetRoot>/scripts/check_office.py`, so it is as
 mandatory as the host (meta layer).
 
+`build-runtime.mjs` keeps only the **target-scoped** payload (step 2e,
+`trimRuntimePayload`): the ported rules from upstream's desktop packaging drop
+source maps, `.d.ts`, build caches, `fs-ext` compiler output, domino test
+fixtures, other-platform node-pty prebuilds and the koffi import library. The
+trim runs BEFORE the file inventory and the tarball, so both describe what
+ships.
+
+**The LibreOffice engine is not in the runtime artifact at all.** The kit
+(`@deepseek-ai/libreoffice-kit` + its `…-kit-<platform>-<arch>` engine, ~330 MiB
+unpacked / ~115 MiB compressed) leaves the tree entirely and travels in a
+**second artifact**, `office-payload-<platform>-<arch>-<version>.tgz` (+
+`.sha512` and an `office-payload-<platform>-<arch>.json` sidecar), built by
+`buildOfficePayload` from the same assembled tree and uploaded to the same
+release. `@deepseek-ai/dsh-office-to-pdf` imports the kit **statically at module
+scope**, so the runtime keeps a tiny loader shim at that specifier
+(`scripts/runtime-stubs/libreoffice-kit`, staged by `stageOfficeKitShim`) which
+loads the real kit out of the installed payload at call time and refuses with an
+actionable error while it is absent — dropping the package without the shim
+makes the provider fail to LOAD, which reads as a plugin-tree fault, not as "the
+engine is not installed". The payload's own install/verify/prune lives in
+`src/kernel/office-payload.ts` (the settings row in 诊断 drives it; nothing
+downloads automatically). Its two version numbers are load-bearing: the asset
+name carries the dsh version (release assets are version-addressed, and the
+mirror's completeness check reads them that way), while `<userData>/dsh-app-office/payload/<version>`
+is named for the payload's CONTENT (kit version, plus the Python version when a
+Python set is carried) — that is what makes a kernel update or a rollback reuse
+the engine already on disk. `buildOfficePayload` installs the closure with its
+own pnpm project and `supportedArchitectures` naming the target, so a
+cross-target cell (win32-arm64 built on a windows x64 runner) gets ITS engine
+rather than the host's; a payload without the target's engine fails the build.
+A staged Python set (upstream's `primary-runtime`) rides the same artifact when
+`DSH_APP_PRIMARY_RUNTIME` names one — nothing in this repo produces one yet.
+
 Dependency installs: root changes use plain `npm install`; plugin-local installs
 use `--legacy-peer-deps` **inside the plugin dir only** (at the ROOT it prunes the
 peer-only tree and breaks `npm ci`); when switching kernel lines delete root
@@ -220,6 +253,7 @@ holds the full detail.
 | `GPU ≈ 0%` beside non-zero main + renderer — an injected script re-entering a loop per resolution, not a rendering problem | `window.ts` |
 | ~30 min to hours — npm dist-tag goes live **before** the runtime matrix finishes uploading, so "安装包尚未发布" in that window is expected | CI |
 | `scripts/publish-modelscope.mjs`, `scripts/diagnose-modelscope-upload.mjs` — manual mirror drills; CI uses the Python SDK in `.github/scripts/` | `scripts/` |
+| `办公文档转换引擎尚未安装` (code `unavailable`) — the runtime's kit shim ran: the office payload is not installed (or `DSH_APP_OFFICE_PAYLOAD` was not published). A MISSING SHIM instead makes the provider fail to load, which surfaces as a plugin-tree activation fault | `src/kernel/office-payload.ts`, `scripts/runtime-stubs/` |
 
 ## 6. Environment variables
 
@@ -233,13 +267,15 @@ holds the full detail.
 | `DSH_APP_HOST_REPO` — checkout the host source comes from at `dsh-v<DSH_VERSION>`, else sibling `../deepseek-harness` (`build-runtime.mjs`) |
 | `DSH_APP_HOST_REPO_URL` — clone URL, used only with no local checkout; empty disables cloning (`build-runtime.mjs`, CI `vars.*`) |
 | `DSH_APP_HOST_TAG` — tag the host source is taken from, default `dsh-v<DSH_VERSION>` (`build-runtime.mjs`, CI `vars.*`) |
-| `DSH_APP_CHANNEL` — kernel line: `alpha` → alpha tag, `beta` → `next`, else stable; at build time the cross-line override (`index.ts`, `kernel-line.mjs`, `build-runtime.mjs`) |
+| `DSH_APP_CHANNEL` — kernel line: `alpha` → alpha tag, `beta` → `next`, else stable; **unset** follows the bundled kernel's own manifest channel (`resources/kernel/manifest.json`, else the repo's `bundled-kernel/manifest.json`) and only falls back to stable with no readable manifest; at build time the cross-line override (`index.ts`, `kernel-line.mjs`, `build-runtime.mjs`) |
 | `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` — GitHub owner/repo hosting runtime artifacts (`shared/constants.ts`) |
 | `DSH_APP_SUITE_VERSION` — overrides the runtime manifest's content-hash suite version (`kernel-line.mjs`, `sources/dev.ts`) |
 | `DSH_APP_NPM_REGISTRIES` — comma-separated registry chain replacing the default (`sources/registry.ts`) |
 | `NPM_CONFIG_REGISTRY` — single-registry override; npmmirror still appended (`sources/registry.ts`) |
 | `DSH_APP_GITHUB_MIRRORS` — comma-separated mirror URL prefixes; empty disables mirrors (`sources/artifact.ts`, `updater.ts`) |
 | `DSH_APP_LOG_DIR` — log directory, default `<userData>` (logs in `<dir>/logs`) (`server.ts`, `index.ts`) |
+| `DSH_APP_PRIMARY_RUNTIME` — a staged Python set (upstream's `primary-runtime` tree, `runtime.json` required) to carry inside the office payload; unset means engine-only (`build-runtime.mjs`) |
+| `DSH_APP_OFFICE_PAYLOAD` — payload directory the shell publishes to the kernel child (`<userData>/dsh-app-office/payload/<version>`, set at spawn whether or not it is installed); read per conversion by the runtime's kit shim (`index.ts`, `scripts/runtime-stubs/libreoffice-kit`) |
 | `DSH_APP_PROXY_PORTS` — ports to probe, replacing the default list (`proxy-detect.ts`) |
 | `DSH_APP_PROXY_WATCHDOG_MS` — watchdog interval, default 30000 (`index.ts`) |
 | `DSH_HOME` — dsh profiles home, default `~/.dsh` (`brand-suite.ts`) |
@@ -266,9 +302,13 @@ Shell release — mechanics in `.github/workflows/release.yml`; the decisions:
 2. **Tag + push** `vX.Y.Z` = the `package.json` version.
 3. **Verify content before publishing** (green is not proof; the release stays a
    draft): all jobs green (prepare-release + 6 runtime + 4 app); the runtime log
-   prints `Runtime artifact ready: …` for the intended kernel; 6 cells with
-   sidecars matching the manifest `integrity` (`gh api
+   prints `Runtime artifact ready: …` **and `Office payload artifact ready: …`**
+   for the intended kernel; 6 cells with sidecars matching the manifest
+   `integrity` (`gh api
    repos/JochenYang/dsh-app/releases/tags/runtime-<v> --jq '.assets[].name'`).
+   Each cell must carry `office-payload-<cell>-<dshVersion>.tgz` (+ `.sha512`
+   and `office-payload-<cell>.json`) — without it that platform's office
+   conversion has no engine at all, and nothing else in the release turns red.
    The `runtime-<dshVersion>` release **must stay prerelease** —
    `/releases/latest` resolves to the newest non-prerelease release, and a runtime
    tag has no `latest.yml`, so it would break updates.
@@ -329,6 +369,14 @@ Runtime tags re-upload with `--clobber` and are safe to re-run. `gh run rerun
   and it misses the safe-mode / proxy / websearch work.
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing
   secrets must be supplied as CI secrets; `resources/icon.png` is a placeholder.
+- **Office payload**: the Python half (upstream's `primary-runtime` set) is wired
+  end to end — `DSH_APP_PRIMARY_RUNTIME` stages one into the payload, the shell
+  hands the child `<payload>/primary-runtime`, and an engine-only payload is the
+  normal case — but nothing in this repo PRODUCES one, so
+  `load_workspace_dependencies` still fails with the path it looked for. The
+  payload is also not bundled with the installer: a first run with no network
+  converts no documents until the 诊断 row downloads it (the engine is ~115 MiB
+  — deliberately not paid by users who never convert).
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version
   upgrades.
 - **The 0.1.6-alpha.2+ host line is not shipped-ready** — its packaged path is

@@ -24,6 +24,9 @@
  *   dsh-runtime-<platform>-<arch>-<version>.tgz
  *   dsh-runtime-<platform>-<arch>-<version>.tgz.sha512
  *   runtime-files-<platform>-<arch>.json — release-time copy of the inventory
+ *   office-payload-<platform>-<arch>-<version>.tgz (+ .sha512) — the LibreOffice
+ *     engine, installed on demand by the shell (see below)
+ *   office-payload-<platform>-<arch>.json — that artifact's release metadata
  *
  * The suite plugins (@dsh-app/plugin-*) join the runtime as tarballs produced
  * by `npm pack`, referenced through file: specs that `overrides` also point at,
@@ -43,11 +46,23 @@
  * One payload the host needs is neither a package nor optional:
  *   - the Office skills (packages/skill/skill-office/assets in a harness
  *     checkout), staged beside the kernel tree as `runtime/office-skills` (see
- *     stageOfficePayload). The host derives its skill asset root from its
+ *     stageOfficeSkills). The host derives its skill asset root from its
  *     primary-runtime argument — `join(dirname(<kernelDir>/app), 'office-skills')`
  *     — and @deepseek-ai/dsh-skill-office THROWS at boot when
  *     `<assetRoot>/scripts/check_office.py` is absent, so a runtime shipped
  *     without it dies a few seconds into the first start.
+ *
+ * One payload the OFFICE PROVIDER needs is deliberately NOT in the tree:
+ *   - the LibreOffice engine (@deepseek-ai/libreoffice-kit + its per-platform
+ *     `…-kit-<platform>-<arch>` package, ~330 MiB unpacked). It is only needed
+ *     when a document is actually converted, so it travels in a SECOND artifact
+ *     (`office-payload-<platform>-<arch>-<version>.tgz`, built by
+ *     buildOfficePayload) that the shell downloads on demand and installs under
+ *     its own data directory. @deepseek-ai/dsh-office-to-pdf imports the kit
+ *     STATICALLY at module scope, so the runtime keeps a tiny loader shim at
+ *     that specifier instead (stageOfficeKitShim) — without it the provider
+ *     entry fails to LOAD, which is a different failure from "no engine
+ *     installed" and much harder to explain. See scripts/lib/office-payload.mjs.
  *
  * Assembly is pnpm ≥ 10 with the hoisted linker (see "pnpm assembly" above
  * main()): a lockfile is generated first and asserted to hold no
@@ -62,6 +77,19 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { c as createTar, t as listTar, x as extractTar } from 'tar'
 import { collectTreeEntries } from './lib/tree-entry.mjs'
+import {
+  createOfficePayloadManifest,
+  kitEnginePackage,
+  officePayloadAssetName,
+  officePayloadManifestName,
+  officePayloadManifestProblems,
+  officePayloadRequiredFiles,
+  officePayloadVersion,
+  PAYLOAD_ARCHIVE_DIR,
+  PAYLOAD_MANIFEST_FILE,
+  PAYLOAD_MODULES_DIR,
+  PAYLOAD_PRIMARY_RUNTIME_DIR,
+} from './lib/office-payload.mjs'
 import {
   assertFollowedVersion,
   assertValidVersion,
@@ -435,18 +463,41 @@ const DESKTOP_HOST_PACKAGE = '@deepseek-ai/dsh-desktop-host'
 const DESKTOP_HOST_APP_DIR = 'apps/desktop-host'
 
 /** The Office skills inside a harness checkout — the payload the host reads beside itself. */
-const OFFICE_PAYLOAD_ASSETS = ['packages', 'skill', 'skill-office', 'assets']
+const OFFICE_SKILLS_ASSETS = ['packages', 'skill', 'skill-office', 'assets']
 
 /**
- * Where that payload lands inside the built runtime tree.
+ * The package that carries the LibreOffice engines, one optional dependency
+ * per platform/arch. Its own manifest is what `selectOfficeEngine` reads:
+ * whichever of `@deepseek-ai/libreoffice-kit-*` it declares for the target is
+ * the one the payload artifact stages for that target.
+ */
+const DESKTOP_OFFICE_KIT_PACKAGE = '@deepseek-ai/libreoffice-kit'
+
+/**
+ * The provider that imports the kit STATICALLY, at module scope. It is what
+ * makes the engine package non-optional in a different way: with no
+ * `@deepseek-ai/libreoffice-kit` resolvable at all, this package fails to load
+ * and the whole plugin entry is refused — so the runtime ships a stub under that
+ * specifier (see stageOfficeKitShim).
+ */
+const DESKTOP_OFFICE_PROVIDER_PACKAGE = '@deepseek-ai/dsh-office-to-pdf'
+
+/** Where the runtime's stub of {@link DESKTOP_OFFICE_KIT_PACKAGE} comes from in this repo. */
+const OFFICE_KIT_STUB_DIR = ['scripts', 'runtime-stubs', 'libreoffice-kit']
+
+/**
+ * Where the Office SKILLS land inside the built runtime tree.
  *
  * The shell hands the host `primaryRuntime = <kernelDir>/app` and
  * @deepseek-ai/dsh-skill-office takes its asset root from
  * `join(dirname(primaryRuntime), 'office-skills')`, so the directory has to sit
  * at `<kernelDir>/runtime/office-skills` — a path nothing else in the runtime
  * occupies, because the kernel tree itself is `<kernelDir>/app`.
+ *
+ * These are the four skill files (three SKILL.md and `scripts/check_office.py`),
+ * not the conversion engine: the engine is the separate payload artifact.
  */
-const OFFICE_PAYLOAD_DIR = 'runtime/office-skills'
+const OFFICE_SKILLS_DIR = 'runtime/office-skills'
 
 /**
  * Upstream repository, cloned only when no local checkout of it exists. The
@@ -502,13 +553,13 @@ function harnessCheckoutCandidates() {
  * explicit DSH_APP_HOST_CHECKOUT or DSH_APP_HOST_REPO wins; otherwise the first
  * sibling checkout that actually holds the payload.
  */
-function officePayloadCheckout() {
+function officeSkillsCheckout() {
   const explicit = (process.env.DSH_APP_HOST_CHECKOUT ?? '').trim()
   if (explicit !== '') return path.resolve(explicit)
   const configured = (process.env.DSH_APP_HOST_REPO ?? '').trim()
   if (configured !== '') return path.resolve(configured)
   const siblings = harnessCheckoutCandidates()
-  return siblings.find((dir) => existsSync(path.join(dir, ...OFFICE_PAYLOAD_ASSETS))) ?? siblings[0]
+  return siblings.find((dir) => existsSync(path.join(dir, ...OFFICE_SKILLS_ASSETS))) ?? siblings[0]
 }
 
 /**
@@ -533,8 +584,8 @@ function officePayloadCheckout() {
  * @throws when the checkout does not carry the payload: skipping it would only
  *   move the failure to a user's machine, several seconds into the first boot.
  */
-async function stageOfficePayload(runtimeDir, checkoutDir) {
-  const source = path.join(checkoutDir, ...OFFICE_PAYLOAD_ASSETS)
+async function stageOfficeSkills(runtimeDir, checkoutDir) {
+  const source = path.join(checkoutDir, ...OFFICE_SKILLS_ASSETS)
   if (!existsSync(path.join(source, 'scripts', 'check_office.py'))) {
     throw new Error(
       `no office payload at ${source}: the desktop host refuses to start unless <primaryRuntime>/../office-skills `
@@ -542,7 +593,7 @@ async function stageOfficePayload(runtimeDir, checkoutDir) {
       + `(or DSH_APP_HOST_REPO) at a checkout of dsh ${DSH_VERSION}`,
     )
   }
-  const target = path.join(runtimeDir, OFFICE_PAYLOAD_DIR)
+  const target = path.join(runtimeDir, OFFICE_SKILLS_DIR)
   await rm(target, { recursive: true, force: true })
   await cp(source, target, { recursive: true })
   // Asserted at the destination too: this is the path the child derives, and a
@@ -550,7 +601,7 @@ async function stageOfficePayload(runtimeDir, checkoutDir) {
   if (!existsSync(path.join(target, 'scripts', 'check_office.py'))) {
     throw new Error(`the staged office payload at ${target} holds no scripts/check_office.py`)
   }
-  console.log(`[build-runtime] office payload: ${source} -> ${OFFICE_PAYLOAD_DIR}`)
+  console.log(`[build-runtime] office payload: ${source} -> ${OFFICE_SKILLS_DIR}`)
   return target
 }
 
@@ -881,7 +932,7 @@ async function concretizeHostWorkspaceSpecs(tarball, manifest, versions) {
  * pnpm cannot install them at all.
  *
  * The office payload the same host refuses to start without is staged here too
- * (see stageOfficePayload): it belongs to the kernel line, so it has to come
+ * (see stageOfficeSkills): it belongs to the kernel line, so it has to come
  * from the same checkout the host was packed from.
  *
  * @param destDir - directory to pack into (the pnpm project's pkgs/).
@@ -908,8 +959,8 @@ async function packDesktopHost(destDir, workRoot, runtimeDir) {
     if (path.resolve(target) !== path.resolve(prebuilt)) await cp(prebuilt, target)
     tarball = target
     // This path brings no checkout of the kernel line, so the payload has to be
-    // resolved on its own (see officePayloadCheckout).
-    await stageOfficePayload(runtimeDir, officePayloadCheckout())
+    // resolved on its own (see officeSkillsCheckout).
+    await stageOfficeSkills(runtimeDir, officeSkillsCheckout())
   } else {
     const source = await prepareDesktopHostSource(workRoot)
     origin = source.origin
@@ -918,7 +969,7 @@ async function packDesktopHost(destDir, workRoot, runtimeDir) {
       const appDir = await buildDesktopHostApp(source.dir)
       // Before the disposer runs: the checkout is the only place the payload
       // exists, and a worktree is removed with it.
-      await stageOfficePayload(runtimeDir, source.dir)
+      await stageOfficeSkills(runtimeDir, source.dir)
       const packed = JSON.parse(capture(npmBin(), ['pack', '--json', '--pack-destination', destDir], appDir))
       const filename = packed?.[0]?.filename
       if (typeof filename !== 'string') throw new Error(`npm pack produced no file name for ${DESKTOP_HOST_PACKAGE}`)
@@ -1178,6 +1229,466 @@ async function writeFileInventory(runtimeDir, manifest) {
   return inventory
 }
 
+/**
+ * Which engine package the target loads: the LibreOffice kit the office payload
+ * carries, plus the engine for THIS platform.
+ *
+ * Ported from the upstream desktop packaging
+ * (apps/desktop/scripts/prepare-dsh.ts and scripts/libreoffice-engine.ts):
+ * `@deepseek-ai/libreoffice-kit` declares one optional dependency per engine
+ * (`…-win32-x64`, `…-darwin-arm64`, `…-wasm`, …) and each of those packages
+ * carries its own platform/arch fields. Reading the SAME declaration answers
+ * which one the target needs — no table of platforms lives here, and a new
+ * engine upstream adds is handled without an edit. A target the kit declares no
+ * native engine for falls back to `wasm`, which is what the kit itself does.
+ * (buildOfficePayload installs it with `supportedArchitectures` naming the
+ * target, so a cross-target cell gets the target's engine rather than the build
+ * host's.)
+ *
+ * @param kitManifest - the installed kit's package.json.
+ * @param platform - Node platform of the artifact being built.
+ * @param arch - Node arch of the artifact being built.
+ * @returns engine suffix as it appears in the engine package name.
+ */
+function selectOfficeEngine(kitManifest, platform, arch) {
+  const native = `${platform}-${arch}`
+  const declared = kitManifest?.optionalDependencies ?? {}
+  return Object.hasOwn(declared, `@deepseek-ai/libreoffice-kit-${native}`) ? native : 'wasm'
+}
+
+/**
+ * Why one path inside the runtime's `app/node_modules` must not ship, or
+ * undefined when the entry is payload.
+ *
+ * Ported rule for rule from the upstream desktop runtime
+ * (apps/desktop/scripts/runtime-file-policy.ts, which decides what their
+ * `cpSync` filter copies): upstream ships the same dsh package tree this build
+ * assembles and boots it as its desktop runtime, so the omissions are known to
+ * be safe for exactly this payload — build and diagnostic files (source maps,
+ * type declarations, build caches, compiler output) and native binaries for
+ * platforms the artifact will never run on. What a target NEEDS is never
+ * excluded: the node-pty prebuild it dlopens and anything unrecognized stay.
+ *
+ * One rule goes FURTHER than upstream's, and deliberately: the whole
+ * LibreOffice kit (the API package and every engine package) leaves the runtime
+ * for the separate payload artifact. Upstream keeps the target's engine inside
+ * its desktop runtime; we cannot, because the shell installs that engine on
+ * demand — a user who never converts a document must not download 115 MiB of it
+ * with every kernel update. The runtime keeps a loader shim at the specifier
+ * the provider imports (see stageOfficeKitShim).
+ *
+ * @param relativePath - path relative to the runtime's app/node_modules.
+ * @param target - platform and arch of the artifact being built.
+ * @returns the reason it is omitted, for the build log.
+ */
+function runtimeFileExclusion(relativePath, target) {
+  const parts = relativePath.split(/[\\/]/u)
+  if (parts.some((part) => ['.bin', '.pnpm', '.modules.yaml', '.pnpm-workspace-state-v1.json'].includes(part))) {
+    return 'package-manager metadata'
+  }
+  const file = parts.at(-1) ?? ''
+  if (/\.(?:[cm]?[jt]s|css)\.map$/u.test(file)) return 'source map'
+  if (/\.d\.[cm]?ts$/u.test(file)) return 'TypeScript declaration'
+  if (/\.tsbuildinfo$/u.test(file)) return 'TypeScript build cache'
+  // The package the entry belongs to, resolved from the LAST node_modules
+  // segment so a nested tree is read as its own package.
+  const packageParts = parts.slice(parts.lastIndexOf('node_modules') + 1)
+  const nameParts = packageParts[0]?.startsWith('@') ? 2 : 1
+  const name = packageParts.slice(0, nameParts).join('/')
+  const entry = packageParts.slice(nameParts).join('/')
+  if (name === DESKTOP_OFFICE_KIT_PACKAGE || name.startsWith(`${DESKTOP_OFFICE_KIT_PACKAGE}-`)) {
+    // The whole kit: the API package AND every engine. All of it moves to the
+    // on-demand payload artifact, whose install is what the runtime's stub
+    // loads (see buildOfficePayload / stageOfficeKitShim). `officeEngine` is no
+    // longer consulted here — it selects what the PAYLOAD stages, not what the
+    // runtime keeps.
+    return 'LibreOffice engine (separate artifact)'
+  }
+  if (name === 'fs-ext' && /^build\/(?:Release|Debug)\/(?:obj(?:\/|$)|fs_ext\.(?:exp|lib|pdb|iobj|ipdb)$)/u.test(entry)) {
+    return 'fs-ext compiler output'
+  }
+  if (name === 'fs-ext' && /^build\/(?:binding\.sln|config\.gypi|fs_ext\.vcxproj(?:\.filters)?)$/u.test(entry)) {
+    return 'fs-ext build configuration'
+  }
+  if (name === '@mixmark-io/domino' && (entry === 'test' || entry.startsWith('test/'))) return 'Domino test fixtures'
+  if (name === 'node-pty' && entry.startsWith('prebuilds/')) {
+    const platform = packageParts[nameParts + 1]
+    if (platform !== undefined && platform !== `${target.platform}-${target.arch}`) return 'node-pty other platform'
+    if (file.endsWith('.pdb')) return 'node-pty debug symbols'
+  }
+  if (name === '@koromix/koffi-win32-x64' && entry === 'win32_x64/koffi.lib') return 'Koffi import library'
+  return undefined
+}
+
+/** Recursively remove a directory's entries that must not ship. */
+async function pruneRuntimeTree(dir, root, target, dropped) {
+  let kept = 0
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      const survivors = await pruneRuntimeTree(full, root, target, dropped)
+      if (survivors === 0) {
+        await rm(full, { recursive: true, force: true })
+        continue
+      }
+      kept += 1
+      continue
+    }
+    const relative = path.relative(root, full)
+    const reason = runtimeFileExclusion(relative, target)
+    if (reason === undefined) {
+      kept += 1
+      continue
+    }
+    const record = dropped.get(reason) ?? { files: 0, bytes: 0 }
+    record.files += 1
+    record.bytes += statSync(full, { throwIfNoEntry: false })?.size ?? 0
+    dropped.set(reason, record)
+    await rm(full, { force: true })
+  }
+  return kept
+}
+
+/**
+ * Keep only the payload this target needs inside the assembled runtime's
+ * `app/node_modules`, and report what was dropped.
+ *
+ * The artifact is a per-platform bundle (platform/arch travel in its manifest,
+ * the installer ships one, and `assertLayerTarget` refuses a foreign one), so
+ * carrying another platform's binaries — or anything that is only ever read
+ * while developing — is payload the user downloads and never runs. This runs
+ * BEFORE the file inventory and the tarball, so both describe exactly what
+ * ships: the inventory has no entry for a path that is not there, and the
+ * layer split reassembles the tree the clients actually receive.
+ *
+ * The LibreOffice kit goes further than "wrong platform": it leaves the runtime
+ * entirely (see runtimeFileExclusion), because the shell installs the engine on
+ * demand. What must NOT leave is the provider that imports it statically — the
+ * stub stageOfficeKitShim writes in its place — so the absence is asserted here,
+ * right after the rule that produces it.
+ *
+ * @param runtimeDir - the runtime tree being assembled (the kernel dir).
+ * @param platform - target platform of this artifact.
+ * @param arch - target arch of this artifact.
+ */
+async function trimRuntimePayload(runtimeDir, platform, arch) {
+  const modulesDir = path.join(runtimeDir, 'app', 'node_modules')
+  if (!existsSync(modulesDir)) return
+  const dropped = new Map()
+  await pruneRuntimeTree(modulesDir, modulesDir, { platform, arch }, dropped)
+  const totals = [...dropped.values()].reduce((sum, record) => ({ files: sum.files + record.files, bytes: sum.bytes + record.bytes }), { files: 0, bytes: 0 })
+  if (totals.files > 0) {
+    const detail = [...dropped.entries()]
+      .sort((a, b) => b[1].bytes - a[1].bytes)
+      .map(([reason, record]) => `${reason} ${record.files} (${formatBytes(record.bytes)})`)
+      .join(', ')
+    console.log(`[build-runtime] trimmed ${platform}-${arch} payload: ${totals.files} files, ${formatBytes(totals.bytes)} (${detail})`)
+  } else {
+    console.log(`[build-runtime] trimmed ${platform}-${arch} payload: nothing to drop`)
+  }
+  // "The rules dropped every engine" and "the install never had one" fail the
+  // same way on a user's machine — a payload that cannot be resolved — so a
+  // leftover engine package is treated as a rule gap, not as a bonus copy: it
+  // would ship ~330 MiB the payload artifact already carries, under a path the
+  // shell's install never updates.
+  const leftover = readdirSync(path.join(modulesDir, '@deepseek-ai'), { withFileTypes: true })
+    .map((entry) => entry.name)
+    .filter((name) => name === 'libreoffice-kit' || name.startsWith('libreoffice-kit-'))
+  if (leftover.length > 0) {
+    throw new Error(`the runtime tree still holds ${leftover.join(', ')} after the trim — the payload exclusion is incomplete`)
+  }
+}
+
+/**
+ * Put the kit loader shim where the provider imports it.
+ *
+ * `@deepseek-ai/dsh-office-to-pdf` imports `@deepseek-ai/libreoffice-kit` at
+ * module scope, so with the real package gone the specifier must still resolve:
+ * a runtime without it makes that plugin fail to LOAD, which surfaces as "the
+ * plugin tree did not activate" rather than as "the engine is not installed".
+ * The shim is a few hundred bytes that load the real kit out of the installed
+ * payload at call time and refuse with an actionable message while it is absent
+ * (scripts/runtime-stubs/libreoffice-kit).
+ *
+ * Written only when the provider is actually in the tree — the shim exists for
+ * that one importer, and a package nothing imports is payload too.
+ *
+ * @param runtimeDir - the runtime tree being assembled (the kernel dir).
+ * @returns the absolute stub directory, or null when no provider needs it.
+ */
+async function stageOfficeKitShim(runtimeDir) {
+  const modulesDir = path.join(runtimeDir, 'app', 'node_modules')
+  const providerDir = path.join(modulesDir, ...DESKTOP_OFFICE_PROVIDER_PACKAGE.split('/'))
+  if (!existsSync(path.join(providerDir, 'package.json'))) {
+    console.log(`[build-runtime] no ${DESKTOP_OFFICE_PROVIDER_PACKAGE} in the tree; no kit shim needed`)
+    return null
+  }
+  const source = path.join(root, ...OFFICE_KIT_STUB_DIR)
+  const target = path.join(modulesDir, ...DESKTOP_OFFICE_KIT_PACKAGE.split('/'))
+  if (!existsSync(path.join(source, 'index.js'))) {
+    throw new Error(`the kit shim is missing from ${source} — a runtime without it cannot load ${DESKTOP_OFFICE_PROVIDER_PACKAGE}`)
+  }
+  // The trim removed the directory; removing it again keeps this idempotent if
+  // the rule ever changes.
+  await rm(target, { recursive: true, force: true })
+  await cp(source, target, { recursive: true })
+  for (const file of ['package.json', 'index.js']) {
+    if (!existsSync(path.join(target, file))) throw new Error(`the staged kit shim at ${target} is missing ${file}`)
+  }
+  console.log(`[build-runtime] LibreOffice kit shim: ${OFFICE_KIT_STUB_DIR.join('/')} -> app/node_modules/${DESKTOP_OFFICE_KIT_PACKAGE}`)
+  return target
+}
+
+/** sha512 (hex) of a file, streamed so a 100 MiB artifact is never buffered. */
+async function sha512File(file) {
+  const hash = createHash('sha512')
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(file)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('end', resolve)
+    stream.on('error', reject)
+  })
+  return hash.digest('hex')
+}
+
+/** One package key of a pnpm-lock.yaml `packages:` section, or undefined. */
+function lockfilePackages(lockfileText) {
+  const entries = []
+  let inPackages = false
+  for (const line of lockfileText.split(/\r?\n/u)) {
+    if (/^packages:\s*$/u.test(line)) { inPackages = true; continue }
+    if (!inPackages) continue
+    if (/^\S/u.test(line)) break // next top-level section (snapshots:)
+    const raw = /^ {2}(\S.*?):\s*$/u.exec(line)?.[1]
+    if (raw === undefined) continue
+    const key = (raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"'))
+      ? raw.slice(1, -1)
+      : raw
+    const at = key.lastIndexOf('@')
+    if (at <= 0) throw new Error(`unexpected package key in pnpm-lock.yaml: ${key}`)
+    entries.push({ name: key.slice(0, at), version: key.slice(at + 1) })
+  }
+  return entries
+}
+
+/**
+ * Where a staged Python set comes from, or null when none is staged.
+ *
+ * `DSH_APP_PRIMARY_RUNTIME` names one explicitly (upstream's packaging stages
+ * it at `<resources>/runtime/primary-runtime`; see its
+ * `apps/desktop/scripts/prepare-primary-runtime.ts`). Nothing in THIS repo
+ * produces one — the shell has never shipped a Python set — so the normal
+ * answer is null and the payload carries the engine alone. A caller who stages
+ * one gets it inside the payload, where the host's `load_workspace_dependencies`
+ * tool finds it as the child's primary-runtime argument.
+ *
+ * @returns absolute path of the staged set, or null.
+ * @throws when the variable names something that is not a primary runtime.
+ */
+function primaryRuntimeSource() {
+  const configured = (process.env.DSH_APP_PRIMARY_RUNTIME ?? '').trim()
+  if (configured === '') return null
+  const source = path.resolve(configured)
+  if (!existsSync(path.join(source, 'runtime.json'))) {
+    throw new Error(`DSH_APP_PRIMARY_RUNTIME names ${source}, which holds no runtime.json — that is not a staged primary runtime`)
+  }
+  return source
+}
+
+/**
+ * Build the office payload artifact: the LibreOffice kit, the target's engine,
+ * and — when one is staged — the Python set the office skills run on.
+ *
+ * This is the half of "the runtime no longer carries the engine" that makes the
+ * other half usable: the shell resolves this artifact through the SAME release
+ * metadata chain as the runtime (official host first, mirrors as transport
+ * only), verifies its sha512 and installs it under `<userData>/dsh-app-office`.
+ *
+ * The closure comes from a pnpm install of its own, not from a hand-picked list
+ * of files: the kit's dependencies (fflate, fontkit, saxes and their own
+ * closures) must resolve from beside the kit inside the payload, because the
+ * payload is extracted OUTSIDE the runtime tree — Node would never reach
+ * `app/node_modules` from there. `supportedArchitectures` makes pnpm install the
+ * TARGET's engine even when the cell builds cross-target (windows-latest builds
+ * win32-arm64), which is what the previous, in-tree arrangement could not do: it
+ * could only keep an engine the build host itself had installed.
+ *
+ * @param work - build work directory (disposable).
+ * @param runtimeDir - the assembled runtime tree, read for the kit's version.
+ * @param platform - target platform of this artifact.
+ * @param arch - target arch of this artifact.
+ * @returns the payload manifest plus the artifact paths and size.
+ * @throws when the payload would be unusable — no kit to copy or no engine for
+ *   the target: an engine-less payload artifact answers nothing, and shipping
+ *   one silently is worse than failing the cell that would produce it.
+ */
+async function buildOfficePayload(work, runtimeDir, platform, arch) {
+  const modulesDir = path.join(runtimeDir, 'app', 'node_modules')
+  const providerInstalled = existsSync(path.join(modulesDir, ...DESKTOP_OFFICE_PROVIDER_PACKAGE.split('/'), 'package.json'))
+  const kitManifestPath = path.join(modulesDir, ...DESKTOP_OFFICE_KIT_PACKAGE.split('/'), 'package.json')
+  if (!existsSync(kitManifestPath)) {
+    // A line without the office provider needs no payload and no shim; one WITH
+    // the provider but no kit is a broken install, and the payload is the only
+    // way that provider can ever work.
+    if (!providerInstalled) {
+      console.log(`[build-runtime] no ${DESKTOP_OFFICE_PROVIDER_PACKAGE} in the tree; no office payload for this line`)
+      return null
+    }
+    throw new Error(`no ${DESKTOP_OFFICE_KIT_PACKAGE} in the assembled tree (${kitManifestPath}) — ${DESKTOP_OFFICE_PROVIDER_PACKAGE} imports it and the payload has nothing to carry`)
+  }
+  let kitManifest
+  try {
+    kitManifest = JSON.parse(readFileSync(kitManifestPath, 'utf8'))
+  } catch (err) {
+    throw new Error(`cannot read ${kitManifestPath}: ${err.message}`, { cause: err })
+  }
+  const kitVersion = kitManifest.version
+  if (typeof kitVersion !== 'string' || kitVersion === '') {
+    throw new Error(`${kitManifestPath} declares no version — the payload cannot be identified`)
+  }
+  const engine = selectOfficeEngine(kitManifest, platform, arch)
+  const python = primaryRuntimeSource()
+  const pythonVersion = python === null
+    ? null
+    : JSON.parse(await readFile(path.join(python, 'runtime.json'), 'utf8'))?.components?.python ?? null
+  if (python !== null && (typeof pythonVersion !== 'string' || pythonVersion === '')) {
+    throw new Error(`the staged primary runtime at ${python} declares no components.python`)
+  }
+  const payloadVersion = officePayloadVersion(kitVersion, pythonVersion)
+
+  // The install project: one dependency, pinned by an override so the lockfile
+  // assertion below can prove the tree holds exactly that kit.
+  const projectDir = path.join(work, 'payload-project')
+  await rm(projectDir, { recursive: true, force: true })
+  await mkdir(projectDir, { recursive: true })
+  await writeFile(path.join(projectDir, 'package.json'), JSON.stringify({
+    name: 'dsh-app-office-payload',
+    private: true,
+    version: kitVersion,
+    dependencies: { [DESKTOP_OFFICE_KIT_PACKAGE]: kitVersion },
+  }, null, 2))
+  await writeFile(path.join(projectDir, 'pnpm-workspace.yaml'), [
+    'packages:',
+    "  - '.'",
+    '',
+    '# Flat node_modules: the payload is extracted outside the runtime tree, so',
+    '# the kit resolves its own dependencies (and its engine) from beside itself.',
+    'nodeLinker: hoisted',
+    '',
+    '# See the note in the runtime assembly below: the resolution must not move',
+    '# with the build date.',
+    'minimumReleaseAge: 0',
+    '',
+    '# The engine for the TARGET, even when this cell builds cross-target',
+    '# (windows-latest builds win32-arm64). The engine packages carry os/cpu',
+    '# fields, so without this pnpm installs only the build host\'s own engine.',
+    'supportedArchitectures:',
+    '  os:',
+    `    - ${platform}`,
+    '  cpu:',
+    `    - ${arch}`,
+    '',
+    'overrides:',
+    `  '${DESKTOP_OFFICE_KIT_PACKAGE}': '${kitVersion}'`,
+    '',
+  ].join('\n'))
+
+  const registry = registryUrl()
+  const installArgs = ['install', '--registry', registry, '--package-import-method=copy']
+  run(pnpmBin(), [...installArgs, '--lockfile-only'], projectDir)
+  const locked = lockfilePackages(await readFile(path.join(projectDir, 'pnpm-lock.yaml'), 'utf8'))
+  if (locked.length === 0) throw new Error('the payload lockfile has no packages: section — it is not usable')
+  const kitEntries = locked.filter((entry) => entry.name === DESKTOP_OFFICE_KIT_PACKAGE)
+  if (kitEntries.length !== 1 || kitEntries[0].version !== kitVersion) {
+    throw new Error(
+      `the payload lockfile resolved ${kitEntries.map((entry) => `${entry.name}@${entry.version}`).join(', ') || 'no kit'}`
+      + `, expected exactly ${DESKTOP_OFFICE_KIT_PACKAGE}@${kitVersion}`,
+    )
+  }
+  const stray = locked.filter((entry) => KERNEL_PACKAGE.test(entry.name))
+  if (stray.length > 0) {
+    throw new Error(`the payload lockfile pulled kernel packages (${stray.map((entry) => entry.name).join(', ')}) — the payload must depend on the kit alone`)
+  }
+  run(pnpmBin(), [...installArgs, '--prod', '--frozen-lockfile', '--trust-lockfile'], projectDir)
+
+  // The tree that becomes the archive: payload/ with the manifest, the
+  // installed closure and — when staged — the Python set.
+  const payloadDir = path.join(work, PAYLOAD_ARCHIVE_DIR)
+  await rm(payloadDir, { recursive: true, force: true })
+  await mkdir(payloadDir, { recursive: true })
+  const payloadModulesDir = path.join(payloadDir, PAYLOAD_MODULES_DIR)
+  await rename(path.join(projectDir, 'node_modules'), payloadModulesDir)
+  // Build-only pnpm state, exactly as the runtime assembly drops it (step 2c):
+  // `.modules.yaml` records the store and virtual-store paths of the machine
+  // that built the artifact AND a `prunedAt` timestamp, which would make two
+  // builds of identical content differ byte for byte — the artifact's sha512 is
+  // verified against the release sidecar, so an unreproducible payload is not
+  // dangerous, but a machine-layout leak in a published file is pointless.
+  // `.bin` is kept when present: it is a payload question, not bookkeeping.
+  for (const entry of await readdir(payloadModulesDir, { withFileTypes: true })) {
+    if (!entry.name.startsWith('.') || entry.name === '.bin') continue
+    if (['.modules.yaml', '.pnpm', '.pnpm-workspace-state-v1.json', '.pnpm-workspace-state.json'].includes(entry.name)) {
+      await rm(path.join(payloadModulesDir, entry.name), { recursive: true, force: true })
+      continue
+    }
+    console.warn(`[build-runtime] unexpected dot entry in the payload's node_modules: ${entry.name} — kept, please review`)
+  }
+  if (python !== null) {
+    await cp(python, path.join(payloadDir, PAYLOAD_PRIMARY_RUNTIME_DIR), { recursive: true })
+  }
+  const manifest = createOfficePayloadManifest({
+    payloadVersion, dshVersion: DSH_VERSION, platform, arch,
+    kitVersion, engine, pythonVersion,
+  })
+  // Self-check against the same rules the shell applies to what it extracts
+  // (officePayloadManifestProblems): the two halves of this contract are
+  // separate implementations, and this is the only place the build can notice
+  // it wrote a manifest the client would refuse.
+  const manifestProblems = officePayloadManifestProblems(manifest, { platform, arch, engine }, payloadVersion)
+  if (manifestProblems.length > 0) {
+    throw new Error(`the payload manifest this build produced is not usable: ${manifestProblems.join('; ')}`)
+  }
+  await writeFile(path.join(payloadDir, PAYLOAD_MANIFEST_FILE), JSON.stringify(manifest, null, 2))
+
+  const missing = officePayloadRequiredFiles(engine).filter((relative) => !existsSync(path.join(payloadDir, relative)))
+  if (missing.length > 0) {
+    throw new Error(
+      `the payload for ${platform}-${arch} is missing ${missing.join(', ')}: no ${kitEnginePackage(engine)} engine was installed. `
+      + 'The kit declares one engine package per target in its optionalDependencies, and pnpm installs the one '
+      + `supportedArchitectures names — a failure here means no engine is published for ${platform}-${arch} `
+      + '(or the kit does not declare one). An engine-less payload artifact cannot convert anything, refusing to publish it',
+    )
+  }
+  const archiveBytes = await directorySize(payloadDir)
+  console.log(
+    `[build-runtime] office payload ${payloadVersion}: kit ${kitVersion}, engine ${engine}, `
+    + `python ${pythonVersion ?? 'none'} (${formatBytes(archiveBytes)} unpacked)`,
+  )
+
+  const tgzPath = path.join(root, 'runtime-dist', officePayloadAssetName(platform, arch, DSH_VERSION))
+  await createTar({ gzip: true, file: tgzPath, cwd: work, portable: true, mtime: new Date(0) }, [PAYLOAD_ARCHIVE_DIR])
+  const sha512 = await sha512File(tgzPath)
+  await writeFile(`${tgzPath}.sha512`, `${sha512}\n`)
+  // The release metadata copy carries what the in-archive manifest must not:
+  // integrity of the archive containing it, and a build timestamp.
+  await writeFile(
+    path.join(root, 'runtime-dist', officePayloadManifestName(platform, arch)),
+    `${JSON.stringify({ ...manifest, integrity: sha512, publishedAt: new Date().toISOString() }, null, 2)}\n`,
+  )
+  return { manifest, tgzPath, sha512, bytes: statSync(tgzPath).size, unpackedBytes: archiveBytes }
+}
+
+/** Total byte size of every file under a tree. */
+async function directorySize(dir) {
+  let total = 0
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) total += await directorySize(full)
+    else total += statSync(full, { throwIfNoEntry: false })?.size ?? 0
+  }
+  return total
+}
+
 async function main() {
   const work = path.join(root, 'runtime-dist', 'work')
   const runtimeDir = path.join(work, 'runtime')
@@ -1365,7 +1876,9 @@ async function main() {
   // `file:pkgs/...` specs are kept verbatim (they name the tarballs the suite
   // came from — the pkgs/ directory itself is build-only and is not shipped).
   await cp(path.join(projectDir, 'package.json'), path.join(runtimeDir, 'app', 'package.json'))
-  // Build-only pnpm state inside node_modules. .bin stays: npm produced it too.
+  // Build-only pnpm state inside node_modules. .bin stays here — it is a
+  // payload question, not bookkeeping, and step 2d decides it with the rest of
+  // the target-scoped omissions.
   for (const entry of await readdir(nmDir, { withFileTypes: true })) {
     if (!entry.name.startsWith('.') || entry.name === '.bin') continue
     if (['.modules.yaml', '.pnpm', '.pnpm-workspace-state-v1.json', '.pnpm-workspace-state.json'].includes(entry.name)) {
@@ -1376,6 +1889,26 @@ async function main() {
     // it would ship) or a package with a leading dot: say so instead of guessing.
     console.warn(`[build-runtime] unexpected dot entry in node_modules: ${entry.name} — kept, please review`)
   }
+
+  // 2d. The office payload, from the tree that still has the kit: the engine
+  //     (~330 MiB unpacked) leaves the runtime for its own artifact here, and
+  //     the trim below is what actually drops it. The payload is built FIRST
+  //     because it reads the kit's version and engine declaration out of the
+  //     assembled tree.
+  const officePayload = await buildOfficePayload(work, runtimeDir, platform, arch)
+
+  // 2e. Target-scoped payload: drop what this platform/arch can never load —
+  //     above all the whole LibreOffice kit, which now travels in the payload
+  //     artifact above — plus the build and diagnostic files that only matter to
+  //     a developer. Runs before the inventory below, so the inventory and the
+  //     tarball describe the same tree, and before the layer split, which reads
+  //     the artifact.
+  await trimRuntimePayload(runtimeDir, platform, arch)
+
+  // 2f. The loader shim that keeps `@deepseek-ai/dsh-office-to-pdf` loadable
+  //     now that the real kit is gone. AFTER the trim, because the trim is what
+  //     removes the package it replaces.
+  await stageOfficeKitShim(runtimeDir)
 
   // 3. Runtime manifest. No publishedAt here: every byte of the in-archive
   //    manifest must be a function of content, or the artifact sha512 changes
@@ -1395,6 +1928,17 @@ async function main() {
     // built before the field existed read as "unknown", which keeps the
     // bundled binary — an older kernel keeps working unchanged.
     node: process.version.replace(/^v/, ''),
+    // The office payload artifact this kernel needs, for the shell to resolve
+    // and install on demand. Named fields rather than a bare version string:
+    // the shell reports them, and a payload built for another cell must be
+    // refusable before a byte is downloaded.
+    ...(officePayload === null ? {} : { officePayload: {
+      version: officePayload.manifest.payloadVersion,
+      platform: officePayload.manifest.platform,
+      arch: officePayload.manifest.arch,
+      engine: officePayload.manifest.components.engine,
+      python: officePayload.manifest.components.python,
+    } }),
     integrity: '', // filled after tarring
     source: 'artifact',
   }
@@ -1447,8 +1991,19 @@ async function main() {
   await writeFile(path.join(root, 'runtime-dist', 'manifest.json'), JSON.stringify(manifest, null, 2))
 
   console.log(`\nRuntime artifact ready: ${tgzPath}`)
+  console.log(`runtime size: ${formatBytes(statSync(tgzPath).size)} (${inventory.fileCount} files, ${formatBytes(unpackedRuntimeBytes(inventory))} unpacked)`)
   console.log(`sha512: ${sha512}`)
+  if (officePayload !== null) {
+    console.log(`\nOffice payload artifact ready: ${officePayload.tgzPath}`)
+    console.log(`payload size: ${formatBytes(officePayload.bytes)} (${formatBytes(officePayload.unpackedBytes)} unpacked), version ${officePayload.manifest.payloadVersion}, engine ${officePayload.manifest.components.engine}`)
+    console.log(`payload sha512: ${officePayload.sha512}`)
+  }
   await rm(work, { recursive: true, force: true })
+}
+
+/** Sum of the inventory's file sizes — the unpacked runtime, as the artifact ships it. */
+function unpackedRuntimeBytes(inventory) {
+  return inventory.files.reduce((total, file) => total + file.size, 0)
 }
 
 main().catch((err) => {

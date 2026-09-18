@@ -10,7 +10,7 @@ working.
 | Package | Side | Role |
 |---|---|---|
 | `plugin-brand` | host | **scaffold** — settings namespace, app-info service and desktop bridge are declared but not wired yet; the shell injects desktop chrome directly |
-| `plugin-client-ui` | client | brand theme, brand Models settings section |
+| `plugin-client-ui` | client | brand theme, brand Models settings section, Diagnostics page (desktop-feature status, kernel log tail, diagnostics export, office-components row) |
 | `plugin-sidebar` | dual | Git panel as a native conversation-view tab (the file tree was retired: upstream ships file management natively) |
 | `plugin-swarm` | host | batch parallel subagent orchestration (`swarm` tool + `/swarm` command), adaptive concurrency, per-item retry |
 | `plugin-usage` | dual | usage capture over session logs + settings-page balance card, heatmap, daily trend chart |

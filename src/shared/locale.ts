@@ -285,6 +285,20 @@ const ZH_CN = {
   'downloadFailure.network': '无法连接任何更新源（{sources}：GitHub 与镜像均不可达）。请检查网络与代理设置，或稍后重试。',
   'downloadFailure.sources': '已尝试 {count} 个来源',
   'downloadFailure.reason': '\n原因：{detail}',
+
+  // ------------------------------------------------------- office payload
+  // The LibreOffice engine the kernel converts office documents with. It is a
+  // separate, on-demand download (see src/kernel/office-payload.ts), so these
+  // lines are what the settings row and the failure answers say.
+  'officePayload.status.unsupported': '当前内核未声明办公组件（开发模式或旧内核），无需下载',
+  'officePayload.status.missing': '未安装（需要 v{version}）',
+  'officePayload.status.installed': '已安装 v{version}',
+  'officePayload.status.downloading': '下载中 {percent}%',
+  'officePayload.status.installing': '正在安装办公组件…',
+  'officePayload.artifactMissing': '未找到办公组件产物 office-payload-{platform}-{arch}-{dshVersion}.tgz，可能尚未发布，请稍后重试',
+  'officePayload.manifestMismatch': '办公组件产物与当前内核不匹配：{detail}',
+  'officePayload.downloadFailed': '下载办公组件失败：{detail}',
+  'officePayload.installFailed': '安装办公组件失败：{detail}',
 } as const
 
 /** Every message key. Both tables must cover exactly this set. */
@@ -533,6 +547,17 @@ const EN_US: Record<MessageKey, string> = {
   'downloadFailure.network': 'Could not reach any update source ({sources}: GitHub and the mirrors are all unreachable). Check your network and proxy settings, or retry later.',
   'downloadFailure.sources': '{count} sources tried',
   'downloadFailure.reason': '\nCause: {detail}',
+
+  // ------------------------------------------------------- office payload
+  'officePayload.status.unsupported': 'This kernel declares no office components (a dev run, or an older kernel); nothing to download',
+  'officePayload.status.missing': 'Not installed (v{version} needed)',
+  'officePayload.status.installed': 'Installed v{version}',
+  'officePayload.status.downloading': 'Downloading {percent}%',
+  'officePayload.status.installing': 'Installing the office components…',
+  'officePayload.artifactMissing': 'No office-payload artifact office-payload-{platform}-{arch}-{dshVersion}.tgz was found; it may not be published yet — retry later',
+  'officePayload.manifestMismatch': 'The office payload does not match this kernel: {detail}',
+  'officePayload.downloadFailed': 'Downloading the office components failed: {detail}',
+  'officePayload.installFailed': 'Installing the office components failed: {detail}',
 }
 
 const TABLES: Readonly<Record<LocaleId, Readonly<Record<string, string>>>> = {
