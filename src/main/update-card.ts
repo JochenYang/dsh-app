@@ -92,7 +92,11 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
     root.textContent = '';
     // Icon
     const icon = document.createElement('div');
-    const iconCommon = 'flex:0 0 16px;width:16px;height:16px;border-radius:50%;display:flex;align-items:center;justify-content:center;';
+    // corner-shape:round is not optional: the app's own design system sets
+    // corner-shape:superellipse(1.5) on body, so a bare border-radius:50% paints
+    // a rounded SQUARE — the spinner read as a squircle until this was added,
+    // and the harness's own spinners each carry their own corner-shape:round.
+    const iconCommon = 'flex:0 0 16px;width:16px;height:16px;border-radius:50%;corner-shape:round;display:flex;align-items:center;justify-content:center;';
     if (p.tone === 'progress') {
       icon.style.cssText = iconCommon +
         'border:2px solid rgba(255,255,255,.4);border-top-color:#fff;' +

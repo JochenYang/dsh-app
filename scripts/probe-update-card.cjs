@@ -137,6 +137,10 @@ run({ message: '正在下载 dsh…', progress: 0.45, tone: 'progress' })
   const icon = card.children[0]
   assert.strictEqual(icon.textContent, '', 'spinner has no glyph')
   assert.ok(icon.style.animation.includes('dshCardSpin'), 'spinner animation')
+  // The host page paints superellipse corners (corner-shape:superellipse(1.5) on
+  // body), so a circle must say so itself — without this the ring and the ✓/✕
+  // badge render as rounded squares.
+  assert.ok(icon.style['corner-shape'] === 'round', 'spinner opts out of the page\'s squircle corners')
   const content = card.children[1]
   assert.strictEqual(content.children[0].textContent, '正在下载 dsh…', 'message text')
   assert.strictEqual(content.children.length, 2, 'text + bar')
@@ -250,7 +254,11 @@ function runKernelCard(payload) {
   assert.strictEqual(actions.children.length, 2, 'later + update buttons')
   assert.strictEqual(actions.children[0].textContent, '稍后')
   assert.strictEqual(actions.children[1].textContent, '立即更新到 0.1.2-alpha.5')
-  assert.ok(actions.children[1].style.background.includes('#3b82f6'), 'primary button uses brand fallback')
+  // The primary button paints the app's own button pair (fill + label); the
+  // stub's getComputedStyle yields no tokens, so the neutral fallbacks are what
+  // must show — a hardcoded brand blue would go invisible on one theme.
+  assert.ok(actions.children[1].style.background.includes('#1f2328'), 'primary button uses the token fallback fill')
+  assert.ok(actions.children[1].style.color.includes('#ffffff'), 'primary button uses the token fallback label colour')
   assert.strictEqual(windowStub.__dshKernelUpdateCard && typeof windowStub.__dshKernelUpdateCard.resolve, 'function', 'registry holds resolve')
   actions.children[1].click()
   assert.strictEqual(await pick1, '0.1.2-alpha.5', 'update button resolves its version')
