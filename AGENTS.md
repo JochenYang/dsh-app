@@ -333,7 +333,12 @@ Shell release — mechanics in `.github/workflows/release.yml`; the decisions:
    release back. Re-run `gh workflow run publish-mirror.yml -f tag=vX.Y.Z` (after
    a `503`, add `-f mode=diagnose`).
 7. **Runtime-only release**: run `npm run check:plugins -- --kernel <runtime.tgz>
-   --home <real profile dir>` first (no `--home` → temp DSH_HOME).
+   --home <real profile dir>` first (no `--home` → temp DSH_HOME). The runtime
+   job now queues the ModelScope mirror itself once the six-cell set is up, so
+   a dispatch-run runtime no longer needs a manual backfill; if a mirror run
+   failed, backfill the same way: `gh workflow run publish-mirror.yml -f
+   tag=runtime-<dshVersion>`. A shell release's own mirror run never touches
+   runtime assets, so "the shell mirrored fine" says nothing about them.
 
 Facts: mirror internals in `.github/scripts/mirror_release.py` (+ tests);
 `keep_versions` default 10 governs `archive/`/`prerelease/`; `latest/` is

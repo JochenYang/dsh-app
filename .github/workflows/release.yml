@@ -26,6 +26,10 @@ on:
 
 permissions:
   contents: write
+  # Needed by the runtime job's closing step, which dispatches the ModelScope
+  # mirror for the tag it just finished (see that step for why the dispatch is
+  # what makes the mirror an ordinary postcondition of the build).
+  actions: write
 
 env:
   DSH_VERSION: ${{ inputs.dsh_version || '' }}
@@ -326,6 +330,50 @@ jobs:
           # sync with layerIndexAssetName() in src/kernel/layers.ts.
           cp runtime-dist/layers/layers.json "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json"
           gh release upload "$TAG" runtime-dist/layers/*.tgz "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json" --clobber
+
+      # Mirror the finished runtime to ModelScope from HERE, not from the
+      # mirror workflow's own event trigger.
+      #
+      # Why: `publish-mirror.yml` reacts to `release: published`, and a runtime
+      # release is created published (the app's resolver needs it that way), so
+      # that event fires in the middle of the six-cell upload and the workflow's
+      # own filter keeps `runtime-*` out of the shell path. The result was a
+      # runtime whose mirror was never written: the first 0.1.6-alpha.2 cells
+      # went up, nothing mirrored them, and every cell answered 404 through the
+      # ModelScope chain while looking healthy. A shell release then hid it
+      # further, because its own mirror run only walks the shell's assets.
+      #
+      # Only the LAST cell to finish dispatches — it is the one that can see the
+      # complete six-cell set — so one release queues one mirror run. The mirror
+      # workflow's own wait step would refuse an incomplete set anyway, and a
+      # dispatch for a tag whose mirror is already current rewrites the same
+      # path, so a duplicate would be harmless rather than wrong; this keeps the
+      # run list honest.
+      - name: Mirror the runtime to ModelScope
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.runtime.outputs.dsh_version }}
+          TAG: runtime-${{ steps.runtime.outputs.dsh_version }}
+        run: |
+          set -euo pipefail
+          required=0
+          present=0
+          for cell in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
+            for asset in "dsh-runtime-${cell}-${VERSION}.tgz.sha512" "manifest-${cell}.json" "layers-${cell}.json"; do
+              required=$((required + 1))
+              if gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -qxF "$asset"; then
+                present=$((present + 1))
+              fi
+            done
+          done
+          if [ "$present" -eq "$required" ]; then
+            gh workflow run publish-mirror.yml --repo "$GITHUB_REPOSITORY" -f tag="$TAG"
+            echo "queued the ModelScope mirror for $TAG (the six-cell set is complete)"
+          else
+            echo "not the last cell: $present/$required of the set is up, so this cell does not queue the mirror"
+          fi
 
       # Also expose the tgz as a workflow artifact so the app job can bundle it
       # into the installer without re-downloading from the (still-draft) release.
