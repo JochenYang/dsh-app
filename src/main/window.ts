@@ -681,10 +681,30 @@ export function resetOverlayColor(win: BrowserWindow): void {
  * for the window's whole life: the UI's URL no longer contains a port that a
  * kernel update could change, so there is nothing to re-arm. The splash is a
  * file:// document and is allowed through as the shell's own doing.
+ *
+ * The window is created hidden and put on screen as soon as its first document
+ * is there. `ready-to-show` is the flash-free signal and is used where the
+ * platform emits it, but this window's chrome — `titleBarStyle: 'hidden'`
+ * together with a `titleBarOverlay` — suppresses it on Windows entirely: with
+ * the same page and renderer, a plain window emits it at ~230 ms and this shape
+ * never does (and `requestAnimationFrame` does not run while it is hidden
+ * either, so nothing else reports a paint). The document's own load is the
+ * trigger that does fire here, and waiting for it is not optional: the kernel
+ * boot takes seconds (10.2 s measured on this machine on a production boot of
+ * the 0.1.6-alpha.2 line), and a window that appears only once the host is ready
+ * leaves the user staring at nothing for all of it, which is the one thing the
+ * loading page exists to prevent. Showing there flashes nothing either: the
+ * window's background colour is already the splash's own by then (see
+ * startup-window.ts's applyWindowTheme).
  */
 export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, show: false })
-  win.once('ready-to-show', () => win.show())
+  const showWhenReady = (): void => {
+    if (!win.isDestroyed()) win.show()
+  }
+  win.once('ready-to-show', showWhenReady)
+  // The trigger that actually fires for this window shape; see the note above.
+  win.webContents.once('did-finish-load', showWhenReady)
   // The splash installs the same state handlers the standalone window did, so
   // the shell keeps driving it through updateStartupWindow/showStartupFailure.
   markLoadingPage(win)

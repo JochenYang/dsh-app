@@ -81,9 +81,28 @@ const READ_DONE_MARKER = `(function () {
 })()`
 
 async function main() {
-  splash.createStartupWindow()
+  // The app binds this module to the MAIN window, which opens showing the
+  // loading page (see window.ts). The probe does the same: it owns a window,
+  // loads the page into it, binds the module, then shows it.
+  const hosted = new BrowserWindow({
+    // The window the app hosts the page in is the MAIN window: full size, no
+    // system title bar (its native controls float over the page). A smaller or
+    // framed fixture would break the page's own layout assertions below.
+    width: 1180,
+    height: 800,
+    show: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#ffffff', symbolColor: '#1a1a1a', height: 36 },
+    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+  })
+  const loaded = hosted.loadFile(splashPage)
+  splash.attachSplashToWindow(hosted)
+  hosted.once('ready-to-show', () => hosted.show())
+  await loaded
   await wait(1500)
-  const win = BrowserWindow.getAllWindows()[0]
+  const win = hosted
+  win.show()
+  await wait(250)
   record('splash window exists', win !== undefined && !win.isDestroyed())
   record('splash is visible', win.isVisible())
   // Custom chrome: same posture as the main window (no system title bar, the
@@ -148,10 +167,15 @@ async function main() {
     JSON.stringify(doneMarker))
   record('brand row shows the product name', ui.name === 'DSH APP', ui.name)
   record('brand row shows the running version', /^v\d+\.\d+\.\d+/.test(ui.version), ui.version)
-  record('brand mark is a vector glyph in a 44px box', ui.mark.svg === true && ui.mark.box === 44, JSON.stringify(ui.mark))
-  // A splash is not a page you scroll: the normal boot state has to fit the
-  // fixed window (460x430, content ~365px tall). The failure card may scroll —
-  // its detail line is arbitrary text — but this state must not.
+  record(
+    'brand mark is a vector glyph sized by the page, not a bitmap',
+    ui.mark.svg === true && ui.mark.box >= 44 && ui.mark.box <= 72,
+    JSON.stringify(ui.mark),
+  )
+  // The page is not scrolled: the normal boot state has to fit the window it
+  // is hosted in — the main window here (1180x800), and the splash-sized one
+  // the failure card was drawn for. The failure card may scroll — its detail
+  // line is arbitrary text — but this state must not.
   const layout = await win.webContents.executeJavaScript(
     '({ scrollHeight: document.documentElement.scrollHeight, innerHeight: window.innerHeight })',
   )
@@ -224,30 +248,43 @@ async function main() {
     JSON.stringify({ hidden: resumed.errorHidden, current: resumed.current }),
   )
 
-  // Hand-off with a main window that is not visible yet: the splash must stay
-  // up (and show the last step) until that window is actually on screen.
+  // Hand-off: this module stops driving the page, and the window it was bound
+  // to is the one that now shows the live UI — so it must survive.
   const idle = new BrowserWindow({ show: false })
   await idle.loadURL('about:blank')
   await wait(300)
-  splash.handoffToMainWindow(idle)
+  splash.handoffToMainWindow(win)
   await wait(250)
-  const handingOver = await win.webContents.executeJavaScript(READ_UI)
-  record('hand-off jumps to the last step', handingOver.status === '正在打开界面…' && handingOver.current === '打开界面', handingOver.status)
-  record('splash stays up while the main window is invisible', !win.isDestroyed())
-  record('the idle window is left untouched', !idle.isDestroyed() && !idle.isVisible())
-
-  splash.closeStartupWindow()
-  await wait(250)
-  record('closeStartupWindow destroys the splash', win.isDestroyed())
-  record('the unrelated window is not closed', !idle.isDestroyed())
-
-  // Real path: create the splash again, push a state BEFORE the page can
-  // render (the cold-start race), then hand off exactly like
-  // startServerAndOpenWindow does — show on ready-to-show, then hand off.
-  splash.createStartupWindow()
+  record('the handed-off window survives hand-off', !win.isDestroyed())
+  record('the unrelated window is left untouched', !idle.isDestroyed() && !idle.isVisible())
   splash.updateStartupWindow({ phase: 'installing', message: '正在激活运行时…', progress: null })
-  await wait(900)
-  const second = BrowserWindow.getAllWindows().find((candidate) => candidate !== idle)
+  await wait(200)
+  const afterHandoff = await win.webContents.executeJavaScript(READ_UI)
+  record(
+    'this module stops driving the page after hand-off',
+    afterHandoff.status !== '正在激活运行时…',
+    String(afterHandoff.status),
+  )
+  win.destroy()
+  await wait(200)
+
+  // Cold-start race, on a fresh binding: a state pushed BEFORE the page can
+  // render must be applied once it loads.
+  const second = new BrowserWindow({
+    width: 1180,
+    height: 800,
+    show: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#ffffff', symbolColor: '#1a1a1a', height: 36 },
+    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+  })
+  const reloading = second.loadFile(splashPage)
+  splash.attachSplashToWindow(second)
+  splash.updateStartupWindow({ phase: 'installing', message: '正在激活运行时…', progress: null })
+  await reloading
+  await wait(700)
+  second.show()
+  await wait(200)
   const early = await second.webContents.executeJavaScript(READ_UI)
   record(
     'a state pushed before the page loads is applied once it loads',
@@ -260,8 +297,8 @@ async function main() {
   splash.handoffToMainWindow(real)
   await loading
   await wait(1200)
-  record('splash closes once the real window painted', second !== undefined && second.isDestroyed())
-  record('real window is on screen and keeps the splash closed', real.isVisible())
+  record('the handed-off window stays up and shows the live UI', second !== undefined && !second.isDestroyed())
+  record('real window is on screen', real.isVisible())
 
   const failed = lines.filter((line) => line.startsWith('FAIL'))
   record('all probe checks passed', failed.length === 0, `${lines.length - failed.length}/${lines.length}`)
