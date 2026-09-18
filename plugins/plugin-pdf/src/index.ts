@@ -46,6 +46,8 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the systemPrompt Context merge into scope.
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
+// Type-only: pulls the office provider's Context merge (ctx.officeToPdf) into scope.
+import type {} from '@deepseek-ai/dsh-office-to-pdf'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { checkPdfDocument, loadPdfDocument } from './pdfd/check.ts'
@@ -56,6 +58,7 @@ import type { ValidationReport } from './pdfd/report.ts'
 import {
   existingWorkspaceFile,
   MAX_PROJECT_TEXT_BYTES,
+  officeFileRelative,
   pdfFileRelative,
   pdfProjectRelative,
   writableWorkspaceFile,
@@ -94,6 +97,76 @@ const OUTCOME_OUTPUT = {
 /** Error message of an unknown cause. */
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
+}
+
+/**
+ * The environment variable the shell sets to the payload directory it expects.
+ *
+ * Present whenever the running kernel DECLARES an office component, absent when
+ * it declares none (development runs boot the local checkout, which ships no
+ * engine) — the one fact that tells the two very different states wearing the
+ * engine's `unavailable` code apart.
+ */
+const OFFICE_PAYLOAD_ENV = 'DSH_APP_OFFICE_PAYLOAD'
+
+/** Whether the running kernel declares an office component at all. */
+function officeComponentDeclared(): boolean {
+  const dir = process.env[OFFICE_PAYLOAD_ENV]
+  return typeof dir === 'string' && dir !== ''
+}
+
+/**
+ * `details.reason` of a document-render failure, when the cause carries one.
+ *
+ * The provider folds every engine error into one remote code
+ * (`document-render/failed`) plus the engine's own reason; reading that reason
+ * structurally keeps this plugin free of the protocol's error class, and an
+ * unrecognized shape only costs a generic message.
+ */
+function officeReasonOf(cause: unknown): string | undefined {
+  if (typeof cause !== 'object' || cause === null || !('details' in cause)) return undefined
+  const details = (cause as { details?: unknown }).details
+  if (typeof details !== 'object' || details === null || !('reason' in details)) return undefined
+  const reason = (details as { reason?: unknown }).reason
+  return typeof reason === 'string' ? reason : undefined
+}
+
+/**
+ * Office conversion failures, worded for the model and the user.
+ *
+ * The provider's own client-side wording is about the preview feature and never
+ * names the fix; here — the only place a conversion is asked for by a tool —
+ * every reason gets a sentence that says what to do. `unavailable` is the one
+ * reason with two causes under one code: a kernel that declares no office
+ * component (a development run boots the local checkout, which has no engine)
+ * and one whose payload is not downloaded yet. Only the second has a button to
+ * send the user to, so the message must not confuse them.
+ */
+function officeFailureText(cause: unknown): string {
+  switch (officeReasonOf(cause)) {
+    case 'unavailable':
+      return officeComponentDeclared()
+        ? '办公文档转换引擎尚未安装：请到「设置 → 诊断 → 办公组件」点「下载」安装，装好后直接重试，不需要重启应用'
+        : '当前内核未声明办公组件（开发运行或旧内核），没有可用的转换引擎；请在随包内核或已声明办公组件的内核里重试'
+    case 'unsupported-format':
+      return 'file_path：只支持 .doc / .docx / .xls / .xlsx / .ppt / .pptx'
+    case 'input-too-large':
+      return '源文件超过转换引擎的输入上限，请拆分或压缩后重试'
+    case 'output-too-large':
+      return '转换后的 PDF 超过引擎的输出上限'
+    case 'invalid-document':
+      return '引擎无法解析这个文件：可能已损坏、受密码保护，或扩展名与实际格式不符'
+    case 'invalid-output':
+      return '引擎没有产出可用的 PDF，请重试'
+    case 'timeout':
+      return '转换超时，请重试'
+    case 'busy':
+      return '转换任务较多，请稍后重试'
+    case 'source-changed':
+      return '文件在转换过程中被修改，请重试'
+    default:
+      return `转换失败：${messageOf(cause)}`
+  }
 }
 
 /** Authoring failure value: Chinese, single actionable message per issue. */
@@ -199,6 +272,66 @@ function registerPdfTools(ctx: Context): () => void {
         } as unknown as JsonValue
       } catch (cause) {
         return readFailed([messageOf(cause)])
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'office_to_pdf',
+    description:
+      'Convert one workspace Office document (*.doc, *.docx, *.xls, *.xlsx, *.ppt, *.pptx) into a PDF with the '
+      + 'application\'s own bundled LibreOffice engine — the engine the document preview uses, downloaded on demand '
+      + 'and independent of office software on the user\'s machine. Slides, sheets and pages keep their layout, '
+      + 'colours and charts, and the text stays selectable. The result names the font families the document asks for '
+      + 'that this machine cannot supply (missingFonts), so a reflowed page is explained rather than mysterious. '
+      + 'Read-only on the source; writes only output_file.',
+    parameters: {
+      file_path: { type: 'string', required: true, description: '工作区内相对路径的 Office 文档（.doc/.docx/.xls/.xlsx/.ppt/.pptx）。' },
+      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径；已存在的同名文件会被替换。' },
+    },
+    output: OUTCOME_OUTPUT,
+    async execute(args, exec: ToolRunContext): Promise<JsonValue> {
+      const { file_path: filePath, output_file: outputFile } = args as Record<string, unknown>
+      const workspace = workspaceRootOf(exec)
+      if ('reason' in workspace) return readFailed([workspace.reason])
+      try {
+        const relative = officeFileRelative(filePath, 'file_path')
+        // Both paths are proven before the engine is asked to read anything:
+        // the source must exist as an in-workspace regular file, and the target
+        // must be an in-workspace write the caller may create.
+        await existingWorkspaceFile(workspace.root, relative, 'file_path')
+        const target = await writableWorkspaceFile(workspace.root, pdfFileRelative(outputFile, 'output_file'), 'output_file')
+        const service = ctx.get('officeToPdf')
+        if (service === undefined) {
+          throw new Error(officeComponentDeclared()
+            ? '当前内核没有办公文档转换服务（内核未包含该组件）；请更新内核后重试'
+            : '当前内核未声明办公组件（开发运行或旧内核），没有可用的转换服务；请在随包内核或已声明办公组件的内核里重试')
+        }
+        const sessionId = exec.agent?.session.header.id
+        if (typeof sessionId !== 'string' || sessionId === '') {
+          throw new Error('当前会话没有会话标识，无法授权读取工作区文件')
+        }
+        // The provider reads and authorizes the source itself (the same path
+        // the preview uses), so versioning, size ceilings, caching and the
+        // conversion queue stay in one place.
+        const rendered = await service.render(
+          { sessionId, workspaceRoot: workspace.root }, relative, 'foreground', exec.signal,
+        )
+        const bytes = Buffer.from(rendered.data, 'base64')
+        await mkdir(dirname(target), { recursive: true })
+        const tmp = `${target}.${process.pid}.tmp`
+        await writeFile(tmp, bytes)
+        await rename(tmp, target)
+        return {
+          status: 'exported',
+          outputPath: outputFile,
+          filePath: relative,
+          sizeBytes: bytes.byteLength,
+          missingFonts: rendered.missingFonts,
+          sha256: sha256Of(bytes),
+        } as unknown as JsonValue
+      } catch (cause) {
+        return readFailed([officeFailureText(cause)])
       }
     },
   })))

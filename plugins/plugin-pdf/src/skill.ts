@@ -24,9 +24,10 @@ description: 读取工作区 PDF 作为材料，或编写结构化 JSON 工程�
 
 # PDF 工作流（${SKILL_NAME}）
 
-两条腿，按任务选择：
+三条腿，按任务选择：
 
 - **读取**：把已有 PDF 当材料——\`pdf_read\` 读取工作区内 \`.pdf\`，返回页数、每页文本与标题/作者。
+- **转换**：把已有的 Office 文档（\`.doc\`/\`.docx\`/\`.xls\`/\`.xlsx\`/\`.ppt\`/\`.pptx\`）原样转成 PDF——\`office_to_pdf\`（入参 \`file_path\` 与新的 \`output_file\`）。转换由本应用自带的 LibreOffice 引擎完成，用户机器不需要装 Office 或 WPS；页数、页面尺寸、配色与图表保留，文字仍可选。返回的 \`missingFonts\` 是文档声明但本机没有的字体族——出现时排版可能与原稿不同，要如实告知用户。不要改用 PowerShell/COM 驱动本机 Office 或 WPS（取决于用户装了什么、可能弹窗、结果不可复现），也不要用截图或重排冒充原样转换。
 - **生成**：编写结构化 JSON 工程（\`*.pdf.json\`）——\`pdf_write\` 写入并即时校验 → \`pdf_check\` 只读全量校验 → \`pdf_render\` 渲染出规范排版的 \`.pdf\`。
 
 ## 阶段流程（生成时严格按顺序，不跳步）

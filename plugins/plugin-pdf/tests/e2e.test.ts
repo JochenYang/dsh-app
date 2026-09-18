@@ -16,6 +16,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -26,6 +27,8 @@ const libEntry = join(pluginRoot, 'lib', 'index.js')
 
 interface FakeExec {
   agent: { session: { header: { id: string, cwd: string } } }
+  /** The registry always hands a tool a cancellation signal. */
+  signal: AbortSignal
 }
 
 interface FakeTool {
@@ -52,14 +55,52 @@ interface FakeHost {
   sections: FakeSection[]
 }
 
+/** One `officeToPdf.render` call, captured for assertions. */
+interface FakeRenderCall {
+  scope: { sessionId: string, workspaceRoot: string }
+  path: string
+  priority: string
+  aborted: boolean
+}
+
+/**
+ * The host's office-conversion service as a tool sees it: `render` hands back a
+ * base64 PDF, or rejects with the code the caller maps to a message.
+ */
+interface FakeOfficeService {
+  calls: FakeRenderCall[]
+  pdf: Uint8Array
+  missingFonts?: string[]
+  fail?: { reason: string }
+}
+
 /** Mount the built bundle against the fake host surfaces it injects. */
-async function mountHost(): Promise<FakeHost> {
+async function mountHost(office?: FakeOfficeService): Promise<FakeHost> {
   const tools = new Map<string, FakeTool>()
   const routes: FakeRoute[] = []
   const sections: FakeSection[] = []
+  const services = new Map<string, unknown>()
+  if (office !== undefined) {
+    services.set('officeToPdf', {
+      async render(
+        scope: FakeRenderCall['scope'], path: string, priority: string, signal: AbortSignal,
+      ): Promise<{ data: string, missingFonts: string[] }> {
+        office.calls.push({ scope, path, priority, aborted: signal.aborted })
+        if (office.fail !== undefined) {
+          // The provider's own shape: one remote code plus the engine reason.
+          throw Object.assign(new Error('Office conversion failed.'), {
+            code: 'document-render/failed',
+            details: { reason: office.fail.reason },
+          })
+        }
+        return { data: Buffer.from(office.pdf).toString('base64'), missingFonts: office.missingFonts ?? [] }
+      },
+    })
+  }
   const ctx = {
     logger: () => ({ info: () => {}, warn: () => {} }),
     effect: (run: () => unknown) => { run() },
+    get: (name: string) => services.get(name),
     tools: {
       register(tool: FakeTool) {
         tools.set(tool.name, tool)
@@ -137,7 +178,7 @@ test('e2e: apply registers the PDF tools, prompt sections and mode route', async
   try {
     process.env.DSH_HOME = home
     const host = await mountHost()
-    assert.deepEqual([...host.tools.keys()].sort(), ['pdf_check', 'pdf_read', 'pdf_render', 'pdf_write'])
+    assert.deepEqual([...host.tools.keys()].sort(), ['office_to_pdf', 'pdf_check', 'pdf_read', 'pdf_render', 'pdf_write'])
     const names = host.sections.map(section => section.name)
     assert.ok(names.includes('tool:pdf-entry'), 'unconditional entry rule registered')
     assert.ok(names.includes('tool:pdf-mode'), 'conditional mode section registered')
@@ -262,7 +303,7 @@ test('e2e: write, check, render and read back a real PDF', async () => {
   try {
     process.env.DSH_HOME = home
     const host = await mountHost()
-    const exec: FakeExec = { agent: { session: { header: { id: 'session-1', cwd: root } } } }
+    const exec: FakeExec = { agent: { session: { header: { id: 'session-1', cwd: root } } }, signal: new AbortController().signal }
     const write = host.tools.get('pdf_write')
     const check = host.tools.get('pdf_check')
     const render = host.tools.get('pdf_render')
@@ -362,6 +403,105 @@ test('e2e: write, check, render and read back a real PDF', async () => {
     const wrongReadExtension = await read.execute({ file_path: 'docs/report.pdf.json' }, exec)
     assert.equal(wrongReadExtension.status, 'failed')
     assert.match(String((wrongReadExtension.issues as { message: string }[])[0]?.message), /\.pdf/u)
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(root, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('e2e: office_to_pdf converts through the host service and reports honestly', async () => {
+  assert.ok(existsSync(libEntry), 'lib/index.js must be built (npm run build) before the e2e test')
+  const home = mkdtempSync(join(tmpdir(), 'pdfd-e2e-office-home-'))
+  const root = mkdtempSync(join(tmpdir(), 'pdfd-e2e-office-root-'))
+  const savedHome = process.env.DSH_HOME
+  // A minimal but real PDF header: the tool copies bytes, it does not parse.
+  const pdf = Buffer.from('%PDF-1.7\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n', 'latin1')
+  const office: FakeOfficeService = { calls: [], pdf, missingFonts: ['Noto Sans CJK SC'] }
+  try {
+    process.env.DSH_HOME = home
+    const host = await mountHost(office)
+    const exec: FakeExec = { agent: { session: { header: { id: 'session-9', cwd: root } } }, signal: new AbortController().signal }
+    const convert = host.tools.get('office_to_pdf')
+    assert.ok(convert !== undefined, 'office_to_pdf is registered')
+    writeFileSync(join(root, 'deck.pptx'), 'pptx-bytes', 'utf8')
+
+    // 1. A normal conversion: the provider is asked for exactly the session's
+    //    own workspace, the output lands where the caller asked, and the result
+    //    carries the identity of what was written.
+    const exported = await convert.execute({ file_path: 'deck.pptx', output_file: 'out/deck.pdf' }, exec)
+    assert.equal(exported.status, 'exported', `convert must export: ${String(exported.issuesText)}`)
+    assert.deepEqual(office.calls.map(call => [call.scope, call.path, call.priority]), [
+      [{ sessionId: 'session-9', workspaceRoot: root }, 'deck.pptx', 'foreground'],
+    ])
+    const written = readFileSync(join(root, 'out', 'deck.pdf'))
+    assert.equal(written.toString('latin1'), pdf.toString('latin1'))
+    assert.equal(exported.sizeBytes, pdf.byteLength)
+    assert.equal(exported.sha256, createHash('sha256').update(pdf).digest('hex'))
+    assert.deepEqual(exported.missingFonts, ['Noto Sans CJK SC'])
+
+    // 2. An existing target is replaced rather than refused (re-converting the
+    //    same deck is the ordinary case).
+    writeFileSync(join(root, 'out', 'deck.pdf'), 'old', 'utf8')
+    const again = await convert.execute({ file_path: 'deck.pptx', output_file: 'out/deck.pdf' }, exec)
+    assert.equal(again.status, 'exported')
+    assert.equal(readFileSync(join(root, 'out', 'deck.pdf')).toString('latin1'), pdf.toString('latin1'))
+
+    // 3. The engine being absent is the one failure a user can fix, so it must
+    //    name the fix instead of the provider's preview wording — but only when
+    //    this kernel declares an office component at all: a development run
+    //    boots a checkout with no engine, and sending it to a download button
+    //    that the 诊断 row does not offer would be a dead end.
+    office.fail = { reason: 'unavailable' }
+    process.env.DSH_APP_OFFICE_PAYLOAD = 'C:/payload/0.0.1'
+    const noEngine = await convert.execute({ file_path: 'deck.pptx', output_file: 'out/missing.pdf' }, exec)
+    assert.equal(noEngine.status, 'failed')
+    const noEngineText = String((noEngine.issues as { message: string }[])[0]?.message)
+    assert.match(noEngineText, /办公文档转换引擎尚未安装/u)
+    assert.match(noEngineText, /办公组件/u)
+    assert.equal(existsSync(join(root, 'out', 'missing.pdf')), false, 'no output when the engine refuses')
+
+    // 3b. The same code without a declared component reads as what it is.
+    process.env.DSH_APP_OFFICE_PAYLOAD = ''
+    try {
+      const undeclared = await convert.execute({ file_path: 'deck.pptx', output_file: 'out/missing.pdf' }, exec)
+      const undeclaredText = String((undeclared.issues as { message: string }[])[0]?.message)
+      assert.match(undeclaredText, /未声明办公组件/u)
+      assert.doesNotMatch(undeclaredText, /诊断/u, 'no download button to send a development run to')
+    } finally {
+      delete process.env.DSH_APP_OFFICE_PAYLOAD
+    }
+
+    // 4. Every other engine reason still reads as its own sentence.
+    office.fail = { reason: 'invalid-document' }
+    const corrupt = await convert.execute({ file_path: 'deck.pptx', output_file: 'out/x.pdf' }, exec)
+    assert.match(String((corrupt.issues as { message: string }[])[0]?.message), /受密码保护/u)
+
+    // 5. Without the host service the tool says so; it never pretends to have
+    //    converted anything.
+    office.fail = undefined
+    process.env.DSH_APP_OFFICE_PAYLOAD = 'C:/payload/0.0.1'
+    const bare = await mountHost()
+    const orphan = await bare.tools.get('office_to_pdf')?.execute({ file_path: 'deck.pptx', output_file: 'out/y.pdf' }, exec)
+    assert.equal(orphan?.status, 'failed')
+    assert.match(String((orphan?.issues as { message: string }[])[0]?.message), /内核没有办公文档转换服务/u)
+    delete process.env.DSH_APP_OFFICE_PAYLOAD
+
+    // 6. Path discipline matches the other tools: only Office extensions, only
+    //    contained relative paths, only a .pdf target.
+    const refusals: [Record<string, unknown>, RegExp][] = [
+      [{ file_path: 'notes.txt', output_file: 'out/a.pdf' }, /\.doc \/ \.docx/u],
+      [{ file_path: 'absent.pptx', output_file: 'out/b.pdf' }, /不存在/u],
+      [{ file_path: '../escape.pptx', output_file: 'out/c.pdf' }, /越出工作区/u],
+      [{ file_path: 'deck.pptx', output_file: 'out/d.pptx' }, /\.pdf 结尾/u],
+    ]
+    for (const [args, expected] of refusals) {
+      const refused = await convert.execute(args, exec)
+      assert.equal(refused.status, 'failed', `${String(args.file_path)} must be refused`)
+      assert.match(String((refused.issues as { message: string }[])[0]?.message), expected)
+    }
+    assert.equal(existsSync(join(root, 'out', 'a.pdf')), false, 'refusals write nothing')
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome

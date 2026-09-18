@@ -33,6 +33,7 @@ export function pdfDefaultSectionText(): string {
   return [
     '## PDF / 报告请求',
     '用户提到 PDF，或要求制作报告、白皮书、规范排版的文档，或提供了 PDF 材料时：按 skill `dsh-pdf` 走 PDF 工作流——需要理解已有 PDF 时用 pdf_read 读取为结构化文本；要产出 PDF 时用 pdf_write 写入结构化 JSON 工程（*.pdf.json）→ pdf_check 校验并逐条修复 → pdf_render 渲染出规范排版的 PDF，不要用普通长文回答，也不要用截图代替正文。内容必须来自用户需求与其提供的材料。',
+    '要把已有的 Office 文档（.doc/.docx/.xls/.xlsx/.ppt/.pptx）转成 PDF 时，用 office_to_pdf 转换：它走本应用自带的转换引擎，用户机器上不需要装 Office 或 WPS，换机器结果一致，页数、页面尺寸、配色与图表都保留、文字仍可选。不要改用 PowerShell/COM 去驱动本机 Office 或 WPS——那依赖用户装了什么软件、可能弹窗、结果不可复现——也不要用截图或重排文档冒充原样转换。',
   ].join('\n')
 }
 

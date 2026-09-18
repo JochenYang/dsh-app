@@ -121,8 +121,8 @@ const AUDIT = [
   },
   {
     match: 'plugins/*/tests/**',
-    count: 95,
-    why: 'plugin suites: every call removes an os.tmpdir scratch root or fixture home that test just created — no link points out of any of them (was 97: the two release-age file-level cleanups went away with the exclusion-list tests)',
+    count: 97,
+    why: 'plugin suites: every call removes an os.tmpdir scratch root or fixture home that test just created — no link points out of any of them (was 97: the two release-age file-level cleanups went away with the exclusion-list tests; back to 97 with the office_to_pdf e2e scratch home + workspace)',
   },
 ]
 

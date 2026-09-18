@@ -1,6 +1,6 @@
 {
   "name": "@dsh-app/plugin-pdf",
-  "description": "DSH APP PDF suite: reads workspace PDFs as material (pdf_read) and authors/validates/renders a structured PDF project (*.pdf.json) with pdf_write, read-only pdf_check and pdf_render. A PDF capsule in the shared office-suite bar (container class dshOfficeBar, data-office-format=\"pdf\", injected after the composer card) toggles a per-session PDF mode; the dsh-pdf skill pins the workflow.",
+  "description": "DSH APP PDF suite: reads workspace PDFs as material (pdf_read) and authors/validates/renders a structured PDF project (*.pdf.json) with pdf_write, read-only pdf_check and pdf_render; office_to_pdf converts an existing Office document (*.doc/*.docx/*.xls/*.xlsx/*.ppt/*.pptx) into a PDF through the application's own on-demand LibreOffice engine. A PDF capsule in the shared office-suite bar (container class dshOfficeBar, data-office-format=\"pdf\", injected after the composer card) toggles a per-session PDF mode; the dsh-pdf skill pins the workflow.",
   "version": "0.1.6",
   "type": "module",
   "main": "lib/index.js",
@@ -55,6 +55,7 @@
     "@deepseek-ai/dsh-client-ui-session": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-home-paths": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-office-to-pdf": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-system-prompt": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-tools": "^0.1.6-alpha.2",
     "react": "^18.2.0"
@@ -62,6 +63,7 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-api-workspace-files": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-atomic-write": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-client-connection": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-client-locale": "^0.1.6-alpha.2",
@@ -69,6 +71,7 @@
     "@deepseek-ai/dsh-client-ui-session": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-home-paths": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-office-to-pdf": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-system-prompt": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-tools": "^0.1.6-alpha.2",
     "@deepseek-ai/dsh-util-values": "^0.1.6-alpha.2",

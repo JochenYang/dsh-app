@@ -16,11 +16,17 @@ import { resolveInWorkspace } from './workspace.ts'
 export const PDF_PROJECT_EXTENSION = '.pdf.json'
 /** The only PDF input/output extension. */
 export const PDF_FILE_EXTENSION = '.pdf'
+/**
+ * Office source extensions the conversion engine accepts — the kit's own set
+ * (`OfficeExtension` in `@deepseek-ai/dsh-office-to-pdf`), so a path this
+ * plugin accepts is never refused (or, worse, guessed) downstream.
+ */
+export const OFFICE_SOURCE_EXTENSIONS: readonly string[] = ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']
 /** Project JSON above this size is refused (a project never needs more). */
 export const MAX_PROJECT_TEXT_BYTES = 1024 * 1024
 
-/** Sanitized workspace-relative path ending in `extension`. */
-function fileRelative(value: unknown, what: string, extension: string): string {
+/** Sanitized workspace-relative path ending in one of `extensions`. */
+function fileRelative(value: unknown, what: string, extensions: readonly string[]): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new Error(`${what}：必须是非空的工作区相对路径`)
   }
@@ -31,20 +37,26 @@ function fileRelative(value: unknown, what: string, extension: string): string {
   if (normalized === '..' || normalized.startsWith('../') || normalized.startsWith('/') || normalized === '.') {
     throw new Error(`${what}：路径越出工作区（${value}）`)
   }
-  if (!normalized.toLowerCase().endsWith(extension)) {
-    throw new Error(`${what}：必须以 ${extension} 结尾（收到 ${normalized}）`)
+  const lower = normalized.toLowerCase()
+  if (!extensions.some(extension => lower.endsWith(extension))) {
+    throw new Error(`${what}：必须以 ${extensions.join(' / ')} 结尾（收到 ${normalized}）`)
   }
   return normalized
 }
 
 /** Workspace-relative `*.pdf.json` project path. */
 export function pdfProjectRelative(value: unknown, what: string): string {
-  return fileRelative(value, what, PDF_PROJECT_EXTENSION)
+  return fileRelative(value, what, [PDF_PROJECT_EXTENSION])
 }
 
 /** Workspace-relative `*.pdf` path (a read source or a render target). */
 export function pdfFileRelative(value: unknown, what: string): string {
-  return fileRelative(value, what, PDF_FILE_EXTENSION)
+  return fileRelative(value, what, [PDF_FILE_EXTENSION])
+}
+
+/** Workspace-relative Office document path (a conversion source). */
+export function officeFileRelative(value: unknown, what: string): string {
+  return fileRelative(value, what, OFFICE_SOURCE_EXTENSIONS)
 }
 
 /**
