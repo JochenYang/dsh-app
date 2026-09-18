@@ -8,6 +8,34 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- 支持上游 0.1.6-alpha.2 起的宿主契约：那条线不再经由父子进程之间的字节管道提供界面与接口，改为自己监听回环端口并回报一个带一次性令牌的地址，外壳先把这个令牌换成 cookie，再用它转发窗口的全部请求（令牌只用于换 cookie，不落日志）；那条线的客户端还会**自己开一条 WebSocket 直连宿主**拉流，所以外壳另外把传输地址作为一条 index 注入写进文档、并在会话层为 `ws://127.0.0.1/*` 的握手补上宿主 cookie 与它接受的 origin（非本窗口、非本应用的握手直接取消）。旧线（0.1.5-rc.2、0.1.6-alpha.1）的管道传输一个字节没动，开发模式直接跑上游 master 检出因此重新可启动；代价是这条线会打开一个本机端口（旧线「不监听任何端口」的性质不适用于它），且宿主要求的 office 载荷由构建侧写进运行时：取自打包宿主的同一检出，落在 `<内核目录>/runtime/office-skills`，随内容寻址的 meta 层发布（开发模式仍旧取检出里的资源）
+- 修复跨内核线切换会删掉自己装的插件：运行时镜像的回收按顶层目录名执行，而 `@deepseek-ai` 是内核与插件市场共用的 scope，市场装的 `@deepseek-ai/dsh-toolkit` 跟着内核包一起被删，profile 清单里仍声明着它，宿主随即拒绝启动；现在所有权记到包一级，scope 目录要等最后一个包离开才移除，旧版标记里的 scope 名按「当初镜像的那棵树」收窄
+- 修复旧线残留的内核包遮蔽当前线的包：收窄若按「当前运行的树」取名单，上一线多出来的包会留在 profile 里，宿主会从 profile 组合出旧线的 `dsh-typert-loader`，终端相关插件因此激活失败；现在按标记记录的镜像来源收窄，残留一并清掉
+- 修复两条内核线共用一个窗口时，后一条线跑完会让前一条线的会话列表整块空掉：界面把视图状态存在窗口存储里，0.1.6 线删掉的字段 rc 线仍在读，`Object.entries(undefined)` 让左侧会话列表崩溃（会话本身都还在磁盘上）；窗口现在记住写下状态的线，切到另一条线时重置窗口存储，代价只是视图状态
+- 修复 0.12.0 起的市场装卸失败：pnpm 11 的发布冷静期会在每条命令前先校验 lockfile，清单里钉着 24 小时内发布的版本时，装和卸都会被拦下；上一版写的「把被拒版本写进白名单」实测清不掉这道校验（pnpm 11.7.0），现在改成运行那一次临时放开策略（`--config.minimumReleaseAge=0`）后重试一次，profile 与其余运行照旧受冷静期保护
+- 插件市场的忙碌指示圈改回与文字同高，并改用 SVG 弧绘制（描边更细、缺口更小）：此前用 16px 的边框圆环，在这个尺寸下看着像缺了一块的「C」，也把按钮行撑高了
+- 修复新内核下应用起不来（`duplicate loader entry id`）：品牌层每次启动会把 home 层（你自己写的 MCP / 搜索等行）抄进 profile 的 patch 文件，而 0.1.6 线内核自身的组合器**也会把 home 层当一层加载**，同一行于是出现两次、判定重复，整棵插件树拒绝加载（表现为启动失败并回退）。现在在这条线上不再抄写 home 行，profile 的 patch 里只留一段说明；rc 线与开发模式保持原样（那里宿主只读这一个文件）
+- 内核线更新到上游 0.1.6-alpha.2：随包运行时改由该线组装，并把新宿主启动时必需的 office 载荷（`runtime/office-skills`，含 `scripts/check_office.py`）一并打进运行时产物——此前只有开发模式有它，正式运行时会在宿主的启动检查处失败
+
+### English
+- Support for the host contract of upstream 0.1.6-alpha.2 and later: that line no longer exports the UI and the API routes over the child's byte pipes — it binds its own loopback port and reports a URL carrying a one-shot token, which the shell trades for a cookie and then uses to forward every request the window makes (the token is used for that exchange only and never logged). That line's client also opens its OWN WebSocket stream straight to the child, so the shell writes the transport address into the boot document as an index row and, at the session, attaches the child's cookie and an accepted `origin` to every `ws://127.0.0.1/*` handshake from the main window (any other handshake is cancelled). The older lines (`0.1.5-rc.2`, `0.1.6-alpha.1`) keep their pipe transport byte for byte, so the dev checkout can run upstream master again; the price is that this line opens a local port — the old line's "no port is bound" property does not apply to it — and the office payload that line asks for is now staged into the runtime by the build — read from the same checkout the host is packed from, laid down at `<kernelDir>/runtime/office-skills` and carried by the content-addressed meta layer (dev reads the checkout's own assets)
+- Fixed the cross-line switch deleting the market's own packages: the runtime mirror was reclaimed by top-level directory name, and `@deepseek-ai` is shared between the kernel and the in-app market — so `@deepseek-ai/dsh-toolkit`, still declared as a bundle in the profile manifest, was deleted along with the kernel packages and the host refused to boot. Ownership is now recorded per package, a scope directory goes away only with its last package, and a bare scope in an older marker is narrowed against the tree it mirrored
+- Fixed a previous line's leftover kernel packages shadowing this line's: narrowing against the tree running NOW keeps every package the old line had and this one does not, so the host composed the old line's `dsh-typert-loader` out of the profile and the terminal plugins failed to activate. The narrowing now follows the runtime recorded in the marker, leftovers included
+- Fixed the release build's session list going blank after the other kernel line had run: the UI persists its view state in the window's own storage, and a field the 0.1.6 line drops is one the rc line still reads with `Object.entries` — the left session list crashed with every session still on disk. The window now remembers which line wrote the state and resets that storage when the line changes; the cost is the window's view state and nothing else
+- Fixed installs and uninstalls failing in the market since 0.12.0: pnpm 11's release-age cooldown checks the lockfile before EVERY command, so a profile pinning a version published inside 24 hours is blocked for both. Recording the rejected versions in the exclusion list (what 0.12.0 did) does not clear that check — measured on pnpm 11.7.0 — so the command now runs once more with the policy lifted for that run (`--config.minimumReleaseAge=0`), leaving the profile and every other run under the cooldown
+- The market's busy ring is back to the label's own size (12 px) and drawn as an SVG arc with round caps instead of a bordered box: the 16 px border ring read as a letter "C" and made the button line taller
+- Fixed the app failing to start on the new kernel (`duplicate loader entry id`): the brand seam copies the home layer
+  (the MCP / search rows you write yourself) into the profile's patch file on every start, and the 0.1.6 kernel's own
+  composer loads that home layer as a layer TOO — the same row then reaches the loader twice and the whole plugin
+  tree is refused (the boot fails and rolls back). The patch no longer repeats those rows on this line; the frames
+  line and a dev checkout keep the copy, whose host reads only that file
+- Kernel line moved to upstream 0.1.6-alpha.2: the bundled runtime is assembled from that line, and the office payload
+  the new host requires at boot (`runtime/office-skills`, `scripts/check_office.py` included) now ships inside the
+  runtime artifact — until now only a dev checkout had it, and a released runtime failed the host's own start check
+
 ## [v0.12.0] - 2026-09-17
 
 ### 中文

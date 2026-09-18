@@ -162,11 +162,27 @@ asserted in both the build and CI — see `AGENTS.md` §10.
 
 ## 6. Server process management
 
-- No port is bound. The kernel runs as a child process whose web surface travels
-  over fd3/fd4 byte pipes (`src/main/desktop-host.ts`); the window loads
-  `dsh-app://app/index.html`, served only by forwarding to that child.
+- The window loads `dsh-app://app/index.html`, served only by forwarding to the
+  kernel child. Two transports carry that forward, chosen by the host package's
+  own version: up to `0.1.6-alpha.1` the web surface travels over fd3/fd4 byte
+  pipes and **no port is bound** (`src/main/desktop-host.ts`); from
+  `0.1.6-alpha.2` on, the child binds its own loopback port, reports an
+  authenticated URL over IPC, and the shell exchanges that URL for a cookie and
+  forwards with it (`src/main/host-web.ts`). That line's child is reachable from
+  the rest of the machine, and the shell's own origin model — the scheme, the
+  window URL, the action route — is unchanged by either transport.
+- The URL transport is not only a proxy: the client's own stream is a WebSocket
+  straight to the child. The boot document carries
+  `globalThis.__DSH_TRANSPORT__ = { ownsHost: true, streamBaseUrl }` (the row
+  upstream's desktop sets from its preload, which this shell has no preload for),
+  and `src/main/host-stream-auth.ts` rewrites `ws://127.0.0.1/*` handshakes from
+  the main window to carry that child's cookie and an `origin` it accepts —
+  cancelling any handshake whose `origin` is not `dsh-app://app`. Removing either
+  half leaves the window connected to nothing: no session list, `[connection]
+  connection lost, retry` in the client console.
 - Health = the child reports `{type:'ready'}` on the IPC channel within 90 s
-  (`HOST_READY_TIMEOUT_MS`).
+  (`HOST_READY_TIMEOUT_MS`); on the URL transport the start then also
+  authenticates that URL (same deadline) before it resolves.
 - Crash → restart with backoff; repeated failure → kernel rollback. A crash
   during startup is reported once (through the rejected `start()`), not twice.
 - Shutdown: SIGTERM → 8 s grace → SIGKILL; logs tee'd to

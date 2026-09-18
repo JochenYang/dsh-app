@@ -123,7 +123,7 @@ $env:DSH_APP_DEV="1"; $env:DSH_APP_DEV_RUNTIME="D:/codes/DSH-APP/deepseek-harnes
 | 项目 | 开发模式 | 生产模式 |
 |---|---|---|
 | 内核来源 | 本地 checkout（desktop host 子进程） | `userData/kernel/` 预装运行时（直连 node 二进制） |
-| 启动速度 | 慢（10 秒级） | 快（2 秒级） |
+| 启动速度 | 秒级，不需要镜像 | 通常秒级；rc 线（0.1.5 宿主）要把运行时镜像进 profile，首启与被插件市场改动过之后会多花十几秒重建（实测 14–17 秒），之后按标记跳过 |
 | 更新检查 | 跳过（钉在 checkout） | 每 6h 自动 + 托盘手动 |
 
 ## 内核更新系统

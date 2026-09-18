@@ -26,6 +26,7 @@ workflow/ralph、subagent(spawn/fork)、web 检索、审批、权限预设、轨
 | P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 | ✅ 已落地（main 未 push，用户已实测投递生效；系统通知 V2 待 desktop bridge） |
 | — | [code-quality-enhancements.md](code-quality-enhancements.md) | 验收钩子（MVP 已验证，单门价值不足，停止投入；等效替代=原生 Hook 用户自配） | 📄 |
 | — | [desktop-shell-experience.md](desktop-shell-experience.md) | plugin-brand 落地 / 诊断中心 / 首启补全 | 📄 |
+| P2 | [kernel-package-set.md](kernel-package-set.md) | 内核交付改为包集（profile 自持核心，rc 线镜像与解压激活退场） | 📄 已立项（方向已定：只学装法，不绑定应用发布） |
 | — | [dev-process-tooling.md](dev-process-tooling.md) | PR CI / 套件冒烟探针 / 版本对齐脚本 | 🔧 CI 门 + 冒烟探针已落地；单测/对齐脚本/看板未做 |
 
 ## 搁置区（判死刑项，留档备查，不占队列）
