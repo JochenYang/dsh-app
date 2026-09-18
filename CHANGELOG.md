@@ -8,6 +8,55 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.12.4] - 2026-09-19
+
+### 中文
+- 办公组件的载荷补上「primary runtime」这一半（独立 Python 3.12.14 + Node 24.21.0 + pnpm 11.7.0，含 numpy/pandas/python-docx/python-pptx/openpyxl/Pillow/lxml/XlsxWriter 共 13 个发行包）与 LibreOffice 引擎同装同卸：此前该产物只有引擎，宿主自带的 `load_workspace_dependencies` 工具每次调用都在 `…/dsh-app-office/primary-runtime/runtime.json` 上报 ENOENT——模型因此拿不到这套离线依赖，只能去翻用户机器上的 Python。现在每个非 Linux 格由 `scripts/build-primary-runtime.mjs` 按摘要锁定的输入（`scripts/primary-runtime-lock.json`）产出这套运行时并打进载荷，`scripts/smoke-primary-runtime.mjs` 用宿主自己的 `primary-runtime.ts` 验证（安装、五条路径、解释器导入、Node/pnpm 版本、以及该工具真的答得上）。代价是载荷产物从 118.5 MB 涨到 210.9 MB——只有下载办公组件的用户付一次，内核产物本身仍是 80.8 MB 不变；Linux 格不产这套（宿主 `readPrimaryRuntime` 只接受 win32/darwin 清单，Linux 上该工具按上游设计不可用）。载荷校验同时收紧：manifest 声明了 Python 集就必须真的带 `primary-runtime/runtime.json`，否则整份产物在安装时被拒绝——否则又是「装上了但工具照样报错」的静默缺口
+- 修复「当前内核未声明办公组件」（开发运行用本地 checkout、旧内核）时 `office_to_pdf` 的错误文案：这类内核根本没有可下载的引擎，之前它却把用户指向「设置 → 诊断 → 办公组件」的下载按钮（那里只会回「无需下载」）；现在按内核是否真的声明了办公组件分成两句，各自指向可行的下一步
+- 新增 `office_to_pdf` 工具：把工作区里已有的 Office 文档（.doc/.docx/.xls/.xlsx/.ppt/.pptx）**原样转成 PDF**，走本应用自带的 LibreOffice 引擎（该引擎的按需下载与预览共用），用户机器上不需要装 Office 或 WPS。此前模型要完成这类请求只能自己去翻本机能力——实测它先用 PowerShell 找系统 LibreOffice（没装），再退回 WPS 的 COM 自动化（`Presentations.SaveAs`），结果依赖用户装了什么软件、可能弹出窗口、换台机器复现不出来；现在工具是确定的，页数/页面尺寸/配色/图表保留、文字可选，并如实回报 `missingFonts`（文档声明但本机没有的字体族）。转换失败按引擎原因给可操作中文：引擎未安装时直接指向「设置 → 诊断 → 办公组件」的下载；源文件与输出路径沿用既有工具的工作区纪律（越界、扩展名不符、源文件不存在都在写盘前拒绝），写盘走临时文件 + 重命名
+- 修复下载类提示条（内核分层下载、更新下载）里的转圈图标画成了**圆角方块**：宿主的设计系统在 `body` 上设了 `corner-shape: superellipse(1.5)`，于是所有 `border-radius:50%` 都被画成超椭圆——宿主自己的 spinner 都各自显式写 `corner-shape:round` 抵消，我们注入的这份漏了。现在 spinner 与成功/失败徽章都显式声明 `corner-shape:round`（同一处公共样式，两个形状一起修正），并加了断言锁死；顺手修好了同一个探针里早就红着的一条内核更新卡按钮断言（它在读早已改成设计令牌的颜色）
+
+### English
+- The office payload now carries the "primary runtime" half (independent Python 3.12.14, Node
+  24.21.0 and pnpm 11.7.0 with 13 locked distributions — numpy, pandas, python-docx, python-pptx,
+  openpyxl, Pillow, lxml, XlsxWriter) alongside the LibreOffice engine: until now that artifact held
+  the engine only, so the host's own `load_workspace_dependencies` tool failed every call with ENOENT
+  on `…/dsh-app-office/primary-runtime/runtime.json` — the model could not reach the offline
+  dependencies and went hunting for the machine's Python instead. Every non-Linux cell now builds that
+  runtime from digest-pinned inputs (`scripts/primary-runtime-lock.json`) via
+  `scripts/build-primary-runtime.mjs`, and `scripts/smoke-primary-runtime.mjs` proves a staged tree
+  against the host's own `primary-runtime.ts` (install, all five paths, interpreter imports, Node and
+  pnpm versions, and the tool actually answering). It takes the payload artifact from 118.5 MB to
+  210.9 MB — paid once, only by users who download the office component; the kernel artifact itself
+  stays at 80.8 MB. Linux cells ship no such set: the host's `readPrimaryRuntime` accepts only
+  win32/darwin manifests, so that tool is unavailable there by upstream design. The payload check is
+  tightened with it: a manifest that declares a Python set must actually carry
+  `primary-runtime/runtime.json`, or the whole artifact is refused at install — otherwise the same
+  silent gap comes back wearing a green install
+- Fixed `office_to_pdf`'s error wording on a kernel that declares no office component (development
+  runs boot the local checkout, older kernels declare nothing): there is no engine to download at all,
+  yet the message sent the user to the 设置 → 诊断 → 办公组件 download button, which answers "nothing to
+  download". It now splits into two sentences whose next step is real in each case
+
+- Added the `office_to_pdf` tool: converts an Office document already in the workspace
+  (.doc/.docx/.xls/.xlsx/.ppt/.pptx) to PDF as-is through the application's own LibreOffice engine
+  (the same on-demand download the preview uses), so the user's machine needs no Office or WPS. Until
+  now the model had to improvise: measured, it first looked for a system LibreOffice (absent), then fell
+  back to WPS through COM automation (`Presentations.SaveAs`) — a result that depends on what the user
+  happens to have installed, can raise windows, and is not reproducible on another machine. The tool is
+  deterministic, keeps page count, page size, colours and charts with selectable text, and reports
+  `missingFonts` (families the document declares that this machine cannot supply). Failures are worded
+  per engine reason: a missing engine points straight at the 设置 → 诊断 → 办公组件 download. Source and
+  output paths keep the existing tools' workspace discipline (escapes, wrong extensions and absent
+  sources are all refused before anything is written), and the PDF lands through a temp file + rename
+- Fixed the spinner in the download toasts (kernel layer download, update download) rendering as a
+  ROUNDED SQUARE: the host's design system sets `corner-shape: superellipse(1.5)` on `body`, so every
+  `border-radius:50%` paints as a superellipse — the host's own spinners each declare
+  `corner-shape:round` to opt out and the card we inject had not. The spinner and the success/error
+  badge (one shared style) now say so explicitly, with an assertion pinning it; the same probe's
+  long-failing kernel-update-card button assertion (still reading a colour that had moved to design
+  tokens) is fixed alongside
+
 ## [v0.12.3] - 2026-09-18
 
 ### 中文

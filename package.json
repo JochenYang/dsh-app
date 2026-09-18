@@ -1,7 +1,7 @@
 {
   "name": "dsh-app",
   "productName": "DSH APP",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "description": "DSH APP — branded desktop client for DeepSeek Harness (dsh). macOS / Windows / Linux.",
   "author": {
     "name": "dsh-app contributors",
@@ -25,6 +25,7 @@
     "dist:mac": "npm run build && node scripts/prepare-bundled-kernel.mjs darwin && electron-builder --mac",
     "dist:linux": "npm run build && node scripts/prepare-bundled-kernel.mjs linux && electron-builder --linux",
     "runtime:build": "node scripts/build-runtime.mjs",
+    "primary-runtime:build": "node scripts/build-primary-runtime.mjs",
     "icon:gen": "node scripts/gen-icon.mjs",
     "icon:build": "python scripts/build-icons.py"
   },
