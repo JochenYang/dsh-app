@@ -380,6 +380,34 @@ jobs:
           cp runtime-dist/layers/layers.json "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json"
           gh release upload "$TAG" runtime-dist/layers/*.tgz "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json" --clobber
 
+      # A rebuilt runtime produces new layer names (they carry content digests),
+      # and `--clobber` cannot remove the ones its predecessor left: layer names
+      # that changed simply become new assets, so the release accumulates dead
+      # tarballs that no index names. Measured on 0.1.6-alpha.2: a rebuild left
+      # ten of them, and the mirror's completeness guard refused the whole
+      # runtime — "not named by any layer index" — until they were deleted by
+      # hand. Each cell prunes ITS OWN platform's unreferenced layer assets, so
+      # the six cells never race on a name.
+      - name: Prune superseded layer assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: runtime-${{ steps.runtime.outputs.dsh_version }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          INDEX="runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json"
+          node -e '
+            const index = require("./" + process.argv[1])
+            for (const layer of index.layers) console.log(layer.name)
+          ' "$INDEX" | sort > "$RUNNER_TEMP/claimed.txt"
+          gh release view "$TAG" --json assets --jq '.assets[].name' \
+            | grep -E "^((meta|vendor|node|suite)-.*-${PLATFORM}-${ARCH}\\.tgz)$" | sort > "$RUNNER_TEMP/present.txt" || true
+          comm -13 "$RUNNER_TEMP/claimed.txt" "$RUNNER_TEMP/present.txt" | while read -r name; do
+            echo "removing superseded layer asset $name" >&2
+            gh release delete-asset "$TAG" "$name" --yes
+          done
+
       # Mirror the finished runtime to ModelScope from HERE, not from the
       # mirror workflow's own event trigger.
       #
