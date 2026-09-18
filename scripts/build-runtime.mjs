@@ -1474,13 +1474,15 @@ function lockfilePackages(lockfileText) {
 /**
  * Where a staged Python set comes from, or null when none is staged.
  *
- * `DSH_APP_PRIMARY_RUNTIME` names one explicitly (upstream's packaging stages
- * it at `<resources>/runtime/primary-runtime`; see its
- * `apps/desktop/scripts/prepare-primary-runtime.ts`). Nothing in THIS repo
- * produces one — the shell has never shipped a Python set — so the normal
- * answer is null and the payload carries the engine alone. A caller who stages
- * one gets it inside the payload, where the host's `load_workspace_dependencies`
- * tool finds it as the child's primary-runtime argument.
+ * `DSH_APP_PRIMARY_RUNTIME` names one explicitly: the release workflow stages it
+ * per cell with `scripts/build-primary-runtime.mjs` (upstream's packaging does
+ * the same at `<resources>/runtime/primary-runtime`; see its
+ * `apps/desktop/scripts/prepare-primary-runtime.ts`). Unset — the local default —
+ * means the payload carries the engine alone, which is why the host's
+ * `load_workspace_dependencies` tool then fails with ENOENT on
+ * `<payload>/primary-runtime/runtime.json`. A caller who stages one gets it
+ * inside the payload, where that tool finds it as the child's primary-runtime
+ * argument.
  *
  * @returns absolute path of the staged set, or null.
  * @throws when the variable names something that is not a primary runtime.
@@ -1650,7 +1652,7 @@ async function buildOfficePayload(work, runtimeDir, platform, arch) {
   }
   await writeFile(path.join(payloadDir, PAYLOAD_MANIFEST_FILE), JSON.stringify(manifest, null, 2))
 
-  const missing = officePayloadRequiredFiles(engine).filter((relative) => !existsSync(path.join(payloadDir, relative)))
+  const missing = officePayloadRequiredFiles(engine, manifest.components.python).filter((relative) => !existsSync(path.join(payloadDir, relative)))
   if (missing.length > 0) {
     throw new Error(
       `the payload for ${platform}-${arch} is missing ${missing.join(', ')}: no ${kitEnginePackage(engine)} engine was installed. `

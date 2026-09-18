@@ -38,6 +38,8 @@ export const PAYLOAD_MANIFEST_FILE = 'manifest.json'
 
 /** The directory an optional Python set occupies inside the archive. */
 export const PAYLOAD_PRIMARY_RUNTIME_DIR = 'primary-runtime'
+/** The staged Python set's own manifest — the marker that it is complete. */
+export const PAYLOAD_PRIMARY_RUNTIME_MANIFEST = 'runtime.json'
 
 /** Package holding the conversion API; the runtime carries a shim of it. */
 export const OFFICE_KIT_PACKAGE = '@deepseek-ai/libreoffice-kit'
@@ -160,7 +162,8 @@ export function officePayloadManifestProblems(value, target, expectedVersion) {
 
 /**
  * Files a payload directory must hold to be usable: the manifest, the kit's
- * entry and the target engine's own package manifest.
+ * entry and the target engine's own package manifest — plus, when the manifest
+ * declares a Python set, that set's own `runtime.json`.
  *
  * The engine marker is the engine package's `package.json` because that is what
  * every engine kind has — including `wasm`, which is the kit's own fallback for
@@ -169,16 +172,25 @@ export function officePayloadManifestProblems(value, target, expectedVersion) {
  * upstream's packaging assertion; `wasm` is the kit's own name for the fallback
  * (see `selectOfficeEngine` in scripts/build-runtime.mjs).
  *
+ * The Python marker is what makes a declared set non-optional: a payload whose
+ * manifest says `components.python` but whose archive lost `primary-runtime/`
+ * would otherwise install cleanly and only fail when the host's
+ * `load_workspace_dependencies` tool reads that exact path.
+ *
  * @param payloadDir - absolute path of an extracted payload.
  * @param engine - engine suffix the target loads.
+ * @param pythonVersion - the manifest's Python component, when it declares one.
  * @returns relative paths that must exist.
  */
-export function officePayloadRequiredFiles(engine) {
+export function officePayloadRequiredFiles(engine, pythonVersion = null) {
   const engineDir = path.join(PAYLOAD_MODULES_DIR, kitEnginePackage(engine))
   return [
     PAYLOAD_MANIFEST_FILE,
     path.join(PAYLOAD_MODULES_DIR, OFFICE_KIT_PACKAGE, 'package.json'),
     path.join(engineDir, 'package.json'),
     ...(engine === 'wasm' ? [] : [path.join(engineDir, 'prebuilds.json')]),
+    ...(typeof pythonVersion === 'string' && pythonVersion !== ''
+      ? [path.join(PAYLOAD_PRIMARY_RUNTIME_DIR, PAYLOAD_PRIMARY_RUNTIME_MANIFEST)]
+      : []),
   ]
 }

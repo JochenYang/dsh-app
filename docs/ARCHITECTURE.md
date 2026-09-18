@@ -156,6 +156,20 @@ because every asset of a runtime release is version-addressed (the mirror's own
 completeness check reads it that way). `src/kernel/office-payload.ts` owns
 resolve/verify/extract/swap/prune; nothing downloads automatically.
 
+**Fonts are deliberately not bundled.** The engine uses the families a document
+declares when the machine has them and substitutes when it does not, reporting
+every family it could not supply (`missingFonts`, surfaced by `office_to_pdf` and
+by the preview's font notice) — that reporting is the difference from an office
+suite that swaps silently. A bundled font is only worth its bytes if it changes
+that substitution, and it does not: measured on a 36-slide deck that declares
+`Noto Sans CJK SC` / `Noto Serif CJK SC` (absent from this host), passing the
+kit's `fontDirectories` and also dropping the face into the engine's own
+`share/fonts/truetype` left the conversion byte-identical, because the kit's
+default fallback groups rank `微软雅黑` / `黑体` above `Noto Sans SC` and any
+Chinese Windows has them. The bundled face is picked only when nothing else can
+cover the glyphs — a host with no CJK fonts at all, which is not this product's
+audience (the kit's README says the same about minimal Linux containers).
+
 ## 5. Update flow (kernel channel)
 
 ```
@@ -311,7 +325,9 @@ asserted in both the build and CI — see `AGENTS.md` §7.
   card; pause/resume and checksum display are not.
 - Office payload: not bundled with the installer, so a first run with no network
   converts no documents until the 诊断 row downloads the engine; the Python set
-  the office skills need is wired end to end but nothing in this repo produces
-  one (`DSH_APP_PRIMARY_RUNTIME` stages it when a caller has it).
+  the office skills need travels in that same artifact and is staged per cell by
+  `scripts/build-primary-runtime.mjs` (`DSH_APP_PRIMARY_RUNTIME` carries it into
+  the build; win32 and darwin only, because the host's `readPrimaryRuntime`
+  refuses a linux manifest).
 - Optional: signed manifests + rollback of `$DSH_HOME` settings on major
   version cross-grades.

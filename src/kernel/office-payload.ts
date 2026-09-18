@@ -43,6 +43,7 @@ import {
   OFFICE_PAYLOAD_MANIFEST_FILE,
   OFFICE_PAYLOAD_MODULES_DIR,
   OFFICE_PRIMARY_RUNTIME_LEAF,
+  OFFICE_PRIMARY_RUNTIME_MANIFEST_FILE,
   OFFICE_ROOT_DIR,
 } from '../shared/constants'
 import { sha512File, verifyIntegrity } from './integrity'
@@ -250,7 +251,7 @@ export class OfficePayloadManager {
   private async verify(dir: string, target: OfficePayloadTarget): Promise<string | null> {
     const manifest = await readManifest(dir)
     if (manifest === null || manifestProblems(manifest, target).length > 0) return null
-    for (const relative of requiredFiles(target.engine)) {
+    for (const relative of requiredFiles(target.engine, manifest.components.python)) {
       if (!(await exists(path.join(dir, relative)))) return null
     }
     return manifest.payloadVersion
@@ -405,7 +406,7 @@ export class OfficePayloadManager {
       if (innerProblems.length > 0) {
         throw new OfficePayloadError('officePayload.manifestMismatch', t('officePayload.manifestMismatch', { detail: innerProblems.join('; ') }))
       }
-      for (const relative of requiredFiles(target.engine)) {
+      for (const relative of requiredFiles(target.engine, inner.components.python)) {
         if (!(await exists(path.join(tree, relative)))) {
           throw new OfficePayloadError('officePayload.manifestMismatch', t('officePayload.manifestMismatch', { detail: `the archive is missing ${relative}` }))
         }
@@ -548,13 +549,19 @@ async function readManifest(dir: string): Promise<KernelOfficePayloadManifest | 
  * packaging assertion), while `wasm` — the kit's fallback for a target without
  * a native engine — does not.
  */
-export function requiredFiles(engine: string): string[] {
+export function requiredFiles(engine: string, pythonVersion: string | null = null): string[] {
   const engineDir = path.join(OFFICE_PAYLOAD_MODULES_DIR, `${KIT_PACKAGE}-${engine}`)
   return [
     OFFICE_PAYLOAD_MANIFEST_FILE,
     path.join(OFFICE_PAYLOAD_MODULES_DIR, KIT_PACKAGE, 'package.json'),
     path.join(engineDir, 'package.json'),
     ...(engine === 'wasm' ? [] : [path.join(engineDir, 'prebuilds.json')]),
+    // A manifest that declares a Python set makes that set non-optional: an
+    // archive that lost `primary-runtime/` would otherwise install cleanly and
+    // only fail when the host's `load_workspace_dependencies` reads it.
+    ...(pythonVersion === null || pythonVersion === ''
+      ? []
+      : [path.join(OFFICE_PRIMARY_RUNTIME_LEAF, OFFICE_PRIMARY_RUNTIME_MANIFEST_FILE)]),
   ]
 }
 

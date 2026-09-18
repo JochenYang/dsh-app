@@ -244,6 +244,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The desktop host's load_workspace_dependencies tool answers with a
+      # "primary runtime" (Python + Node.js + pnpm) it installs from the office
+      # payload the shell hands it; a payload without one fails every call with
+      # ENOENT on <payload>/primary-runtime/runtime.json. The staged tree is
+      # passed to build-runtime.mjs below, which copies it into the payload.
+      # Linux cells skip this: the host's readPrimaryRuntime accepts only win32
+      # and darwin manifests (apps/desktop-host/src/primary-runtime.ts), so a
+      # linux tree could never be installed — scripts/build-primary-runtime.mjs
+      # refuses to build one, and those cells ship the engine-only payload.
+      - name: Build primary runtime
+        id: primary-runtime
+        if: matrix.platform != 'linux'
+        shell: bash
+        run: |
+          node scripts/build-primary-runtime.mjs ${{ matrix.platform }} ${{ matrix.arch }}
+          echo "dir=runtime-dist/primary-runtime-${{ matrix.platform }}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+
       - name: Build suite plugins
         shell: bash
         working-directory: plugins
@@ -262,6 +279,11 @@ jobs:
 
       - name: Build kernel runtime
         id: runtime
+        env:
+          # Empty on linux cells (the step that sets it is skipped there), which
+          # build-runtime.mjs reads as "no Python set" — the payload those cells
+          # must ship, because the host cannot install one on Linux.
+          DSH_APP_PRIMARY_RUNTIME: ${{ steps.primary-runtime.outputs.dir }}
         run: node scripts/build-runtime.mjs ${{ matrix.platform }} ${{ matrix.arch }} "${{ env.DSH_VERSION }}"
 
       # Runtime artifacts attach to their own `runtime-<dshVersion>` tag

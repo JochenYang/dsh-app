@@ -33,6 +33,8 @@ const PLATFORM = 'win32'
 const ARCH = 'x64'
 const ENGINE = 'win32-x64'
 const KIT_VERSION = '0.0.1'
+/** A declared Python set, as the payload manifest names it. */
+const PYTHON_VERSION = '3.12.14'
 const PAYLOAD_VERSION = build.officePayloadVersion(KIT_VERSION)
 const DSH_VERSION = '0.1.6-alpha.2'
 const ASSET = officePayloadAssetName(PLATFORM, ARCH, DSH_VERSION)
@@ -70,12 +72,19 @@ function payloadManifest(version = PAYLOAD_VERSION, overrides = {}) {
  * `payload/` directory holding the manifest, the kit's entry and the target
  * engine's content marker.
  */
-async function makePayloadTarball(dir, { manifest = payloadManifest(), engine = ENGINE } = {}) {
+async function makePayloadTarball(dir, { manifest = payloadManifest(), engine = ENGINE, pythonTree = true } = {}) {
   const tree = path.join(dir, PAYLOAD_ROOT)
   const kit = path.join(tree, 'node_modules', '@deepseek-ai', 'libreoffice-kit')
   const engineDir = path.join(tree, 'node_modules', '@deepseek-ai', `libreoffice-kit-${engine}`)
   mkdirSync(kit, { recursive: true })
   mkdirSync(path.join(engineDir, 'program'), { recursive: true })
+  // A manifest that declares a Python set carries the tree unless the case is
+  // deliberately incomplete (the archive that installs but cannot answer).
+  const python = manifest.components?.python
+  if (pythonTree && typeof python === 'string' && python !== '') {
+    mkdirSync(path.join(tree, 'primary-runtime'), { recursive: true })
+    writeFileSync(path.join(tree, 'primary-runtime', 'runtime.json'), `${JSON.stringify({ components: { python } }, null, 2)}\n`)
+  }
   writeFileSync(path.join(tree, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   writeFileSync(path.join(kit, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/libreoffice-kit', version: KIT_VERSION, type: 'module', main: 'index.js' }, null, 2)}\n`)
   writeFileSync(path.join(kit, 'index.js'), 'export function createConverter() { return Promise.resolve({ render: async () => ({ missingFonts: [] }) }) }\n')
@@ -307,6 +316,31 @@ test('a payload with no engine is refused at install time', async () => {
   }
 })
 
+test('a payload that declares a Python set but lost its tree is refused', async () => {
+  const userData = newUserData()
+  const work = mkdtempSync(path.join(tmpdir(), 'dsh-office-fixture-'))
+  roots.push(work)
+  // The manifest names the Python version the host's `load_workspace_dependencies`
+  // will read; an archive without `primary-runtime/runtime.json` would install
+  // and only fail at that call, so it must never reach the active directory.
+  const manifest = payloadManifest(build.officePayloadVersion(KIT_VERSION, PYTHON_VERSION), {
+    components: { kit: KIT_VERSION, engine: ENGINE, python: PYTHON_VERSION },
+  })
+  const tarball = await makePayloadTarball(work, { manifest, pythonTree: false })
+  const release = stubRelease(tarball, { manifest })
+  const { value } = manager(userData, () => targetFor(manifest.payloadVersion))
+  try {
+    await value.download()
+    const status = await settled(value)
+    assert.equal(status.phase, 'failed')
+    assert.equal(status.error?.code, 'officePayload.manifestMismatch')
+    assert.match(String(status.error?.message), /primary-runtime/u)
+    assert.equal(existsSync(path.join(userData, OFFICE_ROOT_DIR, OFFICE_PAYLOAD_DIR, manifest.payloadVersion)), false)
+  } finally {
+    release.restore()
+  }
+})
+
 test('a payload of another kernel is never reported as installed', async () => {
   const userData = newUserData()
   const work = mkdtempSync(path.join(tmpdir(), 'dsh-office-fixture-'))
@@ -502,6 +536,13 @@ test('the build and the shell agree on every name and on the manifest rules', ()
   // The archive layout: the build's constants are what the shell's required
   // files name, one level deep.
   assert.deepEqual(requiredFiles(ENGINE), build.officePayloadRequiredFiles(ENGINE))
+  // A declared Python set makes its own manifest a required file — the check
+  // that catches an archive which would install but could not answer the host's
+  // `load_workspace_dependencies`.
+  assert.deepEqual(requiredFiles(ENGINE, PYTHON_VERSION), build.officePayloadRequiredFiles(ENGINE, PYTHON_VERSION))
+  assert.equal(requiredFiles(ENGINE, PYTHON_VERSION).some((relative) => relative.endsWith(path.join('primary-runtime', 'runtime.json'))), true)
+  assert.equal(requiredFiles(ENGINE, null).some((relative) => relative.endsWith('runtime.json')), false)
+  assert.equal(requiredFiles(ENGINE, '').some((relative) => relative.endsWith('runtime.json')), false)
   // The wasm engine (the kit's fallback for a target with no native engine —
   // the linux cells) does not ship the native engines' `prebuilds.json`; the
   // marker both sides require for it is the engine package's own manifest.

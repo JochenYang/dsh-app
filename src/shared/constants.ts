@@ -100,6 +100,9 @@ export const OFFICE_PAYLOAD_MODULES_DIR = 'node_modules'
 /** Directory a carried Python set occupies inside an installed payload. */
 export const OFFICE_PRIMARY_RUNTIME_LEAF = 'primary-runtime'
 
+/** The carried Python set's own manifest — the marker that it is complete. */
+export const OFFICE_PRIMARY_RUNTIME_MANIFEST_FILE = 'runtime.json'
+
 /** The payload's own metadata file. */
 export const OFFICE_PAYLOAD_MANIFEST_FILE = 'manifest.json'
 

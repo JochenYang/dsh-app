@@ -117,7 +117,17 @@ own pnpm project and `supportedArchitectures` naming the target, so a
 cross-target cell (win32-arm64 built on a windows x64 runner) gets ITS engine
 rather than the host's; a payload without the target's engine fails the build.
 A staged Python set (upstream's `primary-runtime`) rides the same artifact when
-`DSH_APP_PRIMARY_RUNTIME` names one — nothing in this repo produces one yet.
+`DSH_APP_PRIMARY_RUNTIME` names one — `scripts/build-primary-runtime.mjs`
+produces one per cell (win32 and darwin only; the host's `readPrimaryRuntime`
+refuses a linux manifest), and it is what makes the host's
+`load_workspace_dependencies` tool answer at all. Its inputs are pinned in
+`scripts/primary-runtime-lock.json`, a copy of upstream's
+`apps/desktop/scripts/primary-runtime-lock.json` plus a win32-arm64 cell this
+repo added; refreshing it for a new harness line is a manual drill (copy the
+values, then check every digest against the official source), and
+`node scripts/smoke-primary-runtime.mjs <stagedDir>` proves a staged tree against
+the host's own `primary-runtime.ts` — install, five paths, Python imports, Node
+and pnpm versions, and the `load_workspace_dependencies` answer itself.
 
 Dependency installs: root changes use plain `npm install`; plugin-local installs
 use `--legacy-peer-deps` **inside the plugin dir only** (at the ROOT it prunes the
@@ -291,7 +301,7 @@ holds the full detail.
 | `NPM_CONFIG_REGISTRY` — single-registry override; npmmirror still appended (`sources/registry.ts`) |
 | `DSH_APP_GITHUB_MIRRORS` — comma-separated mirror URL prefixes; empty disables mirrors (`sources/artifact.ts`, `updater.ts`) |
 | `DSH_APP_LOG_DIR` — log directory, default `<userData>` (logs in `<dir>/logs`) (`server.ts`, `index.ts`) |
-| `DSH_APP_PRIMARY_RUNTIME` — a staged Python set (upstream's `primary-runtime` tree, `runtime.json` required) to carry inside the office payload; unset means engine-only (`build-runtime.mjs`) |
+| `DSH_APP_PRIMARY_RUNTIME` — a staged Python set (upstream's `primary-runtime` tree, `runtime.json` required) to carry inside the office payload; unset means engine-only (`build-runtime.mjs`; `scripts/build-primary-runtime.mjs` produces one) |
 | `DSH_APP_OFFICE_PAYLOAD` — payload directory the shell publishes to the kernel child (`<userData>/dsh-app-office/payload/<version>`, set at spawn whether or not it is installed); read per conversion by the runtime's kit shim (`index.ts`, `scripts/runtime-stubs/libreoffice-kit`) |
 | `DSH_APP_PROXY_PORTS` — ports to probe, replacing the default list (`proxy-detect.ts`) |
 | `DSH_APP_PROXY_WATCHDOG_MS` — watchdog interval, default 30000 (`index.ts`) |
@@ -399,13 +409,18 @@ Runtime tags re-upload with `--clobber` and are safe to re-run. `gh run rerun
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing
   secrets must be supplied as CI secrets; `resources/icon.png` is a placeholder.
 - **Office payload**: the Python half (upstream's `primary-runtime` set) is wired
-  end to end — `DSH_APP_PRIMARY_RUNTIME` stages one into the payload, the shell
-  hands the child `<payload>/primary-runtime`, and an engine-only payload is the
-  normal case — but nothing in this repo PRODUCES one, so
-  `load_workspace_dependencies` still fails with the path it looked for. The
-  payload is also not bundled with the installer: a first run with no network
-  converts no documents until the 诊断 row downloads it (the engine is ~115 MiB
-  — deliberately not paid by users who never convert).
+  end to end — `scripts/build-primary-runtime.mjs` stages one per cell (CI runs it
+  for every non-linux cell and passes it through `DSH_APP_PRIMARY_RUNTIME`), the
+  shell hands the child `<payload>/primary-runtime`, and the host's
+  `load_workspace_dependencies` tool installs it under
+  `$DSH_HOME/dsh-runtimes/dsh-primary-runtime`. What is NOT exercised: the darwin
+  and arm64 trees were never executed anywhere (this repo's machine is win32-x64;
+  `scripts/smoke-primary-runtime.mjs` runs the pinned interpreters, so a release
+  should run it on a macOS runner before shipping). The payload is also not
+  bundled with the installer: a first run with no network converts no documents
+  until the 诊断 row downloads it (the engine is ~115 MiB — deliberately not paid
+  by users who never convert; carrying the Python set as well takes that artifact
+  from ~119 MiB to ~211 MiB).
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version
   upgrades.
 - **The 0.1.6-alpha.2+ host line is not shipped-ready** — its packaged path is
