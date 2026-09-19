@@ -1,8 +1,16 @@
-import { BrowserWindow, shell } from 'electron'
+import { BrowserWindow, app, screen, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
 import { kernelChannelLabel, t } from '../shared/locale'
 import { APP_ORIGIN, APP_URL } from './desktop-host'
+import {
+  readWindowBounds,
+  resolveWindowGeometry,
+  toWindowBounds,
+  windowStateFile,
+  writeWindowBounds,
+  type WindowSize,
+} from './window-bounds'
 import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
@@ -37,8 +45,6 @@ function symbolColorFor(bg: string): string {
 }
 
 const MAIN_WINDOW_OPTS = {
-  width: 1280,
-  height: 800,
   minWidth: 900,
   minHeight: 600,
   title: 'DSH APP',
@@ -61,6 +67,24 @@ const MAIN_WINDOW_OPTS = {
     // security model. All desktop capabilities flow through the local server.
   },
 } as const
+
+/** Debounce before the window geometry is written to disk (resize/move end). */
+const GEOMETRY_SAVE_DEBOUNCE_MS = 500
+
+/**
+ * Opening size for the main window: the remembered geometry when there is one,
+ * a size fitted to the display otherwise. The rules live in `window-bounds.ts`
+ * so they can be driven by tests for displays this machine does not have.
+ *
+ * Called at window-creation time, never at module load: `screen` is not usable
+ * before `app.ready`.
+ */
+function initialWindowGeometry(): WindowSize & { x?: number, y?: number } {
+  const displays = screen.getAllDisplays()
+  const primary = screen.getPrimaryDisplay()
+  const saved = readWindowBounds(windowStateFile(app.getPath('userData')))
+  return resolveWindowGeometry(saved, displays, primary.workArea)
+}
 
 /**
  * Probe the effective color behind the native window-control strip: the
@@ -698,7 +722,42 @@ export function resetOverlayColor(win: BrowserWindow): void {
  * startup-window.ts's applyWindowTheme).
  */
 export function createMainWindow(): BrowserWindow {
-  const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, show: false })
+  const geometry = initialWindowGeometry()
+  const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, ...geometry, show: false })
+  // Electron reports a MAXIMIZED window's bounds as the screen's own rect, so
+  // persisting `getBounds()` on close would store "screen-sized at 0,0" and
+  // lose the size the user had before they maximized. `getNormalBounds()` is
+  // the pre-maximize rectangle, which is the one worth remembering.
+  const rememberGeometry = (): void => {
+    if (win.isDestroyed()) return
+    const normal = win.getNormalBounds()
+    writeWindowBounds(windowStateFile(app.getPath('userData')), {
+      ...normal,
+      maximized: win.isMaximized(),
+    })
+  }
+  // Debounced: a drag fires `resize`/`move` continuously, and each one would
+  // otherwise rewrite the file.
+  let saveTimer: ReturnType<typeof setTimeout> | undefined
+  const scheduleGeometrySave = (): void => {
+    if (saveTimer !== undefined) clearTimeout(saveTimer)
+    saveTimer = setTimeout(rememberGeometry, GEOMETRY_SAVE_DEBOUNCE_MS)
+    saveTimer.unref?.()
+  }
+  win.on('resize', scheduleGeometrySave)
+  win.on('move', scheduleGeometrySave)
+  win.on('maximize', scheduleGeometrySave)
+  win.on('unmaximize', scheduleGeometrySave)
+  win.on('close', () => {
+    if (saveTimer !== undefined) clearTimeout(saveTimer)
+    rememberGeometry()
+  })
+  // Restore the maximized state AFTER the window exists: `maximize()` before
+  // the first paint is what makes the splash appear already maximized instead
+  // of flashing a small window first.
+  if (readWindowBounds(windowStateFile(app.getPath('userData')))?.maximized === true) {
+    win.once('ready-to-show', () => { win.maximize() })
+  }
   const showWhenReady = (): void => {
     if (!win.isDestroyed()) win.show()
   }
