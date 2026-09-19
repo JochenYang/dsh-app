@@ -161,7 +161,32 @@ gh api -X DELETE repos/JochenYang/dsh-app/releases/<id>
 git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z
 ```
 
+Publishing a FRESH version number cannot collide: `prepare-release` creates an
+empty draft, so the 422 only ever appears on a second upload into a release that
+already holds the asset.
+
 Runtime tags re-upload with `--clobber` and are safe to re-run. `gh run rerun
 <run> --failed` re-executes the ORIGINAL commit (flakes only; a fix needs
 `workflow_dispatch`). Never two writers on one runtime tag: check no other
 `release.yml` run is active and `git log origin/main..HEAD` is empty.
+
+**A re-run cascades into the app jobs.** `gh run rerun --failed` is documented
+as "rerun only failed jobs, **including dependencies**", and measured on run
+35450267252 (2026-09-19): one flaked `runtime` cell was re-run and all four
+`app` jobs ran again with it — they started at 15:31:18 having already succeeded
+at 15:19. Their electron-builder publish then re-uploaded assets already on the
+draft; the Linux and Windows cells took the `overwrite published file …
+reason=already exists` branch and passed, the macOS cell died on the 422 above.
+
+So decide by whether the app jobs have already uploaded:
+
+1. **`app` still running, or never started** — a re-run is safe.
+2. **`app` already succeeded** — do NOT re-run. Either accept the red cell and
+   verify content per §4.3 instead, or take the delete-and-re-tag path above. A
+   failed `app` job is not evidence of a missing asset: on that run the macOS
+   job died after its four installers and `latest-mac.yml` were already in
+   place, and their digests matched.
+3. **`gh run rerun --job <databaseId>`** (`databaseId`, not the browser URL's
+   job number) is the narrower flag, but its help carries the same "including
+   dependencies" wording and its cascade behaviour is UNVERIFIED — treat it as
+   a re-run, not as a single-job escape hatch.
