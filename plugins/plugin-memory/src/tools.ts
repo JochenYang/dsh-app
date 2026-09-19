@@ -47,10 +47,30 @@ import {
   type TopicCard,
 } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
+import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
 
 /** Hard ceiling for recall output; a runaway scope must not flood the
  * context either. */
 const MAX_RECALL_CHARS = 50_000
+
+/**
+ * The `memory_save` tool description. Exported because it is a PROMPT SURFACE
+ * — the model reads it at every call site — so it carries the shared
+ * card-text discipline like the other three surfaces (see the
+ * `card-discipline` module, which lists them for the tests to walk).
+ */
+export const SAVE_TOOL_DESCRIPTION =
+  'Save one topic card to the persistent cross-session memory. The topic key is the card\'s '
+  + 'identity: saving the SAME topic again rewrites the card (use that to correct or extend a '
+  + 'fact — never create a second card for one subject). Check the injected index BEFORE saving: '
+  + 'if a card already covers the subject, update that topic instead. Scope "project" (default) '
+  + 'saves to the current workspace\'s memory — decisions, conventions, lessons seen only by '
+  + 'sessions of this project. Scope "global" saves a cross-project user preference or habit, '
+  + 'and is the ONLY path by which the global scope grows from work like this: the background '
+  + 'pass writes project memory only, so a genuinely cross-workspace fact has to be saved here '
+  + 'or it will not be remembered. NEVER save API keys, tokens, passwords, or credentials. '
+  + 'These cards are re-injected into future sessions; keep them lean.\n'
+  + CARD_TEXT_DISCIPLINE
 
 /** Where a save lands / what a recall reads. */
 const SCOPES = ['project', 'global'] as const
@@ -96,17 +116,7 @@ export function registerMemoryTools(
 ): () => void {
   const disposeSave = ctx.tools.register(defineTool({
     name: 'memory_save',
-    description:
-      'Save one topic card to the persistent cross-session memory. The topic key is the card\'s '
-      + 'identity: saving the SAME topic again rewrites the card (use that to correct or extend a '
-      + 'fact — never create a second card for one subject). Check the injected index BEFORE saving: '
-      + 'if a card already covers the subject, update that topic instead. Scope "project" (default) '
-      + 'saves to the current workspace\'s memory — decisions, conventions, lessons seen only by '
-      + 'sessions of this project. Scope "global" saves a cross-project user preference or habit, '
-      + 'and is the ONLY path by which the global scope grows from work like this: the background '
-      + 'pass writes project memory only, so a genuinely cross-workspace fact has to be saved here '
-      + 'or it will not be remembered. NEVER save API keys, tokens, passwords, or credentials. '
-      + 'These cards are re-injected into future sessions; keep them lean.',
+    description: SAVE_TOOL_DESCRIPTION,
     parameters: {
       topic: {
         type: 'string',
@@ -386,6 +396,8 @@ export function registerMemoryTools(
           : [['global', root.global], ['project', root.projectFor(cwd as string)]]
       const perScope: Record<string, { forgotten: number, remaining: number, removed: string[] }> = {}
       for (const [label, store] of targets) {
+        // The store records the ledger entry itself (see MemoryStore.forget),
+        // so every delete path is covered by construction.
         const { removed, remaining } = await store.forget(match)
         perScope[label] = { forgotten: removed.length, remaining, removed }
       }

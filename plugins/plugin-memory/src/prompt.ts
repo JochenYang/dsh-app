@@ -28,6 +28,7 @@
 
 import type { MemoryRoot, MemoryStore, TopicCard } from './memory-store.ts'
 import type { MemoryCategory } from './types.ts'
+import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
 
 /** Hard ceiling on the injected GLOBAL card bodies (characters). */
 export const MAX_GLOBAL_CHARS = 1_200
@@ -71,6 +72,8 @@ const GUIDELINES_TEXT = [
   '',
   'The body is one concise paragraph in the user\'s language; the summary (≤40 chars) must say',
   'what the card covers — it is the index line future saves route by.',
+  '',
+  CARD_TEXT_DISCIPLINE,
 ].join('\n')
 
 /** Per-category quota inside the body budget: every category keeps its most

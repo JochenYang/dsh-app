@@ -25,6 +25,21 @@
  *   - Fail-soft: any failure logs a warning and leaves progress unchanged,
  *     so the next quiet window retries the same delta.
  *
+ * **Progress invariant — do not reorder.** {@link MemoryDistiller.runDirect}
+ * calls `advanceDistill` ONLY after `applyEntries` has returned. The cursor
+ * IS the claim "everything up to here has been judged"; moving it before the
+ * writes would make a failed write permanently invisible — the delta is
+ * never re-read, so the material is silently lost instead of retried. The
+ * same rule holds on the curator side: `recordCurated` runs only after the
+ * edits landed AND the pass saw the whole store.
+ *
+ * There is no exception for a missing model route either: `runDirect` is
+ * reached only once the gates found enough new material, and a session can
+ * hold surface material BEFORE its first `request/header` (a turn may close
+ * with no step). The only place that advances without a call is
+ * {@link MemoryDistiller.runDistill}'s too-little-material branch, which
+ * advances precisely because there is nothing to lose.
+ *
  * @module @dsh-app/plugin-memory/distiller
  */
 
@@ -45,6 +60,7 @@ import {
   type MemoryStore,
 } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
+import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
 
 /**
  * Quiet window after the last turn before a distill fires (60 s).
@@ -246,6 +262,7 @@ export function buildDistillPrompt(transcript: string, cwd: string | undefined, 
     '- "topic" is ASCII kebab-case (a-z, 0-9, -): translate non-ASCII topic words into English.',
     '- "summary" states what the card covers in ≤40 chars; it is REQUIRED for a new topic key.',
     '- "content" holds the card TEXT only (≤400 chars): no dates, no bullets, no markdown headers.',
+    CARD_TEXT_DISCIPLINE,
     '',
     'Answer with JSON ONLY, no prose or fences:',
     '{"entries": [{"topic": "<kebab-case-key>", "summary": "<≤40 chars>", "category": "<preference|convention|decision|lesson|fact>", "content": "<card text>"}]}',
@@ -466,8 +483,14 @@ export class MemoryDistiller {
   ): Promise<void> {
     const route = directRouteOf(session)
     if (route === undefined) {
-      this.log.warn(`memory distill for "${sessionId}" skipped: no model route on the session`)
-      this.root.advanceDistill(sessionId, lastEventSeq)
+      // Reached only when the gates above found enough NEW material to be
+      // worth a call — so the delta is real, and the cursor must NOT move.
+      // A route can still APPEAR later: `request/header` is appended inside a
+      // step, and a turn may close with no step at all, so a session can hold
+      // surface material before its first header. Advancing here would retire
+      // that material for good. Retrying costs one prompt assembly and this
+      // log line, and is bounded by the next `turn/end`.
+      this.log.warn(`memory distill for "${sessionId}" skipped: no model route yet (delta kept for the next window)`)
       return
     }
     const result = await streamJson(resolveLlm(this.ctx), {
@@ -491,14 +514,30 @@ export class MemoryDistiller {
       return
     }
     const applied = await this.applyEntries(result.parsed, cwd)
+    // INVARIANT (see the module JSDoc): the cursor moves only AFTER the writes
+    // land. Reversing these two lines would make a failed write permanently
+    // invisible — the delta would never be re-read and the material silently
+    // lost instead of retried on the next quiet window.
     this.root.advanceDistill(sessionId, lastEventSeq)
-    // Leave a durable trace (time, target session, saved count) so the
-    // settings page can show what the background pass actually did.
-    this.root.recordDistill(sessionId, applied, 'direct', result.inputTokens + result.outputTokens)
-    if (applied > 0) {
-      this.log.info(`memory distill: saved ${String(applied)} card${applied === 1 ? '' : 's'} from "${sessionId}"`)
-      const store = resolveScope(cwd) === 'global' ? this.root.global : this.root.projectFor(cwd as string)
-      await this.onSaved?.(parent, sessionId, store)
+    // PAST THE POINT OF NO RETURN: the delta is consumed and the cards are on
+    // disk. A failure from here is NOT a retry, so it must not be reported as
+    // one — the outer catch's "progress kept, will retry" would send a reader
+    // hunting for material that was in fact processed.
+    try {
+      // Leave a durable trace (time, target session, saved count) so the
+      // settings page can show what the background pass actually did.
+      this.root.recordDistill(sessionId, applied, 'direct', result.inputTokens + result.outputTokens)
+      if (applied > 0) {
+        this.log.info(`memory distill: saved ${String(applied)} card${applied === 1 ? '' : 's'} from "${sessionId}"`)
+        const store = resolveScope(cwd) === 'global' ? this.root.global : this.root.projectFor(cwd as string)
+        await this.onSaved?.(parent, sessionId, store)
+      }
+    } catch (error) {
+      // Data stays consistent: the cards are written and the cursor has moved,
+      // so the delta is not re-read. What is lost is a trace row and this
+      // round's maintenance trigger — the next successful save re-arms the
+      // curator from the store fingerprint.
+      this.log.warn(`memory distill for "${sessionId}": delta consumed and ${String(applied)} card(s) written, but the trace/maintenance step failed: ${String(error)}`)
     }
   }
 

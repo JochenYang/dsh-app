@@ -56,11 +56,20 @@ export async function lightSweep(
     for (const group of byBody.values()) {
       if (group.length < 2) continue
       const keep = survivor(group, pinned)
+      const dropped: string[] = []
       for (const card of group) {
-        if (card.name !== keep.name && await store.remove(card.name)) merged += 1
+        if (card.name !== keep.name && await store.remove(card.name, 'light-sweep-dup')) {
+          merged += 1
+          dropped.push(card.name)
+        }
       }
       if (group.length > 1) {
         log.info(`memory light sweep: ${label} merged ${String(group.length)} exact-duplicate cards into "${keep.name}"`)
+        // The survivors' exact-duplicate merge is a silent deletion otherwise:
+        // record it so the ledger explains where those keys went.
+        if (dropped.length > 0) {
+          root.recordLedger({ scope: label, pass: 'light-sweep', op: 'merge', keys: dropped, target: keep.name })
+        }
       }
     }
 

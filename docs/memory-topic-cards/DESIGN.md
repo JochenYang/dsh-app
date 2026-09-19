@@ -3,6 +3,7 @@
 > 状态：Phase 1–2 已实现（2026-09-15），待实测 · Phase 3（L4）观望
 > 范围：`plugins/plugin-memory` 全量（store / tools / prompt / distiller / curator / routes / client）
 > 目标读者：本仓库维护者；实施前请先读 §0 根因与 §7 迁移
+> 加固与可恢复性改造另见同目录 [`OPTIMIZATION.md`](OPTIMIZATION.md)（含回归台账）
 
 ## 0. 背景：为什么现在是流水账
 

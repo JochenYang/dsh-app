@@ -21,7 +21,7 @@ import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
 import type { MemoryKey } from './locales.ts'
-import { ROUTE_PREFIX, type HostText, type MemoryCardRow, type MemoryDistillActivity, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
+import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryDistillActivity, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type MemorySectionProps = PropsLocale<typeof NS>
@@ -86,6 +86,11 @@ function routeErrorCopy(t: TranslateNS<typeof NS>, host: HostText | undefined, f
     'route.invalidBody': t('memory.host.invalidBody', { detail: String(params.detail ?? '') }),
     'route.clearProjectFailed': t('memory.host.clearProjectFailed'),
     'route.clearGlobalFailed': t('memory.host.clearGlobalFailed'),
+    'route.restoreOccupied': t('memory.host.restoreOccupied'),
+    'route.restoreMissing': t('memory.host.restoreMissing'),
+    'route.restoreInvalid': t('memory.host.restoreInvalid'),
+    'route.restoreArgsRequired': t('memory.host.restoreArgsRequired'),
+    'route.archiveFailed': t('memory.host.archiveFailed'),
   }, fallback)
 }
 
@@ -148,6 +153,12 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 /** Distill-activity rows shown before the "show all" fold (list caps at 20). */
 const ACTIVITY_PREVIEW = 5
 
+/** Archived entries shown before the "show all" control. */
+const ARCHIVE_PREVIEW = 5
+
+/** How long a confirmation stays on screen before it clears itself. */
+const NOTICE_DISMISS_MS = 6_000
+
 /** Global card rows shown before the "show all" fold. */
 const CARDS_PREVIEW = 5
 
@@ -159,6 +170,8 @@ const SUMMARY_PREVIEW_CHARS = 80
 type ConfirmState =
   | { kind: 'clear', scope: 'global' | 'project', slug: string, title: string, cards: number }
   | { kind: 'forget', scope: 'global' | 'project', slug: string, topic: string, summary: string, pinned: boolean }
+  | { kind: 'archive-one', scope: 'global' | 'project', slug: string, day: string, file: string, topic: string }
+  | { kind: 'archive-all', count: number }
 
 /** Display line for a card summary, capped for the row. */
 function summaryLine(summary: string): string {
@@ -184,6 +197,8 @@ function categoryLabel(category: string, t: TranslateNS<typeof NS>): string {
 function confirmTitle(state: ConfirmState | null, t: TranslateNS<typeof NS>): string {
   if (state === null) return ''
   if (state.kind === 'clear') return state.scope === 'global' ? t('memory.confirm.clearGlobalTitle') : t('memory.confirm.clearProjectTitle')
+  if (state.kind === 'archive-one') return t('memory.confirm.archiveOneTitle')
+  if (state.kind === 'archive-all') return t('memory.confirm.archiveAllTitle')
   return state.pinned ? t('memory.confirm.forgetPinnedTitle') : t('memory.confirm.forgetTitle')
 }
 
@@ -196,6 +211,8 @@ function confirmMessage(state: ConfirmState | null, t: TranslateNS<typeof NS>): 
       : t('memory.scope.projectNamed', { title: state.title })
     return t('memory.confirm.clearMessage', { target, cards: String(state.cards) })
   }
+  if (state.kind === 'archive-one') return t('memory.confirm.archiveOneMessage', { topic: state.topic, day: state.day })
+  if (state.kind === 'archive-all') return t('memory.confirm.archiveAllMessage', { count: String(state.count) })
   const where = state.scope === 'global' ? t('memory.scope.global.inline') : t('memory.scope.project.inline')
   return t('memory.confirm.forgetMessage', { where, summary: state.summary, topic: state.topic })
 }
@@ -264,6 +281,8 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   const [projectRows, setProjectRows] = useState<{ slug: string, cards: MemoryCardRow[] } | null>(null)
   const [expandedCards, setExpandedCards] = useState<ReadonlySet<string>>(new Set())
   const [globalBodies, setGlobalBodies] = useState<MemoryCardRow[] | null>(null)
+  const [archive, setArchive] = useState<MemoryArchiveRow[] | null>(null)
+  const [archiveExpanded, setArchiveExpanded] = useState(false)
   const inFlight = useRef(false)
 
   const load = useCallback(async () => {
@@ -280,7 +299,58 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
     setProjectRows({ slug, cards: data.cards })
   }, [])
 
+  const loadArchive = useCallback(async () => {
+    try {
+      const data = await fetchJson<MemoryArchiveResponse>(`${ROUTE_PREFIX}/archive`)
+      setArchive(data.cards)
+    } catch (failure) {
+      setError(wireNotice(failure))
+    }
+  }, [])
+
   useEffect(() => { void load() }, [load])
+  // The archive is the one secondary panel: loaded alongside the status so
+  // the count is right on first paint, and again after every delete or
+  // restore (see runForget / onConfirm / onRestore).
+  useEffect(() => { void loadArchive() }, [loadArchive])
+
+  // A confirmation is a transient acknowledgement, not state: leaving it on
+  // screen until the next action made "已删除 1 条记忆" read like a permanent
+  // label. Cleared on a timer, restarted whenever a new one is set.
+  useEffect(() => {
+    if (notice === undefined) return
+    const timer = setTimeout(() => { setNotice(undefined) }, NOTICE_DISMISS_MS)
+    return () => { clearTimeout(timer) }
+  }, [notice])
+
+  const onRestore = useCallback(async (entry: MemoryArchiveRow) => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    setNotice(undefined)
+    try {
+      await fetchJson<{ restored: boolean }>(`${ROUTE_PREFIX}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          day: entry.day,
+          file: entry.file,
+          topic: entry.topic,
+          // The copy lives in the scope it was deleted FROM: restoring a
+          // project's card into the global store (or vice versa) needs the
+          // same scope + slug vocabulary the other routes use.
+          ...(entry.scope === 'global' ? {} : { scope: 'project', slug: entry.slug ?? '' }),
+        }),
+      })
+      setNotice({ source: 'key', key: 'memory.archive.restored', params: { topic: entry.topic } })
+      await Promise.all([load(), loadArchive()])
+    } catch (failure) {
+      setError(wireNotice(failure))
+    } finally {
+      inFlight.current = false
+      setBusy(false)
+    }
+  }, [load, loadArchive])
 
   const onToggle = useCallback(async () => {
     if (status === null || inFlight.current) return
@@ -362,7 +432,11 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
     })
     if (scope === 'project') { await loadProjectRows(slug); await load() }
     else await load()
-  }, [load, loadProjectRows])
+    // The archive panel is the undo surface: refresh it right after a delete,
+    // which is exactly when the user would want to reach for it. The ledger
+    // explains what just happened, so it refreshes with it.
+    await loadArchive()
+  }, [load, loadArchive, loadProjectRows])
 
   const onToggleProject = useCallback(async (project: MemoryProjectSummary) => {
     if (openSlug === project.slug) {
@@ -422,6 +496,29 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
           params: { title: target.title },
         })
         await load()
+        // A clear wipes the archive too, so the panel must drop its entries —
+        // otherwise it offers restores for copies that no longer exist.
+        await loadArchive()
+      } else if (target.kind === 'archive-one') {
+        await fetchJson(`${ROUTE_PREFIX}/archive-delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            day: target.day,
+            file: target.file,
+            ...(target.scope === 'global' ? {} : { scope: 'project', slug: target.slug }),
+          }),
+        })
+        setNotice({ source: 'key', key: 'memory.notice.archiveDropped', params: { topic: target.topic } })
+        await loadArchive()
+      } else if (target.kind === 'archive-all') {
+        await fetchJson(`${ROUTE_PREFIX}/archive-clear`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        setNotice({ source: 'key', key: 'memory.notice.archiveCleared', params: { count: target.count } })
+        await loadArchive()
       } else {
         await runForget(target.scope, target.slug, target.topic)
       }
@@ -431,7 +528,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
       setBusy(false)
       inFlight.current = false
     }
-  }, [confirming, load, runForget])
+  }, [confirming, load, loadArchive, runForget])
 
   /** Body of one global card from the lazily loaded list (undefined = not loaded yet). */
   const globalBodyOf = (topic: string): string | undefined =>
@@ -534,6 +631,88 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                   onClick={() => { setActivityExpanded(expanded => !expanded) }}
                 >
                   {activityExpanded ? t('memory.action.collapse') : t('memory.action.showAll', { count: status.activity.length })}
+                </button>
+              )
+              : null}
+          </div>
+        )
+        : null}
+
+      {/* The change ledger (D) has no panel here on purpose: a panel that
+          cannot be acted on competed with 已删除的记忆 below, which is the one
+          surface a deletion should appear on. The DATA is still recorded
+          (distill-state.json) and served by GET /ledger for diagnostics. */}
+
+      {archive !== null
+        ? (
+          <div className="dshm_projects">
+            <div className="dshm_projectsTitle">{t('memory.archive.title', { count: archive.length })}</div>
+            <div className="dshm_hint">{t('memory.archive.hint', { days: ARCHIVE_RETENTION_DAYS, max: ARCHIVE_MAX_FILES })}</div>
+            {status?.archiveError === true
+              ? <div className="dshm_hint">{t('memory.archive.failed')}</div>
+              : null}
+            {archive.length === 0
+              ? <div className="dshm_hint">{t('memory.archive.empty')}</div>
+              : null}
+            {archive.slice(0, archiveExpanded ? archive.length : ARCHIVE_PREVIEW).map(entry => (
+              <div key={`${entry.scope}-${entry.slug ?? ''}-${entry.day}-${entry.file}`} className="dshm_activityRow">
+                <span className="dshm_activityTime">{t('memory.archive.row', {
+                  topic: entry.topic,
+                  day: entry.day,
+                  scope: entry.scope === 'global'
+                    ? t('memory.scope.global')
+                    : projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug ?? '', cwd: '', cards: 0, sizeBytes: 0 }),
+                })}</span>
+                <button
+                  type="button"
+                  className="dshm_button"
+                  disabled={busy}
+                  aria-label={t('memory.archive.restore.aria')}
+                  onClick={() => { void onRestore(entry) }}
+                >
+                  {t('memory.archive.restore')}
+                </button>
+                <button
+                  type="button"
+                  className="dshm_button"
+                  disabled={busy}
+                  aria-label={t('memory.archive.drop.aria', { topic: entry.topic })}
+                  onClick={() => {
+                    setConfirming({
+                      kind: 'archive-one',
+                      scope: entry.scope,
+                      slug: entry.slug ?? '',
+                      day: entry.day,
+                      file: entry.file,
+                      topic: entry.topic,
+                    })
+                  }}
+                >
+                  {t('memory.archive.drop')}
+                </button>
+              </div>
+            ))}
+            {archive.length > ARCHIVE_PREVIEW
+              ? (
+                <button
+                  type="button"
+                  className="dshm_button dshm_activityMore"
+                  aria-expanded={archiveExpanded}
+                  onClick={() => { setArchiveExpanded(expanded => !expanded) }}
+                >
+                  {archiveExpanded ? t('memory.action.collapse') : t('memory.action.showAll', { count: archive.length })}
+                </button>
+              )
+              : null}
+            {archive.length > 0
+              ? (
+                <button
+                  type="button"
+                  className="dshm_button dshm_activityMore"
+                  disabled={busy}
+                  onClick={() => { setConfirming({ kind: 'archive-all', count: archive.length }) }}
+                >
+                  {t('memory.archive.dropAll', { count: archive.length })}
                 </button>
               )
               : null}

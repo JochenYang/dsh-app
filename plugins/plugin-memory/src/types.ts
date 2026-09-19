@@ -87,6 +87,77 @@ export interface MemoryEntriesResponse {
   cards: MemoryCardRow[]
 }
 
+/**
+ * How long a deleted card is kept under `<scope>/archive/`. Deletion is
+ * irreversible by design (a forget must actually forget), but THREE automated
+ * writers also delete — the curator's merge/delete, the light sweep's
+ * duplicate merge, and a model-driven memory_forget — and a single misjudged
+ * merge would otherwise lose the content permanently. The archive is the
+ * undo: it is written before every automated removal and never participates
+ * in injection, search, or the similarity gate (it lives outside `topics/`).
+ *
+ * Declared HERE (not in `memory-store.ts`) because the client half renders
+ * these numbers in the settings copy and the client is a browser bundle: it
+ * must never pull in the store's `node:fs` imports. The store imports them
+ * from this module, so there is still one source of truth.
+ */
+export const ARCHIVE_RETENTION_DAYS = 30
+
+/** Hard cap on archived files per scope, oldest dropped first. Retention
+ *  alone does not bound a pathological burst (a curator pass can delete
+ *  dozens at once), and the archive must never grow without limit. */
+export const ARCHIVE_MAX_FILES = 200
+
+/** One archived card as the settings page lists it. */
+export interface MemoryArchiveRow {
+  /** `YYYY-MM-DD` directory the copy lives in (the day it was deleted). */
+  day: string
+  /** Archive file stem — the restore handle. Two same-day copies of one
+   *  topic differ only by a `~HHMMSS` suffix, so this is NOT the topic key. */
+  file: string
+  /** Topic key the copy restores to. */
+  topic: string
+  bytes: number
+  /** Which scope the copy belongs to, in the same vocabulary the other routes
+   *  use (`scope` + `slug`) so a restore can address it directly. */
+  scope: 'global' | 'project'
+  /** The project slug when scope is 'project'. */
+  slug?: string
+}
+
+/** Response of GET api/archive — one store's archived cards. */
+export interface MemoryArchiveResponse {
+  cards: MemoryArchiveRow[]
+  total: number
+}
+
+/**
+ * One consolidation event as the settings page lists it: which pass touched
+ * which topic keys, and whether it was applied or refused. The companion to
+ * the archive — this says WHY a card is gone, the archive says how to get it
+ * back.
+ */
+export interface MemoryLedgerRow {
+  /** Unix epoch ms. */
+  at: number
+  /** 'global' or a project slug. */
+  scope: string
+  pass: 'curate' | 'light-sweep' | 'forget'
+  op: 'merge' | 'delete' | 'rewrite' | 'rename'
+  keys: string[]
+  /** Merge/rewrite destination when it differs from the single cited key. */
+  target?: string
+  /** Present when the edit was REFUSED instead of applied. */
+  rejected?: 'unseen' | 'stale' | 'over-limit'
+  /** Short session id (curate only). */
+  session?: string
+}
+
+/** Response of GET api/ledger — recent consolidation events, newest first. */
+export interface MemoryLedgerResponse {
+  entries: MemoryLedgerRow[]
+}
+
 /** Response of GET api/llm-audit — recent background-LLM cost rows. */
 export interface MemoryLlmAuditResponse {
   runs: MemoryLlmAuditRun[]
@@ -112,6 +183,9 @@ export interface MemoryStatus {
   projects: MemoryProjectSummary[]
   /** Recent background-distill traces, newest first (bounded list). */
   activity: MemoryDistillActivity[]
+  /** Set when the last archive write failed: the settings page warns that
+   *  the undo is not available instead of promising a restore. */
+  archiveError?: boolean
 }
 
 /** Route namespace on the shared Connection `/api` channel. The registry admits

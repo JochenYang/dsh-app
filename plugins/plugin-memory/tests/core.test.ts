@@ -8,10 +8,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  ARCHIVE_MAX_FILES,
+  ARCHIVE_RETENTION_DAYS,
+  MAX_LEDGER_ENTRIES,
   MAX_SUMMARY_CHARS,
   MAX_TOPIC_BODY_CHARS,
   MemoryRoot,
@@ -29,6 +32,10 @@ import {
 import { renderCardBlock, renderMemoryText, selectCards } from '../src/prompt.ts'
 import { lightSweep } from '../src/light-sweep.ts'
 import { ROUTE_PREFIX, registerMemoryRoutes } from '../src/routes.ts'
+import { CARD_TEXT_DISCIPLINE, CARD_TEXT_SURFACES, type CardTextSurface } from '../src/card-discipline.ts'
+import { SAVE_TOOL_DESCRIPTION } from '../src/tools.ts'
+import { buildDistillPrompt } from '../src/distiller.ts'
+import { buildCuratePrompt } from '../src/curator.ts'
 import type { MemoryCategory } from '../src/types.ts'
 
 const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), 'dshm-test-')))
@@ -555,4 +562,353 @@ test('projectBySlug: resolves a project store via project.json; unknown slug →
   assert.ok(resolved !== undefined)
   assert.ok(resolved.get('demo-card') !== undefined)
   assert.equal(root.projectBySlug('../etc'), undefined, 'traversal fenced')
+})
+
+// --- archive (undo for automated deletions) ----------------------------------
+
+test('archive: forget keeps a byte-identical copy of the removed card', async () => {
+  const store = tmpStore()
+  await save(store, 'archived-card', '这张卡的内容必须能从归档里原样取回', 'lesson', '归档验证')
+  const before = renderCard(store.get('archived-card')!)
+  const { removed } = await store.forget('archived-card')
+  assert.deepEqual(removed, ['archived-card'])
+  assert.equal(store.get('archived-card'), undefined, 'the card is gone from topics/')
+  const archived = store.archivedCards()
+  assert.equal(archived.length, 1)
+  assert.equal(archived[0]!.topic, 'archived-card')
+  // Byte-identical: the archived file can be copied straight back into topics/.
+  const text = readFileSync(join(store.dir, 'archive', archived[0]!.day, 'archived-card.md'), 'utf8')
+  assert.equal(text, before)
+})
+
+test('archive: restore puts the card back and rebuilds the index', async () => {
+  const store = tmpStore()
+  await save(store, 'restore-me', '恢复后必须重新出现在列表与索引里')
+  await store.forget('restore-me')
+  const [entry] = store.archivedCards()
+  const outcome = await store.restoreArchived(entry!.day, entry!.file, entry!.topic)
+  assert.equal(outcome, 'restored')
+  assert.equal(store.get('restore-me')?.body, '恢复后必须重新出现在列表与索引里')
+  assert.match(store.indexText(), /restore-me/, 'the host-owned index reflects the restore')
+})
+
+test('archive: restore refuses an occupied key rather than overwriting it', async () => {
+  const store = tmpStore()
+  await save(store, 'reused-key', '旧内容')
+  await store.forget('reused-key')
+  const [entry] = store.archivedCards()
+  // A new card takes the same key before the restore is attempted.
+  await save(store, 'reused-key', '新内容')
+  assert.equal(await store.restoreArchived(entry!.day, entry!.file, 'reused-key'), 'occupied')
+  assert.equal(store.get('reused-key')?.body, '新内容', 'the live card is untouched')
+})
+
+test('archive: restore rejects a malformed day, file or topic and a missing copy', async () => {
+  const store = tmpStore()
+  await save(store, 'safe-card', '内容')
+  await store.forget('safe-card')
+  const [entry] = store.archivedCards()
+  assert.equal(await store.restoreArchived('../etc', entry!.file, 'safe-card'), 'invalid', 'traversal fenced')
+  assert.equal(await store.restoreArchived(entry!.day, 'no-such-card', 'no-such-card'), 'missing')
+  assert.equal(await store.restoreArchived(entry!.day, entry!.file, 'Not_A_Topic'), 'invalid')
+  // The file stem is fenced on its own: a path separator or a dot never
+  // reaches the filesystem even when day and topic are well formed.
+  assert.equal(await store.restoreArchived(entry!.day, '../safe-card', 'safe-card'), 'invalid')
+  assert.equal(await store.restoreArchived(entry!.day, 'safe-card.md', 'safe-card'), 'invalid')
+})
+
+test('archive: the light sweep archives the duplicate it merges away', async () => {
+  const root = tmpRoot()
+  await save(root.global, 'dup-keep', '完全一样的内容')
+  await save(root.global, 'dup-drop', '完全一样的内容')
+  const log = { info: (): void => undefined, warn: (): void => undefined }
+  const { merged } = await lightSweep(root, 'global', root.global, log)
+  assert.equal(merged, 1)
+  assert.equal(root.global.list().length, 1, 'one of the two duplicates survives')
+  // Whichever one the survivor rule dropped must be recoverable from the archive.
+  const survivor = root.global.list()[0]!.name
+  const dropped = survivor === 'dup-keep' ? 'dup-drop' : 'dup-keep'
+  assert.ok(root.global.archivedCards().some(card => card.topic === dropped), `the merged-away "${dropped}" is recoverable`)
+})
+
+test('archive: clear() removes the archive too (the reset means a clean slate)', async () => {
+  const store = tmpStore()
+  await save(store, 'gone-card', '内容')
+  await store.forget('gone-card')
+  assert.equal(store.archiveCount(), 1)
+  await store.clear()
+  assert.equal(store.archiveCount(), 0)
+})
+
+test('archive: the archived copy never enters the live list, index or similarity gate', async () => {
+  const store = tmpStore()
+  await save(store, 'hidden-card', '这段文字在归档后不应再被召回')
+  await store.forget('hidden-card')
+  assert.equal(store.list().length, 0, 'topics/ is empty')
+  assert.equal(store.indexText(), '', 'the index does not mention it')
+  assert.equal(store.hasContent('这段文字在归档后不应再被召回'), false, 'the dedupe gate does not see it')
+  assert.equal(store.findSimilar('这段文字在归档后不应再被召回', 0.3, 5).length, 0, 'the similarity gate does not see it')
+})
+
+test('archive: re-deleting the same key on the same day keeps BOTH versions', async () => {
+  const store = tmpStore()
+  await save(store, 'same-day', '第一版内容')
+  await store.forget('same-day')
+  await save(store, 'same-day', '第二版内容')
+  await store.forget('same-day')
+  const entries = store.archivedCards()
+  assert.equal(entries.length, 2, 'the second deletion does not overwrite the first copy')
+  assert.deepEqual(entries.map(e => e.topic), ['same-day', 'same-day'])
+  const bodies = entries.map(e => readFileSync(join(store.dir, 'archive', e.day, `${e.file}.md`), 'utf8'))
+  assert.ok(bodies.some(text => text.includes('第一版内容')), 'the earlier version is still there')
+  // The whole point: the version deleted LAST must be recoverable too.
+  assert.ok(bodies.some(text => text.includes('第二版内容')), 'the version deleted most recently survives')
+  assert.notEqual(entries[0]!.file, entries[1]!.file, 'the two copies are distinct files')
+})
+
+// --- archive pruning (age + count bounds) ------------------------------------
+
+test('archive prune: a copy older than the retention window is dropped on the next write', async () => {
+  const store = tmpStore()
+  await save(store, 'old-card', '过期内容')
+  await store.forget('old-card')
+  const [old] = store.archivedCards()
+  // Backdate the copy past the retention window.
+  const oldPath = join(store.dir, 'archive', old!.day, `${old!.file}.md`)
+  const stale = (Date.now() - (ARCHIVE_RETENTION_DAYS + 1) * 24 * 60 * 60 * 1000) / 1000
+  utimesSync(oldPath, stale, stale)
+  // The next archive write runs the prune.
+  await save(store, 'fresh-card', '新内容')
+  await store.forget('fresh-card')
+  const remaining = store.archivedCards()
+  assert.deepEqual(remaining.map(entry => entry.topic), ['fresh-card'], 'the expired copy is gone, the fresh one stays')
+  // The emptied day directory is removed too.
+  const days = readdirSync(join(store.dir, 'archive'), { withFileTypes: true }).filter(entry => entry.isDirectory())
+  assert.equal(days.length, 1, 'only the day that still holds a copy remains')
+})
+
+test('archive prune: the count cap drops the OLDEST copies, keeping the newest', async () => {
+  const store = tmpStore()
+  // Fill the archive past the cap without paying for one delete each: write
+  // the files directly, then let one real deletion trigger the prune.
+  const dayDir = join(store.dir, 'archive', '2026-01-01')
+  mkdirSync(dayDir, { recursive: true })
+  const total = ARCHIVE_MAX_FILES + 5
+  for (let i = 0; i < total; i += 1) {
+    const path = join(dayDir, `bulk-${String(i).padStart(4, '0')}.md`)
+    writeFileSync(path, `---\nname: bulk-${String(i).padStart(4, '0')}\ncategory: fact\nsummary: s\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n内容 ${String(i)}\n`)
+    // Ascending mtimes: bulk-0000 is the oldest.
+    const at = (Date.now() - (total - i) * 1000) / 1000
+    utimesSync(path, at, at)
+  }
+  await save(store, 'trigger-card', '触发清理')
+  await store.forget('trigger-card')
+  const all = store.archivedCards()
+  assert.equal(all.length, ARCHIVE_MAX_FILES, `the archive is capped at ${String(ARCHIVE_MAX_FILES)}`)
+  const remaining = all.filter(entry => entry.topic.startsWith('bulk-'))
+  // The trigger card is the newest, so the cap is paid entirely by the oldest
+  // bulk copies (205 bulk + 1 trigger = 206 → 6 dropped, all bulk).
+  assert.equal(remaining.length, ARCHIVE_MAX_FILES - 1)
+  assert.ok(!remaining.some(entry => entry.topic === 'bulk-0000'), 'the oldest copy is the one dropped')
+  assert.ok(remaining.some(entry => entry.topic === `bulk-${String(total - 1).padStart(4, '0')}`), 'the newest copy survives')
+  assert.ok(all.some(entry => entry.topic === 'trigger-card'), 'the newest entry of all is never the one dropped')
+})
+
+test('archive prune: a junction inside archive/ is never walked into', async () => {
+  const store = tmpStore()
+  await save(store, 'seed-card', '种子')
+  await store.forget('seed-card')
+  // A directory the prune must NOT touch, reached only through a junction.
+  const outside = join(store.dir, 'outside')
+  mkdirSync(outside, { recursive: true })
+  writeFileSync(join(outside, 'precious.md'), '不能被删掉的内容')
+  const linked = join(store.dir, 'archive', '1999-01-01')
+  try {
+    symlinkSync(outside, linked, 'junction')
+  } catch {
+    return // junctions need Developer Mode / elevation on Windows; skip when refused
+  }
+  // Trigger a prune: an entry under the junction is old, but the walker must
+  // not read through it (isDirectory() is false for a reparse point).
+  const stale = (Date.now() - (ARCHIVE_RETENTION_DAYS + 1) * 24 * 60 * 60 * 1000) / 1000
+  utimesSync(join(outside, 'precious.md'), stale, stale)
+  await save(store, 'trigger-card', '触发清理')
+  await store.forget('trigger-card')
+  assert.ok(existsSync(join(outside, 'precious.md')), 'the linked target is untouched')
+  assert.equal(readFileSync(join(outside, 'precious.md'), 'utf8'), '不能被删掉的内容')
+})
+
+test('archive prune: the retention boundary is the configured window, not looser', async () => {
+  const store = tmpStore()
+  const dayDir = join(store.dir, 'archive', '2026-01-01')
+  mkdirSync(dayDir, { recursive: true })
+  const write = (name: string, ageDays: number): string => {
+    const path = join(dayDir, `${name}.md`)
+    writeFileSync(path, `---\nname: ${name}\ncategory: fact\nsummary: s\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n内容\n`)
+    const at = (Date.now() - ageDays * 24 * 60 * 60 * 1000) / 1000
+    utimesSync(path, at, at)
+    return path
+  }
+  // One minute past the window (dropped) and one minute inside it (kept):
+  // a cutoff off by even a day fails one of the two.
+  const justExpired = write('just-expired', ARCHIVE_RETENTION_DAYS + 1 / 1440)
+  const justInside = write('just-inside', ARCHIVE_RETENTION_DAYS - 1 / 1440)
+  await save(store, 'trigger-card', '触发清理')
+  await store.forget('trigger-card')
+  const topics = store.archivedCards().map(entry => entry.topic)
+  assert.ok(!topics.includes('just-expired'), 'one minute past the window is dropped')
+  assert.ok(topics.includes('just-inside'), 'one minute inside the window is kept')
+  assert.equal(existsSync(justInside), true)
+  assert.equal(existsSync(justExpired), false)
+})
+
+test('archive: an unarchivable target still lets the deletion through, and says so', async () => {
+  const store = tmpStore()
+  await save(store, 'blocked-card', '内容')
+  // Make the archive path unusable: a FILE where the directory must go.
+  writeFileSync(join(store.dir, 'archive'), 'not a directory')
+  assert.equal(await store.remove('blocked-card', 'forget'), true, 'the removal the caller asked for still happens')
+  assert.equal(store.get('blocked-card'), undefined)
+  assert.equal(store.lastArchiveError() !== undefined, true, 'the failure is recorded, not swallowed silently')
+})
+
+// --- ledger (why is this card gone) -------------------------------------------
+
+test('ledger: a forget records the keys it removed, newest first', async () => {
+  const root = tmpRoot()
+  await save(root.global, 'ledger-card', '会被删除的内容')
+  await root.global.forget('ledger-card')
+  const entries = root.ledgerEntries()
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0]!.scope, 'global')
+  assert.equal(entries[0]!.pass, 'forget')
+  assert.equal(entries[0]!.op, 'delete')
+  assert.deepEqual(entries[0]!.keys, ['ledger-card'])
+  assert.ok(entries[0]!.at > 0, 'stamped with a time')
+})
+
+test('ledger: an absent ledger field parses as empty, never throws', () => {
+  const root = tmpRoot()
+  // State written before the ledger existed has no `ledger` key at all.
+  writeFileSync(join(root.dir, 'distill-state.json'), JSON.stringify({ version: 1, sessions: {}, activity: [] }))
+  assert.deepEqual(root.ledgerEntries(), [])
+  // And recording into it still works.
+  root.recordLedger({ scope: 'global', pass: 'forget', op: 'delete', keys: ['x'] })
+  assert.equal(root.ledgerEntries().length, 1)
+})
+
+test('ledger: entries are bounded, oldest dropped first', () => {
+  const root = tmpRoot()
+  for (let i = 0; i < MAX_LEDGER_ENTRIES + 10; i += 1) {
+    root.recordLedger({ scope: 'global', pass: 'curate', op: 'delete', keys: [`card-${String(i)}`] })
+  }
+  const entries = root.ledgerEntries()
+  assert.equal(entries.length, MAX_LEDGER_ENTRIES, 'the ledger is capped')
+  assert.equal(entries[0]!.keys[0], `card-${String(MAX_LEDGER_ENTRIES + 9)}`, 'newest first')
+  assert.ok(!entries.some(entry => entry.keys[0] === 'card-0'), 'the oldest entry was dropped')
+})
+
+test('ledger: clear() records what it wiped, before the archive goes with it', async () => {
+  const root = tmpRoot()
+  await save(root.global, 'clear-a', '会被清空的甲')
+  await save(root.global, 'clear-b', '会被清空的乙')
+  await root.global.clear()
+  assert.equal(root.global.list().length, 0)
+  assert.equal(root.global.archiveCount(), 0, 'the archive goes with the reset')
+  const entries = root.ledgerEntries()
+  assert.equal(entries.length, 1, 'the most destructive action is the one that most needs a record')
+  assert.equal(entries[0]!.scope, 'global')
+  assert.equal(entries[0]!.op, 'delete')
+  assert.deepEqual([...entries[0]!.keys].sort(), ['clear-a', 'clear-b'])
+})
+
+test('ledger: clearing an empty store records nothing', async () => {
+  const root = tmpRoot()
+  await root.global.clear()
+  assert.deepEqual(root.ledgerEntries(), [], 'no cards, no event')
+})
+
+test('ledger: a project store records under its own slug, not the global scope', async () => {
+  const root = tmpRoot()
+  const project = root.projectFor('D:/codes/DSH-APP')
+  const slug = projectSlug('D:/codes/DSH-APP')
+  await save(project, 'project-card', '项目里的卡片')
+  await project.forget('project-card')
+  const entries = root.ledgerEntries()
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0]!.scope, slug, 'the scope names the project store that changed')
+  assert.deepEqual(entries[0]!.keys, ['project-card'])
+})
+
+test('ledger: a corrupted entry is dropped rather than crashing the panel', () => {
+  const root = tmpRoot()
+  writeFileSync(join(root.dir, 'distill-state.json'), JSON.stringify({
+    version: 1,
+    sessions: {},
+    activity: [],
+    ledger: [
+      { at: Date.now(), scope: 'global', pass: 'forget', op: 'delete', keys: ['good'] },
+      { at: Date.now(), scope: 'global', pass: 'forget', op: 'delete' }, // no keys
+      { at: Date.now(), scope: 'global', pass: 'nonsense', op: 'delete', keys: [] },
+      { scope: 'global', pass: 'forget', op: 'delete', keys: [] }, // no at
+      'not an object',
+      { at: Date.now(), scope: 'global', pass: 'forget', op: 'delete', keys: [1, 2] },
+      { at: Number.NaN, scope: 'global', pass: 'forget', op: 'delete', keys: ['nan-time'] },
+    ],
+  }))
+  const entries = root.ledgerEntries()
+  assert.equal(entries.length, 1, 'only the usable entry survives')
+  assert.deepEqual(entries[0]!.keys, ['good'])
+})
+
+test('ledger: events sharing a millisecond still come back newest-first', () => {
+  const root = tmpRoot()
+  const at = Date.now()
+  root.recordLedgerBatch([
+    { at, scope: 'global', pass: 'curate', op: 'delete', keys: ['first'] },
+    { at, scope: 'global', pass: 'curate', op: 'delete', keys: ['second'] },
+    { at, scope: 'global', pass: 'curate', op: 'delete', keys: ['third'] },
+  ])
+  const entries = root.ledgerEntries()
+  // A batch shares one timestamp; a stable sort alone would return the
+  // insertion order (oldest first), contradicting "newest first".
+  assert.deepEqual(entries.map(entry => entry.keys[0]), ['third', 'second', 'first'])
+})
+
+// --- prompt discipline (the injected body must not narrate its own storage) ---
+
+test('card-text discipline forbids narrating the saving, not the vocabulary', () => {
+  // The discipline is ONE exported constant shared by every surface that asks
+  // a model for card text. Asserting its CONTENT here (rather than a phrase in
+  // each prompt) is what makes rewording safe and omission visible: the
+  // per-surface tests below only check that each one carries it.
+  assert.match(CARD_TEXT_DISCIPLINE, /FACT ITSELF/, 'states the positive form to write')
+  assert.match(CARD_TEXT_DISCIPLINE, /never as a note about the act of/i, 'and the form to avoid')
+  assert.match(CARD_TEXT_DISCIPLINE, /BOTH the body\/content AND the one-line summary/,
+    'the summary is the field that is injected in full and never budget-trimmed')
+  assert.match(CARD_TEXT_DISCIPLINE, /Leave out what rots/, 'dates and ids are named too')
+  // The exception is load-bearing: this plugin's own memory IS about the memory
+  // system (topic keys, the index, the size caps), so a bare word ban would
+  // forbid exactly the facts a card about this codebase must state.
+  assert.match(CARD_TEXT_DISCIPLINE, /MAY be about this memory system itself/, 'the domain exception survives')
+  assert.match(CARD_TEXT_DISCIPLINE, /narrating the SAVING, not on these words/, 'and says which is banned')
+})
+
+test('every card-text surface carries the discipline', () => {
+  const root = tmpRoot()
+  const surfaces: Record<CardTextSurface, string> = {
+    // The always-on guidelines ride every assembly in every session.
+    guidelines: renderMemoryText(root, undefined),
+    distiller: buildDistillPrompt('[user] 说了点什么', undefined, root).system,
+    curator: buildCuratePrompt('store text').system,
+    memory_save: SAVE_TOOL_DESCRIPTION,
+  }
+  // Walked from the shared roster: a NEW surface added to the plugin without
+  // the rule fails this test rather than shipping silently.
+  for (const name of CARD_TEXT_SURFACES) {
+    assert.ok(
+      surfaces[name].includes(CARD_TEXT_DISCIPLINE),
+      `the ${name} surface must carry the shared card-text discipline verbatim`,
+    )
+  }
 })

@@ -29,7 +29,7 @@
 
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
-import { ROUTE_PREFIX, type HostText, type MemoryCardRow, type MemoryEntriesResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
+import { ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryEntriesResponse, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
 
 /** Route namespace on the shared `/api` channel (single source in types.ts,
  * shared with the browser half). Re-exported so existing importers keep
@@ -157,6 +157,10 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
           globalList: root.global.list().map(card => cardRow(card, pinned, false)),
           projects: listProjects(root.dir),
           activity: root.distillActivity(),
+          // The undo surface's health: when an archive write failed, the
+          // settings page must say so rather than promising a restore that
+          // is not there.
+          ...(root.global.lastArchiveError() === undefined ? {} : { archiveError: true }),
         }
         return ok(status)
       },
@@ -323,6 +327,151 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
           totalTokens: runs.reduce((sum, run) => sum + run.inputTokens + run.outputTokens, 0),
         }
         return ok(body)
+      },
+    }),
+
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/ledger`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => {
+        const entries = root.ledgerEntries().slice(0, 50)
+        const payload: MemoryLedgerResponse = { entries }
+        return ok(payload)
+      },
+    }),
+
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/archive`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        // Scope comes from the query string (GET): `?scope=project&slug=…`.
+        // WITHOUT one, answer for EVERY scope — that is what the settings page
+        // asks for, and reading only the global archive is how a card deleted
+        // from a project became invisible while the delete itself succeeded.
+        const params = new URL(request.url).searchParams
+        const scope = params.get('scope')
+        const slug = params.get('slug')
+        const targets: Array<{ scope: 'global' | 'project', slug?: string, store: MemoryStore }> = []
+        if (scope === null || scope === '' || scope === 'all') {
+          targets.push({ scope: 'global', store: root.global })
+          for (const project of listProjects(root.dir)) {
+            const store = root.projectBySlug(project.slug)
+            if (store !== undefined) targets.push({ scope: 'project', slug: project.slug, store })
+          }
+        } else {
+          const body: Record<string, unknown> = { scope }
+          if (slug !== null) body.slug = slug
+          const store = resolveStore(root, body)
+          if (store instanceof Response) return store
+          targets.push({ scope: store.dir === root.dir ? 'global' : 'project', ...(store.dir === root.dir ? {} : { slug: slug ?? undefined }), store })
+        }
+        const cards: MemoryArchiveRow[] = []
+        for (const target of targets) {
+          for (const row of target.store.archivedCards()) {
+            cards.push({ ...row, scope: target.scope, ...(target.slug === undefined ? {} : { slug: target.slug }) })
+          }
+        }
+        // Newest day first, then scope, then topic — one stable order across
+        // what used to be several separate lists.
+        cards.sort((a, b) => b.day.localeCompare(a.day) || (a.slug ?? '').localeCompare(b.slug ?? '') || a.topic.localeCompare(b.topic))
+        const payload: MemoryArchiveResponse = { cards, total: cards.length }
+        return ok(payload)
+      },
+    }),
+
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/restore`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        const day = body.day
+        const file = body.file
+        const topic = body.topic
+        if (typeof day !== 'string' || typeof file !== 'string' || typeof topic !== 'string') {
+          return fail(400, 'bad-request', { code: 'route.restoreArgsRequired', text: 'day, file and topic are required' })
+        }
+        const store = resolveStore(root, body)
+        if (store instanceof Response) return store
+        const outcome = await store.restoreArchived(day, file, topic)
+        if (outcome === 'restored') return ok({ restored: true, topic })
+        // Each failure gets its own code so the client can say WHAT went
+        // wrong (the key is taken vs the copy is gone vs the name is bad)
+        // instead of a generic failure.
+        const code = outcome === 'occupied'
+          ? 'route.restoreOccupied'
+          : outcome === 'missing'
+            ? 'route.restoreMissing'
+            : 'route.restoreInvalid'
+        const text = outcome === 'occupied'
+          ? 'a card with that topic already exists'
+          : outcome === 'missing'
+            ? 'no archived card for that day and topic'
+            : 'malformed day or topic'
+        return fail(outcome === 'invalid' ? 400 : 409, outcome, { code, params: { topic }, text })
+      },
+    }),
+
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/archive-delete`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        const day = body.day
+        const file = body.file
+        if (typeof day !== 'string' || typeof file !== 'string') {
+          return fail(400, 'bad-request', { code: 'route.archiveDeleteArgsRequired', text: 'day and file are required' })
+        }
+        const store = resolveStore(root, body)
+        if (store instanceof Response) return store
+        const removed = await store.deleteArchived(day, file)
+        if (!removed) {
+          return fail(409, 'missing', { code: 'route.archiveDeleteMissing', text: 'no archived copy for that day and file' })
+        }
+        return ok({ deleted: true })
+      },
+    }),
+
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/archive-clear`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        // Same scope rule as GET /archive: no scope = every scope, because the
+        // panel that offers this button shows every scope.
+        const scope = body.scope
+        let cleared = 0
+        if (scope === undefined || scope === 'all') {
+          cleared += await root.global.clearArchive()
+          for (const project of listProjects(root.dir)) {
+            const store = root.projectBySlug(project.slug)
+            if (store !== undefined) cleared += await store.clearArchive()
+          }
+        } else {
+          const store = resolveStore(root, body)
+          if (store instanceof Response) return store
+          cleared = await store.clearArchive()
+        }
+        return ok({ cleared })
       },
     }),
   ]
