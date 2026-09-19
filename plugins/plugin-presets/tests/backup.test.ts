@@ -1,10 +1,11 @@
 /**
- * Config-backup tests: the export whitelist (whitelisted store files ride
- * along; credential-named files, settings.yaml and unknown names can never
- * enter the archive), rejection of hostile archives (path traversal, unknown
- * layout, wrong manifest) BEFORE anything is restored, the conflict /
- * overwrite contract on differing targets, and the automatic pre-overwrite
- * copy of the profile patch layer.
+ * Config-backup tests: the export whitelist (whitelisted store files and the
+ * host settings file ride along; credential-named files, a settings.yaml
+ * planted inside a plugin store, and unknown names can never enter the
+ * archive), rejection of hostile archives (path traversal, unknown layout,
+ * wrong manifest) BEFORE anything is restored, the conflict / overwrite
+ * contract on differing targets, and the automatic pre-overwrite copies of
+ * the profile patch layer and the host settings file.
  *
  * @module plugin-presets/tests/backup
  */
@@ -15,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import { strToU8, unzipSync, zipSync } from 'fflate'
-import { packConfigBackup, restoreConfigBackup, unpackConfigBackup } from '../src/backup.ts'
+import { backupLayoutProblem, isSensitiveFileName, packConfigBackup, restoreConfigBackup, unpackConfigBackup } from '../src/backup.ts'
 import { PresetPackageError } from '../src/wire.ts'
 import { patchCentralOriginalSize, setDataDescriptorFlag, zipWithDuplicatedCentralEntry } from './zip-craft.ts'
 
@@ -37,8 +38,35 @@ const VALID_MANIFEST = strToU8(JSON.stringify({
   app: 'dsh-app',
 }))
 
-/** A populated fake home: profile layer, market sources, two plugin stores. */
+/**
+ * The host settings file as a real one looks: providers that carry the
+ * credential ENV VAR NAME (never the key) plus the gateway header a route may
+ * demand. Neither shape may trip the content scan — this fixture proves it.
+ */
+const HOME_SETTINGS = [
+  'llm-pi-ai:',
+  '  providers:',
+  '    gateway:',
+  '      apiKeyEnv: GATEWAY_API_KEY',
+  '      baseURL: https://gateway.example/v1',
+  '      headers:',
+  '        x-gateway-session: route-a',
+  '      models:',
+  '        - id: example-model',
+  '          maxTokens: 32000',
+  '          compat:',
+  '            maxTokensField: max_tokens',
+  'agent-default-model: gateway/example-model',
+  '',
+].join('\n')
+
+/** A populated fake home: settings, hooks, profile layer, market sources, two stores. */
 function writeHome(home: string): void {
+  writeFileSync(join(home, 'settings.yaml'), HOME_SETTINGS, 'utf8')
+  writeFileSync(join(home, 'AGENTS.md'), '# House rules\n\nKeep answers short.\n', 'utf8')
+  mkdirSync(join(home, 'hooks'), { recursive: true })
+  writeFileSync(join(home, 'hooks', 'hooks.json'), '{"hooks":{}}\n', 'utf8')
+  writeFileSync(join(home, 'hooks', 'after-edit.mjs'), 'export default {}\n', 'utf8')
   mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
   writeFileSync(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'rows:\n  - id: keep\n', 'utf8')
   writeFileSync(join(home, 'profiles', 'web', 'package.json'), '{"dependencies":{}}\n', 'utf8')
@@ -50,7 +78,11 @@ function writeHome(home: string): void {
   // Everything that must stay OUT of the archive:
   writeFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'credentials.json'), '{"key":"top-secret"}\n', 'utf8')
   writeFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'api-key.json'), '{"k":"x"}\n', 'utf8')
+  // A store-level settings.yaml is still refused — by the store whitelist, not
+  // by the name tripwire the host-level file is now exempt from.
   writeFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'settings.yaml'), 'tokens: hidden\n', 'utf8')
+  writeFileSync(join(home, 'hooks', 'credentials.json'), '{"key":"x"}\n', 'utf8')
+  writeFileSync(join(home, 'hooks', '.env'), 'FOO=bar\n', 'utf8')
   writeFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'other.json'), '{}\n', 'utf8')
   mkdirSync(join(home, 'storages', 'dsh-app-plugin-bar'), { recursive: true })
   writeFileSync(join(home, 'storages', 'dsh-app-plugin-bar', 'sources.json'), '{"sources":[]}\n', 'utf8')
@@ -64,6 +96,9 @@ describe('packConfigBackup (export whitelist)', () => {
     const zipped = unzipSync(bytes)
     const names = Object.keys(zipped).sort()
     assert.deepEqual(names, [
+      'AGENTS.md',
+      'hooks/after-edit.mjs',
+      'hooks/hooks.json',
       'manifest.json',
       'market/sources.json',
       'plugins/dsh-app-plugin-bar/sources.json',
@@ -71,9 +106,49 @@ describe('packConfigBackup (export whitelist)', () => {
       'plugins/dsh-app-plugin-foo/servers.json',
       'profile/cordis.patch.yml',
       'profile/package.json',
+      'settings.yaml',
     ])
     // Payload bytes survive the round trip.
     assert.equal(Buffer.from(zipped['plugins/dsh-app-plugin-foo/config.json']!).toString('utf8'), '{"enabled":true}\n')
+  })
+
+  it('carries the host settings file byte-for-byte, providers and all', async () => {
+    const home = scratchHome('settings-home')
+    writeHome(home)
+    const zipped = unzipSync(await packConfigBackup(home, 'web'))
+    assert.equal(Buffer.from(zipped['settings.yaml']!).toString('utf8'), HOME_SETTINGS)
+    // Its namesake inside a plugin store never rides along, and the store
+    // whitelist is the gate that refuses it — the same gate a hostile archive
+    // meets on import.
+    assert.equal(backupLayoutProblem('plugins/dsh-app-plugin-foo/settings.yaml')?.code, 'backup.storeFileNotAllowed')
+    assert.equal(backupLayoutProblem('settings.yaml'), undefined)
+    // The order of those two gates is the contract, not an accident: the name
+    // tripwire still fires for a credential-named file, and the host settings
+    // file is exempt from it because the whitelist already decides the store
+    // block. Pinning the pair keeps a future reorder from going unnoticed.
+    assert.equal(isSensitiveFileName('settings.yaml'), false)
+    assert.equal(isSensitiveFileName('credentials.json'), true)
+    assert.equal(backupLayoutProblem('plugins/dsh-app-plugin-foo/credentials.json')?.code, 'backup.storeFileNotAllowed')
+    // AGENTS.md is user content with no other copy anywhere, so it rides in
+    // the same root block as the settings file.
+    assert.equal(backupLayoutProblem('AGENTS.md'), undefined)
+    assert.equal(Buffer.from(zipped['AGENTS.md']!).toString('utf8'), '# House rules\n\nKeep answers short.\n')
+  })
+
+  it('carries top-level hook files and nothing else from the hooks directory', async () => {
+    const home = scratchHome('hooks-home')
+    writeHome(home)
+    const zipped = unzipSync(await packConfigBackup(home, 'web'))
+    assert.equal(Buffer.from(zipped['hooks/hooks.json']!).toString('utf8'), '{"hooks":{}}\n')
+    assert.equal(Buffer.from(zipped['hooks/after-edit.mjs']!).toString('utf8'), 'export default {}\n')
+    // These files are code the kernel will run, so the block admits one narrow
+    // name shape at the top level only — and the layout gate, the same one a
+    // hand-made archive meets, is what says so.
+    assert.equal(backupLayoutProblem('hooks/.env')?.code, 'backup.hookFileInvalid')
+    assert.equal(backupLayoutProblem('hooks/nested/deep.mjs')?.code, 'backup.hookFileInvalid')
+    assert.equal(backupLayoutProblem('hooks/a:b.mjs')?.code, 'backup.hookFileInvalid')
+    assert.equal(backupLayoutProblem('hooks/credentials.json')?.code, 'backup.hookFileSensitive')
+    assert.equal(backupLayoutProblem('hooks/after-edit.mjs'), undefined)
   })
 
   it('carries the config-backup manifest shape', async () => {
@@ -144,13 +219,71 @@ describe('packConfigBackup (content-level secret scan)', () => {
     )
   })
 
-  it('lets credential-free content through (a token word without an assigned value)', async () => {
+  it('refuses export when a header of the host settings file carries a real key', async () => {
+    const home = scratchHome('scan-settings')
+    writeFileSync(join(home, 'settings.yaml'),
+      'llm-pi-ai:\n  providers:\n    gateway:\n      headers:\n        x-api-key: 0123456789abcdef\n', 'utf8')
+    await assert.rejects(
+      () => packConfigBackup(home, 'web'),
+      (error: unknown) => error instanceof PresetPackageError && error.code === 'sensitive-content'
+        && error.host.code === 'backup.secretContent'
+        && error.host.params?.rel === 'settings.yaml' && error.host.params?.rule === 'api-key'
+        // The refusal names file and rule only, never the matched value.
+        && !JSON.stringify(error.host).includes('0123456789abcdef'),
+    )
+  })
+
+  it('lets credential-free content through (names, numbers, references)', async () => {
     const home = scratchHome('scan-clean')
     mkdirSync(join(home, 'storages', 'dsh-app-plugin-foo'), { recursive: true })
     writeFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'config.json'), '{"token":false,"note":"rotate stale token material"}\n', 'utf8')
+    // Numbers, suffixes, a word that merely ends in "sk", and an environment
+    // reference are all settings, not secrets: a rule that refused any of them
+    // would refuse the host settings file of every ordinary install.
+    writeFileSync(join(home, 'settings.yaml'), [
+      'limits:',
+      '  tokenLimit: 4096',
+      '  maxTokens: 32000',
+      '  token: 4096',
+      '  passwordPolicy: strict',
+      'notes:',
+      '  risk: risk-based approach',
+      '  hotkey: ctrl-shift-p',
+      '  ref: ${TOKEN}',
+      '',
+    ].join('\n'), 'utf8')
     const bytes = await packConfigBackup(home, 'web')
     const names = Object.keys(unzipSync(bytes))
     assert.ok(names.includes('plugins/dsh-app-plugin-foo/config.json'))
+    assert.ok(names.includes('settings.yaml'))
+  })
+
+  it('refuses bare and quoted credential shapes under credential-named keys', async () => {
+    // The store files are JSON and quote their values; the host settings file
+    // is YAML and may write them bare or single-quoted. Every shape trips the
+    // same scan, and each case names the rule that must fire.
+    const cases = [
+      ['token', 'token: abc123def4567890\n'],
+      ['token', '"token": "abcd1234ef"\n'],
+      ['secret', 'client_secret: abcdef1234567890\n'],
+      ['secret', 'secretKey: abcdefghijkl\n'],
+      ['password', "password: 'hunter2hunter2'\n"],
+      ['sk', 'x-provider-key: sk-ant-api03-abcdefghijklmnopqrst\n'],
+      ['github', 'tokenless: ghp_abcdefghijklmnopqrst\n'],
+      ['private-key', '-----BEGIN RSA PRIVATE KEY-----\nMIIE\n'],
+    ] as const
+    for (const [rule, body] of cases) {
+      const home = scratchHome(`scan-shape-${rule}-${String(body.length)}`)
+      writeFileSync(join(home, 'settings.yaml'), body, 'utf8')
+      await assert.rejects(
+        () => packConfigBackup(home, 'web'),
+        (error: unknown) => error instanceof PresetPackageError && error.code === 'sensitive-content'
+          && error.host.code === 'backup.secretContent'
+          && error.host.params?.rel === 'settings.yaml'
+          && error.host.params?.rule === rule,
+        `the shape ${JSON.stringify(body)} must refuse the export under rule ${rule}`,
+      )
+    }
   })
 })
 
@@ -293,14 +426,38 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
       'profile/cordis.patch.yml': strToU8('rows:\n  - id: keep\n'),
       'market/sources.json': strToU8('{"sources":[]}\n'),
       'plugins/dsh-app-plugin-foo/config.json': strToU8('{"enabled":true}\n'),
+      'settings.yaml': strToU8('agent-default-model: gateway/example-model\n'),
+      'AGENTS.md': strToU8('# House rules\n'),
+      'hooks/hooks.json': strToU8('{"hooks":{}}\n'),
     }))
     const home = scratchHome('restore-target')
     const outcome = await restoreConfigBackup(home, 'web', files, false)
-    assert.equal(outcome.written, 3)
+    assert.equal(outcome.written, 6)
     assert.equal(outcome.unchanged, 0)
+    // A fresh home has nothing to sidecar: every member here is new.
     assert.deepEqual(outcome.backups, [])
     assert.equal(readFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'config.json'), 'utf8'), '{"enabled":true}\n')
     assert.ok(existsSync(join(home, 'profiles', 'web', 'cordis.patch.yml')))
+    assert.equal(readFileSync(join(home, 'settings.yaml'), 'utf8'), 'agent-default-model: gateway/example-model\n')
+    assert.equal(readFileSync(join(home, 'AGENTS.md'), 'utf8'), '# House rules\n')
+    assert.equal(readFileSync(join(home, 'hooks', 'hooks.json'), 'utf8'), '{"hooks":{}}\n')
+  })
+
+  it('sidecars the previous host settings file before replacing it', async () => {
+    const files = unpackConfigBackup(zipSync({
+      'manifest.json': VALID_MANIFEST,
+      'settings.yaml': strToU8('agent-default-model: gateway/example-model\n'),
+    }))
+    const home = scratchHome('settings-overwrite-target')
+    writeFileSync(join(home, 'settings.yaml'), 'agent-default-model: local/other-model\n', 'utf8')
+    const outcome = await restoreConfigBackup(home, 'web', files, true, () => new Date('2026-09-13T08:09:07.000Z'))
+    assert.equal(outcome.written, 1)
+    assert.equal(readFileSync(join(home, 'settings.yaml'), 'utf8'), 'agent-default-model: gateway/example-model\n')
+    assert.deepEqual(outcome.backups, ['settings.yaml.bak-import-2026-09-13T08-09-07-000Z'])
+    assert.equal(
+      readFileSync(join(home, 'settings.yaml.bak-import-2026-09-13T08-09-07-000Z'), 'utf8'),
+      'agent-default-model: local/other-model\n',
+    )
   })
 
   it('skips members whose target already has identical content', async () => {
@@ -408,5 +565,18 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.equal(readFileSync(join(home, 'storages', 'dsh-app-plugin-foo', 'config.json'), 'utf8'), '{"enabled":true}\n')
     assert.ok(!existsSync(join(home, 'storages', 'dsh-app-plugin-baz', 'config.json')))
     assert.deepEqual(readdirSync(home).filter(name => name.startsWith('.config-import-stage-')), [])
+  })
+
+  it('refuses a member outside the layout before it writes anything', async () => {
+    const home = scratchHome('layout-guard-target')
+    // The layout guard inside restoreConfigBackup is the second line of
+    // defence: a caller that never went through unpackConfigBackup still
+    // cannot write, and nothing — not even a stage directory — is created.
+    await assert.rejects(
+      () => restoreConfigBackup(home, 'web', [{ rel: 'random/file.json', data: strToU8('{}') }], true),
+      (error: unknown) => error instanceof PresetPackageError && error.code === 'illegal-path'
+        && error.host.code === 'backup.illegalPath',
+    )
+    assert.deepEqual(readdirSync(home), [])
   })
 })

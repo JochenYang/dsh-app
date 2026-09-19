@@ -10,9 +10,9 @@
  * hand-authored copy would.
  *
  * The settings section also carries the config backup (`dsh-config-backup`
- * zip, see backup.ts): the profile patch layer and manifest, the market
- * source list, and whitelisted suite-plugin store files — never credential
- * files.
+ * zip, see backup.ts): the host settings file, the profile patch layer and
+ * manifest, the market source list, and whitelisted suite-plugin store files
+ * — never credential files.
  *
  * All archive-level safety (manifest shape, entry whitelist, path
  * containment, size/count caps) is enforced in wire/pack/backup before the

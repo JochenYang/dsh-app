@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-presets",
   "description": "DSH APP preset packages: export locally authored agent presets as shareable .dshpreset archives (zip + manifest) and import them back into the user preset root, with entry-whitelist, path-traversal and size/count safety checks.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

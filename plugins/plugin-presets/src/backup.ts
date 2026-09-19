@@ -1,7 +1,25 @@
 /**
  * Config backup pack/restore: a `dsh-config-backup` zip carrying the user's
- * profile patch layer, the profile manifest, the market source list, and the
- * whitelisted top-level store files of every installed suite plugin.
+ * profile patch layer, the profile manifest, the home-level configuration that
+ * is not part of any profile (the host settings file and AGENTS.md), the market
+ * source list, the whitelisted top-level store files of every installed suite
+ * plugin, and the user's own hook files.
+ *
+ * The host settings file (providers, their model lists, the default model,
+ * theme, locale, permissions) is the bulk of what a migration actually needs,
+ * so it rides along: it carries credential *references* (`apiKeyEnv` names)
+ * and gateway request headers, never key material — dsh keeps the keys in its
+ * own credential store, which no backup path ever reads. A header value the
+ * user filled with a real key still cannot escape the archive: the content
+ * scan below covers this file like every other member. The home's AGENTS.md
+ * rides in the same block: hand-written user content that exists nowhere else,
+ * which is exactly what a machine migration must not lose.
+ *
+ * Hook files are the one member with code semantics — the kernel executes them
+ * on the target machine — so that block admits a narrow name shape at the top
+ * level of `<home>/hooks` only. Importing one is exactly as consequential as
+ * importing the settings file beside it, which is why the client copy says to
+ * import only a backup the user exported themselves.
  *
  * Redaction is structural plus content-scanned, not a filter list: only exact
  * whitelisted FILE names inside plugin store directories ever enter the
@@ -28,7 +46,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { strToU8, unzipSync, zipSync, type Zippable } from 'fflate'
@@ -61,6 +79,7 @@ export const MARKET_STORE_DIR = 'dsh-app-plugin-market'
 export const PROFILE_PREFIX = 'profile/'
 export const MARKET_PREFIX = 'market/'
 export const PLUGINS_PREFIX = 'plugins/'
+export const HOOKS_PREFIX = 'hooks/'
 
 /** Manifest file name inside the backup archive root. */
 export const BACKUP_MANIFEST_NAME = 'manifest.json'
@@ -72,11 +91,35 @@ export const PROFILE_PACKAGE_REL = `${PROFILE_PREFIX}package.json`
 /** Exact archive path of the market source list. */
 export const MARKET_SOURCES_REL = `${MARKET_PREFIX}sources.json`
 
+/**
+ * Exact archive path of the host settings file. It rides at the archive root
+ * beside `manifest.json` because it belongs to the home and not to a profile:
+ * one settings file serves every profile of the install.
+ */
+export const HOME_SETTINGS_REL = 'settings.yaml'
+
+/**
+ * Exact archive path of the home's agent instructions. Same block as the
+ * settings file: it is the user's own hand-written configuration, the one
+ * document a migration would otherwise lose silently.
+ */
+export const HOME_AGENTS_REL = 'AGENTS.md'
+
 /** Store directory names eligible for the `plugins/` block. */
 const PLUGIN_DIR_PATTERN = /^dsh-app-plugin-[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-/** Suffix of the automatic pre-overwrite copy of the profile patch file. */
-const PATCH_BACKUP_SUFFIX = '.bak-import-'
+/**
+ * File names the `hooks/` block admits, top level only. Deliberately narrow:
+ * the kernel EXECUTES these files on the target machine, so the name is the
+ * one thing an archive must not smuggle anything through — no separator, no
+ * colon (an NTFS alternate data stream on Windows), no dot-leading name (the
+ * archive's own path rules refuse those too, and this keeps export and import
+ * agreeing on exactly one name set).
+ */
+const HOOK_FILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+
+/** Suffix of the automatic pre-overwrite copy of a restored file. */
+const OVERWRITE_SIDECAR_SUFFIX = '.bak-import-'
 
 /**
  * The profile a backup applies to. Only DSH_APP_PROFILE names a profiles/
@@ -90,32 +133,56 @@ export function effectiveBackupProfile(raw: string | undefined): string {
 
 /**
  * Whether a file name must never enter a backup: anything that names (or
- * merely contains) a credential-ish token, plus the host's own settings.yaml.
- * Applied in ADDITION to the whitelist — the whitelist is the primary gate,
- * this is the tripwire that keeps a future whitelist edit from leaking keys.
+ * merely contains) a credential-ish token. Applied in ADDITION to the
+ * whitelist, but strictly BEHIND it — every caller tests the whitelist first,
+ * so this only ever sees an already-whitelisted name. That is the job: a
+ * future whitelist edit that admits a credential-named file still cannot pack
+ * it. A key hidden INSIDE a whitelisted file is the content scan's catch, not
+ * this one.
+ *
+ * `settings.yaml` is deliberately NOT matched here. It is the migration
+ * payload (providers, their model lists, the default model), and it carries
+ * credential *references* and gateway request headers rather than key
+ * material; the keys live in dsh's own credential store, which no backup path
+ * reads. Its content still goes through the secret scan like any other member.
  */
 export function isSensitiveFileName(name: string): boolean {
-  const lowered = name.toLowerCase()
-  return lowered === 'settings.yaml'
-    || /credential|token|secret|key/.test(lowered)
+  return /credential|token|secret|key/.test(name.toLowerCase())
 }
 
 /**
  * Content-level fail-closed secret rules scanned over every collected file —
  * the file-name whitelist cannot see what a whitelisted file contains, and
  * the whitelisted store files (servers.json/config.json/sources.json) are
- * exactly where suite plugins keep provider keys. All patterns are matched
- * case-insensitively over the decoded text; a hit refuses the export and only
- * the rule name is ever reported, never the matched content.
+ * exactly where suite plugins keep provider keys. The host settings file is
+ * the other subject: it is free-form YAML, and its provider request headers
+ * are the one place a user can paste a real key by hand. All patterns are
+ * matched case-insensitively over the decoded text; a hit refuses the export
+ * and only the rule name is ever reported, never the matched content.
  */
 const SECRET_CONTENT_RULES: ReadonlyArray<{ readonly name: string, readonly pattern: RegExp }> = [
   // The optional `"` before the colon keeps JSON keys (`"Authorization":`)
   // in reach, same as the api-key/token rules below.
   { name: 'authorization', pattern: /authorization"?\s*[:=]/iu },
   { name: 'bearer', pattern: /bearer\s+[a-z0-9._-]{8,}/iu },
-  { name: 'sk', pattern: /sk-[a-z0-9]{10,}/iu },
+  // The `\b` is load-bearing: without it "task-oriented" reads as a key. The
+  // prefix families mirror the shapes plugin-memory already vets, whose scan
+  // runs over free text and therefore carries the stricter boundary work.
+  { name: 'sk', pattern: /\bsk[-_][a-z0-9_-]{16,}\b/iu },
+  { name: 'github', pattern: /\b(gh[pousr]|github_pat)_[a-z0-9_]{16,}\b/iu },
+  { name: 'slack', pattern: /\bxox[bpas]-[a-z0-9-]+/iu },
   { name: 'api-key', pattern: /api[_-]?key"?\s*[:=]/iu },
-  { name: 'token', pattern: /token"?\s*[:=]\s*"[^"]{8,}/iu },
+  // Every value rule below accepts THREE shapes: a double-quoted value of at
+  // least 8 characters (how a JSON store file writes one), a single-quoted one
+  // (hand-written YAML), or a bare scalar (how the YAML host settings file
+  // writes one). The quoted branches are the original rules unchanged — a rule
+  // may only ever grow, or a shape it used to refuse would start passing. The
+  // bare branch's length is its only guard against refusing a number
+  // (`token: 4096`); `secret`/`password` also match their `*_key` spellings.
+  { name: 'token', pattern: /token"?\s*[:=]\s*("[^"]{8,}|'[^']{8,}|[a-z0-9._-]{12,})/iu },
+  { name: 'secret', pattern: /secret(?:[_-]?key)?"?\s*[:=]\s*("[^"]{8,}|'[^']{8,}|[a-z0-9._-]{8,})/iu },
+  { name: 'password', pattern: /password"?\s*[:=]\s*("[^"]{8,}|'[^']{8,}|[a-z0-9._-]{8,})/iu },
+  { name: 'private-key', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u },
 ]
 
 /**
@@ -154,7 +221,21 @@ export interface BackupManifest {
  * @returns the coded reason when rejected, undefined when restorable.
  */
 export function backupLayoutProblem(rel: string): HostText | undefined {
-  if (rel === PROFILE_PATCH_REL || rel === PROFILE_PACKAGE_REL || rel === MARKET_SOURCES_REL) {
+  if (rel === HOME_SETTINGS_REL
+    || rel === HOME_AGENTS_REL
+    || rel === PROFILE_PATCH_REL
+    || rel === PROFILE_PACKAGE_REL
+    || rel === MARKET_SOURCES_REL) {
+    return undefined
+  }
+  if (rel.startsWith(HOOKS_PREFIX)) {
+    const name = rel.slice(HOOKS_PREFIX.length)
+    if (!HOOK_FILE_PATTERN.test(name)) {
+      return { code: 'backup.hookFileInvalid', params: { name }, text: `invalid hook file name: "${name}"` }
+    }
+    if (isSensitiveFileName(name)) {
+      return { code: 'backup.hookFileSensitive', params: { name }, text: `the hook file looks credential-bearing: "${name}"` }
+    }
     return undefined
   }
   if (rel.startsWith(PLUGINS_PREFIX)) {
@@ -185,6 +266,12 @@ function restoreTargetOf(home: string, profile: string, rel: string): string {
   if (rel === MARKET_SOURCES_REL) {
     return join(home, 'storages', MARKET_STORE_DIR, 'sources.json')
   }
+  if (rel === HOME_SETTINGS_REL || rel === HOME_AGENTS_REL) {
+    return join(home, rel)
+  }
+  if (rel.startsWith(HOOKS_PREFIX)) {
+    return join(home, 'hooks', rel.slice(HOOKS_PREFIX.length))
+  }
   // layout: plugins/<dir>/<file> — validated by backupLayoutProblem first.
   const [dir, file] = rel.slice(PLUGINS_PREFIX.length).split('/') as [string, string]
   return join(home, 'storages', dir, file)
@@ -192,8 +279,9 @@ function restoreTargetOf(home: string, profile: string, rel: string): string {
 
 /**
  * Collect every file the backup carries: the profile patch layer and manifest
- * (optional — a fresh install has neither), the market source list, and the
- * whitelisted top-level files of every suite-plugin store directory.
+ * (optional — a fresh install has neither), the home-level settings file and
+ * AGENTS.md, the market source list, the hook files, and the whitelisted
+ * top-level files of every suite-plugin store directory.
  * @param home - the dsh home root.
  * @param profile - the profile whose patch layer and manifest are packed.
  * @returns the archive payload (manifest.json not included).
@@ -227,6 +315,22 @@ export async function collectConfigBackup(home: string, profile: string): Promis
   add(PROFILE_PATCH_REL, join(profileDir, 'cordis.patch.yml'))
   add(PROFILE_PACKAGE_REL, join(profileDir, 'package.json'))
   add(MARKET_SOURCES_REL, join(home, 'storages', MARKET_STORE_DIR, 'sources.json'))
+  // Optional like the rest: a fresh install may not have written one yet.
+  add(HOME_SETTINGS_REL, join(home, 'settings.yaml'))
+  add(HOME_AGENTS_REL, join(home, 'AGENTS.md'))
+
+  // The kernel EXECUTES hook files on the target machine, so the block admits
+  // one narrow name shape, top level only, and rides the same content scan.
+  let hookNames: string[]
+  try {
+    hookNames = await readdir(join(home, 'hooks'))
+  } catch {
+    hookNames = [] // no hooks directory yet: nothing to pack
+  }
+  for (const name of [...hookNames].sort((a, b) => a.localeCompare(b))) {
+    if (!HOOK_FILE_PATTERN.test(name) || isSensitiveFileName(name)) continue
+    add(`${HOOKS_PREFIX}${name}`, join(home, 'hooks', name))
+  }
 
   let storeDirs: string[]
   try {
@@ -440,7 +544,7 @@ export interface RestoredFile {
 /** The outcome of a successful restore. */
 export interface RestoreOutcome {
   readonly files: readonly RestoredFile[]
-  /** Sidecar copies made before overwriting (e.g. the profile patch layer). */
+  /** Sidecar copies made before overwriting (the profile patch layer and the host settings file). */
   readonly backups: readonly string[]
   /** How many members actually changed on disk. */
   readonly written: number
@@ -464,9 +568,10 @@ function backupStamp(now: () => Date): string {
  * the stage and each new file renames into place. Any swap failure deletes
  * the already-swapped new files, moves the old ones back, and reports `io`
  * with the auto-restore note, so no failure sequence can leave a
- * half-restored config set on disk. Overwriting the profile patch layer
- * first copies it aside as `cordis.patch.yml.bak-import-<timestamp>` so a
- * bad restore is one rename away from recovery.
+ * half-restored config set on disk. Overwriting the profile patch layer or
+ * the host settings file first copies the old one aside as
+ * `<name>.bak-import-<timestamp>` so a bad restore is one rename away from
+ * recovery.
  * @param home - the dsh home root.
  * @param profile - the profile the profile-block members apply to.
  * @param files - validated payload from {@link unpackConfigBackup}.
@@ -557,12 +662,14 @@ export async function restoreConfigBackup(
     for (const item of planned) {
       mkdirSync(dirname(item.target), { recursive: true })
       if (item.replacing) {
-        // The patch layer is the one file a bad restore can silently break
-        // every session with, so it alone gets the automatic sidecar copy.
-        if (item.rel === PROFILE_PATCH_REL) {
-          const sidecar = `${item.target}${PATCH_BACKUP_SUFFIX}${stamp}`
+        // The patch layer and the settings file are the two members a bad
+        // restore can silently break every session with — the patch composes
+        // the loader rows, the settings carry the providers — so each gets an
+        // automatic sidecar copy before it is replaced.
+        if (item.rel === PROFILE_PATCH_REL || item.rel === HOME_SETTINGS_REL) {
+          const sidecar = `${item.target}${OVERWRITE_SIDECAR_SUFFIX}${stamp}`
           copyFileSync(item.target, sidecar)
-          backups.push(`${item.rel}${PATCH_BACKUP_SUFFIX}${stamp}`)
+          backups.push(`${item.rel}${OVERWRITE_SIDECAR_SUFFIX}${stamp}`)
         }
         const oldPath = join(stage, 'old', item.rel)
         mkdirSync(dirname(oldPath), { recursive: true })

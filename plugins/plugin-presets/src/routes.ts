@@ -9,18 +9,18 @@
  *                          managed root; an existing entry answers 409 unless the
  *                          caller explicitly re-posts with `?overwrite=1`
  *   GET  /config-export  — the whole config backup as a zip (attachment): the
- *                          profile patch layer + manifest, the market source
- *                          list, and whitelisted suite-plugin store files
- *                          (credential-named files never enter; collected
- *                          content is scanned and a secret-shaped hit refuses
- *                          the export)
+ *                          host settings file, the profile patch layer +
+ *                          manifest, the market source list, and whitelisted
+ *                          suite-plugin store files (credential-named files
+ *                          never enter; collected content is scanned and a
+ *                          secret-shaped hit refuses the export)
  *   POST /config-import  — backup zip as body; validates (manifest kind/version,
  *                          containment, caps) then restores; differing existing
  *                          targets answer 409 with the conflict list unless the
  *                          caller re-posts with `?overwrite=1` (or `true`; the
  *                          restore is staged and rolled back on failure, and
- *                          the profile patch layer is copied aside before an
- *                          overwrite)
+ *                          the profile patch layer and the host settings file
+ *                          are copied aside before an overwrite)
  *
  * Trust is the carrier's: the Connection transport applies its Host/Origin
  * fence and browser authentication before a route handler runs, and the desktop

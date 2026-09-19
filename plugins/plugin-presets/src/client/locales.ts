@@ -8,14 +8,15 @@
  * carry a page prefix (`presets.`) so a later page of this plugin never
  * collides with this one.
  *
- * zh is the source of truth and stays byte-identical to the pre-i18n page copy;
- * {@link PresetsKey} is its key union, and the English dictionary is typed with
- * it, so a missing or extra key on either side is a compile error. The same
- * union constrains the page's `t` seat (`PropsLocale`), so a key removed from
- * the dictionary cannot be rendered.
+ * zh is the source of truth — it began as the pre-i18n page copy verbatim and
+ * is corrected in place when the page's behaviour changes; {@link PresetsKey}
+ * is its key union, and the English dictionary is typed with it, so a missing
+ * or extra key on either side is a compile error. The same union constrains
+ * the page's `t` seat (`PropsLocale`), so a key removed from the dictionary
+ * cannot be rendered.
  *
- * Two remarks on the zh values, both consequences of "the rendered text does
- * not change":
+ * Two remarks on the zh values, both consequences of the original i18n
+ * migration:
  *
  * - A multi-line JSX text node collapses to one line with single spaces where
  *   the line breaks were; the dictionary carries the collapsed text, which is
@@ -40,11 +41,11 @@
 /** Locale namespace owned by this plugin's client half. */
 export const NS = 'dsh-app.presets'
 
-/** Simplified Chinese dictionary — the pre-i18n page copy, verbatim. */
+/** Simplified Chinese dictionary — the source of truth for this page. */
 export const zh = {
   'presets.nav': '预设包',
   'presets.backup.title': '配置备份',
-  'presets.backup.intro': '导出或恢复当前配置：备份包含插件配置与补丁层；已自动扫描常见密钥形态，命中会拒绝导出——请勿手动放入凭据文件。 依赖清单中的本地 file: 路径会按原样恢复，换一台机器导入可能失效。',
+  'presets.backup.intro': '导出或恢复当前配置：备份包含模型与 provider 设置（settings.yaml）、AGENTS.md、插件配置、补丁层与 hooks 脚本。已自动扫描常见密钥形态，命中即拒绝导出；密钥本体不在包内（存于凭据库），换机器后需重新填写。包内含 provider 地址、请求头与会在本机执行的 hook 脚本，请当作私有文件，且只导入自己导出的备份——它决定请求去向、免审批范围与本机执行的命令。 依赖清单中的本地 file: 路径会按原样恢复，换机器导入可能失效。',
   'presets.backup.export': '导出配置备份',
   'presets.backup.import': '导入配置备份',
   'presets.backup.pick': '选择配置备份 zip 文件',
@@ -64,15 +65,15 @@ export const zh = {
   'presets.backup.export.done': '已导出 {file}（密钥扫描未命中）',
   'presets.backup.restore.written': '已恢复 {written} 项配置',
   'presets.backup.restore.unchanged': '，{unchanged} 项无变化跳过',
-  'presets.backup.restore.backedUp': '，原补丁层已自动备份',
-  'presets.backup.restore.tail': '。依赖清单变更需重启应用后生效。',
+  'presets.backup.restore.backedUp': '，补丁层与 settings.yaml 已自动备份',
+  'presets.backup.restore.tail': '。模型、界面设置与依赖清单变更需重启应用后生效。',
   'presets.backup.tooLarge': '配置备份超过 20MB 上限',
   'presets.request.failed': '请求失败（HTTP {status}）',
   'presets.overwrite.title': '覆盖预设「{entry}」',
   'presets.overwrite.message': '本机已存在同名预设，覆盖导入将替换它的全部文件，且无法撤销。',
   'presets.overwrite.confirm': '覆盖导入',
   'presets.backupOverwrite.title': '覆盖现有配置',
-  'presets.backupOverwrite.message': '备份中的以下文件与本机当前配置不同，覆盖导入将替换它们（原补丁层会自动备份），且无法撤销：{files}',
+  'presets.backupOverwrite.message': '备份中的以下文件与本机当前配置不同，覆盖导入将替换它们（其中补丁层与 settings.yaml 会先自动备份，其余文件直接替换），且无法撤销：{files}',
   'presets.conflict.none': '（服务器未返回具体清单）',
   'presets.conflict.more': '{head} 等 {count} 个文件',
   'presets.list.separator': '、',
@@ -119,6 +120,8 @@ export const zh = {
   'presets.host.backupStoreDirInvalid': '插件存储目录名不合法：「{dir}」',
   'presets.host.backupStoreFileNotAllowed': '插件存储文件不在白名单内：「{file}」',
   'presets.host.backupStoreFileSensitive': '插件存储文件疑似包含凭据：「{file}」',
+  'presets.host.backupHookFileInvalid': 'hooks 目录下的文件名不合法：「{name}」（仅顶层，且只允许字母、数字、点、下划线与短横线）',
+  'presets.host.backupHookFileSensitive': 'hooks 文件疑似包含凭据：「{name}」',
   'presets.host.backupUnknownBlock': '路径不属于配置备份的任何已知区块',
   'presets.host.backupSecretContent': '配置文件「{rel}」命中疑似凭据内容（规则 {rule}），已拒绝导出；请移除该文件中的凭据后重试',
   'presets.host.backupExportTooManyFiles': '配置备份包含 {count} 个文件，超过单包 {cap} 个的上限，无法导出',
@@ -151,7 +154,7 @@ export const zh = {
 export const en: Record<PresetsKey, string> = {
   'presets.nav': 'Presets',
   'presets.backup.title': 'Configuration backup',
-  'presets.backup.intro': 'Export or restore the current configuration: the backup carries plugin configs and the patch layer. Common credential shapes are scanned automatically, and a hit refuses the export — never add a credential file by hand. Local file: paths in the dependency list are restored as-is, so importing on another machine may not work.',
+  'presets.backup.intro': 'Export or restore the current configuration: the backup carries model and provider settings (settings.yaml), AGENTS.md, plugin configs, the patch layer, and hook scripts. Common credential shapes are scanned automatically, and a hit refuses the export; the keys themselves are not in the package (they live in the credential store), so a new machine needs them re-entered. The package holds provider endpoints, request headers, and hook scripts that run on this machine, so treat it as a private file and import only a backup you exported yourself — it decides where requests go, what runs without approval, and which commands execute locally. Local file: paths in the dependency list are restored as-is, so importing on another machine may not work.',
   'presets.backup.export': 'Export configuration backup',
   'presets.backup.import': 'Import configuration backup',
   'presets.backup.pick': 'Choose a configuration-backup zip file',
@@ -171,15 +174,15 @@ export const en: Record<PresetsKey, string> = {
   'presets.backup.export.done': 'Exported {file} (no credential pattern matched)',
   'presets.backup.restore.written': 'Restored {written} configuration items',
   'presets.backup.restore.unchanged': ', {unchanged} unchanged and skipped',
-  'presets.backup.restore.backedUp': ', the previous patch layer was backed up automatically',
-  'presets.backup.restore.tail': '. Dependency-list changes take effect after an app restart.',
+  'presets.backup.restore.backedUp': ', the patch layer and settings.yaml were backed up first',
+  'presets.backup.restore.tail': '. Model, interface, and dependency-list changes take effect after an app restart.',
   'presets.backup.tooLarge': 'The configuration backup exceeds the 20MB limit',
   'presets.request.failed': 'Request failed (HTTP {status})',
   'presets.overwrite.title': 'Overwrite preset "{entry}"',
   'presets.overwrite.message': 'A preset with this name already exists. Importing with overwrite replaces every file of it and cannot be undone.',
   'presets.overwrite.confirm': 'Overwrite',
   'presets.backupOverwrite.title': 'Overwrite the current configuration',
-  'presets.backupOverwrite.message': 'These files in the backup differ from the current configuration; importing with overwrite replaces them (the previous patch layer is backed up automatically) and cannot be undone: {files}',
+  'presets.backupOverwrite.message': 'These files in the backup differ from the current configuration; importing with overwrite replaces them (of which the patch layer and settings.yaml are backed up first, the rest are replaced outright) and cannot be undone: {files}',
   'presets.conflict.none': '(the server returned no file list)',
   'presets.conflict.more': '{head} and {count} files in total',
   'presets.list.separator': ', ',
@@ -225,6 +228,8 @@ export const en: Record<PresetsKey, string> = {
   'presets.host.backupStoreDirInvalid': 'invalid plugin store directory name: "{dir}"',
   'presets.host.backupStoreFileNotAllowed': 'the plugin store file is not whitelisted: "{file}"',
   'presets.host.backupStoreFileSensitive': 'the plugin store file looks credential-bearing: "{file}"',
+  'presets.host.backupHookFileInvalid': 'invalid file name under the hooks directory: "{name}" (top level only, letters, digits, dot, underscore and dash)',
+  'presets.host.backupHookFileSensitive': 'the hook file looks credential-bearing: "{name}"',
   'presets.host.backupUnknownBlock': 'the path belongs to no known section of a configuration backup',
   'presets.host.backupSecretContent': 'configuration file "{rel}" matched a credential-like pattern (rule {rule}); the export was refused. Remove the credential from that file and try again',
   'presets.host.backupExportTooManyFiles': 'the configuration backup has {count} files, over the {cap}-file per-package cap; it cannot be exported',
