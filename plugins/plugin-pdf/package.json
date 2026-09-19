@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-pdf",
   "description": "DSH APP PDF suite: reads workspace PDFs as material (pdf_read) and authors/validates/renders a structured PDF project (*.pdf.json) with pdf_write, read-only pdf_check and pdf_render; office_to_pdf converts an existing Office document (*.doc/*.docx/*.xls/*.xlsx/*.ppt/*.pptx) into a PDF through the application's own on-demand LibreOffice engine. A PDF capsule in the shared office-suite bar (container class dshOfficeBar, data-office-format=\"pdf\", injected after the composer card) toggles a per-session PDF mode; the dsh-pdf skill pins the workflow.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

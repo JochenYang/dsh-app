@@ -8,6 +8,32 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.12.5] - 2026-09-19
+
+### 中文
+- 修复「插件改动根本没送达用户」：suite 版本号是十七个插件**版本号**的哈希，而它决定内核目录名（`dsh-<内核版本>+suite-<哈希>`），外壳按目录名安装内核——于是插件代码改了但版本号没动时，哈希不变、目录名不变，已安装的用户永远保留旧插件，而本地每一道门禁都是绿的。实测：`office_to_pdf` 发布后用户测试时跑的仍是旧插件（会话里完全没有该工具），市面上另有插件市场的 SVG 转圈、会话记忆与预设包的安全删除、以及 fff 的构建脚本三处修复同样压在这里面。现在这五个插件的版本号已各自提升（market 0.1.5、memory 0.8.4、pdf 0.1.7、presets 0.1.4、fff 0.1.1），suite 哈希随之变化，内核会被重新安装、改动真正送达；并新增一条测试：自上一个发布标签以来任何插件改了代码却没提升版本号就报错
+- 发布链路三处修复：①运行时复用判定只看 suite 版本，载荷换了内容也会被「复用」而跳过整个 runtime 矩阵（本次就是这样漏掉新载荷的）——现在逐格比对载荷声明的 Python 集；②Windows 构建机上没有 `unzip`、PowerShell 又拒绝解压没有 `.zip` 后缀的文件（下载缓存按摘要命名），两个 windows 格因此直接失败——改为用 .NET 的 ZipFile 解压；③重建后的分层产物名字带内容摘要，`--clobber` 清不掉旧名字，残留会让镜像守卫判定「有资产不被任何索引引用」而拒绝整份运行时——现在每个格会清掉自己平台上不再被索引引用的分片
+
+### English
+- Fixed plugin changes never reaching users at all: the suite version is a hash of the seventeen plugins'
+  VERSION numbers, and it names the kernel directory (`dsh-<kernel>+suite-<hash>`) the shell installs by —
+  so a plugin whose code changed without a version bump leaves the hash (and the directory name) alone,
+  the existing installation is never replaced, and every local gate stays green. Measured: after
+  `office_to_pdf` shipped, a user's test still ran the OLD plugin (the session contains no trace of the
+  tool), and three more fixes sat in the same blind spot — the market's SVG busy ring, the memory and
+  preset packages' link-safe deletes, and plugin-fff's build script. The five plugins now carry bumped
+  versions (market 0.1.5, memory 0.8.4, pdf 0.1.7, presets 0.1.4, fff 0.1.1), so the hash changes, the
+  kernel is reinstalled and the changes actually arrive; a new test fails whenever a plugin's code
+  changed since the last release tag without a version bump
+- Three release-pipeline fixes: (1) the runtime reuse rule compared only the suite version, so a payload
+  whose contents changed was "reused" and the whole runtime matrix was skipped — which is how this
+  release's first attempt shipped the old payload; it now compares each cell's declared Python set,
+  (2) Windows runners have no `unzip` and their PowerShell refuses an archive whose path lacks the
+  `.zip` extension (the download cache names files by digest), which failed both windows cells — zips
+  now expand through .NET's ZipFile, (3) rebuilt layer assets carry new content-digested names that
+  `--clobber` cannot remove, and the leftovers made the mirror's completeness guard refuse the entire
+  runtime — each cell now prunes its own platform's unreferenced layer assets
+
 ## [v0.12.4] - 2026-09-19
 
 ### 中文
