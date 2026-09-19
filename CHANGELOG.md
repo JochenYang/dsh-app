@@ -8,6 +8,28 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.12.6] - 2026-09-19
+
+### 中文
+- 修复安装办公组件（带 Python 集的那份载荷）后**应用再也起不来**：宿主只用 `argv[4]` 一个参数同时决定两件事——办公技能的资源根取 `dirname(argv[4])/office-skills`，而 `load_workspace_dependencies` 装的是 `argv[4]` 指向的那棵树。上一版为了让工具找到 Python 集，把参数直接指进载荷内部的 `primary-runtime`，资源根因此被算到 `<载荷>/office-skills`——那是任何产物都不带的目录，办公技能插件在启动时硬校验 `scripts/check_office.py` 并抛错（`ENOENT … check_office.py`），失败卡片只显示一句路径。现在参数**永远**是外壳数据目录下的固定叶子 `<dataDir>/dsh-app-office/primary-runtime`，载荷里的 Python 集**链接**到那里（Windows 用 junction，零拷贝）：资源根仍是 `<dataDir>/dsh-app-office/office-skills`（外壳本来就物化在那），而工具通过同一个叶子读到 `runtime.json`。载荷换版本时链接跟着换，内核不声明 Python 集时链接被移除，不留悬空指向已回收的载荷目录。上一版只验证了「载荷能装、工具能答」，没验证「装了载荷之后宿主能不能启动」——现在假宿主与真宿主一样校验那个资源根，两条回归测试覆盖这次的形状，把修复改回旧写法会立刻变红
+
+### English
+- Fixed the application refusing to start at all once the office component (the payload carrying the Python
+  set) was installed: the host spends ONE argument on two jobs — the office skills' asset root is
+  `dirname(argv[4])/office-skills`, while `load_workspace_dependencies` installs the tree `argv[4]` names.
+  The previous release pointed that argument into the payload's own `primary-runtime` so the tool could find
+  the Python set, which moved the asset root to `<payload>/office-skills` — a directory no artifact carries —
+  and the office skill plugin's boot check on `scripts/check_office.py` threw (`ENOENT … check_office.py`),
+  surfacing as a failure card whose only detail was a path. The argument is now ALWAYS the fixed leaf under
+  the shell's data directory (`<dataDir>/dsh-app-office/primary-runtime`) and the payload's Python set is
+  LINKED there (a junction on Windows, so nothing is copied): the asset root stays
+  `<dataDir>/dsh-app-office/office-skills` (where the shell already materializes it) and the tool reads its
+  `runtime.json` through that same leaf. The link follows a new payload version and is removed when a kernel
+  declares no Python set, so nothing dangles into a pruned payload directory. The previous release verified
+  that the payload installs and the tool answers, but never that the host still BOOTS with one — the fake
+  host now enforces the same asset-root check the real one does, and two regression tests cover the shape
+  that broke; reverting the fix turns both red
+
 ## [v0.12.5] - 2026-09-19
 
 ### 中文
