@@ -65,7 +65,7 @@ import { protocol } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync, readFileSync } from 'node:fs'
-import { cp, mkdir, stat } from 'node:fs/promises'
+import { cp, lstat, mkdir, realpath, rm, stat, symlink, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import semver from 'semver'
@@ -523,13 +523,19 @@ const OFFICE_PAYLOAD_DIR = 'office-skills'
  * Leaf the child's `primaryRuntime` argument ends in.
  *
  * The child derives `assetRoot = join(dirname(argv[4]), 'office-skills')`, so
- * this leaf makes the payload directory a SIBLING of the argument —
+ * this leaf makes the skills directory a SIBLING of the argument —
  * `<root>/primary-runtime` beside `<root>/office-skills`, the layout upstream's
  * own runtime uses. Naming it inside the payload directory instead puts the name
  * twice in the derived asset root and the skill fails its boot check on
  * `<root>/office-skills/office-skills/scripts/check_office.py`.
  *
- * The leaf itself is never read and does not have to exist.
+ * The shell always answers THIS path, never the payload's own directory: what
+ * the child does with it is derive the asset root from its parent, and only this
+ * leaf's parent holds the materialized `office-skills`. A payload that carries a
+ * Python set is linked here (see {@link linkPrimaryRuntime}), so the same
+ * argument serves both jobs. The leaf itself may be absent — the child only
+ * derives from it at boot, and `load_workspace_dependencies` reports the path
+ * when nothing is linked there yet.
  */
 const OFFICE_PRIMARY_RUNTIME_LEAF = 'primary-runtime'
 
@@ -563,14 +569,22 @@ async function officePayloadStale(source: string, target: string): Promise<boole
  * (the artifact carries no `runtime/office-skills` yet), which is exactly what
  * the message has to say.
  *
+ * The returned path is ALWAYS the fixed leaf, and that is a hard contract: the
+ * child derives its asset root from `dirname` of this argument, so answering
+ * with the payload's own `primary-runtime` (the obvious way to let
+ * `load_workspace_dependencies` find a Python set) moves the asset root into
+ * `<payload>/office-skills` — a directory no artifact carries — and the boot
+ * fails on the missing `check_office.py`. The Python set is therefore linked
+ * BESIDE the materialized skills instead, where the fixed leaf already points.
+ *
  * @param source - the payload to mirror (dev: the checkout's `skill-office`
  *   assets; production: `<runtimeDir>/../runtime/office-skills`), or undefined
  *   when the caller named none.
  * @param dataDir - the shell's data directory, the materialization root.
  * @param primaryRuntime - the payload's own primary-runtime directory, when the
- *   installed office payload carries one. Given, it is what the child is handed:
- *   the host's `load_workspace_dependencies` tool installs THAT tree, so a
- *   payload that carries Python is what makes the office skills run.
+ *   installed office payload carries one. Given, it is what
+ *   `load_workspace_dependencies` installs; absent, the leaf stays empty and the
+ *   tool reports the path it looked for, exactly as it always has.
  * @returns the primary-runtime path to pass as the child's fourth positional.
  * @throws when either input is missing, or when the source is not a payload.
  */
@@ -581,12 +595,54 @@ async function prepareOfficePayload(source: string | undefined, dataDir: string 
   if (!existsSync(path.join(source, 'scripts', 'check_office.py'))) {
     throw new Error(`dsh host: the office payload ${source} is missing or incomplete (it must hold scripts/check_office.py); the runtime has to ship it beside its own tree`)
   }
-  const target = path.join(dataDir, OFFICE_PAYLOAD_ROOT, OFFICE_PAYLOAD_DIR)
+  const root = path.join(dataDir, OFFICE_PAYLOAD_ROOT)
+  const target = path.join(root, OFFICE_PAYLOAD_DIR)
   if (await officePayloadStale(source, target)) {
-    await mkdir(path.dirname(target), { recursive: true })
+    await mkdir(root, { recursive: true })
     await cp(source, target, { recursive: true })
   }
-  return primaryRuntime ?? path.join(dataDir, OFFICE_PAYLOAD_ROOT, OFFICE_PRIMARY_RUNTIME_LEAF)
+  const leaf = path.join(root, OFFICE_PRIMARY_RUNTIME_LEAF)
+  if (primaryRuntime === undefined) await clearPrimaryRuntimeLink(leaf)
+  else await linkPrimaryRuntime(primaryRuntime, leaf)
+  return leaf
+}
+
+/**
+ * Point the child's primary-runtime leaf at the payload's own Python set.
+ *
+ * A link rather than a copy: the set is ~286 MiB unpacked and the payload it
+ * lives in is version-pruned, so a copy would both duplicate the bytes and
+ * outlive the payload it came from. `load_workspace_dependencies` copies the
+ * tree into the harness home on its first call (`installPrimaryRuntime` with
+ * `dereference: true`), so the link is only ever a name.
+ *
+ * Replaced in place when the payload moves (a kernel update installs a new
+ * payload version) and removed when this kernel's payload carries no Python set,
+ * so a stale link cannot outlive its target.
+ */
+async function linkPrimaryRuntime(source: string, leaf: string): Promise<void> {
+  const resolved = await realpath(source).catch(() => source)
+  const existing = await lstat(leaf).catch(() => undefined)
+  if (existing !== undefined) {
+    if (existing.isSymbolicLink()) {
+      const current = await realpath(leaf).catch(() => undefined)
+      if (current === resolved) return
+      // Ours (the only writer of this leaf): unlink, never delete through it.
+      await unlink(leaf)
+    } else {
+      // A real tree from an earlier layout — the async rm does not descend into
+      // links, which matters if this directory ever held one.
+      await rm(leaf, { recursive: true, force: true })
+    }
+  }
+  await mkdir(path.dirname(leaf), { recursive: true })
+  await symlink(resolved, leaf, process.platform === 'win32' ? 'junction' : 'dir')
+}
+
+/** Remove the leaf link this shell owns, leaving a foreign directory alone. */
+async function clearPrimaryRuntimeLink(leaf: string): Promise<void> {
+  const existing = await lstat(leaf).catch(() => undefined)
+  if (existing?.isSymbolicLink() === true) await unlink(leaf)
 }
 
 /**

@@ -15,7 +15,7 @@
 // exchange, the forward and the index rendering all run for real.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -92,6 +92,8 @@ if (process.env.FAKE_HOST_CONTRACT === 'fail-other') {
  * refused exactly as the real host refuses it.
  */
 const FAKE_WEB_HOST = `
+const fs = require('node:fs')
+const path = require('node:path')
 const http = require('node:http')
 const argv = process.argv.slice(2)
 const problems = []
@@ -99,6 +101,17 @@ if (!process.execArgv.includes('--expose-internals')) problems.push('missing --e
 if (argv.length !== 4) problems.push('positional count ' + String(argv.length))
 if (argv[3] !== 'link' && argv[3] !== 'runtime') problems.push('resolution ' + String(argv[3]))
 if (process.env.FAKE_WEB_CONTRACT === 'refuse') problems.push('unsupported internal option ' + JSON.stringify(argv[1] || ''))
+// The real host composes the office skill plugin with
+// assetRoot = join(dirname(argv[2]), 'office-skills') and the plugin throws at
+// boot unless that holds scripts/check_office.py. Enforced here so a shell that
+// answers with the payload's own primary-runtime (which moves the derived root
+// into <payload>/office-skills) fails this suite instead of the user's boot.
+if (argv[2] !== undefined) {
+  const assetRoot = path.join(path.dirname(argv[2]), 'office-skills')
+  if (!fs.existsSync(path.join(assetRoot, 'scripts', 'check_office.py'))) {
+    problems.push('office skills missing at ' + assetRoot)
+  }
+}
 if (problems.length > 0) {
   process.send({ type: 'fatal', message: 'dsh desktop: ' + problems.join('; ') })
   setTimeout(() => { process.exit(1) }, 10)
@@ -184,6 +197,23 @@ function webStartOptions(runtime) {
     checkoutRuntime: true,
     allowLinkedProfile: true,
   }
+}
+
+/** Absolute path of a shell's data directory, read off a start's argv. */
+function dataDirOf(runtime) {
+  return path.join(runtime.dataDir, 'dsh-app-office')
+}
+
+/**
+ * Canonical long-form path for comparisons.
+ *
+ * `realpathSync` on a Windows junction hands back the 8.3 SHORT form
+ * (`ADMINI~1`) of a long target, so a plain realpath comparison between a link
+ * and the directory it points at fails on a machine with short names enabled.
+ * `.native` resolves the same link to the long form both sides agree on.
+ */
+function canonical(target) {
+  return realpathSync.native(target)
 }
 
 /** One shell log line, by the prefix that names it. */
@@ -404,4 +434,67 @@ test('a web-transport ready without an injection table fails the start', async (
   const runtime = fakeWebRuntime('0.1.6-alpha.2', 'accept', { FAKE_WEB_INJECTIONS: 'missing' })
   const logs = []
   await assert.rejects(start(runtime, logs, webStartOptions(runtime)), /without an index injection table/u)
+})
+
+/**
+ * The regression this suite exists to prevent, learned from a real boot failure:
+ * a payload carrying a Python set used to be handed to the child AS the
+ * primary-runtime argument, which moved the child's derived asset root into
+ * `<payload>/office-skills` — a directory no artifact carries — and the office
+ * skill plugin threw at boot ("ENOENT … check_office.py"). The argument must
+ * stay the fixed leaf beside the materialized skills, with the Python set linked
+ * there.
+ */
+test('a payload carrying a Python set is linked beside the skills, never handed as the argument', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2')
+  // A payload whose primary-runtime is a complete set (its runtime.json is what
+  // `primaryRuntimeDir` gates on) — the shape that used to break the boot.
+  const payloadRuntime = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-python-'))
+  writeFileSync(path.join(payloadRuntime, 'runtime.json'), '{"components":{"python":"3.12.14"}}\n')
+  mkdirSync(path.join(payloadRuntime, 'dependencies'), { recursive: true })
+  const logs = []
+  const run = await start(runtime, logs, { ...webStartOptions(runtime), officePrimaryRuntime: payloadRuntime })
+  try {
+    const leaf = path.join(dataDirOf(runtime), 'primary-runtime')
+    const skills = path.join(dataDirOf(runtime), 'office-skills')
+    // The child's own check ran: the asset root it derives exists.
+    assert.ok(existsSync(path.join(skills, 'scripts', 'check_office.py')), 'the materialized skills sit beside the leaf')
+    // The leaf is a link to the payload's set, not the payload path itself.
+    assert.equal(lstatSync(leaf).isSymbolicLink(), true, 'the leaf is a link')
+    assert.equal(canonical(leaf), canonical(payloadRuntime), 'the link resolves to the payload set')
+    // And the argument the child was handed is the leaf, whose parent holds the
+    // skills — the contract the fake host enforced above.
+    const argv = JSON.parse(line(logs, 'dsh host: web argv').slice('dsh host: web argv '.length))
+    assert.equal(argv[4], leaf)
+    assert.equal(path.dirname(argv[4]), path.dirname(skills))
+    // The set is reachable through the argument: this is what the host's
+    // `load_workspace_dependencies` installs.
+    assert.ok(existsSync(path.join(argv[4], 'runtime.json')), 'the tool finds its runtime.json through the argument')
+  } finally {
+    await run.host.stop()
+  }
+})
+
+test('the leaf link is replaced when the payload moves and dropped when none is declared', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2')
+  const first = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-a-'))
+  const second = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-b-'))
+  for (const dir of [first, second]) writeFileSync(path.join(dir, 'runtime.json'), '{}\n')
+  const leaf = path.join(dataDirOf(runtime), 'primary-runtime')
+
+  const a = await start(runtime, [], { ...webStartOptions(runtime), officePrimaryRuntime: first })
+  await a.host.stop()
+  assert.equal(canonical(leaf), canonical(first))
+
+  // A kernel update installs a new payload version: the leaf follows it.
+  const b = await start(runtime, [], { ...webStartOptions(runtime), officePrimaryRuntime: second })
+  await b.host.stop()
+  assert.equal(canonical(leaf), canonical(second))
+
+  // A kernel whose payload carries no Python set must not leave a stale link
+  // pointing at a pruned payload directory.
+  const c = await start(runtime, [], webStartOptions(runtime))
+  await c.host.stop()
+  assert.equal(existsSync(leaf), false, 'no Python set declared → no leaf')
+  assert.ok(existsSync(path.join(dataDirOf(runtime), 'office-skills', 'scripts', 'check_office.py')), 'the skills stay materialized')
 })
