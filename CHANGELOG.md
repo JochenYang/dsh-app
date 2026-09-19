@@ -8,6 +8,37 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.12.8] - 2026-09-19
+
+### 中文
+- **记忆模块加固**：整理流程不再对「本次没有真正读过正文」的卡片提出合并或删除——索引是整份传的，键叫得出来而正文被输入上限截掉，删掉就等于内容无声消失；现在编辑只能引用这一轮真正读到的卡片，并被一个轮转锚点带着走过被省略的尾部，容量受限的记忆库会被逐段覆盖，而不是永远跳过同一批。每次移除都先在该作用域留下 `archive/` 副本，两条后台整理通道的进度游标改为「写入成功才推进」，读不全的库不再把自己记成已整理，模型路由缺失时保留增量而不是判掉没人看过的新内容
+- **设置页的记忆面板补齐了「删除」这条路**：归档面板现在列出**所有作用域**的副本（此前只查全局），于是删掉一条项目记忆时看到的 `已删除的记忆（0）` 是假象——副本其实躺在项目目录里；现在能逐条恢复、永久删除，也能清空全局记忆，手动删除与后台整理也分成了两条独立记录
+- **新增窗口尺寸记忆**：首次启动按 1440×900 开窗并受工作区约束；之后记住上次的尺寸与位置（最大化状态一并记住），显示器拔掉后不会再把窗口开到屏幕外
+- **配置备份的覆盖面扩大**：现在连同 `settings.yaml`（provider、模型清单、默认模型、主题、语言、权限）、`AGENTS.md`、`hooks/` 下的脚本一起导出与导入。密钥本体始终不在包内（存在凭据库），覆盖前 `settings.yaml` 与补丁层会自动留一份 `.bak-import-` 副本；用新版导出的备份在旧版应用上会被整包拒绝，跨机迁移时先把目标机升到同版本
+
+### English
+- Memory hardening: the curation pass no longer proposes merge or delete for a card whose body it never
+  actually read — the index travels whole, so a key was nameable while its text had been dropped by the
+  input cap, and removing it lost content silently. Edits now cite only the cards this pass read, a
+  rotation anchor walks the omitted tail so a capped store gets covered piece by piece instead of skipping
+  the same cards forever, and every removal leaves an `archive/` copy in its own scope first. Both
+  background passes now advance their progress cursor only once the writes land, a store that could not be
+  read whole no longer records itself as reviewed, and a missing model route keeps its delta instead of
+  retiring material nobody ever judged
+- The settings page's memory panel now has the deletion path it was missing: the archive list covers EVERY
+  scope (it used to read the global one only, which is why deleting a project memory showed
+  `已删除的记忆（0）` while the copy sat in the project directory). Entries can be restored one by one,
+  deleted for good, or the global memory cleared wholesale, and a manual deletion is now a separate record
+  from a background curation
+- New: the window remembers its size. A first run opens at 1440×900 clamped to the work area; after that
+  the last size and position are restored (a maximized window comes back maximized), and unplugging a
+  monitor can no longer place the window off-screen
+- The configuration backup now covers far more: `settings.yaml` (providers, model list, default model,
+  theme, locale, permissions), `AGENTS.md`, and the scripts under `hooks/` travel with it. Key material is
+  still never in the package (it lives in the credential store), overwriting `settings.yaml` or the patch
+  layer first leaves a `.bak-import-` copy, and a backup exported by this version is refused whole by an
+  older one — upgrade the target machine first when migrating
+
 ## [v0.12.7] - 2026-09-19
 
 ### 中文
