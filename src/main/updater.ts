@@ -608,7 +608,7 @@ async function retireSkippedVersionIfRunning(current: string): Promise<void> {
 }
 
 /** One confirmed version advance, kept for the tray's rollback menu. */
-interface VersionHistoryEntry {
+export interface VersionHistoryEntry {
   readonly version: string
   /** ISO timestamp of when this version was confirmed running. */
   readonly at: string
@@ -641,6 +641,64 @@ async function appendVersionHistory(version: string): Promise<void> {
     await writeJsonFileAtomic(versionHistoryFile(), next)
   } catch (err) {
     console.error('[shell-updater] failed to record version history:', (err as Error).message)
+  }
+}
+
+/**
+ * The history that agrees with the version actually running.
+ *
+ * Pure so the rule is testable without a disk or an Electron app (the shell's
+ * I/O around it is {@link reconcileVersionHistory}): the running version is
+ * dropped if it already appears anywhere, then appended, and the list is capped
+ * at {@link VERSION_HISTORY_MAX}. Dropping the earlier record matters for a
+ * re-upgrade — a downgrade followed by an upgrade would otherwise leave two
+ * entries of the same version and shift the rollback menu's `len-2` off the
+ * real previous release.
+ *
+ * @param history - the recorded advances, oldest first.
+ * @param current - the version this process is running.
+ * @param at - ISO timestamp to stamp the appended entry with.
+ * @returns the next history, or null when nothing needs writing.
+ */
+export function reconciledVersionHistory(
+  history: readonly VersionHistoryEntry[],
+  current: string,
+  at: string,
+): VersionHistoryEntry[] | null {
+  if (!isSafeVersion(current)) return null
+  if (history[history.length - 1]?.version === current && !history.slice(0, -1).some((entry) => entry.version === current)) {
+    return null
+  }
+  return [...history.filter((entry) => entry.version !== current), { version: current, at }].slice(-VERSION_HISTORY_MAX)
+}
+
+/**
+ * Make the history agree with the version actually running.
+ *
+ * The only writer used to be the pending-install consumer, which runs solely
+ * after an IN-APP update: a version installed by hand (the download-the-
+ * installer route the user takes when the app cannot start, or any manual
+ * reinstall) advanced without a record, so `history[len-1]` — the entry the
+ * rollback menu reads as "the version I am running" — named an older release
+ * and a rollback would have landed one version too far back. Measured on
+ * 0.12.6: the history ended at 0.12.5 while 0.12.6 was running, and the menu
+ * would have offered 0.12.4.
+ *
+ * Reconciling on every boot closes that gap for every install route at once.
+ * A DEVELOPMENT run is skipped: `app.getVersion()` there is the checkout's
+ * version, and recording it would push a dev number into the rollback list.
+ */
+async function reconcileVersionHistory(): Promise<void> {
+  if (process.env.DSH_APP_DEV === '1') return
+  const current = app.getVersion()
+  const history = await readVersionHistory()
+  const next = reconciledVersionHistory(history, current, new Date().toISOString())
+  if (next === null) return
+  try {
+    await writeJsonFileAtomic(versionHistoryFile(), next)
+    console.log(`[shell-updater] version history reconciled to ${current} (was ${history[history.length - 1]?.version ?? 'empty'})`)
+  } catch (err) {
+    console.error('[shell-updater] failed to reconcile version history:', (err as Error).message)
   }
 }
 
@@ -1133,8 +1191,14 @@ function pendingInstallFile(): string {
  * (wizard cancelled or failed). The host process quits right after spawning
  * the installer, so the outcome can only be observed on the next boot.
  * No-op when no install was in flight.
+ *
+ * Reconciliation runs FIRST and unconditionally, because the pending record
+ * only exists for in-app updates: a version installed by hand still has to
+ * reach the history the rollback menu reads (see
+ * {@link reconcileVersionHistory}).
  */
 export async function consumeUpdaterInstallResult(win: BrowserWindow | null = null): Promise<void> {
+  await reconcileVersionHistory()
   const file = pendingInstallFile()
   let pending: PendingInstall
   try {
