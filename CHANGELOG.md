@@ -8,6 +8,27 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.12.7] - 2026-09-19
+
+### 中文
+- 修复「手动安装的新版本不会进入回滚记录」：版本历史原先只有应用内更新这一条写入路径（应用内更新会先写一份待安装记录，下次启动读到它才登记版本号），而手动下载安装包不会写那份记录——于是 0.12.6 手动装上后，历史仍停在 0.12.5，而托盘的「回滚到上一版」是按「历史倒数第二条」算的，实测它会把你退到 **0.12.4** 而不是 0.12.5。现在每次启动都会把「正在运行的版本」与历史对齐（纯函数判定，开发运行跳过）：当前版本会被移到末尾（重装/降级再升级不会留下两条同版本记录、把倒数第二条挤偏），列表仍保持 5 条上限，无法安全拼进安装包文件名的版本号一律不登记。这条修复对任何安装途径都生效——这正是上一版需要手动下载安装包时的痛点
+- 顺带说明为什么会有这个缺口：手动安装不写待安装记录，恰恰是它「不残留、不会误删」的原因，两者是同一处设计的两面
+
+### English
+- Fixed a hand-installed version never reaching the rollback history: the only writer was the in-app update
+  path (an in-app update stages a pending-install record, and the next boot reads it to register the
+  version), while downloading and running the installer by hand writes no such record — so after 0.12.6
+  was installed manually the history still ended at 0.12.5, and the tray's "roll back to the previous
+  version" reads the SECOND-TO-LAST entry: measured, it would have taken the user to **0.12.4** instead of
+  0.12.5. Every boot now reconciles the running version with the history (a pure rule, skipped for
+  development runs): the current version moves to the end (a reinstall or a downgrade-then-upgrade must not
+  leave two entries of one version and shift the second-to-last off the real previous release), the list
+  stays capped at five, and a version that cannot be spliced into an installer filename is refused. The fix
+  covers every install route — which is exactly the situation the previous release created when it could
+  only be installed by hand
+- Worth knowing why the gap existed: a hand install writing no pending-install record is precisely what
+  makes it leave no residue and delete nothing it should not — two sides of one design
+
 ## [v0.12.6] - 2026-09-19
 
 ### 中文
