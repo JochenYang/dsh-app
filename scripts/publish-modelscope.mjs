@@ -152,7 +152,7 @@ function redactSecrets(text) {
     .replace(/(x-amz-(?:signature|credential|security-token)=)[^&\s"']+/gi, '$1<redacted>')
 }
 
-// 发版时人工核对用的 step summary（对应 AGENTS.md §10）。只在 CI 生效；
+// 发版时人工核对用的 step summary（对应 docs/agents/build-and-release.md §4）。只在 CI 生效；
 // 写失败绝不影响发布结果。
 function writeSummary(lines) {
   const target = process.env.GITHUB_STEP_SUMMARY

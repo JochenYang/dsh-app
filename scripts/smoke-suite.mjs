@@ -3,7 +3,7 @@
  * Suite smoke probe: boots a REAL dsh web kernel with the full brand-suite
  * overlay and asserts every suite plugin's runtime surface. This is the
  * executable answer to the "compile-green ≠ runtime-green" kernel-bump
- * failure mode (AGENTS.md §6): the type gate cannot see across the
+ * failure mode (AGENTS.md §5): the type gate cannot see across the
  * plugin/kernel boundary, this probe can.
  *
  * Modes (mutually exclusive):

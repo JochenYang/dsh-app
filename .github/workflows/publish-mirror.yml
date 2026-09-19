@@ -40,7 +40,7 @@ name: publish-mirror
 # - Mirror failure never blocks or rolls back the release: this is a separate
 #   run and the release is already published when it starts.
 # - Success / skip / failure plus the backfill command are written to
-#   $GITHUB_STEP_SUMMARY (AGENTS.md §10).
+#   $GITHUB_STEP_SUMMARY (docs/agents/build-and-release.md §4).
 # - runtime-* releases are published too, and they are mirrored by the separate
 #   `mirror-runtime` job below. They are NOT let into the `mirror` job: see the
 #   RUNTIME MIRROR section for why the two need different preconditions.
@@ -276,7 +276,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The mirror logic is a repository file now (.github/scripts/
-      # mirror_release.py, AGENTS.md §10), so the workspace must be checked out
+      # mirror_release.py, docs/agents/build-and-release.md §5), so the workspace must be checked out
       # before any mirrored step. Pin the ref to the default branch on purpose:
       # an old release tag does not contain this script, and the logic in force
       # must be the current one, not the tag's snapshot.

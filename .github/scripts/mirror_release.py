@@ -33,7 +33,7 @@ Subcommands:
     diagnose     commit a few-byte probe file to test the commit endpoint
     prune-probe  upload -> list -> delete -> confirm 404 on a throwaway path
 
-Layout in the target repo (see AGENTS.md section 10):
+Layout in the target repo (see docs/agents/build-and-release.md section 5):
 
     releases/latest/<asset>             rolling copy of the newest stable
     releases/archive/<version>/<asset>  every stable version

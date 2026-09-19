@@ -7,7 +7,7 @@
 现状：`plugins/plugin-brand/src/index.ts:27-40` 三个 TODO（settings namespace、
 app-info 服务、desktop bridge remotes），套件里唯一的空壳。
 
-**方案**（按 AGENTS.md §11 的原始设计收口）：
+**方案**（按原设计收口，见 AGENTS.md §6）：
 1. **app-info 服务**：shell 经 server spawn 时注入版本信息（或 host route 读取
    manifest + shell 版本文件）→ client 可显示"DSH APP x.y.z / 内核 dsh a.b.c"，
    更新卡片文案获得真实版本号。
@@ -37,13 +37,15 @@ app-info 服务、desktop bridge remotes），套件里唯一的空壳。
 **验收**：模拟一次 crash restart 后，诊断页能看到重启计数与最近错误行；
 导出的 zip 经 redaction 复查无 `api[key|_key]/authorization/token` 命中。
 
-## 3. 首启体验补全（AGENTS.md §11 已列）
+## 3. 首启体验补全（✅ 已完成）
 
-- 内核下载**暂停/恢复**（setup window 的 install 流程已有 progress；补 cancel 语义
-  区分"暂停"与"放弃"）；
-- **校验和显示**：下载完成页展示 sha512 前 16 位 + "已验证"徽标（integrity.ts 已有
-  校验逻辑，只差展示）；
-- 失败路径文案分层：网络失败 / 镜像链全部失败 / 校验失败，各给可行动建议。
+- 内核下载**暂停/恢复**（`startup-window.ts` 的暂停按钮 → `index.ts`
+  `setPauseToggleHandler` → `kernel.pauseDownload()`/`resumeDownload()`，`Range`
+  续传）；
+- **校验和显示**：启动页展示已校验的摘要 + "运行时已校验"徽标
+  （`setStartupDigest`，`static/startup.html`）；
+- 失败路径文案分层：`updater.allSourcesFailed` / `updater.integrityFailed` /
+  `kernel.artifactMissing` / `kernel.integrityFailed` 各自可行动。
 
 ## 4. 工作区直达（待验证的体验项）
 

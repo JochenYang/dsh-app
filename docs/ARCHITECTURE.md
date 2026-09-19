@@ -117,7 +117,8 @@ boot can always point back at `previous`.
 
 `app/node_modules` holds only what this artifact's platform/arch can load:
 `build-runtime.mjs` drops build and diagnostic files plus the payload for other
-platforms before the inventory and the tarball are written (AGENTS.md §3). The
+platforms before the inventory and the tarball are written
+(`docs/agents/build-and-release.md` §1). The
 one exclusion that goes further is the LibreOffice engine, which is not in the
 runtime at all — see below.
 
@@ -244,7 +245,7 @@ suffixed manifest (`sources/artifact.ts`).
 
 Which kernel line a build follows is decided by `package.json` alone (the
 `@deepseek-ai/dsh*` dependencies), resolved by `scripts/kernel-line.mjs` and
-asserted in both the build and CI — see `AGENTS.md` §7.
+asserted in both the build and CI — see `docs/agents/build-and-release.md` §3.
 
 ## 6. Server process management
 

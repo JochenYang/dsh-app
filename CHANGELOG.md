@@ -1,7 +1,7 @@
 # Changelog
 
 DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**的增量变更（不含历史全量），
-与 GitHub Release 的 release notes 保持一致。发布流程见 `AGENTS.md` §7。
+与 GitHub Release 的 release notes 保持一致。发布流程见 `docs/agents/build-and-release.md`。
 
 发布时把 `[Unreleased]` 改为具体版本号（如 `[v0.1.7]`），然后运行
 `node scripts/gen-release-notes.mjs v0.1.7` 生成双语 notes。
