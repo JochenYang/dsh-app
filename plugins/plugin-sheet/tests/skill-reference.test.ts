@@ -339,7 +339,7 @@ test('chip cleanup: an unreadable draft is reported and does not block the flip'
     )
     assert.deepEqual(decision, { kind: 'skip' })
     assert.equal(warnings.length, 1)
-    assert.match(warnings[0] ?? '', /跳过办公 chip 清理/)
+    assert.match(warnings[0] ?? '', /skipped the office chip cleanup/)
   } finally {
     console.warn = original
   }

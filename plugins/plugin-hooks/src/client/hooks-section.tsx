@@ -102,10 +102,7 @@ function draftFromView(view: BridgeView): Draft {
   }
 }
 
-const NATIVE_PLACEHOLDER = JSON.stringify({ rules: [
-  { name: '禁止修改生成目录', on: 'pre-tool-use', matcher: 'write|edit', action: 'block', message: '生成目录下的文件禁止修改' },
-  { name: '编码规范提醒', on: 'prompt-submit', action: 'context', message: '始终遵循项目的提交规范' },
-] }, null, 2)
+const NATIVE_PLACEHOLDER_KEY = 'hooks.native.placeholder' as const
 
 /** Mount status badge: the dictionary key to show, plus the style class. */
 const STATUS_BADGE: Record<string, { key: HooksKey; className: string }> = {
@@ -241,7 +238,7 @@ export function HooksSection({ t }: HooksSectionProps): ReactNode {
             <div className="dshHk-field">
               <span className="dshHk-label">{t('hooks.field.rules')}</span>
               <textarea className="dshHk-input" style={{ minHeight: '220px', fontFamily: 'ui-monospace,monospace', whiteSpace: 'pre', overflowX: 'auto' }} value={draft.configContent} spellCheck={false} disabled={busy}
-                placeholder={NATIVE_PLACEHOLDER}
+                placeholder={t(NATIVE_PLACEHOLDER_KEY)}
                 onChange={(e) => { setDraft({ ...draft, configContent: e.target.value }) }} />
               <span className="dshHk-fieldHint">
                 {t('hooks.rules.hint')}

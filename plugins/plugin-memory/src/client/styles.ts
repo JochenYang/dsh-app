@@ -342,7 +342,7 @@ const cssText = `
   outline-offset: 2px;
   border-radius: 4px;
 }
-/* Sub-line under the summary: [category] topic · 更新于 date. */
+/* Sub-line under the summary: [category] topic · updated-on date. */
 .dshm_entryMeta {
   color: var(--dsw-alias-label-tertiary);
   font-size: 11px;

@@ -160,7 +160,7 @@ const cssText = `
   color: var(--dsw-alias-label-primary-foreground);
   font-weight: 600;
 }
-/* Update badge pinned to the 已安装 tab's top-right corner: the tab label
+/* Update badge pinned to the installed tab's top-right corner: the tab label
  * already counts every installed package, so the pending-update backlog gets
  * its own corner signal instead of competing with that number in the text. */
 .dshMkt-tabBadge {
@@ -283,7 +283,7 @@ const cssText = `
   margin-left: auto;
   flex: none;
 }
-/* Row-2 byline: 作者 · stars/30 天安装 · 分类, muted so the title leads. */
+/* Row-2 byline: author · stars / 30-day installs · category, muted so the title leads. */
 .dshMkt-cardByline {
   color: var(--dsw-alias-label-tertiary);
   font-size: 11.5px;
@@ -318,12 +318,12 @@ const cssText = `
   background: rgba(148, 163, 184, 0.14);
   color: var(--dsw-alias-label-tertiary);
 }
-/* "可更新 vX → vY" badge: amber reads as pending-work, not as an error. */
+/* "update available vX → vY" badge: amber reads as pending-work, not as an error. */
 .dshMkt-badgeUpdate {
   background: rgba(234, 179, 8, 0.18);
   color: var(--dsw-alias-state-warning-primary, #b45309);
 }
-/* "同名不同源" badge: the same amber attention tone — a same-named install
+/* "same name, different source" badge: the same amber attention tone — a same-named install
  * exists but from another repo, so this entry's install is a replacement. */
 .dshMkt-badgeWarn {
   background: rgba(234, 179, 8, 0.18);

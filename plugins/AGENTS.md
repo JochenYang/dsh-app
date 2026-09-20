@@ -39,7 +39,7 @@ for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; do
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
-  result. Sixteen plugins have suites; **`plugin-fff` has none**.
+  result. All seventeen plugins have suites.
 - **CI runs every plugin with a `tests/` directory** (`.github/workflows/ci.yml`
   loops over `plugins/*/`), so a suite that passes locally also gates the PR.
   The root `test/plugin-version-bump.test.mjs` additionally fails any plugin

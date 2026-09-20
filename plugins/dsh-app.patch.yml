@@ -72,11 +72,12 @@
 #   overwrite confirmation. Failures degrade to per-request errors and never
 #   fail the boot.
 # - websearch: web search manager — registers ONE ctx.web search provider
-#   whose engine chain (Bing / DuckDuckGo / SearXNG / Exa / Parallel) falls
-#   back automatically, plus a settings-page section that orders engines,
-#   stores keys and switches between the brand chain and the upstream
-#   DeepSeek provider. The model-facing web_search tool is upstream's and is
-#   never replaced: only the provider behind it changes. User state lives in
+#   whose engine chain (anysearch / bing / parallel / exa / searxng, in that
+#   preference order) falls back automatically, plus a settings-page section
+#   that orders engines, stores keys and switches between the brand chain and
+#   the upstream DeepSeek provider. The model-facing web_search tool is
+#   upstream's and is never replaced: only the provider behind it changes.
+#   User state lives in
 #   $DSH_HOME/storages/dsh-app-plugin-websearch/config.json (the overlay is
 #   rewritten by the shell on every start). Engine failures are contained per
 #   engine by the chain and never fail the boot.
@@ -187,8 +188,8 @@
 # provider then gets re-registered by another layer and the composed tree dies
 # on a duplicate loader entry, taking `web_fetch` down with it.
 #
-# `searchProvider: dsh-app` is the plugin's own engine chain (Bing / DDG /
-# SearXNG / Exa / Parallel with automatic fallback). The upstream DeepSeek
+# `searchProvider: dsh-app` is the plugin's own engine chain (anysearch /
+# bing / parallel / exa / searxng with automatic fallback). The upstream DeepSeek
 # provider stays mounted and registered; the settings page switches between
 # the two at runtime by rewriting this field, so a user can compare them
 # without editing this file or restarting. Setting it back to

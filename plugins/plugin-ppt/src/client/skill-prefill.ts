@@ -168,7 +168,7 @@ function cleanOfficeDraft(
 ): ComposerInput | undefined {
   if (input === undefined || input.phase !== 'plain') return input
   if (input.draft === undefined) {
-    console.warn('[dsh-app plugin-ppt] 草稿不可读，已跳过办公 chip 清理')
+    console.warn('[dsh-app plugin-ppt] the composer draft is unreadable; skipped the office chip cleanup')
     return input
   }
   const cleaned = stripOfficeTokens(input.draft)

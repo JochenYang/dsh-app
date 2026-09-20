@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-market",
   "description": "DSH APP plugin market: a sidebar footer entry that opens a market panel over catalog sources (https JSON directories) to browse and install/uninstall npm-packaged dsh plugins into the current profile via the kernel's own plugin CLI.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

@@ -83,6 +83,10 @@ export const zh = {
   'hooks.source.inline': '手动编写',
   'hooks.field.rules': '规则配置',
   'hooks.rules.hint': '规则字段：name（名称）、on（时机：pre-tool-use / post-tool-use / prompt-submit / session-start）、matcher（可选正则，匹配工具名）、action（block = 拦截，context = 注入提醒上下文）、message（拦截原因或提醒文本）。',
+  'hooks.native.placeholder': JSON.stringify({ rules: [
+    { name: '禁止修改生成目录', on: 'pre-tool-use', matcher: 'write|edit', action: 'block', message: '生成目录下的文件禁止修改' },
+    { name: '编码规范提醒', on: 'prompt-submit', action: 'context', message: '始终遵循项目的提交规范' },
+  ] }, null, 2),
   'hooks.field.configPath': '配置文件路径',
   'hooks.configPath.placeholder': '例如 D:/proj/.claude/hooks.json',
   'hooks.configPath.hint': '指向你已有的 hooks.json；应用只读取该文件，不修改它。',
@@ -174,6 +178,10 @@ export const en: Record<HooksKey, string> = {
   'hooks.source.inline': 'Write it by hand',
   'hooks.field.rules': 'Rule configuration',
   'hooks.rules.hint': 'Rule fields: name, on (timing: pre-tool-use / post-tool-use / prompt-submit / session-start), matcher (optional regular expression matching tool names), action (block = intercept, context = inject reminder context), message (the block reason or reminder text).',
+  'hooks.native.placeholder': JSON.stringify({ rules: [
+    { name: 'protect generated dirs', on: 'pre-tool-use', matcher: 'write|edit', action: 'block', message: 'files under generated directories must not be edited' },
+    { name: 'coding standards reminder', on: 'prompt-submit', action: 'context', message: 'always follow the project commit conventions' },
+  ] }, null, 2),
   'hooks.field.configPath': 'Configuration file path',
   'hooks.configPath.placeholder': 'for example D:/proj/.claude/hooks.json',
   'hooks.configPath.hint': 'Points at your existing hooks.json; the app only reads that file, never changes it.',

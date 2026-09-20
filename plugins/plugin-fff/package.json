@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-fff",
   "description": "DSH APP fast file search: host-only plugin registering fffind/ffgrep/fff-glob LLM tools over the FFF engine (@ff-labs/fff-node). One shared in-memory index per workspace; results are workspace-relative paths only.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -23,6 +23,7 @@
   ],
   "scripts": {
     "build": "node build.mjs",
+    "test": "node scripts/test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

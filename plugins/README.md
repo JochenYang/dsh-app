@@ -9,10 +9,10 @@ working.
 
 | Package | Side | Role |
 |---|---|---|
-| `plugin-brand` | host | **scaffold** — settings namespace, app-info service and desktop bridge are declared but not wired yet; the shell injects desktop chrome directly |
+| `plugin-brand` | host | **partial scaffold** — settings namespace and app-info service are declared but not wired yet; the desktop bridge's shell side (action route + connection routes) IS wired, while the plugin-side facades (settings page rows, appInfo service) are not |
 | `plugin-client-ui` | client | brand theme, brand Models settings section, Diagnostics page (desktop-feature status, kernel log tail, diagnostics export, office-components row) |
 | `plugin-sidebar` | dual | Git panel as a native conversation-view tab (the file tree was retired: upstream ships file management natively) |
-| `plugin-swarm` | host | batch parallel subagent orchestration (`swarm` tool + `/swarm` command), adaptive concurrency, per-item retry |
+| `plugin-swarm` | dual | batch parallel subagent orchestration (`swarm` tool + `/swarm` command), adaptive concurrency, per-item retry |
 | `plugin-usage` | dual | usage capture over session logs + settings-page balance card, heatmap, daily trend chart |
 | `plugin-archives` | dual | session archive manager (list/delete routes + settings-page section grouped by project) |
 | `plugin-memory` | dual | cross-session memory (global/project files injected per prompt, memory_save/recall/forget tools, background distiller + curator, settings page with per-entry pin/delete) |
@@ -25,7 +25,7 @@ working.
 | `plugin-doc` | dual | Word documents: `doc_write`/`doc_check`/`doc_render` tools over a validated JSON document project, rendered to an editable `.docx`; Word capsule in the shared office bar |
 | `plugin-sheet` | dual | Excel workbooks: `sheet_write`/`sheet_check`/`sheet_render` tools over a validated JSON workbook project, rendered to an editable `.xlsx` with formulas; Excel capsule in the shared office bar |
 | `plugin-pdf` | dual | PDF mode: `pdf_read` extracts text/metadata from workspace PDFs for the agent, `pdf_write`/`pdf_check`/`pdf_render` produce a paginated, rule-checked PDF with an embedded CJK font subset, and `office_to_pdf` converts an existing `.doc/.docx/.xls/.xlsx/.ppt/.pptx` into a PDF through the application's own on-demand LibreOffice engine (`ctx.officeToPdf`, the same one the document preview uses); PDF capsule in the shared office bar |
-| `plugin-websearch` | dual | web search manager: registers ONE `ctx.web` search provider (`dsh-app`) whose engine chain (Bing / AnySearch / SearXNG / Exa / Parallel) falls back automatically, plus a settings-page section that orders engines, stores keys and switches between the brand chain and the upstream DeepSeek provider — each side showing its own availability so the switch never silently fails. The model-facing `web_search` tool stays upstream's — only the provider behind it changes. Replaces the hand-written `dsh-free-search` + exa/parallel MCP overlay rows |
+| `plugin-websearch` | dual | web search manager: registers ONE `ctx.web` search provider (`dsh-app`) whose engine chain (anysearch / bing / parallel / exa / searxng, in that preference order) falls back automatically, plus a settings-page section that orders engines, stores keys and switches between the brand chain and the upstream DeepSeek provider — each side showing its own availability so the switch never silently fails. The model-facing `web_search` tool stays upstream's — only the provider behind it changes. Replaces the hand-written `dsh-free-search` + exa/parallel MCP overlay rows |
 
 The roster lives in the places listed below that must stay in sync — `SUITE_PLUGIN_DIRS`
 (src/main/brand-suite.ts), the overlay rows in `dsh-app.patch.yml`,

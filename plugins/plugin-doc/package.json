@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-doc",
   "description": "DSH APP Word suite: the model authors a structured JSON document project (*.doc.json: title, optional author, ordered content blocks) with doc_write, iterates against the read-only doc_check (unknown fields, heading-level jumps, table shape, cell length, block limits — every issue carries its block index and a fix hint), and exports a native editable .docx via doc_render (headings, paragraphs, bullet lists, tables, embedded images). A Word capsule in the shared office-suite bar (container class dshOfficeBar, injected after the composer card) toggles a per-session Word mode; natural-language Word/document requests run the same workflow; the dsh-word skill pins the workflow.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
