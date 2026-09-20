@@ -32,7 +32,7 @@ capabilities:
 |---|---|---|
 | Conversation sidebar (native views): **Git** — change list grouped by directory, unified diff with dual line numbers, stage/restore/commit, tracked-file list, graph modal (click a commit for its title/body/file stat). The file-tree tab was retired: the upstream sidebar ships workspace file management natively | `@dsh-app/plugin-sidebar` (host + client dual-face) | `plugins/plugin-sidebar/src/client/git-tab.tsx` |
 | Advanced models settings page: model-level editors and whole-list management for llm-pi-ai models (reasoning effort, input modalities, compat switches); declaring a reasoning level auto-fills the compat switches (`supportsDeveloperRole` false + `maxTokensField`), additive-only and never overwriting explicit values; companion-route migration for off-catalog models; models.dev prefill with gh-proxy mirror fallback | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
-| Brand theme and fully localized Chinese UI: `--dsw-alias-*` token overrides | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
+| Brand theme and bilingual (zh/en) UI: `--dsw-alias-*` token overrides | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
 | Brand whale background: static frame at idle, hover-only pointer scatter (the render loop parks when the pointer leaves — no scroll jank); theme-aware contrast (light boost for legibility, dark low-alpha watermark); hovers above the composer, active phase enlarges and centers on the conversation column | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
 | Cross-session memory: `memory_save`/`memory_recall`/`memory_forget` tools + system-prompt injection (newest first under budgets), global vs per-project memory files routed by session cwd; settings-page toggles; a background distiller backfills quiet sessions after 60 seconds through a direct model call (per-call tokens and duration logged), with curator sweeps gated by cooldown and file-change detection and calling the model the same way | `@dsh-app/plugin-memory` | `plugins/plugin-memory/src/{tools,routes,distiller,curator}.ts` |
 | Batch subagent orchestration: independent subtasks fan out to parallel continuable children with an adaptive concurrency gate (shrinks on failure, grows on clean streaks), per-item auto-retry on preserved sessions, resume by child id; `swarm` tool + `/swarm` command | `@dsh-app/plugin-swarm` | `plugins/plugin-swarm/src/orchestrator.ts` |
@@ -41,6 +41,11 @@ capabilities:
 | Fast file search: `fffind`/`ffgrep`/`fff-glob` tools over one shared in-memory index per workspace, every search fenced to the executing agent's session workspace | `@dsh-app/plugin-fff` (host) | `plugins/plugin-fff/src/tools.ts` |
 | MCP server manager: settings-page CRUD, dynamic mount/unmount, each server's tools registered as native `mcp__<server>__<tool>`; secret values masked on read | `@dsh-app/plugin-mcp` (dual-face) | `plugins/plugin-mcp/src/client/mcp-section.tsx` |
 | External hooks bridge: settings-page CRUD over Claude Code / Codex `hooks.json` files, mounted as live hook instances that gate prompts, tools and turns | `@dsh-app/plugin-hooks` (dual-face) | `plugins/plugin-hooks/src/client/hooks-section.tsx` |
+| Office document conversion: `office_to_pdf` renders docx / xlsx / pptx / pdf sources to PDF; the conversion engine (LibreOffice) installs on demand from the Diagnostics page and never ships inside the runtime; missing font families are reported one by one | `@dsh-app/plugin-doc` / `plugin-sheet` / `plugin-ppt` / `plugin-pdf` (host tools + dual-face skill prefill) | `plugins/plugin-{doc,sheet,ppt,pdf}/src/` |
+| Web search: `web_search` / `web_fetch` attached as a provider (brand engine chain anysearch / Bing / Parallel / Exa / SearXNG with one-click self-check); the host half sends stable error codes only | `@dsh-app/plugin-websearch` (dual-face) | `plugins/plugin-websearch/src/` |
+| Plugin market: settings-page browsing / install / uninstall of third-party dsh plugins (installed through the kernel CLI into the current profile; the market handles pnpm's supply-chain policy) | `@dsh-app/plugin-market` (dual-face) | `plugins/plugin-market/src/` |
+| Preset bundles: import / export of brand + upstream configuration sets from the settings page | `@dsh-app/plugin-presets` (dual-face) | `plugins/plugin-presets/src/` |
+| Brand bridge: app info, diagnostics facts and the desktop action route (the host half is still a scaffold) | `@dsh-app/plugin-brand` (host) | `plugins/plugin-brand/src/routes.ts` |
 
 Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
 
@@ -161,11 +166,13 @@ the attached sha512 → activate atomically (previous version kept as
 See [ARCHITECTURE.md §4–5](docs/ARCHITECTURE.md) for the runtime layout and the
 full update flow.
 
-**Bundled-runtime drift detection**: on an upgrade, if the bundled runtime
-content differs from the same-named kernel dir on disk (e.g. the suite gained a
-plugin), boot detects it (sha512 comparison + version guard) and re-activates
-the bundle — stale content can never silently lose plugins; a newer kernel
-installed online is never downgrade-overwritten.
+**Bundled-runtime drift detection**: on an upgrade, if the bundled runtime's
+identity stamp (`<dsh version>+<suite version>`, recorded in `current.json` as
+`bundledStamp`) differs from the one this install adopted (e.g. the suite
+gained a plugin), boot re-extracts and re-activates the bundle — stale content
+can never silently lose plugins; a newer kernel installed online is never
+downgrade-overwritten (an equal stamp is skipped: a packaged tarball is not
+byte-reproducible, so the comparison is the version stamp, not the sha512).
 
 ### Shell (app) updates
 
@@ -205,7 +212,7 @@ node scripts/probe-mirror.mjs
 
 The shell injects desktop niceties into the web UI at runtime with zero changes
 to harness source: window dragging, native window-button clearance, real-time
-title-bar color sync, and a fully localized Chinese UI. Brand functionality
+title-bar color sync, and a bilingual (zh/en) UI. Brand functionality
 (sidebar, models page, …) is equally zero-upstream-change via the
 plugin suite above — `--patch` overlays and slot injections. See
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md) for implementation details.

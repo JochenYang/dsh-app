@@ -213,16 +213,13 @@ Plugin builds and tests: `plugins/AGENTS.md`.
   it; requests carry the top frame's URL + a per-process secret (subframes
   refused).
 - **Office payload**: the Python half (upstream's `primary-runtime` set) is wired
-  end to end, but the darwin and arm64 trees were never executed anywhere (this
-  repo's machine is win32-x64); a release should run
-  `scripts/smoke-primary-runtime.mjs` on a macOS runner before shipping. The
-  payload is also not bundled with the installer: a first run with no network
-  converts no documents until the 诊断 row downloads it. Detail:
+  end to end, and every non-linux release cell now smoke-verifies the staged
+  tree with the host's own code before shipping (`release.yml`). The payload is
+  still not bundled with the installer: a first run with no network converts no
+  documents until the 诊断 row downloads it. Detail:
   `docs/agents/build-and-release.md`.
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing
   secrets must be supplied as CI secrets; `resources/icon.png` is a placeholder.
-- **`docs/ARCHITECTURE.md` lags**: its §2 roster lists ten plugins (there are
-  seventeen) and it misses the safe-mode / proxy / websearch work.
 - **The 0.1.6-alpha.2+ host line is not shipped-ready** — its packaged path is
   unsmoked; the delivery model that would retire the `kernel/` tree, activation
   file and profile mirror is planned in

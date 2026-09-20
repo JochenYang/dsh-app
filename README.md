@@ -27,7 +27,7 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 |---|---|---|
 | 会话侧边栏（原生视图）：**Git 页**——按目录分组的变更列表、统一 diff 双行号、暂存/还原/提交、仓库文件列表、Git 图谱（点提交查看标题/正文/文件统计）。文件树页已退役：上游侧边栏原生提供工作区文件管理 | `@dsh-app/plugin-sidebar`（host + client 双面） | `plugins/plugin-sidebar/src/client/git-tab.tsx` |
 | 模型高级设置页：llm-pi-ai 模型级编辑器与整表管理（推理强度、输入模态、兼容开关）；声明推理强度自动填充兼容开关（`supportsDeveloperRole` false + `maxTokensField`，仅增量、不覆盖用户显式设置）；目录外模型的伴生路由迁移；models.dev 表单预填（直连失败自动回退 gh-proxy 镜像） | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
-| 品牌主题与全中文 UI：`--dsw-alias-*` 令牌覆盖 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
+| 品牌主题与中英双语 UI：`--dsw-alias-*` 令牌覆盖 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
 | 品牌鲸鱼背景：空闲静态帧、悬停时指针散开（指针离开即暂停渲染循环，滚动不卡顿）；主题感知对比度（亮色增强可读性、暗色低透明度水印）；悬停悬浮于输入框上方、活跃时放大并居中于会话列 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
 | 跨会话记忆：`memory_save`/`memory_recall`/`memory_forget` 工具 + 系统提示注入（预算内最新优先），全局与项目记忆按会话 cwd 路由；设置页开关；后台提炼在会话静默 60 秒后直调模型回填要点（每次调用的 token 与耗时记录在案），策展清扫按冷却窗口与文件变更检测触发（同样直调模型） | `@dsh-app/plugin-memory` | `plugins/plugin-memory/src/{tools,routes,distiller,curator}.ts` |
 | 批量子代理编排：独立子任务并行派发给可继续的子代理，自适应并发门控（失败收缩、连续成功增长）、保留会话的逐项自动重试、按子代理标识恢复；`swarm` 工具 + `/swarm` 命令 | `@dsh-app/plugin-swarm` | `plugins/plugin-swarm/src/orchestrator.ts` |
@@ -36,6 +36,11 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 快速文件搜索：`fffind`/`ffgrep`/`fff-glob` 工具，每个工作区一个共享内存索引，每次搜索限定在执行会话的工作区内 | `@dsh-app/plugin-fff`（host） | `plugins/plugin-fff/src/tools.ts` |
 | MCP 服务器管理：设置页增删改查、动态挂载/卸载，服务器工具以原生 `mcp__<server>__<tool>` 注册；读取时掩码密钥值 | `@dsh-app/plugin-mcp`（双面） | `plugins/plugin-mcp/src/client/mcp-section.tsx` |
 | 外部 hooks 桥：对 Claude Code / Codex 的 `hooks.json` 做设置页增删改查，挂载为生效的 hook 实例（拦截提示词、工具与轮次） | `@dsh-app/plugin-hooks`（双面） | `plugins/plugin-hooks/src/client/hooks-section.tsx` |
+| Office 文档转换：`office_to_pdf` 工具把 docx / xlsx / pptx / pdf 源文件转成 PDF；转换引擎（LibreOffice）按需从诊断页安装，不在运行时里；字体缺失逐族上报 | `@dsh-app/plugin-doc` / `plugin-sheet` / `plugin-ppt` / `plugin-pdf`（host 工具 + 双面技能预填） | `plugins/plugin-{doc,sheet,ppt,pdf}/src/` |
+| 网络搜索：`web_search` / `web_fetch` 以 provider 形式接入（品牌引擎链 anysearch / Bing / Parallel / Exa / SearXNG，一键自检），host 侧只发稳定错误码 | `@dsh-app/plugin-websearch`（双面） | `plugins/plugin-websearch/src/` |
+| 插件市场：设置页浏览 / 安装 / 卸载第三方 dsh 插件（走内核 CLI 安装进当前 profile，pnpm 策略由市场处理） | `@dsh-app/plugin-market`（双面） | `plugins/plugin-market/src/` |
+| 预设包：设置页面板导入 / 导出品牌与上游配置组合 | `@dsh-app/plugin-presets`（双面） | `plugins/plugin-presets/src/` |
+| 品牌桥：应用信息、诊断事实源与桌面动作路由（host 半边仍在脚手架阶段） | `@dsh-app/plugin-brand`（host） | `plugins/plugin-brand/src/routes.ts` |
 
 套件接线（每次 server 启动自动完成，`src/main/brand-suite.ts`）：
 
@@ -133,9 +138,10 @@ $env:DSH_APP_DEV="1"; $env:DSH_APP_DEV_RUNTIME="D:/codes/DSH-APP/deepseek-harnes
 sha512 比对校验 → 原子激活（旧版保留为 `previous`）→ 连续启动失败 2 次自动回退上一版。
 内核运行时布局与更新流程详见 [ARCHITECTURE.md §4–5](docs/ARCHITECTURE.md)。
 
-**内置运行时漂移检测**：升级安装时，如果新版本内置的运行时内容与磁盘上同名内核目录
-不一致（例如套件新增了插件），启动时会自动检测（sha512 对比 + 版本守卫）并重新激活
-内置运行时——不会静默沿用旧内容导致插件缺失；在线更新过更新的内核也不会被降级覆盖。
+**内置运行时漂移检测**：升级安装时，如果新安装包内置的运行时与磁盘上已 adopt 的版本戳
+（`<dsh 版本>+<套件版本>`，记录在 `current.json` 的 `bundledStamp`）不一致（例如套件新增了插件），
+启动时会自动重新解压并激活内置运行时——不会静默沿用旧内容导致插件缺失；在线更新过更新的内核
+也不会被降级覆盖（版本戳相等即跳过，打包产物不逐字节可复现，所以比较的是版本戳而非 sha512）。
 
 ### 应用（外壳）更新
 
@@ -168,7 +174,7 @@ node scripts/probe-mirror.mjs
 ## 桌面化适配
 
 外壳通过运行时注入为 Web UI 补桌面体验，harness 源码零改动：窗口拖拽、原生窗口按钮
-让位、顶栏配色实时同步、全中文 UI。品牌功能（侧边栏、模型页等）通过上面的
+让位、顶栏配色实时同步、中英双语 UI。品牌功能（侧边栏、模型页等）通过上面的
 插件套件以 `--patch` 覆盖与 slot 注入实现，同等零上游改动。注入实现细节见
 [ARCHITECTURE.md §2](docs/ARCHITECTURE.md)。
 

@@ -29,7 +29,7 @@
 │   src/kernel/integrity.ts  sha512 verification
 └─ Brand suite (plugins/)
     plugin-brand (host)      brand settings, app info, desktop bridge (scaffold)
-    plugin-client-ui (client) brand theme + advanced models settings page
+    plugin-client-ui (client) brand theme + advanced models settings page + diagnostics page
     plugin-sidebar (dual-face) native conversation view: Git
     plugin-swarm (dual-face)   batch parallel subagent orchestration (swarm tool + /swarm command)
     plugin-usage (dual-face)   usage capture/aggregation + balance card, heatmap, trend chart
@@ -38,6 +38,12 @@
     plugin-fff (host)          fast file search over the FFF engine (fffind/ffgrep/fff-glob)
     plugin-mcp (dual-face)     external MCP server manager with dynamic mounting
     plugin-hooks (dual-face)   external hooks bridge (Claude Code / Codex / native rules)
+    plugin-websearch (dual-face) web_search/web_fetch as a provider: brand engine chain + self-check
+    plugin-market (dual-face)  third-party plugin market: install/uninstall into the booted profile
+    plugin-presets (dual-face) preset bundles: import/export of brand + upstream configuration
+    plugin-doc / plugin-sheet / plugin-ppt / plugin-pdf (dual-face)
+                               office_to_pdf conversion per source format: host tool + client skill
+                               prefill, over the LibreOffice engine installed on demand (§4.1)
 ```
 
 There is no setup renderer: the first run downloads/activates the kernel in the
@@ -97,6 +103,14 @@ fence of its own. `plugin-sidebar`'s git routes (`git-routes.ts`) still use
 `execFile` with argument arrays, an env baseline of PATH + HOME only,
 `windowsHide`, and reads via `sessions.binding(sessionId)` (never the
 "most recent session" — blank sessions sort wrong).
+
+**Web search is a provider, not a tool** (`plugin-websearch`): the suite
+registers one `ctx.web` search provider (`dsh-app`) whose engine chain
+(anysearch / bing / parallel / exa / searxng) falls back per call; the
+model-facing `web_search` / `web_fetch` tools stay upstream's, so the kernel
+upgrades its tools while the brand chain keeps answering behind them. A host
+route never sends user-visible prose — only a stable code the client maps to
+its own dictionary plus an English diagnostic (`src/wire.ts`).
 
 ## 4. Kernel runtime layout
 
@@ -275,17 +289,41 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 - Shutdown: SIGTERM → 8 s grace → SIGKILL; logs tee'd to
   `<userData>/logs/dsh-server-*.log` (kernel diagnostics go to
   `<userData>/logs/dsh-kernel.log`).
+- **Safe mode** (`src/main/safe-mode.ts`): a boot switch that drops the suite's
+  overlay rows (the plugins that keep failing to load) while keeping the user's
+  own patch rows, so a broken suite update never bricks the app. The toggle
+  lives in the in-frame dialog; the next boot reads the marker.
+- **Proxy auto-detection** (`src/main/proxy-detect.ts`): on a TUN/fake-IP VPN
+  client every hostname resolves into 198.18.0.0/15, which the kernel's
+  address-validating web provider refuses. The shell probes the common local
+  proxy ports and injects `HTTPS_PROXY`/`ALL_PROXY` into the kernel child only
+  when a listener actually answers AS a proxy (a TCP connect followed by an
+  HTTP CONNECT probe — a bare connect would adopt any squatter on 7897/7890).
+  An explicit proxy in the user's environment always wins; a watchdog restarts
+  the server only when a SHELL-injected proxy dies (a user's own proxy is
+  theirs to manage). Loopback is never proxied.
 
 ## 7. Security posture
 
 - Main window: `contextIsolation`, `sandbox`, no preload, `nodeIntegration:false`.
-- Navigation confined to `dsh-app://app`; everything else → `shell.openExternal`
-  (http/https only). The splash's own `file:` document is the one exception.
+- Navigation confined to `dsh-app://app` plus the shell's own splash `file:`
+  document (the predicate is `src/main/nav-policy.ts`, compared by
+  protocol + hostname — a custom scheme's URL `origin` is the literal string
+  "null" in every realm); everything else → `shell.openExternal`
+  (http/https only).
 - Plugin `/api` routes are fenced by the Connection carrier (Host/Origin check
   **plus** browser authentication before a handler runs), so a DNS-rebinding
   request cannot reach them by presenting a matching Origin.
 - Kernel downloads verified by sha512 before activation (integrity from the
-  release asset sidecar; can be upgraded to signed manifests later).
+  release asset sidecar; can be upgraded to signed manifests later). The
+  artifact is additionally bound to the requested version before activation:
+  a mirror serving an older tarball under a versioned URL is refused, not
+  silently installed. Tar extraction treats every archive as untrusted — the
+  filter refuses absolute paths, `..` segments, AND link entries whose target
+  leaves the extraction root.
+- The shell's update metadata (latest.yml) is read official-GitHub-first (the
+  version is a trust decision); the ~180 MB installer bytes stay mirror-first
+  for the mainland topology, every candidate gated by that metadata's sha512.
 
 ## 8. Packaging & distribution (M4)
 
@@ -315,11 +353,10 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 
 ## 9. Known TODOs
 
-- `plugin-brand`: settings namespace + app-info service + desktop bridge remotes
-  remain scaffolds.
-- `plugin-client-ui`: the four commented-out enhancement slots (workspace file
-  panel, reminder summary, trajectory export, model badges) are not wired yet;
-  slot ids still to be verified against the running UI.
+- `plugin-brand`: settings namespace + app-info service remain scaffolds; the
+  desktop side of the bridge (action route + connection routes) is wired.
+- `plugin-client-ui`: slot ids still to be verified against the running UI
+  before any new enhancement slot is wired.
 - `plugin-sidebar`: no automated test suite for the client components — the
   plugin is verified through tsc + esbuild + headless dsh server API smokes.
 - First-run UX: kernel download progress is wired into the in-window update
@@ -329,6 +366,7 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
   the office skills need travels in that same artifact and is staged per cell by
   `scripts/build-primary-runtime.mjs` (`DSH_APP_PRIMARY_RUNTIME` carries it into
   the build; win32 and darwin only, because the host's `readPrimaryRuntime`
-  refuses a linux manifest).
+  refuses a linux manifest). Every non-linux cell now smoke-verifies the staged
+  Python set with the host's own code before it ships (release.yml).
 - Optional: signed manifests + rollback of `$DSH_HOME` settings on major
   version cross-grades.

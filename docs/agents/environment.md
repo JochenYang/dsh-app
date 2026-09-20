@@ -29,3 +29,12 @@ exact precedence when a value can come from more than one place.
 | `DSH_VERSION` — kernel version to bundle, else from the followed dist-tag, then asserted (`build-runtime.mjs`) |
 | `NODE_DIST_MIRROR` — mirror for the Node archive; `SHASUMS256.txt` still nodejs.org-first (`build-runtime.mjs`) |
 | `MODELSCOPE_TOKEN` / `MODELSCOPE_REPO` — mirror credentials/target; an unset token reports `SKIPPED`; SDK pinned in `MODELSCOPE_SDK_VERSION` (`publish-mirror.yml`, `mirror_release.py`) |
+| `MODELSCOPE_ENDPOINT` — ModelScope API base the mirror publish/probe/diagnose scripts talk to (`publish-modelscope.mjs`, `diagnose-modelscope-upload.mjs`, `mirror_release.py`) |
+| `DSH_APP_LOCALE` — shell language: `zh-CN` / `en-US`, else the OS locale, else zh-CN; the zh table is frozen (`shared/locale.ts`) |
+| `DSH_APP_PROFILE` — the suite's own profile name the kernel child boots with; plugin-market and plugin-presets install into the profile this names, and the suite smoke writes it (`index.ts` injects it; `plugin-market`, `plugin-presets`, `smoke-suite.mjs`) |
+| `DSH_APP_LEGACY_PROFILE` — the profile a first run migrates the user's patch rows from (`index.ts`) |
+| `DSH_APP_DSH_BIN` — dsh CLI the profile-heal and market paths call, else the kernel's own `bin.js` (`index.ts`, `plugin-market`) |
+| `DSH_APP_DESKTOP` — desktop-host marker the child reads to pick its transport (`index.ts`) |
+| `DSH_APP_SHELL_VERSION` / `DSH_APP_KERNEL_VERSION` / `DSH_APP_KERNEL_CHANNEL` — the facts the 诊断 page shows, injected at spawn (`index.ts`, `plugin-brand` diagnostics facts) |
+| `DSH_APP_SHELL_ACTIONS` — the shell action route base the desktop bridge reads (`shell-actions.ts`) |
+| `DSH_APP_HARNESS_CHECKOUT` — harness checkout the primary-runtime smoke reads the host's `primary-runtime.ts` from; default: a sibling `../deepseek-harness` (`smoke-primary-runtime.mjs`) |
