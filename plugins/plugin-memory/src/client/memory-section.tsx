@@ -1,9 +1,13 @@
 /**
- * The memory settings section: master toggle, global stats, store path, and
- * the global/project topic-card lists — rows show a card's summary and expand
- * to its full body on click; destructive actions go through a confirm dialog.
- * All data flows through the host half's routes; a toggle flip takes effect
- * on the next prompt assembly without a restart.
+ * The memory settings section: the two master toggles, the project count, the
+ * deleted-memory archive, the recent-maintenance list and the per-project
+ * topic-card lists — rows show a card's summary and expand to its full body on
+ * click; destructive actions go through a confirm dialog. All data flows
+ * through the host half's routes; a toggle flip takes effect on the next prompt
+ * assembly without a restart.
+ *
+ * The retired global scope has no block here: the boot migration moves its
+ * cards into `projects/legacy-global`, so they are an ordinary project row.
  *
  * Every string comes from the `dsh-app.memory` namespace through the `t`
  * standard seat: the section registers with `locale: NS`, so the renderer
@@ -65,9 +69,9 @@ function hostMessage(
 }
 
 /**
- * Route-failure copy: every code this plugin's routes can answer with. An
- * unknown code falls back to the host's English diagnostic, so a newer kernel
- * beside an older page still says something actionable.
+ * Route-failure copy: every code this page can render. An unknown code falls
+ * back to the host's English diagnostic, so a newer kernel beside an older page
+ * still says something actionable.
  */
 function routeErrorCopy(t: TranslateNS<typeof NS>, host: HostText | undefined, fallback: string): string {
   const params = host?.params ?? {}
@@ -85,7 +89,6 @@ function routeErrorCopy(t: TranslateNS<typeof NS>, host: HostText | undefined, f
     'route.bodyTooLarge': t('memory.host.bodyTooLarge'),
     'route.invalidBody': t('memory.host.invalidBody', { detail: String(params.detail ?? '') }),
     'route.clearProjectFailed': t('memory.host.clearProjectFailed'),
-    'route.clearGlobalFailed': t('memory.host.clearGlobalFailed'),
     'route.restoreOccupied': t('memory.host.restoreOccupied'),
     'route.restoreMissing': t('memory.host.restoreMissing'),
     'route.restoreInvalid': t('memory.host.restoreInvalid'),
@@ -159,17 +162,16 @@ const ARCHIVE_PREVIEW = 5
 /** How long a confirmation stays on screen before it clears itself. */
 const NOTICE_DISMISS_MS = 6_000
 
-/** Global card rows shown before the "show all" fold. */
-const CARDS_PREVIEW = 5
-
 /** Main-line summary cap (the store already limits summaries to 40 chars;
  *  this only guards against a hand-edited card file). */
 const SUMMARY_PREVIEW_CHARS = 80
 
-/** What the confirm dialog is armed to destroy: a whole store, or a single card. */
+/** What the confirm dialog is armed to destroy: a whole project store, or a
+ *  single card. The archive rows keep a scope of their own — a copy deleted
+ *  while the global store still existed carries that scope on the wire. */
 type ConfirmState =
-  | { kind: 'clear', scope: 'global' | 'project', slug: string, title: string, cards: number }
-  | { kind: 'forget', scope: 'global' | 'project', slug: string, topic: string, summary: string, pinned: boolean }
+  | { kind: 'clear', slug: string, title: string, cards: number }
+  | { kind: 'forget', slug: string, topic: string, summary: string, pinned: boolean }
   | { kind: 'archive-one', scope: 'global' | 'project', slug: string, day: string, file: string, topic: string }
   | { kind: 'archive-all', count: number }
 
@@ -196,7 +198,7 @@ function categoryLabel(category: string, t: TranslateNS<typeof NS>): string {
 /** Dialog heading for the armed action. */
 function confirmTitle(state: ConfirmState | null, t: TranslateNS<typeof NS>): string {
   if (state === null) return ''
-  if (state.kind === 'clear') return state.scope === 'global' ? t('memory.confirm.clearGlobalTitle') : t('memory.confirm.clearProjectTitle')
+  if (state.kind === 'clear') return t('memory.confirm.clearProjectTitle')
   if (state.kind === 'archive-one') return t('memory.confirm.archiveOneTitle')
   if (state.kind === 'archive-all') return t('memory.confirm.archiveAllTitle')
   return state.pinned ? t('memory.confirm.forgetPinnedTitle') : t('memory.confirm.forgetTitle')
@@ -206,20 +208,17 @@ function confirmTitle(state: ConfirmState | null, t: TranslateNS<typeof NS>): st
 function confirmMessage(state: ConfirmState | null, t: TranslateNS<typeof NS>): string {
   if (state === null) return ''
   if (state.kind === 'clear') {
-    const target = state.scope === 'global'
-      ? t('memory.scope.global.inline')
-      : t('memory.scope.projectNamed', { title: state.title })
+    const target = t('memory.scope.projectNamed', { title: state.title })
     return t('memory.confirm.clearMessage', { target, cards: String(state.cards) })
   }
   if (state.kind === 'archive-one') return t('memory.confirm.archiveOneMessage', { topic: state.topic, day: state.day })
   if (state.kind === 'archive-all') return t('memory.confirm.archiveAllMessage', { count: String(state.count) })
-  const where = state.scope === 'global' ? t('memory.scope.global.inline') : t('memory.scope.project.inline')
-  return t('memory.confirm.forgetMessage', { where, summary: state.summary, topic: state.topic })
+  return t('memory.confirm.forgetMessage', { where: t('memory.scope.project.inline'), summary: state.summary, topic: state.topic })
 }
 
 /** Expansion-set key for one card row. */
-function rowKey(scope: 'global' | 'project', slug: string, topic: string): string {
-  return `${scope}:${slug}:${topic}`
+function rowKey(slug: string, topic: string): string {
+  return `${slug}:${topic}`
 }
 
 /** One card row: summary + meta line, click the main area to expand the body. */
@@ -276,11 +275,9 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState<ConfirmState | null>(null)
   const [activityExpanded, setActivityExpanded] = useState(false)
-  const [listExpanded, setListExpanded] = useState(false)
   const [openSlug, setOpenSlug] = useState<string | null>(null)
   const [projectRows, setProjectRows] = useState<{ slug: string, cards: MemoryCardRow[] } | null>(null)
   const [expandedCards, setExpandedCards] = useState<ReadonlySet<string>>(new Set())
-  const [globalBodies, setGlobalBodies] = useState<MemoryCardRow[] | null>(null)
   const [archive, setArchive] = useState<MemoryArchiveRow[] | null>(null)
   const [archiveExpanded, setArchiveExpanded] = useState(false)
   const inFlight = useRef(false)
@@ -396,7 +393,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
     }
   }, [status, load])
 
-  const onPin = useCallback(async (scope: 'global' | 'project', slug: string, topic: string, pinned: boolean) => {
+  const onPin = useCallback(async (slug: string, topic: string, pinned: boolean) => {
     if (inFlight.current) return
     inFlight.current = true
     setBusy(true)
@@ -405,33 +402,32 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
       await fetchJson(`${ROUTE_PREFIX}/pin`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic, pinned, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
+        body: JSON.stringify({ topic, pinned, scope: 'project', slug }),
       })
       setNotice({ source: 'key', key: pinned ? 'memory.notice.pinned' : 'memory.notice.unpinned' })
-      if (scope === 'project') await loadProjectRows(slug)
-      else await load()
+      await loadProjectRows(slug)
     } catch (failure) {
       setError(wireNotice(failure))
     } finally {
       setBusy(false)
       inFlight.current = false
     }
-  }, [load, loadProjectRows])
+  }, [loadProjectRows])
 
   /** Drop one card by its topic key. Every caller goes through the confirm dialog. */
-  const runForget = useCallback(async (scope: 'global' | 'project', slug: string, topic: string) => {
+  const runForget = useCallback(async (slug: string, topic: string) => {
     const result = await fetchJson<{ forgotten: number, removed: string[] }>(`${ROUTE_PREFIX}/forget`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match: topic, ...(scope === 'project' ? { scope: 'project', slug } : {}) }),
+      body: JSON.stringify({ match: topic, scope: 'project', slug }),
     })
     setNotice({
       source: 'key',
       key: result.forgotten > 0 ? 'memory.notice.forgotten' : 'memory.notice.noMatch',
       params: { count: result.forgotten },
     })
-    if (scope === 'project') { await loadProjectRows(slug); await load() }
-    else await load()
+    await loadProjectRows(slug)
+    await load()
     // The archive panel is the undo surface: refresh it right after a delete,
     // which is exactly when the user would want to reach for it. The ledger
     // explains what just happened, so it refreshes with it.
@@ -454,26 +450,16 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
     }
   }, [openSlug, loadProjectRows])
 
-  /** Expand/collapse one card row. The first GLOBAL expand lazily pulls the
-   *  body-carrying list (the status payload ships summaries only); project
-   *  rows already carry their bodies. */
-  const onToggleCard = useCallback(async (scope: 'global' | 'project', slug: string, topic: string) => {
-    const key = rowKey(scope, slug, topic)
-    const opening = !expandedCards.has(key)
+  /** Expand/collapse one card row (the project rows carry their bodies). */
+  const onToggleCard = useCallback((slug: string, topic: string) => {
+    const key = rowKey(slug, topic)
     setExpandedCards(prev => {
       const next = new Set(prev)
-      if (opening) next.add(key)
-      else next.delete(key)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
-    if (!opening || scope !== 'global' || globalBodies !== null) return
-    try {
-      const data = await fetchJson<MemoryEntriesResponse>(`${ROUTE_PREFIX}/entries`)
-      setGlobalBodies(data.cards)
-    } catch (failure) {
-      setError(wireNotice(failure))
-    }
-  }, [expandedCards, globalBodies])
+  }, [])
 
   /** Run whatever the confirm dialog was armed for: clear a store, or drop one card. */
   const onConfirm = useCallback(async () => {
@@ -488,11 +474,11 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         await fetchJson(`${ROUTE_PREFIX}/clear`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(target.scope === 'global' ? { scope: 'global' } : { scope: 'project', slug: target.slug }),
+          body: JSON.stringify({ scope: 'project', slug: target.slug }),
         })
         setNotice({
           source: 'key',
-          key: target.scope === 'global' ? 'memory.notice.clearedGlobal' : 'memory.notice.clearedProject',
+          key: 'memory.notice.clearedProject',
           params: { title: target.title },
         })
         await load()
@@ -520,7 +506,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         setNotice({ source: 'key', key: 'memory.notice.archiveCleared', params: { count: target.count } })
         await loadArchive()
       } else {
-        await runForget(target.scope, target.slug, target.topic)
+        await runForget(target.slug, target.topic)
       }
     } catch (failure) {
       setError(wireNotice(failure))
@@ -530,24 +516,8 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
     }
   }, [confirming, load, loadArchive, runForget])
 
-  /** Body of one global card from the lazily loaded list (undefined = not loaded yet). */
-  const globalBodyOf = (topic: string): string | undefined =>
-    globalBodies?.find(card => card.topic === topic)?.body
-
   /** `{state}` for the toggle labels; the unknown state reads as pending. */
   const pending = t('memory.state.pending')
-
-  /**
-   * Whether the RETIRED global scope still holds cards. The host keeps
-   * serving it (a store that predates the boot migration, or a card file put
-   * there by hand), so the section still renders it — but ONLY when it is
-   * non-empty. With no cards there is nothing to list, nothing to clear and
-   * nothing to say, and a hard-coded "全局记忆 0" beside a permanently
-   * disabled "清空全局记忆" button reads as a broken feature. The block itself
-   * (and its slug-less /entries and /clear calls) is what the next stage
-   * deletes outright.
-   */
-  const globalVisible = status !== null && status.cards > 0
 
   return (
     <div className="dshm_section">
@@ -602,38 +572,10 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
       </div>
 
       <div className="dshm_cards">
-        {/* The three global-scope cards ride the same emptiness rule as the
-            list below: they only mean something while that scope still holds
-            cards (see globalVisible). */}
-        {globalVisible
-          ? (
-            <>
-              <div className="dshm_card">
-                <div className="dshm_cardLabel">{t('memory.scope.global')}</div>
-                <div className="dshm_cardValue">{String(status.cards)}</div>
-              </div>
-              <div className="dshm_card">
-                <div className="dshm_cardLabel">{t('memory.stats.size')}</div>
-                <div className="dshm_cardValue">{fmtBytes(status.sizeBytes)}</div>
-              </div>
-            </>
-          )
-          : null}
         <div className="dshm_card">
           <div className="dshm_cardLabel">{t('memory.stats.projects')}</div>
           <div className="dshm_cardValue">{status === null ? pending : String(status.projects.length)}</div>
         </div>
-        {globalVisible
-          ? (
-            <div className="dshm_card">
-              <div className="dshm_cardLabel">{t('memory.stats.storeDir')}</div>
-              <div
-                className="dshm_cardPath"
-                title={t('memory.storePath.title', { path: status.storePath })}
-              >{status.storePath}</div>
-            </div>
-          )
-          : null}
       </div>
 
       {status !== null && status.distill && status.activity.length > 0
@@ -745,53 +687,6 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         )
         : null}
 
-      {status !== null && status.globalList.length > 0
-        ? (
-          <div className="dshm_projects">
-            <div className="dshm_projectsTitle">{t('memory.scope.global')}</div>
-            <div className="dshm_hint">{t('memory.list.hint', { count: CARDS_PREVIEW })}</div>
-            {status.globalList.slice(0, listExpanded ? status.globalList.length : CARDS_PREVIEW).map(card => (
-              <CardRow
-                key={card.topic}
-                card={card}
-                body={globalBodyOf(card.topic)}
-                expanded={expandedCards.has(rowKey('global', '', card.topic))}
-                busy={busy}
-                t={t}
-                onToggle={() => { void onToggleCard('global', '', card.topic) }}
-                onPin={() => { void onPin('global', '', card.topic, !card.pinned) }}
-                onForget={() => { setConfirming({ kind: 'forget', scope: 'global', slug: '', topic: card.topic, summary: card.summary, pinned: card.pinned }) }}
-              />
-            ))}
-            {status.globalList.length > CARDS_PREVIEW
-              ? (
-                <button
-                  type="button"
-                  className="dshm_button dshm_activityMore"
-                  aria-expanded={listExpanded}
-                  onClick={() => { setListExpanded(expanded => !expanded) }}
-                >
-                  {listExpanded ? t('memory.action.collapse') : t('memory.action.showAll', { count: status.globalList.length })}
-                </button>
-              )
-              : null}
-          </div>
-        )
-        : null}
-
-      {globalVisible
-        ? (
-          <div className="dshm_actions">
-            <button
-              type="button"
-              className="dshm_button dshm_buttonDanger"
-              disabled={busy}
-              onClick={() => { setConfirming({ kind: 'clear', scope: 'global', slug: '', title: t('memory.scope.global'), cards: status.cards }) }}
-            >{t('memory.action.clearGlobal')}</button>
-          </div>
-        )
-        : null}
-
       {status !== null && status.projects.length > 0
         ? (
           <div className="dshm_projects">
@@ -813,7 +708,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                     type="button"
                     className="dshm_button dshm_buttonDanger"
                     disabled={busy}
-                    onClick={() => { setConfirming({ kind: 'clear', scope: 'project', slug: project.slug, title: projectTitle(project), cards: project.cards }) }}
+                    onClick={() => { setConfirming({ kind: 'clear', slug: project.slug, title: projectTitle(project), cards: project.cards }) }}
                   >{t('memory.action.delete')}</button>
                 </div>
                 {openSlug === project.slug
@@ -827,12 +722,12 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                             key={card.topic}
                             card={card}
                             body={card.body}
-                            expanded={expandedCards.has(rowKey('project', project.slug, card.topic))}
+                            expanded={expandedCards.has(rowKey(project.slug, card.topic))}
                             busy={busy}
                             t={t}
-                            onToggle={() => { void onToggleCard('project', project.slug, card.topic) }}
-                            onPin={() => { void onPin('project', project.slug, card.topic, !card.pinned) }}
-                            onForget={() => { setConfirming({ kind: 'forget', scope: 'project', slug: project.slug, topic: card.topic, summary: card.summary, pinned: card.pinned }) }}
+                            onToggle={() => { onToggleCard(project.slug, card.topic) }}
+                            onPin={() => { void onPin(project.slug, card.topic, !card.pinned) }}
+                            onForget={() => { setConfirming({ kind: 'forget', slug: project.slug, topic: card.topic, summary: card.summary, pinned: card.pinned }) }}
                           />
                         ))
                   )

@@ -74,16 +74,6 @@ const cssText = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dshm_cardPath {
-  margin-top: 3px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  line-height: 16px;
-  font-family: var(--dsw-alias-font-mono, monospace);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .dshm_toggleRow {
   display: flex;
   align-items: center;
@@ -142,12 +132,6 @@ const cssText = `
 .dshm_toggle:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 2px;
-}
-.dshm_actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 .dshm_button {
   border: 1px solid var(--dsw-alias-border-l2);
