@@ -39,6 +39,20 @@ test('redact keeps the key name and drops the value in every shape we see', () =
   // JSON pairs (the shape dsh prints in its own diagnostics).
   assert.equal(redact('{"apiKey": "sk-1234567890"}'), '{"apiKey": "[redacted]"}')
   assert.equal(redact("{'authorization': 'Bearer abc.def'}"), "{'authorization': '[redacted]'}")
+  // A Set-Cookie header: every attribute after the name is session material.
+  assert.match(redact('set-cookie: sid=abc123; Path=/; HttpOnly'), /^set-cookie: \[redacted\]$/u)
+  assert.equal(redact('{"set-cookie": "session=xyz; Path=/"}'), '{"set-cookie": "[redacted]"}')
+  // node's inspect() prints single-quoted pairs, and a child's dump reaches
+  // the logs verbatim — this shape leaked before the rule covered it.
+  assert.equal(redact("{'set-cookie': 'sid=abc; Path=/'}"), "{'set-cookie': '[redacted]'}")
+  // The bare rule must not eat the line break and the next line.
+  assert.equal(redact('set-cookie: sid=1\nnext line kept'), 'set-cookie: [redacted]\nnext line kept')
+  // A bearer token carries no key name at all.
+  assert.equal(redact('Authorization failed for bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N'), 'Authorization failed for bearer [redacted]')
+  // A JWT, the bearer token's encoded form, with no key name in sight.
+  assert.equal(redact('got token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_X'), 'got token [redacted]')
+  // A provider key prefix with no key name.
+  assert.equal(redact('request failed for sk-abcdef0123456789abcd'), 'request failed for [redacted]')
   // Query strings: the bare rule below would otherwise swallow the whole URL.
   assert.equal(redact('GET /?token=abc123&next=/x'), 'GET /?token=[redacted]&next=/x')
   // Bare key=value and key: value.
@@ -46,6 +60,10 @@ test('redact keeps the key name and drops the value in every shape we see', () =
   assert.equal(redact('password: hunter2'), 'password: [redacted]')
   // Case-insensitive, and the credential name itself survives for debugging.
   assert.match(redact('TOKEN=abc'), /^TOKEN=\[redacted\]$/u)
+  // The word "bearer" outside an actual token stays readable.
+  assert.equal(redact('using bearer auth for the upstream'), 'using bearer auth for the upstream')
+  // An ordinary hyphenated word starting in "sk" is not a key.
+  assert.equal(redact('task-tracking shows no problems'), 'task-tracking shows no problems')
 })
 
 test('redact leaves ordinary output alone', () => {

@@ -2,7 +2,7 @@ import { BrowserWindow, app, screen, shell } from 'electron'
 import path from 'node:path'
 import type { KernelPhase, KernelStatusPayload } from '../shared/types'
 import { kernelChannelLabel, t } from '../shared/locale'
-import { APP_ORIGIN, APP_URL } from './desktop-host'
+import { APP_URL } from './desktop-host'
 import {
   readWindowBounds,
   resolveWindowGeometry,
@@ -12,6 +12,7 @@ import {
   type WindowSize,
 } from './window-bounds'
 import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
+import { isShellNavigationTarget, SPLASH_PAGE } from './nav-policy'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
 const OVERLAY_HEIGHT = 36
@@ -638,17 +639,11 @@ function openExternalSafe(target: string): void {
   if (protocol === 'http:' || protocol === 'https:') void shell.openExternal(target)
 }
 /**
- * Main window: loads the local dsh web UI. All navigation is confined to the
- * local server origin (host AND port); other http(s) URLs open in the system
- * browser. A hostname-only check would let any 127.0.0.1:<other-port> page
- * (e.g. a local dev server) load inside the app window.
+ * Main window: all navigation is confined to the app origin plus the shell's
+ * own splash document (see nav-policy.ts); every other target — including any
+ * other file: URL and any 127.0.0.1:<port> page — opens in the system browser
+ * instead of in the window.
  */
-/**
- * The loading page, loaded by the main window before the kernel is up. Same
- * file the standalone splash used (static/startup.html → dist/static), so its
- * state contract with startup-window.ts is unchanged.
- */
-const SPLASH_PAGE = path.join(__dirname, '..', 'static', 'startup.html')
 
 /** Window background while the splash is up; the page paints the same value. */
 const DEFAULT_BG = '#ffffff'
@@ -710,10 +705,11 @@ export function resetOverlayColor(win: BrowserWindow): void {
  * used to report (staged progress, failures, retry) now happens in the window
  * the user will keep using.
  *
- * The navigation guard allows exactly one in-app origin, {@link APP_ORIGIN},
- * for the window's whole life: the UI's URL no longer contains a port that a
- * kernel update could change, so there is nothing to re-arm. The splash is a
- * file:// document and is allowed through as the shell's own doing.
+ * The navigation guard allows exactly one in-app origin, `dsh-app://app`
+ * (nav-policy.ts owns the predicate), for the window's whole life: the UI's URL
+ * no longer contains a port that a kernel update could change, so there is
+ * nothing to re-arm. The splash file:// document is allowed through as the
+ * shell's own doing — the resolved splash page, and no other file: target.
  *
  * The window is created hidden and put on screen as soon as its first document
  * is there. `ready-to-show` is the flash-free signal and is used where the
@@ -800,36 +796,47 @@ export function createMainWindow(): BrowserWindow {
 
   installExportToast(win)
 
+  installNavigationFence(win)
+
+  return win
+}
+
+/**
+ * Install the navigation fence on a webContents.
+ *
+ * Extracted so the SAME fence covers every window the app opens:
+ * `window.open` from the app origin is allowed (the Models settings page opens
+ * a sub-view that way) and produces a child window whose webContents would
+ * otherwise have no handlers at all — an unfenced, identical-looking window one
+ * navigation away from any https page. The child is fenced by the
+ * `did-create-window` hook below, which fires for exactly those windows.
+ *
+ * @param win - the window whose webContents gets the fence.
+ */
+function installNavigationFence(win: BrowserWindow): void {
   win.webContents.setWindowOpenHandler(({ url: target }) => {
     // Same-origin window.open (e.g. the Models settings page opening a
     // sub-view) should open inside the app, not be kicked to the browser.
-    try {
-      if (new URL(target).origin === APP_ORIGIN) {
-        return { action: 'allow', overrideBrowserWindowOptions: MAIN_WINDOW_OPTS }
-      }
-    } catch {
-      // not a valid URL — fall through to external
+    // The splash document is allowed as well: it is the shell's own file.
+    if (isShellNavigationTarget(target)) {
+      return { action: 'allow', overrideBrowserWindowOptions: MAIN_WINDOW_OPTS }
     }
     openExternalSafe(target)
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (event, target) => {
     // The splash is a file:// document: navigating to it (or reloading it) is
-    // the shell's own doing, never an external link.
-    if (target.startsWith('file:')) return
-    let allowed = false
-    try {
-      allowed = new URL(target).origin === APP_ORIGIN
-    } catch {
-      // not a valid URL — treat as external
-    }
-    if (!allowed) {
-      event.preventDefault()
-      openExternalSafe(target)
-    }
+    // the shell's own doing. Any OTHER file: target is an external ask from a
+    // compromised page context and goes to the OS, never into this window.
+    if (isShellNavigationTarget(target)) return
+    event.preventDefault()
+    openExternalSafe(target)
   })
-
-  return win
+  // A window this one opens (setWindowOpenHandler above allowed it) inherits
+  // the fence; without this it would be the one unfenced window in the app.
+  win.webContents.on('did-create-window', (child) => {
+    installNavigationFence(child)
+  })
 }
 
 /**

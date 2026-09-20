@@ -17,8 +17,25 @@ export const MAX_LOG_LINE = 2_000
 export function redact(line: string): string {
   return line
     // JSON quoted pairs first: "apiKey": "sk-..." keeps only the key name.
-    .replace(/("(?:api[_-]?key|authorization|token|secret|passwd|password)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"')
-    .replace(/('(?:api[_-]?key|authorization|token|secret|passwd|password)'\s*:\s*)'[^']*'/gi, "$1'[redacted]'")
+    .replace(/("(?:api[_-]?key|authorization|token|secret|passwd|password|set-cookie)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"')
+    // Single-quoted pairs in the same shape — `{'set-cookie': 'sid=…'}` is how
+    // node's own inspect() prints an object, and a child's dump reaches the
+    // logs verbatim.
+    .replace(/('(?:api[_-]?key|authorization|token|secret|passwd|password|set-cookie)'\s*:\s*)'[^']*'/gi, "$1'[redacted]'")
+    // A whole Set-Cookie header: every attribute after the name is session
+    // material (sid=…, session=…), none of which a log needs. The bare form
+    // runs to the end of the line — attributes are part of the value — and
+    // `[ \t]*` (not `\s*`) keeps it from eating the line break.
+    .replace(/(set-cookie[ \t]*:[ \t]*)(?!\[redacted\]).*/gi, '$1[redacted]')
+    // A bearer token carries no key name at all, and is never a short word:
+    // "bearer auth" must stay readable, so the token must be long enough to be
+    // one (16+ chars, well under any real token). A JWT (three base64url
+    // segments, the first starting with the JSON header prefix) is the bearer
+    // token's most common encoded form.
+    .replace(/(\bbearer\s+)[A-Za-z0-9._~+/-]{16,}=*/gi, '$1[redacted]')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, '[redacted]')
+    // Provider key prefixes with no key name in sight (sk-…, sk-proj-…).
+    .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]{15,}/g, '[redacted]')
     // Query-string token (?token=abc&next=/) keeps only the key name: the bare
     // rule below would swallow the rest of the URL with \S+, so this rule must
     // land first AND the bare rule must not re-match the value it produced

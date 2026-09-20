@@ -19,12 +19,20 @@
  *   proxy down → not injected → direct fetch → web_search works, web_fetch
  *                falls back to whatever the local DNS allows
  *
- * Detection is a TCP connect, not an HTTP request: it must be cheap, must not
- * depend on the proxy answering a particular path, and must not outlive the
- * boot by more than the timeout below.
+ * Detection is a TCP connect first, then a single HTTP CONNECT probe. The
+ * probe is deliberately narrow in what it ACCEPTS, but it is not proof of a
+ * proxy: any listener that answers the CONNECT with an HTTP status is taken —
+ * a real proxy always does (200 for the tunnel, 4xx/5xx when the target is
+ * unreachable), while anything that is not an HTTP server at all (a raw TCP
+ * daemon, a port that only accepts and closes) is refused. Telling a proxy
+ * apart from a generic HTTP service would need a full tunnel round-trip, and
+ * the candidate ports below are the proxy clients' OWN defaults; the old
+ * behaviour (a bare connect) adopted any listener whatsoever, so this is
+ * strictly narrower.
  */
 
 import net from 'node:net'
+import http from 'node:http'
 
 /** Proxy env names the kernel reads, in the order it prefers them. */
 const PROXY_ENV_NAMES = ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY'] as const
@@ -81,6 +89,65 @@ function canConnect(host: string, port: number): Promise<boolean> {
 }
 
 /**
+ * Whether the listener on this host:port answers AS AN HTTP SERVER.
+ *
+ * A CONNECT to a loopback address that refuses connections is the cheapest
+ * question an HTTP server answers without side effects: a proxy replies with a
+ * status (200 for the tunnel, or 4xx/5xx when the target is unreachable), and
+ * any other HTTP service replies with its own status too. What is refused is a
+ * listener that does not speak HTTP at all — it times out or drops the
+ * connection. The status itself is not inspected (see the module header for
+ * why a full tunnel round-trip is not worth it here).
+ *
+ * @param host - loopback host to probe.
+ * @param port - port to probe.
+ * @returns true when an HTTP response came back from the port.
+ */
+function speaksProxy(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (result: boolean): void => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+    let req: http.ClientRequest
+    try {
+      req = http.request({
+        host,
+        port,
+        method: 'CONNECT',
+        // A refused loopback target: a proxy answers this without opening an
+        // upstream connection of its own.
+        path: '127.0.0.1:1',
+        agent: false,
+        timeout: PROBE_TIMEOUT_MS,
+      }, (res) => {
+        res.resume()
+        finish(true)
+      })
+    } catch {
+      finish(false)
+      return
+    }
+    // A CONNECT answered with 200 does NOT emit 'response': node's client
+    // hands the tunnel to the 'connect' event (res, socket, head) and leaves
+    // the response callback uninvoked — without this listener the probe would
+    // never settle against exactly the proxies it is meant to accept.
+    req.on('connect', (_res, socket) => {
+      socket.destroy()
+      finish(true)
+    })
+    req.on('timeout', () => {
+      req.destroy()
+      finish(false)
+    })
+    req.on('error', () => finish(false))
+    req.end()
+  })
+}
+
+/**
  * Whether the proxy at this URL is still accepting connections.
  *
  * Used by the shell's watchdog: the proxy is installed into the kernel's
@@ -116,11 +183,16 @@ export async function isProxyAlive(proxyUrl: string): Promise<boolean> {
 export async function detectLocalProxy(): Promise<string | undefined> {
   for (const port of candidatePorts()) {
     for (const host of CANDIDATE_HOSTS) {
-      if (await canConnect(host, port)) {
-        // `::1` needs brackets inside a URL.
-        const authority = host === '::1' ? `[::1]:${String(port)}` : `${host}:${String(port)}`
-        return `http://${authority}`
+      if (!(await canConnect(host, port))) continue
+      if (!(await speaksProxy(host, port))) {
+        // Something listens, but it is not a proxy (a dev server, a stray
+        // daemon): handing it the kernel's outbound traffic would be worse
+        // than having no proxy at all.
+        continue
       }
+      // `::1` needs brackets inside a URL.
+      const authority = host === '::1' ? `[::1]:${String(port)}` : `${host}:${String(port)}`
+      return `http://${authority}`
     }
   }
   return undefined
@@ -165,7 +237,9 @@ export function withDetectedProxy(
 ): { env: NodeJS.ProcessEnv, injected: boolean } {
   const alreadySet = PROXY_ENV_NAMES.some((name) => {
     const value = base[name] ?? base[name.toLowerCase()]
-    return value !== undefined && value !== ''
+    // Same predicate as hasProxyEnv: a whitespace-only value is "not set" in
+    // both places, or the two would disagree about the same environment.
+    return value !== undefined && value.trim() !== ''
   })
   if (alreadySet) return { env: base, injected: false }
   if (detected === undefined) return { env: base, injected: false }
