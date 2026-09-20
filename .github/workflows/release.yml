@@ -132,22 +132,26 @@ jobs:
           # Complete is not the same as current: a runtime published from an
           # earlier suite is still complete, and reusing it would bundle stale
           # plugins into the installer. Compare the suite version baked into
-          # the published manifest against this tree's — a suite change always
-          # rebuilds, and an unreadable manifest rebuilds too rather than
+          # EVERY cell's published manifest against this tree's — a single-cell
+          # check passes a MIXED set (measured on run 35495273559: five cells
+          # were current while win32-arm64 still carried the previous suite, so
+          # that platform would have kept shipping stale plugins and nothing in
+          # the release turned red). An unreadable manifest rebuilds rather than
           # trusting an unknown.
           probe="$(mktemp -d)"
-          if gh release download "$TAG" -D "$probe" -p "manifest-win32-x64.json" >/dev/null 2>&1; then
-            published="$(node -e "try{console.log(require('$probe/manifest-win32-x64.json').suiteVersion ?? '')}catch{console.log('')}")"
-            if [ "$published" != "$SUITE_VERSION" ]; then
-              echo "$TAG carries suite '$published' but this tree has '$SUITE_VERSION'; building" >&2
+          for p in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
+            if ! gh release download "$TAG" -D "$probe" -p "manifest-${p}.json" >/dev/null 2>&1; then
+              echo "could not read $TAG's manifest for $p; building to be safe" >&2
               echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-          else
-            echo "could not read $TAG's manifest; building to be safe" >&2
-            echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+            published="$(node -e "try{console.log(require('$probe/manifest-${p}.json').suiteVersion ?? '')}catch{console.log('')}")"
+            if [ "$published" != "$SUITE_VERSION" ]; then
+              echo "$TAG's $p carries suite '$published' but this tree has '$SUITE_VERSION'; building" >&2
+              echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
           # The office payload's identity rides the same release and is NOT
           # covered by the suite version: the Python set it carries is pinned by
           # scripts/primary-runtime-lock.json, and a release whose payload
