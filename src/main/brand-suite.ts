@@ -380,7 +380,7 @@ function reportLine(line: string, report: ((line: string) => void) | undefined):
  * optional trailing comment. Read as text — see {@link filterUnresolvableRows}
  * for why the shell does not parse the document.
  */
-const PATCH_NAME_LINE = /^([ \t]*)(?:-\s+)?name:[ \t]*(['"]?)([^\s'"#]+)\2[ \t]*(?:#.*)?$/
+const PATCH_NAME_LINE = /^([ \t]*)(?:-\s+)?name:[ \t]*(?:(["'])(.*?)\2|([^\s'"#]+))[ \t]*(?:#.*)?$/
 
 /** A loader entry's id line — the sibling that tells an entry from a config key. */
 const PATCH_ID_LINE = /^([ \t]*)(-\s+)?id:[ \t]*\S/
@@ -416,6 +416,13 @@ function contentIndent(line: string): number | undefined {
 /**
  * Package specifiers one row names, taken only from lines that are entry
  * fields: a `name:` whose content indent carries a sibling `id:`.
+ *
+ * The value is read whether it is quoted or bare, and a QUOTED one may contain
+ * the characters a bare YAML scalar cannot: whitespace, `#`, quotes of the other
+ * kind. That is not a corner case — it is how a path with a space in it is
+ * written (`name: "./my plugins/x.mjs"`), and a reader that could not see such a
+ * row would neither carry its file nor keep it out of the loader, which is the
+ * one fatal shape this whole scan exists to prevent.
  */
 function rowSpecifiers(row: readonly string[]): string[] {
   const entryIndents = new Set<number>()
@@ -430,7 +437,7 @@ function rowSpecifiers(row: readonly string[]): string[] {
     if (match === null) continue
     const indent = contentIndent(line)
     if (indent === undefined || !entryIndents.has(indent)) continue
-    specifiers.push(match[3] ?? '')
+    specifiers.push(match[3] ?? match[4] ?? '')
   }
   return specifiers.filter((specifier) => specifier !== '')
 }

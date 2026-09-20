@@ -209,6 +209,25 @@ test('a row naming a file the loader cannot import is commented out too', () => 
   assert.equal(specifierResolves('./local-plugins/plugin.mjs', profileDir), true)
 })
 
+test('a quoted path value with a space in it is read like any other row', () => {
+  const { profileDir } = fixtureProfile()
+  // How a path with a space is written — and a reader that cannot see this row
+  // would neither carry the file nor keep it out of the loader.
+  const row = '- include:\n    - id: spaced\n      name: "./my plugins/local provider.mjs"\n'
+  assert.deepEqual(relativePatchSpecifiers(row), ['./my plugins/local provider.mjs'])
+  assert.deepEqual(filterUnresolvableRows(row, profileDir).skipped, ['./my plugins/local provider.mjs'])
+  const file = path.join(profileDir, 'my plugins', 'local provider.mjs')
+  mkdirSync(path.dirname(file), { recursive: true })
+  writeFileSync(file, 'export default {}\n')
+  assert.equal(filterUnresolvableRows(row, profileDir).text, row)
+  // Single quotes, and a `#` inside the value, read the same way.
+  const hashRow = "- include:\n    - id: hash\n      name: './local-plugins/a#b.mjs'\n"
+  assert.deepEqual(relativePatchSpecifiers(hashRow), ['./local-plugins/a#b.mjs'])
+  // A trailing comment after a bare value is still a comment.
+  const commented = "- include:\n    - id: c\n      name: ./local-plugins/c.mjs # keep this\n"
+  assert.deepEqual(relativePatchSpecifiers(commented), ['./local-plugins/c.mjs'])
+})
+
 test('relativePatchSpecifiers reads entry fields only, and dedupes', () => {
   const rows = [
     LOCAL_ROW,
