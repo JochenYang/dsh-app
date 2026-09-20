@@ -288,15 +288,51 @@ jobs:
           node scripts/build-primary-runtime.mjs ${{ matrix.platform }} ${{ matrix.arch }}
           echo "dir=runtime-dist/primary-runtime-${{ matrix.platform }}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
 
+      # The staged Python+Node+pnpm set has never been EXECUTED anywhere but
+      # win32-x64 (the machine this repo is developed on): every darwin and
+      # win32-arm64 payload so far was shipped unverified, and a macOS user's
+      # first document conversion was its first run. This step installs the
+      # staged tree with the desktop host's OWN code and exercises the
+      # interpreters BEFORE the runtime build packs it — a broken set fails the
+      # cell, where it is cheap to fix, instead of a user's machine.
+      - name: Smoke the staged primary runtime
+        if: matrix.platform != 'linux'
+        shell: bash
+        env:
+          DSH_VERSION: ${{ needs.resolve.outputs.dsh_version }}
+        run: |
+          # The tag prepareDesktopHostSource derives: DSH_APP_HOST_TAG wins,
+          # else dsh-v<dshVersion> (both job-level env, same defaults). Trim:
+          # build-runtime.mjs's hostTag() trims, so a whitespace-only override
+          # must not become `git clone --branch " "` here.
+          tag="$(printf '%s' "${DSH_APP_HOST_TAG:-}" | tr -d '[:space:]')"
+          if [ -z "$tag" ]; then tag="dsh-v$DSH_VERSION"; fi
+          rm -rf runtime-dist/host-src
+          git clone --filter=blob:none --depth 1 --no-tags --branch "$tag" "$DSH_APP_HOST_REPO_URL" runtime-dist/host-src
+          # The smoke re-execs the host's own TypeScript module through `tsx
+          # --import`, and a fresh clone carries no node_modules: without this
+          # install the step dies on "has no tsx installed" before it verifies
+          # anything. `--filter .` installs the workspace ROOT project, which
+          # is where the smoke looks for tsx (the same install build-runtime
+          # runs for its own clone, minus the desktop-host closure this step
+          # does not build). `--frozen-lockfile`: the checkout is a tag, so the
+          # lockfile is the resolution upstream released.
+          (cd runtime-dist/host-src && pnpm install --frozen-lockfile --ignore-scripts --filter .)
+          DSH_APP_HARNESS_CHECKOUT=runtime-dist/host-src \
+            node scripts/smoke-primary-runtime.mjs runtime-dist/primary-runtime-${{ matrix.platform }}-${{ matrix.arch }}
+
       - name: Build suite plugins
         shell: bash
         working-directory: plugins
         run: |
-          # KEEP IN SYNC with the suitePlugins list in scripts/build-runtime.mjs
-          # (and the overlay rows in plugins/dsh-app.patch.yml): every shipped
-          # plugin must be installed + built before the runtime step copies
-          # lib/ into the artifact. build-runtime.mjs rebuilds them anyway;
-          # this pre-pass guarantees each plugin's own node_modules is ready.
+          # KEEP IN SYNC with the suite roster: SUITE_PLUGINS in
+          # scripts/kernel-line.mjs (build-runtime.mjs imports it from there),
+          # SUITE_PLUGIN_DIRS in src/main/brand-suite.ts, SUITE_DIRS in
+          # scripts/smoke-suite.mjs, and the overlay rows in
+          # plugins/dsh-app.patch.yml. every shipped plugin must be installed +
+          # built before the runtime step copies lib/ into the artifact.
+          # build-runtime.mjs rebuilds them anyway; this pre-pass guarantees
+          # each plugin's own node_modules is ready.
           for p in plugin-brand plugin-client-ui plugin-sidebar plugin-swarm plugin-usage plugin-archives plugin-memory plugin-fff plugin-mcp plugin-hooks plugin-ppt plugin-market plugin-presets plugin-doc plugin-sheet plugin-pdf plugin-websearch; do
             # Use each plugin's own build script (brand: tsc, client-ui: esbuild
             # loader-wrapped bundle). A bare `npx tsc` would neither produce the
@@ -351,8 +387,16 @@ jobs:
           # invisible to the runtime install — the tree boots fine without an
           # engine — and would surface only as "document conversion is not
           # installed" for every user of that cell, which is why the resolve job
-          # requires these three assets before it reuses a release.
-          gh release upload "$TAG" runtime-dist/office-payload-*.tgz runtime-dist/office-payload-*.tgz.sha512 "runtime-dist/office-payload-${PLATFORM}-${ARCH}.json" --clobber
+          # requires these three assets before it reuses a release. A kernel
+          # line without the office provider publishes none at all (the build
+          # writes no files), and bash expands an unmatched glob literally —
+          # which would fail the whole cell with a misleading "file not found"
+          # for a tree that is legitimately engine-less.
+          if compgen -G "runtime-dist/office-payload-*.tgz" > /dev/null; then
+            gh release upload "$TAG" runtime-dist/office-payload-*.tgz runtime-dist/office-payload-*.tgz.sha512 "runtime-dist/office-payload-${PLATFORM}-${ARCH}.json" --clobber
+          else
+            echo "no office payload for ${PLATFORM}-${ARCH}: this kernel line publishes none"
+          fi
 
       # Split the tgz into cacheable layers for the client's incremental path
       # (a dsh bump then downloads the ~10 MiB `dsh` layer instead of ~96 MiB).

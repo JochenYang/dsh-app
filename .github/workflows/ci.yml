@@ -110,9 +110,9 @@ jobs:
       # runtime the app ships, so the probe exercises the shipped composition.
       - name: Build kernel runtime (linux x64)
         run: node scripts/build-runtime.mjs linux x64
-      - name: Extract runtime
-        run: |
-          mkdir smoke-rt
-          tar -xzf runtime-dist/dsh-runtime-*.tgz -C smoke-rt
       - name: Run suite smoke probe
-        run: node scripts/smoke-suite.mjs --runtime smoke-rt/runtime
+        # --tgz, not --runtime: the tgz mode is the only one that also runs the
+        # artifact-level assertions (template catalogs, bundled fonts, packaged
+        # resource lists) — the regression class where a build silently drops a
+        # runtime file the plugin needs. The script extracts the tarball itself.
+        run: node scripts/smoke-suite.mjs --tgz runtime-dist/dsh-runtime-linux-x64-*.tgz
