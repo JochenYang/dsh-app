@@ -18,7 +18,7 @@ import assert from 'node:assert'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const { parseLatestYaml, pickAsset } = await import(
+const { parseLatestYaml, pickAsset, latestYamlCandidates, assetCandidates } = await import(
   pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'main', 'updater.js')).href
 )
 
@@ -27,13 +27,10 @@ const REPO = 'dsh-app'
 const overrideUrl = process.env.PROBE_URL
 
 async function fetchYaml() {
-  const urls = overrideUrl
-    ? [overrideUrl]
-    : [
-        `https://github.com/${OWNER}/${REPO}/releases/latest/download/latest.yml`,
-        `https://gh-proxy.com/https://github.com/${OWNER}/${REPO}/releases/latest/download/latest.yml`,
-        `https://ghfast.top/https://github.com/${OWNER}/${REPO}/releases/latest/download/latest.yml`,
-      ]
+  // The SHIPPING candidate list, not a copy of it: this probe exists to prove
+  // the live chain works, and a hand-kept second list drifted from the real
+  // one once already (it lacked the ModelScope metadata copy).
+  const urls = overrideUrl ? [overrideUrl] : latestYamlCandidates(OWNER, REPO)
   for (const url of urls) {
     try {
       const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
@@ -75,12 +72,8 @@ async function main() {
   )
   console.log(`  picked for ${process.arch}: ${asset.url}`)
 
-  // Candidate chain resolves (HEAD, no body).
-  const candidates = [
-    `https://github.com/${OWNER}/${REPO}/releases/latest/download/${asset.url}`,
-    `https://gh-proxy.com/https://github.com/${OWNER}/${REPO}/releases/latest/download/${asset.url}`,
-    `https://ghfast.top/https://github.com/${OWNER}/${REPO}/releases/latest/download/${asset.url}`,
-  ]
+  // Candidate chain resolves (HEAD, no body) — the shipping byte chain again.
+  const candidates = assetCandidates(OWNER, REPO, asset.url)
   let reachable = false
   for (const url of candidates) {
     try {
@@ -88,7 +81,7 @@ async function main() {
       console.log(`  candidate HTTP ${res.status}: ${url.split('github.com').pop()}`)
       if (res.ok) reachable = true
     } catch (err) {
-      console.log(`  candidate ERR: ${url} (${(err.cause?.code || err.message).slice(0, 60)})`)
+      console.log(`  candidate ERR: ${url.split('github.com').pop()} (${(err.cause?.code || err.message).slice(0, 60)})`)
     }
   }
   assert.ok(reachable, 'at least one download candidate is reachable')

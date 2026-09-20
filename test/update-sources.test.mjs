@@ -1,5 +1,5 @@
-// Unit tests for the Windows update source chain (ModelScope mirror first).
-// Run after the build: node --test test/   (or: npm test)
+// Unit tests for the Windows update source chain (metadata official-first,
+// bytes mirror-first). Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -39,13 +39,16 @@ const GOOD_YAML = [
   'path: DSH-APP-9.9.9-win-x64.exe',
 ].join('\n')
 
-test('latest.yml candidates put the ModelScope mirror first, then official GitHub, then prefixes', () => {
+test('latest.yml candidates put official GitHub first, then the mirror, then prefixes', () => {
   const candidates = latestYamlCandidates(OWNER, REPO)
+  // The version a user is offered is a trust decision: it is read from the
+  // release owner's own copy first, and only falls back to the mirror when
+  // GitHub is unreachable.
+  assert.equal(candidates[0], OFFICIAL_YAML)
   assert.equal(
-    candidates[0],
+    candidates[1],
     `${MODELSCOPE_ENDPOINT}/api/v1/models/${MODELSCOPE_REPO}/repo?Revision=master&FilePath=releases/latest/latest.yml`,
   )
-  assert.equal(candidates[1], OFFICIAL_YAML)
   for (const prefix of MIRROR_PREFIXES) assert.ok(candidates.includes(`${prefix}${OFFICIAL_YAML}`))
   assert.equal(candidates.length, 2 + MIRROR_PREFIXES.length)
 })
@@ -64,76 +67,87 @@ test('ModelScope FilePath URL keeps slashes literal and encodes the filename seg
   assert.ok(!modelscopeReleaseFileUrl('releases/archive/1.0.0/x.exe').includes('%2F'))
 })
 
-test('asset candidates lead with the mirror only when metadata came from the mirror', () => {
+test('asset candidates lead with the mirror for the bytes, official GitHub second', () => {
   const asset = 'DSH-APP-9.9.9-win-x64.exe'
-  const fromMirror = assetCandidates(OWNER, REPO, asset, modelscopeReleaseFileUrl('releases/latest/latest.yml'))
-  assert.equal(fromMirror[0], modelscopeReleaseFileUrl(`releases/latest/${asset}`))
-  assert.equal(fromMirror[1], `${GITHUB_LATEST}/${asset}`)
-  for (const prefix of MIRROR_PREFIXES) assert.ok(fromMirror.includes(`${prefix}${GITHUB_LATEST}/${asset}`))
-  // Mirror-first does not also append the same mirror URL at the end.
-  assert.equal(fromMirror.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
+  const candidates = assetCandidates(OWNER, REPO, asset)
+  // Metadata is official-first; the bytes are transport and mirror-first (a
+  // small latest.yml reaches GitHub while a ~180 MB installer does not).
+  assert.equal(candidates[0], modelscopeReleaseFileUrl(`releases/latest/${asset}`))
+  assert.equal(candidates[1], `${GITHUB_LATEST}/${asset}`)
+  for (const prefix of MIRROR_PREFIXES) assert.ok(candidates.includes(`${prefix}${GITHUB_LATEST}/${asset}`))
+  // The mirror is not appended twice.
+  assert.equal(candidates.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
 })
 
-test('asset candidates close with the ModelScope mirror even when metadata came from GitHub', () => {
-  const asset = 'DSH-APP-9.9.9-win-x64.exe'
-  const fromGitHub = assetCandidates(OWNER, REPO, asset, OFFICIAL_YAML)
-  // The official chain keeps its order...
-  assert.equal(fromGitHub[0], `${GITHUB_LATEST}/${asset}`)
-  for (const prefix of MIRROR_PREFIXES) assert.ok(fromGitHub.includes(`${prefix}${GITHUB_LATEST}/${asset}`))
-  // ...and the mainland mirror is the last resort, exactly once. This is the
-  // "latest.yml reachable but the 180 MB installer is not" topology.
-  assert.equal(fromGitHub[fromGitHub.length - 1], modelscopeReleaseFileUrl(`releases/latest/${asset}`))
-  assert.equal(fromGitHub.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
+test('every asset candidate is sha512-gated, so a lagging mirror copy falls through', async () => {
+  // The trust split in one test: a mirror copy with DIFFERENT bytes than the
+  // official-first latest.yml pinned must never be installed.
+  const realFetch = globalThis.fetch
+  const { dir, dest } = makeTempDest()
+  const pinned = 'the-official-bytes'
+  const candidates = assetCandidates(OWNER, REPO, 'DSH-APP-9.9.9-win-x64.exe')
+  const attempts = []
+  globalThis.fetch = async (url) => {
+    attempts.push(String(url))
+    // The mirror (first candidate) serves different bytes than latest.yml.
+    return attempts.length === 1
+      ? new Response('lagging-mirror-build', { status: 200 })
+      : new Response(pinned, { status: 200 })
+  }
+  try {
+    const won = await downloadWithFallback(candidates, dest, sha512b64(pinned), () => {})
+    assert.equal(attempts.length, 2, 'the mismatched mirror copy did not stop the chain')
+    assert.equal(won, candidates[1], 'the candidate whose bytes verify wins')
+    assert.equal(readFileSync(dest, 'utf8'), pinned)
+  } finally {
+    globalThis.fetch = realFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
-test('rollback metadata candidates lead with the mirror archive for the requested version', () => {
+test('rollback metadata candidates put official GitHub first, then the mirror archive, then prefixes', () => {
   const candidates = releaseLatestYamlCandidates(OWNER, REPO, '0.11.6')
+  assert.equal(candidates[0], `https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/latest.yml`)
   assert.equal(
-    candidates[0],
+    candidates[1],
     `${MODELSCOPE_ENDPOINT}/api/v1/models/${MODELSCOPE_REPO}/repo?Revision=master&FilePath=releases/archive/0.11.6/latest.yml`,
   )
-  assert.equal(candidates[1], `https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/latest.yml`)
   for (const prefix of MIRROR_PREFIXES) {
     assert.ok(candidates.includes(`${prefix}https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/latest.yml`))
   }
 })
 
-test('rollback installer candidates use the mirror archive when metadata came from the mirror', () => {
+test('rollback installer candidates lead with the mirror archive for the bytes', () => {
   const asset = 'DSH-APP-0.11.6-win-x64.exe'
-  const fromMirror = releaseAssetCandidates(OWNER, REPO, '0.11.6', asset, modelscopeReleaseFileUrl('releases/archive/0.11.6/latest.yml'))
-  assert.equal(fromMirror[0], modelscopeReleaseFileUrl(`releases/archive/0.11.6/${asset}`))
-  assert.equal(fromMirror[1], `https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/${asset}`)
-  assert.equal(fromMirror.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
+  const candidates = releaseAssetCandidates(OWNER, REPO, '0.11.6', asset)
+  assert.equal(candidates[0], modelscopeReleaseFileUrl(`releases/archive/0.11.6/${asset}`))
+  assert.equal(candidates[1], `https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/${asset}`)
+  for (const prefix of MIRROR_PREFIXES) assert.ok(candidates.includes(`${prefix}https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/${asset}`))
+  assert.equal(candidates.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
 })
 
-test('rollback installer candidates append the archive mirror as the last resort', () => {
-  const asset = 'DSH-APP-0.11.6-win-x64.exe'
-  const fromGitHub = releaseAssetCandidates(OWNER, REPO, '0.11.6', asset, `https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/latest.yml`)
-  assert.equal(fromGitHub[0], `https://github.com/${OWNER}/${REPO}/releases/download/v0.11.6/${asset}`)
-  assert.equal(fromGitHub[fromGitHub.length - 1], modelscopeReleaseFileUrl(`releases/archive/0.11.6/${asset}`))
-  assert.equal(fromGitHub.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
-})
-
-test('mirror failure falls through to the next metadata source', async () => {
+test('metadata failure falls through to the next source', async () => {
   const realFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (url) => {
     calls.push(String(url))
-    if (calls.length === 1) throw new Error('mirror unreachable')
+    // Official GitHub first — the mainland topology where it is unreachable
+    // and only the mirror can answer.
+    if (calls.length === 1) throw new Error('github unreachable')
     return new Response(GOOD_YAML, { status: 200 })
   }
   try {
     const meta = await fetchAndParseLatest()
     assert.ok(meta, 'a later source should win')
-    assert.equal(meta.source, OFFICIAL_YAML)
+    assert.equal(meta.source, `${MODELSCOPE_ENDPOINT}/api/v1/models/${MODELSCOPE_REPO}/repo?Revision=master&FilePath=releases/latest/latest.yml`)
     assert.equal(meta.yaml.version, '9.9.9')
-    assert.ok(calls[0].startsWith(MODELSCOPE_ENDPOINT), 'mirror is tried first')
+    assert.equal(calls[0], OFFICIAL_YAML, 'official GitHub is tried first')
   } finally {
     globalThis.fetch = realFetch
   }
 })
 
-test('a mirror answering 200 with a non-metadata body falls through too', async () => {
+test('a source answering 200 with a non-metadata body falls through too', async () => {
   const realFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (url) => {
@@ -144,7 +158,7 @@ test('a mirror answering 200 with a non-metadata body falls through too', async 
   }
   try {
     const meta = await fetchAndParseLatest()
-    assert.equal(meta?.source, OFFICIAL_YAML)
+    assert.equal(meta?.source, `${MODELSCOPE_ENDPOINT}/api/v1/models/${MODELSCOPE_REPO}/repo?Revision=master&FilePath=releases/latest/latest.yml`)
   } finally {
     globalThis.fetch = realFetch
   }
@@ -185,7 +199,7 @@ test('every asset candidate failing surfaces the mirror manual-download address'
     throw new Error('connection reset')
   }
   try {
-    const candidates = assetCandidates(OWNER, REPO, 'DSH-APP-9.9.9-win-x64.exe', OFFICIAL_YAML)
+    const candidates = assetCandidates(OWNER, REPO, 'DSH-APP-9.9.9-win-x64.exe')
     await assert.rejects(
       () => downloadWithFallback(candidates, dest, sha512b64('payload'), () => {}),
       (err) => {
@@ -196,11 +210,8 @@ test('every asset candidate failing surfaces the mirror manual-download address'
       },
     )
     assert.equal(attempts.length, candidates.length, 'every candidate was tried')
-    assert.equal(
-      attempts[attempts.length - 1],
-      modelscopeReleaseFileUrl('releases/latest/DSH-APP-9.9.9-win-x64.exe'),
-      'the mirror is the last resort even though the metadata came from GitHub',
-    )
+    // The byte chain leads with the mirror, official GitHub closes it.
+    assert.equal(attempts[0], modelscopeReleaseFileUrl('releases/latest/DSH-APP-9.9.9-win-x64.exe'))
   } finally {
     globalThis.fetch = realFetch
     rmSync(dir, { recursive: true, force: true })

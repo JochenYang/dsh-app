@@ -90,11 +90,12 @@ async function noticeInFrame(
  * Shell update channel.
  *
  * Windows (primary market, mainland-first): a custom flow replaces
- * electron-updater — detect via latest.yml (GitHub `releases/latest` alias, or
- * its ModelScope mirror), pick the installer for the running arch, download
- * with a ModelScope-first / GitHub / mirror-prefix fallback chain, verify the
- * sha512 from latest.yml, then run the NSIS installer silently and quit. This
- * is what makes app updates work without a proxy in mainland China.
+ * electron-updater — detect via latest.yml (official GitHub
+ * `releases/latest` alias first, its ModelScope mirror and the proxy prefixes
+ * as fallback), pick the installer for the running arch, download with a
+ * ModelScope-first byte chain, verify the sha512 from latest.yml, then run the
+ * NSIS installer silently and quit. This is what makes app updates work
+ * without a proxy in mainland China.
  *
  * macOS / Linux: keep electron-updater (native update formats), but surface
  * errors in a dialog and offer a release-page fallback. The ModelScope mirror
@@ -274,10 +275,22 @@ export function parseLatestYaml(text: string): LatestYaml | null {
   return { version, files }
 }
 
-/** The verified metadata URL chain (mirror first, then official GitHub, then mirror prefixes). */
+/**
+ * The metadata URL chain, official GitHub first.
+ *
+ * The version a user is offered is a trust decision — which build runs next,
+ * and whether it is even an upgrade — so the primary answer is read from the
+ * release owner's own copy. The ModelScope mirror and the proxy prefixes stay
+ * in the chain for the mainland topology (GitHub unreachable), where a mirror
+ * is the only source at all; they are fallbacks, never the primary answer.
+ * The BYTES follow the mirror-first order (see {@link assetCandidates}) — that
+ * is transport, and every candidate is gated by the sha512 this metadata
+ * carried, so a lagging or tampered mirror copy fails verification and falls
+ * through instead of substituting content.
+ */
 export function latestYamlCandidates(owner: string, repo: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/latest/download/latest.yml`
-  return [modelscopeReleaseFileUrl('releases/latest/latest.yml'), official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+  return [official, modelscopeReleaseFileUrl('releases/latest/latest.yml'), ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
 }
 
 /**
@@ -303,27 +316,22 @@ function sourceLabel(url: string): string {
 }
 
 /**
- * Installer download candidates for one asset, same-source-first: metadata
- * served by the mirror makes the mirror lead, with official GitHub and its
- * prefixes kept as fallbacks; metadata from GitHub keeps the original order.
- * Either way the ModelScope mirror closes the chain as the last resort.
+ * Installer download candidates for one asset, mirror first.
  *
- * Why the mirror is a safe last resort even when the metadata came from
- * GitHub: the mainland failure topology is asymmetric — a small latest.yml
- * often slips through (corporate proxy / brief connectivity) while a ~180 MB
- * installer consistently dies. Without the trailing mirror those users only
- * ever see the "download manually" hint. Every candidate is gated by the
- * sha512 taken from
- * that same latest.yml, so a mirror serving a *different* build (lagging or
- * tampered) fails verification and falls through — it can degrade to a
- * slower download, never substitute content. When metadata came from the
- * mirror the same URL leads instead of being appended twice.
+ * Metadata is official-first (see {@link latestYamlCandidates}); the BYTES are
+ * the opposite — the mainland failure topology is asymmetric: a small
+ * latest.yml often reaches GitHub while a ~180 MB installer consistently does
+ * not, so the mirror leads the byte chain and official GitHub closes it with
+ * the proxy prefixes. Every candidate is gated by the sha512 taken from that
+ * latest.yml, so a mirror serving a *different* build (lagging or tampered)
+ * fails verification and falls through — it can degrade to a slower download,
+ * never substitute content. The metadata source no longer reorders this chain:
+ * where the version was read from decides what is offered, not what is fast.
  */
-export function assetCandidates(owner: string, repo: string, assetUrl: string, metadataSource: string): string[] {
+export function assetCandidates(owner: string, repo: string, assetUrl: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/latest/download/${assetUrl}`
   const mirror = modelscopeReleaseFileUrl(`releases/latest/${assetUrl}`)
-  const fallbacks = [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
-  return isModelscopeSource(metadataSource) ? [mirror, ...fallbacks] : [...fallbacks, mirror]
+  return [mirror, official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
 }
 
 /** Pick the installer matching the running arch (x64 primary, arm64 explicit). */
@@ -830,7 +838,7 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
       return
     }
 
-    await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url, meta.source), {
+    await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url), {
       title: t('updater.readyTitle', { app: APP_NAME }),
       message: t('updater.installPromptMessage', { app: APP_NAME, version: yaml.version }),
       detail: t('updater.installPromptDetail'),
@@ -941,41 +949,39 @@ async function downloadAndInstallPackage(
 // (a tagged release carrying the installers + latest.yml), which exists only
 // there — macOS/Linux update through electron-updater.
 
-/** Tagged-release latest.yml candidates (mirror archive → official → mirror prefixes). */
+/** Tagged-release latest.yml candidates (official GitHub → mirror archive → mirror prefixes). */
 export function releaseLatestYamlCandidates(owner: string, repo: string, version: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/download/v${version}/latest.yml`
-  return [modelscopeReleaseFileUrl(`releases/archive/${version}/latest.yml`), official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
+  return [official, modelscopeReleaseFileUrl(`releases/archive/${version}/latest.yml`), ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
 }
 
 /**
- * Tagged-release installer candidates: the mirror archive leads when the
- * metadata came from the mirror, and closes the chain otherwise — same
- * trailing-mirror policy and sha512 gate as {@link assetCandidates} (the
- * trailing copy is what rescues a rollback whose metadata reached GitHub but
- * whose installer cannot be fetched from there).
+ * Tagged-release installer candidates, mirror first — the same split as
+ * {@link assetCandidates}: the rollback VERSION is pinned by the tag and its
+ * metadata is official-first, while the bytes lead with the mirror and are
+ * gated by that metadata's sha512.
  */
-export function releaseAssetCandidates(owner: string, repo: string, version: string, assetUrl: string, metadataSource: string): string[] {
+export function releaseAssetCandidates(owner: string, repo: string, version: string, assetUrl: string): string[] {
   const official = `https://github.com/${owner}/${repo}/releases/download/v${version}/${assetUrl}`
   const mirror = modelscopeReleaseFileUrl(`releases/archive/${version}/${assetUrl}`)
-  const fallbacks = [official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
-  return isModelscopeSource(metadataSource) ? [mirror, ...fallbacks] : [...fallbacks, mirror]
+  return [mirror, official, ...githubMirrorPrefixes().map((m) => `${m}${official}`)]
 }
 
 /**
  * Fetch a tagged release's latest.yml. The asset name is fixed by the release
- * contract, so the deterministic `Latest.yml` URL — the mirror archive first
- * (mainland-reachable), then `releases/download/<tag>/latest.yml` with its
- * prefix chain — is tried first; the unauthenticated GitHub API stays as a
- * fallback for anything that renamed it. The parsed version must agree with
- * the tag: a mismatched file would install a version nobody asked for. Null on
- * any failure (caller reports and stays put).
+ * contract, so the deterministic `latest.yml` URL — official GitHub first,
+ * then the mirror archive with its prefix chain (mainland-reachable) — is
+ * tried first; the unauthenticated GitHub API stays as a fallback for anything
+ * that renamed it. The parsed version must agree with the tag: a mismatched
+ * file would install a version nobody asked for. Null on any failure (caller
+ * reports and stays put).
  */
 async function fetchReleaseLatestYaml(version: string): Promise<LatestMetadata | null> {
   const parse = (text: string): LatestYaml | null => {
     const parsed = parseLatestYaml(text)
     return parsed && parsed.version === version ? parsed : null
   }
-  // 1. Deterministic asset URL, mirror first then official + mirrors.
+  // 1. Deterministic asset URL, official first then the mirror + mirrors.
   for (const url of releaseLatestYamlCandidates(UPDATER_OWNER, UPDATER_REPO, version)) {
     const label = sourceLabel(url)
     try {
@@ -1091,7 +1097,7 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
       win,
       previous,
       asset,
-      releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, previous, asset.url, meta.source),
+      releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, previous, asset.url),
       {
         title: t('updater.rollbackReadyTitle', { app: APP_NAME }),
         message: t('updater.rollbackReadyMessage', { app: APP_NAME, previous }),
