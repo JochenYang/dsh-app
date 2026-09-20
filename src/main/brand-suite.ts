@@ -64,9 +64,12 @@
  *      Measured on a real profile, an inherited row that named a package the
  *      profile lacked reached the loader and came back as "1 entry did not
  *      activate" — a failure the user can only answer by reading the kernel's
- *      own diagnostics. Such a row is kept in the file, commented out with the
- *      reason above it, and reported once per start (see
- *      {@link filterUnresolvableRows}).
+ *      own diagnostics. A row naming a PATH is worse still: an absent file
+ *      fails the whole tree (`plugin tree failed to load`) on every kernel,
+ *      including a rollback target, so the app never reaches a window. Both
+ *      shapes are kept in the file, commented out with the reason above them,
+ *      and reported once per start (see {@link filterUnresolvableRows} and
+ *      {@link specifierResolves}).
  *
  * Both seams degrade gracefully: an older kernel without the suite plugins
  * (a rollback target) boots vanilla — no links, no overlay.
@@ -79,7 +82,7 @@
  * warning while the remaining plugins still link.
  */
 import { app } from 'electron'
-import { existsSync, promises as fs } from 'node:fs'
+import { existsSync, promises as fs, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -171,11 +174,13 @@ async function writeOwnedLinks(scopeDir: string, owned: ReadonlySet<string>): Pr
  * @param sources - suite plugin sources for the active kernel.
  * @param scopeDirs - the `@dsh-app` directories to link into: the shared
  *   fallback position and the booted profile (see the module header).
+ * @param report - where a diagnostic line goes (see {@link writeSuitePatchFile}).
  * @returns true when every plugin linked (false → boot without the overlay).
  */
 export async function linkSuitePlugins(
   sources: readonly SuitePluginSource[],
   scopeDirs: readonly string[],
+  report?: (line: string) => void,
 ): Promise<boolean> {
   for (const source of sources) {
     try {
@@ -187,7 +192,7 @@ export async function linkSuitePlugins(
   }
   const suiteTargets = new Set<string>()
   for (const source of sources) suiteTargets.add(await fs.realpath(source.dir))
-  for (const scopeDir of scopeDirs) await linkScope(scopeDir, sources, suiteTargets)
+  for (const scopeDir of scopeDirs) await linkScope(scopeDir, sources, suiteTargets, report)
   return true
 }
 
@@ -196,6 +201,7 @@ async function linkScope(
   scopeDir: string,
   sources: readonly SuitePluginSource[],
   suiteTargets: ReadonlySet<string>,
+  report: ((line: string) => void) | undefined,
 ): Promise<void> {
   await fs.mkdir(scopeDir, { recursive: true })
   const { owned, journalExists: hadJournal } = await readOwnedLinks(scopeDir)
@@ -230,7 +236,7 @@ async function linkScope(
       const isOwnedByUs = ours
         || (!hadJournal && stat.isSymbolicLink() && linkTarget !== undefined && suiteTargets.has(linkTarget))
       if (!isOwnedByUs) {
-        console.warn(`[brand-suite] @dsh-app/${source.dirName} at ${linkPath} is not a link managed by this shell; leaving it in place and skipping.`)
+        reportLine(`[brand-suite] @dsh-app/${source.dirName} at ${linkPath} is not a link managed by this shell; leaving it in place and skipping.`, report)
         continue
       }
       // Ours to replace.
@@ -345,10 +351,28 @@ export function parseSuitePatch(content: string): { preserved: string } {
 /** Read a file as UTF-8, or '' when it is not there (or not readable). */
 async function readOptionalFile(file: string): Promise<string> {
   try {
-    return await fs.readFile(file, 'utf8')
+    // Line endings are normalized on the way in: a patch the user hand-edited on
+    // Windows is CRLF, and the row reader below matches `name:` to the end of a
+    // line. Left alone, that `\r` made a relative row read as a row WITHOUT a
+    // specifier — silently unfilterable and uncarried, which is the exact shape
+    // of the failure this file's guards exist to prevent.
+    return (await fs.readFile(file, 'utf8')).replace(/\r\n?/gu, '\n')
   } catch {
     return ''
   }
+}
+
+/**
+ * Emit one diagnostic line.
+ *
+ * Every line this function is used for explains why a row the user wrote is not
+ * part of the boot — and the packaged Windows build shows no console at all, so
+ * the caller passes the kernel log's own writer (`logKernel` in index.ts). The
+ * console fallback keeps a probe and the dev checkout readable.
+ */
+function reportLine(line: string, report: ((line: string) => void) | undefined): void {
+  if (report === undefined) console.warn(line)
+  else report(line)
 }
 
 /**
@@ -363,6 +387,20 @@ const PATCH_ID_LINE = /^([ \t]*)(-\s+)?id:[ \t]*\S/
 
 /** A top-level row of one section: `- ` at column zero. */
 const PATCH_ROW_LINE = /^- /
+
+/**
+ * Split patch text into lines, with CRLF and lone-CR endings normalized to LF.
+ *
+ * This is where the line-ending rule lives, and it has to exist: `.` never
+ * matches a carriage return (it is a line terminator, like `\n`), so
+ * `contentIndent` cannot read a CRLF line, and a row reader anchored to the end
+ * of a line sees a row with NO specifier at all. A patch a Windows user
+ * hand-edited then reads as neither carried nor filtered — silently, which is
+ * exactly the failure the two readers below exist to prevent.
+ */
+function patchLines(text: string): string[] {
+  return text.replace(/\r\n?/gu, '\n').split('\n')
+}
 
 /**
  * Indentation of a line's content, counting a `- ` sequence marker as two
@@ -398,37 +436,118 @@ function rowSpecifiers(row: readonly string[]): string[] {
 }
 
 /**
- * Whether a row's package specifier can resolve from the booted profile.
+ * Whether a row's specifier can load from the booted profile.
  *
  * The walk starts at the profile directory, so it also covers the shared
  * fallback the harness maintains at `$DSH_HOME/profiles/node_modules` — the
  * directory carrying the kernel's own closure. A kernel-provided package
  * therefore counts as resolvable even though the profile never installed it,
- * which is exactly the set the host's own resolver sees. A specifier that is
- * not a bare package name (a relative path, a `cordis:` builtin) is left alone:
- * not the shell's to judge.
+ * which is exactly the set the host's own resolver sees.
+ *
+ * A PATH specifier is judged first and against the file system, because the
+ * loader imports it directly (`tree.import(name)`). Measured on a real profile:
+ * a carried `name: ./local-plugins/x.mjs` whose file stayed behind in the
+ * profile the user migrated FROM failed the WHOLE tree
+ * (`ERR_MODULE_NOT_FOUND` → `plugin tree failed to load`) — on the new kernel
+ * and on the one it rolled back to, so the app could not start at all until the
+ * file was back. The check is `isFile`, not `existsSync`: a directory (a
+ * half-copied `local-plugins/`, say) is not importable either. A `cordis:`
+ * builtin stays unjudged — the shell has nothing to check it against.
  *
  * @param specifier - the row's `name:` value.
  * @param profileDir - the profile the composition boots from.
  */
 export function specifierResolves(specifier: string, profileDir: string): boolean {
-  if (specifier.startsWith('.') || specifier.includes(':')) return true
+  // Paths first: a relative or absolute specifier may carry a colon (an NTFS
+  // alternate data stream, or a Windows path a user wrote down by hand), and
+  // mistaking that for a URL scheme would leave exactly those rows unexamined.
+  if (specifier.startsWith('.') || path.isAbsolute(specifier)) {
+    return importableFile(path.resolve(profileDir, specifier))
+  }
+  if (SCHEME_SPECIFIER.test(specifier)) return true
   const searchPaths = createRequire(path.join(profileDir, PROFILE_PATCH_FILENAME)).resolve.paths(specifier) ?? []
   return searchPaths.some((dir) => existsSync(path.join(dir, ...specifier.split('/'), 'package.json')))
 }
 
+/** A specifier carrying a URL scheme (`cordis:include`, `node:fs`, `file:…`). */
+const SCHEME_SPECIFIER = /^[a-z][a-z0-9+.-]*:/iu
+
 /**
- * Comment out the rows whose entries name a package this profile cannot
- * resolve, and report every skipped specifier.
+ * Whether a path points at a file the loader can import.
+ *
+ * Three things have to hold, and only the first is obvious:
+ *
+ *   - the path exists as a REGULAR FILE (a directory throws);
+ *   - its extension is one Node's ESM loader accepts. The kernel hands a
+ *     relative specifier to Node's own resolver unchanged (measured in
+ *     `dsh-app-boot`: a relative request with no route falls through to
+ *     `native(request, parent, attributes)`), and Node refuses anything outside
+ *     this set — a `.txt` a user typed by mistake would kill the whole tree
+ *     exactly like a missing file does. Type stripping is NOT enabled in the
+ *     kernel, so a raw `.ts` is refused too;
+ *   - nothing about reading it throws.
+ *
+ * The list is deliberately narrow: commenting a row out is REPORTED in the file
+ * and in the log, while keeping an unimportable one stops the app from starting.
+ */
+function importableFile(candidate: string): boolean {
+  if (!IMPORTABLE_EXTENSIONS.includes(path.extname(candidate).toLowerCase())) return false
+  try {
+    return statSync(candidate).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** Extensions Node's ESM loader imports without an import attribute. */
+const IMPORTABLE_EXTENSIONS: readonly string[] = ['.js', '.mjs', '.cjs', '.node']
+
+/**
+ * The relative specifiers a patch text names, in first-seen order.
+ *
+ * `name:` values are read exactly the way {@link filterUnresolvableRows} reads
+ * them (an entry field: a `name:` with a sibling `id:` at the same indent), so
+ * this cannot mistake a plugin's own config key for a path. The migration uses
+ * it to learn which files have to travel with a patch that is otherwise only
+ * text; a specifier this cannot attribute to an entry is not returned, and
+ * {@link specifierResolves} then keeps that row out of the composition instead.
+ *
+ * @param text - one or more sections of patch-layer text.
+ */
+export function relativePatchSpecifiers(text: string): string[] {
+  const lines = patchLines(text)
+  const found: string[] = []
+  let index = 0
+  while (index < lines.length) {
+    if (!PATCH_ROW_LINE.test(lines[index] ?? '')) {
+      index += 1
+      continue
+    }
+    let end = index + 1
+    while (end < lines.length && !PATCH_ROW_LINE.test(lines[end] ?? '')) end += 1
+    for (const specifier of rowSpecifiers(lines.slice(index, end))) {
+      if (specifier.startsWith('.') && !found.includes(specifier)) found.push(specifier)
+    }
+    index = end
+  }
+  return found
+}
+
+/**
+ * Comment out the rows whose entries name a package or a path this profile
+ * cannot load, and report every skipped specifier.
  *
  * The sections above and below the shipped rows are carried in from two places
  * the shell does not control (this profile's earlier layer, and the user's home
  * layer), and a row among them naming a package this profile does not have is a
  * guaranteed "N entries did not activate" at the next boot — the kernel warns,
  * the client's own boot audit then refuses the page, and nothing about the cause
- * reaches the user. Commenting the row out keeps the composition loadable and
- * the row itself recoverable (the row is intact; delete the `#` prefix after
- * installing the package), while the log line keeps the skip from being silent.
+ * reaches the user. A row naming a missing FILE is worse: the loader's own
+ * `import` throws and the whole tree fails, on every kernel line, so the window
+ * never opens at all. Commenting such a row out keeps the composition loadable
+ * and the row itself recoverable (the row is intact; delete the `#` prefix after
+ * restoring the package or the file), while the log line keeps the skip from
+ * being silent.
  *
  * The scan is deliberately text-level: the shell has no YAML dependency, so it
  * reads entry-shaped `name:` fields rather than parsing the document. Anything
@@ -441,7 +560,7 @@ export function specifierResolves(specifier: string, profileDir: string): boolea
  *   that were skipped (for the caller's log lines).
  */
 export function filterUnresolvableRows(text: string, profileDir: string): { text: string; skipped: string[] } {
-  const lines = text.split('\n')
+  const lines = patchLines(text)
   const kept: string[] = []
   const skipped: string[] = []
   let index = 0
@@ -475,8 +594,11 @@ export function filterUnresolvableRows(text: string, profileDir: string): { text
  * already carried, and the user's home layer.
  *
  * Both carried sections pass through {@link filterUnresolvableRows} first, so a
- * row naming a package this profile cannot load never becomes part of the
- * composition the host boots.
+ * row naming a package — or a file — this profile cannot load never becomes part
+ * of the composition the host boots. When the home layer is NOT copied here (the
+ * web transport, where the kernel loads it as its own layer), the same check
+ * runs over it for the log alone: a row the shell cannot comment out is still a
+ * row it can name.
  *
  * Idempotent by content comparison — an unchanged result leaves the file (and its
  * mtime) alone, so a user watching the profile directory sees a write only when
@@ -484,14 +606,19 @@ export function filterUnresolvableRows(text: string, profileDir: string): { text
  *
  * @param profileDir - the booted profile's directory (its `cordis.patch.yml`).
  * @param options - `suite: false` (safe mode) drops the shipped rows and keeps
- *   only what is the user's own.
+ *   only what is the user's own; `report` receives each diagnostic line (the
+ *   packaged Windows build shows no console, so the caller passes the kernel
+ *   log's own writer — the console fallback is for a probe or a dev checkout).
  */
-export async function writeSuitePatchFile(profileDir: string, options: { suite: boolean; homeRows?: boolean }): Promise<void> {
+export async function writeSuitePatchFile(
+  profileDir: string,
+  options: { suite: boolean; homeRows?: boolean; report?: (line: string) => void },
+): Promise<void> {
   let suite = ''
   if (options.suite) {
     suite = await readOptionalFile(path.join(__dirname, 'dsh-app.patch.yml'))
     if (suite.trim() === '') {
-      console.warn('[brand-suite] shipped overlay dsh-app.patch.yml is missing; booting without the suite rows')
+      reportLine('[brand-suite] shipped overlay dsh-app.patch.yml is missing; booting without the suite rows', options.report)
     }
   }
   const target = path.join(profileDir, PROFILE_PATCH_FILENAME)
@@ -505,7 +632,19 @@ export async function writeSuitePatchFile(profileDir: string, options: { suite: 
     ? filterUnresolvableRows(await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME)), profileDir)
     : { text: PATCH_HOME_OMITTED, skipped: [] }
   for (const specifier of [...carried.skipped, ...home.skipped]) {
-    console.warn(`[brand-suite] patch row skipped: "${specifier}" does not resolve from ${profileDir}; the row stays in ${PROFILE_PATCH_FILENAME} commented out`)
+    reportLine(`[brand-suite] patch row skipped: "${specifier}" does not load from ${profileDir}; the row stays in ${PROFILE_PATCH_FILENAME} commented out`, options.report)
+  }
+  if (!copyHome) {
+    // This line boots through the kernel's own composer, which loads the home
+    // layer ITSELF. The shell cannot comment a row out of a file it does not
+    // write, but it can still say that a file a row names is not here: that is
+    // the one shape which fails the whole tree instead of just warning, and the
+    // user's alternative is an app that never opens a window.
+    const homeText = await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME))
+    for (const specifier of relativePatchSpecifiers(homeText)) {
+      if (specifierResolves(specifier, profileDir)) continue
+      reportLine(`[brand-suite] the home layer names "${specifier}", which does not load from ${profileDir}: put that file there or remove the row — a row naming a missing file stops the host from starting at all`, options.report)
+    }
   }
   const next = composeSuitePatch({
     suite,
@@ -523,13 +662,14 @@ export async function writeSuitePatchFile(profileDir: string, options: { suite: 
 /**
  * Wire both seams before a host start.
  * @param sources - suite plugin sources for the kernel about to boot.
- * @param options - the booted profile's directory, and whether the suite rows
- *   should be part of it (safe mode boots without them).
+ * @param options - the booted profile's directory, whether the suite rows
+ *   should be part of it (safe mode boots without them), and where a diagnostic
+ *   line goes (see {@link writeSuitePatchFile}).
  * @returns true when the suite rows are in the profile's layer.
  */
 export async function prepareBrandSuite(
   sources: readonly SuitePluginSource[],
-  options: { profileDir: string; suite: boolean; homeRows?: boolean },
+  options: { profileDir: string; suite: boolean; homeRows?: boolean; report?: (line: string) => void },
 ): Promise<boolean> {
   let suite = options.suite
   try {
@@ -541,18 +681,18 @@ export async function prepareBrandSuite(
         path.join(resolveDshHome(), 'profiles', 'node_modules', PLUGIN_SCOPE),
         path.join(options.profileDir, 'node_modules', PLUGIN_SCOPE),
       ]
-      suite = await linkSuitePlugins(sources, scopeDirs)
+      suite = await linkSuitePlugins(sources, scopeDirs, options.report)
     }
   } catch (err) {
     // Never block the boot over brand wiring: log and go vanilla.
-    console.error('[brand-suite] plugin linking failed; booting without the suite rows:', err)
+    reportLine(`[brand-suite] plugin linking failed; booting without the suite rows: ${(err as Error).message}`, options.report)
     suite = false
   }
   try {
-    await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows })
+    await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows, report: options.report })
     return suite
   } catch (err) {
-    console.error('[brand-suite] patch layer could not be written:', err)
+    reportLine(`[brand-suite] patch layer could not be written: ${(err as Error).message}`, options.report)
     return false
   }
 }

@@ -20,7 +20,7 @@ import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
 const { redact, MAX_LOG_LINE } = require('../dist/main/redact.js')
-const { composeSuitePatch, filterUnresolvableRows, parseSuitePatch } = require('../dist/main/brand-suite.js')
+const { composeSuitePatch, filterUnresolvableRows, parseSuitePatch, relativePatchSpecifiers, specifierResolves } = require('../dist/main/brand-suite.js')
 
 test('redact keeps the key name and drops the value in every shape we see', () => {
   // JSON pairs (the shape dsh prints in its own diagnostics).
@@ -146,4 +146,77 @@ test('filtering is idempotent: a commented row is not a row any more', () => {
   const twice = filterUnresolvableRows(composeSuitePatch({ suite: '', preserved: once.text, home: '' }), profileDir)
   assert.deepEqual(twice.skipped, [])
   assert.equal(twice.text.match(/NOT LOADED/gu)?.length, 1)
+})
+
+// ------------------------------------------- carried rows that name a FILE
+
+/** The row shape measured on a real profile: a local plugin named relatively. */
+const LOCAL_ROW = "- include:\n    - id: local-provider\n      name: ./local-plugins/local-provider.mjs\n"
+
+test('a carried row naming a missing file is commented out, not left to fail the tree', () => {
+  const { profileDir } = fixtureProfile()
+  // Left in place this is not a warning: the loader's own `import` throws and
+  // the WHOLE tree fails, on every kernel line including a rollback target, so
+  // the app reaches no window at all. Measured on a real profile.
+  const filtered = filterUnresolvableRows(LOCAL_ROW, profileDir)
+  assert.deepEqual(filtered.skipped, ['./local-plugins/local-provider.mjs'])
+  assert.match(filtered.text, /^# \[dsh-app\] NOT LOADED: "\.\/local-plugins\/local-provider\.mjs"/u)
+  // Recoverable the same way an uninstalled package is.
+  assert.equal(parseSuitePatch(filtered.text).preserved, filtered.text.trim())
+})
+
+test('a carried row naming a file that is there is kept verbatim', () => {
+  const { profileDir } = fixtureProfile()
+  const file = path.join(profileDir, 'local-plugins', 'local-provider.mjs')
+  mkdirSync(path.dirname(file), { recursive: true })
+  writeFileSync(file, 'export default {}\n')
+  const filtered = filterUnresolvableRows(LOCAL_ROW, profileDir)
+  assert.equal(filtered.text, LOCAL_ROW)
+  assert.deepEqual(filtered.skipped, [])
+})
+
+test('a relative specifier is judged from the profile directory', () => {
+  const { profileDir } = fixtureProfile()
+  const shared = path.join(profileDir, '..', 'shared', 'helper.mjs')
+  mkdirSync(path.dirname(shared), { recursive: true })
+  writeFileSync(shared, 'export default {}\n')
+  const row = "- include:\n    - id: from-parent\n      name: ../shared/helper.mjs\n"
+  assert.deepEqual(filterUnresolvableRows(row, profileDir).skipped, [])
+  assert.equal(specifierResolves('../shared/helper.mjs', profileDir), true)
+  assert.equal(specifierResolves('../shared/gone.mjs', profileDir), false)
+})
+
+test('a cordis builtin is never judged', () => {
+  const { profileDir } = fixtureProfile()
+  const row = "- include:\n    - id: builtin\n      name: cordis:include\n"
+  assert.deepEqual(filterUnresolvableRows(row, profileDir).skipped, [])
+  assert.equal(specifierResolves('cordis:include', profileDir), true)
+})
+
+test('a row naming a file the loader cannot import is commented out too', () => {
+  const { profileDir } = fixtureProfile()
+  // Existence is not loadability: the kernel hands a relative specifier straight
+  // to Node's ESM resolver, which refuses an unknown extension — so a typed
+  // `.txt` would take the tree down exactly like a missing file.
+  const notes = path.join(profileDir, 'local-plugins', 'notes.txt')
+  mkdirSync(path.dirname(notes), { recursive: true })
+  writeFileSync(notes, 'just notes\n')
+  const row = "- include:\n    - id: notes\n      name: ./local-plugins/notes.txt\n"
+  assert.deepEqual(filterUnresolvableRows(row, profileDir).skipped, ['./local-plugins/notes.txt'])
+  // The same directory, same row, with a script extension: kept.
+  writeFileSync(path.join(profileDir, 'local-plugins', 'plugin.mjs'), 'export default {}\n')
+  assert.equal(specifierResolves('./local-plugins/notes.txt', profileDir), false)
+  assert.equal(specifierResolves('./local-plugins/plugin.mjs', profileDir), true)
+})
+
+test('relativePatchSpecifiers reads entry fields only, and dedupes', () => {
+  const rows = [
+    LOCAL_ROW,
+    // A config key called `name` is not an entry: no sibling `id:` at that indent.
+    "- id: usage-heatmap\n  config:\n    name: ./not-a-path.mjs\n",
+    // The same path again: one entry in the list.
+    LOCAL_ROW,
+    "- insert:\n    - id: pkg\n      name: '@deepseek-ai/dsh-mcp-client'\n",
+  ].join('')
+  assert.deepEqual(relativePatchSpecifiers(rows), ['./local-plugins/local-provider.mjs'])
 })

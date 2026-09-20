@@ -15,8 +15,13 @@
  * so the old "boot the shared `web` profile until the suite profile is ready"
  * two-phase boot is gone. The seeding work is the same either way: write the
  * manifest (the shipped template's bundle list) plus the user's own patch layer
- * where the old profile has one. Doing it before the first host start instead
- * of behind it means the very first launch already runs the suite.
+ * where the old profile has one, AND the files that layer names by relative
+ * path (a `local-plugins/` folder). The layer is only text, and text pointing at
+ * a file that stayed behind boots a tree that cannot load at all: measured on a
+ * real profile, the app looped boot → rollback → boot for a day, on every
+ * kernel line, until the user restored the file by hand. Doing the seeding
+ * before the first host start instead of behind it means the very first launch
+ * already runs the suite.
  *
  * A host line that reads the profile as an INSTALLED tree needs one more thing
  * on top of the seed: the kernel tree under the profile's own node_modules
@@ -37,8 +42,11 @@
  * Third-party packages declared on the old profile are deliberately NOT carried
  * over: the in-app market reinstalls them into the new profile, and it is the
  * component that already knows how to satisfy pnpm's supply-chain policies,
- * prompt for build scripts and handle a spec that no longer resolves. Two "carry
- * the tree" variants were measured and rejected first:
+ * prompt for build scripts and handle a spec no longer resolves. That decision
+ * is about the PACKAGE TREE; a file the user's own patch names travels, and it
+ * is copied one path at a time rather than by moving the profile across, so
+ * neither the package-manager state nor `node_modules` is ever dragged along.
+ * Two "carry the tree" variants were measured and rejected first:
  *
  *   - COPYING `profiles/web` across: pnpm's `.pnpm` virtual store holds
  *     SYMLINKS (peer dependencies) and Windows refuses to create them without
@@ -62,7 +70,7 @@
 import { existsSync, promises as fs, type Stats } from 'node:fs'
 import path from 'node:path'
 import { LEGACY_PROFILE, SUITE_PROFILE, SUITE_PROFILE_BUNDLES } from '../shared/constants'
-import { resolveDshHome } from './brand-suite'
+import { PROFILE_PATCH_FILENAME, relativePatchSpecifiers, resolveDshHome } from './brand-suite'
 
 /** Marker inside the suite profile: present = the profile is ready to boot. */
 export const SUITE_PROFILE_MARKER = '.dsh-app-ready.json'
@@ -93,6 +101,26 @@ export interface MigrationOutcome {
   legacyPackages: number
   /** Whether the user's own patch layer was carried over. */
   carriedPatch: boolean
+  /**
+   * Relative specifiers the patch names whose files were carried into the new
+   * profile along with it (`./local-plugins/…`). Empty in the normal case: a
+   * row naming a file is the exception, a row naming a package the rule.
+   */
+  carriedFiles: readonly string[]
+  /**
+   * Relative specifiers the patch names whose files resolved nowhere — neither
+   * the old profile nor anywhere else. Such a row cannot load in the new
+   * profile, so the composition guard keeps it out of the boot; this list is
+   * what the log line names.
+   */
+  unresolvedFiles: readonly string[]
+  /**
+   * Relative specifiers the shell DECLINED to carry: one resolving outside the
+   * old profile, one reached through a link that leaves it, one naming the
+   * shell's own state, or one whose copy would have crossed an allowance. The
+   * row cannot load either, but the fix is a different one — the file is there.
+   */
+  refusedFiles: readonly string[]
   /** Failure detail, for the log. */
   detail?: string
 }
@@ -118,6 +146,219 @@ async function declaredPackages(profileDir: string): Promise<number> {
   }
 }
 
+/** Cap on the files one migration carries out of the old profile. */
+const MAX_CARRIED_FILES = 500
+
+/** Cap on the bytes one migration carries out of the old profile. */
+const MAX_CARRIED_BYTES = 50 * 1024 * 1024
+
+/**
+ * Whether `rel` (relative to the new profile) is a path the carry must not write.
+ *
+ * The patch is the user's own, so this is not a fence against a stranger — it is
+ * the shell protecting the state it just wrote. `./package.json` would replace
+ * the manifest the profile is booted from, and the marker written afterwards
+ * would declare that profile ready, so it would never be rebuilt; the lockfile
+ * would make the kernel mirror treat the OLD profile's packages as the market's
+ * own and leave them alone; anything under `node_modules/` would shadow the
+ * packages the mirror and the market own.
+ *
+ * The comparison is normalized because the same file has more than one spelling
+ * and only one of them is the one a user writes: Windows (and macOS) fold case,
+ * Windows drops trailing dots and spaces, and `name:` is the one field where an
+ * NTFS stream suffix (`./package.json:$DATA`) could name the file of that name.
+ * A spelling this misses would let the carry — and its cleanup — land on the
+ * shell's own file, which is the whole point of the check.
+ *
+ * The names are listed here rather than in a module constant because two of them
+ * belong to the installed-tree section further down the file.
+ */
+function refusedTarget(rel: string): boolean {
+  const refused: readonly string[] = [
+    'package.json',
+    'pnpm-workspace.yaml',
+    'pnpm-lock.yaml',
+    PROFILE_PATCH_FILENAME,
+    SUITE_PROFILE_MARKER,
+    PROFILE_KERNEL_MARKER,
+  ]
+  const segments = rel.split(/[\\/]+/u).filter((segment) => segment !== '')
+  if (segments.length === 0) return true
+  const first = normalizeSegment(segments[0] ?? '')
+  if (first === 'node_modules') return true
+  return segments.length === 1 && refused.includes(first)
+}
+
+/**
+ * One path segment, as the file system of this platform sees it.
+ *
+ * Only for comparison against the shell's own names — nothing is written under
+ * the normalized form: `:stream` is dropped (the file of that name is what the
+ * copy would hit), trailing dots and spaces are dropped (Windows ignores them),
+ * and the remainder is folded to lower case (Windows and macOS compare that way,
+ * POSIX does not — folding there can only ever refuse MORE, which is the safe
+ * direction for this check).
+ */
+function normalizeSegment(segment: string): string {
+  return (segment.split(':')[0] ?? '').replace(/[. ]+$/u, '').toLowerCase()
+}
+
+/** What one migration may still copy, and whether it stopped early. */
+interface CarryBudget {
+  /** Files still allowed. */
+  left: number
+  /** Bytes copied so far. */
+  bytes: number
+  /** Set when a copy stopped because an allowance ran out. */
+  hit: boolean
+}
+
+/** File text, or '' when it is absent or unreadable. */
+async function readTextIfExists(file: string): Promise<string> {
+  try {
+    return await fs.readFile(file, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+/** Whether `candidate` is a path inside `root` (never `root` itself). */
+function insideRoot(root: string, candidate: string): boolean {
+  const rel = path.relative(root, candidate)
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/**
+ * Copy one referenced FILE from the old profile into the new one.
+ *
+ * Files only: a row names a path the loader imports, and a directory is not
+ * importable — the kernel hands a relative specifier to Node's own ESM resolver
+ * (`dsh-app-boot` falls through to `native` when no route matches), which throws
+ * on a directory and on an unknown extension alike. A directory source is
+ * reported rather than copied, so the effort never lands somewhere the loader
+ * cannot use.
+ *
+ * Symlinks are never followed: the file a link points at may live in the runtime
+ * tree, and a profile must not end up carrying that (`dropRuntimeMirror` applies
+ * the same rule in the other direction).
+ *
+ * @param source - absolute source path, inside the old profile.
+ * @param target - absolute destination, inside the new profile.
+ * @param budget - remaining allowances; decremented per copied file, and flagged
+ *   when an allowance is what stopped the copy.
+ * @returns how many files were copied (0 or 1).
+ */
+async function copyReferenced(source: string, target: string, budget: CarryBudget): Promise<number> {
+  if (budget.left <= 0 || budget.bytes >= MAX_CARRIED_BYTES) {
+    budget.hit = true
+    return 0
+  }
+  const stats = await fs.lstat(source).catch(() => undefined)
+  if (stats === undefined || stats.isSymbolicLink() || !stats.isFile()) return 0
+  if (budget.bytes + stats.size > MAX_CARRIED_BYTES) {
+    budget.hit = true
+    return 0
+  }
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  await fs.copyFile(source, target)
+  budget.left -= 1
+  budget.bytes += stats.size
+  return 1
+}
+
+/**
+ * Carry the files a patch text points at from the old profile into the new one.
+ *
+ * The patch travels as TEXT, and a row may name a file rather than a package (a
+ * local plugin under `./local-plugins/`). Carrying the text without the file
+ * boots a composition whose single unresolvable entry fails the ENTIRE tree, on
+ * every kernel line: measured on a real profile, that looped boot → rollback →
+ * boot until the user restored the file by hand, with the app never reaching a
+ * window.
+ *
+ * The specifiers come from the patch just copied AND from the home layer: a
+ * relative specifier in either resolves against the profile being booted, so a
+ * file the home layer names has to exist in THIS profile too.
+ *
+ * Every step degrades to "not carried" rather than to a failed migration: a
+ * locked file, a link that leaves the old profile, a specifier naming the
+ * shell's own state, a copy that would cross an allowance. The caller reports
+ * the lists, and the composition guard keeps those rows out of the boot — the
+ * app starts with the row disabled instead of not starting at all.
+ *
+ * The two failure lists are kept apart on purpose, because the fix for each is
+ * the user's to make and they are not the same fix: `unresolved` means the file
+ * could not be found or read (restore it, or drop the row), `refused` means the
+ * shell declined to copy what is there (move the file inside the profile, drop
+ * the link, or name something other than the shell's own state).
+ *
+ * @param legacy - the old profile directory; the only source anything is read
+ *   from (a specifier resolving outside it is refused, not followed).
+ * @param target - the new profile directory.
+ * @param home - `$DSH_HOME`, where the home layer lives.
+ * @returns the specifiers that were carried, those whose file was not there, and
+ *   those the shell declined to copy.
+ */
+async function carryPatchFiles(
+  legacy: string,
+  target: string,
+  home: string,
+): Promise<{ carried: string[], unresolved: string[], refused: string[] }> {
+  const specifiers = [
+    ...relativePatchSpecifiers(await readTextIfExists(path.join(target, PROFILE_PATCH_FILENAME))),
+    ...relativePatchSpecifiers(await readTextIfExists(path.join(home, PROFILE_PATCH_FILENAME))),
+  ]
+  const carried: string[] = []
+  const unresolved: string[] = []
+  const refused: string[] = []
+  const budget: CarryBudget = { left: MAX_CARRIED_FILES, bytes: 0, hit: false }
+  const legacyReal = await fs.realpath(legacy).catch(() => undefined)
+  const targetReal = await fs.realpath(target).catch(() => undefined)
+  for (const specifier of [...new Set(specifiers)]) {
+    const from = path.resolve(legacy, specifier)
+    const to = path.resolve(target, specifier)
+    if (!insideRoot(legacy, from) || !insideRoot(target, to) || refusedTarget(path.relative(target, to))) {
+      refused.push(specifier)
+      continue
+    }
+    // A link in the MIDDLE of the path (`local-plugins` as a junction) passes
+    // every lexical check while the bytes come from somewhere else entirely, so
+    // the real path is what decides: a link pointing at the runtime tree cannot
+    // drag kernel files into the profile. The same check refuses the degenerate
+    // case where the two profiles are one directory through a link, which would
+    // otherwise copy a file onto itself and then clean "the copy" away.
+    const fromReal = await fs.realpath(from).catch(() => undefined)
+    if (fromReal === undefined) {
+      unresolved.push(specifier)
+      continue
+    }
+    if (legacyReal === undefined || targetReal === undefined
+      || !insideRoot(legacyReal, fromReal) || insideRoot(targetReal, fromReal)) {
+      refused.push(specifier)
+      continue
+    }
+    budget.hit = false
+    try {
+      if (await copyReferenced(from, to, budget) === 0 || budget.hit) {
+        if (budget.hit) {
+          await fs.rm(to, { recursive: true, force: true }).catch(() => undefined)
+          refused.push(specifier)
+          continue
+        }
+        unresolved.push(specifier)
+        continue
+      }
+    } catch {
+      // Half a copy is worse than none: remove it and let the guard report the row.
+      await fs.rm(to, { recursive: true, force: true }).catch(() => undefined)
+      unresolved.push(specifier)
+      continue
+    }
+    carried.push(specifier)
+  }
+  return { carried, unresolved, refused }
+}
+
 /**
  * Materialize the suite profile. Idempotent: a profile that already carries its
  * manifest short-circuits a second call, and a failed attempt removes its own
@@ -128,7 +369,7 @@ async function declaredPackages(profileDir: string): Promise<number> {
 export async function migrateSuiteProfile(): Promise<MigrationOutcome> {
   const home = resolveDshHome()
   if (isSuiteProfileReady(home) && hasSuiteProfileManifest(home)) {
-    return { status: 'already', legacyPackages: 0, carriedPatch: false }
+    return { status: 'already', legacyPackages: 0, carriedPatch: false, carriedFiles: [], unresolvedFiles: [], refusedFiles: [] }
   }
 
   const target = path.join(home, 'profiles', SUITE_PROFILE)
@@ -137,6 +378,24 @@ export async function migrateSuiteProfile(): Promise<MigrationOutcome> {
     // A leftover directory without a usable manifest is an interrupted attempt.
     await fs.rm(target, { recursive: true, force: true })
     await fs.mkdir(target, { recursive: true })
+
+    // The user's own rows — hand-written disables and MCP inserts. Copied
+    // verbatim: a row naming a package this profile lacks is filtered out of
+    // the composition at write time, and a row naming a FILE gets that file
+    // carried over below.
+    let carriedPatch = false
+    try {
+      await fs.copyFile(path.join(legacy, PROFILE_PATCH_FILENAME), path.join(target, PROFILE_PATCH_FILENAME))
+      carriedPatch = true
+    } catch {
+      /* the old profile has no patch layer: nothing to carry */
+    }
+    const { carried, unresolved, refused } = await carryPatchFiles(legacy, target, home)
+
+    // The shell's own files are written AFTER the carry, so its state wins even
+    // if a patch spelled one of them in a form `refusedTarget` did not
+    // recognize: a manifest the carry replaced would leave the profile booting
+    // the old bundle list while the marker already called it ready.
     await fs.writeFile(
       path.join(target, 'package.json'),
       `${JSON.stringify({
@@ -149,16 +408,6 @@ export async function migrateSuiteProfile(): Promise<MigrationOutcome> {
     )
     await fs.writeFile(path.join(target, 'pnpm-workspace.yaml'), PNPM_WORKSPACE, 'utf8')
 
-    // The user's own rows — hand-written disables and MCP inserts. Copied
-    // verbatim: an id that does not exist in this profile is simply inert.
-    let carriedPatch = false
-    try {
-      await fs.copyFile(path.join(legacy, 'cordis.patch.yml'), path.join(target, 'cordis.patch.yml'))
-      carriedPatch = true
-    } catch {
-      /* the old profile has no patch layer: nothing to carry */
-    }
-
     const legacyPackages = await declaredPackages(legacy)
     await fs.writeFile(
       markerPath(home),
@@ -166,14 +415,25 @@ export async function migrateSuiteProfile(): Promise<MigrationOutcome> {
         migratedAt: new Date().toISOString(),
         from: LEGACY_PROFILE,
         carriedPatch,
+        carriedFiles: carried,
+        unresolvedFiles: unresolved,
+        refusedFiles: refused,
         legacyPackages,
       }, undefined, 2)}\n`,
       'utf8',
     )
-    return { status: 'seeded', legacyPackages, carriedPatch }
+    return { status: 'seeded', legacyPackages, carriedPatch, carriedFiles: carried, unresolvedFiles: unresolved, refusedFiles: refused }
   } catch (error) {
     await fs.rm(target, { recursive: true, force: true }).catch(() => undefined)
-    return { status: 'failed', legacyPackages: 0, carriedPatch: false, detail: (error as Error).message }
+    return {
+      status: 'failed',
+      legacyPackages: 0,
+      carriedPatch: false,
+      carriedFiles: [],
+      unresolvedFiles: [],
+      refusedFiles: [],
+      detail: (error as Error).message,
+    }
   }
 }
 
@@ -281,12 +541,15 @@ async function statOrUndefined(target: string): Promise<Stats | undefined> {
 /**
  * Remove a path WITHOUT ever following a link.
  *
- * Why this exists at all: `fs.rm(path, { recursive: true })` follows a directory
- * junction on the way down — measured on this machine, Electron 44.4.1 / Node
- * 24.21, removing a directory that held junctions into a runtime tree emptied
- * that runtime's own package directories. A profile is a directory users and
- * package managers delete, so this module must never hand such a call a path
- * whose descendants can be links.
+ * Why this exists at all: the SYNC recursive delete (`fs.rmSync(dir, {
+ * recursive: true })`) follows a directory junction on the way down — measured
+ * on this machine, Electron 44.4.1 / Node 24.21, removing a directory that held
+ * junctions into a runtime tree emptied that runtime's own package directories.
+ * The async `fs.rm` does not follow one (asserted in
+ * `test/recursive-delete-guard.test.mjs`), and this walker exists so that
+ * neither form is ever handed a path whose descendants can be links: a profile
+ * is a directory users and package managers delete, and the correctness of a
+ * delete must not rest on which spelling of the call someone reached for.
  */
 async function removeWithoutLinks(target: string): Promise<void> {
   const stats = await statOrUndefined(target)

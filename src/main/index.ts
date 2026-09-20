@@ -604,8 +604,18 @@ function suiteProfileLogLine(outcome: MigrationOutcome): string {
     return `[suite-profile] could not seed "${SUITE_PROFILE}": ${outcome.detail ?? 'unknown error'}`
   }
   if (outcome.status === 'seeded') {
+    const carried = outcome.carriedFiles.length === 0
+      ? ''
+      : `; carried with it ${outcome.carriedFiles.map((file) => `"${file}"`).join(', ')}`
+    const unresolved = outcome.unresolvedFiles.length === 0
+      ? ''
+      : `; the patch names ${outcome.unresolvedFiles.map((file) => `"${file}"`).join(', ')}, whose file is not in the old profile — those rows stay out of the boot`
+    const refused = outcome.refusedFiles.length === 0
+      ? ''
+      : `; the shell declined to carry ${outcome.refusedFiles.map((file) => `"${file}"`).join(', ')} (outside the old profile, behind a link that leaves it, the shell's own state, or over an allowance) — those rows stay out of the boot`
     return `[suite-profile] "${SUITE_PROFILE}" profile created${outcome.carriedPatch ? ' (your patch layer carried over)' : ''}`
       + `; the ${String(outcome.legacyPackages)} package(s) declared on "${LEGACY_PROFILE}" stay there — reinstall them from the plugin market`
+      + carried + unresolved + refused
   }
   return `[suite-profile] "${SUITE_PROFILE}" profile already present`
 }
@@ -753,7 +763,7 @@ async function startServerAndOpenWindow(): Promise<void> {
   })
   const suiteRows = await prepareBrandSuite(
     isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir()),
-    { profileDir: profile.dir, suite: !safeModeActive, homeRows: suiteHomeRows },
+    { profileDir: profile.dir, suite: !safeModeActive, homeRows: suiteHomeRows, report: logKernel },
   )
   if (!suiteRows) logKernel('[brand-suite] booting without the suite rows')
   let host: ReturnType<typeof hostRuntime>
