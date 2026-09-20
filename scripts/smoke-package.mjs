@@ -25,6 +25,12 @@ const REQUIRED_ASAR_ENTRIES = [
   'dist/main/dsh-app.patch.yml',
   'dist/static/startup.html',
   'dist/icon.png',
+  // Production dependencies the shell imports at module scope: if a builder
+  // upgrade ever stops copying node_modules into the asar, the app dies on
+  // the first import instead of at a feature — and nothing else looks here.
+  'node_modules/electron-updater/package.json',
+  'node_modules/tar/package.json',
+  'node_modules/semver/package.json',
 ]
 
 /** The splash is the only file static/ may ship (a stale setup UI regressed once). */

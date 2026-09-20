@@ -4,8 +4,11 @@
 // exactly which shapes are violations.
 // Run: npm test (root suites need a prior build)
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
-import { checkPluginGraph, checkSuiteRoster } from '../scripts/check-plugin-graph.mjs'
+import { checkHanCharacters, checkOnDiskRoster, checkPluginGraph, checkSuiteRoster } from '../scripts/check-plugin-graph.mjs'
 
 const FOLLOWED = '^0.1.5-rc.2'
 
@@ -68,4 +71,51 @@ test('the suite roster is compared on the package name, not the directory', () =
   // The real roster is checked against the real tree: every entry resolves.
   const actual = checkSuiteRoster(new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, '$1'))
   assert.deepEqual(actual, [], 'the shipped roster must match the plugins on disk')
+})
+
+/** A throwaway repo skeleton: `plugins/<dir>/package.json` + optional sources. */
+function skeleton(t, pluginDirs) {
+  const root = mkdtempSync(path.join(tmpdir(), 'dsh-graph-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  for (const dir of pluginDirs) {
+    mkdirSync(path.join(root, 'plugins', dir, 'src', 'client'), { recursive: true })
+    writeFileSync(path.join(root, 'plugins', dir, 'package.json'), `${JSON.stringify({ name: `@dsh-app/${dir}` })}\n`)
+  }
+  return root
+}
+
+test('a plugin directory no roster carries is a violation (the reverse check)', (t) => {
+  const root = skeleton(t, ['plugin-brand', 'plugin-ghost'])
+  const violations = checkOnDiskRoster(root, ['@dsh-app/plugin-brand'])
+  assert.equal(violations.length, 1)
+  assert.match(violations[0], /plugin-ghost/u)
+  // A roster name without the `plugin-` prefix normalizes to the same directory
+  // in BOTH directions — the two checks must not disagree about it.
+  assert.deepEqual(checkOnDiskRoster(root, ['@dsh-app/brand', '@dsh-app/ghost']), [])
+  assert.deepEqual(checkSuiteRoster(root, ['@dsh-app/brand']), [])
+})
+
+test('Han outside a dictionary is a violation; dictionaries and model-facing trees are exempt', (t) => {
+  const root = skeleton(t, ['plugin-alpha'])
+  const write = (relative, text) => writeFileSync(path.join(root, relative), text)
+  const han = '\u8868\u5355'  // two Han characters, as a string literal
+  const section = 'plugins/plugin-alpha/src/client/section.tsx'
+  // Stray Han in ordinary source.
+  write(section, `export const label = '${han}'\n`)
+  assert.equal(checkHanCharacters(root).length, 1)
+  // The dictionary file itself is where it belongs, and ordinary code is clean.
+  write('plugins/plugin-alpha/src/client/locales.ts', `export const zh = { a: '${han}' }\n`)
+  write(section, "export const label = 'form'\n")
+  assert.deepEqual(checkHanCharacters(root), [])
+  // The office plugins' model-facing trees are exempt, but their CLIENT half is
+  // not: that is the drift this exemptions rule kept visible.
+  const officeRoot = skeleton(t, ['plugin-doc'])
+  writeFileSync(path.join(officeRoot, 'plugins', 'plugin-doc', 'src', 'skill.ts'), `export const t = '${han}'\n`)
+  writeFileSync(path.join(officeRoot, 'plugins', 'plugin-doc', 'src', 'client', 'section.tsx'), `export const t = '${han}'\n`)
+  const officeViolations = checkHanCharacters(officeRoot)
+  assert.equal(officeViolations.length, 1)
+  assert.match(officeViolations[0], /plugin-doc\/src\/client\/section\.tsx/u)
+  // A comment is not code: a bilingual JSDoc example must not fire.
+  write(section, `/** ${han} example */\nexport const label = 'x'\n`)
+  assert.deepEqual(checkHanCharacters(root), [])
 })

@@ -47,6 +47,13 @@ body [class*="_panel"] [class*="_header"] [class*="button"],
 body [class*="_panel"] [class*="_header"] [class*="Button"],
 body [class*="_panel"] [class*="_close"],
 body [class*="_panel"] [class*="Close"] { -webkit-app-region: no-drag; }
+/* Sidebar foot: upstream renders the plugin action row (sidebar.footer.action)
+   as a flex ROW, so two suite entries — the market plus any third-party one —
+   shrink side by side and cram above the settings seat. Stack them instead, one
+   full-width row per entry, in registration order; a single entry lays out
+   exactly as before. */
+body [class*="_footerActions"] { flex-direction: column; align-items: stretch; }
+body [class*="_footerActions"] > * { flex: none; width: 100%; }
 `
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))

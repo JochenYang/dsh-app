@@ -99,7 +99,12 @@ async function extractTgz(tgzPath) {
   })
   const dir = path.join(work, 'runtime')
   if (!existsSync(path.join(dir, 'app'))) throw new Error(`unexpected tgz layout: ${dir} has no app/`)
-  return { dir, cleanup: () => rmSync(work, { recursive: true, force: true }) }
+  // No cleanup closure here: the main() finally block removes the extraction
+  // root — a tree this probe made, so a plain sync delete is safe and is what
+  // the delete-guard AUDIT entry records — once the kernel child is gone.
+  // (The scratch HOME, which DOES hold links into this tree, goes through
+  // removeTree instead.)
+  return { dir }
 }
 
 /**
@@ -619,7 +624,17 @@ async function main() {
     const html = index.text
     // Every suite plugin with a dsh.client half (package.json dsh.client +
     // lib/client.js); host-only plugins (brand, fff) are absent by design.
-    const suiteClientPackages = ['@dsh-app/plugin-client-ui', '@dsh-app/plugin-sidebar', '@dsh-app/plugin-swarm', '@dsh-app/plugin-usage', '@dsh-app/plugin-archives', '@dsh-app/plugin-memory', '@dsh-app/plugin-mcp', '@dsh-app/plugin-hooks', '@dsh-app/plugin-ppt', '@dsh-app/plugin-market', '@dsh-app/plugin-presets', '@dsh-app/plugin-doc', '@dsh-app/plugin-sheet', '@dsh-app/plugin-pdf', '@dsh-app/plugin-websearch']
+    // Derived from the manifests rather than hand-listed: a sixth roster would
+    // drift from the other five the moment a plugin gains a client half.
+    const suiteClientPackages = SUITE_DIRS
+      .map((dir) => {
+        const manifestPath = path.join(root, 'plugins', dir, 'package.json')
+        // A manifest this probe cannot read is a build fault, not a smaller
+        // list: silently dropping the plugin would shrink the assertion.
+        return JSON.parse(readFileSync(manifestPath, 'utf8'))
+      })
+      .filter((manifest) => manifest?.dsh?.client !== undefined)
+      .map((manifest) => manifest.name)
     check('client: boot graph lists suite client packages',
       index.status === 200 && suiteClientPackages.every(id => html.includes(id)),
       `HTTP ${index.status}; ids found: ${suiteClientPackages.filter(id => html.includes(id)).join(',') || 'none'}`)

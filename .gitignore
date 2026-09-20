@@ -28,6 +28,9 @@ __pycache__/
 # ---- Local agent context cache (context-codebase skill) ----
 repo/
 
+# ---- Task handoff notes (change-plan skill) ----
+.devflow/
+
 # ---- Generated release outputs (local only; rebuilt per release) ----
 release-notes.md
 

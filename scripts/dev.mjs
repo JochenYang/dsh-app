@@ -35,11 +35,13 @@ console.log(`[dev] DSH_APP_DEV=1, DSH_APP_DEV_RUNTIME=${process.env.DSH_APP_DEV_
 
 // npm start = tsc+copy-static build, then `electron .`. The child inherits
 // stdio so boot/server logs stay visible; shell:true resolves the npm shim
-// on Windows (npm.cmd) and the bare binary on POSIX alike.
+// on Windows (npm.cmd) and the bare binary on POSIX alike. windowsHide keeps
+// the shim's console from flashing a terminal onto the desktop.
 const result = spawnSync('npm', ['start'], {
   cwd: appRoot,
   stdio: 'inherit',
   env: process.env,
   shell: true,
+  windowsHide: true,
 })
 process.exit(result.status ?? 1)

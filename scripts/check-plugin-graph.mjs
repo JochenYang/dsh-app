@@ -30,6 +30,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import semver from 'semver'
 import { DSH_PACKAGE, SUITE_PLUGINS, followedSpec } from './kernel-line.mjs'
+import { stripComments } from './lib/strip-comments.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
@@ -89,10 +90,132 @@ export function checkPluginGraph(plugins, followed) {
  * package names (`@dsh-app/plugin-brand`); on disk each one is the directory
  * `plugins/plugin-brand`, so compare on the last path segment.
  */
+/**
+ * The on-disk directory a roster entry names.
+ *
+ * ONE normalizer for both directions: the forward check resolves a roster name
+ * to its directory, the reverse check resolves a directory back to a name, and
+ * two implementations of this rule would disagree about a name that is not
+ * `plugin-`-prefixed (`@dsh-app/brand`).
+ */
+export function dirNameFor(packageName) {
+  const short = packageName.split('/').pop() ?? packageName
+  return short.startsWith('plugin-') ? short : `plugin-${short}`
+}
+
 export function checkSuiteRoster(repoRoot, roster = SUITE_PLUGINS) {
   return roster
-    .filter((name) => !existsSync(path.join(repoRoot, 'plugins', name.split('/').pop() ?? name, 'package.json')))
-    .map((name) => `roster lists ${name}, but plugins/${name.split('/').pop() ?? name}/package.json does not exist (the overlay row would boot vanilla)`)
+    .filter((name) => !existsSync(path.join(repoRoot, 'plugins', dirNameFor(name), 'package.json')))
+    .map((name) => `roster lists ${name}, but plugins/${dirNameFor(name)}/package.json does not exist (the overlay row would boot vanilla)`)
+}
+
+/**
+ * The reverse direction: a plugin directory on disk that no roster carries.
+ *
+ * The forward check only proves the roster resolves; a NEW plugin builds and
+ * tests green in CI (the `plugins/*` glob) yet never reaches the runtime — it
+ * is not in the overlay, not in the link set, not in the artifact. The failure
+ * is invisible everywhere except the user's UI, which simply lacks the feature.
+ */
+export function checkOnDiskRoster(repoRoot, roster = SUITE_PLUGINS) {
+  const expected = new Set(roster.map(dirNameFor))
+  const pluginsDir = path.join(repoRoot, 'plugins')
+  return readdirSync(pluginsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(path.join(pluginsDir, entry.name, 'package.json')))
+    .map((entry) => entry.name)
+    .filter((dir) => !expected.has(dir))
+    .map((dir) => `plugins/${dir} is on disk but no roster carries it (add it to all five roster places in one commit, or it never ships)`)
+}
+
+/**
+ * Han characters outside a plugin's own dictionary.
+ *
+ * Repository rule (AGENTS.md §4 / plugins/AGENTS.md §4): each plugin owns its
+ * dictionary file and writes no Han characters anywhere else — the model-facing
+ * zh-CN tool failures and the one declared exception in plugin-brand's routes
+ * are the sanctioned cases. New prose drifting into a second place splits the
+ * dictionary and starts a translation nobody can find, so the check enforces
+ * the rule with an explicit allowlist instead of trusting review.
+ *
+ * @param {string} repoRoot - repository root.
+ * @returns {string[]} violations, empty when no stray Han text is found.
+ */
+export function checkHanCharacters(repoRoot) {
+  // Sanctioned locations. Entry forms: a file that IS the dictionary, a
+  // directory whose whole contents are model-facing by declared design, or an
+  // individual file with its reason. Anything not listed here must be Han-free.
+  const DICTIONARY = /(^|\/)(locales?|zh-CN)\.tsx?$/u
+  const ALLOWED_DIRS = [
+    // The office four: every non-client module under these trees is the
+    // model-facing layer by declared design — skill text, prompts, validation
+    // reports and single actionable failure values are all zh-CN (each file's
+    // JSDoc says so). `client/` is explicitly NOT covered: that is the UI
+    // half, whose copy belongs in the plugin's own dictionary.
+    'plugins/plugin-doc/src/',
+    'plugins/plugin-pdf/src/',
+    'plugins/plugin-ppt/src/',
+    'plugins/plugin-sheet/src/',
+  ]
+  const ALLOWLIST = new Set([
+    // plugin-brand's route labels: documented at routes.ts and in the file
+    // header — user-facing picker labels with no dictionary to live in.
+    'plugins/plugin-brand/src/routes.ts',
+    // Model-facing tool failures, declared "zh-CN by design" in the JSDoc.
+    'plugins/plugin-fff/src/tools.ts',
+    'plugins/plugin-fff/src/picker.ts',
+    // The cross-session memory's model-facing layer: the distiller/curator
+    // prompts and the failure values the tools relay.
+    'plugins/plugin-memory/src/prompt.ts',
+    'plugins/plugin-memory/src/distiller.ts',
+    'plugins/plugin-memory/src/curator.ts',
+    'plugins/plugin-memory/src/llm-direct.ts',
+    'plugins/plugin-memory/src/memory-store.ts',
+    'plugins/plugin-memory/src/tools.ts',
+    // The market parses pnpm's own stdout, which is Chinese on a Chinese
+    // Windows; matching its wording is the function.
+    'plugins/plugin-market/src/installer.ts',
+    // plugin-swarm's /swarm command: the NATIVE conversation surface
+    // (upstream's own chat view, which has no dictionary), not the branded
+    // client UI. Known deviation from the HostText rule — tracked as a
+    // follow-up to route it through the wire contract.
+    'plugins/plugin-swarm/src/index.ts',
+  ])
+  const HAN = /[\u4e00-\u9fff]/u
+  const violations = []
+  for (const { dir } of readPlugins(repoRoot)) {
+    for (const file of sourceFiles(path.join(repoRoot, 'plugins', dir, 'src'))) {
+      const relative = path.relative(repoRoot, file).split(path.sep).join('/')
+      if (DICTIONARY.test(relative) || ALLOWLIST.has(relative)) continue
+      // A directory allowance covers the model-facing files ONLY: the UI half
+      // (`client/`) keeps the dictionary rule like every other plugin.
+      if (ALLOWED_DIRS.some((prefix) => relative.startsWith(prefix) && !relative.slice(prefix.length).startsWith('client/'))) continue
+      // Comments are outside the language rule; the shared stripper is
+      // quote-aware and keeps line numbers (a glob like '**/*.ts' must not be
+      // read as a comment start).
+      const text = stripComments(readFileSync(file, 'utf8')).split(/\r?\n/)
+      text.forEach((line, index) => {
+        if (HAN.test(line)) violations.push(`${relative}:${String(index + 1)} holds Han characters outside the dictionary: ${line.trim().slice(0, 60)}`)
+      })
+    }
+  }
+  return violations
+}
+
+/** Every TypeScript source file under `dir`, recursively. */
+function sourceFiles(dir) {
+  const found = []
+  let entries = []
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return found
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) found.push(...sourceFiles(full))
+    else if (/\.tsx?$/.test(entry.name)) found.push(full)
+  }
+  return found
 }
 
 /** Read every plugin manifest under plugins/ (a directory without one is skipped). */
@@ -118,7 +241,12 @@ function main() {
 
   const followed = followedSpec(repoRoot)
   const plugins = readPlugins(repoRoot)
-  const violations = [...checkPluginGraph(plugins, followed), ...checkSuiteRoster(repoRoot)]
+  const violations = [
+    ...checkPluginGraph(plugins, followed),
+    ...checkSuiteRoster(repoRoot),
+    ...checkOnDiskRoster(repoRoot),
+    ...checkHanCharacters(repoRoot),
+  ]
 
   console.log(`plugin graph: ${plugins.length} plugins, followed line ${followed}`)
   if (violations.length === 0) {
