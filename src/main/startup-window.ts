@@ -42,7 +42,7 @@ const SPLASH_BG_DARK = '#151517'
  * Failure-card actions. index.ts owns what each one DOES; this module only
  * reports which button was pressed, and the labels are localized at call time.
  */
-export type StartupActionId = 'retry' | 'open-logs' | 'quit'
+export type StartupActionId = 'retry' | 'open-logs' | 'quit' | 'install-missing'
 
 interface StartupAction {
   id: StartupActionId
@@ -50,13 +50,24 @@ interface StartupAction {
   primary?: boolean
 }
 
-/** The frozen action set: retry / open log folder / quit. */
-function failureActions(): readonly StartupAction[] {
-  return [
+/**
+ * The action set: retry / open log folder / quit, plus a repair when one applies.
+ *
+ * `install-missing` is offered only when the shell knows which packages are
+ * missing (a home-layer row this profile cannot load), because the action is
+ * "install the packages that row names" — without them it would have nothing to
+ * install.
+ */
+function failureActions(extra: readonly StartupActionId[] = []): readonly StartupAction[] {
+  const actions: StartupAction[] = [
     { id: 'retry', label: t('splash.retry'), primary: true },
     { id: 'open-logs', label: t('splash.openLogs') },
     { id: 'quit', label: t('tray.quit') },
   ]
+  if (extra.includes('install-missing')) {
+    actions.splice(1, 0, { id: 'install-missing', label: t('splash.installMissing') })
+  }
+  return actions
 }
 
 interface StartupView {
@@ -282,7 +293,7 @@ const STARTUP_FAILURE_SCRIPT = (failure: StartupFailure): string => `(function (
 
 /** Narrow a value returned by the page to a known action id. */
 function isActionId(value: unknown): value is StartupActionId {
-  return value === 'retry' || value === 'open-logs' || value === 'quit'
+  return value === 'retry' || value === 'open-logs' || value === 'quit' || value === 'install-missing'
 }
 
 /** Everything a push carries; brand, theme, skeleton and digest are push-owned. */
@@ -452,16 +463,22 @@ export function handoffToMainWindow(win: BrowserWindow): void {
  * @param message - the status line already published for this failure (the
  *   frozen wording from KernelManager / index.ts), reused verbatim.
  * @param detail - the error detail, when it says more than the message does.
+ * @param extraActions - actions this failure can offer beyond the frozen set
+ *   (only `install-missing`, and only when the shell knows the packages).
  * @returns the chosen action, or null when the splash is gone — a failure
  *   after the main window opened, where the existing recovery paths and
  *   dialogs own the failure — or when the window died before an answer.
  */
-export async function showStartupFailure(message: string, detail: string): Promise<StartupActionId | null> {
+export async function showStartupFailure(
+  message: string,
+  detail: string,
+  extraActions: readonly StartupActionId[] = [],
+): Promise<StartupActionId | null> {
   const win = splash
   if (win === null || win.isDestroyed() || win.webContents.isDestroyed()) return null
   try {
     const choice = await win.webContents.executeJavaScript(
-      STARTUP_FAILURE_SCRIPT({ title: message, detail, actions: failureActions() }),
+      STARTUP_FAILURE_SCRIPT({ title: message, detail, actions: failureActions(extraActions) }),
     )
     return isActionId(choice) ? choice : null
   } catch {

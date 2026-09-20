@@ -55,6 +55,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { redact } from './redact'
+import { specifierResolves } from './brand-suite'
 
 /**
  * Deadline for the repair run. A cold pnpm cache over a profile with plugins
@@ -115,6 +116,139 @@ export interface HealOptions {
   readonly spawnImpl?: typeof spawn
   /** Test seam; defaults to {@link HEAL_TIMEOUT_MS}. */
   readonly timeoutMs?: number
+}
+
+/**
+ * The release-age policy's failure codes, and the one-run override that lifts it.
+ *
+ * Kept in sync with `plugins/plugin-market/src/release-age.ts`, which owns the
+ * measured wording (the shell cannot import a plugin's module). It matters that
+ * this repair honours the same policy the market does: lifting the cooldown up
+ * front would make "install the missing packages" a way around a supply-chain
+ * check the rest of the app applies.
+ */
+const RELEASE_AGE_CODES = [
+  'ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED',
+  'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION',
+  'ERR_PNPM_NO_MATURE_MATCHING_VERSION',
+] as const
+
+/** The argument that lifts the release-age policy for ONE run. */
+const RELEASE_AGE_OVERRIDE = '--config.minimumReleaseAge=0'
+
+/** Whether a failed run failed on the release-age policy. */
+function isReleaseAgeFailure(output: string): boolean {
+  return RELEASE_AGE_CODES.some((code) => output.includes(code))
+}
+
+/**
+ * The directory name a specifier installs into: its `name@version` tag dropped.
+ *
+ * The read-back has to look at the package, not at the specifier that asked for
+ * it — `pkg@^0.2.1` never matches a directory of that name, and a repair that
+ * judged it un-healed would install again on every click.
+ *
+ * @param specifier - a package name, optionally with a version (`@scope/n@1.2.3`).
+ */
+export function installedNameOf(specifier: string): string {
+  const at = specifier.indexOf('@', specifier.startsWith('@') ? 1 : 0)
+  return at <= 0 ? specifier : specifier.slice(0, at)
+}
+
+/**
+ * Whether a name is one this repair may hand to the CLI.
+ *
+ * Deliberately strict, and it is a security boundary rather than a style rule:
+ * the value comes from a config file the user (or anything that can write one)
+ * controls, and it is handed to a spawned command line as an argument. Anything
+ * that could read as an OPTION — a leading dash above all — is refused before it
+ * can become one, and the version tag stays inside the characters a version uses
+ * (no `:` protocol or alias tag, no quote, no backslash, no space).
+ *
+ * @param name - the specifier a patch row named.
+ */
+export function isInstallablePackageName(name: string): boolean {
+  return /^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*(@[\w^~<>][\w.^~<>-]*)?$/iu.test(name)
+}
+
+/**
+ * Install specific packages into a profile — the repair for a home-layer row the
+ * profile cannot load.
+ *
+ * The row is the user's own; this SATISFIES it rather than editing their
+ * configuration, which matters because the home layer applies to every profile
+ * of the install (a row that does not resolve here may be perfectly good in the
+ * user's own `dsh web`). Runs the same CLI the market installs through, under
+ * the same release-age policy: the policy runs first, and only a run the policy
+ * actually blocked is retried once with it lifted.
+ *
+ * A zero exit is not proof, here as there: the packages are read back through
+ * the same predicate that flagged the rows.
+ *
+ * @param options - the profile, the kernel CLI, the Node that runs it.
+ * @param packages - package names to install (a path cannot be installed).
+ * @returns what happened, for the caller's log line. Never throws.
+ */
+export async function installIntoProfile(options: HealOptions, packages: readonly string[]): Promise<ProfileHealOutcome> {
+  // The filter lives here as well as at the card: this is where the value would
+  // become an argument of a spawned command line.
+  const names = packages.filter((name) => isInstallablePackageName(name))
+  if (names.length === 0) return { status: 'ok', missing: [] }
+  const missing = [...names]
+  try {
+    const head = [options.bin, 'plugin', '--profile', options.profileName]
+    let run = await runHeal(options, [...head, 'add', ...names])
+    if (run.timedOut || run.spawnError !== undefined) return runFailure(options, run, missing)
+    if (run.code !== 0 && isReleaseAgeFailure(run.output)) {
+      // The policy rejected the run before it did anything: run the same command
+      // once with the policy lifted for that run only. No version is recorded,
+      // so the next command starts under the cooldown again.
+      run = await runHeal(options, [...head, RELEASE_AGE_OVERRIDE, 'add', ...names])
+    }
+    const detail = tailOf(run.output)
+    if (run.spawnError !== undefined) {
+      return { status: 'unrepairable', missing, detail: redact(run.spawnError.message) }
+    }
+    if (run.timedOut) {
+      const seconds = Math.round((options.timeoutMs ?? HEAL_TIMEOUT_MS) / 1000)
+      return {
+        status: 'unrepairable',
+        missing,
+        detail: `the install did not finish within ${String(seconds)} seconds and was terminated${detail === '' ? '' : `:\n${detail}`}`,
+      }
+    }
+    const still = names.filter((name) => !specifierResolves(installedNameOf(name), options.profileDir))
+    if (run.code !== 0 && still.length === 0) {
+      // The CLI answered non-zero but the tree carries everything: the tree wins.
+      return { status: 'healed', missing, ...(detail === '' ? {} : { detail }) }
+    }
+    if (run.code !== 0) {
+      return {
+        status: 'unrepairable',
+        missing: [...still],
+        detail: `the install failed (exit code ${String(run.code)})${detail === '' ? '' : `:\n${detail}`}`,
+      }
+    }
+    if (still.length > 0) {
+      return {
+        status: 'unrepairable',
+        missing: [...still],
+        detail: `the install reported success but ${still.join(', ')} still does not resolve${detail === '' ? '' : `:\n${detail}`}`,
+      }
+    }
+    return { status: 'healed', missing, ...(detail === '' ? {} : { detail }) }
+  } catch (error) {
+    return { status: 'unrepairable', missing, detail: redact((error as Error).message) }
+  }
+}
+
+/** The outcome of a run that never produced a code: reported, never thrown. */
+function runFailure(options: HealOptions, run: HealRun, missing: readonly string[]): ProfileHealOutcome {
+  if (run.spawnError !== undefined) {
+    return { status: 'unrepairable', missing: [...missing], detail: redact(run.spawnError.message) }
+  }
+  const seconds = Math.round((options.timeoutMs ?? HEAL_TIMEOUT_MS) / 1000)
+  return { status: 'unrepairable', missing: [...missing], detail: `the install did not finish within ${String(seconds)} seconds and was terminated` }
 }
 
 /** The last `TAIL_LINES` non-empty lines of a captured output, redacted. */

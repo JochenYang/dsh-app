@@ -20,7 +20,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
-const { healLogLine, healProfileDependencies, missingDependencies } = require('../dist/main/profile-heal.js')
+const { healLogLine, healProfileDependencies, installIntoProfile, missingDependencies } = require('../dist/main/profile-heal.js')
 
 /**
  * Scratch harness homes. Each one is an `os.tmpdir()` directory this file
@@ -231,4 +231,134 @@ test('a manifest that cannot be read and a name that is not a dependency run not
   const scoped = fakeProfile(scratch(t), { '@deepseek-ai/dsh-toolkit': '^0.2.1' })
   assert.deepEqual(await missingDependencies(scoped), ['@deepseek-ai/dsh-toolkit'])
   assert.equal(readFileSync(path.join(scoped, 'package.json'), 'utf8').includes('dsh-toolkit'), true)
+})
+
+// --------------------------------------------- installing a named package
+
+/** Install one package's manifest into a profile, the way the CLI would. */
+function installInto(profileDir, name) {
+  const file = path.join(profileDir, 'node_modules', ...name.split('/'), 'package.json')
+  mkdirSync(path.dirname(file), { recursive: true })
+  writeFileSync(file, `${JSON.stringify({ name })}\n`)
+}
+
+test('installing the packages a home-layer row names satisfies it', async (t) => {
+  const home = scratch(t)
+  const profileDir = path.join(home, 'profiles', 'dsh-app')
+  mkdirSync(profileDir, { recursive: true })
+  const { impl, calls } = scriptedSpawn({
+    // The tree is the witness: a zero exit is not proof, here as in the declared
+    // dependency repair.
+    onSpawn: () => installInto(profileDir, '@deepseek-ai/dsh-mcp-client'),
+  })
+  const outcome = await installIntoProfile(
+    { ...options(profileDir, impl), dshHome: home },
+    ['@deepseek-ai/dsh-mcp-client'],
+  )
+  assert.equal(outcome.status, 'healed')
+  assert.equal(calls.length, 1)
+  // The invocation the market installs through. The release-age policy is NOT
+  // lifted here: it runs first, and only a run it blocked is retried with it
+  // lifted (see the case below).
+  assert.deepEqual(calls[0].args, [
+    'D:/kernel/app/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'plugin',
+    '--profile',
+    'dsh-app',
+    'add',
+    '@deepseek-ai/dsh-mcp-client',
+  ])
+})
+
+test('an install that leaves the package missing is reported, not called a success', async (t) => {
+  const home = scratch(t)
+  const profileDir = path.join(home, 'profiles', 'dsh-app')
+  mkdirSync(profileDir, { recursive: true })
+  // Exit code 0 and nothing installed: measured on a real profile, the manager
+  // answered "Already up to date" while the packages were missing.
+  const { impl } = scriptedSpawn({ code: 0, output: 'Already up to date\n' })
+  const outcome = await installIntoProfile(
+    { ...options(profileDir, impl), dshHome: home },
+    ['@deepseek-ai/dsh-mcp-client'],
+  )
+  assert.equal(outcome.status, 'unrepairable')
+  assert.deepEqual(outcome.missing, ['@deepseek-ai/dsh-mcp-client'])
+  assert.match(outcome.detail ?? '', /still does not resolve/u)
+})
+
+test('nothing to install runs nothing', async (t) => {
+  const home = scratch(t)
+  const profileDir = path.join(home, 'profiles', 'dsh-app')
+  mkdirSync(profileDir, { recursive: true })
+  const { impl, calls } = scriptedSpawn()
+  const outcome = await installIntoProfile({ ...options(profileDir, impl), dshHome: home }, [])
+  assert.equal(outcome.status, 'ok')
+  assert.equal(calls.length, 0)
+})
+
+test('a release-age failure is retried once with the policy lifted, never up front', async (t) => {
+  const home = scratch(t)
+  const profileDir = path.join(home, 'profiles', 'dsh-app')
+  mkdirSync(profileDir, { recursive: true })
+  const calls = []
+  let run = 0
+  const impl = (_executable, args) => {
+    calls.push([...args])
+    run += 1
+    const child = new EventEmitter()
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.pid = 6000 + run
+    setImmediate(() => {
+      if (run === 1) {
+        child.stdout.emit('data', 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION: 1 entry rejected\n')
+        child.emit('close', 1)
+        return
+      }
+      installInto(profileDir, '@deepseek-ai/dsh-mcp-client')
+      child.emit('close', 0)
+    })
+    return child
+  }
+  const outcome = await installIntoProfile(
+    { ...options(profileDir, impl), dshHome: home },
+    ['@deepseek-ai/dsh-mcp-client'],
+  )
+  assert.equal(outcome.status, 'healed')
+  assert.equal(calls.length, 2)
+  // The policy runs FIRST: lifting it up front would make this repair a way
+  // around a supply-chain check the rest of the app honours.
+  assert.equal(calls[0].includes('--config.minimumReleaseAge=0'), false)
+  assert.equal(calls[1].includes('--config.minimumReleaseAge=0'), true)
+})
+
+test('a versioned specifier is judged by the package it installs', async (t) => {
+  const home = scratch(t)
+  const profileDir = path.join(home, 'profiles', 'dsh-app')
+  mkdirSync(profileDir, { recursive: true })
+  const { impl } = scriptedSpawn({
+    // `pkg@^1.2.3` installs a directory called `pkg`; a read-back that looked for
+    // the specifier would never match, and the card would never clear.
+    onSpawn: () => installInto(profileDir, 'dsh-pinned-edit'),
+  })
+  const outcome = await installIntoProfile(
+    { ...options(profileDir, impl), dshHome: home },
+    ['dsh-pinned-edit@^1.2.3'],
+  )
+  assert.equal(outcome.status, 'healed')
+})
+
+test('a specifier that could read as an option never reaches the command line', async (t) => {
+  const home = scratch(t)
+  const profileDir = path.join(home, 'profiles', 'dsh-app')
+  mkdirSync(profileDir, { recursive: true })
+  const { impl, calls } = scriptedSpawn()
+  const outcome = await installIntoProfile(
+    { ...options(profileDir, impl), dshHome: home },
+    ['--global', 'pkg@file:../evil', 'pkg;rm -rf /'],
+  )
+  // Nothing installable, nothing spawned: the card reports the rows and stops
+  // offering the button (see installRepairUnavailable).
+  assert.equal(outcome.status, 'ok')
+  assert.equal(calls.length, 0)
 })

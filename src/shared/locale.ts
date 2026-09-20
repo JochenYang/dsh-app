@@ -76,6 +76,7 @@ const ZH_CN = {
   'splash.openingUi': '正在打开界面…',
   'splash.retry': '重试',
   'splash.openLogs': '打开日志目录',
+  'splash.installMissing': '安装缺失的包并重启',
   'splash.hint': '首次启动需要准备运行环境，可能需要几十秒。',
   'splash.failureHint': '可重试启动，或打开日志目录查看最新日志。',
   'splash.step.prepare': '准备运行时',
@@ -92,6 +93,7 @@ const ZH_CN = {
   'splash.saying': '首先您要健康，其次才是其次',
   // --------------------------------------- shell status lines (card, tooltip)
   'status.startingServer': '正在启动 dsh 服务…',
+  'status.installingMissing': '正在把缺失的包装进当前档案…',
   'status.ready': '就绪',
   'status.serverDown': '服务{reason}',
   'status.serverExited': '已退出（code {code}, signal {signal}）',
@@ -111,6 +113,8 @@ const ZH_CN = {
   'serverFailure.homeRowsIntro': '你的常驻配置 {file} 里有 {count} 行在当前档案（{profile}）中加载不到：',
   'serverFailure.homeRowLine': '· 第 {line} 行：{specifier}',
   'serverFailure.homeRowsHint': '上面这些行会让插件树加载失败，应用因此打不开。把它们删掉或注释掉（或先把它们指向的包装进当前档案），再重试；配置的其他部分不会被改动。',
+  'serverFailure.installNoCli': '找不到内核命令行，无法自动安装。请从托盘菜单执行「检查内核更新」重装内核后再试。',
+  'serverFailure.installFailed': '自动安装没有成功：{detail}',
 
   // ------------------------------------------------------------ dev mode
   'devMode.workspaceHint': '开发模式使用本地 deepseek-harness 工作区；若刚拉取上游代码，请先在该目录执行 pnpm install && pnpm run build',
@@ -344,6 +348,7 @@ const EN_US: Record<MessageKey, string> = {
   'splash.openingUi': 'Opening the interface…',
   'splash.retry': 'Retry',
   'splash.openLogs': 'Open log folder',
+  'splash.installMissing': 'Install the missing packages and restart',
   'splash.hint': 'The first launch prepares the runtime, which can take a while.',
   'splash.failureHint': 'Retry the launch, or open the log folder for the latest lines.',
   'splash.step.prepare': 'Preparing the runtime',
@@ -357,6 +362,7 @@ const EN_US: Record<MessageKey, string> = {
   'splash.saying': 'Stay healthy first. Everything else comes second.',
   // --------------------------------------- shell status lines (card, tooltip)
   'status.startingServer': 'Starting the dsh server…',
+  'status.installingMissing': 'Installing the missing packages into the current profile…',
   'status.ready': 'Ready',
   'status.serverDown': 'Server {reason}',
   'status.serverExited': 'exited (code {code}, signal {signal})',
@@ -376,6 +382,8 @@ const EN_US: Record<MessageKey, string> = {
   'serverFailure.homeRowsIntro': 'Your home-layer configuration {file} has {count} row(s) the current profile ({profile}) cannot load:',
   'serverFailure.homeRowLine': '· line {line}: {specifier}',
   'serverFailure.homeRowsHint': 'Those rows make the plugin tree fail to load, which is why the app does not open. Remove or comment them out (or install the packages they name into the current profile) and retry; nothing else in your configuration is changed.',
+  'serverFailure.installNoCli': 'The kernel command line is not available, so the packages cannot be installed automatically. Run "Check for kernel updates" from the tray menu, then try again.',
+  'serverFailure.installFailed': 'The automatic install did not succeed: {detail}',
 
   // ------------------------------------------------------------ dev mode
   'devMode.workspaceHint': 'Dev mode runs the local deepseek-harness workspace; after pulling upstream code, run pnpm install && pnpm run build in that directory first',
