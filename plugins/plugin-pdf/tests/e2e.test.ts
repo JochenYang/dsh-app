@@ -150,6 +150,28 @@ function settle(): Promise<void> {
   return new Promise(resolve => { setTimeout(resolve, 50) })
 }
 
+/**
+ * The mode store persists on a promise tail, so a read right after a POST
+ * races the write. Poll until the file on disk reaches the expected state
+ * instead of trusting a fixed sleep (a fast Linux runner loses that race —
+ * measured: plugin-doc's e2e failed on CI and passed on Windows).
+ */
+async function readModeFile(
+  file: string,
+  predicate: (value: Record<string, unknown>) => boolean,
+  timeoutMs = 2_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (existsSync(file)) {
+      const value = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+      if (predicate(value)) return value
+    }
+    if (Date.now() > deadline) throw new Error(`mode.json never reached the expected state: ${file}`)
+    await new Promise(resolve => { setTimeout(resolve, 10) })
+  }
+}
+
 /** Whitespace-insensitive containment: wrapped lines join without spaces. */
 function compact(text: string): string {
   return text.replace(/\s+/gu, '')
@@ -233,11 +255,7 @@ test('e2e: PDF mode round-trips through the route and drives the prompt section'
     assert.equal(enabled.status, 200)
     assert.equal((enabled.body as { value: { enabled: boolean } }).value.enabled, true)
     assert.match(readPrompt(session), /pdf_write/u, 'enabled session gets the workflow directive')
-    assert.equal(
-      (JSON.parse(readFileSync(modeFile, 'utf8')) as Record<string, { enabled: boolean }>)[session]?.enabled,
-      true,
-      'the toggle persisted to the DSH_HOME store',
-    )
+    await readModeFile(modeFile, (value) => (value[session] as { enabled?: boolean } | undefined)?.enabled === true)
 
     const read = await callRoute(route, { method: 'GET' })
     assert.equal(read.body.ok, false, 'the read requires a session id')

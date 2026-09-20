@@ -103,6 +103,28 @@ function settle(): Promise<void> {
   return new Promise(resolve => { setTimeout(resolve, 50) })
 }
 
+/**
+ * The mode store persists on a promise tail, so a synchronous read right after
+ * a POST races the write (it loses that race deterministically on a fast
+ * Linux runner and won on Windows — a green local run proves nothing here).
+ * Poll until the file on disk reaches the expected state instead of sleeping.
+ */
+async function readModeFile(
+  file: string,
+  predicate: (value: Record<string, unknown>) => boolean,
+  timeoutMs = 2_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (existsSync(file)) {
+      const value = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+      if (predicate(value)) return value
+    }
+    if (Date.now() > deadline) throw new Error(`mode.json never reached the expected state: ${file}`)
+    await new Promise(resolve => { setTimeout(resolve, 10) })
+  }
+}
+
 test('e2e: apply registers the Word tools, prompt sections and mode route', async () => {
   assert.ok(existsSync(libEntry), 'lib/index.js must be built (npm run build) before the e2e test')
   const root = mkdtempSync(join(tmpdir(), 'docd-e2e-mount-'))
@@ -165,8 +187,10 @@ test('e2e: Word mode round-trips through the route and drives the prompt section
     assert.equal(toggle.status, 200)
     assert.equal((await toggle.json() as { value: { enabled: boolean } }).value.enabled, true)
     assert.match(readPrompt(session), /doc_write/u, 'enabled session gets the workflow directive')
+    await settle()
+    const stored = await readModeFile(modeFile, (value) => (value[session] as { enabled?: boolean } | undefined)?.enabled === true)
     assert.equal(
-      (JSON.parse(readFileSync(modeFile, 'utf8')) as Record<string, { enabled: boolean }>)[session]?.enabled,
+      (stored[session] as { enabled: boolean }).enabled,
       true,
       'the toggle persisted to the DSH_HOME store',
     )
@@ -183,8 +207,9 @@ test('e2e: Word mode round-trips through the route and drives the prompt section
     const off = await post({ sessionId: session, enabled: false })
     assert.equal(off.status, 200)
     assert.equal(readPrompt(session), '', 'turning the mode off stops the directive')
+    const cleared = await readModeFile(modeFile, (value) => value[session] === undefined)
     assert.equal(
-      (JSON.parse(readFileSync(modeFile, 'utf8')) as Record<string, unknown>)[session],
+      cleared[session],
       undefined,
       'the cleared toggle left the store',
     )
