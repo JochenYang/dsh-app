@@ -788,7 +788,7 @@ async function startServerAndOpenWindow(): Promise<void> {
     const outcome = await mirrorRuntimeIntoProfile(host.runtimeDir, profile.dir)
     logKernel(kernelTreeLogLine(outcome, hostVersion))
     logKeptEntries(outcome)
-  } else {
+  } else if (host.profileAnchor === 'runtime') {
     const dropped = await dropRuntimeMirror(profile.dir, host.runtimeDir)
     if (dropped.status === 'removed') {
       logKernel(`[suite-profile] dropped the kernel mirror of an earlier line (${String(dropped.entries)} entries)`)
@@ -796,6 +796,13 @@ async function startServerAndOpenWindow(): Promise<void> {
       logKernel(`[suite-profile] the kernel mirror of an earlier line could not be dropped: ${dropped.detail ?? 'unknown error'}`)
     }
     logKeptEntries(dropped)
+  } else {
+    // A host package whose version cannot be read is NOT evidence that a
+    // leftover mirror is safe to remove: the line that mirror was made for may be
+    // the one that needs it (0.1.5 and earlier resolve the kernel out of the
+    // profile). Keeping it costs a shadowed package; removing it costs the boot,
+    // and only one of those is recoverable.
+    logKernel('[suite-profile] the host package reports no readable version, so the profile keeps the mirror it has')
   }
   // The window's view state belongs to the client build of THIS line — see
   // client-state.ts. Aligned before the window is handed the UI, because the

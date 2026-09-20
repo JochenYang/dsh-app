@@ -83,15 +83,14 @@
  */
 import { app } from 'electron'
 import { existsSync, promises as fs, statSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 
 /** Suite plugin directory names under dsh-app/plugins (and kernel node_modules). */
 export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch'] as const
 
-/** npm scope shared by the suite plugins. */
-const PLUGIN_SCOPE = '@dsh-app'
+/** npm scope shared by the suite plugins; also the scope the mirror drop must not take back. */
+export const PLUGIN_SCOPE = '@dsh-app'
 
 /** Journal file inside the scope dir naming every link this shell owns. */
 const OWNERSHIP_JOURNAL = '.dsh-app-links.json'
@@ -550,8 +549,18 @@ export function specifierResolves(specifier: string, profileDir: string): boolea
     return importableFile(path.resolve(profileDir, specifier))
   }
   if (SCHEME_SPECIFIER.test(specifier)) return true
-  const searchPaths = createRequire(path.join(profileDir, PROFILE_PATCH_FILENAME)).resolve.paths(specifier) ?? []
-  return searchPaths.some((dir) => existsSync(path.join(dir, ...specifier.split('/'), 'package.json')))
+  // The two positions the host's enforcing resolver reads, and nothing else: the
+  // booted profile's own node_modules, and the shared fallback the harness links
+  // the kernel's closure into (`$DSH_HOME/profiles/node_modules`). Node's own
+  // upward walk would ALSO accept a package installed at `$DSH_HOME/node_modules`,
+  // in the user's home directory or at a disk root — the shell would keep a row
+  // the host cannot resolve, and the client's boot audit rejects the whole page
+  // over one such row.
+  const searchDirs = [
+    path.join(profileDir, 'node_modules'),
+    path.join(profileDir, '..', 'node_modules'),
+  ]
+  return searchDirs.some((dir) => existsSync(path.join(dir, ...specifier.split('/'), 'package.json')))
 }
 
 /** A specifier carrying a URL scheme (`cordis:include`, `node:fs`, `file:…`). */

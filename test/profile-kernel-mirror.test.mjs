@@ -73,6 +73,27 @@ test('the mirror gives the profile the runtime tree, and a second start writes n
   assert.equal(readFileSync(foreign, 'utf8'), '{"name":"dsh-deja"}\n')
 })
 
+test('dropping the mirror leaves the suite scope alone: the shell links it every start', async () => {
+  const runtime = fakeRuntime()
+  // The shipping runtime CARRIES the suite's own packages, so a mirror of it
+  // records them — and the drop must not take back what the link step has just
+  // put there: 17 entries stop activating when it does.
+  const suite = path.join(runtime, 'node_modules', '@dsh-app', 'plugin-brand')
+  mkdirSync(suite, { recursive: true })
+  writeFileSync(path.join(suite, 'package.json'), '{"name":"@dsh-app/plugin-brand"}\n')
+  const profile = fakeProfile()
+  await mirrorRuntimeIntoProfile(runtime, profile)
+  const linked = path.join(profile, 'node_modules', '@dsh-app', 'plugin-brand')
+  assert.ok(existsSync(linked))
+
+  const dropped = await dropRuntimeMirror(profile, runtime)
+  assert.equal(dropped.status, 'removed')
+  assert.ok(existsSync(linked), 'the suite scope survives a drop')
+  // Everything else the mirror wrote still goes.
+  assert.equal(existsSync(path.join(profile, 'node_modules', 'yaml')), false)
+  assert.equal(existsSync(path.join(profile, 'node_modules', '@deepseek-ai', 'dsh')), false)
+})
+
 test('dropping the mirror removes the profile copy without following links inside it', async () => {
   const runtime = fakeRuntime()
   const profile = fakeProfile()

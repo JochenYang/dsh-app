@@ -72,6 +72,15 @@ const MAIN_WINDOW_OPTS = {
 const GEOMETRY_SAVE_DEBOUNCE_MS = 500
 
 /**
+ * How long the window waits for its first document before showing itself anyway.
+ *
+ * The splash is a local file, so it arrives in milliseconds; the bound only
+ * fires when something is wrong (see `createMainWindow`), and a window on screen
+ * beats no window at all.
+ */
+const SPLASH_SHOW_FALLBACK_MS = 10_000
+
+/**
  * Opening size for the main window: the remembered geometry when there is one,
  * a size fitted to the display otherwise. The rules live in `window-bounds.ts`
  * so they can be driven by tests for displays this machine does not have.
@@ -758,12 +767,27 @@ export function createMainWindow(): BrowserWindow {
   if (readWindowBounds(windowStateFile(app.getPath('userData')))?.maximized === true) {
     win.once('ready-to-show', () => { win.maximize() })
   }
+  let fallback: ReturnType<typeof setTimeout> | undefined
   const showWhenReady = (): void => {
+    if (fallback !== undefined) clearTimeout(fallback)
     if (!win.isDestroyed()) win.show()
   }
   win.once('ready-to-show', showWhenReady)
   // The trigger that actually fires for this window shape; see the note above.
   win.webContents.once('did-finish-load', showWhenReady)
+  // Both triggers above belong to a document that has to ARRIVE. When it cannot
+  // — a damaged install, security software blocking a read out of the asar, a
+  // renderer that dies before its first paint — the window stays hidden for the
+  // life of the process and the user sees nothing at all: no window, no failure
+  // card (the splash's own handlers are not installed either), no dialog, while
+  // the retry and rollback chain runs invisibly behind it. Showing the window
+  // costs nothing by then — it already exists and its background is the splash's
+  // own colour — so the failed load, a dead renderer, and a plain timeout all
+  // put it on screen, and the shell can say what went wrong in it.
+  win.webContents.once('did-fail-load', showWhenReady)
+  win.webContents.once('render-process-gone', showWhenReady)
+  fallback = setTimeout(showWhenReady, SPLASH_SHOW_FALLBACK_MS)
+  fallback.unref?.()
   // The splash installs the same state handlers the standalone window did, so
   // the shell keeps driving it through updateStartupWindow/showStartupFailure.
   markLoadingPage(win)

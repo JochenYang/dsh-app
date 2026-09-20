@@ -588,7 +588,7 @@ async function officePayloadStale(source: string, target: string): Promise<boole
  * @returns the primary-runtime path to pass as the child's fourth positional.
  * @throws when either input is missing, or when the source is not a payload.
  */
-async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined, primaryRuntime?: string): Promise<string> {
+export async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined, primaryRuntime?: string): Promise<string> {
   if (source === undefined || dataDir === undefined) {
     throw new Error(`dsh host: the web transport needs an office payload (a directory holding scripts/check_office.py); ${source === undefined ? 'none was named' : 'no shell data directory was named'} for ${source}`)
   }
@@ -597,9 +597,19 @@ async function prepareOfficePayload(source: string | undefined, dataDir: string 
   }
   const root = path.join(dataDir, OFFICE_PAYLOAD_ROOT)
   const target = path.join(root, OFFICE_PAYLOAD_DIR)
-  if (await officePayloadStale(source, target)) {
+  // The staleness rule alone cannot see an INTERRUPTED materialization: a
+  // half-copied tree is newer than its source, so it is never refreshed and the
+  // child dies on the missing `check_office.py` for good — the payload lives in
+  // the shell's data directory, which no reinstall and no kernel rollback
+  // clears. The marker file is what the child validates, so it decides here too.
+  const marker = path.join(target, 'scripts', 'check_office.py')
+  if (await officePayloadStale(source, target) || !existsSync(marker)) {
     await mkdir(root, { recursive: true })
+    await rm(target, { recursive: true, force: true })
     await cp(source, target, { recursive: true })
+  }
+  if (!existsSync(marker)) {
+    throw new Error(`dsh host: the office payload could not be materialized into ${target} (${path.join('scripts', 'check_office.py')} is not there after copying); the child refuses to boot without it`)
   }
   const leaf = path.join(root, OFFICE_PRIMARY_RUNTIME_LEAF)
   if (primaryRuntime === undefined) await clearPrimaryRuntimeLink(leaf)

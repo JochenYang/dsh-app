@@ -70,7 +70,7 @@
 import { existsSync, promises as fs, type Stats } from 'node:fs'
 import path from 'node:path'
 import { LEGACY_PROFILE, SUITE_PROFILE, SUITE_PROFILE_BUNDLES } from '../shared/constants'
-import { PROFILE_PATCH_FILENAME, relativePatchSpecifiers, resolveDshHome } from './brand-suite'
+import { PLUGIN_SCOPE, PROFILE_PATCH_FILENAME, relativePatchSpecifiers, resolveDshHome } from './brand-suite'
 
 /** Marker inside the suite profile: present = the profile is ready to boot. */
 export const SUITE_PROFILE_MARKER = '.dsh-app-ready.json'
@@ -969,6 +969,14 @@ export async function dropRuntimeMirror(profileDir: string, runtimeDir?: string)
     const kept: KeptEntry[] = []
     for (const name of marker.names) {
       if (accounted.has(name)) continue
+      // The suite's own scope is never the drop's to take back. It is the
+      // directory the shell links on EVERY start (`linkSuitePlugins`), and on a
+      // runtime-anchored line those links are what the enforcing resolver reads
+      // out of the profile. A marker written while a profile-anchored line ran
+      // records them (the runtime tree ships `@dsh-app/*`), so without this the
+      // drop deletes the links the same start has just created: 17 entries stop
+      // activating and the brand UI goes quietly vanilla.
+      if (name === PLUGIN_SCOPE || name.startsWith(`${PLUGIN_SCOPE}/`)) continue
       const reason = await mirrorWitnessGap(name, mirroredFrom)
       if (reason !== undefined) {
         kept.push({ name, reason })

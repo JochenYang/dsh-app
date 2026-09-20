@@ -293,6 +293,30 @@ test('a quoted path value with a space in it is read like any other row', () => 
   assert.deepEqual(relativePatchSpecifiers(commented), ['./local-plugins/c.mjs'])
 })
 
+test('a package only an ancestor of the profile carries does not count as resolvable', () => {
+  const { profileDir } = fixtureProfile()
+  // `createRequire`'s upward walk would accept this one: it lives two levels
+  // above the profile, in the fake home. The host's enforcing resolver reads the
+  // profile and the shared fallback, and nothing else — keeping such a row means
+  // the client's boot audit refuses the whole page over it.
+  const stray = path.join(profileDir, '..', '..', 'node_modules', '@deepseek-ai', 'dsh-stray')
+  mkdirSync(stray, { recursive: true })
+  writeFileSync(path.join(stray, 'package.json'), '{"name":"@deepseek-ai/dsh-stray"}\n')
+  const row = "- insert:\n    - id: stray\n      name: '@deepseek-ai/dsh-stray'\n"
+  assert.deepEqual(filterUnresolvableRows(row, profileDir).skipped, ['@deepseek-ai/dsh-stray'])
+  assert.equal(specifierResolves('@deepseek-ai/dsh-stray', profileDir), false)
+  // The shared fallback IS read, one level up where the harness links it.
+  installTo(path.join(profileDir, '..', 'node_modules'), '@deepseek-ai/dsh-fallback')
+  assert.equal(specifierResolves('@deepseek-ai/dsh-fallback', profileDir), true)
+})
+
+/** Install one package's manifest into a node_modules directory. */
+function installTo(nodeModules, packageName) {
+  const dir = path.join(nodeModules, ...packageName.split('/'))
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(path.join(dir, 'package.json'), `${JSON.stringify({ name: packageName, version: '0.0.1' })}\n`)
+}
+
 test('relativePatchSpecifiers reads entry fields only, and dedupes', () => {
   const rows = [
     LOCAL_ROW,
