@@ -75,13 +75,20 @@ import {
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 
 /** A store below this many cards is not worth an LLM pass. */
-const CURATE_MIN_ENTRIES = 8
+// 8 was the original floor, and measured against the real stores it made the
+// curator unreachable: the stores it was meant to clean hold 4-13 cards, and
+// over the plugin's whole history the distiller wrote 41 cards while curation
+// applied exactly ONE edit — "write fast, clean slow" with the cleaning end
+// switched off. 4 is the smallest floor that still skips a brand-new store.
+const CURATE_MIN_ENTRIES = 4
 
 /** Minimum spacing between sweeps. Distill saves arrive one quiet window
  * apart (60 s), so without this gate an active session re-sweeps every
  * untouched store each minute; requests inside the window coalesce into one
- * trailing sweep. */
-const CURATE_COOLDOWN_MS = 10 * 60_000
+ * trailing sweep. Three minutes, not ten: with the floor above, a store that
+ * just crossed it should get its first pass in the same sitting rather than
+ * after three more distill windows have added to it. */
+const CURATE_COOLDOWN_MS = 3 * 60_000
 
 /** Cap on the serialized store handed to the model (characters); cards past
  *  the cap are left for a future pass. */

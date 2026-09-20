@@ -171,6 +171,12 @@ export function checkHanCharacters(repoRoot) {
     'plugins/plugin-memory/src/llm-direct.ts',
     'plugins/plugin-memory/src/memory-store.ts',
     'plugins/plugin-memory/src/tools.ts',
+    // The one shared card-text rule: it is copied into every model-facing
+    // surface that asks for card text, and its screen has to name the Chinese
+    // markers a Chinese session narrates with ("本次…", "已修复…") — the same
+    // class of zh-CN model-facing text as the four files above. It was Han-free
+    // until that screen existed.
+    'plugins/plugin-memory/src/card-discipline.ts',
     // The market parses pnpm's own stdout, which is Chinese on a Chinese
     // Windows; matching its wording is the function.
     'plugins/plugin-market/src/installer.ts',

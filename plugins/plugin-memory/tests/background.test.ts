@@ -145,7 +145,44 @@ test('distill applyEntries: credentials never reach the store', async () => {
   assert.equal(root.global.list().length, 0)
 })
 
-test('distill applyEntries: at most five writes per run', async () => {
+// --- the mechanical half of the card-text discipline --------------------------
+// The guidelines ban these shapes in prose; the store filled up with them anyway
+// (41 background writes against ONE curation edit, measured). These pin the code
+// rule that now refuses them, so reverting it turns them red.
+
+test('distill applyEntries: a narrated session summary never becomes a card', async () => {
+  const root = tmpRoot()
+  const applied = await distillApply(root, {
+    entries: [entry('injection-order-note', '我们讨论了注入排序，最后决定按 updated 倒序取卡，本次已完成', '本次讨论后按更新时间排序')],
+  })
+  assert.equal(applied, 0)
+  assert.equal(root.global.get('injection-order-note'), undefined)
+})
+
+test('distill applyEntries: a bilingual narration marker is refused too', async () => {
+  const root = tmpRoot()
+  const applied = await distillApply(root, {
+    entries: [entry('wrapup-note', 'This session changed how the index is ordered, and it has been fixed.')],
+  })
+  assert.equal(applied, 0)
+})
+
+test('distill applyEntries: a one-line filler proposal never becomes a card', async () => {
+  const root = tmpRoot()
+  const applied = await distillApply(root, { entries: [entry('write-tests', '注意边界情况')] })
+  assert.equal(applied, 0)
+  assert.equal(root.global.get('write-tests'), undefined)
+})
+
+test('distill applyEntries: a terse but factual card still lands', async () => {
+  const root = tmpRoot()
+  // The floor sits far below the shortest card in the real store (48 chars) and
+  // below the tersest fixture in this suite: a fact is not rejected for brevity.
+  const applied = await distillApply(root, { entries: [entry('pnpm-registry-retry', '镜像源失败时先切换 registry 再重试安装')] })
+  assert.equal(applied, 1)
+})
+
+test('distill applyEntries: at most three writes per run', async () => {
   const root = tmpRoot()
   const proposals = [
     entry('dep-manager', '用户使用 pnpm 管理全部工作区依赖'),
@@ -156,8 +193,8 @@ test('distill applyEntries: at most five writes per run', async () => {
     entry('settings-toggle', '设置页开关写入配置文件即生效'),
     entry('topic-identity', '主题卡以固定键标识便于收敛'),
   ]
-  assert.equal(await distillApply(root, { entries: proposals }), 5)
-  assert.equal(root.global.list().length, 5)
+  assert.equal(await distillApply(root, { entries: proposals }), 3)
+  assert.equal(root.global.list().length, 3)
 })
 
 // --- buildDistillPrompt --------------------------------------------------------
@@ -340,7 +377,9 @@ test('buildCuratePrompt: pinned keys are named as never edited', () => {
 
 test('curator selectTargets: below the card threshold nothing is due', async () => {
   const root = tmpRoot()
-  for (let i = 0; i < 7; i += 1) await seed(root.global, `card-${String(i)}`, `第${String(i)}条互不相同的内容`)
+  // The floor is 4: a store that has not yet outgrown a single sitting's
+  // distill writes is left alone.
+  for (let i = 0; i < 3; i += 1) await seed(root.global, `card-${String(i)}`, `第${String(i)}条互不相同的内容`)
   assert.deepEqual(selectTargets(root), [])
 })
 
@@ -915,7 +954,7 @@ test('progress: a failed WRITE does not advance the cursor either', async () => 
   // The model answers fine; the store write is what fails.
   root.global.upsert = () => Promise.reject(new Error('disk full'))
   const ctx = stubCtxWithLlm([
-    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"x","summary":"s","category":"fact","content":"c"}]}' },
+    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"x","summary":"后台提炼进度语义","category":"fact","content":"正文写入失败时进度游标必须留在原处"}]}' },
     { type: 'finish', reason: { kind: 'stop' } },
   ])
   await assert.rejects(
@@ -929,13 +968,13 @@ test('progress: a SUCCESSFUL run advances the cursor and records the trace', asy
   const root = tmpRoot()
   const session = stubSession('session-progress-ok', { provider: 'p', model: 'm' })
   const ctx = stubCtxWithLlm([
-    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"progress-ok","summary":"s","category":"lesson","content":"落盘的正文"}]}' },
+    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"progress-ok","summary":"后台提炼进度语义","category":"lesson","content":"落盘的正文必须能独立成立并被下次会话复用"}]}' },
     { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
     { type: 'finish', reason: { kind: 'stop' } },
   ])
   await runDirectProbe(ctx, root, 'session-progress-ok', session, undefined, 42)
   assert.equal(root.distillSeqOf('session-progress-ok'), 42, 'progress moves only on success')
-  assert.equal(root.global.get('progress-ok')?.body, '落盘的正文', 'and the card really landed')
+  assert.equal(root.global.get('progress-ok')?.body, '落盘的正文必须能独立成立并被下次会话复用', 'and the card really landed')
   assert.equal(root.distillActivity()[0]?.saved, 1, 'the trace records the write')
 })
 
@@ -967,7 +1006,7 @@ test('progress: a partially-applied run is re-entrant — the retry does not dup
   const root = tmpRoot()
   const session = stubSession('session-progress-retry', { provider: 'p', model: 'm' })
   const chunks = [
-    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"retry-card","summary":"s","category":"lesson","content":"同一条事实"}]}' },
+    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"retry-card","summary":"后台提炼进度语义","category":"lesson","content":"同一条事实在重试后仍只应留下一张卡"}]}' },
     { type: 'finish', reason: { kind: 'stop' } },
   ]
   // Run 1 writes the card but its progress is LOST (simulating a crash right

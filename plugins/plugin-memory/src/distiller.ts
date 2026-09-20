@@ -60,7 +60,7 @@ import {
   type MemoryStore,
 } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
-import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
+import { CARD_TEXT_DISCIPLINE, screenCardText } from './card-discipline.ts'
 
 /**
  * Quiet window after the last turn before a distill fires (60 s).
@@ -173,7 +173,11 @@ const MIN_NEW_CHARS = 4_000
 
 /** Hard cap on card writes accepted from one distill run (updates + creates;
  *  quality over spam). */
-const MAX_DISTILL_ENTRIES = 5
+// 5 was the original cap, and the real store shows what it costs: one session
+// wrote 15 cards in 19 minutes across 6 quiet windows, another 10 in 8 minutes.
+// Three per window keeps the ceiling on injected growth without making a single
+// conversation the store's dominant content.
+const MAX_DISTILL_ENTRIES = 3
 
 /** One candidate card write as proposed by the model (pre-validation). There
  *  is no scope field: the host decides where a card lands (see resolveScope). */
@@ -250,6 +254,13 @@ export function buildDistillPrompt(transcript: string, cwd: string | undefined, 
     '- {"topic": "protobuf-field-map", "summary": "protobuf 字段编号表", "category": "fact",',
     '  "content": "protobuf 字段：1=correlationId 2=clientName 3=method 4=params"}',
     '  — protocol internals a future session reads from the repo in one tool call.',
+    '- {"topic": "injection-order-note", "summary": "本次讨论后按更新时间排序", "category": "fact",',
+    '  "content": "我们讨论了注入排序，最后决定按 updated 倒序取卡"}',
+    '  — narration of THIS conversation; nothing in it outlives the session it happened in.',
+    '- {"topic": "write-tests", "summary": "注意边界情况", "category": "lesson",',
+    '  "content": "开发时要注意边界情况，写好测试"}',
+    '  — true of every codebase and therefore worth nothing; a card must say WHICH case,',
+    '  WHERE it bites, or by how much.',
     'Accepted examples (durable, a DIFFERENT session would act better):',
     '- {"topic": "user-consult-style", "summary": "方案征询期望一次性给综合方案", "category": "preference",',
     '  "content": "用户在方案征询时期望一次性给出综合方案确认，不要逐个提问"} — collaboration preference.',
@@ -562,6 +573,7 @@ export class MemoryDistiller {
     // only store available is the global one.
     const store = resolveScope(cwd) === 'global' ? this.root.global : this.root.projectFor(cwd as string)
     let applied = 0
+    const screened: string[] = []
     for (const raw of proposals) {
       if (applied >= MAX_DISTILL_ENTRIES) break
       const proposal = raw as ProposedEntry
@@ -579,6 +591,16 @@ export class MemoryDistiller {
       // A leaked secret must never reach the store, even from the background
       // pass (the transcript may contain a pasted key the user shared).
       if (containsCredential(content)) continue
+      // The mechanical half of the card-text discipline: the guidelines have
+      // banned work logs since the first version and the store kept filling
+      // with them (41 background writes against ONE curation edit, measured),
+      // so the shape is refused here instead of requested in prose. Only this
+      // path is screened — `memory_save` is the user's own words.
+      const bodyProblem = screenCardText(content, 'body')
+      if (bodyProblem !== undefined) {
+        screened.push(`${bodyProblem}:${topic}`)
+        continue
+      }
       // Overlong summaries are truncated, not rejected: the hook is routing
       // metadata, the body carries the fact. The summary rides the index into
       // every session's prompt, so it gets the same commit-id strip and
@@ -587,6 +609,13 @@ export class MemoryDistiller {
         ? stripCommitIds(proposal.summary.trim()).slice(0, MAX_SUMMARY_CHARS)
         : ''
       if (containsCredential(summary)) continue
+      // A summary is what the next session ROUTES by, and the index is the one
+      // injection that is never trimmed to a budget: a narrated or empty one
+      // costs every future prompt and finds nothing.
+      if (summary !== '' && screenCardText(summary, 'summary') !== undefined) {
+        screened.push(`summary:${topic}`)
+        continue
+      }
 
       const existing = store.get(topic)
       if (existing !== undefined) {
@@ -606,6 +635,12 @@ export class MemoryDistiller {
       if (store.findSimilar(content, SIM_DUPLICATE, 1).length > 0) continue
       await store.upsert({ name: topic, category, summary, body: content })
       applied += 1
+    }
+    // A rejection is reported, not silent: the counts are the only way to tell
+    // "the model proposes well" from "the screen is eating good cards", which
+    // is exactly what the prompt-only attempt could not distinguish.
+    if (screened.length > 0) {
+      this.log.info(`memory distill: refused ${String(screened.length)} proposal(s) on card-text discipline: ${screened.join(', ')}`)
     }
     return applied
   }
