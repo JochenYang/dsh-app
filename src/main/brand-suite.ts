@@ -530,23 +530,54 @@ function contentIndent(line: string): number | undefined {
  * written (`name: "./my plugins/x.mjs"`), and a reader that could not see such a
  * row would neither carry its file nor keep it out of the loader, which is the
  * one fatal shape this whole scan exists to prevent.
+ *
+ * @param row - the row's lines.
+ * @param firstLine - 1-based number of the row's first line, so a finding can be
+ *   reported as a place in the file rather than as a bare specifier.
  */
-function rowSpecifiers(row: readonly string[]): string[] {
+function rowSpecifiers(row: readonly string[], firstLine: number): PatchSpecifier[] {
   const entryIndents = new Set<number>()
   for (const line of row) {
     if (!PATCH_ID_LINE.test(line)) continue
     const indent = contentIndent(line)
     if (indent !== undefined) entryIndents.add(indent)
   }
-  const specifiers: string[] = []
-  for (const line of row) {
+  const specifiers: PatchSpecifier[] = []
+  row.forEach((line, index) => {
     const match = PATCH_NAME_LINE.exec(line)
-    if (match === null) continue
+    if (match === null) return
     const indent = contentIndent(line)
-    if (indent === undefined || !entryIndents.has(indent)) continue
-    specifiers.push(match[3] ?? match[4] ?? '')
+    if (indent === undefined || !entryIndents.has(indent)) return
+    const specifier = match[3] ?? match[4] ?? ''
+    if (specifier !== '') specifiers.push({ specifier, line: firstLine + index })
+  })
+  return specifiers
+}
+
+/** One specifier a patch text names, with the 1-based line it was written on. */
+export interface PatchSpecifier {
+  readonly specifier: string
+  readonly line: number
+}
+
+/** Every specifier a patch text names, in first-seen order, with its line. */
+function namedSpecifiers(text: string): PatchSpecifier[] {
+  const lines = patchLines(text)
+  const found: PatchSpecifier[] = []
+  let index = 0
+  while (index < lines.length) {
+    if (!PATCH_ROW_LINE.test(lines[index] ?? '')) {
+      index += 1
+      continue
+    }
+    let end = index + 1
+    while (end < lines.length && !PATCH_ROW_LINE.test(lines[end] ?? '')) end += 1
+    for (const named of rowSpecifiers(lines.slice(index, end), index + 1)) {
+      if (!found.some((seen) => seen.specifier === named.specifier)) found.push(named)
+    }
+    index = end
   }
-  return specifiers.filter((specifier) => specifier !== '')
+  return found
 }
 
 /**
@@ -633,29 +664,29 @@ const IMPORTABLE_EXTENSIONS: readonly string[] = ['.js', '.mjs', '.cjs', '.node'
  * them (an entry field: a `name:` with a sibling `id:` at the same indent), so
  * this cannot mistake a plugin's own config key for a path. The migration uses
  * {@link relativePatchSpecifiers} to learn which files have to travel with a
- * patch that is otherwise only text; the home-layer audit uses all of them, a
- * package name included, because a row the host cannot resolve is refused by the
- * client's boot audit just the same.
+ * patch that is otherwise only text.
  *
  * @param text - one or more sections of patch-layer text.
  */
 export function patchSpecifiers(text: string): string[] {
-  const lines = patchLines(text)
-  const found: string[] = []
-  let index = 0
-  while (index < lines.length) {
-    if (!PATCH_ROW_LINE.test(lines[index] ?? '')) {
-      index += 1
-      continue
-    }
-    let end = index + 1
-    while (end < lines.length && !PATCH_ROW_LINE.test(lines[end] ?? '')) end += 1
-    for (const specifier of rowSpecifiers(lines.slice(index, end))) {
-      if (!found.includes(specifier)) found.push(specifier)
-    }
-    index = end
-  }
-  return found
+  return namedSpecifiers(text).map((named) => named.specifier)
+}
+
+/**
+ * The specifiers a patch text names that will NOT load from this profile, with
+ * the line each of them sits on.
+ *
+ * This is the finding the shell cannot act on by itself when the text is the
+ * HOME layer: on the web transport the kernel composes that file as its own
+ * layer, so the shell can neither filter it nor comment a row out — but it can
+ * name the file, the line and the row that will stop the host, which is what
+ * turns "the app does not open" into something a user can fix in a minute.
+ *
+ * @param text - the patch text to examine.
+ * @param profileDir - the profile the host will boot.
+ */
+export function unloadableRows(text: string, profileDir: string): PatchSpecifier[] {
+  return namedSpecifiers(text).filter((named) => !specifierResolves(named.specifier, profileDir))
 }
 
 /**
@@ -708,7 +739,9 @@ export function filterUnresolvableRows(text: string, profileDir: string): { text
     let end = index + 1
     while (end < lines.length && !PATCH_ROW_LINE.test(lines[end] ?? '')) end += 1
     const row = lines.slice(index, end)
-    const unresolved = rowSpecifiers(row).filter((specifier) => !specifierResolves(specifier, profileDir))
+    const unresolved = rowSpecifiers(row, index + 1)
+      .filter((named) => !specifierResolves(named.specifier, profileDir))
+      .map((named) => named.specifier)
     if (unresolved.length === 0) {
       kept.push(...row)
     } else {
@@ -747,7 +780,7 @@ export function filterUnresolvableRows(text: string, profileDir: string): { text
 export async function writeSuitePatchFile(
   profileDir: string,
   options: { suite: boolean; homeRows?: boolean; report?: (line: string) => void },
-): Promise<void> {
+): Promise<readonly PatchSpecifier[]> {
   let suite = ''
   if (options.suite) {
     suite = await readOptionalFile(path.join(__dirname, 'dsh-app.patch.yml'))
@@ -767,24 +800,24 @@ export async function writeSuitePatchFile(
   // out and why, and the file itself carries the reason beside the dead row.
   const carried = filterUnresolvableRows(parseSuitePatch(withoutManaged).preserved, profileDir)
   const copyHome = options.homeRows !== false
-  const homeLayerText = copyHome ? await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME)) : ''
+  // Read once, for both jobs: the copy this line may compose, and the audit the
+  // other line needs (it cannot compose that file, so naming the bad rows is the
+  // only thing left to do about them).
+  const homeLayerText = await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME))
   const home = copyHome
     ? filterUnresolvableRows(homeLayerText, profileDir)
     : { text: PATCH_HOME_OMITTED, skipped: [] }
   for (const specifier of [...carried.skipped, ...home.skipped]) {
     reportLine(`[brand-suite] patch row skipped: "${specifier}" does not load from ${profileDir}; the row stays in ${PROFILE_PATCH_FILENAME} commented out`, options.report)
   }
-  if (!copyHome) {
-    // This line boots through the kernel's own composer, which loads the home
-    // layer ITSELF. The shell cannot comment a row out of a file it does not
-    // write, but it can still name the rows that will not resolve: a row naming
-    // a missing file fails the whole plugin tree, and a row naming a package the
-    // profile does not have is refused by the client's boot audit — either way
-    // the window never opens, and the user's only clue is the kernel's own text.
-    for (const specifier of patchSpecifiers(homeLayerText)) {
-      if (specifierResolves(specifier, profileDir)) continue
-      reportLine(`[brand-suite] the home layer names "${specifier}", which does not load from ${profileDir}: install it into that profile (the plugin market's install action does this) or remove the row — the host cannot start while it is there`, options.report)
-    }
+  // Rows in the HOME layer this profile cannot load. On this line the kernel
+  // composes that file as a layer of its own, so the shell can neither filter it
+  // nor comment a row out — but it can hand back the file, the line and the row,
+  // which is the whole difference between "the app does not open" and a fix the
+  // user can make in a minute.
+  const homeUnloadable = copyHome ? [] : unloadableRows(homeLayerText, profileDir)
+  for (const named of homeUnloadable) {
+    reportLine(`[brand-suite] the home layer names "${named.specifier}" (line ${String(named.line)}), which does not load from ${profileDir}: install it into that profile (the plugin market's install action does this) or remove the row — the host cannot start while it is there`, options.report)
   }
   const next = composeSuitePatch({
     suite,
@@ -792,12 +825,13 @@ export async function writeSuitePatchFile(
     home: home.text,
     managed,
   })
-  if (next === existing) return
+  if (next === existing) return homeUnloadable
   await fs.mkdir(profileDir, { recursive: true })
   await fs.writeFile(target, next, 'utf8')
   // The pre-A1 overlay copy in userData is no longer passed to anything; remove
   // it so a stale file cannot look like the live composition.
   await fs.rm(path.join(app.getPath('userData'), 'dsh-app-suite.patch.yml'), { force: true }).catch(() => undefined)
+  return homeUnloadable
 }
 
 /**
@@ -806,12 +840,14 @@ export async function writeSuitePatchFile(
  * @param options - the booted profile's directory, whether the suite rows
  *   should be part of it (safe mode boots without them), and where a diagnostic
  *   line goes (see {@link writeSuitePatchFile}).
- * @returns true when the suite rows are in the profile's layer.
+ * @returns whether the suite rows are in the profile's layer, plus the home-layer
+ *   rows the booted profile cannot load (empty unless the kernel composes that
+ *   file itself — see {@link unloadableRows}).
  */
 export async function prepareBrandSuite(
   sources: readonly SuitePluginSource[],
   options: { profileDir: string; suite: boolean; homeRows?: boolean; report?: (line: string) => void },
-): Promise<boolean> {
+): Promise<{ suite: boolean; homeUnloadable: readonly PatchSpecifier[] }> {
   let suite = options.suite
   try {
     if (suite) {
@@ -830,10 +866,10 @@ export async function prepareBrandSuite(
     suite = false
   }
   try {
-    await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows, report: options.report })
-    return suite
+    const homeUnloadable = await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows, report: options.report })
+    return { suite, homeUnloadable }
   } catch (err) {
     reportLine(`[brand-suite] patch layer could not be written: ${(err as Error).message}`, options.report)
-    return false
+    return { suite: false, homeUnloadable: [] }
   }
 }

@@ -108,6 +108,9 @@ const ZH_CN = {
   'serverFailure.other': '可查看安装目录 logs 文件夹中最新的 dsh-server 日志定位原因。',
   'serverFailure.safeModeDetail': '以安全模式重启将跳过套件插件，仅加载官方内核与你自己的配置。',
   'serverFailure.willExit': '{message}\n\n应用即将退出。',
+  'serverFailure.homeRowsIntro': '你的常驻配置 {file} 里有 {count} 行在当前档案（{profile}）中加载不到：',
+  'serverFailure.homeRowLine': '· 第 {line} 行：{specifier}',
+  'serverFailure.homeRowsHint': '上面这些行会让插件树加载失败，应用因此打不开。把它们删掉或注释掉（或先把它们指向的包装进当前档案），再重试；配置的其他部分不会被改动。',
 
   // ------------------------------------------------------------ dev mode
   'devMode.workspaceHint': '开发模式使用本地 deepseek-harness 工作区；若刚拉取上游代码，请先在该目录执行 pnpm install && pnpm run build',
@@ -370,6 +373,9 @@ const EN_US: Record<MessageKey, string> = {
   'serverFailure.other': 'Check the newest dsh-server log in the logs folder of the installation directory to find the cause.',
   'serverFailure.safeModeDetail': 'Restarting in safe mode skips the suite plugins and loads only the official kernel plus your own configuration.',
   'serverFailure.willExit': '{message}\n\nThe app will now exit.',
+  'serverFailure.homeRowsIntro': 'Your home-layer configuration {file} has {count} row(s) the current profile ({profile}) cannot load:',
+  'serverFailure.homeRowLine': '· line {line}: {specifier}',
+  'serverFailure.homeRowsHint': 'Those rows make the plugin tree fail to load, which is why the app does not open. Remove or comment them out (or install the packages they name into the current profile) and retry; nothing else in your configuration is changed.',
 
   // ------------------------------------------------------------ dev mode
   'devMode.workspaceHint': 'Dev mode runs the local deepseek-harness workspace; after pulling upstream code, run pnpm install && pnpm run build in that directory first',

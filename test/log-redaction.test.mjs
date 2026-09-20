@@ -33,7 +33,7 @@ function loadYaml() {
   }
 }
 const { redact, MAX_LOG_LINE } = require('../dist/main/redact.js')
-const { composeSuitePatch, filterUnresolvableRows, marketManagedBlock, parseSuitePatch, relativePatchSpecifiers, specifierResolves } = require('../dist/main/brand-suite.js')
+const { composeSuitePatch, filterUnresolvableRows, marketManagedBlock, parseSuitePatch, relativePatchSpecifiers, specifierResolves, unloadableRows } = require('../dist/main/brand-suite.js')
 
 test('redact keeps the key name and drops the value in every shape we see', () => {
   // JSON pairs (the shape dsh prints in its own diagnostics).
@@ -345,6 +345,29 @@ function installTo(nodeModules, packageName) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(path.join(dir, 'package.json'), `${JSON.stringify({ name: packageName, version: '0.0.1' })}\n`)
 }
+
+test('unloadableRows names the home-layer rows a profile cannot load, with their lines', () => {
+  const { profileDir } = fixtureProfile()
+  installTo(path.join(profileDir, 'node_modules'), '@deepseek-ai/dsh-present')
+  const text = [
+    '# a comment',
+    '- insert:',
+    '    - id: ok-one',
+    "      name: '@deepseek-ai/dsh-present'",
+    '',
+    '- insert:',
+    '    - id: bad-one',
+    "      name: '@deepseek-ai/dsh-gone'",
+    '- id: later',
+    "  name: './local-plugins/missing.mjs'",
+  ].join('\n')
+  // The line numbers are what make the finding actionable: they go straight to
+  // the failure card, next to the file the user has to open.
+  assert.deepEqual(unloadableRows(text, profileDir), [
+    { specifier: '@deepseek-ai/dsh-gone', line: 8 },
+    { specifier: './local-plugins/missing.mjs', line: 10 },
+  ])
+})
 
 test('relativePatchSpecifiers reads entry fields only, and dedupes', () => {
   const rows = [
