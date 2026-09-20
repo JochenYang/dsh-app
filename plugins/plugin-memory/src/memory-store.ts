@@ -665,11 +665,20 @@ export class MemoryStore {
   }
 
   /**
-   * Put one archived card back into `topics/`. `file` is the archive file's
-   * stem from {@link archivedCards} (which may carry a same-day suffix);
-   * `topic` is the key it restores to. Refuses when the key is taken
-   * (restoring would overwrite a live card) or when the copy is not a valid
-   * card file. Returns the outcome for the caller to report.
+   * Put one archived card back into `topics/` and CONSUME the archived copy.
+   *
+   * `file` is the archive file's stem from {@link archivedCards} (which may
+   * carry a same-day suffix); `topic` is the key it restores to. Refuses when
+   * the key is taken (restoring would overwrite a live card) or when the copy is
+   * not a valid card file.
+   *
+   * The move is what makes the panel tell the truth: "已删除的记忆（N）" lists
+   * this directory, so a restore that left the copy behind kept showing the card
+   * as deleted, kept counting it, and answered the second click with "the key is
+   * taken" — the panel contradicting itself in three ways at once. Reverting the
+   * restore is not lost: deleting the card again archives a fresh copy.
+   *
+   * @returns the outcome for the caller to report.
    */
   async restoreArchived(day: string, file: string, topic: string): Promise<'restored' | 'missing' | 'occupied' | 'invalid'> {
     if (!/^\d{4}-\d{2}-\d{2}$/u.test(day) || !isValidTopic(topic)) return 'invalid'
@@ -689,6 +698,9 @@ export class MemoryStore {
     mkdirSync(this.topicsDirPath, { recursive: true })
     atomicWrite(join(this.topicsDirPath, `${topic}.md`), text)
     await this.reindex()
+    // Only after the card is safely live: a failure here leaves a copy the user
+    // can still restore (the file is re-read on the next click).
+    await this.deleteArchived(day, file)
     return 'restored'
   }
 

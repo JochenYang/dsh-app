@@ -124,8 +124,14 @@ test('GET /archive lists archived cards; POST /restore brings one back', async (
   })
   assert.equal(restored.status, 200)
   assert.equal(root.global.get('arch-me')?.body, '会被删除的内容', 'the card is live again')
+  // The restore CONSUMES the copy: the panel lists this directory, so a copy
+  // left behind would keep the card under "已删除的记忆（N）" forever and answer
+  // the second click with "the key is taken".
+  const afterRestore = await call('archive', { method: 'GET' })
+  const afterBody = await afterRestore.json() as { value: { total: number } }
+  assert.equal(afterBody.value.total, 0, 'the archived copy went with the restore')
 
-  // Restoring the same entry twice: the key is now taken.
+  // Restoring the same entry twice: the copy is no longer there at all.
   const again = await call('restore', {
     method: 'POST',
     body: JSON.stringify({ day: listBody.value.cards[0]!.day, file: listBody.value.cards[0]!.file, topic: 'arch-me' }),
@@ -134,7 +140,7 @@ test('GET /archive lists archived cards; POST /restore brings one back', async (
   const conflict = await again.json() as { ok: boolean, error: { code: string, host: { code: string } } }
   assert.equal(conflict.ok, false)
   // The host never sends prose: a stable code the client maps to its dictionary.
-  assert.equal(conflict.error.host.code, 'route.restoreOccupied')
+  assert.equal(conflict.error.host.code, 'route.restoreMissing')
 
   const missing = await call('restore', { method: 'POST', body: JSON.stringify({ day: '2020-01-01', file: 'nope', topic: 'nope' }) })
   assert.equal(missing.status, 409)
