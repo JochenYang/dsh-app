@@ -57,7 +57,13 @@ function harnessCheckout() {
     path.resolve(root, '..', '..', 'deepseek-harness'),
   ].filter((candidate) => candidate !== '')
   for (const candidate of candidates) {
-    if (existsSync(path.join(candidate, 'apps', 'desktop-host', 'src', 'primary-runtime.ts'))) return candidate
+    // Resolved to an absolute path: the env value may be relative to the
+    // CALLER's cwd, and the child re-exec runs with the harness as its own
+    // cwd — a relative value it inherits would resolve against the wrong tree
+    // (measured on the release workflow's macOS cell: "no harness checkout
+    // found" while the clone sat right there).
+    const resolved = path.resolve(candidate)
+    if (existsSync(path.join(resolved, 'apps', 'desktop-host', 'src', 'primary-runtime.ts'))) return resolved
   }
   throw new Error(`no harness checkout with apps/desktop-host/src/primary-runtime.ts found (looked in ${candidates.join(', ')}); `
     + 'set DSH_APP_HARNESS_CHECKOUT to one')
@@ -156,7 +162,9 @@ if (process.env[CHILD_MARKER] === '1') {
     execFileSync(process.execPath, ['--import', 'tsx/esm', fileURLToPath(import.meta.url), staged, path.join(SMOKE_ROOT, 'dsh-primary-runtime')], {
       cwd: harness,
       stdio: 'inherit',
-      env: { ...process.env, [CHILD_MARKER]: '1' },
+      // The child runs with the harness as its cwd, so it gets the RESOLVED
+      // absolute path rather than whatever the caller's environment held.
+      env: { ...process.env, [CHILD_MARKER]: '1', DSH_APP_HARNESS_CHECKOUT: harness },
     })
   } catch (error) {
     console.error(`[smoke-primary-runtime] ${error instanceof Error ? error.message : String(error)}`)
