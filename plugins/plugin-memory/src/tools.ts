@@ -290,23 +290,16 @@ export function registerMemoryTools(
     },
   }))
 
-  /** Shared tail of the save paths: own-save marker + background trigger
-   *  only when the store actually changed. */
+  /** Shared tail of the save paths: the background trigger fires only when
+   *  the store actually changed. */
   async function finishSave(result: Record<string, unknown>, store: MemoryStore, exec: ToolRunContext): Promise<Record<string, unknown>> {
     if (result.op === 'unchanged') return result
     // The write path is the ONLY trigger the background maintenance pass has
-    // (the session-driven extractor is retired — see index.ts), so without
-    // this call a project's memory would grow forever with the curator never
-    // running. `ctx.get` (not `ctx.agents`): the tools mount without
-    // declaring the agents service, and property access would throw on an
-    // undeclared key.
+    // (nothing reads a conversation — see index.ts), so without this call a
+    // project's memory would grow forever with the curator never running.
+    // `ctx.get` (not `ctx.agents`): the tools mount without declaring the
+    // agents service, and property access would throw on an undeclared key.
     const agent = exec.agent
-    if (agent !== undefined) {
-      const events = (agent.session as { snapshotEvents?: () => ReadonlyArray<{ seq: number }> })
-        .snapshotEvents?.()
-      const seq = events !== undefined && events.length > 0 ? events[events.length - 1]!.seq : 0
-      root.recordDirectSave(agent.id, seq)
-    }
     const agents = ctx.get('agents') as { get(id: SessionId): unknown } | undefined
     const parent = agent === undefined ? undefined : agents?.get(agent.id)
     if (parent !== undefined && agent !== undefined) {

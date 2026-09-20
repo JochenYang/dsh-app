@@ -1,8 +1,8 @@
 /**
- * Unit tests for the background maintenance passes (distiller + curator) on
- * the topic-card model: proposal validation, the write-time similarity gate,
- * the by-key edit protocol, and the due-store selection. Everything is
- * driven through private-method probes on temp-dir stores — no model calls.
+ * Unit tests for the background maintenance PASS (the curator) on the
+ * topic-card model: maybe-proposal validation, the by-key edit protocol, and
+ * the due-store selection. Everything is driven through private-method probes
+ * on temp-dir stores — no model calls.
  *
  * @module @dsh-app/plugin-memory/tests/background
  */
@@ -14,37 +14,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MAX_TOPIC_BODY_CHARS, MemoryRoot, MemoryStore, cardFingerprint, contentHash, projectSlug, type LedgerEntry } from '../src/memory-store.ts'
 import { CARD_TEXT_DISCIPLINE } from '../src/card-discipline.ts'
-import { MemoryDistiller, buildDistillPrompt, type SessionLike } from '../src/distiller.ts'
 import { CURATE_BUDGET, MemoryCurator, buildCuratePrompt, serializeStore } from '../src/curator.ts'
 import { apply as applyHost } from '../src/index.ts'
 
 const tmpRoot = (): MemoryRoot => new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
 const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
 
-/** The workspace the distill probes run in. A session without one writes
- *  nothing at all (the global scope is gone), so every probe that EXPECTS a
- *  write names a workspace — that fact is the point of these tests. */
+/** The workspace the curator probes run in. */
 const PROJECT_CWD = 'D:/proj'
-
-/** The store a distill in {@link PROJECT_CWD} writes to. */
-const projectCards = (root: MemoryRoot): MemoryStore => root.projectFor(PROJECT_CWD)
 
 /** The label the curator and the ledger use for that store. */
 const PROJECT_SLUG = projectSlug(PROJECT_CWD)
-
-/** Probe the distiller's private proposal-validation/apply path in
- *  {@link PROJECT_CWD} — a session WITH a workspace, which is the only kind
- *  that can still write (the global scope is gone). */
-const distillApply = async (root: MemoryRoot, structured: unknown): Promise<number> =>
-  distillApplyIn(root, structured, PROJECT_CWD)
-
-/** The same probe with an explicit workspace; `undefined` models a session
- *  started without one. Two functions because a defaulted parameter cannot
- *  tell "omitted" from "explicitly undefined". */
-const distillApplyIn = async (root: MemoryRoot, structured: unknown, cwd: string | undefined): Promise<number> => {
-  const distiller = new MemoryDistiller(null as never, root, console as never)
-  return (distiller as unknown as { applyEntries(u: unknown, c: string | undefined): Promise<number> }).applyEntries(structured, cwd)
-}
 
 /** Probe the curator's private edit-validation/apply path.
  *
@@ -92,166 +72,6 @@ const selectTargets = (root: MemoryRoot): string[] => {
 
 const entry = (topic: string, content: string, summary = ' routing hook', category = 'fact'): Record<string, string> =>
   ({ topic, summary, category, content })
-
-// --- distiller applyEntries ---------------------------------------------------
-// The pass is retired (nothing schedules it — see the host-apply test at the
-// end of this file); these probes pin the write path it left behind, including
-// the guard that keeps a session without a workspace from writing anywhere.
-
-test('distill applyEntries: a valid proposal lands in the session workspace memory', async () => {
-  const root = tmpRoot()
-  const applied = await distillApply(root, { entries: [entry('user-consult-style', '用户在方案征询时期望一次性给出综合方案确认', '方案征询期望综合方案', 'preference')] })
-  assert.equal(applied, 1)
-  const card = projectCards(root).get('user-consult-style')
-  assert.equal(card?.category, 'preference')
-  assert.equal(card?.body, '用户在方案征询时期望一次性给出综合方案确认')
-  assert.equal(card?.summary, '方案征询期望综合方案')
-  assert.equal(root.global.list().length, 0, 'the retired root scope stays empty')
-})
-
-test('distill applyEntries: a session with no workspace writes NO card anywhere', async () => {
-  const root = tmpRoot()
-  // The global scope used to absorb these — which is exactly how one
-  // workspace's conclusions reached every other project's sessions.
-  const applied = await distillApplyIn(root, {
-    entries: [
-      entry('server-location', '服务器在东京'),
-      entry('registry-retry', '镜像源失败时先切换 registry 再重试安装'),
-    ],
-  }, undefined)
-  assert.equal(applied, 0)
-  assert.equal(root.global.list().length, 0, 'nothing in the retired root scope')
-  assert.equal(existsSync(join(root.dir, 'topics', 'server-location.md')), false)
-  assert.equal(existsSync(join(root.dir, 'projects')), false, 'and no project directory was invented either')
-})
-
-test('distill applyEntries: a session with a workspace writes to the project store', async () => {
-  const root = tmpRoot()
-  const applied = await distillApply(root, { entries: [entry('pnpm-registry-retry', '镜像源失败时先切换 registry 再重试安装')] }, 'D:/proj')
-  assert.equal(applied, 1)
-  assert.equal(root.projectFor('D:/proj').get('pnpm-registry-retry')?.body, '镜像源失败时先切换 registry 再重试安装')
-  assert.equal(root.global.get('pnpm-registry-retry'), undefined)
-})
-
-test('distill applyEntries: a topic key that slugifies to nothing is rejected', async () => {
-  const root = tmpRoot()
-  // Pure-Chinese topic words carry no ASCII letters — the model must translate.
-  const applied = await distillApply(root, { entries: [entry('中文主题', '某些内容'), entry('', '更多内容')] })
-  assert.equal(applied, 0)
-  assert.equal(projectCards(root).list().length, 0)
-})
-
-test('distill applyEntries: same key with near-identical content is already covered', async () => {
-  const root = tmpRoot()
-  await distillApply(root, { entries: [entry('pnpm-registry-retry', '镜像源失败时先切换 registry 再重试安装')] })
-  // Differing only by punctuation, the normalized content is identical (sim 1).
-  const applied = await distillApply(root, { entries: [entry('pnpm-registry-retry', '镜像源失败时，先切换 registry，再重试安装。')] })
-  assert.equal(applied, 0)
-  assert.equal(projectCards(root).get('pnpm-registry-retry')?.body, '镜像源失败时先切换 registry 再重试安装')
-})
-
-test('distill applyEntries: same key with evolved content rewrites the card in place', async () => {
-  const root = tmpRoot()
-  await distillApply(root, { entries: [entry('build-pipeline', '构建脚本必须先跑类型检查再打包产物', '构建顺序约束', 'convention')] })
-  const applied = await distillApply(root, { entries: [entry('build-pipeline', '评审意见按严重度分级列出并附文件行号', '评审输出格式约定', 'convention')] })
-  assert.equal(applied, 1)
-  const card = projectCards(root).get('build-pipeline')
-  assert.equal(card?.body, '评审意见按严重度分级列出并附文件行号')
-  assert.equal(card?.summary, '评审输出格式约定')
-  // Upsert, not append: the topic still has exactly one card.
-  assert.equal(projectCards(root).list().length, 1)
-})
-
-test('distill applyEntries: a new key duplicating an existing card is rejected', async () => {
-  const root = tmpRoot()
-  // The summary is a substring of the body so findSimilar's summary+body
-  // comparison stays dominated by the body the proposal rewords.
-  await distillApply(root, { entries: [entry('pnpm-registry-retry', '镜像源失败时先切换 registry 再重试安装并记录结果', '镜像源失败时先切换')] })
-  const applied = await distillApply(root, { entries: [entry('registry-failover', '镜像源失败时先切换到 registry 再重试安装并记录结果')] })
-  assert.equal(applied, 0)
-  assert.equal(projectCards(root).get('registry-failover'), undefined)
-})
-
-test('distill applyEntries: a new key without a summary is rejected', async () => {
-  const root = tmpRoot()
-  const applied = await distillApply(root, { entries: [{ topic: 'no-hook', category: 'fact', content: '没有索引钩子的卡片' }] })
-  assert.equal(applied, 0)
-})
-
-test('distill applyEntries: credentials never reach the store', async () => {
-  const root = tmpRoot()
-  const applied = await distillApply(root, { entries: [entry('leaked-key', '调试要用 api_key: sk-abcdef1234567890 这个令牌')] })
-  assert.equal(applied, 0)
-  assert.equal(projectCards(root).list().length, 0)
-})
-
-// --- the mechanical half of the card-text discipline --------------------------
-// The guidelines ban these shapes in prose; the store filled up with them anyway
-// (41 background writes against ONE curation edit, measured). These pin the code
-// rule that now refuses them, so reverting it turns them red.
-
-test('distill applyEntries: a narrated session summary never becomes a card', async () => {
-  const root = tmpRoot()
-  const applied = await distillApply(root, {
-    entries: [entry('injection-order-note', '我们讨论了注入排序，最后决定按 updated 倒序取卡，本次已完成', '本次讨论后按更新时间排序')],
-  })
-  assert.equal(applied, 0)
-  assert.equal(projectCards(root).get('injection-order-note'), undefined)
-})
-
-test('distill applyEntries: a bilingual narration marker is refused too', async () => {
-  const root = tmpRoot()
-  const applied = await distillApply(root, {
-    entries: [entry('wrapup-note', 'This session changed how the index is ordered, and it has been fixed.')],
-  })
-  assert.equal(applied, 0)
-})
-
-test('distill applyEntries: a one-line filler proposal never becomes a card', async () => {
-  const root = tmpRoot()
-  const applied = await distillApply(root, { entries: [entry('write-tests', '注意边界情况')] })
-  assert.equal(applied, 0)
-  assert.equal(projectCards(root).get('write-tests'), undefined)
-})
-
-test('distill applyEntries: a terse but factual card still lands', async () => {
-  const root = tmpRoot()
-  // The floor sits far below the shortest card in the real store (48 chars) and
-  // below the tersest fixture in this suite: a fact is not rejected for brevity.
-  const applied = await distillApply(root, { entries: [entry('pnpm-registry-retry', '镜像源失败时先切换 registry 再重试安装')] })
-  assert.equal(applied, 1)
-})
-
-test('distill applyEntries: at most three writes per run', async () => {
-  const root = tmpRoot()
-  const proposals = [
-    entry('dep-manager', '用户使用 pnpm 管理全部工作区依赖'),
-    entry('registry-retry', '镜像源失败时先切换 registry 再重试安装'),
-    entry('build-order', '构建脚本必须先跑类型检查再打包产物'),
-    entry('quiet-window', '会话静默六十秒后触发后台蒸馏'),
-    entry('review-style', '代码评审按严重度分级列出发现'),
-    entry('settings-toggle', '设置页开关写入配置文件即生效'),
-    entry('topic-identity', '主题卡以固定键标识便于收敛'),
-  ]
-  assert.equal(await distillApply(root, { entries: proposals }), 3)
-  assert.equal(projectCards(root).list().length, 3)
-})
-
-// --- buildDistillPrompt --------------------------------------------------------
-
-test('buildDistillPrompt: card contract, no scope field, work-log ban, live index in the user half', async () => {
-  const root = tmpRoot()
-  await root.global.upsert({ name: 'user-consult-style', category: 'preference', summary: '方案征询期望综合方案', body: '用户在方案征询时期望一次性给出综合方案确认' })
-  const { system, user } = buildDistillPrompt('[user] hello', 'D:/proj', root)
-  assert.doesNotMatch(system, /"scope"/)
-  assert.ok(system.includes('"topic"'))
-  assert.ok(system.includes('"summary"'))
-  assert.match(system, /work log/i)
-  assert.match(system, /reuse that exact key/i)
-  // The live store is what the model dedupes and routes against.
-  assert.match(user, /### user-consult-style \[preference\]/)
-  assert.match(user, /用户在方案征询时期望一次性给出综合方案确认/)
-})
 
 // --- curator applyEdits --------------------------------------------------------
 
@@ -928,19 +748,12 @@ test('ledger: every refusal is reported so the caller can decide what to keep', 
   assert.equal(store.list().length, 40, 'nothing was deleted')
 })
 
-// --- prompt discipline on the two background passes ---------------------------
+// --- prompt discipline on the background pass ---------------------------------
 // The RULE itself is asserted once, against its single home, in
 // `core.test.ts` ("card-text discipline forbids narrating the saving…") and
 // the per-surface coverage is walked there too. What belongs HERE is the part
-// specific to these two prompts: that the discipline lands in the SYSTEM half
-// (the user half carries the store, which the model must not rewrite).
-
-test('buildDistillPrompt carries the discipline in its system half', () => {
-  const root = tmpRoot()
-  const { system, user } = buildDistillPrompt('[user] 说了点什么', 'D:/codes/demo', root)
-  assert.ok(system.includes(CARD_TEXT_DISCIPLINE), 'the rule rides the instructions, not the transcript')
-  assert.ok(!user.includes(CARD_TEXT_DISCIPLINE), 'the user half is material to review, not a rulebook')
-})
+// specific to this prompt: that the discipline lands in the SYSTEM half (the
+// user half carries the store, which the model must not rewrite).
 
 test('buildCuratePrompt carries the discipline in its system half', () => {
   // The curator REWRITES existing bodies: a merge that says "I merged two
@@ -950,23 +763,9 @@ test('buildCuratePrompt carries the discipline in its system half', () => {
   assert.ok(!user.includes(CARD_TEXT_DISCIPLINE))
 })
 
-// --- progress invariant (the cursor moves only after the writes land) ---------
-//
-// `advanceDistill` records "everything up to here has been judged". Moving it
-// before the writes would make a failed write PERMANENTLY invisible: the delta
-// is never re-read, so the material is lost instead of retried. These tests
-// drive the real `runDirect` with a stubbed model so the ordering is pinned,
-// not merely documented.
+// --- curator progress: a truncated pass must NOT record the store as done ----
 
-/** A session slice `runDirect` can read: an id plus a model route. */
-const stubSession = (id: string, route: { provider: string, model: string } | undefined): SessionLike => ({
-  id: id as never,
-  snapshotEvents: () => [],
-  header: {},
-  requestHeader: () => (route === undefined ? undefined : { config: route }),
-})
-
-/** A curator/distiller ctx whose `llm.stream` yields the given chunks. */
+/** A curator ctx whose `llm.stream` yields the given chunks. */
 const stubCtxWithLlm = (chunks: Array<Record<string, unknown>>): never => ({
   llm: {
     stream: async function* () {
@@ -974,105 +773,6 @@ const stubCtxWithLlm = (chunks: Array<Record<string, unknown>>): never => ({
     },
   },
 } as never)
-
-const runDirectProbe = async (
-  ctx: unknown,
-  root: MemoryRoot,
-  sessionId: string,
-  session: SessionLike,
-  cwd: string | undefined,
-  lastEventSeq: number,
-): Promise<void> => {
-  const distiller = new MemoryDistiller(ctx as never, root, console as never)
-  type RunDirect = (
-    id: never, s: SessionLike, c: string | undefined, seq: number, sys: string, usr: string, parent: never,
-  ) => Promise<void>
-  return (distiller as unknown as { runDirect: RunDirect })
-    .runDirect(sessionId as never, session, cwd, lastEventSeq, 'sys', 'usr', null as never)
-}
-
-test('progress: a FAILED model call does not advance the cursor', async () => {
-  const root = tmpRoot()
-  const session = stubSession('session-progress-fail', { provider: 'p', model: 'm' })
-  const ctx = stubCtxWithLlm([{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } }])
-  await runDirectProbe(ctx, root, 'session-progress-fail', session, undefined, 42)
-  assert.equal(root.distillSeqOf('session-progress-fail'), 0, 'the delta must be retried, not skipped')
-})
-
-test('progress: a failed WRITE does not advance the cursor either', async () => {
-  const root = tmpRoot()
-  const session = stubSession('session-progress-write', { provider: 'p', model: 'm' })
-  // The model answers fine; the STORE write is what fails. `projects` is a
-  // file, so the project store cannot create its topics directory.
-  writeFileSync(join(root.dir, 'projects'), 'not a directory', 'utf8')
-  const ctx = stubCtxWithLlm([
-    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"x","summary":"后台提炼进度语义","category":"fact","content":"正文写入失败时进度游标必须留在原处"}]}' },
-    { type: 'finish', reason: { kind: 'stop' } },
-  ])
-  await assert.rejects(
-    runDirectProbe(ctx, root, 'session-progress-write', session, PROJECT_CWD, 42),
-    /projects|EEXIST|ENOTDIR|not a directory/i,
-    'the write failure surfaces rather than being swallowed',
-  )
-  assert.equal(root.distillSeqOf('session-progress-write'), 0, 'the un-written delta stays pending for the next window')
-})
-
-test('progress: a SUCCESSFUL run advances the cursor and records the trace', async () => {
-  const root = tmpRoot()
-  const session = stubSession('session-progress-ok', { provider: 'p', model: 'm' })
-  const ctx = stubCtxWithLlm([
-    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"progress-ok","summary":"后台提炼进度语义","category":"lesson","content":"落盘的正文必须能独立成立并被下次会话复用"}]}' },
-    { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
-    { type: 'finish', reason: { kind: 'stop' } },
-  ])
-  await runDirectProbe(ctx, root, 'session-progress-ok', session, PROJECT_CWD, 42)
-  assert.equal(root.distillSeqOf('session-progress-ok'), 42, 'progress moves only on success')
-  assert.equal(projectCards(root).get('progress-ok')?.body, '落盘的正文必须能独立成立并被下次会话复用', 'and the card really landed')
-  assert.equal(root.distillActivity()[0]?.saved, 1, 'the trace records the write')
-})
-
-test('progress: a missing route KEEPS the delta rather than retiring it', async () => {
-  const root = tmpRoot()
-  const session = stubSession('session-progress-noroute', undefined)
-  await runDirectProbe(stubCtxWithLlm([]), root, 'session-progress-noroute', session, PROJECT_CWD, 42)
-  // `runDirect` is reached only when the gates found enough NEW material, and
-  // a route can still appear later (`request/header` is appended inside a
-  // step, and a turn may close with no step at all). Advancing here would
-  // retire that material for good; retrying costs one log line.
-  assert.equal(root.distillSeqOf('session-progress-noroute'), 0, 'nothing is retired while a route may still arrive')
-  assert.equal(projectCards(root).list().length, 0, 'and nothing is written')
-})
-
-test('progress: a missing route is still bounded — the delta is not processed twice', async () => {
-  const root = tmpRoot()
-  const session = stubSession('session-progress-noroute2', undefined)
-  // Retrying is safe because nothing is written and no cursor moves: running
-  // the same skip repeatedly must be idempotent, not accumulate state.
-  await runDirectProbe(stubCtxWithLlm([]), root, 'session-progress-noroute2', session, PROJECT_CWD, 42)
-  await runDirectProbe(stubCtxWithLlm([]), root, 'session-progress-noroute2', session, PROJECT_CWD, 42)
-  assert.equal(root.distillSeqOf('session-progress-noroute2'), 0)
-  assert.equal(projectCards(root).list().length, 0)
-  assert.deepEqual(root.distillActivity(), [], 'and it does not litter the activity trace either')
-})
-
-test('progress: a partially-applied run is re-entrant — the retry does not duplicate', async () => {
-  const root = tmpRoot()
-  const session = stubSession('session-progress-retry', { provider: 'p', model: 'm' })
-  const chunks = [
-    { type: 'text-delta', index: 0, text: '{"entries":[{"topic":"retry-card","summary":"后台提炼进度语义","category":"lesson","content":"同一条事实在重试后仍只应留下一张卡"}]}' },
-    { type: 'finish', reason: { kind: 'stop' } },
-  ]
-  // Run 1 writes the card but its progress is LOST (simulating a crash right
-  // after the write). Run 2 re-reads the same delta and re-proposes the same
-  // card.
-  await runDirectProbe(stubCtxWithLlm(chunks), root, 'session-progress-retry', session, PROJECT_CWD, 42)
-  const first = projectCards(root).get('retry-card')?.body
-  await runDirectProbe(stubCtxWithLlm(chunks), root, 'session-progress-retry', session, PROJECT_CWD, 0)
-  assert.equal(projectCards(root).list().length, 1, 'the retry converges on one card, it does not duplicate')
-  assert.equal(projectCards(root).get('retry-card')?.body, first)
-})
-
-// --- curator progress: a truncated pass must NOT record the store as done ----
 
 /** Drive the real `curate()` with a stubbed model over one target store. */
 const curateProbe = async (
@@ -1245,10 +945,9 @@ test('curator applyEdits: a rename still needs the new key to be well formed', a
 // --- host apply: what is mounted, and what is deliberately not ---------------
 //
 // The one thing this suite cannot see through a private-method probe is the
-// MOUNT decision, and that decision is the change that retired session-driven
-// extraction: `MemoryDistiller.attach()` subscribed to `session/event`, which
-// armed a quiet timer whose fire made a model call. Nothing may subscribe
-// again without this test going red.
+// MOUNT decision, and that decision is what retired session-driven extraction:
+// a subscription to `session/event` armed a quiet timer whose fire made a model
+// call. Nothing may subscribe again without this test going red.
 
 /** A host context stub that records what `apply()` mounted. Only the parts
  *  the plugin actually touches exist; `inject` runs its callback immediately
@@ -1273,12 +972,12 @@ function hostStub(): { ctx: never, mounted: { events: string[], effects: string[
   return { ctx: ctx as never, mounted }
 }
 
-test('host apply: nothing subscribes to the session event feed (no quiet-timer distill)', async () => {
+test('host apply: nothing subscribes to the session event feed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dshm-apply-'))
   const { ctx, mounted } = hostStub()
   await applyHost(ctx, { storePath: dir })
-  // The subscription is what armed the timer, and the timer is what spent a
-  // model call per quiet conversation. Removing the mount is the whole point.
+  // A subscription is what armed the quiet timer, and the timer is what spent
+  // a model call per quiet conversation. Nothing may mount one again.
   assert.deepEqual(mounted.events, [], 'no session/event listener is registered')
   // Everything that must still mount, does: the prompt section, the three
   // tools, the settings routes, and the curator's own disposer seam.

@@ -1,12 +1,12 @@
 /**
  * The background curator — the consolidation pass that keeps a memory store
- * lean over time. Where the retired distiller only UPSERTED cards, the
+ * lean over time. Where the retired extractor only UPSERTED cards, the
  * curator reviews a store that has grown past a threshold and proposes edits
  * BY TOPIC KEY: merge near-duplicate topics into one card, delete stale
  * cards, rewrite a card in place. It acts on memory that already exists —
  * nothing here reads a conversation.
  *
- * Identical safety model to the distiller: a direct LLM call proposes (the
+ * Same safety model as every other writer here: a direct LLM call proposes (the
  * JSON contract lives in the prompt, see {@link buildCuratePrompt}) and the
  * HOST validates every edit before anything is written — referenced keys
  * must exist and be cited at most once per pass; a merge target must be one
@@ -17,11 +17,9 @@
  * trigger.
  *
  * Trigger: the WRITE path hands us the triggering session right after a card
- * was persisted (the `memory_save` tool, and formerly a distill apply — that
- * pass is retired, see distiller.ts). The trigger does NOT depend on the
- * distiller: it is the tool's own save callback, so retiring the extraction
- * left the curator mounted and reachable exactly as before. Two gates keep
- * the pass cheap and rare:
+ * was persisted (the `memory_save` tool — the only writer there is). It is
+ * the tool's own save callback, so the pass runs exactly when memory changed
+ * and never off a conversation. Two gates keep it cheap and rare:
  *   - Cooldown: at most one sweep per {@link CURATE_COOLDOWN_MS}; requests
  *     inside the window coalesce into a single trailing sweep whose session
  *     is re-resolved by id at fire time (the original agent may be disposed
@@ -58,8 +56,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
-import { directRouteOf, type SessionLike } from './distiller.ts'
-import { resolveLlm, streamJson, type DirectRoute } from './llm-direct.ts'
+import { directRouteOf, resolveLlm, streamJson, type DirectRoute, type SessionLike } from './llm-direct.ts'
 import {
   MAX_SUMMARY_CHARS,
   MAX_TOPIC_BODY_CHARS,
@@ -82,17 +79,18 @@ import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
 /** A store below this many cards is not worth an LLM pass. */
 // 8 was the original floor, and measured against the real stores it made the
 // curator unreachable: the stores it was meant to clean hold 4-13 cards, and
-// over the plugin's whole history the distiller wrote 41 cards while curation
-// applied exactly ONE edit — "write fast, clean slow" with the cleaning end
-// switched off. 4 is the smallest floor that still skips a brand-new store.
+// over the plugin's whole history the (since-retired) extractor wrote 41 cards
+// while curation applied exactly ONE edit — "write fast, clean slow" with the
+// cleaning end switched off. 4 is the smallest floor that still skips a
+// brand-new store.
 const CURATE_MIN_ENTRIES = 4
 
-/** Minimum spacing between sweeps. Distill saves arrive one quiet window
- * apart (60 s), so without this gate an active session re-sweeps every
- * untouched store each minute; requests inside the window coalesce into one
- * trailing sweep. Three minutes, not ten: with the floor above, a store that
- * just crossed it should get its first pass in the same sitting rather than
- * after three more distill windows have added to it. */
+/** Minimum spacing between sweeps. Saves arrive as the model writes them, so
+ * without this gate an active session re-sweeps every untouched store on
+ * every save; requests inside the window coalesce into one trailing sweep.
+ * Three minutes, not ten: with the floor above, a store that just crossed it
+ * should get its first pass in the same sitting rather than after three more
+ * saves have added to it. */
 const CURATE_COOLDOWN_MS = 3 * 60_000
 
 /** Cap on the serialized store handed to the model (characters); cards past
@@ -158,7 +156,7 @@ const MAX_CURATE_CITED_KEYS = 30
  *  curating. The limit is an allowance, not a spend. */
 const CURATE_MAX_TOKENS = 8_000
 
-/** The parent-agent type the distill seam hands us (from the distiller). */
+/** The parent-agent type the save seam hands us. */
 type ParentAgent = NonNullable<ReturnType<Context['agents']['get']>>
 
 /** The slice of the triggering session a sweep needs: its id + model route. */
@@ -249,8 +247,8 @@ export function serializeStore(store: MemoryStore, start = 0): {
 
 /**
  * Build the curate prompt as system (task + rules + output contract) and
- * user (the serialized store) halves — the same split the distiller uses.
- * Pinned topic keys are named up front as untouchable: the host rejects any
+ * user (the serialized store) halves. Pinned topic keys are named up front as
+ * untouchable: the host rejects any
  * edit citing one, so telling the model saves a wasted proposal. An
  * over-budget store additionally gets an explicit shrink directive with its
  * concrete numbers. `restructure` (a store still holding auto-migrated
@@ -393,7 +391,7 @@ export class MemoryCurator {
     this.log = log
   }
 
-  /** Provide the disposal seam (effect cleanup, same pattern as the distiller). */
+  /** Provide the disposal seam (effect cleanup; a pending sweep goes with it). */
   attach(): () => void {
     this.ctx.effect(() => () => {
       this.abort.abort()
@@ -406,11 +404,11 @@ export class MemoryCurator {
    * The save trigger: sweep now when the cooldown has elapsed, otherwise
    * coalesce into the pending trailing sweep. Never throws.
    *
-   * The name says SAVE rather than distill because that is the only trigger
-   * left: the session-driven extractor is retired (see distiller.ts), so a
-   * card persisted by the model through `memory_save` is what re-arms the
-   * cleanup. Consolidating existing memory therefore depends on memory being
-   * written at all — its scope is what `memory_save` writes, nothing else.
+   * The name says SAVE because that is the only trigger there is: a card
+   * persisted by the model through `memory_save` is what re-arms the cleanup
+   * (nothing reads a conversation). Consolidating existing memory therefore
+   * depends on memory being written at all — its scope is what `memory_save`
+   * writes, nothing else.
    *
    * Gated by `isDistillEnabled()` — the user-facing background-maintenance
    * toggle (the config FIELD keeps its old name so an existing user setting
@@ -461,8 +459,8 @@ export class MemoryCurator {
 
   /**
    * One full pass over every due store. The model route comes from the
-   * triggering session (same rule as the retired distiller): no route means
-   * no call at all, and the sweep is skipped without burning the cooldown.
+   * triggering session: no route means no call at all, and the sweep is
+   * skipped without burning the cooldown.
    *
    * Never throws. Both the enumeration and each target are guarded, because
    * the callers are `void`-ed fire-and-forget (see `index.ts`) and an escaping
@@ -735,7 +733,7 @@ export class MemoryCurator {
      *  - `unseen`: a cited card's body never reached the prompt (input cap).
      *  - `stale`: the body WAS sent, but the card changed since — the model's
      *    decision was made on a view that no longer exists (a concurrent
-     *    memory_save / distill write during the model call).
+     *    memory_save during the model call).
      *  - `invalid`: shape, existence, pin, or the cited-keys ceiling. */
     type ClaimFailure = 'unseen' | 'stale' | 'over-limit' | 'invalid'
 
@@ -759,8 +757,8 @@ export class MemoryCurator {
         // card bodies do not, so the model can name a card it was never shown
         // (unseen); and because the model call is awaited for up to three
         // minutes, a card it WAS shown can be rewritten underneath it by
-        // memory_save / the distiller (stale). Either way the edit's premise
-        // is gone and applying it would silently lose the newer content.
+        // memory_save (stale). Either way the edit's premise is gone and
+        // applying it would silently lose the newer content.
         const shown = seen.get(key)
         if (shown === undefined) return { ok: false, reason: 'unseen' }
         if (shown !== contentHash(cardFingerprint(card))) return { ok: false, reason: 'stale' }
@@ -772,8 +770,8 @@ export class MemoryCurator {
     /** Validate a card body the model proposes (merge target / rewrite). */
     const cleanBody = (content: unknown): string | undefined => {
       if (typeof content !== 'string') return undefined
-      // Same commit-id hazard as distill proposals (see stripCommitIds): the
-      // model copies cited ids into the rewrite.
+      // Same commit-id hazard as any model-written card text (see
+      // stripCommitIds): the model copies cited ids into the rewrite.
       const body = stripCommitIds(content)
       if (body === '' || body.length > MAX_TOPIC_BODY_CHARS || containsCredential(body)) return undefined
       return body

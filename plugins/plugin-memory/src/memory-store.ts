@@ -7,9 +7,15 @@
  *                                            the root (it is what is left of
  *                                            the old global store) and is NOT
  *                                            card storage.
- *   <root>/distill-state.json              — per-session background progress +
- *                                            run traces + curated hashes +
- *                                            similarity-suspect log
+ *   <root>/distill-state.json              — the curator's own bookkeeping:
+ *                                            curated hashes, rotation anchors,
+ *                                            stalls, similarity suspects and
+ *                                            the consolidation ledger. The FILE
+ *                                            NAME is historical, from the pass
+ *                                            that once wrote per-session
+ *                                            progress here; the reader ignores
+ *                                            the keys it no longer defines
+ *                                            (an old file is not an error)
  *   <root>/llm-audit.json                  — background LLM cost rows
  *   <root>/projects/<slug>/topics/<key>.md — one PROJECT card per topic
  *                                            (decisions, conventions, lessons;
@@ -53,7 +59,7 @@ import {
 import { promises as fsp } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { removeTree } from './remove-tree.ts'
-import type { MemoryCategory, MemoryDistillActivity, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
+import type { MemoryCategory, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
 import { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, MEMORY_CATEGORIES } from './types.ts'
 
 /** One card body gets at most this many characters: room for a consolidated
@@ -199,7 +205,7 @@ const CREDENTIAL_PATTERNS: readonly RegExp[] = [
 
 /**
  * Whether `text` looks like it carries a credential (key/token/password).
- * Checked before every persist path (tool save, distill apply, curator merge)
+ * Checked before every persist path (the tool's save, the curator's edits)
  * so a pasted secret never lands in a card that is re-injected into every
  * future session.
  */
@@ -367,7 +373,7 @@ function indexLine(card: TopicCard, pinned: Set<string>): string {
 }
 
 /** Validate an upsert payload; returns an error string or undefined. Exported
- *  so the tool and the distiller share one rule set. The summary rides the
+ *  so the tool and the curator share one rule set. The summary rides the
  *  index into every session's prompt, so it is credential-checked alongside
  *  the body — a secret is not safer at 40 characters. */
 export function validateCardInput(input: { name: string, category: string, summary: string, body: string }): string | undefined {
@@ -760,7 +766,7 @@ export class MemoryStore {
   // --- queries ---------------------------------------------------------------
 
   /** Whether a card body EQUIVALENT to `content` exists (exact normalized
-   *  match — the distiller's cheap pre-dedupe before similarity runs). */
+   *  match — the cheap pre-dedupe before similarity runs). */
   hasContent(content: string): boolean {
     const needle = normalizeForMatch(content)
     if (needle === '') return false
@@ -992,8 +998,10 @@ export class MemoryStore {
     this.writeConfig({ enabled: value })
   }
 
-  /** Background-distill sub-toggle (the async safety net); defaults ON —
-   *  the whole point is that it needs no user attention. */
+  /** Background-maintenance sub-toggle (the curator's gate); defaults ON —
+   *  the whole point is that it needs no user attention. The config FIELD
+   *  keeps the name of the pass it used to gate, so an existing user setting
+   *  survives. */
   isDistillEnabled(): boolean {
     return this.readConfigField('distill', true)
   }
@@ -1100,32 +1108,9 @@ export async function removeProject(rootDir: string, slug: string): Promise<void
   await removeTree(join(rootDir, 'projects', slug))
 }
 
-/** How many sessions the distill-progress map keeps before the oldest
- * entries are pruned (the map is a cache, not a ledger — a dropped session
- * simply re-distills its full log on next activation). */
-const MAX_TRACKED_SESSIONS = 300
-
-/** How many distill-run traces distill-state.json retains (FIFO). */
-const MAX_ACTIVITY = 20
-
 /** How many similarity-suspect pairs distill-state.json retains (FIFO). The
  *  write-time gate's tuning data: every ≥τ_dup pair the light sweep notices. */
 const MAX_SUSPECTS = 50
-
-/** One session's background-distill progress. */
-export interface DistillProgress {
-  /** Last session-event seq already consumed by a distill run. */
-  seq: number
-  /** Unix epoch ms of the last distill run for this session. */
-  at: number
-  /**
-   * Event seq at which this session last saved a card itself through the
-   * memory_save tool (absent/0 = never). The distiller consumes only events
-   * PAST this point: material up to the save was already judged by the
-   * agent, while everything after it has had no second opinion yet.
-   */
-  savedAtSeq?: number
-}
 
 /** Short display id: the uuid segment's first 8 chars (`session-` prefix
  * dropped), e.g. `session-49ce2455-...` → `49ce2455`. */
@@ -1133,8 +1118,6 @@ export function shortSessionId(sessionId: string): string {
   return sessionId.replace(/^session-/u, '').slice(0, 8)
 }
 
-/** One background-distill run's trace entry (store view of the wire shape). */
-export type DistillActivity = Pick<MemoryDistillActivity, 'at' | 'session' | 'saved' | 'backend' | 'tokens'>
 /** One background LLM call's audit record (store view of the wire shape). */
 export type LlmAuditRun = Pick<MemoryLlmAuditRun, 'at' | 'source' | 'session' | 'status' | 'inputTokens' | 'outputTokens' | 'durationMs' | 'error'>
 /** One similarity-suspect pair noticed by the light sweep. */
@@ -1150,9 +1133,9 @@ const MAX_AUDIT_RUNS = 100
 
 /**
  * One consolidation event: what a pass (or a tool call) DID to the store.
- * `recordDistill`/`recordLlmAudit` count calls and tokens; this records the
- * OBJECTS, which is what answers "why is that card gone?" — pair it with the
- * archive (`archivedCards`) to also answer "and can I get it back?".
+ * `recordLlmAudit` counts calls and tokens; this records the OBJECTS, which is
+ * what answers "why is that card gone?" — pair it with the archive
+ * (`archivedCards`) to also answer "and can I get it back?".
  */
 export interface LedgerEntry {
   at: number
@@ -1202,11 +1185,15 @@ interface LlmAuditState {
   runs: LlmAuditRun[]
 }
 
-/** Persisted shape of distill-state.json. */
+/**
+ * Persisted shape of distill-state.json. Keys an older file still carries —
+ * `sessions` and `activity`, the retired extractor's per-session progress and
+ * run traces — are simply not read: parsing ignores them and the next write
+ * drops them. The FILE NAME itself stays (a rename would drop the live
+ * bookkeeping below it).
+ */
 interface DistillState {
   version: 1
-  sessions: Record<string, DistillProgress>
-  activity: DistillActivity[]
   /**
    * Content hash of each scope ('global' or a project slug) at its last
    * completed curation pass; a scope whose current fingerprint differs is due
@@ -1494,52 +1481,6 @@ export class MemoryRoot {
     return moved
   }
 
-  /** Last-consumed event seq for one session (0 when never distilled). */
-  distillSeqOf(sessionId: string): number {
-    return this.readDistillState().sessions[sessionId]?.seq ?? 0
-  }
-
-  /** Advance one session's distill progress and persist (with pruning). */
-  advanceDistill(sessionId: string, seq: number): void {
-    const state = this.readDistillState()
-    state.sessions[sessionId] = { seq, at: Date.now(), savedAtSeq: 0 }
-    const ids = Object.keys(state.sessions)
-    if (ids.length > MAX_TRACKED_SESSIONS) {
-      ids.sort((a, b) => state.sessions[a]!.at - state.sessions[b]!.at)
-      for (const id of ids.slice(0, ids.length - MAX_TRACKED_SESSIONS)) {
-        delete state.sessions[id]
-      }
-    }
-    mkdirSync(this.dir, { recursive: true })
-    atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
-  }
-
-  /** The event seq at which this session last saved a card itself, 0 when
-   *  it never did (see DistillProgress.savedAtSeq). */
-  ownSaveSeqOf(sessionId: string): number {
-    const progress = this.readDistillState().sessions[sessionId]
-    return Math.max(0, Math.floor(progress?.savedAtSeq ?? 0))
-  }
-
-  /** Record that the session wrote a card itself at the given event seq (the
-   *  highest seq keeps winning across repeated saves). */
-  recordDirectSave(sessionId: string, seq: number): void {
-    const state = this.readDistillState()
-    const previous = state.sessions[sessionId]
-    state.sessions[sessionId] = {
-      seq: previous?.seq ?? 0,
-      at: previous?.at ?? 0,
-      savedAtSeq: Math.max(previous?.savedAtSeq ?? 0, Math.max(0, Math.floor(seq))),
-    }
-    mkdirSync(this.dir, { recursive: true })
-    atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
-  }
-
-  /** Recent distill-run traces, newest first (bounded FIFO). */
-  distillActivity(): DistillActivity[] {
-    return [...this.readDistillState().activity].sort((a, b) => b.at - a.at)
-  }
-
   /** Content hash recorded at a target's last completed curation pass. */
   curatedHashOf(key: string): string | undefined {
     return this.readDistillState().curated?.[key]
@@ -1631,7 +1572,7 @@ export class MemoryRoot {
    * Append consolidation events (bounded FIFO) and persist — ONE read/write
    * for the whole batch. A curator pass can produce dozens of events, and the
    * per-entry form would read and rewrite the entire state file (which also
-   * carries every session cursor) once per event.
+   * carries every curated hash and rotation anchor) once per event.
    *
    * Never throws: this is DIAGNOSTIC data. A failure to record why a card was
    * deleted must not turn a completed deletion into an error for the caller,
@@ -1672,17 +1613,6 @@ export class MemoryRoot {
       .map(item => item.entry)
   }
 
-  /** Append one distill trace and persist (bounded, survives restarts). */
-  recordDistill(sessionId: string, saved: number, backend?: 'direct' | 'subagent', tokens?: number): void {
-    const state = this.readDistillState()
-    state.activity.push({ at: Date.now(), session: shortSessionId(sessionId), saved, backend, tokens })
-    if (state.activity.length > MAX_ACTIVITY) {
-      state.activity = state.activity.slice(-MAX_ACTIVITY)
-    }
-    mkdirSync(this.dir, { recursive: true })
-    atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
-  }
-
   /** Append one background-LLM audit row and persist (bounded FIFO). */
   recordLlmAudit(run: Omit<LlmAuditRun, 'at'> & { at?: number }): void {
     let runs: LlmAuditRun[] = []
@@ -1713,13 +1643,13 @@ export class MemoryRoot {
     return []
   }
 
-  /** Read (and repair) distill-state.json; missing/malformed → empty. */
+  /** Read (and repair) distill-state.json; missing/malformed → empty. Keys an
+   *  older file carries but this module no longer defines are ignored — an old
+   *  state file must never make the store throw. */
   private readDistillState(): DistillState {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.distillStatePath, 'utf8'))
       if (typeof parsed === 'object' && parsed !== null) {
-        const sessions = (parsed as { sessions?: unknown }).sessions
-        const activity = (parsed as { activity?: unknown }).activity
         const curated = (parsed as { curated?: unknown }).curated
         const suspects = (parsed as { suspects?: unknown }).suspects
         const curateCursor = (parsed as { curateCursor?: unknown }).curateCursor
@@ -1727,10 +1657,6 @@ export class MemoryRoot {
         const ledger = (parsed as { ledger?: unknown }).ledger
         return {
           version: 1,
-          sessions: typeof sessions === 'object' && sessions !== null
-            ? sessions as Record<string, DistillProgress>
-            : {},
-          activity: Array.isArray(activity) ? activity as DistillActivity[] : [],
           curated: typeof curated === 'object' && curated !== null
             ? curated as Record<string, string>
             : undefined,
@@ -1747,6 +1673,6 @@ export class MemoryRoot {
     } catch {
       // absent or unreadable → fresh state
     }
-    return { version: 1, sessions: {}, activity: [] }
+    return { version: 1 }
   }
 }

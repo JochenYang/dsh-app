@@ -40,7 +40,7 @@ export interface MemoryCardRow {
   summary: string
   /** `YYYY-MM-DD` of the last content change. */
   updated: string
-  /** Full body (entries route only; the status list omits it). */
+  /** Full body (the rows /entries serves, which the page expands in place). */
   body?: string
   pinned: boolean
 }
@@ -56,27 +56,12 @@ export interface MemoryProjectSummary {
   sizeBytes: number
 }
 
-/** One background-distill run's trace entry (settings-page transparency).
- *  Only rows written by the retired extractor can still appear here — the
- *  curator records its runs in the LLM audit instead. Kept as a wire shape
- *  until the panel that reads it is removed. */
-export interface MemoryDistillActivity {
-  /** Unix epoch ms when the run happened. */
-  at: number
-  /** Short session id (first 8 hex) the run covered. */
-  session: string
-  /** Cards the run persisted (0 = it ran but nothing new qualified). */
-  saved: number
-  /** LLM channel that ran the pass (absent for traces before backend tracking). */
-  backend?: 'direct' | 'subagent'
-  /** Model tokens spent on the pass (direct channel only). */
-  tokens?: number
-}
-
-/** One background-LLM audit row (cost observability). */
+/** One background-LLM audit row (cost observability). Rows written before the
+ *  extractor was retired may still say `distill` on disk; the reader passes
+ *  whatever the file holds through unchanged. */
 export interface MemoryLlmAuditRun {
   at: number
-  source: 'distill' | 'curate'
+  source: 'curate'
   session: string
   status: 'ok' | 'error' | 'aborted'
   inputTokens: number
@@ -85,7 +70,7 @@ export interface MemoryLlmAuditRun {
   error?: string
 }
 
-/** Response of GET api/entries — one store's cards with pin state. */
+/** Response of GET api/entries — one project store's cards with pin state. */
 export interface MemoryEntriesResponse {
   cards: MemoryCardRow[]
 }
@@ -122,10 +107,12 @@ export interface MemoryArchiveRow {
   topic: string
   bytes: number
   /** Which scope the copy belongs to, in the same vocabulary the other routes
-   *  use (`scope` + `slug`) so a restore can address it directly. */
-  scope: 'global' | 'project'
-  /** The project slug when scope is 'project'. */
-  slug?: string
+   *  use (`scope` + `slug`) so a restore can address it directly. Only a
+   *  project exists now: the retired scope's archive moved into
+   *  `projects/legacy-global/` and is listed as that project. */
+  scope: 'project'
+  /** The project slug the copy belongs to (the restore handle). */
+  slug: string
 }
 
 /** Response of GET api/archive — one store's archived cards. */
@@ -175,22 +162,10 @@ export interface MemoryStatus {
   /** Whether the background maintenance pass is active (sub-toggle; the field
    *  keeps the name of the pass it used to gate). */
   distill: boolean
-  /** Cards in the ROOT store — the retired global scope, empty on any store
-   *  whose boot migration has run. Kept until the UI cleanup removes the row. */
-  cards: number
-  /** ROOT topics/ size in bytes. */
-  sizeBytes: number
-  /** ROOT topics directory path (the retired scope's card directory). */
-  storePath: string
-  /** ROOT cards in index order with their pin state (retired scope; empty). */
-  globalList: MemoryCardRow[]
-  /** Per-project summaries, largest first. */
+  /** Per-project summaries, largest first. The retired global scope has no row
+   *  of its own: its cards are `projects/legacy-global/`, listed like any
+   *  other project. */
   projects: MemoryProjectSummary[]
-  /** Recent maintenance-run traces, newest first (bounded list). */
-  activity: MemoryDistillActivity[]
-  /** Set when the last archive write failed: the settings page warns that
-   *  the undo is not available instead of promising a restore. */
-  archiveError?: boolean
 }
 
 /** Route namespace on the shared Connection `/api` channel. The registry admits

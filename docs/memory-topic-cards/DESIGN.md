@@ -5,6 +5,18 @@
 > 目标读者：本仓库维护者；实施前请先读 §0 根因与 §7 迁移
 > 加固与可恢复性改造另见同目录 [`OPTIMIZATION.md`](OPTIMIZATION.md)（含回归台账）
 
+> **Superseded in part — 2026-09-21, commits `cfe0484` (retire the global
+> scope, stop extracting cards from conversations) and `472f554` (drop the
+> settings-page global block), cleanup recorded in `OPTIMIZATION.md` §4.8.** The
+> global scope is retired: its cards and their archive live in
+> `projects/legacy-global/`, no route addresses the root store any more, and the
+> injection carries project cards only. Nothing extracts cards from a
+> conversation in the background: the model saves what it judges worth keeping
+> through `memory_save`, and the background pass only tidies cards that already
+> exist. The sections below stay as the record of the L1–L4 design — where they
+> describe the distiller proposal schema (§2.6) or the two-scope layout (§2.1,
+> §2.5, §5), the notes above are what the code does now.
+
 ## 0. 背景：为什么现在是流水账
 
 当前每个作用域（global / 每 project）只有**一个 append-only 的 `memory.md`**，条目形态为

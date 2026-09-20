@@ -86,10 +86,10 @@ test('GET /status answers the envelope the settings page reads', async () => {
   assert.equal(response.headers.get('content-type'), 'application/json')
   const body = await response.json() as { ok: boolean, value: Record<string, unknown> }
   assert.equal(body.ok, true)
-  // Bodies stay out of the status payload; the entries route serves them.
-  assert.deepEqual(Object.keys(body.value).sort(), [
-    'activity', 'cards', 'distill', 'enabled', 'globalList', 'projects', 'sizeBytes', 'storePath',
-  ])
+  // The payload is the page's world and nothing more: the two toggles and the
+  // project list. Card bodies stay out (the entries route serves them on
+  // demand), and the retired global scope has no row of its own.
+  assert.deepEqual(Object.keys(body.value).sort(), ['distill', 'enabled', 'projects'])
   void dispose()
 })
 
@@ -108,22 +108,25 @@ test('GET /archive lists archived cards; POST /restore brings one back', async (
     return route.fetch(new Request(`https://localhost${route.path}`, init))
   }
 
-  await root.global.upsert({ name: 'arch-me', category: 'lesson', summary: '归档目标', body: '会被删除的内容' })
-  await root.global.forget('arch-me')
+  const slug = projectSlug('D:/codes/demo')
+  const store = root.projectFor('D:/codes/demo')
+  await store.upsert({ name: 'arch-me', category: 'lesson', summary: '归档目标', body: '会被删除的内容' })
+  await store.forget('arch-me')
 
   const listed = await call('archive', { method: 'GET' })
   assert.equal(listed.status, 200)
-  const listBody = await listed.json() as { ok: boolean, value: { cards: Array<{ day: string, topic: string }>, total: number } }
+  const listBody = await listed.json() as { ok: boolean, value: { cards: MemoryArchiveRow[], total: number } }
   assert.equal(listBody.ok, true)
   assert.equal(listBody.value.total, 1)
   assert.equal(listBody.value.cards[0]!.topic, 'arch-me')
+  assert.equal(listBody.value.cards[0]!.slug, slug, 'a copy is addressed by its project')
 
   const restored = await call('restore', {
     method: 'POST',
-    body: JSON.stringify({ day: listBody.value.cards[0]!.day, file: listBody.value.cards[0]!.file, topic: 'arch-me' }),
+    body: JSON.stringify({ scope: 'project', slug, day: listBody.value.cards[0]!.day, file: listBody.value.cards[0]!.file, topic: 'arch-me' }),
   })
   assert.equal(restored.status, 200)
-  assert.equal(root.global.get('arch-me')?.body, '会被删除的内容', 'the card is live again')
+  assert.equal(store.get('arch-me')?.body, '会被删除的内容', 'the card is live again')
   // The restore CONSUMES the copy: the panel lists this directory, so a copy
   // left behind would keep the card under "已删除的记忆（N）" forever and answer
   // the second click with "the key is taken".
@@ -134,7 +137,7 @@ test('GET /archive lists archived cards; POST /restore brings one back', async (
   // Restoring the same entry twice: the copy is no longer there at all.
   const again = await call('restore', {
     method: 'POST',
-    body: JSON.stringify({ day: listBody.value.cards[0]!.day, file: listBody.value.cards[0]!.file, topic: 'arch-me' }),
+    body: JSON.stringify({ scope: 'project', slug, day: listBody.value.cards[0]!.day, file: listBody.value.cards[0]!.file, topic: 'arch-me' }),
   })
   assert.equal(again.status, 409)
   const conflict = await again.json() as { ok: boolean, error: { code: string, host: { code: string } } }
@@ -142,10 +145,15 @@ test('GET /archive lists archived cards; POST /restore brings one back', async (
   // The host never sends prose: a stable code the client maps to its dictionary.
   assert.equal(conflict.error.host.code, 'route.restoreMissing')
 
-  const missing = await call('restore', { method: 'POST', body: JSON.stringify({ day: '2020-01-01', file: 'nope', topic: 'nope' }) })
+  const missing = await call('restore', { method: 'POST', body: JSON.stringify({ scope: 'project', slug, day: '2020-01-01', file: 'nope', topic: 'nope' }) })
   assert.equal(missing.status, 409)
-  const badArgs = await call('restore', { method: 'POST', body: JSON.stringify({ topic: 'arch-me' }) })
+  const badArgs = await call('restore', { method: 'POST', body: JSON.stringify({ scope: 'project', slug, topic: 'arch-me' }) })
   assert.equal(badArgs.status, 400)
+  // A body without a scope used to be served by the ROOT store — the retired
+  // global scope. It is a refusal now, with a code the page can explain.
+  const noScope = await call('restore', { method: 'POST', body: JSON.stringify({ day: '2020-01-01', file: 'nope', topic: 'nope' }) })
+  assert.equal(noScope.status, 400)
+  assert.equal(((await noScope.json()) as { error: { host: { code: string } } }).error.host.code, 'route.scopeRequired')
   void dispose()
 })
 
@@ -180,11 +188,14 @@ test('GET /ledger serves the consolidation events the panels read', async () => 
   void dispose()
 })
 
-test('GET /archive lists EVERY scope, not just global', async () => {
+test('GET /archive lists EVERY project, and never the retired root scope', async () => {
   // The bug this pins: the settings page asked for /archive with no scope, the
   // route defaulted to the GLOBAL store, and a card deleted from a PROJECT was
   // therefore invisible — the user saw "已删除的记忆（0）" right after deleting
-  // one, while the copy sat in projects/<slug>/archive/ the whole time.
+  // one, while the copy sat in projects/<slug>/archive/ the whole time. The
+  // answer is every PROJECT now; the retired scope (the root store) is not one,
+  // so a copy still sitting there is deliberately not listed: restoring it
+  // would address a store nothing reads.
   const routes: RegisteredRoute[] = []
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-allscope-')))
   const dispose = registerMemoryRoutes({
@@ -199,21 +210,36 @@ test('GET /archive lists EVERY scope, not just global', async () => {
     return route.fetch(new Request(`https://localhost${route.path}`, init))
   }
 
-  await root.global.upsert({ name: 'global-casualty', category: 'fact', summary: 's', body: '全局删掉的' })
-  await root.global.forget('global-casualty')
+  await root.global.upsert({ name: 'retired-casualty', category: 'fact', summary: 's', body: '全局删掉的' })
+  await root.global.forget('retired-casualty')
   const project = root.projectFor('D:/codes/demo')
+  const slug = projectSlug('D:/codes/demo')
   await project.upsert({ name: 'project-casualty', category: 'lesson', summary: 's', body: '项目里删掉的' })
   await project.forget('project-casualty')
 
   const listed = await call('archive', { method: 'GET' })
   const body = await listed.json() as { value: { cards: MemoryArchiveRow[], total: number } }
-  assert.equal(body.value.total, 2, 'both scopes are listed')
+  assert.equal(body.value.total, 1, 'the project copy is listed, the retired scope is not')
   const byTopic = new Map(body.value.cards.map(card => [card.topic, card]))
-  assert.equal(byTopic.get('global-casualty')?.scope, 'global')
+  assert.equal(byTopic.get('retired-casualty'), undefined, 'the retired root scope is never enumerated')
   assert.equal(byTopic.get('project-casualty')?.scope, 'project')
-  assert.equal(byTopic.get('project-casualty')?.slug, projectSlug('D:/codes/demo'), 'the slug is the restore handle')
+  assert.equal(byTopic.get('project-casualty')?.slug, slug, 'the slug is the restore handle')
 
-  // And the restore lands back in the scope it came from.
+  // An explicit scope narrows the answer, and the retired scope is REFUSED on
+  // the scope itself — even when a project slug rides along, it resolves to no
+  // store at all.
+  const archiveRoute = routes.find(entry => entry.path === `${ROUTE_PREFIX}/archive`)
+  assert.ok(archiveRoute !== undefined)
+  const query = async (search: string): Promise<Response> =>
+    archiveRoute.fetch(new Request(`https://localhost${ROUTE_PREFIX}/archive${search}`, { method: 'GET' }))
+  const narrowed = await query(`?scope=project&slug=${slug}`)
+  assert.equal(narrowed.status, 200)
+  assert.equal(((await narrowed.json()) as { value: { total: number } }).value.total, 1)
+  const retired = await query(`?scope=global&slug=${slug}`)
+  assert.equal(retired.status, 400)
+  assert.equal(((await retired.json()) as { error: { host: { code: string } } }).error.host.code, 'route.scopeRequired')
+
+  // And the restore lands back in the project it came from.
   const entry = byTopic.get('project-casualty')!
   const restored = await call('restore', {
     method: 'POST',
@@ -221,11 +247,7 @@ test('GET /archive lists EVERY scope, not just global', async () => {
   })
   assert.equal(restored.status, 200)
   assert.equal(project.get('project-casualty')?.body, '项目里删掉的', 'back in the PROJECT store')
-  assert.equal(root.global.get('project-casualty'), undefined, 'and NOT leaked into global')
-
-  // An explicit scope still narrows the answer.
-  const scoped = await call('archive', { method: 'GET', headers: {} })
-  assert.equal(scoped.status, 200)
+  assert.equal(root.global.get('project-casualty'), undefined, 'and NOT leaked into the retired root store')
   void dispose()
 })
 

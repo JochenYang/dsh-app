@@ -1,27 +1,22 @@
 /**
  * Settings-page API on the shared Connection `/api` channel, under
  * `/api/plugins/dsh-app/plugin-memory`:
- *   GET  /status        — toggle states + stats (project list; the retired
- *                         scope's row is empty on any migrated store)
- *   GET  /entries?slug= — one store's cards WITH bodies + pin state;
- *                         no slug (or empty) = the ROOT store, which is what
- *                         the settings page still asks for (see below)
+ *   GET  /status        — toggle states + the project list
+ *   GET  /entries?slug= — one project store's cards WITH bodies + pin state
  *   GET  /llm-audit     — recent background-LLM cost rows (newest 20)
  *   POST /config        — set toggles (body {enabled?, distill?} booleans)
- *   POST /pin           — pin/unpin one card (body {topic, pinned, scope?, slug?})
+ *   POST /pin           — pin/unpin one card (body {topic, pinned, scope, slug})
  *   POST /forget        — delete cards by topic key or content substring
- *                         (body {match, scope?, slug?})
- *   POST /clear         — {scope:'global'} empties the ROOT store (whose cards
- *                         the boot migration already moved out);
- *                         {scope:'project', slug} removes that project directory.
+ *                         (body {match, scope, slug})
+ *   POST /clear         — {scope:'project', slug} removes that project directory
  *
- * The root-level store is the RETIRED global scope: no session injects it and
- * no tool writes it any more, and its cards are relocated into a project at
- * boot (memory-store.ts). The routes below still serve it because the settings
- * page still has that section and must not break on a store the migration
- * could not finish — an empty scope is a truthful answer. Removing the
- * section, these branches and the wire fields they fill is the next stage's
- * work; until then this is compatibility surface, not a capability.
+ * Every scoped call NAMES its store, and only a project can be named: the
+ * former GLOBAL scope is retired (no session injects it, no tool writes it,
+ * and its cards moved into `projects/legacy-global/` at boot), so a body that
+ * omits the scope — or asks for `global` — is refused instead of silently
+ * addressing the root store. Nothing is lost by the refusal: the retired
+ * scope's cards and their archive are an ordinary project directory now,
+ * which is what the project list shows and what these routes address.
  *
  * Trust is the carrier's: the Connection transport applies its Host/Origin fence
  * and browser authentication before a route handler runs (see
@@ -51,18 +46,17 @@ export { ROUTE_PREFIX }
 const MAX_BODY_BYTES = 8_192
 
 /**
- * Resolve the target store of a scoped write body (pin/forget).
+ * Resolve the target store of a scoped write body (pin/forget/restore/…).
  * @param root - the memory root.
  * @param body - the request payload.
- * @returns the store to write to, or the refusal to answer with. An absent
- *   scope still resolves to the ROOT store: that is what the settings page
- *   sends for its (retired) global rows, and serving them keeps the page
- *   working until the next stage removes the section.
+ * @returns the store to write to, or the refusal to answer with. The scope is
+ *   REQUIRED and only `project` can name a store: the retired global scope —
+ *   the root store an omitted scope used to fall back into — is refused here
+ *   rather than silently served.
  */
 function resolveStore(root: MemoryRoot, body: Record<string, unknown>): MemoryStore | Response {
-  if (body.scope === undefined || body.scope === 'global') return root.global
   if (body.scope !== 'project') {
-    return fail(400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
+    return fail(400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be project' })
   }
   const slug = body.slug
   if (typeof slug !== 'string' || !isValidSlug(slug)) {
@@ -96,17 +90,17 @@ function fail(status: number, code: string, host: HostText): Response {
   return sendJson(status, { ok: false, error: { code, message: host.text ?? host.code, host } })
 }
 
-/** Wire row for one card; the status list omits bodies, /entries includes them. */
-function cardRow(card: TopicCard, pinned: ReadonlySet<string>, withBody: boolean): MemoryCardRow {
-  const row: MemoryCardRow = {
+/** Wire row for one card, body included: only /entries serves rows, and the
+ *  expanded row needs the text. */
+function cardRow(card: TopicCard, pinned: ReadonlySet<string>): MemoryCardRow {
+  return {
     topic: card.name,
     category: card.category,
     summary: card.summary,
     updated: card.updated,
     pinned: pinned.has(card.name),
+    body: card.body,
   }
-  if (withBody) row.body = card.body
-  return row
 }
 
 /**
@@ -157,23 +151,14 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
       methods: ['GET'],
       requestBody: 'buffered',
       fetch: async () => {
-        const { cards, sizeBytes } = root.global.stats()
-        const pinned = root.global.pinnedSet()
+        // The payload is exactly what the page renders: the two toggle states
+        // and the project list. The retired global block's stats and the
+        // extractor's run traces are gone with their surfaces — card bodies
+        // are served on demand by /entries.
         const status: MemoryStatus = {
           enabled: root.global.isEnabled(),
           distill: root.global.isDistillEnabled(),
-          cards,
-          sizeBytes,
-          storePath: root.global.storePath,
-          // Bodies stay out of the status payload: the settings list shows
-          // summaries, and the entries route serves bodies on demand.
-          globalList: root.global.list().map(card => cardRow(card, pinned, false)),
           projects: listProjects(root.dir),
-          activity: root.distillActivity(),
-          // The undo surface's health: when an archive write failed, the
-          // settings page must say so rather than promising a restore that
-          // is not there.
-          ...(root.global.lastArchiveError() === undefined ? {} : { archiveError: true }),
         }
         return ok(status)
       },
@@ -220,26 +205,21 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
         } catch (error) {
           return bodyFailure(error)
         }
-        if (body.scope === 'project') {
-          const slug = body.slug
-          if (typeof slug !== 'string' || !isValidSlug(slug)) {
-            return fail(400, 'bad-request', { code: 'route.slugInvalid', text: 'the slug is malformed' })
-          }
-          try {
-            await removeProject(root.dir, slug)
-            return ok({ scope: 'project', slug })
-          } catch {
-            return fail(500, 'io', { code: 'route.clearProjectFailed', text: 'could not clear the project memory' })
-          }
+        // Only a project names a store, so a body without the scope is refused
+        // rather than answered with the root store — clearing is destructive,
+        // and it must never be reached by omission.
+        if (body.scope !== 'project') {
+          return fail(400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be project' })
         }
-        if (body.scope !== 'global' && body.scope !== undefined) {
-          return fail(400, 'bad-request', { code: 'route.scopeRequired', text: 'scope must be global or project' })
+        const slug = body.slug
+        if (typeof slug !== 'string' || !isValidSlug(slug)) {
+          return fail(400, 'bad-request', { code: 'route.slugInvalid', text: 'the slug is malformed' })
         }
         try {
-          await root.global.clear()
-          return ok({ scope: 'global' })
+          await removeProject(root.dir, slug)
+          return ok({ scope: 'project', slug })
         } catch {
-          return fail(500, 'io', { code: 'route.clearGlobalFailed', text: 'could not clear the global memory' })
+          return fail(500, 'io', { code: 'route.clearProjectFailed', text: 'could not clear the project memory' })
         }
       },
     }),
@@ -250,16 +230,19 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
       requestBody: 'buffered',
       fetch: async (request) => {
         const slug = new URL(request.url).searchParams.get('slug')
-        // No slug = the global store (the settings page loads global bodies
-        // lazily on row expand). projectBySlug validates the slug shape before
-        // touching the filesystem, so the traversal fence holds.
-        const store = slug === null || slug === '' ? root.global : root.projectBySlug(slug)
+        // The slug is REQUIRED: with the global scope retired there is no
+        // store a missing slug could mean. projectBySlug validates the slug
+        // shape before touching the filesystem, so the traversal fence holds.
+        if (slug === null || slug === '') {
+          return fail(400, 'bad-request', { code: 'route.slugRequired', text: 'project scope requires a valid slug' })
+        }
+        const store = root.projectBySlug(slug)
         if (store === undefined) {
           return fail(400, 'bad-request', { code: 'route.projectUnknown', text: 'unknown project slug' })
         }
         const pinned = store.pinnedSet()
         const body: MemoryEntriesResponse = {
-          cards: store.list().map(card => cardRow(card, pinned, true)),
+          cards: store.list().map(card => cardRow(card, pinned)),
         }
         return ok(body)
       },
@@ -360,35 +343,38 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
       requestBody: 'buffered',
       fetch: async (request) => {
         // Scope comes from the query string (GET): `?scope=project&slug=…`.
-        // WITHOUT one, answer for EVERY scope — that is what the settings page
-        // asks for, and reading only the global archive is how a card deleted
-        // from a project became invisible while the delete itself succeeded.
+        // WITHOUT one, answer for EVERY PROJECT — that is what the settings
+        // page asks for, and reading only one store is how a card deleted from
+        // a project became invisible while the delete itself succeeded.
         const params = new URL(request.url).searchParams
         const scope = params.get('scope')
         const slug = params.get('slug')
-        const targets: Array<{ scope: 'global' | 'project', slug?: string, store: MemoryStore }> = []
+        const targets: Array<{ slug: string, store: MemoryStore }> = []
         if (scope === null || scope === '' || scope === 'all') {
-          targets.push({ scope: 'global', store: root.global })
+          // The retired global scope is deliberately NOT among these: its
+          // archive was moved into `projects/legacy-global/` at boot, so it is
+          // listed (and restored) as that project like any other.
           for (const project of listProjects(root.dir)) {
             const store = root.projectBySlug(project.slug)
-            if (store !== undefined) targets.push({ scope: 'project', slug: project.slug, store })
+            if (store !== undefined) targets.push({ slug: project.slug, store })
           }
         } else {
-          const body: Record<string, unknown> = { scope }
-          if (slug !== null) body.slug = slug
-          const store = resolveStore(root, body)
+          if (slug === null || slug === '') {
+            return fail(400, 'bad-request', { code: 'route.slugRequired', text: 'project scope requires a valid slug' })
+          }
+          const store = resolveStore(root, { scope, slug })
           if (store instanceof Response) return store
-          targets.push({ scope: store.dir === root.dir ? 'global' : 'project', ...(store.dir === root.dir ? {} : { slug: slug ?? undefined }), store })
+          targets.push({ slug, store })
         }
         const cards: MemoryArchiveRow[] = []
         for (const target of targets) {
           for (const row of target.store.archivedCards()) {
-            cards.push({ ...row, scope: target.scope, ...(target.slug === undefined ? {} : { slug: target.slug }) })
+            cards.push({ ...row, scope: 'project', slug: target.slug })
           }
         }
-        // Newest day first, then scope, then topic — one stable order across
+        // Newest day first, then project, then topic — one stable order across
         // what used to be several separate lists.
-        cards.sort((a, b) => b.day.localeCompare(a.day) || (a.slug ?? '').localeCompare(b.slug ?? '') || a.topic.localeCompare(b.topic))
+        cards.sort((a, b) => b.day.localeCompare(a.day) || a.slug.localeCompare(b.slug) || a.topic.localeCompare(b.topic))
         const payload: MemoryArchiveResponse = { cards, total: cards.length }
         return ok(payload)
       },
@@ -469,12 +455,12 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
         } catch (error) {
           return bodyFailure(error)
         }
-        // Same scope rule as GET /archive: no scope = every scope, because the
-        // panel that offers this button shows every scope.
+        // Same scope rule as GET /archive: no scope = every project, because
+        // the panel that offers this button shows every project. The retired
+        // global scope is not enumerated (see that route).
         const scope = body.scope
         let cleared = 0
         if (scope === undefined || scope === 'all') {
-          cleared += await root.global.clearArchive()
           for (const project of listProjects(root.dir)) {
             const store = root.projectBySlug(project.slug)
             if (store !== undefined) cleared += await store.clearArchive()

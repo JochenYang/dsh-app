@@ -1,13 +1,14 @@
 /**
  * The memory settings section: the two master toggles, the project count, the
- * deleted-memory archive, the recent-maintenance list and the per-project
- * topic-card lists — rows show a card's summary and expand to its full body on
- * click; destructive actions go through a confirm dialog. All data flows
- * through the host half's routes; a toggle flip takes effect on the next prompt
- * assembly without a restart.
+ * deleted-memory archive and the per-project topic-card lists — rows show a
+ * card's summary and expand to its full body on click; destructive actions go
+ * through a confirm dialog. All data flows through the host half's routes; a
+ * toggle flip takes effect on the next prompt assembly without a restart.
  *
- * The retired global scope has no block here: the boot migration moves its
- * cards into `projects/legacy-global`, so they are an ordinary project row.
+ * The retired global scope has no block here, and no archive row of its own:
+ * the boot migration moves its cards AND their archived copies into
+ * `projects/legacy-global`, so both are an ordinary project row — listed,
+ * restorable and deletable like any other.
  *
  * Every string comes from the `dsh-app.memory` namespace through the `t`
  * standard seat: the section registers with `locale: NS`, so the renderer
@@ -25,7 +26,7 @@ import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
 import type { MemoryKey } from './locales.ts'
-import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryDistillActivity, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
+import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type MemorySectionProps = PropsLocale<typeof NS>
@@ -120,28 +121,11 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(2)} MB`
 }
 
-/** Local wall-clock time for one distill trace, e.g. `14:03`. */
-function fmtTime(at: number): string {
-  const d = new Date(at)
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  return `${hh}:${mm}`
-}
-
 /** Display name for a project: basename of the cwd, falling back to slug. */
 function projectTitle(project: MemoryProjectSummary): string {
   if (project.cwd === '') return project.slug
   const parts = project.cwd.replace(/[\\/]+$/u, '').split(/[\\/]/u)
   return parts[parts.length - 1] ?? project.slug
-}
-
-/** Backend + token suffix for one distill trace, e.g. ` · 直调 1.2k tokens`. */
-function formatBackend(item: MemoryDistillActivity, t: TranslateNS<typeof NS>): string {
-  if (item.backend === undefined) return ''
-  const channel = t(item.backend === 'direct' ? 'memory.backend.direct' : 'memory.backend.subagent')
-  if (item.tokens === undefined) return t('memory.activity.backend', { channel })
-  const tokens = item.tokens >= 1000 ? `${(item.tokens / 1000).toFixed(1)}k` : String(item.tokens)
-  return t('memory.activity.backendTokens', { channel, tokens })
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -153,9 +137,6 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return body.value as T
 }
 
-/** Distill-activity rows shown before the "show all" fold (list caps at 20). */
-const ACTIVITY_PREVIEW = 5
-
 /** Archived entries shown before the "show all" control. */
 const ARCHIVE_PREVIEW = 5
 
@@ -166,13 +147,13 @@ const NOTICE_DISMISS_MS = 6_000
  *  this only guards against a hand-edited card file). */
 const SUMMARY_PREVIEW_CHARS = 80
 
-/** What the confirm dialog is armed to destroy: a whole project store, or a
- *  single card. The archive rows keep a scope of their own — a copy deleted
- *  while the global store still existed carries that scope on the wire. */
+/** What the confirm dialog is armed to destroy: a whole project store, a single
+ *  card, or one archived copy. Every target names a project — that is the only
+ *  scope there is. */
 type ConfirmState =
   | { kind: 'clear', slug: string, title: string, cards: number }
   | { kind: 'forget', slug: string, topic: string, summary: string, pinned: boolean }
-  | { kind: 'archive-one', scope: 'global' | 'project', slug: string, day: string, file: string, topic: string }
+  | { kind: 'archive-one', slug: string, day: string, file: string, topic: string }
   | { kind: 'archive-all', count: number }
 
 /** Display line for a card summary, capped for the row. */
@@ -274,7 +255,6 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState<ConfirmState | null>(null)
-  const [activityExpanded, setActivityExpanded] = useState(false)
   const [openSlug, setOpenSlug] = useState<string | null>(null)
   const [projectRows, setProjectRows] = useState<{ slug: string, cards: MemoryCardRow[] } | null>(null)
   const [expandedCards, setExpandedCards] = useState<ReadonlySet<string>>(new Set())
@@ -333,10 +313,11 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
           day: entry.day,
           file: entry.file,
           topic: entry.topic,
-          // The copy lives in the scope it was deleted FROM: restoring a
-          // project's card into the global store (or vice versa) needs the
-          // same scope + slug vocabulary the other routes use.
-          ...(entry.scope === 'global' ? {} : { scope: 'project', slug: entry.slug ?? '' }),
+          // The copy lives in the project it was deleted FROM, so the restore
+          // addresses that store with the same scope + slug vocabulary the
+          // other routes use.
+          scope: 'project',
+          slug: entry.slug,
         }),
       })
       setNotice({ source: 'key', key: 'memory.archive.restored', params: { topic: entry.topic } })
@@ -492,7 +473,8 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
           body: JSON.stringify({
             day: target.day,
             file: target.file,
-            ...(target.scope === 'global' ? {} : { scope: 'project', slug: target.slug }),
+            scope: 'project',
+            slug: target.slug,
           }),
         })
         setNotice({ source: 'key', key: 'memory.notice.archiveDropped', params: { topic: target.topic } })
@@ -578,33 +560,6 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         </div>
       </div>
 
-      {status !== null && status.distill && status.activity.length > 0
-        ? (
-          <div className="dshm_projects">
-            <div className="dshm_projectsTitle">{t('memory.activity.title')}</div>
-            <div className="dshm_hint">{t('memory.activity.hint')}</div>
-            {status.activity.slice(0, activityExpanded ? status.activity.length : ACTIVITY_PREVIEW).map((item: MemoryDistillActivity) => (
-              <div key={`${item.at}-${item.session}`} className="dshm_activityRow">
-                <span className="dshm_activityTime">{fmtTime(item.at)}</span>
-                <span className="dshm_activityMeta">{t('memory.activity.row', { session: item.session, saved: item.saved === 0 ? t('memory.activity.none') : t('memory.activity.added', { count: item.saved }) })}{formatBackend(item, t)}</span>
-              </div>
-            ))}
-            {status.activity.length > ACTIVITY_PREVIEW
-              ? (
-                <button
-                  type="button"
-                  className="dshm_button dshm_activityMore"
-                  aria-expanded={activityExpanded}
-                  onClick={() => { setActivityExpanded(expanded => !expanded) }}
-                >
-                  {activityExpanded ? t('memory.action.collapse') : t('memory.action.showAll', { count: status.activity.length })}
-                </button>
-              )
-              : null}
-          </div>
-        )
-        : null}
-
       {/* The change ledger (D) has no panel here on purpose: a panel that
           cannot be acted on competed with 已删除的记忆 below, which is the one
           surface a deletion should appear on. The DATA is still recorded
@@ -615,9 +570,6 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">{t('memory.archive.title', { count: archive.length })}</div>
             <div className="dshm_hint">{t('memory.archive.hint', { days: ARCHIVE_RETENTION_DAYS, max: ARCHIVE_MAX_FILES })}</div>
-            {status?.archiveError === true
-              ? <div className="dshm_hint">{t('memory.archive.failed')}</div>
-              : null}
             {archive.length === 0
               ? <div className="dshm_hint">{t('memory.archive.empty')}</div>
               : null}
@@ -626,9 +578,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                 <span className="dshm_activityTime">{t('memory.archive.row', {
                   topic: entry.topic,
                   day: entry.day,
-                  scope: entry.scope === 'global'
-                    ? t('memory.scope.global')
-                    : projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug ?? '', cwd: '', cards: 0, sizeBytes: 0 }),
+                  scope: projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug, cwd: '', cards: 0, sizeBytes: 0 }),
                 })}</span>
                 <button
                   type="button"
@@ -647,8 +597,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                   onClick={() => {
                     setConfirming({
                       kind: 'archive-one',
-                      scope: entry.scope,
-                      slug: entry.slug ?? '',
+                      slug: entry.slug,
                       day: entry.day,
                       file: entry.file,
                       topic: entry.topic,

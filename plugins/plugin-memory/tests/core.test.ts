@@ -35,7 +35,6 @@ import { lightSweep } from '../src/light-sweep.ts'
 import { ROUTE_PREFIX, registerMemoryRoutes } from '../src/routes.ts'
 import { CARD_TEXT_DISCIPLINE, CARD_TEXT_SURFACES, type CardTextSurface } from '../src/card-discipline.ts'
 import { SAVE_TOOL_DESCRIPTION } from '../src/tools.ts'
-import { buildDistillPrompt } from '../src/distiller.ts'
 import { buildCuratePrompt } from '../src/curator.ts'
 import type { MemoryCategory } from '../src/types.ts'
 
@@ -622,31 +621,6 @@ test('settings routes: an unparseable or oversized body is refused before it rea
   void routes.dispose()
 })
 
-// --- distill progress markers (unchanged machinery) --------------------------------
-
-test('ownSaveSeq: a direct save marks its event seq, a completed pass consumes it', () => {
-  const root = tmpRoot()
-  const id = 'session-abc'
-  assert.equal(root.ownSaveSeqOf(id), 0)
-  root.recordDirectSave(id, 41)
-  assert.equal(root.ownSaveSeqOf(id), 41)
-  root.recordDirectSave(id, 30)
-  assert.equal(root.ownSaveSeqOf(id), 41, 'a lower save never rewinds the marker')
-  root.advanceDistill(id, 42)
-  assert.equal(root.ownSaveSeqOf(id), 0, 'a completed pass consumes the marker')
-  assert.equal(root.distillSeqOf(id), 42)
-  root.recordDirectSave(id, 50)
-  assert.equal(root.ownSaveSeqOf(id), 50)
-  assert.equal(root.distillSeqOf(id), 42, 'a direct save must not rewind the distill cursor')
-})
-
-test('recordDirectSave: creates the session record before any distill ever ran', () => {
-  const root = tmpRoot()
-  root.recordDirectSave('session-fresh', 9)
-  assert.equal(root.ownSaveSeqOf('session-fresh'), 9)
-  assert.equal(root.distillSeqOf('session-fresh'), 0)
-})
-
 // --- stripCommitIds ----------------------------------------------------------------
 
 test('stripCommitIds: removes mixed hex commit ids; keeps counts, slugs and words', () => {
@@ -991,6 +965,27 @@ test('ledger: events sharing a millisecond still come back newest-first', () => 
   assert.deepEqual(entries.map(entry => entry.keys[0]), ['third', 'second', 'first'])
 })
 
+// --- distill-state.json: the reader tolerates what it no longer defines -------
+
+test('distill-state: a file still carrying the retired extractor keys reads and rewrites clean', () => {
+  const root = tmpRoot()
+  // `sessions` (per-session progress) and `activity` (run traces) were written
+  // by the retired extractor and are not part of the state shape any more. An
+  // old file must neither throw nor keep them alive forever.
+  writeFileSync(join(root.dir, 'distill-state.json'), JSON.stringify({
+    version: 1,
+    sessions: { 'session-old': { seq: 42, at: 1, savedAtSeq: 7 } },
+    activity: [{ at: 1, session: 'abc12345', saved: 2, backend: 'direct', tokens: 30 }],
+    curated: { demo: 'hash' },
+  }))
+  assert.equal(root.curatedHashOf('demo'), 'hash', 'the live bookkeeping still reads')
+  root.recordCurated('demo-two', 'hash-two')
+  const after = JSON.parse(readFileSync(join(root.dir, 'distill-state.json'), 'utf8')) as Record<string, unknown>
+  assert.equal((after.curated as Record<string, string>)['demo-two'], 'hash-two')
+  assert.equal('sessions' in after, false, 'the retired per-session progress is dropped on the next write')
+  assert.equal('activity' in after, false, 'and so are the retired run traces')
+})
+
 // --- prompt discipline (the injected body must not narrate its own storage) ---
 
 test('card-text discipline forbids narrating the saving, not the vocabulary', () => {
@@ -1015,7 +1010,6 @@ test('every card-text surface carries the discipline', () => {
   const surfaces: Record<CardTextSurface, string> = {
     // The always-on guidelines ride every assembly in every session.
     guidelines: renderMemoryText(root, undefined),
-    distiller: buildDistillPrompt('[user] 说了点什么', undefined, root).system,
     curator: buildCuratePrompt('store text').system,
     memory_save: SAVE_TOOL_DESCRIPTION,
   }

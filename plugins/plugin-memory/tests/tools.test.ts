@@ -48,15 +48,11 @@ const SAVE_ARGS = {
   scope: 'project',
 }
 
-/** A realistic exec face: an attached agent with a workspace and an event
- * feed (the save path stamps its own-save marker at the feed's last seq). */
+/** A realistic exec face: an attached agent whose session works in {@link CWD}. */
 const EXEC = {
   agent: {
     id: 'session-abc',
-    session: {
-      header: { cwd: CWD },
-      snapshotEvents: () => [{ type: 'user/message', seq: 7 }],
-    },
+    session: { header: { cwd: CWD } },
   },
 }
 
@@ -64,7 +60,7 @@ const EXEC = {
 const EXEC_NO_CWD = {
   agent: {
     id: 'session-no-cwd',
-    session: { header: {}, snapshotEvents: () => [] },
+    session: { header: {} },
   },
 }
 
@@ -85,7 +81,6 @@ test('memory_save: create → update → unchanged, firing the trigger only on c
   assert.equal(created.op, 'created')
   assert.equal(created.topic, 'e2e-trigger-probe')
   assert.deepEqual(fired, ['session-abc'])
-  assert.equal(root.ownSaveSeqOf('session-abc'), 7, 'own-save marker at the feed tail')
   assert.equal(projectStore(root).get('e2e-trigger-probe')?.body, 'e2e trigger probe', 'the card lands in the workspace memory')
   assert.equal(root.global.get('e2e-trigger-probe'), undefined, 'and never in the retired root scope')
 

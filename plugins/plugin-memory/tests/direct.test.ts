@@ -12,7 +12,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { extractJson, resolveLlm, streamJson } from '../src/llm-direct.ts'
 import { MemoryRoot, repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
-import { buildDistillPrompt } from '../src/distiller.ts'
 import { buildCuratePrompt } from '../src/curator.ts'
 
 test('extractJson parses bare objects', () => {
@@ -130,58 +129,13 @@ test('repairDoublePrefix leaves clean files byte-identical', () => {
 test('recordLlmAudit round-trips newest-first', () => {
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-audit-')))
   assert.deepEqual(root.llmAudit(), [])
-  root.recordLlmAudit({ at: 1000, source: 'distill', session: 'abc123', status: 'ok', inputTokens: 100, outputTokens: 20, durationMs: 500 })
-  root.recordLlmAudit({ at: 2000, source: 'distill', session: 'def456', status: 'error', inputTokens: 90, outputTokens: 10, durationMs: 400, error: 'unparseable JSON response' })
+  root.recordLlmAudit({ at: 1000, source: 'curate', session: 'abc123', status: 'ok', inputTokens: 100, outputTokens: 20, durationMs: 500 })
+  root.recordLlmAudit({ at: 2000, source: 'curate', session: 'def456', status: 'error', inputTokens: 90, outputTokens: 10, durationMs: 400, error: 'unparseable JSON response' })
   const runs = root.llmAudit()
   assert.equal(runs.length, 2)
   assert.equal(runs[0]!.session, 'def456')
   assert.equal(runs[1]!.session, 'abc123')
   assert.equal(runs[0]!.error, 'unparseable JSON response')
-})
-
-test('buildDistillPrompt bans work logs and repo restatements', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-prompt-')))
-  const { system } = buildDistillPrompt('[user] hello', undefined, root)
-  // The false-positive classes this prompt must name explicitly.
-  assert.match(system, /work log/i)
-  assert.match(system, /commit ids/i)
-  assert.match(system, /different conversation/i)
-  assert.match(system, /restating project code or docs/i)
-})
-
-test('buildDistillPrompt offers no scope field to fill in', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-prompt-')))
-  const { system } = buildDistillPrompt('[user] hello', 'D:/proj', root)
-  // The prompt never asked the model to tag a scope: the session's workspace
-  // decided where a proposal landed. A previous revision both asked AND
-  // ignored the answer — the model burned tokens on a dead field, and a test
-  // pinned that stale rule in place. (The pass itself is retired; see the
-  // module header in src/distiller.ts.)
-  assert.doesNotMatch(system, /"scope"/)
-  assert.match(system, /the host decides, not you/i)
-  assert.match(system, /that workspace's project memory/)
-  // No-workspace sessions were told where their cards land too, without being
-  // asked to tag them.
-  const none = buildDistillPrompt('[user] hello', undefined, root)
-  assert.match(none.user, /GLOBAL memory/)
-  assert.doesNotMatch(none.user, /propose scope/)
-})
-
-test('buildDistillPrompt splits system/user and spells out the card contract', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-prompt-')))
-  const { system, user } = buildDistillPrompt('[user] hello', undefined, root)
-  assert.match(system, /JSON ONLY/)
-  // The topic-card output contract: key, hook, category, body.
-  assert.ok(system.includes('"topic"'))
-  assert.ok(system.includes('"summary"'))
-  assert.ok(system.includes('"category"'))
-  assert.ok(system.includes('"content"'))
-  // Reusing an existing key (upsert) instead of inventing near-synonyms.
-  assert.match(system, /reuse that exact key/i)
-  // The empty answer stays a valid answer.
-  assert.match(system, /empty entries array is a VALID answer/i)
-  assert.match(user, /\[user\] hello/)
-  assert.match(user, /No workspace/)
 })
 
 test('buildCuratePrompt bans work logs and spells out the JSON contract', () => {
@@ -292,7 +246,7 @@ test('streamJson times out a hung stream and leaves the serial queue usable', as
   assert.ok(Date.now() - startedAt >= 60, 'the deadline was actually waited for')
   assert.equal(opened, 1)
   // The queue is free again: the hung call settled as a failure instead of
-  // blocking every later distill/curate behind a promise that never settles.
+  // blocking every later maintenance call behind a promise that never settles.
   const after = await streamJson(stubLlm([
     { type: 'text-delta', index: 0, text: '{"entries": []}' },
     { type: 'finish', reason: { kind: 'stop' } },

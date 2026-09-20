@@ -5,6 +5,16 @@
 > 上游：`DESIGN.md` 定义主题卡模型；本文只定义**加固与可恢复性**改造，不改变模型
 > 用途：实施前是方案，实施后是回归台账——每条改动有 ID、验收命令、证据行
 
+> **Superseded in part — 2026-09-21, commits `cfe0484` / `472f554`, cleanup
+> recorded as `J` in §4.8.** The global scope is retired and the extractor that
+> distilled a quiet session's conversation is gone: memory is now what the model
+> itself saves through `memory_save`, and the background pass only consolidates
+> cards that already exist. §1's judgment 9 and §5's not-do rows still stand as
+> decisions — no capture on every turn (and none at all) — but the gates they
+> cite (`src/distiller.ts:60,146,156`) no longer exist. Rows A–I below are the
+> ledger of what was built and why; §4.8 records the retirement cleanup, which
+> measurements were re-run, and what was removed.
+
 ## 0. 维护约定
 
 - 每条改动一个 ID（A–G），状态标记：📄 待实施 / 🚧 实施中 / ✅ 已完成 / ⛔ 已否决 / 👀 观望。
@@ -211,6 +221,7 @@
 | G2 证据层 | 👀 | — | — | — | — | — |
 | H 改名 op | ✅ | `src/curator.ts`、`src/memory-store.ts`、`src/types.ts`、`src/client/*`、`tests/background.test.ts` | 同 A | 见 §4.6 | 0.8.5 | 2026-09-19 |
 | I 删除流程收敛 | ✅ | `src/routes.ts`、`src/types.ts`、`src/client/memory-section.tsx`、`src/client/locales.ts`、`tests/routes.test.ts` | 同 A | 见 §4.7 | 0.8.5 | 2026-09-19 |
+| J 退役收尾 | ✅ | `src/distiller.ts`（删除）、`src/routes.ts`、`src/types.ts`、`src/memory-store.ts`、`src/tools.ts`、`src/card-discipline.ts`、`src/llm-direct.ts`、`src/curator.ts`、`src/index.ts`、`src/light-sweep.ts`（注释）、`src/client/*`、`tests/*.test.ts`、`scripts/check-plugin-graph.mjs`（Han 白名单）、`docs/memory-topic-cards/*`、`docs/ARCHITECTURE.md` | `cd plugins/plugin-memory && npm run typecheck && npm test` · `npm run build` · 仓库根 `npm run check:graph` · `npm test` | 见 §4.8 | 0.8.10 | 2026-09-21 |
 
 > **版本号说明**：A–F 是同一个**未提交**改动集，因此共用一次补丁号提升：**已发布的 0.8.4 → 0.8.5**。（实施过程中一度按工作树的中间状态记成了 0.8.6，那是把未提交的递增当成了已发布版本；已按「已提交基线是 0.8.4」校正。）`suiteVersion` 由插件版本号派生，未提交前这个数字只是"提交时必须带上的号"，不代表已经投递。
 
@@ -618,6 +629,66 @@ npm run check:graph        # 插件图与套件名册规则
 - 若改动触及设置页文案，需要同步插件字典的 zh/en 两份，且宿主只下发 `HostText { code, params }`。
 - 若新增路由，路径必须落在 `/api/plugins/dsh-app/plugin-memory/<name>`，段内不含 `@`，只用 GET/HEAD/POST。
 
+### 4.8 J 退役收尾（2026-09-21）
+
+**来源**：`cfe0484`（退役全局作用域 + 停用后台抽卡）与 `472f554`（移除设置页的全局区块）留下的是**兼容面与死代码**：路由仍能为退役作用域服务，`src/distiller.ts` 的抽取链路仍在源码里，`distill-state.json` 的游标/审计状态仍被读写，测试仍在固定这些主题，两份文档也仍按「双作用域 + 后台提炼」描述。本节记录把这三样一起收掉。
+
+**删除清单**（逐项 grep 确认无消费者）
+
+| 位置 | 删除内容 |
+|---|---|
+| `src/routes.ts` | `resolveStore` 的「无 scope 或 `scope:'global'` → root store」分支：scope 现在必填且只能是 `project`，否则 `route.scopeRequired` |
+| `src/routes.ts` | `GET /status` 的 `cards` / `sizeBytes` / `storePath` / `globalList`（只服务已移除的全局区块）、`activity`（数据源随抽取链路删除）、`archiveError`（取自 root store，而它已不再接受归档写入） |
+| `src/routes.ts` | `GET /entries` 的无 slug 分支（改为 `route.slugRequired`）；`POST /clear` 的「缺省 = 清全局」破坏性缺省；`GET /archive` 与 `POST /archive-clear` 对 root 作用域的枚举 |
+| `src/distiller.ts` | 整个文件：`MemoryDistiller` 及其全部方法、`attach` 的 `session/event` 订阅与静默定时器、`buildDistillPrompt`、`renderExcerpt`、`memoryInput`、`messageText` / `blockText`、`ProposedEntry` 及只被它用的常量。仍被引用的 `SessionLike` 与 `directRouteOf` 迁入 `src/llm-direct.ts`（curator 仍在用） |
+| `src/memory-store.ts` | `distillSeqOf` / `advanceDistill` / `ownSaveSeqOf` / `recordDirectSave` / `recordDistill` / `distillActivity` / `DistillProgress` / `DistillActivity` / `MAX_TRACKED_SESSIONS` / `MAX_ACTIVITY`，以及 `DistillState.sessions` / `.activity` 两个字段。**读取容错**：老文件里的这两个键被直接忽略，下一次写入顺手丢掉 |
+| `src/types.ts` | `MemoryDistillActivity`（随面板一起死）；`MemoryArchiveRow.scope` 收窄为 `'project'`（`slug` 变必填）；`MemoryStatus` 只留 `enabled` / `distill` / `projects`；`MemoryLlmAuditRun.source` 收窄为 `'curate'`（历史行仍按文件原样透传） |
+| `src/card-discipline.ts` | `screenCardText` / `SESSION_NARRATION` / `MIN_CARD_BODY_CHARS` / `MIN_CARD_SUMMARY_CHARS`——唯一调用方是被删的抽取链路；`CARD_TEXT_SURFACES` 去掉 `distiller` 一项（名册仍被 `core.test.ts` 遍历） |
+| `src/tools.ts` | 保存路径上的 `recordDirectSave` 调用（只为已弃用游标服务） |
+| `src/client/*` | 归档行的全局作用域标签分支与 `memory.scope.global`、归档失败提示（`memory.archive.failed`）、「最近整理」面板及其全部词条与 `fmtTime` / `formatBackend`（面板数据源已删）；`memory.host.scopeRequired` 文案改为「只能是 project」 |
+| `scripts/check-plugin-graph.mjs` | Han 白名单里 `plugins/plugin-memory/src/distiller.ts` 的条目（文件已不存在）；`card-discipline.ts` 条目的理由改为「规则文本自身含中文标记」 |
+
+**保留（有意不动）**：`root.global` 这个存储对象与 `migrateLegacyGlobalScope` / `moveRetiredGlobalArchive`（启动迁移照旧把卡片与归档一并搬进 `projects/legacy-global`，`config.json` 仍住在那层目录）、`memory.toggle.distill` 开关字段（现在只门控 curator）、`GET /llm-audit` 与 `GET /ledger` 路由、`distill-state.json` 这个**文件名**（改名会丢掉 curated 指纹、旋转锚点与台账）、`MemoryStore.clear()` / `lastArchiveError()` 等仍被迁移或测试使用的方法。
+
+**删除/改写的用例**（主题消失，不是顺手削弱断言）
+
+| 用例 | 为什么不再成立 |
+|---|---|
+| `background.test.ts`：`distill applyEntries: …` 14 条 | 主题（`MemoryDistiller.applyEntries`）整体删除 |
+| `background.test.ts`：`buildDistillPrompt …` 2 条 | 提示词构建器随抽取链路删除 |
+| `background.test.ts`：`progress: …` 6 条 | 固定的是 distill 游标语义（游标只在写成功后前进），而游标机制已删除 |
+| `core.test.ts`：`ownSaveSeq` / `recordDirectSave` 2 条 | 同一套游标机制 |
+| `core.test.ts`：名册用例里的 `distiller` 一项 | 该提示面不存在；其余三个面（guidelines / memory_save / curator）照旧断言 |
+| `direct.test.ts`：`buildDistillPrompt …` 3 条 | 同上 |
+| `e2e.test.ts`：`own-write marks its seq` / `the distill prompt …` 2 条 | 同上 |
+| `routes.test.ts`：归档/恢复 与「列出每个作用域」2 条 | 主题仍成立，已**改写**为项目作用域版本，并补上：root 归档不再被枚举、`?scope=global` 被 `route.scopeRequired` 拒绝、无 scope 的 `/restore` 不再落到 root store |
+| 新增 1 条 | `core.test.ts` 的 `distill-state: a file still carrying the retired extractor keys reads and rewrites clean`（容错契约的显式回归） |
+
+**保留且仍被断言的契约**：不订阅 `session/event`（host apply 用例）、没有工作区的会话不产生任何卡片（三个工具的拒绝用例）、注入不含 root 作用域（`renderMemoryText` 用例）、curator 与 light-sweep 照旧（`applyEdits` / `serializeStore` / 旋转锚点 / 台账 / light sweep 用例全数保留）。
+
+**验收证据（执行结果）**
+
+| 命令 | 结果 |
+|---|---|
+| `cd plugins/plugin-memory && npm run typecheck` | 通过，无输出 |
+| `npm test`（插件） | `tests 179 / pass 179 / fail 0`（改动前 207：删 29 条、新增 1 条） |
+| `npm run build` | `built @dsh-app/plugin-memory: lib/index.js + lib/client.js` |
+| 产物核验 | `lib/client.js` 无 `node:` 内建；`memory.activity` / `memory.backend` / `memory.scope.global` / `archiveError` / `MemoryDistillActivity` / `ownSaveSeqOf` / `recordDirectSave` / `distillSeqOf` / `advanceDistill` / `distillActivity` / `recordDistill` 在两个产物里均为 **0 次命中** |
+| 仓库根 `npm run check:graph` | `plugin graph: 17 plugins, followed line ^0.1.6-alpha.2 / ok — no violations` |
+| 仓库根 `npm test` | `tests 336 / pass 335 / fail 0 / skipped 1`（build 通过） |
+| **迁移实测**（真实 store 的副本，原 store 只读） | 副本启动前：`topics/` 2 张卡 + `index.md`；一次启动后：`topics/` 0 张、`index.md` 消失、`projects/legacy-global/topics/` 2 张；`config.json` 的 sha256 前后一致；第二次启动仍为 2 张（幂等）；在该副本的 6 个会话（含无工作区会话与 5 个真实项目 cwd）上，迁移过来的 2 张卡在注入文本里 **0 次**出现，root store 卡数为 0 |
+| **老状态文件容错**（同一副本） | 副本的 `distill-state.json` 仍带着 `sessions`（17 条旧会话进度）/ `activity`（20 条旧运行记录）：一次写入后这两个键消失、`curated` 保留、台账照常追加 |
+
+**残余风险**
+
+| 风险 | 说明 |
+|---|---|
+| 老 `distill-state.json` 里 `sessions` / `activity` 的字节会留到下一次写入 | 读取已忽略，写入即丢；在写入发生之前它们只是占位数据 |
+| `GET /llm-audit` 仍可能有历史 `source:'distill'` 行 | wire 类型已收窄为 `'curate'`，读取端按文件内容原样透传（诊断用，客户端不渲染） |
+| 台账仍以 `'global'` 标注 root store 的旧事件 | 这些事件来自退役作用域，改名会让新旧行不一致；等台账里不再有该 scope 的历史行再统一 |
+| 归档失败提示随 `archiveError` 一起删除 | 该字段只反映 root store 的归档写入，而 root store 已不再接受写入。要覆盖**项目**归档需要按项目上报（新设计，不在本次范围） |
+| 老版本客户端（更新的内核 + 旧页面） | 旧页面会请求已删除的 `/status` 字段并发送无 scope 的 `/pin`：字段缺失只影响渲染，无 scope 写入会被 `route.scopeRequired` 稳定拒绝——不会静默写到别处 |
+
 ## 5. 明确不做的事
 
 | 不做 | 理由 |
@@ -651,3 +722,4 @@ npm run check:graph        # 插件图与套件名册规则
 | 2026-09-19 | H 实施完成（不在原方案内，来自复核存量记忆），记录见 §4.6：协议补 `rename`（此前孤立 legacy 卡无法改名）、修复两张违规/含腐烂值的存量卡。同日把版本号从误记的 0.8.6 校正为 **0.8.5**（已发布基线是 0.8.4） |
 | 2026-09-19 | I 实施完成（来自用户实际使用反馈），记录见 §4.7：修复归档面板只读全局作用域（B 的遗留缺陷，删了项目记忆后显示「0」）、移除无法操作的台账面板（删除只在「已删除的记忆」出现一次且可恢复）、提示 6 秒自动消失。补跨作用域回归测试 |
 | 2026-09-19 | I4 补完（用户追问「怎么永久删除」）：归档此前只有恢复与自动过期，没有「现在就删」的入口。补单条「永久删除」与「清空已删除的记忆」两条路径、两个路由，均走二次确认 |
+| 2026-09-21 | J 退役收尾实施完成（插件 0.8.9 → 0.8.10），记录见 §4.8：删除只为退役全局作用域存在的路由/字段与客户端分支，删除 distiller 抽取链路（`src/distiller.ts` 整文件）与 distill 游标/审计状态，删掉主题已消失的 29 条用例（另改写 2 条作用域用例、新增 1 条老状态文件容错用例）。两份文档补 supersede 说明，`docs/ARCHITECTURE.md` 的插件行同步 |

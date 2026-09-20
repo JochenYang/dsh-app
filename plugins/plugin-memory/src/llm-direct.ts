@@ -1,16 +1,17 @@
 /**
- * Direct LLM calls for background maintenance (distill + curate).
+ * Direct LLM calls for the background maintenance pass (the curator), plus
+ * the session slice that pass reads its model route off.
  *
  * A subagent run carries a whole session lifecycle (agent creation, prompt
  * assembly with the full system prompt, structured-output capture tooling);
- * a distill/curate prompt needs none of that — one system + one user message
- * through `ctx.llm.stream()` returns the same JSON for roughly an order of
- * magnitude fewer tokens, so both background passes call the model this way.
+ * a curate prompt needs none of that — one system + one user message through
+ * `ctx.llm.stream()` returns the same JSON for roughly an order of magnitude
+ * fewer tokens, so the pass calls the model this way.
  *
  * Three shared disciplines live here:
- *   - a process-wide serial queue with exponential backoff on 429: quiet
- *     windows can fire across sessions at once, and a burst of parallel
- *     distill calls is exactly what trips provider rate limits;
+ *   - a process-wide serial queue with exponential backoff on 429: saves can
+ *     arrive across sessions at once, and a burst of parallel maintenance
+ *     calls is exactly what trips provider rate limits;
  *   - a per-attempt deadline inside that slot: a provider stream that never
  *     closes would otherwise pin every later maintenance call behind a
  *     promise that never settles;
@@ -23,11 +24,35 @@
  */
 
 import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 
 /** Model route for one direct call (resolved from the triggering session). */
 export interface DirectRoute {
   provider: string
   model: string
+}
+
+/** Structural slice of a Session the background pass reads: an id, plus the
+ *  latest assembled call config its model route comes from. */
+export interface SessionLike {
+  readonly id: SessionId
+  /** Latest assembled call config (provider/model route for direct calls). */
+  requestHeader?: () => { config?: { provider?: unknown, model?: unknown } } | undefined
+}
+
+/**
+ * Model route for a direct call, from the session's latest request header.
+ * The pass calls the model on the route of the session whose save triggered
+ * it (the one session guaranteed to be alive and configured), so every caller
+ * reads that route the same way.
+ */
+export function directRouteOf(session: Pick<SessionLike, 'requestHeader'>): DirectRoute | undefined {
+  const config = session.requestHeader?.()?.config
+  const provider = config?.provider
+  const model = config?.model
+  return typeof provider === 'string' && provider !== '' && typeof model === 'string' && model !== ''
+    ? { provider, model }
+    : undefined
 }
 
 /** One direct JSON call. */
@@ -66,16 +91,15 @@ const DIRECT_RETRIES = 2
 const DIRECT_BACKOFF_MS = 1_000
 
 /**
- * Deadline for one streaming attempt. A distill answer is capped at
+ * Deadline for one streaming attempt. A curate answer is capped at
  * DIRECT_MAX_TOKENS and lands in seconds to tens of seconds; even the 8000
- * token curate answer finishes in ~160 s on a provider streaming as slowly
- * as 50 tokens/s. Three minutes therefore sits above a slow-but-working
- * answer and marks the "hung, not slow" line. A hung stream is what this
- * queue cannot survive: its promise never settles, so every later
- * distill/curate waits behind it forever while the distiller's in-flight
- * guard keeps that session from ever being retried. A timed-out attempt is
- * NOT retried — the retry budget belongs to 429s — it settles the slot with
- * a failure, which is all the queue needs to move on.
+ * token answer finishes in ~160 s on a provider streaming as slowly as
+ * 50 tokens/s. Three minutes therefore sits above a slow-but-working answer
+ * and marks the "hung, not slow" line. A hung stream is what this queue
+ * cannot survive: its promise never settles, so every later maintenance call
+ * waits behind it forever. A timed-out attempt is NOT retried — the retry
+ * budget belongs to 429s — it settles the slot with a failure, which is all
+ * the queue needs to move on.
  */
 const DIRECT_TIMEOUT_MS = 180_000
 
@@ -200,12 +224,12 @@ function release(iterator: AsyncIterator<StreamChunk>): void {
 /**
  * Resolve the LLM runtime off a plugin context. The dsh-llm Context merge
  * is not relied on (see {@link streamJson}); a missing service throws so a
- * mis-mounted distiller fails loud at the quiet window, not silently.
+ * mis-mounted pass fails loud at its trigger, not silently.
  */
 export function resolveLlm(ctx: unknown): LlmRuntimeLike {
   const llm = (ctx as { llm?: unknown } | undefined)?.llm as { stream?: unknown } | undefined
   if (llm === undefined || typeof llm.stream !== 'function') {
-    throw new Error('memory distill: ctx.llm unavailable (missing inject)')
+    throw new Error('memory curate: ctx.llm unavailable (missing inject)')
   }
   return llm as LlmRuntimeLike
 }

@@ -22,14 +22,13 @@
  *    services are available (graceful on kernels without them);
  * 4. settings-page routes (status/toggle/pin/clear) for the client half.
  *
- * What is deliberately NOT mounted any more: the background DISTILLER. Its
+ * What is deliberately NOT mounted any more: session-driven EXTRACTION. Its
  * pass read a quiet session's conversation and proposed cards, and a session
  * with no workspace had its cards written to the global scope — which was
  * then injected into every project's sessions. Measured in practice, that
  * put one workspace's research conclusions into all of them. Memory is now
  * what the model decides to keep through `memory_save`, into the memory of
- * the project it is working in, and the distiller's own scheduler is never
- * attached (see distiller.ts, which keeps the machinery and says the same).
+ * the project it is working in; nothing subscribes to the session event feed.
  *
  * Boot migrations, in order: a store still holding the pre-card `memory.md`
  * timeline is converted to topic cards deterministically (see
@@ -153,14 +152,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // CONSOLIDATES memory that a memory_save already wrote; it calls the model
   // directly on the route of the session whose save triggered it.
   //
-  // The distiller is deliberately NOT constructed and NOT attached here. Its
-  // turn/end subscription was what armed a quiet-timer model call that
-  // extracted cards from a conversation, and a session without a workspace
-  // had its cards written to the global scope — which was then injected into
-  // every project's sessions. Retiring that scheduling is the whole point of
-  // this change: the model saves what it judges worth keeping, through
-  // memory_save, into the memory of the project it is working in. Deleting
-  // the call is also what saves the model call: no timer, no request.
+  // Nothing subscribes to the session event feed: extraction from a
+  // conversation is retired for good. Its turn/end subscription was what
+  // armed a quiet-timer model call, and a session without a workspace had its
+  // cards written to the global scope — which was then injected into every
+  // project's sessions. The model saves what it judges worth keeping, through
+  // memory_save, into the memory of the project it is working in: no
+  // subscription, no timer, no request.
   ctx.inject(['agents', 'llm'], memCtx => {
     const curator = new MemoryCurator(memCtx, root, log)
     // A save hands maintenance its trigger with the session id: the light

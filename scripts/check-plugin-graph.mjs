@@ -163,19 +163,18 @@ export function checkHanCharacters(repoRoot) {
     // Model-facing tool failures, declared "zh-CN by design" in the JSDoc.
     'plugins/plugin-fff/src/tools.ts',
     'plugins/plugin-fff/src/picker.ts',
-    // The cross-session memory's model-facing layer: the distiller/curator
-    // prompts and the failure values the tools relay.
+    // The cross-session memory's model-facing layer: the curator's prompt and
+    // the failure values the tools relay.
     'plugins/plugin-memory/src/prompt.ts',
-    'plugins/plugin-memory/src/distiller.ts',
     'plugins/plugin-memory/src/curator.ts',
     'plugins/plugin-memory/src/llm-direct.ts',
     'plugins/plugin-memory/src/memory-store.ts',
     'plugins/plugin-memory/src/tools.ts',
     // The one shared card-text rule: it is copied into every model-facing
-    // surface that asks for card text, and its screen has to name the Chinese
-    // markers a Chinese session narrates with ("本次…", "已修复…") — the same
-    // class of zh-CN model-facing text as the four files above. It was Han-free
-    // until that screen existed.
+    // surface that asks for card text, and the rule itself names the Chinese
+    // narration markers it bans ("本次…", "已修复…") — the same class of zh-CN
+    // model-facing text as the files above. It was Han-free until that
+    // sentence was added.
     'plugins/plugin-memory/src/card-discipline.ts',
     // The market parses pnpm's own stdout, which is Chinese on a Chinese
     // Windows; matching its wording is the function.
