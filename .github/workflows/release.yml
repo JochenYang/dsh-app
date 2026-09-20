@@ -288,15 +288,21 @@ jobs:
           node scripts/build-primary-runtime.mjs ${{ matrix.platform }} ${{ matrix.arch }}
           echo "dir=runtime-dist/primary-runtime-${{ matrix.platform }}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
 
-      # The staged Python+Node+pnpm set has never been EXECUTED anywhere but
-      # win32-x64 (the machine this repo is developed on): every darwin and
-      # win32-arm64 payload so far was shipped unverified, and a macOS user's
-      # first document conversion was its first run. This step installs the
-      # staged tree with the desktop host's OWN code and exercises the
+      # The staged Python+Node+pnpm set used to ship unexecuted everywhere but
+      # win32-x64 (the machine this repo is developed on). This step installs
+      # the staged tree with the desktop host's OWN code and exercises the
       # interpreters BEFORE the runtime build packs it — a broken set fails the
-      # cell, where it is cheap to fix, instead of a user's machine.
+      # cell, where it is cheap to fix, instead of a user's machine. macos-15-intel
+      # and macos-latest run it natively; win32-arm64 cannot (see the condition).
       - name: Smoke the staged primary runtime
-        if: matrix.platform != 'linux'
+        # A CROSS-BUILT cell cannot smoke: the host refuses a tree whose
+        # manifest names another arch than the running process ("primary
+        # runtime: incompatible platform or architecture", measured on the
+        # win32-arm64 cell of run 35494896864). win32-arm64 is built on an x64
+        # runner and the matrix has no arm64 Windows runner, so its Python set
+        # remains the one that ships unexecuted; every other non-linux cell
+        # executes the tree it is about to pack.
+        if: matrix.platform != 'linux' && !(matrix.platform == 'win32' && matrix.arch == 'arm64')
         shell: bash
         env:
           DSH_VERSION: ${{ needs.resolve.outputs.dsh_version }}
