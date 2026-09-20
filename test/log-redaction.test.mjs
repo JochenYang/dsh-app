@@ -19,6 +19,19 @@ import path from 'node:path'
 import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
+
+/**
+ * js-yaml, when it happens to be installed. An independent reader for the
+ * generated patch file: the structural assertions stand on their own, and this
+ * adds the one check they cannot make — that the document really parses.
+ */
+function loadYaml() {
+  try {
+    return require('js-yaml')
+  } catch {
+    return undefined
+  }
+}
 const { redact, MAX_LOG_LINE } = require('../dist/main/redact.js')
 const { composeSuitePatch, filterUnresolvableRows, parseSuitePatch, relativePatchSpecifiers, specifierResolves } = require('../dist/main/brand-suite.js')
 
@@ -93,20 +106,40 @@ test('an empty flow section cannot break the generated file', () => {
   // reason in its place.
   const text = composeSuitePatch({ suite: SHIPPED, preserved: '[]', home: HOME })
   assert.ok(!text.split('\n').some((line) => line.trim() === '[]'))
-  assert.match(text, /# \[dsh-app\] an empty flow section/u)
+  assert.match(text, /# \[dsh-app\] an empty flow collection/u)
   assert.ok(text.includes('@dsh-app/plugin-brand'))
   assert.ok(text.includes('- id: mcp'))
   // Idempotent: the note reads back as the preserved section and stays put.
   const again = composeSuitePatch({ suite: SHIPPED, preserved: parseSuitePatch(text).preserved, home: HOME })
   assert.equal(again, text)
   // And the result is a document a YAML reader accepts, when one is at hand.
-  let yaml
-  try {
-    yaml = require('js-yaml')
-  } catch {
-    yaml = undefined // not installed: the structural checks above stand alone
-  }
+  const yaml = loadYaml()
   if (yaml !== undefined) assert.doesNotThrow(() => yaml.load(text))
+})
+
+test('the kernel patch template that ends in "[]" heals instead of bricking the file', () => {
+  // The shape that actually occurred, taken from a user's profile: the kernel's
+  // own template — three comment lines, then `[]`. A reader that only looked at
+  // the FIRST character of the section classified this as block text and let the
+  // `[]` through, which is the file that failed with
+  // `end of the stream or a document separator is expected (274:1)`.
+  const template = [
+    '# Your patch layer for this dsh profile, applied after every bundle layer:',
+    '# a top-level YAML array of loader patch entries (id-targeted config',
+    '# overrides, disables, and insert lists; `!!js` expressions allowed).',
+    '[]',
+  ].join('\n')
+  for (const home of ['', HOME]) {
+    const text = composeSuitePatch({ suite: SHIPPED, preserved: template, home })
+    assert.ok(!text.split('\n').some((line) => line.trim() === '[]'), `bare [] left with home=${JSON.stringify(home)}`)
+    assert.match(text, /an empty flow collection/u)
+    assert.ok(text.includes('@dsh-app/plugin-brand'))
+    // Stable: the notes read back as the preserved section and stay put, so a
+    // healed machine does not flip between two files on every start.
+    assert.equal(composeSuitePatch({ suite: SHIPPED, preserved: parseSuitePatch(text).preserved, home }), text)
+    if (home !== '') assert.ok(text.includes('- id: mcp'), 'the home rows must still travel')
+    if (loadYaml() !== undefined) assert.doesNotThrow(() => loadYaml().load(text))
+  }
 })
 
 test('a non-empty flow section is kept visible but inert', () => {

@@ -324,65 +324,88 @@ export function homeRowsInProfilePatch(options: { isDev: boolean; transport: 'fr
   return options.isDev || options.transport === 'frames'
 }
 
-/** How a section's text merges into the generated document. */
-type SectionShape = 'empty' | 'block' | 'flow-empty' | 'flow-content'
+/** A line that is a root-level EMPTY flow collection: `[]` or `{}` at column 0. */
+const ROOT_EMPTY_FLOW = /^[[{]\s*[\]}]\s*$/u
 
 /**
- * Classify one section's text.
+ * Whether a section OPENS a root-level flow node — a complete YAML document on
+ * its own, which therefore cannot be followed by anything.
  *
- * The file is three sections concatenated, so a section that is a COMPLETE
- * flow-style node cannot take part in it: a flow node ends the YAML document,
- * and every block row after it becomes unparseable. Measured on a real profile —
- * one whose patch file was the kernel's own empty-patch shape `[]` — the
- * generated file failed with `end of the stream or a document separator is
- * expected (274:1)` on BOTH kernel lines, and because the regenerator compares
- * content it never rewrote the broken file, so the app could not start again
- * until the file was edited by hand.
+ * Comments and blank lines come first in the shapes that really occur (the
+ * kernel's own patch template is three comment lines and then `[]`), so the
+ * question is asked of the first CONTENT line, and only at column 0: a nested
+ * value may be a flow collection without ending the document.
  */
-function sectionShape(text: string): SectionShape {
-  const trimmed = text.trim()
-  if (trimmed === '') return 'empty'
-  if (!/^[[{]/u.test(trimmed)) return 'block'
-  return /^\[\s*\]$/u.test(trimmed) || /^\{\s*\}$/u.test(trimmed) ? 'flow-empty' : 'flow-content'
+function opensFlowNode(text: string): boolean {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    return /^[[{]/u.test(line)
+  }
+  return false
 }
 
-/** Replaces an empty flow section: it carries no rows, and it breaks the file. */
-const FLOW_EMPTY_NOTE = [
-  '# [dsh-app] an empty flow section ("[]" / "{}") was dropped here.',
-  '# A flow node ENDS the YAML document, so every row after it would fail to',
-  '# parse — the file stayed unreadable until it was edited by hand. It carried',
-  '# no rows, which is what the kernel writes for a profile without a patch.',
-  '',
-].join('\n')
+/** Whether a section carries any row at all. */
+function hasRows(text: string): boolean {
+  return text.split('\n').some((line) => {
+    const trimmed = line.trim()
+    return trimmed !== '' && !trimmed.startsWith('#')
+  })
+}
 
-/** Replaces a NON-empty flow section, which has to be kept visible but inert. */
+/** What replaces an empty flow collection found at the top level of a section. */
+const FLOW_EMPTY_NOTE = [
+  '# [dsh-app] an empty flow collection ("[]" / "{}") was dropped here:',
+  '# a flow node ENDS the YAML document, so nothing after it would parse.',
+]
+
+/** What replaces a section that is a NON-empty flow node and cannot be merged. */
 const FLOW_CONTENT_NOTE = [
   '# [dsh-app] NOT MERGED: this section is a flow node ("[…]" / "{…}"), which',
-  '# ends the YAML document — the rows below it would not parse. The text is',
-  '# kept below, commented out; rewrite it as block rows to have it applied.',
+  '# ends the YAML document — the rows that follow it would not parse. The text',
+  '# is kept below, commented out; rewrite it as block rows to have it applied.',
   '',
 ].join('\n')
 
-/** Render one section: its rows, or the note that has to stand in for them. */
-function sectionBlock(mark: string, text: string): string {
-  switch (sectionShape(text)) {
-    case 'empty':
-      return mark
-    case 'flow-empty':
-      return `${mark}${FLOW_EMPTY_NOTE}`
-    case 'flow-content':
-      return `${mark}${FLOW_CONTENT_NOTE}${text.trimEnd().split('\n').map((line) => (line.trim() === '' || line.startsWith('#') ? line : `# ${line}`)).join('\n')}\n`
-    case 'block':
-      return `${mark}${text.trimEnd()}\n`
-  }
+/** One line, commented out unless it is already blank or a comment. */
+function commentOut(line: string): string {
+  return line.trim() === '' || line.startsWith('#') ? line : `# ${line}`
+}
+
+/**
+ * Render one section: its rows, or the notes that have to stand in for them.
+ *
+ * `mustMerge` is true when a LATER section carries rows — the only situation in
+ * which a flow node here is fatal. Measured end to end on a real profile whose
+ * patch file was the kernel's template (`# …` comments, then `[]`): the generated
+ * file failed with `end of the stream or a document separator is expected
+ * (274:1)` on both kernel lines, and because the regenerator only writes when the
+ * content changed, the broken file regenerated to itself — safe mode included,
+ * since that only drops the suite rows.
+ */
+function sectionBlock(mark: string, text: string, mustMerge: boolean): string {
+  const trimmed = text.trim()
+  if (trimmed === '') return mark
+  // An empty flow collection carries no rows, so it is READ AS EMPTY wherever it
+  // stands — that is the kernel's "no patch" shape, and it is what makes the
+  // difference between a file that boots and one that never does.
+  const lines = trimmed.split('\n').flatMap((line) => (ROOT_EMPTY_FLOW.test(line) ? FLOW_EMPTY_NOTE : [line]))
+  if (!mustMerge) return `${mark}${lines.join('\n')}\n`
+  const body = lines.join('\n')
+  if (!opensFlowNode(body)) return `${mark}${body}\n`
+  return `${mark}${FLOW_CONTENT_NOTE}${body.split('\n').map(commentOut).join('\n')}\n`
 }
 
 /** Render the generated patch file from its three sections. */
 export function composeSuitePatch(sections: { suite: string; preserved: string; home: string }): string {
+  // Order matters for the rule above: a flow node is only fatal when something
+  // with rows follows it, and the sections travel in this order.
+  const homeRows = hasRows(sections.home)
+  const preservedRows = hasRows(sections.preserved)
   return PATCH_HEADER
-    + sectionBlock(PATCH_SUITE_MARK, sections.suite)
-    + sectionBlock(PATCH_PRESERVED_MARK, sections.preserved)
-    + sectionBlock(PATCH_HOME_MARK, sections.home)
+    + sectionBlock(PATCH_SUITE_MARK, sections.suite, preservedRows || homeRows)
+    + sectionBlock(PATCH_PRESERVED_MARK, sections.preserved, homeRows)
+    + sectionBlock(PATCH_HOME_MARK, sections.home, false)
 }
 
 /**
