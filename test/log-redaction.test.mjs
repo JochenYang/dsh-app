@@ -84,7 +84,39 @@ test('safe mode drops the shipped rows and keeps the user ones', () => {
   assert.ok(text.includes('- id: mcp'))
 })
 
-// ------------------------------------------------- carried-row resolvability
+test('an empty flow section cannot break the generated file', () => {
+  // The kernel writes `[]` for a profile that has no patch. Concatenating that
+  // with block rows ENDS the YAML document, and the real failure read
+  // `end of the stream or a document separator is expected` — on both kernel
+  // lines, with the file never rewritten (the generator compares content, so a
+  // broken file regenerates to itself). The empty section is dropped, with the
+  // reason in its place.
+  const text = composeSuitePatch({ suite: SHIPPED, preserved: '[]', home: HOME })
+  assert.ok(!text.split('\n').some((line) => line.trim() === '[]'))
+  assert.match(text, /# \[dsh-app\] an empty flow section/u)
+  assert.ok(text.includes('@dsh-app/plugin-brand'))
+  assert.ok(text.includes('- id: mcp'))
+  // Idempotent: the note reads back as the preserved section and stays put.
+  const again = composeSuitePatch({ suite: SHIPPED, preserved: parseSuitePatch(text).preserved, home: HOME })
+  assert.equal(again, text)
+  // And the result is a document a YAML reader accepts, when one is at hand.
+  let yaml
+  try {
+    yaml = require('js-yaml')
+  } catch {
+    yaml = undefined // not installed: the structural checks above stand alone
+  }
+  if (yaml !== undefined) assert.doesNotThrow(() => yaml.load(text))
+})
+
+test('a non-empty flow section is kept visible but inert', () => {
+  const text = composeSuitePatch({ suite: SHIPPED, preserved: '[{id: x}]', home: HOME })
+  assert.match(text, /NOT MERGED/u)
+  assert.ok(text.includes('# [{id: x}]'))
+  assert.ok(!text.split('\n').some((line) => /^[[{]/u.test(line.trim())))
+})
+
+
 
 /** A throwaway profile under a fake $DSH_HOME layout. */
 function fixtureProfile() {

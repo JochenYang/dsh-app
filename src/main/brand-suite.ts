@@ -324,10 +324,65 @@ export function homeRowsInProfilePatch(options: { isDev: boolean; transport: 'fr
   return options.isDev || options.transport === 'frames'
 }
 
+/** How a section's text merges into the generated document. */
+type SectionShape = 'empty' | 'block' | 'flow-empty' | 'flow-content'
+
+/**
+ * Classify one section's text.
+ *
+ * The file is three sections concatenated, so a section that is a COMPLETE
+ * flow-style node cannot take part in it: a flow node ends the YAML document,
+ * and every block row after it becomes unparseable. Measured on a real profile —
+ * one whose patch file was the kernel's own empty-patch shape `[]` — the
+ * generated file failed with `end of the stream or a document separator is
+ * expected (274:1)` on BOTH kernel lines, and because the regenerator compares
+ * content it never rewrote the broken file, so the app could not start again
+ * until the file was edited by hand.
+ */
+function sectionShape(text: string): SectionShape {
+  const trimmed = text.trim()
+  if (trimmed === '') return 'empty'
+  if (!/^[[{]/u.test(trimmed)) return 'block'
+  return /^\[\s*\]$/u.test(trimmed) || /^\{\s*\}$/u.test(trimmed) ? 'flow-empty' : 'flow-content'
+}
+
+/** Replaces an empty flow section: it carries no rows, and it breaks the file. */
+const FLOW_EMPTY_NOTE = [
+  '# [dsh-app] an empty flow section ("[]" / "{}") was dropped here.',
+  '# A flow node ENDS the YAML document, so every row after it would fail to',
+  '# parse — the file stayed unreadable until it was edited by hand. It carried',
+  '# no rows, which is what the kernel writes for a profile without a patch.',
+  '',
+].join('\n')
+
+/** Replaces a NON-empty flow section, which has to be kept visible but inert. */
+const FLOW_CONTENT_NOTE = [
+  '# [dsh-app] NOT MERGED: this section is a flow node ("[…]" / "{…}"), which',
+  '# ends the YAML document — the rows below it would not parse. The text is',
+  '# kept below, commented out; rewrite it as block rows to have it applied.',
+  '',
+].join('\n')
+
+/** Render one section: its rows, or the note that has to stand in for them. */
+function sectionBlock(mark: string, text: string): string {
+  switch (sectionShape(text)) {
+    case 'empty':
+      return mark
+    case 'flow-empty':
+      return `${mark}${FLOW_EMPTY_NOTE}`
+    case 'flow-content':
+      return `${mark}${FLOW_CONTENT_NOTE}${text.trimEnd().split('\n').map((line) => (line.trim() === '' || line.startsWith('#') ? line : `# ${line}`)).join('\n')}\n`
+    case 'block':
+      return `${mark}${text.trimEnd()}\n`
+  }
+}
+
 /** Render the generated patch file from its three sections. */
 export function composeSuitePatch(sections: { suite: string; preserved: string; home: string }): string {
-  const block = (mark: string, text: string): string => `${mark}${text.trim() === '' ? '' : `${text.trimEnd()}\n`}`
-  return PATCH_HEADER + block(PATCH_SUITE_MARK, sections.suite) + block(PATCH_PRESERVED_MARK, sections.preserved) + block(PATCH_HOME_MARK, sections.home)
+  return PATCH_HEADER
+    + sectionBlock(PATCH_SUITE_MARK, sections.suite)
+    + sectionBlock(PATCH_PRESERVED_MARK, sections.preserved)
+    + sectionBlock(PATCH_HOME_MARK, sections.home)
 }
 
 /**
