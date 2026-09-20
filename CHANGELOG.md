@@ -16,7 +16,7 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 - **日志脱敏补齐四类没有键名的凭据形态**（`Bearer` 令牌、JWT、`sk-` 前缀、`Set-Cookie`），内核与宿主子进程的输出在落盘与诊断页显示之前都会经过
 - **窗口导航围栏收紧**：只放行应用自身来源与启动页文件，其余本地文件一律交给系统打开；`window.open` 打开的应用内子窗口现在同样带上围栏
 - **代理自动探测更严格**：只有端口后面的监听者真的会以 HTTP 应答时才注入代理环境——以前任意占用 7897/7890 的本地进程都会被当成代理接收内核的出站流量
-- **构建与发布的验证补洞**：CI 现在会跑运行时产物的文件级检查（PPT 模板、PDF 字体这类资源此前从不被验证）；非 linux 的发布单元会在打包前用宿主自己的代码实际执行一次办公相关的 Python 集（darwin 与 arm64 的这套此前从未运行过就发出去了）
+- **构建与发布的验证补洞**：CI 现在会跑运行时产物的文件级检查（PPT 模板、PDF 字体这类资源此前从不被验证）；darwin 与 win32-x64 的发布单元会在打包前用宿主自己的代码实际执行一次办公相关的 Python 集（darwin 的两套此前从未运行过就发出去了；win32-arm64 是跨架构构建——宿主会拒绝非本机架构的树，那一套仍无法在 runner 上自检）
 - 另外：办公载荷安装改为「先让位、再替换」，替换失败不再丢掉已装好的引擎；套件新增两条静态检查（磁盘上未登记进名册的插件、字典之外的界面文案）；plugin-fff 补上了此前缺失的测试
 
 ### English
@@ -38,9 +38,10 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
   port actually answers as HTTP — previously any process squatting on 7897/7890 was adopted as a
   proxy and received the kernel's outbound traffic
 - Verification gaps in build and release are closed: CI now runs the artifact-level checks on the
-  runtime (PPT templates, PDF fonts — this class was never executed before), and every non-Linux
-  release cell executes the office Python set with the host's own code before packing it (the
-  darwin and arm64 sets had never been run anywhere)
+  runtime (PPT templates, PDF fonts — this class was never executed before), and the darwin and
+  win32-x64 release cells execute the office Python set with the host's own code before packing it
+  (the darwin sets had never been run anywhere; win32-arm64 is cross-built and the host refuses a
+  tree for another arch, so that one still cannot be self-checked on the runner)
 - Also: the office payload installs by moving the old copy aside first, so a failed swap no longer
   loses the working engine; the suite gained two static checks (a plugin on disk that no roster
   carries, UI copy outside the dictionaries); plugin-fff gained the test suite it was missing
