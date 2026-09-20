@@ -537,6 +537,18 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   /** `{state}` for the toggle labels; the unknown state reads as pending. */
   const pending = t('memory.state.pending')
 
+  /**
+   * Whether the RETIRED global scope still holds cards. The host keeps
+   * serving it (a store that predates the boot migration, or a card file put
+   * there by hand), so the section still renders it — but ONLY when it is
+   * non-empty. With no cards there is nothing to list, nothing to clear and
+   * nothing to say, and a hard-coded "全局记忆 0" beside a permanently
+   * disabled "清空全局记忆" button reads as a broken feature. The block itself
+   * (and its slug-less /entries and /clear calls) is what the next stage
+   * deletes outright.
+   */
+  const globalVisible = status !== null && status.cards > 0
+
   return (
     <div className="dshm_section">
       <p className="dshm_title">{t('memory.title')}</p>
@@ -590,25 +602,38 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
       </div>
 
       <div className="dshm_cards">
-        <div className="dshm_card">
-          <div className="dshm_cardLabel">{t('memory.scope.global')}</div>
-          <div className="dshm_cardValue">{status === null ? pending : String(status.cards)}</div>
-        </div>
-        <div className="dshm_card">
-          <div className="dshm_cardLabel">{t('memory.stats.size')}</div>
-          <div className="dshm_cardValue">{status === null ? pending : fmtBytes(status.sizeBytes)}</div>
-        </div>
+        {/* The three global-scope cards ride the same emptiness rule as the
+            list below: they only mean something while that scope still holds
+            cards (see globalVisible). */}
+        {globalVisible
+          ? (
+            <>
+              <div className="dshm_card">
+                <div className="dshm_cardLabel">{t('memory.scope.global')}</div>
+                <div className="dshm_cardValue">{String(status.cards)}</div>
+              </div>
+              <div className="dshm_card">
+                <div className="dshm_cardLabel">{t('memory.stats.size')}</div>
+                <div className="dshm_cardValue">{fmtBytes(status.sizeBytes)}</div>
+              </div>
+            </>
+          )
+          : null}
         <div className="dshm_card">
           <div className="dshm_cardLabel">{t('memory.stats.projects')}</div>
           <div className="dshm_cardValue">{status === null ? pending : String(status.projects.length)}</div>
         </div>
-        <div className="dshm_card">
-          <div className="dshm_cardLabel">{t('memory.stats.storeDir')}</div>
-          <div
-            className="dshm_cardPath"
-            title={status === null ? '' : t('memory.storePath.title', { path: status.storePath })}
-          >{status === null ? pending : status.storePath}</div>
-        </div>
+        {globalVisible
+          ? (
+            <div className="dshm_card">
+              <div className="dshm_cardLabel">{t('memory.stats.storeDir')}</div>
+              <div
+                className="dshm_cardPath"
+                title={t('memory.storePath.title', { path: status.storePath })}
+              >{status.storePath}</div>
+            </div>
+          )
+          : null}
       </div>
 
       {status !== null && status.distill && status.activity.length > 0
@@ -754,14 +779,18 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         )
         : null}
 
-      <div className="dshm_actions">
-        <button
-          type="button"
-          className="dshm_button dshm_buttonDanger"
-          disabled={busy || status === null || status.cards === 0}
-          onClick={() => { setConfirming({ kind: 'clear', scope: 'global', slug: '', title: t('memory.scope.global'), cards: status?.cards ?? 0 }) }}
-        >{t('memory.action.clearGlobal')}</button>
-      </div>
+      {globalVisible
+        ? (
+          <div className="dshm_actions">
+            <button
+              type="button"
+              className="dshm_button dshm_buttonDanger"
+              disabled={busy}
+              onClick={() => { setConfirming({ kind: 'clear', scope: 'global', slug: '', title: t('memory.scope.global'), cards: status.cards }) }}
+            >{t('memory.action.clearGlobal')}</button>
+          </div>
+        )
+        : null}
 
       {status !== null && status.projects.length > 0
         ? (

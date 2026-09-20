@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { extractJson, resolveLlm, streamJson } from '../src/llm-direct.ts'
 import { MemoryRoot, repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
-import { buildDistillPrompt, resolveScope } from '../src/distiller.ts'
+import { buildDistillPrompt } from '../src/distiller.ts'
 import { buildCuratePrompt } from '../src/curator.ts'
 
 test('extractJson parses bare objects', () => {
@@ -152,15 +152,16 @@ test('buildDistillPrompt bans work logs and repo restatements', () => {
 test('buildDistillPrompt offers no scope field to fill in', () => {
   const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-prompt-')))
   const { system } = buildDistillPrompt('[user] hello', 'D:/proj', root)
-  // The host derives scope from the session's workspace (resolveScope), so the
-  // prompt must not ask the model to guess it. A previous revision both asked
-  // AND ignored the answer — the model burned tokens on a dead field, and a
-  // test pinned that stale rule in place.
+  // The prompt never asked the model to tag a scope: the session's workspace
+  // decided where a proposal landed. A previous revision both asked AND
+  // ignored the answer — the model burned tokens on a dead field, and a test
+  // pinned that stale rule in place. (The pass itself is retired; see the
+  // module header in src/distiller.ts.)
   assert.doesNotMatch(system, /"scope"/)
   assert.match(system, /the host decides, not you/i)
   assert.match(system, /that workspace's project memory/)
-  // No-workspace sessions must be told where their cards land too, without
-  // being asked to tag them.
+  // No-workspace sessions were told where their cards land too, without being
+  // asked to tag them.
   const none = buildDistillPrompt('[user] hello', undefined, root)
   assert.match(none.user, /GLOBAL memory/)
   assert.doesNotMatch(none.user, /propose scope/)
@@ -311,11 +312,4 @@ test('streamJson keeps a caller abort distinct from our timeout', async () => {
   const result = await streamJson(aborting as never, { ...SPEC, signal: controller.signal, timeoutMs: 5_000 })
   assert.equal(result.status, 'aborted')
   assert.equal(result.error, 'aborted')
-})
-
-test('resolveScope: only a session without a workspace reaches the global file', () => {
-  // The host decides the address from the one fact it has; the model no longer
-  // gets a say (see the prompt test above).
-  assert.equal(resolveScope('D:/proj'), 'project')
-  assert.equal(resolveScope(undefined), 'global')
 })

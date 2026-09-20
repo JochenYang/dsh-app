@@ -1,22 +1,36 @@
 /**
- * The background distiller — the code-guaranteed half of proactive memory.
+ * The background distiller — the RETIRED half of proactive memory.
  *
- * While the in-session `memory_save` tool relies on the model noticing
- * durable facts, this pass makes persistence deterministic: after a session
- * goes quiet for {@link QUIET_MS}, one direct LLM call reviews the
- * conversation delta since the last distill plus the current topic cards and
- * proposes card writes as structured JSON. The HOST validates every proposal
- * (topic key shape, category, length, credentials, the similarity write gate)
- * before it ever reaches the store — the model cannot write anything itself.
+ * RETIRED, NOT IN USE. The host no longer schedules a distill: nothing calls
+ * {@link MemoryDistiller.attach}, so no `turn/end` arms a quiet timer and no
+ * model call is ever made from a conversation. The reason is the failure it
+ * produced in practice — an inference that sees one conversation cannot know
+ * whether a fact holds in every workspace, and its output was routed into a
+ * global scope that was then injected into ALL projects. Memory is now what
+ * the model itself decides to keep, through the `memory_save` tool, into the
+ * memory of the project it is working in (see prompt.ts, whose guidelines
+ * carry that instruction).
+ *
+ * The file is kept because the curator still imports its session slice
+ * ({@link SessionLike}, {@link directRouteOf}) and because the pass below is
+ * the reference for the machinery the next stage either restores differently
+ * or deletes outright. Everything else here is dead code.
+ *
+ * The pass, when it did run: after a session went quiet for {@link QUIET_MS},
+ * one direct LLM call reviewed the conversation delta since the last distill
+ * plus the current topic cards and proposed card writes as structured JSON.
+ * The HOST validated every proposal (topic key shape, category, length,
+ * credentials, the similarity write gate) before it ever reached the store —
+ * the model could not write anything itself.
  *
  * Design points:
- *   - Debounce: every `turn/end` re-arms the quiet timer, so an active
- *     conversation never pays for a distill; a cold session at timer fire is
- *     skipped (its progress stays, the next activation re-distills the gap).
+ *   - Debounce: every `turn/end` re-armed the quiet timer, so an active
+ *     conversation never paid for a distill; a cold session at timer fire was
+ *     skipped (its progress stayed, the next activation re-distilled the gap).
  *   - Incremental: `distill-state.json` records the last-consumed event seq
  *     per session, so repeat distills cost only the delta.
  *   - Self-exclusion: subagent sessions (`origin: 'subagent'`, i.e. another
- *     plugin's worker) never trigger distills — background maintenance must
+ *     plugin's worker) never triggered distills — background maintenance must
  *     not run off work that is not the user's own conversation.
  *   - Convergence: proposals address cards by their topic KEY. Reusing an
  *     existing key rewrites that card (upsert), so knowledge about one topic
@@ -180,7 +194,7 @@ const MIN_NEW_CHARS = 4_000
 const MAX_DISTILL_ENTRIES = 3
 
 /** One candidate card write as proposed by the model (pre-validation). There
- *  is no scope field: the host decides where a card lands (see resolveScope). */
+ *  is no scope field: the session's workspace decides where a card lands. */
 interface ProposedEntry {
   topic?: unknown
   summary?: unknown
@@ -189,22 +203,9 @@ interface ProposedEntry {
 }
 
 /**
- * Where one proposal lands. The host decides, not the model: a proposer that
- * sees one conversation has no way to know whether a fact holds in EVERY
- * workspace, and asking it to guess is exactly what scattered one session's
- * project learning into the global store. Scope is derived from the one fact
- * the host actually has — whether the session had a workspace — and the
- * prompt no longer offers a scope field for the model to fill in.
- * memory_save remains the deliberate path for cross-workspace knowledge.
- */
-export function resolveScope(cwd: string | undefined): 'global' | 'project' {
-  return cwd === undefined ? 'global' : 'project'
-}
-
-/**
- * Build the distill prompt as system (task + rules + output contract) and
- * user (memory index + cards + transcript) halves: the direct call maps them
- * to system/user messages.
+ * The distill prompt, when the pass ran, told the model where its proposals
+ * landed — a fixed rule rather than a field the model filled in. Kept with
+ * the retired pass (see the module header).
  */
 export function buildDistillPrompt(transcript: string, cwd: string | undefined, root: MemoryRoot): { system: string, user: string } {
   const globalText = memoryInput(root.global)
@@ -372,7 +373,16 @@ export class MemoryDistiller {
     this.log = log
   }
 
-  /** Subscribe to the event feed; returns the disposer. */
+  /**
+   * Subscribe to the event feed; returns the disposer.
+   *
+   * NOT CALLED ANY MORE (see the module header): this subscription is what
+   * armed the quiet timer that ran a session-driven extraction, and the host
+   * deliberately stopped mounting it. It is kept intact so the next stage can
+   * decide between a differently-scoped extractor and deleting the pass —
+   * re-enabling it as it stands would put project material back into a scope
+   * nothing reads.
+   */
   attach(): () => void {
     const disposeFeed = this.ctx.on('session/event', (session: Session, event) => {
       if (event.type !== 'turn/end') return
@@ -419,9 +429,10 @@ export class MemoryDistiller {
       if (agent === undefined) return
       const session = agent.session as unknown as SessionLike
       if (session.header.origin === 'subagent') return
-      // No workspace → the session still distills, but only the GLOBAL
-      // channel applies: a user preference is never lost just because the
-      // session was started without a cwd.
+      // A session without a workspace has no scope to write to any more: the
+      // global one that used to absorb its cards is gone (see the module
+      // header), so `applyEntries` refuses the whole proposal set instead of
+      // routing it into a directory nothing reads.
       const cwd = session.header.cwd === '' ? undefined : session.header.cwd
 
       this.inFlight.add(sessionId)
@@ -540,7 +551,7 @@ export class MemoryDistiller {
       this.root.recordDistill(sessionId, applied, 'direct', result.inputTokens + result.outputTokens)
       if (applied > 0) {
         this.log.info(`memory distill: saved ${String(applied)} card${applied === 1 ? '' : 's'} from "${sessionId}"`)
-        const store = resolveScope(cwd) === 'global' ? this.root.global : this.root.projectFor(cwd as string)
+        const store = this.root.projectFor(cwd as string)
         await this.onSaved?.(parent, sessionId, store)
       }
     } catch (error) {
@@ -563,15 +574,21 @@ export class MemoryDistiller {
    *     reworded duplicate never lands under a fresh name.
    * Writes hit the disk-backed store immediately, so a card accepted earlier
    * in THIS run is what later proposals in the same run dedupe against.
+   *
+   * A session with NO workspace writes nothing at all: its cards used to fall
+   * back to the global scope, which is gone (see the module header), and the
+   * whole proposal set is dropped rather than routed somewhere nothing reads.
+   * That guard is also what makes the retirement safe if a future revision
+   * re-arms the timer: an extractor that runs with no cwd cannot recreate the
+   * scope the removal exists to get rid of.
    */
   private async applyEntries(structured: unknown, cwd: string | undefined): Promise<number> {
     if (typeof structured !== 'object' || structured === null) return 0
     const proposals = (structured as { entries?: unknown }).entries
     if (!Array.isArray(proposals)) return 0
+    if (cwd === undefined) return 0
 
-    // The host decides the address (see resolveScope): no workspace means the
-    // only store available is the global one.
-    const store = resolveScope(cwd) === 'global' ? this.root.global : this.root.projectFor(cwd as string)
+    const store = this.root.projectFor(cwd)
     let applied = 0
     const screened: string[] = []
     for (const raw of proposals) {

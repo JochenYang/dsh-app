@@ -1,24 +1,30 @@
 /**
  * Two-level persistence for cross-session memory, TOPIC-CARD model:
  *
- *   <root>/topics/<key>.md                 — one GLOBAL card per topic (user
- *                                            preferences, habits; injected into
- *                                            every session)
- *   <root>/index.md                        — GLOBAL index, one line per card,
- *                                            REBUILT BY THE HOST after every
- *                                            write (hand edits are overwritten)
+ *   <root>/config.json                     — master toggle + background-
+ *                                            maintenance toggle + pinned topic
+ *                                            keys + storeVersion. It lives at
+ *                                            the root (it is what is left of
+ *                                            the old global store) and is NOT
+ *                                            card storage.
+ *   <root>/distill-state.json              — per-session background progress +
+ *                                            run traces + curated hashes +
+ *                                            similarity-suspect log
+ *   <root>/llm-audit.json                  — background LLM cost rows
  *   <root>/projects/<slug>/topics/<key>.md — one PROJECT card per topic
  *                                            (decisions, conventions, lessons;
  *                                            injected only into sessions of
  *                                            that workspace)
- *   <root>/projects/<slug>/index.md        — PROJECT index
+ *   <root>/projects/<slug>/index.md        — PROJECT index, one line per card,
+ *                                            REBUILT BY THE HOST after every
+ *                                            write (hand edits are overwritten)
  *   <root>/projects/<slug>/project.json    — {cwd} stamp written on first save
- *   <root>/config.json                     — master toggle + distill toggle +
- *                                            pinned topic keys + storeVersion
- *   <root>/distill-state.json              — per-session distill progress +
- *                                            run traces + curated hashes +
- *                                            similarity-suspect log
- *   <root>/llm-audit.json                  — background LLM cost rows
+ *
+ * The retired GLOBAL scope used to live at `<root>/topics/` and was injected
+ * into every project's sessions. It is gone: {@link MemoryRoot.migrateLegacyGlobalScope}
+ * moves any card still sitting there into `projects/legacy-global/` at boot, so
+ * the cards survive as an ordinary, visible, deletable project instead of a
+ * scope that silently rode every session.
  *
  * A card is the unit of identity: saving the same topic key again REWRITES the
  * card (upsert), so knowledge converges instead of piling up a dated timeline.
@@ -30,8 +36,8 @@
  * `memory.legacy.md` (read-only archive, never deleted implicitly).
  *
  * Project identity: slug = sanitized basename + '-' + 8 hex of the full cwd
- * (same basename in two parents never collides). Sessions with no cwd see
- * only the global scope — hard isolation, not prompt-level discipline.
+ * (same basename in two parents never collides). Sessions with no cwd have no
+ * scope at all — nothing is read for them and nothing can be saved from them.
  *
  * Reads are existsSync-guarded and constructors do NO I/O (a project store
  * is instantiated per prompt assembly), so the dirs appear only on first
@@ -44,7 +50,8 @@ import { createHash } from 'node:crypto'
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
 } from 'node:fs'
-import { basename, join } from 'node:path'
+import { promises as fsp } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { removeTree } from './remove-tree.ts'
 import type { MemoryCategory, MemoryDistillActivity, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
 import { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, MEMORY_CATEGORIES } from './types.ts'
@@ -1035,6 +1042,15 @@ export function contentHash(text: string): string {
 /** Slug shape the clear route accepts — also the traversal fence. */
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 
+/**
+ * Project directory that receives the retired global scope's cards (see
+ * {@link MemoryRoot.migrateLegacyGlobalScope}). Also the placeholder `cwd`
+ * stamped into its `project.json`: the settings page shows the basename, and
+ * no session's real cwd ever equals this, so its cards are never injected —
+ * they are listable and deletable, which is what the removal requires.
+ */
+export const LEGACY_GLOBAL_SLUG = 'legacy-global'
+
 /** Whether a slug is well-formed (used to fence the clear route). */
 export function isValidSlug(slug: string): boolean {
   return SLUG_PATTERN.test(slug)
@@ -1225,11 +1241,19 @@ interface DistillState {
 }
 
 /**
- * The two-level root: one global store plus per-workspace project stores.
- * The global store's config.json holds the master + distill toggles.
+ * The memory root: the per-workspace project stores, plus the root-level
+ * store that now only carries the shared state files (`config.json`,
+ * `distill-state.json`, `llm-audit.json`).
+ *
+ * `global` keeps its name because the root directory IS the old global
+ * store's directory — moving `config.json` would drop the user's toggles and
+ * pins. It is no longer a memory SCOPE: its cards are relocated into
+ * `projects/legacy-global/` at boot, it is never injected, and no write path
+ * targets it.
  */
 export class MemoryRoot {
   readonly dir: string
+  /** The root-level store: shared state files (see the class doc). */
   readonly global: MemoryStore
   private readonly distillStatePath: string
   private readonly llmAuditPath: string
@@ -1258,7 +1282,13 @@ export class MemoryRoot {
     try {
       const meta: unknown = JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8'))
       const cwd = (meta as { cwd?: unknown }).cwd
-      if (typeof cwd === 'string' && cwd !== '') return this.projectFor(cwd)
+      // The stamp is reusable only when it round-trips to THIS directory:
+      // projectFor() derives the path from the slug, so a stamp that does not
+      // reproduce `slug` points at a directory that is not this one. The
+      // legacy-global store records a display placeholder and is exactly that
+      // case — following it would list (and curate) an empty directory beside
+      // the real one.
+      if (typeof cwd === 'string' && cwd !== '' && projectSlug(cwd) === slug) return this.projectFor(cwd)
     } catch {
       // missing/stale metadata → operate on the directory as-is
     }
@@ -1267,7 +1297,22 @@ export class MemoryRoot {
     return store
   }
 
-  /** Migrate every store whose legacy timeline file is still present (boot). */
+  /**
+   * Boot migration. Two passes, in this order:
+   *   1. every store whose legacy `memory.md` timeline is still present is
+   *      converted to topic cards ({@link MemoryStore.migrateLegacy});
+   *   2. the retired root-level scope is relocated
+   *      ({@link migrateLegacyGlobalScope}).
+   *
+   * The order is load-bearing: the root timeline converts into cards under
+   * `<root>/topics/`, and step 2 is what carries them — along with everything
+   * already there — into a real project directory. Running it the other way
+   * round would leave the freshly migrated cards orphaned in a scope nothing
+   * reads or injects.
+   *
+   * Neither pass can block the mount: a failure logs and leaves the input
+   * where it is for the next boot.
+   */
   async migrateAll(log?: { info(msg: string): void }): Promise<void> {
     const stores: Array<[string, MemoryStore]> = [['global', this.global]]
     for (const project of listProjects(this.dir)) {
@@ -1290,6 +1335,163 @@ export class MemoryRoot {
         log?.info(`memory migration for ${label} failed (will retry next boot): ${String(error)}`)
       }
     }
+    await this.migrateLegacyGlobalScope(log)
+  }
+
+  /**
+   * Retire the root-level GLOBAL scope: move every card of `<root>/topics/`
+   * into `<root>/projects/legacy-global/topics/` and stamp that directory's
+   * `project.json` with the display placeholder {@link LEGACY_GLOBAL_SLUG}.
+   *
+   * Why: the global scope injected its cards into EVERY project's sessions,
+   * so a conclusion reached inside one workspace came back in all of them.
+   * Nothing may be lost by removing it, and nothing may silently vanish
+   * either — the cards land in an ordinary project directory, which the
+   * settings page lists and the user can open and delete like any other.
+   *
+   * Idempotent, and a no-op unless `<root>/topics/` still holds `.md` files:
+   * the sources are MOVED (never copied), so a second run finds nothing, and
+   * a re-run after a partial failure skips destinations that already exist.
+   * Never throws: a failure logs one line and leaves the cards where they
+   * are, which costs a retry on the next boot and nothing else.
+   *
+   * `<root>/config.json` stays put — it holds the user's toggles and pins.
+   * The pins of the moved cards are carried onto their new store, since a pin
+   * keyed by topic is the user's "always inject this" intent.
+   *
+   * @param log - host logger (optional; the migration is also runnable from a probe).
+   * @returns how many cards were moved.
+   */
+  async migrateLegacyGlobalScope(log?: { info(msg: string): void }): Promise<number> {
+    const archived = await this.moveRetiredGlobalArchive(log)
+    const source = this.global.storePath
+    if (!existsSync(source)) return 0
+    let entries: string[]
+    try {
+      entries = readdirSync(source, { withFileTypes: true })
+        .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
+        .map(entry => entry.name)
+    } catch (error) {
+      log?.info(`memory migration: could not read the retired global scope ${source} (left in place): ${String(error)}`)
+      return 0
+    }
+    if (entries.length === 0) {
+      if (archived > 0) log?.info(`memory migration: moved ${String(archived)} archived cop(y|ies) of the retired global scope, no live cards were left there`)
+      return 0
+    }
+
+    const targetDir = join(this.dir, 'projects', LEGACY_GLOBAL_SLUG)
+    const targetTopics = join(targetDir, 'topics')
+    const pinned = this.global.pinnedSet()
+    const moved: string[] = []
+    const failed: string[] = []
+    for (const name of entries) {
+      const from = join(source, name)
+      const to = join(targetTopics, name)
+      // A destination that already holds this topic is a previous run's
+      // result (or a genuine project card): the destination wins, the source
+      // copy is left for a human rather than overwritten.
+      if (existsSync(to)) continue
+      try {
+        // Created lazily and per file: a run that moves nothing must not leave
+        // an empty project directory behind for the settings page to list.
+        mkdirSync(targetTopics, { recursive: true })
+        renameSync(from, to)
+        moved.push(name.slice(0, -3))
+      } catch (error) {
+        failed.push(`${name} (${String(error)})`)
+      }
+    }
+    if (moved.length === 0) {
+      if (failed.length > 0) {
+        log?.info(`memory migration: could not move ${String(failed.length)} retired global card(s), left in place: ${failed.join(', ')}`)
+      }
+      return 0
+    }
+    const metaPath = join(targetDir, 'project.json')
+    try {
+      if (!existsSync(metaPath)) {
+        writeFileSync(metaPath, `${JSON.stringify({ cwd: LEGACY_GLOBAL_SLUG }, null, 2)}\n`, 'utf8')
+      }
+      const target = new MemoryStore(targetDir)
+      target.attachLedger(this, LEGACY_GLOBAL_SLUG)
+      await target.reindex()
+      for (const key of moved) {
+        if (pinned.has(key)) await target.addPin(key)
+      }
+      // The retired scope's own index described cards that no longer live
+      // there; reindexing an emptied store drops the file.
+      await this.global.reindex()
+    } catch (error) {
+      // The cards are already at their destination — this is reporting only.
+      log?.info(`memory migration: moved ${String(moved.length)} retired global card(s) but could not finish their index/pins: ${String(error)}`)
+      return moved.length
+    }
+    log?.info(`memory migration: moved ${String(moved.length)} retired global card(s) to projects/${LEGACY_GLOBAL_SLUG} (listable and deletable there)`)
+    if (failed.length > 0) {
+      log?.info(`memory migration: ${String(failed.length)} retired global card(s) could not be moved, left in place: ${failed.join(', ')}`)
+    }
+    return moved.length
+  }
+
+  /**
+   * Move the retired scope's ARCHIVE into the same project directory.
+   *
+   * The archive is the undo surface of the scope the migration just retired, and
+   * a restore writes back into the store it belongs to — so leaving it at the
+   * root would let a user "restore" a card into a scope nothing injects and
+   * nothing lists: the card would exist and be invisible. Moving it keeps the
+   * undo working and makes the restored card land in `legacy-global`, where the
+   * settings page shows it.
+   *
+   * Idempotent the same way the cards are (moves, never copies; a destination
+   * that exists wins), and never fatal: a failure leaves the copy where it is.
+   *
+   * @param log - host logger (optional).
+   * @returns how many archived copies were moved.
+   */
+  private async moveRetiredGlobalArchive(log?: { info(msg: string): void }): Promise<number> {
+    // `storePath` is the topics directory; the archive sits beside it, at the
+    // store's own root.
+    const source = join(dirname(this.global.storePath), 'archive')
+    if (!existsSync(source)) return 0
+    let days: string[]
+    try {
+      days = readdirSync(source, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name)
+    } catch {
+      return 0
+    }
+    let moved = 0
+    for (const day of days) {
+      let names: string[]
+      try {
+        names = readdirSync(join(source, day), { withFileTypes: true })
+          .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
+          .map(entry => entry.name)
+      } catch {
+        continue
+      }
+      for (const name of names) {
+        const to = join(this.dir, 'projects', LEGACY_GLOBAL_SLUG, 'archive', day, name)
+        if (existsSync(to)) continue
+        try {
+          mkdirSync(dirname(to), { recursive: true })
+          renameSync(join(source, day, name), to)
+          moved += 1
+        } catch (error) {
+          log?.info(`memory migration: could not move the archived copy ${day}/${name} of the retired global scope: ${String(error)}`)
+        }
+      }
+      // The day directory itself is left if anything is still in it (a copy
+      // that could not be moved); an empty one goes, so the retired archive
+      // does not linger as a tree of empty dates.
+      try {
+        await fsp.rmdir(join(source, day))
+      } catch {
+        // Not empty, or already gone: nothing to do either way.
+      }
+    }
+    return moved
   }
 
   /** Last-consumed event seq for one session (0 when never distilled). */

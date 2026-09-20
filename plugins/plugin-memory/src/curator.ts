@@ -1,9 +1,10 @@
 /**
  * The background curator — the consolidation pass that keeps a memory store
- * lean over time. Where the distiller only UPSERTS cards, the curator reviews
- * a store that has grown past a threshold and proposes edits BY TOPIC KEY:
- * merge near-duplicate topics into one card, delete stale cards, rewrite a
- * card in place.
+ * lean over time. Where the retired distiller only UPSERTED cards, the
+ * curator reviews a store that has grown past a threshold and proposes edits
+ * BY TOPIC KEY: merge near-duplicate topics into one card, delete stale
+ * cards, rewrite a card in place. It acts on memory that already exists —
+ * nothing here reads a conversation.
  *
  * Identical safety model to the distiller: a direct LLM call proposes (the
  * JSON contract lives in the prompt, see {@link buildCuratePrompt}) and the
@@ -15,18 +16,22 @@
  * record. Any failure leaves the store untouched and retries on the next
  * trigger.
  *
- * Trigger: the distiller hands us the triggering session right after it
- * persisted cards. Two gates keep the pass cheap and rare:
+ * Trigger: the WRITE path hands us the triggering session right after a card
+ * was persisted (the `memory_save` tool, and formerly a distill apply — that
+ * pass is retired, see distiller.ts). The trigger does NOT depend on the
+ * distiller: it is the tool's own save callback, so retiring the extraction
+ * left the curator mounted and reachable exactly as before. Two gates keep
+ * the pass cheap and rare:
  *   - Cooldown: at most one sweep per {@link CURATE_COOLDOWN_MS}; requests
  *     inside the window coalesce into a single trailing sweep whose session
  *     is re-resolved by id at fire time (the original agent may be disposed
  *     by then — a dead session drops the pass and every due store simply
- *     waits for the next distill save).
+ *     waits for the next save).
  *   - Change detection: a store whose card fingerprint is unchanged since its
  *     last completed pass is skipped, so a sweep only pays for stores a
  *     writer actually touched.
- * Stores below {@link CURATE_MIN_ENTRIES} cards are left alone: the distiller
- * keeps them healthy on its own and the injection budget still fits.
+ * Stores below {@link CURATE_MIN_ENTRIES} cards are left alone: they stay
+ * healthy on their own and the injection budget still fits.
  *
  * **Progress invariant — do not reorder.** `recordCurated` is the claim "this
  * store has been reviewed"; it runs ONLY after the edits landed AND the pass
@@ -361,10 +366,9 @@ interface CurateTarget {
 
 /**
  * The background curator. {@link attach} provides the cleanup seam; the
- * trigger arrives through {@link runAfterDistill} (called by the host when
- * a distill run persisted cards). Everything below the trigger is fail-soft:
- * a bad model answer or a dead session just logs and retries on the next
- * distill.
+ * trigger arrives through {@link runAfterSave} (called by the host when a
+ * card was persisted). Everything below the trigger is fail-soft: a bad
+ * model answer or a dead session just logs and retries on the next save.
  */
 export class MemoryCurator {
   private readonly ctx: Context
@@ -402,13 +406,21 @@ export class MemoryCurator {
    * The save trigger: sweep now when the cooldown has elapsed, otherwise
    * coalesce into the pending trailing sweep. Never throws.
    *
-   * Gated by `isDistillEnabled()` — the user-facing 后台自动提炼 toggle
-   * means "no background model work", so it stops the curator too, not just
-   * the distiller. Keeping one gate for every background pass is what makes
-   * flipping it cost-predictable; a save-triggered sweep slipping through
-   * with the toggle off would spend tokens the user opted out of.
+   * The name says SAVE rather than distill because that is the only trigger
+   * left: the session-driven extractor is retired (see distiller.ts), so a
+   * card persisted by the model through `memory_save` is what re-arms the
+   * cleanup. Consolidating existing memory therefore depends on memory being
+   * written at all — its scope is what `memory_save` writes, nothing else.
+   *
+   * Gated by `isDistillEnabled()` — the user-facing background-maintenance
+   * toggle (the config FIELD keeps its old name so an existing user setting
+   * survives a rename of the pass it controls). It means "no background model
+   * work", so it stops the curator: keeping one gate for every background
+   * pass is what makes flipping it cost-predictable, and a save-triggered
+   * sweep slipping through with the toggle off would spend tokens the user
+   * opted out of.
    */
-  async runAfterDistill(parent: ParentAgent, sessionId: SessionId): Promise<void> {
+  async runAfterSave(parent: ParentAgent, sessionId: SessionId): Promise<void> {
     if (!this.root.global.isEnabled() || !this.root.global.isDistillEnabled()) return
     const dueAt = this.lastSweepAt + this.cooldownMs
     if (Date.now() >= dueAt) {
@@ -449,8 +461,8 @@ export class MemoryCurator {
 
   /**
    * One full pass over every due store. The model route comes from the
-   * triggering session (same rule as the distiller): no route means no call
-   * at all, and the sweep is skipped without burning the cooldown.
+   * triggering session (same rule as the retired distiller): no route means
+   * no call at all, and the sweep is skipped without burning the cooldown.
    *
    * Never throws. Both the enumeration and each target are guarded, because
    * the callers are `void`-ed fire-and-forget (see `index.ts`) and an escaping
@@ -470,24 +482,28 @@ export class MemoryCurator {
       // the sweep down before it starts.
       targets = this.selectTargets()
     } catch (error) {
-      this.log.warn(`memory curate: could not enumerate stores (will retry on next distill): ${String(error)}`)
+      this.log.warn(`memory curate: could not enumerate stores (will retry on next save): ${String(error)}`)
       return
     }
     for (const target of targets) {
       try {
         await this.curate(target, route, session.id)
       } catch (error) {
-        this.log.warn(`memory curate for "${target.label}" failed (will retry on next distill): ${String(error)}`)
+        this.log.warn(`memory curate for "${target.label}" failed (will retry on next save): ${String(error)}`)
       }
     }
   }
 
   /**
-   * Every DUE store (global + projects with a resolvable cwd): at or above
-   * the card threshold AND changed since its last completed pass — a store
-   * whose fingerprint still matches the recorded one was already
-   * consolidated, and re-reading the same cards would only propose the same
-   * nothing.
+   * Every DUE store (one per project directory): at or above the card
+   * threshold AND changed since its last completed pass — a store whose
+   * fingerprint still matches the recorded one was already consolidated, and
+   * re-reading the same cards would only propose the same nothing.
+   *
+   * The root-level store is deliberately absent: it holds no cards any more
+   * (the retired global scope's cards are relocated into a project directory
+   * at boot), and consolidating a scope nothing injects would spend model
+   * calls on material no session ever sees.
    */
   private selectTargets(): CurateTarget[] {
     const targets: CurateTarget[] = []
@@ -496,10 +512,15 @@ export class MemoryCurator {
       if (this.root.curatedHashOf(key) === store.fingerprint()) return
       targets.push({ label: key, store })
     }
-    consider('global', this.root.global)
     for (const project of listProjects(this.root.dir)) {
+      // A directory with no cwd stamp is not a scope any session can address;
+      // it was skipped before this pass learned about slugs and stays skipped.
       if (project.cwd === '') continue
-      consider(project.slug, this.root.projectFor(project.cwd))
+      // projectBySlug, not projectFor(cwd): the two agree for a real project
+      // stamp, and only projectBySlug also resolves a directory whose stamp
+      // does not round-trip to its slug (the migrated legacy-global store).
+      const store = this.root.projectBySlug(project.slug)
+      if (store !== undefined) consider(project.slug, store)
     }
     return targets
   }

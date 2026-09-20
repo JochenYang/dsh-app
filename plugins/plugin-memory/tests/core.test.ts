@@ -21,6 +21,7 @@ import {
   MemoryStore,
   contentSimilarity,
   isValidTopic,
+  listProjects,
   normalizeForMatch,
   parseCard,
   projectSlug,
@@ -292,7 +293,7 @@ test('migrateLegacy: credential-looking entries are not carried over', async () 
   assert.equal(migrated, 1, 'the credential-looking line is dropped at the gate')
 })
 
-test('migrateAll: covers global and projects, skips clean stores', async () => {
+test('migrateAll: migrates every store timeline, then retires the root scope', async () => {
   const root = tmpRoot()
   writeFileSync(join(root.dir, 'memory.md'), '- [lesson] 2026-09-01 全局旧条目\n', 'utf8')
   const project = root.projectFor('D:/codes/Demo')
@@ -300,8 +301,100 @@ test('migrateAll: covers global and projects, skips clean stores', async () => {
   writeFileSync(join(project.dir, 'memory.md'), '- [lesson] 2026-09-01 项目旧条目\n', 'utf8')
   writeFileSync(join(project.dir, 'project.json'), `${JSON.stringify({ cwd: 'D:/codes/Demo' })}\n`, 'utf8')
   await root.migrateAll()
-  assert.equal(root.global.list().length, 1)
-  assert.equal(root.projectFor('D:/codes/Demo').list().length, 1)
+  assert.equal(root.projectFor('D:/codes/Demo').list().length, 1, 'the project timeline stays in its own store')
+  // The root timeline converted first and was then carried out with the rest
+  // of the retired scope: running these passes the other way round would
+  // orphan the freshly migrated cards in a directory nothing reads.
+  assert.equal(root.global.list().length, 0)
+  const legacy = root.projectBySlug('legacy-global')
+  assert.ok(legacy !== undefined)
+  assert.equal(legacy.list().length, 1)
+  assert.equal(legacy.list()[0]?.body, '全局旧条目')
+})
+
+// --- retiring the global scope (boot migration, no data loss) -----------------
+
+test('migrateLegacyGlobalScope: root cards move into projects/legacy-global, once', async () => {
+  const root = tmpRoot()
+  await save(root.global, 'old-global-a', '旧的全局卡甲', 'preference', '旧全局甲')
+  await save(root.global, 'old-global-b', '旧的全局卡乙')
+  await root.global.addPin('old-global-a')
+
+  const moved = await root.migrateLegacyGlobalScope()
+  assert.equal(moved, 2)
+  assert.equal(root.global.list().length, 0, 'the retired scope is empty')
+  const legacyDir = join(root.dir, 'projects', 'legacy-global')
+  assert.ok(existsSync(join(legacyDir, 'topics', 'old-global-a.md')), 'the card file moved, not copied')
+  assert.ok(existsSync(join(legacyDir, 'topics', 'old-global-b.md')))
+  assert.equal(existsSync(join(root.dir, 'topics', 'old-global-a.md')), false, 'nothing is left behind')
+  assert.equal(existsSync(join(root.dir, 'index.md')), false, 'the retired scope index goes with its cards')
+  // The stamp is what makes the settings page list it as a project the user
+  // can open and delete, with a placeholder cwd no session ever has.
+  const meta: unknown = JSON.parse(readFileSync(join(legacyDir, 'project.json'), 'utf8'))
+  assert.deepEqual(meta, { cwd: 'legacy-global' })
+
+  const listed = listProjects(root.dir)
+  assert.equal(listed.length, 1)
+  assert.equal(listed[0]!.slug, 'legacy-global')
+  assert.equal(listed[0]!.cwd, 'legacy-global')
+  assert.equal(listed[0]!.cards, 2)
+  const store = root.projectBySlug('legacy-global')
+  assert.ok(store !== undefined)
+  assert.equal(store.get('old-global-a')?.body, '旧的全局卡甲', 'the content is intact')
+  assert.equal(store.get('old-global-a')?.category, 'preference', 'and so is its category')
+  assert.ok(store.pinnedSet().has('old-global-a'), 'a pin is the user\'s intent — it follows the card')
+
+  // IDEMPOTENT: a second construction (a later boot) must move nothing again
+  // and must not duplicate or overwrite what is already there.
+  const nextBoot = new MemoryRoot(root.dir)
+  assert.equal(await nextBoot.migrateLegacyGlobalScope(), 0, 'a second run finds nothing to move')
+  assert.equal(listProjects(root.dir)[0]!.cards, 2, 'still exactly two cards')
+  assert.equal(nextBoot.projectBySlug('legacy-global')?.list().length, 2)
+})
+
+test('migrateLegacyGlobalScope: an empty or absent root topics/ is a no-op', async () => {
+  const root = tmpRoot()
+  assert.equal(await root.migrateLegacyGlobalScope(), 0, 'no topics/ directory at all')
+  await save(root.projectFor('D:/codes/Demo'), 'project-card', '项目卡片')
+  assert.equal(await root.migrateLegacyGlobalScope(), 0)
+  assert.equal(existsSync(join(root.dir, 'projects', 'legacy-global')), false, 'and no empty project directory is invented')
+})
+
+test('migrateLegacyGlobalScope: the retired scope archive moves with its cards', async () => {
+  const root = tmpRoot()
+  await save(root.global, 'retired-card', '会被删除的旧全局卡')
+  await root.global.forget('retired-card')
+  // The archive is the undo surface of THAT scope, and a restore writes back
+  // into the store it belongs to: left at the root, "restore" would put a card
+  // into a scope nothing injects and nothing lists.
+  assert.equal(root.global.archiveCount(), 1)
+
+  assert.equal(await root.migrateLegacyGlobalScope(), 0, 'there is no live card left to move')
+
+  const moved = join(root.dir, 'projects', 'legacy-global', 'archive')
+  assert.equal(existsSync(moved), true, 'the archived copy followed the scope')
+  const store = root.projectBySlug('legacy-global')
+  assert.ok(store !== undefined)
+  const [row] = store.archivedCards()
+  assert.ok(row !== undefined, 'and it is restorable from where it now lives')
+  assert.equal(await store.restoreArchived(row.day, row.file, row.topic), 'restored')
+  assert.equal(store.get('retired-card')?.body, '会被删除的旧全局卡')
+})
+
+test('migrateLegacyGlobalScope: a destination already holding the topic is not overwritten', async () => {
+  const root = tmpRoot()
+  await save(root.global, 'shared-key', '根目录里的版本')
+  const legacyDir = join(root.dir, 'projects', 'legacy-global')
+  mkdirSync(join(legacyDir, 'topics'), { recursive: true })
+  writeFileSync(join(legacyDir, 'topics', 'shared-key.md'), renderCard({
+    name: 'shared-key', category: 'lesson', summary: '已经在那里', created: '2026-01-01', updated: '2026-01-01', body: '已经搬到过目的地的版本', malformed: false,
+  }), 'utf8')
+  // A previous run's result (or a real card) wins; the source copy is left
+  // where a human can see it rather than being silently overwritten.
+  assert.equal(await root.migrateLegacyGlobalScope(), 0)
+  const store = root.projectBySlug('legacy-global')
+  assert.equal(store?.get('shared-key')?.body, '已经搬到过目的地的版本')
+  assert.equal(root.global.get('shared-key')?.body, '根目录里的版本', 'the source is left in place for review')
 })
 
 // --- injection selection ----------------------------------------------------------
@@ -337,19 +430,42 @@ test('renderCardBlock: malformed cards render verbatim, normal cards get a headi
   assert.equal(renderCardBlock(malformed), '手改内容')
 })
 
-test('renderMemoryText: index + cards per scope; project isolation holds', async () => {
+test('renderMemoryText: the project index and cards inject; the retired root scope never does', async () => {
   const root = tmpRoot()
-  await save(root.global, 'user-lang', '用户偏好中文回复', 'preference', '中文回复')
+  // A card still sitting in the retired root scope (a store whose boot
+  // migration has not run): it must not reach any session.
+  await save(root.global, 'retired-global-card', '旧全局卡的内容不该再被注入', 'preference', '旧全局')
   await save(root.projectFor('D:/codes/Demo'), 'demo-flow', 'Demo 项目的约定', 'convention', 'Demo 约定')
   await save(root.projectFor('D:/codes/Other'), 'other-secret', '其它项目的卡片', 'fact', '其它')
   const text = renderMemoryText(root, 'D:/codes/Demo')
-  assert.ok(text.includes('user-lang'), 'global index line injected')
-  assert.ok(text.includes('用户偏好中文回复'), 'global body injected')
   assert.ok(text.includes('demo-flow'), 'project index line injected')
+  assert.ok(text.includes('Demo 项目的约定'), 'project body injected')
   assert.ok(!text.includes('other-secret'), 'another project is structurally absent')
+  assert.ok(!text.includes('retired-global-card'), 'the retired root scope is not injected')
+  assert.ok(!text.includes('旧全局卡的内容不该再被注入'), 'nor is its content')
   const noCwd = renderMemoryText(root, undefined)
-  assert.ok(noCwd.includes('user-lang'))
+  assert.ok(!noCwd.includes('retired-global-card'), 'a session without a workspace gets no scope at all')
   assert.ok(!noCwd.includes('demo-flow'), 'no cwd → no project scope')
+  // The guidelines ride every assembly, cwd or not: they are what asks the
+  // model to save at all now that no background pass does it.
+  assert.ok(text.includes('memory_save'))
+  assert.ok(noCwd.includes('memory_save'))
+})
+
+test('renderMemoryText: the guidelines ask for the save themselves, at the end of the task', async () => {
+  const root = tmpRoot()
+  const text = renderMemoryText(root, 'D:/codes/Demo')
+  // The extractor is retired, so this block is the ONLY thing that asks for a
+  // save: it must name the tool, the moment, and what not to save.
+  assert.match(text, /SAVE what is durable yourself, with memory_save, BEFORE the task ends/)
+  assert.match(text, /no background\s+pass writes memory for you/)
+  assert.match(text, /NEVER save/)
+  assert.match(text, /work logs/)
+  assert.match(text, /how far the\s+current task has got/)
+  assert.match(text, /from the repo in one tool call/)
+  // One scope, named: no global scope is offered anywhere in the block.
+  assert.doesNotMatch(text, /\bGLOBAL\b/)
+  assert.doesNotMatch(text, /scope "global"/)
 })
 
 // --- light sweep -------------------------------------------------------------------

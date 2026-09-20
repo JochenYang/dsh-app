@@ -56,11 +56,14 @@ export interface MemoryProjectSummary {
   sizeBytes: number
 }
 
-/** One background-distill run's trace entry (settings-page transparency). */
+/** One background-distill run's trace entry (settings-page transparency).
+ *  Only rows written by the retired extractor can still appear here — the
+ *  curator records its runs in the LLM audit instead. Kept as a wire shape
+ *  until the panel that reads it is removed. */
 export interface MemoryDistillActivity {
-  /** Unix epoch ms when the distill ran. */
+  /** Unix epoch ms when the run happened. */
   at: number
-  /** Short session id (first 8 hex) the run distilled. */
+  /** Short session id (first 8 hex) the run covered. */
   session: string
   /** Cards the run persisted (0 = it ran but nothing new qualified). */
   saved: number
@@ -169,19 +172,21 @@ export interface MemoryLlmAuditResponse {
 export interface MemoryStatus {
   /** Whether memory injection + tools are active (master toggle). */
   enabled: boolean
-  /** Whether the background distiller pass is active (sub-toggle). */
+  /** Whether the background maintenance pass is active (sub-toggle; the field
+   *  keeps the name of the pass it used to gate). */
   distill: boolean
-  /** GLOBAL card count. */
+  /** Cards in the ROOT store — the retired global scope, empty on any store
+   *  whose boot migration has run. Kept until the UI cleanup removes the row. */
   cards: number
-  /** GLOBAL topics/ size in bytes. */
+  /** ROOT topics/ size in bytes. */
   sizeBytes: number
-  /** GLOBAL topics directory path, shown so the user can edit cards by hand. */
+  /** ROOT topics directory path (the retired scope's card directory). */
   storePath: string
-  /** GLOBAL cards in index order with their pin state (settings list). */
+  /** ROOT cards in index order with their pin state (retired scope; empty). */
   globalList: MemoryCardRow[]
   /** Per-project summaries, largest first. */
   projects: MemoryProjectSummary[]
-  /** Recent background-distill traces, newest first (bounded list). */
+  /** Recent maintenance-run traces, newest first (bounded list). */
   activity: MemoryDistillActivity[]
   /** Set when the last archive write failed: the settings page warns that
    *  the undo is not available instead of promising a restore. */

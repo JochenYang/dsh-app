@@ -1,8 +1,9 @@
 /**
  * The light sweep — the no-LLM maintenance pass that runs after EVERY write
- * (memory_save or a distill apply), closing the old write-fast/clean-slow gap:
- * the heavy curator sweeps under cooldown and thresholds, while this pass is
- * free enough to run unconditionally.
+ * (a memory_save; formerly also a distill apply, a pass that is retired),
+ * closing the old write-fast/clean-slow gap: the heavy curator sweeps under
+ * cooldown and thresholds, while this pass is free enough to run
+ * unconditionally.
  *
  *   1. merge exact-content duplicates across cards (possible after hand
  *      edits): the pinned or most-recently-updated card survives, the rest

@@ -1,15 +1,23 @@
 /**
- * The three LLM tools over the two-level topic-card store:
+ * The three LLM tools over the topic-card store:
  *   `memory_save`   — UPSERT one card by topic key (create or rewrite in
  *                     place; a correction is the same key saved again, never
- *                     a second card), routed by scope (project default,
- *                     global explicit); the project is resolved from the
- *                     executing agent's session cwd, never from model input.
- *   `memory_recall` — read cards (all/global/project scope), one card by
- *                     exact topic, or a keyword filter over key+summary+body.
+ *                     a second card) into the memory of the executing agent's
+ *                     session workspace; the project is resolved from that
+ *                     session cwd, never from model input. A session without
+ *                     a workspace has no scope, and the retired `global`
+ *                     scope is refused with a stable code.
+ *   `memory_recall` — read cards (the current project), one card by exact
+ *                     topic, or a keyword filter over key+summary+body.
  *   `memory_forget` — DELETE cards by exact topic key or content match, so a
  *                     retracted fact disappears instead of contradicting its
  *                     replacement.
+ *
+ * Scope discipline: memory is per project, and there is exactly one scope to
+ * address. The former global scope — cards injected into EVERY project's
+ * sessions — is gone (see index.ts for why), so nothing here may write to it,
+ * and a caller that still asks for it gets a coded, actionable refusal rather
+ * than a silent redirect.
  *
  * Write-time anti-redundancy gate (the topic model's boundary-overlap
  * defense): a NEW key whose content is ≥ SIM_DUPLICATE similar to an existing
@@ -18,10 +26,10 @@
  * the model can consolidate or link.
  *
  * Model-driven proactive saving — the model observes durable facts and
- * records them without waiting to be asked — with the store as the
- * single source of truth and the master toggle honored at execute time (a
- * disabled plugin answers "disabled" instead of throwing, so the model can
- * tell the user instead of retrying).
+ * records them without waiting to be asked; nothing else writes memory any
+ * more — with the store as the single source of truth and the master toggle
+ * honored at execute time (a disabled plugin answers "disabled" instead of
+ * throwing, so the model can tell the user instead of retrying).
  *
  * @module @dsh-app/plugin-memory/tools
  */
@@ -56,25 +64,54 @@ const MAX_RECALL_CHARS = 50_000
 /**
  * The `memory_save` tool description. Exported because it is a PROMPT SURFACE
  * — the model reads it at every call site — so it carries the shared
- * card-text discipline like the other three surfaces (see the
- * `card-discipline` module, which lists them for the tests to walk).
+ * card-text discipline like the other surfaces (see the
+ * `card-discipline` module, which lists them for the tests to walk), plus
+ * the "save before the task ends" instruction (nothing writes memory for the
+ * model any more) and the scope rule.
  */
 export const SAVE_TOOL_DESCRIPTION =
-  'Save one topic card to the persistent cross-session memory. The topic key is the card\'s '
-  + 'identity: saving the SAME topic again rewrites the card (use that to correct or extend a '
-  + 'fact — never create a second card for one subject). Check the injected index BEFORE saving: '
-  + 'if a card already covers the subject, update that topic instead. Scope "project" (default) '
-  + 'saves to the current workspace\'s memory — decisions, conventions, lessons seen only by '
-  + 'sessions of this project. Scope "global" saves a cross-project user preference or habit, '
-  + 'and is the ONLY path by which the global scope grows from work like this: the background '
-  + 'pass writes project memory only, so a genuinely cross-workspace fact has to be saved here '
-  + 'or it will not be remembered. NEVER save API keys, tokens, passwords, or credentials. '
-  + 'These cards are re-injected into future sessions; keep them lean.\n'
+  'Save one topic card to the persistent cross-session memory of the CURRENT workspace. The topic '
+  + 'key is the card\'s identity: saving the SAME topic again rewrites the card (use that to correct '
+  + 'or extend a fact — never create a second card for one subject). Check the injected index BEFORE '
+  + 'saving: if a card already covers the subject, update that topic instead. Call this before the '
+  + 'task ends, when you learned something that will still hold in a later session of this project '
+  + '(a settled decision, a convention, a root cause, a pitfall) — no background pass writes memory '
+  + 'for you. The session\'s workspace decides where the card lands; there is only that one scope, '
+  + 'and a session without a workspace cannot save. NEVER save API keys, tokens, passwords, or '
+  + 'credentials, work logs or task progress. These cards are re-injected into future sessions of '
+  + 'this workspace; keep them lean.\n'
   + CARD_TEXT_DISCIPLINE
 
-/** Where a save lands / what a recall reads. */
-const SCOPES = ['project', 'global'] as const
-const RECALL_SCOPES = ['all', 'global', 'project'] as const
+/**
+ * The retired GLOBAL scope, still spelled out so a caller that asks for it can
+ * be told why it is refused. Memory is per project (see the module header).
+ *
+ * The `scope` parameters of all three tools are deliberately NOT enumerations
+ * any more: the tool framework rejects an out-of-enum value before `execute`
+ * runs, so an enumerated field would answer a stale `"global"` with
+ * `INVALID_ARGS: "scope" must be one of [...]` and explain nothing. Leaving
+ * the value free-form (the accepted vocabulary lives in the parameter
+ * description) lets the request reach the guards below and come back as the
+ * coded, actionable refusal, while the schema still does not offer the
+ * removed scope as an option.
+ */
+const RETIRED_SCOPE = 'global'
+
+/** Stable, machine-readable refusal for the removed scope. The `reason` is
+ *  the model-facing sentence; this is what a test (or a future client) keys
+ *  on, so the wording can change without breaking the contract. */
+const GLOBAL_REMOVED = 'scope-global-removed'
+
+/** Why a `global` request is refused, in the model's language. */
+const GLOBAL_REMOVED_REASON =
+  '全局记忆已移除：记忆按项目保存，请改用项目记忆（scope "project"，或省略 scope；没有工作区的会话无法保存）'
+
+/** Stable refusal code for a request that needs a workspace and has none. */
+const NO_WORKSPACE = 'no-workspace'
+
+/** Why a workspace-less request is refused, in the model's language. */
+const NO_WORKSPACE_REASON =
+  '当前会话没有工作区：记忆按项目保存，没有项目目录就无处可存（请在该项目的会话里记录）'
 
 /** The executing agent's workspace path, when an agent is attached. */
 function execCwd(exec: ToolRunContext): string | undefined {
@@ -143,8 +180,9 @@ export function registerMemoryTools(
       },
       scope: {
         type: 'string',
-        enum: [...SCOPES],
-        description: 'project (default) = current workspace only; global = every project',
+        description: 'Only "project" (default) exists: the card is saved to the memory of the current '
+          + 'workspace. The former "global" scope (injected into every project) has been removed — asking '
+          + 'for it is refused.',
       },
     },
     output: {
@@ -157,6 +195,24 @@ export function registerMemoryTools(
     async execute(args, exec: ToolRunContext): Promise<JsonValue> {
       if (!root.global.isEnabled()) {
         return Promise.resolve({ saved: false, reason: 'disabled' } as unknown as JsonValue)
+      }
+      // A caller that still sends the removed scope — a stale client, a model
+      // reading an older prompt — gets the coded refusal below: the parameter
+      // is free-form precisely so this guard is reachable (see RETIRED_SCOPE).
+      if (args.scope === RETIRED_SCOPE) {
+        return Promise.resolve({
+          saved: false,
+          code: GLOBAL_REMOVED,
+          reason: GLOBAL_REMOVED_REASON,
+        })
+      }
+      const cwd = execCwd(exec)
+      if (cwd === undefined) {
+        return Promise.resolve({
+          saved: false,
+          code: NO_WORKSPACE,
+          reason: NO_WORKSPACE_REASON,
+        })
       }
       const topic = slugifyTopic(String(args.topic ?? ''))
       if (topic === '') {
@@ -189,15 +245,7 @@ export function registerMemoryTools(
           reason: 'summary 可能包含密钥或凭据，拒绝保存；索引行会注入每个会话，敏感信息一律不落盘',
         } as unknown as JsonValue)
       }
-      const scope = args.scope === 'global' ? 'global' : 'project'
-      const cwd = execCwd(exec)
-      if (scope === 'project' && cwd === undefined) {
-        return Promise.resolve({
-          saved: false,
-          reason: 'no active workspace for a project-scoped save; retry with scope "global" if this is a cross-project preference',
-        } as unknown as JsonValue)
-      }
-      const store = scope === 'global' ? root.global : root.projectFor(cwd as string)
+      const store = root.projectFor(cwd)
       const existing = store.get(topic)
       if (existing === undefined) {
         // Write-time gate: a new key must not be a near-duplicate of a card
@@ -217,7 +265,7 @@ export function registerMemoryTools(
         }
         const related = similar.filter(hit => hit.score >= SIM_RELATED && hit.score < SIM_DUPLICATE).map(hit => hit.name)
         const { op } = await store.upsert({ name: topic, category: category as MemoryCategory, summary, body: content })
-        return Promise.resolve(finishSave({ saved: true, op, topic, scope, ...(related.length > 0 ? { related } : {}) } as Record<string, unknown>, store, exec) as unknown as JsonValue)
+        return Promise.resolve(finishSave({ saved: true, op, topic, scope: 'project', ...(related.length > 0 ? { related } : {}) } as Record<string, unknown>, store, exec) as unknown as JsonValue)
       }
       // Update path: same key rewrites the card; the summary is inherited
       // when omitted so an update cannot accidentally blank the index hook.
@@ -238,7 +286,7 @@ export function registerMemoryTools(
         ...(summary !== '' ? { summary } : {}),
         body: content,
       })
-      return Promise.resolve(finishSave({ saved: true, op, topic, scope } as Record<string, unknown>, store, exec) as unknown as JsonValue)
+      return Promise.resolve(finishSave({ saved: true, op, topic, scope: 'project' } as Record<string, unknown>, store, exec) as unknown as JsonValue)
     },
   }))
 
@@ -246,11 +294,12 @@ export function registerMemoryTools(
    *  only when the store actually changed. */
   async function finishSave(result: Record<string, unknown>, store: MemoryStore, exec: ToolRunContext): Promise<Record<string, unknown>> {
     if (result.op === 'unchanged') return result
-    // The direct path consolidates too: without this, a project whose cards
-    // all arrive through memory_save (never through a distill run) could grow
-    // forever with the curator never receiving a trigger. `ctx.get` (not
-    // `ctx.agents`): the tools mount without declaring the agents service,
-    // and property access would throw on an undeclared key.
+    // The write path is the ONLY trigger the background maintenance pass has
+    // (the session-driven extractor is retired — see index.ts), so without
+    // this call a project's memory would grow forever with the curator never
+    // running. `ctx.get` (not `ctx.agents`): the tools mount without
+    // declaring the agents service, and property access would throw on an
+    // undeclared key.
     const agent = exec.agent
     if (agent !== undefined) {
       const events = (agent.session as { snapshotEvents?: () => ReadonlyArray<{ seq: number }> })
@@ -269,15 +318,15 @@ export function registerMemoryTools(
   const disposeRecall = ctx.tools.register(defineTool({
     name: 'memory_recall',
     description:
-      'Read the persistent memory. Default scope "all" returns the global cards plus the current '
-      + 'project\'s cards, clearly separated. Pass topic to fetch ONE card by its exact key from the '
-      + 'index (the full body, even when it was not injected); pass query to filter by keyword over '
-      + 'topic+summary+body. Prefer those targeted forms over reading everything.',
+      'Read the persistent memory of the CURRENT workspace (memory is stored per project). Pass topic '
+      + 'to fetch ONE card by its exact key from the index (the full body, even when it was not '
+      + 'injected); pass query to filter by keyword over topic+summary+body. Prefer those targeted '
+      + 'forms over reading everything. A session without a workspace has no memory to read.',
     parameters: {
       scope: {
         type: 'string',
-        enum: [...RECALL_SCOPES],
-        description: 'all (default) | global | project',
+        description: 'all (default) | project — both read the current project\'s memory; the former '
+          + '"global" scope has been removed and is refused.',
       },
       topic: {
         type: 'string',
@@ -301,13 +350,23 @@ export function registerMemoryTools(
       if (!root.global.isEnabled()) {
         return Promise.resolve({ reason: 'disabled' } as unknown as JsonValue)
       }
-      const scope = args.scope === 'global' || args.scope === 'project' ? args.scope : 'all'
+      // See memory_save: the free-form parameter is what makes this refusal
+      // reachable for a caller that still sends the removed scope.
+      if (args.scope === RETIRED_SCOPE) {
+        return Promise.resolve({
+          code: GLOBAL_REMOVED,
+          reason: GLOBAL_REMOVED_REASON,
+        })
+      }
+      const cwd = execCwd(exec)
+      if (cwd === undefined) {
+        return Promise.resolve({
+          code: NO_WORKSPACE,
+          reason: NO_WORKSPACE_REASON,
+        })
+      }
       const query = typeof args.query === 'string' ? args.query.trim() : ''
       const topic = typeof args.topic === 'string' && args.topic.trim() !== '' ? slugifyTopic(args.topic) : ''
-      const cwd = execCwd(exec)
-      if (scope === 'project' && cwd === undefined) {
-        return Promise.resolve({ reason: 'no active workspace' } as unknown as JsonValue)
-      }
       const view = (store: MemoryStore): Record<string, unknown> => {
         const pinned = store.pinnedSet()
         if (topic !== '') {
@@ -332,27 +391,20 @@ export function registerMemoryTools(
           ...(query === '' ? {} : { matched: cards.length }),
         }
       }
-      if (scope === 'global') {
-        return Promise.resolve({ global: view(root.global) } as unknown as JsonValue)
-      }
-      if (scope === 'project') {
-        return Promise.resolve({ project: view(root.projectFor(cwd as string)) } as unknown as JsonValue)
-      }
-      return Promise.resolve({
-        global: view(root.global),
-        project: cwd === undefined ? undefined : view(root.projectFor(cwd)),
-      } as unknown as JsonValue)
+      // Both admissible scopes read the same store: 'all' is kept as an
+      // alias so a call written against the two-scope shape still works.
+      return Promise.resolve({ project: view(root.projectFor(cwd)) } as unknown as JsonValue)
     },
   }))
 
   const disposeForget = ctx.tools.register(defineTool({
     name: 'memory_forget',
     description:
-      'DELETE saved memory cards: pass a topic key from the index to drop exactly that card, or any '
-      + 'text to delete every card whose summary/body matches it (case-insensitive substring after '
-      + 'normalization; Chinese is matched natively). Use it when the user retracts a fact entirely '
-      + '— to CORRECT a fact, save the same topic again with the revised content instead. Returns '
-      + 'the topic keys removed.',
+      'DELETE saved memory cards of the CURRENT workspace: pass a topic key from the index to drop '
+      + 'exactly that card, or any text to delete every card whose summary/body matches it '
+      + '(case-insensitive substring after normalization; Chinese is matched natively). Use it when '
+      + 'the user retracts a fact entirely — to CORRECT a fact, save the same topic again with the '
+      + 'revised content instead. Returns the topic keys removed.',
     parameters: {
       match: {
         type: 'string',
@@ -362,8 +414,8 @@ export function registerMemoryTools(
       },
       scope: {
         type: 'string',
-        enum: ['all', 'global', 'project'],
-        description: 'all (default) = global + current project; global; project',
+        description: 'all (default) | project — both act on the current project\'s memory; the former '
+          + '"global" scope has been removed and is refused.',
       },
     },
     output: {
@@ -377,31 +429,35 @@ export function registerMemoryTools(
       if (!root.global.isEnabled()) {
         return Promise.resolve({ forgotten: 0, reason: 'disabled' } as unknown as JsonValue)
       }
-      const match = String(args.match ?? '').trim()
-      if (match === '') {
-        return Promise.resolve({ forgotten: 0, reason: 'empty match' } as unknown as JsonValue)
-      }
-      const scope = args.scope === 'global' || args.scope === 'project' ? args.scope : 'all'
-      const cwd = execCwd(exec)
-      if (scope !== 'global' && cwd === undefined) {
+      // See memory_save: the free-form parameter is what makes this refusal
+      // reachable for a caller that still sends the removed scope.
+      if (args.scope === RETIRED_SCOPE) {
         return Promise.resolve({
           forgotten: 0,
-          reason: 'no active workspace for a project-scoped forget; retry with scope "global"',
-        } as unknown as JsonValue)
+          code: GLOBAL_REMOVED,
+          reason: GLOBAL_REMOVED_REASON,
+        })
       }
-      const targets: Array<['global' | 'project', MemoryStore]> = scope === 'global'
-        ? [['global', root.global]]
-        : scope === 'project'
-          ? [['project', root.projectFor(cwd as string)]]
-          : [['global', root.global], ['project', root.projectFor(cwd as string)]]
-      const perScope: Record<string, { forgotten: number, remaining: number, removed: string[] }> = {}
-      for (const [label, store] of targets) {
-        // The store records the ledger entry itself (see MemoryStore.forget),
-        // so every delete path is covered by construction.
-        const { removed, remaining } = await store.forget(match)
-        perScope[label] = { forgotten: removed.length, remaining, removed }
+      const match = String(args.match ?? '').trim()
+      if (match === '') {
+        return Promise.resolve({ forgotten: 0, reason: 'empty match' })
       }
-      return Promise.resolve({ forgotten: targets.reduce((sum, [label]) => sum + perScope[label]!.forgotten, 0), scopes: perScope } as unknown as JsonValue)
+      const cwd = execCwd(exec)
+      if (cwd === undefined) {
+        return Promise.resolve({
+          forgotten: 0,
+          code: NO_WORKSPACE,
+          reason: NO_WORKSPACE_REASON,
+        })
+      }
+      const store = root.projectFor(cwd)
+      // The store records the ledger entry itself (see MemoryStore.forget),
+      // so every delete path is covered by construction.
+      const { removed, remaining } = await store.forget(match)
+      return Promise.resolve({
+        forgotten: removed.length,
+        scopes: { project: { forgotten: removed.length, remaining, removed } },
+      } as unknown as JsonValue)
     },
   }))
 

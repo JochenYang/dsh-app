@@ -1,17 +1,27 @@
 /**
  * Settings-page API on the shared Connection `/api` channel, under
  * `/api/plugins/dsh-app/plugin-memory`:
- *   GET  /status        — toggle states + global/project stats + global card
- *                         rows (summaries only, no bodies)
+ *   GET  /status        — toggle states + stats (project list; the retired
+ *                         scope's row is empty on any migrated store)
  *   GET  /entries?slug= — one store's cards WITH bodies + pin state;
- *                         no slug (or empty) = the global store
+ *                         no slug (or empty) = the ROOT store, which is what
+ *                         the settings page still asks for (see below)
  *   GET  /llm-audit     — recent background-LLM cost rows (newest 20)
  *   POST /config        — set toggles (body {enabled?, distill?} booleans)
  *   POST /pin           — pin/unpin one card (body {topic, pinned, scope?, slug?})
  *   POST /forget        — delete cards by topic key or content substring
  *                         (body {match, scope?, slug?})
- *   POST /clear         — {scope:'global'} empties the global store;
+ *   POST /clear         — {scope:'global'} empties the ROOT store (whose cards
+ *                         the boot migration already moved out);
  *                         {scope:'project', slug} removes that project directory.
+ *
+ * The root-level store is the RETIRED global scope: no session injects it and
+ * no tool writes it any more, and its cards are relocated into a project at
+ * boot (memory-store.ts). The routes below still serve it because the settings
+ * page still has that section and must not break on a store the migration
+ * could not finish — an empty scope is a truthful answer. Removing the
+ * section, these branches and the wire fields they fill is the next stage's
+ * work; until then this is compatibility surface, not a capability.
  *
  * Trust is the carrier's: the Connection transport applies its Host/Origin fence
  * and browser authentication before a route handler runs (see
@@ -21,8 +31,8 @@
  * a path segment, and another method of that same path falls through to the
  * shared channel's own 404 instead of a route body. The slug is pattern-validated
  * before it ever reaches the filesystem (traversal fence). Writes act on the root
- * the tools, injection, and distiller share, so a toggle flip here is honored by
- * the next prompt assembly / distill window with no restart.
+ * the tools, injection, and curator share, so a toggle flip here is honored by
+ * the next prompt assembly / maintenance sweep with no restart.
  *
  * @module @dsh-app/plugin-memory/routes
  */
@@ -42,9 +52,12 @@ const MAX_BODY_BYTES = 8_192
 
 /**
  * Resolve the target store of a scoped write body (pin/forget).
- * @param root - the two-level memory root.
+ * @param root - the memory root.
  * @param body - the request payload.
- * @returns the store to write to, or the refusal to answer with.
+ * @returns the store to write to, or the refusal to answer with. An absent
+ *   scope still resolves to the ROOT store: that is what the settings page
+ *   sends for its (retired) global rows, and serving them keeps the page
+ *   working until the next stage removes the section.
  */
 function resolveStore(root: MemoryRoot, body: Record<string, unknown>): MemoryStore | Response {
   if (body.scope === undefined || body.scope === 'global') return root.global

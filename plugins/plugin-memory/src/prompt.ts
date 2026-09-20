@@ -1,11 +1,11 @@
 /**
  * System-prompt contributions: static saving guidelines + a dynamic section
- * injecting TWO scopes — the global cards (every session) and the current
- * project's cards (only sessions of that workspace). Other projects' cards
- * are physically absent from the assembly; isolation is structural, not
+ * injecting the CURRENT PROJECT's cards (only sessions of that workspace).
+ * Every other project's cards — and the retired root-level scope's — are
+ * physically absent from the assembly; isolation is structural, not
  * prompt-level discipline.
  *
- * Per scope the section carries:
+ * The section carries:
  *   1. the INDEX in full (one line per topic card) — the write-side routing
  *      map: before saving, the model checks whether a card already covers
  *      the subject and updates it instead of creating a near-duplicate;
@@ -19,9 +19,8 @@
  * memory_save mid-session is visible to the NEXT turn, and the master
  * toggle is honored live.
  *
- * Body budgets (index is always whole — it is the routing map):
- *   global  ≤ {@link MAX_GLOBAL_CHARS}   — preferences stay small by discipline
- *   project ≤ {@link MAX_PROJECT_CHARS}  — the growth valve
+ * Body budget (index is always whole — it is the routing map):
+ *   project ≤ {@link MAX_PROJECT_CHARS} — the growth valve
  *
  * @module @dsh-app/plugin-memory/prompt
  */
@@ -30,33 +29,35 @@ import type { MemoryRoot, MemoryStore, TopicCard } from './memory-store.ts'
 import type { MemoryCategory } from './types.ts'
 import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
 
-/** Hard ceiling on the injected GLOBAL card bodies (characters). */
-export const MAX_GLOBAL_CHARS = 1_200
-
 /** Hard ceiling on the injected PROJECT card bodies (characters). */
 export const MAX_PROJECT_CHARS = 2_800
 
 /** Guidelines shown to the model whenever memory is enabled. English, to
  * match the harness's own prompt sections; the model writes CARD CONTENT in
- * the user's language as instructed below. The save triggers are worded
- * MODEL-driven ("whenever you observe") — a user-driven wording ("when the
- * user asks") silently drops implicit preferences the user never states and
- * facts the model digs out on its own. Kept lean: this block rides along
- * with EVERY prompt assembly in every session. */
+ * the user's language as instructed below.
+ *
+ * The saving instruction is what replaced the retired background extractor:
+ * nothing else writes memory any more, so the prompt has to ask for the save
+ * explicitly and at the moment the material is still at hand. It is worded
+ * MODEL-driven ("when you learned something", "before the task ends") — a
+ * user-driven wording ("when the user asks") silently drops implicit
+ * preferences the user never states and facts the model digs out on its own.
+ * Kept lean: this block rides along with EVERY prompt assembly in every
+ * session. */
 const GUIDELINES_TEXT = [
   '## Cross-session memory',
   '',
-  'Memory persists across sessions as TOPIC CARDS in two scopes:',
-  '- GLOBAL: user preferences and habits, valid in every project.',
-  '- PROJECT: decisions, conventions, and lessons of this workspace only.',
-  'Each scope injects its INDEX (every topic, one line) plus selected cards below;',
-  'memory_recall reads any card in full.',
+  'Memory is stored PER PROJECT as TOPIC CARDS: one card per subject, injected into',
+  'later sessions of this workspace and of no other. The index below lists every topic',
+  'of this project, one line each; memory_recall reads any card in full.',
   '',
-  'SAVE proactively via memory_save — do not wait to be asked — whenever you observe:',
+  'SAVE what is durable yourself, with memory_save, BEFORE the task ends — no background',
+  'pass writes memory for you. Save, without waiting to be asked, when you learned:',
   '- an explicit request to remember something;',
-  '- a durable user preference, stated or inferred from repeated behavior → scope "global";',
-  '- a settled project decision or a hard-won lesson (root cause, non-obvious constraint, pitfall)',
-  '  → scope "project".',
+  '- a preference or working habit of this project that will recur;',
+  '- a settled decision, a hard-won root cause, a non-obvious constraint or pitfall.',
+  'The moment you notice it is the moment writing it is cheapest; a fact you meant to',
+  'save at the end of the task is a fact you will forget to save.',
   '',
   'ONE TOPIC, ONE CARD: pick a stable ASCII kebab-case topic key for the subject',
   '(e.g. "pnpm11-allowscripts"). To correct or extend a saved fact, SAVE THE SAME TOPIC',
@@ -65,10 +66,11 @@ const GUIDELINES_TEXT = [
   'creating a near-duplicate (memory_recall reads it first when unsure).',
   '',
   'NEVER save: credentials (even when asked); work logs — what this conversation implemented,',
-  'fixed, or committed (commit ids, "已完成" reports, file-by-file change lists); task summaries;',
-  'anything a future session reads from the repo in one tool call (paths, API signatures, config',
-  'values, build commands). The test: would a future session in a DIFFERENT conversation act',
-  'better because this card exists? When unsure, skip — do not save guesses.',
+  'fixed, or committed (commit ids, "已完成" reports, file-by-file change lists); how far the',
+  'current task has got, or what is left to do; task summaries; anything a future session reads',
+  'from the repo in one tool call (paths, API signatures, config values, build commands).',
+  'The test: would a future session in a DIFFERENT conversation act better because this card',
+  'exists? When unsure, skip — do not save guesses.',
   '',
   'The body is one concise paragraph in the user\'s language; the summary (≤40 chars) must say',
   'what the card covers — it is the index line future saves route by.',
@@ -229,27 +231,29 @@ function renderScope(store: MemoryStore, heading: string, budget: number): strin
 
 /**
  * Render the whole injected memory block for one assembly.
+ *
+ * The retired root-level scope is never rendered: its cards are relocated into
+ * a project directory at boot (see `MemoryRoot.migrateLegacyGlobalScope`), so
+ * a card can no longer be injected into every project's sessions.
+ *
  * @param root - the two-level memory root.
  * @param cwd - the assembling session's workspace path; undefined (agentless
- *   diagnostics) injects the global scope only.
+ *   diagnostics) injects nothing but the guidelines — memory is per project.
  * @returns the section text; '' when the master toggle is off.
  */
 export function renderMemoryText(root: MemoryRoot, cwd: string | undefined): string {
   if (!root.global.isEnabled()) return ''
-  const projectStore = cwd === undefined ? undefined : root.projectFor(cwd)
-  const projectName = cwd === undefined ? '' : cwd.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
-
   const parts: string[] = [GUIDELINES_TEXT]
-  const globalParts = renderScope(root.global, 'Memory — global', MAX_GLOBAL_CHARS)
-  const projectParts = projectStore === undefined
-    ? []
-    : renderScope(projectStore, `Memory — current project (${projectName})`, MAX_PROJECT_CHARS)
-
-  if (globalParts.length === 0 && projectParts.length === 0) {
-    parts.push('', '## Memory (persisted)', '', '(empty — nothing saved yet)')
+  if (cwd === undefined) {
+    parts.push('', '## Memory (persisted)', '', '(this session has no workspace — memory is stored per project, so none is injected)')
     return parts.join('\n')
   }
-  if (globalParts.length > 0) parts.push('', ...globalParts)
-  if (projectParts.length > 0) parts.push('', ...projectParts)
+  const projectName = cwd.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
+  const projectParts = renderScope(root.projectFor(cwd), `Memory — current project (${projectName})`, MAX_PROJECT_CHARS)
+  if (projectParts.length === 0) {
+    parts.push('', '## Memory (persisted)', '', '(empty — nothing saved for this workspace yet)')
+    return parts.join('\n')
+  }
+  parts.push('', ...projectParts)
   return parts.join('\n')
 }

@@ -1,38 +1,48 @@
 /**
  * DSH APP cross-session memory — host half (topic-card model).
  *
- * Mounts five things over one two-level root
+ * Mounts four things over one two-level root
  * (`$DSH_HOME/storages/dsh-app-plugin-memory`):
  *
  * 1. a system-prompt section whose text is a per-assembly provider —
- *    saving guidelines plus the LIVE global and current-project indexes
- *    and selected cards (resolved from the assembling agent's session cwd;
- *    bounded, see prompt.ts), so a mid-session memory_save is visible to
- *    the next turn;
+ *    saving guidelines plus the LIVE current-project index and selected cards
+ *    (resolved from the assembling agent's session cwd; bounded, see
+ *    prompt.ts), so a mid-session memory_save is visible to the next turn.
+ *    The retired root-level scope injects nothing;
  * 2. three LLM tools, `memory_save` / `memory_recall` / `memory_forget`
- *    (model-driven proactive saving with upsert semantics; project routing
- *    comes from the executing agent's session cwd, never from model input);
- * 3. the background distiller (see distiller.ts): after a session goes
- *    quiet, one direct LLM call reviews the conversation delta and proposes
- *    cards the host validates before writing — the code-guaranteed half of
- *    proactive memory;
- * 4. the maintenance pair: the LIGHT sweep (see light-sweep.ts) runs after
+ *    (model-driven proactive saving with upsert semantics; the project comes
+ *    from the executing agent's session cwd, never from model input, and a
+ *    session without a workspace has no scope at all);
+ * 3. the maintenance pair: the LIGHT sweep (see light-sweep.ts) runs after
  *    every persisted write with no model call (exact-dup merge, similarity
  *    suspects, index parity), and the heavy CURATOR (see curator.ts) sweeps
  *    under cooldown/threshold gates to merge near-duplicate topics and prune
- *    stale cards. Both passes mount only when the agents + llm services are
- *    available (graceful on kernels without them);
- * 5. settings-page routes (status/toggle/pin/clear) for the client half.
+ *    stale cards. Both are triggered by the WRITE path (a memory_save that
+ *    actually changed something) and mount only when the agents + llm
+ *    services are available (graceful on kernels without them);
+ * 4. settings-page routes (status/toggle/pin/clear) for the client half.
  *
- * Boot migration: a store still holding the pre-card `memory.md` timeline is
- * converted to topic cards deterministically (see MemoryStore.migrateLegacy)
- * and the old file kept as `memory.legacy.md`.
+ * What is deliberately NOT mounted any more: the background DISTILLER. Its
+ * pass read a quiet session's conversation and proposed cards, and a session
+ * with no workspace had its cards written to the global scope — which was
+ * then injected into every project's sessions. Measured in practice, that
+ * put one workspace's research conclusions into all of them. Memory is now
+ * what the model decides to keep through `memory_save`, into the memory of
+ * the project it is working in, and the distiller's own scheduler is never
+ * attached (see distiller.ts, which keeps the machinery and says the same).
+ *
+ * Boot migrations, in order: a store still holding the pre-card `memory.md`
+ * timeline is converted to topic cards deterministically (see
+ * MemoryStore.migrateLegacy, kept as `memory.legacy.md`), and the cards of
+ * the retired global scope are moved into `projects/legacy-global/` so the
+ * user still sees and can delete them (MemoryRoot.migrateAll owns the order).
  *
  * The user's exit valve is `<storeDir>/config.json` (`enabled: false`, the
  * same discipline as plugin-usage): a disabled plugin mounts nothing but
  * its status route, and the toggle set through the settings page takes
  * effect on the next prompt assembly — no restart. A second field
- * (`distill: false`) disables only the background passes.
+ * (`distill: false`, named for the pass it used to gate) disables only the
+ * background maintenance passes.
  *
  * Stability discipline: zero global side effects; a kernel without the
  * consumed services never mounts anything.
@@ -54,7 +64,6 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { MemoryRoot, type MemoryStore } from './memory-store.ts'
-import { MemoryDistiller } from './distiller.ts'
 import { MemoryCurator } from './curator.ts'
 import { lightSweep } from './light-sweep.ts'
 import { renderMemoryText } from './prompt.ts'
@@ -100,9 +109,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const dir = config.storePath !== '' ? config.storePath : join(resolveDshHome(), 'storages', 'dsh-app-plugin-memory')
   const root = new MemoryRoot(dir)
 
-  // Boot migration: convert any legacy memory.md timeline into topic cards.
-  // Deterministic (no model), idempotent, and the legacy file is kept as
-  // memory.legacy.md; a failure leaves the store untouched for the next boot.
+  // Boot migrations, one entry point: any legacy memory.md timeline becomes
+  // topic cards, and the retired global scope's cards move into a project
+  // directory the user can see and delete (MemoryRoot.migrateAll owns the
+  // order). Deterministic (no model), idempotent, and a failure leaves the
+  // store untouched for the next boot.
   await root.migrateAll(log)
 
   if (!root.global.isEnabled()) {
@@ -111,15 +122,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     return
   }
 
-  // Provider evaluated on every assembly: guidelines + the live global and
-  // current-project indexes/cards, honoring the toggle without a restart.
+  // Provider evaluated on every assembly: guidelines + the live current-project
+  // index/cards, honoring the toggle without a restart.
   ctx.effect(() => ctx.systemPrompt.section({
     name: 'tool:memory',
     order: PROMPT_SECTION_ORDER,
     text: context => renderMemoryText(root, context.agent?.session.header.cwd),
   }), 'plugin-memory: system prompt section')
 
-  // The direct-save path's maintenance trigger. Tools mount regardless of the
+  // The write path's maintenance trigger. Tools mount regardless of the
   // agents/llm seam (below), so the curator half of the callback is a
   // late-bound holder: a kernel without those services still gets the free
   // light sweep, and memory_save keeps working.
@@ -136,28 +147,28 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => registerMemoryTools(ctx, root, onSaved), 'plugin-memory: llm tools')
   ctx.effect(() => registerMemoryRoutes(ctx.connection.fetch, root), 'plugin-memory: settings routes')
 
-  // The background passes need the agents + llm services; on a kernel
-  // without them (e.g. a rollback target) the plugin still mounts everything
-  // else — only the async safety nets are absent. The distiller writes NEW
-  // cards; a saved run hands the light sweep + curator the trigger (see
-  // distiller.ts / curator.ts). Both call the model directly on the
-  // triggering session's own route.
+  // The background maintenance pass needs the agents + llm services; on a
+  // kernel without them (e.g. a rollback target) the plugin still mounts
+  // everything else — only the async safety net is absent. The curator only
+  // CONSOLIDATES memory that a memory_save already wrote; it calls the model
+  // directly on the route of the session whose save triggered it.
+  //
+  // The distiller is deliberately NOT constructed and NOT attached here. Its
+  // turn/end subscription was what armed a quiet-timer model call that
+  // extracted cards from a conversation, and a session without a workspace
+  // had its cards written to the global scope — which was then injected into
+  // every project's sessions. Retiring that scheduling is the whole point of
+  // this change: the model saves what it judges worth keeping, through
+  // memory_save, into the memory of the project it is working in. Deleting
+  // the call is also what saves the model call: no timer, no request.
   ctx.inject(['agents', 'llm'], memCtx => {
     const curator = new MemoryCurator(memCtx, root, log)
-    // The distill hands maintenance its save trigger with the session id and
-    // the affected store: the light sweep runs inline; the heavy sweep runs
-    // in the distill's own window, with further saves inside the cooldown
+    // A save hands maintenance its trigger with the session id: the light
+    // sweep already ran inline (see onSaved); the heavy sweep runs under the
+    // curator's own cooldown, with further saves inside that window
     // coalescing into one trailing sweep that re-resolves the session by id.
-    const distiller = new MemoryDistiller(memCtx, root, log, async (parent, sessionId, store) => {
-      await lightSweep(root, scopeLabel(root, store), store, log)
-      return curator.runAfterDistill(parent, sessionId)
-    })
-    requestCurate = (parent, sessionId) => { void curator.runAfterDistill(parent, sessionId) }
-    memCtx.effect(() => {
-      const disposeDistiller = distiller.attach()
-      const disposeCurator = curator.attach()
-      return () => { disposeDistiller(); disposeCurator() }
-    }, 'plugin-memory: background passes')
+    requestCurate = (parent, sessionId) => { void curator.runAfterSave(parent, sessionId) }
+    memCtx.effect(() => curator.attach(), 'plugin-memory: background maintenance')
   })
 
   log.info(`memory root: ${dir}`)
