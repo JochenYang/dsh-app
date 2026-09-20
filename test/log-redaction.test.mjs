@@ -33,7 +33,7 @@ function loadYaml() {
   }
 }
 const { redact, MAX_LOG_LINE } = require('../dist/main/redact.js')
-const { composeSuitePatch, filterUnresolvableRows, parseSuitePatch, relativePatchSpecifiers, specifierResolves } = require('../dist/main/brand-suite.js')
+const { composeSuitePatch, filterUnresolvableRows, marketManagedBlock, parseSuitePatch, relativePatchSpecifiers, specifierResolves } = require('../dist/main/brand-suite.js')
 
 test('redact keeps the key name and drops the value in every shape we see', () => {
   // JSON pairs (the shape dsh prints in its own diagnostics).
@@ -140,6 +140,35 @@ test('the kernel patch template that ends in "[]" heals instead of bricking the 
     if (home !== '') assert.ok(text.includes('- id: mcp'), 'the home rows must still travel')
     if (loadYaml() !== undefined) assert.doesNotThrow(() => loadYaml().load(text))
   }
+})
+
+test('the plugin market block survives a regeneration', () => {
+  // The market appends its managed block past the home marker, where a rewrite
+  // did not read: every start silently re-enabled the plugins a user had just
+  // switched off, and the reason they switched them off came back with them.
+  const market = [
+    '# ── plugin-market managed disables ──',
+    '- id: broken-plugin',
+    '  disabled: true',
+    '# ── end managed ──',
+  ].join('\n')
+  const first = composeSuitePatch({ suite: SHIPPED, preserved: '', home: HOME, managed: market })
+  assert.ok(first.includes(market))
+  // A second start reads the block back out of the file (it sits after the home
+  // marker) and keeps it there — once, with its rows intact.
+  const withoutBlock = first.replace(market, '')
+  const again = composeSuitePatch({
+    suite: SHIPPED,
+    preserved: parseSuitePatch(withoutBlock).preserved,
+    home: HOME,
+    managed: marketManagedBlock(first),
+  })
+  assert.equal(again, first)
+  assert.equal(again.match(/- id: broken-plugin/gu)?.length, 1)
+  // A file that never had one stays without one.
+  assert.equal(marketManagedBlock(composeSuitePatch({ suite: SHIPPED, preserved: '', home: HOME })), '')
+  // A hand-truncated block (no footer) is left to the market to repair.
+  assert.equal(marketManagedBlock('# ── plugin-market managed disables ──\n- id: x\n'), '')
 })
 
 test('a non-empty flow section is kept visible but inert', () => {

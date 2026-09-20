@@ -75,6 +75,10 @@ async function makeRelease(dir, { dshVersion = VERSION, suiteVersion = SUITE, in
   mkdirSync(path.join(runtime, 'app', 'node_modules', 'third-party'), { recursive: true })
   writeFileSync(path.join(runtime, 'node', NODE_BINARY), 'fake-node')
   writeFileSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '// dsh')
+  // A real tree carries the host package the shell spawns, and `load()` verifies
+  // both entries before it reuses an installed kernel.
+  mkdirSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib'), { recursive: true })
+  writeFileSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js'), '// host')
   writeFileSync(path.join(runtime, 'app', 'node_modules', '@dsh-app', 'plugin-x', 'index.js'), '// plugin')
   writeFileSync(path.join(runtime, 'app', 'node_modules', 'third-party', 'index.js'), '// vendor')
   writeFileSync(path.join(runtime, 'app', 'package.json'), JSON.stringify({ name: 'app', type: 'module' }))

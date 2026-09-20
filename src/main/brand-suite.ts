@@ -395,16 +395,46 @@ function sectionBlock(mark: string, text: string, mustMerge: boolean): string {
   return `${mark}${FLOW_CONTENT_NOTE}${body.split('\n').map(commentOut).join('\n')}\n`
 }
 
-/** Render the generated patch file from its three sections. */
-export function composeSuitePatch(sections: { suite: string; preserved: string; home: string }): string {
+/** First line of the plugin market's own managed block; its writer's markers. */
+const MARKET_BLOCK_HEADER = '# ── plugin-market managed disables ──'
+/** Last line of that block. Kept in sync with `plugins/plugin-market/src/patchfile.ts`. */
+const MARKET_BLOCK_FOOTER = '# ── end managed ──'
+
+/**
+ * The plugin market's managed disable block, wherever it sits in `content`.
+ *
+ * The market appends that block to the END of the profile patch — after the home
+ * section, where the regenerator does not read. Without lifting it out first,
+ * every start silently re-enabled the plugins a user had just switched off, and
+ * the reason they switched them off (a row that stops the page from loading)
+ * came back with them.
+ *
+ * @param content - current file content.
+ * @returns the block verbatim, or '' when there is none (including a block whose
+ *   footer is missing: a hand-truncated one is the market's to repair).
+ */
+export function marketManagedBlock(content: string): string {
+  const start = content.indexOf(MARKET_BLOCK_HEADER)
+  if (start === -1) return ''
+  const end = content.indexOf(MARKET_BLOCK_FOOTER, start)
+  if (end === -1) return ''
+  return content.slice(start, end + MARKET_BLOCK_FOOTER.length).trimEnd()
+}
+
+/** Render the generated patch file from its sections. */
+export function composeSuitePatch(sections: { suite: string; preserved: string; home: string; managed?: string }): string {
   // Order matters for the rule above: a flow node is only fatal when something
   // with rows follows it, and the sections travel in this order.
   const homeRows = hasRows(sections.home)
   const preservedRows = hasRows(sections.preserved)
+  const managed = (sections.managed ?? '').trimEnd()
   return PATCH_HEADER
     + sectionBlock(PATCH_SUITE_MARK, sections.suite, preservedRows || homeRows)
     + sectionBlock(PATCH_PRESERVED_MARK, sections.preserved, homeRows)
     + sectionBlock(PATCH_HOME_MARK, sections.home, false)
+    // The market's block travels LAST, exactly as it was written: its rows have
+    // to win over the suite rows they disable, and it owns its own markers.
+    + (managed === '' ? '' : `${managed}\n`)
 }
 
 /**
@@ -597,18 +627,19 @@ function importableFile(candidate: string): boolean {
 const IMPORTABLE_EXTENSIONS: readonly string[] = ['.js', '.mjs', '.cjs', '.node']
 
 /**
- * The relative specifiers a patch text names, in first-seen order.
+ * Every specifier a patch text names, in first-seen order.
  *
  * `name:` values are read exactly the way {@link filterUnresolvableRows} reads
  * them (an entry field: a `name:` with a sibling `id:` at the same indent), so
  * this cannot mistake a plugin's own config key for a path. The migration uses
- * it to learn which files have to travel with a patch that is otherwise only
- * text; a specifier this cannot attribute to an entry is not returned, and
- * {@link specifierResolves} then keeps that row out of the composition instead.
+ * {@link relativePatchSpecifiers} to learn which files have to travel with a
+ * patch that is otherwise only text; the home-layer audit uses all of them, a
+ * package name included, because a row the host cannot resolve is refused by the
+ * client's boot audit just the same.
  *
  * @param text - one or more sections of patch-layer text.
  */
-export function relativePatchSpecifiers(text: string): string[] {
+export function patchSpecifiers(text: string): string[] {
   const lines = patchLines(text)
   const found: string[] = []
   let index = 0
@@ -620,11 +651,20 @@ export function relativePatchSpecifiers(text: string): string[] {
     let end = index + 1
     while (end < lines.length && !PATCH_ROW_LINE.test(lines[end] ?? '')) end += 1
     for (const specifier of rowSpecifiers(lines.slice(index, end))) {
-      if (specifier.startsWith('.') && !found.includes(specifier)) found.push(specifier)
+      if (!found.includes(specifier)) found.push(specifier)
     }
     index = end
   }
   return found
+}
+
+/**
+ * The relative (path) specifiers a patch text names, in first-seen order.
+ *
+ * @param text - one or more sections of patch-layer text.
+ */
+export function relativePatchSpecifiers(text: string): string[] {
+  return patchSpecifiers(text).filter((specifier) => specifier.startsWith('.'))
 }
 
 /**
@@ -717,13 +757,19 @@ export async function writeSuitePatchFile(
   }
   const target = path.join(profileDir, PROFILE_PATCH_FILENAME)
   const existing = await readOptionalFile(target)
+  // The market's block lives past the home marker, where a write would drop it.
+  // It is lifted out before the sections are read, so it neither disappears nor
+  // arrives twice.
+  const managed = marketManagedBlock(existing)
+  const withoutManaged = managed === '' ? existing : existing.replace(managed, '')
   // The carried sections are filtered before they enter the composition, and
   // every skip is reported: a user who reads the log learns which row was left
   // out and why, and the file itself carries the reason beside the dead row.
-  const carried = filterUnresolvableRows(parseSuitePatch(existing).preserved, profileDir)
+  const carried = filterUnresolvableRows(parseSuitePatch(withoutManaged).preserved, profileDir)
   const copyHome = options.homeRows !== false
+  const homeLayerText = copyHome ? await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME)) : ''
   const home = copyHome
-    ? filterUnresolvableRows(await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME)), profileDir)
+    ? filterUnresolvableRows(homeLayerText, profileDir)
     : { text: PATCH_HOME_OMITTED, skipped: [] }
   for (const specifier of [...carried.skipped, ...home.skipped]) {
     reportLine(`[brand-suite] patch row skipped: "${specifier}" does not load from ${profileDir}; the row stays in ${PROFILE_PATCH_FILENAME} commented out`, options.report)
@@ -731,19 +777,20 @@ export async function writeSuitePatchFile(
   if (!copyHome) {
     // This line boots through the kernel's own composer, which loads the home
     // layer ITSELF. The shell cannot comment a row out of a file it does not
-    // write, but it can still say that a file a row names is not here: that is
-    // the one shape which fails the whole tree instead of just warning, and the
-    // user's alternative is an app that never opens a window.
-    const homeText = await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME))
-    for (const specifier of relativePatchSpecifiers(homeText)) {
+    // write, but it can still name the rows that will not resolve: a row naming
+    // a missing file fails the whole plugin tree, and a row naming a package the
+    // profile does not have is refused by the client's boot audit — either way
+    // the window never opens, and the user's only clue is the kernel's own text.
+    for (const specifier of patchSpecifiers(homeLayerText)) {
       if (specifierResolves(specifier, profileDir)) continue
-      reportLine(`[brand-suite] the home layer names "${specifier}", which does not load from ${profileDir}: put that file there or remove the row — a row naming a missing file stops the host from starting at all`, options.report)
+      reportLine(`[brand-suite] the home layer names "${specifier}", which does not load from ${profileDir}: install it into that profile (the plugin market's install action does this) or remove the row — the host cannot start while it is there`, options.report)
     }
   }
   const next = composeSuitePatch({
     suite,
     preserved: carried.text,
     home: home.text,
+    managed,
   })
   if (next === existing) return
   await fs.mkdir(profileDir, { recursive: true })

@@ -123,3 +123,23 @@ export const HOST_SHUTDOWN_GRACE_MS = 8_000
 
 /** Grace period per signal (SIGTERM, then the tree kill) while stopping. */
 export const HOST_SIGNAL_GRACE_MS = 5_000
+
+/** Name of the Node binary inside a runtime tree. */
+export const KERNEL_NODE_NAME = process.platform === 'win32' ? 'node.exe' : 'node'
+
+/**
+ * The entries an installed kernel tree must still carry for a start to be
+ * possible, relative to the tree's root: the Node binary the host child runs on,
+ * and the host package the shell spawns.
+ *
+ * A tree can lose either one without losing the directory itself — security
+ * software quarantining a file, a disk cleaner, an interrupted install — and
+ * reusing it then turns every retry, and the rollback that follows, into the same
+ * failure. Measured on a real machine: the rolled-back 0.1.5 tree answered
+ * `ERR_MODULE_NOT_FOUND` for `@deepseek-ai/dsh-desktop-host/lib/index.js`, so
+ * neither kernel line could start the app at all.
+ */
+export const KERNEL_REQUIRED_ENTRIES: readonly (readonly string[])[] = [
+  ['node', KERNEL_NODE_NAME],
+  ['app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js'],
+]

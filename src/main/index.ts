@@ -36,7 +36,7 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
-import { KERNEL_CHECK_INTERVAL_MS, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
+import { KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { healLogLine, healProfileDependencies } from './profile-heal'
 import { alignWindowStateWithLine } from './client-state'
@@ -650,9 +650,10 @@ function logKeptEntries(outcome: KernelTreeOutcome): void {
 }
 
 /**
- * Name of the Node binary inside a runtime tree.
+ * Name of the Node binary inside a runtime tree (see `KERNEL_REQUIRED_ENTRIES`
+ * for the entries a start verifies).
  */
-const NODE_BINARY_NAME = process.platform === 'win32' ? 'node.exe' : 'node'
+const NODE_BINARY_NAME = KERNEL_NODE_NAME
 
 /**
  * The machine's Node, for a dev checkout (which ships no binary of its own) and

@@ -38,6 +38,10 @@ async function makeRuntimeBundle(dir, { dshVersion, suiteVersion, platform = PLA
   mkdirSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
   writeFileSync(path.join(runtime, 'node', NODE_BINARY), 'fake-node')
   writeFileSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '// dsh')
+  // A real tree carries the host package the shell spawns, and `load()` verifies
+  // both entries before it reuses an installed kernel.
+  mkdirSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib'), { recursive: true })
+  writeFileSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js'), '// host')
   const manifest = { dshVersion, suiteVersion, channel: 'stable', platform, arch, integrity: '', source: 'artifact' }
   writeFileSync(path.join(runtime, 'manifest.json'), JSON.stringify(manifest))
 
@@ -230,6 +234,23 @@ test('load() reports a broken install as "no kernel" so the caller reinstalls', 
     artifactOwner: 'owner', artifactRepo: 'repo',
   })
 
+  assert.equal(await fresh.load(), null)
+})
+
+test('load() refuses a tree that lost the host package, not just a missing one', async (t) => {
+  const h = await harness(t, 'dsh-kernel-incomplete-')
+  const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
+  await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
+  // Measured on a real machine: the rolled-back 0.1.5 tree answered
+  // `ERR_MODULE_NOT_FOUND` for this file, so the directory was there and every
+  // start — including the rollback — died on the same missing module. A tree
+  // that cannot boot is reported like one that is not there at all, which sends
+  // the caller down the reinstall path it already has.
+  rmSync(path.join(h.root, 'dsh-1.0.0+suite-s1', 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host'), { recursive: true, force: true })
+  const fresh = new KernelManager({
+    runtimeRoot: h.userData, platform: PLATFORM, arch: ARCH, source: 'artifact', channel: 'stable',
+    artifactOwner: 'owner', artifactRepo: 'repo',
+  })
   assert.equal(await fresh.load(), null)
 })
 

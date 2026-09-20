@@ -11,7 +11,7 @@ import type {
   KernelStatusPayload,
   UpdateCheckResult,
 } from '../shared/types'
-import { KERNEL_ROOT_DIR, LAYERS_DIR, LAYER_STAGING_DIR, STAGING_DIR, TARBALL_FILE } from '../shared/constants'
+import { KERNEL_REQUIRED_ENTRIES, KERNEL_ROOT_DIR, LAYERS_DIR, LAYER_STAGING_DIR, STAGING_DIR, TARBALL_FILE } from '../shared/constants'
 import { t } from '../shared/locale'
 import { exists, loadCurrentKernel, readRuntimeManifest, saveCurrentKernel } from './manifest'
 import { sha512File, verifyIntegrity } from './integrity'
@@ -22,6 +22,22 @@ import { fetchRegistryInfo } from './sources/registry'
 import type { RegistryInfo } from './sources/registry'
 import { GitHubArtifactResolver } from './sources/artifact'
 import { readDevManifest } from './sources/dev'
+
+/**
+ * The first entry a kernel tree no longer carries, or undefined when it is
+ * complete enough to start.
+ *
+ * Only the two entries a start cannot do without are checked (see
+ * `KERNEL_REQUIRED_ENTRIES`): a full inventory would cost a walk of tens of
+ * thousands of files on every boot, and a tree that lost a leaf file fails in
+ * its own diagnostics with the path in hand.
+ */
+async function missingKernelEntry(dir: string): Promise<string | undefined> {
+  for (const entry of KERNEL_REQUIRED_ENTRIES) {
+    if (!(await exists(path.join(dir, ...entry)))) return entry.join('/')
+  }
+  return undefined
+}
 
 export interface KernelManagerOptions {
   /** userData/kernel — holds versioned runtimes + current.json + staging. */
@@ -154,11 +170,17 @@ export class KernelManager {
     if (this.opts.source === 'dev') return this.initDev()
     this.current = await loadCurrentKernel(this.root)
     if (!this.current) return null
-    if (await exists(this.kernelDir(this.current.active))) {
+    const dir = this.kernelDir(this.current.active)
+    // The directory existing is not the question. A tree that lost its host
+    // package or its Node binary boots nothing, and reusing it makes every retry
+    // — and the rollback that follows — fail the same way; reporting it like a
+    // missing tree sends the caller down the reinstall path it already has.
+    const broken = await missingKernelEntry(dir)
+    if (broken === undefined) {
       this.log(`active kernel ${this.current.active} present`)
       return this.current
     }
-    this.log(`active kernel ${this.current.active} missing — reinstall`)
+    this.log(`active kernel ${this.current.active} is incomplete (${broken} is missing) — reinstall`)
     this.current = null
     return null
   }

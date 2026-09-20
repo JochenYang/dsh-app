@@ -69,6 +69,10 @@ function runtimeFixture() {
     mkdirSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
     writeFileSync(path.join(runtime, 'node', NODE_BINARY), 'fake-node')
     writeFileSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '// dsh')
+    // A real tree carries the host package the shell spawns, and `load()`
+    // verifies both entries before it reuses an installed kernel.
+    mkdirSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib'), { recursive: true })
+    writeFileSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js'), '// host')
     const pad = randomBytes(PAD_BYTES)
     writeFileSync(path.join(runtime, 'node', 'pad.bin'), pad)
     const manifest = {
