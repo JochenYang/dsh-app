@@ -8,6 +8,37 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.12.9] - 2026-09-20
+
+### 中文
+- **修复「升级后打不开」的一条主因**：内核为「没有补丁」写出的空补丁（`[]`）被我们当成一段内容拼进了档案补丁，而 YAML 读到它就把文档结束掉——整个补丁文件解析失败，新旧内核都起不来、回滚也无效；又因为「内容不变就不重写」，坏文件会一直留着，安全模式也救不了（它只丢套件行）。现在这类空段被识别为空并就地写明原因，**升级后首次启动即自动修复**。同类的另外三种形态一并修掉：CRLF 补丁读不出行、引号里含空格的路径读不出行、以及档案迁移只搬补丁文本不搬它引用的文件（本地插件因此在迁移后丢失）
+- **启动前校验两处前提**：复用已安装的内核前会确认它仍带着启动必需的宿主包（残缺的内核树以前会被当成好的用，回滚因此失效）；办公载荷物化后会校验目标（半拷贝或被杀软清掉以前是永久打不开，重装与回滚都治不好）
+- **失败时说得清、也能一键修**：若失败来自常驻配置 `$DSH_HOME/cordis.patch.yml` 里某一行指向当前档案没有的包，卡片会直接列出**文件、行号、那一行**，并给出「安装缺失的包并重启」按钮——**不改动你自己的配置**，只把缺的包装进当前档案；装包与插件市场走同一条命令行，并遵守同样的冷却期政策
+- 另外：启动页加载不出来时窗口也会显示（以前是完全没有任何界面）；插件市场里停用的插件不再被下一次启动撤销；内核镜像清理不再删掉同一次启动刚链接好的套件
+
+### English
+- Fixed a main cause of "it will not open after updating": the empty patch the kernel writes
+  for "no patch" (`[]`) was concatenated into our profile patch as if it were rows, and YAML ends
+  the document there — so the whole patch file failed to parse, neither kernel line could start
+  (rollback included), and because the generator only writes when the content changed, the broken
+  file stayed broken: safe mode did not help either, since it only drops the suite rows. Such a
+  section is now read as empty with the reason written in its place, and an affected machine
+  **heals on its first start after the update**. Three siblings of the same class went with it: a
+  CRLF patch yielding no rows, a quoted path containing a space yielding no rows, and a profile
+  migration that carried the patch text but not the files it names (so local plugins were lost)
+- Two startup preconditions are now verified: an installed kernel tree is checked for the host
+  package a start needs (an incomplete tree used to be reused, which made rollback a dead end), and
+  the office payload is checked where it was materialized (a half copy or a cleaned-up one used to
+  be permanent, since neither a reinstall nor a rollback clears that directory)
+- A failure caused by the home layer is now named and fixable: when a row in
+  `$DSH_HOME/cordis.patch.yml` points at a package this profile does not have, the card lists the
+  file, the line and the row, and offers "install the missing packages and restart" — which
+  **changes nothing in your own configuration** and only installs what those rows ask for, through
+  the same command line the plugin market uses and under the same release-age policy
+- Also: the window appears even when the startup page cannot be loaded (there used to be no
+  interface at all), a plugin disabled in the market is no longer re-enabled by the next start, and
+  dropping a kernel mirror no longer removes the suite links the same start has just made
+
 ## [v0.12.8] - 2026-09-19
 
 ### 中文
