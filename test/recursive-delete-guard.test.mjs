@@ -59,8 +59,8 @@ const AUDIT = [
   },
   {
     match: 'scripts/smoke-suite.mjs',
-    count: 2,
-    why: 'the mkdtemp dir this probe unpacked a runtime tgz into, and its tgz-mode copy: a tree the probe made, with no link pointing out of it. The scratch HOME — which DOES hold @dsh-app junctions into that runtime — goes through remove-tree.mjs instead',
+    count: 1,
+    why: 'the mkdtemp dir this probe unpacked a runtime tgz into: a tree the probe made, with no link pointing out of it. The scratch HOME — which DOES hold @dsh-app junctions into that runtime — goes through remove-tree.mjs instead (the extraction root is removed in the same finally, after the kernel child is gone)',
   },
   {
     match: 'scripts/diagnose-modelscope-upload.mjs',
@@ -116,8 +116,8 @@ const AUDIT = [
   },
   {
     match: 'test/*.test.mjs',
-    count: 22,
-    why: 'root suites: every call removes an os.tmpdir scratch root that test just created (the mirror test also deletes a hardlink-only profile mirror on purpose, the kernel-manager suite removes one package out of a scratch runtime tree to prove `load()` refuses an incomplete one, and the office-payload suite removes its mkdtemp userData/fixture roots at process exit) — no link out of any of them; the profile-repair suite cleans its scratch roots the same way, through one helper',
+    count: 27,
+    why: 'root suites: every call removes an os.tmpdir scratch root that test just created (the mirror test also deletes a hardlink-only profile mirror on purpose, the kernel-manager suite removes one package out of a scratch runtime tree to prove `load()` refuses an incomplete one, the office-payload suite removes its mkdtemp userData/fixture roots at process exit, the activation-guard suite removes its mkdtemp bundle/userData roots plus the symlink-privilege probe dir, the graph suite removes the plugin skeleton it wrote, and the updater suites remove their mkdtemp download destinations) — no link out of any of them; the profile-repair suite cleans its scratch roots the same way, through one helper',
   },
   {
     match: 'plugins/*/tests/**',

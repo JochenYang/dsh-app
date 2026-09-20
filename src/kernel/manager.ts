@@ -18,6 +18,7 @@ import { sha512File, verifyIntegrity } from './integrity'
 import { classifyDownloadFailure, describeDownloadFailure } from './failures'
 import { assertLayerTarget, missingLayers, readLayerIndex } from './layers'
 import type { KernelLayer, LayerIndex } from './layers'
+import { tarExtractionFilter } from './tar-entry'
 import { fetchRegistryInfo } from './sources/registry'
 import type { RegistryInfo } from './sources/registry'
 import { GitHubArtifactResolver } from './sources/artifact'
@@ -483,8 +484,11 @@ export class KernelManager {
       ))
     }
 
-    // 2. (Verified above.) Extract, sanity-check, and activate.
-    const next = await this.activateTarball(tarball)
+    // 2. (Verified above.) Extract, sanity-check, and activate. The requested
+    //    version is bound to the artifact's own manifest: a mirror serving an
+    //    older tarball under a versioned URL would otherwise activate a
+    //    silently downgraded kernel whose digest is self-consistent.
+    const next = await this.activateTarball(tarball, version)
     // Record the verified source hash (mirror side of the download chain);
     // see installFromLocalTarballInner for the comparison semantics.
     next.sha512 = artifact.sha512
@@ -633,12 +637,12 @@ export class KernelManager {
       await tar.x({
         file: path.join(cacheDir, layer.name),
         cwd: extractDir,
-        filter: (entryPath) => !path.isAbsolute(entryPath) && !entryPath.split('/').includes('..'),
+        filter: tarExtractionFilter,
       })
       assembled += 1
     }
 
-    const next = await this.activateExtracted(path.join(extractDir, 'runtime'))
+    const next = await this.activateExtracted(path.join(extractDir, 'runtime'), index.dshVersion)
     // Provenance: the layer files this install used, so cleanup() can tell the
     // cache entries the active install depends on from reclaimable ones.
     next.layers = index.layers.map((layer) => ({ name: layer.name, sha512: layer.sha512 }))
@@ -657,7 +661,7 @@ export class KernelManager {
    * install from a bundled tarball (after sidecar sha512 verify). The caller
    * is responsible for integrity verification before calling this.
    */
-  private async activateTarball(tarball: string): Promise<CurrentKernel> {
+  private async activateTarball(tarball: string, expectedVersion: string | null): Promise<CurrentKernel> {
     const extractDir = path.join(this.root, STAGING_DIR, 'extract')
     await fs.rm(extractDir, { recursive: true, force: true })
     await fs.mkdir(extractDir, { recursive: true })
@@ -676,7 +680,7 @@ export class KernelManager {
     await tar.x({
       file: tarball,
       cwd: extractDir,
-      filter: (entryPath) => !path.isAbsolute(entryPath) && !entryPath.split('/').includes('..'),
+      filter: tarExtractionFilter,
       onentry: () => {
         extracted += 1
         if (total <= 0) return
@@ -688,7 +692,7 @@ export class KernelManager {
         }, extracted === total)
       },
     })
-    return this.activateExtracted(path.join(extractDir, 'runtime'))
+    return this.activateExtracted(path.join(extractDir, 'runtime'), expectedVersion)
   }
 
   /**
@@ -697,9 +701,10 @@ export class KernelManager {
    * previous version for rollback. This is the ONE activation tail: the online
    * tgz, bundled tgz and split-layer paths all end here, so their activation
    * semantics (target rm, same-name re-activation, previous bookkeeping,
-   * staging cleanup) cannot drift apart.
+   * staging cleanup) cannot drift apart. `expectedVersion` binds the artifact
+   * to the version its caller asked for — see the version check below.
    */
-  private async activateExtracted(inner: string): Promise<CurrentKernel> {
+  private async activateExtracted(inner: string, expectedVersion: string | null): Promise<CurrentKernel> {
     const innerManifest = await readRuntimeManifest(inner)
     if (!innerManifest) throw new Error(t('kernel.manifestMissing'))
     if (innerManifest.platform !== this.opts.platform || innerManifest.arch !== this.opts.arch) {
@@ -708,6 +713,17 @@ export class KernelManager {
         artifactArch: innerManifest.arch,
         platform: this.opts.platform,
         arch: this.opts.arch,
+      }))
+    }
+    // The activation tail is shared, so the version binding lives here rather
+    // than in each caller: any path that knows which version it asked for
+    // refuses an artifact that declares another. A null binder (a bundled
+    // tarball whose own manifest.json is unreadable) keeps the tolerant
+    // behavior of the boot drift check, which is version-agnostic.
+    if (expectedVersion !== null && innerManifest.dshVersion !== expectedVersion) {
+      throw new Error(t('kernel.artifactVersionMismatch', {
+        artifactVersion: innerManifest.dshVersion,
+        version: expectedVersion,
       }))
     }
 
@@ -778,7 +794,15 @@ export class KernelManager {
       }))
     }
     this.log(`bundled tarball verified: ${path.basename(tarballPath)}`)
-    const next = await this.activateTarball(tarball)
+    // The bundle's own manifest is read BEFORE activation so its declared
+    // version can bind the artifact (a bundled manifest disagreeing with the
+    // tarball's inner manifest is a build fault, not something to activate).
+    // A manifest that parses but declares no usable version cannot bind
+    // anything: normalize it to null rather than passing `undefined`, which
+    // would fail the comparison AND throw inside the localized message.
+    const shipped = await readRuntimeManifest(path.dirname(tarballPath))
+    const shippedVersion = typeof shipped?.dshVersion === 'string' && shipped.dshVersion !== '' ? shipped.dshVersion : null
+    const next = await this.activateTarball(tarball, shippedVersion)
     // Record the verified source hash and the identity of the bundle itself.
     // The stamp is what the boot drift check compares against: it says WHICH
     // bundled runtime this install adopted, so "already adopted" is
@@ -786,7 +810,6 @@ export class KernelManager {
     // from the same manifest.json the boot check reads, so the two can never
     // disagree about what was adopted.
     next.sha512 = expected
-    const shipped = await readRuntimeManifest(path.dirname(tarballPath))
     if (shipped !== null) next.bundledStamp = `${shipped.dshVersion}+${shipped.suiteVersion}`
     await saveCurrentKernel(this.root, next)
     this.current = next

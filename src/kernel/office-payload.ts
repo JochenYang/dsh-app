@@ -21,8 +21,9 @@
  * as transport only — `GitHubArtifactResolver`), verified
  * against the sha512 of that phase-1 metadata, extracted into a staging
  * directory under the payload root, validated (its own manifest must describe
- * this target and the required files must be there), and only then renamed into
- * place. Until that rename the previously installed version is untouched, and a
+ * this target and the required files must be there), and only then swapped into
+ * place: the old install is renamed aside first and deleted after the verified
+ * tree takes its place, so a failed swap restores the previous version. A
  * failed attempt leaves nothing behind but the last good install.
  *
  * What it deliberately does NOT do: download anything by itself. Nothing here
@@ -38,6 +39,7 @@ import * as tar from 'tar'
 import type { KernelOfficePayloadManifest } from '../shared/types'
 import type { MessageKey } from '../shared/locale'
 import { t } from '../shared/locale'
+import { tarExtractionFilter } from './tar-entry'
 import {
   OFFICE_PAYLOAD_DIR,
   OFFICE_PAYLOAD_MANIFEST_FILE,
@@ -203,8 +205,18 @@ export class OfficePayloadManager {
     return path.join(this.root(), OFFICE_PAYLOAD_DIR)
   }
 
-  /** Absolute directory one payload version installs into. */
+  /**
+   * Absolute directory one payload version installs into.
+   *
+   * The version is validated here, not only where it is read: it becomes a
+   * path component that rename/rm act on, and a value carrying `..` or a
+   * separator would step outside the payload root. A caller with a
+   * version-shaped value (every real target) sees no difference.
+   */
   installDir(version: string): string {
+    if (!isVersionDirectory(version)) {
+      throw new Error(t('officePayload.manifestMismatch', { detail: `payload version ${JSON.stringify(version)} is not a version-shaped name` }))
+    }
     return path.join(this.payloadRoot(), version)
   }
 
@@ -394,7 +406,7 @@ export class OfficePayloadManager {
         cwd: extract,
         // The same traversal refusal as the kernel's own extraction: an archive
         // is untrusted input even when its digest matched.
-        filter: (entryPath) => !path.isAbsolute(entryPath) && !entryPath.split('/').includes('..'),
+        filter: tarExtractionFilter,
       })
       this.throwIfAborted(task)
       const tree = path.join(extract, ARCHIVE_DIR)
@@ -412,17 +424,25 @@ export class OfficePayloadManager {
         }
       }
 
-      // Commit. The required version's directory is replaced wholesale and the
-      // rename is what publishes it; everything before this point lives in the
-      // staging directory, so a failure left the previous install untouched.
+      // Commit. The required version's directory is swapped atomically: the
+      // old install moves aside INSIDE the payload root first (a rename on the
+      // same volume), the verified tree takes its place, and only then is the
+      // old one deleted. A rename that fails after the old one moved aside
+      // restores it, so at no point is the engine both absent and unrecoverable.
       const destination = this.installDir(target.payloadVersion)
-      const replaced = await exists(destination)
-      await fs.rm(destination, { recursive: true, force: true })
-      await renameWithRetry(tree, destination)
+      const retired = await exists(destination) ? `${destination}.retired-${Date.now()}` : null
+      if (retired !== null) await renameWithRetry(destination, retired)
+      try {
+        await renameWithRetry(tree, destination)
+      } catch (err) {
+        if (retired !== null) await renameWithRetry(retired, destination).catch(() => undefined)
+        throw err
+      }
+      if (retired !== null) await fs.rm(retired, { recursive: true, force: true }).catch(() => undefined)
       const pruned = await this.pruneOtherVersions(target.payloadVersion)
       if (pruned.length > 0) this.log(`pruned old payload versions: ${pruned.join(', ')}`)
       await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined)
-      this.log(`payload ${target.payloadVersion} installed at ${destination}${replaced ? ' (replaced)' : ''}`)
+      this.log(`payload ${target.payloadVersion} installed at ${destination}${retired !== null ? ' (replaced)' : ''}`)
       task.phase = 'idle'
       task.progress = null
       task.error = null
@@ -505,6 +525,10 @@ export class OfficePayloadManager {
     for (const entry of entries) {
       if (entry.name === keep) continue
       if (!entry.isDirectory() || !isVersionDirectory(entry.name)) {
+        // Only the crash-left staging directories land here: a `.retired-`
+        // name is version-shaped (`<version>.retired-<ts>`, the swap's
+        // aside-copy), so it takes the delete branch below like any other
+        // version nobody requires.
         if (entry.name.startsWith('.staging-')) {
           await fs.rm(path.join(this.payloadRoot(), entry.name), { recursive: true, force: true }).catch(() => undefined)
         }
