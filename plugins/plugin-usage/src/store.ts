@@ -129,18 +129,33 @@ export class UsageStore {
     }, FLUSH_DELAY_MS)
   }
 
+  /**
+   * Write the pending rows and watermarks. FAILURE KEEPS THE DATA: the batch
+   * is only dropped from the buffer after the append succeeded, and the
+   * watermark file is only written once its rows are on disk. Clearing first
+   * (the earlier shape) lost rows for good on a full disk or a locked file —
+   * the watermark had already advanced past them, so neither the live path nor
+   * the backfill would ever produce them again.
+   */
   private flush(): void {
     if (this.pendingLines.length === 0 && !this.watermarksDirty) return
-    const lines = this.pendingLines
-    this.pendingLines = []
-    try {
-      if (lines.length > 0) appendFileSync(this.filePath, `${lines.join('\n')}\n`, 'utf8')
-      if (this.watermarksDirty) {
-        writeFileSync(this.watermarkPath, `${JSON.stringify(Object.fromEntries(this.watermarks), null, 2)}\n`, 'utf8')
-        this.watermarksDirty = false
+    if (this.pendingLines.length > 0) {
+      try {
+        appendFileSync(this.filePath, `${this.pendingLines.join('\n')}\n`, 'utf8')
+        this.pendingLines = []
+      } catch (error) {
+        // Keep the buffer for the next flush (a new save schedules one) and
+        // report it: a silent drop here under-reports the user's usage forever.
+        this.log(`usage store: persist failed, ${String(this.pendingLines.length)} row(s) kept for retry: ${(error as Error).message}`)
+        return
       }
+    }
+    if (!this.watermarksDirty) return
+    try {
+      writeFileSync(this.watermarkPath, `${JSON.stringify(Object.fromEntries(this.watermarks), null, 2)}\n`, 'utf8')
+      this.watermarksDirty = false
     } catch (error) {
-      this.log(`usage store: persist failed: ${(error as Error).message}`)
+      this.log(`usage store: watermark persist failed (rows are safe; watermarks retry): ${(error as Error).message}`)
     }
   }
 

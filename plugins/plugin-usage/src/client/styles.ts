@@ -199,11 +199,75 @@ const cssText = `
 .dshau_calendar {
   position: relative;
   display: grid;
-  gap: 3px;
+  /* Width comes from the grid template (set inline from the measured panel);
+     the fallback scroll only engages at the minimum cell size. */
   width: max-content;
+  max-width: 100%;
   min-width: 0;
   overflow-x: auto;
   padding-bottom: 4px;
+}
+/* The grid and its side stats share one row: the numbers anchor the shape
+   (how many days, which one peaked) instead of leaving the reader to count. */
+.dshau_calRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 24px;
+  min-width: 0;
+}
+.dshau_calStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin: 0;
+  padding-top: 6px;
+}
+.dshau_calStats dt {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.dshau_calStats dd {
+  margin: 2px 0 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 16px;
+  line-height: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.dshau_calStatsDate {
+  color: var(--dsw-alias-label-tertiary) !important;
+  font-size: 11px !important;
+  line-height: 16px !important;
+  font-weight: 400 !important;
+}
+/* Granularity switch and the fill scale, under the grid. */
+.dshau_calFooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dshau_calModes {
+  margin-left: 0;
+}
+.dshau_legendScale {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.dshau_calLegend {
+  width: 10px !important;
+  height: 10px !important;
+  cursor: default;
+}
+.dshau_calTotal {
+  font-variant-numeric: tabular-nums;
 }
 .dshau_calMonth {
   color: var(--dsw-alias-label-tertiary);
@@ -212,31 +276,31 @@ const cssText = `
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.dshau_calDow {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 10px;
-  line-height: 13px;
-  text-align: right;
-  padding-right: 5px;
-}
 .dshau_calCell {
+  /* Size is set inline (the grid scales to its panel); these are the
+     pre-measurement fallbacks, matching the largest step. */
   width: 13px;
   height: 13px;
   border-radius: 3px;
-  background: var(--dsw-alias-bg-layer-2);
+  /* The empty-day base has to be VISIBLE against the panel, or a 53-week grid
+     reads as scattered fragments instead of a calendar — the empty days are
+     what give the filled ones their shape. A hairline keeps the grid legible
+     in both schemes without competing with the fill scale. */
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l1);
   cursor: default;
   overflow: hidden;
   color: transparent;
   font-size: 0;
 }
 .dshau_calCell[data-level='1'] {
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, var(--dsw-alias-bg-layer-2));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, var(--dsw-alias-bg-layer-1));
 }
 .dshau_calCell[data-level='2'] {
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 48%, var(--dsw-alias-bg-layer-2));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, var(--dsw-alias-bg-layer-1));
 }
 .dshau_calCell[data-level='3'] {
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 70%, var(--dsw-alias-bg-layer-2));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 72%, var(--dsw-alias-bg-layer-1));
 }
 .dshau_calCell[data-level='4'] {
   background: var(--dsw-alias-brand-primary);

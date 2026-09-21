@@ -96,6 +96,31 @@ function startOfLocalDay(time: number): number {
   return d.getTime()
 }
 
+/**
+ * The first millisecond of the local day `offset` calendar days away from
+ * `dayStart` (negative = earlier). Stepped through the calendar, never by
+ * adding {@link DAY_MS}: a day is 23 or 25 hours long across a DST
+ * transition, so a fixed-millisecond walk drifts one day off — the day's rows
+ * then fall outside every generated bucket and the totals stop matching the
+ * buckets they are drawn from.
+ *
+ * The `setHours(0,0,0,0)` after the date step is what makes this exact: the
+ * calendar step preserves the wall-clock time, so a day whose 00:00 does not
+ * exist (a spring-forward transition at midnight) lands on the first hour that
+ * does, and the reset pulls it back to the real start of that day.
+ */
+function dayStartOffset(dayStart: number, offset: number): number {
+  const d = new Date(dayStart)
+  d.setDate(d.getDate() + offset)
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
+/** The last millisecond of the local day that starts at `dayStart`. */
+function endOfLocalDay(dayStart: number): number {
+  return dayStartOffset(dayStart, 1) - 1
+}
+
 function emptyAgg(date: string): UsageAgg {
   return {
     date,
@@ -132,8 +157,8 @@ function finalize(agg: UsageAgg): void {
  */
 export function summarize(rows: readonly UsageRow[], days: number, prices: readonly UsagePrice[]): UsageSummary {
   const today = startOfLocalDay(Date.now())
-  const since = today - (days - 1) * DAY_MS
-  const until = today + DAY_MS - 1
+  const since = dayStartOffset(today, -(days - 1))
+  const until = endOfLocalDay(today)
   const totals = emptyAgg('')
   const byDay = new Map<string, UsageAgg>()
   const byModel = new Map<string, UsageModelAgg>()
@@ -160,7 +185,7 @@ export function summarize(rows: readonly UsageRow[], days: number, prices: reado
   finalize(totals)
   const daily: UsageAgg[] = []
   for (let offset = 0; offset < days; offset += 1) {
-    const key = localDateKey(since + offset * DAY_MS)
+    const key = localDateKey(dayStartOffset(since, offset))
     const day = byDay.get(key)
     if (day !== undefined) finalize(day)
     daily.push(day ?? emptyAgg(key))
@@ -184,7 +209,7 @@ export function heatmap(
 ): UsageHeatCell[] {
   const cells = new Map<string, UsageHeatCell & { billedInput: number }>()
   for (let offset = 0; offset < weeks * 7; offset += 1) {
-    const key = localDateKey(since + offset * DAY_MS)
+    const key = localDateKey(dayStartOffset(since, offset))
     cells.set(key, { date: key, requests: 0, totalTokens: 0, cacheHitRate: 0, billedInput: 0 })
   }
   for (const row of rows) {
@@ -203,4 +228,4 @@ export function heatmap(
 }
 
 /** Expose day math to the route layer (single source for both endpoints). */
-export { DAY_MS, startOfLocalDay }
+export { DAY_MS, dayStartOffset, endOfLocalDay, startOfLocalDay }

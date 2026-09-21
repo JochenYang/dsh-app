@@ -77,17 +77,28 @@ function rememberHeader(sessionId: string, provider: string, model: string): voi
  * source, falls back to the turn's request header, and finally to the
  * session's last-seen header (the live path folds one event per call, so the
  * header usually arrived in an earlier call).
+ *
+ * @param fromSeq - lowest seq to fold, when the caller knows something the
+ *   store does not. The backfill passes a FORK's `inheritedEventCount` here:
+ *   those leading events were copied from the parent and already folded under
+ *   the parent's id, so folding them again under the child would double-count
+ *   the same model calls. The store's own watermark still applies on top.
  * @returns the number of rows actually added (deduped).
  */
-export function foldEvents(store: UsageStore, sessionId: string, events: readonly FoldEvent[]): number {
+export function foldEvents(
+  store: UsageStore,
+  sessionId: string,
+  events: readonly FoldEvent[],
+  fromSeq?: number,
+): number {
   if (events.length === 0) return 0
-  const fromSeq = store.watermark(sessionId)
+  const floor = Math.max(store.watermark(sessionId), fromSeq ?? 0)
   const rows: UsageRow[] = []
   const cached = headerBySession.get(sessionId)
   let provider = cached?.provider ?? ''
   let model = cached?.model ?? ''
   for (const event of events) {
-    if (event.seq <= fromSeq) continue
+    if (event.seq <= floor) continue
     if (event.type === 'request/header') {
       const data = asObject(event.data) as RequestHeaderShape | undefined
       const config = asObject(data?.header?.config)

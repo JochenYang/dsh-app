@@ -27,7 +27,7 @@
  */
 
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
-import { DAY_MS, heatmap, startOfLocalDay, summarize } from './aggregate.ts'
+import { dayStartOffset, endOfLocalDay, heatmap, startOfLocalDay, summarize } from './aggregate.ts'
 import type { HostText, UsageBalance, UsageBalanceSnapshot, UsagePrice } from './types.ts'
 import type { UsageStore } from './store.ts'
 
@@ -175,14 +175,20 @@ export function registerUsageRoutes(
     if (!options.active || store === null) {
       return fail(503, 'disabled', DISABLED)
     }
-    const weeks = readInt(new URL(request.url, 'http://localhost'), 'weeks', 26, 104)
+    // 53 = a full year, the calendar convention; the route cap keeps a hand
+    // -written ?weeks= from asking for more than two years of buckets.
+    const weeks = readInt(new URL(request.url, 'http://localhost'), 'weeks', 53, 104)
     const today = startOfLocalDay(Date.now())
-    const since = today - (weeks * 7 - 1) * DAY_MS
+    // Calendar-stepped, never `weeks * 7 * DAY_MS`: a DST transition makes one
+    // day 23 or 25 hours long, and a fixed-millisecond window then starts a day
+    // off — the grid would leave the day's rows out of every bucket.
+    const since = dayStartOffset(today, -(weeks * 7 - 1))
+    const until = endOfLocalDay(today)
     return ok({
       weeks,
       since,
-      until: today + DAY_MS - 1,
-      cells: heatmap(store.all(), weeks, since, today + DAY_MS - 1),
+      until,
+      cells: heatmap(store.all(), weeks, since, until),
     })
   }
   // Balance cache: only SUCCESSFUL fetches populate it (a failing silent

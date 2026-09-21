@@ -8,8 +8,14 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DAY_MS, heatmap, mergePricing, startOfLocalDay, summarize, DEFAULT_PRICING } from '../src/aggregate.ts'
+import { DAY_MS, dayStartOffset, endOfLocalDay, heatmap, mergePricing, startOfLocalDay, summarize, DEFAULT_PRICING } from '../src/aggregate.ts'
 import type { UsagePrice, UsageRow } from '../src/types.ts'
+
+/** Local `YYYY-MM-DD` of an instant — the day key the aggregation buckets by. */
+const localKey = (time: number): string => {
+  const d = new Date(time)
+  return `${String(d.getFullYear())}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 const now = Date.now()
 
@@ -113,4 +119,54 @@ test('heatmap: cache-hit rate divides cache-read by billed input', () => {
   )
   const hit = cells.find(c => c.requests > 0)!
   assert.equal(hit.cacheHitRate, 300 / 400)
+})
+
+// --- calendar-day math (DST safety) ----------------------------------------------
+
+test('dayStartOffset: a day is a calendar day, not 86 400 000 ms', () => {
+  // The invariant that matters: every generated key is a DISTINCT local day and
+  // every day in the window is generated. A fixed-millisecond walk breaks this
+  // across a DST transition (one day is 23 or 25 hours), which made a day's rows
+  // fall outside every bucket — the totals then exceeded the buckets drawn from
+  // them and that day rendered empty.
+  const today = startOfLocalDay(now)
+  const days = 400 // long enough to cross both transitions in either hemisphere
+  const keys = new Set<string>()
+  for (let offset = -(days - 1); offset <= 0; offset += 1) {
+    keys.add(localKey(dayStartOffset(today, offset)))
+  }
+  assert.equal(keys.size, days, 'one distinct local day per offset, across a year')
+})
+
+test('dayStartOffset: stepping back and forward returns the same instant', () => {
+  const today = startOfLocalDay(now)
+  for (const offset of [-1, -30, -180, -365]) {
+    assert.equal(dayStartOffset(dayStartOffset(today, offset), -offset), today, `offset ${String(offset)} round-trips`)
+  }
+})
+
+test('endOfLocalDay: the last millisecond of that same local day', () => {
+  const today = startOfLocalDay(now)
+  const end = endOfLocalDay(today)
+  assert.equal(new Date(end).getDate(), new Date(today).getDate(), 'same calendar day')
+  assert.ok(end > today && end - today >= 23 * 3_600_000, 'covers a 23-hour day')
+  assert.ok(end - today <= 25 * 3_600_000, 'and never spills into the next')
+})
+
+test('summarize/heatmap: every day of the window is a bucket, and rows land in one', () => {
+  // The regression this guards: a row at the START of the oldest day in the
+  // window. With fixed-millisecond stepping that instant could fall before the
+  // first generated bucket, so the totals counted it while no bucket held it.
+  const today = startOfLocalDay(now)
+  const days = 30
+  const since = dayStartOffset(today, -(days - 1))
+  const summary = summarize([row({ time: since })], days, DEFAULT_PRICING)
+  assert.equal(summary.daily.length, days, 'one bucket per day in the window')
+  assert.equal(summary.totals.requests, 1, 'the row is in the totals')
+  const carried = summary.daily.reduce((n, day) => n + day.requests, 0)
+  assert.equal(carried, 1, 'and exactly one bucket carries it — totals match the series')
+  // The heatmap grid agrees with the summary over the same window.
+  const cells = heatmap([row({ time: since })], 5, dayStartOffset(today, -(5 * 7 - 1)), endOfLocalDay(today))
+  assert.equal(cells.length, 35)
+  assert.equal(cells.reduce((n, cell) => n + cell.requests, 0), 1)
 })

@@ -1,5 +1,5 @@
 /**
- * DSH APP usage statistics — settings-page section (client half UI).
+ * DSH APP usage statistics — the 用量统计 tab's client half UI.
  *
  * Layout: summary cards → daily heatmap → redesigned daily trend chart →
  * per-model table. The trend chart is a dual-axis SVG: stacked token bars on
@@ -10,7 +10,7 @@
  * link, caption subtitles) are deliberately absent.
  *
  * Every string this page renders comes from the `dsh-app.usage` namespace
- * through the `t` standard seat: the section registers with `locale: NS`, so
+ * through the `t` standard seat: the tab registers with `locale: NS`, so
  * the renderer hands the component — and, through its props, the cards, the
  * heatmap, the trend chart and the table below — a namespace-bound translate
  * that reads the active UI locale at call time and re-renders on a language
@@ -40,8 +40,37 @@ const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-usage'
 /** The page's namespace-bound translate, handed to the sub-components below. */
 type UsageTranslate = TranslateNS<typeof NS>
 
-/** Heatmap window in weeks (the host route's own default). */
-const HEAT_WEEKS = 26
+/**
+ * Heatmap window in weeks (the host route's own default). A full year reads as
+ * a habit calendar — the shape of a month is only visible once several months
+ * sit side by side — and the grid scales its cells to the panel, so the wider
+ * window costs nothing in width.
+ */
+const HEAT_WEEKS = 53
+
+/**
+ * Heatmap cell size in px. The grid sizes itself to the panel it is drawn in
+ * (see {@link HeatCalendar}): 53 weeks of fixed 13px cells need ~850px, which a
+ * settings panel does not have, so the cells used to run off the right edge
+ * behind a scrollbar that nothing announced. Clamped to stay legible; below
+ * {@link MIN_CELL_PX} the grid scrolls rather than shrinking into noise.
+ */
+const MAX_CELL_PX = 13
+const MIN_CELL_PX = 5
+/** Gap between cells: the wide default, and the tight one used when the panel
+ *  cannot fit the wide grid at a legible cell size. */
+const CELL_GAP_PX = 3
+const MIN_GAP_PX = 1
+
+/** Granularity of the heatmap grid: each day, each week, or the running total. */
+type HeatMode = 'day' | 'week' | 'cumulative'
+
+/** The three granularities, in the order the segmented control shows them. */
+const HEAT_MODES: ReadonlyArray<{ id: HeatMode, labelKey: UsageKey }> = [
+  { id: 'day', labelKey: 'usage.cal.modeDay' },
+  { id: 'week', labelKey: 'usage.cal.modeWeek' },
+  { id: 'cumulative', labelKey: 'usage.cal.modeCumulative' },
+]
 
 /** Month-label keys, indexed by `Date.getMonth()` order. */
 const MONTH_KEYS = [
@@ -316,6 +345,12 @@ function BalanceCard({ t }: { t: UsageTranslate }): ReactNode {
 // daily heatmap
 // ---------------------------------------------------------------------------
 
+/**
+ * Intensity bucket of one cell, relative to the window maximum. Quartile-ish
+ * thresholds rather than even fifths: real usage is spiky, so the top bucket
+ * has to be reachable by the busiest days without flattening everything else
+ * into the first one.
+ */
 function cellLevel(value: number, max: number): number {
   if (value <= 0 || max <= 0) return 0
   const ratio = value / max
@@ -325,73 +360,223 @@ function cellLevel(value: number, max: number): number {
   return 1
 }
 
+/** One cell of the rendered grid: its day, value, level and tooltip lines. */
+interface HeatView {
+  date: string
+  value: number
+  level: number
+  tip: string[]
+}
+
+/**
+ * Regroup the wire cells (flat, Sunday-first, one row per week) into the
+ * Monday-first week COLUMNS the calendar draws, and apply the selected
+ * granularity:
+ *
+ *  - `day` — the value of that day;
+ *  - `week` — every cell of a column carries its week's total, so the grid
+ *    keeps one shape and hovering any cell reports the week (a weekly view of
+ *    a daily calendar, not a second chart);
+ *  - `cumulative` — the running total in reading order, i.e. how the window
+ *    accumulated rather than what each day contributed.
+ *
+ * A mode switch must not change the grid's shape, so all three return the same
+ * number of columns and rows; only values, levels and tooltips differ.
+ */
+function toHeatView(
+  cells: HeatmapWire['cells'],
+  weeks: number,
+  mode: HeatMode,
+  metric: 'tokens' | 'requests',
+  tipOf: (cell: HeatmapWire['cells'][number]) => string[],
+  t: UsageTranslate,
+): HeatView[] {
+  const valueOf = (cell: HeatmapWire['cells'][number]): number => (metric === 'tokens' ? cell.totalTokens : cell.requests)
+  // The wire grid is Sunday-first; the calendar reads Monday-first (the work
+  // week), so rotate each 7-day column by one. Column w, row r holds
+  // (w*7 + ((r + 1) % 7)).
+  const rotated: HeatView[] = new Array<HeatView>(weeks * 7)
+  for (let w = 0; w < weeks; w += 1) {
+    for (let r = 0; r < 7; r += 1) {
+      const source = cells[w * 7 + ((r + 1) % 7)]
+      if (source === undefined) continue
+      rotated[w * 7 + r] = { date: source.date, value: valueOf(source), level: 0, tip: tipOf(source) }
+    }
+  }
+  const present = rotated.filter((cell): cell is HeatView => cell !== undefined)
+  if (mode === 'week') {
+    for (let w = 0; w < weeks; w += 1) {
+      const column = rotated.slice(w * 7, w * 7 + 7).filter((cell): cell is HeatView => cell !== undefined)
+      if (column.length === 0) continue
+      const total = column.reduce((sum, cell) => sum + cell.value, 0)
+      const first = column[0]!.date
+      const last = column[column.length - 1]!.date
+      for (const cell of column) {
+        cell.value = total
+        cell.tip = [`${first} ~ ${last}`, t('usage.cal.tipWeekTotal', { tokens: fmtTokens(total) })]
+      }
+    }
+  } else if (mode === 'cumulative') {
+    let run = 0
+    for (const cell of present) {
+      run += cell.value
+      cell.value = run
+      cell.tip = [cell.date, t('usage.cal.tipCumulative', { tokens: fmtTokens(run) })]
+    }
+  }
+  // One scale per mode: the level is relative to the largest value the CURRENT
+  // view shows, so a quiet week still reads as texture in weekly mode.
+  const max = present.reduce((m, cell) => (cell.value > m ? cell.value : m), 0)
+  for (const cell of rotated) {
+    if (cell !== undefined) cell.level = cellLevel(cell.value, max)
+  }
+  return rotated
+}
+
 function HeatCalendar({ heat, metric, onTip, t }: { heat: HeatmapWire; metric: 'tokens' | 'requests'; onTip: (tip: Tip | null) => void; t: UsageTranslate }): ReactNode {
   const { cells, weeks } = heat
-  const max = cells.reduce((m, cell) => {
-    const v = metric === 'tokens' ? cell.totalTokens : cell.requests
-    return v > m ? v : m
-  }, 0)
-  const dows = [
-    t('usage.cal.dow.sun'), t('usage.cal.dow.mon'), t('usage.cal.dow.tue'), t('usage.cal.dow.wed'),
-    t('usage.cal.dow.thu'), t('usage.cal.dow.fri'), t('usage.cal.dow.sat'),
-  ]
-  const firstDow = new Date(`${cells[0]!.date}T00:00:00`).getDay()
-  const monthLabels: string[] = []
-  const monthSpans: number[] = []
-  for (let w = 0; w < weeks; w += 1) {
-    const date = cells[w * 7]!.date
-    const prev = w > 0 ? cells[(w - 1) * 7]!.date : ''
-    monthLabels.push(w === 0 || date.slice(0, 7) !== prev.slice(0, 7) ? monthLabel(Number(date.slice(5, 7)), t) : '')
-    monthSpans.push(0)
-  }
-  let nextLabel = weeks
-  for (let w = weeks - 1; w >= 0; w -= 1) {
-    if (monthLabels[w] === '') continue
-    monthSpans[w] = Math.max(1, nextLabel - w)
-    nextLabel = w
-  }
-  const tipText = (cell: HeatmapWire['cells'][number]): string[] => [
+  // Size the grid to the panel it is drawn in. 53 weeks at the full cell size
+  // need ~850px; a narrower panel used to hide the newest weeks behind an
+  // unannounced horizontal scrollbar, which reads as "the heatmap is
+  // incomplete". Measured from the container so it follows a window resize.
+  //
+  // The GAP gives way before the cell does: at 53 columns the 3px gaps cost
+  // 156px, so dropping them to 1px buys more room than shaving cells below the
+  // legibility floor would — and only once both are exhausted does the grid
+  // scroll.
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [fit, setFit] = useState<{ cell: number, gap: number }>({ cell: MAX_CELL_PX, gap: CELL_GAP_PX })
+  const [mode, setMode] = useState<HeatMode>('day')
+  useEffect(() => {
+    const node = containerRef.current
+    if (node === null) return
+    const measure = (): void => {
+      const available = node.clientWidth
+      if (available <= 0) return
+      const atFullGap = Math.floor((available - (weeks - 1) * CELL_GAP_PX) / weeks)
+      if (atFullGap >= MIN_CELL_PX) {
+        setFit({ cell: Math.min(MAX_CELL_PX, atFullGap), gap: CELL_GAP_PX })
+        return
+      }
+      const atTightGap = Math.floor((available - (weeks - 1) * MIN_GAP_PX) / weeks)
+      setFit({ cell: Math.max(MIN_CELL_PX, Math.min(MAX_CELL_PX, atTightGap)), gap: MIN_GAP_PX })
+    }
+    measure()
+    // ResizeObserver where available (the panel follows the window); the
+    // window listener is the fallback for a host without it.
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure)
+      return () => { window.removeEventListener('resize', measure) }
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => { observer.disconnect() }
+  }, [weeks])
+  const tipOf = (cell: HeatmapWire['cells'][number]): string[] => [
     cell.date,
     t('usage.cal.tipRequests', { requests: cell.requests, tokens: fmtTokens(cell.totalTokens) }),
     t('usage.cal.tipHitRate', { rate: fmtPct(cell.cacheHitRate) }),
   ]
+  const view = toHeatView(cells, weeks, mode, metric, tipOf, t)
+  // Month tags sit UNDER the grid (the calendar convention): a column is
+  // labelled when its first day enters a new month, so the label marks where
+  // that month starts rather than spanning it.
+  const monthTags = Array.from({ length: weeks }, (_unused, w) => {
+    const first = view[w * 7]
+    if (first === undefined) return ''
+    if (w === 0) return monthLabel(Number(first.date.slice(5, 7)), t)
+    const previous = view[(w - 1) * 7]
+    return previous === undefined || previous.date.slice(0, 7) !== first.date.slice(0, 7)
+      ? monthLabel(Number(first.date.slice(5, 7)), t)
+      : ''
+  })
+  // The two numbers that make the shape legible: how many days had any usage,
+  // and the single busiest day (with its date, so it can be found on the grid).
+  const stats = ((): { activeDays: number, best: { date: string, value: number } } => {
+    let activeDays = 0
+    let best = { date: '', value: 0 }
+    for (const cell of view) {
+      if (cell === undefined || cell.value <= 0) continue
+      activeDays += 1
+      if (cell.value > best.value) best = { date: cell.date, value: cell.value }
+    }
+    return { activeDays, best }
+  })()
   return (
-    <div
-      className="dshau_calendar"
-      style={{ gridTemplateColumns: `26px repeat(${weeks}, 13px)`, gridTemplateRows: '16px repeat(7, 13px)' }}
-    >
-      <div style={{ gridRow: 1, gridColumn: 1 }} />
-      {monthLabels.map((label, w) => label !== '' && (
-        <div className="dshau_calMonth" style={{ gridRow: 1, gridColumn: `${w + 2} / span ${monthSpans[w]}` }} key={`m${w}`}>{label}</div>
-      ))}
-      {dows.map((_dow, d) => (
-        <div className="dshau_calDow" style={{ gridRow: d + 2, gridColumn: 1 }} key={`d${d}`}>{dows[(firstDow + d) % 7]}</div>
-      ))}
-      {cells.map((cell, i) => {
-        const week = Math.floor(i / 7)
-        const dow = i % 7
-        const value = metric === 'tokens' ? cell.totalTokens : cell.requests
-        const level = cellLevel(value, max)
-        return (
-          <div
-            className="dshau_calCell"
-            data-level={level}
-            style={{ gridRow: dow + 2, gridColumn: week + 2 }}
-            key={cell.date}
-            onMouseEnter={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect()
-              onTip({ text: tipText(cell), x: rect.left + rect.width / 2, y: rect.top })
-            }}
-            onMouseMove={(event) => {
-              onTip({ text: tipText(cell), x: event.clientX + 14, y: event.clientY + 14 })
-            }}
-            onMouseLeave={() => { onTip(null) }}
-          >
-            {cell.date}
+    <>
+      <div className="dshau_calRow">
+        <div
+          ref={containerRef}
+          className="dshau_calendar"
+          style={{
+            gridTemplateColumns: `repeat(${String(weeks)}, ${String(fit.cell)}px)`,
+            gridTemplateRows: `repeat(7, ${String(fit.cell)}px) 14px`,
+            gap: `${String(fit.gap)}px`,
+          }}
+        >
+          {view.map((cell, i) => {
+            const week = Math.floor(i / 7)
+            const row = i % 7
+            if (cell === undefined) return null
+            return (
+              <div
+                className="dshau_calCell"
+                data-level={cell.level}
+                style={{ gridRow: row + 1, gridColumn: week + 1, width: fit.cell, height: fit.cell }}
+                key={cell.date}
+                onMouseEnter={(event) => {
+                  const rect = event.currentTarget.getBoundingClientRect()
+                  onTip({ text: cell.tip, x: rect.left + rect.width / 2, y: rect.top })
+                }}
+                onMouseMove={(event) => {
+                  onTip({ text: cell.tip, x: event.clientX + 14, y: event.clientY + 14 })
+                }}
+                onMouseLeave={() => { onTip(null) }}
+              >
+                {cell.date}
+              </div>
+            )
+          })}
+          {monthTags.map((tag, w) => tag === '' ? null : (
+            <div className="dshau_calMonth" style={{ gridRow: 8, gridColumn: w + 1 }} key={`m${w}`}>{tag}</div>
+          ))}
+        </div>
+        <dl className="dshau_calStats">
+          <div>
+            <dt>{t('usage.cal.activeDays')}</dt>
+            <dd>{t('usage.cal.days', { count: stats.activeDays })}</dd>
           </div>
-        )
-      })}
-    </div>
+          <div>
+            <dt>{t('usage.cal.bestDay')}</dt>
+            <dd>{fmtTokens(stats.best.value)}</dd>
+            {stats.best.date !== '' && <dd className="dshau_calStatsDate">{stats.best.date}</dd>}
+          </div>
+        </dl>
+      </div>
+      <div className="dshau_calFooter">
+        <div className="dshau_tabs dshau_calModes" role="tablist" aria-label={t('usage.cal.modeAria')}>
+          {HEAT_MODES.map(({ id, labelKey }) => (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === id}
+              className="dshau_tab"
+              onClick={() => { setMode(id) }}
+              key={id}
+            >
+              {t(labelKey)}
+            </button>
+          ))}
+        </div>
+        <span className="dshau_legendScale">
+          {t('usage.cal.less')}
+          {[0, 1, 2, 3, 4].map((level) => (
+            <span className="dshau_calCell dshau_calLegend" data-level={level} key={level} />
+          ))}
+          {t('usage.cal.more')}
+        </span>
+      </div>
+    </>
   )
 }
 
@@ -817,6 +1002,11 @@ export function UsageSection({ t }: UsageSectionProps): ReactNode {
                 })}
               </h3>
               <div className="dshau_legend">
+                {/* The window total is the number the grid's shape is relative
+                    to; without it the intensity scale has no anchor. */}
+                <span className="dshau_legendItem dshau_calTotal">
+                  {heat !== null ? t('usage.cal.total', { tokens: fmtTokens(heat.cells.reduce((sum, cell) => sum + cell.totalTokens, 0)) }) : ''}
+                </span>
                 <span className="dshau_legendItem">
                   <button
                     type="button"
@@ -826,11 +1016,6 @@ export function UsageSection({ t }: UsageSectionProps): ReactNode {
                     {t('usage.cal.colorBy', { metric: t(heatMetric === 'tokens' ? 'usage.metric.tokens' : 'usage.metric.requests') })}
                   </button>
                 </span>
-                <span className="dshau_legendItem">{t('usage.cal.less')}</span>
-                {[0, 1, 2, 3, 4].map((level) => (
-                  <span className="dshau_legendCell" data-level={level} key={level} />
-                ))}
-                <span className="dshau_legendItem">{t('usage.cal.more')}</span>
               </div>
             </div>
             {heat !== null && <HeatCalendar heat={heat} metric={heatMetric} onTip={setTip} t={t} />}

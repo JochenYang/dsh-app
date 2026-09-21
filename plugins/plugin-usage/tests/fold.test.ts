@@ -118,3 +118,28 @@ test('foldLiveEvent: a newer header replaces the cached one mid-session', () => 
   assert.equal(row.provider, 'p2')
   assert.equal(row.model, 'm2')
 })
+
+// --- fork inheritance ---------------------------------------------------------
+
+test('foldEvents: fromSeq skips a fork inherited prefix the parent already counted', () => {
+  const store = tmpStore()
+  // A forked session's log physically contains the parent's first 4 events with
+  // the SAME seq values. Folding the whole log under the child id would count
+  // the parent's model calls twice; fromSeq is the cut that prevents it.
+  const inherited = [header(1, 'deepseek', 'm1'), message(2, { inputTokens: 100, outputTokens: 50 })]
+  const own = [message(6, { inputTokens: 7, outputTokens: 3 })]
+  const added = foldEvents(store, 'child', [...inherited, ...own], 4)
+  assert.equal(added, 1, 'only the child own events fold')
+  const row = store.all()[0]!
+  assert.equal(row.sessionId, 'child')
+  assert.equal(row.seq, 6)
+  assert.equal(row.inputTokens, 7)
+})
+
+test('foldEvents: fromSeq never rewinds below the stored watermark', () => {
+  const store = tmpStore()
+  foldEvents(store, 's', [message(9, { inputTokens: 1, outputTokens: 1 })])
+  // A caller passing a lower floor must not make the store re-count seq 9.
+  assert.equal(foldEvents(store, 's', [message(9, { inputTokens: 1, outputTokens: 1 })], 0), 0)
+  assert.equal(store.size, 1)
+})

@@ -33,9 +33,18 @@ app.whenReady().then(async () => {
       return !!t
     })()`)
     await sleep(1200)
+    // 用量统计 is the first tab of the merged 维护 section: open the rail row,
+    // then the tab (see docs/desktop-optimization-plan.md §3.1).
     out.navFound = await win.webContents.executeJavaScript(`(() => {
-      const t = [...document.querySelectorAll('button')]
-        .find((b) => (b.textContent || '').trim().includes('用量统计'))
+      const t = [...document.querySelectorAll('[class*="navList"] button')]
+        .find((b) => (b.textContent || '').trim().includes('维护'))
+      if (t) t.click()
+      return !!t
+    })()`)
+    await sleep(1200)
+    out.tabFound = await win.webContents.executeJavaScript(`(() => {
+      const t = [...document.querySelectorAll('[role="tab"]')]
+        .find((b) => (b.textContent || '').trim() === '用量统计')
       if (t) t.click()
       return !!t
     })()`)

@@ -1,6 +1,6 @@
 /**
- * Dictionary of the 用量统计 settings page, in the plugin's own locale
- * namespace.
+ * Dictionary of the 用量统计 page (the first tab of 维护), in the plugin's own
+ * locale namespace.
  *
  * The namespace is declared by the client entry (`src/client.ts`, the
  * `declare module` merge into `LocaleNamespaceMap`); this module owns the
@@ -72,13 +72,6 @@ export const zh = {
   'usage.balance.queriedAt': ' · {time} 查询',
   'usage.balance.aria': '查询 DeepSeek 官方账户余额',
 
-  'usage.cal.dow.sun': '日',
-  'usage.cal.dow.mon': '一',
-  'usage.cal.dow.tue': '二',
-  'usage.cal.dow.wed': '三',
-  'usage.cal.dow.thu': '四',
-  'usage.cal.dow.fri': '五',
-  'usage.cal.dow.sat': '六',
   'usage.cal.m.1': '1月',
   'usage.cal.m.2': '2月',
   'usage.cal.m.3': '3月',
@@ -91,13 +84,23 @@ export const zh = {
   'usage.cal.m.10': '10月',
   'usage.cal.m.11': '11月',
   'usage.cal.m.12': '12月',
-  'usage.cal.title': '每日热力（最近 {weeks} 周{range}）',
+  'usage.cal.title': 'Token 活动（最近 {weeks} 周{range}）',
   'usage.cal.titleRange': ' · {since} ~ {until}',
   'usage.cal.colorBy': '着色依据：{metric}',
+  'usage.cal.total': '窗口合计 {tokens}',
+  'usage.cal.modeAria': '热力图粒度',
+  'usage.cal.modeDay': '每日',
+  'usage.cal.modeWeek': '每周',
+  'usage.cal.modeCumulative': '累计',
+  'usage.cal.activeDays': '活跃天数',
+  'usage.cal.days': '{count} 天',
+  'usage.cal.bestDay': '单日最高',
   'usage.cal.less': '少',
   'usage.cal.more': '多',
   'usage.cal.tipRequests': '请求 {requests} · 总 tokens {tokens}',
   'usage.cal.tipHitRate': '缓存命中率 {rate}',
+  'usage.cal.tipWeekTotal': '本周合计 {tokens}',
+  'usage.cal.tipCumulative': '累计 {tokens}',
 
   'usage.trend.title': '每日趋势（近 {days} 天{weekly}）',
   'usage.trend.weekly': '，按周聚合',
@@ -173,13 +176,6 @@ export const en: Record<UsageKey, string> = {
   'usage.balance.queriedAt': ' · queried {time}',
   'usage.balance.aria': 'Query the DeepSeek account balance',
 
-  'usage.cal.dow.sun': 'S',
-  'usage.cal.dow.mon': 'M',
-  'usage.cal.dow.tue': 'T',
-  'usage.cal.dow.wed': 'W',
-  'usage.cal.dow.thu': 'T',
-  'usage.cal.dow.fri': 'F',
-  'usage.cal.dow.sat': 'S',
   'usage.cal.m.1': 'Jan',
   'usage.cal.m.2': 'Feb',
   'usage.cal.m.3': 'Mar',
@@ -192,13 +188,23 @@ export const en: Record<UsageKey, string> = {
   'usage.cal.m.10': 'Oct',
   'usage.cal.m.11': 'Nov',
   'usage.cal.m.12': 'Dec',
-  'usage.cal.title': 'Daily heatmap (last {weeks} weeks{range})',
+  'usage.cal.title': 'Token activity (last {weeks} weeks{range})',
   'usage.cal.titleRange': ' · {since} ~ {until}',
   'usage.cal.colorBy': 'Colored by: {metric}',
+  'usage.cal.total': 'Window total {tokens}',
+  'usage.cal.modeAria': 'Heatmap granularity',
+  'usage.cal.modeDay': 'Daily',
+  'usage.cal.modeWeek': 'Weekly',
+  'usage.cal.modeCumulative': 'Cumulative',
+  'usage.cal.activeDays': 'Active days',
+  'usage.cal.days': '{count} days',
+  'usage.cal.bestDay': 'Busiest day',
   'usage.cal.less': 'Less',
   'usage.cal.more': 'More',
   'usage.cal.tipRequests': 'Requests {requests} · total tokens {tokens}',
   'usage.cal.tipHitRate': 'Cache hit rate {rate}',
+  'usage.cal.tipWeekTotal': 'Week total {tokens}',
+  'usage.cal.tipCumulative': 'Cumulative {tokens}',
 
   'usage.trend.title': 'Daily trend (last {days} days{weekly})',
   'usage.trend.weekly': ', aggregated by week',

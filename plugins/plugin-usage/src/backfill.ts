@@ -17,13 +17,34 @@ import type { UsageStore } from './store.ts'
  * local so the plugin compiles against any kernel providing these calls.
  * The rc-line kernel reads logs through `open(id, 'read')` handles (the old
  * single-call `inspect(id)` is gone with the lifecycle-owned persistence).
+ *
+ * `list()` returns SNAPSHOT WRAPPERS, not bare headers: the id lives on
+ * `entry.header.id`. Reading `entry.id` yields `undefined` for every entry,
+ * which silently turned this whole pass into a no-op (every session skipped,
+ * `inspected 0`) — the one shape mistake here is invisible by construction.
+ * `listedSessionId` below accepts both shapes so a future kernel that flattens
+ * the wrapper keeps working.
  */
 export interface BackfillPersistence {
   list(): Promise<readonly unknown[]>
   open(id: string, access: 'read'): Promise<{
+    /**
+     * Fork-inherited prefix length: the leading events this log copied from
+     * its parent. `0` for an ordinary session. Rows above it are this
+     * session's own; the prefix was already folded under the PARENT's id.
+     */
+    readonly inheritedEventCount?: number
     read(): Promise<{ events: readonly FoldEvent[] }>
     close(): Promise<void>
   }>
+}
+
+/** The session id of one `list()` entry, wrapper or bare-header shape. */
+export function listedSessionId(entry: unknown): string {
+  const wrapped = (entry as { header?: { id?: unknown } }).header
+  if (typeof wrapped?.id === 'string' && wrapped.id !== '') return wrapped.id
+  const bare = (entry as { id?: unknown }).id
+  return typeof bare === 'string' ? bare : ''
 }
 
 /** One backfill pass outcome, for logging. */
@@ -36,6 +57,12 @@ export interface BackfillReport {
  * Scan every persisted session and fold the parts above their watermarks.
  * A failing session is skipped (logged); a failing listing aborts the pass
  * with the error rethrown to the caller's catch.
+ *
+ * A FORK's log physically contains its parent's leading events, with the same
+ * seq values but a different session id — so folding the whole log would count
+ * the parent's usage a second time under the child. The inherited prefix is
+ * skipped by seeding the fold with the handle's `inheritedEventCount` as the
+ * starting watermark; the parent owns those rows.
  */
 export async function runBackfill(
   store: UsageStore,
@@ -51,17 +78,25 @@ export async function runBackfill(
     return report
   }
   for (const entry of headers) {
-    const header = entry as { id?: unknown }
-    const id = String(header.id ?? '')
+    const id = listedSessionId(entry)
     if (id === '') continue
-    let handle: { read(): Promise<{ events: readonly FoldEvent[] }>, close(): Promise<void> } | undefined
+    let handle: {
+      readonly inheritedEventCount?: number
+      read(): Promise<{ events: readonly FoldEvent[] }>
+      close(): Promise<void>
+    } | undefined
     try {
       handle = await persistence.open(id, 'read')
       const { events } = await handle.read()
       report.inspected += 1
+      const inherited = typeof handle.inheritedEventCount === 'number' ? handle.inheritedEventCount : 0
       const lastSeq = events.length > 0 ? events[events.length - 1]!.seq : 0
-      if (lastSeq <= store.watermark(id)) continue
-      report.added += foldEvents(store, id, [...events])
+      // Both bounds must be cleared: the stored watermark (what this plugin
+      // already folded) and the inherited prefix (what the PARENT's fold
+      // already counted).
+      const fromSeq = Math.max(store.watermark(id), inherited)
+      if (lastSeq <= fromSeq) continue
+      report.added += foldEvents(store, id, [...events], fromSeq)
     } catch (error) {
       log(`usage backfill: session ${id} skipped: ${(error as Error).message}`)
     } finally {
