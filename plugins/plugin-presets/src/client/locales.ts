@@ -1,6 +1,6 @@
 /**
- * Dictionary of the preset-packages settings page, in this plugin's own locale
- * namespace.
+ * Dictionary of the preset-packages page (the 预设包 tab of 维护), in this
+ * plugin's own locale namespace.
  *
  * The namespace is declared by the client entry (`src/client.ts`, the
  * `declare module` merge into `LocaleNamespaceMap`); this module owns the keys.

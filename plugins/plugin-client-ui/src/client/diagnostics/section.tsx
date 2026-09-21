@@ -1,6 +1,8 @@
 /**
- * The 诊断 settings section (order 22): what the app can tell about its own
- * runtime without leaving the page.
+ * The 诊断 page: what the app can tell about its own runtime without leaving
+ * the page. It is the third tab (order 3) of the merged 维护 settings section —
+ * `plugin-client-ui`'s own client entry registers it there, next to the two
+ * report pages the other suite plugins contribute.
  *
  * Four cards, in the order a support question arrives:
  * 1. **桌面功能** — whether this environment can perform a desktop action at
@@ -24,7 +26,7 @@
  * page never asks for, shows or copies a credential.
  *
  * Every string here comes from the `dsh-app.client-ui` namespace through the
- * `t` standard seat: the section registers with `locale: NS`, so the renderer
+ * `t` standard seat: the tab registers with `locale: NS`, so the renderer
  * hands the component a namespace-bound translate that reads the active UI
  * locale at call time and re-renders on a language switch.
  *

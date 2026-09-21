@@ -12,7 +12,8 @@
  *    shrink below its content so `overflow-y: auto` has something to do.
  * 2. **Two of our rows want a real glyph.** Upstream maps a few section ids to
  *    icons and falls back to a generic gear for everything else, so Advanced
- *    Models and Diagnostics would both wear that same gear.
+ *    Models and 维护 (the merged upkeep section) would both wear that same
+ *    gear.
  *
  * Rows carry no per-id DOM hook — the section id is not rendered and the
  * CSS-module class names are stable in name only — so a row is found by its

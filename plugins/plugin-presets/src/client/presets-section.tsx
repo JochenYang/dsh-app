@@ -1,13 +1,13 @@
 /**
- * The preset-packages settings section: the list of locally authored presets
- * with per-row export (download a `.dshpreset` file) and a file-picker
- * import. Above it sits the config-backup block: a whole-config zip (the host
- * settings file, plugin configs, market sources, the profile patch layer) with
- * one-click export — secret-shaped content is scanned and a hit refuses the
- * export — and a file-picker import that turns a 409 conflict into an explicit
- * overwrite confirmation. The host enforces every rule (whitelist, containment,
- * caps); this half only mirrors the upload size caps for an instant local
- * answer.
+ * The preset-packages page (the 预设包 tab of 维护): the list of locally
+ * authored presets with per-row export (download a `.dshpreset` file) and a
+ * file-picker import. Above it sits the config-backup block: a whole-config zip
+ * (the host settings file, plugin configs, market sources, the profile patch
+ * layer) with one-click export — secret-shaped content is scanned and a hit
+ * refuses the export — and a file-picker import that turns a 409 conflict into
+ * an explicit overwrite confirmation. The host enforces every rule (whitelist,
+ * containment, caps); this half only mirrors the upload size caps for an
+ * instant local answer.
  *
  * @module @dsh-app/plugin-presets/client/presets-section
  */

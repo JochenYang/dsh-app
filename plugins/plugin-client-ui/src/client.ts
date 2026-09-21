@@ -2,11 +2,13 @@
  * DSH APP brand client plugin (browser side).
  *
  * Loaded by the dsh web client composition through the `dsh.client` metadata
- * in package.json. Registers the brand theme and the Advanced Models settings
- * page (model-level fields the official Models page leaves to settings.yaml);
- * the upstream Models page stays untouched. The conversation minimap was
- * retired: the upstream turn rail (ui-chat TurnNavigator) covers the same
- * right-edge turn navigation with full-history paging.
+ * in package.json. Registers the brand theme and two settings pages: the
+ * Advanced Models page (model-level fields the official Models page leaves to
+ * settings.yaml) and 维护 — the merged maintenance section (order 22) that
+ * holds the suite's three upkeep pages as tabs. The upstream Models page stays
+ * untouched. The conversation minimap was retired: the upstream turn rail
+ * (ui-chat TurnNavigator) covers the same right-edge turn navigation with
+ * full-history paging.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: loads the theme plugin's Context merge (ctx.theme), the slots
@@ -28,25 +30,58 @@ import type { AdvancedModelsState } from './client/models-advanced/store.ts'
 import { DiagnosticsSection } from './client/diagnostics/section.tsx'
 import { en as diagnosticsEn, zh as diagnosticsZh } from './client/diagnostics/locales.ts'
 import type { DiagnosticsKey } from './client/diagnostics/locales.ts'
+import { MaintenanceSection } from './client/maintenance/section.tsx'
+import type { MaintenanceInjected, MaintenanceTabRow } from './client/maintenance/section.tsx'
+import { en as maintenanceEn, zh as maintenanceZh } from './client/maintenance/locales.ts'
+import type { MaintenanceKey } from './client/maintenance/locales.ts'
 import { en as advancedEn, zh as advancedZh } from './client/models-advanced/locales.ts'
 import type { AdvancedModelsKey } from './client/models-advanced/locales.ts'
 import { NS } from './client/namespace.ts'
 import { mountSettingsNav } from './client/settings-nav.ts'
 import { installWorkspaceLaunch } from './client/workspace-launch.ts'
 import { mountWhaleBackground } from './client/whale-background.ts'
+// The ledger projection reads each tab entry's registered label, which a
+// thunk re-evaluates per read so the strip follows the active locale.
+import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/dsh-client-ui-settings/client'
 
 // The locale namespace table lives in ui-slots: this merge is what makes
 // `ctx.locale.register`/`bind` key-checked — a key missing from (or extra in)
 // any dictionary of the pair fails this package's typecheck, and the same
-// union constrains each page's `t` seat. One namespace carries both page
-// dictionaries; their `diag.` / `adv.` key prefixes keep them apart.
+// union constrains each page's `t` seat. One namespace carries all three page
+// dictionaries; their `diag.` / `maint.` / `adv.` key prefixes keep them apart.
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Brand client-plugin copy: the diagnostics page and the Advanced Models page. */
-    [NS]: DiagnosticsKey | AdvancedModelsKey
+    /** Brand client-plugin copy: the maintenance container, its diagnostics tab, and Advanced Models. */
+    [NS]: DiagnosticsKey | MaintenanceKey | AdvancedModelsKey
   }
 }
+
+// --- 维护 tab slot (`settings.dsh-app-maintenance.tab`). The section owner —
+// plugin-client-ui — DECLARES it in the same register() call that contributes
+// the section (its `children` table); every tab contributor registers into it.
+// The suite ships no shared package, so this block is repeated in three client
+// entries — plugin-client-ui/src/client.ts, plugin-usage/src/client.ts and
+// plugin-presets/src/client.ts — and the three copies must stay identical line
+// for line. A checkout may give each file a different line ending (this tree
+// mixes CRLF and LF), so plugin-client-ui/tests/settings-merge.test.ts compares
+// them modulo line endings and fails if one drifts.
+// BEGIN maintenance-tab-slot
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    'settings.dsh-app-maintenance.tab': {
+      kind: 'list'
+      scope: 'root'
+      owner: MaintenanceTabOwnerProps
+    }
+  }
+}
+/** Owner share of one maintenance tab (the section supplies nothing). */
+interface MaintenanceTabOwnerProps {
+  /** Marker field: tab owner props are intentionally empty. */
+  children?: never
+}
+// END maintenance-tab-slot
 
 // The Advanced Models store talks to the `llm` and `settings` Remote domains
 // directly (provider directory + discovery, settings.mutate), so those nested
@@ -61,8 +96,11 @@ export const BRAND_THEME_ID = 'dsh-app-brand'
 /** Nav identity of the Advanced Models page (its label is the `adv.nav` key). */
 const ADVANCED_SECTION_ID = 'model-advanced'
 
-/** Nav identity of the diagnostics page (its label is the `diag.nav` key). */
-const DIAGNOSTICS_SECTION_ID = 'dsh-app-diagnostics'
+/** Nav identity of the merged 维护 section (its label is the `maint.nav` key). */
+const MAINTENANCE_SECTION_ID = 'dsh-app-maintenance'
+
+/** Tab identity of the diagnostics page inside 维护 (its label is `diag.nav`). */
+const DIAGNOSTICS_TAB_ID = 'dsh-app-diagnostics'
 
 /**
  * Brand theme: a dark-first variant built on the alias-token layer.
@@ -122,12 +160,13 @@ const NAV_ICON_SVG = [
 ].join('')
 
 /**
- * A heartbeat line for the Diagnostics row: the same 16-grid and 1.4 stroke as
- * the rest of the set, and one recognizable gesture at 16 px — the page it
- * opens is a status readout plus a log tail, which a monitor/wrench glyph
+ * A heartbeat line for the 维护 row: the same 16-grid and 1.4 stroke as the
+ * rest of the set, and one recognizable gesture at 16 px — the row now opens
+ * the merged upkeep page (usage stats, preset packages, diagnostics), whose
+ * tab 3 is a status readout plus a log tail, which a monitor/wrench glyph
  * would only muddy at this size.
  */
-const NAV_ICON_DIAGNOSTICS_SVG = [
+const NAV_ICON_MAINTENANCE_SVG = [
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">',
   '<path d="M1.6 8.6h3.1l1.5-4.4 2.2 7.6 1.6-3.2h4.4"',
   ' fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
@@ -136,13 +175,13 @@ const NAV_ICON_DIAGNOSTICS_SVG = [
 
 export function apply(ctx: ClientContext): void {
   // --- Dictionaries first: every seat below resolves through this namespace,
-  // and the effect disposes the pair with this plugin's fiber. Both page
+  // and the effect disposes the pair with this plugin's fiber. All three page
   // dictionaries register in one call — one namespace per plugin, one pair
   // per namespace. ---
   ctx.effect(
     () => ctx.locale.register(NS, {
-      zh: { ...diagnosticsZh, ...advancedZh },
-      en: { ...diagnosticsEn, ...advancedEn },
+      zh: { ...maintenanceZh, ...diagnosticsZh, ...advancedZh },
+      en: { ...maintenanceEn, ...diagnosticsEn, ...advancedEn },
     }),
     'dsh-app plugin-client-ui: dictionaries',
   )
@@ -210,17 +249,79 @@ export function apply(ctx: ClientContext): void {
     inject: injected,
   }, AdvancedModelsSection))
 
-  // --- Diagnostics page: desktop-bridge status, the shell's log directory and
-  // the kernel log tail. Two host routes of plugin-brand, no new transport. ---
+  // The tab ledger the section renders: a snapshot source over the child
+  // slot's entries, cached on (ledger version, locale revision) so a tab
+  // registration or a language switch produces a new array while an unrelated
+  // moment re-reads the same one — the uSES pairing the renderer depends on.
+  // Labels resolve through resolveSlotLabel, which calls the thunk the
+  // registrant declared, so a locale switch re-labels the strip.
+  let tabsVersion = -1
+  let tabsRevision = -1
+  let tabs: readonly MaintenanceTabRow[] = []
+  const tabsInjected = (): MaintenanceInjected => ({
+    hooks: {
+      tabs: {
+        getSnapshot: () => {
+          const version = ctx.slots.getVersion('settings.dsh-app-maintenance.tab')
+          const revision = ctx.locale.getSnapshot().revision
+          if (version !== tabsVersion || revision !== tabsRevision) {
+            tabsVersion = version
+            tabsRevision = revision
+            tabs = ctx.slots.entries('settings.dsh-app-maintenance.tab')
+              .map((entry) => ({
+                id: entry.options.id ?? '',
+                order: entry.options.order ?? 0,
+                label: resolveSlotLabel(entry.options.label) ?? '',
+              }))
+              .sort((left, right) => left.order - right.order)
+          }
+          return tabs
+        },
+        subscribe: (listener: () => void) => {
+          const offLedger = ctx.slots.subscribe('settings.dsh-app-maintenance.tab', listener)
+          // Dictionary registrations bump the locale revision, so this is also
+          // how a late-arriving tab dictionary reaches an already-open page.
+          const offLocale = ctx.locale.subscribe(listener)
+          return () => {
+            offLedger()
+            offLocale()
+          }
+        },
+      },
+    },
+  })
+
+  // --- 维护: the merged upkeep section. Its child slot
+  // (`settings.dsh-app-maintenance.tab`, declared by the `children` table
+  // below) carries three tabs — 用量统计 (1, plugin-usage), 预设包 (2,
+  // plugin-presets) and 诊断 (3, registered right after this call). The
+  // section owns the strip and the panel; each tab keeps its own page, its own
+  // namespace and its own copy.
+  //
+  // 22 = after the agent band (19-20), before the session-data trio
+  // (23 = memory, 24 = archives, 25 = upstream's archived sessions): the
+  // system-level page belongs at the tail. NOT 14: plugin-websearch already
+  // holds 14, and a tie is only "harmless" while the loader keeps
+  // registration order — a placement hint should not double as an identity.
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
-    id: DIAGNOSTICS_SECTION_ID,
-    // 22 = after the agent band (19-21), before the session-data trio
-    // (23 = memory, 24 = archives, 25 = upstream's archived sessions): the
-    // system-level page belongs at the tail. NOT 14: plugin-websearch already
-    // holds 14, and a tie is only "harmless" while the loader keeps
-    // registration order — a placement hint should not double as an identity.
+    id: MAINTENANCE_SECTION_ID,
     order: 22,
+    // `locale:` puts the namespace-bound `t` seat on the component's props.
+    locale: NS,
+    label: () => t('maint.nav'),
+    inject: tabsInjected,
+    children: { 'settings.dsh-app-maintenance.tab': { kind: 'list', scope: 'root' } },
+  }, MaintenanceSection))
+
+  // --- Diagnostics page: desktop-bridge status, the shell's log directory and
+  // the kernel log tail. Two host routes of plugin-brand, no new transport. ---
+  ctx.slots.inject('settings.dsh-app-maintenance.tab', () => ctx.slots.register({
+    name: 'settings.dsh-app-maintenance.tab',
+    id: DIAGNOSTICS_TAB_ID,
+    // 3 = last: the page a support question ends on reads last, after the two
+    // report pages (usage 1, presets 2).
+    order: 3,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: NS,
     label: () => t('diag.nav'),
@@ -247,10 +348,10 @@ export function apply(ctx: ClientContext): void {
       ctx.on('connection/reset', refresh),
     ]
     // Settings rail: the scroll rule the suite's extra rows need, plus real
-    // glyphs for our two pages (upstream would give both the generic gear).
+    // glyphs for our two rows (upstream would give both the generic gear).
     const disposeNav = mountSettingsNav([
       { label: () => t('adv.nav'), cls: 'dshAmaAdvNav', svg: NAV_ICON_SVG },
-      { label: () => t('diag.nav'), cls: 'dshDiagNav', svg: NAV_ICON_DIAGNOSTICS_SVG },
+      { label: () => t('maint.nav'), cls: 'dshMaintNav', svg: NAV_ICON_MAINTENANCE_SVG },
     ])
     // Brand whale background: Canvas 2D port of the DeepSeek hero digitile
     // whale (assembles on load, swims idly, scatters from the pointer),

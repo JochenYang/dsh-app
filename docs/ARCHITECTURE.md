@@ -93,6 +93,19 @@ Client-side composition (all zero-upstream-change):
 - **Advanced models settings page** (`plugin-client-ui`): `settings.section` —
   model-level editors over llm-pi-ai providers, companion-route migration,
   models.dev prefill with gh-proxy mirror fallback.
+- **Maintenance settings section** (`plugin-client-ui`, one rail row at order
+  22): the suite's three upkeep pages — usage statistics (`plugin-usage`),
+  preset packages (`plugin-presets`) and diagnostics — as TABS of that one
+  section. The owner declares the child list slot
+  `settings.dsh-app-maintenance.tab` in the same `register()` call that
+  contributes the section, draws the strip, and mounts one contribution per
+  panel (`renderSlot(key, {}, { only: id })`); the contributors register into
+  that slot from their own client halves. This is the kernel's own 内置插件
+  section pattern, copied rather than reinvented — a tab keeps its state once
+  selected, and a single remaining contribution renders as the page itself. The
+  slot's `SlotMap` augmentation is repeated in the three client entries (the
+  suite ships no shared package) and pinned identical by
+  `plugins/plugin-client-ui/tests/settings-merge.test.ts`.
 
 Host side (suite routes on the Connection carrier): every suite plugin registers
 its routes with `ctx.connection.fetch.register` and they answer under
