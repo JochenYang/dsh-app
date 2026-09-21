@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- **修复用量统计页面滚动卡顿**：热力图 53 周共 371 个格子各画一道内嵌细边，滚动设置面板时滚容器每帧都要把它们重新光栅化一遍（实测：帧间隔 p95 27.8ms，空闲时 6.9ms，每次滚动掉 7 帧）。现在把网格提升为独立的合成层，滚动只是移动一张缓存纹理（实测 p95 13.9ms、掉帧 0）。布局不受影响：在 556/520/460/400/300px 五个面板宽度下，网格宽度、格子尺寸、缩放模板与溢出回退行为与改动前逐项一致
+- **清理一次性探针**：删除 19 个只服务过一次调查、且已无任何引用的探针（9 个 `probe-advanced-*`，以及 `probe-close-dialog`、`probe-fff`、`probe-heatmap`、`probe-retry-card`、`probe-shell-update`、`probe-startup-window`、`probe-usage`、`probe-websearch`）。保留 7 个仍有活引用、删掉会弄红其它东西的：`probe-drag`（被 `desktop-chrome-css` 测试读取）、`probe-launch-folder`（被递归删除守卫测试审计，也是内核线升级后的步骤）、`probe-settings-nav`（改设置分区后的步骤）、`probe-mirror`（README 的连通性自检）、`probe-in-frame-dialog` 与 `probe-update-card`（各自模块的 JSDoc 指明由它们执行）、`probe-whale`（`whale-background` 的诊断接口专为它暴露）
+
+### English
+- **Fix the usage page's scroll hitch**: the heatmap's 53 weeks are 371 cells, each painting an inset hairline, so scrolling the settings pane made the scroller re-rasterize all of them every frame (measured: p95 frame gap 27.8ms against 6.9ms idle, 7 dropped frames per scroll). The grid now has its own compositor layer, so the same scroll moves a cached texture (measured p95 13.9ms, 0 dropped frames). Layout is unaffected: at 556/520/460/400/300px panel widths the grid width, cell size, fit template and overflow fallback are identical to before
+- **Delete the one-off probes**: 19 probes that served a single investigation and hold no live reference are gone (the nine `probe-advanced-*` files, plus `probe-close-dialog`, `probe-fff`, `probe-heatmap`, `probe-retry-card`, `probe-shell-update`, `probe-startup-window`, `probe-usage` and `probe-websearch`). The seven with a live caller stay, since deleting them would break something else: `probe-drag` (read by the `desktop-chrome-css` test), `probe-launch-folder` (audited by the recursive-delete guard test, and the post-kernel-bump step), `probe-settings-nav` (the settings-section step), `probe-mirror` (the README connectivity check), `probe-in-frame-dialog` and `probe-update-card` (named by their modules' JSDoc), and `probe-whale` (owns the diagnostics `whale-background` exposes)
+
 ## [v0.13.1] - 2026-09-21
 
 ### 中文
