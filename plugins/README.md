@@ -15,7 +15,7 @@ working.
 | `plugin-swarm` | dual | batch parallel subagent orchestration (`swarm` tool + `/swarm` command), adaptive concurrency, per-item retry |
 | `plugin-usage` | dual | usage capture over session logs + settings-page balance card, heatmap, daily trend chart |
 | `plugin-archives` | dual | session archive manager (list/delete routes + settings-page section grouped by project) |
-| `plugin-memory` | dual | cross-session memory (project-scoped card files injected per prompt, memory_save/recall/forget tools the model calls itself, background curator over existing cards, settings page with per-entry pin/delete; the global scope was retired and its cards migrated into a `legacy-global` project) |
+| `plugin-memory` | dual | cross-session memory (project-scoped card files injected per prompt, memory_save/recall/forget tools the model calls itself, background curator over existing cards plus a per-project "curate now" button, settings page with per-entry pin/delete; the global scope was retired and its cards migrated into a `legacy-global` project) |
 | `plugin-fff` | host | native fast file search, exposed to agents as a tool |
 | `plugin-mcp` | dual | external MCP server manager: settings-page CRUD, dynamic mount, tools registered as native `mcp__<server>__<tool>` |
 | `plugin-hooks` | dual | external hooks bridge: settings-page CRUD over Claude Code / Codex `hooks.json`, mounted as live hook instances |

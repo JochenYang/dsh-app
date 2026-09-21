@@ -76,6 +76,46 @@ export interface MemoryEntriesResponse {
 }
 
 /**
+ * Outcome of POST api/curate — the "curate now" button, which runs ONE
+ * maintenance pass on the user's request.
+ *
+ * The status vocabulary is closed on purpose: each value maps to one sentence
+ * in the client dictionary, and the two that are not failures (`busy`,
+ * `no-route`) exist because the honest answer is "try again" rather than an
+ * error the user cannot act on. Counts are what the pass APPLIED, so the
+ * toast can say what happened instead of claiming success: a pass that found
+ * nothing to do and a pass that merged three cards are different news.
+ */
+export interface MemoryCurateResult {
+  status:
+    /** Edits landed. */
+    | 'completed'
+    /** The pass ran and everything was already tidy. */
+    | 'nothing'
+    /** Another pass is in flight; nothing was queued. */
+    | 'busy'
+    /** No live session to borrow a model route from. */
+    | 'no-route'
+    /** Memory is switched off (the master toggle). */
+    | 'disabled'
+    /** The slug names no project directory. */
+    | 'unknown-project'
+    /** The background-maintenance half is not mounted (no agents/llm services). */
+    | 'unavailable'
+    /** The model call did not land; nothing was applied. */
+    | 'failed'
+  /** Cards absorbed by a merge. */
+  merged: number
+  /** Cards deleted outright. */
+  deleted: number
+  /** Cards rewritten in place. */
+  rewritten: number
+  /** Proposals the host refused (unseen/stale/pinned/over-limit); each carries
+   *  its reason in the ledger. */
+  refused: number
+}
+
+/**
  * How long a deleted card is kept under `<scope>/archive/`. Deletion is
  * irreversible by design (a forget must actually forget), but THREE automated
  * writers also delete — the curator's merge/delete, the light sweep's

@@ -74,7 +74,7 @@ import {
   type MemoryRoot,
   type MemoryStore,
 } from './memory-store.ts'
-import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
+import { MEMORY_CATEGORIES, type MemoryCategory, type MemoryCurateResult } from './types.ts'
 
 /** A store below this many cards is not worth an LLM pass. */
 // 8 was the original floor, and measured against the real stores it made the
@@ -273,7 +273,16 @@ export function buildCuratePrompt(
     '- delete: cards that are stale (already superseded), wrong, or no longer relevant.',
     '- delete: cards that are work logs rather than reusable knowledge — reports of what a',
     '  session did ("X 已完成", "修复全落地", "审查后…"), file-by-file change lists, commit',
-    '  ids, task summaries. Keep only what a future session could act on.',
+    '  ids, task summaries, progress snapshots ("current state", "next steps", what is left to',
+    '  do), tool-output noise, message or turn counts. Keep only what a future session could',
+    '  act on.',
+    '- BUT a work-log card carrying a durable lesson is not simply deleted: when it holds a',
+    '  constraint, a root cause, or a decision and the reason for it, REWRITE it as that lesson —',
+    '  strip the narrative of what happened, keep what generalizes. Delete it only when nothing',
+    '  in it generalizes.',
+    '- contradicting cards: when two cards assert different things about one subject, the',
+    '  LATER-updated one is the current state. Keep that truth — merge them into one card, or',
+    '  delete the superseded one — rather than leaving both to be injected side by side.',
     '- delete: cards whose own text NARRATES the remembering instead of stating the fact',
     '  ("I saved a note that…", "according to the memory index…") — that narration gets',
     '  re-injected into every future session. Do NOT delete a card merely for MENTIONING this',
@@ -286,6 +295,9 @@ export function buildCuratePrompt(
     '- Keep only cards a future session would ACT on. For a non-pinned card, when in doubt',
     '  between keeping and deleting, delete.',
     '- Prefer keeping the SURVIVING card when one strictly supersedes another: delete the stale one.',
+    '- Preserve what outlives the session even while deleting the narrative around it: settled',
+    '  decisions and why they were settled, constraints and pitfalls, user preferences,',
+    '  problem→solution pairs, pointers to where something lives.',
     '- NEVER mention credentials (API keys, tokens, passwords) — not even in a rewrite.',
     ...(pinnedKeys.length > 0
       ? ['- The topic keys listed under "Pinned cards" were pinned by the user and are NEVER edited:',
@@ -314,6 +326,11 @@ export function buildCuratePrompt(
     '- Each cited key must exist below. The same key may be cited at most once across all edits.',
     '- A merge/rewrite body is concise card TEXT in the user\'s language, at most 400 characters —',
     '  no dates, no bullets, no markdown headers.',
+    '- Ground every merged or rewritten body in the cards you were SHOWN: carry over only the',
+    '  facts, identifiers and numbers that appear there, and drop what you cannot support —',
+    '  never fill a gap from your own knowledge.',
+    '- Every surviving card must stand alone: a future session that never saw this conversation',
+    '  has to be able to act on it. Strip references to "this session", "above", "as discussed".',
     CARD_TEXT_DISCIPLINE,
     '- A merge target topic is either one of the cited keys or a NEW well-named kebab-case key;',
     '  its summary (≤40 chars) is required when the target is a new key.',
@@ -368,6 +385,27 @@ interface CurateTarget {
  * card was persisted). Everything below the trigger is fail-soft: a bad
  * model answer or a dead session just logs and retries on the next save.
  */
+/**
+ * What one pass did, as the manual trigger reports it. `called: false` means
+ * the model never answered: nothing was applied, and the caller must not
+ * report a tidy store — a failed call and an empty edit list are different
+ * news (`MemoryCurateResult.status`).
+ */
+interface PassResult {
+  called: boolean
+  /** Cards absorbed by a merge. */
+  merged: number
+  /** Cards deleted outright. */
+  deleted: number
+  /** Cards rewritten in place. */
+  rewritten: number
+  /** Proposals the host refused; each carries its reason in the ledger. */
+  refused: number
+}
+
+/** A pass that never reached the model. */
+const PASS_NOT_CALLED: PassResult = { called: false, merged: 0, deleted: 0, rewritten: 0, refused: 0 }
+
 export class MemoryCurator {
   private readonly ctx: Context
   private readonly root: MemoryRoot
@@ -378,6 +416,13 @@ export class MemoryCurator {
   /** The coalesced trailing sweep; further requests never push its deadline. */
   private pendingTimer: ReturnType<typeof setTimeout> | undefined
   private pendingSessionId: SessionId | undefined
+  /**
+   * A pass is in flight. Single-flight for BOTH triggers: one model call runs
+   * for seconds to minutes, and two passes over one store would race their own
+   * bookkeeping (the completion marker, the stall counter, the rotation
+   * anchor) even though `applyEdits` keeps each individual edit safe.
+   */
+  private sweeping = false
 
   constructor(
     ctx: Context,
@@ -458,6 +503,76 @@ export class MemoryCurator {
   }
 
   /**
+   * A pass the USER asked for: the settings page's "curate now" button.
+   *
+   * The gate set differs from the automatic path on purpose. BYPASSED: the
+   * card threshold, the fingerprint check, the cooldown, the stall back-off —
+   * and the background-maintenance toggle, which exists to stop the app
+   * spending a model call nobody asked for while this click IS the ask.
+   * ENFORCED: the master toggle (memory off means there is nothing to tidy),
+   * single-flight (a pass already running answers `busy` instead of queueing a
+   * second destructive sweep), the project boundary (one slug, never a walk
+   * over every store), and every apply-time guard the automatic path has —
+   * pins, unseen and stale cards, the cited-keys ceiling,
+   * archive-before-delete, the ledger.
+   *
+   * The model route comes from a LIVE session (the newest one that has a
+   * route): a background pass borrows the route of the session that saved, and
+   * a button click has no session of its own. No live route answers `no-route`
+   * — a "try again in a moment" rather than an error the user cannot act on.
+   */
+  async curateNow(slug: string): Promise<MemoryCurateResult> {
+    const idle: MemoryCurateResult = { status: 'nothing', merged: 0, deleted: 0, rewritten: 0, refused: 0 }
+    if (!this.root.global.isEnabled()) return { ...idle, status: 'disabled' }
+    if (this.sweeping) return { ...idle, status: 'busy' }
+    const store = this.root.projectBySlug(slug)
+    if (store === undefined) return { ...idle, status: 'unknown-project' }
+    const borrowed = this.routeOfNewestSession()
+    if (borrowed === undefined) return { ...idle, status: 'no-route' }
+    this.sweeping = true
+    // A manual pass is a pass: it arms the cooldown, so the automatic path
+    // does not immediately repeat the same review.
+    this.lastSweepAt = Date.now()
+    try {
+      const result = await this.curate({ label: slug, store }, borrowed.route, borrowed.session.id)
+      this.log.info(`memory curate: manual pass for "${slug}" (${result.called ? 'model answered' : 'no answer'})`)
+      if (!result.called) return { ...idle, status: 'failed' }
+      const applied = result.merged + result.deleted + result.rewritten
+      return {
+        status: applied > 0 ? 'completed' : 'nothing',
+        merged: result.merged,
+        deleted: result.deleted,
+        rewritten: result.rewritten,
+        refused: result.refused,
+      }
+    } catch (error) {
+      // A route that dies mid-call rejects here (abort, timeout). The caller is
+      // an HTTP request, so the failure becomes a typed answer — and the log
+      // keeps the cause rather than a stack from an unhandled rejection.
+      this.log.warn(`memory curate: manual pass for "${slug}" failed: ${String(error)}`)
+      return { ...idle, status: 'failed' }
+    } finally {
+      this.sweeping = false
+    }
+  }
+
+  /**
+   * The newest LIVE session that carries a model route. Sessions register in
+   * creation order, so the last one is the most recently started — the best
+   * guess at "the model this user is talking to right now". A route-less
+   * session (diagnostics, a config-created agent) is skipped rather than
+   * failing the pass.
+   */
+  private routeOfNewestSession(): { route: DirectRoute, session: CurateSession } | undefined {
+    for (const parent of [...this.ctx.agents.list()].reverse()) {
+      const session = sessionOf(parent)
+      const route = directRouteOf(session)
+      if (route !== undefined) return { route, session }
+    }
+    return undefined
+  }
+
+  /**
    * One full pass over every due store. The model route comes from the
    * triggering session: no route means no call at all, and the sweep is
    * skipped without burning the cooldown.
@@ -467,28 +582,40 @@ export class MemoryCurator {
    * rejection would surface as an unhandled rejection rather than a retry.
    */
   private async sweep(session: CurateSession): Promise<void> {
+    if (this.sweeping) {
+      // The automatic path never QUEUES a second pass: the stores a save
+      // re-armed stay due, and the next save — or the settings page's button —
+      // picks them up. Overlapping passes would race their own bookkeeping.
+      this.log.info('memory curate: a pass is already running; this sweep skipped')
+      return
+    }
     const route = directRouteOf(session)
     if (route === undefined) {
       this.log.warn(`memory curate skipped: no model route on session "${session.id}"`)
       return
     }
+    this.sweeping = true
     this.lastSweepAt = Date.now()
-    let targets: CurateTarget[]
     try {
-      // selectTargets walks the projects directory: an EACCES/EPERM there is
-      // transient on Windows (a scanner holding `topics/`) and must not take
-      // the sweep down before it starts.
-      targets = this.selectTargets()
-    } catch (error) {
-      this.log.warn(`memory curate: could not enumerate stores (will retry on next save): ${String(error)}`)
-      return
-    }
-    for (const target of targets) {
+      let targets: CurateTarget[]
       try {
-        await this.curate(target, route, session.id)
+        // selectTargets walks the projects directory: an EACCES/EPERM there is
+        // transient on Windows (a scanner holding `topics/`) and must not take
+        // the sweep down before it starts.
+        targets = this.selectTargets()
       } catch (error) {
-        this.log.warn(`memory curate for "${target.label}" failed (will retry on next save): ${String(error)}`)
+        this.log.warn(`memory curate: could not enumerate stores (will retry on next save): ${String(error)}`)
+        return
       }
+      for (const target of targets) {
+        try {
+          await this.curate(target, route, session.id)
+        } catch (error) {
+          this.log.warn(`memory curate for "${target.label}" failed (will retry on next save): ${String(error)}`)
+        }
+      }
+    } finally {
+      this.sweeping = false
     }
   }
 
@@ -523,8 +650,12 @@ export class MemoryCurator {
     return targets
   }
 
-  /** The pass body for one store: one direct call, then the validated edits. */
-  private async curate(target: CurateTarget, route: DirectRoute, sessionId: SessionId): Promise<void> {
+  /**
+   * The pass body for one store: one direct call, then the validated edits.
+   * Returns what it did (see {@link PassResult}): the automatic sweep ignores
+   * the summary, the manual trigger reports it to the user.
+   */
+  private async curate(target: CurateTarget, route: DirectRoute, sessionId: SessionId): Promise<PassResult> {
     // The stored cursor is a topic KEY; turn it into the list offset this pass
     // starts at. A key that no longer exists (the card was deleted between
     // passes) means the anchor is gone — start at the top rather than guess.
@@ -572,10 +703,14 @@ export class MemoryCurator {
     })
     if (result.status !== 'ok') {
       this.log.warn(`memory curate for "${target.label}" direct call ${result.status} (${result.error ?? 'no detail'})`)
-      return
+      return PASS_NOT_CALLED
     }
     const { merged, deleted, rewritten, skippedUnseen, skippedStale, skippedOverLimit, events } = await this.applyEdits(target.store, result.parsed, seen)
     const touched = merged + deleted + rewritten
+    // The refused total, for the manual trigger's answer: every refusal path
+    // pushes a ledger event, so the rejected events ARE the count (the three
+    // skipped* values below are its breakdown, not an addition to it).
+    const refused = events.filter(event => event.rejected !== undefined).length
     // Persist what this pass did and refused — ONE batch write, tagged with the
     // scope label and session so the settings page can answer "why is that card
     // gone" without a debugger.
@@ -679,6 +814,7 @@ export class MemoryCurator {
     } else {
       this.root.recordCurateCursor(target.label, truncated ? nextAnchor : undefined)
     }
+    return { called: true, merged, deleted, rewritten, refused }
   }
 
   /**

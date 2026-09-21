@@ -34,7 +34,7 @@
 
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
-import { ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryEntriesResponse, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
+import { ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
 
 /** Route namespace on the shared `/api` channel (single source in types.ts,
  * shared with the browser half). Re-exported so existing importers keep
@@ -138,13 +138,33 @@ function bodyFailure(error: unknown): Response {
 }
 
 /**
+ * Host callbacks the settings page needs BEYOND the store itself. The
+ * maintenance half mounts LATER than the routes (it needs the agents/llm
+ * services), so the hook is read at call time and the route answers a coded
+ * `unavailable` while it is missing — the page never sees a silent no-op.
+ */
+export interface MemoryRouteHooks {
+  /**
+   * Run ONE maintenance pass for a project, on the user's request.
+   * @param slug - the project directory slug the page is showing.
+   * @returns what the pass did, in the wire vocabulary the page renders.
+   */
+  curateNow?: (slug: string) => Promise<MemoryCurateResult>
+}
+
+/**
  * Register the settings-page routes on the Connection exact-Fetch registry.
  *
  * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
  * @param root - the two-level memory root.
+ * @param hooks - the optional host callbacks (see {@link MemoryRouteHooks}).
  * @returns disposer removing all routes.
  */
-export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root: MemoryRoot): () => Promise<void> {
+export function registerMemoryRoutes(
+  connectionFetch: HostConnectionFetch,
+  root: MemoryRoot,
+  hooks: MemoryRouteHooks = {},
+): () => Promise<void> {
   const disposers = [
     connectionFetch.register({
       path: `${ROUTE_PREFIX}/status`,
@@ -300,6 +320,35 @@ export function registerMemoryRoutes(connectionFetch: HostConnectionFetch, root:
         // the store's substring fallback only fires for hand-typed calls.
         const result = await store.forget(match)
         return ok({ forgotten: result.removed.length, removed: result.removed })
+      },
+    }),
+
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/curate`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        // resolveStore is the whole validation here: the scope must be
+        // `project` and the slug must be pattern-valid AND resolve to a
+        // directory. One pass runs on exactly one store — the page names the
+        // project it is showing, never "everything".
+        const store = resolveStore(root, body)
+        if (store instanceof Response) return store
+        if (hooks.curateNow === undefined) {
+          const unavailable: MemoryCurateResult = { status: 'unavailable', merged: 0, deleted: 0, rewritten: 0, refused: 0 }
+          return ok(unavailable)
+        }
+        // The pass takes as long as its one model call does. The request stays
+        // open and answers with what happened, because the page has no push
+        // channel: a client that walks away loses the REPORT, not the pass —
+        // the ledger records it either way.
+        return ok(await hooks.curateNow(String(body.slug)))
       },
     }),
 

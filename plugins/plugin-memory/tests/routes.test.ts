@@ -47,6 +47,7 @@ test('every settings route owns one exact path, its own methods, and a buffered 
     `${ROUTE_PREFIX}/entries`,
     `${ROUTE_PREFIX}/pin`,
     `${ROUTE_PREFIX}/forget`,
+    `${ROUTE_PREFIX}/curate`,
     `${ROUTE_PREFIX}/llm-audit`,
     `${ROUTE_PREFIX}/ledger`,
     `${ROUTE_PREFIX}/archive`,
@@ -55,11 +56,85 @@ test('every settings route owns one exact path, its own methods, and a buffered 
     `${ROUTE_PREFIX}/archive-clear`,
   ])
   assert.deepEqual(routes.map(route => route.methods), [
-    ['GET'], ['POST'], ['POST'], ['GET'], ['POST'], ['POST'], ['GET'], ['GET'], ['GET'], ['POST'], ['POST'], ['POST'],
+    ['GET'], ['POST'], ['POST'], ['GET'], ['POST'], ['POST'], ['POST'], ['GET'], ['GET'], ['GET'], ['POST'], ['POST'], ['POST'],
   ])
   // The carrier buffers the body under its own cap, so a handler always reads a
   // complete request (and applies its own, smaller limit on top).
   assert.deepEqual([...new Set(routes.map(route => route.requestBody))], ['buffered'])
+  void dispose()
+})
+
+test('POST /curate runs the hook for the project the page names', async () => {
+  const routes: RegisteredRoute[] = []
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-curate-')))
+  const asked: string[] = []
+  const dispose = registerMemoryRoutes({
+    register: (route: RegisteredRoute) => {
+      routes.push(route)
+      return () => Promise.resolve()
+    },
+  } as never, root, {
+    curateNow: async (slug) => {
+      asked.push(slug)
+      return { status: 'completed', merged: 2, deleted: 1, rewritten: 0, refused: 1 }
+    },
+  })
+  const call = async (body: unknown): Promise<number> => {
+    const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/curate`)
+    assert.ok(route !== undefined, 'the curate route is registered')
+    const response = await route.fetch(new Request(`https://localhost${route.path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }))
+    if (response.status === 200) {
+      const parsed = await response.json() as { value: { status: string, merged: number } }
+      assert.equal(parsed.value.status, 'completed')
+      assert.equal(parsed.value.merged, 2, 'the counts the page renders ride the answer')
+    }
+    return response.status
+  }
+  const slug = projectSlug('D:/codes/demo')
+  // The store has to be resolvable by slug, and project.json is written by the
+  // first save: an empty directory would answer `route.projectUnknown`.
+  await root.projectFor('D:/codes/demo').upsert({ name: 'curate-me', category: 'lesson', summary: '整理目标', body: '会被整理的内容' })
+  assert.equal(await call({ scope: 'project', slug }), 200)
+  assert.deepEqual(asked, [slug], 'the hook gets exactly the slug the page showed')
+  // The whole validation is the shared store resolver, so a pass can never
+  // start for a request that names no project, a bad slug or a missing one.
+  assert.equal(await call({ slug }), 400, 'scope is required')
+  assert.equal(await call({ scope: 'project', slug: '../etc' }), 400, 'the slug is pattern-validated')
+  assert.equal(await call({ scope: 'project', slug: 'missing-project' }), 400, 'and must resolve to a directory')
+  assert.deepEqual(asked, [slug], 'a refused request never reaches the hook')
+  void dispose()
+})
+
+test('POST /curate without the maintenance half answers a coded unavailable', async () => {
+  const routes: RegisteredRoute[] = []
+  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-curate-off-')))
+  const dispose = registerMemoryRoutes({
+    register: (route: RegisteredRoute) => {
+      routes.push(route)
+      return () => Promise.resolve()
+    },
+  } as never, root)
+  const slug = projectSlug('D:/codes/demo')
+  // The store has to be resolvable by slug, and project.json is written by the
+  // first save: an empty directory would answer `route.projectUnknown`.
+  await root.projectFor('D:/codes/demo').upsert({ name: 'curate-me', category: 'lesson', summary: '整理目标', body: '会被整理的内容' })
+  const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/curate`)
+  assert.ok(route !== undefined)
+  const response = await route.fetch(new Request(`https://localhost${route.path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ scope: 'project', slug }),
+  }))
+  // A kernel without the agents/llm services mounts the routes without the
+  // curator: the answer has to SAY so rather than report a pass that never ran.
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    value: { status: 'unavailable', merged: 0, deleted: 0, rewritten: 0, refused: 0 },
+  })
   void dispose()
 })
 

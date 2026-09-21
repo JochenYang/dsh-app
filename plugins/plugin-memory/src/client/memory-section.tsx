@@ -2,8 +2,10 @@
  * The memory settings section: the two master toggles, the project count, the
  * deleted-memory archive and the per-project topic-card lists — rows show a
  * card's summary and expand to its full body on click; destructive actions go
- * through a confirm dialog. All data flows through the host half's routes; a
- * toggle flip takes effect on the next prompt assembly without a restart.
+ * through a confirm dialog, and a per-project "curate now" button runs one
+ * maintenance pass whose HTTP response IS its report. All data flows through
+ * the host half's routes; a toggle flip takes effect on the next prompt
+ * assembly without a restart.
  *
  * The retired global scope has no block here, and no archive row of its own:
  * the boot migration moves its cards AND their archived copies into
@@ -26,7 +28,7 @@ import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
 import type { MemoryKey } from './locales.ts'
-import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
+import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type MemorySectionProps = PropsLocale<typeof NS>
@@ -113,6 +115,53 @@ function wireNotice(failure: unknown): Notice {
 function noticeText(notice: Notice, t: TranslateNS<typeof NS>): string {
   if (notice.source === 'key') return t(notice.key, notice.params)
   return routeErrorCopy(t, notice.host, notice.fallback)
+}
+
+/**
+ * Notice key of one maintenance-pass outcome. Exhaustive by TYPE: a status
+ * added to {@link MemoryCurateResult} fails this module's typecheck until it
+ * has copy, so the page can never silently report the wrong thing.
+ */
+const CURATE_NOTICE: Record<MemoryCurateResult['status'], MemoryKey> = {
+  completed: 'memory.notice.curateCompleted',
+  nothing: 'memory.notice.curateNothing',
+  busy: 'memory.notice.curateBusy',
+  'no-route': 'memory.notice.curateNoRoute',
+  disabled: 'memory.notice.curateDisabled',
+  'unknown-project': 'memory.notice.curateUnknownProject',
+  unavailable: 'memory.notice.curateUnavailable',
+  failed: 'memory.notice.curateFailed',
+}
+
+/**
+ * The notice a finished pass reports. `completed` and the refused-only answer
+ * interpolate counts — they are the sentences that say what the pass actually
+ * did (or why it changed nothing), which is why the host returns the counts
+ * beside the status.
+ * @param result - the pass report.
+ * @returns the notice to show.
+ */
+function curateNotice(result: MemoryCurateResult): Notice {
+  if (result.status === 'completed') {
+    return {
+      source: 'key',
+      key: CURATE_NOTICE.completed,
+      params: { merged: result.merged, deleted: result.deleted, rewritten: result.rewritten },
+    }
+  }
+  // "Nothing needed changing" and "the model proposed edits and every one was
+  // refused" are different news: the second means the store DOES need work the
+  // guards would not let through, and the ledger is where that shows. Reporting
+  // the second as the first would tell the user the memory is tidy when the
+  // model said otherwise.
+  if (result.status === 'nothing' && result.refused > 0) {
+    return { source: 'key', key: 'memory.notice.curateRefused', params: { refused: result.refused } }
+  }
+  // The response is a cast, not a checked parse: a status this build does not
+  // know (a host newer than the page) must land on a sentence rather than a
+  // `t()` on a missing key that would take the whole section down.
+  const key: MemoryKey | undefined = CURATE_NOTICE[result.status]
+  return { source: 'key', key: key ?? CURATE_NOTICE.failed }
 }
 
 function fmtBytes(n: number): string {
@@ -260,6 +309,9 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   const [expandedCards, setExpandedCards] = useState<ReadonlySet<string>>(new Set())
   const [archive, setArchive] = useState<MemoryArchiveRow[] | null>(null)
   const [archiveExpanded, setArchiveExpanded] = useState(false)
+  // The project whose maintenance pass is in flight, if any: the pass can run
+  // for a minute on one model call, and its row has to say so.
+  const [curatingSlug, setCuratingSlug] = useState<string | null>(null)
   const inFlight = useRef(false)
 
   const load = useCallback(async () => {
@@ -394,6 +446,43 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
       inFlight.current = false
     }
   }, [loadProjectRows])
+
+  /**
+   * Run one maintenance pass for a project — the row's "curate now" button.
+   *
+   * The request IS the report: there is no push channel, so the button holds
+   * its busy label until the response lands, and the outcome (including the
+   * honest "busy" and "no-route" answers, which are not failures) becomes the
+   * notice. Every gate belongs to the host; this handler only reports it.
+   */
+  const onCurate = useCallback(async (project: MemoryProjectSummary) => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    setCuratingSlug(project.slug)
+    setNotice(undefined)
+    try {
+      const result = await fetchJson<MemoryCurateResult>(`${ROUTE_PREFIX}/curate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: 'project', slug: project.slug }),
+      })
+      setNotice(curateNotice(result))
+      // A pass rewrites cards, deletes copies into the archive and records the
+      // ledger, so it reloads what the manual delete path reloads — including
+      // this project's card list while it is open, which would otherwise keep
+      // showing a card the pass just merged away.
+      await load()
+      if (openSlug === project.slug) await loadProjectRows(project.slug)
+      await loadArchive()
+    } catch (failure) {
+      setError(wireNotice(failure))
+    } finally {
+      setCuratingSlug(null)
+      setBusy(false)
+      inFlight.current = false
+    }
+  }, [load, loadArchive, loadProjectRows, openSlug])
 
   /** Drop one card by its topic key. Every caller goes through the confirm dialog. */
   const runForget = useCallback(async (slug: string, topic: string) => {
@@ -653,6 +742,12 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                     disabled={busy}
                     onClick={() => { void onToggleProject(project) }}
                   >{openSlug === project.slug ? t('memory.action.collapse') : t('memory.action.items')}</button>
+                  <button
+                    type="button"
+                    className="dshm_button"
+                    disabled={busy}
+                    onClick={() => { void onCurate(project) }}
+                  >{curatingSlug === project.slug ? t('memory.action.curating') : t('memory.action.curate')}</button>
                   <button
                     type="button"
                     className="dshm_button dshm_buttonDanger"

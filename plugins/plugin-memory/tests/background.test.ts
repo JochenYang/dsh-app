@@ -863,6 +863,110 @@ test('curator progress: a pass whose WRITE failed does not record the store as d
   assert.equal(root.curatedHashOf('global'), undefined, 'a half-applied pass records nothing')
 })
 
+// --- the manual trigger: the settings page's "curate now" button -------------
+
+/** A curator ctx with both a stub model and live sessions (`curateNow` needs
+ *  a session to borrow a model route from; the automatic probe does not). */
+const stubCtxForManual = (
+  chunks: Array<Record<string, unknown>>,
+  sessions: Array<{ id: string, provider?: string, model?: string }> = [{ id: 'live-session', provider: 'p', model: 'm' }],
+): never => ({
+  llm: {
+    stream: async function* () {
+      for (const chunk of chunks) yield chunk
+    },
+  },
+  agents: {
+    list: () => sessions.map(session => ({
+      id: session.id,
+      session: {
+        id: session.id,
+        requestHeader: () => ({ config: { provider: session.provider, model: session.model } }),
+      },
+    })),
+  },
+} as never)
+
+const MANUAL_CWD = 'D:/codes/demo'
+const MANUAL_SLUG = projectSlug(MANUAL_CWD)
+const STOP = [{ type: 'finish', reason: { kind: 'stop' } }]
+
+test('curateNow: the button bypasses the gates the automatic path honors', async () => {
+  const root = tmpRoot()
+  const store = root.projectFor(MANUAL_CWD)
+  // TWO cards: below CURATE_MIN_ENTRIES, and no recorded fingerprint — the
+  // automatic sweep would not touch this store. The click IS the ask, so both
+  // gates are bypassed and the edit must land.
+  await seed(store, 'manual-a', '内容 A')
+  await seed(store, 'manual-b', '内容 B')
+  const ctx = stubCtxForManual([
+    { type: 'text-delta', index: 0, text: '{"edits":[{"op":"delete","topics":["manual-a"]}]}' },
+    ...STOP,
+  ])
+  const curator = new MemoryCurator(ctx as never, root, console as never)
+  const result = await curator.curateNow(MANUAL_SLUG)
+  assert.deepEqual(result, { status: 'completed', merged: 0, deleted: 1, rewritten: 0, refused: 0 })
+  assert.equal(store.get('manual-a'), undefined, 'the edit landed although the store was never "due"')
+  assert.equal(store.get('manual-b')?.body, '内容 B', 'and nothing else moved')
+})
+
+test('curateNow: a pass already in flight answers busy and applies nothing', async () => {
+  const root = tmpRoot()
+  const store = root.projectFor(MANUAL_CWD)
+  await seed(store, 'busy-a', '内容 A')
+  // A reply that WOULD delete the card: if anything ran, the card is gone.
+  const ctx = stubCtxForManual([
+    { type: 'text-delta', index: 0, text: '{"edits":[{"op":"delete","topics":["busy-a"]}]}' },
+    ...STOP,
+  ])
+  const curator = new MemoryCurator(ctx as never, root, console as never)
+  ;(curator as unknown as { sweeping: boolean }).sweeping = true
+  assert.deepEqual(await curator.curateNow(MANUAL_SLUG), { status: 'busy', merged: 0, deleted: 0, rewritten: 0, refused: 0 })
+  // The automatic path does not QUEUE either: a save arriving during a running
+  // pass leaves its store due for the next one instead of stacking a second
+  // pass over the same cards.
+  const parent = {
+    id: 'live-session',
+    session: { id: 'live-session', requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) },
+  }
+  await curator.runAfterSave(parent as never, 'live-session' as never)
+  assert.ok(store.get('busy-a') !== undefined, 'neither trigger overlapped the running pass')
+})
+
+test('curateNow: no live route and no live session are both answered', async () => {
+  const root = tmpRoot()
+  const store = root.projectFor(MANUAL_CWD)
+  await seed(store, 'noroute-a', '内容 A')
+  // A workspace-less or diagnostics session carries no route: it must not be
+  // pressed into service with a guessed model.
+  const routeLess = stubCtxForManual([...STOP], [{ id: 'diag' }])
+  assert.equal((await new MemoryCurator(routeLess as never, root, console as never).curateNow(MANUAL_SLUG)).status, 'no-route')
+  const none = stubCtxForManual([...STOP], [])
+  assert.equal((await new MemoryCurator(none as never, root, console as never).curateNow(MANUAL_SLUG)).status, 'no-route')
+})
+
+test('curateNow: the master toggle and an unknown slug are answered, not worked around', async () => {
+  const root = tmpRoot()
+  const store = root.projectFor(MANUAL_CWD)
+  await seed(store, 'state-a', '内容 A')
+  const curator = new MemoryCurator(stubCtxForManual([...STOP]) as never, root, console as never)
+  assert.equal((await curator.curateNow('missing-project')).status, 'unknown-project')
+  root.global.setEnabled(false)
+  assert.equal((await curator.curateNow(MANUAL_SLUG)).status, 'disabled', 'memory switched off means nothing to tidy')
+})
+
+test('curateNow: a failed model call answers failed and records nothing', async () => {
+  const root = tmpRoot()
+  const store = root.projectFor(MANUAL_CWD)
+  await seed(store, 'fail-a', '内容 A')
+  const ctx = stubCtxForManual([{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } }])
+  const curator = new MemoryCurator(ctx as never, root, console as never)
+  assert.equal((await curator.curateNow(MANUAL_SLUG)).status, 'failed')
+  // Recording the store here would mark it reviewed although the model never
+  // answered — the cards it holds would then never be looked at again.
+  assert.equal(root.curatedHashOf(MANUAL_SLUG), undefined, 'a pass that never ran records nothing')
+})
+
 // --- rename: the only op that can move a LONE card onto a new key --------------
 //
 // Before this, a single `legacy-*` card could never be renamed: `rewrite` keeps

@@ -68,6 +68,7 @@ import { lightSweep } from './light-sweep.ts'
 import { renderMemoryText } from './prompt.ts'
 import { registerMemoryRoutes } from './routes.ts'
 import { registerMemoryTools } from './tools.ts'
+import type { MemoryCurateResult } from './types.ts'
 
 export const name = 'plugin-memory'
 
@@ -134,6 +135,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // late-bound holder: a kernel without those services still gets the free
   // light sweep, and memory_save keeps working.
   let requestCurate: ((parent: NonNullable<ReturnType<Context['agents']['get']>>, sessionId: SessionId) => void) | undefined
+  // The settings page's "curate now" button rides the same late-binding: these
+  // routes mount before (and without) the agents/llm seam that owns the
+  // curator, so until it exists the hook answers `unavailable` — a coded
+  // sentence the page renders instead of a silent success.
+  let curateNow: ((slug: string) => Promise<MemoryCurateResult>) | undefined
+  const hookCurateNow = async (slug: string): Promise<MemoryCurateResult> => curateNow === undefined
+    ? { status: 'unavailable', merged: 0, deleted: 0, rewritten: 0, refused: 0 }
+    : await curateNow(slug)
   const onSaved = async (
     parent: NonNullable<ReturnType<Context['agents']['get']>>,
     sessionId: SessionId,
@@ -144,7 +153,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     requestCurate?.(parent, sessionId)
   }
   ctx.effect(() => registerMemoryTools(ctx, root, onSaved), 'plugin-memory: llm tools')
-  ctx.effect(() => registerMemoryRoutes(ctx.connection.fetch, root), 'plugin-memory: settings routes')
+  ctx.effect(() => registerMemoryRoutes(ctx.connection.fetch, root, { curateNow: hookCurateNow }), 'plugin-memory: settings routes')
 
   // The background maintenance pass needs the agents + llm services; on a
   // kernel without them (e.g. a rollback target) the plugin still mounts
@@ -166,6 +175,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // curator's own cooldown, with further saves inside that window
     // coalescing into one trailing sweep that re-resolves the session by id.
     requestCurate = (parent, sessionId) => { void curator.runAfterSave(parent, sessionId) }
+    // The manual trigger: the settings page's button, answered with what the
+    // pass did (see MemoryCurateResult). Same curator instance, so the button
+    // and the automatic path can never run at the same time.
+    curateNow = slug => curator.curateNow(slug)
     memCtx.effect(() => curator.attach(), 'plugin-memory: background maintenance')
   })
 

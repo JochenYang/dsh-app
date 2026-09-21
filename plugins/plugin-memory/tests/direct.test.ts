@@ -157,6 +157,19 @@ test('buildCuratePrompt bans work logs and spells out the JSON contract', () => 
   assert.match(user, /two cards/)
 })
 
+test('buildCuratePrompt: the brief carries the consolidation jobs, not only the delete list', () => {
+  const { system } = buildCuratePrompt('### some-topic [lesson] (updated 2026-09-06)\ntwo cards')
+  // Deleting work logs is half the job: a lesson buried in one has to survive
+  // as a rule, two cards that disagree must not keep contradicting each other,
+  // and a rewrite may not invent what the cards never said.
+  assert.match(system, /REWRITE it as that lesson/, 'generalization instead of losing the lesson')
+  assert.match(system, /LATER-updated one is the current state/, 'contradictions resolve to the later truth')
+  assert.match(system, /never fill a gap from your own knowledge/, 'grounding: no invented detail')
+  assert.match(system, /must stand alone/, 'a card has to work without the conversation')
+  assert.match(system, /problem→solution pairs/, 'the preserve list names what outlives the session')
+  assert.match(system, /progress snapshots/, 'and the discard list names progress state, not just logs')
+})
+
 function stubLlm(chunks: Array<Record<string, unknown>>): never {
   return {
     stream: async function* () {
