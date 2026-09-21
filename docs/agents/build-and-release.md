@@ -85,9 +85,11 @@ share, maps it to a dist-tag, and owns the suite roster + `suiteVersion`;
 line = one edit (bump, tag).
 
 **`suiteVersion` hashes plugin `package.json` versions**, not code — **any change
-under `plugins/` needs a patch bump in that plugin**, or CI reuses the published
-runtime (shell-only releases reuse it on purpose). `test/plugin-version-bump.test.mjs`
-enforces this against the newest release tag and skips in a shallow clone.
+under `plugins/` needs a version bump in that plugin**, or CI reuses the published
+runtime (shell-only releases reuse it on purpose). The patch field is a single
+digit: a tenth change carries into the minor (`0.8.9` → `0.9.0`), never
+`0.8.10`. `test/plugin-version-bump.test.mjs` enforces this against the newest
+release tag and skips in a shallow clone.
 
 ## 4. Shell release SOP
 

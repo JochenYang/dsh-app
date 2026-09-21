@@ -1022,3 +1022,53 @@ test('every card-text surface carries the discipline', () => {
     )
   }
 })
+
+// --- injection growth policy & the read side of a card -----------------------
+
+test('renderMemoryText: a capped index announces the cut and the consolidation that ends it', async () => {
+  const root = tmpRoot()
+  const store = root.projectFor('D:/codes/Demo')
+  const keys = Array.from({ length: 51 }, (_, index) => `topic-${String(index).padStart(2, '0')}`)
+  for (const [index, key] of keys.entries()) {
+    await save(store, key, `第 ${String(index)} 张卡的正文`, 'fact', `卡 ${String(index)}`)
+  }
+  const text = renderMemoryText(root, 'D:/codes/Demo')
+  // Index lines, not every "- " line: the guidelines above also carry bullets.
+  const indexLines = text.split('\n')
+    .filter(line => /^- (📌 )?\[(preference|convention|decision|lesson|fact)\] /u.test(line))
+  assert.equal(indexLines.length, 50, 'the index is cut at its ceiling, not injected whole')
+  // A cut with no growth policy leaks every topic past it: the note has to name
+  // the ceiling, the recall path AND what the model can do about the overflow.
+  assert.match(text, /1 more topic is NOT listed above/)
+  assert.match(text, /50-line ceiling/)
+  assert.match(text, /memory_recall reaches any card/)
+  assert.match(text, /consolidate rather than add/)
+  assert.match(text, /within 40 characters/)
+  // Exactly the over-ceiling topic is unlisted, and the store still holds it —
+  // which is the only thing that makes a recall pointer honest.
+  const listed = indexLines.join('\n')
+  const unlisted = keys.filter(key => !listed.includes(key))
+  assert.equal(unlisted.length, 1, 'one topic past the ceiling is unlisted')
+  assert.ok(store.get(unlisted[0]!) !== undefined, 'and memory_recall can still reach it')
+})
+
+test('renderMemoryText: the guidelines carry the read side — a card is a snapshot', async () => {
+  const root = tmpRoot()
+  const text = renderMemoryText(root, undefined)
+  // Saving discipline alone lets a stale card be acted on as current: what is
+  // injected is a snapshot, so the prompt must say how to use it.
+  assert.match(text, /SNAPSHOT of the moment it was written/)
+  assert.match(text, /check the file still exists/)
+  assert.match(text, /outweighs any card/)
+  assert.match(text, /trust the observation/)
+  assert.match(text, /memory_forget when the fact is retracted/)
+})
+
+test('card-text discipline: guidance cards carry the reason and the boundary', () => {
+  // A rule without its reason cannot be judged against a case it never
+  // anticipated — and the reason must stay a fact, never the story of the
+  // discussion that produced it.
+  assert.match(CARD_TEXT_DISCIPLINE, /GUIDANCE cards \(convention, lesson, decision\)/)
+  assert.match(CARD_TEXT_DISCIPLINE, /the reason it holds and the case it does NOT cover/)
+  assert.match(CARD_TEXT_DISCIPLINE, /not as the story of how it was agreed/)
+})

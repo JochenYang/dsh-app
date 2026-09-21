@@ -1,14 +1,15 @@
 /**
- * System-prompt contributions: static saving guidelines + a dynamic section
- * injecting the CURRENT PROJECT's cards (only sessions of that workspace).
- * Every other project's cards — and the retired root-level scope's — are
- * physically absent from the assembly; isolation is structural, not
- * prompt-level discipline.
+ * System-prompt contributions: static guidelines (how to save, and how to use
+ * what is saved) + a dynamic section injecting the CURRENT PROJECT's cards
+ * (only sessions of that workspace). Every other project's cards — and the
+ * retired root-level scope's — are physically absent from the assembly;
+ * isolation is structural, not prompt-level discipline.
  *
  * The section carries:
- *   1. the INDEX in full (one line per topic card) — the write-side routing
- *      map: before saving, the model checks whether a card already covers
- *      the subject and updates it instead of creating a near-duplicate;
+ *   1. the INDEX (one line per topic card, capped at {@link MAX_INDEX_LINES}
+ *      with an overflow note) — the write-side routing map: before saving, the
+ *      model checks whether a card already covers the subject and updates it
+ *      instead of creating a near-duplicate;
  *   2. selected card BODIES under the budget (pinned always win, then the
  *      most recently updated of each category up to a quota — one bucket
  *      cannot crowd out the others; whatever is dropped stays reachable via
@@ -19,7 +20,8 @@
  * memory_save mid-session is visible to the NEXT turn, and the master
  * toggle is honored live.
  *
- * Body budget (index is always whole — it is the routing map):
+ * Body budget (the index is the routing map, so it is never budget-trimmed —
+ * only capped, and the cap announces itself):
  *   project ≤ {@link MAX_PROJECT_CHARS} — the growth valve
  *
  * @module @dsh-app/plugin-memory/prompt
@@ -28,6 +30,7 @@
 import type { MemoryRoot, MemoryStore, TopicCard } from './memory-store.ts'
 import type { MemoryCategory } from './types.ts'
 import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
+import { MAX_SUMMARY_CHARS } from './memory-store.ts'
 
 /** Hard ceiling on the injected PROJECT card bodies (characters). */
 export const MAX_PROJECT_CHARS = 2_800
@@ -71,6 +74,13 @@ const GUIDELINES_TEXT = [
   'from the repo in one tool call (paths, API signatures, config values, build commands).',
   'The test: would a future session in a DIFFERENT conversation act better because this card',
   'exists? When unsure, skip — do not save guesses.',
+  '',
+  'BEFORE USING a card: it is a SNAPSHOT of the moment it was written, not a claim about now.',
+  'If it names a file path, check the file still exists; if it names a function, flag or config',
+  'key, read or grep for it before relying on it. On the present state of the repo, the repo (or',
+  'git) outweighs any card. When a card contradicts what you observe, trust the observation, fix',
+  'the card with memory_save (same topic) — or memory_forget when the fact is retracted — and say',
+  'what changed instead of acting on the stale text.',
   '',
   'The body is one concise paragraph in the user\'s language; the summary (≤40 chars) must say',
   'what the card covers — it is the index line future saves route by.',
@@ -191,22 +201,32 @@ export function selectCards(cards: readonly TopicCard[], budget: number, pinned:
 
 /** Index lines injected per scope at most. The index is the write-side
  *  routing map and rides every assembly in full, so it needs its own ceiling:
- *  on a kernel without the background passes (no agents/llm services) a store
- *  only ever grows, and an uncapped index would inflate every system prompt
- *  linearly. Overflow stays discoverable through memory_recall. */
+ *  a store only ever grows, and an uncapped index would inflate every system
+ *  prompt linearly. What was dropped stays reachable through memory_recall —
+ *  and the note below carries the other half the ceiling needs: the ceiling is
+ *  structural, so the only durable fix is fewer, coarser topics. */
 const MAX_INDEX_LINES = 50
 
-/** The index text for injection, capped with an explicit overflow note. */
+/** The index text for injection, capped with an overflow note that states BOTH
+ *  where the dropped topics can still be reached AND the consolidation that
+ *  stops the overflow — a ceiling without a growth policy turns into a silent
+ *  leak of every topic past the cut. */
 function cappedIndex(store: MemoryStore): string {
   const text = store.indexText()
   const lines = text.split('\n').filter(line => line.startsWith('- '))
   if (lines.length <= MAX_INDEX_LINES) return text
   const header = text.split('\n').filter(line => !line.startsWith('- ') && line !== '').join('\n')
+  const missing = lines.length - MAX_INDEX_LINES
+  const absent = missing === 1 ? '1 more topic is' : `${String(missing)} more topics are`
   return [
     header,
     '',
     ...lines.slice(0, MAX_INDEX_LINES),
-    `— …and ${String(lines.length - MAX_INDEX_LINES)} more topics; memory_recall lists them.`,
+    `— ${absent} NOT listed above: the index is over its `
+      + `${String(MAX_INDEX_LINES)}-line ceiling and is cut here. memory_recall reaches any card `
+      + 'by topic or keyword. To stop the overflow, consolidate rather than add: merge the topics '
+      + `that cover one subject and keep every summary within ${String(MAX_SUMMARY_CHARS)} `
+      + 'characters — one card per subject, the index a routing map.',
   ].join('\n')
 }
 

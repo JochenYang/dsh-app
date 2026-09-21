@@ -29,6 +29,10 @@ export const CARD_TEXT_DISCIPLINE = [
   'stored. Leave out what rots: dates, commit ids, session ids, "as discussed above".',
   'Never narrate the CONVERSATION either ("we discussed…", "本次…", "已修复…", "接下来…"):',
   'that is a work log, and a fact is what survives every session it will be read in.',
+  'GUIDANCE cards (convention, lesson, decision) lead with the rule or the settled choice, then',
+  'the reason it holds and the case it does NOT cover — a rule read on its own cannot be judged',
+  'against a situation it never anticipated. State the reason as a FACT (the constraint, the',
+  'failure it prevents), not as the story of how it was agreed.',
   'A card MAY be about this memory system itself (its topic keys, its index, its size limits) —',
   'state such facts directly. The ban is on narrating the SAVING, not on these words.',
 ].join('\n')
