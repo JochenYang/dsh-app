@@ -33,7 +33,7 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 批量子代理编排：独立子任务并行派发给可继续的子代理，自适应并发门控（失败收缩、连续成功增长）、保留会话的逐项自动重试、按子代理标识恢复；`swarm` 工具 + `/swarm` 命令 | `@dsh-app/plugin-swarm` | `plugins/plugin-swarm/src/orchestrator.ts` |
 | 用量统计：余额卡（官方 deepseek providers、CNY 闲时/高峰双档计价、密钥不出主机）、每日使用热度图与趋势图；余额 5 分钟 TTL 缓存（single-flight，挂载静默刷新、点击卡片强制重查） | `@dsh-app/plugin-usage` | `plugins/plugin-usage/src/client/usage-section.tsx` |
 | 会话归档管理：按项目工作目录分组（可折叠、键盘支持）、两步删除确认；删除经 `resolveCurrentLog` 物理移除会话日志目录（迁移前格式的会话回退到按后端布局定位），归档记录保留为可见性栅栏、由面板「清理」回收 | `@dsh-app/plugin-archives` | `plugins/plugin-archives/src/client/archives-section.tsx` |
-| 快速文件搜索：`fffind`/`ffgrep`/`fff-glob` 工具，每个工作区一个共享内存索引，每次搜索限定在执行会话的工作区内 | `@dsh-app/plugin-fff`（host） | `plugins/plugin-fff/src/tools.ts` |
+| 交付审阅：文件改动卡片、单栏差异悬停预览 | `@dsh-app/plugin-sidebar`（host+client） | `plugins/plugin-sidebar/src/index.ts` |
 | MCP 服务器管理：设置页增删改查、动态挂载/卸载，服务器工具以原生 `mcp__<server>__<tool>` 注册；读取时掩码密钥值 | `@dsh-app/plugin-mcp`（双面） | `plugins/plugin-mcp/src/client/mcp-section.tsx` |
 | 外部 hooks 桥：对 Claude Code / Codex 的 `hooks.json` 做设置页增删改查，挂载为生效的 hook 实例（拦截提示词、工具与轮次） | `@dsh-app/plugin-hooks`（双面） | `plugins/plugin-hooks/src/client/hooks-section.tsx` |
 | Office 文档转换：`office_to_pdf` 工具把 docx / xlsx / pptx / pdf 源文件转成 PDF；转换引擎（LibreOffice）按需从诊断页安装，不在运行时里；字体缺失逐族上报 | `@dsh-app/plugin-doc` / `plugin-sheet` / `plugin-ppt` / `plugin-pdf`（host 工具 + 双面技能预填） | `plugins/plugin-{doc,sheet,ppt,pdf}/src/` |

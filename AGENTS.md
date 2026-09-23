@@ -33,7 +33,7 @@ halves; `npm` here, `pnpm` in the harness checkout; Node 22+.
 
 - `src/main/` shell (Electron main), `src/kernel/` kernel manager,
   `src/shared/` cross-cutting types, constants and the locale table.
-- `plugins/` the seventeen-plugin brand suite — see `plugins/AGENTS.md`.
+- `plugins/` the sixteen-plugin brand suite — see `plugins/AGENTS.md`.
 - `scripts/` build, smoke and probe tooling; `test/` root suites.
 - `static/` startup page, `resources/` icons, `docs/` documentation.
 
@@ -44,18 +44,22 @@ Never commit build output (gitignored): `dist/`, `release/`, `runtime-dist/`,
 
 ## 3. Build, dev & verification
 
-Prerequisites (one-time): sibling `deepseek-harness` checkout at
-`../deepseek-harness` with `pnpm install` + `pnpm run build:web`, then
-`npm install` here.
+Prerequisites: for `npm run dev` and `npm test`, none — a dev run boots the
+**installed** runtime, the same artifact a packaged start uses. A local
+`deepseek-harness` checkout is needed only to work against live sources
+(`DSH_APP_DEV_RUNTIME`) or to rebuild the runtime artifact
+(`npm run runtime:build`, see `docs/agents/build-and-release.md`); it must have
+`pnpm install` + `pnpm run build` run in it.
 
 ```sh
 npm run typecheck             # tsc --noEmit; the compile gate
 npm run build                 # tsc -> dist/ + static/overlay/tray icon copy
 npm test                      # root tests (builds first; needs dist/)
 npm start                     # build + launch Electron (production-like)
-npm run dev                   # DSH_APP_DEV=1 + local harness checkout
+npm run dev                   # DSH_APP_DEV=1 + the installed runtime
 #   PowerShell: $env:DSH_APP_DEV="1"; npm start   (no `VAR=1 cmd` in PowerShell)
-#   Override:   DSH_APP_DEV_RUNTIME=D:/.../deepseek-harness
+#   A built runtime tree:  DSH_APP_DEV_KERNEL=D:/.../runtime-dist/work/runtime
+#   A source checkout:     DSH_APP_DEV_RUNTIME=D:/.../deepseek-harness  (must be built)
 npm run check:graph           # static plugin-graph + suite-roster rules
 npm run dist:win | dist:mac | dist:linux
 npm run verify                                        # smoke-suite.mjs
@@ -187,7 +191,12 @@ Plugin builds and tests: `plugins/AGENTS.md`.
 - **Upstream API drift**: slices and `as unknown as` casts bypass the type gate —
   a kernel-deleted API leaves tests green while the runtime throws; verify each
   plugin end-to-end after every kernel-line bump (`npm run verify`,
-  `npm run check:plugins`).
+  `npm run check:plugins`). The half a compile cannot see is a name the line
+  STOPPED exporting — `import { IconX } from '…/primitives'` type-checks and is
+  `undefined` at render. `test/plugin-kernel-imports.test.mjs` checks every named
+  runtime import against the installed line's real exports (no kernel tree, no
+  network), and `scratch/check-third-party-client-imports.mjs` runs the same
+  check over a third-party plugin's sources.
 - **Proxy: probe before injecting** — a TUN/fake-IP client resolves hostnames into
   `198.18.0.0/15`; the kernel installs its dispatcher once at boot, so a proxy that
   disappears later points every request at a closed port. `proxy-detect.ts` probes
@@ -220,9 +229,12 @@ Plugin builds and tests: `plugins/AGENTS.md`.
   `docs/agents/build-and-release.md`.
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing
   secrets must be supplied as CI secrets; `resources/icon.png` is a placeholder.
-- **The 0.1.6-alpha.2+ host line is not shipped-ready** — its packaged path is
-  unsmoked; the delivery model that would retire the `kernel/` tree, activation
-  file and profile mirror is planned in
+- **The `0.1.7-alpha.1` host line is not shipped-ready** — a LOCALLY built runtime
+  of it has been smoked end to end in this tree (`npm run verify -- --tgz` all
+  green against `runtime-dist/dsh-runtime-win32-x64-0.1.7-alpha.1.tgz`, plus a real
+  app start on `DSH_APP_DEV_KERNEL`), but no RELEASED artifact of that line has
+  been cut or verified, and the delivery model that would retire the `kernel/`
+  tree, activation file and profile mirror is still planned in
   `docs/capability-roadmap/kernel-package-set.md`.
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version
   upgrades.

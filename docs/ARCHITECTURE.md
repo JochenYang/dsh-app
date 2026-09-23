@@ -35,7 +35,6 @@
     plugin-usage (dual-face)   usage capture/aggregation + balance card, heatmap, trend chart
     plugin-archives (dual-face) session archive manager (host list/delete + settings section)
     plugin-memory (dual-face)  cross-session memory (tools + prompt injection + curator)
-    plugin-fff (host)          fast file search over the FFF engine (fffind/ffgrep/fff-glob)
     plugin-mcp (dual-face)     external MCP server manager with dynamic mounting
     plugin-hooks (dual-face)   external hooks bridge (Claude Code / Codex / native rules)
     plugin-websearch (dual-face) web_search/web_fetch as a provider: brand engine chain + self-check
