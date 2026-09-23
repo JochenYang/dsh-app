@@ -1262,10 +1262,9 @@ Config/Schema 的 `Volatile` 不兼容）——正好是"上游在动、我们�
   它没有、也不该顺带解决"根本没人给 pnpm"。
 - **官方机制（若要做，形态是清楚的）**：把 pnpm 打进 runtime（`runtime/pnpm/bin/pnpm.mjs`
   及它依赖的整包 + `runtime/bin`），启动时作为第 5/6 个位置传给宿主。
-  **代价**：新增一个随包第三方二进制（MIT）、产物变大、要动 `build-runtime.mjs` 与外壳 argv，
-  而且本机**无法端到端验证**（可发布的 runtime 目前被 sheetjs CDN 阻塞，见下方"环境阻塞"那条）。
-  → **列为待用户拍板的独立项，不在本轮实施**：它超出本文件的条目范围，且属于"新随包依赖 +
-  改打包"，按规则要先给方案等确认。
+  **代价**：新增一个随包第三方二进制（MIT）、产物变大、要动 `build-runtime.mjs` 与外壳 argv。
+  → **已于 2026-09-23 实施**（§12.9）：主人拍板后照这条形态做了，代价与预期一致（+4.4 MiB），
+  验证覆盖命令级与应用级。
 - **本轮只做了零风险的那一步**：把 `webShapeArgs` 里那段**说错了理由的注释**改对
   （原文写"故意不发，因为应用内市场自己驱动内核 CLI"——这个理由不成立，CLI 自己也要 pnpm）。
   行为一字未改（`npm test` 与真机 argv 都不受影响），但下一个人不会再把这句话当真。
@@ -1293,12 +1292,18 @@ Config/Schema 的 `Volatile` 不兼容）——正好是"上游在动、我们�
   3. `npm pack` 之后，`workspace:^` 规格需要具体化（预打包路径没有 checkout 可解析），
      用 `scratch/concretize-host-manifest.mjs` 按 checkout 里的 332 个包改写 11 处规格；
   4. `DSH_APP_HOST_PACKAGE=<改写后的 tgz>` + `DSH_APP_HOST_CHECKOUT=<checkout>` 驱动 runtime 构建。
-- **反例（明确记录）**：这一次 runtime 产物里的 `ui-sidebar-files` 是**被排除的**，
-  也就是说**它不能当作"可发布产物"**——只用于本机的适配验证。发布构建必须在能访问该 CDN
-  （或改走镜像/代理）的环境里跑一次完整安装；`docs/agents/build-and-release.md` 应记下这一条。
-- **给上游/自己的两条待办**：① `.github/workflows/release.yml` 的构建环境要有 sheetjs CDN 的出口；
-  ② 若长期不可达，值得让 `build-runtime.mjs` 支持一个"排除包"的环境变量（本轮**没有**改它，
-  以免为了本机绕过去动发布脚本）。
+- **反例（明确记录）**：那一次**构建步骤**（checkout 上装依赖来打宿主包）排除了 `ui-sidebar-files`。
+  **但这不是"产物缺了 Excel 预览"**——见下方 2026-09-23 的更正：runtime 产物是从 registry 装的
+  （发布出去的前端 tarball 里已经把 xlsx 打进 `client.excel.js` 了），本轮三个 alpha.2 产物都带着它。
+- **更正（2026-09-23 实测）**：`ui-sidebar-files` **在 runtime 产物里**（9 个条目）、
+  `dsh-client-ui-sidebar-documentpreview` 也在（11 个条目，含 `lib/client.excel.js`，7,059,723 字节，
+  里面就是打包好的 SheetJS）。所以"本机产物验不到 Excel 预览"这个说法**不成立**——它是把
+  checkout 安装那一步的绕过，误当成了产物本身的缺失（§12.5 第 8 条、§12.4.4 与 §12.3 第 2 条一并更正）。
+  sheetjs CDN 只对**从 checkout 打宿主包**这一条路有影响（CI 也走那条；那次失败是当天 fake-IP DNS
+  把 `cdn.sheetjs.com` 解析到 198.18.1.112 造成的超时），与 runtime 装配无关。
+- **给上游/自己的两条待办**：① `.github/workflows/release.yml` 的构建环境要有 sheetjs CDN 的出口
+  （只影响宿主打包那一步）；② 若长期不可达，值得让 `build-runtime.mjs` 支持一个"排除包"的环境变量
+  （本轮**没有**改它，以免为了本机绕过去动发布脚本）。
 
 ### 步 4 — B1 补丁尾部保留 `[~]`（实机验收待步 6）
 
@@ -3151,7 +3156,7 @@ checkout 也已切到 `dsh-v0.1.7-alpha.2`）。这一节记录**跟这一版**�
 | "首次安装插件未配置源时优先寻找最优可访问的 npm 源；保留手动与私有源" | **复验**：市场的安装/更新路径与我们 `sources.json` 的交互 |
 | "模型发现候选优先显示可读名称，缺失时显示模型 ID" | **复验**：内核「模型」页与我们的「模型高级设置」页 |
 | "Web 服务重启后…原页面在应用就绪后恢复连接，保留会话历史和输入草稿" | **复验**：我们的 web transport（A1 那一处） |
-| 改动审阅浮窗错位；**含特殊内容的 Excel 无法预览**；Excel 预览随面板缩放 | **复验**：B14 与侧边栏预览。**注意 Excel 预览正是因 sheetjs CDN 被排除出本机 runtime 的那个包**——本机产物验不到它 |
+| 改动审阅浮窗错位；**含特殊内容的 Excel 无法预览**；Excel 预览随面板缩放 | **复验**：B14 与侧边栏预览。**更正**：Excel 预览那一半**在产物里**（`ui-sidebar-files` + `documentpreview/lib/client.excel.js`，见 §12.3 第 2 条的更正），当时"产物缺它"的说法是把 checkout 安装那一步的绕过误当成了产物缺失；要复验的是上游那条修复本身，不是"我们有没有这个包" |
 | "默认不再限制任务完成后连续唤醒 Agent 的次数" | **复验**：我们 swarm 插件的循环/重试行为 |
 | 客户端滚动跟随、历史分页、轮次跳转、代码块与差异样式 | **复验**：我们是注入式适配，设置页与侧边栏要过一遍 |
 | `maxInlineBytes` → `maxInlineTokens`（spill-policy） | **不用管**：全仓 grep 无命中，我们没配 |
@@ -3164,8 +3169,9 @@ checkout 也已切到 `dsh-v0.1.7-alpha.2`）。这一节记录**跟这一版**�
 1. **desktop-host 要按 alpha.2 的 checkout 重打**：手上那份 `scratch/host-pack/host-concrete.tgz`
    是 alpha.1 时期打的，用它打出来的 runtime 会是"alpha.2 的源码 + alpha.1 的宿主"。
 2. **runtime 产物要打一次 `0.1.7-alpha.2`**（`DSH_APP_HOST_PACKAGE` + `DSH_APP_HOST_CHECKOUT`
-   那条绕行路径），并且**仍会排除 `ui-sidebar-files`**（sheetjs CDN 不可达）→ **只能本机验证，
-   不能当发布产物**；发布构建要在能访问该 CDN 的环境里跑。
+   那条绕行路径）。~~并且仍会排除 `ui-sidebar-files`~~ **更正（见第 2 条本节的更正）**：排除只发生在
+   checkout 那次依赖安装里，产物**带着** `ui-sidebar-files` 与 Excel 预览；本机这份只差
+   "没在真机上点开一个 xlsx 看过"这一步，不是缺组件。
 3. **冒烟**（`npm run verify -- --tgz <新产物>`）与**真机启动**，然后过 12.2 的复验清单。
 
 > **这三条都已在当天晚些时候做完**（宿主按 alpha.2 重打、runtime 打成 `0.1.7-alpha.2`、冒烟 60/60 与真机逐条复验），
@@ -3227,7 +3233,21 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 | 模型发现候选显示可读名称 | **上游界面，非我们代码**；本机没有可用的模型端点可点，留给主人日常使用（不是欠账） |
 | 插件安装源探测 | 我们的路径**自己解析版本**（`resolveRegistryVersion`：官方域名 → npmmirror，单测 6 条）再交给 `dsh plugin add`，上游"优先找最优源"只影响它的拉取；B7 已用断网代理在真机上验过镜像回退 |
 | app-boot fail-loud | **冒烟即覆盖**：真产物在临时 home 上起内核、60 条路由检查全过（任何未处理 rejection 现在会杀掉子进程，红得会很明显） |
-| 改动审阅浮窗 / Excel 预览 | **本机产物验不到 Excel**：`ui-sidebar-files` 因 sheetjs CDN 不可达被排除（§12.3 第 2 条）；浮窗错位属上游界面 |
+| 改动审阅浮窗 / Excel 预览 | **上游界面**；Excel 预览那一半**在产物里**（更正见 §12.3 第 2 条），只是没在真机上点开一个 xlsx 看过 |
+
+### 12.4.5b 一处更正（2026-09-23 晚，主人问起 sheetjs）
+
+主人问"sheetjs CDN 我们能访问，为什么说少了 Excel 预览那半边"，重新核对了三处：
+
+| 查什么 | 结果 |
+|---|---|
+| 本机产物里有没有那个包 | **有**：`dsh-runtime-win32-x64-0.1.7-alpha.2.tgz` 里 `dsh-client-ui-sidebar-files` **9 个条目**、`dsh-client-ui-sidebar-documentpreview` **11 个条目**，含 `lib/client.excel.js`（7,059,723 字节） |
+| xlsx 从哪来 | **打进那个 client bundle 里**（文件里有 `SheetJS LLC` 等标记）；它自己的 `package.json` 依赖只有 schemastery，所以**装 runtime 时不需要 CDN** |
+| 当时到底卡在哪 | 卡在**从 checkout 打宿主包**那一步的 `pnpm install`（闭包里有 `packages/client/ui-sidebar-files` → `xlsx@0.20.3`，该版本只在 `cdn.sheetjs.com`）；当天 DNS 把它解析到 `198.18.1.112`（fake-IP）后超时。排除那个包只影响**那次安装**，不影响产物 |
+
+**结论**：§12.3 第 2 条、§12.4.4、§12.5 第 8 条里"本机产物缺 Excel 预览那半边"的说法**是错的**，
+已在原处逐条更正。教训与前几条同源：**把一次构建绕过的范围，当成了产物的属性**——下判断前应该直接
+查产物（`tar -tzf` 一次就够），而不是从绕过步骤外推。
 
 ### 12.4.5 这一段暴露的**新**缺陷（不是 alpha.2 引入的，是跟线时撞出来的）
 
@@ -3255,7 +3275,7 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 4. **边界覆盖**：空 patch、CRLF、已有托管块、重复 id、patch 缺失、树被改名（dev 的回退与拒绝两条
    分支）都走过；primary-runtime 冒烟覆盖"已安装则复用"的第二次调用分支与"路径不存在即失败"的断言。
 5. **验证证据**：12.4.3 的六行 + 两笔提交各自的 `Verified:` 行；**没跑的说清原因**（配额 / 需要机器 /
-   本机产物缺 sheetjs 的那些在 12.4.4 与 §6.2 末尾）。
+   ~~本机产物缺 sheetjs 的那些~~ <ins>当时以为缺 sheetjs 的那几条**已更正**：产物里有，见 §12.4.5b</ins>）。
 6. **反例（残余风险）**：如果主人装的是**同一条线**的已发布内核（例如 0.1.7-alpha.2），dev 的
    回退分支会直接用它——那么"两套内核共用同一个 profile"这件事**依然存在**，只是不再跨线。这一条
    **没有被证伪**，见 §12.5 第 1 条。
@@ -3274,7 +3294,7 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 | 5 | 第三方插件（`dshmarket`、`dsh-lsp-actions`、`dsh-remote` 等）的客户端 API 漂移 | `[!]` | 上游 `ui-primitives` 在两条线之间动过 26 个文件；`dshmarket` 因此渲染成错误卡（React #130）。我们**不 import** 它（`plugin-kernel-imports` 门禁），所以不是我们的缺陷；要不要逐条找作者/换版本由主人定 |
 | 6 | 两处文案 | `[!]` | (a) 市场目录源返回非 JSON 时的说法（现在是"返回了无法解析的 JSON"，其实是**传输**问题，见 §11 那条）；(b) 引擎状态的「就绪」→「已配置」 |
 | 7 | A3 / B5 / B13 / B14 / O4 五行界面待验 | `[–]` | 处置与理由在 §6.2 末尾那张表里（花配额 / 要机器 / 不属于我们的代码路径 / 你日常一看就知道） |
-| 8 | **本机产物的两条限制**（不是缺陷，是环境） | — | ① `ui-sidebar-files` 因 sheetjs CDN 不可达被排除 → **Excel 预览在本机产物里验不到**，发布要在能访问该 CDN 的环境跑；② 办公组件要带 `DSH_APP_PRIMARY_RUNTIME` 才含 Python 半边（见 12.4.5 #3），不带就只有 `0.0.1` 那个 engine-only 版本 |
+| 8 | **本机产物的一条限制**（不是缺陷，是环境） | — | ① ~~`ui-sidebar-files` 因 sheetjs CDN 不可达被排除~~ **更正（见 §11 那条与 §12.3 第 2 条）**：runtime 产物**带着** `ui-sidebar-files` 与 `documentpreview/lib/client.excel.js`（里面就是打包好的 SheetJS）——当时排除的只是**从 checkout 打宿主包**那一步的依赖安装，`cdn.sheetjs.com` 只对那条路有影响；② 办公组件要带 `DSH_APP_PRIMARY_RUNTIME` 才含 Python 半边（见 12.4.5 #3），不带就只有 `0.0.1` 那个 engine-only 版本 |
 
 ## 12.6 收尾三查（Agent Team / 组合检查 / 页面控制台）
 
