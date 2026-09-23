@@ -19,6 +19,17 @@
  *   proxy down → not injected → direct fetch → web_search works, web_fetch
  *                falls back to whatever the local DNS allows
  *
+ * A third state is refused outright, and the reason is measured rather than
+ * principled. On a machine whose resolver answers with placeholder addresses (the
+ * SAME TUN client: everything resolves into 198.18.0.0/15) the proxy env would be
+ * the only reason the kernel loads its own `undici`, and in this version pairing —
+ * that undici against Node's bundled one — the kernel's BUILT-IN `fetch` then
+ * reads every provider response as an unparsable body. The visible symptom is the
+ * model list failing for every provider while nothing else notices; the traffic
+ * still flows, because the TUN adapter routes it. Such a machine keeps the env
+ * out, and {@link decideProxyOffer} owns that rule (`DSH_APP_PROXY_INJECT`
+ * overrides it).
+ *
  * Detection is a TCP connect first, then a single HTTP CONNECT probe. The
  * probe is deliberately narrow in what it ACCEPTS, but it is not proof of a
  * proxy: any listener that answers the CONNECT with an HTTP status is taken —
@@ -33,6 +44,7 @@
 
 import net from 'node:net'
 import http from 'node:http'
+import { lookup } from 'node:dns/promises'
 
 /** Proxy env names the kernel reads, in the order it prefers them. */
 const PROXY_ENV_NAMES = ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY'] as const
@@ -258,4 +270,111 @@ export function withDetectedProxy(
   }
   env.NO_PROXY = noProxyEntries.join(',')
   return { env, injected: true }
+}
+
+/** The RFC 2544 benchmarking range a TUN client answers with instead of an address. */
+const FAKE_IP_SECOND_OCTETS = ['18', '19'] as const
+
+/** Public names the fake-IP probe resolves; a real resolver answers both. */
+const FAKE_IP_PROBE_HOSTS = ['example.com', 'www.example.org'] as const
+
+/** Bound on the probe, so a blocked resolver cannot hold up the start. */
+const FAKE_IP_PROBE_TIMEOUT_MS = 1_500
+
+/** Await `work`, or reject once `ms` elapse — the timer never keeps Node alive. */
+async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error('probe timed out'))
+        }, ms)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Whether an address is the placeholder a TUN/fake-IP client hands out.
+ *
+ * 198.18.0.0/15 is the RFC 2544 benchmarking range: no public host is in it, and a
+ * client in TUN mode answers EVERY hostname with an address in it so its own rules
+ * decide where the connection really goes.
+ *
+ * @param address - one answer from `dns.lookup`.
+ * @returns true when the address is such a placeholder.
+ */
+export function isFakeIpAddress(address: string): boolean {
+  const parts = address.split('.')
+  const second = parts[1] ?? ''
+  return parts.length === 4 && parts[0] === '198' && FAKE_IP_SECOND_OCTETS.some((octet) => octet === second)
+}
+
+/**
+ * Whether this machine's resolver answers with placeholder addresses.
+ *
+ * Measured on the machine this was written for: `cpa.geluman.cn → 198.18.1.134`,
+ * `api.github.com → 198.18.0.29`, and the machine's own address `198.18.0.1` with
+ * DNS `198.18.0.2` — a client in TUN mode, where the adapter routes every outbound
+ * connection and a proxy environment is not what makes traffic flow.
+ *
+ * A resolution that fails or times out answers false, so the caller keeps the
+ * behaviour it had; see {@link decideProxyOffer} for what the two answers do.
+ *
+ * @returns true when a public name resolves into the placeholder range.
+ */
+export async function resolvesToFakeIpRange(): Promise<boolean> {
+  for (const host of FAKE_IP_PROBE_HOSTS) {
+    let answers: readonly { address: string }[]
+    try {
+      answers = await withTimeout(lookup(host, { all: true }), FAKE_IP_PROBE_TIMEOUT_MS)
+    } catch {
+      continue
+    }
+    if (answers.some((entry) => isFakeIpAddress(entry.address))) return true
+  }
+  return false
+}
+
+/** Why the shell did or did not offer the kernel a proxy. */
+export type ProxyOfferReason = 'detected' | 'none' | 'fake-ip' | 'override-off'
+
+/**
+ * The proxy to hand the kernel child, and why.
+ *
+ * The fake-IP rule is the surprising one, and it is a measured trade rather than a
+ * preference. On such a machine the injected URL buys exactly one thing — the
+ * kernel's web_fetch passes its address validation, which refuses the placeholder
+ * answers unless a proxy is visible — and it costs the model list: with a proxy in
+ * its environment the kernel installs an `undici` dispatcher into the global slot,
+ * and in this version pairing (the npm undici the kernel ships, against Node's own
+ * bundled one) the BUILT-IN `fetch` then reads a response with no headers and an
+ * undecoded body, so every provider interrogation fails with "did not answer with
+ * JSON". Measured both ways on one machine, same endpoint and same credential:
+ * proxy env → every provider fails; no proxy env → the real model list. Traffic
+ * still reaches the internet either way, because that is what the TUN adapter does.
+ *
+ * `DSH_APP_PROXY_INJECT` overrides the rule: `on` injects whatever was detected,
+ * `off` injects nothing.
+ *
+ * @param options - the detected proxy, whether this machine answers with fake
+ *   addresses, and the user's override.
+ * @returns the URL to inject (undefined leaves the environment alone) and the
+ *   reason, for the caller's log line.
+ */
+export function decideProxyOffer(options: {
+  detected: string | undefined
+  fakeIp: boolean
+  override: string | undefined
+}): { proxy: string | undefined; reason: ProxyOfferReason } {
+  const override = options.override?.trim().toLowerCase()
+  if (override === 'off') return { proxy: undefined, reason: 'override-off' }
+  if (options.detected === undefined) return { proxy: undefined, reason: 'none' }
+  if (override === 'on') return { proxy: options.detected, reason: 'detected' }
+  if (options.fakeIp) return { proxy: undefined, reason: 'fake-ip' }
+  return { proxy: options.detected, reason: 'detected' }
 }

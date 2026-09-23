@@ -201,7 +201,12 @@ Plugin builds and tests: `plugins/AGENTS.md`.
   `198.18.0.0/15`; the kernel installs its dispatcher once at boot, so a proxy that
   disappears later points every request at a closed port. `proxy-detect.ts` probes
   first, an explicit user proxy wins, and the watchdog restarts only a
-  shell-injected proxy.
+  shell-injected proxy. **A fake-IP machine gets no injection** (`decideProxyOffer`):
+  there the URL buys only `web_fetch`'s address validation while costing the model
+  list — with a proxy visible the kernel loads its own `undici` and its BUILT-IN
+  `fetch` then reads every provider response as an unparsable body (measured both
+  ways; detail in `docs/kernel-0.1.7-alpha.1-regression.md` §12.13). The TUN adapter
+  routes the traffic anyway; `DSH_APP_PROXY_INJECT=on|off` overrides.
 - **Web search is a provider, not a tool** — `web_search`/`web_fetch` stay
   upstream's; register a `ctx.web` provider (one per call), so fallback lives
   inside it.

@@ -301,6 +301,15 @@ const PATCH_HOME_MARK = '# @@dsh-app-rows:home\n'
 const PATCH_TAIL_MARK = '# @@dsh-app-rows:tail\n'
 
 /**
+ * Any of the four section markers above. Structural lines of this file's own
+ * format, so a reader splitting it into sections must treat them as boundaries —
+ * including the one that reads back a commented row (a marker line follows the
+ * dead text of the last row of every section, and taking it for code would put
+ * `@@dsh-app-rows:home` in the middle of a row).
+ */
+const PATCH_SECTION_LINE = /^# @@dsh-app-rows:/u
+
+/**
  * Placeholder written instead of the home rows when the composer reads the home
  * layer itself. It sits under the home marker so the file still says where the
  * user's rows apply, and so the next start's `parseSuitePatch` keeps working.
@@ -856,11 +865,13 @@ export function relativePatchSpecifiers(text: string): string[] {
  * @param profileDir - the profile the composition boots from.
  * @param extraDirs - package roots the host also resolves from (see
  *   {@link specifierResolves}); the active kernel's `app/node_modules`.
- * @returns the section with unloadable rows commented out, plus the specifiers
- *   that were skipped (for the caller's log lines).
+ * @returns the section with unloadable rows commented out, the specifiers that
+ *   were skipped, and the ones a previous build had commented but this one can
+ *   load again (for the caller's log lines).
  */
-export function filterUnresolvableRows(text: string, profileDir: string, extraDirs: readonly string[] = []): { text: string; skipped: string[] } {
-  const lines = patchLines(text)
+export function filterUnresolvableRows(text: string, profileDir: string, extraDirs: readonly string[] = []): { text: string; skipped: string[]; restored: string[] } {
+  const restored = restoreCommentedRows(text, profileDir, extraDirs)
+  const lines = patchLines(restored.text)
   const kept: string[] = []
   const skipped: string[] = []
   let index = 0
@@ -888,7 +899,115 @@ export function filterUnresolvableRows(text: string, profileDir: string, extraDi
     }
     index = end
   }
-  return { text: kept.join('\n'), skipped }
+  return { text: kept.join('\n'), skipped, restored: restored.restored }
+}
+
+/** The marker a previous build wrote above a row it commented out. */
+const NOT_LOADED_MARKER = '# [dsh-app] NOT LOADED:'
+
+/**
+ * Un-comment the rows an EARLIER build commented out, when this build's
+ * judgement no longer objects to them.
+ *
+ * Why this exists: the pre-0.1.7 judgement read config VALUES as package
+ * specifiers, so a row carrying model names ("deepseek-v4-flash,") was
+ * commented out with a `NOT LOADED` marker — the user's custom providers
+ * silently left the composition. The judgement was fixed, but a fix only
+ * prevents NEW comments: the file already carried the dead text, and the shell
+ * carried it forward verbatim on every start. Measured on this machine: the same
+ * row was commented, restored by hand, and re-commented by the old build still
+ * installed, twice — a user upgrading to a fixed build kept an empty provider
+ * list until they edited the file themselves.
+ *
+ * The restore is judged, never blind: the commented block is un-commented and
+ * handed to the same resolution scan, and it is only kept in that form when it
+ * still reads as rows and every name in it now resolves. A row that is still
+ * unloadable stays commented (and the writer re-emits the marker), so this can
+ * never introduce a boot failure the old comment was hiding.
+ *
+ * @param text - one section's text, comments included.
+ * @param profileDir - the profile the composition boots from.
+ * @param extraDirs - package roots the host also resolves from.
+ * @returns the text with recoverable rows un-commented, and what was recovered.
+ */
+function restoreCommentedRows(
+  text: string,
+  profileDir: string,
+  extraDirs: readonly string[],
+): { text: string; restored: string[] } {
+  const lines = patchLines(text)
+  const out: string[] = []
+  const restored: string[] = []
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index] ?? ''
+    if (!line.startsWith(NOT_LOADED_MARKER)) {
+      out.push(line)
+      index += 1
+      continue
+    }
+    // The block this marker explains: the commented lines that follow it. A blank
+    // line is taken with the block, because a row may hold one. The lines that end
+    // it are the file's own: the next marker, so two dead rows in a row stay two
+    // candidates rather than one malformed one, and a section marker, which follows
+    // the dead text of the last row of every section.
+    let end = index + 1
+    while (end < lines.length) {
+      const next = lines[end] ?? ''
+      if (next.startsWith(NOT_LOADED_MARKER) || PATCH_SECTION_LINE.test(next)) break
+      if (!next.startsWith('#') && next.trim() !== '') break
+      end += 1
+    }
+    const block = lines.slice(index + 1, end)
+    const candidate = block.map((commented) => (commented.startsWith('# ') ? commented.slice(2) : commented.slice(1)))
+    const names = candidate.length === 0 ? [] : judgedSpecifiers(candidate, profileDir, extraDirs)
+    const loadable = names.every((specifier) => specifierResolves(specifier, profileDir, extraDirs))
+    if (names.length > 0 && loadable && rowShaped(candidate)) {
+      out.push(...candidate)
+      restored.push(...names)
+    } else {
+      out.push(line, ...block)
+    }
+    index = end
+  }
+  return { text: out.join('\n'), restored }
+}
+
+/** Names the candidate rows ask the loader for (empty when none are rows). */
+function judgedSpecifiers(
+  candidate: readonly string[],
+  profileDir: string,
+  extraDirs: readonly string[],
+): string[] {
+  const found: string[] = []
+  let index = 0
+  while (index < candidate.length) {
+    if (!PATCH_ROW_LINE.test(candidate[index] ?? '')) {
+      index += 1
+      continue
+    }
+    let end = index + 1
+    while (end < candidate.length && !PATCH_ROW_LINE.test(candidate[end] ?? '')) end += 1
+    found.push(...rowSpecifiers(candidate.slice(index, end), index + 1).map((named) => named.specifier))
+    index = end
+  }
+  return found
+}
+
+/**
+ * Whether an un-commented block still reads as loader rows.
+ *
+ * Marking a dead row prefixes `# ` to each of its lines, and that encoding is
+ * lossy one way: a comment the USER had at column zero inside the row
+ * (`# keep this first`) was left alone while the row was commented, and looks
+ * exactly like commented code afterwards. Stripping the two characters would
+ * then emit bare prose where the loader expects YAML — a boot failure in place
+ * of the silent omission this restore exists to undo. So a candidate is accepted
+ * only while every line is still a row (`- ` at column zero), a continuation of
+ * one (indented), or blank; a block that fails that test keeps its comment.
+ */
+function rowShaped(candidate: readonly string[]): boolean {
+  return candidate.every((line) => line.trim() === '' || /^\s/u.test(line) || PATCH_ROW_LINE.test(line))
 }
 
 /**
@@ -945,9 +1064,15 @@ export async function writeSuitePatchFile(
   const homeLayerText = await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME))
   const home = copyHome
     ? filterUnresolvableRows(homeLayerText, profileDir, closure)
-    : { text: PATCH_HOME_OMITTED, skipped: [] }
+    : { text: PATCH_HOME_OMITTED, skipped: [], restored: [] }
   for (const specifier of [...carried.skipped, ...home.skipped]) {
     reportLine(`[brand-suite] patch row skipped: "${specifier}" does not load from ${profileDir}; the row stays in ${PROFILE_PATCH_FILENAME} commented out`, options.report)
+  }
+  // Rows an older build commented out with a judgement that no longer objects:
+  // reported for the same reason the skips are — a user whose provider list came
+  // back is owed the line that says why.
+  for (const specifier of [...carried.restored, ...home.restored]) {
+    reportLine(`[brand-suite] patch row restored: "${specifier}" loads again from ${profileDir}; a build with an older judgement had commented it out`, options.report)
   }
   // Rows in the HOME layer this profile cannot load. On this line the kernel
   // composes that file as a layer of its own, so the shell can neither filter it

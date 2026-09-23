@@ -20,7 +20,8 @@ import { installSessionHeaderRules } from './session-hooks'
 import { isSafeModeEnabled, setSafeMode } from './safe-mode'
 import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
 import { checkConfigSchema } from './config-schema'
-import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from './proxy-detect'
+import { decideProxyOffer, detectLocalProxy, hasProxyEnv, isProxyAlive, resolvesToFakeIpRange, withDetectedProxy } from './proxy-detect'
+import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, type PatchSpecifier } from './brand-suite'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
@@ -1044,13 +1045,27 @@ async function startServerAndOpenWindow(): Promise<void> {
   // instead of printing a blank version. `channel` is a literal union, so it
   // needs no empty check of its own.
   const detectedProxy = await proxyProbe
-  const { env: proxyEnv, injected } = withDetectedProxy(scrubbed.env, detectedProxy)
+  // A TUN client answers every hostname with a placeholder address, and on such a
+  // machine the proxy env buys web_fetch's address validation while costing the
+  // model list — the trade and its measurement are in decideProxyOffer.
+  const offer = decideProxyOffer({
+    detected: detectedProxy,
+    fakeIp: detectedProxy === undefined ? false : await resolvesToFakeIpRange(),
+    override: process.env.DSH_APP_PROXY_INJECT,
+  })
+  const { env: proxyEnv, injected } = withDetectedProxy(scrubbed.env, offer.proxy)
   // Record what THIS shell injected so the watchdog can act on it later. A
   // proxy the user exported is deliberately not recorded: it is not ours to
   // re-evaluate, and restarting on its disappearance would fight their setup.
-  injectedProxyUrl = injected ? detectedProxy : undefined
+  injectedProxyUrl = injected ? offer.proxy : undefined
   if (injected) {
-    logKernel(`[kernel] local proxy detected at ${detectedProxy ?? ''}; injecting proxy env`)
+    logKernel(`[kernel] local proxy detected at ${offer.proxy ?? ''}; injecting proxy env`)
+  } else if (offer.reason === 'fake-ip') {
+    logKernel(
+      `[kernel] local proxy at ${detectedProxy ?? ''} NOT injected: this network answers every hostname with a placeholder address (198.18.0.0/15, a TUN client), and with a proxy visible this kernel line reads every provider response as an unparsable body — the model list then fails for every provider. The TUN adapter routes the traffic either way. Set DSH_APP_PROXY_INJECT=on to inject it regardless (web_fetch's address validation then passes and the model list does not)`,
+    )
+  } else if (offer.reason === 'override-off') {
+    logKernel('[kernel] DSH_APP_PROXY_INJECT=off; kernel runs without proxy env')
   } else if (detectedProxy === undefined) {
     logKernel('[kernel] no local proxy listening; kernel runs without proxy env')
   }
@@ -1733,22 +1748,19 @@ async function boot(): Promise<void> {
 
 // ---------------------------------------------------------------- app
 
-// Pin the userData directory to the DSH APP brand name, and migrate the old
-// "DSH App" directory once. Without this the product rename would change the
-// default userData path and orphan the installed kernel + settings. renameSync
-// is same-volume on every platform, so it preserves the existing install.
+// Pin the userData directory to the DSH APP brand name, in ONE spelling, and
+// carry the old "DSH App" directory over. Without this the product rename would
+// change the default userData path and orphan the installed kernel + settings.
+// The rename is same-volume on every platform, so the install survives it; the
+// one-spelling rule and what breaks without it are in src/main/user-data.ts.
 const appDataDir = app.getPath('appData')
-const userDataDir = path.join(appDataDir, 'DSH APP')
-try {
-  const legacyDir = path.join(appDataDir, 'DSH App')
-  if (existsSync(legacyDir) && !existsSync(userDataDir)) {
-    renameSync(legacyDir, userDataDir)
-    console.log(`[userData] migrated ${legacyDir} → ${userDataDir}`)
-  }
-} catch (err) {
-  // Best-effort: on failure the new (empty) dir just falls back to a fresh
-  // first-run install, which handles itself.
-  console.error('[userData] migration failed:', err)
+const userDataDir = alignUserDataDir(appDataDir)
+if (path.basename(userDataDir) !== USER_DATA_DIR_NAME) {
+  console.warn(
+    `[userData] ${appDataDir} will not take the "${USER_DATA_DIR_NAME}" spelling; ` +
+      `using ${userDataDir} — every path handed to the kernel must use this exact ` +
+      'string, or its modules load twice and settings writes are refused',
+  )
 }
 app.setPath('userData', userDataDir)
 

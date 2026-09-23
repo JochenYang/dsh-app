@@ -313,6 +313,82 @@ test('filtering is idempotent: a commented row is not a row any more', () => {
   assert.equal(twice.text.match(/NOT LOADED/gu)?.length, 1)
 })
 
+// --------------------------------- rows an EARLIER build commented out
+//
+// A judgement that was wrong once leaves text behind: the pre-0.1.7 reader took
+// config VALUES for package names, so a provider row carrying a model list was
+// commented out and, before this, stayed that way through every later start —
+// measured on the machine this was written for, the user's model list came back
+// empty after two shell upgrades because the file still held the dead row.
+
+/** A row commented out exactly the way {@link filterUnresolvableRows} writes one. */
+function commentedOut(why, row) {
+  return [
+    `# [dsh-app] NOT LOADED: "${why}" does not resolve from this profile.`,
+    ...row.replace(/\n$/u, '').split('\n').map((line) => (line.startsWith('#') ? line : `# ${line}`)),
+    '',
+  ].join('\n')
+}
+
+/** The row the wrong judgement killed: a custom provider, its models a config value. */
+const PI_AI_ROW = "- insert:\n    - id: llm-pi-ai\n      name: '@deepseek-ai/dsh-llm-pi-ai'\n      config:\n        models: 'deepseek-v4-flash,deepseek-v4-pro'\n"
+
+test('a row an older build commented out comes back once it resolves', () => {
+  const { profileDir, install } = fixtureProfile()
+  install('@deepseek-ai/dsh-llm-pi-ai')
+  const filtered = filterUnresolvableRows(commentedOut('deepseek-v4-flash,', PI_AI_ROW), profileDir)
+  assert.deepEqual(filtered.restored, ['@deepseek-ai/dsh-llm-pi-ai'])
+  assert.deepEqual(filtered.skipped, [])
+  assert.equal(filtered.text, PI_AI_ROW)
+  if (loadYaml() !== undefined) assert.doesNotThrow(() => loadYaml().load(filtered.text))
+})
+
+test('a row an older build commented out stays dead while it cannot load', () => {
+  const { profileDir } = fixtureProfile()
+  const dead = commentedOut('@deepseek-ai/dsh-not-installed', "- insert:\n    - id: ghost\n      name: '@deepseek-ai/dsh-not-installed'\n")
+  const filtered = filterUnresolvableRows(dead, profileDir)
+  assert.deepEqual(filtered.restored, [])
+  // Byte-identical: the block keeps its marker, so the file still explains itself.
+  assert.equal(filtered.text, dead)
+})
+
+test('a dead row holding a comment at column zero is left alone', () => {
+  const { profileDir, install } = fixtureProfile()
+  install('@deepseek-ai/dsh-mcp-client')
+  // Marking a row prefixes `# ` to its lines and leaves an existing `#` line as it
+  // is, so the marker cannot tell this comment from commented code. Un-commenting
+  // it would put bare prose where the loader expects YAML — worse than the silent
+  // omission the restore undoes, so the block keeps its comment.
+  const row = "- insert:\n    - id: mcp-context7\n# keep this one first\n      name: '@deepseek-ai/dsh-mcp-client'\n"
+  const dead = commentedOut('@deepseek-ai/dsh-mcp-client', row)
+  const filtered = filterUnresolvableRows(dead, profileDir)
+  assert.deepEqual(filtered.restored, [])
+  assert.equal(filtered.text, dead)
+})
+
+test('two dead rows in a row are judged one at a time', () => {
+  const { profileDir, install } = fixtureProfile()
+  install('@deepseek-ai/dsh-mcp-client')
+  const text = commentedOut('@deepseek-ai/dsh-mcp-client', "- insert:\n    - id: mcp-context7\n      name: '@deepseek-ai/dsh-mcp-client'\n")
+    + commentedOut('@deepseek-ai/dsh-not-installed', "- insert:\n    - id: ghost\n      name: '@deepseek-ai/dsh-not-installed'\n")
+  const filtered = filterUnresolvableRows(text, profileDir)
+  assert.deepEqual(filtered.restored, ['@deepseek-ai/dsh-mcp-client'])
+  assert.ok(filtered.text.includes("name: '@deepseek-ai/dsh-mcp-client'"), 'the loadable row is live again')
+  assert.ok(filtered.text.includes('NOT LOADED: "@deepseek-ai/dsh-not-installed"'), 'the unloadable one keeps its marker')
+  if (loadYaml() !== undefined) assert.doesNotThrow(() => loadYaml().load(filtered.text))
+})
+
+test('a fixed judgement undoes an older one through the whole composition', () => {
+  const { profileDir, install } = fixtureProfile()
+  install('@deepseek-ai/dsh-llm-pi-ai')
+  // What the old build left on disk: the composed file, its provider row dead.
+  const asWritten = composeSuitePatch({ suite: '', preserved: commentedOut('deepseek-v4-flash,', PI_AI_ROW), home: '' })
+  const filtered = filterUnresolvableRows(asWritten, profileDir)
+  assert.deepEqual(filtered.restored, ['@deepseek-ai/dsh-llm-pi-ai'])
+  assert.ok(!filtered.text.includes('NOT LOADED'))
+  assert.ok(parseSuitePatch(filtered.text).preserved.includes("name: '@deepseek-ai/dsh-llm-pi-ai'"))
+})
+
 // ------------------------------------------- carried rows that name a FILE
 
 /** The row shape measured on a real profile: a local plugin named relatively. */

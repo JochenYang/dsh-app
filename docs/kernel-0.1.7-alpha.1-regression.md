@@ -3502,13 +3502,16 @@ POSIX（mac/linux）的 `bin/pnpm` shim 只做了静态生成，没有在对应�
 **顺带记一个工具**：`scratch/read-session-log.mjs`——V4 会话日志是**多帧** zstd，Node 的流式解码器
 在第二帧就报 `Unknown frame descriptor`（实测 72 KB 的文件只读出 199 字节），按帧魔数切开逐帧解就好。
 
-## 12.12 上游 bug：桌面宿主的设置写入被拒（2026-09-23 深夜，v0.13.2 已发布后发现）
+## 12.12 设置写入被拒（v0.13.2 已发布后发现）—— **结论已更正：不是上游，是我们**
 
 主人装上 v0.13.2 后报的第一个故障：**内测声明点「继续」提示"暂时无法保存确认状态，请重试"**，
-每次启动都重新出现。查证结论：**这是 0.1.7-rc.1 上游桌面宿主的缺陷**，不是我们的 profile、
-补丁文件或启动参数；症状已用可写的那条路径修掉。
+每次启动都重新出现；随后同一条错误又出现在**切换预设**上，模型商列表整个消失、高级配置里
+拉不到任何 provider 的模型。本节最初的结论是"**这是 0.1.7-rc.1 上游桌面宿主的缺陷**"，
+下面的证据 1–7 当时都指向那里。**那个结论是错的**：根因在**我们自己的数据目录拼写**上
+（§12.12.5），上游宿主只是受害者。证据保留在此，因为"同一 profile、同一内核、换 CLI 就成功"
+这一类对照仍然成立，误导之处在于我把"宿主独有"读成了"宿主有错"。
 
-### 12.12.1 证据链
+### 12.12.1 一开始的证据链（每条都成立，指向错了）
 
 | # | 事实 | 来源 |
 |---|---|---|
@@ -3517,41 +3520,170 @@ POSIX（mac/linux）的 `bin/pnpm` shim 只做了静态生成，没有在对应�
 | 3 | 这条拒绝来自 `reconcileProfilePatches`：`WeakMap<Context, Entry>`（`bootstrapIncludes`）里没有它拿到的那个 context | `packages/boot/app-boot/src/index.ts:275`；调用方 `packages/boot/config-editor/src/index.ts:84,132` 传的是 `this.ownerContext.root` |
 | 4 | **同一个 profile、同一个内核，换成 CLI 启动，同一条写入成功** | 实跑：`<rt>/node/node <rt>/app/…/dsh/lib/bin.js --profile dsh-app --host 127.0.0.1 --port 19421 --no-open`，再用会话 cookie POST 同一条 → `ok:true`、`value:{welcomeNoticeVersion:"2026-08-13.1"}`、`applies:"live"` |
 | 5 | 启动参数不是原因 | 与官方 Electron 桌面逐字比对（`apps/desktop/src/host-process.ts:151-170`）：`--expose-internals` / entry / runtimeDir / projectDir / primaryRuntime / pnpm / nodeBin 完全一致 |
-| 6 | 官方桌面**自己也走同一条路径**，即同样中招 | `apps/desktop-host/src/index.ts:22-27`：`loadProfileDirectory(…)` + `runProfile({resolvedProfile:{…}})`，正是 CLI 那条路径之外的另一半 |
+| 6 | 官方桌面**自己也走同一条路径** | `apps/desktop-host/src/index.ts:22-27`：`loadProfileDirectory(…)` + `runProfile({resolvedProfile:{…}})`，正是 CLI 那条路径之外的另一半 |
 | 7 | 上游 tag 之后没有相关修复 | 检出就在 `dsh-v0.1.7-rc.1`（`merge #5073`），`HEAD..origin/master` 为空 |
 
-**疑点（未证实）**：`bootstrapIncludes` 是模块级 WeakMap，按模块**实例**记账。桌面宿主自己 import 的
-`@deepseek-ai/dsh-app-boot` 与 profile 树里 config-editor 解析到的那份**可能不是同一个实例**
-（宿主用 `HostResolvedRootInclude` / 运行时拦截解析裸包名，而它自己的 import 走普通 ESM 注册表）——
-于是"写进去的那个 ctx"和"读出来的那个 ctx"分属两份 WeakMap。要确认需要对 `boot()` 与 config editor
-两侧各取一次该模块的身份。
+那时的"疑点"写的是：`bootstrapIncludes` 是模块级 WeakMap，按模块**实例**记账，桌面宿主自己
+import 的 `@deepseek-ai/dsh-app-boot` 与 config-editor 解析到的那份**可能不是同一个实例**。
+**这条疑点是对的，而且就是根因**——见 §12.12.5；我当时把它标成"未证实"，转而去查上游，
+方向就偏了。
 
-### 12.12.2 影响面
+### 12.12.2 影响面（当时）
 
-**桌面应用里凡是走客户端设置页的写入都存不住**（通用设置、主题、模型、网络搜索…）。
-我们的外壳自己需要的少量值可以绕过（见下），但**用户改自己的设置会失败**——这是这一条线在
-发布版 v0.13.2 上的已知缺陷。
+**桌面应用里凡是走客户端设置页的写入都存不住**（通用设置、主题、模型、网络搜索…），
+以及当时已确认的两处连带症状：模型商列表消失、内测声明每次启动重现。
 
-### 12.12.3 已做的处置
+### 12.12.3 当时的处置（**已被 12.12.5 取代**）
 
 1. **症状修掉**：通过 CLI 路径把确认值写进 profile 补丁的**保留区**（`# @@dsh-app-rows:home` 之前）：
+   `- id: ui-settings-general` + `config.welcomeNoticeVersion: 2026-08-13.1`。真应用复验：不再弹声明。
+2. **上游报告草稿**：`scratch/upstream-settings-write.md`——**结论作废**，不要发出（真正根因是我们的
+   数据目录拼写，见 12.12.5）。
+3. **临时绕法**：用 `dsh web` 改这类设置——**不再需要**，桌面端自己已经能写。
 
-   ```yaml
-   - id: ui-settings-general
-     name: "@deepseek-ai/dsh-client-ui-settings-general"
-     config:
-       welcomeNoticeVersion: 2026-08-13.1
-   ```
+### 12.12.4 判断依据与那次的教训
 
-   真应用复验：启动后页面里**不再出现**「内测声明」。备份 `scratch/patch-before-settings-probe.yml`。
-2. **上游报告草稿**：`scratch/upstream-settings-write.md`（含两次实跑对照、代码位置、疑似机制）。
-3. **临时绕法（写给主人）**：要改那类设置，先用 `dsh web`（同一 profile，CLI 路径）改；那条路是好的。
-
-### 12.12.4 判据与残余
-
-- **判断依据**：第 4 条（同 profile 换启动路径就成功）是决定性的——它把"profile 坏了"和"启动路径坏了"
-  分开；第 5、6 条把它钉到上游宿主，而不是我们的 argv 或外壳。
-- **残余**：设置页写入仍然失败；直到上游修好之前，桌面端的设置只能靠 CLI 路径改。
-  这一条应当写进下一次发布的 CHANGELOG（已知问题），并在上游修复后复验一次。
-- **教训**：`dsh web` 那条对照一开始我拿的是**另一个 profile**（web 而非 dsh-app），
+- ~~第 4 条（同 profile 换启动路径就成功）是决定性的~~：它确实把"profile 坏了"和"启动路径坏了"分开了，
+  但"桌面宿主独有"≠"桌面宿主有错"——**CLI 那条路径不经过 `app.setPath('userData')`**，
+  所以它天然不会踩到我们的拼写问题。这一条是我读错的地方。
+- **教训**：把"上游与我们的差异"当证据之前，先把差异**逐项**对照到具体代码行；那次的差异清单里
+  少了最重要的一项（路径怎么拼出来的），于是"宿主独有"被当成了"宿主有错"。
+- **另一条教训**：`dsh web` 那条对照一开始拿的是**另一个 profile**（web 而非 dsh-app），
   差点得出"宿主没问题"的结论——设置是**按 profile** 存的，跨 profile 对照不成立。
+
+### 12.12.5 真正的根因（已查清、已修、已在真应用复验）
+
+**一句话**：外壳把数据目录改名到品牌拼写 `DSH APP` 的那段代码**从来没生效过**，磁盘上一直是
+`DSH App`，而外壳交给内核子进程的是字面量 `DSH APP`——两种拼写是**同一目录**，却是 ESM 缓存里
+**两个不同的模块 URL**，于是 `@deepseek-ai/dsh-app-boot` 被加载两次，模块级 WeakMap 各记一份。
+
+| # | 事实 | 来源 |
+|---|---|---|
+| 1 | 旧判据 `existsSync(legacy) && !existsSync(target)` 在大小写不敏感的卷上恒为 `true && false` | `src/main/index.ts`（原 1740–1753 行）；Windows 与默认 macOS 卷都是这类卷 |
+| 2 | 探针打进安装版内核树，同一包**加载两次**，URL 只差大小写 | `[probe] MODULE LOADED …/DSH%20APP/kernel/…` 与 `…/DSH%20App/kernel/…`（两次，间隔 1.7s） |
+| 3 | 每次 reconcile 都 `has=false marker=yes`——ctx 是同一个对象（自定义属性可见），WeakMap 却查不到 | 同一份日志：`reconcile url=…DSH%20App… isRoot=true has=false marker=yes`（改写后同一条变 `has=true`） |
+| 4 | **只改目录名、不动代码**，重启同一个安装版：模块加载 2 → 1，`has` false → true | 同一探针，两次启动对照 |
+| 5 | 同一条写入 RPC：`settings/rejected` → `ok:true` | CDP 直发 `api/settings/mutate` |
+| 6 | 真机复验：模型页列出 **45 条 provider 路由**（含 7 条"手写"路由），首屏不再弹内测声明 | 安装版真跑 |
+
+**修法**（`src/main/user-data.ts`，新模块）：按大小写不敏感的方式找出数据目录的**真实拼写**；
+不是品牌拼写就两步改名（只改大小写的改名必须分两步，否则等于原地不动）；改不动就**采用磁盘上的
+拼写**——两种结果都只有一个拼写被交给内核。改名失败时打印一行说明后果的警告。
+
+**残余**：已发布的 v0.13.2 **外壳里没有这个修复**（它的 asar 是旧的），用户装上它仍会踩到；
+修复随下一次外壳发布生效。**那一台机器已经在磁盘上改好名字**，所以现在装着的 v0.13.2 也能正常工作。
+
+## 12.13 上游缺陷：代理环境下**每个** provider 都取不到模型（2026-09-24 凌晨）
+
+主人报的："模型高级设置所有的 provider 都无法从 provider 获取模型了"。
+
+### 12.13.1 症状与第一手证据
+
+| # | 事实 | 来源 |
+|---|---|---|
+| 1 | 真应用里问一个**已配置**的路由：`llm/discoverModels` → `{ok:false, code:"llm/model-discovery-rejected", message:"https://cpa.geluman.cn/v1/models did not answer with JSON"}` | CDP 直发 RPC（安装版，端口 9313；换 dev 同样复现） |
+| 2 | **这句话的是非题是"2XX 但 body 不是 JSON"**，不是 401/网络失败 | `packages/llm/llm-pi-ai/src/discovery.ts:327-360`：先判 `!response.ok`（会带上 `; check the API key`），再 `JSON.parse` |
+| 3 | 端点本身没问题：带同一个 key 直连与走本地代理都是 `200 / 2104B / application/json`，body 是合法模型列表 | `curl`，两种路径各一次 |
+| 4 | 凭据也到位：宿主**自己**解析出了 `apiKeyEnv`，请求头里是 `authorization: Bearer …(len 55)` | 把 baseURL 指向本地回显服务器，抓到请求头；同一个调用返回 `ok:true` + 两个模型 |
+| 5 | **同一个应用、同一个 profile、同一个端点，去掉代理环境就成功** | `DSH_APP_PROXY_PORTS=1`（探不到代理 → 不注入）→ 同一个 RPC 返回真实模型列表 |
+| 6 | 与 Node 版本无关：运行时自带 Node 22.23.2 与替成 Node 24.18.0 表现完全一致 | 两次真跑（dev，同一端口序列） |
+
+### 12.13.2 机制（用运行时自己的 Node 复现到底）
+
+内核的代理支持是**故意**让 Node 的内建 `fetch` 也能走代理的：
+`packages/util/http-proxy/src/install.ts:171-175` 把自家的 `Agent`（按 origin 决定 ProxyAgent / Pool）
+装进**全局** dispatcher，注释写明"Installing replaces undici's global dispatcher, which is what Node's
+built-in fetch resolves"。而 `packages/llm/llm-pi-ai/src/discovery.ts:327` 用的正是**裸 `fetch`**。
+
+问题出在两个 `undici` 的配对：
+
+| # | 组合（运行时 Node） | 结果 |
+|---|---|---|
+| 1 | 裸 `fetch`（未 import 包） | 200 / 2080B / 14 头 / JSON ✅ |
+| 2 | import 了内核那份 `undici@8.11.0` 之后，仍用裸 `fetch` | 200 / **360B 未解压的 gzip** / **0 头** / 不是 JSON ❌ |
+| 3 | 同一进程里改成 `undici.fetch` | 200 / 2080B / 14 头 / JSON ✅ |
+| 4 | `undici.fetch` + 内核那种 policy dispatcher（含 ProxyAgent） | ✅ |
+| 5 | `undici.fetch` + 裸 `ProxyAgent` | ✅ |
+| 6 | 裸 `fetch` + policy dispatcher（显式传） | 抛 `fetch failed` ❌ |
+
+`undici@8` 的 `lib/global.js` 在 import 时就给**旧符号** `Symbol.for('undici.globalDispatcher.1')`
+装了一个 `Dispatcher1Wrapper`（Node 22/24 的内建 `fetch` 读的就是这个符号），而内建 `fetch` 与
+`undici@8` 的响应管线不是一套东西：**响应头全丢、body 不解压**。同一份 `undici` 自己的 `fetch` 走
+自己的符号（`.2`）与自己的 dispatcher，一切正常——所以"内核自己的 web_fetch 没事、模型列表全坏"，
+差别只在"谁调用了 `fetch`"。
+
+**诱因是外壳注入了代理环境变量**：`proxy-detect.ts` 在探到本地代理时把 `HTTPS_PROXY/HTTP_PROXY/ALL_PROXY`
+交给内核子进程（这台机器上确实需要，见 12.13.3），而内核只要看到代理就会 import 那份 `undici` 并装
+全局 dispatcher。**注意范围**：任何让内核 import 到那份 `undici` 的动作都会污染该进程里后续的裸
+`fetch`（内建的 `web_fetch` 工具第一条请求就会 import 它），所以这不是"注入代理才有"的问题。
+
+### 12.13.3 我们的处置（保守那一侧：保住模型列表）
+
+这台机器是 **TUN/fake-IP**：`cpa.geluman.cn → 198.18.1.134`、`api.github.com → 198.18.0.29`，
+本机地址 `198.18.0.1`、DNS `198.18.0.2`。对这个网络，注入的代理 URL 只买到**一件事**——内核
+`web_fetch` 的地址校验（解析结果是保留段时，**只有在它看得见代理时才跳过校验**，见
+`web-fetch-http/src/network.ts` 的 `resolvePublicAddresses` 与 `isNonPublicIpLiteral` 注释）——
+代价却是**模型列表**。
+
+因此 `decideProxyOffer`（`src/main/proxy-detect.ts`）新增一条规则：**解析出占位地址的网络不注入**，
+日志里写明原因与后果；`DSH_APP_PROXY_INJECT=on/off` 是双向逃生口。规则只作用在**我们自己**的注入上，
+用户显式导出的代理环境仍然优先（`withDetectedProxy` 的老行为不变）。
+
+**真跑复验（默认启动、无任何覆盖）**：日志出现
+`local proxy at http://127.0.0.1:7897 NOT injected: this network answers every hostname with a placeholder address (198.18.0.0/15, a TUN client)…`；
+同一个 RPC → `{ok:true, count:26, first:[gemini-pro-agent, hy4-preview-f, glm-5.2, claude-sonnet-4-6]}`。
+
+**已知代价（写在这里，不藏在日志里）**：这台机器上 `web_fetch` 会像注入功能存在之前那样被地址校验
+拒绝；要那边的能力就用 `DSH_APP_PROXY_INJECT=on` 换回来（模型列表随即失效）。两者在当前内核线上
+不能同时成立——真正的修法在上游。
+
+### 12.13.4 上游报告（可直接发出）
+
+> **Title**: `proxy install makes Node's built-in fetch return header-less, undecoded responses`
+>
+> **Where**: `packages/util/http-proxy/src/install.ts` (`setGlobalDispatcher` with the package's own
+> `Agent`/`Pool`/`ProxyAgent`) together with any bare `fetch()` call site — measured on
+> `packages/llm/llm-pi-ai/src/discovery.ts:327`.
+>
+> **What happens**: with the package's `undici` (8.11.0) loaded in the process, a bare `fetch()` to an
+> endpoint that answers `Content-Encoding: gzip` returns **status 200, zero response headers, and the raw
+> compressed body**, so `JSON.parse` fails. The visible effect is model discovery failing for every
+> configured provider: `llm/model-discovery-rejected … did not answer with JSON`.
+>
+> **Repro** (runtime node 22.23.2 and 24.18.0 behave identically):
+>
+> ```js
+> const r1 = await fetch(URL, { headers })            // 200, 2080 B, 14 headers, JSON parses
+> const undici = await import('<app>/node_modules/undici/index.js')
+> const r2 = await fetch(URL, { headers })            // 200,  360 B,  0 headers, JSON.parse throws
+> const r3 = await undici.fetch(URL, { headers })     // 200, 2080 B, 14 headers, JSON parses
+> ```
+>
+> `undici/lib/global.js` installs a `Dispatcher1Wrapper` onto the legacy
+> `Symbol.for('undici.globalDispatcher.1')` at import time; Node's built-in `fetch` reads that symbol and
+> the response it hands back loses its headers and its body decoding. Node 22 and 24 both bundle a
+> DIFFERENT undici (6.28.0 / 7.28.0) from the one this package depends on (8.11.0).
+>
+> **Suggested directions**: call the package's own `fetch` at the bare call sites that must go through the
+> proxy (as `web-fetch-http` already does), or gate the legacy-symbol install, or pin an undici whose
+> wrapper is compatible with Node's bundled one.
+>
+> **Impact**: any deployment with a proxy visible in the environment (or any use of `web_fetch`, which
+> imports the same undici) loses response bodies for the rest of that process.
+
+### 12.13.5 批判性审查（六问）
+
+1. **这是不是"看起来修好了"？** 判定标准是那条 RPC 的返回值：修前 `ok:false`，修后 `ok:true` +
+   26 个模型；不是"日志里没有报错"。✅
+2. **会不会把别的能力悄悄弄坏？** 会，而且我把它写在上面第 12.13.3 节和日志行里：
+   这台机器的 `web_fetch` 回到被拒状态。这是**取舍**，不是遗漏；逃生口是环境变量。
+3. **有没有更小的改法？** 试过并否掉三条：① 只让 fake-IP 机器绕开代理的**校验**——校验读的就是
+   环境变量，绕不开；② 用预加载把两个 dispatcher 符号做成惰性槽——Node 自己的 `undici` 会因此
+   在 `defineProperty` 上抛错，实测**更坏**；③ 只对 provider 请求要求 `accept-encoding: identity`——
+   body 能解析但**响应头照样是空的**，会把"坏得明显"换成"坏得隐蔽"。
+4. **改动范围是否最小？** 只动 `proxy-detect.ts`（新规则 + 纯函数）与 `index.ts` 的一个调用点，
+   加两条单测；没有改注入的 URL 形状、没有碰 `NO_PROXY` 的老行为、没有碰用户显式环境。
+5. **残余风险**：非 fake-IP 机器仍会在装了代理时踩到这个上游缺陷（我们这边的注入对它们是必需的），
+   所以这次修的是**这台机器**这一类网络，不是整条线的问题；上游修复前，那句话要写进已知问题。
+6. **证据等级**：机制是 L1（可复现的最小脚本，两种 Node 版本、六个组合）；取舍的影响面是
+   L2（代码路径 + 注释级证据，没有真跑 `web_fetch` 被拒的端到端）。
