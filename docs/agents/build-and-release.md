@@ -120,6 +120,7 @@ where it belongs, and each has bitten this project):**
 |---|---|---|
 | The `runtime-<dshVersion>` release **stays a prerelease** | `/releases/latest` resolves to the newest NON-prerelease release, and a runtime tag carries no `latest.yml` — publishing it as a normal release points the shell's own update check at a release that cannot answer it | §4.3 |
 | A shell **`vX.Y.Z` tag is never re-run** | electron-builder's publish is not idempotent (422 `already_exists`); recovery is delete release + delete tag, then re-tag with the same content | §6 |
+| **Publish WITH the generated notes** | `node scripts/gen-release-notes.mjs vX.Y.Z` → `release-notes.md`, then `gh release edit vX.Y.Z --draft=false --notes-file release-notes.md`. Flipping the draft without `--notes-file` leaves an EMPTY release page — measured on v0.13.2, where the notes had to be attached afterwards | §4.4–§4.5 |
 | The **ModelScope mirror runs itself** when the draft is flipped to published | `.github/workflows/publish-mirror.yml` hooks `release: published`, which IS that moment (a job inside `release.yml` cannot observe it), and `MODELSCOPE_TOKEN` supplies the credentials. A manual `gh workflow run publish-mirror.yml -f tag=vX.Y.Z` is the **backfill** path (after a `503`, add `-f mode=diagnose`) — not a required step | §4.5–§4.7 |
 
 **And know which line the release moves**: the shell's kernel channel comes from
