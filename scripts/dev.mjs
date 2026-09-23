@@ -22,6 +22,7 @@
 // in it (measured on this tree: three builds behind HEAD, still carrying 0.1.6
 // symbols). A runtime tree announces its own version, so this cannot happen here.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -76,6 +77,58 @@ function localRuntimeOfFollowedLine() {
   return found[0]
 }
 
+/**
+ * The version the INSTALLED app's active kernel declares, or undefined.
+ *
+ * Read from the app's own kernel pointer (`<userData>/kernel/current.json` →
+ * `<active>/manifest.json`) so the fallback below can be honest about which line
+ * it is about to boot. `<userData>` is Electron's, named by `productName`
+ * (`DSH APP`, electron-builder.yml) under the platform's own root — the three
+ * candidates below are that root on Windows, macOS and Linux. A machine that
+ * never installed a kernel, or a layout none of them matches, answers undefined,
+ * which costs the fallback only its precision — never a wrong decision.
+ *
+ * The manifest is the authoritative record of what is on disk; the pointer's
+ * embedded copy is the fallback for a kernel directory that was moved rather
+ * than installed.
+ *
+ * @returns the declared `dshVersion`, or undefined when it cannot be read.
+ */
+function installedKernelVersion() {
+  const name = 'DSH APP'
+  const roots = []
+  if (process.env.APPDATA) roots.push(path.join(process.env.APPDATA, name, 'kernel'))
+  roots.push(path.join(os.homedir(), 'Library', 'Application Support', name, 'kernel'))
+  roots.push(path.join(os.homedir(), '.config', name, 'kernel'))
+  for (const root of roots) {
+    try {
+      const pointer = JSON.parse(readFileSync(path.join(root, 'current.json'), 'utf8'))
+      const active = pointer.active
+      if (typeof active !== 'string' || active === '') continue
+      let declared
+      try {
+        declared = JSON.parse(readFileSync(path.join(root, active, 'manifest.json'), 'utf8')).dshVersion
+      } catch {
+        declared = pointer.manifest?.dshVersion
+      }
+      if (typeof declared === 'string' && declared !== '') return declared
+    } catch {
+      // Not this root — try the next one.
+    }
+  }
+  return undefined
+}
+
+/** Whether one declared version satisfies the followed line, by the project's own rule. */
+function followsLine(version) {
+  try {
+    assertFollowedVersion(version, followedSpec())
+    return true
+  } catch {
+    return false
+  }
+}
+
 const named = [
   ['DSH_APP_DEV_RUNTIME', process.env.DSH_APP_DEV_RUNTIME],
   ['DSH_APP_DEV_KERNEL', process.env.DSH_APP_DEV_KERNEL],
@@ -86,10 +139,26 @@ if (named.length > 0) {
 } else {
   const local = localRuntimeOfFollowedLine()
   if (local === undefined) {
+    const installed = installedKernelVersion()
+    if (installed !== undefined && !followsLine(installed)) {
+      // Booting a MISMATCHED pair is worse than not booting: measured here, the
+      // older kernel's own boot projects its packages into the profile
+      // (`node_modules/@scope/*` → `.dsh-module-fallback`), and every later boot of
+      // the followed line then loads THAT line's packages — `settings … this.load is
+      // not a function`, `configForms` never provided, seven client entries pending.
+      // The warning below was not enough; this refuses and says how to get a kernel
+      // of the right line.
+      console.error(`[dev] refusing to boot: the installed kernel is dsh ${installed}, but this repository follows ${followedSpec()}.`)
+      console.error('[dev] Starting anyway mixes two lines in one profile: the older kernel projects its packages')
+      console.error('[dev] into $DSH_HOME, and the line this repository is adapted to then loads them.')
+      console.error('[dev] Build one (npm run dist / scripts/build-runtime.mjs) and extract it under scratch/<name>/runtime,')
+      console.error('[dev] or name an existing tree: DSH_APP_DEV_KERNEL=<dir with node/ and app/> npm run dev')
+      process.exit(1)
+    }
     console.error(`[dev] WARNING: no runtime tree built here declares the followed line ${followedSpec()}.`)
-    console.error('[dev] Falling back to the INSTALLED kernel, which may be another line — the suite is adapted')
-    console.error('[dev] per line, and a mismatch fails in the plugin tree with a confusing error. Build a runtime,')
-    console.error('[dev] or name one: DSH_APP_DEV_KERNEL=<dir with node/ and app/> npm run dev')
+    console.error(`[dev] Falling back to the INSTALLED kernel (dsh ${installed ?? 'unknown'}), which is the same line —`)
+    console.error('[dev] the suite is adapted per line, so a mismatch would fail in the plugin tree with a confusing error.')
+    console.error('[dev] Build a runtime, or name one: DSH_APP_DEV_KERNEL=<dir with node/ and app/> npm run dev')
   } else {
     process.env.DSH_APP_DEV_KERNEL = local.tree
     console.log(`[dev] DSH_APP_DEV=1, kernel: ${path.relative(appRoot, local.tree).replace(/\\/gu, '/')} `
