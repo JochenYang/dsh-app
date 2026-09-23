@@ -3119,6 +3119,54 @@ market `0.1.9 → 0.2.0`，套件 hash → **`d00aa1fd`**。
 （顺带记一条流程违规：这次我给代理脚本加 import 时用了 `sed -i`——**这正是我自己规则里禁止的
 "用流式命令改文件"**，虽然对象只是 scratch 探针；后面改用 Edit。）
 
+---
+
+## 12 alpha.2 增量（2026-09-23 当天跟线）
+
+上游在本文档的 alpha.1 工作做完之后发布了 **0.1.7-alpha.2**（`alpha` dist-tag 已指向它，
+checkout 也已切到 `dsh-v0.1.7-alpha.2`）。这一节记录**跟这一版**做了什么、还欠什么。
+
+### 12.1 机械项（已做并验证）
+
+| 项 | 结果 |
+|---|---|
+| 跟随 spec | `^0.1.7-alpha.1` → **`^0.1.7-alpha.2`**，**17 个 manifest / 351 处**（`scripts/kernel-line.mjs` 的判据是"所有 `@deepseek-ai/dsh*` 子包的 spec 必须完全一致"，它没抛错就说明这次是一整套） |
+| vendor | cordis **4.0.2/4.0.3 → 4.0.4**、schemastery **3.18.2/3.18.3 → 3.18.4**（16 个插件的精确 devDep + 根 devDep） |
+| 重装 | 根 `node_modules` 先用 `scripts/lib/remove-tree.mjs` 删掉再 `npm install`（换线必须清树，否则 ERESOLVE）；16 个插件各自 `npm install --legacy-peer-deps`，**全部 ok** |
+| 门禁 | `npm run typecheck` 干净；`npm test` **374 / 373 通过 / 0 失败**；`check:graph` → `16 plugins, followed line ^0.1.7-alpha.2`；16 个插件逐个 build+test **1226 个测试、0 失败** |
+
+- **一次假红，记在这里**：第一次 `npm test` 时我**同时在跑 16 个插件的重装**，两条 spawn+超时的
+  用例（`log-redaction`、`nav-policy`）因此红了；空载重跑即绿。**测门禁时不要并行跑重装**——
+  这和之前 pdf/doc 那条偶发是同一类（负载导致的假红）。
+- **套件 hash 未变**（`44f7e5b7`）：升线只动了依赖范围，插件**版本号**没动，而 hash 只吃版本号。
+  要发布仍然必须重建 runtime（这次要打成 **0.1.7-alpha.2**）。
+
+### 12.2 alpha.2 动了哪些我们踩过的面（逐条对上更新日志与 diff）
+
+| alpha.2 的改动 | 我们要做什么 |
+|---|---|
+| **app-boot fail-loud**：未捕获的 rejection / `uncaughtException` 一律诊断 + `exit(1)`（`packages/boot/app-boot/src/index.ts`） | **复验**：插件里任何异步抛错现在会杀掉内核子进程。升线后必须跑一遍启动 + 开会话 |
+| "首次安装插件未配置源时优先寻找最优可访问的 npm 源；保留手动与私有源" | **复验**：市场的安装/更新路径与我们 `sources.json` 的交互 |
+| "模型发现候选优先显示可读名称，缺失时显示模型 ID" | **复验**：内核「模型」页与我们的「模型高级设置」页 |
+| "Web 服务重启后…原页面在应用就绪后恢复连接，保留会话历史和输入草稿" | **复验**：我们的 web transport（A1 那一处） |
+| 改动审阅浮窗错位；**含特殊内容的 Excel 无法预览**；Excel 预览随面板缩放 | **复验**：B14 与侧边栏预览。**注意 Excel 预览正是因 sheetjs CDN 被排除出本机 runtime 的那个包**——本机产物验不到它 |
+| "默认不再限制任务完成后连续唤醒 Agent 的次数" | **复验**：我们 swarm 插件的循环/重试行为 |
+| 客户端滚动跟随、历史分页、轮次跳转、代码块与差异样式 | **复验**：我们是注入式适配，设置页与侧边栏要过一遍 |
+| `maxInlineBytes` → `maxInlineTokens`（spill-policy） | **不用管**：全仓 grep 无命中，我们没配 |
+| `packages/extensions/agent-preset` | **不用管**：两版之间 **0 文件改动**，预设注册行的字段表不变 |
+| 宿主 argv | **不用管**：形状没变；`fatal` 只多了一个 `diagnostic` 字段（64 KiB 上限的完整栈），我们的 `isHostEvent` 只要求 `message` 是字符串 → **可选改进**：把 `diagnostic` 记进日志 |
+| `packages/client/ui-primitives`（26 个文件） | **我们不用管**（`plugin-kernel-imports` 门禁证明我们不 import 它）；**第三方要重查**（`dshmarket` 就是被这里的图标导出变动打崩的） |
+
+### 12.3 跟线还欠的
+
+1. **desktop-host 要按 alpha.2 的 checkout 重打**：手上那份 `scratch/host-pack/host-concrete.tgz`
+   是 alpha.1 时期打的，用它打出来的 runtime 会是"alpha.2 的源码 + alpha.1 的宿主"。
+2. **runtime 产物要打一次 `0.1.7-alpha.2`**（`DSH_APP_HOST_PACKAGE` + `DSH_APP_HOST_CHECKOUT`
+   那条绕行路径），并且**仍会排除 `ui-sidebar-files`**（sheetjs CDN 不可达）→ **只能本机验证，
+   不能当发布产物**；发布构建要在能访问该 CDN 的环境里跑。
+3. **冒烟**（`npm run verify -- --tgz <新产物>`）与**真机启动**，然后过 12.2 的复验清单。
+
+
 
 
 
