@@ -65,11 +65,11 @@ import { protocol } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync, readFileSync } from 'node:fs'
-import { cp, lstat, mkdir, realpath, rm, stat, symlink, unlink } from 'node:fs/promises'
+import { cp, link, lstat, mkdir, realpath, rm, stat, symlink, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import semver from 'semver'
-import { HOST_READY_TIMEOUT_MS, HOST_SHUTDOWN_GRACE_MS, HOST_SIGNAL_GRACE_MS } from '../shared/constants'
+import { HOST_READY_TIMEOUT_MS, HOST_SHUTDOWN_GRACE_MS, HOST_SIGNAL_GRACE_MS, KERNEL_NODE_NAME } from '../shared/constants'
 import { authenticateHostWeb, forwardHostWebRequest, parseHostInjections, type HostIndexInjection, type HostWebSession } from './host-web'
 import { redact } from './redact'
 
@@ -629,11 +629,23 @@ const OFFICE_PAYLOAD_DIR = 'office-skills'
  * the child does with it is derive the asset root from its parent, and only this
  * leaf's parent holds the materialized `office-skills`. A payload that carries a
  * Python set is linked here (see {@link linkPrimaryRuntime}), so the same
- * argument serves both jobs. The leaf itself may be absent — the child only
- * derives from it at boot, and `load_workspace_dependencies` reports the path
- * when nothing is linked there yet.
+ * argument serves both jobs. The leaf is never absent: a payload with no Python
+ * set still gets the interpreter the child names (see
+ * {@link materializeLeafInterpreter}), and only `load_workspace_dependencies`
+ * reports the path it looked for — exactly as it always has.
  */
 const OFFICE_PRIMARY_RUNTIME_LEAF = 'primary-runtime'
+
+/**
+ * The interpreter the child reads out of that leaf, relative to it.
+ *
+ * A 0.1.7-rc.1 host derives this path from the primary-runtime argument it is
+ * handed and gives it to `skill-office`, which `statSync`s it while registering
+ * its skills — on EVERY start, whether or not an office payload is installed.
+ * The layout is the primary runtime's, not the runtime tree's: the tree keeps
+ * its binary at `<tree>/node/<node>`, the leaf needs `dependencies/node/bin/`.
+ */
+const OFFICE_LEAF_INTERPRETER = path.join('dependencies', 'node', 'bin', KERNEL_NODE_NAME)
 
 /**
  * Whether the materialized payload is absent or older than its source.
@@ -679,12 +691,16 @@ async function officePayloadStale(source: string, target: string): Promise<boole
  * @param dataDir - the shell's data directory, the materialization root.
  * @param primaryRuntime - the payload's own primary-runtime directory, when the
  *   installed office payload carries one. Given, it is what
- *   `load_workspace_dependencies` installs; absent, the leaf stays empty and the
- *   tool reports the path it looked for, exactly as it always has.
+ *   `load_workspace_dependencies` installs; absent, the leaf carries only the
+ *   interpreter the child checks at boot and the tool reports the path it looked
+ *   for, exactly as it always has.
+ * @param interpreter - the Node the host child itself runs on
+ *   (`DshHostOptions.executable`), placed inside the leaf while no Python set is
+ *   linked. A bare command name is resolved through `PATH`.
  * @returns the primary-runtime path to pass as the child's fourth positional.
- * @throws when either input is missing, or when the source is not a payload.
+ * @throws when any input is missing, or when the source is not a payload.
  */
-export async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined, primaryRuntime?: string): Promise<string> {
+export async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined, primaryRuntime?: string, interpreter?: string): Promise<string> {
   if (source === undefined || dataDir === undefined) {
     throw new Error(`dsh host: the web transport needs an office payload (a directory holding scripts/check_office.py); ${source === undefined ? 'none was named' : 'no shell data directory was named'} for ${source}`)
   }
@@ -708,9 +724,74 @@ export async function prepareOfficePayload(source: string | undefined, dataDir: 
     throw new Error(`dsh host: the office payload could not be materialized into ${target} (${path.join('scripts', 'check_office.py')} is not there after copying); the child refuses to boot without it`)
   }
   const leaf = path.join(root, OFFICE_PRIMARY_RUNTIME_LEAF)
-  if (primaryRuntime === undefined) await clearPrimaryRuntimeLink(leaf)
+  if (primaryRuntime === undefined) await materializeLeafInterpreter(leaf, interpreter)
   else await linkPrimaryRuntime(primaryRuntime, leaf)
   return leaf
+}
+
+/**
+ * Absolute path of an existing executable, resolving a bare command through
+ * `PATH` the way a shell would.
+ *
+ * A dev run against a checkout names its Node as the bare command `node` (see
+ * `machineNodeBinary` in index.ts): the checkout ships no binary of its own, so
+ * the shell spawns the child through `PATH` and there is no path to place in the
+ * leaf.
+ */
+function executableFile(executable: string): string | undefined {
+  if (path.isAbsolute(executable)) return existsSync(executable) ? executable : undefined
+  // Windows resolves `.EXE`/`.CMD`/… through PATHEXT; POSIX appends nothing.
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter((extension) => extension !== '')
+    : ['']
+  for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (directory === '') continue
+    for (const extension of extensions) {
+      const candidate = path.join(directory, executable + extension)
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return undefined
+}
+
+/**
+ * Give the leaf the interpreter the child names at boot, while no Python set is
+ * linked there (see {@link OFFICE_LEAF_INTERPRETER}).
+ *
+ * Hard-linked rather than copied: the runtime tree's own Node already runs the
+ * kernel child and this host, and a copy would put a second ~80 MiB executable
+ * on every install that has not downloaded the payload yet. It is a Node of the
+ * same line the payload's Python set carries (from the official dist, at
+ * whatever patch each side was pinned to), which is all the kit CLI needs from
+ * an interpreter. A hard link cannot cross volumes and a Windows filesystem
+ * policy can refuse one outright, so a copy is the fallback — one file, never
+ * the 286 MiB set the payload exists to keep out of the runtime.
+ *
+ * Rebuilt on every start, so a kernel update cannot leave the previous tree's
+ * binary behind. The leaf stays a REAL directory, which is the shape
+ * {@link linkPrimaryRuntime} already knows how to replace wholesale once a
+ * payload carrying a Python set arrives.
+ */
+async function materializeLeafInterpreter(leaf: string, executable: string | undefined): Promise<void> {
+  await clearPrimaryRuntimeLink(leaf)
+  const target = path.join(leaf, OFFICE_LEAF_INTERPRETER)
+  const source = executable === undefined ? undefined : executableFile(executable)
+  if (source === undefined) {
+    throw new Error(`dsh host: no Node to place at ${target} — ${executable === undefined ? 'the start named none' : `${executable} is neither a file nor a command on PATH`}; a 0.1.7-rc.1 host checks that path on every start and dies before it serves anything without it. Point DSH_APP_NODE_BINARY at the Node this install should use`)
+  }
+  const prior = await lstat(target).catch(() => undefined)
+  if (prior !== undefined) {
+    if (!prior.isFile() && !prior.isSymbolicLink()) {
+      throw new Error(`dsh host: ${target} is a directory this shell did not write; remove it and restart`)
+    }
+    await unlink(target)
+  }
+  await mkdir(path.dirname(target), { recursive: true })
+  try {
+    await link(source, target)
+  } catch {
+    await cp(source, target)
+  }
 }
 
 /**
@@ -1119,12 +1200,15 @@ export class DshHost implements DshAppTarget {
     // Both payloads the spawn depends on are resolved before it: the office
     // payload the web child needs to compose at all, and the argv itself. A
     // failure here is a start failure with a reason, never a child that dies
-    // several seconds later with its own.
+    // several seconds later with its own. The interpreter rides along because a
+    // 0.1.7-rc.1 child checks one inside the primary-runtime leaf on every start
+    // (see materializeLeafInterpreter).
     const args = web
       ? webShapeArgs(this.options, await prepareOfficePayload(
         this.options.officeSkillsSource,
         this.options.userDataDir,
         this.options.officePrimaryRuntime,
+        this.options.executable,
       ))
       : shapeArgs(shape, this.options)
     if (web) {

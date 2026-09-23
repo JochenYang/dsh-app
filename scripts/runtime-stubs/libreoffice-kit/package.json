@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/libreoffice-kit",
-  "version": "0.0.1",
-  "description": "Loader shim shipped by dsh-app in place of the LibreOffice kit: it loads the real kit out of the separately downloaded office payload, and refuses with an actionable error while that payload is absent.",
+  "version": "0.1.0",
+  "description": "Loader shim shipped by dsh-app in place of the LibreOffice kit: it loads the real kit out of the separately downloaded office payload, and refuses with an actionable error while that payload is absent. Also carries lib/cli.js, the path a 0.1.7-rc.1 desktop host derives from this manifest and checks at startup.",
   "type": "module",
   "main": "index.js",
   "license": "MIT",

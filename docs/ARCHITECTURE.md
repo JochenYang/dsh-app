@@ -377,8 +377,9 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
   converts no documents until the 诊断 row downloads the engine; the Python set
   the office skills need travels in that same artifact and is staged per cell by
   `scripts/build-primary-runtime.mjs` (`DSH_APP_PRIMARY_RUNTIME` carries it into
-  the build; win32 and darwin only, because the host's `readPrimaryRuntime`
-  refuses a linux manifest). Every non-linux cell now smoke-verifies the staged
-  Python set with the host's own code before it ships (release.yml).
+  the build; win32 and darwin only, because no linux engine is staged or tested
+  here and one would ride ~150 MB in every linux office payload — a 0.1.7 host
+  reads a linux manifest itself). Every non-linux cell now smoke-verifies the
+  staged Python set with the host's own code before it ships (release.yml).
 - Optional: signed manifests + rollback of `$DSH_HOME` settings on major
   version cross-grades.

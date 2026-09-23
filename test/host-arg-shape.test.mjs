@@ -121,6 +121,13 @@ if (argv[2] !== undefined) {
   if (!fs.existsSync(path.join(assetRoot, 'scripts', 'check_office.py'))) {
     problems.push('office skills missing at ' + assetRoot)
   }
+  // 0.1.7-rc.1 reads an interpreter out of the SAME argument and stats it while
+  // registering those skills — on every start, whether or not an office payload
+  // is installed. A real payload's primary-runtime always carries one; a shell
+  // that answers with a leaf holding neither the set nor an interpreter of its
+  // own fails the user's boot, so it fails this suite first.
+  const interpreter = path.join(argv[2], 'dependencies', 'node', 'bin', process.platform === 'win32' ? 'node.exe' : 'node')
+  if (!fs.existsSync(interpreter)) problems.push('office interpreter missing at ' + interpreter)
 }
 if (problems.length > 0) {
   process.send({ type: 'fatal', message: 'dsh desktop: ' + problems.join('; ') })
@@ -517,6 +524,28 @@ test('a web-transport ready without an injection table fails the start', async (
 })
 
 /**
+ * The interpreter a 0.1.7-rc.1 child reads out of its primary-runtime argument,
+ * relative to that argument (see `OFFICE_LEAF_INTERPRETER` in the shell).
+ */
+const LEAF_INTERPRETER = path.join(
+  'dependencies', 'node', 'bin', process.platform === 'win32' ? 'node.exe' : 'node',
+)
+
+/**
+ * A payload's primary-runtime directory carrying the interpreter every real set
+ * has (the build stages the Node that runs Python and pnpm there). The fake host
+ * refuses a leaf without it, exactly as `skill-office` does, so a fixture that
+ * is linked into the leaf has to model it.
+ */
+function fakePayloadRuntime() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-'))
+  const interpreter = path.join(dir, LEAF_INTERPRETER)
+  mkdirSync(path.dirname(interpreter), { recursive: true })
+  writeFileSync(interpreter, '')
+  return dir
+}
+
+/**
  * The regression this suite exists to prevent, learned from a real boot failure:
  * a payload carrying a Python set used to be handed to the child AS the
  * primary-runtime argument, which moved the child's derived asset root into
@@ -529,9 +558,8 @@ test('a payload carrying a Python set is linked beside the skills, never handed 
   const runtime = fakeWebRuntime('0.1.6-alpha.2')
   // A payload whose primary-runtime is a complete set (its runtime.json is what
   // `primaryRuntimeDir` gates on) — the shape that used to break the boot.
-  const payloadRuntime = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-python-'))
+  const payloadRuntime = fakePayloadRuntime()
   writeFileSync(path.join(payloadRuntime, 'runtime.json'), '{"components":{"python":"3.12.14"}}\n')
-  mkdirSync(path.join(payloadRuntime, 'dependencies'), { recursive: true })
   const logs = []
   const run = await start(runtime, logs, { ...webStartOptions(runtime), officePrimaryRuntime: payloadRuntime })
   try {
@@ -555,10 +583,10 @@ test('a payload carrying a Python set is linked beside the skills, never handed 
   }
 })
 
-test('the leaf link is replaced when the payload moves and dropped when none is declared', async () => {
+test('the leaf follows the payload when it moves, and holds the interpreter when none is declared', async () => {
   const runtime = fakeWebRuntime('0.1.6-alpha.2')
-  const first = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-a-'))
-  const second = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-b-'))
+  const first = fakePayloadRuntime()
+  const second = fakePayloadRuntime()
   for (const dir of [first, second]) writeFileSync(path.join(dir, 'runtime.json'), '{}\n')
   const leaf = path.join(dataDirOf(runtime), 'primary-runtime')
 
@@ -572,9 +600,13 @@ test('the leaf link is replaced when the payload moves and dropped when none is 
   assert.equal(canonical(leaf), canonical(second))
 
   // A kernel whose payload carries no Python set must not leave a stale link
-  // pointing at a pruned payload directory.
+  // pointing at a pruned payload directory. The leaf still exists — a
+  // 0.1.7-rc.1 child stats an interpreter inside it on every start — but it is a
+  // real directory now, carrying the shell's own interpreter rather than the set.
   const c = await start(runtime, [], webStartOptions(runtime))
   await c.host.stop()
-  assert.equal(existsSync(leaf), false, 'no Python set declared → no leaf')
+  assert.equal(lstatSync(leaf).isSymbolicLink(), false, 'the stale link is gone, not left pointing at a pruned payload')
+  assert.equal(existsSync(path.join(leaf, 'runtime.json')), false, 'the pruned set is no longer reachable through the leaf')
+  assert.ok(existsSync(path.join(leaf, LEAF_INTERPRETER)), 'the interpreter the child stats is there')
   assert.ok(existsSync(path.join(dataDirOf(runtime), 'office-skills', 'scripts', 'check_office.py')), 'the skills stay materialized')
 })

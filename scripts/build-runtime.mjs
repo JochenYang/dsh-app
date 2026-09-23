@@ -1077,8 +1077,15 @@ async function packDesktopHost(destDir, workRoot, runtimeDir) {
       // exists, and a worktree is removed with it.
       await stageOfficeSkills(runtimeDir, source.dir)
       const packed = JSON.parse(capture(npmBin(), ['pack', '--json', '--pack-destination', destDir], appDir))
-      const filename = packed?.[0]?.filename
-      if (typeof filename !== 'string') throw new Error(`npm pack produced no file name for ${DESKTOP_HOST_PACKAGE}`)
+      // `npm pack --json` answers an ARRAY of entries up to npm 11 and an OBJECT
+      // keyed by package name from npm 12. There is exactly one entry either way,
+      // and reading only the array shape turns a newer local npm into "produced
+      // no file name" — a build failure that says nothing about its real cause.
+      const [entry] = Array.isArray(packed) ? packed : Object.values(packed ?? {})
+      const filename = entry?.filename
+      if (typeof filename !== 'string') {
+        throw new Error(`npm pack produced no file name for ${DESKTOP_HOST_PACKAGE}; npm answered ${JSON.stringify(packed)?.slice(0, 200) ?? String(packed)}`)
+      }
       tarball = path.join(destDir, filename)
       versions = workspacePackageVersions(source.dir)
     } finally {
@@ -1340,7 +1347,7 @@ async function writeFileInventory(runtimeDir, manifest) {
  * carries, plus the engine for THIS platform.
  *
  * Ported from the upstream desktop packaging
- * (apps/desktop/scripts/prepare-dsh.ts and scripts/libreoffice-engine.ts):
+ * (apps/desktop/scripts/prepare-dsh.ts and scripts/libreoffice-packages.mjs):
  * `@deepseek-ai/libreoffice-kit` declares one optional dependency per engine
  * (`…-win32-x64`, `…-darwin-arm64`, `…-wasm`, …) and each of those packages
  * carries its own platform/arch fields. Reading the SAME declaration answers
@@ -1519,6 +1526,11 @@ async function trimRuntimePayload(runtimeDir, platform, arch) {
  * Written only when the provider is actually in the tree — the shim exists for
  * that one importer, and a package nothing imports is payload too.
  *
+ * It must also carry `lib/cli.js`: a 0.1.7-rc.1 desktop host derives that path
+ * from this package's manifest as it boots and hands it to `skill-office`, which
+ * `statSync`s it while registering its skills. A shim without the file fails the
+ * host's own startup, whether or not the payload is installed.
+ *
  * @param runtimeDir - the runtime tree being assembled (the kernel dir).
  * @returns the absolute stub directory, or null when no provider needs it.
  */
@@ -1531,14 +1543,16 @@ async function stageOfficeKitShim(runtimeDir) {
   }
   const source = path.join(root, ...OFFICE_KIT_STUB_DIR)
   const target = path.join(modulesDir, ...DESKTOP_OFFICE_KIT_PACKAGE.split('/'))
-  if (!existsSync(path.join(source, 'index.js'))) {
-    throw new Error(`the kit shim is missing from ${source} — a runtime without it cannot load ${DESKTOP_OFFICE_PROVIDER_PACKAGE}`)
+  const required = ['package.json', 'index.js', path.join('lib', 'cli.js')]
+  const absent = required.filter((file) => !existsSync(path.join(source, file)))
+  if (absent.length > 0) {
+    throw new Error(`the kit shim at ${source} is missing ${absent.join(', ')} — a runtime without it cannot serve ${DESKTOP_OFFICE_PROVIDER_PACKAGE}`)
   }
   // The trim removed the directory; removing it again keeps this idempotent if
   // the rule ever changes.
   await rm(target, { recursive: true, force: true })
   await cp(source, target, { recursive: true })
-  for (const file of ['package.json', 'index.js']) {
+  for (const file of required) {
     if (!existsSync(path.join(target, file))) throw new Error(`the staged kit shim at ${target} is missing ${file}`)
   }
   console.log(`[build-runtime] LibreOffice kit shim: ${OFFICE_KIT_STUB_DIR.join('/')} -> app/node_modules/${DESKTOP_OFFICE_KIT_PACKAGE}`)

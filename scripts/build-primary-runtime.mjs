@@ -34,10 +34,12 @@
  * transport, never a source of content.
  *
  * Targets: win32-x64, win32-arm64 (both arches of this app's Windows installer),
- * darwin-x64 and darwin-arm64. Linux is NOT a target: `readPrimaryRuntime`
- * accepts only `win32` and `darwin` manifests, and `installPrimaryRuntime`
- * refuses a manifest whose platform is not the running one, so a linux payload
- * could never be installed — linux cells build the office payload without it.
+ * darwin-x64 and darwin-arm64. Linux is NOT a target: a 0.1.7 host reads a linux
+ * manifest (its reader is `packages/skill/tool-workspace-dependencies`), but no
+ * linux engine is staged or smoke-verified here and one would ride ~150 MB in
+ * every linux office payload — so linux cells build the office payload without
+ * it. The entry point below refuses the platform for that reason, not because a
+ * linux payload could not be installed at all.
  *
  * Proxies: the script uses global `fetch`, which ignores `HTTP_PROXY`/
  * `HTTPS_PROXY` unless Node is told to honour them — run it as
