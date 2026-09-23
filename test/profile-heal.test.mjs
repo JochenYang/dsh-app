@@ -162,7 +162,11 @@ test('the bundled package manager goes in front of the run\'s PATH', async (t) =
       writeFileSync(file, `{"name":"${missingName}"}\n`)
     },
   })
-  const pnpmBinDir = path.join('D:/kernel', 'pnpm', 'bin')
+  // Built from the running platform rather than spelled out: the assertion below
+  // splits the child's PATH by `path.delimiter`, so a Windows-shaped fixture
+  // ('D:/…') under a POSIX delimiter splits into 'D' and the test fails on Linux
+  // for a reason that has nothing to do with the behaviour it guards.
+  const pnpmBinDir = path.join(process.cwd(), 'fake-kernel', 'pnpm', 'bin')
   await healProfileDependencies(options(profile, impl, { pnpmBinDir }))
   assert.equal(calls.length, 1)
   const key = Object.keys(calls[0].options.env).find((name) => name.toUpperCase() === 'PATH')
