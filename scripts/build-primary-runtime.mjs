@@ -19,8 +19,9 @@
  * first tool call and answers absolute paths into that copy.
  *
  * What the tree must look like is NOT decided here: it is the layout
- * `workspaceDependencyPaths` returns in upstream's
- * `apps/desktop-host/src/primary-runtime.ts`, and the `runtime.json` fields
+ * `workspaceDependencyPaths` returns in upstream's payload module
+ * (`packages/skill/tool-workspace-dependencies/src/index.ts` since 0.1.7, before
+ * that `apps/desktop-host/src/primary-runtime.ts`), and the `runtime.json` fields
  * `readPrimaryRuntime` validates there. That module is deliberately not imported
  * (this build must not need a harness checkout), so the layout is restated in
  * {@link workspaceLayout} and checked against the real function by
@@ -135,7 +136,8 @@ function targetLock(platform, arch) {
 
 /**
  * The directory layout the host's tool answers with, restated from
- * `workspaceDependencyPaths` (apps/desktop-host/src/primary-runtime.ts).
+ * `workspaceDependencyPaths` (`packages/skill/tool-workspace-dependencies/src/index.ts`
+ * since the 0.1.7 line).
  *
  * The build cannot import that module — it must run without a harness checkout —
  * so the two copies exist and `scripts/smoke-primary-runtime.mjs` is what keeps
@@ -540,13 +542,14 @@ export async function main(argv) {
     throw new Error('usage: node scripts/build-primary-runtime.mjs <platform> <arch> [outDir]')
   }
   if (platform === 'linux') {
-    // Not an oversight and not a container limitation: the host's
-    // readPrimaryRuntime accepts only win32 and darwin manifests, and
-    // installPrimaryRuntime refuses one whose platform is not the running one —
-    // so a linux tree could never be installed, while carrying ~150 MB in every
-    // linux office payload.
-    throw new Error('linux primary runtimes cannot be used: the desktop host validates `platform` against win32|darwin only '
-      + '(readPrimaryRuntime in apps/desktop-host/src/primary-runtime.ts), so build the office payload for linux cells without DSH_APP_PRIMARY_RUNTIME')
+    // The 0.1.7 line accepts a linux manifest — the payload logic moved to
+    // packages/skill/tool-workspace-dependencies, whose platform list is
+    // win32|darwin|linux — but no cell here stages or tests a linux engine, and
+    // one would ride ~150 MB in every linux office payload. Refused until that
+    // is a decision someone has made, not something this build assumes.
+    throw new Error('linux primary runtimes are not built here yet: no linux engine is staged or tested '
+      + '(the manifest reader in packages/skill/tool-workspace-dependencies accepts one since 0.1.7), '
+      + 'so build the office payload for linux cells without DSH_APP_PRIMARY_RUNTIME')
   }
   if (platform !== 'win32' && platform !== 'darwin') {
     throw new Error(`unsupported platform "${platform}": expected win32, darwin or linux`)

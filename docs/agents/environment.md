@@ -39,4 +39,4 @@ exact precedence when a value can come from more than one place.
 | `DSH_APP_DESKTOP` — desktop-host marker the child reads to pick its transport (`index.ts`) |
 | `DSH_APP_SHELL_VERSION` / `DSH_APP_KERNEL_VERSION` / `DSH_APP_KERNEL_CHANNEL` — the facts the 诊断 page shows, injected at spawn (`index.ts`, `plugin-brand` diagnostics facts) |
 | `DSH_APP_SHELL_ACTIONS` — the shell action route base the desktop bridge reads (`shell-actions.ts`) |
-| `DSH_APP_HARNESS_CHECKOUT` — harness checkout the primary-runtime smoke reads the host's `primary-runtime.ts` from; default: a sibling `../deepseek-harness` (`smoke-primary-runtime.mjs`) |
+| `DSH_APP_HARNESS_CHECKOUT` — harness checkout the primary-runtime smoke reads the host's payload module from (`packages/skill/tool-workspace-dependencies/src/index.ts` on the 0.1.7 line, `apps/desktop-host/src/primary-runtime.ts` before it); default: a sibling `../deepseek-harness` (`smoke-primary-runtime.mjs`) |

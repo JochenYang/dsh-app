@@ -9,9 +9,10 @@
  * what `scripts/build-primary-runtime.mjs <platform> <arch>` writes.
  *
  * Why it re-runs itself under the harness's tsx: the only authority on what this
- * tree must contain is `apps/desktop-host/src/primary-runtime.ts`, a TypeScript
- * source file in the harness checkout, and importing it needs a TypeScript
- * loader. This script therefore starts a child process
+ * tree must contain is the host's primary-runtime module — a TypeScript source
+ * file in the harness checkout (see {@link primaryRuntimeModules} for where the
+ * two kernel lines keep it) — and importing it needs a TypeScript loader. This
+ * script therefore starts a child process
  * (`node --import tsx/esm`, cwd = the checkout, which has tsx from its own pnpm
  * install) rather than restating the layout — a copy would agree with itself
  * while disagreeing with the host, which is exactly the failure this checks for.
@@ -25,7 +26,8 @@
  *      the same paths, plus a second call to exercise its reuse branch;
  *   4. runs the installed Python on every library the tool promises, the
  *      installed Node, and pnpm through that Node, checking the reported versions
- *      against `components`.
+ *      against the manifest (the `components` block of older files is normalized
+ *      on read, so the assertions use the top-level fields).
  *
  * The checkout is found through DSH_APP_HARNESS_CHECKOUT, else the same two
  * sibling paths `scripts/build-runtime.mjs` looks in.
@@ -49,6 +51,28 @@ const CHILD_MARKER = 'DSH_APP_PRIMARY_RUNTIME_SMOKE_CHILD'
 /** Libraries the tool's description promises, imported by the installed Python. */
 const PYTHON_IMPORTS = 'import decimal, lxml, numpy, pandas, docx, pptx, openpyxl, PIL, xlsxwriter; print(\'py ok\')'
 
+/**
+ * The host modules this smoke imports, for the checkout it was handed.
+ *
+ * The 0.1.7 line moved the payload logic and the `load_workspace_dependencies`
+ * tool out of `apps/desktop-host` into `@deepseek-ai/dsh-tool-workspace-dependencies`
+ * (harness commit `6e49ccad18`), so the helpers and `apply` are now ONE module
+ * where 0.1.6 and older had two. Both layouts are answered here because the
+ * checkout is whatever `DSH_APP_HARNESS_CHECKOUT` names — this script has no
+ * kernel line of its own to assume.
+ *
+ * @param harness - resolved harness checkout.
+ * @returns the module holding the payload helpers, and the one holding `apply`.
+ */
+function primaryRuntimeModules(harness) {
+  const moved = path.join(harness, 'packages', 'skill', 'tool-workspace-dependencies', 'src', 'index.ts')
+  if (existsSync(moved)) return { runtime: moved, tool: moved }
+  return {
+    runtime: path.join(harness, 'apps', 'desktop-host', 'src', 'primary-runtime.ts'),
+    tool: path.join(harness, 'apps', 'desktop-host', 'src', 'workspace-dependencies.ts'),
+  }
+}
+
 /** First candidate directory that holds the host's primary-runtime module. */
 function harnessCheckout() {
   const candidates = [
@@ -63,9 +87,10 @@ function harnessCheckout() {
     // (measured on the release workflow's macOS cell: "no harness checkout
     // found" while the clone sat right there).
     const resolved = path.resolve(candidate)
-    if (existsSync(path.join(resolved, 'apps', 'desktop-host', 'src', 'primary-runtime.ts'))) return resolved
+    const { runtime, tool } = primaryRuntimeModules(resolved)
+    if (existsSync(runtime) && existsSync(tool)) return resolved
   }
-  throw new Error(`no harness checkout with apps/desktop-host/src/primary-runtime.ts found (looked in ${candidates.join(', ')}); `
+  throw new Error(`no harness checkout with the host's primary-runtime module found (looked in ${candidates.join(', ')}); `
     + 'set DSH_APP_HARNESS_CHECKOUT to one')
 }
 
@@ -86,12 +111,13 @@ function capture(command, args) {
  * @param installRoot - absolute path the host would install it to.
  */
 async function verify(staged, installRoot) {
+  const modules = primaryRuntimeModules(harnessCheckout())
   const { installPrimaryRuntime, readPrimaryRuntime, workspaceDependencyPaths } = await import(
-    pathToFileURL(path.join(harnessCheckout(), 'apps', 'desktop-host', 'src', 'primary-runtime.ts')).href
+    pathToFileURL(modules.runtime).href
   )
   const manifest = await readPrimaryRuntime(staged)
   report('manifest', `desktopVersion ${manifest.desktopVersion}, ${manifest.platform}-${manifest.arch}, payloadDigest ${manifest.payloadDigest ?? 'absent'}`)
-  report('python distributions', `${String(Object.keys(manifest.pythonPackages ?? {}).length)} locked, python ${manifest.components.python}, node ${manifest.components.node}, pnpm ${manifest.components.pnpm}`)
+  report('python distributions', `${String(Object.keys(manifest.pythonPackages ?? {}).length)} locked, python ${manifest.python}, node ${manifest.node}, pnpm ${manifest.pnpm}`)
 
   const stagedPaths = workspaceDependencyPaths(staged, manifest)
   report('workspaceDependencyPaths(staged)', JSON.stringify(stagedPaths, undefined, 2).replace(/\n\s*/gu, ' '))
@@ -116,11 +142,11 @@ async function verify(staged, installRoot) {
   report(`python -I -c "<imports>"`, pythonOutput)
 
   const nodeVersion = capture(installed.node, ['--version'])
-  if (nodeVersion !== `v${manifest.components.node}`) throw new Error(`the installed Node answered ${nodeVersion}, manifest says ${manifest.components.node}`)
+  if (nodeVersion !== `v${manifest.node}`) throw new Error(`the installed Node answered ${nodeVersion}, manifest says ${manifest.node}`)
   report('node --version', nodeVersion)
 
   const pnpmVersion = capture(installed.node, [installed.pnpm, '--version'])
-  if (pnpmVersion !== manifest.components.pnpm) throw new Error(`pnpm answered ${pnpmVersion}, manifest says ${manifest.components.pnpm}`)
+  if (pnpmVersion !== manifest.pnpm) throw new Error(`pnpm answered ${pnpmVersion}, manifest says ${manifest.pnpm}`)
   report('node <pnpm.mjs> --version', pnpmVersion)
 
   // The tool itself, through its own module: `apply` registers
@@ -128,9 +154,7 @@ async function verify(staged, installRoot) {
   // A minimal context is enough because the plugin only registers one tool and
   // settles one effect — no loader, no other service participates.
   const toolRoot = path.join(path.dirname(installRoot), 'tool-root')
-  const { apply } = await import(
-    pathToFileURL(path.join(harnessCheckout(), 'apps', 'desktop-host', 'src', 'workspace-dependencies.ts')).href
-  )
+  const { apply } = await import(pathToFileURL(modules.tool).href)
   let registered
   apply({ tools: { register: (tool) => { registered = tool; return () => undefined } }, effect: () => undefined }, { source: staged, root: toolRoot })
   if (registered?.name !== 'load_workspace_dependencies') throw new Error(`the plugin registered ${String(registered?.name)}, not load_workspace_dependencies`)
