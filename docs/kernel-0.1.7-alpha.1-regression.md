@@ -3267,10 +3267,10 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 
 | # | 事项 | 状态 | 要点 |
 |---|---|---|---|
-| 1 | **dev 与已装应用共用一个 profile**（"两全"问题） | `[!]` | 现状两套都读 `$DSH_HOME/profiles/dsh-app`。**同线**时不会互相污染（套件按当前运行的那棵树重建链接），**跨线**时会（0.1.6 的内核把自己的包投影进 profile，0.1.7 的启动随后加载它们——7 条客户端条目 pending）。三个可选方向：**(a)** dev 用独立 `$DSH_HOME`（代价：dev 里的登录态、设置、会话另起一份）；**(b)** 保持共享，靠"已发布版本跟上仓库线"消化（本次 alpha.2 就是这条）；**(c)** 外壳在**检测到线变化**时清掉 profile 的模块投影（与 `client-state.ts` 按线清 localStorage 同一个道理，但要在内核写投影之前/之后抢时序）。我没有替主人选，因为 (a) 影响日常使用体感、(c) 要动启动时序 |
+| 1 | **dev 与已装应用共用一个 profile**（"两全"问题） | `[x]` | **两处都修好了，不需要再选方案**：①上游只在 `loadProfile` 里清 `.dsh-module-fallback`，桌面宿主走的 `loadProfileDirectory` 不清——外壳现在在 spawn 前自己删**属于别的树**的投影（§12.8.1，5 条测试 + 真机 E2E）；②profile patch 里那份 **home 行副本从来就是多余的**（web 线的宿主自己合成 home 层），而它是旧线 `duplicate loader entry id` 的来源——`isDev \|\|` 已删，dev 与生产同规则（§12.8.2）。**残余**：9-17 那个旧构建**自己的旧判据**仍会把行注释掉、并回退重装它自带的 0.1.5 内核——所以别再用它，装同线构建即可 |
 | 2 | **`bundled-kernel/` 要按 0.1.7-alpha.2 重新 stage** | `[x]` | 已重 stage（`node scripts/prepare-bundled-kernel.mjs win32 x64`）：`bundled-kernel/manifest.json` 现在是 `0.1.7-alpha.2 / 6e0ad788`，`integrity` 写着这次产物的真 sha512 `4b2677ef…`，`officePayload 0.0.1-py3.12.14`。**此前它是 `0.1.6-alpha.2 / c913bff9`**——装完即用、还没下载内核的那一次启动会拿 0.1.6 跑 0.1.7 适配过的套件。**发布链路本来就会做这一步**（`release.yml` 从当次产物 stage），这里补的是**本机**那份 |
 | 3 | Agent Team 装进 profile（专项三 / D3） | `[x]` | **装载完成、界面可用、并真跑过一个团队任务**（证据在 §12.6 与 §12.7）。§11「步 7」那句"客户端半没出现"是 **0.1.6 线**的旧状态。**共享任务看板（`team_task_*`）没走过**——那一次的任务是用 `spawn_teammate` + `send_message` 直接派的，主人说"其余需要跑板的后面再说" |
-| 4 | 随包 pnpm（B2 的前提） | `[!]` | 插件管理页的包操作需要 `PATH` 上有 pnpm |
+| 4 | 随包 pnpm（B2 的前提） | `[x]` | **已做**（§12.9）：运行时自带锁定的 pnpm 11.7.0 + 平台 shim，外壳把它接到子进程 `PATH` 最前与宿主的包管理器参数位；命令级与应用级都实测过（把 `PATH` 里所有 pnpm 删掉仍能装插件）。**残余**：内核自带插件页那条 service 路径只验了参数送出，POSIX shim 未在对应平台实跑 |
 | 5 | 第三方插件（`dshmarket`、`dsh-lsp-actions`、`dsh-remote` 等）的客户端 API 漂移 | `[!]` | 上游 `ui-primitives` 在两条线之间动过 26 个文件；`dshmarket` 因此渲染成错误卡（React #130）。我们**不 import** 它（`plugin-kernel-imports` 门禁），所以不是我们的缺陷；要不要逐条找作者/换版本由主人定 |
 | 6 | 两处文案 | `[!]` | (a) 市场目录源返回非 JSON 时的说法（现在是"返回了无法解析的 JSON"，其实是**传输**问题，见 §11 那条）；(b) 引擎状态的「就绪」→「已配置」 |
 | 7 | A3 / B5 / B13 / B14 / O4 五行界面待验 | `[–]` | 处置与理由在 §6.2 末尾那张表里（花配额 / 要机器 / 不属于我们的代码路径 / 你日常一看就知道） |
@@ -3335,20 +3335,21 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 **验证**：`test/projection-drop.test.mjs` 5 条（含"删完以后那棵别人的内核树必须完好"与"指向别处的 profile 链接不能被顺手删掉"）；根测试 **378/0**；**真机端到端**：在真实 profile 里种一个指向已装 0.1.6 内核的投影（3 条），启动后外壳打出
 `[suite-profile] dropped the module projection of an earlier line (1 entries, 3 profile links)`，投影目录消失、窗口无 pending 条目。
 
-### 12.8.2 "两全"的最后一块：home 行副本是**必需的**，也是**致命的**
+### 12.8.2 "两全"的最后一块：home 行副本**根本不该有**（`isDev \|\|` 已删）
 
-查这条时做了两次真机对照（同一份 profile、同一台机器）：
+**先更正一段错判**：这一段最初写的是"桌面宿主只读 profile patch，所以 dev 必须复制 home 行、生产模式因此丢了预设选择器"。**那是读界面读错了**——预设入口是个按钮，它的可访问名来自内容（`标准模式`），不带 `aria-label`，我按 aria-label 找当然找不到；而"`Agent Team` 动作"在**新建会话**里本来就不存在（那要团队会话才有）。以下才是实测结论：
 
-| 启动方式 | profile patch 里有没有 home 行副本 | 结果 |
+| 启动方式 | profile patch 里的 home 行副本 | 结果 |
 |---|---|---|
-| `DSH_APP_DEV=1`（我们日常） | **有**（`homeRowsInProfilePatch` 里 `isDev \|\|` 强制复制） | 输入栏有**预设选择器**、会话头部有 `自进化模式` 徽章与 `Agent Team` 入口、模型列表正常 |
-| 不带 `DSH_APP_DEV`（安装版路径） | **没有**（web transport → 写占位注释） | 客户端健康、但**没有预设选择器、没有 `Agent Team` 动作、没有预设徽章**（37 个 slot 里 `conversation.session.header.actions` 是空的） |
+| `DSH_APP_DEV=1`（旧判据 `isDev \|\|` 强制复制） | 有 | 一切正常——**但副本就是那条 `duplicate loader entry id` 的来源** |
+| 打包后的 0.1.7 构建（不带 `DSH_APP_DEV`） | **0 条** | 预设菜单里**有「自进化模式」**（只存在于 home 层）；团队会话的会话头部**有 `Agent Team`**；子代理计数也在 |
+| 改完判据后的 dev（副本 0 条） | **0 条** | 预设菜单里**同样有「自进化模式」**——home 层本来就进得来 |
 
-**结论**：桌面宿主**只读 profile patch**，所以 home 行必须复制进来；而 0.1.6 那条线的合成器**同时读 home 层**，副本就成了 `duplicate loader entry id`（主人那台机器上已装的应用正是这样起不来的）。
-**一个 profile 同时给两条线用，这两件事无法两全**——除非两边的宿主都在同一条线上。所以：
+**结论**：web 线（0.1.6-alpha.2 及以后）的宿主**自己会合成 home 层**，所以 profile patch 里的副本**从来就是多余的**，而且**是有害的**：它会让任何一条"合成 home 层"的启动撞上重复 id（主人机器上那个 9-17 旧构建就是这么起不来的，随后回退去重装它自带的 0.1.5 内核、把 2.5 万个文件镜像进 profile）。
 
-- **短期**：dev 的 `isDev ||` 复制照旧（否则 dev 里主人的 MCP / 预设会消失）；**已装的那个旧构建（9-17 的 v0.13.1）不要再和 dev 共用这个 profile**，它还会用旧判据把行注释掉（这段实测里它把「模型」两行与预设行又注释了一次，已按同一判据恢复）。
-- **正式解**：装上同一条线的新构建（这次要发布的这份），两边就都是 0.1.7，副本不再跨线冲突。
+**修法**：`homeRowsInProfilePatch` 去掉 `isDev ||`，只按 transport 判（frames 线仍复制，那条线的宿主只拿到这个文件）。**dev 现在与生产同一条规则**，于是 dev 不再每次启动就往共享 profile 里种一颗雷。新增 `test/home-rows.test.mjs` 钉住这条（含"签名里不许再出现 `isDev`"）。
+
+**为什么之前那个"两全"结论也一并作废**：既然副本不必要，两条线共用一个 profile 的冲突就只剩**投影**那一处——而那一处 §12.8.1 已经修了（`dropForeignProjection` 在启动前删掉属于别的树的投影）。也就是说：**同一台机器上跨线共用 profile 现在是可以成立的**（仍须注意：旧构建自己的旧判据会注释行，那是它自己的问题，装同线构建即可）。
 
 ### 12.8.3 `/swarm` 真跑（A3 的一半）
 
@@ -3375,3 +3376,56 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 - **没有环境变量入口**（`DSH_PNPM` 之类无读取点，service 路径还会被 `scrubbedParentEnv()` 清掉）。
 - **我们外壳已经有上游那半**：`dsh-desktop-host` 读 `process.argv[5]/[6]` 当 `packageManager`（`command=process.execPath`、`args=['--expose-internals', <pnpm.mjs>]`、`env.PATH=<nodeBin>;…`），我们现在**没传这两个 argv**，所以没生效。
 - 因此最小做法是两件：①运行时随包一份**锁定版本**的 pnpm（照 `scripts/primary-runtime-lock.json` 里 node 的下载+校验写法）；②spawn 宿主/CLI 子进程时把它的目录前置到 `PATH`（CLI 链路只认 PATH），并可顺带补上 argv[5]/[6] 让内核自己的插件管理页也用它。**未实施**，理由是它会动打包与子进程环境，值得单独一轮。
+
+## 12.9 随包 pnpm（2026-09-23 晚）`[x]`
+
+**为什么做**：内核的每一次包操作都是子进程，而 `dsh plugin --profile <p> add <pkg>` 这条 CLI 路径
+**按名字**（`pnpm`）从 `PATH` 上找——所以在没装 pnpm 的机器上，插件管理页、内核自带的插件页、
+以及启动时的 profile 修复**全部**死在 spawn。本机有 pnpm 所以一直没暴露；这是"发出去别人装了就坏"
+的那类缺口。
+
+**查证**（只读上游 alpha.2 源码，证据在 §12.8.5）：只支持 pnpm；CLI 路径固定 `execa('pnpm')`
+（`packages/boot/plugin-manager/src/operations.ts:118`），env 全量继承；官方两个注入点是行配置
+`pnpmCommand`（只作用于内核内 service 路径）与启动器注入的 `ProfileContext.packageManager`
+（`{command,args,env}`，官方桌面就是这么把 `runtime/pnpm/bin/pnpm.mjs` 交给宿主的）；**没有环境变量入口**。
+
+**做成什么样**
+
+| 位置 | 改动 |
+|---|---|
+| `scripts/build-runtime.mjs` | 新增 `stagePnpm()`：从 `primary-runtime-lock.json` 读 pin（**与办公组件同一份 pin，一处 bump 两处跟**），npmmirror → npmjs → pin 里的地址依次取，**sha512 校验通过才用**，解出 `package/` 到 `runtime/pnpm`，再写平台对应的 shim：Windows `bin/pnpm.cmd`、POSIX `bin/pnpm`（都用**树内的 node** 跑 `bin/pnpm.mjs`，`--expose-internals` 与上游一致） |
+| `src/main/desktop-host.ts` | `hostPnpmEntry` / `hostPnpmBinDir`（**吃的是 runtime TREE，而宿主拿到的是树里的 `app/`**——所以新增了 `DshHostOptions.pnpmTree`，由 `index.ts` 的 `activeRuntimeDir()` 填）；`webShapeArgs` 在树带 pnpm 时**多送两个位置参数**（宿主读 `process.argv[5]/[6]`，正是官方桌面那两位）；`startAttempt` 把 shim 目录**放在子进程 PATH 最前**（内核 CLI 按名字找得到，且优先于用户自己的版本；`PATH` 大小写写法按平台处理） |
+| `src/main/profile-heal.ts` + `index.ts` | 外壳自己 spawn 的修复同样需要它（那次 spawn 的父进程是外壳，看不到子进程 PATH），新增 `pnpmBinDir` 选项 |
+| `scripts/split-runtime-layers.mjs` | `runtime/pnpm` 与 `runtime/node` **同层**（都是内容寻址的运行时工具）；不放进任何层会让"仅用层重组"的校验直接失败 |
+
+**版本与来源**：pnpm **11.7.0**，与 CI（`pnpm/action-setup@v4` 固定 11.7.0）和构建 runtime 的版本同一个——
+profile 的 lockfile 就是它写的，漂版本会让"安装行为"跟着变。运行时体积 +4.4 MiB（90.6 MiB）。
+
+### 验证（三层，都是真跑）
+
+| 层 | 证据 |
+|---|---|
+| **单元/集成**（根测试 383/0） | `test/host-arg-shape.test.mjs` 新增：树带 pnpm 时 argv 多出 `pnpm.mjs` + 树内 node 目录、且 shim 在子进程 PATH **第一位**；**同一文件里另一条**证明不带 pnpm 的树**一个字节都不多送**（连 PATH 前缀都没有）。`test/profile-heal.test.mjs` 新增：修复子进程的 PATH 以 shim 开头、其余 PATH 保留；不带 `pnpmBinDir` 时**原样继承** |
+| **命令级**（`scratch/probe-bundled-pnpm.mjs`） | 在**一次性 `DSH_HOME`**（模板新建的 profile）里跑市场用的同一句 CLI，`PATH` 里删掉用户所有 pnpm 目录：**不带** shim → exit 1、cmd 报「不是内部或外部命令」；**带上** → exit 0，`+ dsh-better-edit ^0.8.2`、`Done in 614ms using pnpm v11.7.0`，包真的落在那个 profile 的 `node_modules` 里 |
+| **应用级**（真窗口 + CDP，同样无 pnpm 的 PATH） | `POST /api/plugins/dsh-app/plugin-market/install` → **200**、`installed: true, version 0.8.2`，pnpm 输出 `Packages: +17 … Done in 2s using pnpm v11.7.0`。这一跑用的是**一次性 DSH_HOME**（`scratch/probe-home-pnpm`），主人的真实 profile 一个字节没动 |
+| **产物** | 重打 runtime：90.6 MiB、sha512 `1ca12718…`、`runtime/pnpm` 555 个条目在包内；冒烟 `--tgz` **60/60**；层拆 `5 layers, 90.6 MiB` 且 `verify ok — 12834 files reproduced exactly` |
+
+**边界（没验的）**：内核**自带**插件页那条 service 路径只验到"参数位送出去了"（宿主日志里 argv 可见），
+没有从那个页面真的装一次——它走的是 `ctx.pluginManager`，与市场那条 CLI 路径不同一条；
+POSIX（mac/linux）的 `bin/pnpm` shim 只做了静态生成，没有在对应平台上跑过（本机是 Windows）。
+
+### 批判性审查（六问）
+
+1. **主张复核**：原判断"随包 pnpm 是 B2 的前提"成立，但**归属要说清**——本机本来就有 pnpm，
+   所以这条修的不是主人的机器，而是**任何没装 pnpm 的安装**。上一段文档里"我们运行时里没有 pnpm"
+   那句同时更正：办公组件里那份 pnpm 是**可选载荷**（要下载办公组件才有），不能当依赖。
+2. **修复最小性**：没有新依赖（pnpm 由现有 pin + 现有下载/校验模式获取），没有改上游源码；
+   改动集中在"构建多放一个目录 + 外壳多接两处"。
+3. **新风险**：(a) 子进程 PATH 被前置，若用户本机 pnpm 版本**旧于** lockfile 要求，现在会被我们这份覆盖——
+   这正是想要的，但要知道这是行为变化；(b) 参数位多送两个，**旧宿主**（不认识这两位）会把它们当多余位置参数——
+   所以只在树**确实带 pnpm** 时才送，而树带 pnpm 的唯一来源就是本期之后的构建；(c) 产物变大 ~4.4 MiB。
+4. **边界覆盖**：空/不带 pnpm 的树、`PATH` 大小写、非 Windows shim、`pnpmBinDir` 缺省、层重组校验都走过。
+5. **验证证据**：上表四层；**没跑的说清**（service 路径只验参数、POSIX shim 未实跑）。
+6. **反例（残余）**：如果内核将来**不再**用 `pnpm` 这个名字（例如改名或改用 `corepack`），
+   这个 shim 就失效了——判据是"内核 CLI 解析命令名的位置"，需要跟线时重看
+   `plugin-manager/src/operations.ts` 的默认值。

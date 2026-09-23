@@ -23,6 +23,19 @@ pinned `@deepseek-ai/dsh-web-frontend` (`latest` lags), the private
 `<assetRoot>/scripts/check_office.py`, so it is as mandatory as the host (meta
 layer).
 
+The runtime also carries **pnpm** at `<kernelDir>/runtime/pnpm` (`stagePnpm`),
+pinned by `scripts/primary-runtime-lock.json` — the same pin the office payload
+uses, so one bump moves both, and the tarball is sha512-verified before it is
+unpacked. Why it must be there: every package operation the kernel performs is a
+child process, and the `dsh plugin … add` path resolves the command by NAME
+through `PATH` (`plugin-manager`'s `pnpmCommand` default), so an installer cannot
+assume the user has one. The shell wires it in twice — at the front of the kernel
+child's `PATH` and in the desktop host's package-manager argument slots
+(`webShapeArgs`) — and `split-runtime-layers.mjs` keeps `runtime/pnpm` in the
+`node` layer, whose re-assembly check fails if any entry belongs to no layer.
+The pin must track CI's `pnpm/action-setup` version: the profile lockfiles are
+written by whichever pnpm assembles the runtime.
+
 `build-runtime.mjs` keeps only the **target-scoped** payload (step 2e,
 `trimRuntimePayload`): the ported rules from upstream's desktop packaging drop
 source maps, `.d.ts`, build caches, `fs-ext` compiler output, domino test
@@ -122,7 +135,8 @@ Mechanics live in `.github/workflows/release.yml` (jobs: `prepare-release`,
    release back. Re-run `gh workflow run publish-mirror.yml -f tag=vX.Y.Z` (after
    a `503`, add `-f mode=diagnose`).
 7. **Runtime-only release**: run `npm run check:plugins -- --kernel <runtime.tgz>
-   --home <real profile dir>` first (no `--home` → temp DSH_HOME). The runtime
+   --home <the DSH_HOME, the directory holding profiles/>` first (it is not the
+   profile directory itself; no `--home` → temp DSH_HOME). The runtime
    job queues the ModelScope mirror itself once the six-cell set is up, so
    a dispatch-run runtime no longer needs a manual backfill; if a mirror run
    failed, backfill the same way: `gh workflow run publish-mirror.yml -f
@@ -143,7 +157,10 @@ Layers: five + one index per cell; names are the cache keys
 (`node`/`vendor`/`meta` content-addressed, `dsh`/`suite` version-addressed); the
 client prefers layers and falls back to the tarball; digests
 official-first/fail-closed/ModelScope-never; `cleanup()` keeps
-`<userData>/kernel/layers/` and drops only unreferenced layers.
+`<userData>/kernel/layers/` and drops only unreferenced layers. `node` also
+carries `runtime/pnpm` (the tree's bundled package manager), so a pnpm bump
+renames that layer on its own — and any runtime entry no layer claims fails
+`split-runtime-layers.mjs`'s own re-assembly check.
 
 The office payload is part of the runtime set the mirror requires: the script
 reads each cell's manifest and demands all three payload assets for every cell
