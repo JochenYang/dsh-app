@@ -78,13 +78,17 @@ without the target's engine fails the build.
 
 A staged Python set (upstream's `primary-runtime`) rides the same artifact when
 `DSH_APP_PRIMARY_RUNTIME` names one — `scripts/build-primary-runtime.mjs`
-produces one per cell (win32 and darwin only; the host's `readPrimaryRuntime`
-refuses a linux manifest), and it is what makes the host's
+produces one per cell (win32 and darwin only: a 0.1.7 host reads a linux
+manifest too, but no linux engine is staged or tested here and one would ride
+~150 MB in every linux office payload), and it is what makes the host's
 `load_workspace_dependencies` tool answer at all. Its inputs are pinned in
-`scripts/primary-runtime-lock.json`, a copy of upstream's
-`apps/desktop/scripts/primary-runtime-lock.json` plus a win32-arm64 cell this
-repo added; refreshing it for a new harness line is a manual drill (copy the
-values, then check every digest against the official source), and
+`scripts/primary-runtime-lock.json`, a MERGE of upstream's
+`scripts/primary-runtime/lock.json` — 0.1.7-alpha.2 moved that file out of
+`apps/desktop/scripts/` — with two additions of this repo: a win32-arm64 cell,
+and the pnpm pin upstream resolves from its own workspace. Refreshing it for a
+new harness line is therefore a merge, not a copy — the shared values move
+together, both additions stay, and every digest is then checked against the
+official source, and
 `node scripts/smoke-primary-runtime.mjs <stagedDir>` proves a staged tree against
 the host's own `primary-runtime.ts` — install, five paths, Python imports, Node
 and pnpm versions, and the `load_workspace_dependencies` answer itself.
@@ -108,6 +112,27 @@ release tag and skips in a shallow clone.
 
 Mechanics live in `.github/workflows/release.yml` (jobs: `prepare-release`,
 `resolve`, `runtime` × 6 cells, `app` × 4 cells); the decisions:
+
+**Before anything else — three things that cost a release each (each is expanded
+where it belongs, and each has bitten this project):**
+
+| Rule | Why | Where |
+|---|---|---|
+| The `runtime-<dshVersion>` release **stays a prerelease** | `/releases/latest` resolves to the newest NON-prerelease release, and a runtime tag carries no `latest.yml` — publishing it as a normal release points the shell's own update check at a release that cannot answer it | §4.3 |
+| A shell **`vX.Y.Z` tag is never re-run** | electron-builder's publish is not idempotent (422 `already_exists`); recovery is delete release + delete tag, then re-tag with the same content | §6 |
+| The **ModelScope mirror is dispatched by hand** for a shell release | `release.yml` does not run it: the runtime job queues its own mirror, but the shell's must be started with **your own** credentials after the draft is published (CI's `GITHUB_TOKEN` neither triggers the downstream run nor carries the mirror's token) | §4.5–§4.7 |
+
+**And know which line the release moves**: the shell's kernel channel comes from
+the manifest of the kernel it bundles (`bundledKernelChannel`,
+`src/main/index.ts:93`), and a user's kernel-update path is pinned to that
+channel's dist-tag. So a shell released on an `alpha` bundle cannot update its
+kernel past an alpha version whose runtime was never published — the artifact
+probe returns early and the alternatives on other tags are never considered
+(`src/kernel/manager.ts:358-364`). Shipping a shell whose bundled kernel is
+`rc` (channel `beta` → dist-tag `next`) is what moves those users onto the new
+line: the shell update installs the newer bundled kernel, and the channel follows
+it. Backfilling an older line's runtime helps only users who do NOT take the
+shell update.
 
 1. **Bump + changelog**: `version` in `package.json`; `[Unreleased]` →
    `[vX.Y.Z]` in `CHANGELOG.md` (zh/en aligned); commit both.
