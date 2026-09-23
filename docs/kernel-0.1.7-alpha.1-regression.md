@@ -3501,3 +3501,57 @@ POSIX（mac/linux）的 `bin/pnpm` shim 只做了静态生成，没有在对应�
 
 **顺带记一个工具**：`scratch/read-session-log.mjs`——V4 会话日志是**多帧** zstd，Node 的流式解码器
 在第二帧就报 `Unknown frame descriptor`（实测 72 KB 的文件只读出 199 字节），按帧魔数切开逐帧解就好。
+
+## 12.12 上游 bug：桌面宿主的设置写入被拒（2026-09-23 深夜，v0.13.2 已发布后发现）
+
+主人装上 v0.13.2 后报的第一个故障：**内测声明点「继续」提示"暂时无法保存确认状态，请重试"**，
+每次启动都重新出现。查证结论：**这是 0.1.7-rc.1 上游桌面宿主的缺陷**，不是我们的 profile、
+补丁文件或启动参数；症状已用可写的那条路径修掉。
+
+### 12.12.1 证据链
+
+| # | 事实 | 来源 |
+|---|---|---|
+| 1 | 点「继续」时发出的 RPC：`POST api/settings/mutate`，`{ns:"ui-settings-general", ops:[{op:"set", path:["welcomeNoticeVersion"], value:"2026-08-13.1"}]}` | 在真应用渲染进程里包了一层 `window.fetch` 抓到的（CDP，端口 9300） |
+| 2 | 内核的回答：`200 {ok:false, error:{code:"settings/rejected", message:"dsh: profile reload requires the root Include entry"}}` | 同上。**是明确的拒绝，不是网络或超时** |
+| 3 | 这条拒绝来自 `reconcileProfilePatches`：`WeakMap<Context, Entry>`（`bootstrapIncludes`）里没有它拿到的那个 context | `packages/boot/app-boot/src/index.ts:275`；调用方 `packages/boot/config-editor/src/index.ts:84,132` 传的是 `this.ownerContext.root` |
+| 4 | **同一个 profile、同一个内核，换成 CLI 启动，同一条写入成功** | 实跑：`<rt>/node/node <rt>/app/…/dsh/lib/bin.js --profile dsh-app --host 127.0.0.1 --port 19421 --no-open`，再用会话 cookie POST 同一条 → `ok:true`、`value:{welcomeNoticeVersion:"2026-08-13.1"}`、`applies:"live"` |
+| 5 | 启动参数不是原因 | 与官方 Electron 桌面逐字比对（`apps/desktop/src/host-process.ts:151-170`）：`--expose-internals` / entry / runtimeDir / projectDir / primaryRuntime / pnpm / nodeBin 完全一致 |
+| 6 | 官方桌面**自己也走同一条路径**，即同样中招 | `apps/desktop-host/src/index.ts:22-27`：`loadProfileDirectory(…)` + `runProfile({resolvedProfile:{…}})`，正是 CLI 那条路径之外的另一半 |
+| 7 | 上游 tag 之后没有相关修复 | 检出就在 `dsh-v0.1.7-rc.1`（`merge #5073`），`HEAD..origin/master` 为空 |
+
+**疑点（未证实）**：`bootstrapIncludes` 是模块级 WeakMap，按模块**实例**记账。桌面宿主自己 import 的
+`@deepseek-ai/dsh-app-boot` 与 profile 树里 config-editor 解析到的那份**可能不是同一个实例**
+（宿主用 `HostResolvedRootInclude` / 运行时拦截解析裸包名，而它自己的 import 走普通 ESM 注册表）——
+于是"写进去的那个 ctx"和"读出来的那个 ctx"分属两份 WeakMap。要确认需要对 `boot()` 与 config editor
+两侧各取一次该模块的身份。
+
+### 12.12.2 影响面
+
+**桌面应用里凡是走客户端设置页的写入都存不住**（通用设置、主题、模型、网络搜索…）。
+我们的外壳自己需要的少量值可以绕过（见下），但**用户改自己的设置会失败**——这是这一条线在
+发布版 v0.13.2 上的已知缺陷。
+
+### 12.12.3 已做的处置
+
+1. **症状修掉**：通过 CLI 路径把确认值写进 profile 补丁的**保留区**（`# @@dsh-app-rows:home` 之前）：
+
+   ```yaml
+   - id: ui-settings-general
+     name: "@deepseek-ai/dsh-client-ui-settings-general"
+     config:
+       welcomeNoticeVersion: 2026-08-13.1
+   ```
+
+   真应用复验：启动后页面里**不再出现**「内测声明」。备份 `scratch/patch-before-settings-probe.yml`。
+2. **上游报告草稿**：`scratch/upstream-settings-write.md`（含两次实跑对照、代码位置、疑似机制）。
+3. **临时绕法（写给主人）**：要改那类设置，先用 `dsh web`（同一 profile，CLI 路径）改；那条路是好的。
+
+### 12.12.4 判据与残余
+
+- **判断依据**：第 4 条（同 profile 换启动路径就成功）是决定性的——它把"profile 坏了"和"启动路径坏了"
+  分开；第 5、6 条把它钉到上游宿主，而不是我们的 argv 或外壳。
+- **残余**：设置页写入仍然失败；直到上游修好之前，桌面端的设置只能靠 CLI 路径改。
+  这一条应当写进下一次发布的 CHANGELOG（已知问题），并在上游修复后复验一次。
+- **教训**：`dsh web` 那条对照一开始我拿的是**另一个 profile**（web 而非 dsh-app），
+  差点得出"宿主没问题"的结论——设置是**按 profile** 存的，跨 profile 对照不成立。
