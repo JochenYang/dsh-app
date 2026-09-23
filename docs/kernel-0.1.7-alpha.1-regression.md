@@ -3269,7 +3269,7 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 |---|---|---|---|
 | 1 | **dev 与已装应用共用一个 profile**（"两全"问题） | `[!]` | 现状两套都读 `$DSH_HOME/profiles/dsh-app`。**同线**时不会互相污染（套件按当前运行的那棵树重建链接），**跨线**时会（0.1.6 的内核把自己的包投影进 profile，0.1.7 的启动随后加载它们——7 条客户端条目 pending）。三个可选方向：**(a)** dev 用独立 `$DSH_HOME`（代价：dev 里的登录态、设置、会话另起一份）；**(b)** 保持共享，靠"已发布版本跟上仓库线"消化（本次 alpha.2 就是这条）；**(c)** 外壳在**检测到线变化**时清掉 profile 的模块投影（与 `client-state.ts` 按线清 localStorage 同一个道理，但要在内核写投影之前/之后抢时序）。我没有替主人选，因为 (a) 影响日常使用体感、(c) 要动启动时序 |
 | 2 | **`bundled-kernel/` 要按 0.1.7-alpha.2 重新 stage** | `[x]` | 已重 stage（`node scripts/prepare-bundled-kernel.mjs win32 x64`）：`bundled-kernel/manifest.json` 现在是 `0.1.7-alpha.2 / 6e0ad788`，`integrity` 写着这次产物的真 sha512 `4b2677ef…`，`officePayload 0.0.1-py3.12.14`。**此前它是 `0.1.6-alpha.2 / c913bff9`**——装完即用、还没下载内核的那一次启动会拿 0.1.6 跑 0.1.7 适配过的套件。**发布链路本来就会做这一步**（`release.yml` 从当次产物 stage），这里补的是**本机**那份 |
-| 3 | Agent Team 装进 profile（专项三 / D3） | `[x]` | **装载完成且界面可用**：bundle 在 profile 的 `dsh.profile.bundles` 里、四个包都在、会话头部的槽位里有 `Agent Team` 入口、点开能看到成员与共享任务（证据在 §12.6）。§11「步 7」那句"客户端半没出现"是 **0.1.6 线**的旧状态。还剩一件小的：**没真跑一个团队任务**（要花配额，与第 7 条同一类） |
+| 3 | Agent Team 装进 profile（专项三 / D3） | `[x]` | **装载完成、界面可用、并真跑过一个团队任务**（证据在 §12.6 与 §12.7）。§11「步 7」那句"客户端半没出现"是 **0.1.6 线**的旧状态。**共享任务看板（`team_task_*`）没走过**——那一次的任务是用 `spawn_teammate` + `send_message` 直接派的，主人说"其余需要跑板的后面再说" |
 | 4 | 随包 pnpm（B2 的前提） | `[!]` | 插件管理页的包操作需要 `PATH` 上有 pnpm |
 | 5 | 第三方插件（`dshmarket`、`dsh-lsp-actions`、`dsh-remote` 等）的客户端 API 漂移 | `[!]` | 上游 `ui-primitives` 在两条线之间动过 26 个文件；`dshmarket` 因此渲染成错误卡（React #130）。我们**不 import** 它（`plugin-kernel-imports` 门禁），所以不是我们的缺陷；要不要逐条找作者/换版本由主人定 |
 | 6 | 两处文案 | `[!]` | (a) 市场目录源返回非 JSON 时的说法（现在是"返回了无法解析的 JSON"，其实是**传输**问题，见 §11 那条）；(b) 引擎状态的「就绪」→「已配置」 |
@@ -3284,5 +3284,33 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 | **组合静态检查现在报什么** | 直接跑外壳那一步的同一个命令：`DSH_HOME=<真实> <runtime>/node/node <runtime>/app/node_modules/@deepseek-ai/dsh/lib/bin.js --profile dsh-app --dump-config-schema` | **7 条 error，一条都不是我们的、也不是 agent-team 的**：`/173–176` 与 `/210`、`/212` 全是 `@deepseek-ai/dsh-agent-preset` 行（**内核自带的四个预设** standard / ptc / minimal / cordis，加上迁移进来的 `preset-rsi-dev`），`/182` 是第三方 `dsh-context`（"Config is not a native Schemastery schema"）。**`preset-rsi-dev` 同时出现在 `/210` 与 `/212`**——因为它两处都写着（`$DSH_HOME/cordis.patch.yml:56` 与 profile 的 `cordis.patch.yml:1357`）。内核没把它当重复条目拒绝（同 id 在不同分组下各算一条），应用照常启动；**要不要收敛成一处是主人的内容决定**，我没有动它 |
 | **页面重载后控制台还有什么** | 用新写的 `scratch/probe-boot-audit.mjs`（CDP 订阅 `Runtime.consoleAPICalled` + `Log.entryAdded`，然后 `Page.reload`）抓一次真窗口的启动审计 | **没有 `web boot: N entries did not activate`**——这一线上没有任何客户端条目停在 pending（用户当时贴的那条 7 条 pending 是**混线运行时**的症状）。三条 `404` 是客户端向 `dsh-app://app/api/changes.summary?sessionId=…` 要一个**当前内核进程里没有 announce 的老会话**的改动摘要，路由自己的注释就写着 "while its Session lives"，属预期，不是缺陷 |
 
-**这三查各自的边界**：Agent Team 只验了"入口在、面板开、能列出成员与共享任务"，**没有真跑一个团队任务**（那要花配额，见 §12.5 第 7 条）；
+**这三查各自的边界**：Agent Team 那时只验了"入口在、面板开、能列出成员与共享任务"，**真跑见 §12.7**；
 组合检查验的是**静态组合**，不等于运行时行为；控制台那一次抓的是**重载**路径，不是首次冷启动的每一次。
+
+## 12.7 真跑一次 Agent Team（2026-09-23 17:33，`test` 工作区）
+
+主人要求：**先在 `test` 工作区真跑一次团队面板**，模型用「littlejochen 下的 deepseek-v4-flash」（他此前已设为默认），
+共享任务看板留到以后再说。
+
+**跑法**：在真应用窗口（CDP 驱动 `dsh-app://app/index.html`，内核是本机产物）里点左侧 `test` 工作区的
+「新建会话」，输入并发送：
+
+> 用 agent team 起一个两人小队完成任务：成员 A 在当前工作区根目录写 hello.txt（内容 hello，落款 A）；
+> 成员 B 写 world.txt（内容 world，落款 B）；两人都完成后，你核对两个文件确实存在且内容正确，然后汇总报告。
+
+**结果（53 秒、一轮 7 步、270K tokens）**
+
+| 看什么 | 看到什么 |
+|---|---|
+| 会话落位 | 新会话出现在左侧 **`test` 工作区**下，标题「Agent 小队双人任务协作」；成员各自的会话也落在同一工作区（目录 `--D-codes-…-test--` 下新增两个） |
+| 团队真的起了 | 会话头部三处：我们的预设徽章、**`Agent Team`**、`2 个子代理`；面板点开是 **成员：lead / worker-a / worker-b**（三名，均已结束显示"未运行"），与三个各自的模型 `deepseek-v4-flash` |
+| 成员真的干活了 | **磁盘核对**（不是只看模型的自述）：`D:\codes\杂项\test\hello.txt` = `hello` + `-- A`，`world.txt` = `world` + `-- B`，两个文件都是 17:33 写入的 |
+| 成员会话可跳转 | 点面板里的成员行会**切到那名成员的会话**（面包屑 `Agent 小队双人任务协作 / 创建 world.txt`），它自己的开场白就是 `<system-reminder>You are teammate "worker-b".</system-reminder>` 加那段任务说明——这一路上游的"切换到成员会话"是通的 |
+| 报告质量 | lead 说它**亲自读回**两个文件核对（不是只凭成员自报），并说明了归属；文件内容与要求逐字一致 |
+| 模型确实是主人指定的那条 | `$DSH_HOME/profiles/dsh-app/cordis.patch.yml:1296–1299` 的 `agent-default-model` 行写着 `provider: littlejochen` / `model: deepseek-v4-flash` / `reasoningEffort: xhigh`——**这就是内核的新会话默认值**，我全程没碰模型选择器；界面上输入栏显示 `deepseek-v4-flash`，用量表 `deepseek-v4-flash` 一行从 30 次涨到 **43 次**（+13 = 三个会话的请求），总量 2025 → **2038** |
+
+**没做的**：`team_task_create` / `team_task_list` 那条**共享任务看板**没走（面板里"共享任务：还没有共享任务"，
+因为这次任务是 `spawn_teammate` + `send_message` 直接派的）——主人说"其余需要跑板的后面再说"，记在这里。
+
+**这一跑的边界**：只证明"两人小队 + 成员会话 + 面板 + 汇报"这条主干通；**中断、成员失败重试、
+长任务并行、`team_task_*` 看板**都没碰。
