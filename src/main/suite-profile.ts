@@ -464,6 +464,9 @@ export async function ensureSuiteProfile(): Promise<SuiteProfileStatus> {
 /** Marker inside the profile recording the runtime tree its node_modules mirrors. */
 export const PROFILE_KERNEL_MARKER = '.dsh-app-kernel.json'
 
+/** Upstream's legacy link-backend projection; see {@link dropForeignProjection}. */
+const LEGACY_PROJECTION_DIR = '.dsh-module-fallback'
+
 /** The profile's own package-manager state; see {@link lockfileOwnedNames}. */
 const PROFILE_LOCKFILE = 'pnpm-lock.yaml'
 
@@ -999,4 +1002,119 @@ export async function dropRuntimeMirror(profileDir: string, runtimeDir?: string)
   } catch (error) {
     return { status: 'failed', entries: 0, files: 0, kept: [], detail: (error as Error).message }
   }
+}
+
+/** What {@link dropForeignProjection} did, for the caller's log line. */
+export interface ProjectionOutcome {
+  /** `absent` — no projection; `kept` — it belongs to this tree; `dropped` — another tree's, removed. */
+  status: 'absent' | 'kept' | 'dropped' | 'failed'
+  /** Entries the projection held, when one was there. */
+  entries?: number
+  /** Profile `node_modules` links that pointed into it and were unlinked. */
+  links?: number
+  /** Failure detail, for the log. */
+  detail?: string
+}
+
+/** Whether `target` names a path at or below `root`, the way the platform compares them. */
+function insidePath(target: string, root: string): boolean {
+  const fold = (value: string): string => (process.platform === 'win32' ? value.toLowerCase() : value)
+  const folded = fold(target)
+  const prefix = fold(root.endsWith(path.sep) ? root : root + path.sep)
+  return folded === fold(root) || folded.startsWith(prefix)
+}
+
+/**
+ * Drop a `.dsh-module-fallback` projection that belongs to ANOTHER kernel tree.
+ *
+ * That directory is upstream's link backend: a launching kernel materializes
+ * `<profile>/.dsh-module-fallback/node_modules/<name>` and points the profile's own
+ * `node_modules/<name>` at it, so a profile plugin resolves the kernel's packages
+ * without their being installed there. Upstream removes it in `loadProfile` — but
+ * the DESKTOP host calls `loadProfileDirectory`, which does not, so on this line
+ * nobody does. Measured on this machine: a 0.1.6 boot left 144 entries and 434
+ * profile links behind, and the next 0.1.7 boot then resolved 0.1.6 client
+ * packages out of it — `web boot: 7 entries did not activate` with every settings
+ * client waiting on `configForms`, i.e. the app opened on "Failed to load plugins".
+ *
+ * Only a projection that belongs to SOMEONE ELSE is dropped: one whose entries
+ * resolve inside the tree about to boot is that tree's own bookkeeping and stays.
+ * Links are unlinked, never walked — see {@link removeWithoutLinks}.
+ *
+ * @param profileDir - the profile about to be booted.
+ * @param runtimeDir - the runtime tree running now.
+ * @returns what happened, for the caller's log line. Never throws.
+ */
+export async function dropForeignProjection(profileDir: string, runtimeDir: string): Promise<ProjectionOutcome> {
+  const owned = path.join(profileDir, LEGACY_PROJECTION_DIR)
+  try {
+    const stats = await statOrUndefined(owned)
+    if (stats === undefined) return { status: 'absent' }
+    const projectionModules = path.join(owned, 'node_modules')
+    const entries = await fs.readdir(projectionModules).catch(() => [])
+    if (await projectionBelongsTo(projectionModules, entries, runtimeDir)) {
+      return { status: 'kept', entries: entries.length }
+    }
+    let links = 0
+    // Read the LINKS, not their realpaths: on Windows a junction's `realpath`
+    // resolves THROUGH it to the tree it points at, so a link into the
+    // projection looks like a link into that kernel tree and the filter would
+    // never match (measured; caught by test/projection-drop.test.mjs). The
+    // junction's stored target is the projection path itself.
+    for (const candidate of await symlinksUnder(path.join(profileDir, 'node_modules'))) {
+      const stored = await fs.readlink(candidate).catch(() => undefined)
+      if (stored === undefined) continue
+      const target = path.resolve(path.dirname(candidate), stored)
+      if (!insidePath(target, path.join(owned, 'node_modules'))) continue
+      await removeWithoutLinks(candidate)
+      links += 1
+    }
+    await removeWithoutLinks(owned)
+    return { status: 'dropped', entries: entries.length, links }
+  } catch (error) {
+    return { status: 'failed', detail: (error as Error).message }
+  }
+}
+
+/** One projection entry is enough to tell whose tree the projection was made for. */
+async function projectionBelongsTo(projectionModules: string, entries: readonly string[], runtimeDir: string): Promise<boolean> {
+  const runtime = await fs.realpath(runtimeDir).catch(() => path.resolve(runtimeDir))
+  for (const name of entries) {
+    if (name.startsWith('@')) {
+      const scoped = await fs.readdir(path.join(projectionModules, name)).catch(() => [])
+      if (scoped.length === 0) continue
+      const real = await fs.realpath(path.join(projectionModules, name, scoped[0])).catch(() => undefined)
+      if (real !== undefined) return real.startsWith(runtime + path.sep)
+      continue
+    }
+    const real = await fs.realpath(path.join(projectionModules, name)).catch(() => undefined)
+    if (real !== undefined) return real.startsWith(runtime + path.sep)
+  }
+  // Nothing resolvable: not evidence of ownership, and a projection nobody can
+  // resolve is exactly the state that shadows this line's packages.
+  return false
+}
+
+/** Symlinks directly under a `node_modules` directory, top level and one scope deep. */
+async function symlinksUnder(modulesDir: string): Promise<string[]> {
+  const found: string[] = []
+  for (const entry of await fs.readdir(modulesDir, { withFileTypes: true }).catch(() => [])) {
+    const full = path.join(modulesDir, entry.name)
+    // `lstat`, not the dirent: on Windows a junction comes back from `readdir`
+    // as a plain directory (`isSymbolicLink()` false) while `lstat` reports the
+    // reparse point, and a link the walk misses is a link that stays.
+    const stats = await statOrUndefined(full)
+    if (stats === undefined) continue
+    if (stats.isSymbolicLink()) {
+      found.push(full)
+      continue
+    }
+    if (!entry.name.startsWith('@') || !stats.isDirectory()) continue
+    for (const child of await fs.readdir(full, { withFileTypes: true }).catch(() => [])) {
+      const childPath = path.join(full, child.name)
+      const childStats = await statOrUndefined(childPath)
+      if (childStats?.isSymbolicLink() === true) found.push(childPath)
+    }
+  }
+  return found
 }

@@ -38,7 +38,7 @@ import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
-import { dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
+import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { healLogLine, healProfileDependencies, installIntoProfile, isInstallablePackageName, type ProfileHealOutcome } from './profile-heal'
 import { alignWindowStateWithLine } from './client-state'
 import { countV4SessionLogs } from './session-logs'
@@ -980,6 +980,18 @@ async function startServerAndOpenWindow(): Promise<void> {
     // profile). Keeping it costs a shadowed package; removing it costs the boot,
     // and only one of those is recoverable.
     logKernel('[suite-profile] the host package reports no readable version, so the profile keeps the mirror it has')
+  }
+  // Upstream's legacy link projection is cleaned in `loadProfile`, which the
+  // desktop host does not call — so a projection an EARLIER line left here would
+  // be the package tree this boot resolves, and its client half is not this
+  // line's (`configForms` never provided, seven entries pending, the window on
+  // "Failed to load plugins"). Dropped before the spawn, and only when it
+  // belongs to another tree; see dropForeignProjection.
+  const projection = await dropForeignProjection(profile.dir, host.runtimeDir)
+  if (projection.status === 'dropped') {
+    logKernel(`[suite-profile] dropped the module projection of an earlier line (${String(projection.entries ?? 0)} entries, ${String(projection.links ?? 0)} profile links)`)
+  } else if (projection.status === 'failed') {
+    logKernel(`[suite-profile] the module projection of an earlier line could not be dropped: ${projection.detail ?? 'unknown error'}`)
   }
   // The window's view state belongs to the client build of THIS line — see
   // client-state.ts. Aligned before the window is handed the UI, because the
