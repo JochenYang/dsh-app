@@ -7,7 +7,7 @@
 
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
-import { sameNameStateOf, updatablePackages, mergeUpdateFacts } from '../src/client/installed-projection.ts'
+import { installedOwnerBadge, sameNameStateOf, updatablePackages, mergeUpdateFacts } from '../src/client/installed-projection.ts'
 
 describe('updatablePackages', () => {
   it('counts only non-suite packages with a pending update', () => {
@@ -109,5 +109,22 @@ describe('sameNameStateOf (catalog card same-name verdict)', () => {
       sameNameStateOf({ repoKey: 'github.com/o/r#path' }, { source: 'git', repoKey: 'github.com/o/r' }),
       { kind: 'local-git', sameRepo: false },
     )
+  })
+})
+
+describe('installedOwnerBadge', () => {
+  it('marks a suite plugin as the shell\'s own', () => {
+    assert.equal(installedOwnerBadge({ suite: true }), 'suite')
+  })
+
+  it('marks every other row as the author\'s, whatever it came in as', () => {
+    // npm, a git repo, a local tarball: all of them belong to whoever wrote the
+    // package, and the badge is what stops their breakage reading as ours.
+    assert.equal(installedOwnerBadge({ suite: false, source: 'registry' }), 'third-party')
+    assert.equal(installedOwnerBadge({ suite: false, source: 'git' }), 'third-party')
+    assert.equal(installedOwnerBadge({ suite: false, source: 'local' }), 'third-party')
+    // A row that does not carry the flag at all is not a suite plugin either:
+    // the shell sets it explicitly on the plugins it ships.
+    assert.equal(installedOwnerBadge({}), 'third-party')
   })
 })

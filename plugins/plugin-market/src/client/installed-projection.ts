@@ -116,3 +116,24 @@ export function sameNameStateOf(
   if (pkg.source === 'local' || pkg.source === 'git') return { kind: 'local-git', sameRepo }
   return sameRepo ? { kind: 'same-origin' } : { kind: 'cross-origin' }
 }
+
+/** Which ownership badge an installed row carries, if any. */
+export type InstalledOwnerBadge = 'suite' | 'third-party' | null
+
+/**
+ * The ownership badge for one installed row.
+ *
+ * Two entries answer the question a user actually asks when something in the
+ * list misbehaves — "is this ours to fix?" — and exactly one of them is true for
+ * any row: a suite plugin is written and shipped with the desktop shell, and
+ * everything else came from npm, a git repo or a local tarball and is the
+ * author's. The distinction is not cosmetic: a third-party plugin whose client
+ * half was built against another kernel line renders as an error card, and
+ * without the badge that reads as ours.
+ *
+ * @param pkg - the installed row's suite flag (absent = not a suite plugin).
+ * @returns the badge id, or null for a row that carries neither.
+ */
+export function installedOwnerBadge(pkg: { readonly suite?: boolean }): InstalledOwnerBadge {
+  return pkg.suite === true ? 'suite' : 'third-party'
+}

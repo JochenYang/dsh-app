@@ -32,7 +32,7 @@ import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
 import type { CatalogEntry, CatalogValue, InstalledPackage, LegacyValue, SourcesValue, UpdateValue } from './api.ts'
 import { categoryOptionsOf, entryMatchesQuery } from './catalog-filter.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
-import { sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
+import { installedOwnerBadge, sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
 import { type HostText } from '../errors.ts'
 import { NS } from './locales.ts'
 import { hostMessage, sourceReasonOf, type Translate } from './messages.ts'
@@ -1201,7 +1201,14 @@ function InstalledTab({
               <span className={pkg.bundled ? 'dshMkt-badge dshMkt-badgeOn' : 'dshMkt-badge dshMkt-badgeOff'}>
                 {pkg.bundled ? t('mkt.installed.mounted') : t('mkt.installed.unmounted')}
               </span>
-              {pkg.suite ? <span className="dshMkt-badge">{t('mkt.installed.suite')}</span> : null}
+              {/* Ownership: the row's own answer to "is this ours to fix?" — a
+                  suite plugin ships with the shell, everything else is the
+                  author's (see installedOwnerBadge). */}
+              {installedOwnerBadge(pkg) === 'suite' ? (
+                <span className="dshMkt-badge">{t('mkt.installed.suite')}</span>
+              ) : (
+                <span className="dshMkt-badge" title={t('mkt.installed.thirdPartyTitle')}>{t('mkt.installed.thirdParty')}</span>
+              )}
             </div>
             <div className="dshMkt-cardFoot">
               <button
