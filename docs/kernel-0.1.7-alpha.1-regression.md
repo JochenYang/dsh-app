@@ -3314,3 +3314,64 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 
 **这一跑的边界**：只证明"两人小队 + 成员会话 + 面板 + 汇报"这条主干通；**中断、成员失败重试、
 长任务并行、`team_task_*` 看板**都没碰。
+
+## 12.8 第三段：投影清理的真实根因、swarm 真跑、两处文案（2026-09-23 晚）
+
+### 12.8.1 跨内核线共用 profile —— 根因查清并修掉
+
+上一段把 (c) 写成"外壳在检测到线变化时清掉 profile 的模块投影"，当时靠推断。这一段把它查到了**具体一行**：
+
+**上游的清理在 `loadProfile` 里，而桌面宿主调的是 `loadProfileDirectory`**（`apps/desktop-host/src/index.ts`：`loadProfileDirectory('dsh', projectDir, installAnchor)` → `runProfile({resolvedProfile})`）。也就是说 **桌面这条线上没人清 `.dsh-module-fallback`**：
+上游 `removeLinkProjections`（`packages/boot/app-boot/src/profile.ts:697`，随 `loadProfile` 走）确实存在，但桌面路径根本不经过它。
+
+**实测后果**（本机真实数据）：一次 0.1.6 启动在 profile 里留下 **144 个投影条目 + 434 条 profile 链接**（全部指向已装的 0.1.6 内核树），随后 0.1.7 启动就**从那里解析包**：0.1.6 的客户端包被加载 → `web boot: 7 entries did not activate`，每个设置客户端都在等 `configForms`，窗口停在 **"Failed to load plugins"**——与主人早先贴的那段 console 完全一致。
+
+**修法**（`src/main/suite-profile.ts` 新增 `dropForeignProjection`，在 spawn 之前调用）：只有当投影里的条目解析结果**不在本次要启动的那棵树里**时才删——本树自己的投影留着；删的时候先解开指向它的 profile 链接，再用 `removeWithoutLinks` 去掉目录（**永不穿过链接**：那目录里全是指向另一棵内核树的 junction，穿过去就等于清空别人的包）。
+
+**两个 Windows 细节，都由新测试当场抓到**：
+1. `readdir(withFileTypes)` 把 **junction 当成普通目录**报回来（`isSymbolicLink()` 为 false），所以枚举必须 `lstat`；
+2. **junction 的 `realpath` 会穿过它**解析到目标树，所以判断"这个链接指向投影"只能读**链接自身的文本**（`readlink`），不能用 realpath。
+
+**验证**：`test/projection-drop.test.mjs` 5 条（含"删完以后那棵别人的内核树必须完好"与"指向别处的 profile 链接不能被顺手删掉"）；根测试 **378/0**；**真机端到端**：在真实 profile 里种一个指向已装 0.1.6 内核的投影（3 条），启动后外壳打出
+`[suite-profile] dropped the module projection of an earlier line (1 entries, 3 profile links)`，投影目录消失、窗口无 pending 条目。
+
+### 12.8.2 "两全"的最后一块：home 行副本是**必需的**，也是**致命的**
+
+查这条时做了两次真机对照（同一份 profile、同一台机器）：
+
+| 启动方式 | profile patch 里有没有 home 行副本 | 结果 |
+|---|---|---|
+| `DSH_APP_DEV=1`（我们日常） | **有**（`homeRowsInProfilePatch` 里 `isDev \|\|` 强制复制） | 输入栏有**预设选择器**、会话头部有 `自进化模式` 徽章与 `Agent Team` 入口、模型列表正常 |
+| 不带 `DSH_APP_DEV`（安装版路径） | **没有**（web transport → 写占位注释） | 客户端健康、但**没有预设选择器、没有 `Agent Team` 动作、没有预设徽章**（37 个 slot 里 `conversation.session.header.actions` 是空的） |
+
+**结论**：桌面宿主**只读 profile patch**，所以 home 行必须复制进来；而 0.1.6 那条线的合成器**同时读 home 层**，副本就成了 `duplicate loader entry id`（主人那台机器上已装的应用正是这样起不来的）。
+**一个 profile 同时给两条线用，这两件事无法两全**——除非两边的宿主都在同一条线上。所以：
+
+- **短期**：dev 的 `isDev ||` 复制照旧（否则 dev 里主人的 MCP / 预设会消失）；**已装的那个旧构建（9-17 的 v0.13.1）不要再和 dev 共用这个 profile**，它还会用旧判据把行注释掉（这段实测里它把「模型」两行与预设行又注释了一次，已按同一判据恢复）。
+- **正式解**：装上同一条线的新构建（这次要发布的这份），两边就都是 0.1.7，副本不再跨线冲突。
+
+### 12.8.3 `/swarm` 真跑（A3 的一半）
+
+在 `test` 工作区真跑了 `/swarm`（命令被识别为"已按并行子代理模式发送，正在拆分执行"）：两个子任务并行，**各写一个文件并读回确认**，lead 随后自己复核。**42 秒、115K tokens（两个子各 142K）**。
+磁盘核对：`D:\codes\杂项\test\swarm-a.txt` = `a`/`A`，`swarm-b.txt` = `b`/`B`（均 18:05 写入）。
+
+**没跑的一半**：A3 还要"触发一条 context 类 hook 规则"，需要在 Hooks 里配一条规则再跑一轮会话——**没做**，记在 §12.5 第 7 条那一类里。
+
+### 12.8.4 两处文案（已改，含版本号）
+
+| 位置 | 改成 |
+|---|---|
+| `plugin-websearch/src/client/locales.ts` 的 `ws.status.ready` | 就绪 → **已配置**（en `Ready` → `Configured`）。那一列是**配置体检**，旁边就是「缺少必要配置 / 需要 API Key / 未配置实例」，"就绪"会被读成"现在能用" |
+| `plugin-market/src/client/locales.ts` 的 `mkt.host.catalogNotJson` | 不再说"目录源返回了无法解析的 JSON"（把传输问题说成用户配的源坏了），改为"目录源响应不是可解析的 JSON（可能是代理或压缩破坏了响应体，源本身未必有问题）" |
+
+版本：`plugin-websearch 0.1.6→0.1.7`、`plugin-market 0.2.1→0.2.2`；套件 hash **`6e0ad788` → `d807f31d`**。门禁：websearch 92/92、market 203/203、根测试 378/0。
+
+### 12.8.5 随包 pnpm —— 调查结论（未实施）
+
+只读查了 `D:\codes\deepseek-harness`（alpha.2），结论：
+
+- **只支持 pnpm**，没有 npm/yarn/bun 分支；`dsh plugin ...` CLI 链路固定 `execa('pnpm')`（`packages/boot/plugin-manager/src/operations.ts:118`），**按 PATH 解析**，env 全量继承；找不到时报 `pnpm was not found; install pnpm and make it available on PATH`。
+- 官方有两个"指定二进制"入口：行配置 `plugin-manager` 的 **`pnpmCommand`**（可绝对路径，**只作用于内核内 service 路径**），以及启动器注入的 **`ProfileContext.packageManager`**（`{command,args,env}`；官方桌面就是这么把 `runtime/pnpm/bin/pnpm.mjs` 交给宿主的）。
+- **没有环境变量入口**（`DSH_PNPM` 之类无读取点，service 路径还会被 `scrubbedParentEnv()` 清掉）。
+- **我们外壳已经有上游那半**：`dsh-desktop-host` 读 `process.argv[5]/[6]` 当 `packageManager`（`command=process.execPath`、`args=['--expose-internals', <pnpm.mjs>]`、`env.PATH=<nodeBin>;…`），我们现在**没传这两个 argv**，所以没生效。
+- 因此最小做法是两件：①运行时随包一份**锁定版本**的 pnpm（照 `scripts/primary-runtime-lock.json` 里 node 的下载+校验写法）；②spawn 宿主/CLI 子进程时把它的目录前置到 `PATH`（CLI 链路只认 PATH），并可顺带补上 argv[5]/[6] 让内核自己的插件管理页也用它。**未实施**，理由是它会动打包与子进程环境，值得单独一轮。
