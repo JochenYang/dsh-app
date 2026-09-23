@@ -120,7 +120,7 @@ where it belongs, and each has bitten this project):**
 |---|---|---|
 | The `runtime-<dshVersion>` release **stays a prerelease** | `/releases/latest` resolves to the newest NON-prerelease release, and a runtime tag carries no `latest.yml` — publishing it as a normal release points the shell's own update check at a release that cannot answer it | §4.3 |
 | A shell **`vX.Y.Z` tag is never re-run** | electron-builder's publish is not idempotent (422 `already_exists`); recovery is delete release + delete tag, then re-tag with the same content | §6 |
-| The **ModelScope mirror is dispatched by hand** for a shell release | `release.yml` does not run it: the runtime job queues its own mirror, but the shell's must be started with **your own** credentials after the draft is published (CI's `GITHUB_TOKEN` neither triggers the downstream run nor carries the mirror's token) | §4.5–§4.7 |
+| The **ModelScope mirror runs itself** when the draft is flipped to published | `.github/workflows/publish-mirror.yml` hooks `release: published`, which IS that moment (a job inside `release.yml` cannot observe it), and `MODELSCOPE_TOKEN` supplies the credentials. A manual `gh workflow run publish-mirror.yml -f tag=vX.Y.Z` is the **backfill** path (after a `503`, add `-f mode=diagnose`) — not a required step | §4.5–§4.7 |
 
 **And know which line the release moves**: the shell's kernel channel comes from
 the manifest of the kernel it bundles (`bundledKernelChannel`,
@@ -152,13 +152,20 @@ shell update.
 4. **Notes**: `node scripts/gen-release-notes.mjs vX.Y.Z`; incremental, bilingual
    (zh open, English in `<details>`), generated — never hand-written HTML.
 5. **Publish the draft** (`gh release edit vX.Y.Z --draft=false --notes-file
-   release-notes.md`) with **your own credentials** — CI's `GITHUB_TOKEN` triggers
-   nothing and skips the mirror.
-6. **Verify the mirror**: Summary `OK` / `SKIPPED` (no token) / `FAILED`
-   (+ backfill), `Prune` and `Latest cleanup` checked, `releases/latest/` holding
+   release-notes.md`). That moment is what starts the mirror:
+   `publish-mirror.yml` hooks `release: published` (a job inside `release.yml`
+   cannot observe the flip, and mirroring an unreviewed draft would push every
+   version that review later discards into ModelScope for good).
+6. **Verify the mirror** (the run appears within seconds of step 5): Summary
+   `OK` / `SKIPPED` (no token on the repo) / `FAILED` (+ backfill via
+   `gh workflow run publish-mirror.yml -f tag=vX.Y.Z`), `Prune` and
+   `Latest cleanup` checked, `releases/latest/` holding
    only this version + the four `latest*.yml`; a failed mirror never rolls the
-   release back. Re-run `gh workflow run publish-mirror.yml -f tag=vX.Y.Z` (after
-   a `503`, add `-f mode=diagnose`).
+   release back. Backfill the same tag with
+   `gh workflow run publish-mirror.yml -f tag=vX.Y.Z` (after a `503`, add
+   `-f mode=diagnose`) — runs of one tag are serialized repo-wide
+   (`concurrency: publish-mirror`, `cancel-in-progress: false`), so a queued
+   backfill waits instead of racing the running one.
 7. **Runtime-only release**: run `npm run check:plugins -- --kernel <runtime.tgz>
    --home <the DSH_HOME, the directory holding profiles/>` first (it is not the
    profile directory itself; no `--home` → temp DSH_HOME). The runtime
