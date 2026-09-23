@@ -32,17 +32,34 @@ export interface ConfigSchemaDiagnostic {
   /** The row's module name at that pointer, when the dump names one. */
   readonly entryName?: string
   /**
-   * Whether this diagnostic points at a row the SUITE owns (its module name is
-   * one of ours). A diagnostic on somebody else's row is reported as such
-   * rather than hidden: it is still a real finding about the running app.
+   * Which side the row at this pointer belongs to.
+   *
+   * `suite` — a module the desktop shell ships; `migrated-preset` — an agent
+   * preset row THIS APP declared, i.e. one the 0.1.7 directory-preset migration
+   * wrote into the user's layer. Those rows name the kernel's own
+   * `@deepseek-ai/dsh-agent-preset` package, so attributing by module prefix
+   * alone files them under "other" and leaves the user wondering whether a
+   * finding belongs to a plugin they installed; `foreign` — anybody else's
+   * (the kernel's shipped rows included), reported as such rather than hidden:
+   * it is still a real finding about the running app.
    */
-  readonly ours: boolean
+  readonly origin: 'suite' | 'migrated-preset' | 'foreign'
   /**
    * The row's type-check status: `schema` when the kernel resolved a config
    * schema for it, `absent` when the package is not installed, `unsupported`
    * when the package is there but declares no native schema.
    */
   readonly status?: string
+}
+
+/** How many diagnostics fell on each side (see {@link ConfigSchemaDiagnostic.origin}). */
+export interface ConfigSchemaOrigins {
+  /** Diagnostics on rows the suite ships. */
+  readonly suite: number
+  /** Diagnostics on preset rows this app's migration declared. */
+  readonly migratedPreset: number
+  /** Diagnostics on the kernel's own rows and third-party rows. */
+  readonly foreign: number
 }
 
 /** What one run of the checker produced. */
@@ -53,10 +70,8 @@ export interface ConfigSchemaReport {
   /** Total entries in the composed tree, for context on the count. */
   readonly entries: number
   readonly diagnostics: readonly ConfigSchemaDiagnostic[]
-  /** Diagnostics that point at a suite-owned row. */
-  readonly ours: number
-  /** Diagnostics on rows that are not ours (the kernel's own, or a third party's). */
-  readonly others: number
+  /** Diagnostics per side, so the page can say who each finding belongs to. */
+  readonly origins: ConfigSchemaOrigins
 }
 
 /** Everything {@link checkConfigSchema} needs from the shell. */
@@ -90,6 +105,34 @@ const CAPTURE_BYTES = 32 * 1024 * 1024
 /** Whether a module name belongs to the suite. */
 function isSuiteName(name: string | undefined, prefixes: readonly string[]): boolean {
   return name !== undefined && prefixes.some(prefix => name.startsWith(prefix))
+}
+
+/** The package every agent preset row names, whatever wrote the row. */
+const AGENT_PRESET_PACKAGE = '@deepseek-ai/dsh-agent-preset'
+
+/**
+ * Ids of the presets the KERNEL ships. A row naming the same package under any
+ * other id is a preset this profile declares — on this machine, the one the
+ * 0.1.7 directory migration wrote.
+ */
+const SHIPPED_PRESET_IDS = new Set(['preset-standard', 'preset-ptc', 'preset-minimal', 'preset-cordis'])
+
+/**
+ * Which side one row belongs to.
+ *
+ * The module prefix answers it for the suite and for everybody else; the agent
+ * preset package is the one case where it does not, because the row we write
+ * and the rows the kernel ships name the same module (see
+ * {@link ConfigSchemaDiagnostic.origin}).
+ */
+function originOf(
+  id: string | undefined,
+  name: string | undefined,
+  suitePrefixes: readonly string[],
+): ConfigSchemaDiagnostic['origin'] {
+  if (isSuiteName(name, suitePrefixes)) return 'suite'
+  if (name === AGENT_PRESET_PACKAGE && id !== undefined && !SHIPPED_PRESET_IDS.has(id)) return 'migrated-preset'
+  return 'foreign'
 }
 
 /**
@@ -140,18 +183,21 @@ export function attributeDiagnostics(dump: unknown, suitePrefixes: readonly stri
       ...id === undefined ? {} : { entryId: id },
       ...name === undefined ? {} : { entryName: name },
       ...status === undefined ? {} : { status },
-      ours: isSuiteName(name, suitePrefixes),
+      origin: originOf(id, name, suitePrefixes),
     })
   }
 
-  const ours = reported.filter(item => item.ours).length
+  const origins: ConfigSchemaOrigins = {
+    suite: reported.filter(item => item.origin === 'suite').length,
+    migratedPreset: reported.filter(item => item.origin === 'migrated-preset').length,
+    foreign: reported.filter(item => item.origin === 'foreign').length,
+  }
   return {
     profile: typeof profile === 'string' ? profile : '',
     complete: complete === true,
     entries: entries.length,
     diagnostics: reported,
-    ours,
-    others: reported.length - ours,
+    origins,
   }
 }
 

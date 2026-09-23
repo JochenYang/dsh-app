@@ -32,30 +32,33 @@ function dumpWith(diagnostics, entries = []) {
   }
 }
 
-/** The stock rows the kernel's own checker complains about, plus one of ours. */
+/** The stock rows the kernel's own checker complains about, plus one of ours and one we migrated. */
 const STOCK_ROWS = [
   { path: '/173', id: 'preset-standard', name: '@deepseek-ai/dsh-agent-preset', status: 'schema' },
   { path: '/174', id: 'preset-ptc', name: '@deepseek-ai/dsh-agent-preset', status: 'schema' },
   { path: '/182', id: 'dsh-context', name: 'dsh-context', status: 'unsupported' },
   { path: '/190', id: 'dsh-app-brand', name: '@dsh-app/plugin-brand', status: 'unsupported' },
+  // A preset row THIS app declared: it names the kernel's own preset package,
+  // so a module-prefix rule alone would file it under 'foreign'.
+  { path: '/210', id: 'preset-rsi-dev', name: '@deepseek-ai/dsh-agent-preset', status: 'schema' },
 ]
 
-test('a diagnostic is attributed to the row it points at, and ours is marked ours', () => {
+test('a diagnostic is attributed to the row it points at: suite, migrated preset, or foreign', () => {
   const dump = dumpWith([
     { level: 'error', path: '/173', message: 'unrecognized Loader tree carrier; use cordis:group or cordis:include for native child collection' },
     { level: 'error', path: '/182', message: 'Config is not a native Schemastery schema' },
     { level: 'error', path: '/190', message: 'Config is not a native Schemastery schema' },
     { level: 'warning', path: '/108', message: 'config/contactFormUrl: regular-expression syntax or Unicode semantics require native validation' },
+    { level: 'error', path: '/210', message: 'unrecognized Loader tree carrier; use cordis:group or cordis:include for native child collection' },
   ], STOCK_ROWS)
   const report = attributeDiagnostics(dump, ['@dsh-app/'])
   assert.equal(report.profile, 'dsh-app')
   assert.equal(report.complete, false)
-  assert.equal(report.entries, 4)
+  assert.equal(report.entries, 5)
   // The kernel's own rows and a third-party row are reported, not hidden: they
   // are real findings about the running app, they are just not ours to fix.
-  assert.deepEqual(report.diagnostics.map(item => item.ours), [false, false, true, false])
-  assert.equal(report.ours, 1)
-  assert.equal(report.others, 3)
+  assert.deepEqual(report.diagnostics.map(item => item.origin), ['foreign', 'foreign', 'suite', 'foreign', 'migrated-preset'])
+  assert.deepEqual(report.origins, { suite: 1, migratedPreset: 1, foreign: 3 })
   assert.equal(report.diagnostics[2].entryId, 'dsh-app-brand')
   assert.equal(report.diagnostics[2].entryName, '@dsh-app/plugin-brand')
   assert.equal(report.diagnostics[2].status, 'unsupported')
@@ -68,8 +71,8 @@ test('a pointer with no row behind it is still reported, with no id', () => {
   const report = attributeDiagnostics(dumpWith([{ level: 'error', path: '/999', message: 'orphan' }]), ['@dsh-app/'])
   assert.equal(report.diagnostics.length, 1)
   assert.equal(report.diagnostics[0].entryId, undefined)
-  assert.equal(report.diagnostics[0].ours, false)
-  assert.equal(report.others, 1)
+  assert.equal(report.diagnostics[0].origin, 'foreign')
+  assert.deepEqual(report.origins, { suite: 0, migratedPreset: 0, foreign: 1 })
 })
 
 test('a document that is not a dump is refused rather than read as empty', () => {
@@ -139,7 +142,7 @@ test('the checker runs the kernel CLI for the profile, with DSH_HOME pinned', as
   // The shell has no console: without this a terminal flashes over the user's
   // work on Windows (the repository rule about probes inside Electron).
   assert.equal(seen.options.windowsHide, true)
-  assert.equal(report.ours, 1)
+  assert.equal(report.origins.suite, 1)
   // A non-zero exit with a usable document is still a report: the checker
   // signals "there were errors" through its exit code, which is not a failure
   // of the RUN.
@@ -159,7 +162,7 @@ test('the diagnostics on stderr do not corrupt the document on stdout', async ()
   })
   const report = await checkConfigSchema({ ...BASE, spawnImpl })
   assert.equal(report.diagnostics.length, 1, 'the document parsed despite the diagnostic lines')
-  assert.equal(report.ours, 1)
+  assert.equal(report.origins.suite, 1)
 })
 
 test('a run that produced no usable document is an error, never an empty report', async () => {

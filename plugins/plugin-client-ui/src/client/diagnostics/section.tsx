@@ -420,9 +420,12 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   // The card's whole point is ATTRIBUTION: the kernel's checker reports findings
   // for rows it did not write (a stock profile already produces four errors and
   // a warning), so the count alone cannot tell the reader whether this app is at
-  // fault. `ours` is the number that can.
+  // fault. `suite` is the number that can; `migratedPreset` is reported
+  // separately because those rows ARE ours to explain (this app's directory
+  // migration declared them) while naming the kernel's own preset package.
   const checkReport = check.kind === 'ready' ? check.report : undefined
   const checkErrors = checkReport === undefined ? 0 : checkReport.diagnostics.filter(item => item.level === 'error').length
+  const others = checkReport === undefined ? 0 : checkReport.origins.migratedPreset + checkReport.origins.foreign
   const checkBadge = ((): { text: string, ok: boolean } => {
     if (check.kind === 'idle') return { text: t('diag.check.idle'), ok: false }
     if (check.kind === 'busy') return { text: t('diag.check.running'), ok: false }
@@ -430,22 +433,23 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
     if (checkReport === undefined) return { text: t('diag.check.noReport'), ok: false }
     // "Ours clean" is the useful green: the profile may still carry findings on
     // other rows, and calling that a failure would train the reader to ignore it.
-    if (checkReport.ours === 0 && checkReport.complete) return { text: t('diag.check.ok'), ok: true }
-    if (checkReport.ours === 0) return { text: t('diag.check.okOthers', { others: checkReport.others }), ok: true }
-    return { text: t('diag.check.ours', { ours: checkReport.ours }), ok: false }
+    if (checkReport.origins.suite === 0 && checkReport.complete) return { text: t('diag.check.ok'), ok: true }
+    if (checkReport.origins.suite === 0) return { text: t('diag.check.okOthers', { others }), ok: true }
+    return { text: t('diag.check.ours', { ours: checkReport.origins.suite }), ok: false }
   })()
   const checkSummary = checkReport === undefined
     ? undefined
     : t('diag.check.summary', {
       entries: checkReport.entries,
       errors: checkErrors,
-      others: checkReport.others,
+      others,
+      migrated: checkReport.origins.migratedPreset,
     })
   const checkHint = check.kind === 'unsupported' || check.kind === 'failed'
     ? undefined
     : checkReport === undefined
       ? t('diag.check.hintIdle')
-      : checkReport.others === 0
+      : others === 0
         ? t('diag.check.hintClean')
         : t('diag.check.hintOthers')
 
@@ -555,12 +559,17 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
           : (
             <ul className="dshDiag-checkList">
               {checkReport.diagnostics.map(item => (
-                <li key={item.path} className={item.ours ? 'dshDiag-checkItem dshDiag-checkOurs' : 'dshDiag-checkItem'}>
+                <li
+                  key={item.path}
+                  className={item.origin === 'suite' ? 'dshDiag-checkItem dshDiag-checkOurs' : 'dshDiag-checkItem'}
+                >
                   <span className={item.level === 'error' ? 'dshDiag-checkLevel dshDiag-checkError' : 'dshDiag-checkLevel'}>
                     {item.level === 'error' ? t('diag.check.levelError') : t('diag.check.levelWarning')}
                   </span>
                   <span className="dshDiag-checkWho">
-                    {item.ours ? t('diag.check.whoOurs') : t('diag.check.whoOther')}
+                    {item.origin === 'suite'
+                      ? t('diag.check.whoOurs')
+                      : item.origin === 'migrated-preset' ? t('diag.check.whoMigrated') : t('diag.check.whoOther')}
                   </span>
                   <code className="dshDiag-checkWhere">{item.entryName ?? item.entryId ?? item.path}</code>
                   {/* The kernel's own sentence: a diagnostic, not UI copy, so it

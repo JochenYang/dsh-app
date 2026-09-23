@@ -133,13 +133,14 @@ export const zh = {
   'diag.check.ok': '我们的行没有问题',
   'diag.check.okOthers': '我们的行没有问题（另有 {others} 条在别的行上）',
   'diag.check.ours': '有 {ours} 条落在我们的行上',
-  'diag.check.summary': '内核组合了 {entries} 个条目，{errors} 条错误；其中 {others} 条不在我们的行上。',
+  'diag.check.summary': '内核组合了 {entries} 个条目，{errors} 条错误；其中 {others} 条不在我们的行上（{migrated} 条在我们迁移出来的预设行上）。',
   'diag.check.hintIdle': '这项检查让内核在不启动的情况下组合一遍 profile，报告它没能静态校验的条目。检查需要几秒钟，所以由你决定何时运行。',
   'diag.check.hintClean': '所有条目都通过了静态校验。',
   'diag.check.hintOthers': '「不在我们的行上」不是可以忽略的意思：它们仍是这个应用的运行状态，只是属于内核自带的条目或你从插件市场装的第三方包。内核自带的条目在一份全新 profile 上就会报出同样的内容，所以看到它们并不代表这台机器出了问题。',
   'diag.check.levelError': '错误',
   'diag.check.levelWarning': '警告',
   'diag.check.whoOurs': '我们的',
+  'diag.check.whoMigrated': '我们迁移的预设',
   'diag.check.whoOther': '其他',
 } as const
 
@@ -247,13 +248,14 @@ export const en: Record<DiagnosticsKey, string> = {
   'diag.check.ok': 'No findings on our rows',
   'diag.check.okOthers': 'No findings on our rows ({others} elsewhere)',
   'diag.check.ours': '{ours} finding(s) on our rows',
-  'diag.check.summary': 'The kernel composed {entries} entries with {errors} error(s); {others} of them are not on our rows.',
+  'diag.check.summary': 'The kernel composed {entries} entries with {errors} error(s); {others} of them are not on our rows ({migrated} of those sit on a preset row this app migrated).',
   'diag.check.hintIdle': 'This check has the kernel compose the profile WITHOUT starting it and report every entry it could not type-check. It takes a few seconds, so it runs when you ask.',
   'diag.check.hintClean': 'Every entry passed static validation.',
   'diag.check.hintOthers': '"Not on our rows" is not the same as harmless: they are still this app\'s runtime state, they just belong to the kernel\'s own entries or to a third-party package installed from the plugin market. The kernel\'s own entries report the same findings on a brand-new profile, so seeing them does not mean this machine is broken.',
   'diag.check.levelError': 'error',
   'diag.check.levelWarning': 'warning',
   'diag.check.whoOurs': 'ours',
+  'diag.check.whoMigrated': 'our migrated preset',
   'diag.check.whoOther': 'other',
 }
 

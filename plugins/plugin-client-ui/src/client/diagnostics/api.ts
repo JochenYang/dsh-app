@@ -165,8 +165,12 @@ export interface ConfigCheckDiagnostic {
   readonly message: string
   readonly entryId?: string
   readonly entryName?: string
-  /** Whether the row belongs to this app's own suite. */
-  readonly ours: boolean
+  /**
+   * Which side the row belongs to: the suite's own module, a preset row this
+   * app's migration declared, or somebody else's (the kernel's shipped rows
+   * included).
+   */
+  readonly origin: 'suite' | 'migrated-preset' | 'foreign'
   readonly status?: string
 }
 
@@ -177,8 +181,11 @@ export interface ConfigCheckAnswer extends RouteEnvelope {
     readonly complete: boolean
     readonly entries: number
     readonly diagnostics: readonly ConfigCheckDiagnostic[]
-    readonly ours: number
-    readonly others: number
+    readonly origins: {
+      readonly suite: number
+      readonly migratedPreset: number
+      readonly foreign: number
+    }
   }
 }
 

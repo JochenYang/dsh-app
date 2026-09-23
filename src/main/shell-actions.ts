@@ -498,7 +498,7 @@ async function dispatch(action: ShellAction, request: Request, deps: ShellAction
       // which are safe here but noisy in a log shared with the diagnostics
       // export. The counts are what tells a support reader whether the failure
       // was ours.
-      deps.log?.(`[shell-action] ${action}: profile=${report.profile} complete=${String(report.complete)} entries=${String(report.entries)} diagnostics=${String(report.diagnostics.length)} ours=${String(report.ours)} others=${String(report.others)}`)
+      deps.log?.(`[shell-action] ${action}: profile=${report.profile} complete=${String(report.complete)} entries=${String(report.entries)} diagnostics=${String(report.diagnostics.length)} suite=${String(report.origins.suite)} migratedPreset=${String(report.origins.migratedPreset)} foreign=${String(report.origins.foreign)}`)
       return sendJson(200, { ok: true, report })
     }
     default:

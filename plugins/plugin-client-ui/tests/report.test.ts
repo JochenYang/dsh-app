@@ -123,7 +123,8 @@ describe('diagnostics report text', () => {
       'diag.check.title', 'diag.check.action', 'diag.check.running', 'diag.check.idle',
       'diag.check.noReport', 'diag.check.ok', 'diag.check.okOthers', 'diag.check.ours',
       'diag.check.summary', 'diag.check.hintIdle', 'diag.check.hintClean', 'diag.check.hintOthers',
-      'diag.check.levelError', 'diag.check.levelWarning', 'diag.check.whoOurs', 'diag.check.whoOther',
+      'diag.check.levelError', 'diag.check.levelWarning', 'diag.check.whoOurs', 'diag.check.whoMigrated',
+      'diag.check.whoOther',
     ] as const
     for (const key of keys) {
       assert.equal(typeof zh[key], 'string', `zh is missing ${key}`)
@@ -132,7 +133,7 @@ describe('diagnostics report text', () => {
       assert.notEqual(en[key].trim(), '', `${key} is empty in en`)
     }
     // Every placeholder a key declares has to be one the card supplies.
-    const supplied = { others: 3, ours: 1, entries: 211, errors: 5 }
+    const supplied = { others: 4, ours: 1, migrated: 1, entries: 211, errors: 5 }
     for (const key of keys) {
       const zhText = makeT(zh)(key, supplied)
       const enText = makeT(en)(key, supplied)
