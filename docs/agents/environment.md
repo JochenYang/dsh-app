@@ -6,9 +6,11 @@ exact precedence when a value can come from more than one place.
 
 | Variable → meaning (used in) |
 |---|
-| `DSH_APP_DEV=1` — dev mode: local harness checkout, not a downloaded kernel (`index.ts`) |
-| `DSH_APP_DEV_RUNTIME` — explicit dev checkout path, else `../deepseek-harness` (`index.ts`) |
-| `DSH_APP_NODE_BINARY` — dev-mode Node for the host child, else `node` from PATH; production uses the bundled `node/node[.exe]` (`index.ts`) |
+| `DSH_APP_DEV=1` — dev mode: the suite plugins come from this repository instead of the runtime, and the updater/rollback paths stay off (`index.ts`) |
+| `DSH_APP_DEV_RUNTIME` — a deepseek-harness SOURCE checkout to run as the kernel; it must be built (the shell starts its `apps/desktop-host` and `apps/cli`). **Named explicitly only** — there is no sibling-directory probing, so a pulled-but-unbuilt checkout can never be booted by accident (`index.ts`, `dev.mjs`) |
+| `DSH_APP_DEV_KERNEL` — an already-built runtime tree (`node/` + `app/`) to boot in place, leaving the installed kernel and its `current.json` untouched (`index.ts`, `kernel/manager.ts`) |
+| *(neither set, with `DSH_APP_DEV=1`)* — the dev run boots the **installed** runtime, the same artifact a packaged start boots; with nothing installed it installs the bundled `kernel.tgz` offline and never reaches the network (`index.ts`) |
+| `DSH_APP_NODE_BINARY` — Node for the host child when the kernel is a source checkout (which ships no binary of its own), else `node` from PATH; a runtime tree — installed or named — always uses its own `node/node[.exe]` (`index.ts`) |
 | `DSH_APP_HOST_CHECKOUT` — built checkout to pack the private host from (`apps/desktop-host/lib/index.js` required) (`build-runtime.mjs`) |
 | `DSH_APP_HOST_PACKAGE` — prebuilt host tarball instead of building one (`pnpm pack`) (`build-runtime.mjs`) |
 | `DSH_APP_HOST_REPO` — checkout the host source comes from at `dsh-v<DSH_VERSION>`, else sibling `../deepseek-harness` (`build-runtime.mjs`) |

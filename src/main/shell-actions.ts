@@ -69,6 +69,7 @@ import type { Session, WebFrameMain } from 'electron'
 import { APP_ORIGIN, type DshAppRoute } from './desktop-host'
 import type { SessionHeaderRule } from './session-hooks'
 import type { OfficePayloadStatus } from '../kernel/office-payload'
+import type { ConfigSchemaReport } from './config-schema'
 import { t, type MessageKey } from '../shared/locale'
 
 /**
@@ -122,6 +123,7 @@ export const SHELL_ACTIONS = [
   'office-payload-state',
   'office-payload-download',
   'office-payload-cancel',
+  'config-check',
 ] as const
 
 /** One of {@link SHELL_ACTIONS}. */
@@ -176,6 +178,13 @@ export interface ShellActionDeps {
    * pretending the feature exists.
    */
   officePayload?: OfficePayloadSeam
+  /**
+   * Run the profile's static composition check (`dsh --dump-config-schema`).
+   * Absent in tests and in a shell with no active kernel; `config-check` then
+   * answers `shellAction.failed` rather than an empty report — an empty report
+   * reads as "all clear", which is the one wrong answer here.
+   */
+  configCheck?: () => Promise<ConfigSchemaReport>
   /** One shell log line (English, log-only). */
   log?(line: string): void
 }
@@ -475,6 +484,22 @@ async function dispatch(action: ShellAction, request: Request, deps: ShellAction
       // can name a path, and the log is shared with the diagnostics export.
       deps.log?.(`[shell-action] ${action}: supported=${String(status.supported)} phase=${status.phase} required=${status.required ?? '-'} installed=${status.installed ?? '-'}`)
       return sendJson(200, { ok: true, payload: status })
+    }
+    case 'config-check': {
+      // The body is deliberately not read, like open-logs: the profile to check
+      // is the one this shell boots, so a caller cannot ask about another.
+      const check = deps.configCheck
+      if (check === undefined) {
+        deps.log?.(`[shell-action] ${action}: no active kernel in this shell`)
+        return fail(500, 'shellAction.failed')
+      }
+      const report = await check()
+      // Counts only: a diagnostic message names loader ids and module names,
+      // which are safe here but noisy in a log shared with the diagnostics
+      // export. The counts are what tells a support reader whether the failure
+      // was ours.
+      deps.log?.(`[shell-action] ${action}: profile=${report.profile} complete=${String(report.complete)} entries=${String(report.entries)} diagnostics=${String(report.diagnostics.length)} ours=${String(report.ours)} others=${String(report.others)}`)
+      return sendJson(200, { ok: true, report })
     }
     default:
       action satisfies never

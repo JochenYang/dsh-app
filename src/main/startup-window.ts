@@ -23,8 +23,9 @@ import { isShowingLoadingPage, resetOverlayColor } from './window'
 import path from 'node:path'
 import type { KernelStatusPayload, KernelStatusStep } from '../shared/types'
 import { t, ZH_KERNEL_STATUS_STEP_KEYWORDS } from '../shared/locale'
-import { resolveDshHome } from './brand-suite'
-import { readThemePreference, resolveThemeMode, type ThemeMode, type ThemePreference } from './theme'
+import { resolveDshHome, PROFILE_PATCH_FILENAME } from './brand-suite'
+import { SUITE_PROFILE } from '../shared/constants'
+import { readThemePreference, readThemePreferenceFromPatch, resolveThemeMode, type ThemeMode, type ThemePreference } from './theme'
 
 /** Splash page path: dist/main/ -> dist/static/ in a dev build and in asar. */
 const SPLASH_PAGE = path.join(__dirname, '..', 'static', 'startup.html')
@@ -171,6 +172,11 @@ export function attachSplashToWindow(win: BrowserWindow): void {
   splash = win
   pageReady = false
   currentStage = 1
+  // Resolve the PERSISTED preference before the first paint. Everything below
+  // reads `currentTheme`, and the window background is what shows before the page
+  // does — leaving this call out is how the splash and the window chrome stayed
+  // on the OS preference while the app itself rendered the user's own setting.
+  applyThemePreference()
   stopThemeWatch = watchSystemTheme()
   applyWindowTheme()
   win.on('closed', () => {
@@ -350,14 +356,39 @@ let themePreference: ThemePreference | null = null
 /**
  * Resolve the splash's appearance from the UI's setting plus the OS.
  *
- * The settings document lives under `$DSH_HOME` — the same home the brand-suite
- * seam links plugins into, resolved through the same helper so the two can
- * never disagree about where the user's dsh lives.
+ * The setting lives under `$DSH_HOME` — the same home the brand-suite seam links
+ * plugins into, resolved through the same helper so the two can never disagree
+ * about where the user's dsh lives. WHICH file holds it depends on the kernel
+ * line; {@link readThemePreferenceAcrossLines} asks each address in turn.
  */
 function applyThemePreference(): ThemeMode {
-  themePreference = readThemePreference(path.join(resolveDshHome(), 'settings.yaml'))
+  themePreference = readThemePreferenceAcrossLines()
   currentTheme = resolveThemeMode(themePreference, nativeTheme.shouldUseDarkColors)
   return currentTheme
+}
+
+/**
+ * The appearance setting, wherever this machine keeps it.
+ *
+ * Where it lives moved with the kernel line, and the splash has to read it
+ * BEFORE a kernel is resolved — so the shell asks the addresses in the order the
+ * lines introduced them and takes the first that answers:
+ *
+ *   1. the booted profile's own patch — 0.1.7 stores every setting there;
+ *   2. `$DSH_HOME/settings.yaml` — every line before it;
+ *   3. `$DSH_HOME/settings.yaml.imported` — where 0.1.7 moved (2) after importing
+ *      it, so a machine that upgraded and later rolled back still opens on the
+ *      preference its owner chose rather than on the OS default.
+ *
+ * Reading three small files once per start is cheaper than any bookkeeping that
+ * would say which one is current, and it cannot be wrong: an address that holds
+ * no preference answers null.
+ */
+function readThemePreferenceAcrossLines(): ThemePreference | null {
+  const home = resolveDshHome()
+  return readThemePreferenceFromPatch(path.join(home, 'profiles', SUITE_PROFILE, PROFILE_PATCH_FILENAME))
+    ?? readThemePreference(path.join(home, 'settings.yaml'))
+    ?? readThemePreference(path.join(home, 'settings.yaml.imported'))
 }
 
 /**

@@ -164,18 +164,11 @@ if (process.env.GITHUB_OUTPUT) {
 const CHANNEL = channelFromVersion(DSH_VERSION)
 
 /**
- * FFF native binding version, derived from the plugin that declares it: the
- * runtime's app/package.json must carry the binding itself, because build-lib's
- * external filters keep `@ff-labs/*` out of the plugin bundle (fff-node loads a
- * native library at runtime) and a hoisted top-level copy is what its require
- * resolves. Reading the plugin's own pin keeps the two in lockstep.
+ * The plugin roster and the suite version it hashes to both come from
+ * scripts/kernel-line.mjs — the same module the release workflow reads to
+ * decide whether a published runtime can be reused, so the two can never
+ * disagree about what "the current suite" is.
  */
-const FFF_NODE_PIN = JSON.parse(readFileSync(path.join(root, 'plugins', '@dsh-app/plugin-fff'.replace('@dsh-app/', ''), 'package.json'), 'utf8')).dependencies['@ff-labs/fff-node']
-
-// The plugin roster and the suite version it hashes to both come from
-// scripts/kernel-line.mjs — the same module the release workflow reads to
-// decide whether a published runtime can be reused, so the two can never
-// disagree about what "the current suite" is.
 const SUITE_VERSION = computeSuiteVersion()
 
 /**
@@ -1058,9 +1051,9 @@ async function packPlugin(shortName, destDir) {
  *
  * The runtime never installs a plugin's production dependencies and must not:
  * `plugins/build-lib.mjs` inlines everything a plugin requires except the
- * framework imports and each plugin's declared extras (today only `@ff-labs/*`,
- * which the runtime carries as its own top-level dependency so the native
- * binding resolves from app/node_modules). Left in place, the field makes pnpm
+ * framework imports and each plugin's declared extras (none today: the last one
+ * was the FFF native binding, which went with `plugin-fff`). Left in place, the
+ * field makes pnpm
  * unpack all of it a second time — measured at 76 MiB of duplicates (exceljs 23,
  * pdf-lib 21, docx 7, pptxgenjs 6, unpdf 3 plus their closure) for code already
  * inside lib/index.js, and the previous hand-copy never installed any of it.
@@ -1768,9 +1761,6 @@ async function main() {
         .filter((name) => name !== '@deepseek-ai/dsh')
         .map((name) => [name, DSH_VERSION])),
       [DESKTOP_HOST_PACKAGE]: host.spec,
-      // fff-node ships the platform-specific FFF binary into the runtime so
-      // plugin-fff's external require resolves from app/node_modules.
-      '@ff-labs/fff-node': FFF_NODE_PIN,
       ...suiteSpecs,
     },
     // npm ≥11 refuses to run install/build scripts of dependencies unless the

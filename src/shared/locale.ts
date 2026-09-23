@@ -155,6 +155,7 @@ const ZH_CN = {
   'kernelUpdate.installFailed': '内核安装失败：{detail}\n\n请检查网络连接，然后从托盘菜单重新执行「检查内核更新」。',
   'kernelUpdate.updateFailed': '内核更新失败：{detail}',
   'kernelUpdate.rollbackBootFailed': '内核更新启动失败，已回滚到 dsh {version}。',
+  'kernelUpdate.rollbackHidesNewerSessions': '内核更新启动失败，已回滚到 dsh {version}。注意：这台机器上有 {count} 个会话是在较新的内核上写入的，回滚后的内核不会把它们列出来——文件仍在磁盘上，回到较新的内核即可恢复，请先不要清理会话。',
 
   // ------------------------------------------------------- kernel channels
   'channel.stable': '正式版',
@@ -231,6 +232,9 @@ const ZH_CN = {
   'kernel.devCheckoutMissing': '开发模式需要配置 devCheckoutDir（本地 deepseek-harness 源码目录）',
   'kernel.devManifestUnreadable': '开发模式内核目录无效：{checkout} 下缺少可读的 package.json，请确认 DSH_APP_DEV_RUNTIME 指向 deepseek-harness 源码根目录',
   'kernel.devManifestNoVersion': '开发模式内核目录无效：{checkout}/package.json 缺少 version 字段',
+  'kernel.devKernelMissing': '这次开发运行没有可用的内核：既没有已安装的运行时，本构建也没有随包内核。请先正常启动一次应用完成安装，或用 DSH_APP_DEV_KERNEL 指向一个已构建的运行时目录',
+  'kernel.localRuntimeUnreadable': 'DSH_APP_DEV_KERNEL 指向的目录不是运行时树：{dir} 下缺少可读的 manifest.json',
+  'kernel.localRuntimeIncomplete': 'DSH_APP_DEV_KERNEL 指向的运行时树不完整：{dir} 下缺少 {entry}',
   'kernel.notInitialized': '内核尚未初始化',
   'kernel.installBusy': '内核安装正在进行中，请稍候',
   'kernel.registryUnreachable': '无法连接 npm 注册表以解析 dsh 版本',
@@ -425,6 +429,7 @@ const EN_US: Record<MessageKey, string> = {
   'kernelUpdate.installFailed': 'Kernel installation failed: {detail}\n\nCheck your network, then run "Check for kernel updates" from the tray menu again.',
   'kernelUpdate.updateFailed': 'Kernel update failed: {detail}',
   'kernelUpdate.rollbackBootFailed': 'The updated kernel failed to start; rolled back to dsh {version}.',
+  'kernelUpdate.rollbackHidesNewerSessions': 'The updated kernel failed to start; rolled back to dsh {version}. {count} sessions on this machine were written by the NEWER kernel, and the older one does not list them — their files are still on disk, so returning to the newer kernel brings them back. Please do not clean up sessions until then.',
 
   // ------------------------------------------------------- kernel channels
   'channel.stable': 'stable',
@@ -499,6 +504,9 @@ const EN_US: Record<MessageKey, string> = {
   'kernel.devCheckoutMissing': 'Dev mode needs devCheckoutDir (the local deepseek-harness source directory)',
   'kernel.devManifestUnreadable': 'The dev-mode kernel directory is invalid: no readable package.json under {checkout}; make sure DSH_APP_DEV_RUNTIME points at the root of a deepseek-harness checkout',
   'kernel.devManifestNoVersion': 'The dev-mode kernel directory is invalid: {checkout}/package.json has no version field',
+  'kernel.devKernelMissing': 'This dev run has no kernel to boot: nothing is installed and this build ships no bundled kernel. Start the app normally once to install one, or point DSH_APP_DEV_KERNEL at a built runtime directory',
+  'kernel.localRuntimeUnreadable': 'DSH_APP_DEV_KERNEL does not name a runtime tree: no readable manifest.json under {dir}',
+  'kernel.localRuntimeIncomplete': 'The runtime tree DSH_APP_DEV_KERNEL names is incomplete: {entry} is missing under {dir}',
   'kernel.notInitialized': 'The kernel has not been initialized yet',
   'kernel.installBusy': 'A kernel installation is already running — please wait',
   'kernel.registryUnreachable': 'Could not reach the npm registry to resolve a dsh version',

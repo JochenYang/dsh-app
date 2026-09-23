@@ -90,3 +90,56 @@ export function resolveThemeMode(preference: ThemePreference | null, systemDark:
   if (effective === 'dark') return 'dark'
   return systemDark ? 'dark' : 'light'
 }
+
+/**
+ * Read the preference out of a PROFILE PATCH document (`cordis.patch.yml`).
+ *
+ * 0.1.7 keeps user settings as rows in the booted profile's patch instead of in
+ * `$DSH_HOME/settings.yaml`, and it renames that file to
+ * `settings.yaml.imported` once the import has run — so on that line the reader
+ * above finds nothing, and the window would open on the OS preference whatever
+ * the user had chosen. Same namespace, same field, different address:
+ *
+ *     - id: ui-theme
+ *       name: '@deepseek-ai/dsh-ui-theme'
+ *       config:
+ *         preference: dark
+ *
+ * Narrow on purpose, like {@link parseThemePreference}: the row is found by id,
+ * the field is read inside that row only, and the scan stops at the next
+ * top-level entry. `preference` also exists under other namespaces (the locale
+ * plugin keeps one — see the sibling parser's note), so a document-wide search
+ * would return whichever happens to come first.
+ *
+ * @param text - the profile patch's contents.
+ * @returns the preference, or null when there is no ui-theme row with one.
+ */
+export function parseThemePreferenceFromPatch(text: string): ThemePreference | null {
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex(line => /^- id: ui-theme\s*$/u.test(line))
+  if (start === -1) return null
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    // The row's block ends where the next top-level entry begins.
+    if (/^-/u.test(line)) break
+    const match = /^\s+preference:\s*(\S+)\s*$/u.exec(line)
+    if (match === null) continue
+    const value = match[1].replace(/^['"]|['"]$/g, '')
+    return value === 'light' || value === 'dark' || value === 'system' ? value : null
+  }
+  return null
+}
+
+/**
+ * Read the preference from a profile patch file.
+ * @param patchFile - absolute path to `<profile>/cordis.patch.yml`.
+ * @returns the preference, or null when the file is missing or carries none.
+ */
+export function readThemePreferenceFromPatch(patchFile: string): ThemePreference | null {
+  try {
+    return parseThemePreferenceFromPatch(readFileSync(patchFile, 'utf8'))
+  } catch {
+    // A profile that has never been written is the normal first-run state.
+    return null
+  }
+}

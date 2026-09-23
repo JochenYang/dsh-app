@@ -3,7 +3,7 @@
  *
  * The suite plugins (@dsh-app/plugin-brand, @dsh-app/plugin-client-ui,
  * @dsh-app/plugin-sidebar, @dsh-app/plugin-swarm, @dsh-app/plugin-usage,
- * @dsh-app/plugin-archives, @dsh-app/plugin-memory, @dsh-app/plugin-fff,
+ * @dsh-app/plugin-archives, @dsh-app/plugin-memory,
  * @dsh-app/plugin-mcp, @dsh-app/plugin-hooks) ship with the product, not
  * with the upstream dsh
  * kernel, so two seams have to be stitched at every server start:
@@ -87,7 +87,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /** Suite plugin directory names under dsh-app/plugins (and kernel node_modules). */
-export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch'] as const
+export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch'] as const
 
 /** npm scope shared by the suite plugins; also the scope the mirror drop must not take back. */
 export const PLUGIN_SCOPE = '@dsh-app'
@@ -288,6 +288,17 @@ const PATCH_HEADER = [
 const PATCH_SUITE_MARK = '# @@dsh-app-rows:suite\n'
 const PATCH_PRESERVED_MARK = '# @@dsh-app-rows:preserved\n'
 const PATCH_HOME_MARK = '# @@dsh-app-rows:home\n'
+/**
+ * End of the sections the shell owns. Everything past this line is opaque: it
+ * is read back verbatim and written out again untouched.
+ *
+ * It exists because the kernel's own configuration editor writes the rows it
+ * stores for a setting into THIS file (`configEditor` edits the profile patch),
+ * and it appends them after everything else. A regenerator that re-derives the
+ * file from its named sections therefore dropped the user's settings on the next
+ * start — the marker is what makes "not ours" a position rather than a guess.
+ */
+const PATCH_TAIL_MARK = '# @@dsh-app-rows:tail\n'
 
 /**
  * Placeholder written instead of the home rows when the composer reads the home
@@ -422,37 +433,83 @@ export function marketManagedBlock(content: string): string {
 }
 
 /** Render the generated patch file from its sections. */
-export function composeSuitePatch(sections: { suite: string; preserved: string; home: string; managed?: string }): string {
+export function composeSuitePatch(sections: {
+  suite: string
+  preserved: string
+  home: string
+  /** Everything past {@link PATCH_TAIL_MARK}: rows the shell never interprets. */
+  tail?: string
+  managed?: string
+}): string {
   // Order matters for the rule above: a flow node is only fatal when something
   // with rows follows it, and the sections travel in this order.
   const homeRows = hasRows(sections.home)
   const preservedRows = hasRows(sections.preserved)
   const managed = (sections.managed ?? '').trimEnd()
+  const tail = (sections.tail ?? '').trim()
   return PATCH_HEADER
     + sectionBlock(PATCH_SUITE_MARK, sections.suite, preservedRows || homeRows)
     + sectionBlock(PATCH_PRESERVED_MARK, sections.preserved, homeRows)
-    + sectionBlock(PATCH_HOME_MARK, sections.home, false)
+    // The home section is no longer the last thing this file carries: the tail
+    // marker and whatever the kernel appended after it follow, so the home body
+    // has to merge whenever either of them brings rows of its own.
+    + sectionBlock(PATCH_HOME_MARK, sections.home, tail !== '' || managed !== '')
+    + PATCH_TAIL_MARK
+    + (tail === '' ? '' : `${tail}\n`)
     // The market's block travels LAST, exactly as it was written: its rows have
     // to win over the suite rows they disable, and it owns its own markers.
     + (managed === '' ? '' : `${managed}\n`)
 }
 
 /**
- * Read the preserved section out of an existing generated file.
+ * Read the shell's own sections out of an existing generated file.
  *
  * A file without the markers is either empty or the profile's own layer from
  * before the shell generated it — both are preserved verbatim, which is what
  * keeps a user's hand-written rows alive across the first A1 start.
  *
+ * The tail is returned verbatim and is the whole point of the marker: it is
+ * where the KERNEL's configuration editor appends the rows it stores for a
+ * setting (0.1.7 keeps user settings in this file), and re-deriving the file
+ * from its sections alone dropped them on the next start.
+ *
  * @param content - current file content ('' when absent).
- * @returns the text to keep as this profile's preserved section.
+ * @returns the preserved section, plus the opaque tail — '' for a file written
+ *   before the tail marker existed, which the caller reads with
+ *   {@link legacyTail} instead.
  */
-export function parseSuitePatch(content: string): { preserved: string } {
-  if (content.trim() === '') return { preserved: '' }
-  const preservedAt = content.indexOf(PATCH_PRESERVED_MARK)
-  const homeAt = content.indexOf(PATCH_HOME_MARK)
-  if (preservedAt === -1 || homeAt === -1 || homeAt < preservedAt) return { preserved: content.trimEnd() }
-  return { preserved: content.slice(preservedAt + PATCH_PRESERVED_MARK.length, homeAt).trimEnd() }
+export function parseSuitePatch(content: string): { preserved: string; tail: string } {
+  const tailAt = content.indexOf(PATCH_TAIL_MARK)
+  const body = tailAt === -1 ? content : content.slice(0, tailAt)
+  const tail = tailAt === -1
+    ? ''
+    : content.slice(tailAt + PATCH_TAIL_MARK.length).replace(/^\n+/u, '').trimEnd()
+  if (body.trim() === '') return { preserved: '', tail }
+  const preservedAt = body.indexOf(PATCH_PRESERVED_MARK)
+  const homeAt = body.indexOf(PATCH_HOME_MARK)
+  if (preservedAt === -1 || homeAt === -1 || homeAt < preservedAt) return { preserved: body.trimEnd(), tail }
+  return { preserved: body.slice(preservedAt + PATCH_PRESERVED_MARK.length, homeAt).trimEnd(), tail }
+}
+
+/**
+ * The opaque tail of a profile patch written before {@link PATCH_TAIL_MARK}.
+ *
+ * The regenerator that wrote such a file ended its output with the home section,
+ * so everything after that exact text is content the shell never wrote — in
+ * practice the rows the kernel's configuration editor appends. The home text is
+ * recomputed from the current home layer, which makes this an exact match
+ * whenever nothing has edited that layer since the last start; when it does not
+ * match, nothing is guessed and the caller keeps a copy of the file instead.
+ *
+ * @param withoutManaged - file content with the market's block already lifted out.
+ * @param homeText - the home section this start would write.
+ * @returns the tail, or undefined when the file does not end with that section.
+ */
+export function legacyTail(withoutManaged: string, homeText: string): string | undefined {
+  const homeSection = sectionBlock(PATCH_HOME_MARK, homeText, false)
+  const at = withoutManaged.lastIndexOf(homeSection)
+  if (at === -1) return undefined
+  return withoutManaged.slice(at + homeSection.length).trim()
 }
 
 /** Read a file as UTF-8, or '' when it is not there (or not readable). */
@@ -542,12 +599,26 @@ function rowSpecifiers(row: readonly string[], firstLine: number): PatchSpecifie
     const indent = contentIndent(line)
     if (indent !== undefined) entryIndents.add(indent)
   }
+  // Only the block's OWN entries are judged: those sit at its SHALLOWEST
+  // id-bearing indent. A deeper one is a nested composition — a preset's
+  // `config.plugins`, a group's children — and its names are resolved by
+  // whoever mounts that composition, not by this profile. Judging them here
+  // costs the whole row: measured on a real home layer, one migrated
+  // `@deepseek-ai/dsh-agent-preset` row carries a 35-name composition, and a
+  // single nested name that does not resolve from the profile got the user's
+  // entire preset commented out. That is the "wrong drop" this function's own
+  // doctrine forbids ("a wrong keep costs a kernel warning, a wrong drop would
+  // silently remove a user's own row"): a nested row that cannot load fails the
+  // preset's MOUNT — the registry logs a warning and the preset does not appear,
+  // which is recoverable — while a dropped row takes the preset away with no
+  // way back except editing the file by hand.
+  const entryIndent = entryIndents.size === 0 ? undefined : Math.min(...entryIndents)
   const specifiers: PatchSpecifier[] = []
   row.forEach((line, index) => {
     const match = PATCH_NAME_LINE.exec(line)
     if (match === null) return
     const indent = contentIndent(line)
-    if (indent === undefined || !entryIndents.has(indent)) return
+    if (indent === undefined || indent !== entryIndent) return
     const specifier = match[3] ?? match[4] ?? ''
     if (specifier !== '') specifiers.push({ specifier, line: firstLine + index })
   })
@@ -583,11 +654,26 @@ function namedSpecifiers(text: string): PatchSpecifier[] {
 /**
  * Whether a row's specifier can load from the booted profile.
  *
- * The walk starts at the profile directory, so it also covers the shared
- * fallback the harness maintains at `$DSH_HOME/profiles/node_modules` — the
- * directory carrying the kernel's own closure. A kernel-provided package
- * therefore counts as resolvable even though the profile never installed it,
- * which is exactly the set the host's own resolver sees.
+ * Three positions, and they are the ones the host's enforcing resolver reads:
+ *
+ *   1. the booted profile's own `node_modules`,
+ *   2. the shared fallback the harness maintains at
+ *      `$DSH_HOME/profiles/node_modules`, and
+ *   3. **the installation closure** (`extraDirs`, the active kernel's
+ *      `app/node_modules`).
+ *
+ * Position 3 is not a convenience — it is the AUTHORITY, and positions 1-2 are
+ * mirrors of it. `createRuntimeResolution` (`packages/boot/app-boot/src/profile.ts`)
+ * builds the resolver's table from `collectInstallationScopePackages(installAnchor)`
+ * — the running dsh installation's own dependency closure — and the resolver
+ * consults that NAME→DIRECTORY TABLE, not a directory scan
+ * (`profile-resolution/resolver.ts`: `entries: new Map(resolution.entries…)`).
+ * The shared fallback directory is a harness-maintained copy of that closure, so
+ * it LAGS: measured on this machine it still held the 0.1.6-era set (including a
+ * package 0.1.7 deleted) while lacking three packages 0.1.7 ships. Reading only
+ * the mirrors therefore reported resolvable rows as unresolvable — three of them
+ * in one real home layer, which got the user's preset commented out for no
+ * reason. Passing the closure directory closes that gap.
  *
  * A PATH specifier is judged first and against the file system, because the
  * loader imports it directly (`tree.import(name)`). Measured on a real profile:
@@ -599,10 +685,17 @@ function namedSpecifiers(text: string): PatchSpecifier[] {
  * half-copied `local-plugins/`, say) is not importable either. A `cordis:`
  * builtin stays unjudged — the shell has nothing to check it against.
  *
+ * Node's own upward walk stays out of it on purpose: it would ALSO accept a
+ * package installed at `$DSH_HOME/node_modules`, in the user's home directory or
+ * at a disk root, and the shell would then keep a row the host cannot resolve.
+ *
  * @param specifier - the row's `name:` value.
  * @param profileDir - the profile the composition boots from.
+ * @param extraDirs - additional package roots the host resolves from, highest
+ *   authority last (the active kernel's `app/node_modules`). Defaults to none,
+ *   which is the pre-fix behaviour and keeps every existing caller honest.
  */
-export function specifierResolves(specifier: string, profileDir: string): boolean {
+export function specifierResolves(specifier: string, profileDir: string, extraDirs: readonly string[] = []): boolean {
   // Paths first: a relative or absolute specifier may carry a colon (an NTFS
   // alternate data stream, or a Windows path a user wrote down by hand), and
   // mistaking that for a URL scheme would leave exactly those rows unexamined.
@@ -610,22 +703,52 @@ export function specifierResolves(specifier: string, profileDir: string): boolea
     return importableFile(path.resolve(profileDir, specifier))
   }
   if (SCHEME_SPECIFIER.test(specifier)) return true
-  // The two positions the host's enforcing resolver reads, and nothing else: the
-  // booted profile's own node_modules, and the shared fallback the harness links
-  // the kernel's closure into (`$DSH_HOME/profiles/node_modules`). Node's own
-  // upward walk would ALSO accept a package installed at `$DSH_HOME/node_modules`,
-  // in the user's home directory or at a disk root — the shell would keep a row
-  // the host cannot resolve, and the client's boot audit rejects the whole page
-  // over one such row.
   const searchDirs = [
     path.join(profileDir, 'node_modules'),
     path.join(profileDir, '..', 'node_modules'),
+    ...extraDirs,
   ]
-  return searchDirs.some((dir) => existsSync(path.join(dir, ...specifier.split('/'), 'package.json')))
+  // A SUBPATH specifier (`@scope/pkg/tool`) has no `…/tool/package.json`; the
+  // package root is what has to be present, and whether its `exports` admits the
+  // subpath is the loader's business. Building the path from the whole specifier
+  // reported every subpath row as unresolvable — two of the three above are
+  // subpaths, and both are exported by their package.
+  const [packageName] = splitPackageSpecifier(specifier)
+  return packageName !== undefined
+    && searchDirs.some((dir) => existsSync(path.join(dir, ...packageName.split('/'), 'package.json')))
+}
+
+/**
+ * The package name a bare specifier starts with, plus whatever follows it.
+ *
+ * `@scope/pkg/tool/x` → `['@scope/pkg', 'tool/x']`; `pkg/tool` → `['pkg', 'tool']`;
+ * a specifier whose scope segment is missing → `[undefined, '']`.
+ *
+ * @param specifier - a bare (non-path, non-scheme) specifier.
+ */
+function splitPackageSpecifier(specifier: string): [string | undefined, string] {
+  const parts = specifier.split('/')
+  if (!specifier.startsWith('@')) return [parts[0], parts.slice(1).join('/')]
+  if (parts.length < 2 || parts[0] === '' || parts[1] === '') return [undefined, '']
+  return [`${parts[0] ?? ''}/${parts[1] ?? ''}`, parts.slice(2).join('/')]
 }
 
 /** A specifier carrying a URL scheme (`cordis:include`, `node:fs`, `file:…`). */
 const SCHEME_SPECIFIER = /^[a-z][a-z0-9+.-]*:/iu
+
+/**
+ * The installation-closure package root to add to the resolution check, or none
+ * when there is no kernel to point at.
+ *
+ * A directory that does not exist is dropped rather than passed on: the check's
+ * whole test is `existsSync`, so an absent root would never match — but handing
+ * it over anyway would make a typo look like a position that was consulted.
+ *
+ * @param kernelNodeModules - the active kernel's `app/node_modules`, when known.
+ */
+function extraResolutionDirs(kernelNodeModules: string | undefined): readonly string[] {
+  return kernelNodeModules !== undefined && existsSync(kernelNodeModules) ? [kernelNodeModules] : []
+}
 
 /**
  * Whether a path points at a file the loader can import.
@@ -684,9 +807,11 @@ export function patchSpecifiers(text: string): string[] {
  *
  * @param text - the patch text to examine.
  * @param profileDir - the profile the host will boot.
+ * @param extraDirs - package roots the host also resolves from (see
+ *   {@link specifierResolves}); the active kernel's `app/node_modules`.
  */
-export function unloadableRows(text: string, profileDir: string): PatchSpecifier[] {
-  return namedSpecifiers(text).filter((named) => !specifierResolves(named.specifier, profileDir))
+export function unloadableRows(text: string, profileDir: string, extraDirs: readonly string[] = []): PatchSpecifier[] {
+  return namedSpecifiers(text).filter((named) => !specifierResolves(named.specifier, profileDir, extraDirs))
 }
 
 /**
@@ -721,10 +846,12 @@ export function relativePatchSpecifiers(text: string): string[] {
  *
  * @param text - one section's text (comments included).
  * @param profileDir - the profile the composition boots from.
+ * @param extraDirs - package roots the host also resolves from (see
+ *   {@link specifierResolves}); the active kernel's `app/node_modules`.
  * @returns the section with unloadable rows commented out, plus the specifiers
  *   that were skipped (for the caller's log lines).
  */
-export function filterUnresolvableRows(text: string, profileDir: string): { text: string; skipped: string[] } {
+export function filterUnresolvableRows(text: string, profileDir: string, extraDirs: readonly string[] = []): { text: string; skipped: string[] } {
   const lines = patchLines(text)
   const kept: string[] = []
   const skipped: string[] = []
@@ -740,7 +867,7 @@ export function filterUnresolvableRows(text: string, profileDir: string): { text
     while (end < lines.length && !PATCH_ROW_LINE.test(lines[end] ?? '')) end += 1
     const row = lines.slice(index, end)
     const unresolved = rowSpecifiers(row, index + 1)
-      .filter((named) => !specifierResolves(named.specifier, profileDir))
+      .filter((named) => !specifierResolves(named.specifier, profileDir, extraDirs))
       .map((named) => named.specifier)
     if (unresolved.length === 0) {
       kept.push(...row)
@@ -773,14 +900,17 @@ export function filterUnresolvableRows(text: string, profileDir: string): { text
  *
  * @param profileDir - the booted profile's directory (its `cordis.patch.yml`).
  * @param options - `suite: false` (safe mode) drops the shipped rows and keeps
- *   only what is the user's own; `report` receives each diagnostic line (the
+ *   only what is the user's own; `kernelNodeModules` is the active kernel's
+ *   `app/node_modules`, the installation closure the host resolves through
+ *   (see {@link specifierResolves}); `report` receives each diagnostic line (the
  *   packaged Windows build shows no console, so the caller passes the kernel
  *   log's own writer — the console fallback is for a probe or a dev checkout).
  */
 export async function writeSuitePatchFile(
   profileDir: string,
-  options: { suite: boolean; homeRows?: boolean; report?: (line: string) => void },
+  options: { suite: boolean; homeRows?: boolean; kernelNodeModules?: string; report?: (line: string) => void },
 ): Promise<readonly PatchSpecifier[]> {
+  const closure = extraResolutionDirs(options.kernelNodeModules)
   let suite = ''
   if (options.suite) {
     suite = await readOptionalFile(path.join(__dirname, 'dsh-app.patch.yml'))
@@ -798,14 +928,15 @@ export async function writeSuitePatchFile(
   // The carried sections are filtered before they enter the composition, and
   // every skip is reported: a user who reads the log learns which row was left
   // out and why, and the file itself carries the reason beside the dead row.
-  const carried = filterUnresolvableRows(parseSuitePatch(withoutManaged).preserved, profileDir)
+  const parsed = parseSuitePatch(withoutManaged)
+  const carried = filterUnresolvableRows(parsed.preserved, profileDir, closure)
   const copyHome = options.homeRows !== false
   // Read once, for both jobs: the copy this line may compose, and the audit the
   // other line needs (it cannot compose that file, so naming the bad rows is the
   // only thing left to do about them).
   const homeLayerText = await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME))
   const home = copyHome
-    ? filterUnresolvableRows(homeLayerText, profileDir)
+    ? filterUnresolvableRows(homeLayerText, profileDir, closure)
     : { text: PATCH_HOME_OMITTED, skipped: [] }
   for (const specifier of [...carried.skipped, ...home.skipped]) {
     reportLine(`[brand-suite] patch row skipped: "${specifier}" does not load from ${profileDir}; the row stays in ${PROFILE_PATCH_FILENAME} commented out`, options.report)
@@ -815,23 +946,123 @@ export async function writeSuitePatchFile(
   // nor comment a row out — but it can hand back the file, the line and the row,
   // which is the whole difference between "the app does not open" and a fix the
   // user can make in a minute.
-  const homeUnloadable = copyHome ? [] : unloadableRows(homeLayerText, profileDir)
+  const homeUnloadable = copyHome ? [] : unloadableRows(homeLayerText, profileDir, closure)
   for (const named of homeUnloadable) {
     reportLine(`[brand-suite] the home layer names "${named.specifier}" (line ${String(named.line)}), which does not load from ${profileDir}: install it into that profile (the plugin market's install action does this) or remove the row — the host cannot start while it is there`, options.report)
+  }
+  // The opaque tail — the rows the kernel's configuration editor appended when it
+  // stored a setting. A file written before the tail marker existed says nothing
+  // about where its own content ends, so that case is read with `legacyTail`; and
+  // when even that anchor is missing, the file is copied aside rather than
+  // re-derived, because a rewrite would take those rows with it.
+  let tail = parsed.tail
+  if (tail === '' && !existing.includes(PATCH_TAIL_MARK)) {
+    const recovered = legacyTail(withoutManaged, home.text)
+    if (recovered === undefined) {
+      await keepUnlocatableTailAside(target, existing, withoutManaged, options.report)
+    } else {
+      tail = recovered
+      if (recovered !== '') {
+        reportLine('[brand-suite] this profile patch predates the preserved tail; the rows past the home marker were adopted, so settings the kernel stores here survive from now on', options.report)
+      }
+    }
   }
   const next = composeSuitePatch({
     suite,
     preserved: carried.text,
     home: home.text,
+    tail,
     managed,
   })
   if (next === existing) return homeUnloadable
   await fs.mkdir(profileDir, { recursive: true })
-  await fs.writeFile(target, next, 'utf8')
+  await writePatchAtomically(target, next)
   // The pre-A1 overlay copy in userData is no longer passed to anything; remove
   // it so a stale file cannot look like the live composition.
   await fs.rm(path.join(app.getPath('userData'), 'dsh-app-suite.patch.yml'), { force: true }).catch(() => undefined)
   return homeUnloadable
+}
+
+/**
+ * Install a newly composed profile patch through a temporary file and a rename.
+ *
+ * This file IS the composition the host boots, so the failure modes matter more
+ * than the bytes. A plain `writeFile` interrupted by a crash or a full disk
+ * leaves a TRUNCATED patch: a profile that cannot load, with the previous content
+ * gone. A rename is atomic, so a reader sees the old file or the new one and
+ * never half of either.
+ *
+ * What this deliberately does NOT do is remove the target first — the trick
+ * `writeJsonFileAtomic` uses, which is fine for a record whose absence means "not
+ * set". Here the same window would take the suite rows, the rows the profile
+ * carried and the kernel's own tail with it, and a boot without them is the
+ * failure this whole file exists to prevent. If the rename cannot be made to
+ * land, the OLD file stays and the caller hears about it.
+ *
+ * Windows refuses a rename while another process holds the target — an antivirus
+ * scanner or the search indexer, briefly — so the transient codes are retried
+ * exactly as the kernel manager retries its own activation rename.
+ *
+ * @param target - absolute path of the profile's `cordis.patch.yml`.
+ * @param content - the composed content to install.
+ * @throws when the rename cannot be made to land; the previous file is untouched.
+ */
+export async function writePatchAtomically(target: string, content: string): Promise<void> {
+  const staging = `${target}.${String(process.pid)}.tmp`
+  await fs.writeFile(staging, content, 'utf8')
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await fs.rename(staging, target)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      const transient = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
+      if (!transient || attempt >= 5) {
+        // The old file is still in place, so the profile keeps booting on the
+        // composition it had; the staging file is junk in a directory nothing
+        // reads. Fail loudly rather than report a write that did not land.
+        await fs.rm(staging, { force: true }).catch(() => undefined)
+        throw error
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 50))
+    }
+  }
+}
+
+/**
+ * Keep a copy of a profile patch whose tail could not be located.
+ *
+ * Reached only for a file written before {@link PATCH_TAIL_MARK} whose home
+ * section this start would not reproduce byte for byte — the home layer changed
+ * since, or the file was edited by hand. Rewriting it is still correct for the
+ * shell's own sections, but anything past them goes with the rewrite, and the
+ * shell cannot tell a kernel-written settings row from a user's row there. So the
+ * file is copied beside itself first and the log names the copy. Best effort: a
+ * copy that cannot be written must not stop the boot.
+ *
+ * @param target - the profile patch being rewritten.
+ * @param content - its current content (the copy that is kept).
+ * @param withoutManaged - content with the market's block already lifted out.
+ * @param report - where the diagnostic line goes.
+ */
+async function keepUnlocatableTailAside(
+  target: string,
+  content: string,
+  withoutManaged: string,
+  report: ((line: string) => void) | undefined,
+): Promise<void> {
+  const homeAt = withoutManaged.indexOf(PATCH_HOME_MARK)
+  if (homeAt === -1) return
+  // Only rows are at risk: comments past the marker are already inert.
+  const atRisk = withoutManaged.slice(homeAt).split('\n').some((line) => /^\s*-\s/u.test(line))
+  if (!atRisk) return
+  const copy = `${target}.pre-tail-${new Date().toISOString().replace(/[:.]/gu, '-')}`
+  try {
+    await fs.writeFile(copy, content, 'utf8')
+    reportLine(`[brand-suite] this profile patch predates the preserved tail and its rows past the home marker cannot be told apart from yours; the file as it was is kept at ${copy}`, report)
+  } catch (error) {
+    reportLine(`[brand-suite] could not keep a copy of ${target} before rewriting it (${String(error)}); rows past the home marker may be lost`, report)
+  }
 }
 
 /**
@@ -846,7 +1077,7 @@ export async function writeSuitePatchFile(
  */
 export async function prepareBrandSuite(
   sources: readonly SuitePluginSource[],
-  options: { profileDir: string; suite: boolean; homeRows?: boolean; report?: (line: string) => void },
+  options: { profileDir: string; suite: boolean; homeRows?: boolean; kernelNodeModules?: string; report?: (line: string) => void },
 ): Promise<{ suite: boolean; homeUnloadable: readonly PatchSpecifier[] }> {
   let suite = options.suite
   try {
@@ -866,7 +1097,7 @@ export async function prepareBrandSuite(
     suite = false
   }
   try {
-    const homeUnloadable = await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows, report: options.report })
+    const homeUnloadable = await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows, kernelNodeModules: options.kernelNodeModules, report: options.report })
     return { suite, homeUnloadable }
   } catch (err) {
     reportLine(`[brand-suite] patch layer could not be written: ${(err as Error).message}`, options.report)

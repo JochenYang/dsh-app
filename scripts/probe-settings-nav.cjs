@@ -23,15 +23,14 @@ const fs = require('node:fs')
 const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 const root = path.resolve(__dirname, '..')
 const OVERLAY = path.join(root, 'dist', 'main', 'dsh-app.patch.yml')
 const CHECKOUT = process.env.DSH_APP_DEV_RUNTIME ?? 'D:/codes/deepseek-harness'
-const SUITE_DIRS = [
-  'plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives',
-  'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets',
-  'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch',
-]
+// The suite roster is NOT copied here — a copy is precisely how this probe went
+// stale when plugin-fff was removed (`throw new Error('suite plugin missing')`).
+// It is derived from scripts/kernel-line.mjs's SUITE_PLUGINS inside main().
 
 const args = process.argv.slice(2)
 const argOf = (name, fallback) => (args.includes(name) ? args[args.indexOf(name) + 1] : fallback)
@@ -263,15 +262,20 @@ async function main() {
   // the kernel's profile resolver collects candidates from the booted profile's
   // node_modules walk and stops at the shared fallback position, which is
   // resolved only through the installation closure — a suite package is in
-  // neither, so the shared link alone leaves all seventeen entries failing with
+  // neither, so the shared link alone leaves every suite entry failing with
   // "Cannot find package '@dsh-app/plugin-*' imported from <home>/profiles/web/".
+  //
+  // The roster is DERIVED, never copied: a list beside this code is how the probe
+  // went stale when plugin-fff was removed (it threw "suite plugin missing").
+  const { SUITE_PLUGINS } = await import(pathToFileURL(path.join(root, 'scripts', 'kernel-line.mjs')).href)
+  const suiteDirs = SUITE_PLUGINS.map((name) => name.replace('@dsh-app/', ''))
   const sharedScope = path.join(dshHome, 'profiles', 'node_modules', '@dsh-app')
   // `dsh web` boots the profile named after the command; the probe pre-creates
   // its scope dir so the links are in place before the kernel reads the tree.
   const profileScope = path.join(dshHome, 'profiles', 'web', 'node_modules', '@dsh-app')
   mkdirSync(sharedScope, { recursive: true })
   mkdirSync(profileScope, { recursive: true })
-  for (const dir of SUITE_DIRS) {
+  for (const dir of suiteDirs) {
     const target = path.join(root, 'plugins', dir)
     if (!existsSync(path.join(target, 'package.json'))) throw new Error(`suite plugin missing at ${target}`)
     for (const scope of [sharedScope, profileScope]) {
@@ -458,7 +462,10 @@ async function main() {
 
     if (SECTION !== null) {
       const clicked = await win.webContents.executeJavaScript(CLICK_ROW(SECTION))
-      record(`nav row "${SECTION}" is clickable`, clicked === true)
+      // A label substring is language-specific, so a zh-CN run asked for the
+      // English name of a row fails on the INVOCATION, not on the product — print
+      // the labels this rail actually carries, so the next reader sees that.
+      record(`nav row "${SECTION}" is clickable`, clicked === true, `rows: ${nav.rows.map((row) => row.label).join(' | ')}`)
       if (clicked) {
         await sleep(1500)
         await shot(win, 'settings-section')
@@ -509,6 +516,65 @@ async function main() {
               && /可用|不可用|available|unavailable/i.test(seen[seen.length - 1]),
             JSON.stringify(seen))
         }
+
+        // Our own composition-check card. This is the half the Han sweep CANNOT
+        // see: "no Han" means nothing LEAKED, not that the card rendered — a card
+        // that never mounted leaves the sweep green.
+        //
+        // The HAPPY path is deliberately NOT asserted here: the action lives on
+        // the shell's own origin (`dsh-app://app/`, see the page's
+        // SHELL_ACTION_ORIGIN) and this window is loaded from the kernel's
+        // http://127.0.0.1 URL, so the call cannot reach it from here. What this
+        // context CAN prove is that the card mounts with its own copy and that
+        // the click is never a silent no-op (the defect this file's bridge block
+        // was written for).
+        const READ_CHECK = `(function () {
+          const cards = [...document.querySelectorAll('.dshDiag-card')]
+          const card = cards.find((el) => /Static composition check|组合静态检查/.test(el.textContent))
+          if (card === undefined) return { cards: cards.length, badge: null, button: null, summary: null, rows: 0 }
+          const badge = card.querySelector('[role="status"]')
+          const button = [...card.querySelectorAll('button')].find((b) => /^(?:Run check|运行检查|Checking…|检查中…)$/.test(b.textContent.trim()))
+          const summary = card.querySelector('.dshDiag-path')
+          return {
+            cards: cards.length,
+            badge: badge === null ? null : badge.textContent,
+            button: button === undefined ? null : button.textContent,
+            summary: summary === null ? null : summary.textContent,
+            rows: card.querySelectorAll('.dshDiag-checkItem').length,
+          }
+        })()`
+        const checkBefore = await win.webContents.executeJavaScript(READ_CHECK)
+        record('the composition-check card renders, idle, before anything is run',
+          checkBefore.badge !== null && /未运行|Not run/.test(checkBefore.badge) && checkBefore.button !== null,
+          JSON.stringify(checkBefore))
+        const checkStarted = await win.webContents.executeJavaScript(`(function () {
+          const card = [...document.querySelectorAll('.dshDiag-card')]
+            .find((el) => /Static composition check|组合静态检查/.test(el.textContent))
+          if (card === undefined) return false
+          const button = [...card.querySelectorAll('button')].find((b) => /^(?:Run check|运行检查)$/.test(b.textContent.trim()))
+          if (button === undefined) return false
+          button.click()
+          return true
+        })()`)
+        const checkSeen = []
+        for (let i = 0; i < 120; i += 1) {
+          const now = await win.webContents.executeJavaScript(READ_CHECK)
+          if (now.badge !== null && checkSeen[checkSeen.length - 1] !== now.badge) checkSeen.push(now.badge)
+          if (checkSeen.some((text) => /检查中|Checking/.test(text)) && !/检查中|Checking/.test(checkSeen[checkSeen.length - 1] ?? '')) break
+          await sleep(500)
+        }
+        const checkAfter = await win.webContents.executeJavaScript(READ_CHECK)
+        console.log(`\n--- 组合静态检查 (${LANG}) ---`)
+        console.log(`  badge  : ${JSON.stringify(checkAfter.badge)}`)
+        console.log(`  seen   : ${JSON.stringify(checkSeen)}`)
+        console.log(`  summary: ${JSON.stringify(checkAfter.summary)}`)
+        console.log(`  rows   : ${checkAfter.rows}`)
+        console.log('  note   : the happy path needs the app origin (dsh-app://app/); this window is on the kernel URL')
+        record('running the composition check moves the verdict off idle — the click is never a no-op',
+          checkStarted === true
+            && checkSeen.length >= 2
+            && !/未运行|Not run/.test(checkSeen[checkSeen.length - 1] ?? ''),
+          JSON.stringify(checkSeen))
       }
     }
   } finally {

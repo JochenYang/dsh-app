@@ -98,8 +98,11 @@ const http = require('node:http')
 const argv = process.argv.slice(2)
 const problems = []
 if (!process.execArgv.includes('--expose-internals')) problems.push('missing --expose-internals')
-if (argv.length !== 4) problems.push('positional count ' + String(argv.length))
-if (argv[3] !== 'link' && argv[3] !== 'runtime') problems.push('resolution ' + String(argv[3]))
+// The 0.1.7 contract: runtime tree, profile, primary-runtime — and NOTHING after
+// it. The slot this line dropped used to be the profile-resolution mode, and the
+// slot after that is the package-manager script, so a shell still sending a mode
+// is handing the child a package manager it never chose.
+if (argv.length !== 3) problems.push('positional count ' + String(argv.length))
 if (process.env.FAKE_WEB_CONTRACT === 'refuse') problems.push('unsupported internal option ' + JSON.stringify(argv[1] || ''))
 // The real host composes the office skill plugin with
 // assetRoot = join(dirname(argv[2]), 'office-skills') and the plugin throws at
@@ -194,7 +197,6 @@ function webStartOptions(runtime) {
   return {
     officeSkillsSource: runtime.officeSource,
     userDataDir: runtime.dataDir,
-    checkoutRuntime: true,
     allowLinkedProfile: true,
   }
 }
@@ -367,13 +369,16 @@ test('a web-transport version starts on the child URL contract, office payload a
     // refuses them leaves nothing else to read.
     const argv = JSON.parse(line(logs, 'dsh host: web argv').slice('dsh host: web argv '.length))
     const primaryRuntime = path.join(runtime.dataDir, 'dsh-app-office', 'primary-runtime')
+    // The list ENDS at the primary-runtime path: the kernel line that removed the
+    // profile-resolution mode also turned the old next slot into the package-
+    // manager script, so a shell still sending `'link'` here handed the child
+    // `node --expose-internals link` as its package manager.
     assert.deepEqual(argv, [
       '--expose-internals',
       desktopHostEntry(runtime.root),
       runtime.root,
       runtime.projectDir,
       primaryRuntime,
-      'link',
     ])
     // The invariant the child depends on, not the literal: its asset root is
     // `dirname(argv[4])/office-skills`, so the payload must sit BESIDE the

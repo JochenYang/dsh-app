@@ -25,6 +25,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { removeTree } from './lib/remove-tree.mjs'
+import { redactToken } from './lib/redact-token.mjs'
 
 // 内核入口相对内核根目录的固定位置，与 runtime 产物布局一致
 const KERNEL_BIN = path.join('app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -252,8 +253,7 @@ async function main() {
     const startedAt = Date.now()
     const { child: proc, result } = await runKernel(binJs, homeDir, args.profile, args.port, args.timeout * 1000, lines, flushers)
     child = proc
-    // 收尾：无论结局先整树杀，再给流一点时间 flush 残留输出
-    killTree(child.pid)
+    // 收尾：无论结局先整树杀，再给流一点时间 flush 残留输出    killTree(child.pid)
     await new Promise((r) => setTimeout(r, 300))
     for (const flush of flushers) flush()
 
@@ -274,7 +274,7 @@ async function main() {
     console.log(`就绪信号:   ${outcomeSummary(result, args.timeout)}，用时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`)
     if (tail.length > 0) {
       console.log('---- 启动输出（尾部）----')
-      for (const line of tail) console.log(`  ${line}`)
+      for (const line of tail) console.log(`  ${redactToken(line)}`)
     }
     console.log('---- 结论 ----')
     if (passed) {
@@ -284,7 +284,7 @@ async function main() {
       if (!readySeen) console.log('原因: 就绪信号未出现（内核未能在超时前提供 web 服务）')
       if (!exitOk) console.log(`原因: 就绪后进程异常退出 (code=${result.code})`)
       console.log(`失败信号命中 ${hits.length} 行:`)
-      for (const line of hits.slice(0, 20)) console.log(`  ✗ ${line.slice(0, 300)}`)
+      for (const line of hits.slice(0, 20)) console.log(`  ✗ ${redactToken(line).slice(0, 300)}`)
     }
     process.exitCode = passed ? 0 : 1
   } catch (err) {

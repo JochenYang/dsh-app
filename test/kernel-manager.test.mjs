@@ -206,6 +206,58 @@ test('cleanup keeps active and previous, drops orphans and staging', async (t) =
   assert.ok(!existsSync(path.join(h.root, 'staging')))
 })
 
+test('a locally named runtime is booted in place, and never pruned', async (t) => {
+  // DSH_APP_DEV_KERNEL (`localRuntimeDir`): a dev run boots a runtime tree it
+  // names instead of the installed one, and must not touch the installed kernel —
+  // neither by pruning it nor by claiming its activation record. `cleanup` is the
+  // dangerous half: its keep-set is built from `current.active`, and this mode's
+  // value is a sentinel that matches no directory, so without its own guard the
+  // run would prune the very install a packaged start depends on.
+  const h = await harness(t, 'dsh-kernel-localruntime-')
+  const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
+  await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
+  const orphan = path.join(h.root, 'dsh-0.9.0+suite-old')
+  mkdirSync(orphan)
+  // A runtime tree of its own, shaped like an installed one (node/ + app/).
+  const runtimeDir = path.join(h.dir, 'built-runtime')
+  mkdirSync(path.join(runtimeDir, 'node'), { recursive: true })
+  writeFileSync(path.join(runtimeDir, 'node', NODE_BINARY), '')
+  mkdirSync(path.join(runtimeDir, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib'), { recursive: true })
+  writeFileSync(path.join(runtimeDir, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js'), '')
+  writeFileSync(path.join(runtimeDir, 'manifest.json'), JSON.stringify({ dshVersion: '9.9.9', suiteVersion: 'local', channel: 'stable', platform: PLATFORM, arch: ARCH }, null, 2))
+
+  const local = new KernelManager({
+    runtimeRoot: h.userData, platform: PLATFORM, arch: ARCH, source: 'artifact', channel: 'stable',
+    artifactOwner: 'owner', artifactRepo: 'repo', localRuntimeDir: runtimeDir,
+  })
+  const current = await local.load()
+
+  assert.equal(current?.manifest.dshVersion, '9.9.9', 'the named tree is the kernel this run boots')
+  assert.equal(local.getCurrentDir(), runtimeDir, 'and it is booted in place, not from a versioned dir')
+  await local.cleanup()
+  assert.ok(existsSync(path.join(h.root, 'dsh-1.0.0+suite-s1')), 'the installed kernel survives')
+  assert.ok(existsSync(orphan), 'a locally named runtime does not sweep the installed tree at all')
+
+  // A tree that is not one — no manifest, or missing a required entry — fails by
+  // name here rather than several seconds into a start.
+  const emptyDir = path.join(h.dir, 'not-a-runtime')
+  mkdirSync(emptyDir, { recursive: true })
+  const bad = new KernelManager({
+    runtimeRoot: h.userData, platform: PLATFORM, arch: ARCH, source: 'artifact', channel: 'stable',
+    artifactOwner: 'owner', artifactRepo: 'repo', localRuntimeDir: emptyDir,
+  })
+  await assert.rejects(() => bad.load(), /manifest\.json/u)
+
+  const halfBuilt = path.join(h.dir, 'half-built-runtime')
+  mkdirSync(path.join(halfBuilt, 'node'), { recursive: true })
+  writeFileSync(path.join(halfBuilt, 'manifest.json'), JSON.stringify({ dshVersion: '9.9.9', suiteVersion: 'local', channel: 'stable', platform: PLATFORM, arch: ARCH }, null, 2))
+  const half = new KernelManager({
+    runtimeRoot: h.userData, platform: PLATFORM, arch: ARCH, source: 'artifact', channel: 'stable',
+    artifactOwner: 'owner', artifactRepo: 'repo', localRuntimeDir: halfBuilt,
+  })
+  await assert.rejects(() => half.load(), /incomplete|不完整/u)
+})
+
 test('cleanup in dev mode never touches a production kernel tree', async (t) => {
   const h = await harness(t, 'dsh-kernel-devcleanup-')
   const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })

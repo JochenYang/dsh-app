@@ -160,9 +160,6 @@ export function checkHanCharacters(repoRoot) {
     // plugin-brand's route labels: documented at routes.ts and in the file
     // header — user-facing picker labels with no dictionary to live in.
     'plugins/plugin-brand/src/routes.ts',
-    // Model-facing tool failures, declared "zh-CN by design" in the JSDoc.
-    'plugins/plugin-fff/src/tools.ts',
-    'plugins/plugin-fff/src/picker.ts',
     // The cross-session memory's model-facing layer: the curator's prompt and
     // the failure values the tools relay.
     'plugins/plugin-memory/src/prompt.ts',

@@ -402,7 +402,13 @@ export async function migrateSuiteProfile(): Promise<MigrationOutcome> {
         name: `dsh-profile-${SUITE_PROFILE}`,
         private: true,
         dependencies: {},
-        dsh: { profile: { bundles: [...SUITE_PROFILE_BUNDLES], patchReload: 'live' } },
+        // No `patchReload`: the field was removed upstream — a profile's
+        // configuration reloads through the base bundle's `hmr` row now
+        // (`packages/bundle/base`, `cordis.patch.yml`), which this kernel line
+        // always composes. Writing it here would be a field nothing reads, and a
+        // later reader would have to find out the hard way that it decides
+        // nothing about reload behaviour.
+        dsh: { profile: { bundles: [...SUITE_PROFILE_BUNDLES] } },
       }, undefined, 2)}\n`,
       'utf8',
     )

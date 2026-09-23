@@ -12,7 +12,7 @@
 //     must survive the skip so the user can install the package and re-enable it.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -33,7 +33,7 @@ function loadYaml() {
   }
 }
 const { redact, MAX_LOG_LINE } = require('../dist/main/redact.js')
-const { composeSuitePatch, filterUnresolvableRows, marketManagedBlock, parseSuitePatch, relativePatchSpecifiers, specifierResolves, unloadableRows } = require('../dist/main/brand-suite.js')
+const { composeSuitePatch, filterUnresolvableRows, legacyTail, marketManagedBlock, parseSuitePatch, relativePatchSpecifiers, specifierResolves, unloadableRows, writePatchAtomically } = require('../dist/main/brand-suite.js')
 
 test('redact keeps the key name and drops the value in every shape we see', () => {
   // JSON pairs (the shape dsh prints in its own diagnostics).
@@ -187,6 +187,59 @@ test('the plugin market block survives a regeneration', () => {
   assert.equal(marketManagedBlock(composeSuitePatch({ suite: SHIPPED, preserved: '', home: HOME })), '')
   // A hand-truncated block (no footer) is left to the market to repair.
   assert.equal(marketManagedBlock('# ── plugin-market managed disables ──\n- id: x\n'), '')
+})
+
+test('rows the kernel appends past the home section survive a regeneration', () => {
+  // 0.1.7 keeps user SETTINGS in this file: the kernel's configuration editor
+  // parses the profile patch as a YAML document and appends a row for the entry
+  // whose config changed (`packages/boot/config-editor`). The regenerator
+  // re-derives the file from its named sections, so without a marker for
+  // "everything past the shell's own text" that row was dropped on the next
+  // start and the user's setting went with it. Measured on a copy of the real
+  // profile patch with the very document API the kernel uses: the row lands
+  // after the home section whenever the home section is not a trailing comment
+  // block — always in dev (the home rows are copied in) and in production as
+  // soon as the plugin market has written its own block.
+  const settingsRow = [
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: littlejochen',
+    '    model: deepseek-v4.1-flash',
+  ].join('\n')
+
+  const first = composeSuitePatch({ suite: SHIPPED, preserved: '', home: HOME })
+  assert.ok(first.includes('@@dsh-app-rows:tail'), 'the shell marks where its own text ends')
+
+  // The kernel appends its row after everything the shell wrote.
+  const kernelWrote = `${first}${settingsRow}\n`
+
+  // The next start carries it, once, byte for byte.
+  const read = parseSuitePatch(kernelWrote)
+  const again = composeSuitePatch({ suite: SHIPPED, preserved: read.preserved, home: HOME, tail: read.tail })
+  assert.equal(again, kernelWrote)
+  assert.equal(again.match(/- id: agent-default-model/gu)?.length, 1)
+
+  // And it stays put across further starts — the regeneration is idempotent.
+  const third = parseSuitePatch(again)
+  assert.equal(composeSuitePatch({ suite: SHIPPED, preserved: third.preserved, home: HOME, tail: third.tail }), again)
+})
+
+test('a patch written before the tail marker adopts its trailing rows once', () => {
+  // Files the previous shell wrote end with the home section and say nothing
+  // about what follows it. The recovery anchors on that exact text — the home
+  // section this start would write — and takes what comes after it.
+  const settingsRow = ['- id: llm-deepseek', '  config: { models: [] }'].join('\n')
+  const legacy = composeSuitePatch({ suite: SHIPPED, preserved: '', home: HOME })
+    .replace('# @@dsh-app-rows:tail\n', '')
+  assert.ok(!legacy.includes('@@dsh-app-rows:tail'))
+
+  assert.equal(parseSuitePatch(legacy).tail, '')
+  assert.equal(legacyTail(legacy, HOME), '')
+  assert.equal(legacyTail(`${legacy}${settingsRow}\n`, HOME), settingsRow)
+
+  // A file whose home section is NOT the one this start would write is not
+  // guessed at: the caller keeps a copy aside instead (undefined here).
+  assert.equal(legacyTail(legacy, '- id: something-else\n  config: {}\n'), undefined)
 })
 
 test('a non-empty flow section is kept visible but inert', () => {
@@ -398,3 +451,95 @@ test('relativePatchSpecifiers reads entry fields only, and dedupes', () => {
   ].join('')
   assert.deepEqual(relativePatchSpecifiers(rows), ['./local-plugins/local-provider.mjs'])
 })
+
+test('writePatchAtomically installs the composition whole, with no staging file left behind', async () => {
+  const { profileDir } = fixtureProfile()
+  const target = path.join(profileDir, 'cordis.patch.yml')
+  writeFileSync(target, 'previous composition\n')
+  await writePatchAtomically(target, 'new composition\n')
+  assert.equal(readFileSync(target, 'utf8'), 'new composition\n')
+  // The staging file is what an interrupted write would leave in a directory the
+  // host reads at every start.
+  assert.deepEqual(readdirSync(profileDir).filter((name) => name.endsWith('.tmp')), [])
+})
+
+test('writePatchAtomically keeps what is at the target when the install cannot land', async () => {
+  const { profileDir } = fixtureProfile()
+  const target = path.join(profileDir, 'cordis.patch.yml')
+  // A non-empty directory cannot be replaced by a rename on any platform. This
+  // is the observable half of "the target is never removed first": an install
+  // that fails has to leave the composition that was already there intact.
+  mkdirSync(target)
+  writeFileSync(path.join(target, 'composition.txt'), 'still here\n')
+  await assert.rejects(writePatchAtomically(target, 'new composition\n'), (error) => {
+    return /^(EPERM|EACCES|EBUSY|EISDIR|ENOTEMPTY|EEXIST)$/u.test(error.code)
+  })
+  assert.equal(readFileSync(path.join(target, 'composition.txt'), 'utf8'), 'still here\n')
+  assert.deepEqual(readdirSync(profileDir).filter((name) => name.endsWith('.tmp')), [])
+})
+
+test('a nested composition is not judged against the profile, so one bad name cannot sink the row', () => {
+  // Measured on a real home layer: one migrated `@deepseek-ai/dsh-agent-preset`
+  // row carries a 35-name composition, and a single nested name that did not
+  // resolve from the profile got the user's ENTIRE preset commented out. A
+  // nested row's names are resolved by whoever mounts that composition (the
+  // preset registry), and a mount failure is a warning the user can act on —
+  // while a dropped row takes the preset away with no way back.
+  const { profileDir } = fixtureProfile()
+  const row = [
+    '- insert:',
+    '    - id: preset-rsi-dev',
+    "      name: '@deepseek-ai/dsh-agent-preset'",
+    '      config:',
+    '        id: rsi-dev',
+    '        plugins:',
+    '          - id: nested',
+    "            name: '@deepseek-ai/dsh-nested-not-installed'",
+    '',
+  ].join('\n')
+  const filtered = filterUnresolvableRows(row, profileDir)
+  // ONLY the row's own entry is reported; the nested name is not this profile's
+  // to judge. Before the fix this list carried both, and the row was dropped.
+  assert.deepEqual(filtered.skipped, ['@deepseek-ai/dsh-agent-preset'])
+
+  // With the installation closure in play the own name resolves too, and the row
+  // survives verbatim — the shape the real home layer has.
+  const closure = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-preset-closure-'))
+  installInto(path.join(closure, '@deepseek-ai', 'dsh-agent-preset'), '@deepseek-ai/dsh-agent-preset')
+  const kept = filterUnresolvableRows(row, profileDir, [closure])
+  assert.deepEqual(kept.skipped, [])
+  assert.equal(kept.text, row, 'the row is kept verbatim')
+
+  // The gate still works on the row's OWN entry: same shape, own name missing.
+  const own = row.replace("'@deepseek-ai/dsh-agent-preset'", "'@deepseek-ai/dsh-not-installed'")
+  assert.deepEqual(filterUnresolvableRows(own, profileDir, [closure]).skipped, ['@deepseek-ai/dsh-not-installed'])
+})
+
+test('the installation closure is a resolution position, and a subpath resolves through its package root', () => {
+  // The host resolves through a TABLE built from the running installation's
+  // dependency closure (`createRuntimeResolution` → `collectInstallationScopePackages`),
+  // not from the fallback DIRECTORY — which is a mirror and can lag. Measured:
+  // the mirror still held the 0.1.6-era set while lacking three packages 0.1.7
+  // ships, so the shell reported resolvable rows as unresolvable.
+  const { profileDir } = fixtureProfile()
+  const closure = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-closure-'))
+  installInto(path.join(closure, '@deepseek-ai', 'dsh-agent-preset'), '@deepseek-ai/dsh-agent-preset')
+  installInto(path.join(closure, '@deepseek-ai', 'dsh-plugin-manager'), '@deepseek-ai/dsh-plugin-manager')
+
+  assert.equal(specifierResolves('@deepseek-ai/dsh-agent-preset', profileDir), false, 'not in either mirror')
+  assert.equal(specifierResolves('@deepseek-ai/dsh-agent-preset', profileDir, [closure]), true, 'the closure is the authority')
+  // A SUBPATH has no `…/tools/package.json`; the package root is what must be
+  // present. Building the path from the whole specifier reported every subpath
+  // row unresolvable — and two of the three real ones are subpaths.
+  assert.equal(specifierResolves('@deepseek-ai/dsh-plugin-manager/tools', profileDir, [closure]), true)
+  assert.equal(specifierResolves('@deepseek-ai/dsh-plugin-manager/tools', profileDir), false)
+  // A package nothing carries stays refused, subpath or not.
+  assert.equal(specifierResolves('@deepseek-ai/dsh-nope/tools', profileDir, [closure]), false)
+  assert.equal(specifierResolves('http-free-pkg', profileDir, [closure]), false)
+})
+
+/** Write one package's manifest at an explicit directory. */
+function installInto(dir, packageName) {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(path.join(dir, 'package.json'), `${JSON.stringify({ name: packageName, version: '0.0.1' })}\n`)
+}

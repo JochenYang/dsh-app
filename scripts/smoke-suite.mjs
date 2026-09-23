@@ -44,7 +44,7 @@ import { removeTree } from './lib/remove-tree.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
-const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-fff', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch']
+const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch']
 
 // Mirrors SUITE_PROFILE / SUITE_PROFILE_BUNDLES in src/shared/constants.ts.
 // The suite boots its own profile; the throwaway home below has no legacy
@@ -493,7 +493,9 @@ async function main() {
       name: `dsh-profile-${SUITE_PROFILE}`,
       private: true,
       dependencies: {},
-      dsh: { profile: { bundles: SUITE_PROFILE_BUNDLES, patchReload: 'live' } },
+      // Mirrors the shell's own seed (`src/main/suite-profile.ts`): no
+      // `patchReload` — the field was removed upstream and decides nothing.
+      dsh: { profile: { bundles: SUITE_PROFILE_BUNDLES } },
     }, undefined, 2)}\n`)
   }
   // Replicate the shell's brand-suite seam inside the throwaway home: one link
@@ -623,7 +625,7 @@ async function main() {
     const index = await getJson(base, '/')
     const html = index.text
     // Every suite plugin with a dsh.client half (package.json dsh.client +
-    // lib/client.js); host-only plugins (brand, fff) are absent by design.
+    // lib/client.js); host-only plugins (brand) are absent by design.
     // Derived from the manifests rather than hand-listed: a sixth roster would
     // drift from the other five the moment a plugin gains a client half.
     const suiteClientPackages = SUITE_DIRS
@@ -638,11 +640,29 @@ async function main() {
     check('client: boot graph lists suite client packages',
       index.status === 200 && suiteClientPackages.every(id => html.includes(id)),
       `HTTP ${index.status}; ids found: ${suiteClientPackages.filter(id => html.includes(id)).join(',') || 'none'}`)
-    const combo = /\/plugins\/\?\?[^"']+/.exec(html)?.[0]?.replace(/&amp;/g, '&')
-    check('client: combo bundle URL advertised', typeof combo === 'string')
-    if (typeof combo === 'string') {
-      check('client: combo bundle includes plugin-mcp', combo.includes('@dsh-app/plugin-mcp/client.js'))
-      check('client: combo bundle includes plugin-websearch', combo.includes('@dsh-app/plugin-websearch/client.js'))
+    // 0.1.7 serves the shell, its API and its plugin resources from the DOCUMENT
+    // directory, so the index advertises each combo document-relative
+    // (`plugins/??…`); every earlier line advertised an absolute path
+    // (`/plugins/??…`). Both address the same route from this index, so the check
+    // accepts either.
+    //
+    // The index carries SEVERAL combos, not one: the application phase's batches
+    // as preloads, then the bootstrap phase's as scripts (see
+    // `packages/client/modules/src/index.ts`, "index injection"). Which batch a
+    // package lands in is the graph's business, so the check asks the union —
+    // pinning the FIRST match silently asserted "everything is in one batch" and
+    // broke the moment the suite gained a package that boots late.
+    const advertised = [...html.matchAll(/(?:\/)?plugins\/\?\?[^"']+/gu)].map((match) => match[0].replace(/&amp;/g, '&'))
+    check('client: combo bundle URL advertised', advertised.length > 0,
+      `no plugin combo reference in the index (${String(html.length)} bytes scanned)`)
+    const comboUnion = advertised.join(' ')
+    // `base` is a bare origin and these helpers join by concatenation, so the
+    // fetch needs the absolute form of whichever combo we picked.
+    const first = advertised[0]
+    const combo = first === undefined ? undefined : (first.startsWith('/') ? first : `/${first}`)
+    if (advertised.length > 0) {
+      check('client: combo bundles include plugin-mcp', comboUnion.includes('@dsh-app/plugin-mcp/client.js'))
+      check('client: combo bundles include plugin-websearch', comboUnion.includes('@dsh-app/plugin-websearch/client.js'))
       const served = await getJson(base, combo)
       check('client: combo bundle serves 200', served.status === 200, `HTTP ${served.status} for ${combo.slice(0, 120)}`)
     }

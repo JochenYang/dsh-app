@@ -190,7 +190,12 @@ const RESPONSE_FRAME_ERROR = 4
  * index injection table), and `handleMessage` refuses whichever pair does not
  * match. `shutdown-complete` and `update-tasks` are the web transport's own
  * messages — the first is upstream's teardown acknowledgement, the second its
- * update handoff, which this shell's updater does not use.
+ * update handoff, which this shell's updater does not use. `platform-session`
+ * is upstream's account-session report, which this shell has no surface for
+ * (see {@link handleMessage}); it is listed so the union stays the complete
+ * set of messages the 0.1.7 host line sends.
+ *
+ * An unknown tag is NOT a fatal condition — see {@link DshHost.startAttempt}.
  */
 type HostEvent = {
   readonly type: 'ready'
@@ -208,6 +213,9 @@ type HostEvent = {
   readonly requestId: number
   readonly active: boolean
   readonly error?: string
+} | {
+  readonly type: 'platform-session'
+  readonly session: unknown
 }
 
 /** One decoded response-pipe frame. */
@@ -278,14 +286,6 @@ export interface DshHostOptions {
    * "resolved outside the desktop profile" check refuses without this flag.
    */
   allowLinkedProfile?: boolean
-  /**
-   * Whether the runtime tree is a workspace checkout rather than an installed
-   * runtime. The web transport hands the answer to the child as its profile
-   * resolution mode (`link`, then; `runtime` for an installed tree), which is
-   * what lets a checkout's packages resolve per app instead of failing the
-   * "must live inside this runtime" check.
-   */
-  checkoutRuntime?: boolean
   /**
    * Office assets directory the web transport mirrors into {@link userDataDir}
    * (see {@link prepareOfficePayload} — the child refuses to compose without a
@@ -485,14 +485,33 @@ function shapeArgs(shape: HostArgShape, options: DshHostOptions): string[] {
  * The web transport's flags and positional arguments.
  *
  * The shape is the child's own, fixed by its release: `--expose-internals`
- * before the entry, then the runtime tree, the profile, the primary-runtime
- * path and the profile resolution mode. The two slots after the profile have no
- * flag form of their own, so nothing else may be inserted before them; the
- * package-manager pair the child also understands is deliberately omitted,
- * because the in-app market drives the kernel CLI itself.
+ * before the entry, then the runtime tree, the profile and the primary-runtime
+ * path. Those last three have no flag form of their own, so nothing else may be
+ * inserted before them.
  *
- * `--allow-linked-profile` has no counterpart here either: a checkout runtime is
- * what `link` says, and an extra argument would land in a positional slot.
+ * The package-manager pair the child also understands is NOT sent, and that has
+ * a real cost worth knowing before touching this: the child then leaves
+ * `packageManager` undefined and every package operation falls back to a `pnpm`
+ * resolved through `PATH` (`plugin-manager`'s `pnpmCommand` default). Our runtime
+ * tree carries no pnpm — the official shell bundles
+ * `<resources>/runtime/pnpm/bin/pnpm.mjs` and `<resources>/runtime/bin` and sends
+ * them in these two slots — so on a machine without a global pnpm the in-app
+ * market, the kernel's own plugin manager page and `profileHeal`'s repair all
+ * fail at the spawn. Measured: one `dsh plugin --profile <p> add <pkg>` answered
+ * `+ <pkg> <version>` with pnpm on `PATH` and cmd.exe's "not recognized"
+ * diagnostic without it.
+ *
+ * The kernel line that REMOVED the profile-resolution mode is why this list ends
+ * at the primary-runtime path. Up to 0.1.6 the next positional was
+ * `'link' | 'runtime'`, which the child read as its own resolution mode and then
+ * treated the slot after it as the package-manager script; a shell that kept
+ * sending a mode handed the child `node --expose-internals link` as its package
+ * manager and broke every in-app package operation. From 0.1.7 the two anchors of
+ * module resolution are consulted unconditionally, so there is no mode to send.
+ *
+ * `--allow-linked-profile` has no counterpart here either: it travels on the
+ * other shape's arguments (see {@link shapeArgs}), and an extra argument here
+ * would land in a positional slot.
  *
  * @param options - the start's inputs.
  * @param primaryRuntime - the office payload path (see {@link prepareOfficePayload}).
@@ -505,7 +524,6 @@ function webShapeArgs(options: DshHostOptions, primaryRuntime: string): string[]
     options.runtimeDir,
     options.projectDir,
     primaryRuntime,
-    options.checkoutRuntime === true ? 'link' : 'runtime',
   ]
 }
 
@@ -1082,8 +1100,12 @@ export class DshHost implements DshAppTarget {
     child.on('message', (message: unknown) => {
       if (!live()) return
       if (!isHostEvent(message)) {
-        this.fail(new Error('dsh host sent an invalid IPC event'))
-        child.kill('SIGTERM')
+        // An unknown tag is version skew, not corruption: the host line grows
+        // messages of its own (0.1.7 added `platform-session`), and killing the
+        // child over a tag this shell has never heard of turned a newer kernel
+        // into "the app does not start". The tag is logged, never the payload;
+        // the message is dropped and the host keeps running.
+        this.options.onLog?.(`dsh host: ignoring an IPC event this shell does not know (${hostEventTag(message)})`)
         return
       }
       this.handleMessage(message)
@@ -1535,6 +1557,13 @@ export class DshHost implements DshAppTarget {
         // what proves the teardown), and the update-task control is upstream's
         // update handoff — this shell's updater replaces the app, not the host.
         return
+      case 'platform-session':
+        // Upstream's account-session report (0.1.7+). The shell ships no
+        // account surface, and the profile this app boots is not the `desktop`
+        // profile that report is aimed at, so there is nothing to update — but
+        // the message must be ACCEPTED, because refusing an unknown tag is what
+        // turned a newer host line into a startup failure.
+        return
       default:
         message satisfies never
     }
@@ -1572,9 +1601,30 @@ function isHostEvent(message: unknown): message is HostEvent {
     case 'update-tasks':
       return Number.isSafeInteger(message.requestId) && typeof message.active === 'boolean'
         && (message.error === undefined || typeof message.error === 'string')
+    case 'platform-session':
+      // The payload is deliberately unread (see `handleMessage`): accepting the
+      // tag is the whole point, and validating a field nothing consumes would
+      // make the shell refuse a future shape of a message it ignores anyway.
+      return true
     default:
       return false
   }
+}
+
+/**
+ * The type tag of an IPC message this shell does not know, for its log line.
+ *
+ * Only the tag is ever read: an unrecognized message's payload is not this
+ * shell's to trust, and the one tag upstream sends today carries account
+ * material. The line names what arrived so version skew is diagnosable without
+ * printing anything that arrived with it.
+ *
+ * @param message - the value read off the child's IPC channel.
+ * @returns the tag, or `<no type>` when the value carries none.
+ */
+function hostEventTag(message: unknown): string {
+  if (!isRecord(message) || typeof message.type !== 'string') return '<no type>'
+  return message.type
 }
 
 /**

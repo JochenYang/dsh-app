@@ -33,6 +33,14 @@ import { readDevManifest } from './sources/dev'
  * thousands of files on every boot, and a tree that lost a leaf file fails in
  * its own diagnostics with the path in hand.
  */
+/**
+ * `CurrentKernel.active` sentinel for a runtime tree booted in place (see
+ * {@link KernelManager.initLocal}). It is deliberately not a directory name
+ * under `runtimeRoot` — nothing is installed for such a run — so every path that
+ * would treat `active` as one checks it first.
+ */
+const LOCAL_ACTIVE = 'local'
+
 async function missingKernelEntry(dir: string): Promise<string | undefined> {
   for (const entry of KERNEL_REQUIRED_ENTRIES) {
     if (!(await exists(path.join(dir, ...entry)))) return entry.join('/')
@@ -49,9 +57,18 @@ export interface KernelManagerOptions {
   channel: KernelChannel
   /** Required when source === 'dev': path to a deepseek-harness checkout. */
   devCheckoutDir?: string
-  /** Required when source !== 'dev': GitHub owner/repo hosting runtime artifacts. */
+  /**
+   * Required when source !== 'dev': GitHub owner/repo hosting runtime artifacts.
+   */
   artifactOwner?: string
   artifactRepo?: string
+  /**
+   * A runtime tree to boot in place, instead of the installed one — the shape a
+   * packaged install has (`node/` + `app/`), named directly by a dev run
+   * (`DSH_APP_DEV_KERNEL`). No install, no activation record: `current.json`
+   * belongs to the installed kernel and this mode must not touch it.
+   */
+  localRuntimeDir?: string
   onStatus?: (status: KernelStatusPayload) => void
   log?: (message: string) => void
 }
@@ -169,6 +186,7 @@ export class KernelManager {
    */
   async load(): Promise<CurrentKernel | null> {
     if (this.opts.source === 'dev') return this.initDev()
+    if (this.opts.localRuntimeDir !== undefined) return this.initLocal(this.opts.localRuntimeDir)
     this.current = await loadCurrentKernel(this.root)
     if (!this.current) return null
     const dir = this.kernelDir(this.current.active)
@@ -200,6 +218,34 @@ export class KernelManager {
     return this.current
   }
 
+  /**
+   * A runtime tree booted in place, named directly by a dev run.
+   *
+   * Deliberately NOT an install: nothing is written to `current.json`, so a dev
+   * run pointed at a locally built runtime cannot disturb — or be disturbed by —
+   * the kernel the packaged app is running. The tree is validated the same way an
+   * installed one is, so a half-built runtime fails here by name instead of
+   * several seconds into a start.
+   *
+   * @param dir - absolute runtime directory (`node/` + `app/`).
+   * @returns the kernel record this run boots.
+   * @throws when the manifest or a required entry is missing.
+   */
+  private async initLocal(dir: string): Promise<CurrentKernel> {
+    const manifest = await readRuntimeManifest(dir)
+    if (manifest === null) throw new Error(t('kernel.localRuntimeUnreadable', { dir }))
+    const broken = await missingKernelEntry(dir)
+    if (broken !== undefined) throw new Error(t('kernel.localRuntimeIncomplete', { dir, entry: broken }))
+    this.current = {
+      active: 'local',
+      previous: null,
+      installedAt: new Date().toISOString(),
+      manifest,
+    }
+    this.log(`local kernel: dsh ${manifest.dshVersion}+suite ${manifest.suiteVersion} at ${dir}`)
+    return this.current
+  }
+
   // ------------------------------------------------------------- discovery
 
   getCurrent(): CurrentKernel | null {
@@ -210,6 +256,9 @@ export class KernelManager {
   getCurrentDir(): string {
     if (!this.current) throw new Error(t('kernel.notInitialized'))
     if (this.opts.source === 'dev') return this.opts.devCheckoutDir!
+    // A locally named tree has no directory under `runtimeRoot`: `active` is the
+    // sentinel 'local' and the path is the one the run was pointed at.
+    if (this.current.active === LOCAL_ACTIVE) return this.opts.localRuntimeDir!
     return this.kernelDir(this.current.active)
   }
 
@@ -1123,6 +1172,11 @@ export class KernelManager {
     // non-dev start still depends on (current.json keeps pointing at the
     // removed dir and forces a broken reinstall).
     if (this.opts.source === 'dev') return
+    // A locally named runtime is the same situation, and a sharper one: its
+    // `active` is a sentinel that matches no directory, so `keep` below would
+    // protect NOTHING and this run would prune the very install a packaged start
+    // depends on. A dev run has no business touching the installed kernel.
+    if (this.opts.localRuntimeDir !== undefined) return
     // Never race an install/update: cleanup's `rm -rf staging` would destroy
     // the in-flight download (open 'staging/runtime.tgz' → ENOENT) when a
     // server restart fires during a kernel update — exactly what happens in
