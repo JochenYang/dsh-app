@@ -47,6 +47,21 @@ describe('applyDisableToggle (disable)', () => {
     assert.deepEqual([...disabledIdsOf(next)], ['dsh-context'])
   })
 
+  it('quotes a scoped id, because a bare `@` is a reserved YAML indicator', () => {
+    // Measured consequence of NOT quoting: `- id: @deepseek-ai/dsh-tool-session-query`
+    // made the whole patch unparseable ("bad indentation of a mapping entry"), the
+    // kernel child died on it, and neither the installed app nor a dev run could
+    // start until that one line was quoted by hand.
+    const next = applyDisableToggle('', '@deepseek-ai/dsh-tool-session-query', false)
+    assert.match(next, /- id: "@deepseek-ai\/dsh-tool-session-query"\n/u)
+    // The reader must still recognise the id — quotes are syntax, not part of it —
+    // or a toggle would stop seeing its own row and write a duplicate.
+    assert.deepEqual([...disabledIdsOf(next)], ['@deepseek-ai/dsh-tool-session-query'])
+    // Removing it leaves the kernel's empty-patch template, not a zero-byte file
+    // (an empty document is not valid YAML) — same as the unquoted path.
+    assert.equal(applyDisableToggle(next, '@deepseek-ai/dsh-tool-session-query', true), '[]\n')
+  })
+
   it('appends the block after existing content byte-for-byte', () => {
     const next = applyDisableToggle(REAL_SAMPLE, 'dsh-context', false)
     assert.ok(next.startsWith(REAL_SAMPLE), 'existing content must be untouched')

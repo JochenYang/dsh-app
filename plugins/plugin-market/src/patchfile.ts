@@ -72,6 +72,23 @@ function scalarOf(raw: string): string {
 }
 
 /**
+ * An entry id as a YAML scalar that parses.
+ *
+ * A scoped id starts with `@`, and `@` is a RESERVED indicator in YAML — it may
+ * not start a plain scalar. Written bare, the row was not merely misread: the
+ * whole patch stopped parsing (`bad indentation of a mapping entry`), so the
+ * kernel child died and NEITHER app could start until the line was quoted by
+ * hand. Measured with `@deepseek-ai/dsh-tool-session-query` in the managed block.
+ *
+ * `ENTRY_ID_PATTERN` allows only `[A-Za-z0-9@/._-]` and a first character of
+ * `[A-Za-z0-9]` or `@`, so a leading `@` is the only shape that needs quoting —
+ * and {@link scalarOf} strips the quotes back off when this row is read.
+ */
+function yamlId(entryId: string): string {
+  return entryId.startsWith('@') ? JSON.stringify(entryId) : entryId
+}
+
+/**
  * Ids the patch layer disables: a `- id: <x>` list row whose mapping block
  * (lines indented deeper than the row's dash) carries `disabled: true`. This
  * is a read heuristic over kernel-controlled shapes; rows the scanner cannot
@@ -213,7 +230,7 @@ export function applyDisableToggle(patchText: string, entryId: string, enable: b
   // Already disabled — whether by a previous managed write or a hand-written
   // row outside the block — means adding another row would be pure duplication.
   if (target !== undefined || disabledIdsOf(patchText).has(entryId)) return patchText
-  const row = [`- id: ${entryId}${eol}`, `  disabled: true${eol}`]
+  const row = [`- id: ${yamlId(entryId)}${eol}`, `  disabled: true${eol}`]
   if (block === undefined) {
     if (elements.length === 0) return [MANAGED_BLOCK_HEADER + eol, ...row, MANAGED_BLOCK_FOOTER + eol].join('')
     const last = elements[elements.length - 1]!
