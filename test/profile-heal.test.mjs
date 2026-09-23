@@ -147,6 +147,47 @@ test('a declared dependency that is missing triggers exactly one run with the ma
   assert.match(healLogLine(outcome, profile), /reinstalled them/u)
 })
 
+test('the bundled package manager goes in front of the run\'s PATH', async (t) => {
+  // The repair drives `dsh plugin … add`, which spawns pnpm by NAME. This run's
+  // parent is the SHELL, which never saw the host child's PATH prefix, so the
+  // shell hands the directory in — otherwise a machine without a global pnpm
+  // cannot repair a profile at all.
+  const missingName = '@deepseek-ai/dsh-toolkit'
+  const profile = fakeProfile(scratch(t), { [missingName]: '^0.2.1' })
+  const { impl, calls } = scriptedSpawn({
+    output: 'added 1\n',
+    onSpawn: () => {
+      const file = path.join(profile, 'node_modules', '@deepseek-ai', 'dsh-toolkit', 'package.json')
+      mkdirSync(path.dirname(file), { recursive: true })
+      writeFileSync(file, `{"name":"${missingName}"}\n`)
+    },
+  })
+  const pnpmBinDir = path.join('D:/kernel', 'pnpm', 'bin')
+  await healProfileDependencies(options(profile, impl, { pnpmBinDir }))
+  assert.equal(calls.length, 1)
+  const key = Object.keys(calls[0].options.env).find((name) => name.toUpperCase() === 'PATH')
+  assert.ok(key !== undefined, 'the child gets a PATH')
+  assert.equal(calls[0].options.env[key].split(path.delimiter)[0], pnpmBinDir)
+  // The rest of PATH survives: dropping it would take the system tools with it.
+  assert.ok(calls[0].options.env[key].split(path.delimiter).length > 1)
+
+  // And a runtime built before the tree carried pnpm passes nothing, so the run
+  // keeps whatever PATH it inherited — the behaviour it has always had.
+  const bare = fakeProfile(scratch(t), { [missingName]: '^0.2.1' })
+  const { impl: withoutImpl, calls: withoutCalls } = scriptedSpawn({
+    output: 'added 1\n',
+    onSpawn: () => {
+      const file = path.join(bare, 'node_modules', '@deepseek-ai', 'dsh-toolkit', 'package.json')
+      mkdirSync(path.dirname(file), { recursive: true })
+      writeFileSync(file, `{"name":"${missingName}"}\n`)
+    },
+  })
+  await healProfileDependencies(options(bare, withoutImpl))
+  const inheritedKey = Object.keys(process.env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
+  const childKey = Object.keys(withoutCalls[0].options.env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
+  assert.equal(withoutCalls[0].options.env[childKey], process.env[inheritedKey] ?? '')
+})
+
 test('a run that reports success without restoring the package is still a failure', async (t) => {
   // The measured trap: pnpm answered "Already up to date" while the packages
   // were missing, so a zero exit proves nothing on its own.

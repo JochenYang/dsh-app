@@ -112,6 +112,17 @@ export interface HealOptions {
   readonly bin: string
   /** Node executable that must run the CLI (never Electron's own). */
   readonly node: string
+  /**
+   * Directory holding the runtime's bundled `pnpm` shim, put in front of the
+   * child's `PATH`.
+   *
+   * The repair drives `dsh plugin ... add`, which spawns pnpm by NAME: an
+   * installer cannot assume the user has one, and this run happens in the SHELL
+   * process, whose own `PATH` never saw the host child's (see
+   * `hostPnpmBinDir`). Absent on a runtime built before the tree carried pnpm,
+   * where the run falls back to whatever `PATH` offers — the behaviour it had.
+   */
+  readonly pnpmBinDir?: string
   /** Test seam; defaults to `node:child_process.spawn`. */
   readonly spawnImpl?: typeof spawn
   /** Test seam; defaults to {@link HEAL_TIMEOUT_MS}. */
@@ -311,6 +322,23 @@ interface HealRun {
 }
 
 /**
+ * The environment one repair run is spawned with.
+ *
+ * `DSH_HOME` is pinned (see {@link HealOptions.dshHome}) and the bundled pnpm
+ * shim goes in front of `PATH` — the CLI spawns pnpm by NAME, and this run's
+ * parent is the shell, not the host child whose `PATH` already carries it.
+ * `PATH`'s spelling varies (`Path` on a stock Windows environment), so the
+ * existing entry is rewritten under its own name.
+ */
+function healEnv(options: HealOptions): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: options.dshHome }
+  if (options.pnpmBinDir === undefined) return env
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
+  env[key] = `${options.pnpmBinDir}${path.delimiter}${env[key] ?? ''}`
+  return env
+}
+
+/**
  * Run the repair command once. Never rejects: a spawn error and the timeout are
  * data the caller turns into an outcome, because this step is never allowed to
  * fail the boot.
@@ -328,7 +356,7 @@ function runHeal(options: HealOptions, argv: readonly string[]): Promise<HealRun
         // `$DSH_HOME/profiles/<name>`, so an inherited value could send the
         // repair at another profile entirely while this one stays broken (see
         // the HealOptions.dshHome note).
-        env: { ...process.env, DSH_HOME: options.dshHome },
+        env: healEnv(options),
         stdio: ['ignore', 'pipe', 'pipe'],
       })
     } catch (error) {

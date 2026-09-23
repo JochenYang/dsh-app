@@ -50,7 +50,13 @@ const META_ENTRIES = ['runtime/manifest.json', 'runtime/app/package.json', 'runt
 
 /** Layer definitions: what goes in, and where it unpacks inside the runtime. */
 const LAYER_SPECS = [
-  { kind: 'node', entries: ['runtime/node'] },
+  // `runtime/pnpm` rides with the Node binary because it IS tooling of the same
+  // kind — a pinned runtime the kernel shells out to, not a package the profile
+  // resolves — and because both are content-addressed, so a pnpm bump renames
+  // this layer alone. Leaving it out is not an option: the re-assembly check
+  // below compares the layers against the input tree, and an entry no layer
+  // reaches fails it.
+  { kind: 'node', entries: ['runtime/node', 'runtime/pnpm'] },
   { kind: 'vendor', entries: ['runtime/app'], excludePackageScopes: true },
   { kind: 'dsh', entries: ['runtime/app/node_modules/@deepseek-ai'] },
   { kind: 'suite', entries: ['runtime/app/node_modules/@dsh-app'] },

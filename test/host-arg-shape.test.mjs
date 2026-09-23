@@ -98,11 +98,18 @@ const http = require('node:http')
 const argv = process.argv.slice(2)
 const problems = []
 if (!process.execArgv.includes('--expose-internals')) problems.push('missing --expose-internals')
-// The 0.1.7 contract: runtime tree, profile, primary-runtime — and NOTHING after
-// it. The slot this line dropped used to be the profile-resolution mode, and the
-// slot after that is the package-manager script, so a shell still sending a mode
-// is handing the child a package manager it never chose.
-if (argv.length !== 3) problems.push('positional count ' + String(argv.length))
+// The 0.1.7 contract: runtime tree, profile, primary-runtime — then, and only
+// then, the package-manager pair (the pnpm script and the Node directory that
+// runs it). The slot this line dropped used to be the profile-resolution mode,
+// and the slot after that is the package-manager script, so a shell still
+// sending a mode is handing the child a package manager it never chose.
+if (argv.length !== 3 && argv.length !== 5) problems.push('positional count ' + String(argv.length))
+if (argv.length === 5) {
+  if (!String(argv[3] || '').endsWith('pnpm.mjs')) problems.push('package manager script ' + JSON.stringify(argv[3] || ''))
+  if (!fs.existsSync(path.join(String(argv[4] || ''), 'node.exe')) && !fs.existsSync(path.join(String(argv[4] || ''), 'node'))) {
+    problems.push('package manager node dir ' + JSON.stringify(argv[4] || ''))
+  }
+}
 if (process.env.FAKE_WEB_CONTRACT === 'refuse') problems.push('unsupported internal option ' + JSON.stringify(argv[1] || ''))
 // The real host composes the office skill plugin with
 // assetRoot = join(dirname(argv[2]), 'office-skills') and the plugin throws at
@@ -119,6 +126,10 @@ if (problems.length > 0) {
   process.send({ type: 'fatal', message: 'dsh desktop: ' + problems.join('; ') })
   setTimeout(() => { process.exit(1) }, 10)
 } else {
+  // The child's own PATH, written where the test can read it: the shell puts the
+  // bundled package manager's shim in front of it, and the kernel's CLI path
+  // resolves pnpm by NAME through exactly this variable.
+  fs.writeFileSync(path.join(process.cwd(), '.fake-web-path.txt'), process.env.PATH || '')
   const server = http.createServer((request, response) => {
     if ((request.url || '').startsWith('/?token=')) {
       response.writeHead(303, { 'set-cookie': 'dsh=fake-session; Path=/; HttpOnly', location: '/' })
@@ -198,12 +209,36 @@ function webStartOptions(runtime) {
     officeSkillsSource: runtime.officeSource,
     userDataDir: runtime.dataDir,
     allowLinkedProfile: true,
+    // What index.ts names for an installed runtime tree: the host is handed the
+    // tree's `app/` directory as `runtimeDir`, and the bundled pnpm sits at the
+    // tree's root.
+    pnpmTree: runtime.root,
   }
 }
 
 /** Absolute path of a shell's data directory, read off a start's argv. */
 function dataDirOf(runtime) {
   return path.join(runtime.dataDir, 'dsh-app-office')
+}
+
+/**
+ * A web runtime that CARRIES the bundled package manager: `pnpm/bin/pnpm.mjs`
+ * and the Node directory beside the tree, the two things the shell hands the
+ * child in its last argument slots.
+ */
+function withBundledPnpm(runtime) {
+  const bin = path.join(runtime.root, 'pnpm', 'bin')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(path.join(bin, 'pnpm.mjs'), '#!/usr/bin/env node\nconsole.log("fake pnpm")\n')
+  writeFileSync(path.join(bin, 'pnpm.cmd'), '@echo off\r\necho fake pnpm\r\n')
+  mkdirSync(path.join(runtime.root, 'node'), { recursive: true })
+  writeFileSync(path.join(runtime.root, 'node', process.platform === 'win32' ? 'node.exe' : 'node'), 'fake node\n')
+  return runtime
+}
+
+/** The PATH the child was spawned with, as the fake host recorded it. */
+function childPath(runtime) {
+  return readFileSync(path.join(runtime.projectDir, '.fake-web-path.txt'), 'utf8')
 }
 
 /**
@@ -369,10 +404,11 @@ test('a web-transport version starts on the child URL contract, office payload a
     // refuses them leaves nothing else to read.
     const argv = JSON.parse(line(logs, 'dsh host: web argv').slice('dsh host: web argv '.length))
     const primaryRuntime = path.join(runtime.dataDir, 'dsh-app-office', 'primary-runtime')
-    // The list ENDS at the primary-runtime path: the kernel line that removed the
-    // profile-resolution mode also turned the old next slot into the package-
-    // manager script, so a shell still sending `'link'` here handed the child
-    // `node --expose-internals link` as its package manager.
+    // The list ENDS at the primary-runtime path ON A TREE WITHOUT pnpm: the
+    // kernel line that removed the profile-resolution mode also turned the old
+    // next slot into the package-manager script, so a shell still sending
+    // `'link'` here handed the child `node --expose-internals link` as its
+    // package manager. The pair a tree WITH pnpm gets is the next test's.
     assert.deepEqual(argv, [
       '--expose-internals',
       desktopHostEntry(runtime.root),
@@ -380,6 +416,9 @@ test('a web-transport version starts on the child URL contract, office payload a
       runtime.projectDir,
       primaryRuntime,
     ])
+    // And nothing was put in front of this child's PATH: a shell that invented a
+    // shim directory would be pointing the kernel at a pnpm that is not there.
+    assert.equal(childPath(runtime).includes(`${path.sep}pnpm${path.sep}`), false)
     // The invariant the child depends on, not the literal: its asset root is
     // `dirname(argv[4])/office-skills`, so the payload must sit BESIDE the
     // argument — naming the leaf inside the payload puts the name twice in the
@@ -407,6 +446,42 @@ test('a web-transport version starts on the child URL contract, office payload a
     assert.match(html, /fake web index/u)
     assert.ok(html.includes('globalThis["__DSH_BOOT__"] = {"entries":[]}'), 'the boot row reaches the document')
     assert.ok(html.includes('globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()'), 'the client gate is created')
+  } finally {
+    await run.host.stop()
+  }
+})
+
+test('a runtime carrying pnpm sends the package-manager pair and puts its shim on PATH', async () => {
+  // The kernel's package operations are child processes: the service path takes
+  // the script from these two slots, and the CLI path (`dsh plugin … add`) runs
+  // `execa('pnpm')`, resolving the command NAME through PATH. Without both, a
+  // package operation works only where the user happens to have pnpm installed.
+  const runtime = withBundledPnpm(fakeWebRuntime('0.1.7-alpha.2'))
+  const logs = []
+  const run = await start(runtime, logs, webStartOptions(runtime))
+  try {
+    const argv = JSON.parse(line(logs, 'dsh host: web argv').slice('dsh host: web argv '.length))
+    const primaryRuntime = path.join(runtime.dataDir, 'dsh-app-office', 'primary-runtime')
+    assert.deepEqual(argv, [
+      '--expose-internals',
+      desktopHostEntry(runtime.root),
+      runtime.root,
+      runtime.projectDir,
+      primaryRuntime,
+      // The script the host runs with its own Node, then the Node directory that
+      // governs the package manager's own child processes — upstream's two slots.
+      path.join(runtime.root, 'pnpm', 'bin', 'pnpm.mjs'),
+      path.join(runtime.root, 'node'),
+    ])
+    // The shim comes FIRST on the child's PATH: a later entry would lose to a
+    // global pnpm of another version, which is the whole reason to bundle one.
+    const childPathValue = childPath(runtime)
+    assert.equal(childPathValue.split(path.delimiter)[0], path.join(runtime.root, 'pnpm', 'bin'))
+    // …and the child accepted it, which is what the fake host's own contract
+    // check proves: it refuses a count other than 3 or 5, and a fifth slot pair
+    // that is not a pnpm script plus a Node directory.
+    assert.equal(run.shapes().length, 1)
+    assert.match(line(logs, 'dsh host: web transport ready at'), /^dsh host: web transport ready at http:\/\/127\.0\.0\.1:\d+$/u)
   } finally {
     await run.host.stop()
   }

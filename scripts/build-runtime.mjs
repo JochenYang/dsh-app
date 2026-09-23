@@ -19,6 +19,11 @@
  * Produces, under runtime-dist/:
  *   runtime/manifest.json
  *   runtime/node/            — the Node.js binary (downloaded, sha256-verified)
+ *   runtime/pnpm/            — the pinned pnpm package plus the `pnpm`/`pnpm.cmd`
+ *                              shim the kernel resolves through PATH (see
+ *                              stagePnpm); its `bin/pnpm.mjs` is also what the
+ *                              shell hands the desktop host as its package
+ *                              manager
  *   runtime/app/             — pnpm-assembled dsh profile (package.json +
  *                              node_modules + runtime-files.json inventory)
  *   dsh-runtime-<platform>-<arch>-<version>.tgz
@@ -67,6 +72,13 @@
  * Assembly is pnpm ≥ 10 with the hoisted linker (see "pnpm assembly" above
  * main()): a lockfile is generated first and asserted to hold no
  * registry-resolved core package, then installed from that frozen lockfile.
+ *
+ * The runtime also CARRIES pnpm (see stagePnpm): the kernel's package operations
+ * — the in-app market, the kernel's own plugin page, and the shell's profile
+ * repair — run `pnpm` as a child process, and the CLI path resolves it by NAME
+ * through `PATH` (`plugin-manager`'s `pnpmCommand` default). Without a bundled
+ * one they work only on a machine that happens to have pnpm installed, which an
+ * installer cannot assume.
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -415,6 +427,107 @@ async function downloadNodeBinary(platform, arch, destDir) {
   await rm(extractDir, { recursive: true, force: true })
   await rm(archivePath, { force: true })
   console.log(`node ${ver} ${distPlatform}-${arch} placed at ${path.join(destDir, nodeBin)}`)
+}
+
+// ---------------------------------------------------------------------------
+// pnpm for the kernel's package operations
+// ---------------------------------------------------------------------------
+
+/** Where the pinned pnpm tarball may come from; a domestic mirror first, as everywhere else. */
+const PNPM_REGISTRY_BASES = ['https://registry.npmmirror.com', 'https://registry.npmjs.org']
+
+/**
+ * Stage the pinned pnpm package plus the shim that makes it resolvable by name.
+ *
+ * Why the runtime has to carry it: every package operation the product performs
+ * — the in-app market, the kernel's own plugin manager page, and the shell's
+ * profile repair — reaches pnpm as a CHILD PROCESS, and on the CLI path
+ * (`dsh plugin --profile <p> add <pkg>`) the kernel resolves the command name
+ * `pnpm` through `PATH` with nothing to override it. An installer cannot assume
+ * the user has pnpm; ours is pinned, so the version the profile's lockfiles were
+ * written by is the version that reads them.
+ *
+ * Two consumers, two shapes:
+ *   - `bin/pnpm.mjs` is what the shell hands the desktop host as its
+ *     package-manager script (the host runs it with its own Node);
+ *   - `bin/pnpm.cmd` (Windows) / `bin/pnpm` (POSIX) is a shim that runs that
+ *     same script through the node binary beside it, so a bare `pnpm` resolves
+ *     when the shell puts this directory on the child's `PATH`.
+ *
+ * The pin is `primary-runtime-lock.json`'s — the same file the office payload's
+ * pnpm comes from, so one bump moves both, and the digest decides which mirror
+ * wins.
+ *
+ * @param runtimeDir - the runtime tree being assembled.
+ * @param platform - target platform, for the shim's shape.
+ */
+async function stagePnpm(runtimeDir, platform) {
+  const lock = JSON.parse(readFileSync(path.join(root, 'scripts', 'primary-runtime-lock.json'), 'utf8'))
+  const [algorithm, integrity] = String(lock.pnpmIntegrity).split('-')
+  if (algorithm !== 'sha512' || !/^[A-Za-z0-9+/=]+$/u.test(integrity ?? '')) {
+    throw new Error(`primary-runtime-lock.json carries an unusable pnpmIntegrity: ${String(lock.pnpmIntegrity)}`)
+  }
+  const urls = [...new Set([
+    ...PNPM_REGISTRY_BASES.map((base) => `${base}/pnpm/-/pnpm-${lock.pnpmVersion}.tgz`),
+    lock.pnpmTarball,
+  ])]
+  let buffer
+  let from = ''
+  const failures = []
+  for (const url of urls) {
+    try {
+      console.log(`$ download ${url}`)
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60_000) })
+      if (!res.ok) { failures.push(`${url} → HTTP ${String(res.status)}`); continue }
+      const body = Buffer.from(await res.arrayBuffer())
+      const got = createHash('sha512').update(body).digest('base64')
+      if (got !== integrity) { failures.push(`${url} → sha512 mismatch`); continue }
+      buffer = body
+      from = url
+      break
+    } catch (error) {
+      failures.push(`${url} → ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (buffer === undefined) {
+    throw new Error(`pnpm ${lock.pnpmVersion} could not be fetched and verified:\n- ${failures.join('\n- ')}`)
+  }
+  console.log(`$ verified pnpm-${lock.pnpmVersion}.tgz ${algorithm} against ${from}`)
+
+  const work = path.join(runtimeDir, '.pnpm-stage')
+  await rm(work, { recursive: true, force: true })
+  await mkdir(work, { recursive: true })
+  const tarball = path.join(work, 'pnpm.tgz')
+  await writeFile(tarball, buffer)
+  await extractTar({ file: tarball, cwd: work })
+  const dest = path.join(runtimeDir, 'pnpm')
+  await rm(dest, { recursive: true, force: true })
+  await cp(path.join(work, 'package'), dest, { recursive: true })
+  await rm(work, { recursive: true, force: true })
+
+  // The shim: `--expose-internals` is what upstream's own desktop passes when it
+  // runs this script, and the relative paths are resolved from the shim's own
+  // directory so the runtime stays relocatable.
+  const bin = path.join(dest, 'bin')
+  if (platform === 'win32') {
+    await writeFile(path.join(bin, 'pnpm.cmd'), [
+      '@echo off',
+      'rem Runs the bundled pnpm through the Node beside it; %~dp0 ends with a backslash.',
+      '"%~dp0..\\..\\node\\node.exe" --expose-internals "%~dp0pnpm.mjs" %*',
+      '',
+    ].join('\r\n'))
+  } else {
+    const posix = path.join(bin, 'pnpm')
+    await writeFile(posix, [
+      '#!/bin/sh',
+      '# Runs the bundled pnpm through the Node beside it.',
+      'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
+      'exec "$here/../../node/node" --expose-internals "$here/pnpm.mjs" "$@"',
+      '',
+    ].join('\n'))
+    execFileSync('chmod', ['+x', posix])
+  }
+  console.log(`[build-runtime] pnpm ${lock.pnpmVersion} staged at ${path.relative(root, dest).replace(/\\/gu, '/')} (bin/pnpm.mjs + ${platform === 'win32' ? 'bin/pnpm.cmd' : 'bin/pnpm'})`)
 }
 
 // ---------------------------------------------------------------------------
@@ -1700,6 +1813,9 @@ async function main() {
   const pnpm = assertPnpm()
   console.log(`[build-runtime] assembling with pnpm ${pnpm.version}`)
   await downloadNodeBinary(platform, arch, path.join(runtimeDir, 'node'))
+  //    The tree also CARRIES pnpm: the kernel runs its package operations as
+  //    child processes and the CLI path resolves `pnpm` by name through PATH.
+  await stagePnpm(runtimeDir, platform)
 
   // 2. Assemble the dsh profile with pnpm.
   //

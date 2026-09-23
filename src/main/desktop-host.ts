@@ -304,6 +304,16 @@ export interface DshHostOptions {
   officePrimaryRuntime?: string
   /** Shell data directory (`<userData>`); the web transport materializes the office payload under it. */
   userDataDir?: string
+  /**
+   * The kernel RUNTIME TREE the host runs from (`<tree>/node`, `<tree>/app`),
+   * when the caller knows it.
+   *
+   * `runtimeDir` is the tree's `app/` directory, but the bundled package manager
+   * lives at the tree's root — beside `node/`. A checkout names no tree, because
+   * it carries none: the child then falls back to a `pnpm` from `PATH`, the
+   * behaviour before the runtime shipped one.
+   */
+  pnpmTree?: string
   /** Ride along {@link hostProxyBootstrap} — set when `env` carries a proxy (see `hasProxyEnv`). */
   proxyBootstrap?: boolean
   /** Raw child output lines (stdout + stderr), one per call. */
@@ -320,6 +330,58 @@ export function desktopHostDir(runtimeDir: string): string {
 /** Entry script of the host inside an installed runtime tree. */
 export function desktopHostEntry(runtimeDir: string): string {
   return path.join(desktopHostDir(runtimeDir), 'lib', 'index.js')
+}
+
+/**
+ * The package-manager script inside a kernel RUNTIME TREE, when it carries one
+ * (see `stagePnpm` in scripts/build-runtime.mjs).
+ *
+ * The tree, not the `app/` directory the host is handed as its runtime: the
+ * bundled pnpm sits beside `node/` at the tree's root. A tree built before it
+ * carried pnpm answers undefined, and the caller then sends nothing — the child
+ * falls back to a `pnpm` resolved through `PATH`, exactly as it did before this
+ * existed.
+ */
+export function hostPnpmEntry(runtimeTree: string): string | undefined {
+  const entry = path.join(runtimeTree, 'pnpm', 'bin', 'pnpm.mjs')
+  return existsSync(entry) ? entry : undefined
+}
+
+/**
+ * Directory holding the bundled `pnpm` shim, for a child's `PATH`.
+ *
+ * The kernel's CLI path resolves the command NAME (`execa('pnpm')`), so a
+ * package operation only works when a `pnpm` executable is findable: the shim in
+ * this directory runs the bundled script through the Node beside it.
+ *
+ * @param runtimeTree - the kernel runtime tree (`<tree>/node`, `<tree>/app`).
+ */
+export function hostPnpmBinDir(runtimeTree: string): string | undefined {
+  const dir = path.join(runtimeTree, 'pnpm', 'bin')
+  return existsSync(path.join(dir, 'pnpm.mjs')) ? dir : undefined
+}
+
+/**
+ * `PATH` with the bundled package manager's shim directory first.
+ *
+ * `PATH` is spelled with varying case on Windows (`Path` in a stock environment,
+ * `PATH` in Git Bash), so the existing entry is looked up case-insensitively and
+ * rewritten under its own name — setting a second spelling would leave Node's
+ * environment with two variables and the child reading whichever the platform
+ * prefers.
+ *
+ * @param env - the environment to derive from (not mutated).
+ * @param runtimeTree - the runtime tree whose pnpm should win.
+ * @returns a copy of `env` with the shim first, or `env` itself when the tree
+ *   carries no pnpm.
+ */
+export function withHostPnpmPath(env: NodeJS.ProcessEnv, runtimeTree: string): NodeJS.ProcessEnv {
+  const dir = hostPnpmBinDir(runtimeTree)
+  if (dir === undefined) return env
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
+  const existing = env[key] ?? ''
+  const next = existing === '' ? dir : `${dir}${path.delimiter}${existing}`
+  return { ...env, [key]: next }
 }
 
 /** One JSON file, parsed; undefined when it is absent or is not readable JSON. */
@@ -507,7 +569,10 @@ function shapeArgs(shape: HostArgShape, options: DshHostOptions): string[] {
  * treated the slot after it as the package-manager script; a shell that kept
  * sending a mode handed the child `node --expose-internals link` as its package
  * manager and broke every in-app package operation. From 0.1.7 the two anchors of
- * module resolution are consulted unconditionally, so there is no mode to send.
+ * module resolution are consulted unconditionally, so there is no mode to send —
+ * and the slots after it are the package-manager pair, which this shell now
+ * fills whenever the runtime tree carries a bundled pnpm (see
+ * {@link hostPnpmEntry}).
  *
  * `--allow-linked-profile` has no counterpart here either: it travels on the
  * other shape's arguments (see {@link shapeArgs}), and an extra argument here
@@ -518,12 +583,25 @@ function shapeArgs(shape: HostArgShape, options: DshHostOptions): string[] {
  * @returns the argument list, empty of Node flags except the one the child requires.
  */
 function webShapeArgs(options: DshHostOptions, primaryRuntime: string): string[] {
+  // The package-manager pair, in the two slots the child reads after the
+  // primary-runtime path (its `process.argv[5]`/`[6]`): the pnpm script to run,
+  // and the directory to put in front of the package manager's own PATH — the
+  // Node that runs it, which is the same thing upstream's desktop sends from its
+  // `runtime/bin`. The shim directory rides on this child's own PATH instead
+  // (see {@link withHostPnpmPath}), which is what the kernel's CLI path needs to
+  // resolve the command NAME. Sent only when the runtime TREE carries a pnpm: a
+  // tree built before that answers two argument slots short, the shape it has
+  // always had.
+  const pnpm = options.pnpmTree === undefined ? undefined : hostPnpmEntry(options.pnpmTree)
   return [
     '--expose-internals',
     options.entry,
     options.runtimeDir,
     options.projectDir,
     primaryRuntime,
+    ...(pnpm === undefined || options.pnpmTree === undefined
+      ? []
+      : [pnpm, path.join(options.pnpmTree, 'node')]),
   ]
 }
 
@@ -1027,6 +1105,17 @@ export class DshHost implements DshAppTarget {
     // the variable, and the shell deliberately ships a real one for the child
     // (see the DshHost note in index.ts about the profile resolver's addon).
     if (/^electron/iu.test(path.basename(executable))) childEnv.ELECTRON_RUN_AS_NODE = '1'
+    // The bundled package manager goes on this child's PATH, and through it on
+    // the PATH of everything the child spawns: the kernel's CLI path runs
+    // `execa('pnpm')`, resolving the command NAME, so without this a package
+    // operation from the in-app market or the kernel's own plugin page works only
+    // on a machine that happens to have pnpm installed. Applied after the filter
+    // above, which drops the parent's own npm/pnpm variables.
+    const pnpmBin = this.options.pnpmTree === undefined ? undefined : hostPnpmBinDir(this.options.pnpmTree)
+    if (pnpmBin !== undefined) {
+      const pathKey = Object.keys(childEnv).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
+      childEnv[pathKey] = `${pnpmBin}${path.delimiter}${childEnv[pathKey] ?? ''}`
+    }
     // Both payloads the spawn depends on are resolved before it: the office
     // payload the web child needs to compose at all, and the argv itself. A
     // failure here is a start failure with a reason, never a child that dies

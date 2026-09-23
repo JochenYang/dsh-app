@@ -13,7 +13,7 @@ import {
   preferredKernel,
 } from '../kernel/bundled'
 import { DshServer, resolveLogDir } from './server'
-import { APP_URL, desktopHostEntry, hostPackageVersion, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
+import { APP_URL, desktopHostEntry, hostPackageVersion, hostPnpmBinDir, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
 import { createShellActionHandler, shellActionStampRule, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
 import { hostStreamAuthRule } from './host-stream-auth'
 import { installSessionHeaderRules } from './session-hooks'
@@ -394,6 +394,8 @@ function hostRuntime(): {
   profileAnchor: HostProfileAnchor | undefined
   /** Office payload to mirror for the web transport (see DshHostOptions). */
   officeSkillsSource: string
+  /** The runtime TREE the host runs from, when there is one (see DshHostOptions.pnpmTree). */
+  pnpmTree?: string
   /** Whether the runtime tree is a checkout; the web transport passes it as the profile resolution mode. */
   checkoutRuntime: boolean
 } {
@@ -414,6 +416,9 @@ function hostRuntime(): {
       entry: desktopHostEntry(runtimeDir),
       allowLinkedProfile: isDev,
       profileAnchor,
+      // The bundled pnpm lives at the TREE's root, beside `node/`, while the
+      // host is handed the tree's `app/` directory — see pnpmTree.
+      pnpmTree: dir,
       // The layout the upstream desktop host expects beside its runtime tree. A
       // released DSH APP runtime carries no office payload yet, so a host line
       // that needs one fails the start with the path it looked for.
@@ -876,6 +881,9 @@ function kernelCliPath(): string {
 async function healProfileBeforeStart(profileDir: string): Promise<void> {
   const bin = kernelCliPath()
   if (bin === '' || !existsSync(bin)) return
+  // The bundled pnpm, so the repair does not depend on the user's own: this run's
+  // parent is the shell, whose PATH never saw the host child's prefix.
+  const pnpmBinDir = hostPnpmBinDir(kernel.getCurrentDir())
   const outcome = await healProfileDependencies({
     profileDir,
     profileName: SUITE_PROFILE,
@@ -885,6 +893,7 @@ async function healProfileBeforeStart(profileDir: string): Promise<void> {
     bin,
     // A real Node, never Electron's own — see hostNodeBinary.
     node: hostNodeBinary(),
+    ...(pnpmBinDir === undefined ? {} : { pnpmBinDir }),
   })
   const line = healLogLine(outcome, profileDir)
   if (line !== null) logKernel(line)
