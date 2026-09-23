@@ -3168,6 +3168,9 @@ checkout 也已切到 `dsh-v0.1.7-alpha.2`）。这一节记录**跟这一版**�
    不能当发布产物**；发布构建要在能访问该 CDN 的环境里跑。
 3. **冒烟**（`npm run verify -- --tgz <新产物>`）与**真机启动**，然后过 12.2 的复验清单。
 
+> **这三条都已在当天晚些时候做完**（宿主按 alpha.2 重打、runtime 打成 `0.1.7-alpha.2`、冒烟 60/60 与真机逐条复验），
+> 记录在 **§12.4**；本节保留原始待办是为了看清当时的判断，不要把这里的"要打一次"当成还没做。
+
 
 
 
@@ -3266,9 +3269,20 @@ scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），�
 |---|---|---|---|
 | 1 | **dev 与已装应用共用一个 profile**（"两全"问题） | `[!]` | 现状两套都读 `$DSH_HOME/profiles/dsh-app`。**同线**时不会互相污染（套件按当前运行的那棵树重建链接），**跨线**时会（0.1.6 的内核把自己的包投影进 profile，0.1.7 的启动随后加载它们——7 条客户端条目 pending）。三个可选方向：**(a)** dev 用独立 `$DSH_HOME`（代价：dev 里的登录态、设置、会话另起一份）；**(b)** 保持共享，靠"已发布版本跟上仓库线"消化（本次 alpha.2 就是这条）；**(c)** 外壳在**检测到线变化**时清掉 profile 的模块投影（与 `client-state.ts` 按线清 localStorage 同一个道理，但要在内核写投影之前/之后抢时序）。我没有替主人选，因为 (a) 影响日常使用体感、(c) 要动启动时序 |
 | 2 | **`bundled-kernel/` 要按 0.1.7-alpha.2 重新 stage** | `[x]` | 已重 stage（`node scripts/prepare-bundled-kernel.mjs win32 x64`）：`bundled-kernel/manifest.json` 现在是 `0.1.7-alpha.2 / 6e0ad788`，`integrity` 写着这次产物的真 sha512 `4b2677ef…`，`officePayload 0.0.1-py3.12.14`。**此前它是 `0.1.6-alpha.2 / c913bff9`**——装完即用、还没下载内核的那一次启动会拿 0.1.6 跑 0.1.7 适配过的套件。**发布链路本来就会做这一步**（`release.yml` 从当次产物 stage），这里补的是**本机**那份 |
-| 3 | Agent Team 装进 profile（专项三 / D3） | `[!]` | 宿主侧已启用、**客户端半没出现**；§11「步 7」有全过程 |
+| 3 | Agent Team 装进 profile（专项三 / D3） | `[x]` | **装载完成且界面可用**：bundle 在 profile 的 `dsh.profile.bundles` 里、四个包都在、会话头部的槽位里有 `Agent Team` 入口、点开能看到成员与共享任务（证据在 §12.6）。§11「步 7」那句"客户端半没出现"是 **0.1.6 线**的旧状态。还剩一件小的：**没真跑一个团队任务**（要花配额，与第 7 条同一类） |
 | 4 | 随包 pnpm（B2 的前提） | `[!]` | 插件管理页的包操作需要 `PATH` 上有 pnpm |
 | 5 | 第三方插件（`dshmarket`、`dsh-lsp-actions`、`dsh-remote` 等）的客户端 API 漂移 | `[!]` | 上游 `ui-primitives` 在两条线之间动过 26 个文件；`dshmarket` 因此渲染成错误卡（React #130）。我们**不 import** 它（`plugin-kernel-imports` 门禁），所以不是我们的缺陷；要不要逐条找作者/换版本由主人定 |
 | 6 | 两处文案 | `[!]` | (a) 市场目录源返回非 JSON 时的说法（现在是"返回了无法解析的 JSON"，其实是**传输**问题，见 §11 那条）；(b) 引擎状态的「就绪」→「已配置」 |
 | 7 | A3 / B5 / B13 / B14 / O4 五行界面待验 | `[–]` | 处置与理由在 §6.2 末尾那张表里（花配额 / 要机器 / 不属于我们的代码路径 / 你日常一看就知道） |
 | 8 | **本机产物的两条限制**（不是缺陷，是环境） | — | ① `ui-sidebar-files` 因 sheetjs CDN 不可达被排除 → **Excel 预览在本机产物里验不到**，发布要在能访问该 CDN 的环境跑；② 办公组件要带 `DSH_APP_PRIMARY_RUNTIME` 才含 Python 半边（见 12.4.5 #3），不带就只有 `0.0.1` 那个 engine-only 版本 |
+
+## 12.6 收尾三查（Agent Team / 组合检查 / 页面控制台）
+
+| 查什么 | 怎么查 | 结论 |
+|---|---|---|
+| **Agent Team 到底装上了没有**（用户第 3 项：把 web 版的 agent team 装进 dsh-app 的 profile） | ① profile 的 `package.json` 里 `dsh.profile.bundles` **含** `@deepseek-ai/dsh-experimental-agent-team-profile`，四个包（`-agent-team` / `-tool-agent-team` / `-client-ui-agent-team` / profile）都在 profile 的 `node_modules` 里；② 真应用开会话后读 `conversation.session.header.actions` 这个槽位的三个子节点：**`自进化模式`（我们的预设徽章）、`Agent Team`、`6 个子代理`**；③ 点 `Agent Team` → 面板打开，内容是 `Agent Team / 成员 / lead / 未运行 · 模型: deepseek-v4-flash / 共享任务 / 还没有共享任务` | **`[x]` 装好且界面可用**。§11「步 7」记的"客户端半没出现"是**0.1.6 那条线**的状态；在这一线上客户端半**正常挂载**（槽位注册是无条件的，所以团队会话之外也能看到入口）。之前扫不到是因为那个入口不是 `<button>`（是 `div.VoX2oq_root`），只按 `button` 找会漏 |
+| **组合静态检查现在报什么** | 直接跑外壳那一步的同一个命令：`DSH_HOME=<真实> <runtime>/node/node <runtime>/app/node_modules/@deepseek-ai/dsh/lib/bin.js --profile dsh-app --dump-config-schema` | **7 条 error，一条都不是我们的、也不是 agent-team 的**：`/173–176` 与 `/210`、`/212` 全是 `@deepseek-ai/dsh-agent-preset` 行（**内核自带的四个预设** standard / ptc / minimal / cordis，加上迁移进来的 `preset-rsi-dev`），`/182` 是第三方 `dsh-context`（"Config is not a native Schemastery schema"）。**`preset-rsi-dev` 同时出现在 `/210` 与 `/212`**——因为它两处都写着（`$DSH_HOME/cordis.patch.yml:56` 与 profile 的 `cordis.patch.yml:1357`）。内核没把它当重复条目拒绝（同 id 在不同分组下各算一条），应用照常启动；**要不要收敛成一处是主人的内容决定**，我没有动它 |
+| **页面重载后控制台还有什么** | 用新写的 `scratch/probe-boot-audit.mjs`（CDP 订阅 `Runtime.consoleAPICalled` + `Log.entryAdded`，然后 `Page.reload`）抓一次真窗口的启动审计 | **没有 `web boot: N entries did not activate`**——这一线上没有任何客户端条目停在 pending（用户当时贴的那条 7 条 pending 是**混线运行时**的症状）。三条 `404` 是客户端向 `dsh-app://app/api/changes.summary?sessionId=…` 要一个**当前内核进程里没有 announce 的老会话**的改动摘要，路由自己的注释就写着 "while its Session lives"，属预期，不是缺陷 |
+
+**这三查各自的边界**：Agent Team 只验了"入口在、面板开、能列出成员与共享任务"，**没有真跑一个团队任务**（那要花配额，见 §12.5 第 7 条）；
+组合检查验的是**静态组合**，不等于运行时行为；控制台那一次抓的是**重载**路径，不是首次冷启动的每一次。
