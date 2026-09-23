@@ -317,21 +317,29 @@ const PATCH_HOME_OMITTED = [
 /**
  * Whether the generated profile patch has to carry the home layer's rows.
  *
- * It does for every composer that reads ONLY this file — the desktop host
- * (`profile-boot`), which is what the frames lines and a dev checkout run:
- * without the copy the user's own rows (their MCP servers, a pinned search
- * provider) would simply be absent from the desktop UI.
+ * It does for a composer that reads ONLY this file. That is the FRAMES line: its
+ * desktop host is handed the profile and composes no home layer, so without the
+ * copy the user's own rows (their MCP servers, a pinned search provider) would
+ * simply be absent from the UI.
  *
- * It must NOT for the kernel's own boot on the web transport (`dsh-app-boot`):
- * that composer loads `$DSH_HOME/cordis.patch.yml` as a layer itself, so the copy
- * is a duplicate row id and the tree fails to load — measured on 0.1.6-alpha.2,
- * where a profile carrying both could not start a host at all.
+ * It must NOT for the web line (`0.1.6-alpha.2` and later), whose host composes
+ * `$DSH_HOME/cordis.patch.yml` as a layer itself: the copy is then a second row
+ * with the same id, and the tree fails with `duplicate loader entry id` —
+ * measured on 0.1.6-alpha.2, where a profile carrying both could not start a host
+ * at all, and measured again from the other side on the packaged 0.1.7 build:
+ * with NO copy in the profile patch its preset menu still lists the migrated
+ * `自进化模式` and its session header still shows the `Agent Team` action, both of
+ * which come from the home layer alone.
  *
- * @param options.isDev - the host runs from a checkout.
+ * A dev checkout follows the same rule as production. It used to force the copy
+ * (`isDev ||`), which put the duplicate into the shared profile on every dev
+ * start — harmless while only the web line booted it, fatal the moment an older
+ * build on the same machine did.
+ *
  * @param options.transport - the host's transport (see `hostTransport`).
  */
-export function homeRowsInProfilePatch(options: { isDev: boolean; transport: 'frames' | 'web' }): boolean {
-  return options.isDev || options.transport === 'frames'
+export function homeRowsInProfilePatch(options: { transport: 'frames' | 'web' }): boolean {
+  return options.transport === 'frames'
 }
 
 /** A line that is a root-level EMPTY flow collection: `[]` or `{}` at column 0. */

@@ -912,14 +912,14 @@ async function startServerAndOpenWindow(): Promise<void> {
   // without the suite plugins boots vanilla. Safe mode drops the shipped rows
   // and keeps only what is the user's own.
   //
-  // Which composer will read that file decides the home rows: the desktop host
-  // (`profile-boot`) reads only this file, so they have to be copied in; the
-  // kernel's own boot on the web transport also loads `$DSH_HOME` as a layer, and
-  // a copy there is a second row with the same id — the whole tree then fails
-  // with `duplicate loader entry id` (measured on 0.1.6-alpha.2, whose kernel
-  // boot composes the home layer itself).
+  // Which composer will read that file decides the home rows: the frames line's
+  // host reads only this file, so they have to be copied in; the web line's host
+  // (`0.1.6-alpha.2` and later) composes `$DSH_HOME` as a layer itself, and a copy
+  // there is a second row with the same id — the whole tree then fails with
+  // `duplicate loader entry id` (measured on 0.1.6-alpha.2, and again on the
+  // packaged 0.1.7 build from the other side: with no copy its preset menu and its
+  // Agent Team action are both still there, and both come from the home layer).
   const suiteHomeRows = homeRowsInProfilePatch({
-    isDev,
     transport: hostTransport(hostPackageVersion(path.join(kernel.getCurrentDir(), 'app'))) ?? 'frames',
   })
   const suiteRows = await prepareBrandSuite(
