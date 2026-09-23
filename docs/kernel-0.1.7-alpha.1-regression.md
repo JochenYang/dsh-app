@@ -111,7 +111,7 @@
 | C3 补丁文件原子写                               | `[x]` | 由 `fs.writeFile(target)` 改为"写暂存 + 改名"（`writePatchAtomically`），**故意不先删目标**；两条护栏测试（成功无残留 / 改名落不下去时目标仍在且抛出）；29/29。**不加锁**，理由见 §11                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | C5 两条低危读取路径                             | `[x]` | sidebar：**删掉读不存在字段的死分支**（上游取 cwd 的五处全走列表行），并纠正了那条把人引回死路的注释；swarm：用量改读 `tokenUsage` 投影（顺手修掉重试重复计入），失败码因**官方无替代物**保留但加 `typeof` 守卫。sidebar 11/11、swarm 28/28；两插件各升版                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | C6 设置导航 DOM 冗余                            | `[x]` | **代码已改**：删掉与上游重复的 `SCROLL_RULE`（上游 `.navList` 自带 `overflow-y:auto`），保留图形钩子；build/typecheck/8 个测试全绿。**界面复验已做**：真窗口探针在 1280x620 下 `canScroll=true`（能滚到底）、1440x900 下 12 行全可见，`patched=true` 只落在我们的行上（见 §6.2 C6 与 §11「探针」）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| 插件版本号（交付项）                              | `[x]` | **14 个插件升版**（相对 tag `v0.13.1`）。**未升的是 `plugin-brand` 0.2.4 与 `plugin-mcp` 0.2.3** —— 逐条查过 `git diff v0.13.1 -- plugins/<p>/{src,assets,build.mjs,cordis.patch.yml}`：**两个都是空**（无代码差异，只改了 `package.json` 里的依赖范围，而门禁不看这个文件）。**套件 hash 演进** `b904343c` → … → `33039169` → `6ee300d4` → `924402be` → `86d5f280`（O2）→ `f6ce4063`（O1 + 步 9）→ `35a78923`（O5：swarm `0.7.0→0.7.1`）→ `c6d3bae3`（O5：usage `0.2.8→0.2.9`）→ `017f5b64`（修迁移漏掉的预设显示名字段：presets `0.1.9→0.2.0`）→ `ff9318bf`（市场目录源改发 `accept-encoding: identity`：market `0.1.8→0.1.9`）→ `d00aa1fd`（注册表请求同样改发 `identity`：market `0.1.9→0.2.0`）→ **`44f7e5b7`**（搜索引擎请求也改发 `identity` + Bing 的备选主机：websearch `0.1.5→0.1.6`）。⚠️ **hash 变了就意味着：已构建的 runtime/安装包里的套件是旧的，要交付必须重建**；⚠️ `test/plugin-version-bump.test.mjs` 只比对**已提交**差异：上面这份清单是**工作区 vs tag** 的手工审计，**提交后必须再跑一次门禁** |
+| 插件版本号（交付项）                              | `[x]` | **14 个插件升版**（相对 tag `v0.13.1`）。**未升的是 `plugin-brand` 0.2.4 与 `plugin-mcp` 0.2.3** —— 逐条查过 `git diff v0.13.1 -- plugins/<p>/{src,assets,build.mjs,cordis.patch.yml}`：**两个都是空**（无代码差异，只改了 `package.json` 里的依赖范围，而门禁不看这个文件）。**套件 hash 演进** `b904343c` → … → `33039169` → `6ee300d4` → `924402be` → `86d5f280`（O2）→ `f6ce4063`（O1 + 步 9）→ `35a78923`（O5：swarm `0.7.0→0.7.1`）→ `c6d3bae3`（O5：usage `0.2.8→0.2.9`）→ `017f5b64`（修迁移漏掉的预设显示名字段：presets `0.1.9→0.2.0`）→ `ff9318bf`（市场目录源改发 `accept-encoding: identity`：market `0.1.8→0.1.9`）→ `d00aa1fd`（注册表请求同样改发 `identity`：market `0.1.9→0.2.0`）→ **`44f7e5b7`**（搜索引擎请求也改发 `identity` + Bing 的备选主机：websearch `0.1.5→0.1.6`）→ **`6e0ad788`**（市场托管禁用块给以 `@` 开头的条目 id 加引号：market `0.2.0→0.2.1`）。⚠️ **hash 变了就意味着：已构建的 runtime/安装包里的套件是旧的，要交付必须重建**；⚠️ `test/plugin-version-bump.test.mjs` 只比对**已提交**差异：上面这份清单是**工作区 vs tag** 的手工审计，**提交后必须再跑一次门禁** |
 | 步 9 预设迁移（B4/D2）                            | `[x]` | **迁移代码 + 真机端到端都已验**：`plugin-presets/src/legacy-migration.ts`（整块缩进嵌入保住 `!!js`、幂等、坏 patch 拒写、备份 + tmp/rename；写入 HOME layer）；`dump-config-schema` 里出现 `preset-rsi-dev`（`schema`）→ 真机启动后**profile patch 里那一行是活的**（不再是 `NOT LOADED`）→ **没有 `agent preset …` 挂载失败警告 = 预设挂载成功**；用户原有行一条没少。**技能是否出现在面板仍待界面复验** → §6.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 外壳解析判据（本轮修的真 bug）                    | `[x]` | 真机启动抓到：迁移的预设行被外壳注释掉。读宿主实现后定位**两处错**：① 它查的是**镜像目录**，而宿主读的是**安装闭包表**（`createRuntimeResolution` → `collectInstallationScopePackages`），镜像会滞后（实测 0.1.6 线、缺三个 0.1.7 包）；② 子路径按目录拼（`…/tools/package.json`），必然失败；③ `rowSpecifiers` 把**嵌套组合**当本行条目判，35 个名字任一个坏就沉掉整行。三处都修（新增可选 `extraDirs`、`splitPackageSpecifier` 取包根、只判本块最浅 id 缩进）。**真机复验：`patch row skipped` 3 → 0**，那一行变活。见 §11 步 9                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | 步 7 Agent Team（D3）                             | `[!]` | **根因已定**：`ui-agent-team` 那一行被**用户自己的 overlay 显式 `disabled: true`**（`~/.dsh/profiles/dsh-app/cordis.patch.yml:248-271`，注释记录了 0.1.6-alpha.1 时客户端半让整页被拒的实测）。**不是缺陷、不是上游问题。** 0.1.7 上版本已同源，但**没人验证过**是否仍失败 → 一行 `disabled: false`（home layer）即可安全试，失败删两行恢复。**等用户点头**，见 §11 步 7                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -724,7 +724,7 @@ npm run verify                         # smoke-suite.mjs，默认自动找 sibli
 npm run verify -- --runtime <解包后的 runtime 目录>   # node/ + app/ 都在的那种
 npm run verify -- --tgz <新 runtime.tgz>
 npm run verify -- --dev-checkout D:/codes/deepseek-harness   # §3 改造后用于对比源码树模式
-npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 profile 目录>
+npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME，即含 profiles/ 的那一层>
 ```
 
 ### 6.2 实机回归（按修复项对应）
@@ -3138,8 +3138,10 @@ checkout 也已切到 `dsh-v0.1.7-alpha.2`）。这一节记录**跟这一版**�
 - **一次假红，记在这里**：第一次 `npm test` 时我**同时在跑 16 个插件的重装**，两条 spawn+超时的
   用例（`log-redaction`、`nav-policy`）因此红了；空载重跑即绿。**测门禁时不要并行跑重装**——
   这和之前 pdf/doc 那条偶发是同一类（负载导致的假红）。
-- **套件 hash 未变**（`44f7e5b7`）：升线只动了依赖范围，插件**版本号**没动，而 hash 只吃版本号。
-  要发布仍然必须重建 runtime（这次要打成 **0.1.7-alpha.2**）。
+- **套件 hash 升线时未变**（`44f7e5b7`）：升线只动了依赖范围，插件**版本号**没动，而 hash 只吃版本号。
+  要发布仍然必须重建 runtime（这次要打成 **0.1.7-alpha.2**）。**当天晚些时候又变了一次**：
+  市场那条 scoped id 引号修复 → **`6e0ad788`**（market `0.2.0→0.2.1`），于是这次重建是必需的，
+  不是可选的——见 §12.4。
 
 ### 12.2 alpha.2 动了哪些我们踩过的面（逐条对上更新日志与 diff）
 
@@ -3173,3 +3175,100 @@ checkout 也已切到 `dsh-v0.1.7-alpha.2`）。这一节记录**跟这一版**�
 
 
 
+
+## 12.4 跟线第二段（2026-09-23 晚：提交、重打、复验）`[x]`
+
+这一段的起点是主人当时的三处症状（**模型列表空了 / 用量统计没有记录 / 自进化模式不见了**）与
+「dev 到底读哪套内核」的追问。上一段的结论已经指向两个根因：**profile patch 被一行不带引号的
+scoped id 写坏**（整份 patch 解析失败 → 内核子进程退出），以及**两道内核线共用一个 profile**
+（旧的 0.1.6 内核把自己的包投影进 profile，之后 0.1.7 的启动一直加载那批包）。这一段做的是收尾：
+提交、重打产物、把 §12.2 逐条复验，并补上跟线过程中暴露的两个新缺陷。
+
+### 12.4.1 提交（两笔，工作区当时干净）
+
+| commit | 内容 | 关键证据 |
+|---|---|---|
+| `e4a4db4` `fix(market): quote a scoped id in the managed block` | 托管禁用块写入器对以 `@` 开头的条目 id 加引号（`yamlId()`）；market `0.2.0→0.2.1` | plugin-market build + test **203/203**（+1 条：引号、`disabledIdsOf` 往返、删除路径） |
+| `c1c031a` `fix(dev): refuse an installed kernel of another line` | 已装内核线与仓库跟随线不一致时**拒绝启动**并打印两条线号；同线仍回退（带警告） | 把 alpha.2 树的 `manifest.json` 藏起来后 `node scripts/dev.mjs` 打出拒绝、`exit=1`，点名 `dsh 0.1.6-alpha.2` vs `^0.1.7-alpha.2` |
+
+### 12.4.2 产物（本次唯一有效的本机 runtime）
+
+| 字段 | 值 |
+|---|---|
+| 跟随 spec | `^0.1.7-alpha.2`（17 manifest） |
+| 套件 hash | **`6e0ad788`**（market 0.2.1；上一版 `44f7e5b7` 的市场是 0.2.0，**不含引号修复**，所以这次重打是必需的） |
+| runtime | `runtime-dist/dsh-runtime-win32-x64-0.1.7-alpha.2.tgz`，90,365,974 B，sha512 `4b2677ef…` |
+| 办公组件 | `office-payload-win32-x64-0.1.7-alpha.2.tgz`，221,158,475 B，**`0.0.1-py3.12.14`**，sha512 `b73b6046…` |
+| 本机 dev 树 | `scratch/rt-0.1.7-alpha.2b/runtime`（由上面这份 tgz 解出，manifest `0.0.1-py3.12.14`） |
+| 已退役 | `rt-0.1.7`（alpha.1）、`rt-0.1.7-alpha.2`（旧 suite 的那次构建）与 `runtime-dist` 里 alpha.1 的两个 tgz + 两个 sha512（`scratch/refresh-dev-runtime.mjs --dry-run` 先看过清单再删） |
+
+### 12.4.3 复验证据（真应用 / 真产物，不是推断）
+
+| 项 | 证据 |
+|---|---|
+| **主人报的三处症状** | 全部在**真应用窗口**（CDP 驱动 `dsh-app://app/index.html`，内核是本机产物）里逐条看过：**新会话建出来了**（输入框可用、能打字）；**「自进化模式」在选择器里**；**用量统计有记录**（表内 1114 次请求 / 26 周热力图 / 缓存读 564.82M）；**模型页列出 11 个提供商**与「添加模型提供商」入口 |
+| **我先前那句"会话建不出来"** | **是错的，已证伪**：那句话读的是一段**修复前**的 console（`persona … already registered` + 7 条 pending），不是修复后的现状。真应用上新建会话成功，且当前 dev 日志里 `agent-preset/invalid` / `already registered` **出现 0 次** |
+| **alpha.2「Web 重启后恢复连接、保留会话与草稿」** | 杀掉内核子进程（PID 26616）→ 外壳打出 `[server] down: 已退出（code 1, signal ?） (attempt 1)` → **同一端口 19387** 重新 ready → 页面**会话仍在、草稿仍在**（`reconnect-draft-do-not-send` 逐字还在） |
+| **`npm run verify -- --tgz`** | **60 项全过、0 失败**（临时 `DSH_HOME`，含 `websearch: bing engine returns sources (real network)`）；换成本次最终产物又跑了一次，同样全过 |
+| **`npm run check:plugins -- --kernel <tgz> --home C:/Users/Administrator/.dsh`** | **通过**（真 `DSH_HOME`）：内核 8.4s 就绪、零失败信号。**注意 `--home` 是 `DSH_HOME` 那一层（含 `profiles/`），不是 profile 目录本身**——按文档原来那句写成 profile 目录时会得到 `profile "dsh-app" does not exist`，那句已更正 |
+| **`scripts/smoke-primary-runtime.mjs`** | **`result: ok`**：manifest 规范化读出、五条路径都在、安装 + 复用分支、**Python 13 个分布 `py ok`**、`node v24.21.0`、`pnpm 11.7.0`、`load_workspace_dependencies` 答出 13 个分布 |
+
+### 12.4.4 §12.2 的逐条裁决（哪些其实不需要我们验）
+
+| §12.2 的项 | 裁决 |
+|---|---|
+| 官方 DeepSeek 适配器移除 `protocol` 选项 | **不用改**：`grep -rn protocol` 在 profile 自己的 `cordis.patch.yml` / `cordis.yml` / `desktop.cordis.yml` / `package.json` 里**零命中**（命中全在 `node_modules` 与市场缓存里），没有旧字段要迁移 |
+| 「工作区文件读取统一为 `readBytes`，插件需迁移旧接口」 | **不用改**：全仓 `readFile`/`readFileSync` 命中**全是 `node:fs`**，没有一处调用内核的读取接口 |
+| 「仅存在自定义事件里的附件不再自动读取或导出」 | **不用改**：唯一命中 `attachment` 的是 `plugin-presets/src/routes.ts` 的 **HTTP `content-disposition` 头**，与附件无关 |
+| 「默认不再限制任务完成后连续唤醒 Agent 的次数」 | **不用改**：我们的 swarm 里没有任何"连续唤醒"上限（`grep wake\|consecutive` 只命中 stagger 与 worker 唤醒），上游放开限次不会与我们相撞 |
+| 模型发现候选显示可读名称 | **上游界面，非我们代码**；本机没有可用的模型端点可点，留给主人日常使用（不是欠账） |
+| 插件安装源探测 | 我们的路径**自己解析版本**（`resolveRegistryVersion`：官方域名 → npmmirror，单测 6 条）再交给 `dsh plugin add`，上游"优先找最优源"只影响它的拉取；B7 已用断网代理在真机上验过镜像回退 |
+| app-boot fail-loud | **冒烟即覆盖**：真产物在临时 home 上起内核、60 条路由检查全过（任何未处理 rejection 现在会杀掉子进程，红得会很明显） |
+| 改动审阅浮窗 / Excel 预览 | **本机产物验不到 Excel**：`ui-sidebar-files` 因 sheetjs CDN 不可达被排除（§12.3 第 2 条）；浮窗错位属上游界面 |
+
+### 12.4.5 这一段暴露的**新**缺陷（不是 alpha.2 引入的，是跟线时撞出来的）
+
+| # | 缺陷 | 证据 | 处置 |
+|---|---|---|---|
+| 1 | `scripts/smoke-primary-runtime.mjs` 仍从 `apps/desktop-host/src/primary-runtime.ts` 取宿主模块，而 **0.1.7 已把它搬进 `@deepseek-ai/dsh-tool-workspace-dependencies`**（harness `6e49ccad18`，标题就是"extract … into a package"） | `git ls-tree dsh-v0.1.6-alpha.2 -- apps/desktop-host/src/primary-runtime.ts` 有、`dsh-v0.1.7-alpha.1`/`.2` **都没有**；脚本实跑报 `no harness checkout with … found` | **已修**：新增 `primaryRuntimeModules()`，新线读 `packages/skill/tool-workspace-dependencies/src/index.ts`，旧线仍读两处分文件；报告与断言改用**规范化后**的顶层字段（`manifest.python/node/pnpm`，新读取器会把旧的 `components` 规范化掉）。**这条同时说明 release.yml 那一步在 0.1.7 线上是会红的**——修完 `result: ok` |
+| 2 | `build-primary-runtime.mjs` 拒绝 linux 的理由（"宿主只认 win32/darwin"）在 0.1.7 已不成立：新模块的 `PLATFORMS` 是 `win32\|darwin\|linux` | 新模块源码 | **只更正了注释与报错文案，行为不变**：本仓仍不构建 linux primary runtime（没有引擎、没人测、每个 linux 办公包要多 ~150 MB）——要不要开是主人的决定，构建脚本不替主人假设 |
+| 3 | 本机产物**没有 Python 半边**：不传 `DSH_APP_PRIMARY_RUNTIME` 时 payload 版本是 `0.0.1`（`python: null`），而 CI 会 stage 后传（`release.yml` 359 行），所以发布产物是 `0.0.1-py3.12.14` | 第一次构建的 `office-payload` manifest；诊断页因此读「办公组件 未安装 / 当前内核需要 v0.0.1」 | **已修（构建方式，不是代码）**：带上 `DSH_APP_PRIMARY_RUNTIME=runtime-dist/primary-runtime-win32-x64` 重打 → `0.0.1-py3.12.14`，与已安装的那份**同一个版本号**，dev 里办公组件不再误报「未安装」 |
+| 4 | `bundled-kernel/` 还是 **0.1.6-alpha.2 / suite `c913bff9`**，而仓库跟的是 0.1.7-alpha.2 / `6e0ad788` | `bundled-kernel/manifest.json`，启动日志 `[kernel] channel alpha (bundled 0.1.6-alpha.2)` | **未修，交付前必做**：装完即用（还没下载内核）的那一次启动会拿 0.1.6 跑 0.1.7 适配过的套件。发布链路由 `scripts/prepare-bundled-kernel.mjs` 从当次产物 stage（`release.yml` 565+），**本机要单独跑一次**——记在 §12.5 |
+
+### 12.4.6 批判性审查（§1.0 六问，本段整体）
+
+1. **主张复核**：本段开始时我**手上有一个错判断**（"会话建不出来"），来源是把修复前的 console 当现状；
+   真应用上新建会话成功，已更正。同一批的另外三处症状（模型页 / 用量 / 自进化模式）也逐条在真应用里
+   重看过，不是照抄之前的结论。§12.2 里几条"复验"也重新分了类：**其中 4 条其实不用做**（见 12.4.4），
+   理由写在表里——把"不做"的依据写清，比留一个 `[ ]` 诚实。
+2. **修复最小性**：本段只动 3 处代码（市场引号、dev 拒绝分支、primary-runtime 冒烟的路径/字段）、
+   3 处注释或文档（`environment.md`、`build-primary-runtime.mjs` 的两处路径说明）。**没有新依赖、
+   没有新抽象**；市场那处只多一个 `yamlId()`，dev 那处只多两个小函数。
+3. **新风险**：(a) 市场现在会写出**带引号的 id**，读取端本来就剥引号，但"内核认不认"要有证据——B8 的
+   真机往返（禁用 → 重启后内核显示「已停用」→ 启用 → 逐字节复原）正是这条；(b) dev 的拒绝分支让
+   "本机没有本行 runtime 树"的机器**无法 `npm run dev`**——**这是有意的**，出口在报错信息里
+   （`DSH_APP_DEV_KERNEL=<dir>` 或先构建一份）；(c) 重打产物换掉了 sha512，任何按旧摘要写死的
+   地方都会红（本仓没有这种地方，`runtime-files-*.json` 与 manifest 同一次构建产出）。
+4. **边界覆盖**：空 patch、CRLF、已有托管块、重复 id、patch 缺失、树被改名（dev 的回退与拒绝两条
+   分支）都走过；primary-runtime 冒烟覆盖"已安装则复用"的第二次调用分支与"路径不存在即失败"的断言。
+5. **验证证据**：12.4.3 的六行 + 两笔提交各自的 `Verified:` 行；**没跑的说清原因**（配额 / 需要机器 /
+   本机产物缺 sheetjs 的那些在 12.4.4 与 §6.2 末尾）。
+6. **反例（残余风险）**：如果主人装的是**同一条线**的已发布内核（例如 0.1.7-alpha.2），dev 的
+   回退分支会直接用它——那么"两套内核共用同一个 profile"这件事**依然存在**，只是不再跨线。这一条
+   **没有被证伪**，见 §12.5 第 1 条。
+
+
+## 12.5 待决与剩余（这一段结束时点）
+
+**标 `[!]` 的是等主人拍板；标 `[ ]` 的是我该做但还没做；标 `[–]` 的是判定不做。**
+
+| # | 事项 | 状态 | 要点 |
+|---|---|---|---|
+| 1 | **dev 与已装应用共用一个 profile**（"两全"问题） | `[!]` | 现状两套都读 `$DSH_HOME/profiles/dsh-app`。**同线**时不会互相污染（套件按当前运行的那棵树重建链接），**跨线**时会（0.1.6 的内核把自己的包投影进 profile，0.1.7 的启动随后加载它们——7 条客户端条目 pending）。三个可选方向：**(a)** dev 用独立 `$DSH_HOME`（代价：dev 里的登录态、设置、会话另起一份）；**(b)** 保持共享，靠"已发布版本跟上仓库线"消化（本次 alpha.2 就是这条）；**(c)** 外壳在**检测到线变化**时清掉 profile 的模块投影（与 `client-state.ts` 按线清 localStorage 同一个道理，但要在内核写投影之前/之后抢时序）。我没有替主人选，因为 (a) 影响日常使用体感、(c) 要动启动时序 |
+| 2 | **`bundled-kernel/` 要按 0.1.7-alpha.2 重新 stage** | `[x]` | 已重 stage（`node scripts/prepare-bundled-kernel.mjs win32 x64`）：`bundled-kernel/manifest.json` 现在是 `0.1.7-alpha.2 / 6e0ad788`，`integrity` 写着这次产物的真 sha512 `4b2677ef…`，`officePayload 0.0.1-py3.12.14`。**此前它是 `0.1.6-alpha.2 / c913bff9`**——装完即用、还没下载内核的那一次启动会拿 0.1.6 跑 0.1.7 适配过的套件。**发布链路本来就会做这一步**（`release.yml` 从当次产物 stage），这里补的是**本机**那份 |
+| 3 | Agent Team 装进 profile（专项三 / D3） | `[!]` | 宿主侧已启用、**客户端半没出现**；§11「步 7」有全过程 |
+| 4 | 随包 pnpm（B2 的前提） | `[!]` | 插件管理页的包操作需要 `PATH` 上有 pnpm |
+| 5 | 第三方插件（`dshmarket`、`dsh-lsp-actions`、`dsh-remote` 等）的客户端 API 漂移 | `[!]` | 上游 `ui-primitives` 在两条线之间动过 26 个文件；`dshmarket` 因此渲染成错误卡（React #130）。我们**不 import** 它（`plugin-kernel-imports` 门禁），所以不是我们的缺陷；要不要逐条找作者/换版本由主人定 |
+| 6 | 两处文案 | `[!]` | (a) 市场目录源返回非 JSON 时的说法（现在是"返回了无法解析的 JSON"，其实是**传输**问题，见 §11 那条）；(b) 引擎状态的「就绪」→「已配置」 |
+| 7 | A3 / B5 / B13 / B14 / O4 五行界面待验 | `[–]` | 处置与理由在 §6.2 末尾那张表里（花配额 / 要机器 / 不属于我们的代码路径 / 你日常一看就知道） |
+| 8 | **本机产物的两条限制**（不是缺陷，是环境） | — | ① `ui-sidebar-files` 因 sheetjs CDN 不可达被排除 → **Excel 预览在本机产物里验不到**，发布要在能访问该 CDN 的环境跑；② 办公组件要带 `DSH_APP_PRIMARY_RUNTIME` 才含 Python 半边（见 12.4.5 #3），不带就只有 `0.0.1` 那个 engine-only 版本 |
