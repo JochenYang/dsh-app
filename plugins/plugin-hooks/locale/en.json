@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "External hooks",
+    "description": "External hooks bridge: mounts Claude Code / Codex hooks.json files as live hook instances."
+  }
+}

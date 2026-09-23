@@ -452,6 +452,27 @@ describe('fetchCatalog (offline behavior)', () => {
     const result = await fetchCatalog('https://reserved-tld.invalid/catalog.json')
     assert.equal('reason' in result, true)
   })
+
+  it('asks the source for an UNCOMPRESSED body', async () => {
+    // The header is the whole defence against a proxy that answers with the
+    // origin's compressed bytes but drops the `content-encoding` that says so:
+    // measured here, such a response arrives as 1,036,056 bytes of gzip and
+    // `JSON.parse` rejects it, and the user is told their catalog source is
+    // broken. Nothing else in this suite can see the request's headers.
+    const original = globalThis.fetch
+    let seen: RequestInit | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit): Promise<Response> => {
+      seen = init
+      return new Response('{"plugins":[]}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      const result = await fetchCatalog('https://example.test/catalog.json')
+      assert.equal('entries' in result, true)
+      assert.deepEqual(seen?.headers, { 'accept-encoding': 'identity' })
+    } finally {
+      globalThis.fetch = original
+    }
+  })
 })
 
 describe('source list limits', () => {

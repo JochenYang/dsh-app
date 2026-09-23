@@ -65,12 +65,16 @@ const rowOf = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 
 /** A persistence stub over in-memory logs, in the KERNEL's wrapper shape. */
 const persistenceOf = (
-  logs: Record<string, { events: FoldEvent[], inherited?: number }>,
+  logs: Record<string, { events: FoldEvent[], inherited?: number, version?: number }>,
 ): BackfillPersistence => ({
   // The kernel's `list()` returns snapshot wrappers: the id lives on
   // `entry.header.id`. Returning bare headers here would make this test pass
-  // against the very bug it exists to catch.
-  list: () => Promise.resolve(Object.keys(logs).map(id => ({ header: { id }, sizeBytes: 0 }))),
+  // against the very bug it exists to catch. The header also carries the LOG
+  // FORMAT version, which is what the fold treats as its seq-space witness.
+  list: () => Promise.resolve(Object.keys(logs).map(id => ({
+    header: { id, ...(logs[id]?.version === undefined ? {} : { version: logs[id]!.version }) },
+    sizeBytes: 0,
+  }))),
   open: (id: string) => {
     const log = logs[id]
     return Promise.resolve({
@@ -129,6 +133,37 @@ test('runBackfill: a session whose log is entirely inherited adds nothing', asyn
   assert.equal(report.inspected, 1)
   assert.equal(report.added, 0, 'nothing above the inherited cut')
   assert.equal(store.size, 0)
+})
+
+test('runBackfill: a log format change re-folds a session once, at its current seq', async () => {
+  // The V3→V4 migration appends synthetic events and renumbers the tail, so an
+  // already-folded message can come back at a DIFFERENT seq. Both halves of the
+  // fix are asserted here, because each one alone is wrong: without the format
+  // witness the watermark skips the moved message (usage quietly too low), and
+  // with only the watermark dropped the re-fold adds a SECOND row under the new
+  // seq and counts that usage twice (`keyOf` is `sessionId:seq`).
+  const store = newStore(tmpDir())
+  const before = persistenceOf({ s1: { events: [header(1, 'deepseek', 'm'), message(9, 10, 5)], version: 3 } })
+  assert.equal((await runBackfill(store, before, () => {})).added, 1)
+  assert.deepEqual(store.all().map(row => [row.seq, row.inputTokens]), [[9, 10]])
+
+  // The same session after its log was migrated: the message now sits at seq 4.
+  const migrated = persistenceOf({ s1: { events: [header(1, 'deepseek', 'm'), message(4, 10, 5)], version: 4 } })
+  const report = await runBackfill(store, migrated, () => {})
+
+  assert.equal(report.added, 1, 'the migrated log is folded again')
+  assert.equal(store.size, 1, 'and the pre-migration row is gone, not kept beside it')
+  assert.deepEqual(store.all().map(row => [row.seq, row.inputTokens]), [[4, 10]])
+})
+
+test('runBackfill: an unchanged log format does not re-fold anything', async () => {
+  // The witness must not fire for the ordinary case: two passes on the same line
+  // have to keep costing nothing.
+  const store = newStore(tmpDir())
+  const persistence = persistenceOf({ s1: { events: [header(1, 'deepseek', 'm'), message(2, 10, 5)], version: 4 } })
+  assert.equal((await runBackfill(store, persistence, () => {})).added, 1)
+  assert.equal((await runBackfill(store, persistence, () => {})).added, 0)
+  assert.equal(store.size, 1)
 })
 
 test('runBackfill: a second pass over the same logs adds nothing (watermark)', async () => {

@@ -6,8 +6,8 @@
  * only registers into it. Third-party usage plugins coexist by design (each
  * renders its own page over its own data — see the host half's header), so
  * this half always registers. A user who prefers their own plugin disables
- * this one through the user config file (`<storeDir>/config.json`,
- * `enabled: false`), and the tab then shows the disabled notice from the
+ * this one through the plugin's declarative `enabled` config field (see the
+ * host half's header), and the tab then shows the disabled notice from the
  * host's /status signal instead of data.
  *
  * @module @dsh-app/plugin-usage/client

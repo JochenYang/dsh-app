@@ -561,6 +561,9 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
         : state.status === 'loading' && state.routes.length === 0
           ? <p className="dshAma-hint">{t('adv.load.loading')}</p>
           : null}
+      {state.status === 'ready' && state.routes.length === 0
+        ? <p className="dshAma-hint">{t('adv.load.noRoutes')}</p>
+        : null}
       {state.status === 'ready' && !state.writable
         ? <p className="dshAma-hint">{t('adv.readOnly')}</p>
         : null}

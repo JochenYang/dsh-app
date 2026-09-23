@@ -15,9 +15,22 @@
 
 import type { WebSearchSource } from '@deepseek-ai/dsh-web'
 import type { Engine, EngineRequest } from './types.ts'
-import { dedupeSources, requestText, source, stripTags, USER_AGENT } from './types.ts'
+import { dedupeSources, request, source, stripTags, USER_AGENT } from './types.ts'
 
 const ENDPOINT = 'https://www.bing.com/search'
+
+/**
+ * Where the zh market's request ends up, measured rather than guessed:
+ * `www.bing.com/search?…&mkt=zh-CN` answers `302 → cn.bing.com/search?…`.
+ *
+ * That redirect is why the settings page's probe can report a bare "HTTP 302"
+ * while the page is perfectly reachable — measured on this machine, the local
+ * proxy returns responses with NO headers at all, so `Location` is gone, undici
+ * has nothing to follow, and the engine gives up on the 302. Direct, the same
+ * request is 200 with ten result blocks. The retry below is the host Bing itself
+ * named.
+ */
+const ZH_REDIRECT_HOST = 'https://cn.bing.com/search'
 
 /** Bing market + Accept-Language pairs. `mkt` drives result localization. */
 const LANG_PROFILES: Readonly<Record<string, { readonly market: string, readonly acceptLang: string }>> = {
@@ -61,8 +74,16 @@ export function bingEngine(lang = 'zh'): Engine {
     id: 'bing',
     async run({ query, maxResults, signal }: EngineRequest): Promise<WebSearchSource[]> {
       const params = new URLSearchParams({ q: query, mkt: profile.market, adlt: 'off' })
-      const html = await requestText(`${ENDPOINT}?${params}`, { headers: headers(lang), signal })
-      return parseBing(html, maxResults)
+      const first = await request(`${ENDPOINT}?${params}`, { headers: headers(lang), signal })
+      if (first.ok) return parseBing(await first.text(), maxResults)
+      // A redirect we could not follow — see {@link ZH_REDIRECT_HOST}. Only the zh
+      // market has a measured target, so the others report the status as before.
+      if (first.status >= 300 && first.status < 400 && lang === 'zh') {
+        const second = await request(`${ZH_REDIRECT_HOST}?${params}`, { headers: headers(lang), signal })
+        if (second.ok) return parseBing(await second.text(), maxResults)
+        throw new Error(`HTTP ${second.status}`)
+      }
+      throw new Error(`HTTP ${first.status}`)
     },
   }
 }

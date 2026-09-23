@@ -7,7 +7,7 @@ plugin's own JSDoc header before changing its internals.
 
 ## 1. What the suite is
 
-Seventeen dsh plugins layered on top of the upstream kernel **without forking
+Sixteen dsh plugins layered on top of the upstream kernel **without forking
 it** — that is what keeps the desktop app updateable when upstream moves.
 `plugins/README.md` is the roster: which plugin owns which capability, and each
 one's host/client role. `plugins/dsh-app.patch.yml` is the loader overlay that
@@ -34,12 +34,12 @@ for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run bu
 for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; done
 ```
 
-- **Build**: sixteen plugins run `node build.mjs` (esbuild bundles both halves).
+- **Build**: fifteen plugins run `node build.mjs` (esbuild bundles both halves).
   `plugin-brand` is the one exception — `tsc -p tsconfig.json` into `lib/`.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
-  result. All seventeen plugins have suites.
+  result. All sixteen plugins have suites.
 - **CI runs every plugin with a `tests/` directory** (`.github/workflows/ci.yml`
   loops over `plugins/*/`), so a suite that passes locally also gates the PR.
   The root `test/plugin-version-bump.test.mjs` additionally fails any plugin

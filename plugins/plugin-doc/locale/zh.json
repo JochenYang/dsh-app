@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Word 文档",
+    "description": "用结构化 JSON 工程编写文档，导出原生可编辑的 .docx；输入框下方提供 Word 模式开关。"
+  }
+}

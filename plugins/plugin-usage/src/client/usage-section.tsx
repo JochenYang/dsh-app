@@ -903,8 +903,8 @@ export function UsageSection({ t }: UsageSectionProps): ReactNode {
     }
   }, [range])
 
-  // Liveness check first: the host may be disabled by the user config file
-  // (the coexistence exit valve — see the host half's header), in which
+  // Liveness check first: the host may be disabled by its `enabled` config
+  // field (the coexistence exit valve — see the host half's header), in which
   // case /status answers active:false and the section shows the notice.
   useEffect(() => {
     let cancelled = false

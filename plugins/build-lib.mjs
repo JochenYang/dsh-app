@@ -96,7 +96,8 @@ export async function buildDual(here, id, options = {}) {
   console.log('built ' + id + ': lib/index.js + lib/client.js')
 }
 
-// Host-only plugin (no client half, e.g. plugin-fff).
+// Host-only plugin (no client half — a plugin whose whole surface is host rows
+// and LLM tools).
 export async function buildHostOnly(here, id, options = {}) {
   const { extra = [], hostTarget = 'node20' } = options
   await buildHost(here, { target: hostTarget, external: externalFramework(extra) })

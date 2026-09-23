@@ -369,3 +369,14 @@ test('skill text: the two authoring channels share one format and one gate set',
   assert.ok(SKILL_MARKDOWN.includes('共用同一 PPTD 工程格式'))
   assert.ok(SKILL_MARKDOWN.includes('不需要重建工程'))
 })
+
+test('skill text: the delivery step registers the artifact with present', () => {
+  // Without this the rendered deck reaches the user only as a path in prose:
+  // the changed-files card is fed by the file tools, and this plugin writes its
+  // artifact with node:fs, so nothing else puts it on the delivery card.
+  assert.ok(SKILL_MARKDOWN.includes('present'))
+  assert.ok(SKILL_MARKDOWN.includes('交付卡片'))
+  // The tool is mounted by the standard/ptc/cordis presets, not by the bare
+  // minimal one, so the instruction has to be conditional rather than absolute.
+  assert.ok(SKILL_MARKDOWN.includes('若当前会话提供'))
+})

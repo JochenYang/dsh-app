@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Web search",
+    "description": "Web search management: register the brand search provider with multi-engine fallback, and configure engine order and keys."
+  }
+}

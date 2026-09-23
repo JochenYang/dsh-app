@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Parallel subagents",
+    "description": "Batch parallel subagents: expand one template into many child tasks with adaptive concurrency, per-item retry, and a token budget."
+  }
+}

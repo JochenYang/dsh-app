@@ -18,7 +18,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SKILL_NAME } from '../src/skill.ts'
+import { SKILL_MARKDOWN, SKILL_NAME } from '../src/skill.ts'
 import {
   CHIP_APPEARANCE,
   CHIP_LABEL,
@@ -83,6 +83,17 @@ test('skill reference: constants mirror the installed skill name', () => {
   assert.equal(REFERENCE_SOURCE, 'dsh-office-pdf')
   assert.equal(CHIP_LABEL, 'PDF')
   assert.equal(CHIP_APPEARANCE, 'session')
+})
+
+test('skill text: the delivery step registers the artifact with present', () => {
+  // The changed-files card is fed by the file tools, and this plugin writes its
+  // artifact with node:fs — without this instruction the rendered .pdf reaches
+  // the user only as a path in prose.
+  assert.ok(SKILL_MARKDOWN.includes('present'))
+  assert.ok(SKILL_MARKDOWN.includes('交付卡片'))
+  // Mounted by the standard/ptc/cordis presets, not the bare minimal one: the
+  // instruction has to be conditional rather than absolute.
+  assert.ok(SKILL_MARKDOWN.includes('若当前会话提供'))
 })
 
 test('skill reference: the registered source owns the codec and claims no menu space', async () => {

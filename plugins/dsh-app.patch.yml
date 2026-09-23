@@ -12,14 +12,20 @@
 # - swarm: batch parallel subagent orchestration over the upstream subagent
 #   seam (model-facing `swarm` tool + `/swarm` command), dual-face: the
 #   package.json `dsh.client` declaration adds the settings-page section
-#   (并行子代理) editing $DSH_HOME/storages/dsh-app-plugin-swarm/config.json.
+#   (并行子代理) whose knobs are declared as volatile config fields on the
+#   plugin's own Config schema, so the kernel's config editor stores them as
+#   a row in this profile patch (see the swarm row below).
 #   Needs a kernel whose base bundle registers a subagent provider; older
 #   kernels boot without it.
 # - usage: usage statistics over session logs (host capture/aggregation +
 #   settings-page heatmap and daily trend chart). Coexists with third-party
-#   usage plugins (read-only shared source, namespaced store/routes); users
-#   disable it or extend the price table via
-#   <DSH_HOME>/storages/dsh-app-plugin-usage/config.json.
+#   usage plugins (read-only shared source, namespaced store/routes); its
+#   `enabled` / `pricing` / `backfillOnStart` / `rescanMinutes` knobs are
+#   declared as volatile config fields on the plugin's own Config schema, so
+#   the kernel's config editor stores them as a row in this profile patch
+#   (see the usage row below). The JSON store this plugin used to read
+#   (`<DSH_HOME>/storages/dsh-app-plugin-usage/config.json`) is imported once
+#   and kept aside.
 # - archives: session archive manager (host list/delete routes over the
 #   workspace registry's archive set + settings-page section grouping
 #   archived sessions by project). Deletion is fenced server-side to
@@ -30,10 +36,6 @@
 #   settings-page toggles). Model-driven saving with a code-guaranteed async
 #   net; users disable it via
 #   <DSH_HOME>/storages/dsh-app-plugin-memory/config.json.
-# - fff: fast file search over the FFF engine (in-process C library) — host
-#   fffind/ffgrep/fff-glob LLM tools, per-workspace index managed by the
-#   picker. Every search is fenced to the executing agent's session workspace;
-#   no client half. Exit valve: remove this row (or tune config).
 # - mcp: MCP manager — settings-page CRUD over external MCP servers. The
 #   user's server set lives in
 #   $DSH_HOME/storages/dsh-app-plugin-mcp/servers.json (the overlay is
@@ -96,6 +98,13 @@
       name: '@dsh-app/plugin-swarm'
       config:
         provider: spawn
+        # These knobs are declared as volatile config fields, so the settings
+        # page writes them through the kernel's config editor — which appends a
+        # row of its own to this profile patch. Patch semantics replace a row's
+        # whole `config`, so the plugin's write path always carries every field,
+        # and the values here are what an untouched knob keeps (not the schema
+        # defaults: maxItems 8 and a pool of 4 are NOT the shipped tuning).
+        enabled: true
         maxItems: 64
         # Two orthogonal knobs: maxItems bounds batch size only (the worker
         # pool bounds actual load, so a 64-item batch at pool 4 is just 16
@@ -130,10 +139,6 @@
         # Batch token budget (0 = disabled): once settled children's summed
         # usage reaches this, the batch stops launching work. Per-call
         # override: the swarm tool's token_budget argument.
-        # User-level overrides live in
-        # $DSH_HOME/storages/dsh-app-plugin-swarm/config.json (this overlay is
-        # rewritten by the shell on every start, so edits here do not stick
-        # for end users — the config file wins over these values).
         tokenBudget: 0
         # maxDepth is the absolute delegation-depth cap (harness-enforced):
         # 1 makes every child a leaf worker — its own delegation attempts are
@@ -149,9 +154,6 @@
 
     - id: memory
       name: '@dsh-app/plugin-memory'
-
-    - id: fff
-      name: '@dsh-app/plugin-fff'
 
     - id: mcp
       name: '@dsh-app/plugin-mcp'
@@ -230,26 +232,31 @@
 - id: ui-schedule
   disabled: false
 
-# Experimental Agent Teams — deliberately OFF for every profile of this app.
+# Agent Teams: the veto that used to live here is GONE, and this note is kept so
+# nobody re-adds it by reflex.
 #
-# The row belongs to the upstream bundle @deepseek-ai/dsh-experimental-agent-
-# team-web-profile (its cordis.patch.yml inserts `ui-agent-team` ->
-# @deepseek-ai/dsh-experimental-client-ui-agent-team). At 0.1.6-alpha.1 that
-# entry does not activate — its published client half fails against the loader
-# shipped in the same version, and the client boot audit reports it as `failed`
-# — and a client-side plugin failure is not a warning here: that audit rejects
-# the page, so the window is stuck on "Failed to load plugins" with nothing
-# else reachable. Measured 2026-09-17 with the row present:
+# The row this overlay disabled is `ui-agent-team`, inserted by the upstream
+# bundle @deepseek-ai/dsh-experimental-agent-team-profile (0.1.6 shipped it in a
+# separate `-web-profile` package; 0.1.7 merged the service, the tools and the UI
+# into one bundle, which is what removed the reason for the veto). It was
+# disabled because at 0.1.6-alpha.1 that client half failed against the loader of
+# its own line, and a client-side plugin failure is not a warning here: the boot
+# audit rejects the page, so the window sits on "Failed to load plugins" with
+# nothing else reachable. Measured 2026-09-17 with the row present:
 #   Failed to load plugins
 #   @deepseek-ai/dsh-experimental-client-ui-agent-team
 #   web boot: 1 entry did not activate
 #   @deepseek-ai/dsh-experimental-client-ui-agent-team: failed
-# A profile that lists the bundle composes exactly this row, and `dsh plugin`
-# re-appends the bundle from its dependency on the next install, so the state
-# can come back without anyone editing this file. Vetoed here because this
-# overlay is applied after every bundle layer and is rewritten on each start —
-# the disable survives a re-install, and dropping the row (or overriding it
-# with `disabled: false` in the home layer, which applies last) is all it takes
-# to turn Agent Teams back on once upstream republishes the package.
-- id: ui-agent-team
-  disabled: true
+#
+# Re-enabled on 0.1.7-alpha.1: the three packages the bundle depends on
+# (`dsh-experimental-agent-team`, `-tool-agent-team`,
+# `-client-ui-agent-team`) ship inside the runtime itself, so enabling it needs
+# no download and cannot pull a version from another kernel line.
+#
+# The bundle is switched on in the PROFILE, not here: it has to be listed in
+# `dsh.profile.bundles` for its patch layer to compose at all, and the shell
+# never rewrites a profile's package.json — the enable survives every restart,
+# which is exactly why it is not expressed as a row in this generated file.
+# The row is deliberately NOT re-added with `disabled: false`: a profile that
+# does not list the bundle has no row for it to act on, and an unmatched row is
+# noise in every other profile this overlay is shared with.

@@ -64,13 +64,26 @@ export function isAbort(error: unknown): boolean {
  * and composes it into `signal` before calling. Adding a second timer inside
  * each engine would make the effective deadline depend on which engine ran,
  * which is exactly the ambiguity the single budget exists to remove.
+ *
+ * Every request asks for an UNCOMPRESSED body, and the caller's own headers are
+ * merged rather than replaced. Measured on this machine through the kernel's own
+ * dispatcher: the local proxy hands back responses with **no headers at all**
+ * (`headers: []`), so a gzip body arrives with no `content-encoding` to explain
+ * it and nothing can decode it — the Parallel MCP endpoint answered 50,347 bytes
+ * of valid JSON-RPC directly and 10,817 bytes of gzip through that path, which
+ * our parser can only report as "no parsable JSON-RPC frame". A host that ignores
+ * the header behaves exactly as before.
  */
 export async function request(
   url: string,
   init: RequestInit & { readonly signal: AbortSignal },
 ): Promise<Response> {
   try {
-    return await fetch(url, { redirect: 'follow', ...init })
+    return await fetch(url, {
+      redirect: 'follow',
+      ...init,
+      headers: { 'accept-encoding': 'identity', ...init.headers },
+    })
   } catch (error) {
     if (isAbort(error)) throw error
     throw new Error(`network request failed: ${describeError(error)}`)

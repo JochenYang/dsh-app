@@ -20,6 +20,7 @@ import {
   PACKAGE_NAME_PATTERN,
   registryUrl,
   resolveDshBin,
+  resolveRegistryVersion,
   tailLines,
   validateExactVersion,
   validatePackageName,
@@ -208,5 +209,100 @@ describe('latestVersionsOf (bounded batch probe)', () => {
 
   it('answers an empty record for an empty batch', async () => {
     assert.deepEqual(await latestVersionsOf([], async () => '1.0.0'), {})
+  })
+})
+
+// --- registry fallback -------------------------------------------------------
+//
+// From Mainland China — this product's first market — npm's own host is
+// regularly unreachable or slow, while the kernel's own plugin manager already
+// declares `registry.npmmirror.com` as a fallback. Without one, the panel
+// reports "no such package" for a package the CLI installs fine.
+//
+// The distinction these cases pin is the one a naive retry loop gets wrong: a
+// host that could not be REACHED is not a verdict, but "no such package" from
+// the canonical host IS one — asking a lagging mirror next would let its 404
+// masquerade as the package not existing.
+
+describe('resolveRegistryVersion (registry fallback)', () => {
+  const realFetch = globalThis.fetch
+  afterEach(() => { globalThis.fetch = realFetch })
+
+  /** Answer every request with `respond`, recording the URLs asked. */
+  function stubFetch(respond: (url: string) => Response): string[] {
+    const asked: string[] = []
+    globalThis.fetch = ((url: unknown) => {
+      asked.push(String(url))
+      return Promise.resolve(respond(String(url)))
+    }) as typeof fetch
+    return asked
+  }
+
+  it('answers from the canonical host without asking anyone else', async () => {
+    const asked = stubFetch(() => new Response(JSON.stringify({ version: '1.2.3' }), { status: 200 }))
+    assert.equal(await resolveRegistryVersion('react'), '1.2.3')
+    assert.deepEqual(asked, ['https://registry.npmjs.org/react/latest'])
+  })
+
+  it('falls back to the mirror when the canonical host cannot be reached', async () => {
+    const asked = stubFetch((url) => (url.includes('registry.npmjs.org')
+      ? (() => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') })()
+      : new Response(JSON.stringify({ version: '1.2.3' }), { status: 200 })))
+    assert.equal(await resolveRegistryVersion('react'), '1.2.3')
+    assert.deepEqual(asked, [
+      'https://registry.npmjs.org/react/latest',
+      'https://registry.npmmirror.com/react/latest',
+    ])
+  })
+
+  it('treats a 5xx as "this host did not answer" and moves on', async () => {
+    const asked = stubFetch((url) => (url.includes('registry.npmjs.org')
+      ? new Response('bad gateway', { status: 502 })
+      : new Response(JSON.stringify({ version: '1.2.3' }), { status: 200 })))
+    assert.equal(await resolveRegistryVersion('react'), '1.2.3')
+    assert.equal(asked.length, 2)
+  })
+
+  it('takes "no such package" as the answer and stops asking', async () => {
+    const asked = stubFetch(() => new Response('{"error":"Not found"}', { status: 404 }))
+    await assert.rejects(() => resolveRegistryVersion('no-such-package'))
+    assert.deepEqual(asked, ['https://registry.npmjs.org/no-such-package/latest'])
+  })
+
+  it('a requested version is asked for by name on whichever host answers', async () => {
+    const asked = stubFetch(() => new Response(JSON.stringify({ version: '1.2.3' }), { status: 200 }))
+    assert.equal(await resolveRegistryVersion('react', '1.2.3'), '1.2.3')
+    assert.deepEqual(asked, ['https://registry.npmjs.org/react/1.2.3'])
+  })
+
+  it('asks both registry paths for an UNCOMPRESSED body', async () => {
+    // The header is the whole defence against a dispatcher that hands back the
+    // origin's gzip bytes with the `content-encoding` gone: measured through the
+    // kernel's own dispatcher, one mirror `…/latest` answered with NO headers and
+    // 8,738 bytes of gzip (unparseable) where the same request with this header
+    // answered 22,000 bytes of valid JSON. Without it the panel reports
+    // `update.latestUnknown` while the mirror is serving the manifest perfectly —
+    // so the resolve path AND the latest probe are both asserted here.
+    const seen: Array<RequestInit | undefined> = []
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) => {
+      seen.push(init)
+      return Promise.resolve(new Response(JSON.stringify({ version: '1.2.3' }), { status: 200 }))
+    }) as typeof fetch
+    // Distinct names: the latest probe caches per package for five minutes, and a
+    // name an earlier test already probed would answer from that cache with no
+    // request at all.
+    await resolveRegistryVersion('plain-body-resolve')
+    await latestVersionsOf(['plain-body-latest'])
+    assert.equal(seen.length, 2, `expected one request per path, saw ${String(seen.length)}`)
+    for (const init of seen) {
+      assert.equal((init?.headers as Record<string, string> | undefined)?.['accept-encoding'], 'identity')
+    }
+  })
+})
+
+describe('registryUrl', () => {
+  it('targets the canonical host unless told otherwise', () => {
+    assert.equal(registryUrl('react'), 'https://registry.npmjs.org/react/latest')
+    assert.equal(registryUrl('react', '1.2.3', 'registry.npmmirror.com'), 'https://registry.npmmirror.com/react/1.2.3')
   })
 })

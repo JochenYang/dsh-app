@@ -24,6 +24,12 @@ description: 读取工作区 PDF 作为材料，或编写结构化 JSON 工程�
 
 # PDF 工作流（${SKILL_NAME}）
 
+> **与内核自带技能的分工**：内核随包提供 \`office-docx\` / \`office-pptx\` / \`office-xlsx\`，
+> 用于**检查和修改已有的** OOXML 文件；本技能管的是 PDF——读它（\`pdf_read\`）、从 JSON 工程
+> 产出它（\`pdf_render\`）、或把已有的 Office 文档转成它（\`office_to_pdf\`）。
+> 只是想**看一眼**某个 .docx/.xlsx 的内容时不需要转换：侧栏已能原生预览 Office 与表格文件；
+> 转换的用途是产出 PDF 本身。
+
 三条腿，按任务选择：
 
 - **读取**：把已有 PDF 当材料——\`pdf_read\` 读取工作区内 \`.pdf\`，返回页数、每页文本与标题/作者。
@@ -36,7 +42,7 @@ description: 读取工作区 PDF 作为材料，或编写结构化 JSON 工程�
 2. 用 \`pdf_write\` 把整份文档写成结构化 JSON（\`*.pdf.json\`，工作区相对路径）。\`pdf_write\` 会先校验，发现 error 时不写盘并返回问题清单。
 3. 调用只读的 \`pdf_check\`（入参 \`file_path\`）。返回 \`needs_revision\` 是正常的写作反馈：问题清单完整返回，每条带块索引、字段与修复指引。
 4. 按 **块索引 + 字段** 逐条修复：用普通文件工具读取该 \`.pdf.json\`，改好后用 \`pdf_write\` 整份覆盖（替换已存在文件必须带上一次返回的 \`expected_sha256\`），再次 \`pdf_check\`。
-5. 校验通过后调用 \`pdf_render\`（入参 \`file_path\` 与新的 \`output_file\`，\`.pdf\` 结尾）。渲染内部仍会复验：\`status: needs_revision\` 表示未产出任何文件，回到第 4 步继续修；\`status: exported\` 才算交付。最后在回复结尾给出产出 \`.pdf\` 的**明确路径引用**（让用户能直接打开）与 \`.pdf.json\` 工程路径，并说明可用你本机的 PDF 阅读器打开查看；不声称已在本机打开验证过。
+5. 校验通过后调用 \`pdf_render\`（入参 \`file_path\` 与新的 \`output_file\`，\`.pdf\` 结尾）。渲染内部仍会复验：\`status: needs_revision\` 表示未产出任何文件，回到第 4 步继续修；\`status: exported\` 才算交付。导出成功后，**若当前会话提供 \`present\` 工具，就用它把成品登记为本次交付**（\`files: [{ "path": "<产出>.pdf" }]\`；相对路径按会话工作目录解析，文件必须已经存在）——登记过的文件才会出现在会话的交付卡片里，用户能直接点开；没有该工具时跳过这一步即可。最后在回复结尾给出产出 \`.pdf\` 的**明确路径引用**与 \`.pdf.json\` 工程路径，并说明可用你本机的 PDF 阅读器打开查看；不声称已在本机打开验证过。
 
 ## 读取现有 PDF
 

@@ -1,6 +1,6 @@
 # DSH APP — brand plugin suite
 
-The suite is seventeen dsh plugins that layer on top of upstream dsh **without
+The suite is sixteen dsh plugins that layer on top of upstream dsh **without
 forking it**. This is what keeps the desktop app updateable: when upstream dsh
 releases a new version, the shell swaps the kernel and these plugins keep
 working.
@@ -16,7 +16,6 @@ working.
 | `plugin-usage` | dual | usage capture over session logs + settings-page balance card, heatmap, daily trend chart |
 | `plugin-archives` | dual | session archive manager (list/delete routes + settings-page section grouped by project) |
 | `plugin-memory` | dual | cross-session memory (project-scoped card files injected per prompt, memory_save/recall/forget tools the model calls itself, background curator over existing cards plus a per-project "curate now" button, settings page with per-entry pin/delete; the global scope was retired and its cards migrated into a `legacy-global` project) |
-| `plugin-fff` | host | native fast file search, exposed to agents as a tool |
 | `plugin-mcp` | dual | external MCP server manager: settings-page CRUD, dynamic mount, tools registered as native `mcp__<server>__<tool>` |
 | `plugin-hooks` | dual | external hooks bridge: settings-page CRUD over Claude Code / Codex `hooks.json`, mounted as live hook instances |
 | `plugin-ppt` | dual | editable PPTX generation: the model authors a local PPTD project (`.pptd` manifest + `.page` YAML) against bundled layout templates via `ppt_list_templates`/`ppt_get_template_reference`/`ppt_get_template_pages`/`pptd_write_file`/`pptd_list_files`/`pptd_read_file`/`pptd_check`/`pptd_render` (read-only check locates text overflow/occlusion per file-page-elementId before export), a guiding skill installed into `$DSH_HOME/skills`, and the PPT mode capsule in the **office-suite capsule bar** — the row of format capsules injected after the composer card (container class `dshOfficeBar`, one host per format as `[data-office-format]`, container reused and hosts ordered/deduplicated by that attribute so later Word/Excel/PDF plugins join the same row; see `plugins/plugin-ppt/src/client/office-bar.ts`). The capsule toggles the mode and opens a real cover-preview template panel behind its ▾ dropdown; a pick made before any session exists is parked and applied to the session once it starts |
@@ -40,5 +39,5 @@ kernel contains dsh + the suite in one immutable directory. Once the suite is
 published to npm, switch those references to version ranges.
 
 The loader overlay (`dsh-app.patch.yml`) is copied into userData at server
-start and passed to `dsh web --patch ...`; it inserts all seventeen suite entries
+start and passed to `dsh web --patch ...`; it inserts all sixteen suite entries
 after every bundle layer and the profile's own patch (last write wins).

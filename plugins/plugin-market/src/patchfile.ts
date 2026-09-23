@@ -13,9 +13,16 @@
  * normalized to `[]`.
  *
  * Kernel facts this relies on: a disable patch row is `{ id, disabled: true }`
- * targeting the composed entry id, and the web profile's patchReload=live
- * applies patch-file edits without a restart. The shell's own overlay applies
- * AFTER the profile layer, so disables only hold for non-suite packages.
+ * targeting the composed entry id, and the shell's own overlay applies AFTER the
+ * profile layer, so disables only hold for non-suite packages.
+ *
+ * It does NOT rely on patch edits being live. This kernel line has no
+ * `patchReload` field (it was removed, and the profile configuration reloads
+ * through the base bundle's `hmr` row instead — `packages/bundle/base`,
+ * `cordis.patch.yml`), so writing the file may leave the loaded composition
+ * untouched until the next start. The panel therefore reports what it WROTE, and
+ * leaves "restart to apply" to the reload receipt rather than promising an effect
+ * it cannot observe.
  *
  * @module @dsh-app/plugin-market/patchfile
  */

@@ -230,12 +230,25 @@ interface ChildTurnFailure {
 }
 
 /**
- * Minimal structural slice of a child session's event log. alpha.4 replaced
- * the `Session.events` getter with `snapshotEvents()`/`ownEvents()`; read
- * through the method so the slice works on rc-line kernels.
+ * Minimal structural slice of a live child session.
+ *
+ * `snapshotEvents` is the kernel's own synchronous history reader, and it is
+ * DEPRECATED: arbitrary position/range reads are off the storage direction
+ * (`.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md`),
+ * and new calls are prohibited. The single call left in this file predates that
+ * note and survives for a reason the official surfaces do not cover: the seam
+ * reports a failure TEXT (`SubagentResult.diagnostic`, preferred below) but no
+ * failure CODE, and the code is what separates a retryable transport failure
+ * from a content failure. Declared optional on purpose — a kernel that drops
+ * the reader degrades to "no detail" instead of throwing inside a settle path.
  */
 interface ChildSessionSlice {
-  snapshotEvents(): ReadonlyArray<{ type: string, data: unknown }>
+  snapshotEvents?: () => ReadonlyArray<{ type: string, data: unknown }>
+}
+
+/** One child's event log, or undefined when that reader is not available. */
+function childEvents(session: ChildSessionSlice | undefined): ReadonlyArray<{ type: string, data: unknown }> | undefined {
+  return typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : undefined
 }
 
 /**
@@ -246,7 +259,7 @@ interface ChildSessionSlice {
  * batch actionable instead of a bare "run failed".
  */
 function childTurnFailure(session: ChildSessionSlice | undefined): ChildTurnFailure | undefined {
-  const events = session?.snapshotEvents()
+  const events = childEvents(session)
   if (events === undefined) return undefined
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]
@@ -260,30 +273,71 @@ function childTurnFailure(session: ChildSessionSlice | undefined): ChildTurnFail
   return undefined
 }
 
+/** Provider-reported token buckets, as the kernel's `tokenUsage` unit folds them. */
+interface UsageTotals {
+  readonly uncachedInputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+}
+
+/** The slice of `ctx.sessionProjections` this file reads. */
+interface SessionProjectionsService {
+  stateOf(session: unknown, key: 'tokenUsage'): { readonly totals?: Partial<UsageTotals> } | undefined
+}
+
+const ZERO_USAGE: UsageTotals = { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+
 /**
- * Sum the token accounting of a child session's `assistant/message` events.
- * `watermark` excludes epochs a previous batch already accounted (a resumed
- * child's log accumulates across batches); pass 0 when the session was not
- * readable at launch.
+ * Read one child's cumulative provider usage from the kernel's own `tokenUsage`
+ * projection rather than re-scanning its event log.
+ *
+ * The projection is registered by the `token-meter` row of the base bundle
+ * (`@deepseek-ai/dsh-base/cordis.patch.yml`), so it exists in every base-backed
+ * profile. A profile that omits the row answers `undefined` — `stateOf` reports
+ * an unregistered key, it does not throw — and the batch then reports no
+ * numbers instead of reading history for them. Folding is also what makes the
+ * number right under retries: a superseded attempt's sample is replaced, where
+ * summing `assistant/message` events counted it twice.
  */
-function childUsage(session: ChildSessionSlice | undefined, watermark: number): TokenUsage | undefined {
-  const events = session?.snapshotEvents()
-  if (events === undefined) return undefined
-  let input = 0
-  let output = 0
-  let total = 0
-  let seen = false
-  for (let i = watermark; i < events.length; i++) {
-    const event = events[i]
-    if (event.type !== 'assistant/message') continue
-    const usage = (event.data as { usage?: TokenUsage }).usage
-    if (usage === undefined) continue
-    seen = true
-    input += usage.inputTokens
-    output += usage.outputTokens
-    total += usage.totalTokens ?? usage.inputTokens + usage.outputTokens
+function childUsageTotals(ctx: Context, session: ChildSessionSlice | undefined): UsageTotals | undefined {
+  if (session === undefined) return undefined
+  // `ctx.get` is typed `any` (the context map carries no `sessionProjections`
+  // row for this plugin), so the slice is stated here rather than blind-cast.
+  const projections = ctx.get('sessionProjections') as SessionProjectionsService | undefined
+  const totals = projections?.stateOf(session, 'tokenUsage')?.totals
+  if (totals === undefined) return undefined
+  return {
+    uncachedInputTokens: totals.uncachedInputTokens ?? 0,
+    outputTokens: totals.outputTokens ?? 0,
+    cacheReadTokens: totals.cacheReadTokens ?? 0,
+    cacheWriteTokens: totals.cacheWriteTokens ?? 0,
   }
-  return seen ? { inputTokens: input, outputTokens: output, totalTokens: total } : undefined
+}
+
+/**
+ * This batch's usage: the child's totals minus the epochs an earlier batch
+ * already accounted. `baseline` is captured when a resumed child's follow-up is
+ * accepted, and is undefined for a fresh child, whose session starts empty.
+ * Undefined when the projection is unavailable or the delta is all zero — "no
+ * numbers" rather than a row of zeroes the caller would read as an answer.
+ */
+function childUsage(ctx: Context, session: ChildSessionSlice | undefined, baseline: UsageTotals | undefined): TokenUsage | undefined {
+  const totals = childUsageTotals(ctx, session)
+  if (totals === undefined) return undefined
+  const base = baseline ?? ZERO_USAGE
+  const inputTokens = totals.uncachedInputTokens - base.uncachedInputTokens
+  const outputTokens = totals.outputTokens - base.outputTokens
+  const cacheReadTokens = totals.cacheReadTokens - base.cacheReadTokens
+  const cacheWriteTokens = totals.cacheWriteTokens - base.cacheWriteTokens
+  if (inputTokens === 0 && outputTokens === 0 && cacheReadTokens === 0 && cacheWriteTokens === 0) return undefined
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    ...cacheReadTokens === 0 ? {} : { cacheReadTokens },
+    ...cacheWriteTokens === 0 ? {} : { cacheWriteTokens },
+  }
 }
 
 /** Total token count of one usage record (provider total preferred). */
@@ -654,10 +708,10 @@ function watchSettlements(ctx: Context, parent: Agent, signal: AbortSignal): Set
  * existing one (cold-resuming its persisted session). Never throws: every
  * failure path lands in the item's status.
  *
- * Metrics: the attempt's wall time always lands on the outcome; failure
- * records and token usage are recovered from the child session's event log
- * when it is still live (a settled child may cold-unload — the outcome then
- * carries neither).
+ * Metrics: the attempt's wall time always lands on the outcome. Token usage
+ * comes from the child's `tokenUsage` projection and the failure record from
+ * its event log — both only while the child is still live (a settled child may
+ * cold-unload, and the outcome then carries neither).
  */
 async function runContinuableTask(
   ctx: Context,
@@ -674,13 +728,15 @@ async function runContinuableTask(
       return { index: task.index, item: task.item, status: 'aborted' }
     }
     let childId: string
-    // Resume watermark: events before this batch's follow-up belong to epochs
-    // a previous batch already accounted. Read it AFTER sendMessage resolves —
-    // cold-resuming loads the persisted session, so the log is live by then
-    // (the accepted follow-up appends no usage events yet). A still-unreadable
-    // session falls back to 0, overcounting prior epochs — documented
-    // best-effort. Fresh children always start from 0.
-    let watermark = 0
+    // Usage baseline: the child's cumulative totals BEFORE this batch's
+    // follow-up carry the epochs a previous batch already accounted. Read AFTER
+    // sendMessage resolves — cold-resuming loads the persisted session, so the
+    // projection cell is live by then (the accepted follow-up reports no usage
+    // of its own yet). A projection that is not registered leaves the baseline
+    // undefined, which reads as "no previous epochs" and overcounts them —
+    // documented best-effort, unchanged from the event-index watermark this
+    // replaced. Fresh children start from zero either way.
+    let usageBaseline: UsageTotals | undefined
     if (task.resumeChildId !== undefined) {
       // rc.1 renamed followup → sendMessage (and dropped the explicit source
       // option: the coordinator-relay provenance is now implicit to the seam).
@@ -691,7 +747,7 @@ async function runContinuableTask(
         { signal: options.signal },
       )
       childId = task.resumeChildId
-      watermark = liveChildSession(ctx, childId)?.snapshotEvents().length ?? 0
+      usageBaseline = childUsageTotals(ctx, liveChildSession(ctx, childId))
     } else {
       const started = await ctx.subagents.startContinuable({
         provider: options.provider,
@@ -715,7 +771,7 @@ async function runContinuableTask(
     }
     const terminal = await watch.wait(childId)
     const session = liveChildSession(ctx, childId)
-    const usage = childUsage(session, watermark)
+    const usage = childUsage(ctx, session, usageBaseline)
     const durationMs = Date.now() - startedAt
     const metrics = { childId, durationMs, ...usage === undefined ? {} : { usage } }
     if (terminal.stopReason === 'completed') {
@@ -799,7 +855,7 @@ async function runOneShotTask(
     })
     const result = await run.result
     const session = run.localAgent?.session as unknown as ChildSessionSlice | undefined
-    const usage = childUsage(session, 0)
+    const usage = childUsage(ctx, session, undefined)
     const durationMs = Date.now() - startedAt
     const metrics = { durationMs, ...usage === undefined ? {} : { usage } }
     if (result.stopReason === 'completed') {

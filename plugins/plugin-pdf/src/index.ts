@@ -317,7 +317,10 @@ function registerPdfTools(ctx: Context): () => void {
         const rendered = await service.render(
           { sessionId, workspaceRoot: workspace.root }, relative, 'foreground', exec.signal,
         )
-        const bytes = Buffer.from(rendered.data, 'base64')
+        // 0.1.7 hands back the converted document as BYTES (`RenderedDocumentBytes
+        // extends WorkspaceFileBytes`), not the base64 string this call used to
+        // decode — the workspace file interfaces were unified on `readBytes`.
+        const bytes = rendered.data
         await mkdir(dirname(target), { recursive: true })
         const tmp = `${target}.${process.pid}.tmp`
         await writeFile(tmp, bytes)

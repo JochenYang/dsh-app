@@ -30,6 +30,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 // Type-only: pulls the connection Context merge (ctx.connection) into scope.
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -73,6 +74,17 @@ export function apply(ctx: Context): void {
     // the sessions store every id looks cold (still safe to delete), and
     // without the projection cache rows just lose their titles.
     sessions: ctx.get('sessions') as SessionsLike | undefined,
+    // The kernel's own "is this session busy" answer: the same
+    // `workspace/session-activity` waterfall that `archiveSession` refuses on,
+    // answered by the turn family, running background jobs, subagent
+    // descendants and scheduled follow-ups. Handed over as a plain function
+    // over a string id so the route layer stays kernel-agnostic; the id is
+    // built with the kernel's own constructor rather than asserted.
+    activity: id => ctx.waterfall(
+      'workspace/session-activity',
+      { sessionId: SessionId(id) },
+      () => Promise.resolve([]),
+    ),
     projectionCache: ctx.get('sessionProjectionCache') as ProjectionCacheLike | undefined,
     // Session full-text search + agent-tool availability (opt-in overlay):
     // without them /search answers 503 and agentToolAvailable stays false.

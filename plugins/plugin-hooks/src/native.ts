@@ -22,15 +22,24 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ContextFormed, MessageSource } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { PostToolDecision, PreToolDecision } from '@deepseek-ai/dsh-tools'
 import type { NativeRule } from './wire.ts'
 import { HooksValidationError, parseNativeRules } from './wire.ts'
 import type { HooksMountStatus, HostText } from './wire.ts'
 
+// The session log's V4 admission refuses the retired generic `plugin` kind:
+// every producer owns its own `kind` (packages/llm/llm/src/message.ts,
+// "there is no shared catch-all `plugin` kind"), so this runtime declares one.
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-app-native-hooks': { kind: 'dsh-app-native-hooks' } & ContextFormed
+  }
+}
+
 /** Source stamped on every context message this runtime injects. */
-const NATIVE_SOURCE: MessageSource = { kind: 'plugin', plugin: 'dsh-app-native-hooks' }
+const NATIVE_SOURCE: MessageSource = { kind: 'dsh-app-native-hooks' }
 
 /** Overlong matchers are rejected at sync: unbounded patterns are a ReDoS vector. */
 const MAX_MATCHER_CHARS = 500
@@ -57,7 +66,7 @@ type Hookable = {
   on(event: 'tools/pre-execute', handler: (exec: { name: string }, next: () => Promise<unknown>) => Promise<unknown>): () => void
   on(event: 'tools/post-execute', handler: (exec: { name: string }, _result: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
   on(event: 'agent/pre-step', handler: (data: { agent: { inject: (msg: unknown) => void }; messages: unknown[] }, next: () => Promise<unknown>) => Promise<unknown>): () => void
-  on(event: 'agent/session-start', handler: (data: { agent: { inject: (msg: unknown) => void } }) => void): () => void
+  on(event: 'agent/created', handler: (data: { agent: { inject: (msg: unknown) => void } }) => void): () => void
 }
 
 export class NativeHookRuntime {
@@ -170,7 +179,7 @@ export class NativeHookRuntime {
         const ours = createUserMessage({ content, source: NATIVE_SOURCE })
         return { ...downstream, messages: [...(downstream.messages ?? []), ours] }
       }),
-      hookable.on('agent/session-start', ({ agent }) => {
+      hookable.on('agent/created', ({ agent }) => {
         const contexts = this.liveRules.filter(rule => rule.on === 'session-start' && rule.action === 'context')
         if (contexts.length === 0) return
         const content: ContentBlock[] = contexts.map(rule => ({ type: 'text' as const, text: rule.message }))

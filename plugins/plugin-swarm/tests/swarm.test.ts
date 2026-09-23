@@ -19,7 +19,15 @@ import {
   type SwarmTask,
 } from '../src/orchestrator.ts'
 import { expandTasks } from '../src/expand.ts'
-import { loadSwarmUserConfig } from '../src/user-config.ts'
+import {
+  projectSwarmConfig,
+  readRetiredSwarmConfig,
+  retireSwarmConfigFile,
+  SWARM_CONFIG_FIELDS,
+  SwarmConfigValidationError,
+  validateSwarmConfigPatch,
+} from '../src/user-config.ts'
+import type { SwarmConfigEditor } from '../src/routes.ts'
 
 // --- expandTasks -------------------------------------------------------------
 
@@ -101,12 +109,52 @@ test('AdaptiveGate: disabled mode pins the limit and feedback is a no-op', () =>
 interface MockChild {
   readonly stopReason: 'completed' | 'error' | 'aborted' | 'max-tokens' | 'refusal'
   readonly text?: string
-  /** Child session events (turn/end failure facts, assistant/message usage). */
+  /** Child session events (turn/end failure facts read off the log). */
   readonly events?: readonly { type: string, data: unknown }[]
+  /**
+   * Provider-reported usage, as the kernel's `tokenUsage` projection would hold
+   * it for this child's session by the time the child settles.
+   */
+  readonly usage?: { readonly inputTokens: number, readonly outputTokens: number }
+  /**
+   * Totals the same cell already holds when a resume is accepted: the epochs an
+   * earlier batch already accounted. Absent means "none measured", which reads
+   * as zero and overcounts them (the documented best-effort).
+   */
+  readonly priorUsage?: { readonly inputTokens: number, readonly outputTokens: number }
   /** Settle delay in ms (default 0); orders settlements across children. */
   readonly delay?: number
   /** Emit the terminal synchronously inside startContinuable (pre-wait). */
   readonly sync?: boolean
+}
+
+/**
+ * Mock the one read `childUsage` makes of the kernel's projection service: each
+ * mock child session is registered with the totals its real `tokenUsage` cell
+ * would hold. An unregistered session (or key) answers `undefined`, mirroring
+ * `stateOf` on a profile that does not carry the `token-meter` row.
+ */
+function mockSessionProjections() {
+  const totals = new WeakMap<object, { uncachedInputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }>()
+  const set = (session: object, usage: { readonly inputTokens: number, readonly outputTokens: number } | undefined): void => {
+    if (usage === undefined) totals.delete(session)
+    else totals.set(session, { uncachedInputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  }
+  return {
+    service: {
+      stateOf: (session: unknown, key: string) => {
+        const registered = key === 'tokenUsage' ? totals.get(session as object) : undefined
+        return registered === undefined ? undefined : { totals: registered }
+      },
+    },
+    /** Register one mock child session with the usage its projection cell holds. */
+    track: (session: object, spec: MockChild): object => {
+      set(session, spec.usage)
+      return session
+    },
+    /** Move one session's cell (a resumed epoch advances it past its baseline). */
+    set,
+  }
 }
 
 const tasksOf = (...items: string[]): SwarmTask[] =>
@@ -126,7 +174,10 @@ function baseOptions(): Omit<SwarmBatchOptions, 'tasks'> {
 
 /** Mock ctx whose one-shot `start` resolves each child from the spec map. */
 function mockOneShotCtx(children: Record<string, MockChild>): Context {
+  const projections = mockSessionProjections()
   const ctx = {
+    get: (name: string) => name === 'sessionProjections' ? projections.service : undefined,
+    sessionProjections: projections.service,
     subagents: {
       getProvider: () => ({}),
       start: async (_provider: string, req: { prompt: readonly { text: string }[] }) => {
@@ -139,7 +190,7 @@ function mockOneShotCtx(children: Record<string, MockChild>): Context {
             stopReason: spec.stopReason,
             output: spec.text === undefined ? [] : [{ type: 'text', text: spec.text }],
           }),
-          localAgent: { session: { snapshotEvents: () => spec.events ?? [] } },
+          localAgent: { session: projections.track({ snapshotEvents: () => spec.events ?? [] }, spec) },
           dispose: async () => {},
         }
       },
@@ -154,7 +205,7 @@ test('runSwarmBatch (one-shot): aggregates outputs, per-item durationMs, and bat
     alpha: {
       stopReason: 'completed',
       text: 'alpha done',
-      events: [{ type: 'assistant/message', data: { usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } } }],
+      usage: { inputTokens: 10, outputTokens: 5 },
     },
     beta: { stopReason: 'completed', text: 'beta done' },
   })
@@ -186,11 +237,11 @@ test('runSwarmBatch (one-shot): a RATE_LIMIT turn error classifies as transport,
 })
 
 test('runSwarmBatch (one-shot): the token budget stops launching; unstarted items report aborted', async () => {
-  const usage = { inputTokens: 60, outputTokens: 40, totalTokens: 100 }
+  const usage = { inputTokens: 60, outputTokens: 40 }
   const ctx = mockOneShotCtx({
-    a: { stopReason: 'completed', text: 'a', events: [{ type: 'assistant/message', data: { usage } }] },
-    b: { stopReason: 'completed', text: 'b', events: [{ type: 'assistant/message', data: { usage } }] },
-    c: { stopReason: 'completed', text: 'c', events: [{ type: 'assistant/message', data: { usage } }] },
+    a: { stopReason: 'completed', text: 'a', usage },
+    b: { stopReason: 'completed', text: 'b', usage },
+    c: { stopReason: 'completed', text: 'c', usage },
   })
   const outcome = await runSwarmBatch(ctx, {
     ...baseOptions(),
@@ -217,8 +268,24 @@ interface ContinuableHarness {
 function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHarness {
   const listeners: ((info: unknown) => void)[] = []
   const sentFollowups: string[] = []
+  const projections = mockSessionProjections()
+  const sessions = new Map<string, object>()
   let launches = 0
+  // One stable session object per child: the kernel answers every lookup with
+  // the same instance, which is what makes its projection cell addressable.
+  const sessionOf = (key: string): object | undefined => {
+    const spec = children[key]
+    if (spec === undefined) return undefined
+    let session = sessions.get(key)
+    if (session === undefined) {
+      session = projections.track({ snapshotEvents: () => spec.events ?? [] }, spec)
+      sessions.set(key, session)
+    }
+    return session
+  }
   const ctx = {
+    get: (name: string) => name === 'sessionProjections' ? projections.service : undefined,
+    sessionProjections: projections.service,
     on: (event: string, listener: (info: unknown) => void) => {
       assert.equal(event, 'subagent/end')
       listeners.push(listener)
@@ -227,10 +294,8 @@ function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHar
     agents: {
       get: (id: unknown) => {
         // Live-child lookup: the swarm addresses children as `child-<key>`.
-        const key = String(id).replace(/^child-/, '')
-        const spec = children[key]
-        if (spec === undefined) return undefined
-        return { session: { snapshotEvents: () => spec.events ?? [] } }
+        const session = sessionOf(String(id).replace(/^child-/, ''))
+        return session === undefined ? undefined : { session }
       },
     },
     subagents: {
@@ -254,8 +319,15 @@ function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHar
       sendMessage: async (_parent: unknown, childId: unknown) => {
         sentFollowups.push(String(childId))
         const key = String(childId).replace(/^child-/, '')
+        const session = sessionOf(key)
+        // While the follow-up is accepted the cell still holds the epochs a
+        // previous batch paid for; this epoch advances it before settling.
+        if (session !== undefined) projections.set(session, children[key].priorUsage)
         // The retried child succeeds.
-        setTimeout(() => emit(String(childId), { stopReason: 'completed', text: `${key} recovered` }), 0)
+        setTimeout(() => {
+          if (session !== undefined) projections.set(session, children[key].usage)
+          emit(String(childId), { stopReason: 'completed', text: `${key} recovered` })
+        }, 0)
         return 'm2'
       },
       interrupt: () => {},
@@ -366,7 +438,7 @@ test('runSwarmBatch (continuable): tripping the budget drops a pending retry and
       stopReason: 'completed',
       text: 'spender done',
       delay: 20,
-      events: [{ type: 'assistant/message', data: { usage: { inputTokens: 900, outputTokens: 200, totalTokens: 1100 } } }],
+      usage: { inputTokens: 900, outputTokens: 200 },
     },
   })
   const outcome = await runSwarmBatch(harness.ctx, {
@@ -383,6 +455,33 @@ test('runSwarmBatch (continuable): tripping the budget drops a pending retry and
   assert.equal(flaky.childId, 'child-flaky', 'resume handle survives the reap')
   assert.equal(outcome.budgetExhausted, true)
   assert.deepEqual(harness.sentFollowups, [], 'no follow-up was sent for the reaped retry')
+})
+
+test('runSwarmBatch (continuable): a resumed epoch reports only its own usage', async () => {
+  // The projection is cumulative over the child's whole session, so a retried
+  // item has to subtract the totals its first epoch already reported —
+  // otherwise every batch re-bills the tokens its predecessor paid for.
+  const harness = mockContinuableCtx({
+    flaky: {
+      stopReason: 'error',
+      events: [{ type: 'turn/end', data: { reason: { kind: 'error', error: { message: '429', code: 'RATE_LIMIT' } } } }],
+      priorUsage: { inputTokens: 100, outputTokens: 20 },
+      usage: { inputTokens: 300, outputTokens: 80 },
+    },
+    steady: { stopReason: 'completed', text: 'steady done' },
+  })
+  const outcome = await runSwarmBatch(harness.ctx, {
+    ...baseOptions(),
+    tasks: tasksOf('flaky', 'steady'),
+    itemMaxRetries: 1,
+    itemRetryDelayMs: 1,
+  })
+  const [flaky, steady] = outcome.items
+  assert.equal(flaky.status, 'completed')
+  assert.equal(flaky.retries, 1)
+  // 300/80 cumulative, 100/20 of it already accounted: this epoch is 200/60.
+  assert.deepEqual(flaky.usage, { inputTokens: 200, outputTokens: 60, totalTokens: 260 })
+  assert.equal(steady.usage, undefined, 'a child whose session carries no totals reports none')
 })
 
 // --- adaptive exploration (gate v2) ------------------------------------------
@@ -414,9 +513,56 @@ test('AdaptiveGate: a pinned batch (exploreCeiling == ceiling) never grows past 
   assert.equal(gate.noteSettled('completed'), undefined, 'no growth beyond the pinned ceiling')
 })
 
-// --- user config -------------------------------------------------------------
+// --- the settings-page config -------------------------------------------------
 
-test('loadSwarmUserConfig: missing file, malformed JSON, and bad fields all degrade to safe overrides', async () => {
+/** The shipped overlay row's values (plugins/dsh-app.patch.yml): what one layer yields. */
+const LAYER = {
+  enabled: true,
+  maxItems: 64,
+  defaultConcurrency: 8,
+  maxConcurrency: 16,
+  adaptive: true,
+  itemMaxRetries: 2,
+  itemRetryDelayMs: 15000,
+  perItemOutputLimit: 4000,
+  tokenBudget: 0,
+  startStaggerMs: 1000,
+}
+
+/** The effective values here: the layer values with one knob already customized. */
+const EFFECTIVE = { ...LAYER, maxItems: 32 }
+
+test('validateSwarmConfigPatch: unknown fields, wrong types, and floors reject the whole patch', () => {
+  assert.throws(() => validateSwarmConfigPatch({ nonsense: 1 }), { code: 'config.unknownField', params: { field: 'nonsense' } })
+  assert.throws(() => validateSwarmConfigPatch({ maxConcurrency: 0 }), { code: 'config.belowMinimum', params: { field: 'maxConcurrency', minimum: 1 } })
+  assert.throws(() => validateSwarmConfigPatch({ maxItems: 1 }), { code: 'config.belowMinimum', params: { field: 'maxItems', minimum: 2 } })
+  assert.throws(() => validateSwarmConfigPatch({ perItemOutputLimit: 0 }), { code: 'config.belowMinimum', params: { field: 'perItemOutputLimit', minimum: 1 } })
+  assert.throws(() => validateSwarmConfigPatch({ adaptive: 'yes' }), { code: 'config.notBoolean', params: { field: 'adaptive' } })
+  assert.throws(() => validateSwarmConfigPatch({ enabled: 1 }), { code: 'config.notBoolean', params: { field: 'enabled' } })
+  assert.deepEqual(validateSwarmConfigPatch({ tokenBudget: 0 }), { tokenBudget: 0 }, 'the budget legitimately allows 0 (disabled)')
+  assert.deepEqual(validateSwarmConfigPatch({ maxConcurrency: 12.6 }), { maxConcurrency: 12 }, 'a fractional count floors')
+  assert.deepEqual(validateSwarmConfigPatch({ maxItems: null }), { maxItems: null }, 'null is how the page clears a value')
+})
+
+test('projectSwarmConfig: a one-field patch carries every editable field and leaks no schema default', () => {
+  const next = projectSwarmConfig({ provider: 'spawn', maxDepth: 1 }, LAYER, { adaptive: false }, EFFECTIVE)
+  assert.equal(next.adaptive, false, 'the named field takes the written value')
+  assert.equal(next.maxItems, 32, 'an unnamed field keeps the effective value, not the schema default 8')
+  assert.equal(next.maxConcurrency, 16, 'nor the schema default 8')
+  assert.equal(next.startStaggerMs, 1000, 'nor the schema default 800')
+  assert.equal(next.provider, 'spawn', 'structural fields survive the row replacement')
+  assert.equal(next.maxDepth, 1)
+  for (const field of SWARM_CONFIG_FIELDS) assert.ok(field in next, `${field} must travel with every write`)
+})
+
+test('projectSwarmConfig: a cleared field returns to the layer value, or to the schema default when no layer sets it', () => {
+  const cleared = projectSwarmConfig({ provider: 'spawn' }, LAYER, { maxItems: null }, EFFECTIVE)
+  assert.equal(cleared.maxItems, 64, 'null means "back to the shipped value", not "keep the customization"')
+  const dropped = projectSwarmConfig({ provider: 'spawn' }, {}, { enabled: null }, EFFECTIVE)
+  assert.ok(!Object.hasOwn(dropped, 'enabled'), 'with no layer value to return to, the schema default is the deployment value')
+})
+
+test('readRetiredSwarmConfig: a missing, malformed, or partial store degrades to what it can import', async () => {
   const { mkdtempSync, writeFileSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
@@ -424,18 +570,36 @@ test('loadSwarmUserConfig: missing file, malformed JSON, and bad fields all degr
   const warnings: string[] = []
   const log = (m: string): void => { warnings.push(m) }
 
-  assert.deepEqual(loadSwarmUserConfig(join(dir, 'absent.json'), log), {})
+  assert.equal(readRetiredSwarmConfig(join(dir, 'absent.json'), log), undefined, 'no store: nothing to import')
 
   writeFileSync(join(dir, 'bad.json'), '{not json')
-  assert.deepEqual(loadSwarmUserConfig(join(dir, 'bad.json'), log), {})
+  assert.equal(readRetiredSwarmConfig(join(dir, 'bad.json'), log), undefined)
   assert.ok(warnings.some(w => w.includes('unreadable JSON')))
 
+  writeFileSync(join(dir, 'list.json'), '[1, 2]')
+  assert.equal(readRetiredSwarmConfig(join(dir, 'list.json'), log), undefined)
+  assert.ok(warnings.some(w => w.includes('expected a JSON object')))
+
   writeFileSync(join(dir, 'mixed.json'), JSON.stringify({ maxConcurrency: 24, adaptive: false, startStaggerMs: 'fast', enabled: 1 }))
-  const cfg = loadSwarmUserConfig(join(dir, 'mixed.json'), log)
-  assert.equal(cfg.maxConcurrency, 24)
-  assert.equal(cfg.adaptive, false)
-  assert.equal(cfg.startStaggerMs, undefined, 'non-numeric field ignored')
-  assert.equal(cfg.enabled, undefined, 'non-boolean field ignored')
+  const imported = readRetiredSwarmConfig(join(dir, 'mixed.json'), log)
+  assert.deepEqual(imported, { maxConcurrency: 24, adaptive: false }, 'only usable values travel')
+  assert.ok(warnings.some(w => w.includes('"startStaggerMs"')), 'a non-numeric field is reported, not imported')
+  assert.ok(warnings.some(w => w.includes('"enabled"')), 'a non-boolean field is reported, not imported')
+})
+
+test('retireSwarmConfigFile: the retired store is renamed aside and kept verbatim', async () => {
+  const { existsSync, mkdtempSync, readFileSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
+  const file = join(dir, 'config.json')
+  writeFileSync(file, '{"maxItems": 32}', 'utf8')
+
+  const movedTo = retireSwarmConfigFile(file)
+  assert.ok(movedTo !== undefined, 'the file must be moved aside, never deleted')
+  assert.equal(existsSync(file), false, 'the old path is free, so the import cannot run twice')
+  assert.equal(readFileSync(movedTo, 'utf8'), '{"maxItems": 32}', "the user's own file survives verbatim")
+  assert.equal(retireSwarmConfigFile(join(dir, 'gone.json')), undefined, 'a missing file is not an error')
 })
 
 // --- output_mode projection ---------------------------------------------------
@@ -478,21 +642,6 @@ test('AdaptiveGate: a pinned batch shrinks on failure and recovers exactly to th
   assert.equal(gate.noteSettled('completed'), undefined, 'pinned pool never exceeds the pin')
 })
 
-test('loadSwarmUserConfig: zero values on floored fields are rejected, not merged', async () => {
-  const { mkdtempSync, writeFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
-  const warnings: string[] = []
-  writeFileSync(join(dir, 'zero.json'), JSON.stringify({ maxConcurrency: 0, maxItems: 0, defaultConcurrency: 0, tokenBudget: 0 }))
-  const cfg = loadSwarmUserConfig(join(dir, 'zero.json'), m => { warnings.push(m) })
-  assert.equal(cfg.maxConcurrency, undefined)
-  assert.equal(cfg.maxItems, undefined)
-  assert.equal(cfg.defaultConcurrency, undefined)
-  assert.equal(cfg.tokenBudget, 0, 'tokenBudget legitimately allows 0 (disabled)')
-  assert.equal(warnings.length, 3)
-})
-
 test('runSwarmBatch (one-shot, adaptive): outcome carries peakConcurrency and learnedCeiling', async () => {
   const ctx = mockOneShotCtx({
     alpha: { stopReason: 'completed', text: 'a' },
@@ -509,70 +658,15 @@ test('runSwarmBatch (one-shot, adaptive): outcome carries peakConcurrency and le
   assert.equal(outcome.learnedCeiling, 4, 'no failures: the ceiling stays at the configured cap')
 })
 
-test('writeSwarmUserConfig: validates, merges, persists atomically, and null clears an override', async () => {
-  const { mkdtempSync, readFileSync, existsSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const { writeSwarmUserConfig } = await import('../src/user-config.ts')
-  const file = join(mkdtempSync(join(tmpdir(), 'dshs-test-')), 'config.json')
-
-  // Write two fields; the file is created with the parent directory.
-  const after = writeSwarmUserConfig(file, { maxConcurrency: 24, adaptive: false })
-  assert.equal(after.maxConcurrency, 24)
-  assert.equal(after.adaptive, false)
-  assert.ok(existsSync(file))
-
-  // A second write merges without dropping the first field.
-  const merged = writeSwarmUserConfig(file, { tokenBudget: 500000 })
-  assert.equal(merged.maxConcurrency, 24)
-  assert.equal(merged.tokenBudget, 500000)
-
-  // null clears one override; the others survive.
-  const cleared = writeSwarmUserConfig(file, { maxConcurrency: null })
-  assert.equal(cleared.maxConcurrency, undefined)
-  assert.equal(cleared.adaptive, false)
-  assert.equal(cleared.tokenBudget, 500000)
-  assert.ok(!('maxConcurrency' in JSON.parse(readFileSync(file, 'utf8')) as object))
-
-  // Unknown fields and invalid values reject the whole write, with a stable
-  // code rather than a sentence: the settings page owns the copy (see the
-  // host-message test below).
-  assert.throws(() => writeSwarmUserConfig(file, { nonsense: 1 }), { code: 'config.unknownField', params: { field: 'nonsense' } })
-  assert.throws(() => writeSwarmUserConfig(file, { maxConcurrency: 0 }), { code: 'config.belowMinimum', params: { field: 'maxConcurrency', minimum: 1 } })
-  assert.throws(() => writeSwarmUserConfig(file, { adaptive: 'yes' }), { code: 'config.notBoolean', params: { field: 'adaptive' } })
-  // A rejected write leaves the file untouched.
-  assert.equal(loadSwarmUserConfig(file, () => {}).tokenBudget, 500000)
-})
-
 // --- host-message codes (the settings page owns the copy) ----------------------
 
 /** The Han range: a wire payload must never carry one — the client renders copy. */
 const HAN = /[\u4e00-\u9fff]/
 
-/** The overlay slice the settings page starts from (see index.ts). */
-const OVERLAY = {
-  enabled: true,
-  defaultConcurrency: 4,
-  maxConcurrency: 8,
-  maxItems: 8,
-  startStaggerMs: 800,
-  itemMaxRetries: 2,
-  itemRetryDelayMs: 15000,
-  perItemOutputLimit: 4000,
-  tokenBudget: 0,
-  adaptive: true,
-}
-
-test('SwarmConfigValidationError: the wire form is a code, its params, and an English diagnostic', async () => {
-  const { mkdtempSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const { SwarmConfigValidationError, writeSwarmUserConfig } = await import('../src/user-config.ts')
-  const file = join(mkdtempSync(join(tmpdir(), 'dshs-test-')), 'config.json')
-
-  const reject = (patch: Record<string, unknown>): InstanceType<typeof SwarmConfigValidationError> => {
+test('SwarmConfigValidationError: the wire form is a code, its params, and an English diagnostic', () => {
+  const reject = (patch: Record<string, unknown>): SwarmConfigValidationError => {
     try {
-      writeSwarmUserConfig(file, patch)
+      validateSwarmConfigPatch(patch)
     } catch (error) {
       assert.ok(error instanceof SwarmConfigValidationError, 'the write must be rejected by the coded error')
       return error
@@ -604,71 +698,139 @@ test('SwarmConfigValidationError: the wire form is a code, its params, and an En
   }
 })
 
-test('swarm routes: every failure answers a coded host message, never Chinese prose', async () => {
-  const { mkdtempSync, writeFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
+// --- the settings route over a fake config editor ------------------------------
+
+/** One mounted settings route plus the configs its fake editor was asked to store. */
+interface MountedRoutes {
+  /** GET /config. */
+  get(): Promise<Response>
+  /** POST /config with a raw body (the unparsable case needs one). */
+  post(body: string): Promise<Response>
+  /** What the change callbacks derived, in call order: exactly what would be stored. */
+  readonly writes: Record<string, unknown>[]
+  /** The path the fake editor reports as its document. */
+  readonly documentPath: string
+}
+
+/**
+ * Mount the settings route over a fake Connection exact-Fetch registry.
+ *
+ * The editor fake mirrors the kernel's `configEditor`: it hands the change
+ * callback the raw config the entry currently carries and the config the layers
+ * alone yield, and records what the callback derived — which is what would land
+ * in the profile patch.
+ *
+ * @param options - host variations: a failing editor, or a host with none.
+ * @returns the mounted route and what it stored.
+ */
+async function mountRoutes(options: { failing?: boolean, editorless?: boolean } = {}): Promise<MountedRoutes> {
   const { registerSwarmRoutes, ROUTE_PREFIX } = await import('../src/routes.ts')
-
-  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
-  /**
-   * Mount the route over a fake Connection exact-Fetch registry and hand back
-   * the captured Fetch handler. Registration returns an async disposer, like
-   * the real registry.
-   */
-  const mount = (configPath: string): ((request: Request) => Promise<Response>) => {
-    const handlers = new Map<string, (request: Request) => Promise<Response>>()
-    registerSwarmRoutes({
-      register: (route: { path: string, fetch: (request: Request) => Promise<Response> }) => {
-        handlers.set(route.path, route.fetch)
-        return Promise.resolve(async () => { handlers.delete(route.path) })
-      },
-    }, OVERLAY, configPath)
-    const handler = handlers.get(`${ROUTE_PREFIX}/config`)
-    assert.ok(handler !== undefined, 'the config route must be registered')
-    return handler
+  const documentPath = 'C:/dsh-home/profiles/ds.app/cordis.patch.yml'
+  const handlers = new Map<string, (request: Request) => Promise<Response>>()
+  const writes: Record<string, unknown>[] = []
+  const editor: SwarmConfigEditor = {
+    documentPath,
+    edit: async (_entry, change) => {
+      if (options.failing === true) throw new Error('EACCES: permission denied, open profile/cordis.patch.yml')
+      writes.push(change({ provider: 'spawn', maxDepth: 1 }, LAYER))
+    },
   }
-
-  /** One request round trip through the captured route. */
-  const call = async (
-    fetchRoute: (request: Request) => Promise<Response>,
-    body: string,
-  ): Promise<{ status: number, text: string }> => {
-    const response = await fetchRoute(new Request(`dsh-app://app${ROUTE_PREFIX}/config`, {
+  registerSwarmRoutes({
+    register: (route: { path: string, fetch: (request: Request) => Promise<Response> }) => {
+      handlers.set(route.path, route.fetch)
+      return Promise.resolve(async () => { handlers.delete(route.path) })
+    },
+  }, {
+    live: () => EFFECTIVE,
+    layerDefaults: () => LAYER,
+    entry: () => ({ options: { id: 'swarm' } }),
+    ...(options.editorless === true ? {} : { editor }),
+  })
+  const handler = handlers.get(`${ROUTE_PREFIX}/config`)
+  assert.ok(handler !== undefined, 'the config route must be registered')
+  return {
+    writes,
+    documentPath,
+    get: () => handler(new Request(`dsh-app://app${ROUTE_PREFIX}/config`)),
+    post: (body) => handler(new Request(`dsh-app://app${ROUTE_PREFIX}/config`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body,
-    }))
-    return { status: response.status, text: await response.text() }
+    })),
   }
+}
 
-  const rejected = await call(mount(join(dir, 'config.json')), JSON.stringify({ nonsense: 1 }))
+test('swarm routes: a one-field save writes every editable field, so untouched knobs keep the shipped value', async () => {
+  const routes = await mountRoutes()
+  const saved = await routes.post(JSON.stringify({ adaptive: false }))
+  assert.equal(saved.status, 200)
+  assert.equal(routes.writes.length, 1)
+  const written = routes.writes[0]
+
+  // The profile row REPLACES the overlay's config, so a field left out of the
+  // write falls back to the SCHEMA default — maxItems 8, pool 4, stagger 800 —
+  // and silently retunes a knob the user never touched.
+  for (const field of SWARM_CONFIG_FIELDS) assert.ok(field in written, `${field} must travel with every write`)
+  assert.equal(written.adaptive, false, 'the written field takes the new value')
+  assert.equal(written.maxItems, 32, 'the effective value, never the schema default 8')
+  assert.equal(written.maxConcurrency, 16, 'the layer value, never the schema default 8')
+  assert.equal(written.startStaggerMs, 1000, 'the layer value, never the schema default 800')
+  assert.equal(written.provider, 'spawn', 'structural fields survive the row replacement')
+  assert.equal(written.maxDepth, 1)
+})
+
+test('swarm routes: a cleared field returns to the layer value, and GET reports defaults, changes, and effective values', async () => {
+  const routes = await mountRoutes()
+  await routes.post(JSON.stringify({ maxItems: null, adaptive: false }))
+  assert.equal(routes.writes[0].maxItems, LAYER.maxItems, 'clearing returns the shipped value')
+  assert.equal(routes.writes[0].adaptive, false, 'the other field of the same patch still applies')
+
+  const body = await (await routes.get()).json() as { value: { defaults: Record<string, number | boolean>, overrides: Record<string, number | boolean>, effective: Record<string, number | boolean>, filePath: string } }
+  assert.deepEqual(body.value.overrides, { maxItems: 32 }, 'only the field that differs from the layer is a customization')
+  assert.equal(body.value.defaults.maxItems, 64)
+  assert.equal(body.value.effective.maxItems, 32)
+  assert.equal(body.value.effective.startStaggerMs, 1000)
+  assert.equal(body.value.filePath, routes.documentPath)
+})
+
+test('swarm routes: every failure answers a coded host message, never Chinese prose', async () => {
+  const rejected = await (await mountRoutes()).post(JSON.stringify({ nonsense: 1 }))
   assert.equal(rejected.status, 400)
+  const rejectedText = await rejected.text()
   assert.deepEqual(
-    (JSON.parse(rejected.text) as { error: { code: string, host: unknown } }).error,
+    (JSON.parse(rejectedText) as { error: { code: string, host: unknown } }).error,
     {
       code: 'bad-request',
       message: 'unknown config field "nonsense"',
       host: { code: 'config.unknownField', params: { field: 'nonsense' }, text: 'unknown config field "nonsense"' },
     },
   )
-  assert.ok(!HAN.test(rejected.text), 'a rejected write must not answer with a Chinese sentence')
+  assert.ok(!HAN.test(rejectedText), 'a rejected write must not answer with a Chinese sentence')
 
-  const unparsable = await call(mount(join(dir, 'config.json')), '{not json')
+  const unparsable = await (await mountRoutes()).post('{not json')
   assert.equal(unparsable.status, 400)
-  assert.equal((JSON.parse(unparsable.text) as { error: { host: { code: string } } }).error.host.code, 'route.invalidBody')
-  assert.ok(!HAN.test(unparsable.text))
+  const unparsableBody = await unparsable.json() as { error: { host: { code: string } } }
+  assert.equal(unparsableBody.error.host.code, 'route.invalidBody')
+  assert.ok(!HAN.test(JSON.stringify(unparsableBody)))
 
-  // A config path whose parent is a FILE: the atomic write throws, and the 500
-  // is a coded message too (it used to be a Chinese sentence). The diagnostic
-  // is the fs error itself — it carries a path, so only the code is asserted.
-  writeFileSync(join(dir, 'blocked'), 'not a directory', 'utf8')
-  const unwritable = await call(mount(join(dir, 'blocked', 'config.json')), JSON.stringify({ adaptive: false }))
+  // A profile patch the kernel cannot write: the 500 is a coded message too
+  // (it used to be a Chinese sentence). The diagnostic is the fs error itself —
+  // it carries a path, so only the code is asserted.
+  const unwritable = await (await mountRoutes({ failing: true })).post(JSON.stringify({ adaptive: false }))
   assert.equal(unwritable.status, 500)
-  const unwritableBody = JSON.parse(unwritable.text) as { error: { code: string, host: { code: string, text: string } } }
+  const unwritableBody = await unwritable.json() as { error: { code: string, host: { code: string, text: string } } }
   assert.equal(unwritableBody.error.code, 'io')
   assert.equal(unwritableBody.error.host.code, 'route.writeFailed')
   assert.ok(unwritableBody.error.host.text !== '', 'the fallback diagnostic must not be empty')
+
+  // A host with no config editor cannot persist at all: say so instead of
+  // answering a save that never happened.
+  const editorless = await mountRoutes({ editorless: true })
+  const refused = await editorless.post(JSON.stringify({ adaptive: false }))
+  assert.equal(refused.status, 503)
+  assert.equal((await refused.json() as { error: { host: { code: string } } }).error.host.code, 'route.noEditor')
+  assert.equal(editorless.writes.length, 0)
+  assert.equal((await (await editorless.get()).json() as { value: { filePath: string } }).value.filePath, '', 'no editor, no path to show')
 })
 
 // --- plugin shape guards -------------------------------------------------------

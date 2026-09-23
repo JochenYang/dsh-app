@@ -18,6 +18,12 @@ import type {
   LlmConfigurableProvider, LlmDiscoveredModel, LlmModelDiscoveryRequest, LlmProviderInfo,
   RemoteResult, SettingsNamespaceView, SettingsPathOpView,
 } from '@deepseek-ai/dsh-api-remotes/client'
+// Type-only, and it must be here: 0.1.7 moved the settings vocabulary
+// (`settings/conflict`, `settings/rejected`) out of the remotes client and into
+// this package's declaration merge of the Remote error map. Without it in the
+// program, `response.error.code` narrows to the generic gateway codes and the
+// conflict branch below stops compiling — while the code is still sent.
+import type {} from '@deepseek-ai/dsh-api-settings-controller/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -143,10 +149,23 @@ export type WriteOutcome =
   | { kind: 'failure'; message: PageMessage }
 
 /**
- * One `settings.mutate` against the stored `llm-pi-ai` user layer. Ops are
- * path-addressed and name only what this page edits, so a concurrent edit to
- * another route or field survives. A conflict is reported as its own outcome:
- * the page reloads and lets the user retry on fresh state.
+ * The settings namespace this page reads and writes: the base bundle's own row id
+ * for the pi-ai route plugin.
+ *
+ * Named once, and named as NOT OURS, for two reasons. It is the single address
+ * every write of this page goes to, so a second literal somewhere is a second
+ * answer to "where does this page write". And an upstream rename of that row id
+ * would leave the page listing nothing — which is why the empty case is reported
+ * to the user (see the directory load) instead of rendering as "you have no
+ * routes".
+ */
+export const ROUTE_SETTINGS_NS = 'llm-pi-ai'
+
+/**
+ * One `settings.mutate` against the stored route user layer ({@link
+ * ROUTE_SETTINGS_NS}). Ops are path-addressed and name only what this page edits,
+ * so a concurrent edit to another route or field survives. A conflict is reported
+ * as its own outcome: the page reloads and lets the user retry on fresh state.
  */
 export async function writeOps(
   api: Pick<AdvancedModelsRemote, 'settings'>,
@@ -154,7 +173,7 @@ export async function writeOps(
   expectedRevision: number | undefined,
 ): Promise<WriteOutcome> {
   try {
-    const response = await api.settings.mutate('llm-pi-ai', [...ops], expectedRevision)
+    const response = await api.settings.mutate(ROUTE_SETTINGS_NS, [...ops], expectedRevision)
     if (response.ok) return { kind: 'ok', namespace: response.value }
     return response.error.code === 'settings/conflict'
       ? { kind: 'conflict' }
@@ -232,7 +251,7 @@ export class AdvancedModelsStore {
       const views: readonly SettingsNamespaceView[] = mirrored.view.namespaces
       const namespaces = new Map(views.map(view => [view.ns, view]))
       const routes: RouteRow[] = providers
-        .filter(entry => entry.settingsNs === 'llm-pi-ai')
+        .filter(entry => entry.settingsNs === ROUTE_SETTINGS_NS)
         .map((entry) => {
           const namespace = namespaces.get(entry.settingsNs)
           const profile = namespace === undefined

@@ -111,7 +111,7 @@ export interface UsageHeatmap {
 
 /** Response of GET api/status — the collector's liveness signal. */
 export interface UsageStatus {
-  /** false when the user config file disabled the collector. */
+  /** false when the plugin config disabled the collector. */
   active: boolean
   /** Present when active is false; identifies why. */
   reason?: 'disabled-by-user-config'

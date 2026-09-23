@@ -40,6 +40,7 @@ export const zh = {
   'adv.intro.declaredAfter': '伴生路由，不要硬塞进目录路由。',
   'adv.load.failed': '加载失败：{message}',
   'adv.load.loading': '加载中…',
+  'adv.load.noRoutes': '当前内核没有为这个页面声明任何可配置的模型路由。它们由基础包的一行声明；如果上游改动了那一行的 id，这里就会空着——这是上游的问题，不是你的配置丢了。',
   'adv.readOnly': '当前设置源为只读，页面仅可查看。',
   'adv.syncing': '正在同步 provider 配置…',
 
@@ -375,6 +376,7 @@ export const en: Record<AdvancedModelsKey, string> = {
   'adv.intro.declaredAfter': ' companion route instead of forcing it into a catalog route.',
   'adv.load.failed': 'Load failed: {message}',
   'adv.load.loading': 'Loading…',
+  'adv.load.noRoutes': 'This kernel declares no configurable model routes for this page. They come from one row of the base bundle; if upstream renamed that row, this list is where it shows — nothing of yours was lost.',
   'adv.readOnly': 'The current settings source is read-only, so this page is view-only.',
   'adv.syncing': 'Syncing provider configuration…',
 

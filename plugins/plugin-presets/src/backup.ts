@@ -46,7 +46,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { copyFileSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { strToU8, unzipSync, zipSync, type Zippable } from 'fflate'
@@ -316,7 +316,22 @@ export async function collectConfigBackup(home: string, profile: string): Promis
   add(PROFILE_PACKAGE_REL, join(profileDir, 'package.json'))
   add(MARKET_SOURCES_REL, join(home, 'storages', MARKET_STORE_DIR, 'sources.json'))
   // Optional like the rest: a fresh install may not have written one yet.
-  add(HOME_SETTINGS_REL, join(home, 'settings.yaml'))
+  //
+  // WHICH name holds it depends on the kernel line: 0.1.7 keeps user settings in
+  // the profile patch and renames this file to `settings.yaml.imported` once it
+  // has imported it — so on a machine that has been through that import the old
+  // name is simply absent, and a backup that only looked for it would silently
+  // drop the settings a restore needs most.
+  //
+  // The archive's own path stays `settings.yaml` either way: it names the
+  // CONTENT (the home's settings document), and a restore writes it back under
+  // that name because every line reads it — the newer one re-imports it on the
+  // next start, the older one reads it directly. Only the first name present is
+  // taken: two entries at one archive path would be a duplicate, and when both
+  // files exist the un-renamed one is the newer line's live document.
+  const settingsNames = ['settings.yaml', 'settings.yaml.imported']
+  const settingsPath = settingsNames.map(name => join(home, name)).find(candidate => existsSync(candidate))
+  add(HOME_SETTINGS_REL, settingsPath ?? join(home, settingsNames[0]))
   add(HOME_AGENTS_REL, join(home, 'AGENTS.md'))
 
   // The kernel EXECUTES hook files on the target machine, so the block admits

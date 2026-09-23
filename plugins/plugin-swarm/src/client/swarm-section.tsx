@@ -1,7 +1,8 @@
 /**
  * The swarm settings section: enable toggle (restart-applied), adaptive
- * toggle, and the numeric scheduling knobs. Reads and writes the user config
- * file through the host half's routes; scheduling edits apply to the next
+ * toggle, and the numeric scheduling knobs. Values are read from and written
+ * through the host half's routes, which store them as declarative plugin
+ * config in the profile's patch document; scheduling edits apply to the next
  * swarm call without a restart.
  *
  * Every string comes from the `dsh-app.swarm` namespace through the `t`
@@ -57,6 +58,7 @@ const HOST_KEYS: Readonly<Record<string, SwarmKey>> = {
   'config.notBoolean': 'swarm.host.notBoolean',
   'config.belowMinimum': 'swarm.host.belowMinimum',
   'route.writeFailed': 'swarm.host.writeFailed',
+  'route.noEditor': 'swarm.host.noEditor',
   'route.bodyTooLarge': 'swarm.host.bodyTooLarge',
   'route.invalidBody': 'swarm.host.invalidBody',
 }
@@ -203,7 +205,7 @@ export function SwarmSection({ t }: SwarmSectionProps): ReactNode {
     for (const field of dirtyFields) {
       const raw = draft[field.key] ?? ''
       if (raw.trim() === '') {
-        // Cleared input = clear the override (fall back to the overlay value).
+        // Cleared input = clear the override (fall back to the shipped value).
         patch[field.key] = null
         continue
       }
@@ -355,7 +357,7 @@ export function SwarmSection({ t }: SwarmSectionProps): ReactNode {
         >{t('swarm.action.resetAll')}</button>
       </div>
 
-      {config !== null
+      {config !== null && config.filePath !== ''
         ? <p className="dshs_path" title={config.filePath}>{t('swarm.path', { path: config.filePath })}</p>
         : null}
     </div>

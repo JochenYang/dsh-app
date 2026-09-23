@@ -150,6 +150,7 @@ const DELEGATED_ACTIONS = [
   'office-payload-state',
   'office-payload-download',
   'office-payload-cancel',
+  'config-check',
 ] as const satisfies readonly ShellAction[]
 
 /** One of {@link DELEGATED_ACTIONS}. */
@@ -181,6 +182,9 @@ const DELEGATED_FIELDS: Record<DelegatedAction, readonly FieldSpec[]> = {
   'office-payload-state': [],
   'office-payload-download': [],
   'office-payload-cancel': [],
+  // The config check takes no field either: the profile it checks is the one
+  // this shell boots, so a caller cannot ask about a different one.
+  'config-check': [],
 }
 
 /** The only desktop action whose body carries a path. */

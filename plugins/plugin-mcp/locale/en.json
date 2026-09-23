@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP servers",
+    "description": "External MCP server manager: settings-page CRUD, dynamic mounting, tools registered as mcp__<server>__<tool>."
+  }
+}

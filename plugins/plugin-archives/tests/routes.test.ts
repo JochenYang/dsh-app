@@ -74,15 +74,21 @@ async function call(
 
 /** Registry stub that counts every write-side call. */
 function registry(archivedSessionIds: readonly string[]) {
-  const calls = { enqueueOperation: 0, requireState: 0, setState: 0 }
-  const state = { workspaceIds: [], archivedSessionIds }
+  const calls = { unarchiveSession: 0 }
+  const state = { workspaceIds: [] as string[], archivedSessionIds: [...archivedSessionIds] }
   return {
     calls,
     registry: {
       get archivedSessionIds(): readonly string[] { return state.archivedSessionIds },
-      requireState: () => { calls.requireState++; return state },
-      enqueueOperation: <T>(operation: () => Promise<T>): Promise<T> => { calls.enqueueOperation++; return operation() },
-      setState: (next: unknown) => { calls.setState++; Object.assign(state, next); return next },
+      // The PUBLIC removal path this plugin uses (`WorkspaceRegistry.
+      // unarchiveSession`). The double mutates its own state the way the kernel
+      // mutates its domain state, and it does so one id at a time — which is what
+      // makes "how many writes did this flow perform" observable here.
+      unarchiveSession: (sessionId: string): Promise<void> => {
+        calls.unarchiveSession += 1
+        state.archivedSessionIds = state.archivedSessionIds.filter(id => id !== sessionId)
+        return Promise.resolve()
+      },
     },
   }
 }
@@ -102,6 +108,8 @@ async function scenario(options: {
   archived: readonly string[]
   resolvable?: boolean
   sessions?: ArchiveRoutesOptions['sessions']
+  /** The kernel's activity answer per id; absent means nothing is running. */
+  activity?: ArchiveRoutesOptions['activity']
 }) {
   const root = await mkdtemp(join(tmpdir(), 'dshar-test-'))
   const logs = new Map<string, string>()
@@ -123,6 +131,9 @@ async function scenario(options: {
     registry: made.registry as unknown as ArchiveRoutesOptions['registry'],
     sessions: options.sessions,
     projectionCache: undefined,
+    // Nothing runs anywhere unless a test says so: the fence's own test is the
+    // one that passes a busy id, and every other scenario means "idle".
+    activity: options.activity ?? (async () => []),
     sessionQuery: undefined,
     tools: undefined,
   })
@@ -157,6 +168,9 @@ async function legacyScenario(
     registry: made.registry as unknown as ArchiveRoutesOptions['registry'],
     sessions: undefined,
     projectionCache: undefined,
+    // These scenarios are about LOCATING a log, not about liveness: nothing is
+    // running, so the fence has nothing to refuse.
+    activity: async () => [],
     sessionQuery: undefined,
     tools: undefined,
   })
@@ -176,7 +190,7 @@ test('delete: removes the log directory and leaves the archive set untouched', a
   assert.equal(existsSync(s.logs.get('session-a')!), false, 'the log directory must be gone')
   assert.ok(value.freedBytes > 0, 'freedBytes must report the removed directory size')
   // The core invariant: no registry write, and the record still filters the id.
-  assert.deepEqual(s.made.calls, { enqueueOperation: 0, requireState: 0, setState: 0 })
+  assert.deepEqual(s.made.calls, { unarchiveSession: 0 })
   assert.deepEqual([...s.made.registry.archivedSessionIds], ['session-a'])
 })
 
@@ -207,15 +221,16 @@ test('delete: a backend without a log resolver skips instead of dropping records
   assert.deepEqual(value.deleted, [])
   assert.deepEqual(value.skipped, [{ id: 'session-a', reason: 'unsupported' }])
   assert.equal(existsSync(s.logs.get('session-a')!), true)
-  assert.equal(s.made.calls.setState, 0, 'degrading to a record drop is the pop-back bug')
+  assert.equal(s.made.calls.unarchiveSession, 0, 'degrading to a record drop is the pop-back bug')
 })
 
-test('delete: fences unarchived and mid-turn ids without touching either', async () => {
+test('delete: fences unarchived and BUSY ids without touching either', async () => {
   const s = await scenario({
     ids: ['session-a', 'session-b'],
     archived: ['session-a'],
-    // turn/start with no matching turn/end — the open-turn fence.
-    sessions: { get: (id: string) => (id === 'session-a' ? { snapshotEvents: () => [{ type: 'turn/start' }] } : undefined) },
+    // The kernel's own answer for a running session: the waterfall reports what
+    // it found, and the fence takes its word for it.
+    activity: async (id: string) => (id === 'session-a' ? [{ kind: 'turn', label: 'a turn' }] : []),
   })
 
   const reply = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, request('POST', { ids: ['session-a', 'session-b'] }))
@@ -228,7 +243,26 @@ test('delete: fences unarchived and mid-turn ids without touching either', async
   ])
   assert.equal(existsSync(s.logs.get('session-a')!), true)
   assert.equal(existsSync(s.logs.get('session-b')!), true)
-  assert.equal(s.made.calls.setState, 0)
+  assert.equal(s.made.calls.unarchiveSession, 0)
+})
+
+test('delete: a fence that cannot answer keeps the session', async () => {
+  // The waterfall throwing means "cannot tell whether work is running" — and the
+  // only safe reading of that is that it might be. A delete path that treated an
+  // error as "idle" would remove a live session's log, taking the turn, its
+  // subagent transcripts and the record of what ran with it.
+  const s = await scenario({
+    ids: ['session-a'],
+    archived: ['session-a'],
+    activity: async () => { throw new Error('waterfall disposed') },
+  })
+
+  const reply = await call(s.routes.get(`${ROUTE_PREFIX}/delete`)!, request('POST', { ids: ['session-a'] }))
+  const value = (reply.body as { value: ArchiveDeleteResult }).value
+
+  assert.deepEqual(value.deleted, [])
+  assert.deepEqual(value.skipped, [{ id: 'session-a', reason: 'live' }])
+  assert.equal(existsSync(s.logs.get('session-a')!), true)
 })
 
 test('delete: rejects a malformed body before any filesystem work', async () => {
@@ -251,7 +285,7 @@ test('delete: locates a session whose log the resolver refuses to name', async (
   assert.deepEqual(value.deleted, ['session-legacy-1'])
   assert.equal(existsSync(join(s.root, '--D-codes-app--', 'session-legacy-1')), false, 'the directory must be gone')
   assert.ok(value.freedBytes > 0)
-  assert.equal(s.made.calls.setState, 0)
+  assert.equal(s.made.calls.unarchiveSession, 0)
 })
 
 test('delete: reads the sessions root from the public config copy too', async () => {
@@ -315,12 +349,43 @@ test('prune: drops exactly the records whose logs are gone', async () => {
   assert.equal(existsSync(s.logs.get('session-b')!), true)
 })
 
+test('prune: keeps a record whose log this kernel cannot list but which is still on disk', async () => {
+  // What a rollback looks like from here: a newer kernel wrote the session, so
+  // this one's listing does not report it at all — the persistence backend lists
+  // the generations it can read and skips the rest in silence. The archive record
+  // IS the client's visibility fence, so dropping it would un-hide a session the
+  // user archived, for good, and nothing re-creates it. The filesystem has the
+  // last word: the directory is there, the session is not gone.
+  const root = await mkdtemp(join(tmpdir(), 'dshar-unlisted-'))
+  const dir = join(root, '--D-codes-example--', 'session-hidden')
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'session.v4.jsonl.zstd'), 'x')
+  const made = registry(['session-hidden'])
+  const routes = harness({
+    persistence: { list: async () => [], root } as unknown as ArchiveRoutesOptions['persistence'],
+    registry: made.registry as unknown as ArchiveRoutesOptions['registry'],
+    sessions: undefined,
+    projectionCache: undefined,
+    activity: async () => [],
+    sessionQuery: undefined,
+    tools: undefined,
+  })
+
+  const reply = await call(routes.get(`${ROUTE_PREFIX}/prune`)!, request('POST', {}))
+  const value = (reply.body as { value: { pruned: number; remaining: number } }).value
+
+  assert.equal(reply.status, 200)
+  assert.deepEqual(value, { pruned: 0, remaining: 1 })
+  assert.equal(made.calls.unarchiveSession, 0, 'an unlisted-but-present session does not rewrite the set')
+})
+
 test('prune: a registry without the write chain answers 501', async () => {
   const handlers = harness({
     persistence: { list: async () => [] },
     registry: { archivedSessionIds: [] },
     sessions: undefined,
     projectionCache: undefined,
+    activity: async () => [],
     sessionQuery: undefined,
     tools: undefined,
   })
@@ -339,6 +404,7 @@ test('list: a session whose header has no cwd gets an empty group title — that
     registry: { archivedSessionIds: ['session-a'] },
     sessions: undefined,
     projectionCache: undefined,
+    activity: async () => [],
     sessionQuery: undefined,
     tools: undefined,
   })

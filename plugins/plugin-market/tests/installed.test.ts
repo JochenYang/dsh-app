@@ -78,6 +78,30 @@ describe('readInstalled', () => {
     assert.equal(sourceOf('plain-pkg'), 'registry')
   })
 
+  it('finds the entry id in an ORDERED patch list, not only in a single file', () => {
+    // `dsh.bundle.patch` is one file or an ordered list of them on this kernel
+    // line (`packages/boot/app-boot`, `bundlePatchPaths`). A list used to fall
+    // through to `entryId: name`, which matches no composed row — so the panel's
+    // disable wrote a row nothing named and showed "disabled" while the package
+    // stayed loaded.
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({
+      dependencies: { 'dsh-usage-heatmap': '^0.1.1' },
+    }), 'utf8')
+    const pkgDir = join(dir, 'node_modules', 'dsh-usage-heatmap')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({
+      name: 'dsh-usage-heatmap',
+      dsh: { bundle: { patch: ['./first.patch.yml', './cordis.patch.yml'] } },
+    }), 'utf8')
+    // The FIRST file carries no insert row for this package; the second does —
+    // declaration order is the order the kernel composes them in.
+    writeFileSync(join(pkgDir, 'first.patch.yml'), '- id: unrelated\n  disabled: true\n', 'utf8')
+    writeFileSync(join(pkgDir, 'cordis.patch.yml'), INSERT_PATCH, 'utf8')
+
+    const view = readInstalled(dir, 'web')
+    assert.equal(view.packages.find(pkg => pkg.name === 'dsh-usage-heatmap')?.entryId, 'usage-heatmap')
+  })
+
   it('derives the entry id from the package bundle patch and the enabled state from the profile patch', () => {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({
       dependencies: { 'dsh-usage-heatmap': '^0.1.1', 'dsh-better-edit': '^0.8.1' },

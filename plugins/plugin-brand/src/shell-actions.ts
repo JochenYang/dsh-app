@@ -38,7 +38,15 @@ export const SHELL_ACTIONS_ENV = 'DSH_APP_SHELL_ACTIONS'
 const APP_SCHEME = 'dsh-app:'
 const APP_HOST = 'app'
 
-/** The actions the shell's route performs. */
+/**
+ * The actions the shell's route performs.
+ *
+ * A MIRROR of `src/main/shell-actions.ts` (`SHELL_ACTIONS`), which is the
+ * authority: this process cannot import the shell's module, so the list is
+ * spelled twice and the two have to move together. The shell's own test suite
+ * asserts the shape of the route; this type only decides what the plugin is
+ * willing to forward.
+ */
 export type ShellAction =
   | 'notify'
   | 'save-text-as'
@@ -46,6 +54,7 @@ export type ShellAction =
   | 'office-payload-state'
   | 'office-payload-download'
   | 'office-payload-cancel'
+  | 'config-check'
 
 /** Read one environment variable, tolerating an unset value. */
 function envValue(name: string): string {

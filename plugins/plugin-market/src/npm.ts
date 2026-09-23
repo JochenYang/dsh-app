@@ -31,8 +31,21 @@ export const EXACT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-
 /** npm's own name length cap (scoped names count the whole string). */
 const MAX_NAME_LENGTH = 214
 
-/** Official registry host — the only host registry requests may target. */
-export const REGISTRY_HOST = 'registry.npmjs.org'
+/**
+ * Registry hosts the panel asks, in order.
+ *
+ * The first is canonical: package metadata has to come from somewhere the user's
+ * package manager also trusts, and npm's own host is what every install path
+ * defaults to. The second is the kernel's own declared fallback
+ * (`packages/boot/plugin-manager`, `fallbackRegistries`) — from Mainland China,
+ * this product's first market, npmjs is regularly unreachable or slow, and the
+ * panel reporting "no such package" while the CLI installs that same package
+ * fine is precisely the mismatch a fallback removes.
+ */
+export const REGISTRY_HOSTS = ['registry.npmjs.org', 'registry.npmmirror.com'] as const
+
+/** Official registry host — the first host every registry request targets. */
+export const REGISTRY_HOST = REGISTRY_HOSTS[0]
 
 /** Registry lookup timeout (ms) — the panel must stay responsive. */
 export const REGISTRY_TIMEOUT_MS = 10_000
@@ -180,8 +193,91 @@ export function validateProfileName(raw: string): string {
  * accepts the encoded form and it keeps every byte of the name inside the
  * path component.
  */
-export function registryUrl(name: string, version = 'latest'): string {
-  return `https://${REGISTRY_HOST}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+export function registryUrl(name: string, version = 'latest', host: string = REGISTRY_HOST): string {
+  return `https://${host}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+}
+
+/**
+ * Ask a registry for an UNCOMPRESSED body, deliberately.
+ *
+ * Measured through the kernel's own dispatcher (undici plus the local proxy): a
+ * registry answer arrives with NO headers at all (`headers: []`) and a gzip body,
+ * so nothing can tell that it is compressed and `JSON.parse` rejects it. That is
+ * how a live mirror came to look dead — with npmjs refused, the panel answered
+ * `update.latestUnknown` while the mirror was serving the manifest perfectly
+ * (measured on one `…/latest`: 8,738 bytes of gzip without this header, 22,000
+ * bytes of valid JSON with it). A host that ignores the header behaves as before,
+ * and the cost is bytes on a manifest that is already capped.
+ */
+const PLAIN_BODY = { headers: { 'accept-encoding': 'identity' } } as const
+
+/**
+ * Fetch one package/version manifest, trying each registry host in turn.
+ *
+ * Only a host that did not ANSWER is skipped: a registry that says "no such
+ * package" has answered, and the canonical host is asked first — asking a mirror
+ * whether npmjs knows a package would let a lagging mirror's 404 masquerade as
+ * the package not existing. A 404 is therefore final, while a transport failure,
+ * a timeout or a 5xx moves on to the next host.
+ *
+ * @param name - a validated package name.
+ * @param requested - user-specified exact version, or undefined for latest.
+ * @returns the raw manifest body, capped.
+ * @throws MarketValidationError when a registry answered "no such package/version".
+ * @throws MarketExecutionError when no host could answer.
+ */
+async function fetchRegistryManifest(name: string, requested?: string): Promise<string> {
+  let lastFailure: MarketExecutionError | undefined
+  for (const host of REGISTRY_HOSTS) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REGISTRY_TIMEOUT_MS)
+    try {
+      const response = await fetch(registryUrl(name, requested ?? 'latest', host), { signal: controller.signal, redirect: 'error', ...PLAIN_BODY })
+      if (response.status === 404) {
+        throw new MarketValidationError(requested === undefined
+          ? {
+              code: 'registry.notFound',
+              params: { name },
+              text: `no such plugin package on npm: "${name}"`,
+            }
+          : {
+              code: 'registry.versionNotFound',
+              params: { name, version: requested },
+              text: `no such version: "${name}@${requested}"`,
+            })
+      }
+      if (!response.ok) {
+        throw new MarketExecutionError({
+          code: 'registry.httpFailed',
+          // The sentence takes the status; the host rides the English diagnostic
+          // (a stable code plus an operator-facing detail, never prose).
+          params: { status: response.status },
+          text: `registry lookup failed (HTTP ${String(response.status)} from ${host})`,
+        }, 'registry')
+      }
+      return (await response.text()).slice(0, REGISTRY_MAX_BYTES)
+    } catch (error) {
+      // "No such package" is the registry's ANSWER, not its absence: it is the
+      // one failure that must not be retried against a second host.
+      if (error instanceof MarketValidationError) throw error
+      lastFailure = error instanceof MarketExecutionError
+        ? error
+        : new MarketExecutionError({
+            code: 'registry.lookupFailed',
+            // The nested code keeps the zh sentence's own wording when nothing
+            // else is known; an error's message is a diagnostic and rides verbatim.
+            params: { detail: error instanceof Error ? error.message : 'error.network' },
+            text: `registry lookup failed: ${error instanceof Error ? error.message : 'a network error'}`,
+          }, 'registry')
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  throw lastFailure ?? new MarketExecutionError({
+    code: 'registry.lookupFailed',
+    params: { detail: 'error.network' },
+    text: 'registry lookup failed',
+  }, 'registry')
 }
 
 /**
@@ -195,45 +291,7 @@ export function registryUrl(name: string, version = 'latest'): string {
  *   requested version that does not exist.
  */
 export async function resolveRegistryVersion(name: string, requested?: string): Promise<string> {
-  const url = registryUrl(name, requested ?? 'latest')
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REGISTRY_TIMEOUT_MS)
-  let body: string
-  try {
-    const response = await fetch(url, { signal: controller.signal, redirect: 'error' })
-    if (response.status === 404) {
-      throw new MarketValidationError(requested === undefined
-        ? {
-            code: 'registry.notFound',
-            params: { name },
-            text: `no such plugin package on npm: "${name}"`,
-          }
-        : {
-            code: 'registry.versionNotFound',
-            params: { name, version: requested },
-            text: `no such version: "${name}@${requested}"`,
-          })
-    }
-    if (!response.ok) {
-      throw new MarketExecutionError({
-        code: 'registry.httpFailed',
-        params: { status: response.status },
-        text: `registry lookup failed (HTTP ${String(response.status)})`,
-      }, 'registry')
-    }
-    body = (await response.text()).slice(0, REGISTRY_MAX_BYTES)
-  } catch (error) {
-    if (error instanceof MarketValidationError || error instanceof MarketExecutionError) throw error
-    throw new MarketExecutionError({
-      code: 'registry.lookupFailed',
-      // The nested code keeps the zh sentence's own wording when nothing else
-      // is known; an error's message is a diagnostic and rides verbatim.
-      params: { detail: error instanceof Error ? error.message : 'error.network' },
-      text: `registry lookup failed: ${error instanceof Error ? error.message : 'a network error'}`,
-    }, 'registry')
-  } finally {
-    clearTimeout(timer)
-  }
+  const body = await fetchRegistryManifest(name, requested)
   let manifest: unknown
   try {
     manifest = JSON.parse(body)
@@ -335,19 +393,25 @@ const latestCache = new Map<string, LatestCacheEntry>()
  * degrades to undefined so one dead package cannot block the installed view.
  */
 async function fetchLatestVersion(name: string): Promise<string | undefined> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REGISTRY_TIMEOUT_MS)
-  try {
-    const response = await fetch(registryUrl(name), { signal: controller.signal, redirect: 'error' })
-    if (!response.ok) return undefined
-    const manifest = JSON.parse((await response.text()).slice(0, REGISTRY_MAX_BYTES)) as { version?: unknown } | null
-    const version = manifest?.version
-    return typeof version === 'string' && EXACT_VERSION_PATTERN.test(version) ? version : undefined
-  } catch {
-    return undefined
-  } finally {
-    clearTimeout(timer)
+  // Same host chain as the install path's resolution: the panel's "update
+  // available" column has to agree with what an install would actually fetch,
+  // and from Mainland China npmjs alone regularly answers nothing at all.
+  for (const host of REGISTRY_HOSTS) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REGISTRY_TIMEOUT_MS)
+    try {
+      const response = await fetch(registryUrl(name, 'latest', host), { signal: controller.signal, redirect: 'error', ...PLAIN_BODY })
+      if (!response.ok) continue
+      const manifest = JSON.parse((await response.text()).slice(0, REGISTRY_MAX_BYTES)) as { version?: unknown } | null
+      const version = manifest?.version
+      if (typeof version === 'string' && EXACT_VERSION_PATTERN.test(version)) return version
+    } catch {
+      // A host that did not answer is not a verdict; the next one gets its turn.
+    } finally {
+      clearTimeout(timer)
+    }
   }
+  return undefined
 }
 
 /**

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Plugin marketplace",
+    "description": "Plugin marketplace: a sidebar entry and drawer panel that installs and removes plugins through the kernel CLI."
+  }
+}

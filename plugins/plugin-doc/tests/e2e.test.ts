@@ -98,7 +98,10 @@ function sectionText(section: FakeSection | undefined, context: unknown): string
   return typeof section.text === 'function' ? section.text(context) : section.text
 }
 
-/** Wait until the fire-and-forget disk writes of the host settle. */
+/**
+ * Let in-memory fire-and-forget work settle. NOT for disk state — 50 ms loses
+ * that race under load; use `waitForFile` / `readModeFile` there.
+ */
 function settle(): Promise<void> {
   return new Promise(resolve => { setTimeout(resolve, 50) })
 }
@@ -121,6 +124,21 @@ async function readModeFile(
       if (predicate(value)) return value
     }
     if (Date.now() > deadline) throw new Error(`mode.json never reached the expected state: ${file}`)
+    await new Promise(resolve => { setTimeout(resolve, 10) })
+  }
+}
+
+/**
+ * Poll until a file the host writes fire-and-forget exists. Measured: the skill
+ * install outlasts a fixed 50 ms sleep on a loaded machine (the same class of
+ * failure that made plugin-doc's e2e fail on CI). The installer writes
+ * atomically (`writeFileAtomic`), so existence means the content is complete.
+ */
+async function waitForFile(file: string, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (existsSync(file)) return true
+    if (Date.now() > deadline) return false
     await new Promise(resolve => { setTimeout(resolve, 10) })
   }
 }
@@ -151,8 +169,7 @@ test('e2e: apply registers the Word tools, prompt sections and mode route', asyn
     // GET/HEAD/POST only: the registry admits no PUT, so the toggle is a POST.
     assert.deepEqual(host.routes.map(route => [...route.methods]), [['GET', 'POST'], ['GET']])
     // The skill installer ran against the temp DSH_HOME.
-    await settle()
-    assert.ok(existsSync(join(home, 'skills', 'dsh-word', 'SKILL.md')), 'dsh-word skill installed')
+    assert.ok(await waitForFile(join(home, 'skills', 'dsh-word', 'SKILL.md')), 'dsh-word skill installed')
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome

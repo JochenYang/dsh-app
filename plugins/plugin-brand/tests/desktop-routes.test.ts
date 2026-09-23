@@ -375,7 +375,7 @@ test('an unknown path, an unknown method and the old web-server prefix are the c
 
 test('the registered routes are removed by the returned disposer', async () => {
   const host = await startHost()
-  assert.equal(host.registered(), 11, 'status + log tail + export + eight actions')
+  assert.equal(host.registered(), 12, 'status + log tail + export + nine actions')
   await host.close()
   assert.equal(host.registered(), 0)
 })

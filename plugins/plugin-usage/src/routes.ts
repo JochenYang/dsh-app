@@ -46,12 +46,12 @@ export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-usage'
 const BALANCE_TTL_MS = 5 * 60_000
 
 /**
- * The answer of every data route while the user config has the collector off.
+ * The answer of every data route while the plugin config has the collector off.
  * Coded, not worded: the settings page renders it in the active UI language.
  */
 const DISABLED: HostText = {
   code: 'disabled',
-  text: 'built-in usage collection is disabled by the user config file',
+  text: 'built-in usage collection is disabled in the plugin configuration',
 }
 
 /**

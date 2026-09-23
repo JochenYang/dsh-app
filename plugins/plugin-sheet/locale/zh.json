@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Excel 表格",
+    "description": "生成带公式的可编辑 Excel 工作簿：结构化 JSON 工程写入、校验后导出 .xlsx。"
+  }
+}

@@ -429,6 +429,7 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
             )
           })}
         </div>
+        <p className="dshWs-hint">{t('ws.provider.ownedHere')}</p>
       </div>
 
       <div className="dshWs-card">

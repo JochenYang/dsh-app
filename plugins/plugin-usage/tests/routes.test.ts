@@ -126,7 +126,7 @@ test('data routes answer the coded disabled message while the collector is off',
     const body = JSON.parse(answer.text) as FailureBody
     assert.equal(body.error.code, 'disabled')
     assert.equal(body.error.host.code, 'disabled')
-    assert.equal(body.error.host.text, 'built-in usage collection is disabled by the user config file')
+    assert.equal(body.error.host.text, 'built-in usage collection is disabled in the plugin configuration')
     assert.ok(!HAN.test(answer.text), `/${path} must not answer with a Chinese sentence`)
   }
 })

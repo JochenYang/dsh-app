@@ -84,7 +84,7 @@ async function mountHost(office?: FakeOfficeService): Promise<FakeHost> {
     services.set('officeToPdf', {
       async render(
         scope: FakeRenderCall['scope'], path: string, priority: string, signal: AbortSignal,
-      ): Promise<{ data: string, missingFonts: string[] }> {
+      ): Promise<{ data: Uint8Array, missingFonts: string[] }> {
         office.calls.push({ scope, path, priority, aborted: signal.aborted })
         if (office.fail !== undefined) {
           // The provider's own shape: one remote code plus the engine reason.
@@ -93,7 +93,12 @@ async function mountHost(office?: FakeOfficeService): Promise<FakeHost> {
             details: { reason: office.fail.reason },
           })
         }
-        return { data: Buffer.from(office.pdf).toString('base64'), missingFonts: office.missingFonts ?? [] }
+        // 0.1.7 hands the converted document back as BYTES
+        // (`RenderedDocumentBytes extends WorkspaceFileBytes`, part of the
+        // workspace-file unification on `readBytes`). This stub returned the
+        // previous line's base64 string, which the tool would now copy into the
+        // output file verbatim — the test caught exactly that.
+        return { data: office.pdf, missingFonts: office.missingFonts ?? [] }
       },
     })
   }
@@ -145,7 +150,10 @@ function sectionText(section: FakeSection | undefined, context: unknown): string
   return typeof section.text === 'function' ? section.text(context) : section.text
 }
 
-/** Wait until the fire-and-forget disk writes of the host settle. */
+/**
+ * Let in-memory fire-and-forget work settle. NOT for disk state — 50 ms loses
+ * that race under load; use `waitForFile` / `readModeFile` there.
+ */
 function settle(): Promise<void> {
   return new Promise(resolve => { setTimeout(resolve, 50) })
 }
@@ -168,6 +176,21 @@ async function readModeFile(
       if (predicate(value)) return value
     }
     if (Date.now() > deadline) throw new Error(`mode.json never reached the expected state: ${file}`)
+    await new Promise(resolve => { setTimeout(resolve, 10) })
+  }
+}
+
+/**
+ * Poll until a file the host writes fire-and-forget exists. Measured: the skill
+ * install outlasts a fixed 50 ms sleep on a loaded machine, and this assertion
+ * failed once in 34 runs here for exactly that reason. The installer writes
+ * atomically (`writeFileAtomic`), so existence means the content is complete.
+ */
+async function waitForFile(file: string, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (existsSync(file)) return true
+    if (Date.now() > deadline) return false
     await new Promise(resolve => { setTimeout(resolve, 10) })
   }
 }
@@ -221,8 +244,7 @@ test('e2e: apply registers the PDF tools, prompt sections and mode route', async
     assert.deepEqual(host.routes.map(route => route.methods), [['GET', 'POST'], ['GET'], ['GET']])
     assert.deepEqual(host.routes.map(route => route.requestBody), ['buffered', 'buffered', 'buffered'])
     // The skill installer ran against the temp DSH_HOME.
-    await settle()
-    assert.ok(existsSync(join(home, 'skills', 'dsh-pdf', 'SKILL.md')), 'dsh-pdf skill installed')
+    assert.ok(await waitForFile(join(home, 'skills', 'dsh-pdf', 'SKILL.md')), 'dsh-pdf skill installed')
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome

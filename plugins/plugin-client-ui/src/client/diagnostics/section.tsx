@@ -46,10 +46,11 @@ import {
   cancelOfficePayload,
   noticeText,
   openLogDirectory,
+  runConfigCheck,
   TAIL_LINES,
   UNREACHABLE_NOTICE,
 } from './api.ts'
-import type { RouteNotice, OfficePayloadState } from './api.ts'
+import type { RouteNotice, OfficePayloadState, ConfigCheckAnswer } from './api.ts'
 import { NS } from './locales.ts'
 import { buildReportText, reportFileName } from './report.ts'
 
@@ -114,6 +115,20 @@ type PayloadState =
  */
 const PAYLOAD_POLL_MS = 1_000
 
+/**
+ * The profile's static composition check as the page shows it.
+ *
+ * `idle` is the initial state and is deliberately NOT "loading": the check runs
+ * the kernel CLI for a couple of seconds, so it is a gesture the reader asks
+ * for, not something every visit to this page pays for.
+ */
+type CheckState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'busy' }
+  | { readonly kind: 'ready'; readonly report: NonNullable<ConfigCheckAnswer['report']> }
+  | { readonly kind: 'unsupported'; readonly notice: RouteNotice }
+  | { readonly kind: 'failed'; readonly notice: RouteNotice }
+
 /** Longest path shown before {@link shortenPath} trims its middle. */
 const PATH_DISPLAY_MAX = 96
 
@@ -148,6 +163,7 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   const [open, setOpen] = useState<OpenState>({ kind: 'idle' })
   const [save, setSave] = useState<ExportState>({ kind: 'idle' })
   const [payload, setPayload] = useState<PayloadState>({ kind: 'loading' })
+  const [check, setCheck] = useState<CheckState>({ kind: 'idle' })
   const logRef = useRef<HTMLPreElement | null>(null)
 
   const loadDesktop = useCallback(async (): Promise<void> => {
@@ -240,6 +256,30 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
       return
     }
     setOpen({ kind: 'failed', notice: outcome.notice })
+  }, [])
+
+  /**
+   * Run the profile's static composition check. On demand, because it spawns the
+   * kernel CLI: the reader asks for it, and the answer stays on screen until the
+   * next ask (or a language switch, which re-renders it through the dictionary).
+   */
+  const runCheck = useCallback(async (): Promise<void> => {
+    setCheck({ kind: 'busy' })
+    const outcome = await runConfigCheck()
+    if (outcome.kind === 'ok') {
+      const report = outcome.body.report
+      // No report in an `ok` answer is the shell saying "I have no kernel to
+      // ask", which is a refusal, not an all-clear.
+      setCheck(report === undefined
+        ? { kind: 'failed', notice: { source: 'key', key: 'diag.check.noReport' } }
+        : { kind: 'ready', report })
+      return
+    }
+    if (outcome.kind === 'unsupported') {
+      setCheck({ kind: 'unsupported', notice: outcome.notice })
+      return
+    }
+    setCheck({ kind: 'failed', notice: outcome.notice })
   }, [])
 
   /**
@@ -376,6 +416,39 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
         ? t('diag.payload.hint')
         : t('diag.payload.hintMissing')
 
+  // ------------------------------------------------- config check card
+  // The card's whole point is ATTRIBUTION: the kernel's checker reports findings
+  // for rows it did not write (a stock profile already produces four errors and
+  // a warning), so the count alone cannot tell the reader whether this app is at
+  // fault. `ours` is the number that can.
+  const checkReport = check.kind === 'ready' ? check.report : undefined
+  const checkErrors = checkReport === undefined ? 0 : checkReport.diagnostics.filter(item => item.level === 'error').length
+  const checkBadge = ((): { text: string, ok: boolean } => {
+    if (check.kind === 'idle') return { text: t('diag.check.idle'), ok: false }
+    if (check.kind === 'busy') return { text: t('diag.check.running'), ok: false }
+    if (check.kind !== 'ready') return { text: noticeText(check.notice, t), ok: false }
+    if (checkReport === undefined) return { text: t('diag.check.noReport'), ok: false }
+    // "Ours clean" is the useful green: the profile may still carry findings on
+    // other rows, and calling that a failure would train the reader to ignore it.
+    if (checkReport.ours === 0 && checkReport.complete) return { text: t('diag.check.ok'), ok: true }
+    if (checkReport.ours === 0) return { text: t('diag.check.okOthers', { others: checkReport.others }), ok: true }
+    return { text: t('diag.check.ours', { ours: checkReport.ours }), ok: false }
+  })()
+  const checkSummary = checkReport === undefined
+    ? undefined
+    : t('diag.check.summary', {
+      entries: checkReport.entries,
+      errors: checkErrors,
+      others: checkReport.others,
+    })
+  const checkHint = check.kind === 'unsupported' || check.kind === 'failed'
+    ? undefined
+    : checkReport === undefined
+      ? t('diag.check.hintIdle')
+      : checkReport.others === 0
+        ? t('diag.check.hintClean')
+        : t('diag.check.hintOthers')
+
   return (
     <section className="dshDiag-root" aria-label={t('diag.nav')}>
       <style>{DIAGNOSTICS_CSS}</style>
@@ -464,6 +537,43 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
 
       <div className="dshDiag-card">
         <div className="dshDiag-cardHead">
+          <span className="dshDiag-cardTitle">{t('diag.check.title')}</span>
+          <span
+            className={checkBadge.ok ? 'dshDiag-badge dshDiag-badgeOk' : 'dshDiag-badge dshDiag-badgeMuted'}
+            role="status"
+          >{checkBadge.text}</span>
+          <button
+            type="button" className="dshDiag-button dshDiag-buttonPrimary"
+            disabled={check.kind === 'busy'}
+            onClick={() => { void runCheck() }}
+          >{check.kind === 'busy' ? t('diag.check.running') : t('diag.check.action')}</button>
+        </div>
+        {checkSummary === undefined ? null : <p className="dshDiag-path">{checkSummary}</p>}
+        {checkHint === undefined ? null : <p className="dshDiag-hint">{checkHint}</p>}
+        {checkReport === undefined || checkReport.diagnostics.length === 0
+          ? null
+          : (
+            <ul className="dshDiag-checkList">
+              {checkReport.diagnostics.map(item => (
+                <li key={item.path} className={item.ours ? 'dshDiag-checkItem dshDiag-checkOurs' : 'dshDiag-checkItem'}>
+                  <span className={item.level === 'error' ? 'dshDiag-checkLevel dshDiag-checkError' : 'dshDiag-checkLevel'}>
+                    {item.level === 'error' ? t('diag.check.levelError') : t('diag.check.levelWarning')}
+                  </span>
+                  <span className="dshDiag-checkWho">
+                    {item.ours ? t('diag.check.whoOurs') : t('diag.check.whoOther')}
+                  </span>
+                  <code className="dshDiag-checkWhere">{item.entryName ?? item.entryId ?? item.path}</code>
+                  {/* The kernel's own sentence: a diagnostic, not UI copy, so it
+                      stays in the language the kernel wrote it in. */}
+                  <span className="dshDiag-checkMessage">{item.message}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+      </div>
+
+      <div className="dshDiag-card">
+        <div className="dshDiag-cardHead">
           <span className="dshDiag-cardTitle">{t('diag.export.title')}</span>
           <button
             type="button" className="dshDiag-button dshDiag-buttonPrimary"
@@ -529,6 +639,14 @@ const DIAGNOSTICS_CSS = `
 .dshDiag-hint { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.5; }
 .dshDiag-hintBlocked { padding: 6px 10px; border-left: 2px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); background: var(--dsw-alias-bg-layer-2, #f1f5f9); border-radius: 0 6px 6px 0; }
 .dshDiag-path { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshDiag-checkList { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.dshDiag-checkItem { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 4px 8px; align-items: baseline; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); font-size: 11.5px; }
+.dshDiag-checkOurs { border-color: var(--dsw-alias-border-l2, rgba(15,23,42,.18)); background: var(--dsw-alias-bg-layer-2, #f8fafc); }
+.dshDiag-checkLevel { font-weight: 600; color: var(--dsw-alias-label-secondary, #64748b); }
+.dshDiag-checkError { color: var(--dsw-alias-label-error, #d92d20); }
+.dshDiag-checkWho { color: var(--dsw-alias-label-secondary, #94a3b8); }
+.dshDiag-checkWhere { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.dshDiag-checkMessage { grid-column: 1 / -1; color: var(--dsw-alias-label-secondary, #475569); overflow-wrap: anywhere; }
 .dshDiag-log { margin: 0; padding: 8px 10px; box-sizing: border-box; height: 320px; overflow: auto; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f8fafc); color: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .dshDiag-log:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #3b82f6); outline-offset: 1px; }
 .dshDiag-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -467,11 +467,22 @@ function installedFactsOf(profileDir: string, name: string): {
       : undefined
     const repoKey = manifestRepoKeyOf(manifest)
     const patch = manifest.dsh?.bundle?.patch
-    if (typeof patch !== 'string' || patch === '' || isAbsolute(patch) || patch.split(/[\\/]/).includes('..')) {
-      return { entryId: name, installedVersion, repoKey }
+    // `dsh.bundle.patch` is ONE file or an ordered LIST of them on this kernel line
+    // (`packages/boot/app-boot`, `bundlePatchPaths`). A list used to fall through to
+    // `entryId: name` — a lookup key that matches no composed row, so the panel's
+    // disable toggle wrote a row nothing named, showed "disabled", and the package
+    // stayed loaded. The files are read in declaration order and the first one whose
+    // patch inserts this package wins, which is the order the kernel composes them.
+    const patchFiles = typeof patch === 'string'
+      ? [patch]
+      : Array.isArray(patch) ? patch.filter((file): file is string => typeof file === 'string') : []
+    for (const file of patchFiles) {
+      if (file === '' || isAbsolute(file) || file.split(/[\\/]/).includes('..')) continue
+      const patchText = readTextIfPresent(join(profileDir, 'node_modules', ...segments, file))
+      const inserted = insertedEntryIdOf(patchText, name)
+      if (inserted !== undefined) return { entryId: inserted, installedVersion, repoKey }
     }
-    const patchText = readTextIfPresent(join(profileDir, 'node_modules', ...segments, patch))
-    return { entryId: insertedEntryIdOf(patchText, name) ?? name, installedVersion, repoKey }
+    return { entryId: name, installedVersion, repoKey }
   } catch {
     return { entryId: name, installedVersion: undefined, repoKey: undefined }
   }

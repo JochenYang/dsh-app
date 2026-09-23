@@ -11,7 +11,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -112,7 +112,24 @@ describe('packConfigBackup (export whitelist)', () => {
     assert.equal(Buffer.from(zipped['plugins/dsh-app-plugin-foo/config.json']!).toString('utf8'), '{"enabled":true}\n')
   })
 
-  it('carries the host settings file byte-for-byte, providers and all', async () => {
+  it('carries the settings file even after the kernel line renamed it', async () => {
+    // 0.1.7 keeps user settings in the profile patch and renames `settings.yaml`
+    // to `settings.yaml.imported` once it has imported it — so a home that has
+    // been through that import has no `settings.yaml` at all. This is precisely
+    // the home a migration backup is taken from, and looking only for the old
+    // name dropped the one file the user cannot reconstruct.
+    const home = mkdtempSync(join(scratchRoot, 'imported-'))
+    writeHome(home)
+    renameSync(join(home, 'settings.yaml'), join(home, 'settings.yaml.imported'))
+
+    const zipped = unzipSync(await packConfigBackup(home, 'web'))
+    assert.equal(Buffer.from(zipped['settings.yaml']!).toString('utf8'), HOME_SETTINGS)
+    // The archive names the CONTENT, not the file it was read from: one path,
+    // whatever this machine happens to call it.
+    assert.equal(zipped['settings.yaml.imported'], undefined)
+  })
+
+  it('carries the settings file byte-for-byte, providers and all', async () => {
     const home = scratchHome('settings-home')
     writeHome(home)
     const zipped = unzipSync(await packConfigBackup(home, 'web'))

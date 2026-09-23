@@ -37,12 +37,12 @@ export const zh = {
   'usage.loading': '加载中…',
   'usage.loadFailed': '加载失败：{message}',
   'usage.empty': '暂无用量数据',
-  'usage.disabled': '内置用量统计已在用户配置中停用（enabled=false）。将 storages/dsh-app-plugin-usage/config.json 中的 enabled 改为 true 或删除该文件后重启即可恢复。',
+  'usage.disabled': '内置用量统计已在插件配置中停用（enabled=false）。该值保存在当前 profile 的 cordis.patch.yml 里 id: usage 那一行；把该行的 enabled 改为 true（或删除该行）后重启即可恢复。',
   'usage.error.unknown': '未知错误',
   // --- Failures the HOST reports. The host sends a code plus its values (see
   // `HostText` in types.ts); the sentences live here, and a code this build
   // does not know falls back to the host's English diagnostic. ---
-  'usage.host.disabled': '内置用量统计已在用户配置中停用',
+  'usage.host.disabled': '内置用量统计已在插件配置中停用',
   'usage.host.balanceMissingCredential': '未配置 DeepSeek API Key，请先在设置 → 模型页配置',
   'usage.host.balanceInvalidCredential': 'DeepSeek API Key 无效，请检查设置 → 模型页的配置',
   'usage.host.balanceUpstream': '查询余额失败，请稍后重试',
@@ -143,10 +143,10 @@ export const en: Record<UsageKey, string> = {
   'usage.loading': 'Loading…',
   'usage.loadFailed': 'Load failed: {message}',
   'usage.empty': 'No usage data',
-  'usage.disabled': 'The built-in usage statistics are switched off in the user config (enabled=false). Set enabled to true in storages/dsh-app-plugin-usage/config.json, or delete that file and restart.',
+  'usage.disabled': 'The built-in usage statistics are switched off in the plugin configuration (enabled=false). The value lives in the current profile\'s cordis.patch.yml, in the id: usage row; set its enabled to true (or remove the row) and restart to restore collection.',
   'usage.error.unknown': 'unknown error',
   // --- Failures the HOST reports; see the zh block above for the contract. ---
-  'usage.host.disabled': 'The built-in usage statistics are switched off in the user config',
+  'usage.host.disabled': 'The built-in usage statistics are switched off in the plugin configuration',
   'usage.host.balanceMissingCredential': 'No DeepSeek API key is configured; set one on the Models settings page first',
   'usage.host.balanceInvalidCredential': 'The DeepSeek API key is invalid; check the configuration on the Models settings page',
   'usage.host.balanceUpstream': 'Could not query the balance; try again later',

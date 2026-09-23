@@ -30,6 +30,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the web seam Context merge (ctx.web) + provider types.
 import type {} from '@deepseek-ai/dsh-web'
 import { ChainExhaustedError, runChainCached, SearchCache, type ChainStep } from './chain.ts'
+import { AccountingBox } from './accounting.ts'
 import { createEngine } from './engines/index.ts'
 import { registerWebSearchRoutes } from './routes.ts'
 import { WebSearchStore } from './store.ts'
@@ -100,26 +101,6 @@ interface SearchAccounting {
   readonly failed: readonly string[]
 }
 
-/**
- * A one-slot holder for the last search's accounting.
- *
- * A plain `let` does not work here: the write happens inside the provider
- * closure and the read happens at the self-test call site, so TypeScript's
- * control-flow analysis cannot see the assignment and narrows the variable to
- * `never`. A getter hides the value from narrowing, which is what makes the
- * read type-check honestly.
- */
-class AccountingBox {
-  private value: SearchAccounting | undefined
-
-  set(next: SearchAccounting | undefined): void {
-    this.value = next
-  }
-
-  get(): SearchAccounting | undefined {
-    return this.value
-  }
-}
 export function apply(ctx: Context, config: Config): void {
   const log = ctx.logger(name)
   const dir = config.storePath !== '' ? config.storePath : join(resolveDshHome(), 'storages', 'dsh-app-plugin-websearch')
@@ -134,10 +115,10 @@ export function apply(ctx: Context, config: Config): void {
   /** Result cache; cleared when the config changes (see the save route). */
   const cache = new SearchCache()
   /**
-   * The last search's chain accounting. The seam's `WebSearchResult` has no
-   * room for it (it is a portable shape owned upstream), so the self-test
-   * reads it from here — that is what lets the UI show which engine actually
-   * answered and whether the result was a cache hit.
+   * The last search's chain accounting, keyed by the query that produced it
+   * (`accounting.ts`): the self-test clears it, searches once, and reads its own
+   * query's answer back — so a concurrent call cannot hand it another query's
+   * engine and cache verdict.
    */
   const lastOutcome = new AccountingBox()
 
@@ -174,7 +155,7 @@ export function apply(ctx: Context, config: Config): void {
         ...signal !== undefined ? { signal } : {},
       })
       const failed = outcome.attempts.filter(attempt => !attempt.ok)
-      lastOutcome.set({
+      lastOutcome.set(request.query, {
         engine: outcome.usedEngine,
         cached: outcome.cached,
         attempts: outcome.attempts.length,
@@ -278,13 +259,13 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error('this kernel has no ctx.web service, so no search can run')
       }
       const file = store.load()
-      lastOutcome.set(undefined)
+      lastOutcome.clear()
       const startedAt = Date.now()
       const result = await seam.search({ query, maxResults: file.maxResults }) as {
         sources?: readonly unknown[]
         content?: unknown
       }
-      const accounting = lastOutcome.get()
+      const accounting = lastOutcome.get(query)
       return {
         provider: seam.searchProviderId ?? 'unknown',
         resultCount: Array.isArray(result?.sources) ? result.sources.length : 0,

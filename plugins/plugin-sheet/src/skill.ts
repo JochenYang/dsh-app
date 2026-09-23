@@ -24,6 +24,11 @@ description: 编写本地 .sheet.json 表格工程并导出可编辑 .xlsx。当
 
 # 表格生成（${SKILL_NAME}）
 
+> **与内核自带技能的分工**：内核随包提供 \`office-xlsx\`（以及 \`office-docx\` / \`office-pptx\`），
+> 用于**检查和修改已有的** OOXML 文件；本技能用于**从结构化 JSON 工程产出新的** .xlsx
+> （\`sheet_write\` → \`sheet_check\` → \`sheet_render\`）。手边是要改的表格时用内核技能，
+> 要交一份排版规范的成品时用本技能。
+
 本 Skill 由用户选中的表格模式启用，也适用于用户直接提出的 Excel / 表格请求。目标：为用户产出**可编辑**的 .xlsx 与可复用的 .sheet.json 工程。数据、公式、列宽与数字格式都写进单元格，不使用整表截图或图片代替数据。
 
 ## 阶段流程（严格按顺序，不跳步）
@@ -33,7 +38,7 @@ description: 编写本地 .sheet.json 表格工程并导出可编辑 .xlsx。当
 3. 用 \`sheet_write\` 一次性写出工作区 \`.sheet.json\` 工程（完整 JSON 文本，不是片段）。字段与边界见下。
 4. 调用只读的 \`sheet_check\`（入参 \`file_path\`）。返回 \`needs_revision\` 是正常反馈：每条问题都带 表名、行号、列、JSON 路径与修复方式。按清单逐条修改后重新 \`sheet_write\` 再 \`sheet_check\`，error 清零前不要导出。
 5. 调用 \`sheet_render\`（入参 \`file_path\` 与新的 \`output_file\`，.xlsx 结尾）。渲染内部会再次全量校验：\`status: needs_revision\` 表示未导出任何文件，回到第 4 步继续修；\`status: exported\` 才算交付。
-6. 在回复结尾给出产出 .xlsx 的**明确路径引用**（让用户能直接打开）与 .sheet.json 工程路径，说明哪些数字来自哪里，并说明可用你本机的 Excel/WPS 打开继续编辑；不声称已在本机打开验证过。
+6. 导出成功后，**若当前会话提供 \`present\` 工具，就用它把成品登记为本次交付**（\`files: [{ "path": "<产出>.xlsx" }]\`；相对路径按会话工作目录解析，文件必须已经存在）——登记过的文件才会出现在会话的交付卡片里，用户能直接点开；没有该工具时跳过这一步即可。随后在回复结尾给出产出 .xlsx 的**明确路径引用**与 .sheet.json 工程路径，说明哪些数字来自哪里，并说明可用你本机的 Excel/WPS 打开继续编辑；不声称已在本机打开验证过。
 
 ## 工程格式
 

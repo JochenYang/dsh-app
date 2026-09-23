@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git panel",
+    "description": "Git panel: repository status, diff, log, and sync actions as a conversation view tab."
+  }
+}

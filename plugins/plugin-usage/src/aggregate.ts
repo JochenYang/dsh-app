@@ -4,9 +4,8 @@
  * Day keys use the server's local timezone (the numbers a user cross-checks
  * against their own day are the ones they expect). Cost is an estimate in
  * CNY: the built-in DeepSeek price table carries the official idle/peak
- * dual-tier rates (peak applied per row timestamp), and can be overridden
- * or extended per provider/model through the plugin config or the user
- * config file (`<storeDir>/config.json`).
+ * dual-tier rates (peak applied per row timestamp), and can be overridden or
+ * extended per provider/model through the plugin's `pricing` config field.
  *
  * @module @dsh-app/plugin-usage/aggregate
  */

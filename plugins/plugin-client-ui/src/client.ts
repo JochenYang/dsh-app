@@ -88,7 +88,7 @@ interface MaintenanceTabOwnerProps {
 // namespace services must be declared here — Cordis refuses `remote.*` access
 // that is not in this plugin's `inject`.
 export const inject = [
-  'theme', 'slots', 'locale', 'remote', 'remote.llm', 'remote.settings', 'settingsScope', 'settingsSchema',
+  'theme', 'slots', 'locale', 'remote', 'remote.llm', 'remote.settings', 'configForms', 'settingsSchema',
 ]
 
 export const BRAND_THEME_ID = 'dsh-app-brand'
@@ -229,7 +229,7 @@ export function apply(ctx: ClientContext): void {
   const controller = new AdvancedModelsStore(
     ctx.remote,
     schema,
-    ctx.settingsScope.describe() as SettingsDescribeFace,
+    ctx.configForms.describe() as SettingsDescribeFace,
   )
   const injected = (): AdvancedModelsInjected => ({
     controller,
@@ -347,8 +347,9 @@ export function apply(ctx: ClientContext): void {
       ctx.remote.$on('llm/adapters-updated', refresh),
       ctx.on('connection/reset', refresh),
     ]
-    // Settings rail: the scroll rule the suite's extra rows need, plus real
-    // glyphs for our two rows (upstream would give both the generic gear).
+    // Settings rail: real glyphs for our two rows (upstream would give both the
+    // generic gear). The rail's own scrolling is upstream's job now — see
+    // settings-nav.ts for why our rule was removed.
     const disposeNav = mountSettingsNav([
       { label: () => t('adv.nav'), cls: 'dshAmaAdvNav', svg: NAV_ICON_SVG },
       { label: () => t('maint.nav'), cls: 'dshMaintNav', svg: NAV_ICON_MAINTENANCE_SVG },

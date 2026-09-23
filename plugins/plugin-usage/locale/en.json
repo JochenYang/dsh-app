@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Usage statistics",
+    "description": "Usage statistics: aggregate tokens and cost from session logs, with a balance card, heatmap, and trend chart."
+  }
+}

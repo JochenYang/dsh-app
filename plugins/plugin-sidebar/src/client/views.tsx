@@ -3,9 +3,16 @@
  * ring that renders 对话/审查/轨迹).
  *
  * The registration shape mirrors ui-trajectory (the official template):
- * thunk label + per-session inject face. Session facts (cwd) resolve through
- * `sessions.binding(sessionId)` — the same API the official trajectory view
- * uses — with the list store as fallback before the binding resolves.
+ * thunk label + per-session inject face.
+ *
+ * Session facts (cwd) resolve through the session LIST row —
+ * `sessions.list.getSnapshot().byId[sessionId]?.cwd` — which is the only
+ * accessor upstream itself uses for this (`ui-chat/src/client/ChatView.tsx:104`,
+ * `ui-conversation/src/client/skeleton/ConversationContent.tsx:34`,
+ * `ui-deliverables/src/client/Deliverables.tsx:76`). The session-scoped client
+ * `SessionSnapshot` carries no `cwd`, so the earlier
+ * `sessions.binding(id).session.getSnapshot().cwd` branch read a field that
+ * does not exist on that contract; it never resolved and is gone.
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -18,22 +25,15 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { GitTab } from './git-tab.tsx'
 import { NS as SIDEBAR_NS } from './locales.ts'
 
-/** Narrowed sessions service face (list store + binding both exist upstream). */
+/** Narrowed sessions service face (the list store carries the cwd column). */
 interface SessionsService {
   list: {
     getSnapshot(): { byId?: Readonly<Record<string, { cwd?: unknown }>> }
   }
-  binding?(id: SessionId): { session?: { getSnapshot?: () => unknown } } | undefined
 }
 
-/** Resolve cwd for one session (official binding API, list store fallback). */
+/** Resolve cwd for one session from its list row (upstream's own accessor). */
 function cwdFor(sessions: SessionsService, sessionId: SessionId): string | undefined {
-  const bound = sessions.binding?.(sessionId)?.session
-  const snap = bound?.getSnapshot?.()
-  if (typeof snap === 'object' && snap !== null) {
-    const cwdField = (snap as { cwd?: unknown }).cwd
-    if (typeof cwdField === 'string' && cwdField !== '') return cwdField
-  }
   const summary = sessions.list.getSnapshot().byId?.[sessionId]
   return typeof summary?.cwd === 'string' && summary.cwd !== '' ? summary.cwd : undefined
 }

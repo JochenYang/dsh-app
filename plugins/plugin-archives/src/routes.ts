@@ -47,6 +47,9 @@
 import { readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
+// The kernel's own session-id constructor: `/prune` hands ids to the registry's
+// public removal, which takes the branded type (never a bare string).
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveSkipReason, ArchivedSession, HostText } from './types.ts'
 
 /** Route namespace on the shared Connection `/api` channel. */
@@ -125,23 +128,26 @@ export interface WorkspaceRegistryLike {
 type RegistryState = { archivedSessionIds: readonly string[] } & Record<string, unknown>
 
 /**
- * Private write-side slice of the upstream workspace registry. Upstream
- * exposes no archive-set removal API (only `archiveSession`), so /prune
- * reaches the registry's serialized read-modify-write chain — these methods
- * are private in the source but live on the runtime prototype. Every method
- * is capability-checked before use; a kernel that reshaped the class gets a
- * structured 501, never a corrupted state.
+ * PUBLIC write-side slice of the upstream workspace registry.
+ *
+ * `/prune` used to reach into the registry's private write chain
+ * (`requireState` / `enqueueOperation` / `setState`) because the kernel exposed
+ * no way to remove one id from the archive set. This kernel line publishes one:
+ * `archivedSessionIds` answers what is archived, and `unarchiveSession` removes a
+ * single id through the registry's OWN serialized write — which also drops that
+ * session's pin in the same durable write, something a whole-state rewrite by
+ * this plugin could not know about (it spread the fields it knew and silently
+ * dropped any it did not).
  */
-interface RegistryWriter extends WorkspaceRegistryLike {
-  /** Current domain global state. */
-  requireState(): RegistryState
-  /** Serialized mutation chain: check-then-write pairs cannot interleave. */
-  enqueueOperation<T>(operation: () => Promise<T>): Promise<T>
-  /** Durably replace the whole domain state. */
-  setState(state: unknown): Promise<unknown>
+interface RegistryPruner extends WorkspaceRegistryLike {
+  /** Durably remove one id from the archive set. */
+  unarchiveSession(sessionId: SessionId): Promise<void>
 }
 
-/** Structural slice of the sessions store (liveness guard). */
+/**
+ * Structural slice of the sessions store, for the one question /prune asks it:
+ * whether a session is still resident (a cold record is not one).
+ */
 export interface SessionsLike {
   get(id: string): unknown
 }
@@ -177,30 +183,6 @@ export interface ArchiveSearchResult {
 }
 
 /**
- * Whether a store-resident session is mid-turn (a `turn/start` with no
- * matching `turn/end` yet — the same open-turn test the upstream fork
- * boundary uses). The api-proxy keeps every opened session resident for the
- * whole process lifetime, so mere store presence would flag every
- * previously-opened archived session as live and make it undeletable; only a
- * session still WRITING its log must be fenced. An unreadable event log is
- * treated as mid-turn (conservative: keep the old skip behavior).
- */
-function isMidTurn(session: unknown): boolean {
-  // alpha.4 replaced the `Session.events` getter with `snapshotEvents()`;
-  // an unreadable/absent log stays fenced (treated as mid-turn).
-  const source = session as { snapshotEvents?: () => unknown } | undefined
-  const events = typeof source?.snapshotEvents === 'function' ? source.snapshotEvents() : undefined
-  if (!Array.isArray(events)) return true
-  let open = false
-  for (const event of events) {
-    const type = (event as { type?: unknown }).type
-    if (type === 'turn/start') open = true
-    else if (type === 'turn/end') open = false
-  }
-  return open
-}
-
-/**
  * Structural slice of the sessionProjectionCache (zero-I/O title lookup).
  *
  * Upstream signature: `cachedSnapshot(meta, inheritedEventCount, keys?)` —
@@ -212,7 +194,6 @@ function isMidTurn(session: unknown): boolean {
 export interface ProjectionCacheLike {
   cachedSnapshot(
     meta: SessionHeaderLike,
-    inheritedEventCount: number,
     keys?: readonly string[],
   ): { values: { title?: string | null } } | undefined
 }
@@ -223,6 +204,17 @@ export interface ArchiveRoutesOptions {
   registry: WorkspaceRegistryLike
   sessions: SessionsLike | undefined
   projectionCache: ProjectionCacheLike | undefined
+  /**
+   * The kernel's own answer to "is this session busy", asked once per id before
+   * its log artifact is removed.
+   *
+   * This is the `workspace/session-activity` waterfall — the seam
+   * `WorkspaceRegistry.archiveSession` refuses on — whose providers are the turn
+   * family, running background jobs, subagent descendants and scheduled
+   * follow-ups. Required, not optional: a delete path that cannot ask has no
+   * safe default, and the host half always has the seam to hand over.
+   */
+  activity: (id: string) => Promise<readonly unknown[]>
   /** Cross-session full-text search service (structural slice of ctx.sessionQuery). */
   sessionQuery: SessionQueryLike | undefined
   /** Tools registry (structural slice of ctx.tools): enough to report agent-tool availability. */
@@ -313,7 +305,7 @@ async function listArchives(options: ArchiveRoutesOptions): Promise<ArchiveList>
     // backend provides); the rc-line kernel no longer exposes per-session
     // artifact paths, so directory walks are gone.
     const sizeBytes = entrySizeBytes(entry)
-    const cachedTitle = options.projectionCache?.cachedSnapshot(header, 0)?.values.title
+    const cachedTitle = options.projectionCache?.cachedSnapshot(header)?.values.title
     const session: ArchivedSession = {
       id,
       createdAt: header.createdAt,
@@ -435,23 +427,42 @@ async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly strin
     return [String(header.id), entry] as const
   }))
   const archivedIds = new Set(options.registry.archivedSessionIds.map(String))
-  const deletable = ids.filter((id) => {
+  const deletable: string[] = []
+  for (const id of ids) {
     // Fence 1: only sessions the user archived are manageable here.
     if (!archivedIds.has(id)) {
       result.skipped.push({ id, reason: 'not-archived' })
-      return false
+      continue
     }
+    // Fence 2: the log has to be there to be removable (an id whose log is gone
+    // is /prune's business, not /delete's).
     if (entries.get(id) === undefined) {
       result.skipped.push({ id, reason: 'missing' })
-      return false
+      continue
     }
-    const resident = options.sessions?.get(id)
-    if (resident !== undefined && isMidTurn(resident)) {
+    // Fence 3: what the KERNEL says is running. This replaces a mid-turn guess
+    // read off `session.snapshotEvents()` — a method this kernel line
+    // deprecates — which knew nothing about background jobs, subagent
+    // descendants or scheduled follow-ups, and which only ever looked at
+    // sessions that happened to be resident.
+    //
+    // A waterfall that THROWS cannot answer the question, and the only safe
+    // reading of "cannot tell whether work is running" is that it might be: the
+    // session stays. Deleting a log whose session is mid-turn loses the turn,
+    // the subagent transcripts under it, and the only record of what ran.
+    let activity: readonly unknown[]
+    try {
+      activity = await options.activity(id)
+    } catch {
       result.skipped.push({ id, reason: 'live' })
-      return false
+      continue
     }
-    return true
-  })
+    if (activity.length > 0) {
+      result.skipped.push({ id, reason: 'live' })
+      continue
+    }
+    deletable.push(id)
+  }
   for (const id of deletable) {
     try {
       // The log artifact is `<sessionDir>/…`; removing the directory takes
@@ -484,20 +495,33 @@ async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly strin
  * re-read inside the registry's serialized write chain so a concurrent
  * archive/unarchive write can never be lost.
  */
-async function pruneStaleArchives(writer: RegistryWriter, options: ArchiveRoutesOptions): Promise<ArchivePruneResult> {
+async function pruneStaleArchives(writer: RegistryPruner, options: ArchiveRoutesOptions): Promise<ArchivePruneResult> {
   const headerIds = new Set((await options.persistence.list()).map((entry) => String(listedHeader(entry).id)))
-  return writer.enqueueOperation(async () => {
-    // Liveness is probed per candidate inside the chain (the store exposes
-    // no enumeration): fresher than a snapshot, and cheap in-memory lookups.
-    const state = writer.requireState()
-    const current = state.archivedSessionIds.map(String)
-    const filtered = current.filter((id) => headerIds.has(id) || options.sessions?.get(id) !== undefined)
-    if (filtered.length !== current.length) {
-      // Spread first: sibling state fields must survive the rewrite.
-      await writer.setState({ ...state, archivedSessionIds: filtered })
-    }
-    return { pruned: current.length - filtered.length, remaining: filtered.length }
-  })
+  const current = writer.archivedSessionIds.map(String)
+  // A record is stale only when its session is GONE — not merely absent from
+  // what this kernel can list. An older kernel skips a log written by a newer
+  // one in silence (the listing reports the generations it can read and nothing
+  // else), and pruning on that answer would drop the archive records of exactly
+  // the sessions a rollback hid — un-hiding them for good, because the record
+  // IS the client's visibility fence and nothing re-creates it.
+  //
+  // So the filesystem has the last word: a log directory still on disk means
+  // the session is not gone, whatever the listing says.
+  const root = sessionsRoot(options.persistence)
+  const stale: string[] = []
+  for (const id of current) {
+    if (headerIds.has(id) || options.sessions?.get(id) !== undefined) continue
+    if (root !== undefined && await locatedSessionDir(root, id) !== undefined) continue
+    stale.push(id)
+  }
+  // One id at a time, through the registry's own public removal: it writes on the
+  // registry's serialized chain (so a concurrent archive/unarchive cannot be
+  // lost) and maintains the fields a whole-state rewrite would have to know about
+  // — the pin, and whatever this kernel line adds beside it next.
+  for (const id of stale) {
+    await writer.unarchiveSession(SessionId(id))
+  }
+  return { pruned: stale.length, remaining: current.length - stale.length }
 }
 
 /**
@@ -543,13 +567,11 @@ export function registerArchiveRoutes(connectionFetch: HostConnectionFetch, opti
     }
   }
   const pruneFetch = async (request: Request): Promise<Response> => {
-    // Capability check: the write path is private upstream API — a kernel
-    // that reshaped the registry must fail loudly (501) instead of risking
-    // a corrupted domain state.
-    const writer = options.registry as RegistryWriter
-    if (typeof writer.enqueueOperation !== 'function'
-      || typeof writer.requireState !== 'function'
-      || typeof writer.setState !== 'function') {
+    // Capability check on the PUBLIC removal path: a kernel that does not publish
+    // `unarchiveSession` must fail loudly (501) rather than have this plugin reach
+    // for a private write chain that may have been reshaped.
+    const writer = options.registry as RegistryPruner
+    if (typeof writer.unarchiveSession !== 'function') {
       return fail(501, 'prune-unsupported', {
         code: 'route.pruneUnsupported',
         text: 'this kernel version cannot prune archive records',

@@ -156,6 +156,32 @@ export interface OfficePayloadAnswer extends RouteEnvelope {
   readonly payload?: OfficePayloadState
 }
 
+/** One diagnostic the kernel's composition checker reported. */
+export interface ConfigCheckDiagnostic {
+  readonly level: 'error' | 'warning'
+  /** The checker's JSON pointer into the composed tree (`/173`). */
+  readonly path: string
+  /** The kernel's English message, verbatim (it is a diagnostic, not UI copy). */
+  readonly message: string
+  readonly entryId?: string
+  readonly entryName?: string
+  /** Whether the row belongs to this app's own suite. */
+  readonly ours: boolean
+  readonly status?: string
+}
+
+/** `POST /desktop/config-check`: the profile's static composition report. */
+export interface ConfigCheckAnswer extends RouteEnvelope {
+  readonly report?: {
+    readonly profile: string
+    readonly complete: boolean
+    readonly entries: number
+    readonly diagnostics: readonly ConfigCheckDiagnostic[]
+    readonly ours: number
+    readonly others: number
+  }
+}
+
 /**
  * One message the page shows: a key of this page's dictionary, a coded message
  * from the host (rendered through the same dictionary), or text the wire
@@ -472,4 +498,24 @@ export function downloadOfficePayload(): Promise<RouteOutcome<OfficePayloadAnswe
 /** `POST /desktop/office-payload-cancel` — stop the transfer in flight. */
 export function cancelOfficePayload(): Promise<RouteOutcome<OfficePayloadAnswer>> {
   return officePayloadAction('office-payload-cancel')
+}
+
+/**
+ * `POST /desktop/config-check` — run the profile's static composition check.
+ *
+ * The shell runs `dsh --profile <name> --dump-config-schema` and answers with a
+ * small report: how many entries the profile composed, whether the kernel could
+ * type-check all of them, and each diagnostic attributed to the row it points
+ * at. The schema document itself (~900 KB) never crosses this hop.
+ *
+ * The report is the reason this exists: the kernel's checker reports findings
+ * for rows it did not write, and a stock profile already produces several, so a
+ * bare error count cannot tell a reader whether the app is at fault.
+ *
+ * @returns the report, or the outcome that refused the call.
+ */
+export async function runConfigCheck(): Promise<RouteOutcome<ConfigCheckAnswer>> {
+  const delegate = await delegateAction('/desktop/config-check', {})
+  if (delegate.kind !== 'ok') return delegate
+  return callShellAction<ConfigCheckAnswer>(delegate.url, {})
 }

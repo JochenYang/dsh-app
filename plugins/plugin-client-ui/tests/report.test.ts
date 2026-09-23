@@ -114,4 +114,35 @@ describe('diagnostics report text', () => {
     const fallback = reportFileName({}, new Date(2026, 0, 2, 3, 4, 5))
     assert.equal(fallback, 'dsh-app-diagnostics-20260102-0304.txt')
   })
+
+  it('the config-check copy exists in both languages and fills every param', () => {
+    // The card renders four of these with counts, and a count that never
+    // arrives prints a literal `{ours}` on the page — which reads as a broken
+    // check rather than a broken dictionary.
+    const keys = [
+      'diag.check.title', 'diag.check.action', 'diag.check.running', 'diag.check.idle',
+      'diag.check.noReport', 'diag.check.ok', 'diag.check.okOthers', 'diag.check.ours',
+      'diag.check.summary', 'diag.check.hintIdle', 'diag.check.hintClean', 'diag.check.hintOthers',
+      'diag.check.levelError', 'diag.check.levelWarning', 'diag.check.whoOurs', 'diag.check.whoOther',
+    ] as const
+    for (const key of keys) {
+      assert.equal(typeof zh[key], 'string', `zh is missing ${key}`)
+      assert.equal(typeof en[key], 'string', `en is missing ${key}`)
+      assert.notEqual(zh[key].trim(), '', `${key} is empty in zh`)
+      assert.notEqual(en[key].trim(), '', `${key} is empty in en`)
+    }
+    // Every placeholder a key declares has to be one the card supplies.
+    const supplied = { others: 3, ours: 1, entries: 211, errors: 5 }
+    for (const key of keys) {
+      const zhText = makeT(zh)(key, supplied)
+      const enText = makeT(en)(key, supplied)
+      assert.equal(PLACEHOLDER.test(zhText), false, `${key} (zh) left a placeholder unfilled: ${zhText}`)
+      assert.equal(PLACEHOLDER.test(enText), false, `${key} (en) left a placeholder unfilled: ${enText}`)
+    }
+    // The two languages must not be the same string: a copy-paste that never got
+    // translated is invisible in a screenshot.
+    for (const key of keys) {
+      if (!zh[key].includes('{')) assert.notEqual(zh[key], en[key], `${key} was not translated`)
+    }
+  })
 })

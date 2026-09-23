@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "跨会话记忆",
+    "description": "跨会话记忆：按项目注入记忆卡片，模型可调用 memory_save/recall/forget，并有后台整理器。"
+  }
+}

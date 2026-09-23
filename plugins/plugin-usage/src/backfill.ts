@@ -47,6 +47,22 @@ export function listedSessionId(entry: unknown): string {
   return typeof bare === 'string' ? bare : ''
 }
 
+/**
+ * The LOG FORMAT version one `list()` entry declares, or undefined.
+ *
+ * The header carries it (`SessionHeader.version`, "the current logical format
+ * version"), and the header is deliberately NOT a session event — it never
+ * reaches {@link foldEvents}, so this is the only place a fold can learn which
+ * seq space it is reading. Same wrapper-or-bare tolerance as
+ * {@link listedSessionId}: the listing's shape is the backend's business.
+ */
+export function listedHeaderVersion(entry: unknown): number | undefined {
+  const wrapped = (entry as { header?: { version?: unknown } }).header
+  if (typeof wrapped?.version === 'number') return wrapped.version
+  const bare = (entry as { version?: unknown }).version
+  return typeof bare === 'number' ? bare : undefined
+}
+
 /** One backfill pass outcome, for logging. */
 export interface BackfillReport {
   inspected: number
@@ -91,6 +107,19 @@ export async function runBackfill(
       report.inspected += 1
       const inherited = typeof handle.inheritedEventCount === 'number' ? handle.inheritedEventCount : 0
       const lastSeq = events.length > 0 ? events[events.length - 1]!.seq : 0
+      // The log format is the witness for every watermark below: a migration
+      // renumbers the tail, so a watermark advanced under the previous format can
+      // skip events that moved below it — read here, before the watermark is
+      // consulted, so the re-fold happens in THIS pass rather than the next.
+      // Rows are deduplicated by key, so re-reading a log cannot double-count.
+      const version = listedHeaderVersion(entry)
+      if (version !== undefined && store.observeLogFormat(version)) {
+        // The witness moved, so this session's stored rows may hold the same
+        // message under its OLD seq — re-folding without dropping them would
+        // count that usage twice. See `UsageStore.dropRowsFor`.
+        const dropped = store.dropRowsFor(id)
+        log(`usage backfill: log format ${String(version)} differs from the folded one; re-folding sessions${dropped > 0 ? ` (${String(dropped)} row(s) dropped for this one)` : ''}`)
+      }
       // Both bounds must be cleared: the stored watermark (what this plugin
       // already folded) and the inherited prefix (what the PARENT's fold
       // already counted).

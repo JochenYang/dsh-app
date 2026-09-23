@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "PDF 文档",
+    "description": "读取 PDF 文本、生成规范排版的 PDF，并把已有 Office 文档原样转成 PDF。"
+  }
+}

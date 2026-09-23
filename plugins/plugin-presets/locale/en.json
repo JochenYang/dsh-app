@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Preset packages",
+    "description": "Portable preset packages: export a preset directory as a .dshpreset archive and import it against the kernel roster."
+  }
+}

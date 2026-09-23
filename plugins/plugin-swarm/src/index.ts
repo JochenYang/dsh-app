@@ -26,12 +26,22 @@
  * @module @dsh-app/plugin-swarm
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
+
+// The session log's V4 admission refuses the retired generic `plugin` kind:
+// every producer owns its own `kind` (packages/llm/llm/src/message.ts, "there
+// is no shared catch-all `plugin` kind"), so this plugin declares one.
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-app-swarm': { kind: 'dsh-app-swarm' } & ContextFormed
+  }
+}
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
@@ -45,8 +55,8 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import { projectOutputItems, runSwarmBatch, type SwarmBatchOutcome, type SwarmItemOutcome } from './orchestrator.ts'
 import { MIN_ITEMS, expandTasks } from './expand.ts'
 import type { SwarmToolArgs } from './expand.ts'
-import { loadSwarmUserConfig } from './user-config.ts'
-import { registerSwarmRoutes } from './routes.ts'
+import { projectSwarmConfig, readRetiredSwarmConfig, retireSwarmConfigFile, type SwarmConfigValues } from './user-config.ts'
+import { registerSwarmRoutes, type SwarmConfigEditor } from './routes.ts'
 
 export const name = 'plugin-swarm'
 
@@ -72,42 +82,58 @@ const SWARM_SECTION_ORDER = 116.6
  */
 const SWARM_EXPLORE_CEILING = 64
 
-/** Config: provider, scheduling bounds, and child defaults. */
+/**
+ * Config: provider, scheduling bounds, and child defaults.
+ *
+ * The ten fields the settings page edits are `Volatile` references (see
+ * user-config.ts): the kernel's config editor stores them in the profile's
+ * `cordis.patch.yml` and commits a new value into this running plugin's
+ * references, so a saved knob applies to the next swarm call with no restart.
+ * `provider`, `agentOptions` and `maxDepth` stay ordinary fields — they say
+ * which backend runs and what a child is, which is deployment structure rather
+ * than user tuning.
+ */
 export interface Config {
   /** The `ctx.subagents` provider name to start runs on (default `spawn`). */
   provider: string
+  /**
+   * Whether the tool, the `/swarm` command and the prompt section mount at all
+   * (default true). Needs a restart: the mount decision is the plugin's own
+   * activation, so the reference is read once per start.
+   */
+  enabled: Volatile<boolean>
   /** Hard cap on batch size (default 8). */
-  maxItems: number
+  maxItems: Volatile<number>
   /** Worker-pool size when the model does not request one (default 4). */
-  defaultConcurrency: number
+  defaultConcurrency: Volatile<number>
   /** Hard cap on worker-pool size (default 8). */
-  maxConcurrency: number
+  maxConcurrency: Volatile<number>
   /**
    * Adaptive scheduling: item failures halve the live pool (floor 1) and
    * double the start stagger (cap 30s); a streak of clean completions grows
    * the pool back toward maxConcurrency and eases the stagger to base
    * (default true).
    */
-  adaptive: boolean
+  adaptive: Volatile<boolean>
   /**
    * Automatic retries per item after an error settle (continuable backend
    * only; the child continues from its preserved context). 0 disables
    * (default 2).
    */
-  itemMaxRetries: number
+  itemMaxRetries: Volatile<number>
   /** Base backoff before the first item retry, doubling per attempt (default 15000). */
-  itemRetryDelayMs: number
+  itemRetryDelayMs: Volatile<number>
   /** Per-item output truncation limit in characters (default 4000). */
-  perItemOutputLimit: number
+  perItemOutputLimit: Volatile<number>
   /**
    * Batch token budget (default 0 = disabled). Once the summed usage of
    * settled children reaches this, the batch stops launching work; in-flight
    * children settle normally. Best-effort: children whose sessions are
    * unreadable contribute no accounting.
    */
-  tokenBudget: number
+  tokenBudget: Volatile<number>
   /** Delay between consecutive child starts in ms; smooths provider rate limits (default 800). */
-  startStaggerMs: number
+  startStaggerMs: Volatile<number>
   /** Agent options applied to every child; omitted fields use child-loop defaults. */
   agentOptions?: AgentOptions
   /**
@@ -119,19 +145,33 @@ export interface Config {
   maxDepth: number
 }
 
-export const Config: z<Config> = z.object({
+/**
+ * The effective config with the kernel's volatile references snapshotted: what
+ * the runtime reads per call, with no reference to hold on to.
+ */
+export type ResolvedConfig = {
+  readonly [K in keyof Config]: Config[K] extends Volatile<infer V> ? V : Config[K]
+}
+
+// The schema is the runtime source of truth for the interface above, and stays
+// unannotated on purpose: schemastery's volatile mode makes an object schema's
+// own `default()` signature incompatible with `z<Config>`, which is why the
+// kernel's volatile configs (`ui-theme`, `agent-default-model`) also declare
+// the interface beside an inferred schema. Keep the two in step by hand.
+export const Config = z.object({
   provider: z.string().default('spawn'),
+  enabled: z.boolean().default(true).volatile(),
   // Floors mirror FIELD_MINIMUMS in user-config.ts — a 0 here would merge
   // into the effective config and trip the load-time assertions below.
-  maxItems: z.natural().min(MIN_ITEMS).max(Number.MAX_SAFE_INTEGER).default(8),
-  defaultConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4),
-  maxConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(8),
-  adaptive: z.boolean().default(true),
-  itemMaxRetries: z.natural().max(Number.MAX_SAFE_INTEGER).default(2),
-  itemRetryDelayMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(15000),
-  perItemOutputLimit: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4000),
-  tokenBudget: z.natural().max(Number.MAX_SAFE_INTEGER).default(0),
-  startStaggerMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(800),
+  maxItems: z.natural().min(MIN_ITEMS).max(Number.MAX_SAFE_INTEGER).default(8).volatile(),
+  defaultConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4).volatile(),
+  maxConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(8).volatile(),
+  adaptive: z.boolean().default(true).volatile(),
+  itemMaxRetries: z.natural().max(Number.MAX_SAFE_INTEGER).default(2).volatile(),
+  itemRetryDelayMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(15000).volatile(),
+  perItemOutputLimit: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4000).volatile(),
+  tokenBudget: z.natural().max(Number.MAX_SAFE_INTEGER).default(0).volatile(),
+  startStaggerMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(800).volatile(),
   // Prevent Schemastery from materializing omitted agentOptions as `{}`.
   agentOptions: z.object({
     provider: z.string(),
@@ -140,6 +180,22 @@ export const Config: z<Config> = z.object({
   }).default(undefined as unknown as { provider: string; model: string; maxTokens: number }),
   maxDepth: z.natural().max(Number.MAX_SAFE_INTEGER).default(1),
 })
+
+/** The ten editable values, as the settings page and the write path see them. */
+function editableValues(config: ResolvedConfig): SwarmConfigValues {
+  return {
+    enabled: config.enabled,
+    adaptive: config.adaptive,
+    defaultConcurrency: config.defaultConcurrency,
+    maxConcurrency: config.maxConcurrency,
+    maxItems: config.maxItems,
+    startStaggerMs: config.startStaggerMs,
+    itemMaxRetries: config.itemMaxRetries,
+    itemRetryDelayMs: config.itemRetryDelayMs,
+    perItemOutputLimit: config.perItemOutputLimit,
+    tokenBudget: config.tokenBudget,
+  }
+}
 
 /**
  * Standing guidance for the autonomous (tool-choice) path.
@@ -191,8 +247,20 @@ const SWARM_COMMAND_USAGE =
   '用法：/swarm <任务描述>\n将任务拆分为多个并行子代理执行，完成后自动汇总结果。\n示例：/swarm 为 src/api、src/ui、src/store 三个目录分别补充单元测试'
 
 
+/**
+ * The loader entry that owns this plugin's row — the handle the kernel's config
+ * editor addresses (`ctx.fiber.entry` in `packages/boot/config-editor`). The
+ * loader merges that property onto the fiber through
+ * `@deepseek-ai/cordis-plugin-loader`, which this package does not depend on at
+ * runtime; it is read structurally so the host half never has to resolve a
+ * package whose own cordis import can land on a second copy.
+ */
+function owningEntry(ctx: Context): unknown {
+  return (ctx.fiber as { entry?: unknown }).entry
+}
+
 /** Clamp a requested pool size into the configured bounds. */
-function resolveConcurrency(requested: number | undefined, config: Config): number {
+function resolveConcurrency(requested: number | undefined, config: ResolvedConfig): number {
   const value = requested !== undefined && Number.isFinite(requested) ? Math.floor(requested) : config.defaultConcurrency
   return Math.max(1, Math.min(value, config.maxConcurrency))
 }
@@ -269,36 +337,92 @@ interface SwarmItemOutput extends Pick<SwarmItemOutcome,
 }
 
 export function apply(ctx: Context, baseConfig: Config): void {
-  // User-level overrides: the shell rewrites the loader overlay on every
-  // server start, so `$DSH_HOME/storages/dsh-app-plugin-swarm/config.json`
-  // is the user's tuning point (see user-config.ts). Read lazily per swarm
-  // call so settings-page edits apply to the next execution with no restart.
-  const configPath = join(resolveDshHome(), 'storages', 'dsh-app-plugin-swarm', 'config.json')
-  const resolveConfig = (): Config & { enabled?: boolean } => ({
-    ...baseConfig,
-    ...loadSwarmUserConfig(configPath, message => ctx.logger.warn(message)),
+  /**
+   * The kernel's persistent config editor, when this host has one. It appends
+   * the rows it stores for a setting to the profile's `cordis.patch.yml`, the
+   * document the desktop shell preserves verbatim (`src/main/brand-suite.ts`,
+   * the opaque tail). A host without a profile carries no editor, and then a
+   * settings write can only be refused.
+   */
+  const configEditor = (): SwarmConfigEditor | undefined => ctx.get('configEditor') as SwarmConfigEditor | undefined
+
+  /**
+   * The effective config, read live. Every scheduling field is a volatile
+   * reference — a stable handle the kernel updates in place — so a value saved
+   * on the settings page is in effect for the next swarm call, and `enabled` is
+   * read once per activation.
+   */
+  const resolveConfig = (): ResolvedConfig => ({
+    provider: baseConfig.provider,
+    enabled: baseConfig.enabled.get(),
+    maxItems: baseConfig.maxItems.get(),
+    defaultConcurrency: baseConfig.defaultConcurrency.get(),
+    maxConcurrency: baseConfig.maxConcurrency.get(),
+    adaptive: baseConfig.adaptive.get(),
+    itemMaxRetries: baseConfig.itemMaxRetries.get(),
+    itemRetryDelayMs: baseConfig.itemRetryDelayMs.get(),
+    perItemOutputLimit: baseConfig.perItemOutputLimit.get(),
+    tokenBudget: baseConfig.tokenBudget.get(),
+    startStaggerMs: baseConfig.startStaggerMs.get(),
+    agentOptions: baseConfig.agentOptions,
+    maxDepth: baseConfig.maxDepth,
   })
+
+  /**
+   * Import the retired JSON store once, then move it aside.
+   *
+   * That file (`$DSH_HOME/storages/dsh-app-plugin-swarm/config.json`) is what
+   * this plugin read before its knobs became declarative config, so a tuning
+   * saved there would be ignored from now on. The values are written into the
+   * profile row, and the file is renamed — never deleted, it is the user's own
+   * writing. Deferred past activation (the editor refuses an entry whose fiber
+   * is still loading) and never fatal: a stale file must not fail a boot.
+   */
+  const importRetiredConfig = async (): Promise<void> => {
+    const storePath = join(resolveDshHome(), 'storages', 'dsh-app-plugin-swarm', 'config.json')
+    const retired = readRetiredSwarmConfig(storePath, message => ctx.logger.warn(message))
+    if (retired === undefined) return
+    const editor = configEditor()
+    const entry = owningEntry(ctx)
+    if (editor === undefined || entry === undefined) {
+      ctx.logger.warn(`swarm plugin: cannot import ${storePath} — this host has no configuration editor to persist it through, so the file is left in place`)
+      return
+    }
+    try {
+      if (Object.keys(retired).length > 0) {
+        await editor.edit(entry, (current, inherited) => projectSwarmConfig(current, inherited, retired, editableValues(resolveConfig())))
+      }
+    } catch (error) {
+      ctx.logger.warn(`swarm plugin: could not import ${storePath}: ${error instanceof Error ? error.message : String(error)}; the file is left in place`)
+      return
+    }
+    const movedTo = retireSwarmConfigFile(storePath)
+    ctx.logger.info(movedTo === undefined
+      ? `swarm plugin: imported ${storePath} into the plugin config, but could not move the file aside`
+      : `swarm plugin: imported ${storePath} into the plugin config; the old file is kept as ${movedTo}`)
+  }
 
   // The settings route mounts even when the tool is disabled, so the page
   // can re-enable the plugin (a re-enable needs a restart either way).
   ctx.effect(
     () => registerSwarmRoutes(ctx.connection.fetch, {
-      enabled: true,
-      defaultConcurrency: baseConfig.defaultConcurrency,
-      maxConcurrency: baseConfig.maxConcurrency,
-      maxItems: baseConfig.maxItems,
-      startStaggerMs: baseConfig.startStaggerMs,
-      itemMaxRetries: baseConfig.itemMaxRetries,
-      itemRetryDelayMs: baseConfig.itemRetryDelayMs,
-      perItemOutputLimit: baseConfig.perItemOutputLimit,
-      tokenBudget: baseConfig.tokenBudget,
-      adaptive: baseConfig.adaptive,
-    }, configPath),
+      live: () => editableValues(resolveConfig()),
+      // What the composing layers alone yield — the "default" the page badges
+      // and the value a cleared field returns to.
+      layerDefaults: () => configEditor()?.configuration?.().find(row => row.entry === owningEntry(ctx))?.inherited,
+      entry: () => owningEntry(ctx),
+      editor: configEditor(),
+    }),
     'plugin-swarm: settings routes',
   )
 
+  ctx.effect(() => {
+    const timer = setTimeout(() => { void importRetiredConfig() }, 0)
+    return () => { clearTimeout(timer) }
+  }, 'plugin-swarm: retired config import')
+
   const config = resolveConfig()
-  if (config.enabled === false) {
+  if (!config.enabled) {
     ctx.logger.info('swarm plugin: disabled by user config')
     return
   }
@@ -657,7 +781,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
         const agent = invocation.agent
         agent.inject(createUserMessage({
           content: [{ type: 'text', text: SWARM_COMMAND_DIRECTIVE }],
-          source: { kind: 'plugin', plugin: 'swarm', form: 'notice', summary: 'swarm 模式：任务将拆分为并行子代理执行' },
+          source: { kind: 'dsh-app-swarm', form: 'notice', summary: 'swarm 模式：任务将拆分为并行子代理执行' },
         }))
         agent.followup(createUserMessage({
           content: [{ type: 'text', text: task }],

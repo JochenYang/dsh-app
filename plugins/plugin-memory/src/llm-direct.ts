@@ -245,7 +245,10 @@ export async function streamJson(llm: LlmRuntimeLike, spec: DirectCallSpec): Pro
   const startedAt = Date.now()
   const timeoutMs = spec.timeoutMs ?? DIRECT_TIMEOUT_MS
   const messages = [
-    createSystemMessage(spec.system, 'plugin-memory'),
+    // 0.1.7's `createSystemMessage` takes the text alone: a system message's
+    // source is fixed at `{ kind: 'system-prompt' }`, so the producer label this
+    // call used to pass has nowhere to go and is no longer accepted.
+    createSystemMessage(spec.system),
     createUserMessage({ content: [{ type: 'text', text: spec.user }], source: { kind: 'user' } }),
   ]
   // The structural face erases the nominal brands (see LlmRuntimeLike), so

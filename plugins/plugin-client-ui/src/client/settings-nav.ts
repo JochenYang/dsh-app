@@ -1,19 +1,19 @@
 /**
- * Settings nav rail: one injected stylesheet for the two things the suite made
- * necessary there.
+ * Settings nav rail: one injected stylesheet, for the one thing the suite still
+ * needs there.
  *
- * 1. **The rail has to scroll.** Upstream sizes it for its own five sections
- *    and makes only the content column scrollable; the suite adds ten more
- *    rows, and the nav list has no overflow of its own. Measured in a real
- *    window: at 1280x620 the last four rows sit below the panel's bottom edge,
- *    clipped by its `overflow: hidden`, and the list cannot scroll
- *    (`overflow-y: visible`, `scrollHeight === clientHeight`) — unreachable
- *    rather than merely off-screen. `min-height: 0` is what lets the flex child
- *    shrink below its content so `overflow-y: auto` has something to do.
- * 2. **Two of our rows want a real glyph.** Upstream maps a few section ids to
- *    icons and falls back to a generic gear for everything else, so Advanced
- *    Models and 维护 (the merged upkeep section) would both wear that same
- *    gear.
+ * **Two of our rows want a real glyph.** Upstream maps a few section ids to
+ * icons and falls back to a generic gear for everything else, so Advanced
+ * Models and 维护 (the merged upkeep section) would both wear that same gear.
+ *
+ * The rail's own scrolling is NOT ours any more. It used to be: upstream sized
+ * the rail for its own five sections and made only the content column
+ * scrollable, so with ten more rows the last ones sat below the panel's clipped
+ * bottom edge and could not be reached (`overflow-y: visible`,
+ * `scrollHeight === clientHeight`). The stylesheet this module prepended —
+ * `min-height: 0; overflow-y: auto` plus a bottom pad — is now gone, because
+ * upstream's own `.navList` carries `overflow-y: auto` (`SettingsRoot.module.css`,
+ * 0.1.7): a second answer for the same element would only fight the first.
  *
  * Rows carry no per-id DOM hook — the section id is not rendered and the
  * CSS-module class names are stable in name only — so a row is found by its
@@ -33,9 +33,6 @@ export interface NavGlyph {
   readonly svg: string
 }
 
-/** The list that must scroll; scoped to the nav so no other list is touched. */
-const SCROLL_RULE = 'nav [class*="navList"] { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 22px; }'
-
 /** Mask declarations shared by every glyph. */
 const glyphRules = (glyph: NavGlyph): string[] => {
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(glyph.svg)}")`
@@ -50,14 +47,14 @@ const glyphRules = (glyph: NavGlyph): string[] => {
 }
 
 /**
- * Install the rail stylesheet and keep the glyph tags in sync.
+ * Install the glyph stylesheet and keep the glyph tags in sync.
  *
  * @param glyphs - the rows to paint, matched by their label of the moment.
  * @returns the disposer (observer, style rule, tags).
  */
 export function mountSettingsNav(glyphs: readonly NavGlyph[]): () => void {
   const style = document.createElement('style')
-  style.textContent = [SCROLL_RULE, ...glyphs.flatMap(glyphRules)].join('\n')
+  style.textContent = glyphs.flatMap(glyphRules).join('\n')
   document.head.append(style)
 
   const patch = (): void => {

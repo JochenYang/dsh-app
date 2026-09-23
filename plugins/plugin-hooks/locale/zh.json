@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "外部钩子",
+    "description": "外部钩子桥接：把 Claude Code / Codex 的 hooks.json 挂成活的钩子实例。"
+  }
+}

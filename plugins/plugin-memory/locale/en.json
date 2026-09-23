@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cross-session memory",
+    "description": "Cross-session memory: project-scoped cards injected per prompt, memory_save/recall/forget tools, and a background curator."
+  }
+}
