@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, Notification, session, shell } from 'electron'
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
@@ -22,6 +22,8 @@ import { loadEnvScrubConfig, scrubEnvironment } from './env-scrub'
 import { checkConfigSchema } from './config-schema'
 import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from './proxy-detect'
 import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
+import { installCrashLogging } from './crash-log'
+import { appendRotatingLog } from './log-file'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, type PatchSpecifier } from './brand-suite'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
@@ -1515,18 +1517,9 @@ function logKernel(line: string): void {
   console.log(line)
   try {
     if (kernelLogFile === null) {
-      const dir = resolveLogDir()
-      mkdirSync(dir, { recursive: true })
-      const file = path.join(dir, 'dsh-kernel.log')
-      // Keep exactly one previous run: an unbounded log is worse than none.
-      if ((statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 1_000_000) {
-        // Windows refuses a rename onto an existing target.
-        rmSync(`${file}.1`, { force: true })
-        renameSync(file, `${file}.1`)
-      }
-      kernelLogFile = file
+      kernelLogFile = path.join(resolveLogDir(), 'dsh-kernel.log')
     }
-    appendFileSync(kernelLogFile, `${new Date().toISOString()} ${line}\n`)
+    appendRotatingLog(kernelLogFile, line)
   } catch {
     // Never let diagnostics break the boot path.
   }
@@ -1758,6 +1751,14 @@ if (path.basename(userDataDir) !== USER_DATA_DIR_NAME) {
   )
 }
 app.setPath('userData', userDataDir)
+
+// Last-resort handlers, installed before any other work: an uncaught exception
+// in the main process otherwise raises a native error box with a raw stack and a
+// single "OK" button, and in a packaged build neither that nor an unhandled
+// rejection leaves any trace (there is no console). Both now land in the kernel
+// log with their full stack. Detail — including why the process deliberately
+// stays up — is in src/main/crash-log.ts.
+installCrashLogging(logKernel)
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {

@@ -53,7 +53,7 @@ const CALL = /\b(rmSync|rmdirSync)\s*\(/g
 const AUDIT = [
   // ── shell + tooling, reviewed call by call ────────────────────────────────
   {
-    match: 'src/main/index.ts',
+    match: 'src/main/log-file.ts',
     count: 1,
     why: 'kernel log rotation: unlinks the single file `<dsh-kernel.log>.1` in the app log dir, never a tree',
   },

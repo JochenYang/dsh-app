@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- **主进程的兜底错误处理：不再弹原生错误框，并且不再无迹可查**。用户报的「点立即更新后弹出一个带红叉的『A JavaScript error occurred in the main process』」在 Electron 44.4.5 上实测确认了机制：**未捕获异常**（`uncaughtException`）会弹那个框、而且进程**继续运行**；**未处理的 rejection 不弹框**。两者在打包版里都**完全不可见**（没有控制台），所以那个弹框无法追到任何一行——这也是这次排查只能推断的原因。现在两类错误都装上了兜底：写进 `dsh-kernel.log`（含完整栈），并标注是 `TRANSPORT`（网络/传输类，如 undici 的 `TypeError: terminated`、`ECONNRESET`、`TimeoutError`）还是 `DEFECT`。**进程在两种情况下都保持运行**——退出会是一个新的失败模式（Electron 自己的行为就是继续跑），而这类失败的可恢复路径（下载链换源）只在进程活着时才有效。日志轮转同时抽成 `log-file.ts` 并补了测试（保留一代、两次轮转不撞 Windows 的改名限制）
+
+### English
+- **Last-resort error handling in the main process: no more native error box, and no more invisible failures.** The reported "clicked Update now and got a red-X 'A JavaScript error occurred in the main process' box" was measured on Electron 44.4.5: an **uncaughtException** raises that box and the process **keeps running**, while an **unhandled rejection raises no box at all** — and in a packaged build neither is observable, because there is no console. That is why the box could not be traced to a line. Both listeners are now installed: every escaped error is written to `dsh-kernel.log` with its full stack, labelled `TRANSPORT` (a network condition such as undici's `TypeError: terminated`, `ECONNRESET`, `TimeoutError`) or `DEFECT`. **The process stays up in both cases** — exiting would be a new failure mode (Electron's own behaviour is to continue), and the recovery path for the interesting case, the download chains moving to their next source, only works while the process lives. The log rotation moved to `log-file.ts` with tests (one generation kept; a second rotation does not hit Windows' rename-onto-existing limit)
+
 ## [v0.13.4] - 2026-09-24
 
 ### 中文
