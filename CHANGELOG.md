@@ -8,7 +8,7 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
-## [Unreleased]
+## [v0.13.4] - 2026-09-24
 
 ### 中文
 - **修复「开代理时每个 provider 都取不到模型」的真正根因，并撤回上一版的错误处置**：0.1.6 线两个能力都正常、0.1.7 线一开代理模型列表就全坏，差别只在**运行时装的 `undici` 版本**——0.1.6 是 **8.10.2**，0.1.7 是 **8.11.0**。两版之间**只差一行**（`lib/dispatcher/dispatcher1-wrapper.js` 的 `dispatch`）：8.10.2 是 `if (opts.allowH2 !== false)`，一律把请求降级到 HTTP/1.1；8.11.0 改成 `if (opts.upgrade && opts.allowH2 !== false)`，只对 WebSocket 降级。内核为了让裸 `fetch` 也能走代理，会把自家 undici 的这层兼容包装装到 Node 内建 `fetch` 读的全局槽上；于是普通 GET 在 8.11.0 下走 HTTP/2、交给 v1 处理器，**响应头全丢、body 未解码**——`llm-pi-ai` 的模型探测正是用裸 `fetch`，所以只有模型列表坏（内核自己的 `web_fetch` 用自家 undici 的 `fetch`，一直没事）。**实测**：同一棵 rc.1 运行时、同一个 Node、只换 undici 目录 → 8.11.0 是 `392B / 0 头 / 非 JSON`，8.10.2 是 `2172B / 16 头 / JSON`。**修法**：把 `undici` 钉在 8.10.2，钉在运行时组装那一层（`scripts/build-runtime.mjs` 的安装输入 `overrides`），随 runtime 分发到所有平台。**上一版那条「fake-IP 网络不注入代理」的规则已整体删除**——那是在错误根因下做的取舍，它拿 `web_fetch` 换模型列表，而两者本来可以同时成立
