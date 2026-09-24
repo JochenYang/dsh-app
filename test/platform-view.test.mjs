@@ -192,3 +192,45 @@ test('the platform preload scopes the credential to the view that owns it', () =
   assert.match(built, /value\.origin === location\.origin/u)
   assert.match(built, /exposeInMainWorld\('dsh'/u)
 })
+
+// ------------------------------------------------- the session survives ordering
+//
+// The account session is published by the KERNEL while it boots, and the view is
+// created by the SHELL as part of its own startup — two independent events, in no
+// guaranteed order. The first implementation held the session only on the view and
+// applied it with an optional call, so an early publication was silently dropped
+// and the embedded page failed with "no account session" (found only by signing in
+// on a real machine). The fix keeps the session in shell state and hands it to the
+// view at creation, which makes the ORDER irrelevant rather than merely correct.
+//
+// This is a structural assertion for the same reason the theme one is: the
+// invariant is "who owns the state", and no return value shows it.
+
+test('the session lives in shell state, so the view cannot miss an early one', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+  // The shell records every publication...
+  const handler = /onPlatformSession:\s*\(session\)\s*=>\s*\{([\s\S]*?)\n\s*\},/u.exec(source)
+  assert.ok(handler !== null, 'the host callback is where a publication arrives')
+  assert.match(handler[1], /platformSession\s*=\s*session/u, 'the shell must keep the session itself')
+  // ...and the view is handed that state when it is created, BEFORE the IPC that
+  // can open a page exists (a page opened against a view with no session is the
+  // failure this guards).
+  const ensure = /function ensurePlatformView\(\)[^{]*\{([\s\S]*?)\n\}/u.exec(source)
+  assert.ok(ensure !== null, 'ensurePlatformView is where the view is created')
+  assert.match(ensure[1], /platformView\.setSession\(platformSession\)/u, 'the created view must be given the current session')
+  const setAt = ensure[1].indexOf('setSession(platformSession)')
+  const ipcAt = ensure[1].indexOf('installPlatformIpc(')
+  assert.ok(setAt !== -1 && ipcAt !== -1 && setAt < ipcAt, 'the session must be applied before the IPC surface can open a page')
+})
+
+test('a publication is not lost when it arrives before the view exists', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+  // The original defect, stated as the thing that must NOT come back: applying a
+  // session ONLY through an optional view, with no shell-side record. That shape
+  // silently discards the first publication whenever the host wins the race.
+  const earlyReturnShape = /onPlatformSession:\s*\(session\)\s*=>\s*\{\s*platformView\?\.setSession\(session\)\s*\}/u
+  assert.ok(
+    !earlyReturnShape.test(source),
+    'applying the session only through `platformView?.` drops an early publication — keep it in shell state instead',
+  )
+})

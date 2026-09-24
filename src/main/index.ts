@@ -13,7 +13,7 @@ import {
   preferredKernel,
 } from '../kernel/bundled'
 import { DshServer, resolveLogDir } from './server'
-import { APP_URL, desktopHostEntry, hostPackageVersion, hostPnpmBinDir, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor } from './desktop-host'
+import { APP_URL, desktopHostEntry, hostPackageVersion, hostPnpmBinDir, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor, type PlatformSession } from './desktop-host'
 import { createShellActionHandler, shellActionStampRule, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
 import { hostStreamAuthRule } from './host-stream-auth'
 import { installSessionHeaderRules } from './session-hooks'
@@ -146,9 +146,22 @@ let injectedProxyUrl: string | undefined
 /** Interval handle for the proxy watchdog; cleared on quit. */
 let proxyWatchdog: NodeJS.Timeout | undefined
 /**
+ * The account session for embedded Platform views, as the kernel last published
+ * it — shell state, NOT a field of the view.
+ *
+ * It lives here so that the order of two independent events stops mattering: the
+ * kernel publishes this while it boots (measured: BEFORE the host's own `ready`),
+ * while the view is created as part of the shell's own startup. Held on the view
+ * instead, an earlier publication was silently dropped by an optional call
+ * (`platformView?.setSession(...)`), and the embedded page then failed with "no
+ * account session" — a bug that took a real sign-in to surface. Now whichever
+ * happens second catches up: the view is handed the current value when it is
+ * created, and every later publication is applied to it.
+ */
+let platformSession: PlatformSession | null = null
+/**
  * The embedded Platform view (usage / top-up), created with the first window and
- * reused for every open. Holds the account credential snapshot in main-process
- * memory only; see src/main/platform-view.ts.
+ * reused for every open. Holds no credential itself — see {@link platformSession}.
  */
 let platformView: PlatformView | undefined
 
@@ -744,6 +757,10 @@ function ensurePlatformView(): void {
   // appearance the shell resolved for its own chrome (see PlatformView.applyTheme).
   const platformTheme = (): 'light' | 'dark' => activeThemeMode()
   platformView = new PlatformView(platformPreloadPath(), platformLocale, platformTheme)
+  // Hand it whatever the kernel has already published: this call and the host's
+  // publication are independent events, and the view must not miss a session that
+  // arrived while the shell was still starting (see `platformSession`).
+  platformView.setSession(platformSession)
   installPlatformIpc({
     owner: () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents),
     view: () => platformView,
@@ -1649,10 +1666,14 @@ async function boot(): Promise<void> {
       recordServerLog(line)
     },
     // The account credential snapshot, straight from the host's private channel.
-    // `PlatformView` keeps it in main-process memory only; signing out (null) closes
-    // whatever page was open, because a document prepared with the old account must
-    // not outlive it.
-    onPlatformSession: (session) => { platformView?.setSession(session) },
+    // It is recorded in SHELL state first and then applied, so a publication that
+    // arrives before the view exists is kept rather than dropped (see
+    // `platformSession`); signing out (null) closes whatever page was open,
+    // because a document prepared with the old account must not outlive it.
+    onPlatformSession: (session) => {
+      platformSession = session
+      platformView?.setSession(session)
+    },
   })
   // The window's `dsh-app://app/…` requests are served from whatever host is
   // running; with none running the page gets a 503 rather than an open socket

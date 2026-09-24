@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.13.7] - 2026-09-24
+
+### 中文
+- **账号会话改为外壳持有，两个独立的启动事件不再有先后要求**。内核发布账号会话的时机（实测：**早于** host 自己的 `ready`）与外壳创建内嵌视图的时机是两个互不相关的事件。此前会话**只存在视图里**、用 `platformView?.setSession(...)` 应用——视图还没建时那次发布就被**静默丢弃**，症状是内嵌用量/充值页报「无账号会话」，只有真人登录一次才会暴露。上一版把视图的创建提前到 `server.start()` 之前，那只是**把顺序调对**：谁动了启动流程就会再犯。现在会话记录在外壳状态里、视图创建时自己取，**谁先谁后都不会丢**。
+- **补上这类缺陷的自动化守卫**：新增两条结构性断言（与主题那条同一思路——"状态归谁所有"是返回值看不出来的不变量）：① 会话必须存在外壳状态、且视图创建时**先取会话再装 IPC**（页面在无会话的视图上打开就是这次要防的失败）；② **把原缺陷写成禁止的形状**——`platformView?.setSession(session)` 单独出现即失败，将来谁改回去测试先红。**这是上一版遗留的测试缺口，现已关闭。**
+- **发布文档补两条这一版换来的教训**（`docs/agents/release-checklist.md`，决定 bump 什么之前先读）：① 行为变了但版本没 bump = **什么都没发**——v0.13.6 实测：四个插件改了可见行为却没动版本，采纳指纹停在 `7b7e969e`，外壳会判定"已采纳"而不解包新内核，用户看到旧 UI **且无任何报错**；② 外壳 tag **覆盖不到** runtime 里的代码——"修好重发外壳"不是插件改动的交付路径。同时给发布前核对加了必查项：每格 manifest 的 suiteVersion 必须是刚构建的那个（混合集合没有任何红灯），以及**从产物里把插件版本读出来**（漏 bump 某个插件只有这一步能发现）。
+
+### English
+- **The account session is shell state now, so two independent startup events no longer have an order requirement.** When the kernel publishes that session (measured: **before** the host's own `ready`) and when the shell creates the embedded view are unrelated events. The session used to live ONLY on the view and was applied with `platformView?.setSession(...)` — so a publication arriving while the view did not exist was **silently dropped**, and the embedded usage/top-up page then failed with "no account session", which only a real sign-in could surface. The previous release moved the view's creation ahead of `server.start()`, but that merely made the order correct: the next person to touch the startup flow would reintroduce it. The session is now recorded in shell state and read back by the view at creation, so **either order works**.
+- **An automated guard for that class of defect**: two structural assertions (the same approach as the theme one — "who owns the state" is an invariant no return value shows). ① The session must live in shell state, and the view must be given it **before** the IPC surface is installed (opening a page against a session-less view is exactly the failure this guards). ② **The original defect is written down as a forbidden shape** — a bare `platformView?.setSession(session)` fails the test, so a future edit that reintroduces it goes red. **This closes the test gap the previous release left open.**
+- **The release document gained the two lessons this release paid for** (`docs/agents/release-checklist.md`; read before deciding what to bump): ① a behaviour change with no version bump ships **nothing** — measured on v0.13.6, where four plugins changed visibly without a version change, the adoption key stayed `7b7e969e`, the shell judged the kernel "already adopted" and unpacked nothing, and the user saw the old UI **with no error anywhere**; ② a shell tag **cannot** cover code that ships inside the runtime, so "fix it and re-release the shell" is not a delivery path for a plugin change. The pre-publish checklist also gained two mandatory checks: every cell's manifest must carry the suite version just built (a mixed set turns nothing red), and **the plugin versions must be read out of the artifact** (a forgotten bump is visible only there).
+
 ## [v0.13.6] - 2026-09-24
 
 ### 中文

@@ -24,6 +24,29 @@ mistakes that have each cost a release called out where they apply.
     installs the newer bundled kernel and the channel follows it.
 - [ ] `runtime-dist/` is gitignored and build output — never commit it.
 
+### Two lessons this project paid for (read before deciding what to bump)
+
+- [ ] **A behaviour change with no version bump ships NOTHING.** Measured on
+      v0.13.6: four suite plugins had their visible behaviour changed (a settings
+      row promoted out of a tab, a row renamed and moved, a registration shape
+      changed) and none had its `version` touched, so `suiteVersion` stayed
+      `7b7e969e`. The shell's adoption key was then IDENTICAL to what the installed
+      kernel already carried, so the update would have unpacked nothing and the
+      user would have seen the old UI — **with no error anywhere**. Bumping the
+      four plugins moved the key to `28049ec2`, which is what actually delivered
+      the change. Bump EVERY plugin whose behaviour changed, not just the one you
+      think of first, and verify afterwards that the published artifact carries
+      the new versions:
+      `tar -xzOf <runtime.tgz> runtime/app/node_modules/@dsh-app/<plugin>/package.json`.
+- [ ] **A shell `vX.Y.Z` never covers a fix to code that ships inside the
+      runtime.** The runtime is a separate artifact with its own tag
+      (`runtime-<dshVersion>`), and the shell only re-extracts it when the
+      adoption key changes. So "fix it and re-release the shell" is not a delivery
+      path for a plugin change; the runtime has to be rebuilt (see the previous
+      item) and the shell tag is a *new* version, never a re-run of the old one.
+      Same for the reverse: a `src/` fix cannot reach anyone through a runtime
+      release.
+
 ## Bump and changelog
 
 - [ ] `version` in `package.json`.
@@ -39,6 +62,17 @@ mistakes that have each cost a release called out where they apply.
 
 - [ ] Every job green: `prepare-release`, `resolve`, six `runtime` cells, four
       `app` cells.
+- [ ] **Every cell's manifest carries the suite version you just built**
+      (`gh release download runtime-<v> -p 'manifest-<cell>.json'` → `.suiteVersion`).
+      A MIXED set is the failure the `resolve` job's own probe guards against: one
+      cell left on the previous suite means that platform keeps shipping stale
+      plugins and nothing in the release turns red.
+- [ ] **The published artifact really contains the new plugin versions** — read
+      them out of the tarball, do not trust the log:
+      `tar -xzOf dsh-runtime-<cell>-<v>.tgz runtime/app/node_modules/@dsh-app/<plugin>/package.json`.
+      This is the check that closes the "bumped nothing / bumped the wrong plugin"
+      failure: a manifest can carry a fresh key while a plugin you forgot is still
+      the old version.
 - [ ] The runtime log prints `Runtime artifact ready: …` **and**
       `Office payload artifact ready: …` for the intended kernel.
 - [ ] Six cells whose sidecars match each manifest `integrity`
