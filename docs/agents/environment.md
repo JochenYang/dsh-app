@@ -26,7 +26,7 @@ exact precedence when a value can come from more than one place.
 | `DSH_APP_PRIMARY_RUNTIME` — a staged Python set (upstream's `primary-runtime` tree, `runtime.json` required) to carry inside the office payload; unset means engine-only (`build-runtime.mjs`; `scripts/build-primary-runtime.mjs` produces one) |
 | `DSH_APP_OFFICE_PAYLOAD` — payload directory the shell publishes to the kernel child (`<userData>/dsh-app-office/payload/<version>`, set at spawn whether or not it is installed); read per conversion by the runtime's kit shim (`index.ts`, `scripts/runtime-stubs/libreoffice-kit`) |
 | `DSH_APP_PROXY_PORTS` — ports to probe, replacing the default list (`proxy-detect.ts`) |
-| `DSH_APP_PROXY_INJECT` — `on` injects the detected proxy even on a fake-IP machine, `off` injects none; unset keeps the rule in `decideProxyOffer` (a fake-IP machine gets none, every other machine gets it) (`proxy-detect.ts`, `index.ts`) |
+| `DSH_APP_PROXY_INJECT` — `off` keeps the detected proxy out of the kernel child's environment; any other value (or unset) injects it (`index.ts`) |
 | `DSH_APP_PROXY_WATCHDOG_MS` — watchdog interval, default 30000 (`index.ts`) |
 | `DSH_HOME` — dsh profiles home, default `~/.dsh` (`brand-suite.ts`) |
 | `DSH_VERSION` — kernel version to bundle, else from the followed dist-tag, then asserted (`build-runtime.mjs`) |

@@ -1951,6 +1951,21 @@ async function main() {
     // only after the whole download).
     `  '${DESKTOP_HOST_PACKAGE}': '${host.spec}'`,
     ...SUITE_PLUGINS.map((name) => `  '${name}': '${suiteSpecs[name]}'`),
+    // undici is pinned to the last release whose compatibility wrapper still
+    // forces HTTP/1.1 for every request. 8.11.0 narrowed that to WebSocket
+    // upgrades only (`opts.upgrade &&`), so an ordinary GET is dispatched over
+    // HTTP/2 through the legacy wrapper the proxy installer puts on the global
+    // dispatcher — and Node's BUILT-IN `fetch` then reads a response with no
+    // headers and an undecoded body. Measured on one machine, one endpoint, the
+    // runtime's own Node and only the undici tree changed:
+    //   8.11.0 → 200, 0 headers, gzip bytes, JSON.parse throws
+    //   8.10.2 → 200, 16 headers, decoded JSON
+    // The visible cost of not pinning it is every provider's model list failing
+    // with "did not answer with JSON" whenever a proxy is in the environment,
+    // which is the state 0.1.7 shipped in (0.1.6 shipped 8.10.2 and was fine).
+    // Re-verify this pin on every kernel-line bump: it is a workaround for an
+    // upstream regression, not a preference.
+    "  'undici': '8.10.2'",
     '',
   ].join('\n'))
 

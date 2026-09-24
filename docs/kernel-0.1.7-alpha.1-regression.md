@@ -3573,9 +3573,16 @@ import 的 `@deepseek-ai/dsh-app-boot` 与 config-editor 解析到的那份**可
 **残余**：已发布的 v0.13.2 **外壳里没有这个修复**（它的 asar 是旧的），用户装上它仍会踩到；
 修复随下一次外壳发布生效。**那一台机器已经在磁盘上改好名字**，所以现在装着的 v0.13.2 也能正常工作。
 
-## 12.13 上游缺陷：代理环境下**每个** provider 都取不到模型（2026-09-24 凌晨）
+## 12.13 代理环境下**每个** provider 都取不到模型（2026-09-24）—— 根因是 undici 的补丁版本
 
-主人报的："模型高级设置所有的 provider 都无法从 provider 获取模型了"。
+主人报的："模型高级设置所有的 provider 都无法从 provider 获取模型了"。当时我把它判成上游缺陷，
+并为了保住模型列表做了一条"fake-IP 网络不注入代理"的规则——**那条规则是在错误根因下做的取舍，
+已撤销**。真正的根因见 §12.13.6：运行时装的 `undici` 从 8.10.2 升到 8.11.0 时，兼容层的
+HTTP/1.1 降级条件被收窄，于是内建 `fetch` 拿到的是没有响应头、未解码的字节。
+
+**为什么先前判错**：我先看到"不注入代理就好了"，就把它当成"代理本身有问题"，进而认为
+`web_fetch` 与模型列表二者不可兼得。真正该问的是"0.1.6 线为什么两者都能用"——主人指出这一点后，
+我把 0.1.6 的 runtime 拉下来做对照，差异立刻只剩一个包版本。
 
 ### 12.13.1 症状与第一手证据
 
@@ -3617,25 +3624,14 @@ built-in fetch resolves"。而 `packages/llm/llm-pi-ai/src/discovery.ts:327` 用
 全局 dispatcher。**注意范围**：任何让内核 import 到那份 `undici` 的动作都会污染该进程里后续的裸
 `fetch`（内建的 `web_fetch` 工具第一条请求就会 import 它），所以这不是"注入代理才有"的问题。
 
-### 12.13.3 我们的处置（保守那一侧：保住模型列表）
+### 12.13.3 撤销的处置（保留记录：为什么它不该存在）
 
-这台机器是 **TUN/fake-IP**：`cpa.geluman.cn → 198.18.1.134`、`api.github.com → 198.18.0.29`，
-本机地址 `198.18.0.1`、DNS `198.18.0.2`。对这个网络，注入的代理 URL 只买到**一件事**——内核
-`web_fetch` 的地址校验（解析结果是保留段时，**只有在它看得见代理时才跳过校验**，见
-`web-fetch-http/src/network.ts` 的 `resolvePublicAddresses` 与 `isNonPublicIpLiteral` 注释）——
-代价却是**模型列表**。
+当时的处置是 `decideProxyOffer` 里一条"**解析出占位地址的网络不注入代理**"的规则，理由是这台机器
+是 TUN/fake-IP，注入的代理 URL 只买到 `web_fetch` 的地址校验，代价却是模型列表。**这条规则已在
+§12.13.6 的修复里整体删除**：代价不是代理带来的，而是 undici 版本带来的，钉住版本之后两者可以同时成立。
 
-因此 `decideProxyOffer`（`src/main/proxy-detect.ts`）新增一条规则：**解析出占位地址的网络不注入**，
-日志里写明原因与后果；`DSH_APP_PROXY_INJECT=on/off` 是双向逃生口。规则只作用在**我们自己**的注入上，
-用户显式导出的代理环境仍然优先（`withDetectedProxy` 的老行为不变）。
-
-**真跑复验（默认启动、无任何覆盖）**：日志出现
-`local proxy at http://127.0.0.1:7897 NOT injected: this network answers every hostname with a placeholder address (198.18.0.0/15, a TUN client)…`；
-同一个 RPC → `{ok:true, count:26, first:[gemini-pro-agent, hy4-preview-f, glm-5.2, claude-sonnet-4-6]}`。
-
-**已知代价（写在这里，不藏在日志里）**：这台机器上 `web_fetch` 会像注入功能存在之前那样被地址校验
-拒绝；要那边的能力就用 `DSH_APP_PROXY_INJECT=on` 换回来（模型列表随即失效）。两者在当前内核线上
-不能同时成立——真正的修法在上游。
+保留这段是为了记住那个判断错在哪：**把"某个开关能让症状消失"当成了"那个开关就是原因"**。
+`DSH_APP_PROXY_INJECT` 作为逃生口保留下来（`off` 即不注入），但它不再是默认路径的一部分。
 
 ### 12.13.4 上游报告（可直接发出）
 
@@ -3687,3 +3683,54 @@ built-in fetch resolves"。而 `packages/llm/llm-pi-ai/src/discovery.ts:327` 用
    所以这次修的是**这台机器**这一类网络，不是整条线的问题；上游修复前，那句话要写进已知问题。
 6. **证据等级**：机制是 L1（可复现的最小脚本，两种 Node 版本、六个组合）；取舍的影响面是
    L2（代码路径 + 注释级证据，没有真跑 `web_fetch` 被拒的端到端）。
+### 12.13.6 真正的根因与修复（2026-09-24，主人指出方向后）
+
+**一句话**：0.1.6 线装的 `undici` 是 **8.10.2**，0.1.7 线装的是 **8.11.0**；两版之间，
+兼容层 `Dispatcher1Wrapper` 的 HTTP/1.1 降级条件被收窄，于是走 HTTP/2 的请求交给 v1 处理器，
+响应头与 body 解码一起丢。
+
+| # | 事实 | 来源 |
+|---|---|---|
+| 1 | 0.1.6-alpha.2 的 runtime 里 `undici` = **8.10.2**；0.1.7-alpha.2 与 rc.1 的树里都是 **8.11.0** | 前者从 GitHub 的 `runtime-0.1.6-alpha.2` 资产下载后读 `package.json`；后者读本机已安装的两棵树 |
+| 2 | 两版之间**只差一行**（`lib/dispatcher/dispatcher1-wrapper.js` 的 `dispatch`）：8.10.2 是 `if (opts.allowH2 !== false)`（一律降级），8.11.0 是 `if (opts.upgrade && opts.allowH2 !== false)`（只对 WebSocket） | `npm pack` 两版后 `diff` |
+| 3 | **同一棵 rc.1 运行时、同一个 Node、只换 undici 目录**：8.11.0 → `392B / 0 头 / 非 JSON`；8.10.2 → `2172B / 16 头 / JSON` | `scratch/rt-0.1.7-rc.1`，三次调用结果一致 |
+| 4 | 内核把代理装成**全局 dispatcher**，而 `llm-pi-ai` 的模型探测用的是**裸 `fetch`**——Node 内建 `fetch` 读的正是被包装的那个符号 | `packages/util/http-proxy/src/install.ts:171-175`（注释自陈）、`packages/llm/llm-pi-ai/src/discovery.ts:327` |
+| 5 | 内核自己的 `web_fetch` 走**自家 undici 的 fetch**（`web-fetch-http/src/network.ts:199,235`），所以它一直没事——这解释了"只有模型列表坏" | 同上 |
+| 6 | 9-18 的日志显示当时跑的是 `0.1.6-alpha.2` + `injecting proxy env`，即**注入与"两个都能用"曾经同时成立** | `logs/dsh-kernel.log` 最早几行 |
+
+**修法**：把 `undici` 钉在 **8.10.2**，钉在**运行时组装**那一层（`scripts/build-runtime.mjs` 写进
+安装输入的 `overrides`）。选这里的理由：运行时本来就是本项目自己组装的产物，这条覆盖随 runtime
+分发到所有平台，`assertLockfileCore` 也不会受影响（它只审 `@dsh-app` 与 `@deepseek-ai/dsh*` 两类）。
+
+**真跑复验（默认启动、代理开着、注入恢复、无任何环境变量覆盖）**：
+
+| 能力 | 结果 |
+|---|---|
+| 模型列表（`llm/discoverModels`） | `ok:true`，**27 个模型** |
+| `web_fetch`（内核 provider，走代理） | `https://example.com/` → `200 / 15B`；`https://cn.bing.com/` → `200 / 15B`（路由日志：`proxied via http://127.0.0.1:7897`） |
+| 不注入（`DSH_APP_PROXY_INJECT=off`） | 模型列表照常（这条路径本来就与代理无关） |
+
+**残余风险**：
+
+1. **它依赖上游那行代码不回退**：若 8.12/9.x 把降级条件再改一次，钉住的 8.10.2 仍在，行为不变；
+   但若上游把 `dsh-http-proxy` 改成不再需要 v1 兼容层，这个钉就该重新评估——**每次内核线升级都要复验**。
+2. **升级内核线时容易忘**：钉在构建脚本里、不体现在 `package.json` 的依赖表上，所以
+   `npm run typecheck` 不会提醒。已在 `AGENTS.md` 的代理条目里写明"每次内核线 bump 复验"。
+3. **上游报告仍应发出**（§12.13.4）：钉版本是我们这侧的自保，上游那侧 8.11.0 与 Node 内建
+   `fetch` 的冲突对任何装了代理的部署都成立。
+
+### 12.13.7 批判性审查（六问，本次修复）
+
+1. **主张是什么，为假时最短的检查是什么？** 主张"模型列表坏是因为 undici 8.11.0"。为假时最短检查：
+   在同一棵 rc.1 运行时里只替换 undici 目录，看裸 `fetch` 是否恢复——**已执行**，8.10.2 恢复、
+   8.11.0 不复现（三次一致）。这是 L1 证据。
+2. **有没有把"相关"当"因果"？** 先前正是这么错的（"不注入就好了"→"代理是原因"）。这次的反证是
+   主人提出的"0.1.6 时两个都能用"：若代理是原因，0.1.6 也该坏——它不坏，所以原因在别处。
+3. **修复是不是最小的？** 只加一条 `overrides` 与撤销一条规则；没有改注入逻辑、没有碰
+   `NO_PROXY` 语义、没有动用户显式导出的环境。
+4. **会不会弄坏别的？** 钉 `undici` 影响整棵 runtime 树里所有用 undici 的地方：内核自己的
+   `web_fetch` 已实测通过；插件侧的 undici 用法经 `npm test`（397 项）与套件冒烟。**未覆盖**的是
+   第三方插件自己的 undici 用法——它们装在 profile 里、有自己的依赖树，不受这条覆盖影响。
+5. **是不是"看起来好了"？** 两个能力都是真跑：模型列表回 `ok:true`+27 条；`web_fetch` 经真 provider
+   类取回 200。不是"日志没有报错"。
+6. **残余风险写在哪？** 上面三条，外加 §12.13.4 的上游报告（该发出，不该因为我们自保了就沉默）。

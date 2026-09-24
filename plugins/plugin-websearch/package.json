@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-websearch",
   "description": "DSH APP web search manager: registers a single ctx.web search provider whose engine chain (Bing / DuckDuckGo / SearXNG / Exa / Parallel) falls back automatically, plus a settings page to order engines, store keys and switch between the brand provider and the upstream DeepSeek one.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
