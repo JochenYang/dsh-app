@@ -40,7 +40,7 @@ import { closeDialogScript, type CloseDialogChoice } from './close-dialog'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
-import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate } from './updater'
+import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
 import { KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { healLogLine, healProfileDependencies, installIntoProfile, isInstallablePackageName, type ProfileHealOutcome } from './profile-heal'
@@ -1200,6 +1200,15 @@ async function startServerAndOpenWindow(): Promise<void> {
   if (isShowingLoadingPage(mainWindow)) loadAppIntoWindow(mainWindow)
   else void mainWindow.loadURL(APP_URL)
   mainWindow.show()
+  // A launch the updater started (NSIS relaunches with `--updated`) must not sit
+  // behind whatever the user was looking at: the update they just approved is
+  // the reason this window exists. `show()` above only un-hides; on Windows a
+  // relaunched process can still land behind the foreground window, so the
+  // focus is explicit and comes after the document is in place.
+  if (process.argv.includes(UPDATED_ARGV)) {
+    mainWindow.focus()
+    logKernel('[shell-updater] launched after an update; window brought to the front')
+  }
   // The loading page is gone now; the standalone splash (if one was ever
   // created) is closed and unhooked. Nothing else about mainWindow's lifecycle
   // — the close dialog, the 'closed' handler, reuse across restarts — changes.

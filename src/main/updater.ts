@@ -111,6 +111,16 @@ async function noticeInFrame(
  * The dsh kernel is updated separately by the KernelManager; the two channels
  * stay decoupled.
  */
+
+/**
+ * The argument the NSIS installer passes to the process it relaunches after an
+ * update. electron-builder's NSIS sets it on the one-click and assisted paths
+ * alike, so a launch carrying it is a post-update launch rather than a user's
+ * own start — which is what lets the shell bring the new window to the front
+ * instead of leaving it behind whatever was in front (see `boot`).
+ */
+export const UPDATED_ARGV = '--updated'
+
 export function initShellUpdater(): void {
   if (initialized) return
   initialized = true
