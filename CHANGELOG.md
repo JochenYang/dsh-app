@@ -8,7 +8,7 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
-## [Unreleased]
+## [v0.13.5] - 2026-09-24
 
 ### 中文
 - **主进程的兜底错误处理：不再弹原生错误框，并且不再无迹可查**。用户报的「点立即更新后弹出一个带红叉的『A JavaScript error occurred in the main process』」在 Electron 44.4.5 上实测确认了机制：**未捕获异常**（`uncaughtException`）会弹那个框、而且进程**继续运行**；**未处理的 rejection 不弹框**。两者在打包版里都**完全不可见**（没有控制台），所以那个弹框无法追到任何一行——这也是这次排查只能推断的原因。现在两类错误都装上了兜底：写进 `dsh-kernel.log`（含完整栈），并标注是 `TRANSPORT`（网络/传输类，如 undici 的 `TypeError: terminated`、`ECONNRESET`、`TimeoutError`）还是 `DEFECT`。**进程在两种情况下都保持运行**——退出会是一个新的失败模式（Electron 自己的行为就是继续跑），而这类失败的可恢复路径（下载链换源）只在进程活着时才有效。日志轮转同时抽成 `log-file.ts` 并补了测试（保留一代、两次轮转不撞 Windows 的改名限制）
