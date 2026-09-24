@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-client-ui",
   "description": "DSH APP brand client plugin: brand theme registration, the Advanced Models settings page, and the maintenance settings section (order 22: usage statistics, preset packages and diagnostics as three tabs).",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",

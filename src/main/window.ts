@@ -64,8 +64,13 @@ const MAIN_WINDOW_OPTS = {
     contextIsolation: true,
     nodeIntegration: false,
     sandbox: true,
-    // No preload for the dsh web UI: it is a remote-origin page with its own
-    // security model. All desktop capabilities flow through the local server.
+    // ONE marker, and nothing else: the kernel's account UI exists only when the
+    // page sees `window.dshDesktop` (`ui-settings-account/src/client/index.ts:28`
+    // returns early without it), and without it the account section, sign-in
+    // dialog and balance card are silently never registered. The preload exposes
+    // that key and no channel — see src/main/account-preload.ts for what is
+    // deliberately absent. Everything else still flows through the local server.
+    preload: path.join(__dirname, 'account-preload.js'),
   },
 } as const
 

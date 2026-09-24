@@ -45,56 +45,45 @@ export const inject = ['slots', 'locale']
 const SECTION_ID = 'dsh-app-usage'
 const SECTION_TITLE = 'usage.title' satisfies UsageKey
 
-// --- 维护 tab slot (`settings.dsh-app-maintenance.tab`). The section owner —
-// plugin-client-ui — DECLARES it in the same register() call that contributes
-// the section (its `children` table); every tab contributor registers into it.
-// The suite ships no shared package, so this block is repeated in three client
-// entries — plugin-client-ui/src/client.ts, plugin-usage/src/client.ts and
-// plugin-presets/src/client.ts — and the three copies must stay identical line
-// for line. A checkout may give each file a different line ending (this tree
-// mixes CRLF and LF), so plugin-client-ui/tests/settings-merge.test.ts compares
-// them modulo line endings and fails if one drifts.
-// BEGIN maintenance-tab-slot
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface SlotMap {
-    'settings.dsh-app-maintenance.tab': {
-      kind: 'list'
-      scope: 'root'
-      owner: MaintenanceTabOwnerProps
-    }
-  }
-}
-/** Owner share of one maintenance tab (the section supplies nothing). */
-interface MaintenanceTabOwnerProps {
-  /** Marker field: tab owner props are intentionally empty. */
-  children?: never
-}
-// END maintenance-tab-slot
+// This half no longer declares the 维护 tab slot: the usage page is its own rail
+// section (see `apply`), so it is not a tab contributor any more. The slot stays
+// declared and rendered by plugin-client-ui (its owner) for the two contributors
+// that DO remain — plugin-presets and plugin-client-ui's own diagnostics page.
 
 /**
- * Client apply: adopt styles and register the usage tab in 维护.
+ * Client apply: adopt styles and register the usage section in the rail.
+ *
+ * This page used to be a TAB inside 维护 (order 22). It is its own rail row now:
+ * 维护 collects SYSTEM-level pages (preset packages, diagnostics — "is the
+ * install healthy?"), while usage is the user's own DATA view ("what did I
+ * spend?"), and burying it behind a tab made it hard to find — reported after a
+ * search for 用量统计 in the rail came up empty. The two usage views also read
+ * better side by side: the account section shows the SERVER's balance, this page
+ * the LOCAL session logs.
+ *
  * @param ctx - the client root context.
  */
 export function apply(ctx: ClientContext): void {
-  // --- Dictionaries first: the tab label and the page below resolve through
+  // --- Dictionaries first: the rail label and the page below resolve through
   // this namespace, and the effect disposes the pair with this plugin's
   // fiber. ---
   ctx.effect(
     () => ctx.locale.register(USAGE_NS, { zh: usageZh, en: usageEn }),
     'dsh-app plugin-usage: dictionaries',
   )
-  // Tab labels are read per render and the section owner keys its ledger cache
-  // on the locale revision, so a thunk over this binding follows a language
+  // Labels are read per render, so a thunk over this binding follows a language
   // switch without re-registration — the same contract as the `t` seat.
   const t = ctx.locale.bind(USAGE_NS)
 
   adoptStyles()
-  ctx.slots.inject('settings.dsh-app-maintenance.tab', () => ctx.slots.register({
-    name: 'settings.dsh-app-maintenance.tab',
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
     id: SECTION_ID,
-    // 1 = first: usage is the page a support question starts from (what ran,
-    // and how much), ahead of the preset packages and the diagnostics readout.
-    order: 1,
+    // 21 = right after the agent band (19-20) and directly ABOVE 维护 (22): the
+    // user's own usage sits with the other data views, not at the tail with the
+    // system pages it used to be tabbed into. 16-18 are free but kept as the
+    // band boundary between the integration rows (11-14) and the ecosystem ones.
+    order: 21,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: USAGE_NS,
     label: () => t(SECTION_TITLE),

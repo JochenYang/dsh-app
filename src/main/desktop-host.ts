@@ -320,6 +320,36 @@ export interface DshHostOptions {
   onLog?: (line: string) => void
   /** First exit AFTER readiness; a failure before it reaches start()'s rejection. */
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void
+  /**
+   * Account session for the embedded Platform views: the credential snapshot the
+   * host hands over so a view can be opened signed in, or null when the account
+   * is gone. Delivered PRIVATE to the main process only — the payload is never
+   * forwarded to a renderer (upstream's comment on the same field says so: "never
+   * exposes credentials to the renderer").
+   */
+  onPlatformSession?: (session: PlatformSession | null) => void
+}
+
+/**
+ * Host-only account credentials for an embedded Platform document.
+ *
+ * Declared locally rather than imported: the package that defines it
+ * (`@deepseek-ai/dsh-deepseek-account`) lives in the KERNEL's dependency tree, and
+ * this shell typechecks against its own. Only these three fields are read, and the
+ * shape is asserted on arrival — an unreadable payload is treated as absent rather
+ * than trusted.
+ */
+export interface PlatformSession {
+  readonly origin: string
+  readonly token: string
+  readonly embeddedPageDist?: string
+  /**
+   * Deployment-owned request headers for the Platform origin (never the user's
+   * token). Upstream injects these into the embedded view's requests and merges
+   * their `cookie` pairs with the session's own; the user's credential travels
+   * separately, through the view's preload.
+   */
+  readonly requestHeaders?: Readonly<Record<string, string>>
 }
 
 /** Directory of the host package inside an installed runtime tree. */
@@ -1731,11 +1761,12 @@ export class DshHost implements DshAppTarget {
         // update handoff — this shell's updater replaces the app, not the host.
         return
       case 'platform-session':
-        // Upstream's account-session report (0.1.7+). The shell ships no
-        // account surface, and the profile this app boots is not the `desktop`
-        // profile that report is aimed at, so there is nothing to update — but
-        // the message must be ACCEPTED, because refusing an unknown tag is what
-        // turned a newer host line into a startup failure.
+        // Upstream's account-session report (0.1.7+): the credential snapshot an
+        // embedded Platform view (usage / top-up) needs. Upstream delivers it over
+        // this private IPC channel precisely so it never touches a renderer, so the
+        // payload is forwarded straight to the main process and NOT logged — a log
+        // line would put a bearer token in a file.
+        this.options.onPlatformSession?.(readPlatformSession(message.session))
         return
       default:
         message satisfies never
@@ -1756,6 +1787,42 @@ export class DshHost implements DshAppTarget {
     this.pending.clear()
     this.blockedResponses.clear()
     this.responsePipe?.resume()
+  }
+}
+
+/**
+ * Read the account session out of a `platform-session` payload.
+ *
+ * The payload arrives from the kernel and is treated as UNTRUSTED input: only the
+ * fields this shell actually uses are read, each is type-checked, and anything
+ * else — a future shape, a partial object, a null — becomes `null`, which the
+ * caller reads as "no account". Returning null rather than throwing is deliberate:
+ * a malformed session must leave the app running with the account surface simply
+ * signed out, not fail the host handshake.
+ *
+ * `token` is required: a session without one cannot open an authenticated view.
+ *
+ * @param value - the raw `session` field of the host's message.
+ * @returns the session this shell can use, or null.
+ */
+export function readPlatformSession(value: unknown): PlatformSession | null {
+  if (!isRecord(value)) return null
+  const { origin, token, embeddedPageDist, requestHeaders } = value
+  if (typeof origin !== 'string' || origin === '') return null
+  if (typeof token !== 'string' || token === '') return null
+  const headers: Record<string, string> = {}
+  if (isRecord(requestHeaders)) {
+    for (const [name, headerValue] of Object.entries(requestHeaders)) {
+      // Header names and values come from the kernel's own configuration, but a
+      // non-string value would corrupt the request rather than be ignored.
+      if (typeof headerValue === 'string' && headerValue !== '') headers[name.toLowerCase()] = headerValue
+    }
+  }
+  return {
+    origin,
+    token,
+    ...(typeof embeddedPageDist === 'string' && embeddedPageDist !== '' ? { embeddedPageDist } : {}),
+    ...(Object.keys(headers).length > 0 ? { requestHeaders: headers } : {}),
   }
 }
 

@@ -201,6 +201,21 @@
     searchProvider: dsh-app
     fetchProvider: http
 
+# The account provider's identity header. The upstream row sets
+# `desktopPlatform` only when the booted profile is NAMED `desktop`
+# (`packages/bundle/base/cordis.patch.yml`), which is the official app's profile;
+# this shell boots `dsh-app`, so without this row the platform would see an
+# unidentified client even though the window IS a desktop one (`x-client-platform`
+# stays unset — `deepseek-account-platform/src/index.ts` builds it from this flag).
+#
+# Patch semantics replace the WHOLE config object, so the field set here is the
+# row's entire configuration. `null` on a platform the provider does not name is
+# its own "no identity" value, which is the honest answer for anything but
+# Windows and macOS.
+- id: deepseek-account
+  config:
+    desktopPlatform: !!js "['darwin', 'win32'].includes(process.platform) ? process.platform : null"
+
 # Session full-text search: override the base/web-app row's openAt from
 # 'never' to 'first-search' (the sqlite handle is created lazily on the
 # first search, so Node 22 startup stays quiet). The agent-side

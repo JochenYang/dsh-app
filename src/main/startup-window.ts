@@ -420,6 +420,29 @@ function applyWindowTheme(): void {
 }
 
 /**
+ * The appearance the shell resolved for the UI right now.
+ *
+ * Exported so the embedded Platform view can carry the SAME appearance into the
+ * page it hosts: measured, that page follows `prefers-color-scheme` and ignores
+ * any `?theme=` parameter (only the LOGIN page honours that one), so the only
+ * lever is `nativeTheme.themeSource`.
+ *
+ * It RE-RESOLVES on every call instead of returning {@link currentTheme}. That
+ * cached field is written once, when the splash mounts — and the kernel rewrites
+ * the preference the moment the user picks a new theme, so a cached answer is
+ * stale for the rest of the run: measured, switching to dark and then opening the
+ * top-up page still produced a white page, because this function was still
+ * answering the value read at launch. Three small files per call is nothing next
+ * to a user-visible app, and the alternative (a listener on a file the KERNEL
+ * owns) would have to be invalidated in ways this shell cannot observe.
+ *
+ * @returns the effective mode, never the raw preference.
+ */
+export function activeThemeMode(): ThemeMode {
+  return applyThemePreference()
+}
+
+/**
  * Keep the splash in step with the OS while the preference is `system`.
  * @returns the disposer.
  */

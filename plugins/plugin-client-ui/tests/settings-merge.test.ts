@@ -1,14 +1,18 @@
-// One slot, three compilations, no shared package.
+// One slot, two compilations, no shared package.
 //
 // The merged 维护 section is declared by THIS plugin's client entry (the
-// `children` table of its `settings.section` register call) and registered
-// into by two other plugins. Every one of the three needs the
-// `settings.dsh-app-maintenance.tab` entry in its own `SlotMap`: the owner
-// declares it from its copy, and each contributor's `inject`/`register` call
-// is type-checked against its copy. A drift in ONE copy therefore compiles —
-// the other two are separate programs — and fails only at runtime, as an
-// undeclared slot or a thrown registration. The copies are pinned identical
+// `children` table of its `settings.section` register call) and registered into
+// by plugin-presets. Both need the `settings.dsh-app-maintenance.tab` entry in
+// their own `SlotMap`: the owner declares it from its copy, and the contributor's
+// `inject`/`register` call is type-checked against its copy. A drift in ONE copy
+// therefore compiles — the two are separate programs — and fails only at runtime,
+// as an undeclared slot or a thrown registration. The copies are pinned identical
 // here so that failure mode cannot ship.
+//
+// A THIRD copy (plugin-usage) used to carry the block as a tab contributor. The
+// usage page is its own rail section now, so that copy is gone and plugin-usage
+// declares no maintenance slot at all — which this test asserts, because a stale
+// copy left behind would keep the file looking like a contributor.
 //
 // Line endings are normalized before the comparison: git stores every one of
 // the three files with LF, but `core.autocrlf` hands a checkout CRLF for the
@@ -26,15 +30,10 @@ const START = '// BEGIN maintenance-tab-slot'
 const END = '// END maintenance-tab-slot'
 const SLOT = 'settings.dsh-app-maintenance.tab'
 
-/**
- * The three client entries carrying the block, keyed by the half they belong
- * to (the message names which copy drifted).
- * @returns copy name -> that copy's block text, newline-normalized.
- */
+/** The two client entries carrying the block, keyed by the half they belong to. */
 function copies(): Record<string, string> {
   const files = {
     'plugin-client-ui (the section owner)': new URL('../src/client.ts', import.meta.url),
-    'plugin-usage': new URL('../../plugin-usage/src/client.ts', import.meta.url),
     'plugin-presets': new URL('../../plugin-presets/src/client.ts', import.meta.url),
   }
   const found: Record<string, string> = {}
@@ -49,7 +48,7 @@ function copies(): Record<string, string> {
 }
 
 describe('maintenance tab slot', () => {
-  it('declares the same augmentation in all three client entries, line for line', () => {
+  it('declares the same augmentation in both client entries, line for line', () => {
     const found = copies()
     const names = Object.keys(found)
     for (const name of names.slice(1)) {
@@ -69,5 +68,18 @@ describe('maintenance tab slot', () => {
     // One child key per file: a second one here would be a second slot nobody
     // declares or renders.
     assert.equal(block.match(/'settings\.[a-z.-]+'/gu)?.length, 1)
+  })
+
+  it('plugin-usage carries no copy: it is a rail section, not a tab', () => {
+    const text = readFileSync(new URL('../../plugin-usage/src/client.ts', import.meta.url), 'utf8')
+    // A stale block here would type-check its own file and look like a
+    // contributor, while the section owner no longer has a strip entry for it.
+    assert.equal(text.indexOf(START), -1, 'plugin-usage still carries the maintenance tab block')
+    assert.ok(
+      !text.includes(`'${SLOT}'`),
+      'plugin-usage still names the maintenance tab slot',
+    )
+    // And it registers a section of its own instead.
+    assert.match(text, /ctx\.slots\.register\(\{\s*\n\s*name: 'settings\.section'/u)
   })
 })

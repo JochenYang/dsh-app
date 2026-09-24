@@ -123,11 +123,11 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,
-    // 24 = immediately before upstream's "archived sessions" (pinned at 25):
-    // the two pages are the same story (this one prunes, that one restores),
-    // and session memory sits at 23 right above them. See the order table in
-    // docs/desktop-optimization-plan.md.
-    order: 24,
+    // 23 = immediately before the suite's upkeep row (维护设置, 24) and two
+    // below upstream's "archived sessions" (pinned at 25): session memory is at
+    // 22 right above this page, and the two are the same story (this one prunes,
+    // memory keeps). See the order table in docs/desktop-optimization-plan.md.
+    order: 23,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: ARCHIVES_NS,
     label: () => t(SECTION_TITLE),

@@ -119,11 +119,11 @@ const CLICK_ROW = (needle) => `(function () {
 // expectations below are the merge's contract: one row, no retired rows, one
 // glyph, three tabs in order, and a visited tab that stays mounted.
 /** The merged row's label, either locale. */
-const MERGED_ROW = /^(?:Maintenance|维护)$/
+const MERGED_ROW = /^(?:Maintenance|维护设置)$/
 /** The rail labels the merge retired (each is a tab inside 维护 now). */
-const RETIRED_ROWS = new Set(['Usage statistics', '用量统计', 'Presets', '预设包', 'Diagnostics', '诊断'])
+const RETIRED_ROWS = new Set(['Presets', '预设包', 'Diagnostics', '诊断'])
 /** The tab labels of 维护, in order, either locale. */
-const TAB_LABELS = [/^(?:Usage statistics|用量统计)$/u, /^(?:Presets|预设包)$/u, /^(?:Diagnostics|诊断)$/u]
+const TAB_LABELS = [/^(?:Presets|预设包)$/u, /^(?:Diagnostics|诊断)$/u]
 /** The tab strip of the ACTIVE pane — the merged section's own, not a page's inner one. */
 const MERGED_TABS = `(function () {
   const pane = document.querySelector('[class*="options"]')
@@ -372,8 +372,24 @@ async function main() {
     record('the nav list can scroll when it overflows', nav.navList.scrollHeight <= nav.navList.clientHeight || nav.navList.canScroll, `overflowY=${nav.navList.overflowY} scrollHeight=${nav.navList.scrollHeight} clientHeight=${nav.navList.clientHeight}`)
     const mergedRows = nav.rows.filter((row) => MERGED_ROW.test(row.label))
     const retiredRows = nav.rows.filter((row) => RETIRED_ROWS.has(row.label))
-    record('the rail carries exactly one 维护 row', mergedRows.length === 1, `rows=${JSON.stringify(nav.rows.map((row) => row.label))}`)
+    record('the rail carries exactly one 维护设置 row', mergedRows.length === 1, `rows=${JSON.stringify(nav.rows.map((row) => row.label))}`)
     record('the three retired rows left the rail', retiredRows.length === 0, retiredRows.map((row) => row.label).join(', ') || '(none)')
+    // 用量统计 is its own row now, and it sits with the DATA views (21, right
+    // after the agent band, above the session block) rather than at the tail
+    // with the system pages it used to be tabbed into.
+    const usageRow = nav.rows.findIndex((row) => /^(?:Usage statistics|用量统计)$/u.test(row.label))
+    const maintenanceRow = nav.rows.findIndex((row) => MERGED_ROW.test(row.label))
+    const memoryRow = nav.rows.findIndex((row) => /^(?:Session memory|会话记忆)$/u.test(row.label))
+    const archivesRow = nav.rows.findIndex((row) => /^(?:Session archives|会话归档)$/u.test(row.label))
+    record('用量统计 is its own rail row, in the data band above the session block',
+      usageRow !== -1 && memoryRow !== -1 && usageRow < memoryRow,
+      `usage=${String(usageRow)} memory=${String(memoryRow)} rows=${JSON.stringify(nav.rows.map((row) => row.label))}`)
+    // Upkeep closes the suite's rows: it used to sit at 22, BETWEEN two data
+    // views, which made the rail read "data → system → data".
+    record('维护设置 is the last suite row, after the session pair',
+      maintenanceRow !== -1 && archivesRow !== -1 && maintenanceRow > archivesRow
+      && maintenanceRow === nav.rows.length - 1,
+      `maintenance=${String(maintenanceRow)} archives=${String(archivesRow)} total=${String(nav.rows.length)} rows=${JSON.stringify(nav.rows.map((row) => row.label))}`)
 
     // The interesting case is a SMALL window: the panel follows the viewport
     // (min(800, 100vh - 48)), so the rail is where the rows get cut.
@@ -386,27 +402,29 @@ async function main() {
     console.log(`navList : ${JSON.stringify(small.navList)}`)
     console.log(`  rows below the panel: ${small.rows.filter((row) => row.bottom > small.panel.bottom).map((row) => row.label).join(', ') || '(none)'}`)
     const maintenance = small.rows.find((row) => MERGED_ROW.test(row.label))
-    record('the merged 维护 row paints its own glyph', maintenance !== undefined && maintenance.patched === true, JSON.stringify(maintenance))
+    record('the merged 维护设置 row paints its own glyph', maintenance !== undefined && maintenance.patched === true, JSON.stringify(maintenance))
     record('a small window still reaches every row', small.navList.canScroll || lastSmall.bottom <= small.panel.bottom, `canScroll=${small.navList.canScroll} last=${lastSmall.label}@${lastSmall.bottom} panel=${small.panel.bottom}`)
     win.setContentSize(1440, 900)
     await sleep(600)
 
     await shot(win, 'settings-nav')
 
-    // --- The merge itself: three plugins contribute tabs, the section owner
+    // --- The merge itself: two plugins contribute tabs, the section owner
     // draws the strip and mounts one panel at a time, and every visited panel
-    // stays mounted (that is what preserves a page's state across switches). ---
+    // stays mounted (that is what preserves a page's state across switches).
+    // 用量统计 was the third contributor and is its own rail row now, so it is
+    // checked as a ROW (see the rail-order assertion) rather than as a tab. ---
     const openedMerged = await win.webContents.executeJavaScript(CLICK_MERGED)
-    record('the merged 维护 row opens its section', openedMerged === true)
+    record('the merged 维护设置 row opens its section', openedMerged === true)
     await sleep(1200)
     const strip = await win.webContents.executeJavaScript(TABS_REPORT)
     const tabLabels = (strip.tabs ?? []).map((tab) => tab.text)
-    console.log(`\n--- 维护 tab strip (${LANG}) ---`)
+    console.log(`\n--- 维护设置 tab strip (${LANG}) ---`)
     console.log(`aria-label: ${JSON.stringify(strip.aria)}`)
     for (const tab of strip.tabs ?? []) console.log(`  ${tab.text.padEnd(18)} selected=${String(tab.selected).padEnd(5)} tabIndex=${tab.tabIndex} controls=${tab.controls}`)
     for (const panel of strip.panels ?? []) console.log(`  panel ${panel.id} hidden=${String(panel.hidden).padEnd(5)} rendered=${panel.rendered} labelledBy=${panel.labelledBy}`)
-    record('维护 holds its three pages as tabs, in order',
-      tabLabels.length === 3 && TAB_LABELS.every((pattern, index) => pattern.test(tabLabels[index] ?? '')),
+    record('维护 holds its two remaining pages as tabs, in order',
+      tabLabels.length === 2 && TAB_LABELS.every((pattern, index) => pattern.test(tabLabels[index] ?? '')),
       JSON.stringify(tabLabels))
     record('exactly one tab is selected, and it is the only one in the tab order',
       (strip.tabs ?? []).filter((tab) => tab.selected).length === 1

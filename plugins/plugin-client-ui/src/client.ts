@@ -293,20 +293,27 @@ export function apply(ctx: ClientContext): void {
 
   // --- 维护: the merged upkeep section. Its child slot
   // (`settings.dsh-app-maintenance.tab`, declared by the `children` table
-  // below) carries three tabs — 用量统计 (1, plugin-usage), 预设包 (2,
-  // plugin-presets) and 诊断 (3, registered right after this call). The
-  // section owns the strip and the panel; each tab keeps its own page, its own
-  // namespace and its own copy.
+  // below) carries two tabs — 预设包 (2, plugin-presets) and 诊断 (3,
+  // registered right after this call). The section owns the strip and the
+  // panel; each tab keeps its own page, its own namespace and its own copy.
   //
-  // 22 = after the agent band (19-20), before the session-data trio
-  // (23 = memory, 24 = archives, 25 = upstream's archived sessions): the
-  // system-level page belongs at the tail. NOT 14: plugin-websearch already
-  // holds 14, and a tie is only "harmless" while the loader keeps
-  // registration order — a placement hint should not double as an identity.
+  // 用量统计 used to be the third tab (order 1) and is its own rail section now
+  // (order 21, plugin-usage): the pages that stay here are the SYSTEM-level ones
+  // ("is the install healthy?"), while usage is the user's own data view and was
+  // hard to find behind a tab.
+  //
+  // 24 = AFTER everything else this suite registers (21 = usage, 22 = memory,
+  // 23 = archives): upkeep is the LAST settings row by convention — the place a
+  // user looks when something is wrong — and at 22 it sat between two data
+  // views, so the rail read "data → system → data" and beat against the eye.
+  // Before the upstream 已归档会话 row (25), which is pinned and cannot move.
+  // NOT 14: plugin-websearch already holds 14, and a tie is only "harmless"
+  // while the loader keeps registration order — a placement hint should not
+  // double as an identity.
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: MAINTENANCE_SECTION_ID,
-    order: 22,
+    order: 24,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: NS,
     label: () => t('maint.nav'),

@@ -114,8 +114,13 @@ Plugin builds and tests: `plugins/AGENTS.md`.
     registered privileged **before** `app.ready` and served only by forwarding to
     that child (other host → 404, no host → 503). A 0.1.6-alpha.2+ host binds its
     own loopback port instead (`docs/ARCHITECTURE.md` §6).
-  - Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, **no
-    preload**.
+  - Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, and a
+    preload that exposes **exactly one frozen marker** (`window.dshDesktop`,
+    `src/main/account-preload.ts`) — the kernel's account UI registers only when
+    that key is present, and nothing else needs a bridge. A second preload exists
+    for the embedded Platform view (`src/main/platform-preload.ts`), which is a
+    separate `WebContentsView` in its own partition; it is not exposed to the app
+    document. Neither may grow a channel without a security review.
   - Navigate only within `dsh-app://app` (the splash's `file:` document is the
     shell's own); everything else → `shell.openExternal` (http/https only).
   - **An app-origin document never goes into a sandbox frame** — the action route

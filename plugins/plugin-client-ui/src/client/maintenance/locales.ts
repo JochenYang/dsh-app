@@ -22,7 +22,12 @@ export { NS } from '../namespace.ts'
 export const zh = {
   // The rail row and the page heading: one key, two seats — the same shape the
   // usage page already uses for its own title/label.
-  'maint.nav': '维护',
+  //
+  // Four characters, matching the 通用设置 family it belongs to (通用设置 /
+  // 维护设置): the row read as a bare 维护 next to 模型高级设置 and 并行子代理,
+  // and "维护设置" says both what it is and that it is a settings page. The
+  // English side keeps `Maintenance` — no English word improves on it.
+  'maint.nav': '维护设置',
   // Accessible name of the tab strip; the pages inside draw their own tablists
   // (the usage page's day range), so this name must not read like theirs.
   'maint.tabs': '维护视图',

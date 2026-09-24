@@ -111,12 +111,13 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,
-    // 23 = the tail block: this page and the two archive pages are the
-    // session-data surfaces, and upstream's "archived sessions" is pinned at
-    // 25 — so the trio reads in order (memory → archives → archived). The
-    // agent pages own 19-21 (parallel subagents, agent presets, presets) and
-    // diagnostics 22; see the order table in docs/desktop-optimization-plan.md.
-    order: 23,
+    // 22 = the head of the session-data block: this page and the archive page
+    // are the session-data surfaces, and upstream's "archived sessions" is
+    // pinned at 25 — so the pair reads in order (memory → archives) and the
+    // suite's upkeep row (维护设置, 24) closes the block rather than splitting
+    // it. Usage owns 21; the agent pages 19-20. See the order table in
+    // docs/desktop-optimization-plan.md.
+    order: 22,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: NS,
     label: () => t('memory.nav'),

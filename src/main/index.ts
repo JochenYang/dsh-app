@@ -24,9 +24,10 @@ import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from '
 import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
 import { installCrashLogging } from './crash-log'
 import { appendRotatingLog } from './log-file'
+import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, type PatchSpecifier } from './brand-suite'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
-import { attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
+import { activeThemeMode, attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
 import {
   deliverWorkspaceLaunch,
   queueWorkspaceArg,
@@ -45,7 +46,7 @@ import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRun
 import { healLogLine, healProfileDependencies, installIntoProfile, isInstallablePackageName, type ProfileHealOutcome } from './profile-heal'
 import { alignWindowStateWithLine } from './client-state'
 import { countV4SessionLogs } from './session-logs'
-import { initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
+import { getLocale, initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
 import type { KernelChannel, KernelStatusPayload } from '../shared/types'
 
 // ---------------------------------------------------------------- config
@@ -144,6 +145,12 @@ let safeModeActive = false
 let injectedProxyUrl: string | undefined
 /** Interval handle for the proxy watchdog; cleared on quit. */
 let proxyWatchdog: NodeJS.Timeout | undefined
+/**
+ * The embedded Platform view (usage / top-up), created with the first window and
+ * reused for every open. Holds the account credential snapshot in main-process
+ * memory only; see src/main/platform-view.ts.
+ */
+let platformView: PlatformView | undefined
 
 // --------------------------------------------------------------- helpers
 
@@ -717,6 +724,34 @@ async function openQueuedWorkspace(): Promise<void> {
  *
  * @param win - the freshly created main window.
  */
+/**
+ * Create the embedded Platform view and its IPC surface, once.
+ *
+ * Called after the window exists (the view needs an owner), and idempotent: a
+ * tray restart re-enters this path, and a second instance would fight the first
+ * over `platformView`.
+ *
+ * The IPC install is what lets the app document ask for the usage / top-up view.
+ * Without it the account surface still works — the kernel falls back to external
+ * links when `window.dshPlatform` is absent — so a refusal here is a degraded
+ * feature, never a broken app.
+ */
+function ensurePlatformView(): void {
+  if (platformView !== undefined) return
+  // The kernel's embed expects its own pair, not the shell's locale ids.
+  const platformLocale = (): PlatformLocale => (getLocale() === 'en-US' ? 'en_US' : 'zh_CN')
+  // The embedded page follows `prefers-color-scheme`, so it is given the same
+  // appearance the shell resolved for its own chrome (see PlatformView.applyTheme).
+  const platformTheme = (): 'light' | 'dark' => activeThemeMode()
+  platformView = new PlatformView(platformPreloadPath(), platformLocale, platformTheme)
+  installPlatformIpc({
+    owner: () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents),
+    view: () => platformView,
+    locale: platformLocale,
+    log: logKernel,
+  })
+}
+
 function attachMainWindowHandlers(win: BrowserWindow): void {
   win.on('close', (event) => {
     // Tray app: closing the window may either hide it (keep running in the
@@ -1116,6 +1151,19 @@ async function startServerAndOpenWindow(): Promise<void> {
     // `officePrimaryRuntime` is where a Python-carrying office payload landed
     // (absent: the fixed leaf beside those skills).
     const { profileAnchor: _anchor, ...hostOptions } = host
+    // BEFORE the host starts, not after: the kernel publishes its account session
+    // while it boots (measured — the publisher runs before the host's own `ready`),
+    // so a view created afterwards misses the only delivery of that snapshot and
+    // every embedded page then answers "no account session". The view holds the
+    // snapshot until a page asks for it, so an earlier creation costs nothing.
+    if (!mainWindow) {
+      // The tray's "restart server" path, where the window was destroyed while the
+      // host was down. The normal boot created it far earlier, with the loading
+      // page — see boot().
+      mainWindow = createMainWindow()
+      attachMainWindowHandlers(mainWindow)
+    }
+    ensurePlatformView()
     await server.start({
       ...hostOptions,
       userDataDir,
@@ -1127,13 +1175,6 @@ async function startServerAndOpenWindow(): Promise<void> {
   } catch (err) {
     await handleServerDown(t('status.serverStartFailed', { detail: (err as Error).message }))
     return
-  }
-  if (!mainWindow) {
-    // Only reachable when the window was destroyed while the host was down
-    // (the tray's "restart server" path). The normal boot creates it far
-    // earlier, with the loading page — see boot().
-    mainWindow = createMainWindow()
-    attachMainWindowHandlers(mainWindow)
   }
   // Both remaining cases end on the live UI: a window still on the loading page
   // is handed over, one already showing the UI (kernel update, crash recovery,
@@ -1607,6 +1648,11 @@ async function boot(): Promise<void> {
       console.log('[host]', line)
       recordServerLog(line)
     },
+    // The account credential snapshot, straight from the host's private channel.
+    // `PlatformView` keeps it in main-process memory only; signing out (null) closes
+    // whatever page was open, because a document prepared with the old account must
+    // not outlive it.
+    onPlatformSession: (session) => { platformView?.setSession(session) },
   })
   // The window's `dsh-app://app/…` requests are served from whatever host is
   // running; with none running the page gets a 503 rather than an open socket

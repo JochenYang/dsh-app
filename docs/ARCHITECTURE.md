@@ -287,7 +287,9 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 - The URL transport is not only a proxy: the client's own stream is a WebSocket
   straight to the child. The boot document carries
   `globalThis.__DSH_TRANSPORT__ = { ownsHost: true, streamBaseUrl }` (the row
-  upstream's desktop sets from its preload, which this shell has no preload for),
+  upstream's desktop sets from its preload; this shell's preload is a marker only —
+  `src/main/account-preload.ts` — so the transport row comes from the host's own
+  document instead),
   and `src/main/host-stream-auth.ts` rewrites `ws://127.0.0.1/*` handshakes from
   the main window to carry that child's cookie and an `origin` it accepts —
   cancelling any handshake whose `origin` is not `dsh-app://app`. Removing either
@@ -317,7 +319,16 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 
 ## 7. Security posture
 
-- Main window: `contextIsolation`, `sandbox`, no preload, `nodeIntegration:false`.
+- Main window: `contextIsolation`, `sandbox`, `nodeIntegration:false`, and a
+  preload whose entire surface is one frozen marker (`window.dshDesktop`,
+  `src/main/account-preload.ts`). It exists because the kernel's account UI
+  registers itself only when that key is present
+  (`ui-settings-account/src/client/index.ts` returns early without it), so the
+  preload is the switch for the account section, sign-in dialog and balance card.
+  It exposes **no channel and no IPC**: a page cannot ask the main process for
+  anything through it. The embedded Platform view has its own preload and its own
+  non-persistent partition (`src/main/platform-preload.ts`, `platform-view.ts`),
+  which the app document cannot reach.
 - Navigation confined to `dsh-app://app` plus the shell's own splash `file:`
   document (the predicate is `src/main/nav-policy.ts`, compared by
   protocol + hostname — a custom scheme's URL `origin` is the literal string

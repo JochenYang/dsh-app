@@ -13,16 +13,22 @@
 import { app } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { DshHost, type DshHostOptions } from './desktop-host'
+import { DshHost, type DshHostOptions, type PlatformSession } from './desktop-host'
 import { redact } from './redact'
 
 export interface ServerEvents {
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void
   onLog?: (line: string) => void
+  /**
+   * The account session for embedded Platform views, or null when signed out.
+   * Private to the main process: the payload carries a bearer token and must never
+   * reach a renderer, a log file, or a diagnostics bundle.
+   */
+  onPlatformSession?: (session: PlatformSession | null) => void
 }
 
 /** One start's inputs: where the host lives and which profile it boots. */
-export type DshServerSpec = Omit<DshHostOptions, 'onLog' | 'onExit'>
+export type DshServerSpec = Omit<DshHostOptions, 'onLog' | 'onExit' | 'onPlatformSession'>
 
 /** How many recent host log files to keep on disk. */
 const MAX_KEPT_LOG_FILES = 10
@@ -72,6 +78,10 @@ export class DshServer {
         if (this.stopping) return
         this.events.onExit?.(code, signal)
       },
+      // The account session rides the host's own private channel to the main
+      // process and stops here: it is never logged (a log line would put a bearer
+      // token in a file) and never forwarded to a renderer.
+      onPlatformSession: (session) => { this.events.onPlatformSession?.(session) },
     })
     this.host = host
     this.handleLine(`dsh host: ${spec.entry} (runtime ${spec.runtimeDir}, profile ${spec.projectDir})`)
