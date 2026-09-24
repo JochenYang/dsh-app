@@ -240,6 +240,16 @@
 # 2026-09-07); the ui row exists disabled in the web bundle and is flipped on
 # here. Verified with the packaged bin.js before merging (never trust the dev
 # pnpm closure alone): a missing package fails the whole tree, not one row.
+#
+# 0.1.7-rc.2 ships the `schedule` row itself (disabled), so the composed tree
+# carries it twice. Measured on the packaged rc.2 runtime, that is NOT a
+# duplicate-loader-entry failure: every layer's patches are applied in ONE
+# `applyEntryPatches` call, entries are keyed by id within a tree, and the LAST
+# row wins — ours is appended last (`--dump-config` shows both rows with no
+# skipped-patch warning; a real-profile boot with this row came up healthy).
+# An insert is kept over a row override because an override no-ops on a kernel
+# without the row: after a failed rc.2 boot the rollback target is rc.1, where a
+# skipped row would silently drop schedule with only a log line.
 - insert:
     - id: schedule
       name: '@deepseek-ai/dsh-schedule'

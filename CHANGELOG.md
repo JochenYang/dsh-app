@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- **内核跟进 0.1.7-rc.2**：23 个 `@deepseek-ai/dsh-*` 依赖升到 `^0.1.7-rc.2`，锁文件整体重建（旧锁钉死 rc.1 的传递闭包，只改 spec 会 ERESOLVE）。rc.2 的 web-app bundle 自己带了 `schedule` 行（`disabled: true`），与 overlay 的 insert 行在组合树里同时存在——**实测这不是 duplicate loader entry 失败**：所有层的 patch 在同一次 `applyEntryPatches` 调用里应用，树内条目按 id 取**最后一行**，我们 append 在最后。`--dump-config` 显示两行且无跳过警告；带该 insert 行的真实 profile 启动 rc.2 健康就绪。**保留 insert 而不改成行覆盖**：行覆盖在**没有**该行的内核上是空操作，而 rc.2 启动失败后的回滚目标是 rc.1——被跳过的行只留一行日志，schedule 静默消失。
+- **内核字节链改为镜像优先**（ModelScope → 官方 → 公共代理），与外壳安装包链一致。理由是这次下载的**进程归属**：它发生在外壳里、用的是裸 `fetch`，既看不到为 `web_fetch` 注入内核子进程的代理环境，也会被 TUN 客户端在网络层拦走——挂不挂代理都一样。旧顺序下每次内核更新都要先等一次缓慢或失败的 GitHub 尝试，才轮到国内可达的镜像。**元数据链不动**（官方优先、fail-closed，镜像只在官方网络不可达时补），每个候选仍按官方 sidecar 的 sha512 校验，镜像 serve 别的内容只会验证失败后落到下一个源。文档、注释与 11 处钉顺序的测试同步更新。
+- **更新后窗口自动到前台**：NSIS 重拉的进程带 `--updated`，外壳在文档就绪后显式 `focus()`——此前更新完新窗口可能留在用户当时看的窗口后面。
+- **rc.2 的 office kit 0.1.1 复验：外壳侧无需改动**。host 依赖升到 `^0.1.1`，但它只用 `import.meta.resolve` 推 `lib/cli.js` 路径、交给 skill-office 做存在性检查，不校验版本；垫片停在 0.1.0 照旧满足（入口按 payload 内 kit 自己的 manifest 解析，与版本解耦；runtime 自带 Node v24.18.0，满足 kit 的 `>=22.19.0`）。载荷自己的内容版本随 rc.2 移到 **0.1.1**，按既有“按需下载”通道交付，与内核版本解耦（真机转换待启动确认时一并验）。
+
+### English
+- **The kernel line is followed to 0.1.7-rc.2**: the 23 `@deepseek-ai/dsh-*` specs move to `^0.1.7-rc.2` with the lockfile rebuilt (the old lock pinned rc.1's transitive closure, so editing specs alone ERESOLVEs). rc.2's web-app bundle now ships its own `schedule` row (`disabled: true`), so the composed tree carries it twice alongside the overlay's insert — **measured, that is NOT a duplicate-loader-entry failure**: every layer's patches are applied in ONE `applyEntryPatches` call, entries are keyed by id within a tree and the LAST row wins, and ours is appended last (`--dump-config` shows both rows with no skipped-patch warning; a real-profile boot with the insert row came up healthy on rc.2). **The insert is kept rather than a row override** because an override no-ops on a kernel WITHOUT the row: after a failed rc.2 boot the rollback target is rc.1, where a skipped row would drop schedule silently with only a log line.
+- **The kernel byte chain is mirror-first now** (ModelScope → official → public proxies), the same order the installer chain uses. The reason is WHO downloads: the shell process, over a bare `fetch` — it never sees the proxy environment injected into the kernel child for `web_fetch`, and a TUN client routes the shell's own connections at the network layer, proxy or not. Under the old order every kernel update waited out a slow or failing GitHub attempt before reaching the host a mainland user can actually reach. **The metadata chain is unchanged** (official-first, fail-closed, mirrors only when the official host is unreachable at the network level), and every candidate is still gated by the official sidecar's sha512, so a mirror serving different content fails verification and falls through. Docs, comments and the 11 order-pinning tests move with it.
+- **The window comes to the front after an update**: a launch the NSIS installer started carries `--updated`, and the shell focuses the window explicitly once the document is in place — previously the new window could sit behind whatever the user was looking at.
+- **rc.2's office kit 0.1.1 checked: no shell-side change needed**: the host's dependency rose to `^0.1.1`, but it only resolves `lib/cli.js` with `import.meta.resolve` and hands the path to skill-office for an existence check — no version validation. The shim stays at 0.1.0 and still satisfies it (its entry is resolved through the payload kit's own manifest, so it is version-agnostic; the runtime carries Node v24.18.0, meeting the kit's `>=22.19.0`). The payload's own content version moved to **0.1.1** with rc.2 and travels the existing on-demand channel, decoupled from the kernel version (a real conversion is to be exercised during the launch confirmation).
+
 ## [v0.13.7] - 2026-09-24
 
 ### 中文

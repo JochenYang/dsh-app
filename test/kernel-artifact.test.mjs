@@ -2,8 +2,10 @@
 // mirror, while the trusted digest chain stays official-first. These tests pin
 // that separation — it is the invariant that lets a mirror serve 100 MB without
 // ever being able to substitute content. They also pin the TRANSPORT order:
-// official → the ModelScope copy → the public proxies, because the mirror is a
-// file this project publishes while the proxies are third-party transports.
+// the ModelScope copy → official → the public proxies, because the download
+// runs in the shell (never through the proxy the kernel child is given) and a
+// mainland user — proxy or not — reaches the mirror we publish faster than the
+// host that is slow or blocked for them.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
@@ -55,14 +57,14 @@ function resolver() {
   return new GitHubArtifactResolver(OWNER, REPO, PLATFORM, ARCH)
 }
 
-test('tarball candidates are official-first, then the ModelScope copy, then the proxies', async () => {
+test('tarball candidates lead with the ModelScope copy, then official, then the proxies', async () => {
   const stub = stubFetch()
   try {
     const info = await resolver().fetchArtifact(VERSION)
     assert.ok(info)
     assert.deepEqual(info.candidates, [
-      `${OFFICIAL_BASE}/${NAME}`,
       modelscopeRuntimeAssetUrl(VERSION, NAME),
+      `${OFFICIAL_BASE}/${NAME}`,
       ...githubMirrorPrefixes().map((prefix) => `${prefix}${OFFICIAL_BASE}/${NAME}`),
     ])
     assert.equal(info.candidates.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
@@ -73,7 +75,7 @@ test('tarball candidates are official-first, then the ModelScope copy, then the 
   }
 })
 
-test('the office payload travels the same order: official, ModelScope copy, then proxies', async () => {
+test('the office payload travels the same order: the ModelScope copy, official, then proxies', async () => {
   const stub = stubFetch((target) => {
     if (target === `${OFFICIAL_BASE}/${PAYLOAD_NAME}.sha512`) return new Response(`${OFFICIAL_SHA}\n`, { status: 200 })
     if (target === `${OFFICIAL_BASE}/${PAYLOAD_MANIFEST}`) return new Response(JSON.stringify(MANIFEST), { status: 200 })
@@ -83,8 +85,8 @@ test('the office payload travels the same order: official, ModelScope copy, then
     const info = await resolver().fetchOfficePayload(VERSION, '0.0.1')
     assert.ok(info)
     assert.deepEqual(info.candidates, [
-      `${OFFICIAL_BASE}/${PAYLOAD_NAME}`,
       modelscopeRuntimeAssetUrl(VERSION, PAYLOAD_NAME),
+      `${OFFICIAL_BASE}/${PAYLOAD_NAME}`,
       ...githubMirrorPrefixes().map((prefix) => `${prefix}${OFFICIAL_BASE}/${PAYLOAD_NAME}`),
     ])
     assert.equal(info.sha512, OFFICIAL_SHA)

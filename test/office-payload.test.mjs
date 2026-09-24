@@ -22,7 +22,7 @@ import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
 const { OfficePayloadManager, manifestProblems, requiredFiles } = require('../dist/kernel/office-payload.js')
-const { officePayloadAssetName, officePayloadManifestName } = require('../dist/kernel/sources/artifact.js')
+const { officePayloadAssetName, officePayloadManifestName, modelscopeRuntimeAssetUrl } = require('../dist/kernel/sources/artifact.js')
 const { OFFICE_PAYLOAD_DIR, OFFICE_ROOT_DIR } = require('../dist/shared/constants.js')
 const build = await import('../scripts/lib/office-payload.mjs')
 const tar = require('tar')
@@ -215,9 +215,13 @@ test('a download installs the payload, verifies it, and reports it installed', a
     for (const relative of requiredFiles(ENGINE)) {
       assert.ok(existsSync(path.join(installed, relative)), relative)
     }
-    // The artifact travels official-first and is fetched exactly once.
+    // The transport leads with the ModelScope copy; this fake release has no
+    // route to it, so the walk continues to the official asset — fetched once.
     const assetCalls = release.calls.filter((url) => url.endsWith(`/${ASSET}`))
-    assert.deepEqual(assetCalls, [`${OFFICIAL_BASE}/${ASSET}`])
+    assert.deepEqual(assetCalls, [
+      modelscopeRuntimeAssetUrl(DSH_VERSION, ASSET),
+      `${OFFICIAL_BASE}/${ASSET}`,
+    ])
     // Parsed back: the installed manifest is the one the release carried.
     assert.deepEqual(JSON.parse(readFileSync(path.join(installed, 'manifest.json'), 'utf8')), payloadManifest())
   } finally {

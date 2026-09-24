@@ -205,11 +205,11 @@ function resolver() {
 
 // ------------------------------------------------------------ pure resolution
 
-test('layer asset candidates are official-first, then the ModelScope copy, then the proxies', () => {
+test('layer asset candidates lead with the ModelScope copy, then official, then the proxies', () => {
   const name = `node-abcdef123456-${PLATFORM}-${ARCH}.tgz`
   assert.deepEqual(resolver().assetCandidates(VERSION, name), [
-    `${OFFICIAL_BASE}/${name}`,
     modelscopeRuntimeAssetUrl(VERSION, name),
+    `${OFFICIAL_BASE}/${name}`,
     ...mirrorBases().map((base) => `${base}/${name}`),
   ])
 })
@@ -335,28 +335,30 @@ test('a layer whose bytes do not match the index is fetched from the next candid
   const h = harness(t, 'dsh-remote-candidate-')
   const release = await h.release({})
   const [node, vendor] = release.index.layers
+  // The transport leads with the ModelScope copy, so THAT is the candidate
+  // serving bytes that do not verify here.
   const stub = stubFetch(release.assets, (target) =>
-    target === `${OFFICIAL_BASE}/${vendor.name}` ? new Response('tampered bytes', { status: 200 }) : undefined)
+    target === modelscopeRuntimeAssetUrl(VERSION, vendor.name) ? new Response('tampered bytes', { status: 200 }) : undefined)
   try {
     const current = await h.manager.installVersion(VERSION)
 
     assert.equal(current.active, `dsh-${VERSION}+suite-${SUITE}`)
-    assert.ok(stub.calls.includes(`${OFFICIAL_BASE}/${vendor.name}`), 'the official copy was tried first')
-    // The next candidate is the ModelScope copy, not a public proxy: a file the
-    // project itself published outranks a third-party transport.
+    assert.ok(stub.calls.includes(modelscopeRuntimeAssetUrl(VERSION, vendor.name)), 'the ModelScope copy was tried first')
+    // Rejected bytes walk on to the official release, not to a public proxy:
+    // a host the project itself runs outranks a third-party transport.
     assert.ok(
-      stub.calls.includes(modelscopeRuntimeAssetUrl(VERSION, vendor.name)),
-      'and rejected in favour of the ModelScope copy',
+      stub.calls.includes(`${OFFICIAL_BASE}/${vendor.name}`),
+      'and rejected in favour of the official release',
     )
     assert.ok(
       !stub.calls.includes(`${mirrorBases()[0]}/${vendor.name}`),
-      'a proxy is only reached when the mirror could not serve the bytes',
+      'a proxy is only reached when the mirror and the official host could not serve the bytes',
     )
     assert.equal(sha512Hex(readFileSync(path.join(h.cacheDir, vendor.name))), vendor.sha512, 'only verified bytes reach the cache')
     assert.deepEqual(
       stub.calls.filter((url) => url.endsWith(`/${node.name}`)),
-      [`${OFFICIAL_BASE}/${node.name}`],
-      'a mismatch on one layer does not push the others through the mirror chain',
+      [modelscopeRuntimeAssetUrl(VERSION, node.name)],
+      'a mismatch on one layer does not push the others through the rest of the chain',
     )
   } finally {
     stub.restore()
@@ -375,8 +377,8 @@ test('every candidate failing for one layer still installs, via the single tarba
     const current = await h.manager.installVersion(VERSION)
 
     assert.equal(current.active, `dsh-${VERSION}+suite-${SUITE}`)
-    assert.ok(stub.calls.includes(release.tgzUrl), 'the real tarball path ran')
-    assert.ok(stub.calls.includes(`${release.tgzUrl}.sha512`), 'and it verified against the release sidecar')
+    assert.ok(stub.calls.includes(modelscopeRuntimeAssetUrl(VERSION, release.tgzName)), 'the real tarball path ran, mirror-first')
+    assert.ok(stub.calls.includes(`${release.tgzUrl}.sha512`), 'and its digest was read from the official sidecar')
     assert.equal(current.sha512, release.tgzDigest)
     assert.equal(current.layers, undefined, 'a tgz install records no layer provenance')
     assert.equal(h.readCurrent().sha512, release.tgzDigest)
@@ -397,7 +399,7 @@ test('a malformed layer index falls back to the tarball instead of failing the i
     const current = await h.manager.installVersion(VERSION)
 
     assert.equal(current.active, `dsh-${VERSION}+suite-${SUITE}`)
-    assert.ok(stub.calls.includes(release.tgzUrl))
+    assert.ok(stub.calls.includes(modelscopeRuntimeAssetUrl(VERSION, release.tgzName)))
     assert.ok(h.fellBack(), 'a broken index must be reported, not swallowed')
   } finally {
     stub.restore()
@@ -413,7 +415,7 @@ test('a release with no layer index installs from the tarball as an ordinary pat
     const current = await h.manager.installVersion(VERSION)
 
     assert.equal(current.active, `dsh-${VERSION}+suite-${SUITE}`)
-    assert.ok(stub.calls.includes(release.tgzUrl))
+    assert.ok(stub.calls.includes(modelscopeRuntimeAssetUrl(VERSION, release.tgzName)))
     assert.ok(!h.fellBack(), '"this release has no layers" is not an error path')
   } finally {
     stub.restore()
@@ -431,7 +433,7 @@ test('an index for another target is refused and the install falls back to the t
 
     assert.equal(current.active, `dsh-${VERSION}+suite-${SUITE}`)
     assert.equal(current.manifest.arch, ARCH)
-    assert.ok(stub.calls.includes(release.tgzUrl))
+    assert.ok(stub.calls.includes(modelscopeRuntimeAssetUrl(VERSION, release.tgzName)))
     assert.ok(h.fellBack())
   } finally {
     stub.restore()
@@ -496,7 +498,7 @@ test('a cached layer whose bytes changed is re-downloaded, never trusted', async
     assert.equal(sha512Hex(readFileSync(path.join(h.cacheDir, damaged.name))), damaged.sha512, 'the corrupted entry was repaired')
     assert.deepEqual(
       second.calls.filter((url) => url.endsWith('.tgz') && !url.endsWith(`/${release.tgzName}`)),
-      [`${OFFICIAL_BASE}/${damaged.name}`],
+      [modelscopeRuntimeAssetUrl(VERSION, damaged.name)],
       'exactly the layers whose digest did not match were fetched',
     )
   } finally {

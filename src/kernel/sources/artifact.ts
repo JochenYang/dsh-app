@@ -32,19 +32,20 @@ import type { LayerIndex } from '../layers'
  *      digest source, which is why an index that fails validation is an error
  *      rather than a silent "no layers".
  *   2. The large tarball is downloaded from an ordered candidate list —
- *      official URL first, then the ModelScope mirror copy, then each public
- *      proxy prefix — and EVERY candidate is checked against the phase-1
- *      digest, so a hostile mirror cannot substitute content even when it
- *      serves the bytes. ModelScope is a transport-only entry: it never
- *      supplies metadata (see `bases` vs the candidate list in fetchArtifact).
- *      Layer files and the office payload use exactly the same candidate list,
- *      verified against the digest their own metadata carries.
+ *      the ModelScope mirror copy first, then the official URL, then each
+ *      public proxy prefix — and EVERY candidate is checked against the
+ *      phase-1 digest, so a hostile mirror cannot substitute content even
+ *      when it serves the bytes. ModelScope is a transport-only entry: it
+ *      never supplies metadata (see `bases` vs the candidate list in
+ *      fetchArtifact). Layer files and the office payload use exactly the
+ *      same candidate list, verified against the digest their own metadata
+ *      carries.
  *
  * Override the mirror chain with DSH_APP_GITHUB_MIRRORS (comma-separated
  * URL prefixes; empty value disables mirrors entirely).
  */
 export interface ArtifactInfo {
-  /** Ordered download candidates (official first, then the ModelScope copy, then the public proxies). */
+  /** Ordered download candidates (the ModelScope copy first, then official, then the public proxies). */
   candidates: string[]
   /** Trusted sha512 (hex) for the tarball, from the phase-1 metadata source. */
   sha512: string
@@ -157,25 +158,41 @@ export class GitHubArtifactResolver {
   }
 
   /**
-   * Ordered download candidates for ONE asset of a kernel version: the official
-   * release first, then the ModelScope copy, then each public proxy prefix
-   * wrapping the official URL. Shared by the tarball, the split-layer path and
-   * the office payload so all three inherit the same transport chain; whatever
-   * a candidate serves is still checked against a digest that came from the
-   * phase-1 metadata source.
+   * Ordered download candidates for ONE asset of a kernel version: the ModelScope
+   * copy first, then the official release, then each public proxy prefix wrapping
+   * the official URL. Shared by the tarball, the split-layer path and the office
+   * payload so all three inherit the same transport chain; whatever a candidate
+   * serves is still checked against a digest that came from the phase-1 metadata
+   * source (official-first), so a mirror serving a different build fails
+   * verification and falls through instead of substituting content.
    *
-   * Why the ModelScope copy outranks the public proxies: it is a file this
-   * project publishes and verifies at upload time, while ghfast.top and
-   * gh-proxy.com are third-party transports measured to be unstable. A user
-   * waits on this download once per artifact version (the office engine is
-   * ~115 MiB), so the stable host goes first and the proxies stay as the last
-   * resort for the case where the mirror has not been backfilled yet.
+   * Why the mirror leads, in two steps:
+   *
+   * 1. The mirror is OUR file. We publish it and verify it at upload time; the
+   *    public proxies (ghfast.top, gh-proxy.com) are third-party transports
+   *    measured to be unstable. So the mirror outranks them — that ordering is
+   *    older than this change.
+   * 2. The mirror also outranks the official host FOR THE BYTES, because the
+   *    failure topology is asymmetric and this download is the largest one the
+   *    app makes (~95 MiB per artifact, ~115 MiB for the office engine). A user
+   *    in the mainland reaches ModelScope quickly and GitHub slowly or not at
+   *    all; one who has a VPN on is not helped either, because a TUN client
+   *    routes the shell's own connections wherever its rules say, and this
+   *    download runs in the SHELL (not the kernel child), so it never sees the
+   *    proxy environment the shell injects for web_fetch. Measured consequence
+   *    of the old order: every kernel update waited out a slow or failing
+   *    GitHub attempt before reaching the host that would have served it.
+   *
+   * The metadata chain is deliberately NOT reordered: which build a user is
+   * offered is a trust decision and stays official-first. Only the transport
+   * follows this order, and every candidate is gated by the sha512 the metadata
+   * carried.
    */
   assetCandidates(version: string, assetName: string): string[] {
     const official = this.baseUrl(version)
     return [
-      `${official}/${assetName}`,
       modelscopeRuntimeAssetUrl(version, assetName),
+      `${official}/${assetName}`,
       ...githubMirrorPrefixes().map((prefix) => `${prefix}${official}/${assetName}`),
     ]
   }
@@ -186,9 +203,9 @@ export class GitHubArtifactResolver {
    * The release tag and the phase-1 metadata chain are the runtime's,
    * unchanged: official host authoritative and fail-closed, proxies consulted
    * only when it is unreachable at the network level. The candidate order is
-   * the runtime's too — official, then the ModelScope copy, then the proxies
-   * (see `assetCandidates`). A second trust rule for the same kind of artifact
-   * is exactly what this reuses `fetchMetadataOutcome` to avoid.
+   * the runtime's too — the ModelScope copy, then the official URL, then the
+   * proxies (see `assetCandidates`). A second trust rule for the same kind of
+   * artifact is exactly what this reuses `fetchMetadataOutcome` to avoid.
    *
    * Two versions meet here and both matter: `dshVersion` names the release
    * (every asset of a runtime release is version-addressed), `payloadVersion`

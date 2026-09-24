@@ -164,7 +164,7 @@ runtime at all — see below.
 The engine is ~115 MiB compressed, only needed when a document is converted, and
 identical for every kernel that wants the same kit — so it travels in a second
 release artifact (`office-payload-<platform>-<arch>-<dshVersion>.tgz`, resolved
-by the same official-first metadata chain and the same official → ModelScope →
+by the same official-first metadata chain and the same ModelScope → official →
 proxies transport order as the runtime) and is installed on
 demand from the 诊断 settings row. The runtime keeps a loader shim at
 `app/node_modules/@deepseek-ai/libreoffice-kit` because
@@ -204,7 +204,7 @@ check (every 6 h + manual; never at startup)
   → npm registry dist-tags (@deepseek-ai/dsh): latest | next (rc) | alpha
   → newer? → prompt
 download runtime artifact (GitHub Release asset, per platform/arch)
-  → candidates: official release → ModelScope copy → public proxies, sha512
+  → candidates: ModelScope copy → official release → public proxies, sha512
     verified against the official sidecar on EVERY candidate
 extract staging → validate inner manifest + platform/arch match
   → rename into versioned dir
@@ -352,8 +352,8 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 
 - `electron-builder.yml`: win NSIS, mac dmg+zip, linux AppImage+deb; x64+arm64.
 - Shell updates: Windows uses a custom in-app flow — latest.yml detection via
-  the GitHub `releases/latest` alias, arch-matched installer download with an
-  official-first / gh-proxy-mirror fallback chain, sha512 verification, then a
+  the GitHub `releases/latest` alias, arch-matched installer download with a
+  mirror-first / official-GitHub fallback chain, sha512 verification, then a
   **visible** NSIS install wizard (`updater.ts`: the app writes a
   pending-install record and quits; the GUI installer is spawned directly —
   a detached cmd watcher always flashes a console window on Windows, even
