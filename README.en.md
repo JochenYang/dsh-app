@@ -159,8 +159,9 @@ $env:DSH_APP_DEV="1"; $env:DSH_APP_DEV_RUNTIME="D:/codes/DSH-APP/deepseek-harnes
 
 The app ships a versioned kernel under `userData/kernel/` and never depends on a
 system-installed dsh. Update pipeline: resolve the version from npm registry
-dist-tags → download the runtime artifact from GitHub Releases → verify against
-the attached sha512 → activate atomically (previous version kept as
+dist-tags → download the runtime artifact through the "ModelScope mirror →
+official → public proxies" candidate chain (each candidate verified against the
+official sidecar's sha512) → activate atomically (previous version kept as
 `previous`) → automatically roll back after two consecutive startup failures.
 See [ARCHITECTURE.md §4–5](docs/ARCHITECTURE.md) for the runtime layout and the
 full update flow.
@@ -179,8 +180,8 @@ Windows uses a custom in-app flow; macOS / Linux use `electron-updater`.
 
 1. Detect: `github.com/<owner>/<repo>/releases/latest/download/latest.yml`
    (mirror fallback)
-2. Download: arch-matched installer, official URL first with
-   ghfast.top / gh-proxy.com fallback chain
+2. Download: arch-matched installer, ModelScope mirror first, the official URL
+   second, then the ghfast.top / gh-proxy.com chain
 3. Verify: sha512 against latest.yml — a mirror can never substitute content
 4. Install: **visible install wizard** — "install now" quits the app and opens
    the same NSIS wizard as a first-time install (progress fully visible); the
@@ -194,11 +195,13 @@ Both update paths have fallback chains and work out of the box:
 | Path | Official | Fallback | Override |
 |---|---|---|---|
 | Version resolution | `registry.npmjs.org` | `registry.npmmirror.com` | `DSH_APP_NPM_REGISTRIES` (comma-separated) or `NPM_CONFIG_REGISTRY` |
-| Artifact download | `github.com` Release | `ghfast.top`, `gh-proxy.com` (tried in order) | `DSH_APP_GITHUB_MIRRORS` (comma-separated prefixes; empty = mirrors off) |
+| Artifact download | `github.com` Release | ModelScope mirror (`modelscope.cn`, leads the bytes), `ghfast.top`, `gh-proxy.com` (tried in order) | `DSH_APP_GITHUB_MIRRORS` (comma-separated prefixes; empty = mirrors off) |
 
-Security model: **sha512 metadata is fetched from the official GitHub first**;
-mirrors only take part in the large-file download stage, and every candidate
-(official + each mirror) is verified against the same trusted sha512 — a
+Security model: **sha512 metadata (latest.yml / sidecars / manifests) is fetched
+from the official GitHub first**; the large-file download leads with the
+ModelScope mirror, the official host second and the public proxies last, and
+every candidate
+(mirror + official + each proxy) is verified against the same trusted sha512 — a
 hijacked mirror cannot substitute content.
 
 Connectivity self-check (run once in the target network environment):

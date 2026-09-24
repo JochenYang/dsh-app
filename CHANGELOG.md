@@ -8,7 +8,7 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
-## [Unreleased]
+## [v0.13.8] - 2026-09-24
 
 ### 中文
 - **内核跟进 0.1.7-rc.2**：23 个 `@deepseek-ai/dsh-*` 依赖升到 `^0.1.7-rc.2`，锁文件整体重建（旧锁钉死 rc.1 的传递闭包，只改 spec 会 ERESOLVE）。rc.2 的 web-app bundle 自己带了 `schedule` 行（`disabled: true`），与 overlay 的 insert 行在组合树里同时存在——**实测这不是 duplicate loader entry 失败**：所有层的 patch 在同一次 `applyEntryPatches` 调用里应用，树内条目按 id 取**最后一行**，我们 append 在最后。`--dump-config` 显示两行且无跳过警告；带该 insert 行的真实 profile 启动 rc.2 健康就绪。**保留 insert 而不改成行覆盖**：行覆盖在**没有**该行的内核上是空操作，而 rc.2 启动失败后的回滚目标是 rc.1——被跳过的行只留一行日志，schedule 静默消失。

@@ -134,8 +134,9 @@ $env:DSH_APP_DEV="1"; $env:DSH_APP_DEV_RUNTIME="D:/codes/DSH-APP/deepseek-harnes
 ## 内核更新系统
 
 应用自带版本化内核（`userData/kernel/`），不依赖系统是否安装过 dsh。更新链路：
-解析 npm registry 的 dist-tag 版本 → 从 GitHub Releases 下载运行时产物 → 与附带的
-sha512 比对校验 → 原子激活（旧版保留为 `previous`）→ 连续启动失败 2 次自动回退上一版。
+解析 npm registry 的 dist-tag 版本 → 按「ModelScope 镜像 → 官方 → 公共代理」的候选链下载
+运行时产物（每个候选用官方 sidecar 的 sha512 校验）→ 原子激活（旧版保留为 `previous`）→
+连续启动失败 2 次自动回退上一版。
 内核运行时布局与更新流程详见 [ARCHITECTURE.md §4–5](docs/ARCHITECTURE.md)。
 
 **内置运行时漂移检测**：升级安装时，如果新安装包内置的运行时与磁盘上已 adopt 的版本戳
@@ -148,7 +149,7 @@ sha512 比对校验 → 原子激活（旧版保留为 `previous`）→ 连续�
 Windows 使用自定义链路；macOS / Linux 使用 `electron-updater`。
 
 1. 检测：`github.com/<owner>/<repo>/releases/latest/download/latest.yml`（镜像回退）
-2. 下载：按架构选择安装包，官方直链优先、ghfast.top / gh-proxy.com 依次回退
+2. 下载：按架构选择安装包，ModelScope 镜像优先、官方直链次之、ghfast.top / gh-proxy.com 再回退
 3. 校验：sha512 与 latest.yml 比对，镜像永远替换不了内容
 4. 安装：**可视化安装向导**——点击「立即安装」后关闭应用、打开与首次安装相同的
    NSIS 向导（安装进度全程可见），完成后自动启动应用，安装包自动删除（取消安装也会删除）
@@ -160,10 +161,12 @@ Windows 使用自定义链路；macOS / Linux 使用 `electron-updater`。
 | 链路 | 官方源 | 回退 | 覆盖方式 |
 |---|---|---|---|
 | 版本解析 | `registry.npmjs.org` | `registry.npmmirror.com` | `DSH_APP_NPM_REGISTRIES`（逗号分隔）或 `NPM_CONFIG_REGISTRY` |
-| 产物下载 | `github.com` Release | `ghfast.top`、`gh-proxy.com`（依次尝试） | `DSH_APP_GITHUB_MIRRORS`（逗号分隔前缀；置空 = 关闭镜像） |
+| 产物下载 | `github.com` Release | ModelScope 镜像（`modelscope.cn`，字节优先）、`ghfast.top`、`gh-proxy.com`（依次回退） | `DSH_APP_GITHUB_MIRRORS`（逗号分隔前缀；置空 = 关闭镜像） |
 
-安全模型：**sha512 元数据优先从官方 GitHub 获取**，镜像只在大文件下载阶段参与，
-且每个下载候选（官方 + 每个镜像）都用同一份可信 sha512 校验——镜像被劫持也换不掉内容。
+安全模型：**sha512 元数据（latest.yml / sidecar / manifest）优先从官方 GitHub 获取**；大文件
+下载 ModelScope 镜像优先、官方次之、公共代理兜退，且每个下载候选（镜像 + 官方 + 每个代理）
+都用同一份可信 sha512 校验——镜像被劫持也换不掉内容。内核运行时与外壳安装包走同一条字节链：
+下载发生在外壳进程，不经代理注入，所以挂不挂梯子都优先走国内可达的镜像。
 
 连通性自检（在目标网络环境跑一遍）：
 
