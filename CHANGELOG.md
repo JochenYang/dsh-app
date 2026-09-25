@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.14.0] - 2026-09-25
+
+### 中文
+- **Windows 安装器不再把共享目录里的其他软件当成自己**：应用运行检测过去匹配“可执行路径以安装目录开头”的所有进程，安装目录选到共享目录（如 `Program Files` 根目录）时会把其他软件当成要关闭的进程，反复弹“DSH APP 无法关闭”（实测命中 8 个有道词典进程）。现在只精确匹配 `$INSTDIR\DSH APP.exe`，共享目录里的邻居不受影响。
+- **修复装在其他盘时覆盖更新被“无法卸载旧版本”拦死**：更新路径上旧版卸载器会先把安装文件逐个搬进 TEMP 目录再删除，而 NSIS 的重命名不能跨盘——装在 D 盘、TEMP 在 C 盘时第一个文件就失败，卸载器退出码 2，安装器重试 5 次后以 `Failed to uninstall old application files` 终止（应用内更新从非系统盘安装必现）。安装器现在带兜底：旧卸载器失败或无法启动时，自己用逐文件删除（不受盘符限制）清掉旧安装并继续安装。用户数据（`~/.dsh`、应用 userData）全程不在删除范围。
+
+### English
+- **The Windows installer no longer mistakes other software in a shared directory for itself**: the app-running check matched every process whose executable path starts with `$INSTDIR`, so installing into a shared directory (a Program Files root) found unrelated software and looped on "DSH APP cannot be closed" (measured: eight dictionary processes). It now matches exactly `$INSTDIR\DSH APP.exe`, so a neighbour in a shared directory is never disturbed.
+- **Updates from another drive no longer die on "Failed to uninstall old application files"**: on the update path the previous version's uninstaller moves every installed file into TEMP before deleting, and NSIS's rename cannot cross volumes — an install on D: with TEMP on C: failed on the first file, the uninstaller exited 2, and the installer gave up after five retries (every in-app update from a non-system drive). The installer now falls back to removing the previous install itself (a per-file delete, volume-agnostic) when the old uninstaller fails or cannot be launched. User data (`~/.dsh`, the app's userData) is never in scope.
+
 ## [v0.13.9] - 2026-09-25
 
 ### 中文
