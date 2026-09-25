@@ -25,12 +25,31 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The changeset gate diffs against the PR's base branch (or the
+          # push's before-sha), so the clone needs history, not one commit.
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - name: Install dependencies
         run: npm ci
+      # Changeset gate: a change that reaches users declares it in the same
+      # commit (changesets/<name>.md) — the v0.12.5/v0.13.6 failure class,
+      # where changed code with an unchanged version shipped nothing while
+      # every gate stayed green. The releasable paths mirror the delivery
+      # paths in docs/agents/release-checklist.md. No dependencies needed,
+      # so it runs before the build-shaped steps.
+      - name: Changeset gate
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            base="${{ github.event.before }}"
+            git cat-file -e "${base}^{commit}" 2>/dev/null || base="HEAD~1"
+          fi
+          node scripts/check-changeset.mjs --base "$base"
       - name: Typecheck shell + kernel
         run: npm run typecheck
       # Static plugin-graph rules: core packages declared as peers, no packaged

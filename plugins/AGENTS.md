@@ -89,7 +89,10 @@ drifts from the followed kernel line.
 patch field is a SINGLE digit: a tenth change carries into the minor
 (`0.8.9` → `0.9.0`), never `0.8.10`. `suiteVersion` hashes plugin `package.json`
 versions, not code, so an unbumped plugin ships nothing — every installation
-keeps the old one and every local gate stays green.
+keeps the old one and every local gate stays green. The bump travels with a
+`changesets/<name>.md` fragment at the repository root naming the plugin (see
+the root AGENTS.md §7); ci.yml refuses the commit without one, and
+`scripts/fold-changesets.mjs` consumes it at release time.
 
 ## 6. Kernel-line bumps
 

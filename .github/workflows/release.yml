@@ -53,6 +53,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # A tag whose version has no bilingual CHANGELOG section would publish
+      # an empty release page (v0.13.2 shipped that way and the notes had to
+      # be attached afterwards). The section is folded from the changeset
+      # fragments before tagging, so this only fails a tag cut without one.
+      - name: Verify the tag's changelog section
+        run: node scripts/check-changeset.mjs --tag "${{ github.ref_name }}"
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -34,7 +34,8 @@ halves; `npm` here, `pnpm` in the harness checkout; Node 22+.
 - `src/main/` shell (Electron main), `src/kernel/` kernel manager,
   `src/shared/` cross-cutting types, constants and the locale table.
 - `plugins/` the sixteen-plugin brand suite — see `plugins/AGENTS.md`.
-- `scripts/` build, smoke and probe tooling; `test/` root suites.
+- `scripts/` build, smoke and probe tooling; `test/` root suites;
+  `changesets/` the release-input fragments (see §7).
 - `static/` startup page, `resources/` icons, `docs/` documentation.
 
 Never commit build output (gitignored): `dist/`, `release/`, `runtime-dist/`,
@@ -255,3 +256,10 @@ Plugin builds and tests: `plugins/AGENTS.md`.
 `<type>(<scope>): <subject>` (`feat:`/`fix:`/`chore:`/`ci:`/`docs:`/`test:`);
 imperative, ≤50 chars, no period; body = one change per `-` bullet, ~72-char
 wrap, then a standalone `Verified:` line.
+
+A commit that reaches users (`src/`, a plugin's `src/` or `package.json`,
+`scripts/build-runtime.mjs`, `scripts/kernel-line.mjs`) also carries a
+`changesets/<name>.md` fragment declaring the shell impact and the plugins
+whose behaviour changed — the gate in ci.yml refuses it otherwise, and
+`scripts/fold-changesets.mjs` consumes it at release time. Format and rules:
+`changesets/README.md`.

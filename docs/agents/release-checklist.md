@@ -7,6 +7,14 @@ mistakes that have each cost a release called out where they apply.
 
 ## Decide what the release contains
 
+The declarations were made where each change landed: every commit touching a
+releasable path (`src/`, a plugin's `src/` or `package.json`, the two runtime
+build scripts) carried a `changesets/<name>.md` fragment, and ci.yml refused
+the push without one. So this section is a REVIEW of what the fragments
+declared — `node scripts/check-changeset.mjs --base <last-tag>` lists the
+releasable diff — plus the delivery-path walk for anything that predates the
+gate:
+
 - [ ] **Does a user on the previous version actually RECEIVE this change?** Walk
       the delivery path, do not assume it:
   - a change in `src/` (the shell) → a new `vX.Y.Z` tag. Nothing else delivers it.
@@ -50,9 +58,14 @@ mistakes that have each cost a release called out where they apply.
 ## Bump and changelog
 
 - [ ] `version` in `package.json`.
-- [ ] `[Unreleased]` → `[vX.Y.Z]` in `CHANGELOG.md`, **zh and en aligned** (same
-      entries, same order).
-- [ ] Commit both.
+- [ ] `node scripts/fold-changesets.mjs X.Y.Z` — assembles the bilingual
+      section from the `changesets/` fragments each change carried (the gate in
+      ci.yml enforced that they exist), then deletes them. The output is a
+      draft: review and enrich it the way past entries are enriched, keeping
+      **zh and en aligned** (same entries, same order).
+- [ ] Commit both. `release.yml` refuses a tag whose version has no bilingual
+      section, so a tag cut without this step fails instead of publishing an
+      empty release page.
 
 ## Tag
 
