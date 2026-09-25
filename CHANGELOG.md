@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.14.1] - 2026-09-25
+
+### 中文
+- 智能体团队浮窗不再透明：皮肤伪元素过去被设置对话框的拖拽条规则（`[class*="_panel"]::before`，把整块面板改成 20px 拖拽区）劫持，规则收窄到 `data-shortcut-modal="settings"` 后恢复；玻璃填充同时改为近不透明，补上本壳不渲染 backdrop-filter 的缺口。
+- 窗口控件条不再吞掉原生按钮的鼠标：标题行拖拽区过去盖住最小化/最大化/关闭，右侧打出 no-drag 洞后按钮的提示与点击恢复（悬停高亮由系统绘制，缺失是已知上限）。
+
+### English
+- The Team panel is no longer see-through: its skin pseudo-element was hijacked by the settings dialog's drag-strip rule, now scoped to `data-shortcut-modal="settings"`; the glass fill is near-opaque as well, covering this shell's unrendered backdrop-filter.
+- The window-control strip no longer swallows the native buttons' mouse: the title-row drag region used to cover minimize/maximize/close, and a no-drag hole over the strip restores their tooltips and clicks (the hover highlight is system-drawn; its absence is a known ceiling).
+
 ## [v0.14.0] - 2026-09-25
 
 ### 中文
