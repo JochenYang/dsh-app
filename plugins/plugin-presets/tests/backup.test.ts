@@ -64,6 +64,10 @@ const HOME_SETTINGS = [
 function writeHome(home: string): void {
   writeFileSync(join(home, 'settings.yaml'), HOME_SETTINGS, 'utf8')
   writeFileSync(join(home, 'AGENTS.md'), '# House rules\n\nKeep answers short.\n', 'utf8')
+  // The home's own patch layer and dsh's credential store ride as exact-path
+  // members — the two files a machine migration cannot reconstruct.
+  writeFileSync(join(home, 'cordis.patch.yml'), 'rows:\n  - id: home-row\n', 'utf8')
+  writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  OPENAI_API_KEY: sk-abcdefghijklmnopqrstuv\n', 'utf8')
   mkdirSync(join(home, 'hooks'), { recursive: true })
   writeFileSync(join(home, 'hooks', 'hooks.json'), '{"hooks":{}}\n', 'utf8')
   writeFileSync(join(home, 'hooks', 'after-edit.mjs'), 'export default {}\n', 'utf8')
@@ -92,11 +96,13 @@ describe('packConfigBackup (export whitelist)', () => {
   it('packs whitelisted files only and never credential-named ones', async () => {
     const home = scratchHome('export-home')
     writeHome(home)
-    const bytes = await packConfigBackup(home, 'web')
+    const { bytes, warnings } = await packConfigBackup(home, 'web')
     const zipped = unzipSync(bytes)
     const names = Object.keys(zipped).sort()
     assert.deepEqual(names, [
       'AGENTS.md',
+      'home/cordis.patch.yml',
+      'home/credentials.yaml',
       'hooks/after-edit.mjs',
       'hooks/hooks.json',
       'manifest.json',
@@ -108,6 +114,12 @@ describe('packConfigBackup (export whitelist)', () => {
       'profile/package.json',
       'settings.yaml',
     ])
+    // The credential store rides byte-for-byte — it is the one credential file
+    // the backup carries on purpose, admitted by exact path.
+    assert.match(Buffer.from(zipped['home/credentials.yaml']!).toString('utf8'), /OPENAI_API_KEY/u)
+    // Its key material is REPORTED, never hidden: the warning names the file
+    // and the rule, and the export succeeds regardless.
+    assert.deepEqual(warnings, [{ rel: 'home/credentials.yaml', rule: 'sk' }])
     // Payload bytes survive the round trip.
     assert.equal(Buffer.from(zipped['plugins/dsh-app-plugin-foo/config.json']!).toString('utf8'), '{"enabled":true}\n')
   })
@@ -122,7 +134,7 @@ describe('packConfigBackup (export whitelist)', () => {
     writeHome(home)
     renameSync(join(home, 'settings.yaml'), join(home, 'settings.yaml.imported'))
 
-    const zipped = unzipSync(await packConfigBackup(home, 'web'))
+    const zipped = unzipSync((await packConfigBackup(home, 'web')).bytes)
     assert.equal(Buffer.from(zipped['settings.yaml']!).toString('utf8'), HOME_SETTINGS)
     // The archive names the CONTENT, not the file it was read from: one path,
     // whatever this machine happens to call it.
@@ -132,7 +144,7 @@ describe('packConfigBackup (export whitelist)', () => {
   it('carries the settings file byte-for-byte, providers and all', async () => {
     const home = scratchHome('settings-home')
     writeHome(home)
-    const zipped = unzipSync(await packConfigBackup(home, 'web'))
+    const zipped = unzipSync((await packConfigBackup(home, 'web')).bytes)
     assert.equal(Buffer.from(zipped['settings.yaml']!).toString('utf8'), HOME_SETTINGS)
     // Its namesake inside a plugin store never rides along, and the store
     // whitelist is the gate that refuses it — the same gate a hostile archive
@@ -155,7 +167,7 @@ describe('packConfigBackup (export whitelist)', () => {
   it('carries top-level hook files and nothing else from the hooks directory', async () => {
     const home = scratchHome('hooks-home')
     writeHome(home)
-    const zipped = unzipSync(await packConfigBackup(home, 'web'))
+    const zipped = unzipSync((await packConfigBackup(home, 'web')).bytes)
     assert.equal(Buffer.from(zipped['hooks/hooks.json']!).toString('utf8'), '{"hooks":{}}\n')
     assert.equal(Buffer.from(zipped['hooks/after-edit.mjs']!).toString('utf8'), 'export default {}\n')
     // These files are code the kernel will run, so the block admits one narrow
@@ -171,7 +183,7 @@ describe('packConfigBackup (export whitelist)', () => {
   it('carries the config-backup manifest shape', async () => {
     const home = scratchHome('manifest-home')
     writeHome(home)
-    const bytes = await packConfigBackup(home, 'web')
+    const { bytes } = await packConfigBackup(home, 'web')
     const manifest = JSON.parse(Buffer.from(unzipSync(bytes)['manifest.json']!).toString('utf8')) as Record<string, unknown>
     assert.equal(manifest.kind, 'dsh-config-backup')
     assert.equal(manifest.formatVersion, 1)
@@ -181,7 +193,7 @@ describe('packConfigBackup (export whitelist)', () => {
 
   it('tolerates a bare home (no profile layer, no storages yet)', async () => {
     const home = scratchHome('bare-home')
-    const bytes = await packConfigBackup(home, 'web')
+    const { bytes } = await packConfigBackup(home, 'web')
     const names = Object.keys(unzipSync(bytes))
     assert.deepEqual(names, ['manifest.json'])
   })
@@ -197,7 +209,7 @@ describe('packConfigBackup (export whitelist)', () => {
     } catch {
       return // environment without symlink privilege: the fence is unverifiable here
     }
-    const bytes = await packConfigBackup(home, 'web')
+    const { bytes } = await packConfigBackup(home, 'web')
     const names = Object.keys(unzipSync(bytes))
     assert.ok(names.includes('plugins/dsh-app-plugin-foo/servers.json'))
     assert.ok(!names.includes('plugins/dsh-app-plugin-foo/config.json'))
@@ -205,49 +217,36 @@ describe('packConfigBackup (export whitelist)', () => {
 })
 
 describe('packConfigBackup (content-level secret scan)', () => {
-  it('refuses export when a whitelisted store file carries credential content', async () => {
+  it('reports a whitelisted store file that carries credential content — and packs it', async () => {
     const home = scratchHome('scan-authorization')
     mkdirSync(join(home, 'storages', 'dsh-app-plugin-mcp'), { recursive: true })
     writeFileSync(join(home, 'storages', 'dsh-app-plugin-mcp', 'servers.json'),
       '{"mcp":{"url":"https://mcp.example","headers":{"Authorization":"Bearer abcdefghijklmn"}}}\n', 'utf8')
-    await assert.rejects(
-      () => packConfigBackup(home, 'web'),
-      (error: unknown) => {
-        if (!(error instanceof PresetPackageError) || error.code !== 'sensitive-content') return false
-        // The refusal names the file and the rule (as a stable code plus those
-        // two values), never the matched content.
-        return error.host.code === 'backup.secretContent'
-          && error.host.params?.rel === 'plugins/dsh-app-plugin-mcp/servers.json'
-          && error.host.params?.rule === 'authorization'
-          && !JSON.stringify(error.host).includes('abcdefghijklmn')
-      },
-    )
+    const { bytes, warnings } = await packConfigBackup(home, 'web')
+    // The export SUCCEEDS: key material rides by design, and the warning names
+    // the file and the rule (never the matched content) so the user is told.
+    assert.deepEqual(warnings, [{ rel: 'plugins/dsh-app-plugin-mcp/servers.json', rule: 'authorization' }])
+    assert.ok(Object.keys(unzipSync(bytes)).includes('plugins/dsh-app-plugin-mcp/servers.json'))
+    assert.ok(!JSON.stringify(warnings).includes('abcdefghijklmn'))
   })
 
   it('reports the matched rule when the patch layer carries an api key shape', async () => {
     const home = scratchHome('scan-api-key')
     mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
     writeFileSync(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'provider:\n  api_key = "0123456789abcd"\n', 'utf8')
-    await assert.rejects(
-      () => packConfigBackup(home, 'web'),
-      (error: unknown) => error instanceof PresetPackageError && error.code === 'sensitive-content'
-        && error.host.code === 'backup.secretContent'
-        && error.host.params?.rel === 'profile/cordis.patch.yml' && error.host.params?.rule === 'api-key',
-    )
+    const { warnings } = await packConfigBackup(home, 'web')
+    assert.deepEqual(warnings, [{ rel: 'profile/cordis.patch.yml', rule: 'api-key' }])
   })
 
-  it('refuses export when a header of the host settings file carries a real key', async () => {
+  it('reports a real key pasted into a settings header — and packs it with the warning', async () => {
     const home = scratchHome('scan-settings')
     writeFileSync(join(home, 'settings.yaml'),
       'llm-pi-ai:\n  providers:\n    gateway:\n      headers:\n        x-api-key: 0123456789abcdef\n', 'utf8')
-    await assert.rejects(
-      () => packConfigBackup(home, 'web'),
-      (error: unknown) => error instanceof PresetPackageError && error.code === 'sensitive-content'
-        && error.host.code === 'backup.secretContent'
-        && error.host.params?.rel === 'settings.yaml' && error.host.params?.rule === 'api-key'
-        // The refusal names file and rule only, never the matched value.
-        && !JSON.stringify(error.host).includes('0123456789abcdef'),
-    )
+    const { bytes, warnings } = await packConfigBackup(home, 'web')
+    assert.deepEqual(warnings, [{ rel: 'settings.yaml', rule: 'api-key' }])
+    assert.ok(Object.keys(unzipSync(bytes)).includes('settings.yaml'))
+    // The warning names file and rule only, never the matched value.
+    assert.ok(!JSON.stringify(warnings).includes('0123456789abcdef'))
   })
 
   it('lets credential-free content through (names, numbers, references)', async () => {
@@ -269,16 +268,17 @@ describe('packConfigBackup (content-level secret scan)', () => {
       '  ref: ${TOKEN}',
       '',
     ].join('\n'), 'utf8')
-    const bytes = await packConfigBackup(home, 'web')
+    const { bytes } = await packConfigBackup(home, 'web')
     const names = Object.keys(unzipSync(bytes))
     assert.ok(names.includes('plugins/dsh-app-plugin-foo/config.json'))
     assert.ok(names.includes('settings.yaml'))
   })
 
-  it('refuses bare and quoted credential shapes under credential-named keys', async () => {
+  it('reports bare and quoted credential shapes under credential-named keys', async () => {
     // The store files are JSON and quote their values; the host settings file
     // is YAML and may write them bare or single-quoted. Every shape trips the
-    // same scan, and each case names the rule that must fire.
+    // same scan, and each case names the rule that must be reported — the
+    // export itself now always succeeds.
     const cases = [
       ['token', 'token: abc123def4567890\n'],
       ['token', '"token": "abcd1234ef"\n'],
@@ -292,15 +292,21 @@ describe('packConfigBackup (content-level secret scan)', () => {
     for (const [rule, body] of cases) {
       const home = scratchHome(`scan-shape-${rule}-${String(body.length)}`)
       writeFileSync(join(home, 'settings.yaml'), body, 'utf8')
-      await assert.rejects(
-        () => packConfigBackup(home, 'web'),
-        (error: unknown) => error instanceof PresetPackageError && error.code === 'sensitive-content'
-          && error.host.code === 'backup.secretContent'
-          && error.host.params?.rel === 'settings.yaml'
-          && error.host.params?.rule === rule,
-        `the shape ${JSON.stringify(body)} must refuse the export under rule ${rule}`,
-      )
+      const { warnings } = await packConfigBackup(home, 'web')
+      assert.deepEqual(warnings, [{ rel: 'settings.yaml', rule }],
+        `the shape ${JSON.stringify(body)} must be reported under rule ${rule}`)
     }
+  })
+
+  it('reports the credential store as a warning, never as a refusal', async () => {
+    // The one credential file that rides on purpose: its content hits the scan
+    // by design, and that hit is the user's notice that the archive carries
+    // plaintext keys — not a reason to fail the export.
+    const home = scratchHome('scan-credentials')
+    writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n', 'utf8')
+    const { bytes, warnings } = await packConfigBackup(home, 'web')
+    assert.deepEqual(warnings, [{ rel: 'home/credentials.yaml', rule: 'sk' }])
+    assert.ok(Object.keys(unzipSync(bytes)).includes('home/credentials.yaml'))
   })
 })
 
@@ -475,6 +481,39 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
       readFileSync(join(home, 'settings.yaml.bak-import-2026-09-13T08-09-07-000Z'), 'utf8'),
       'agent-default-model: local/other-model\n',
     )
+  })
+
+  it('restores the home patch layer and the credential store to their own targets', async () => {
+    // The two members a machine migration cannot reconstruct: hand-written
+    // rows and the API keys. The round trip is pack -> unpack -> restore, the
+    // same path a user's exported backup takes.
+    const source = scratchHome('new-members-src')
+    writeHome(source)
+    const { bytes } = await packConfigBackup(source, 'web')
+    const files = unpackConfigBackup(bytes)
+    const home = scratchHome('new-members-target')
+    const outcome = await restoreConfigBackup(home, 'web', files, false)
+    assert.ok(outcome.written >= 2)
+    assert.equal(readFileSync(join(home, 'cordis.patch.yml'), 'utf8'), 'rows:\n  - id: home-row\n')
+    assert.match(readFileSync(join(home, '.credentials.yaml'), 'utf8'), /OPENAI_API_KEY/u)
+    // Layout: both paths are first-class members, and a store-shaped guess at
+    // them is refused.
+    assert.equal(backupLayoutProblem('home/cordis.patch.yml'), undefined)
+    assert.equal(backupLayoutProblem('home/credentials.yaml'), undefined)
+    assert.equal(backupLayoutProblem('plugins/dsh-app-plugin-foo/.credentials.yaml')?.code, 'backup.storeFileNotAllowed')
+  })
+
+  it('sidecars the previous credential store before replacing it', async () => {
+    const files = unpackConfigBackup(zipSync({
+      'manifest.json': VALID_MANIFEST,
+      'home/credentials.yaml': strToU8('version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n'),
+    }))
+    const home = scratchHome('credentials-overwrite-target')
+    writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-oldoldoldoldoldoldoldold\n', 'utf8')
+    const outcome = await restoreConfigBackup(home, 'web', files, true, () => new Date('2026-09-13T08:09:07.000Z'))
+    assert.equal(outcome.written, 1)
+    assert.match(readFileSync(join(home, '.credentials.yaml'), 'utf8'), /sk-abcdefghijklmnopqrstuv/u)
+    assert.deepEqual(outcome.backups, ['home/credentials.yaml.bak-import-2026-09-13T08-09-07-000Z'])
   })
 
   it('skips members whose target already has identical content', async () => {

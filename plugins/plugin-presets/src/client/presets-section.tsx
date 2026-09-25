@@ -128,6 +128,25 @@ function formatBytes(bytes: number): string {
 }
 
 /**
+ * Decode the export answer's `x-dsh-backup-warnings` header (base64 JSON of
+ * `{ rel, rule }`). A malformed header must never fail a successful export —
+ * the standing warning in the section intro still covers the risk.
+ */
+function decodeBackupWarnings(header: string | null): { rel: string, rule: string }[] {
+  if (header === null || header === '') return []
+  try {
+    const parsed: unknown = JSON.parse(atob(header))
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry): entry is { rel: string, rule: string } =>
+      typeof entry === 'object' && entry !== null
+      && typeof (entry as { rel?: unknown }).rel === 'string'
+      && typeof (entry as { rule?: unknown }).rule === 'string')
+  } catch {
+    return []
+  }
+}
+
+/**
  * Render the preset-packages settings section.
  * @param props - the framework-supplied `t` seat of this page's namespace.
  * @returns the section page.
@@ -255,7 +274,16 @@ export function PresetsSection({ t }: PresetsSectionProps): ReactNode {
       anchor.click()
       anchor.remove()
       setTimeout(() => { URL.revokeObjectURL(url) }, 10_000)
-      setNotice(t('presets.backup.export.done', { file: `dsh-config-backup-${localDateStamp()}.zip` }))
+      const file = `dsh-config-backup-${localDateStamp()}.zip`
+      // The archive carries the credential store by design, so the host
+      // reports every secret-shaped file it packed; the notice is where the
+      // user learns the zip holds plaintext keys.
+      const warnings = decodeBackupWarnings(response.headers.get('x-dsh-backup-warnings'))
+      setNotice(warnings.length === 0
+        ? t('presets.backup.export.done', { file })
+        : `${t('presets.backup.export.done', { file })} ${t('presets.backup.export.secrets', {
+          list: warnings.map((warning) => t('presets.host.backupSecretContent', warning)).join(t('presets.list.separator')),
+        })}`)
     } catch (failure) {
       setError(failureText(failure, t))
     } finally {

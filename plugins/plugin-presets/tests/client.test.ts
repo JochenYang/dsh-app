@@ -38,7 +38,7 @@ describe('hostMessage (presets)', () => {
     )
     assert.equal(
       hostMessage({ code: 'backup.secretContent', params: { rel: 'profile/cordis.patch.yml', rule: 'api-key' } }, t),
-      '配置文件「profile/cordis.patch.yml」命中疑似凭据内容（规则 api-key），已拒绝导出；请移除该文件中的凭据后重试',
+      '配置文件「profile/cordis.patch.yml」命中疑似凭据内容（规则 api-key）',
     )
     assert.equal(hostMessage({ code: 'route.presetTooLarge', params: { mb: 10 } }, t), '预设包超过 10MB 上限')
   })

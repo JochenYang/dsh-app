@@ -1,35 +1,36 @@
 /**
  * Config backup pack/restore: a `dsh-config-backup` zip carrying the user's
  * profile patch layer, the profile manifest, the home-level configuration that
- * is not part of any profile (the host settings file and AGENTS.md), the market
- * source list, the whitelisted top-level store files of every installed suite
- * plugin, and the user's own hook files.
+ * is not part of any profile (the host settings file, the home patch layer,
+ * the credential store and AGENTS.md), the market source list, the
+ * whitelisted top-level store files of every installed suite plugin, and the
+ * user's own hook files.
  *
  * The host settings file (providers, their model lists, the default model,
  * theme, locale, permissions) is the bulk of what a migration actually needs,
  * so it rides along: it carries credential *references* (`apiKeyEnv` names)
  * and gateway request headers, never key material — dsh keeps the keys in its
- * own credential store, which no backup path ever reads. A header value the
- * user filled with a real key still cannot escape the archive: the content
- * scan below covers this file like every other member. The home's AGENTS.md
- * rides in the same block: hand-written user content that exists nowhere else,
- * which is exactly what a machine migration must not lose.
+ * own credential store. That store (`.credentials.yaml`) rides as a
+ * first-class member: a machine migration that drops it costs the user every
+ * API key, which is the one thing a backup exists to prevent. It is admitted
+ * by exact path, the same way the settings file is — the name-level refusal
+ * below still keeps a credential-named file out of every OTHER block.
+ *
+ * Because key material now travels by design, the content scan changed jobs:
+ * it no longer refuses the export (fail-closed was written for a world where
+ * a secret in the archive was always an accident). It REPORTS — every
+ * collected file is scanned against secret-shaped content rules, and each hit
+ * is returned as a `{ rel, rule }` warning that names the file and the rule,
+ * never the matched content. The route surfaces the list to the client, which
+ * tells the user the archive carries plaintext key material and to keep it
+ * local or encrypt it. A user who pasted a real key into a settings header
+ * learns exactly that from the same notice.
  *
  * Hook files are the one member with code semantics — the kernel executes them
  * on the target machine — so that block admits a narrow name shape at the top
  * level of `<home>/hooks` only. Importing one is exactly as consequential as
  * importing the settings file beside it, which is why the client copy says to
  * import only a backup the user exported themselves.
- *
- * Redaction is structural plus content-scanned, not a filter list: only exact
- * whitelisted FILE names inside plugin store directories ever enter the
- * archive, any name that smells like a credential
- * (credential/token/secret/key) is refused again at collect time, and every
- * collected file is scanned against secret-shaped content rules — the
- * whitelisted names are exactly where suite plugins keep provider keys, so
- * the name whitelist alone cannot keep a secret out of the archive. A scan
- * hit refuses the export (fail-closed) and reports only the file and rule
- * name, never the matched content.
  *
  * Import mirrors the preset package engine (pack.ts): a decompress-free
  * census pass proves every member path safe, unique, and within the declared
@@ -77,6 +78,7 @@ export const MARKET_STORE_DIR = 'dsh-app-plugin-market'
 
 /** Archive layout prefixes. */
 export const PROFILE_PREFIX = 'profile/'
+export const HOME_PREFIX = 'home/'
 export const MARKET_PREFIX = 'market/'
 export const PLUGINS_PREFIX = 'plugins/'
 export const HOOKS_PREFIX = 'hooks/'
@@ -97,6 +99,26 @@ export const MARKET_SOURCES_REL = `${MARKET_PREFIX}sources.json`
  * one settings file serves every profile of the install.
  */
 export const HOME_SETTINGS_REL = 'settings.yaml'
+
+/**
+ * Exact archive path of the home's own patch layer — the document a user hand
+ * writes rows into (the kernel composes it as a layer of its own on this
+ * line). A migration that drops it loses every hand-written row, which is
+ * where this app's own users keep their provider routes.
+ */
+export const HOME_LAYER_REL = `${HOME_PREFIX}cordis.patch.yml`
+
+/**
+ * Exact archive path of dsh's credential store — the API keys themselves.
+ * Admitted by exact path, deliberately: it is the one credential-named file
+ * the backup carries on purpose, and the content scan reports it as a warning
+ * so the user is told the archive holds plaintext key material. The archive
+ * name drops the leading dot on purpose: the zip safety rules refuse a
+ * dot-leading segment, and a security rule that exists for hostile archives
+ * is not carved up for one known member — the restore target below maps this
+ * name back to the dot-leading file on disk.
+ */
+export const CREDENTIALS_REL = `${HOME_PREFIX}credentials.yaml`
 
 /**
  * Exact archive path of the home's agent instructions. Same block as the
@@ -143,22 +165,25 @@ export function effectiveBackupProfile(raw: string | undefined): string {
  * `settings.yaml` is deliberately NOT matched here. It is the migration
  * payload (providers, their model lists, the default model), and it carries
  * credential *references* and gateway request headers rather than key
- * material; the keys live in dsh's own credential store, which no backup path
- * reads. Its content still goes through the secret scan like any other member.
+ * material; the keys live in dsh's own credential store, which rides the
+ * backup as an exact-path member (CREDENTIALS_REL) and never passes through
+ * this name test. Settings content still goes through the secret scan like
+ * any other member.
  */
 export function isSensitiveFileName(name: string): boolean {
   return /credential|token|secret|key/.test(name.toLowerCase())
 }
 
 /**
- * Content-level fail-closed secret rules scanned over every collected file —
- * the file-name whitelist cannot see what a whitelisted file contains, and
+ * Content-level secret rules scanned over every collected file — the
+ * file-name whitelist cannot see what a whitelisted file contains, and
  * the whitelisted store files (servers.json/config.json/sources.json) are
  * exactly where suite plugins keep provider keys. The host settings file is
  * the other subject: it is free-form YAML, and its provider request headers
  * are the one place a user can paste a real key by hand. All patterns are
- * matched case-insensitively over the decoded text; a hit refuses the export
- * and only the rule name is ever reported, never the matched content.
+ * matched case-insensitively over the decoded text; a hit is REPORTED (never
+ * refuses the export any more — the credential store rides on purpose) and
+ * only the rule name is ever surfaced, never the matched content.
  */
 const SECRET_CONTENT_RULES: ReadonlyArray<{ readonly name: string, readonly pattern: RegExp }> = [
   // The optional `"` before the colon keeps JSON keys (`"Authorization":`)
@@ -205,6 +230,17 @@ export interface BackupFile {
   readonly data: Uint8Array
 }
 
+/**
+ * One content-scan hit: the file that carries secret-shaped content and the
+ * rule that matched. Reported to the user so the archive's key material is
+ * never a surprise; the rule name is the only detail ever surfaced, never the
+ * matched text.
+ */
+export interface SecretWarning {
+  readonly rel: string
+  readonly rule: string
+}
+
 /** The validated manifest of a config backup (kind/version strict, rest lenient). */
 export interface BackupManifest {
   readonly formatVersion: number
@@ -214,15 +250,18 @@ export interface BackupManifest {
 
 /**
  * Whether an archive path is a layout member this plugin restores. Every
- * member must map to one exact profile/market block or one whitelisted file
- * of a suite-plugin store directory — a backup carries known shapes only, so
- * an unexpected member is a tampered or foreign archive, not a skip candidate.
+ * member must map to one exact profile/home/market block or one whitelisted
+ * file of a suite-plugin store directory — a backup carries known shapes
+ * only, so an unexpected member is a tampered or foreign archive, not a skip
+ * candidate.
  * @param rel - archive path (already through the traversal safety rules).
  * @returns the coded reason when rejected, undefined when restorable.
  */
 export function backupLayoutProblem(rel: string): HostText | undefined {
   if (rel === HOME_SETTINGS_REL
     || rel === HOME_AGENTS_REL
+    || rel === HOME_LAYER_REL
+    || rel === CREDENTIALS_REL
     || rel === PROFILE_PATCH_REL
     || rel === PROFILE_PACKAGE_REL
     || rel === MARKET_SOURCES_REL) {
@@ -266,6 +305,13 @@ function restoreTargetOf(home: string, profile: string, rel: string): string {
   if (rel === MARKET_SOURCES_REL) {
     return join(home, 'storages', MARKET_STORE_DIR, 'sources.json')
   }
+  if (rel.startsWith(HOME_PREFIX)) {
+    // The credential store's archive name drops the on-disk leading dot (the
+    // zip safety rules refuse a dot-leading segment); every other member of
+    // this block restores under its own name.
+    const name = rel === CREDENTIALS_REL ? '.credentials.yaml' : rel.slice(HOME_PREFIX.length)
+    return join(home, name)
+  }
   if (rel === HOME_SETTINGS_REL || rel === HOME_AGENTS_REL) {
     return join(home, rel)
   }
@@ -279,17 +325,28 @@ function restoreTargetOf(home: string, profile: string, rel: string): string {
 
 /**
  * Collect every file the backup carries: the profile patch layer and manifest
- * (optional — a fresh install has neither), the home-level settings file and
- * AGENTS.md, the market source list, the hook files, and the whitelisted
- * top-level files of every suite-plugin store directory.
+ * (optional — a fresh install has neither), the home-level settings file,
+ * the home patch layer, the credential store and AGENTS.md, the market source
+ * list, the hook files, and the whitelisted top-level files of every
+ * suite-plugin store directory.
+ *
+ * Secret-shaped content no longer refuses the export: the credential store
+ * rides on purpose, so a hit is REPORTED — `{ rel, rule }` per file, never
+ * the matched text — and the route surfaces the list so the user is told the
+ * archive carries plaintext key material.
+ *
  * @param home - the dsh home root.
  * @param profile - the profile whose patch layer and manifest are packed.
- * @returns the archive payload (manifest.json not included).
- * @throws PresetPackageError with codes `too-many-files`, `too-large`,
- *   `sensitive-content`, `io`.
+ * @returns the archive payload (manifest.json not included) plus the
+ *   content-scan warnings.
+ * @throws PresetPackageError with codes `too-many-files`, `too-large`, `io`.
  */
-export async function collectConfigBackup(home: string, profile: string): Promise<BackupFile[]> {
+export async function collectConfigBackup(
+  home: string,
+  profile: string,
+): Promise<{ files: BackupFile[], warnings: SecretWarning[] }> {
   const files: BackupFile[] = []
+  const warnings: SecretWarning[] = []
   const add = (rel: string, path: string): void => {
     try {
       // Export never follows symlinks: a link named like a whitelisted file
@@ -298,16 +355,9 @@ export async function collectConfigBackup(home: string, profile: string): Promis
       if (!statSync(path).isFile()) return
       const data = readFileSync(path)
       const rule = secretScanRuleHit(data)
-      if (rule !== undefined) {
-        throw new PresetPackageError('sensitive-content', {
-          code: 'backup.secretContent',
-          params: { rel, rule },
-          text: `configuration file "${rel}" matched a credential-like pattern (rule ${rule}); the export was refused`,
-        })
-      }
+      if (rule !== undefined) warnings.push({ rel, rule })
       files.push({ rel, data })
-    } catch (error) {
-      if (error instanceof PresetPackageError) throw error
+    } catch {
       // Absent/unreadable optional member: the backup just carries less.
     }
   }
@@ -333,6 +383,13 @@ export async function collectConfigBackup(home: string, profile: string): Promis
   const settingsPath = settingsNames.map(name => join(home, name)).find(candidate => existsSync(candidate))
   add(HOME_SETTINGS_REL, settingsPath ?? join(home, settingsNames[0]))
   add(HOME_AGENTS_REL, join(home, 'AGENTS.md'))
+  // The home's own patch layer: the document a user hand-writes rows into
+  // (provider routes among them). Absent on a machine that never wrote one.
+  add(HOME_LAYER_REL, join(home, 'cordis.patch.yml'))
+  // dsh's credential store — the API keys. Admitted by exact path; its
+  // content hits the scan by design and that hit IS the warning that tells
+  // the user the archive carries plaintext key material.
+  add(CREDENTIALS_REL, join(home, '.credentials.yaml'))
 
   // The kernel EXECUTES hook files on the target machine, so the block admits
   // one narrow name shape, top level only, and rides the same content scan.
@@ -386,7 +443,7 @@ export async function collectConfigBackup(home: string, profile: string): Promis
       text: `the configuration backup is over the ${String(Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024))} MB total-size cap; it cannot be exported`,
     })
   }
-  return files
+  return { files, warnings }
 }
 
 /**
@@ -394,11 +451,15 @@ export async function collectConfigBackup(home: string, profile: string): Promis
  * memory.
  * @param home - the dsh home root.
  * @param profile - the profile whose patch layer and manifest are packed.
- * @returns the archive bytes (≤ MAX_BACKUP_ZIP_BYTES).
+ * @returns the archive bytes (≤ MAX_BACKUP_ZIP_BYTES) plus the content-scan
+ *   warnings the route surfaces to the user.
  * @throws PresetPackageError with codes from {@link collectConfigBackup} or `too-large`.
  */
-export async function packConfigBackup(home: string, profile: string): Promise<Uint8Array> {
-  const files = await collectConfigBackup(home, profile)
+export async function packConfigBackup(
+  home: string,
+  profile: string,
+): Promise<{ bytes: Uint8Array, warnings: SecretWarning[] }> {
+  const { files, warnings } = await collectConfigBackup(home, profile)
   const manifest = {
     formatVersion: BACKUP_FORMAT_VERSION,
     kind: BACKUP_KIND,
@@ -418,7 +479,7 @@ export async function packConfigBackup(home: string, profile: string): Promise<U
       text: `the packed configuration backup is over the ${String(Math.floor(MAX_BACKUP_ZIP_BYTES / 1024 / 1024))} MB cap; it cannot be exported`,
     })
   }
-  return bytes
+  return { bytes, warnings }
 }
 
 /** Shape of the manifest a config backup carries. */
@@ -677,11 +738,12 @@ export async function restoreConfigBackup(
     for (const item of planned) {
       mkdirSync(dirname(item.target), { recursive: true })
       if (item.replacing) {
-        // The patch layer and the settings file are the two members a bad
-        // restore can silently break every session with — the patch composes
-        // the loader rows, the settings carry the providers — so each gets an
-        // automatic sidecar copy before it is replaced.
-        if (item.rel === PROFILE_PATCH_REL || item.rel === HOME_SETTINGS_REL) {
+        // The patch layer, the settings file and the credential store are
+        // the members a bad restore can silently break every session with —
+        // the patch composes the loader rows, the settings carry the
+        // providers, the store carries the keys — so each gets an automatic
+        // sidecar copy before it is replaced.
+        if (item.rel === PROFILE_PATCH_REL || item.rel === HOME_SETTINGS_REL || item.rel === CREDENTIALS_REL) {
           const sidecar = `${item.target}${OVERWRITE_SIDECAR_SUFFIX}${stamp}`
           copyFileSync(item.target, sidecar)
           backups.push(`${item.rel}${OVERWRITE_SIDECAR_SUFFIX}${stamp}`)

@@ -9,11 +9,16 @@
  *                          managed root; an existing entry answers 409 unless the
  *                          caller explicitly re-posts with `?overwrite=1`
  *   GET  /config-export  — the whole config backup as a zip (attachment): the
- *                          host settings file, the profile patch layer +
+ *                          host settings file, the home patch layer, the
+ *                          credential store, the profile patch layer +
  *                          manifest, the market source list, and whitelisted
- *                          suite-plugin store files (credential-named files
- *                          never enter; collected content is scanned and a
- *                          secret-shaped hit refuses the export)
+ *                          suite-plugin store files. Credential-named files
+ *                          never enter outside the store's exact path;
+ *                          collected content is scanned and every
+ *                          secret-shaped hit rides the answer as an
+ *                          `x-dsh-backup-warnings` header (base64 JSON of
+ *                          `{ rel, rule }`), because the archive carries
+ *                          plaintext key material by design
  *   POST /config-import  — backup zip as body; validates (manifest kind/version,
  *                          containment, caps) then restores; differing existing
  *                          targets answer 409 with the conflict list unless the
@@ -245,10 +250,19 @@ export function registerBackupRoutes(connectionFetch: HostConnectionFetch, deps:
       requestBody: 'buffered',
       fetch: async () => {
         try {
-          const bytes = await packConfigBackup(deps.home, deps.profile)
-          // The client names the file with a date stamp; the header carries
-          // the plain fallback name.
-          return zipResponse(bytes, 'dsh-config-backup.zip')
+          const { bytes, warnings } = await packConfigBackup(deps.home, deps.profile)
+          // Secret-shaped content no longer refuses the export — the
+          // credential store rides on purpose — so the scan hits travel with
+          // the answer: base64 JSON in a header, decoded by the client into
+          // the "this archive holds plaintext key material" notice.
+          const response = zipResponse(bytes, 'dsh-config-backup.zip')
+          if (warnings.length > 0) {
+            response.headers.set(
+              'x-dsh-backup-warnings',
+              Buffer.from(JSON.stringify(warnings), 'utf8').toString('base64'),
+            )
+          }
+          return response
         } catch (error: unknown) {
           if (error instanceof PresetPackageError) return failPackage(error)
           return fail(500, 'io', { code: 'route.backupExportFailed', text: 'cannot export the configuration backup' })
