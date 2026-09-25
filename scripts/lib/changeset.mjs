@@ -145,6 +145,30 @@ export function decide(changedPaths) {
 }
 
 /**
+ * Decide per commit — the unit the fragment travels in.
+ *
+ * A push's endpoint diff is the WRONG unit: a release push adds the fragment
+ * in the fix commit and consumes it in the release commit, so the cumulative
+ * diff shows the code change and no fragment, and a gate that reads endpoints
+ * fails a release that followed the rule (measured on v0.14.1's push). Each
+ * commit answers for itself.
+ *
+ * @param {readonly { sha: string, paths: readonly string[] }[]} commits - the
+ *   commits a push or PR adds, oldest first.
+ * @returns {{ sha: string, releasable: string[], hasFragment: boolean }[]} one
+ *   entry per offending commit; empty when every commit carries its
+ *   declaration.
+ */
+export function decideCommits(commits) {
+  const problems = []
+  for (const { sha, paths } of commits) {
+    const { releasable, hasFragment, ok } = decide(paths)
+    if (!ok) problems.push({ sha, releasable, hasFragment })
+  }
+  return problems
+}
+
+/**
  * Read and parse every fragment in a directory, sorted by name.
  *
  * @param {string} dir - the changesets directory.

@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   decide,
+  decideCommits,
   insertSection,
   isChangesetFile,
   isReleasablePath,
@@ -79,6 +80,23 @@ test('the gate fires on releasable changes without a fragment', () => {
   const docsOnly = decide(['docs/agents/release-checklist.md'])
   assert.equal(docsOnly.ok, true)
   assert.deepEqual(docsOnly.releasable, [])
+})
+
+test('the gate answers per commit, so a release push passes', () => {
+  // The v0.14.1 push, exactly as it landed: the mechanism, the fix with its
+  // fragments, then the release that consumes them. An endpoint diff of the
+  // whole push sees the code change and no fragment and fails; per commit,
+  // every commit carries its declaration.
+  const commits = [
+    { sha: 'aaaaaaa', paths: ['scripts/lib/changeset.mjs', '.github/workflows/ci.yml', 'docs/agents/release-checklist.md'] },
+    { sha: 'bbbbbbb', paths: ['src/main/window.ts', 'scripts/probe-drag.cjs', 'changesets/team-panel-see-through.md', 'changesets/window-controls-strip.md'] },
+    { sha: 'ccccccc', paths: ['package.json', 'CHANGELOG.md', 'changesets/team-panel-see-through.md', 'changesets/window-controls-strip.md'] },
+  ]
+  assert.deepEqual(decideCommits(commits), [])
+
+  const withBare = decideCommits([...commits, { sha: 'ddddddd', paths: ['src/main/index.ts'] }])
+  assert.equal(withBare.length, 1)
+  assert.equal(withBare[0].sha, 'ddddddd')
 })
 
 test('the fold renders a bilingual section and refuses a duplicate', () => {

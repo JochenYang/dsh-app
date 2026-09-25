@@ -3,8 +3,9 @@
  * The changeset gate, in its two modes.
  *
  *   node scripts/check-changeset.mjs --base <git-ref>
- *       Gate mode: the diff <ref>...HEAD must carry a changeset fragment when
- *       it touches a releasable path. Runs in ci.yml on every push and PR.
+ *       Gate mode: every commit in <ref>..HEAD that touches a releasable path
+ *       must carry a changeset fragment in the SAME commit. Runs in ci.yml on
+ *       every push and PR.
  *
  *   node scripts/check-changeset.mjs --tag v0.14.0
  *       Tag mode: the version must already have a bilingual CHANGELOG section.
@@ -17,12 +18,12 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   CHANGESET_DIR,
-  decide,
+  decideCommits,
   isChangesetFile,
   parseFragment,
   sectionBullets,
@@ -41,13 +42,24 @@ function git(args) {
 }
 
 /**
- * Repository-relative paths changed since a ref.
+ * The commits a push or PR adds, oldest first.
  *
- * @param {string} base - the git ref to diff against.
+ * @param {string} base - the git ref the range starts after.
+ * @returns {string[]} commit shas.
+ */
+function commitsSince(base) {
+  const output = git(['rev-list', '--reverse', `${base}..HEAD`])
+  return output === '' ? [] : output.split('\n')
+}
+
+/**
+ * Paths one commit changes, against its first parent.
+ *
+ * @param {string} commit - the commit sha.
  * @returns {string[]} the changed paths.
  */
-function changedSince(base) {
-  const output = git(['diff', '--name-only', `${base}...HEAD`])
+function changedIn(commit) {
+  const output = git(['diff', '--name-only', `${commit}^`, commit])
   return output === '' ? [] : output.split('\n')
 }
 
@@ -93,22 +105,37 @@ function main() {
     process.exit(2)
   }
 
-  const changed = changedSince(base)
-  const { releasable, hasFragment } = decide(changed)
+  // Per commit, not per push: the fragment must travel in the SAME commit as
+  // the change, and a release push adds the fragment in one commit and
+  // consumes it in the next — an endpoint diff of the whole push sees neither
+  // and would fail a release that followed the rule (measured on v0.14.1's
+  // push; the pure decision lives in decideCommits, tested against that shape).
+  const commits = commitsSince(base).map((sha) => ({ sha, paths: changedIn(sha) }))
 
-  for (const file of changed.filter(isChangesetFile)) {
-    try {
-      parseFragment(readFileSync(path.join(root, file), 'utf8'), file)
-    } catch (error) {
-      fail(`${error instanceof Error ? error.message : String(error)} — see ${CHANGESET_DIR}/README.md`)
+  const problems = []
+  for (const commit of commits) {
+    for (const file of commit.paths.filter(isChangesetFile)) {
+      const full = path.join(root, file)
+      // A deletion (the release commit consuming the fragments) was validated
+      // when it was added; only what the tree still holds can be parsed.
+      if (!existsSync(full)) continue
+      try {
+        parseFragment(readFileSync(full, 'utf8'), file)
+      } catch (error) {
+        problems.push(`${commit.sha.slice(0, 7)}: ${error instanceof Error ? error.message : String(error)} — see ${CHANGESET_DIR}/README.md`)
+      }
     }
   }
 
-  if (releasable.length > 0 && !hasFragment) {
-    fail(`releasable changes without a changeset fragment:\n${releasable.map((file) => `  ${file}`).join('\n')}\nAdd ${CHANGESET_DIR}/<name>.md in the same commit — see ${CHANGESET_DIR}/README.md`)
+  for (const { sha, releasable } of decideCommits(commits)) {
+    problems.push(`${sha.slice(0, 7)}: releasable changes without a changeset fragment:\n${releasable.map((file) => `    ${file}`).join('\n')}`)
   }
 
-  console.log(`changeset gate: ${releasable.length} releasable path(s), fragment ${hasFragment ? 'present' : 'not needed'}`)
+  if (problems.length > 0) {
+    fail(`${problems.join('\n')}\nAdd ${CHANGESET_DIR}/<name>.md in the same commit — see ${CHANGESET_DIR}/README.md`)
+  }
+
+  console.log(`changeset gate: every commit since ${base.slice(0, 7)} carries its declaration`)
 }
 
 main()
