@@ -47,8 +47,8 @@ ships.
 never a hand list; `smoke-suite.mjs` asserts what a bare `ok:true` cannot.
 
 **The installer pre-extracts the bundled kernel** (`scripts/installer/
-extract-kernel.nsh`, wired through `nsis.include` in electron-builder.yml): an
-NSIS `customInstall` hook unpacks `resources/kernel/kernel.tgz` into
+installer-hooks.nsh`, wired through `nsis.include` in electron-builder.yml):
+an NSIS `customInstall` hook unpacks `resources/kernel/kernel.tgz` into
 `resources/kernel-staged/` with Windows' own `tar.exe` while the installer runs,
 so the app's first launch adopts the staged tree (`src/kernel/staged.ts`, a
 rename — or a copy when userData sits on another volume) instead of unpacking
@@ -57,6 +57,35 @@ sidecar before the stage is touched, and every fault falls back to the app's own
 extraction path, so a failed pre-extraction is a slower first launch, never a
 broken install. Windows only by construction (macOS/Linux installers have no
 NSIS hook); the stage is an installer artifact and dev runs simply have none.
+
+The same file replaces the stock app-running check with an exact-match one
+(`customCheckAppRunning`): the stock matches every process whose path starts
+with `$INSTDIR`, so installing into a shared directory — a Program Files root —
+finds and tries to kill the user's unrelated software and dies in the
+"cannot be closed" loop; the replacement matches only
+`$INSTDIR\<app>.exe`.
+
+The same file also carries the update-path fallback
+(`customUnInstallCheck` / `customUnInstallCheckCurrentUser`). On an update the
+installer runs the PREVIOUS version's uninstaller first and treats any non-zero
+exit as fatal ("Failed to uninstall old application files"). That uninstaller
+ships on the user's machine already, so it cannot be fixed retroactively — and
+it cannot survive an install on another drive: with `--updated` it renames
+every installed file into `$PLUGINSDIR` (TEMP) before deleting, and **NSIS's
+`Rename` cannot cross volumes** (measured: D:→C: and C:→D: both fail), so a
+D: install with TEMP on C: aborts on the first file and exits 2. Every in-app
+update from a non-system drive hits this (electron-updater invokes the
+installer with `--updated /S /D=<dir>`, `NsisUpdater.js`). The hooks replace
+the stock failure handling: when the old uninstaller fails or cannot be
+launched, remove the previous install directly (`RMDir /r` deletes file by
+file, so it is volume-agnostic) plus its registry entries, and let the install
+continue. User data is never in scope — `$DSH_HOME` (`~/.dsh`) and the Electron
+userData live outside `$INSTDIR`, the registry keys and the shortcuts, and the
+update path passes `--updated`, which suppresses app-data deletion.
+
+Rebuild note: the D: drive on the maintainer's machine rejects writes from
+electron-builder's bundled 7za and makensis, so local verification builds must
+pass `-c.directories.output=<C: path>`.
 
 ## 2. The office payload (the engine that is NOT in the runtime)
 

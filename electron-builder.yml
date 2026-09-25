@@ -36,10 +36,15 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   shortcutName: DSH APP
-  # Extracts the bundled kernel into resources/kernel-staged at install time
-  # so the first launch activates instead of unpacking. A failure there is
-  # non-fatal — the app extracts on first launch instead.
-  include: scripts/installer/extract-kernel.nsh
+  # Installer hooks: extracts the bundled kernel into resources/kernel-staged
+  # at install time so the first launch activates instead of unpacking (a
+  # failure there is non-fatal — the app extracts on first launch instead),
+  # matches only this app's own executable in the app-running check so a shared
+  # install directory can never disturb other software, and falls back to a
+  # direct removal when the previous version's uninstaller fails on the update
+  # path (its rename-into-TEMP dance cannot cross volumes, so an install on
+  # another drive would otherwise abort with "Failed to uninstall").
+  include: scripts/installer/installer-hooks.nsh
 
 mac:
   target:
