@@ -304,6 +304,21 @@ body [class*="_titleRow"] button,
 body [class*="_titleRow"] a,
 body [class*="_titleRow"] input,
 body [class*="_titleRow"] [role="button"] { -webkit-app-region: no-drag; }
+/* The titleRow drag region spans the row's full box, which runs underneath the
+   native window controls (min/max/close) — a drag region there swallows the
+   mouse, so the buttons lose their hover. Punch a no-drag hole over the
+   control strip: the topmost region wins, and this is the same pseudo-element
+   mechanism the welcome-state drag bar above already relies on. The row gets
+   position:relative so the hole anchors to the row, not to a tall ancestor. */
+body [class*="_titleRow"] { position: relative; }
+body [class*="_titleRow"]::after {
+  content: "";
+  position: absolute;
+  top: 0; right: 0;
+  width: ${WINDOW_CONTROLS_WIDTH}px;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
 body [data-details-collapsed] [class*="_headerUtilities"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
 /* Alpha.1 removed the details column and added a far-right corner seat
    (data-conversation-header-corner, e.g. the sidebar expand button) that
@@ -327,7 +342,7 @@ body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
   z-index: 5;
 }
 /* The settings dialog floats above the frame, so the frame's drag regions are
-   masked while it is open; give the panel its own title strip instead. The
+   masked while it is open; give the dialog its own title strip instead. The
    strip stops at the header's own top padding (20px) so it never covers the
    header buttons: an absolutely positioned ::before paints above normal flow,
    and a drag strip overlapping a button would swallow clicks on its upper
@@ -336,8 +351,14 @@ body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
    Geometry keeps everything clear of the native window controls for free:
    the centered panel always starts >=24px below the viewport top and the
    header padding adds 20 more, so buttons sit at >=44px — below the 36px
-   overlay strip — at every window size. */
-body [class*="_panel"]::before {
+   overlay strip — at every window size.
+   Scoped by the dialog's own data-shortcut-modal="settings" marker, never
+   by [class*="_panel"]: that matched every *_panel* class in the app —
+   including the Team panel, whose skin is itself a ::before — and the strip's
+   height/z-index overrode the skin, leaving the panel see-through (the skin
+   only painted a 20px band). Measured: eleven elements matched, three of them
+   unrelated overlays. */
+body [data-shortcut-modal="settings"]::before {
   content: "";
   position: absolute;
   top: 0; left: 0; right: 0;
@@ -348,20 +369,20 @@ body [class*="_panel"]::before {
 /* Header blank areas drag the window; controls opt back out (same pattern as
    the frame's logoRow/titleRow). This restores the native layout: buttons
    return to their original position, on the same axis as the nav title. */
-body [class*="_panel"] [class*="_header"] { -webkit-app-region: drag; }
+body [data-shortcut-modal="settings"] [class*="_header"] { -webkit-app-region: drag; }
 /* The header rule above also catches headers that ARE buttons: a plugin
    disclosure card (ui-settings-plugins header button) would otherwise be
    swallowed by the drag region and never receive clicks. The button itself
    opts back out; blank header areas of non-button headers keep dragging. */
-body [class*="_panel"] button[class*="_header"] { -webkit-app-region: no-drag; }
+body [data-shortcut-modal="settings"] button[class*="_header"] { -webkit-app-region: no-drag; }
 /* Header controls (buttons, links, and any role=button element) stay clickable. */
-body [class*="_panel"] [class*="_header"] button,
-body [class*="_panel"] [class*="_header"] a,
-body [class*="_panel"] [class*="_header"] [role="button"],
-body [class*="_panel"] [class*="_header"] [class*="button"],
-body [class*="_panel"] [class*="_header"] [class*="Button"],
-body [class*="_panel"] [class*="_close"],
-body [class*="_panel"] [class*="Close"] { -webkit-app-region: no-drag; }
+body [data-shortcut-modal="settings"] [class*="_header"] button,
+body [data-shortcut-modal="settings"] [class*="_header"] a,
+body [data-shortcut-modal="settings"] [class*="_header"] [role="button"],
+body [data-shortcut-modal="settings"] [class*="_header"] [class*="button"],
+body [data-shortcut-modal="settings"] [class*="_header"] [class*="Button"],
+body [data-shortcut-modal="settings"] [class*="_close"],
+body [data-shortcut-modal="settings"] [class*="Close"] { -webkit-app-region: no-drag; }
 /* Sidebar foot: upstream renders the plugin action row (sidebar.footer.action)
    as a flex ROW, so two suite entries — the market plus any third-party one —
    shrink side by side and cram above the settings seat. Stack them instead, one
@@ -377,6 +398,24 @@ body [class*="_tabStrip"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
 /* rc.2 schedule catalog (the 自动化任务 surface): its page heading carries the
    right-aligned create button under the native controls — pad the heading. */
 body [class*="_pageHeading"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
+/* Overlay skins in this kernel are painted on a ::before: a semi-transparent
+   fill plus backdrop-filter (MenuSurface and the Team panel share the shape).
+   This shell's window does not render that blur — measured on Windows: the
+   identical page blurs in Chromium on the same machine, and in this window
+   under software rendering, but not on the GPU path the app takes — so the
+   fill alone reads see-through and page text shows through every menu. Upstream
+   takes the same escape hatch on macOS, where the fill stays near-opaque for
+   the same reason (ui-theme design-platform.css); apply it here for both
+   themes. Both tokens are overridden: --dsw-specific-menu is the alias the
+   Team panel consumes, --dsw-menu-surface-fill the value MenuSurface reads. */
+html body {
+  --dsw-menu-surface-fill: rgba(248, 249, 250, 0.96);
+  --dsw-specific-menu: rgba(248, 249, 250, 0.96);
+}
+html body[data-ds-dark-theme] {
+  --dsw-menu-surface-fill: rgba(40, 41, 45, 0.96);
+  --dsw-specific-menu: rgba(40, 41, 45, 0.96);
+}
 `
 
 /** Inject the desktop chrome stylesheet once per document. */

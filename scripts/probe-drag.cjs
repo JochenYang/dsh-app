@@ -19,6 +19,15 @@ body [class*="_titleRow"] button,
 body [class*="_titleRow"] a,
 body [class*="_titleRow"] input,
 body [class*="_titleRow"] [role="button"] { -webkit-app-region: no-drag; }
+body [class*="_titleRow"] { position: relative; }
+body [class*="_titleRow"]::after {
+  content: "";
+  position: absolute;
+  top: 0; right: 0;
+  width: ${WINDOW_CONTROLS_WIDTH}px;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
 body [data-details-collapsed] [class*="_headerUtilities"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
 body [class*="_titleRow"]:has([data-conversation-header-corner]) [data-conversation-header-corner] { margin-right: ${WINDOW_CONTROLS_WIDTH}px; }
 body [class*="_centerCol"] { position: relative; }
@@ -30,7 +39,7 @@ body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
   -webkit-app-region: drag;
   z-index: 5;
 }
-body [class*="_panel"]::before {
+body [data-shortcut-modal="settings"]::before {
   content: "";
   position: absolute;
   top: 0; left: 0; right: 0;
@@ -38,15 +47,15 @@ body [class*="_panel"]::before {
   -webkit-app-region: drag;
   z-index: 0;
 }
-body [class*="_panel"] [class*="_header"] { -webkit-app-region: drag; }
-body [class*="_panel"] button[class*="_header"] { -webkit-app-region: no-drag; }
-body [class*="_panel"] [class*="_header"] button,
-body [class*="_panel"] [class*="_header"] a,
-body [class*="_panel"] [class*="_header"] [role="button"],
-body [class*="_panel"] [class*="_header"] [class*="button"],
-body [class*="_panel"] [class*="_header"] [class*="Button"],
-body [class*="_panel"] [class*="_close"],
-body [class*="_panel"] [class*="Close"] { -webkit-app-region: no-drag; }
+body [data-shortcut-modal="settings"] [class*="_header"] { -webkit-app-region: drag; }
+body [data-shortcut-modal="settings"] button[class*="_header"] { -webkit-app-region: no-drag; }
+body [data-shortcut-modal="settings"] [class*="_header"] button,
+body [data-shortcut-modal="settings"] [class*="_header"] a,
+body [data-shortcut-modal="settings"] [class*="_header"] [role="button"],
+body [data-shortcut-modal="settings"] [class*="_header"] [class*="button"],
+body [data-shortcut-modal="settings"] [class*="_header"] [class*="Button"],
+body [data-shortcut-modal="settings"] [class*="_close"],
+body [data-shortcut-modal="settings"] [class*="Close"] { -webkit-app-region: no-drag; }
 /* Sidebar foot: upstream renders the plugin action row (sidebar.footer.action)
    as a flex ROW, so two suite entries — the market plus any third-party one —
    shrink side by side and cram above the settings seat. Stack them instead, one
@@ -62,6 +71,14 @@ body [class*="_tabStrip"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
 /* rc.2 schedule catalog (the 自动化任务 surface): its page heading carries the
    right-aligned create button under the native controls — pad the heading. */
 body [class*="_pageHeading"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
+html body {
+  --dsw-menu-surface-fill: rgba(248, 249, 250, 0.96);
+  --dsw-specific-menu: rgba(248, 249, 250, 0.96);
+}
+html body[data-ds-dark-theme] {
+  --dsw-menu-surface-fill: rgba(40, 41, 45, 0.96);
+  --dsw-specific-menu: rgba(40, 41, 45, 0.96);
+}
 `
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
