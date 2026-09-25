@@ -121,6 +121,15 @@ export const HOME_LAYER_REL = 'cordis.patch.yml'
 export const CREDENTIALS_REL = 'credentials.yaml'
 
 /**
+ * Transitional archive paths: the intermediate (never released) build put the
+ * two home members under a `home/` prefix. Import still admits exactly these
+ * two paths — mapping to the same restore targets — so an archive exported by
+ * that build restores; export writes the root-level names only.
+ */
+const LEGACY_HOME_LAYER_REL = 'home/cordis.patch.yml'
+const LEGACY_CREDENTIALS_REL = 'home/credentials.yaml'
+
+/**
  * Exact archive path of the home's agent instructions. Same block as the
  * settings file: it is the user's own hand-written configuration, the one
  * document a migration would otherwise lose silently.
@@ -262,6 +271,8 @@ export function backupLayoutProblem(rel: string): HostText | undefined {
     || rel === HOME_AGENTS_REL
     || rel === HOME_LAYER_REL
     || rel === CREDENTIALS_REL
+    || rel === LEGACY_HOME_LAYER_REL
+    || rel === LEGACY_CREDENTIALS_REL
     || rel === PROFILE_PATCH_REL
     || rel === PROFILE_PACKAGE_REL
     || rel === MARKET_SOURCES_REL) {
@@ -309,9 +320,13 @@ function restoreTargetOf(home: string, profile: string, rel: string): string {
   }
   // The credential store's archive name drops the on-disk leading dot (the
   // zip safety rules refuse a dot-leading segment); everything else of the
-  // home block restores under its own name.
-  if (rel === CREDENTIALS_REL) {
+  // home block restores under its own name. The two legacy `home/` paths map
+  // to the same targets.
+  if (rel === CREDENTIALS_REL || rel === LEGACY_CREDENTIALS_REL) {
     return join(home, '.credentials.yaml')
+  }
+  if (rel === LEGACY_HOME_LAYER_REL) {
+    return join(home, 'cordis.patch.yml')
   }
   if (rel.startsWith(HOOKS_PREFIX)) {
     return join(home, 'hooks', rel.slice(HOOKS_PREFIX.length))

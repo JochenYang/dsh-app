@@ -510,6 +510,23 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.equal(backupLayoutProblem('plugins/dsh-app-plugin-foo/.credentials.yaml')?.code, 'backup.storeFileNotAllowed')
   })
 
+  it('restores the transitional home/ archive shape to the same targets', async () => {
+    // The intermediate (never released) build wrote the two home members
+    // under home/; an archive exported by it must still restore.
+    const files = unpackConfigBackup(zipSync({
+      'manifest.json': VALID_MANIFEST,
+      'home/cordis.patch.yml': strToU8('rows:\n  - id: legacy-home\n'),
+      'home/credentials.yaml': strToU8('version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n'),
+    }))
+    const home = scratchHome('legacy-home-target')
+    const outcome = await restoreConfigBackup(home, 'web', files, false)
+    assert.equal(outcome.written, 2)
+    assert.equal(readFileSync(join(home, 'cordis.patch.yml'), 'utf8'), 'rows:\n  - id: legacy-home\n')
+    assert.match(readFileSync(join(home, '.credentials.yaml'), 'utf8'), /sk-abcdefghijklmnopqrstuv/u)
+    // And the layout gate still refuses anything else under that prefix.
+    assert.equal(backupLayoutProblem('home/other.yml')?.code, 'backup.unknownBlock')
+  })
+
   it('sidecars the previous credential store before replacing it', async () => {
     const files = unpackConfigBackup(zipSync({
       'manifest.json': VALID_MANIFEST,
