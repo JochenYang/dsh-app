@@ -24,6 +24,10 @@
  *     composer card, anchored by measuring the textarea DOM box.
  *   - active (messages exist): the whale drops into the background, larger
  *     and dimmed, behind the transcript.
+ *   - no phase element at all (the SPA is on a foreign surface — plugins,
+ *     settings, market): the whale parks itself invisible. Reading that
+ *     state as "welcome" — which this module did until the plugin page
+ *     made the consequence visible — hovered the whale over every route.
  *
  * Theming: colors derive from the live `--dsw-alias-*` tokens (ink mixed
  * toward brand). Light themes paint at a higher base alpha with a bluer
@@ -272,6 +276,15 @@ interface Box {
 }
 
 /**
+ * The conversation root's phase attribute, scoped to the center column — the
+ * same scope {@link WHALE_CSS} paints with. The scope is load-bearing twice
+ * over: the settings tabs and the composer carry their own `data-phase`
+ * state machines, and the SPA's foreign surfaces (plugins, settings, market)
+ * have no phase element at all, which is the signal that parks the whale.
+ */
+const PHASE_SELECTOR = "[class*='_centerCol'] [data-phase='hero'], [class*='_centerCol'] [data-phase='active'], [class*='_centerCol'] [data-phase='settling']"
+
+/**
  * Mount the whale background. Returns a disposer that removes the canvas,
  * its stylesheet, and every listener/observer.
  */
@@ -399,9 +412,24 @@ export function mountWhaleBackground(): () => void {
   let tT = 1
   /** First poll snaps instead of transitioning (the CSS fade covers entry). */
   let booted = false
+  /** Parked invisible: the SPA is on a surface the whale does not belong to. */
+  let hidden = false
 
   function applyPlacement(): void {
     canvas.style.transform = `translate(${place.cx - W / 2}px, ${place.cy - H / 2}px)`
+  }
+
+  /** Park (or unpark) the whale when the SPA leaves (or enters) a conversation. */
+  function setHidden(next: boolean): void {
+    if (hidden === next) return
+    hidden = next
+    if (next) {
+      canvas.classList.remove('is-visible')
+      mouse.active = false
+      stop()
+    } else {
+      canvas.classList.add('is-visible')
+    }
   }
 
   function beginTransition(target: LayoutState): void {
@@ -447,14 +475,18 @@ export function mountWhaleBackground(): () => void {
     const next = readTheme()
     if (next.dark !== theme.dark || cssRgb(next.base) !== cssRgb(theme.base) || cssRgb(next.brand) !== cssRgb(theme.brand)) {
       theme = next
-      renderFrame()
+      if (!hidden) renderFrame()
     }
     // The conversation root carries data-phase (hero | active | settling).
-    // Filter by those exact values: the input textarea and settings tabs
-    // also carry a data-phase, but from unrelated state machines. No match
-    // (pre-mount or foreign phase) reads as the welcome state.
-    const phase = document.querySelector("[data-phase='hero'], [data-phase='active'], [data-phase='settling']")
+    // NO match means the SPA is on a foreign surface (plugins, settings,
+    // market, …): the whale is a conversation-page brand mark and parks
+    // itself invisible there. Reading "no match" as the welcome state —
+    // which this did until the plugin page made it visible — hovered the
+    // whale over every route of the app.
+    const phase = document.querySelector(PHASE_SELECTOR)
     const value = phase === null ? null : phase.getAttribute('data-phase')
+    setHidden(value === null)
+    if (hidden) return
     beginTransition(value === 'active' ? activeLayout() : heroLayout())
   }
 
@@ -703,8 +735,11 @@ export function mountWhaleBackground(): () => void {
   place = heroLayout()
   pollState()
   // Reveal after the first paint so the CSS opacity fade actually runs
-  // (double rAF beats the "class added in the insertion frame" skip).
-  requestAnimationFrame(() => requestAnimationFrame(() => canvas.classList.add('is-visible')))
+  // (double rAF beats the "class added in the insertion frame" skip). A
+  // foreign surface — pollState parked the whale — never reveals.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (!hidden) canvas.classList.add('is-visible')
+  }))
 
   const poll = setInterval(pollState, POLL_MS)
   const onMotionChange = (): void => {

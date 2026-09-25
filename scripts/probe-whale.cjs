@@ -39,7 +39,7 @@ const log = (...a) => fs.writeSync(1, a.join(' ') + '\n')
 const DIAG_JS = `(() => {
   const canvas = document.querySelector('#dshapp-whale-bg')
   const seat = document.querySelector('textarea[class*="_input"]')
-  const phase = document.querySelector("[data-phase='hero'], [data-phase='active'], [data-phase='settling']")
+  const phase = document.querySelector("[class*='_centerCol'] [data-phase='hero'], [class*='_centerCol'] [data-phase='active'], [class*='_centerCol'] [data-phase='settling']")
   if (canvas === null) return JSON.stringify({ canvas: false })
   const rect = canvas.getBoundingClientRect()
   const g = canvas.getContext('2d')
@@ -164,7 +164,7 @@ app.whenReady().then(async () => {
     // Active phase: flip the conversation root's data-phase and verify the
     // whale re-centers on the conversation column (not the viewport).
     await win.webContents.executeJavaScript(`(() => {
-      const root = document.querySelector("[data-phase='hero'], [data-phase='settling']")
+      const root = document.querySelector("[class*='_centerCol'] [data-phase='hero'], [class*='_centerCol'] [data-phase='settling']")
       if (root) root.setAttribute('data-phase', 'active')
       const col = document.querySelector('[class*="_centerCol"]')
       const r = col ? col.getBoundingClientRect() : null
