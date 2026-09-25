@@ -263,6 +263,18 @@ The tarball sha512 is deliberately not the comparison key: a packaged runtime
 tarball is not byte-reproducible across builds, so a hash comparison would
 re-extract an identical runtime on every boot.
 
+**Install-time kernel extraction** (`scripts/installer/extract-kernel.nsh`,
+`src/kernel/staged.ts`): the Windows installer unpacks the bundled tarball into
+`resources/kernel-staged/` while it installs (an NSIS `customInstall` hook over
+Windows' own `tar.exe`), so the first launch activates the staged tree — a
+rename, or a copy when userData sits on another volume — instead of unpacking
+~13k files behind the splash. The tarball's sha512 is verified against its
+sidecar BEFORE the staged tree is touched, and every fault (no stage, a
+half-written stage, a manifest that disagrees with the bundle) falls back to
+the app's own extraction path — a failed pre-extraction is a slower first
+launch, never a broken install. The stage is an installer artifact: dev and
+unpackaged runs have none and follow the tarball path.
+
 Artifact metadata naming: `build-runtime.mjs` publishes
 `dsh-runtime-<platform>-<arch>-<ver>.tgz`, its `.sha512` sidecar, and a
 platform-suffixed `manifest-<platform>-<arch>.json` (six parallel CI cells

@@ -19,6 +19,8 @@ import { classifyDownloadFailure, describeDownloadFailure } from './failures'
 import { assertLayerTarget, missingLayers, readLayerIndex } from './layers'
 import type { KernelLayer, LayerIndex } from './layers'
 import { tarExtractionFilter } from './tar-entry'
+import { findStagedKernel } from './staged'
+import type { StagedKernel } from './staged'
 import { fetchRegistryInfo } from './sources/registry'
 import type { RegistryInfo } from './sources/registry'
 import { GitHubArtifactResolver } from './sources/artifact'
@@ -851,6 +853,21 @@ export class KernelManager {
     // would fail the comparison AND throw inside the localized message.
     const shipped = await readRuntimeManifest(path.dirname(tarballPath))
     const shippedVersion = typeof shipped?.dshVersion === 'string' && shipped.dshVersion !== '' ? shipped.dshVersion : null
+
+    // Fast path: the installer pre-extracted this tarball (verified above) at
+    // install time. Moving the staged tree is a rename on the usual layout;
+    // the tarball extraction below stays as the fallback for every fault.
+    const staged = findStagedKernel()
+    if (staged !== null) {
+      try {
+        this.log(`adopting the installer-staged kernel from ${staged.dir}`)
+        const stagedNext = await this.activateStagedKernel(staged, shippedVersion)
+        return this.finishLocalInstall(stagedNext, expected, shipped)
+      } catch (err) {
+        this.log(`staged kernel unusable (${(err as Error).message}); extracting the tarball instead`)
+      }
+    }
+
     const next = await this.activateTarball(tarball, shippedVersion)
     // Record the verified source hash and the identity of the bundle itself.
     // The stamp is what the boot drift check compares against: it says WHICH
@@ -858,7 +875,43 @@ export class KernelManager {
     // distinguishable from "a new shell shipped a different one". It is read
     // from the same manifest.json the boot check reads, so the two can never
     // disagree about what was adopted.
-    next.sha512 = expected
+    return this.finishLocalInstall(next, expected, shipped)
+  }
+
+  /**
+   * Move the installer-staged runtime tree into the kernel root's staging
+   * area and run the shared activation tail on it. The stage lives in
+   * `resources/` and the kernel root in userData — two different trees that
+   * are usually on one volume, so the move is a rename when it can be and a
+   * copy when it cannot (a user whose APPDATA sits on another drive).
+   */
+  private async activateStagedKernel(staged: StagedKernel, expectedVersion: string | null): Promise<CurrentKernel> {
+    const extractDir = path.join(this.root, STAGING_DIR, 'extract')
+    await fs.rm(extractDir, { recursive: true, force: true })
+    await fs.mkdir(extractDir, { recursive: true })
+    const destination = path.join(extractDir, 'runtime')
+    this.status({ phase: 'installing', message: t('kernel.status.activating'), progress: null, step: 2 })
+    try {
+      await renameWithRetry(staged.runtime, destination)
+    } catch {
+      await fs.cp(staged.runtime, destination, { recursive: true })
+    }
+    return this.activateExtracted(destination, expectedVersion)
+  }
+
+  /** The shared tail of a local (bundled) install: record, persist, publish. */
+  private async finishLocalInstall(
+    next: CurrentKernel,
+    expectedSha512: string,
+    shipped: Awaited<ReturnType<typeof readRuntimeManifest>>,
+  ): Promise<CurrentKernel> {
+    // Record the verified source hash and the identity of the bundle itself.
+    // The stamp is what the boot drift check compares against: it says WHICH
+    // bundled runtime this install adopted, so "already adopted" is
+    // distinguishable from "a new shell shipped a different one". It is read
+    // from the same manifest.json the boot check reads, so the two can never
+    // disagree about what was adopted.
+    next.sha512 = expectedSha512
     if (shipped !== null) next.bundledStamp = `${shipped.dshVersion}+${shipped.suiteVersion}`
     await saveCurrentKernel(this.root, next)
     this.current = next

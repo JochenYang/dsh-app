@@ -152,7 +152,7 @@ $env:DSH_APP_DEV="1"; $env:DSH_APP_DEV_RUNTIME="D:/codes/DSH-APP/deepseek-harnes
 | Item | Dev mode | Production |
 |---|---|---|
 | Kernel source | local checkout (desktop host child process) | preinstalled runtime under `userData/kernel/` (direct node binary) |
-| Startup time | slow (order of 10 s) | fast (order of 2 s) |
+| Startup time | seconds, no mirroring | usually seconds; the rc line mirrors the runtime into the profile, so the first boot and any post-market-change rebuild cost ten-odd seconds (measured 14–17 s) and later boots skip it by marker; the Windows installer pre-extracts the kernel, so the first launch pays no extraction |
 | Update checks | skipped (pinned to checkout) | every 6 h auto + manual via tray |
 
 ## Kernel update system

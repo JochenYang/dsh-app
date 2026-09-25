@@ -46,6 +46,18 @@ ships.
 **Runtime resources come from each plugin's own `package.json` `files` field**,
 never a hand list; `smoke-suite.mjs` asserts what a bare `ok:true` cannot.
 
+**The installer pre-extracts the bundled kernel** (`scripts/installer/
+extract-kernel.nsh`, wired through `nsis.include` in electron-builder.yml): an
+NSIS `customInstall` hook unpacks `resources/kernel/kernel.tgz` into
+`resources/kernel-staged/` with Windows' own `tar.exe` while the installer runs,
+so the app's first launch adopts the staged tree (`src/kernel/staged.ts`, a
+rename — or a copy when userData sits on another volume) instead of unpacking
+~13k files behind the splash. The tarball's sha512 is verified against its
+sidecar before the stage is touched, and every fault falls back to the app's own
+extraction path, so a failed pre-extraction is a slower first launch, never a
+broken install. Windows only by construction (macOS/Linux installers have no
+NSIS hook); the stage is an installer artifact and dev runs simply have none.
+
 ## 2. The office payload (the engine that is NOT in the runtime)
 
 **The LibreOffice engine is not in the runtime artifact at all.** The kit

@@ -351,3 +351,53 @@ test('install statuses carry the splash step and the localized wording', async (
   assert.equal(statuses[0].message, locale.t('kernel.status.verifyBundled'), 'the wording comes from the table')
   assert.equal(statuses.at(-1).message, locale.t('kernel.status.activating'))
 })
+
+// ------------------------------------------------- install-time staged tree
+
+/**
+ * Simulate the installer's pre-extraction: the same tarball, unpacked the way
+ * `scripts/installer/extract-kernel.nsh` lays it down. `process.resourcesPath`
+ * is where the manager looks for the stage (undefined under the test runner),
+ * so it is pointed at the bundle directory for the duration of the test.
+ */
+async function stageInstallerTree(t, bundle) {
+  const staged = path.join(path.dirname(bundle.tarball), 'kernel-staged')
+  mkdirSync(staged, { recursive: true })
+  await tar.x({ file: bundle.tarball, cwd: staged })
+  const previous = process.resourcesPath
+  process.resourcesPath = path.dirname(bundle.tarball)
+  t.after(() => { process.resourcesPath = previous })
+  return staged
+}
+
+test('the first install adopts the installer-staged tree instead of extracting', async (t) => {
+  const h = await harness(t, 'dsh-kernel-staged-')
+  const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
+  const staged = await stageInstallerTree(t, bundle)
+
+  const current = await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
+
+  assert.equal(current.active, 'dsh-1.0.0+suite-s1')
+  assert.equal(current.sha512, bundle.digest, 'the digest is still the tarball sidecar')
+  assert.equal(current.bundledStamp, '1.0.0+s1')
+  assert.ok(existsSync(path.join(h.root, current.active, 'node', NODE_BINARY)))
+  // The staged tree was MOVED, not copied: nothing is left in resources.
+  assert.ok(!existsSync(path.join(staged, 'runtime')), 'the staged tree is consumed by the adoption')
+})
+
+test('a staged tree that disagrees with the bundle falls back to extracting the tarball', async (t) => {
+  const h = await harness(t, 'dsh-kernel-staged-bad-')
+  const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
+  const staged = await stageInstallerTree(t, bundle)
+  // A half-written stage: the inner manifest names another platform, so the
+  // shared activation tail refuses it and the tarball path takes over.
+  writeFileSync(
+    path.join(staged, 'runtime', 'manifest.json'),
+    JSON.stringify({ ...bundle.manifest, platform: 'darwin' }),
+  )
+
+  const current = await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
+
+  assert.equal(current.active, 'dsh-1.0.0+suite-s1')
+  assert.ok(existsSync(path.join(h.root, current.active, 'node', NODE_BINARY)))
+})

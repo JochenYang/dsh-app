@@ -36,6 +36,10 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   shortcutName: DSH APP
+  # Extracts the bundled kernel into resources/kernel-staged at install time
+  # so the first launch activates instead of unpacking. A failure there is
+  # non-fatal — the app extracts on first launch instead.
+  include: scripts/installer/extract-kernel.nsh
 
 mac:
   target:
