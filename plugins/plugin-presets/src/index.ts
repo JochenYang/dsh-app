@@ -10,9 +10,13 @@
  * hand-authored copy would.
  *
  * The settings section also carries the config backup (`dsh-config-backup`
- * zip, see backup.ts): the host settings file, the profile patch layer and
- * manifest, the market source list, and whitelisted suite-plugin store files
- * — never credential files.
+ * zip, see backup.ts): the host settings file, the home patch layer, the
+ * credential store (`.credentials.yaml` — the API keys in plaintext, an
+ * exact-path member by design), the profile patch layer and manifest, the
+ * market source list, and whitelisted suite-plugin store files. Credential-
+ * named files are still refused everywhere else; the content scan reports
+ * secret-shaped members instead of refusing the export, so the user is told
+ * the archive carries key material.
  *
  * All archive-level safety (manifest shape, entry whitelist, path
  * containment, size/count caps) is enforced in wire/pack/backup before the

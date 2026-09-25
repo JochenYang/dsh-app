@@ -500,6 +500,12 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     // them is refused.
     assert.equal(backupLayoutProblem('home/cordis.patch.yml'), undefined)
     assert.equal(backupLayoutProblem('home/credentials.yaml'), undefined)
+    // Negative: the home block admits exactly those two paths. A future
+    // widening of HOME_PREFIX must not silently start packing other files —
+    // this pair is the invariant that answers "what else can carry keys".
+    assert.equal(backupLayoutProblem('home/other.yml')?.code, 'backup.unknownBlock')
+    assert.equal(backupLayoutProblem('home/nested/deep.yml')?.code, 'backup.unknownBlock')
+    assert.equal(backupLayoutProblem('home/.credentials.yaml')?.code, 'backup.unknownBlock')
     assert.equal(backupLayoutProblem('plugins/dsh-app-plugin-foo/.credentials.yaml')?.code, 'backup.storeFileNotAllowed')
   })
 

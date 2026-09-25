@@ -24,8 +24,9 @@
  *                          targets answer 409 with the conflict list unless the
  *                          caller re-posts with `?overwrite=1` (or `true`; the
  *                          restore is staged and rolled back on failure, and
- *                          the profile patch layer and the host settings file
- *                          are copied aside before an overwrite)
+ *                          the profile patch layer, the host settings file and
+ *                          the credential store are copied aside before an
+ *                          overwrite)
  *
  * Trust is the carrier's: the Connection transport applies its Host/Origin
  * fence and browser authentication before a route handler runs, and the desktop

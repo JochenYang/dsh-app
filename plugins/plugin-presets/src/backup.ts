@@ -387,9 +387,16 @@ export async function collectConfigBackup(
   // (provider routes among them). Absent on a machine that never wrote one.
   add(HOME_LAYER_REL, join(home, 'cordis.patch.yml'))
   // dsh's credential store — the API keys. Admitted by exact path; its
-  // content hits the scan by design and that hit IS the warning that tells
-  // the user the archive carries plaintext key material.
+  // content usually hits the scan and that hit IS the warning that tells the
+  // user the archive carries plaintext key material.
   add(CREDENTIALS_REL, join(home, '.credentials.yaml'))
+  // A store whose content matches no rule (a custom header name, an opaque
+  // ref) must still produce the notice: the archive carries keys either way,
+  // and the warning is the only per-export channel that says so.
+  if (files.some((file) => file.rel === CREDENTIALS_REL)
+    && !warnings.some((warning) => warning.rel === CREDENTIALS_REL)) {
+    warnings.push({ rel: CREDENTIALS_REL, rule: 'credential-store' })
+  }
 
   // The kernel EXECUTES hook files on the target machine, so the block admits
   // one narrow name shape, top level only, and rides the same content scan.

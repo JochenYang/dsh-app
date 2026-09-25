@@ -2,12 +2,14 @@
  * The preset-packages page (the 预设包 tab of 维护): the list of locally
  * authored presets with per-row export (download a `.dshpreset` file) and a
  * file-picker import. Above it sits the config-backup block: a whole-config zip
- * (the host settings file, plugin configs, market sources, the profile patch
- * layer) with one-click export — secret-shaped content is scanned and a hit
- * refuses the export — and a file-picker import that turns a 409 conflict into
- * an explicit overwrite confirmation. The host enforces every rule (whitelist,
- * containment, caps); this half only mirrors the upload size caps for an
- * instant local answer.
+ * (the host settings file, the home patch layer, the credential store, plugin
+ * configs, market sources, the profile patch layer) with one-click export —
+ * secret-shaped content is scanned and every hit rides the answer as an
+ * `x-dsh-backup-warnings` header this half turns into a notice, because the
+ * archive carries plaintext keys by design — and a file-picker import that
+ * turns a 409 conflict into an explicit overwrite confirmation. The host
+ * enforces every rule (whitelist, containment, caps); this half only mirrors
+ * the upload size caps for an instant local answer.
  *
  * @module @dsh-app/plugin-presets/client/presets-section
  */
@@ -19,6 +21,7 @@ import type { HostText } from '../wire.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
 import { hostMessage, type Translate } from './messages.ts'
+import { BACKUP_WARNINGS_HEADER, decodeBackupWarnings } from './backup-warnings.ts'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type PresetsSectionProps = PropsLocale<typeof NS>
@@ -112,12 +115,16 @@ function localDateStamp(): string {
  * The conflict list of an overwrite confirmation, capped so a huge backup
  * cannot flood the dialog (the full list stays in the host's refusal). The
  * list separator is a dictionary entry: a joiner hardcoded here cannot serve
- * both languages.
+ * both languages. One archive path is shown as what it IS on the user's
+ * machine: `home/credentials.yaml` is the API-key store, and a user must not
+ * have to recognize an internal archive path to know their keys are being
+ * replaced.
  */
 function describeConflictFiles(files: readonly string[], t: Translate): string {
   if (files.length === 0) return t('presets.conflict.none')
-  const head = files.slice(0, 5).join(t('presets.list.separator'))
-  return files.length > 5 ? t('presets.conflict.more', { head, count: files.length }) : head
+  const named = files.map((file) => (file === 'home/credentials.yaml' ? t('presets.backup.file.credentials') : file))
+  const head = named.slice(0, 5).join(t('presets.list.separator'))
+  return named.length > 5 ? t('presets.conflict.more', { head, count: named.length }) : head
 }
 
 /** Human size for a file count/bytes summary. */
@@ -125,25 +132,6 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${String(bytes)} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
-/**
- * Decode the export answer's `x-dsh-backup-warnings` header (base64 JSON of
- * `{ rel, rule }`). A malformed header must never fail a successful export —
- * the standing warning in the section intro still covers the risk.
- */
-function decodeBackupWarnings(header: string | null): { rel: string, rule: string }[] {
-  if (header === null || header === '') return []
-  try {
-    const parsed: unknown = JSON.parse(atob(header))
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((entry): entry is { rel: string, rule: string } =>
-      typeof entry === 'object' && entry !== null
-      && typeof (entry as { rel?: unknown }).rel === 'string'
-      && typeof (entry as { rule?: unknown }).rule === 'string')
-  } catch {
-    return []
-  }
 }
 
 /**
@@ -278,11 +266,13 @@ export function PresetsSection({ t }: PresetsSectionProps): ReactNode {
       // The archive carries the credential store by design, so the host
       // reports every secret-shaped file it packed; the notice is where the
       // user learns the zip holds plaintext keys.
-      const warnings = decodeBackupWarnings(response.headers.get('x-dsh-backup-warnings'))
+      const warnings = decodeBackupWarnings(response.headers.get(BACKUP_WARNINGS_HEADER))
       setNotice(warnings.length === 0
         ? t('presets.backup.export.done', { file })
         : `${t('presets.backup.export.done', { file })} ${t('presets.backup.export.secrets', {
-          list: warnings.map((warning) => t('presets.host.backupSecretContent', warning)).join(t('presets.list.separator')),
+          list: warnings
+            .map((warning) => t('presets.host.backupSecretContent', { rel: warning.rel, rule: warning.rule }))
+            .join(t('presets.list.separator')),
         })}`)
     } catch (failure) {
       setError(failureText(failure, t))

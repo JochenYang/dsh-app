@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [Unreleased]
+
+### 中文
+- **配置备份补上迁移真正需要的两块，密钥携带从“拒绝”改为“告知”**：备份现在包含 home 层补丁（`~/.dsh/cordis.patch.yml`，用户手写提供商路由的家）和 dsh 凭据库（`.credentials.yaml`，API 密钥明文）——此前两者都不在包内，换机器等于重填所有钥匙。两块都按精确归档路径准入，凭据库覆盖前自动留副本。内容扫描不再拒导：命中改为收集 `{文件, 规则}` 警告，随导出响应经 `x-dsh-backup-warnings` 头返回，客户端提示“ZIP 内含明文密钥，只在本机保管或先加密再传输”；凭据库即使内容不命中任何规则也必定告警。恢复与覆盖确认的文案同步补上凭据库，冲突列表里 `home/credentials.yaml` 显示为「凭据库（API 密钥）」。
+- **窗口适配跟上 rc.2 的新表面**：`window.open` 子窗过去只继承标题栏叠加、不继承注入 CSS 与颜色同步（自动化任务弹窗的按钮压在原生窗口按钮下）；右侧边栏顶部的分栏/全屏/收起按钮与调度目录页眉的「新建」按钮都已推离原生按钮带。新增 `scripts/probe-chrome-surfaces.cjs` 用真内核逐元素测量这类几何。
+- **鲸鱼背景只在会话面显示**：插件页等非会话面上，鲸鱼曾以欢迎态位置悬停（`pollState` 把“没有 data-phase”当成新会话面）。现在非会话面收起画布，回到会话面恢复；phase 查询限定在中心列内，设置页签与输入框自带的 `data-phase` 不再误判。
+
+### English
+- **The config backup now carries the two things a migration actually needs, and key material moved from "refused" to "disclosed"**: the backup includes the home patch layer (`~/.dsh/cordis.patch.yml`, where users hand-write provider routes) and dsh's credential store (`.credentials.yaml`, API keys in plaintext) — both were absent before, so a new machine meant re-entering every key. Both are exact-path members, and the store is sidecarred before an overwrite. The content scan no longer refuses the export: hits are collected as `{file, rule}` warnings that ride the answer in an `x-dsh-backup-warnings` header, which the client turns into "the zip holds plaintext keys — keep it local or encrypt it"; the store is reported even when its content matches no rule. Restore and overwrite copy now names the store, and the conflict list shows `home/credentials.yaml` as "the credential store (API keys)".
+- **The window chrome caught up with rc.2's new surfaces**: a `window.open` child inherited the title-bar overlay but never the injected CSS or the color sync (the automation-task popup's buttons sat under the native controls); the right dock sidebar's split/fullscreen/collapse buttons and the schedule catalog's create button now clear the native strip. `scripts/probe-chrome-surfaces.cjs` measures this geometry element by element against a real kernel.
+- **The whale background shows on conversation surfaces only**: on foreign pages (plugins, settings) it hovered at the welcome position, because `pollState` read "no data-phase element" as the new-session state. It now parks on foreign surfaces and returns with the conversation; the phase query is scoped to the center column, so the settings tabs' and the composer's own `data-phase` no longer pose as one.
+
 ## [v0.13.8] - 2026-09-24
 
 ### 中文
