@@ -99,26 +99,49 @@
   ${endIf}
 !macroend
 
-; ------------------------------------------------- (3) old-uninstall fallback
+; ------------------------------------------------- (3) old-uninstall handling
 
-# electron-builder runs the PREVIOUS version's uninstaller before installing
-# over it and treats any non-zero exit as fatal ("Failed to uninstall old
-# application files"). That uninstaller ships on the user's machine already, so
-# it cannot be fixed retroactively — and it has a hard failure mode: on the
-# update path (--updated) it renames every installed file into $PLUGINSDIR (the
-# TEMP directory) before deleting, and NSIS's Rename cannot cross volumes. An
-# install on D: with TEMP on C: therefore fails on the very first file, aborts,
-# and exits 2 — measured, both directions. Every in-app update from a
-# non-system drive hits this.
+# The failure this section exists for, as measured on this machine:
 #
-# These hooks replace the stock failure handling: when the old uninstaller
-# fails or cannot be launched, remove the previous install ourselves — RMDir /r
-# deletes file by file, so it is volume-agnostic — and let the install
-# continue. User data is never in scope: the paths touched here are $INSTDIR
-# (app binaries and the staged kernel), shortcuts, and registry keys; $DSH_HOME
-# (~/.dsh) and the Electron userData live outside all of them, and the update
-# path passes --updated, which suppresses app-data deletion even when an
-# uninstaller would otherwise offer it.
+# electron-builder's installer, before unpacking, finds the previous install in
+# the registry and runs ITS uninstaller with `--updated` (installUtil.nsh:206 —
+# unconditionally). That uninstaller then exits 2 and the installer retries
+# five times before raising "$(appCannotBeClosed)" — the dialog users see.
+#
+# What the exit code depends on (four isolated runs of the REAL installed
+# uninstaller against a scratch tree):
+#
+#   /S --updated _?=<dir>   exit 2   the installer's own invocation
+#   /S --updated (no _?=)   exit 0   registry-resolved target
+#   /S (no --updated)       exit 0   the manual-uninstall path
+#   empty tree, --updated   exit 2   NOT about how many files there are
+#
+# So `--updated` plus a pinned target is what fails, and it fails on an EMPTY
+# tree too — emptying the directory first (what this file did in its previous
+# revision) cannot help. Two hooks handle it:
+#
+#   A. `customRemoveFiles` (uninstaller side, this macro) — replaces the stock
+#      delete block outright, so a NEW uninstaller never runs the `--updated`
+#      move-into-$PLUGINSDIR dance. Cures every update from 0.14.2 onward.
+#   B. `dshPreclearPreviousInstall` (installer side, below) — removes the
+#      registry entries before the stock code looks for them, so an OLD
+#      uninstaller is never invoked at all. That is what covers the very next
+#      update, where the uninstaller on disk is still the old one.
+#
+# User data is never in scope either way: the paths touched here are $INSTDIR
+# (app binaries and the staged kernel), shortcuts and registry keys. $DSH_HOME
+# (~/.dsh) and the Electron userData live outside all of them, and the stock
+# `--updated` flag is what suppresses app-data deletion in the first place.
+
+; A. The uninstaller-side replacement for the stock delete block.
+!macro customRemoveFiles
+  # The stock block renames $INSTDIR into $PLUGINSDIR before deleting, and
+  # aborts when that rename fails — which is what produces the exit code the
+  # installer treats as fatal. Delete in place instead: RMDir /r removes file
+  # by file, so it works on any volume and on any tree shape.
+  SetOutPath $TEMP
+  RMDir /r $INSTDIR
+!macroend
 
 !macro dshRemovePreviousInstall
   ${if} ${errors}
@@ -136,6 +159,47 @@
   DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY}"
   DeleteRegKey HKCU "${INSTALL_REGISTRY_KEY}"
   DeleteRegKey HKLM "${INSTALL_REGISTRY_KEY}"
+!macroend
+
+; B. Installer side: take the registry entries away before the stock code reads
+; them, so it never finds a previous install to run an uninstaller for.
+;
+; Why this works where removing files did not: `uninstallOldVersion` resolves
+; the target from `${INSTALL_REGISTRY_KEY}` InstallLocation and returns
+; immediately when the uninstall string is absent (installUtil.nsh:155-164).
+; No entry, no uninstaller, no retry loop, no dialog — and the installer writes
+; fresh entries at the end of a successful install, so nothing is left missing.
+;
+; Called from `customInit` (.onInit), which matters for the elevated path: a
+; per-machine install elevates through UAC and the INNER instance runs
+; `.onInit` again (initMultiUser → setInstallModePerAllUsers → UAC_RunElevated),
+; while the install section's running-process check is skipped for that inner
+; instance. `.onInit` is therefore the one place both the normal and the
+; elevated instance pass through, and `$INSTDIR` is already resolved by
+; initMultiUser when customInit runs.
+;
+; The per-machine entry is read from HKLM first: an elevated instance sees the
+; machine hive, and a per-user instance must still find an HKLM install it is
+; about to be replaced by.
+!macro dshPreclearPreviousInstall
+  !ifndef BUILD_UNINSTALLER
+    ReadRegStr $R2 HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation
+    ${if} $R2 == ""
+      ReadRegStr $R2 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
+    ${endif}
+    ${if} $R2 != ""
+      DetailPrint "removing the previous install at $R2 (registry first, so its uninstaller is never run)"
+      DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY}"
+      DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY}"
+      DeleteRegKey HKCU "${INSTALL_REGISTRY_KEY}"
+      DeleteRegKey HKLM "${INSTALL_REGISTRY_KEY}"
+      RMDir /r $R2
+    ${endif}
+  !endif
+!macroend
+
+!macro customInit
+  !insertmacro dshPreclearPreviousInstall
 !macroend
 
 !macro customUnInstallCheck
