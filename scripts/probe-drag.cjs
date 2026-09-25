@@ -54,6 +54,14 @@ body [class*="_panel"] [class*="Close"] { -webkit-app-region: no-drag; }
    exactly as before. */
 body [class*="_footerActions"] { flex-direction: column; align-items: stretch; }
 body [class*="_footerActions"] > * { flex: none; width: 100%; }
+/* rc.2 right dock sidebar: its tab strip carries the split / fullscreen /
+   collapse buttons at the panel's top-right — under the native window
+   controls. Pad the strip so they clear them (measured: the collapse button's
+   right edge sat 42px past the strip's left edge). */
+body [class*="_tabStrip"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
+/* rc.2 schedule catalog (the 自动化任务 surface): its page heading carries the
+   right-aligned create button under the native controls — pad the heading. */
+body [class*="_pageHeading"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
 `
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))

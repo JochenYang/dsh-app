@@ -369,6 +369,14 @@ body [class*="_panel"] [class*="Close"] { -webkit-app-region: no-drag; }
    exactly as before. */
 body [class*="_footerActions"] { flex-direction: column; align-items: stretch; }
 body [class*="_footerActions"] > * { flex: none; width: 100%; }
+/* rc.2 right dock sidebar: its tab strip carries the split / fullscreen /
+   collapse buttons at the panel's top-right — under the native window
+   controls. Pad the strip so they clear them (measured: the collapse button's
+   right edge sat 42px past the strip's left edge). */
+body [class*="_tabStrip"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
+/* rc.2 schedule catalog (the 自动化任务 surface): its page heading carries the
+   right-aligned create button under the native controls — pad the heading. */
+body [class*="_pageHeading"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
 `
 
 /** Inject the desktop chrome stylesheet once per document. */
@@ -841,6 +849,14 @@ function installNavigationFence(win: BrowserWindow): void {
   // the fence; without this it would be the one unfenced window in the app.
   win.webContents.on('did-create-window', (child) => {
     installNavigationFence(child)
+    // The chrome adaptation is per-window state, not per-session: the child
+    // opens with the main window's options (titleBarOverlay included) but
+    // nothing ever installs the injected stylesheet, the controls-width
+    // concessions or the overlay color sync on it — observed on the schedule
+    // catalog popup, whose own top-right create button sat under the native
+    // window buttons while the strip kept the static light color. One call
+    // wires the same did-finish-load chain the main window gets.
+    startChromeSync(child)
   })
 }
 
