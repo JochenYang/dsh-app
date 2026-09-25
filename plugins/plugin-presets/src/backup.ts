@@ -78,7 +78,6 @@ export const MARKET_STORE_DIR = 'dsh-app-plugin-market'
 
 /** Archive layout prefixes. */
 export const PROFILE_PREFIX = 'profile/'
-export const HOME_PREFIX = 'home/'
 export const MARKET_PREFIX = 'market/'
 export const PLUGINS_PREFIX = 'plugins/'
 export const HOOKS_PREFIX = 'hooks/'
@@ -104,21 +103,22 @@ export const HOME_SETTINGS_REL = 'settings.yaml'
  * Exact archive path of the home's own patch layer — the document a user hand
  * writes rows into (the kernel composes it as a layer of its own on this
  * line). A migration that drops it loses every hand-written row, which is
- * where this app's own users keep their provider routes.
+ * where this app's own users keep their provider routes. It rides at the
+ * archive root like the other home-level members (settings.yaml, AGENTS.md).
  */
-export const HOME_LAYER_REL = `${HOME_PREFIX}cordis.patch.yml`
+export const HOME_LAYER_REL = 'cordis.patch.yml'
 
 /**
  * Exact archive path of dsh's credential store — the API keys themselves.
  * Admitted by exact path, deliberately: it is the one credential-named file
  * the backup carries on purpose, and the content scan reports it as a warning
  * so the user is told the archive holds plaintext key material. The archive
- * name drops the leading dot on purpose: the zip safety rules refuse a
- * dot-leading segment, and a security rule that exists for hostile archives
+ * name drops the on-disk leading dot on purpose: the zip safety rules refuse
+ * a dot-leading segment, and a security rule that exists for hostile archives
  * is not carved up for one known member — the restore target below maps this
  * name back to the dot-leading file on disk.
  */
-export const CREDENTIALS_REL = `${HOME_PREFIX}credentials.yaml`
+export const CREDENTIALS_REL = 'credentials.yaml'
 
 /**
  * Exact archive path of the home's agent instructions. Same block as the
@@ -266,8 +266,7 @@ export function backupLayoutProblem(rel: string): HostText | undefined {
     || rel === PROFILE_PACKAGE_REL
     || rel === MARKET_SOURCES_REL) {
     return undefined
-  }
-  if (rel.startsWith(HOOKS_PREFIX)) {
+  }  if (rel.startsWith(HOOKS_PREFIX)) {
     const name = rel.slice(HOOKS_PREFIX.length)
     if (!HOOK_FILE_PATTERN.test(name)) {
       return { code: 'backup.hookFileInvalid', params: { name }, text: `invalid hook file name: "${name}"` }
@@ -305,15 +304,14 @@ function restoreTargetOf(home: string, profile: string, rel: string): string {
   if (rel === MARKET_SOURCES_REL) {
     return join(home, 'storages', MARKET_STORE_DIR, 'sources.json')
   }
-  if (rel.startsWith(HOME_PREFIX)) {
-    // The credential store's archive name drops the on-disk leading dot (the
-    // zip safety rules refuse a dot-leading segment); every other member of
-    // this block restores under its own name.
-    const name = rel === CREDENTIALS_REL ? '.credentials.yaml' : rel.slice(HOME_PREFIX.length)
-    return join(home, name)
-  }
-  if (rel === HOME_SETTINGS_REL || rel === HOME_AGENTS_REL) {
+  if (rel === HOME_SETTINGS_REL || rel === HOME_AGENTS_REL || rel === HOME_LAYER_REL) {
     return join(home, rel)
+  }
+  // The credential store's archive name drops the on-disk leading dot (the
+  // zip safety rules refuse a dot-leading segment); everything else of the
+  // home block restores under its own name.
+  if (rel === CREDENTIALS_REL) {
+    return join(home, '.credentials.yaml')
   }
   if (rel.startsWith(HOOKS_PREFIX)) {
     return join(home, 'hooks', rel.slice(HOOKS_PREFIX.length))

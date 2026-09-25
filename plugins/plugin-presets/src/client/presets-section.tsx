@@ -116,13 +116,13 @@ function localDateStamp(): string {
  * cannot flood the dialog (the full list stays in the host's refusal). The
  * list separator is a dictionary entry: a joiner hardcoded here cannot serve
  * both languages. One archive path is shown as what it IS on the user's
- * machine: `home/credentials.yaml` is the API-key store, and a user must not
+ * machine: `credentials.yaml` is the API-key store, and a user must not
  * have to recognize an internal archive path to know their keys are being
  * replaced.
  */
 function describeConflictFiles(files: readonly string[], t: Translate): string {
   if (files.length === 0) return t('presets.conflict.none')
-  const named = files.map((file) => (file === 'home/credentials.yaml' ? t('presets.backup.file.credentials') : file))
+  const named = files.map((file) => (file === 'credentials.yaml' ? t('presets.backup.file.credentials') : file))
   const head = named.slice(0, 5).join(t('presets.list.separator'))
   return named.length > 5 ? t('presets.conflict.more', { head, count: named.length }) : head
 }

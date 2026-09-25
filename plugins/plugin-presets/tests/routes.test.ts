@@ -58,12 +58,12 @@ test('the credential store rides, and the warning header names it (base64 JSON)'
   assert.equal(response.status, 200)
   const header = response.headers.get(BACKUP_WARNINGS_HEADER)
   assert.ok(header !== null, 'the warning header is present when key material rides')
-  assert.deepEqual(decodeBackupWarnings(header), [{ rel: 'home/credentials.yaml', rule: 'sk' }])
+  assert.deepEqual(decodeBackupWarnings(header), [{ rel: 'credentials.yaml', rule: 'sk' }])
   // The header carries file and rule only — never the matched value.
   assert.ok(!header.includes('sk-abcdefghijklmnopqrstuv'))
   // And the archive really holds the store.
   const names = Object.keys(unzipSync(new Uint8Array(await response.arrayBuffer())))
-  assert.ok(names.includes('home/credentials.yaml'))
+  assert.ok(names.includes('credentials.yaml'))
 })
 
 test('a credential store whose content matches no rule is still reported', async () => {
@@ -74,7 +74,7 @@ test('a credential store whose content matches no rule is still reported', async
   const response = await exportAnswer(home)
   const header = response.headers.get(BACKUP_WARNINGS_HEADER)
   assert.ok(header !== null)
-  assert.deepEqual(decodeBackupWarnings(header), [{ rel: 'home/credentials.yaml', rule: 'credential-store' }])
+  assert.deepEqual(decodeBackupWarnings(header), [{ rel: 'credentials.yaml', rule: 'credential-store' }])
 })
 
 test('no warning header when nothing secret-shaped rides', async () => {

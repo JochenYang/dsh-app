@@ -101,8 +101,8 @@ describe('packConfigBackup (export whitelist)', () => {
     const names = Object.keys(zipped).sort()
     assert.deepEqual(names, [
       'AGENTS.md',
-      'home/cordis.patch.yml',
-      'home/credentials.yaml',
+      'cordis.patch.yml',
+      'credentials.yaml',
       'hooks/after-edit.mjs',
       'hooks/hooks.json',
       'manifest.json',
@@ -116,10 +116,10 @@ describe('packConfigBackup (export whitelist)', () => {
     ])
     // The credential store rides byte-for-byte — it is the one credential file
     // the backup carries on purpose, admitted by exact path.
-    assert.match(Buffer.from(zipped['home/credentials.yaml']!).toString('utf8'), /OPENAI_API_KEY/u)
+    assert.match(Buffer.from(zipped['credentials.yaml']!).toString('utf8'), /OPENAI_API_KEY/u)
     // Its key material is REPORTED, never hidden: the warning names the file
     // and the rule, and the export succeeds regardless.
-    assert.deepEqual(warnings, [{ rel: 'home/credentials.yaml', rule: 'sk' }])
+    assert.deepEqual(warnings, [{ rel: 'credentials.yaml', rule: 'sk' }])
     // Payload bytes survive the round trip.
     assert.equal(Buffer.from(zipped['plugins/dsh-app-plugin-foo/config.json']!).toString('utf8'), '{"enabled":true}\n')
   })
@@ -305,8 +305,8 @@ describe('packConfigBackup (content-level secret scan)', () => {
     const home = scratchHome('scan-credentials')
     writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n', 'utf8')
     const { bytes, warnings } = await packConfigBackup(home, 'web')
-    assert.deepEqual(warnings, [{ rel: 'home/credentials.yaml', rule: 'sk' }])
-    assert.ok(Object.keys(unzipSync(bytes)).includes('home/credentials.yaml'))
+    assert.deepEqual(warnings, [{ rel: 'credentials.yaml', rule: 'sk' }])
+    assert.ok(Object.keys(unzipSync(bytes)).includes('credentials.yaml'))
   })
 })
 
@@ -498,28 +498,29 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.match(readFileSync(join(home, '.credentials.yaml'), 'utf8'), /OPENAI_API_KEY/u)
     // Layout: both paths are first-class members, and a store-shaped guess at
     // them is refused.
-    assert.equal(backupLayoutProblem('home/cordis.patch.yml'), undefined)
-    assert.equal(backupLayoutProblem('home/credentials.yaml'), undefined)
-    // Negative: the home block admits exactly those two paths. A future
-    // widening of HOME_PREFIX must not silently start packing other files —
-    // this pair is the invariant that answers "what else can carry keys".
-    assert.equal(backupLayoutProblem('home/other.yml')?.code, 'backup.unknownBlock')
-    assert.equal(backupLayoutProblem('home/nested/deep.yml')?.code, 'backup.unknownBlock')
-    assert.equal(backupLayoutProblem('home/.credentials.yaml')?.code, 'backup.unknownBlock')
+    assert.equal(backupLayoutProblem('cordis.patch.yml'), undefined)
+    assert.equal(backupLayoutProblem('credentials.yaml'), undefined)
+    // Negative: the home block admits exactly those two paths beside the
+    // settings file and AGENTS.md. A future widening must not silently start
+    // packing other root-level files — this pair is the invariant that
+    // answers "what else can carry keys".
+    assert.equal(backupLayoutProblem('other.yml')?.code, 'backup.unknownBlock')
+    assert.equal(backupLayoutProblem('nested/deep.yml')?.code, 'backup.unknownBlock')
+    assert.equal(backupLayoutProblem('.credentials.yaml')?.code, 'backup.unknownBlock')
     assert.equal(backupLayoutProblem('plugins/dsh-app-plugin-foo/.credentials.yaml')?.code, 'backup.storeFileNotAllowed')
   })
 
   it('sidecars the previous credential store before replacing it', async () => {
     const files = unpackConfigBackup(zipSync({
       'manifest.json': VALID_MANIFEST,
-      'home/credentials.yaml': strToU8('version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n'),
+      'credentials.yaml': strToU8('version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n'),
     }))
     const home = scratchHome('credentials-overwrite-target')
     writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-oldoldoldoldoldoldoldold\n', 'utf8')
     const outcome = await restoreConfigBackup(home, 'web', files, true, () => new Date('2026-09-13T08:09:07.000Z'))
     assert.equal(outcome.written, 1)
     assert.match(readFileSync(join(home, '.credentials.yaml'), 'utf8'), /sk-abcdefghijklmnopqrstuv/u)
-    assert.deepEqual(outcome.backups, ['home/credentials.yaml.bak-import-2026-09-13T08-09-07-000Z'])
+    assert.deepEqual(outcome.backups, ['credentials.yaml.bak-import-2026-09-13T08-09-07-000Z'])
   })
 
   it('skips members whose target already has identical content', async () => {
