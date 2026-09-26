@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.14.3] - 2026-09-27
+
+### 中文
+- 内核子进程重启的原因现在写进 `dsh-kernel.log`，不再只发给一个打包版不存在的控制台。
+- 钉住内核自带的办公转换组件版本，让重建后的内核不会要求一个尚未发布的办公组件版本、导致用户点「更新」必然失败。
+- 诊断页的办公组件行现在显示已安装的版本，并把「有新版本可更新」与「从未安装」分开，不再把已有引擎的机器报成未安装。
+
+### English
+- The kernel child's restart reason now reaches `dsh-kernel.log` instead of a console a packaged build does not have.
+- Pin the office conversion kit the kernel ships, so a rebuilt kernel cannot demand an office-payload version no release carries — which made every "update" a user could click fail.
+- The diagnostics office-components row now shows the installed version and tells an available update apart from a first install, instead of reporting a machine that already holds an engine as "not installed".
+
 ## [v0.14.2] - 2026-09-25
 
 ### 中文
