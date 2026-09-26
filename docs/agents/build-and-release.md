@@ -243,12 +243,17 @@ shell update.
    backfill waits instead of racing the running one.
 7. **Runtime-only release**: run `npm run check:plugins -- --kernel <runtime.tgz>
    --home <the DSH_HOME, the directory holding profiles/>` first (it is not the
-   profile directory itself; no `--home` → temp DSH_HOME). The runtime
-   job queues the ModelScope mirror itself once the six-cell set is up, so
-   a dispatch-run runtime no longer needs a manual backfill; if a mirror run
-   failed, backfill the same way: `gh workflow run publish-mirror.yml -f
-   tag=runtime-<dshVersion>`. A shell release's own mirror run never touches
-   runtime assets, so "the shell mirrored fine" says nothing about them.
+   profile directory itself; no `--home` → temp DSH_HOME). A separate
+   `mirror-runtime` job waits for all six runtime cells and then verifies each
+   cell's manifest, sha512 sidecar, layer index and office payload against what
+   the tree just built before queueing the ModelScope mirror — every name on a
+   runtime release is reused by a rebuild, so only content can tell this run's
+   assets from a previous run's, and a cell it cannot prove turns the job red
+   instead of mirroring a stale set. A dispatch-run runtime therefore no longer
+   needs a manual backfill; if a mirror run failed, backfill the same way: `gh
+   workflow run publish-mirror.yml -f tag=runtime-<dshVersion>`. A shell
+   release's own mirror run never touches runtime assets, so "the shell mirrored
+   fine" says nothing about them.
 
 ## 5. Mirror and layer facts
 

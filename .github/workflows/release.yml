@@ -77,6 +77,7 @@ jobs:
     outputs:
       dsh_version: ${{ steps.resolve.outputs.dsh_version }}
       skip_runtime: ${{ steps.resolve.outputs.skip_runtime }}
+      suite_version: ${{ steps.resolve.outputs.suite_version }}
     steps:
       # kernel-line.mjs reads the followed kernel line straight out of the
       # tree's package.json, so this job needs the checkout and its deps.
@@ -109,6 +110,12 @@ jobs:
             DSH_VERSION="$(node scripts/kernel-line.mjs --resolve)"
           fi
           echo "dsh_version=$DSH_VERSION" >> "$GITHUB_OUTPUT"
+          # Exposed so the mirror job can prove an asset came from THIS tree
+          # rather than from a previous run of the same kernel line: every
+          # per-cell manifest carries `suiteVersion`, and the value is a content
+          # hash of the plugin versions plus the office kit pin, so it changes
+          # exactly when the runtime's contents do.
+          echo "suite_version=$SUITE_VERSION" >> "$GITHUB_OUTPUT"
           # All 6 cells × (tgz + sha512 + per-cell manifest + layer index + the
           # office payload's three assets) must be present; anything missing (or
           # no release at all) means a full rebuild. The layer index is required
@@ -487,50 +494,6 @@ jobs:
             gh release delete-asset "$TAG" "$name" --yes
           done
 
-      # Mirror the finished runtime to ModelScope from HERE, not from the
-      # mirror workflow's own event trigger.
-      #
-      # Why: `publish-mirror.yml` reacts to `release: published`, and a runtime
-      # release is created published (the app's resolver needs it that way), so
-      # that event fires in the middle of the six-cell upload and the workflow's
-      # own filter keeps `runtime-*` out of the shell path. The result was a
-      # runtime whose mirror was never written: the first 0.1.6-alpha.2 cells
-      # went up, nothing mirrored them, and every cell answered 404 through the
-      # ModelScope chain while looking healthy. A shell release then hid it
-      # further, because its own mirror run only walks the shell's assets.
-      #
-      # Only the LAST cell to finish dispatches — it is the one that can see the
-      # complete six-cell set — so one release queues one mirror run. The mirror
-      # workflow's own wait step would refuse an incomplete set anyway, and a
-      # dispatch for a tag whose mirror is already current rewrites the same
-      # path, so a duplicate would be harmless rather than wrong; this keeps the
-      # run list honest.
-      - name: Mirror the runtime to ModelScope
-        if: ${{ !cancelled() }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.runtime.outputs.dsh_version }}
-          TAG: runtime-${{ steps.runtime.outputs.dsh_version }}
-        run: |
-          set -euo pipefail
-          required=0
-          present=0
-          for cell in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
-            for asset in "dsh-runtime-${cell}-${VERSION}.tgz.sha512" "manifest-${cell}.json" "layers-${cell}.json"; do
-              required=$((required + 1))
-              if gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -qxF "$asset"; then
-                present=$((present + 1))
-              fi
-            done
-          done
-          if [ "$present" -eq "$required" ]; then
-            gh workflow run publish-mirror.yml --repo "$GITHUB_REPOSITORY" -f tag="$TAG"
-            echo "queued the ModelScope mirror for $TAG (the six-cell set is complete)"
-          else
-            echo "not the last cell: $present/$required of the set is up, so this cell does not queue the mirror"
-          fi
-
       # Also expose the tgz as a workflow artifact so the app job can bundle it
       # into the installer without re-downloading from the (still-draft) release.
       - name: Upload runtime artifact
@@ -542,6 +505,175 @@ jobs:
             runtime-dist/dsh-runtime-*.tgz.sha512
             runtime-dist/manifest.json
           retention-days: 1
+
+  # Mirror the finished runtime to ModelScope.
+  #
+  # Why a SEPARATE job and not a step inside the runtime matrix: the matrix cells
+  # finish in an arbitrary order and upload their assets at different times, so
+  # "am I the last one?" has to be answered by polling a shared list — and that
+  # question cannot be answered correctly from inside a cell. Measured on
+  # v0.14.3, with the dispatch living in the last cell to notice:
+  #
+  #   * the completeness check counted assets the PREVIOUS run had left behind.
+  #     Asset names carry the dsh version and nothing else (`manifest-<cell>.json`
+  #     carries no version at all), so a rebuild of the same kernel line reuses
+  #     the exact names — `ubuntu-arm64` reported 17/18 at 16:45:48 with only the
+  #     six linux assets uploaded, and `win32-x64` dispatched at 16:51:29 while
+  #     `darwin-x64` still held its PREVIOUS payload;
+  #   * `darwin-x64`'s own check then reported 1/18 at 16:55:29, with its assets
+  #     uploaded at 16:53:02 — a listing that came back short, its error swallowed
+  #     by the `2>/dev/null` the check needed to survive a missing tag.
+  #
+  # The mirror therefore copied a stale `office-payload-darwin-x64`: that
+  # platform's office conversion would have been one kit version behind while
+  # every job stayed green. A backfill was needed to repair it.
+  #
+  # `needs: runtime` makes the ordering a fact instead of a race: this job starts
+  # only after every cell has finished, so a single listing is complete by
+  # construction. Ordering alone is not enough, though — a complete list of
+  # WRONG assets is still wrong, and names cannot carry that distinction (a
+  # rebuild of one kernel line reuses every name). The step below therefore
+  # proves each cell by CONTENT — the per-cell manifest against this tree's dsh
+  # version and suite version, the tgz's sha512 sidecar against that manifest's
+  # `integrity`, the layer index against the suite layer name it has to name,
+  # and the office payload's sidecar against the version the manifest declares.
+  # All of it is small sidecar downloads; the ~96 MiB tarballs are never fetched
+  # here.
+  #
+  # An earlier revision filtered the listing by `updated_at >= run_started_at`
+  # instead. It was dropped rather than kept as a second line of defence: a
+  # wall-clock comparison needs two clocks to agree, says nothing about what the
+  # bytes are, and passes a previous run's asset whenever windows overlap — the
+  # exact failure it was meant to catch. Content is the property that has to
+  # hold before a mirror is written.
+  #
+  # Why the mirror is dispatched from here rather than left to the mirror
+  # workflow's own event trigger: `publish-mirror.yml` reacts to
+  # `release: published`, and a runtime release is created published (the app's
+  # resolver needs it that way), so that event fires in the middle of the upload
+  # while the workflow's own filter keeps `runtime-*` out of the shell path. The
+  # result was a runtime whose mirror was never written: the first 0.1.6-alpha.2
+  # cells went up, nothing mirrored them, and every cell answered 404 through the
+  # ModelScope chain while looking healthy.
+  mirror-runtime:
+    if: ${{ !cancelled() && needs.runtime.result == 'success' }}
+    name: mirror runtime to ModelScope
+    needs: [resolve, runtime]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify this run's runtime set
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.dsh_version }}
+          TAG: runtime-${{ needs.resolve.outputs.dsh_version }}
+          SUITE: ${{ needs.resolve.outputs.suite_version }}
+        run: |
+          set -euo pipefail
+          problems=""
+          note() {
+            problems="$problems $1"
+            echo "$1" >&2
+          }
+
+          # One listing, once. Every cell has finished by the time this job
+          # starts, so the NAMES below are complete by construction — the defect
+          # this job was written for came from reading a list mid-flight and
+          # believing the answer.
+          if ! gh release view "$TAG" --json assets --jq '.assets[].name' | sort > "$RUNNER_TEMP/names.txt"; then
+            echo "::error::could not list $TAG; nothing was mirrored" >&2
+            exit 1
+          fi
+
+          # Names cannot tell THIS run's assets from a previous run's: rebuilding
+          # one kernel line reproduces every name, and neither the manifest nor
+          # the layer index names the dsh version in its file name at all. So
+          # each cell is proven from the small sidecars' CONTENT below.
+          probe="$(mktemp -d)"
+          for cell in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
+            platform="${cell%-*}"
+            arch="${cell##*-}"
+            tgz="dsh-runtime-${cell}-${VERSION}.tgz"
+            for name in "$tgz.sha512" "manifest-${cell}.json" "layers-${cell}.json"; do
+              grep -qxF "$name" "$RUNNER_TEMP/names.txt" || note "absent: $name"
+            done
+            mkdir -p "$probe/$cell"
+            if ! gh release download "$TAG" -D "$probe/$cell" \
+              -p "manifest-${cell}.json" -p "layers-${cell}.json" -p "$tgz.sha512" >/dev/null 2>&1; then
+              note "unreadable: ${cell} manifest/layers/sha512 could not be downloaded"
+              continue
+            fi
+            manifest="$probe/$cell/manifest-${cell}.json"
+            layers="$probe/$cell/layers-${cell}.json"
+
+            got="$(jq -r '.dshVersion // ""' "$manifest")"
+            [ "$got" = "$VERSION" ] || note "$cell: manifest dshVersion is '$got', expected '$VERSION'"
+            got="$(jq -r '.suiteVersion // ""' "$manifest")"
+            [ "$got" = "$SUITE" ] || note "$cell: manifest suiteVersion is '$got', expected '$SUITE'"
+            got="$(jq -r '.platform + "-" + .arch' "$manifest")"
+            [ "$got" = "$cell" ] || note "$cell: manifest describes $got, not $cell"
+
+            # The sidecar is the value every client verifies the tarball against;
+            # one left by another build would name another digest.
+            got="$(tr -d '[:space:]' < "$probe/$cell/$tgz.sha512")"
+            claimed="$(jq -r '.integrity // ""' "$manifest")"
+            [ "$got" = "$claimed" ] || note "$cell: $tgz.sha512 does not match the manifest integrity"
+
+            got="$(jq -r '.suiteVersion // ""' "$layers")"
+            [ "$got" = "$SUITE" ] || note "$cell: layer index suiteVersion is '$got', expected '$SUITE'"
+            # The index is what the incremental path caches by. An index left by
+            # another build names another suite layer, and a client would keep
+            # serving old plugins from a file this release no longer implies.
+            if ! jq -e --arg n "suite-${SUITE}-${platform}-${arch}.tgz" '.layers | any(.name == $n)' "$layers" >/dev/null; then
+              note "$cell: layer index does not name suite-${SUITE}-${platform}-${arch}.tgz"
+            fi
+
+            # The office payload is the asset that actually went stale in the
+            # incident, and it rides its OWN version (the kit pin), not the dsh
+            # version. It is checked wherever the manifest — already proven to be
+            # this build's — declares one: a kernel line without an office
+            # provider publishes none.
+            declared="$(jq -r '.officePayload.version // ""' "$manifest")"
+            [ -n "$declared" ] || continue
+            payload="office-payload-${cell}-${VERSION}.tgz"
+            for name in "$payload" "$payload.sha512" "office-payload-${cell}.json"; do
+              grep -qxF "$name" "$RUNNER_TEMP/names.txt" || note "absent: $name"
+            done
+            if ! gh release download "$TAG" -D "$probe/$cell" \
+              -p "office-payload-${cell}.json" -p "$payload.sha512" >/dev/null 2>&1; then
+              note "unreadable: ${cell} payload metadata could not be downloaded"
+              continue
+            fi
+            sidecar="$probe/$cell/office-payload-${cell}.json"
+            got="$(jq -r '.payloadVersion // ""' "$sidecar")"
+            [ "$got" = "$declared" ] || note "$cell: payload sidecar is version '$got', manifest declares '$declared'"
+            got="$(jq -r '.platform + "-" + .arch' "$sidecar")"
+            [ "$got" = "$cell" ] || note "$cell: payload sidecar describes $got, not $cell"
+            got="$(tr -d '[:space:]' < "$probe/$cell/$payload.sha512")"
+            claimed="$(jq -r '.integrity // ""' "$sidecar")"
+            [ "$got" = "$claimed" ] || note "$cell: $payload.sha512 does not match the payload sidecar integrity"
+          done
+
+          if [ -n "$problems" ]; then
+            # Loud, not silent: the previous design logged a shrug and moved on,
+            # which is how a stale payload reached the mirror unnoticed. A red
+            # job tells the releaser to backfill — `gh workflow run
+            # publish-mirror.yml -f tag=$TAG` — rather than leaving a mirror that
+            # answers 404 through the ModelScope chain while every job is green.
+            echo "::error::this run's runtime set is not fully up:$problems" >&2
+            exit 1
+          fi
+          echo "all six cells verified against dsh $VERSION, suite $SUITE"
+
+      - name: Dispatch the ModelScope mirror
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: runtime-${{ needs.resolve.outputs.dsh_version }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-mirror.yml --repo "$GITHUB_REPOSITORY" -f tag="$TAG"
+          echo "queued the ModelScope mirror for $TAG (the six-cell set is verified from this run)"
 
   # Runs only on tag pushes. workflow_dispatch is the runtime-only path:
   # publish kernel artifacts for a dsh version without cutting a shell release.
@@ -682,3 +814,7 @@ jobs:
   # every version later discarded during review in ModelScope forever. It is a
   # separate event-driven workflow instead: publish-mirror.yml
   # (`on: release: types: [published]`), which also owns manual backfill.
+  #
+  # The one dispatch this file does make is `mirror-runtime` above, for a runtime
+  # release — created published, so the event cannot be its trigger. See that
+  # job's comment for why its ordering and asset set are proven, not assumed.

@@ -73,8 +73,12 @@ gate:
 
 ## Verify before publishing (the release stays a draft)
 
-- [ ] Every job green: `prepare-release`, `resolve`, six `runtime` cells, four
-      `app` cells.
+- [ ] Every job green: `prepare-release`, `resolve`, six `runtime` cells,
+      `mirror-runtime`, four `app` cells. A red `mirror-runtime` is not a warning:
+      it means one cell's assets could not be proven to come from this build, so
+      the runtime was never mirrored — backfill it by hand
+      (`gh workflow run publish-mirror.yml -f tag=runtime-<dshVersion>`) and find
+      out which cell was short.
 - [ ] **Every cell's manifest carries the suite version you just built**
       (`gh release download runtime-<v> -p 'manifest-<cell>.json'` → `.suiteVersion`).
       A MIXED set is the failure the `resolve` job's own probe guards against: one
