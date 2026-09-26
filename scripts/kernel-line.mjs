@@ -59,6 +59,37 @@ function readJson(file) {
   return JSON.parse(readFileSync(file, 'utf8'))
 }
 
+/**
+ * The LibreOffice kit version this build ships, or null to let the kernel
+ * line's `^0.1.1` range decide.
+ *
+ * It lives HERE rather than in `build-runtime.mjs` because it is part of the
+ * build's IDENTITY, not a build knob: the kit version becomes the office
+ * payload version (`officePayloadVersion(kitVersion, pythonVersion)`), and that
+ * payload is a separate artifact published once per runtime release. Two
+ * consequences, both fixed by {@link computeSuiteVersion} hashing this value:
+ *
+ *   - A floating range makes the same source demand whatever kit existed on the
+ *     build DATE. Measured on this tree: kit 0.1.2 shipped 2026-09-25T16:02Z,
+ *     twelve hours after the 0.1.7-rc.2 runtime was cut, so a rebuild resolved
+ *     0.1.2 and required `0.1.2-py3.12.14`; every installed `0.1.1-py3.12.14`
+ *     stopped satisfying its kernel and the settings row offered a download
+ *     that could only fail (release assets are named after the KERNEL version,
+ *     so the requirement pointed at an asset still carrying the old payload).
+ *   - Bumping this value alone changes what users must download. Without it in
+ *     the suite hash, `bundledStamp` would be unchanged, `decideBundledAdoption`
+ *     would answer `already-adopted`, and the new runtime would never reach
+ *     anyone — the same silent no-op the CI reuse gate was fixed for.
+ *
+ * Bumping it is a deliberate act with two steps, in this order:
+ *   1. Build and PUBLISH the runtime — the release then carries an
+ *      `office-payload-<platform>-<arch>.json` whose `payloadVersion` names the
+ *      new kit.
+ *   2. Only after that artifact is public does a runtime requiring it become
+ *      installable by existing users.
+ */
+export const DESKTOP_OFFICE_KIT_VERSION = '0.1.2'
+
 /** The devDependency spec every shell/plugin build is typechecked against. */
 export function followedSpec(repoRoot = root) {
   const pkg = readJson(path.join(repoRoot, 'package.json'))
@@ -156,11 +187,18 @@ export function assertFollowedVersion(version, spec = followedSpec()) {
 
 /**
  * Suite version, content-addressed from the bundled plugins' package.json
- * versions. Any suite change yields a new versionDir name (dsh-<v>+suite-<h>)
- * so activation lands in a fresh directory and the previous one stays for
- * rollback, while an unchanged suite keeps the same name AND — with the
- * reproducible tarball — the same artifact sha512, so a boot-time drift check
- * sees "no change" and skips the extract entirely.
+ * versions AND the office kit pin. Any suite change yields a new versionDir name
+ * (dsh-<v>+suite-<h>) so activation lands in a fresh directory and the previous
+ * one stays for rollback, while an unchanged suite keeps the same name AND —
+ * with the reproducible tarball — the same artifact sha512, so a boot-time drift
+ * check sees "no change" and skips the extract entirely.
+ *
+ * The kit pin is part of this hash because it decides the PAYLOAD version every
+ * kernel will require: a pin bump changes what users must download, so it has to
+ * move the kernel's identity with it. Without that, `bundledStamp` stays equal,
+ * `decideBundledAdoption` answers `already-adopted`, and the new runtime reaches
+ * nobody — see {@link DESKTOP_OFFICE_KIT_VERSION}.
+ *
  * An explicit DSH_APP_SUITE_VERSION still wins for hand-tagged builds.
  */
 export function computeSuiteVersion(repoRoot = root, env = process.env) {
@@ -170,6 +208,9 @@ export function computeSuiteVersion(repoRoot = root, env = process.env) {
     const pkg = readJson(path.join(repoRoot, 'plugins', name.replace('@dsh-app/', ''), 'package.json'))
     return `${name}@${pkg.version}`
   })
+  // A named suffix rather than a bare value, so a reader of the hash input can
+  // tell which fact moved without re-deriving the string.
+  parts.push(`office-kit@${DESKTOP_OFFICE_KIT_VERSION}`)
   return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 8)
 }
 

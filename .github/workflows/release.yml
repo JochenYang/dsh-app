@@ -168,6 +168,19 @@ jobs:
           # component against what this tree stages (Linux cells stage none: the
           # host accepts only win32/darwin manifests).
           EXPECTED_PYTHON="$(node -e "console.log(require('./scripts/primary-runtime-lock.json').pythonVersion)")"
+          # The KIT is the other half of that identity, and it is checked against
+          # the PAYLOAD sidecar rather than the runtime manifest the suite check
+          # above reads: the two are separate assets on the same release, and a
+          # payload upload that failed or was clobbered leaves the runtime looking
+          # current while every installed client would fetch a payload whose kit
+          # is not the one this tree pins. (`computeSuiteVersion` does cover the
+          # pin, so a pin bump alone already trips the suite check — this is the
+          # comparison that survives a half-published release, and it names the
+          # kit by value when it fires.)
+          EXPECTED_KIT="$(node -e "
+            import('./scripts/kernel-line.mjs').then((m) => console.log(m.DESKTOP_OFFICE_KIT_VERSION))
+              .catch((err) => { console.error(String(err)); process.exit(1) })
+          ")"
           for p in win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
             if ! gh release download "$TAG" -D "$probe" -p "office-payload-${p}.json" >/dev/null 2>&1; then
               echo "could not read $TAG's office payload sidecar for $p; building to be safe" >&2
@@ -181,6 +194,12 @@ jobs:
             PUBLISHED_PYTHON="$(node -e "try{console.log(JSON.stringify(require('$probe/office-payload-${p}.json').components?.python ?? null))}catch{console.log('')}")"
             if [ "$PUBLISHED_PYTHON" != "$WANTED_PYTHON" ]; then
               echo "$TAG's office payload for $p declares python $PUBLISHED_PYTHON, this tree stages $WANTED_PYTHON; building" >&2
+              echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            PUBLISHED_KIT="$(node -e "try{console.log(require('$probe/office-payload-${p}.json').components?.kit ?? '')}catch{console.log('')}")"
+            if [ "$PUBLISHED_KIT" != "$EXPECTED_KIT" ]; then
+              echo "$TAG's office payload for $p carries kit $PUBLISHED_KIT but this tree pins $EXPECTED_KIT; building" >&2
               echo "skip_runtime=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi

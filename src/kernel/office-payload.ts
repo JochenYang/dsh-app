@@ -109,6 +109,19 @@ export interface OfficePayloadStatus {
   required: string | null
   /** Installed payload version that satisfies {@link required}, or null. */
   installed: string | null
+  /**
+   * A payload version that IS on disk and verifies, whether or not it is the
+   * one {@link required} names, or null when no usable version is installed.
+   *
+   * This is the difference between "nothing is installed" and "an upgrade is
+   * available": a kernel whose bundled kit moved (a `^0.1.1` range resolving to
+   * 0.1.2 at build time) requires a version the user does not have, while the
+   * payload they downloaded a week ago is still complete on disk. Reporting
+   * that one as {@link installed} would hide the upgrade; reporting only null
+   * loses the fact that something IS installed and shows an untouched machine's
+   * "download" flow instead of "update".
+   */
+  installedOnDisk: string | null
   phase: OfficePayloadPhase
   /** 0..1 while downloading, null otherwise. */
   progress: number | null
@@ -270,20 +283,62 @@ export class OfficePayloadManager {
   }
 
   /**
+   * Whether one directory is a COMPLETE payload for this kernel's platform,
+   * arch and engine — the question {@link verify} answers while ignoring which
+   * content version the directory carries.
+   *
+   * Used only to report an install that exists while the required version has
+   * moved past it. It must never satisfy a download: the kit and engine a
+   * kernel needs are named by its OWN target's version, so a stale payload is
+   * still a download.
+   */
+  private async shapeOk(dir: string, target: OfficePayloadTarget): Promise<boolean> {
+    const manifest = await readManifest(dir)
+    if (manifest === null || payloadShapeProblems(manifest, target).length > 0) return false
+    for (const relative of requiredFiles(target.engine, manifest.components.python)) {
+      if (!(await exists(path.join(dir, relative)))) return false
+    }
+    return true
+  }
+
+  /**
+   * The newest payload version on disk that is complete for this target, or
+   * null when none is. "Newest" is by name order of the version directories,
+   * which is only ever used to pick WHICH name to show when several are
+   * present (the install path prunes the others) — never to decide whether to
+   * download, which stays {@link installed}/{@link OfficePayloadStatus.required}.
+   */
+  private async installedOnDisk(target: OfficePayloadTarget): Promise<string | null> {
+    const entries = await fs.readdir(this.payloadRoot(), { withFileTypes: true }).catch(() => [])
+    const candidates: string[] = []
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !isVersionDirectory(entry.name)) continue
+      if (await this.shapeOk(this.installDir(entry.name), target)) candidates.push(entry.name)
+    }
+    if (candidates.length === 0) return null
+    return candidates.sort().at(-1) ?? null
+  }
+
+  /**
    * The current state, from disk plus whatever task is in flight. Never throws
    * and never touches the network, so the row can call it freely.
    */
   async status(): Promise<OfficePayloadStatus> {
     const target = this.opts.target()
     if (target === null) {
-      return { supported: false, required: null, installed: null, phase: 'idle', progress: null, error: null }
+      return { supported: false, required: null, installed: null, installedOnDisk: null, phase: 'idle', progress: null, error: null }
     }
     const installed = await this.verify(this.installDir(target.payloadVersion), target)
+    // Only scanned when the required version is NOT installed: a satisfied
+    // kernel has nothing to distinguish, and the scan is the expensive half
+    // (it reads every other version directory's manifest).
+    const installedOnDisk = installed !== null ? installed : await this.installedOnDisk(target)
     const task = this.task
     return {
       supported: true,
       required: target.payloadVersion,
       installed,
+      installedOnDisk,
       phase: task === null ? 'idle' : task.phase,
       progress: task === null ? null : task.progress,
       error: task === null ? null : task.error,
@@ -600,6 +655,24 @@ export function manifestProblems(manifest: KernelOfficePayloadManifest, target: 
   if (manifest.payloadVersion !== target.payloadVersion) {
     problems.push(`the payload is version ${String(manifest.payloadVersion)}, but this kernel requires ${target.payloadVersion}`)
   }
+  problems.push(...payloadShapeProblems(manifest, target))
+  return problems
+}
+
+/**
+ * Why one payload manifest cannot serve this target at all, IGNORING which
+ * content version it carries.
+ *
+ * The version equality is deliberately not part of this: it answers "is this a
+ * complete payload for this kernel's platform, arch and engine?", which is what
+ * an already-installed version must satisfy to be worth REPORTING when
+ * {@link OfficePayloadTarget.payloadVersion} has moved past it (a `^0.1.1` kit
+ * range resolving to a new kit at build time moves the required version without
+ * anything about the user's install changing). {@link manifestProblems} adds
+ * the version rule on top, so the two cannot disagree about the shape.
+ */
+export function payloadShapeProblems(manifest: KernelOfficePayloadManifest, target: OfficePayloadTarget): string[] {
+  const problems: string[] = []
   if (manifest.platform !== target.platform || manifest.arch !== target.arch) {
     problems.push(`the payload is built for ${String(manifest.platform)}-${String(manifest.arch)}, not ${target.platform}-${target.arch}`)
   }

@@ -116,8 +116,8 @@ const AUDIT = [
   },
   {
     match: 'test/*.test.mjs',
-    count: 29,
-    why: 'root suites: every call removes an os.tmpdir scratch root that test just created (the mirror test also deletes a hardlink-only profile mirror on purpose, the kernel-manager suite removes one package out of a scratch runtime tree to prove `load()` refuses an incomplete one, the office-payload suite removes its mkdtemp userData/fixture roots at process exit, the activation-guard suite removes its mkdtemp bundle/userData roots plus the symlink-privilege probe dir, the graph suite removes the plugin skeleton it wrote, the updater suites remove their mkdtemp download destinations, and the changeset-gate suite removes the two mkdtemp fragment directories it read) — no link out of any of them; the profile-repair suite cleans its scratch roots the same way, through one helper',
+    count: 30,
+    why: 'root suites: every call removes an os.tmpdir scratch root that test just created (the mirror test also deletes a hardlink-only profile mirror on purpose, the kernel-manager suite removes one package out of a scratch runtime tree to prove `load()` refuses an incomplete one, the office-payload suite removes its mkdtemp userData/fixture roots at process exit and, in the on-disk-version test, one engine directory INSIDE a scratch payload root to prove an incomplete payload is not reported as installed, the activation-guard suite removes its mkdtemp bundle/userData roots plus the symlink-privilege probe dir, the graph suite removes the plugin skeleton it wrote, the updater suites remove their mkdtemp download destinations, and the changeset-gate suite removes the two mkdtemp fragment directories it read) — no link out of any of them; the profile-repair suite cleans its scratch roots the same way, through one helper',
   },
   {
     match: 'plugins/*/tests/**',

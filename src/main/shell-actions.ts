@@ -482,7 +482,9 @@ async function dispatch(action: ShellAction, request: Request, deps: ShellAction
           : await payload.status()
       // Only the state is logged (phase, version, size-free): a failure message
       // can name a path, and the log is shared with the diagnostics export.
-      deps.log?.(`[shell-action] ${action}: supported=${String(status.supported)} phase=${status.phase} required=${status.required ?? '-'} installed=${status.installed ?? '-'}`)
+      // `onDisk` is the version present while `required` moves past it — the
+      // pair that tells "upgrade available" from "nothing installed".
+      deps.log?.(`[shell-action] ${action}: supported=${String(status.supported)} phase=${status.phase} required=${status.required ?? '-'} installed=${status.installed ?? '-'} onDisk=${status.installedOnDisk ?? '-'}`)
       return sendJson(200, { ok: true, payload: status })
     }
     case 'config-check': {

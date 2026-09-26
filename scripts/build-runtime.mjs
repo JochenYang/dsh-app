@@ -107,6 +107,7 @@ import {
   assertValidVersion,
   channelFromVersion,
   computeSuiteVersion,
+  DESKTOP_OFFICE_KIT_VERSION,
   followedSpec,
   resolveFollowChannel,
   resolveDistTagVersion,
@@ -578,6 +579,12 @@ const OFFICE_SKILLS_ASSETS = ['packages', 'skill', 'skill-office', 'assets']
  * the one the payload artifact stages for that target.
  */
 const DESKTOP_OFFICE_KIT_PACKAGE = '@deepseek-ai/libreoffice-kit'
+
+// DESKTOP_OFFICE_KIT_VERSION is imported from kernel-line.mjs, not declared here:
+// it is part of the build's IDENTITY (computeSuiteVersion hashes it, so the
+// kernel directory name, the bundled stamp and the adoption decision all move
+// with it), and a second declaration would let the two drift. That module's
+// JSDoc carries the full rationale and the two-step bump order.
 
 /**
  * The provider that imports the kit STATICALLY, at module scope. It is what
@@ -1946,6 +1953,10 @@ async function main() {
     'overrides:',
     `  '@deepseek-ai/dsh': '${DSH_VERSION}'`,
     `  '@deepseek-ai/dsh-*': '${DSH_VERSION}'`,
+    // The office kit decides the PAYLOAD version the runtime will require, and
+    // that payload is published once per release — see
+    // DESKTOP_OFFICE_KIT_VERSION for what a floating range cost.
+    `  '${DESKTOP_OFFICE_KIT_PACKAGE}': '${DESKTOP_OFFICE_KIT_VERSION}'`,
     // The exact key outranks the wildcard for the private host: that package is
     // not on npm, so a wildcard resolution would fail the install (loudly, but
     // only after the whole download).

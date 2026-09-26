@@ -23,7 +23,7 @@ import { test } from 'node:test'
 const require = createRequire(import.meta.url)
 const { OfficePayloadManager, manifestProblems, requiredFiles } = require('../dist/kernel/office-payload.js')
 const { officePayloadAssetName, officePayloadManifestName, modelscopeRuntimeAssetUrl } = require('../dist/kernel/sources/artifact.js')
-const { OFFICE_PAYLOAD_DIR, OFFICE_ROOT_DIR } = require('../dist/shared/constants.js')
+const { OFFICE_PAYLOAD_DIR, OFFICE_PAYLOAD_MODULES_DIR, OFFICE_ROOT_DIR } = require('../dist/shared/constants.js')
 const build = await import('../scripts/lib/office-payload.mjs')
 const tar = require('tar')
 
@@ -171,7 +171,7 @@ async function settled(instance, { timeoutMs = 20_000 } = {}) {
 test('a kernel that declares no payload reports unsupported, never a download', async () => {
   const { value } = manager(newUserData(), () => null)
   assert.deepEqual(await value.status(), {
-    supported: false, required: null, installed: null, phase: 'idle', progress: null, error: null,
+    supported: false, required: null, installed: null, installedOnDisk: null, phase: 'idle', progress: null, error: null,
   })
   // A download for an unsupported kernel is a no-op, not an error: nothing can
   // resolve, so the row must not offer it and no file may appear.
@@ -248,6 +248,39 @@ test('an installed payload is never fetched again — a kernel update reuses it'
     assert.equal(status.installed, PAYLOAD_VERSION)
     assert.equal(status.phase, 'idle')
     assert.equal(release.calls.length, callsAfterInstall)
+    // And the ROW must not fall back to "not installed": a satisfied payload is
+    // `installed`, so there is no upgrade to report either. Asserted here because
+    // a shell (or client) that read the wrong field would show a download button
+    // over a working install — the regression this pair of fields exists against.
+    assert.equal(status.installedOnDisk, PAYLOAD_VERSION)
+    assert.equal(status.required, PAYLOAD_VERSION)
+  } finally {
+    release.restore()
+  }
+})
+
+test('a kit bump reads as an UPDATE, never as a fresh install', async () => {
+  const userData = newUserData()
+  const work = mkdtempSync(path.join(tmpdir(), 'dsh-office-fixture-'))
+  roots.push(work)
+  const tarball = await makePayloadTarball(work)
+  const release = stubRelease(tarball)
+  try {
+    // Install kit 0.0.1 for this target, then read it from a kernel whose kit
+    // pin moved to 0.0.2 — exactly what `DESKTOP_OFFICE_KIT_VERSION` does. The
+    // two versions differ only in the kit component, mirroring a real bump.
+    const first = manager(userData, () => targetFor())
+    await first.value.download()
+    await settled(first.value)
+
+    const bumped = build.officePayloadVersion('0.0.2')
+    const status = await manager(userData, () => targetFor(bumped)).value.status()
+    assert.equal(status.required, bumped, 'the kernel requires the bumped version')
+    assert.equal(status.installed, null, 'the bumped version is not installed — an upgrade IS available')
+    // The whole point: the version already on disk is still REPORTED, so the row
+    // can say "installed vX, update available" instead of "not installed".
+    assert.equal(status.installedOnDisk, PAYLOAD_VERSION)
+    assert.notEqual(status.installedOnDisk, status.required)
   } finally {
     release.restore()
   }
@@ -364,6 +397,43 @@ test('a payload of another kernel is never reported as installed', async () => {
     assert.equal(status.required, '0.0.1-py3.12.7')
     assert.equal(status.installed, null)
     assert.equal(await other.value.installedDir(), null)
+    // ...while the version that IS on disk is reported separately. This is the
+    // "an upgrade is available" state: a `^0.1.1` kit range resolving to a new
+    // kit at build time moves `required` past a payload the user already has,
+    // and reporting only `installed: null` showed them an untouched machine's
+    // download flow instead of an update.
+    assert.equal(status.installedOnDisk, PAYLOAD_VERSION)
+  } finally {
+    release.restore()
+  }
+})
+
+test('a version on disk that is NOT complete is never reported as installed-on-disk', async () => {
+  const userData = newUserData()
+  const work = mkdtempSync(path.join(tmpdir(), 'dsh-office-fixture-'))
+  roots.push(work)
+  const tarball = await makePayloadTarball(work)
+  const release = stubRelease(tarball)
+  const payloadRoot = path.join(userData, OFFICE_ROOT_DIR, OFFICE_PAYLOAD_DIR)
+  // A DIFFERENT content version than the one installed, so the tree below is
+  // read by the "required moved past it" path this field exists for.
+  const otherVersion = '0.0.1-py3.12.7'
+  try {
+    const first = manager(userData, () => targetFor())
+    await first.value.download()
+    await settled(first.value)
+
+    // Intact first: the engine is there, so the version IS reported. Without
+    // this half, the mutilated assertion below would pass for the wrong reason.
+    const intact = manager(userData, () => targetFor(otherVersion))
+    assert.equal((await intact.value.status()).installedOnDisk, PAYLOAD_VERSION)
+
+    // Now remove the engine marker: a payload that lost it is not usable at all,
+    // so it must not be offered as "installed, update available" either — the
+    // honest answer is the download flow.
+    rmSync(path.join(payloadRoot, PAYLOAD_VERSION, OFFICE_PAYLOAD_MODULES_DIR, '@deepseek-ai', `libreoffice-kit-${ENGINE}`), { recursive: true, force: true })
+    const mutilated = manager(userData, () => targetFor(otherVersion))
+    assert.equal((await mutilated.value.status()).installedOnDisk, null)
   } finally {
     release.restore()
   }

@@ -112,6 +112,39 @@ the payload's CONTENT (kit version, plus the Python version when a Python set is
 carried) — that is what makes a kernel update or a rollback reuse the engine
 already on disk.
 
+**The kit version is PINNED** (`DESKTOP_OFFICE_KIT_VERSION` in
+`scripts/kernel-line.mjs`, imported by `build-runtime.mjs` and overridden into
+the assembly), and that pin is what keeps the payload version reproducible. The
+kernel line declares `^0.1.1` — a floating range — so without the pin the same
+source produces a runtime demanding whatever kit existed on the build DATE.
+Measured on this tree: kit 0.1.2 was published 2026-09-25T16:02Z, twelve hours
+after the 0.1.7-rc.2 runtime was cut, so a rebuild resolved 0.1.2 and every
+installed `0.1.1-py3.12.14` payload stopped satisfying its kernel. The row then
+offered a download that could only fail: release assets are named after the
+KERNEL version, so the 0.1.2 requirement pointed at an asset still carrying the
+0.1.1 payload.
+
+The pin lives in `kernel-line.mjs` because it is part of the build's IDENTITY,
+not a build knob: `computeSuiteVersion` hashes it, so a pin bump moves the kernel
+directory name, the `bundledStamp` and the adoption decision together. Without
+that, a pin-only bump would leave the stamp equal, `decideBundledAdoption` would
+answer `already-adopted`, and the runtime demanding the new payload would reach
+nobody — the same silent no-op the CI reuse gate compares the kit for.
+
+Bumping the pin is therefore a two-step act, in this order:
+
+1. Bump `DESKTOP_OFFICE_KIT_VERSION`, build, and PUBLISH the runtime. The release
+   then carries an `office-payload-<platform>-<arch>.json` whose
+   `payloadVersion` names the new kit.
+2. Only after that artifact is public does a runtime requiring it become
+   installable by existing users.
+
+Users see the change as an UPDATE, never as a fresh install: the payload
+directory is named for the kit and Python versions alone, so an unchanged kit
+keeps satisfying every later kernel, and a bumped one shows the previously
+installed version beside the new requirement (`installedOnDisk` in
+`src/kernel/office-payload.ts`, rendered by the 诊断 row).
+
 `buildOfficePayload` installs the closure with its own pnpm project and
 `supportedArchitectures` naming the target, so a cross-target cell (win32-arm64
 built on a windows x64 runner) gets ITS engine rather than the host's; a payload

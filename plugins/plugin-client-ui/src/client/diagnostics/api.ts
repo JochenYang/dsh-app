@@ -146,6 +146,12 @@ export interface OfficePayloadState {
   readonly supported?: boolean
   readonly required?: string | null
   readonly installed?: string | null
+  /**
+   * A complete payload present on disk while {@link required} names a different
+   * version — "an upgrade is available", which is not the same state as "this
+   * machine has never installed one". Equal to `installed` once they agree.
+   */
+  readonly installedOnDisk?: string | null
   readonly phase?: 'idle' | 'downloading' | 'installing' | 'failed'
   readonly progress?: number | null
   readonly error?: { readonly code?: string, readonly message?: string } | null

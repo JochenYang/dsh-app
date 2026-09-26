@@ -1241,7 +1241,13 @@ async function startServerAndOpenWindow(): Promise<void> {
 async function handleServerDown(reason: string): Promise<void> {
   if (quitting) return
   restartAttempts += 1
-  console.error(`[server] down: ${reason} (attempt ${restartAttempts})`)
+  // Through the log file, not `console.error`: a packaged Windows build has no
+  // console, so the one datum that says WHAT died — the exit code and signal —
+  // was the only thing a restart never left behind, and the reason had to be
+  // read off a card that is gone by the time anyone asks. Measured: three
+  // in-process host restarts in one afternoon (19:58, 20:25, 20:30) and
+  // `dsh-kernel.log` recorded none of them.
+  logKernel(`[server] down: ${reason} (attempt ${restartAttempts})`)
   broadcastStatus({ phase: 'error', message: t('status.serverDown', { reason }), progress: null, error: reason })
 
   if (restartAttempts >= 2 && !isDev) {

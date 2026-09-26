@@ -385,6 +385,12 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   const payloadInstalled = payloadState?.installed ?? null
   const payloadRequired = payloadState?.required ?? null
   const payloadInstalledNow = payloadInstalled !== null && payloadInstalled === payloadRequired
+  // A complete payload on disk while the kernel requires a different version:
+  // an upgrade, not a first install. The two read very differently ("update to
+  // v0.1.2" vs "download v0.1.2") and only the shell can tell them apart, so the
+  // distinction has to be carried here rather than inferred from `installed`.
+  const payloadOnDisk = payloadState?.installedOnDisk ?? null
+  const payloadUpgrade = !payloadInstalledNow && payloadOnDisk !== null
   const payloadBusy = payloadPhase === 'downloading' || payloadPhase === 'installing'
   const payloadFailed = payloadPhase === 'failed'
 
@@ -398,6 +404,12 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
     }
     if (payloadPhase === 'installing') return t('diag.payload.installing')
     if (payloadInstalledNow) return t('diag.payload.installed', { version: payloadInstalled })
+    // The installed version stays on screen while an upgrade is offered: the
+    // user's question is "what do I have", and answering "not installed" to a
+    // machine that holds a working engine is what this branch exists to stop.
+    // The version being moved TO is the row's own "required" line below, so
+    // each line carries one fact.
+    if (payloadUpgrade) return t('diag.payload.updateAvailable', { installed: payloadOnDisk })
     return payloadFailed ? t('diag.payload.failed') : t('diag.payload.missing')
   })()
 
@@ -414,7 +426,9 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
       ? t('diag.payload.hintUnsupported')
       : payloadInstalledNow
         ? t('diag.payload.hint')
-        : t('diag.payload.hintMissing')
+        : payloadUpgrade
+          ? t('diag.payload.hintUpdate', { version: payloadRequired ?? '', installed: payloadOnDisk ?? '' })
+          : t('diag.payload.hintMissing')
 
   // ------------------------------------------------- config check card
   // The card's whole point is ATTRIBUTION: the kernel's checker reports findings
@@ -522,13 +536,18 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
               ? <span className="dshDiag-hint">{t('diag.payload.cancelling')}</span>
               // Installed: the badge already says so, and a disabled "Download"
               // next to it would read as "this cannot be downloaded" rather than
-              // as "there is nothing to do".
+              // as "there is nothing to do". An upgrade keeps its button — the
+              // row has something to say, and it is not "already done" — and it
+              // stays the primary one: offering an update in a de-emphasized
+              // control while conversion is broken is the wrong emphasis.
               : payloadSupported && payload.kind === 'ready' && !payloadInstalledNow
                 ? (
                   <button
                     type="button" className="dshDiag-button dshDiag-buttonPrimary"
                     onClick={() => { void startPayloadDownload() }}
-                  >{payloadFailed ? t('diag.payload.retry') : t('diag.payload.download')}</button>
+                  >{payloadFailed
+                      ? t('diag.payload.retry')
+                      : payloadUpgrade ? t('diag.payload.update') : t('diag.payload.download')}</button>
                 )
                 : null}
         </div>
