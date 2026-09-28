@@ -16,6 +16,16 @@
  * targeting the composed entry id, and the shell's own overlay applies AFTER the
  * profile layer, so disables only hold for non-suite packages.
  *
+ * The block is NOT the only writer of this file, and that shapes the row model.
+ * The kernel's configuration editor stores a plugin's settings as its own row in
+ * the same document, and because the market appends its block at the END of the
+ * file, a setting the user changes lands INSIDE this block — under the same entry
+ * id. So "a row with this id" is not the same thing as "our row", and the two are
+ * told apart by SHAPE: ours is a bare `- id: x` + `disabled: true`, the kernel's
+ * carries a `config:`. Matching on the id alone broke both directions, measured:
+ * enabling deleted the user's settings row along with the disable row, and
+ * disabling found the kernel's row and silently wrote nothing.
+ *
  * It does NOT rely on patch edits being live. This kernel line has no
  * `patchReload` field (it was removed, and the profile configuration reloads
  * through the base bundle's `hmr` row instead — `packages/bundle/base`,
@@ -152,6 +162,37 @@ interface BlockRow {
   readonly start: number
   end: number
   readonly id: string | undefined
+  /**
+   * Whether this is a row the MARKET wrote, i.e. a bare disable row.
+   *
+   * The distinction is load-bearing: the kernel's configuration editor stores a
+   * plugin's settings as its own row in the same file, with the same id, and when
+   * the managed block sits at the end of that file (the normal case — the market
+   * appends it) the kernel's row lands INSIDE this block. Treating "a row with this
+   * id" as ours then breaks both directions, measured:
+   *
+   *   - enabling deleted the kernel's settings row along with the disable row
+   *     (`kept = rows.filter(row => row.id !== entryId)` matched both);
+   *   - disabling found the kernel's row as `target` and returned the text
+   *     unchanged, so the disable silently did not happen.
+   *
+   * A row is ours only when it is a disable row: `- id: x` with nothing but
+   * `disabled: true` under it. Anything else — a `config:`, a `name:` — is another
+   * writer's row and is left alone.
+   */
+  readonly own: boolean
+}
+
+/** Whether a block row is a bare disable row (the market's own shape). */
+function isOwnRow(elements: readonly string[], row: { start: number, end: number }): boolean {
+  let sawDisabled = false
+  for (let i = row.start + 1; i < row.end; i += 1) {
+    const content = lineContent(elements[i]!)
+    if (content.trim() === '') continue
+    if (!DISABLED_LINE.test(content)) return false
+    sawDisabled = true
+  }
+  return sawDisabled
 }
 
 /** Locate the managed block; a header without a footer spans to EOF (self-heal for hand truncation). */
@@ -172,10 +213,10 @@ function blockRows(elements: readonly string[], start: number, end: number): Blo
   for (let i = start + 1; i < end; i += 1) {
     const content = lineContent(elements[i]!)
     const idMatch = ID_LINE.exec(content)
-    if (idMatch !== null) rows.push({ start: i, end: i + 1, id: scalarOf(idMatch[2]!) })
+    if (idMatch !== null) rows.push({ start: i, end: i + 1, id: scalarOf(idMatch[2]!), own: false })
     else if (rows.length > 0) rows[rows.length - 1]!.end = i + 1
   }
-  return rows
+  return rows.map((row) => ({ ...row, own: isOwnRow(elements, row) }))
 }
 
 /**
@@ -203,11 +244,16 @@ export function applyDisableToggle(patchText: string, entryId: string, enable: b
   const elements = splitKeepEnds(patchText)
   const block = blockRange(elements)
   const rows = block === undefined ? [] : blockRows(elements, block.start, block.end)
-  const target = rows.find(row => row.id === entryId)
+  // `target` is the market's OWN row for this id — not merely "a row with this id".
+  // The kernel stores a plugin's settings under the same id, and inside this block
+  // when it sits at the end of the file, so matching on the id alone would let an
+  // enable delete the user's settings and let a disable find a row that is not ours
+  // (and silently do nothing).
+  const target = rows.find(row => row.id === entryId && row.own)
 
   if (enable) {
     if (block === undefined || target === undefined) return patchText
-    const kept = rows.filter(row => row.id !== entryId)
+    const kept = rows.filter(row => row !== target)
     const head = elements.slice(0, block.start)
     const tail = block.closed ? elements.slice(block.end + 1) : []
     if (kept.length === 0) {

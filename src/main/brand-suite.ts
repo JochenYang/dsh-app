@@ -1202,15 +1202,35 @@ async function keepUnlocatableTailAside(
  * Wire both seams before a host start.
  * @param sources - suite plugin sources for the kernel about to boot.
  * @param options - the booted profile's directory, whether the suite rows
- *   should be part of it (safe mode boots without them), and where a diagnostic
- *   line goes (see {@link writeSuitePatchFile}).
- * @returns whether the suite rows are in the profile's layer, plus the home-layer
+ *   should be part of it (safe mode boots without them), where a diagnostic
+ *   line goes (see {@link writeSuitePatchFile}), and which channel the rows
+ *   travel through (`layer` — see {@link SuiteLayerOutcome}).
+ * @returns whether the suite rows are in the composition, plus the home-layer
  *   rows the booted profile cannot load (empty unless the kernel composes that
  *   file itself — see {@link unloadableRows}).
  */
 export async function prepareBrandSuite(
   sources: readonly SuitePluginSource[],
-  options: { profileDir: string; suite: boolean; homeRows?: boolean; kernelNodeModules?: string; report?: (line: string) => void },
+  options: {
+    profileDir: string
+    suite: boolean
+    homeRows?: boolean
+    kernelNodeModules?: string
+    report?: (line: string) => void
+    /**
+     * Whether the rows travel as a bundle layer the profile names, instead of
+     * being regenerated into the profile patch on every start.
+     *
+     * True for the web line, whose host composes `$DSH_HOME` itself and whose
+     * kernel stores the user's settings in that patch file — the two writers
+     * cannot share it. False for the frames line, which is kept on the old
+     * writer until it retires: that host composes neither the home layer nor a
+     * patch flag, so the file is the user's only channel for their own rows, and
+     * freezing it would be a functional regression on a line this shell still
+     * boots for rollback.
+     */
+    layer?: boolean
+  },
 ): Promise<{ suite: boolean; homeUnloadable: readonly PatchSpecifier[] }> {
   let suite = options.suite
   try {
@@ -1229,6 +1249,14 @@ export async function prepareBrandSuite(
     reportLine(`[brand-suite] plugin linking failed; booting without the suite rows: ${(err as Error).message}`, options.report)
     suite = false
   }
+  if (options.layer === true) {
+    // The web line: the profile patch belongs to the kernel, so nothing is written
+    // into it here. The rows arrive as a bundle layer, materialized by the caller
+    // AFTER the mirror step (see `installSuiteLayer`) — that step writes into the
+    // profile's own `node_modules`, and the layer has to land in a tree it has
+    // already settled.
+    return { suite, homeUnloadable: await homeUnloadableRows(options) }
+  }
   try {
     const homeUnloadable = await writeSuitePatchFile(options.profileDir, { suite, homeRows: options.homeRows, kernelNodeModules: options.kernelNodeModules, report: options.report })
     return { suite, homeUnloadable }
@@ -1236,4 +1264,20 @@ export async function prepareBrandSuite(
     reportLine(`[brand-suite] patch layer could not be written: ${(err as Error).message}`, options.report)
     return { suite: false, homeUnloadable: [] }
   }
+}
+
+/**
+ * The home-layer rows the booted profile cannot load.
+ *
+ * Used on the layer path, where `writeSuitePatchFile` no longer runs: the kernel
+ * composes `$DSH_HOME/cordis.patch.yml` itself on the web line, so the shell can
+ * neither filter it nor comment a row out — what it can do is name the file, the
+ * line and the row that will stop the host (see {@link unloadableRows}).
+ */
+async function homeUnloadableRows(options: { profileDir: string; homeRows?: boolean; kernelNodeModules?: string }): Promise<readonly PatchSpecifier[]> {
+  // The rows are copied into the profile patch on the frames line, where that
+  // file's own filter is the report — so there is nothing to name here.
+  if (options.homeRows !== false) return []
+  const homeLayer = await readOptionalFile(path.join(resolveDshHome(), PROFILE_PATCH_FILENAME))
+  return unloadableRows(homeLayer, options.profileDir, extraResolutionDirs(options.kernelNodeModules))
 }

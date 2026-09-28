@@ -26,6 +26,7 @@ import { installCrashLogging } from './crash-log'
 import { appendRotatingLog } from './log-file'
 import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, type PatchSpecifier } from './brand-suite'
+import { SUITE_LAYER_PACKAGE, installSuiteLayer, readShippedOverlay } from './suite-layer'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { activeThemeMode, attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
 import {
@@ -971,27 +972,33 @@ async function startServerAndOpenWindow(): Promise<void> {
   // the repair runs the profile's package manager before the start. Non-fatal
   // and silent in the normal case — see healProfileBeforeStart.
   await healProfileBeforeStart(profile.dir)
-  // Brand suite wiring: profile-dir module links, and the suite rows plus the
-  // user's home layer written into the profile's patch file. An older kernel
-  // without the suite plugins boots vanilla. Safe mode drops the shipped rows
-  // and keeps only what is the user's own.
+  // Brand suite wiring: profile-dir module links, and the suite's rows. Which
+  // channel those rows travel through depends on the host line, and the two are
+  // NOT interchangeable:
   //
-  // Which composer will read that file decides the home rows: the frames line's
-  // host reads only this file, so they have to be copied in; the web line's host
-  // (`0.1.6-alpha.2` and later) composes `$DSH_HOME` as a layer itself, and a copy
-  // there is a second row with the same id — the whole tree then fails with
-  // `duplicate loader entry id` (measured on 0.1.6-alpha.2, and again on the
-  // packaged 0.1.7 build from the other side: with no copy its preset menu and its
-  // Agent Team action are both still there, and both come from the home layer).
-  const suiteHomeRows = homeRowsInProfilePatch({
-    transport: hostTransport(hostPackageVersion(path.join(kernel.getCurrentDir(), 'app'))) ?? 'frames',
-  })
+  //   - the web line (`0.1.6-alpha.2` and later) composes `$DSH_HOME` as a layer
+  //     itself, and since kernel 0.1.7 it also stores the user's SETTINGS in the
+  //     profile patch. Two writers on that file cannot both be right, so the shell
+  //     stops writing it: the rows arrive as a bundle layer the profile names, and
+  //     a one-time migration moves any the profile still carries (see
+  //     `suite-layer.ts`). Home rows are NOT copied into the profile patch here —
+  //     the kernel composes that file, and a copy beside it is a second row with
+  //     the same id (measured on 0.1.6-alpha.2, and again on the packaged 0.1.7
+  //     build from the other side: with no copy its preset menu and its Agent Team
+  //     action are both still there, and both come from the home layer).
+  //   - the frames line keeps the old writer: its host reads only the profile
+  //     patch and composes no home layer, so that file is the user's only channel
+  //     for their own rows and freezing it would be a functional regression on a
+  //     line this shell still boots for rollback.
+  const hostTransportNow = hostTransport(hostPackageVersion(path.join(kernel.getCurrentDir(), 'app'))) ?? 'frames'
+  const suiteHomeRows = homeRowsInProfilePatch({ transport: hostTransportNow })
   const suiteRows = await prepareBrandSuite(
     isDev ? devSuiteSources() : prodSuiteSources(kernel.getCurrentDir()),
     {
       profileDir: profile.dir,
       suite: !safeModeActive,
       homeRows: suiteHomeRows,
+      layer: hostTransportNow === 'web',
       // The installation closure the host's enforcing resolver resolves through
       // (its table is built from the running dsh installation, NOT from the
       // fallback directory). Without it the shell's check reads a stale mirror
@@ -1044,6 +1051,37 @@ async function startServerAndOpenWindow(): Promise<void> {
     // profile). Keeping it costs a shadowed package; removing it costs the boot,
     // and only one of those is recoverable.
     logKernel('[suite-profile] the host package reports no readable version, so the profile keeps the mirror it has')
+  }
+  // The suite's rows, on the line whose host owns the profile patch (web): the
+  // layer is materialized HERE, after the mirror step above, because that step
+  // rewrites the profile's own `node_modules` and the layer has to land in a tree
+  // already settled. (The projection drop just below is safe either way — it only
+  // unlinks links that point into `.dsh-module-fallback`.) Safe mode keeps the
+  // bundle DECLARED and writes an empty layer — dropping the manifest entry would
+  // churn it on every toggle, and an empty patch is already the kernel's own shape
+  // for "contributes nothing".
+  if (hostTransportNow === 'web') {
+    const overlay = suiteRows.suite ? await readShippedOverlay() : ''
+    if (suiteRows.suite && overlay.trim() === '') {
+      logKernel('[brand-suite] shipped overlay dsh-app.patch.yml is missing; booting without the suite rows')
+    }
+    const layer = await installSuiteLayer({
+      profileDir: profile.dir,
+      overlay: suiteRows.suite ? overlay : '',
+      report: logKernel,
+    })
+    if (layer.status === 'failed') {
+      // The host treats an unresolvable declared bundle as a skip, not a failure
+      // (`loadProfileDirectory` per-bundle try/catch → `skippedBundles`, which
+      // `dsh-desktop-host` only prints), so a layer that cannot be written costs
+      // the suite's rows and not the boot — the UI comes up vanilla. That is a
+      // silent degradation, so it is said out loud here too: the packaged build
+      // shows no console, and the host's own report is stderr only.
+      logKernel(`[suite-layer] the suite layer could not be installed, so this boot has no suite rows: ${layer.detail ?? 'unknown error'}`)
+    } else if (layer.status === 'installed') {
+      logKernel(`[suite-layer] the suite's rows now travel in ${layer.layerDir ?? SUITE_LAYER_PACKAGE}`
+        + (layer.removed.length === 0 ? '' : `; ${String(layer.removed.length)} overlay insert(s) were migrated out of the profile patch`))
+    }
   }
   // Upstream's legacy link projection is cleaned in `loadProfile`, which the
   // desktop host does not call — so a projection an EARLIER line left here would

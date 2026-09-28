@@ -2,13 +2,21 @@
  * Restore a profile whose declared dependencies went missing, before the host
  * is started on it.
  *
- * The host refuses to boot a profile whose manifest names a bundle that does
- * not resolve (`cannot resolve profile bundle "@deepseek-ai/dsh-toolkit"`), and
- * the user has no path out of that from inside the app: the failure card offers
- * rollback and retry, both of which boot the same profile. Measured: a manual
- * `pnpm install` in the profile answered "Already up to date" while the packages
- * were missing — pnpm's own state files still agreed with the lockfile — so even
- * the documented hand-repair did not work without deleting `node_modules` first.
+ * The failure this step exists for: a package the profile declares is not
+ * installed, so the bundle it provides cannot activate. Whether that refuses the
+ * boot depends on WHICH bundle it was — `loadProfileDirectory` catches a bundle it
+ * cannot resolve and lists it in `skippedBundles` (measured: a manifest naming
+ * `@dsh-app/not-installed` loads with that entry skipped, print-only via
+ * `reportSkippedBundles`), but the composition the skipped bundle would have
+ * contributed is then missing, and the boot check refuses when a REQUIRED entry
+ * (`requiredStartupEntryIds`: `agent-loop`, `webserver`, `modules`, `connection`
+ * …) never activates (`auditStartupEntries`). So the user gets a window that
+ * reports a startup failure, and has no path out of it from inside the app: the
+ * failure card offers rollback and retry, both of which boot the same profile.
+ * Measured: a manual `pnpm install` in the profile answered "Already up to date"
+ * while the packages were missing — pnpm's own state files still agreed with the
+ * lockfile — so even the documented hand-repair did not work without deleting
+ * `node_modules` first.
  *
  * What this step does instead is drive the profile's OWN package manager
  * through the kernel CLI, which is the same path the in-app market installs

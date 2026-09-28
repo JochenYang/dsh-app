@@ -139,6 +139,58 @@ describe('applyDisableToggle (enable)', () => {
   })
 })
 
+// The kernel's configuration editor writes a plugin's SETTINGS as its own row in
+// this same file, and because the market appends its block at the END, a setting
+// the user changes lands inside the block — under the same entry id. So "a row
+// with this id" is not "our row". Both directions were measured broken before the
+// shape test existed.
+describe('applyDisableToggle (the kernel\'s rows inside the block)', () => {
+  /** A setting row the kernel wrote, with the given id. */
+  const kernelRow = (id: string, value: string): string =>
+    `- id: ${id}\n  name: '${id}'\n  config:\n    theme: ${value}\n`
+
+  it('enabling removes only OUR row, not the settings row sharing its id', () => {
+    const patch = `${MANAGED_BLOCK_HEADER}\n- id: dsh-context\n  disabled: true\n\n${kernelRow('dsh-context', 'dark')}\n${MANAGED_BLOCK_FOOTER}\n`
+    const enabled = applyDisableToggle(patch, 'dsh-context', true)
+    assert.ok(enabled.includes('theme: dark'), 'the user\'s setting survives')
+    assert.ok(!enabled.includes('disabled: true'), 'our disable row went')
+  })
+
+  it('disabling still writes when the block already holds a settings row for that id', () => {
+    // Before the shape test this returned the text unchanged: `target` matched the
+    // kernel's row, so the toggle silently did nothing while the panel reported
+    // success.
+    const patch = `${MANAGED_BLOCK_HEADER}\n${kernelRow('dsh-context', 'dark')}\n${MANAGED_BLOCK_FOOTER}\n`
+    const disabled = applyDisableToggle(patch, 'dsh-context', false)
+    assert.ok(disabled.includes('disabled: true'), 'the disable row was written')
+    assert.ok(disabled.includes('theme: dark'), 'and the settings row is untouched')
+    assert.ok(disabledIdsOf(disabled).has('dsh-context'))
+  })
+
+  it('leaves a settings row alone in every placement inside the block', () => {
+    // Head, middle, tail, and beside a second settings row: none of them is ours,
+    // so no toggle may touch them.
+    const placements = [
+      `${MANAGED_BLOCK_HEADER}\n${kernelRow('ui-theme', 'dark')}\n- id: a-plugin\n  disabled: true\n${MANAGED_BLOCK_FOOTER}\n`,
+      `${MANAGED_BLOCK_HEADER}\n- id: a-plugin\n  disabled: true\n\n${kernelRow('ui-theme', 'dark')}\n- id: b-plugin\n  disabled: true\n${MANAGED_BLOCK_FOOTER}\n`,
+      `${MANAGED_BLOCK_HEADER}\n- id: a-plugin\n  disabled: true\n\n${kernelRow('ui-theme', 'dark')}\n${MANAGED_BLOCK_FOOTER}\n`,
+    ]
+    for (const patch of placements) {
+      for (const [id, enable] of [['a-plugin', true], ['b-plugin', true], ['c-plugin', false], ['ui-theme', true]] as const) {
+        const out = applyDisableToggle(patch, id, enable)
+        assert.ok(out.includes('theme: dark'), `a setting was lost: ${id} enable=${String(enable)}`)
+      }
+    }
+  })
+
+  it('keeps a comment that sits between our rows and the kernel\'s', () => {
+    const patch = `${MANAGED_BLOCK_HEADER}\n- id: a-plugin\n  disabled: true\n# the user's own note\n\n${kernelRow('ui-theme', 'dark')}\n${MANAGED_BLOCK_FOOTER}\n`
+    const out = applyDisableToggle(patch, 'a-plugin', true)
+    assert.ok(out.includes('the user\'s own note'), 'the comment survives')
+    assert.ok(out.includes('theme: dark'), 'and so does the setting')
+  })
+})
+
 describe('toggleManagedDisable (file level)', () => {
   let dir: string
   let path: string
