@@ -236,26 +236,42 @@
 # the current time at every pre-step (token burn on every tool call), while
 # schedule only needs the time at delivery (computed server-side). Users who
 # need the time on demand use their own time plugin.
-# The schedule package is verified in the CLI runtime closure (apps/cli deps,
-# 2026-09-07); the ui row exists disabled in the web bundle and is flipped on
-# here. Verified with the packaged bin.js before merging (never trust the dev
-# pnpm closure alone): a missing package fails the whole tree, not one row.
+# Both packages are verified in the CLI runtime closure (apps/cli deps,
+# 2026-09-07). Verified with the packaged bin.js before merging (never trust the
+# dev pnpm closure alone): a missing package fails the whole tree, not one row.
 #
-# 0.1.7-rc.2 ships the `schedule` row itself (disabled), so the composed tree
-# carries it twice. Measured on the packaged rc.2 runtime, that is NOT a
-# duplicate-loader-entry failure: every layer's patches are applied in ONE
-# `applyEntryPatches` call, entries are keyed by id within a tree, and the LAST
-# row wins — ours is appended last (`--dump-config` shows both rows with no
-# skipped-patch warning; a real-profile boot with this row came up healthy).
-# An insert is kept over a row override because an override no-ops on a kernel
-# without the row: after a failed rc.2 boot the rollback target is rc.1, where a
-# skipped row would silently drop schedule with only a log line.
+# Both rows are INSERTS rather than overrides, because the row each one used to
+# override is not on every line:
+#
+#   - 0.1.7-rc.2 ships the `schedule` row itself (disabled) and the `ui-schedule`
+#     row (disabled), both in the web bundle — which is why the ui row used to be
+#     flipped on here instead of inserted;
+#   - 0.2.0-rc.1 ships NEITHER in the web bundle: they travel in
+#     `@deepseek-ai/dsh-experimental-schedule-bundle`, which this profile does not
+#     list (it also inserts `time-context`, which this overlay leaves out on
+#     purpose). An override row then has no target at all: every start logs
+#     `patch: entry "ui-schedule" not found` twice — once for this layer, once for
+#     the profile patch's copy — and the schedule page silently stays absent.
+#
+# Being an insert keeps the capability on both lines. The composed tree then
+# carries two rows per id on a line that ships its own (measured on the packaged
+# rc.2 runtime): that is NOT a duplicate-loader-entry failure — every layer's
+# patches are applied in ONE `applyEntryPatches` call
+# (`dsh-app-boot/lib/index.js`), an id-less insert is a plain `data.push`, and the
+# loader keys rows by id with the LAST one winning (`cordis-plugin-loader`), which
+# is ours. The insert therefore SHADOWS the line's own row for that id, which is
+# why ours carries nothing but `id` and `name`: a `config` here would replace a
+# config the line sets.
+#
+# An insert is also what survives a rollback: an override no-ops on a kernel
+# without the row, where a skipped row would silently drop the capability with only
+# a log line.
 - insert:
     - id: schedule
       name: '@deepseek-ai/dsh-schedule'
 
-- id: ui-schedule
-  disabled: false
+    - id: ui-schedule
+      name: '@deepseek-ai/dsh-client-ui-schedule'
 
 # Agent Teams: the veto that used to live here is GONE, and this note is kept so
 # nobody re-adds it by reflex.

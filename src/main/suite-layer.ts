@@ -207,6 +207,36 @@ export function overlayOwnedIds(overlayText: string): Set<string> {
 }
 
 /**
+ * The ids the shipped overlay declares INSIDE an `insert:` block.
+ *
+ * A subset of {@link overlayOwnedIds}, and the subset that answers the other
+ * removal question. An id in the roster can still be a row the profile patch has
+ * to keep — `web` and `deepseek-account` are override rows carrying the user's own
+ * choice. An id in THIS set is a row the layer appends by name, on every line,
+ * whether or not the kernel ships a row of its own — so a config-less copy of it
+ * left in the profile patch is residue from the pre-layer overlay, not the user's
+ * (the kernel's editor only ever writes a row with `config`, and deletes a row it
+ * has emptied).
+ *
+ * Why the residue has to go rather than merely be tolerated: a non-insert row with
+ * no target logs `patch: entry "<id>" not found` on every start, and the one
+ * start where the target is missing by design is SAFE MODE — the layer is written
+ * empty there, so the suite's own leftover is the only thing naming that id.
+ *
+ * @param overlayText - the shipped overlay's contents ('' when there is none).
+ * @returns every id declared inside an `insert:` row.
+ */
+export function overlayInsertOwnedIds(overlayText: string): Set<string> {
+  const inserted = new Set<string>()
+  if (overlayText.trim() === '') return inserted
+  for (const row of splitRows(overlayText).rows) {
+    if (!isInsertRow(row)) continue
+    for (const id of rowEntryIds(row)) inserted.add(id)
+  }
+  return inserted
+}
+
+/**
  * Whether an `insert:` block belongs to the suite.
  *
  * Two ways to qualify, and the second is not a convenience — it is what keeps the
@@ -249,6 +279,48 @@ function isSuiteInsertBlock(row: readonly string[], names: ReadonlyMap<string, s
 }
 
 /**
+ * Whether a non-insert row is residue the layer has since taken over.
+ *
+ * Three conditions, and each one answers "could this row be the user's own?":
+ *
+ *   1. it declares exactly ONE id, and that id is one the current overlay INSERTS
+ *      (see {@link overlayInsertOwnedIds}) — so its only possible target is a row
+ *      the layer appends by name, and removing this copy cannot remove a
+ *      capability or reset a value;
+ *   2. it carries no `config:` and no key besides `id`/`name`/`disabled` — the
+ *      kernel's configuration editor writes a `config` with every setting it
+ *      stores, and deletes a row it has emptied, so a row with no `config` holds
+ *      no value of the user's;
+ *   3. the state it asks for is the state the layer already gives that id
+ *      (`disabled` absent or exactly `false`) — a row saying `disabled: true` is
+ *      somebody's decision and is kept, even though it then costs one
+ *      skipped-patch line in safe mode.
+ *
+ * The shape this exists for, measured on the real profile: the pre-layer overlay
+ * carried `- id: ui-schedule` + `disabled: false` to flip a row the kernel then
+ * shipped disabled. 0.2.0's web bundle ships no such row, the overlay now inserts
+ * it, and the leftover copy has nothing left to override — every start logged
+ * `patch: entry "ui-schedule" not found`, and in SAFE MODE that line is the only
+ * thing naming that id, because the layer is written empty there.
+ *
+ * @param row - the row's lines.
+ * @param ids - the ids the row declares, from {@link rowEntryIds}.
+ * @param insertOwnedIds - the overlay's inserted ids.
+ * @returns whether the row is spent residue.
+ */
+function isSpentFlipRow(row: readonly string[], ids: readonly string[], insertOwnedIds: ReadonlySet<string>): boolean {
+  if (isInsertRow(row)) return false
+  const id = ids.length === 1 ? ids[0] : undefined
+  if (id === undefined || !insertOwnedIds.has(id)) return false
+  const keys = rowOwnKeys(row)
+  for (const key of keys.keys()) {
+    if (key !== 'id' && key !== 'name' && key !== 'disabled') return false
+  }
+  const disabled = keys.get('disabled')
+  return disabled === undefined || /^(?:false|'false'|"false")$/u.test(disabled)
+}
+
+/**
  * The package name each `- id:` in a row declares, by id.
  *
  * An entry's `name:` is a sibling of its `id:` at the same content column, so this
@@ -258,6 +330,37 @@ function isSuiteInsertBlock(row: readonly string[], names: ReadonlyMap<string, s
  * @param row - the row's lines.
  * @returns id → package name, for the entries that declare one.
  */
+/**
+ * The keys a patch entry's OWN row carries, by name, with their raw values.
+ *
+ * A key belongs to the row when it sits at the entry's content column — the same
+ * column rule {@link rowEntryNames} applies to `name:`: in
+ *
+ *     - id: ui-schedule
+ *       disabled: false
+ *
+ * `id` and `disabled` share a column, while a nested `config:` subtree sits
+ * deeper and is not read as a key of the row.
+ *
+ * @param row - the row's lines.
+ * @returns the row's own keys, in file order.
+ */
+function rowOwnKeys(row: readonly string[]): Map<string, string> {
+  const keys = new Map<string, string>()
+  let keyIndent = -1
+  for (const line of row) {
+    const content = line.replace(/^[ \t]*/u, '').replace(/^-\s+/u, '')
+    if (content === '' || content.startsWith('#')) continue
+    const marker = /^(-\s+)/u.test(line.replace(/^[ \t]*/u, '')) ? 2 : 0
+    const indent = (line.match(/^[ \t]*/u)?.[0].length ?? 0) + marker
+    if (keyIndent < 0) keyIndent = indent
+    if (indent !== keyIndent) continue
+    const match = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/u.exec(content)
+    if (match !== null) keys.set(match[1] ?? '', (match[2] ?? '').trim())
+  }
+  return keys
+}
+
 function rowEntryNames(row: readonly string[]): Map<string, string> {
   const names = new Map<string, string>()
   let pendingId: string | undefined
@@ -447,8 +550,8 @@ function anchored(text: string): string {
 }
 
 /**
- * Remove the overlay's own `insert:` blocks from a profile patch, keeping
- * everything else.
+ * Remove the overlay's own `insert:` blocks from a profile patch — and the spent
+ * flip rows whose target the layer now inserts — keeping everything else.
  *
  * A block goes only when it is an `insert:` row AND every id it defines is one the
  * overlay declares. A block this cannot attribute (a hand-written third-party
@@ -456,11 +559,16 @@ function anchored(text: string): string {
  * the loader collapses to the last one; the price of removing wrongly is a user's
  * plugin disappearing, which nothing recovers.
  *
- * A line that is neither a list item nor indented inside such a block is NOT part
+ * A row that is NOT an insert goes only under {@link isSpentFlipRow}: one id, one
+ * the overlay inserts, no `config`, and a `disabled` state the layer already
+ * provides. Everything else is kept verbatim, including every override row that
+ * carries a value the user may have chosen.
+ *
+ * A line that is neither a list item nor indented inside such a row is NOT part
  * of it — it is a same-indent sibling key (`- insert:` … `  extra: 1`), which YAML
  * reads as a second field of the same patch entry. The shell never writes one (its
  * own blocks carry only indented children), but a hand-edited file can, and taking
- * it with the block would silently drop a key the user wrote. Such a block is kept
+ * it with the block would silently drop a key the user wrote. Such a row is kept
  * whole instead — the safe direction, per the attribution rule above.
  *
  * TRAILING comments are the exception: the shipped overlay explains each of its
@@ -471,9 +579,12 @@ function anchored(text: string): string {
  *
  * @param patchText - the profile patch's contents.
  * @param ownedIds - the overlay's ids, from {@link overlayOwnedIds}.
+ * @param insertOwnedIds - the overlay's inserted ids, from
+ *   {@link overlayInsertOwnedIds}; required rather than defaulted, so a caller that
+ *   forgets it cannot silently disable the flip-row rule.
  * @returns the text to write, and the ids that were removed.
  */
-export function stripSuiteRows(patchText: string, ownedIds: ReadonlySet<string>): { text: string, removed: string[] } {
+export function stripSuiteRows(patchText: string, ownedIds: ReadonlySet<string>, insertOwnedIds: ReadonlySet<string>): { text: string, removed: string[] } {
   const { preamble, rows } = splitRows(patchText)
   const removed: string[] = []
   const kept: string[] = []
@@ -508,6 +619,10 @@ export function stripSuiteRows(patchText: string, ownedIds: ReadonlySet<string>)
     // the cost is a duplicate entry, which the loader collapses; the cost of the
     // other direction is a key the user wrote.
     const sibling = row.slice(1).some((line) => !isComment(line) && contentIndent(line) <= keyIndent)
+    // A plain row's own fields sit AT its key column (only an `insert:` list puts
+    // its children deeper), so the disqualifying shape here is a line SHALLOWER than
+    // the row's keys — a document-level key a hand-edited file can carry.
+    const outdented = row.slice(1).some((line) => !isComment(line) && contentIndent(line) < keyIndent)
     const attributable = !sibling && isSuiteInsertBlock(row, rowEntryNames(row), ownedIds)
     if (attributable) {
       removed.push(...ids)
@@ -516,6 +631,11 @@ export function stripSuiteRows(patchText: string, ownedIds: ReadonlySet<string>)
       // insert block and the next row, so those lines land in this row's span. They
       // carry no row, and dropping them would strip the file's own explanations on
       // every start. Siblings cannot reach here — they disqualify the strip above.
+      kept.push(...row.slice(1).filter(isComment))
+      continue
+    }
+    if (!outdented && isSpentFlipRow(row, ids, insertOwnedIds)) {
+      removed.push(...ids)
       kept.push(...row.slice(1).filter(isComment))
       continue
     }
@@ -653,8 +773,10 @@ export async function installSuiteLayer(options: {
       // the one thing it must not do. The migration is the same work on all three
       // paths (safe mode, a failed plugin link, a normal start), so it reads the
       // roster it needs and only the layer's CONTENT follows `overlay`.
-      const owned = overlayOwnedIds(await readShippedOverlay())
-      const stripped = owned.size === 0 ? { text: existing, removed: [] } : stripSuiteRows(existing, owned)
+      const shipped = await readShippedOverlay()
+      const owned = overlayOwnedIds(shipped)
+      const insertOwned = overlayInsertOwnedIds(shipped)
+      const stripped = owned.size === 0 ? { text: existing, removed: [] } : stripSuiteRows(existing, owned, insertOwned)
       // One last look for rows an OLDER build commented out: nothing else undoes
       // those comments any more, so this is their only chance to come back.
       //

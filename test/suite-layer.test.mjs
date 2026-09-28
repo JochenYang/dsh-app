@@ -15,9 +15,17 @@
 //     patch would coexist with the layer's copy — the duplicate shape;
 //   - a plain `- id: web` row OVERRIDES an entry, creates nothing, and is exactly
 //     where the kernel's configuration editor stores the user's own choice. The
-//     shipped overlay carries two such rows (`web`, `deepseek-account`), so
-//     removing them by id would silently reset the user's search provider and
-//     account identity to the overlay's defaults.
+//     shipped overlay carries such rows (`web`, `deepseek-account`), so removing
+//     them by id would silently reset the user's search provider and account
+//     identity to the overlay's defaults.
+//
+// The one exception is a row that cannot be the user's: a config-less flip
+// (`- id: ui-schedule` + `disabled: false`) for an id the current overlay INSERTS,
+// asking for the state the layer already provides. Its only target is a row the
+// layer appends by name, so the copy is residue from the pre-layer overlay — and
+// residue is not harmless: an override with no target logs a skipped-patch line on
+// every start, and in SAFE MODE the layer is written empty, so the residue is the
+// only thing left naming that id.
 //
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
@@ -27,10 +35,11 @@ import { createRequire } from 'node:module'
 import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
-const { SUITE_LAYER_PACKAGE, overlayOwnedIds, stripSuiteRows } = require('../dist/main/suite-layer.js')
+const { SUITE_LAYER_PACKAGE, overlayOwnedIds, overlayInsertOwnedIds, stripSuiteRows } = require('../dist/main/suite-layer.js')
 
 const OVERLAY = readFileSync(path.join(import.meta.dirname, '..', 'dist', 'main', 'dsh-app.patch.yml'), 'utf8')
 const OWNED = overlayOwnedIds(OVERLAY)
+const INSERTED = overlayInsertOwnedIds(OVERLAY)
 
 test('the overlay\'s id roster is read off the overlay itself', () => {
   // The roster is derived, never listed in the module: a copy could only rot.
@@ -55,7 +64,7 @@ test('an overlay insert block is removed', () => {
     "      name: '@dsh-app/plugin-swarm'",
     '',
   ].join('\n')
-  const { text: next, removed } = stripSuiteRows(text, OWNED)
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(removed.sort(), ['brand', 'swarm'])
   assert.ok(!next.includes('insert:'), 'the block is gone')
   assert.ok(next.includes('a comment the user wrote'), 'the comment around it stays')
@@ -78,10 +87,55 @@ test('a non-insert overlay row is KEPT: it is where the user\'s own choice lives
     "    desktopPlatform: 'win32'",
     '',
   ].join('\n')
-  const { text: next, removed } = stripSuiteRows(text, OWNED)
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(removed, [], 'nothing is removed')
   assert.equal(next, text, 'the document is returned unchanged, byte for byte')
   assert.ok(next.includes('my-own-provider'), 'the user\'s provider choice is still there')
+})
+
+test('a spent flip row goes: its id is one the layer inserts, and it holds no value', () => {
+  // The exact residue the real profile carried: the pre-layer overlay flipped on a
+  // row the kernel then shipped disabled. 0.2.0 ships no such row, the overlay now
+  // inserts it (`ui-schedule` sits in an insert block), and this copy had nothing
+  // left to override — every start logged `patch: entry "ui-schedule" not found`,
+  // and in safe mode (empty layer) that line is the only thing naming the id.
+  const text = [
+    '- id: web',
+    '  config:',
+    '    searchProvider: dsh-app',
+    '- id: ui-schedule',
+    '  disabled: false',
+    '',
+  ].join('\n')
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
+  assert.deepEqual(removed, ['ui-schedule'])
+  assert.ok(!next.includes('ui-schedule'), 'the spent row is gone')
+  assert.ok(next.includes('searchProvider: dsh-app'), 'the row carrying a value stays')
+})
+
+test('a flip row that says something ELSE is kept: it is somebody\'s decision', () => {
+  const text = ['- id: ui-schedule', '  disabled: true', ''].join('\n')
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
+  assert.deepEqual(removed, [], 'nothing is removed')
+  assert.equal(next, text, 'the document is returned unchanged')
+})
+
+test('a row carrying config is never spent, even for an id the layer inserts', () => {
+  // Real shape: the kernel stores a plugin's settings as a config row for an id the
+  // overlay also inserts (swarm's knobs). Removing it would drop the user's tuning.
+  const text = ['- id: swarm', '  config:', '    maxItems: 4', ''].join('\n')
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
+  assert.deepEqual(removed, [])
+  assert.equal(next, text)
+})
+
+test('a config-less flip for an id the layer only OVERRIDES stays', () => {
+  // `web` is an override row, not an insert: the layer has no row of its own to
+  // take this one over, so the copy stays and keeps working on a line that ships it.
+  const text = ['- id: web', '  disabled: false', ''].join('\n')
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
+  assert.deepEqual(removed, [])
+  assert.equal(next, text)
 })
 
 test('kernel-written settings and user rows survive the migration', () => {
@@ -94,7 +148,7 @@ test('kernel-written settings and user rows survive the migration', () => {
     '    models: []',
   ].join('\n')
   const mixed = ['- insert:', '    - id: brand', '', settings, ''].join('\n')
-  const { text, removed } = stripSuiteRows(mixed, OWNED)
+  const { text, removed } = stripSuiteRows(mixed, OWNED, INSERTED)
   assert.deepEqual(removed, ['brand'])
   assert.ok(text.includes('preference: dark'), 'the appearance setting is still there')
   assert.ok(text.includes('llm-deepseek'), 'the user\'s provider row is still there')
@@ -105,20 +159,20 @@ test('an insert block this cannot fully attribute is KEPT', () => {
   // declare: keeping it costs a duplicate entry, which the loader collapses to the
   // last one. Removing it wrongly costs the user a plugin nothing brings back.
   const thirdParty = ['- insert:', '    - id: some-third-party-plugin', "      name: 'dsh-market-plugin'", ''].join('\n')
-  const { text, removed } = stripSuiteRows(thirdParty, OWNED)
+  const { text, removed } = stripSuiteRows(thirdParty, OWNED, INSERTED)
   assert.deepEqual(removed, [])
   assert.equal(text, thirdParty)
 
   // Mixed: one known id and one unknown. The whole block stays.
   const mixed = ['- insert:', '    - id: brand', '    - id: some-third-party-plugin', ''].join('\n')
-  assert.deepEqual(stripSuiteRows(mixed, OWNED).removed, [])
+  assert.deepEqual(stripSuiteRows(mixed, OWNED, INSERTED).removed, [])
 })
 
 test('the migration is idempotent: a second pass finds nothing to remove', () => {
   const text = ['- insert:', '    - id: brand', '', '- id: usage-heatmap', '  disabled: true', ''].join('\n')
-  const once = stripSuiteRows(text, OWNED)
+  const once = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(once.removed, ['brand'])
-  const twice = stripSuiteRows(once.text, OWNED)
+  const twice = stripSuiteRows(once.text, OWNED, INSERTED)
   assert.deepEqual(twice.removed, [])
   assert.equal(twice.text, once.text, 'the second pass writes nothing')
 })
@@ -128,7 +182,7 @@ test('a CRLF document is read, not silently skipped', () => {
   // reads a CRLF row as having no value — silently, which is the failure mode the
   // sibling readers in brand-suite.ts exist to avoid.
   const text = ['- insert:', '    - id: brand', '', '- id: ui-theme', '  config:', '    preference: dark', ''].join('\r\n')
-  const { text: next, removed } = stripSuiteRows(text, OWNED)
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(removed, ['brand'], 'the CRLF block is recognised')
   assert.ok(next.includes('preference: dark'), 'the CRLF settings row is kept')
 })
@@ -151,7 +205,7 @@ test('a block holding prose is left commented: un-commenting it would be invalid
     '  config:',
     '    preference: dark',
   ].join('\n')
-  const { text: next, removed } = stripSuiteRows(text, OWNED)
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.equal(next, text, 'the block is untouched')
   assert.deepEqual(removed, [], 'the block is not an insert row any more (it is commented)')
   // The file still parses, which is the property the guard protects.
@@ -170,17 +224,17 @@ test('rowsToRestore restores only the shell\'s own commented blocks', () => {
     '#     - id: brand',
     "#       name: '@dsh-app/plugin-brand'",
   ].join('\n')
-  assert.deepEqual(restore(ours, OWNED), ['brand'], 'the shell\'s own block is recognised')
+  assert.deepEqual(restore(ours, OWNED, INSERTED), ['brand'], 'the shell\'s own block is recognised')
   assert.ok(uncomment(ours, ['brand']).startsWith('- insert:'), 'and it comes back live')
 
   // A block naming something the overlay does not declare: left exactly as it is.
   const foreign = [`${marker} "@third/party" does not resolve`, '# - id: third-party-plugin', "#   name: '@third/party'"].join('\n')
-  assert.deepEqual(restore(foreign, OWNED), [], 'a foreign block is not touched')
+  assert.deepEqual(restore(foreign, OWNED, INSERTED), [], 'a foreign block is not touched')
   assert.equal(uncomment(foreign, []), foreign, 'and it stays commented')
 
   // A user's own prose comment under a marker is not rows at all.
   const prose = [`${marker} "x"`, '# remember to check the docs'].join('\n')
-  assert.deepEqual(restore(prose, OWNED), [], 'prose is not a row')
+  assert.deepEqual(restore(prose, OWNED, INSERTED), [], 'prose is not a row')
 })
 
 test('column-0 comments between a block and the next row do not disqualify the block', () => {
@@ -199,7 +253,7 @@ test('column-0 comments between a block and the next row do not disqualify the b
     '  config:',
     '    preference: dark',
   ].join('\n')
-  const { text: next, removed } = stripSuiteRows(text, OWNED)
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(removed, ['brand'], 'the block is still attributed to the overlay')
   assert.ok(next.includes('a comment the shell ships'), 'the comments stay')
   assert.ok(next.includes('preference: dark'), 'the settings row stays')
@@ -212,7 +266,7 @@ test('a same-indent sibling key keeps the whole block', () => {
   // the user wrote. Keeping the block costs a duplicate entry, which the loader
   // collapses; dropping the key costs the user their edit.
   const text = ['- insert:', '    - id: brand', '  extra: 1', ''].join('\n')
-  const { text: next, removed } = stripSuiteRows(text, OWNED)
+  const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(removed, [], 'the block is kept whole')
   assert.equal(next, text, 'the file is untouched')
 })
@@ -235,7 +289,7 @@ test('a block from an OLDER roster is still attributed to the suite', () => {
     '',
   ].join('\n')
   assert.ok(!OWNED.has('fff'), 'the current roster no longer declares it')
-  const { removed } = stripSuiteRows(text, OWNED)
+  const { removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(removed.sort(), ['brand', 'fff'], 'the whole old block goes')
 })
 
@@ -243,15 +297,15 @@ test('a third-party block is not attributed, even beside suite ids', () => {
   // The scope fallback must not reach a user's own plugin. A block naming its own
   // scope stays; a mixed block stays too (the ids are not all the suite's).
   const thirdParty = ['- insert:', '    - id: my-plugin', "      name: 'dsh-some-third-party'", ''].join('\n')
-  assert.deepEqual(stripSuiteRows(thirdParty, OWNED).removed, [], 'a third-party block stays')
+  assert.deepEqual(stripSuiteRows(thirdParty, OWNED, INSERTED).removed, [], 'a third-party block stays')
 
   const mixed = ['- insert:', '    - id: brand', "      name: '@dsh-app/plugin-brand'", '    - id: my-plugin', "      name: 'dsh-some-third-party'", ''].join('\n')
-  assert.deepEqual(stripSuiteRows(mixed, OWNED).removed, [], 'a mixed block stays whole')
+  assert.deepEqual(stripSuiteRows(mixed, OWNED, INSERTED).removed, [], 'a mixed block stays whole')
 
   // A suite-scoped block with no `name:` is not attributed either: the scope has to
   // be READ, not assumed.
   const nameless = ['- insert:', '    - id: x', '    - id: y', ''].join('\n')
-  assert.deepEqual(stripSuiteRows(nameless, OWNED).removed, [], 'no name, no attribution')
+  assert.deepEqual(stripSuiteRows(nameless, OWNED, INSERTED).removed, [], 'no name, no attribution')
 })
 
 test('a block whose row has a blank line inside it is restored whole or not at all', () => {
@@ -272,7 +326,7 @@ test('a block whose row has a blank line inside it is restored whole or not at a
   ].join('\n')
   const restore = require('../dist/main/suite-layer.js').rowsToRestore
   const uncomment = require('../dist/main/suite-layer.js').uncommentRows
-  const ids = restore(withBlank, OWNED)
+  const ids = restore(withBlank, OWNED, INSERTED)
   assert.deepEqual(ids, ['brand', 'swarm'], 'the blank line does not split the block')
   const out = uncomment(withBlank, ids)
   assert.ok(out.includes('- id: swarm'), 'both halves came back')
@@ -294,7 +348,7 @@ test('a block carrying prose is not split at the prose either', () => {
     '    preference: dark',
   ].join('\n')
   const restore = require('../dist/main/suite-layer.js').rowsToRestore
-  assert.deepEqual(restore(prose, OWNED), [], 'a block with prose is left alone')
+  assert.deepEqual(restore(prose, OWNED, INSERTED), [], 'a block with prose is left alone')
 })
 
 test('the layer package name is the synthetic scope entry the manifest names', () => {

@@ -327,10 +327,26 @@ preserved 标记 at 16347
 | 形态 | 处理 | 依据 |
 |---|---|---|
 | `- insert:` 块（内部 id 全在 overlay 名单内） | **摘除** | insert 是纯追加（`applyEntryPatches`），重复的唯一来源 |
-| 非 insert 行（含 `web` / `deepseek-account` / `ui-schedule` / `session-query-sqlite`） | **保留** | 后组成的非 insert 行压过先行的层行（`probe-layer-precedence.mjs`），且 profile patch 组成在最后；内核此后就地编辑它们，稳态成立；回滚线上 override 对不存在的行是 no-op（`plugins/dsh-app.patch.yml:250-252` 自己的注释），无启动风险 |
+| 非 insert 行（含 `web` / `deepseek-account` / `session-query-sqlite`） | **保留** | 后组成的非 insert 行压过先行的层行（`probe-layer-precedence.mjs`），且 profile patch 组成在最后；内核此后就地编辑它们，稳态成立；回滚线上 override 对不存在的行是 no-op（`plugins/dsh-app.patch.yml:240-268` 自己的注释），无启动风险 |
+
+> 2026-09-28 更正：`ui-schedule` 从上面第二行移到**成立**的行——它现在随套件 insert
+> （`plugins/dsh-app.patch.yml:269`），不再是改写上游禁用行的 override。原因是 0.2.0 的
+> web bundle 不再携带该行（改由 `@deepseek-ai/dsh-experimental-schedule-bundle` 提供，本
+> profile 不列它），override 于是没有目标：每次启动两条 `patch: entry "ui-schedule" not
+> found`，日程页静默缺失。实测两条线：0.2.0 上警告归零且行回到组合树；0.1.7-rc.2 上组合树
+> 多出一行同 id，生效的仍是最后那行（enabled），与改写上游行等价。
+>
+> 2026-09-28 又一条（当天稍晚）：老 profile 里那份非 insert 行**也不再保留**，改由
+> `stripSuiteRows` 按 `isSpentFlipRow` 摘除——它没有 config（内核的编辑器每写一个设置都会带
+> config，写完再清空会把整行删掉），只声明一个 id，且那个 id 是当前 overlay **以 insert 声明**
+> 的，`disabled` 状态又与层里那行一致。三个条件缺一不可：只摘「与层里那行同状态的残留」，
+> 带 config 的行（用户的设置）与 `disabled: true` 这种用户决定一律保留。原因是**安全模式**：
+> 那条路径写的层是空的，残留在那里重新打出 `patch: entry "ui-schedule" not found`。
+> 实证：真实 profile 的副本上迁移只摘了 `ui-schedule` 一个 id、留了 `.pre-suite-layer-*` 备份、
+> 组合树不变；副本切到安全模式（空层）后 dump 的 stderr 为空。
 
 摘除单位是**块**不是行：`plugins/dsh-app.patch.yml:87-183` 是一整块携带 16 个条目，
-`:254` 是携带 `schedule` 的另一块。既有的 `PATCH_ROW_LINE` 分块机制
+`:269` 是携带 `schedule` 与 `ui-schedule` 的另一块。既有的 `PATCH_ROW_LINE` 分块机制
 （`src/main/brand-suite.ts:652-669`）可直接用。内核编辑器**从不写 insert 行**
 （`config-editor:92` 的 `findLastIndex` 只匹配无 `insert` 的行），所以 patch 里的 insert
 块只能来自外壳旧的第 1 段，不会误伤用户手写的第三方 insert 块（其 id 不在名单内）。

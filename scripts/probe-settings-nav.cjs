@@ -170,7 +170,14 @@ const TABS_REPORT = `(function () {
       id: panel.id,
       labelledBy: panel.getAttribute('aria-labelledby'),
       hidden: panel.hasAttribute('hidden'),
-      rendered: panel.querySelector('section') !== null,
+      // "Rendered" must NOT be a shape assumption. It used to be a
+      // querySelector('section') test, which only holds for a page built out of
+      // that tag: plugin-presets' page roots at div.dshPresets-section and
+      // answered false on every run (2026-09-28), a standing false FAIL that
+      // hides a real one. Element children are the shape-agnostic witness that
+      // the page mounted.
+      children: panel.childElementCount,
+      rendered: panel.childElementCount > 0,
     })),
   }
 })()`
@@ -422,7 +429,7 @@ async function main() {
     console.log(`\n--- 维护设置 tab strip (${LANG}) ---`)
     console.log(`aria-label: ${JSON.stringify(strip.aria)}`)
     for (const tab of strip.tabs ?? []) console.log(`  ${tab.text.padEnd(18)} selected=${String(tab.selected).padEnd(5)} tabIndex=${tab.tabIndex} controls=${tab.controls}`)
-    for (const panel of strip.panels ?? []) console.log(`  panel ${panel.id} hidden=${String(panel.hidden).padEnd(5)} rendered=${panel.rendered} labelledBy=${panel.labelledBy}`)
+    for (const panel of strip.panels ?? []) console.log(`  panel ${panel.id} hidden=${String(panel.hidden).padEnd(5)} rendered=${panel.rendered} children=${panel.children} labelledBy=${panel.labelledBy}`)
     record('维护 holds its two remaining pages as tabs, in order',
       tabLabels.length === 2 && TAB_LABELS.every((pattern, index) => pattern.test(tabLabels[index] ?? '')),
       JSON.stringify(tabLabels))
