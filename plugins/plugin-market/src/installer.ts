@@ -16,9 +16,8 @@
  *   4. stdout/stderr are captured (capped) and the tail is returned for the
  *      panel's log disclosure; the full text is scanned for pnpm's
  *      build-scripts-blocked signal so the panel can offer the whitelist +
- *      retry path (see blockedBuildsOf / build-allow.ts) and for its
- *      release-age policy failures, which this class clears itself by re-running
- *      the command ONCE with the policy lifted for that run (see release-age.ts).
+ *      retry path (see blockedBuildsOf / build-allow.ts). Every run carries
+ *      pnpm's release-age policy lifted for that run alone (see release-age.ts).
  *
  * Serialization: every install/remove is queued behind an in-process promise
  * chain, so concurrent panel actions can never run two package-manager
@@ -234,22 +233,27 @@ export class PluginInstaller {
    * non-zero exit into MarketBlockedBuildError so the panel can offer the
    * allow-and-retry path instead of a bare failure.
    *
-   * A pnpm release-age policy failure is instead recovered here: the command
-   * runs once more with the policy lifted for that run (see release-age.ts). The
-   * retry's outcome is the one reported, so a second failure surfaces its own
-   * output rather than the stale first one.
+   * The release-age policy is lifted for the run ITSELF (see release-age.ts),
+   * never persisted. A directory whose lockfile pins a version inside pnpm's
+   * window is otherwise blocked for EVERY command — install and uninstall alike —
+   * for the rest of that window, which is the normal state of this profile rather
+   * than an exception: the suite and the followed kernel line publish same-day,
+   * and so does every plugin the user has just installed. Measured on the real
+   * profile (2026-09-28): two entries in the window, and `pnpm install
+   * --lockfile-only` failed on them with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION
+   * before touching anything. Waiting for that failure and re-running would work
+   * — it is what this class used to do — but it pays a rejected package-manager
+   * run on every action and logs an error the user did nothing to deserve.
    */
   private async runCli(args: readonly string[]): Promise<{ output: string, blockedBuilds: readonly string[] | null }> {
-    let outcome = await this.runOnce(args)
-    if (outcome.code !== 0 && isReleaseAgeFailure(outcome.raw)) {
-      // The policy rejected the run before it did anything (see release-age.ts):
-      // run the same command once with the policy lifted for this run only. No
-      // version is recorded anywhere, so the next command starts under the
-      // cooldown again.
-      this.log(`plugin-market: the release-age policy blocked the run; retrying once with it lifted (profile ${this.profile})`)
-      outcome = await this.runOnce([RELEASE_AGE_OVERRIDE, ...args])
-    }
+    const outcome = await this.runOnce([RELEASE_AGE_OVERRIDE, ...args])
     if (outcome.code !== 0) {
+      if (isReleaseAgeFailure(outcome.raw)) {
+        // The override did not clear it: a pnpm whose config key or policy codes
+        // moved, or a policy this module does not know. Named here so the log
+        // points at the cause instead of only at pnpm's own output.
+        this.log(`plugin-market: pnpm's release-age policy rejected a run carrying ${RELEASE_AGE_OVERRIDE} (profile ${this.profile})`)
+      }
       throw outcome.blockedBuilds !== null
         ? new MarketBlockedBuildError(commandFailureHost(outcome.output, outcome.code), outcome.blockedBuilds)
         : new MarketExecutionError(commandFailureHost(outcome.output, outcome.code), 'cli')

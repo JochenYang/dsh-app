@@ -24,6 +24,14 @@
  * every other run exactly as the profile and the user had them, and writes
  * nothing.
  *
+ * The market therefore runs EVERY command with that override attached rather than
+ * waiting to be rejected: this profile's lockfile pins fresh versions as a matter
+ * of course (the suite and the followed kernel line publish same-day, and so does
+ * each plugin the user has just installed), so the rejection is the steady state,
+ * not an exception. {@link isReleaseAgeFailure} stays for the case the override
+ * does not clear — a pnpm whose config key or policy codes moved — so that
+ * failure is named instead of being read as an ordinary one.
+ *
  * @module @dsh-app/plugin-market/release-age
  */
 

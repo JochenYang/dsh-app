@@ -3,8 +3,10 @@
  * recognition across pnpm 10/11 wordings and a Chinese variant, package-name
  * extraction from the two documented message shapes, grammar filtering of
  * free-form log text, dedupe, and the no-signal null), plus the release-age
- * recovery around the CLI run — one retry with the policy lifted for that run,
- * and the untouched failure paths (blocked builds, plain failures).
+ * policy around the CLI run — the per-run override is part of the run itself,
+ * the profile's own configuration is never written, and the failure paths
+ * (blocked builds, plain failures, a policy failure the override did not clear)
+ * are reported rather than retried.
  *
  * @module plugin-market/tests/installer
  */
@@ -91,7 +93,7 @@ function scriptedSpawn(runs: readonly ScriptedRun[]): { impl: typeof spawn, call
   return { impl: impl as unknown as typeof spawn, calls }
 }
 
-describe('PluginInstaller release-age recovery', () => {
+describe('PluginInstaller release-age policy', () => {
   let home: string
   let profileDir: string
   let workspacePath: string
@@ -99,13 +101,19 @@ describe('PluginInstaller release-age recovery', () => {
   let previousBin: string | undefined
 
   const WORKSPACE = 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n'
+  /** A lockfile the market must never rewrite itself: pnpm owns this file. */
+  const LOCKFILE = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n"
+
+  let lockfilePath: string
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'dsh-market-installer-'))
     profileDir = join(home, 'profiles', 'dsh-app')
     workspacePath = join(profileDir, 'pnpm-workspace.yaml')
+    lockfilePath = join(profileDir, 'pnpm-lock.yaml')
     mkdirSync(profileDir, { recursive: true })
     writeFileSync(workspacePath, WORKSPACE, 'utf8')
+    writeFileSync(lockfilePath, LOCKFILE, 'utf8')
     previousHome = process.env.DSH_HOME
     process.env.DSH_HOME = home
     // The CLI path the shell normally exports; the spawn itself is scripted,
@@ -128,60 +136,66 @@ describe('PluginInstaller release-age recovery', () => {
     writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-dsh-app', private: true, dependencies }), 'utf8')
   }
 
-  it('retries once with the policy lifted when pnpm names no version', async () => {
-    manifest({ 'dsh-plugin-x': '0.7.3', range: '^1.0.0' })
-    const spawnImpl = scriptedSpawn([
-      {
-        code: 1,
-        output: '[ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED] 1 resolution-policy violation was produced but no handleResolutionPolicyViolations callback was wired to react to them.\n',
-      },
-      { code: 0, output: 'dependencies:\n- dsh-plugin-x 0.7.3\nDone in 1.2s\n' },
-    ])
+  it('passes the per-run override on the first run', async () => {
+    manifest({ 'dsh-plugin-x': '0.7.3' })
+    const spawnImpl = scriptedSpawn([{ code: 0, output: 'dependencies:\n- dsh-plugin-x 0.7.3\nDone in 1.2s\n' }])
     const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
 
     const result = await installer.uninstall('dsh-plugin-x')
 
-    assert.equal(spawnImpl.calls.length, 2, 'exactly one retry')
-    // The retry's pnpm arguments: the per-run override first, the command intact
-    // behind it — and nothing written into the profile.
-    assert.deepEqual(spawnImpl.calls[1]!.slice(-3), ['--config.minimumReleaseAge=0', 'remove', 'dsh-plugin-x'])
+    // One run, the policy lifted for it: the override first, the command intact
+    // behind it.
+    assert.equal(spawnImpl.calls.length, 1, 'no second run')
+    assert.deepEqual(spawnImpl.calls[0]!.slice(-3), ['--config.minimumReleaseAge=0', 'remove', 'dsh-plugin-x'])
     assert.equal(readFileSync(workspacePath, 'utf8'), WORKSPACE, 'the profile keeps its own policy')
-    assert.ok(result.output.includes('Done in 1.2s'), 'the retry output is what the panel shows')
+    assert.equal(readFileSync(lockfilePath, 'utf8'), LOCKFILE, 'and its lockfile: only pnpm owns that file')
+    assert.ok(result.output.includes('Done in 1.2s'), 'the run output is what the panel shows')
   })
 
-  it('lifts the policy for the lockfile-verification failure the exclusions cannot clear', async () => {
+  it('carries the override for a lockfile the exclusions cannot clear', async () => {
     manifest({ 'dsh-context': '0.53.2' })
-    // Verbatim from pnpm 11.7.0, with the offending version ALREADY in the
-    // profile's exclude list: writing exclusions is not a way out of this one,
-    // so the retry must lift the policy instead.
+    // The profile's own exclude list is present and must come out unchanged: the
+    // lockfile check ignores that list, so the override — not a written
+    // exclusion — is what clears this one.
     writeFileSync(workspacePath, `${WORKSPACE}minimumReleaseAgeExclude:\n  - dsh-context@0.53.2\n`, 'utf8')
-    const spawnImpl = scriptedSpawn([
-      {
-        code: 1,
-        output: [
-          '? Verifying lockfile against supply-chain policies (33 entries)...',
-          '✗ Lockfile failed supply-chain policy check (33 entries in 1.5s)',
-          '[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:',
-          '  dsh-context@0.53.2 was published at 2026-09-17T09:06:32.000Z, within the minimumReleaseAge cutoff (2026-09-16T14:15:46.564Z)',
-          '',
-        ].join('\n'),
-      },
-      { code: 0, output: 'Already up to date\nDone in 900ms\n' },
-    ])
+    const spawnImpl = scriptedSpawn([{ code: 0, output: 'Already up to date\nDone in 900ms\n' }])
     const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
 
     await installer.uninstall('dsh-context')
 
-    assert.equal(spawnImpl.calls.length, 2, 'exactly one retry')
-    assert.deepEqual(spawnImpl.calls[1]!.slice(-3), ['--config.minimumReleaseAge=0', 'remove', 'dsh-context'])
+    assert.equal(spawnImpl.calls.length, 1)
+    assert.deepEqual(spawnImpl.calls[0]!.slice(-3), ['--config.minimumReleaseAge=0', 'remove', 'dsh-context'])
     assert.equal(
       readFileSync(workspacePath, 'utf8'),
       `${WORKSPACE}minimumReleaseAgeExclude:\n  - dsh-context@0.53.2\n`,
-      'the retry writes nothing',
+      'the run writes nothing',
     )
+    assert.equal(readFileSync(lockfilePath, 'utf8'), LOCKFILE, 'the lockfile is left alone too')
   })
 
-  it('does not retry when the failure is not a release-age one', async () => {
+  it('names the policy even when a blocked-builds signal shares the output', async () => {
+    manifest({ 'dsh-plugin-x': '0.7.3' })
+    const spawnImpl = scriptedSpawn([{
+      code: 1,
+      output: [
+        'Ignored build scripts: esbuild. Run "pnpm approve-builds" to pick which dependencies should be allowed',
+        '[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:',
+        '',
+      ].join('\n'),
+    }])
+    const lines: string[] = []
+    const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, (message) => lines.push(message))
+
+    await assert.rejects(installer.uninstall('dsh-plugin-x'), (error: unknown) => {
+      // The blocked-builds error is the actionable one and keeps its precedence.
+      assert.ok(error instanceof MarketBlockedBuildError)
+      assert.deepEqual(error.blockedBuilds, ['esbuild'])
+      return true
+    })
+    assert.ok(lines.some((line) => line.includes('release-age policy rejected')))
+  })
+
+  it('runs the command once: a failure is reported, not re-run', async () => {
     manifest({ 'dsh-plugin-x': '0.7.3' })
     const spawnImpl = scriptedSpawn([{ code: 1, output: 'npm ERR! 404 Not Found\n' }])
     const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
@@ -191,20 +205,21 @@ describe('PluginInstaller release-age recovery', () => {
     assert.equal(readFileSync(workspacePath, 'utf8'), WORKSPACE, 'nothing was written')
   })
 
-  it('reports the retry failure when the policy is lifted and pnpm still fails', async () => {
+  it('names a release-age failure the override did not clear', async () => {
     manifest({ 'dsh-plugin-x': '0.7.3' })
     const spawnImpl = scriptedSpawn([
       { code: 1, output: '[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 1 lockfile entries failed verification:\n  dsh-plugin-x@0.7.3 was published recently\n' },
-      { code: 1, output: 'npm ERR! 404 Not Found\n' },
     ])
-    const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
+    const lines: string[] = []
+    const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, (message) => lines.push(message))
 
-    await assert.rejects(installer.uninstall('dsh-plugin-x'), (error: unknown) => {
-      assert.ok(error instanceof MarketExecutionError)
-      assert.ok(String(error.message).includes('404'), 'the second run is the one reported')
-      return true
-    })
-    assert.equal(spawnImpl.calls.length, 2)
+    await assert.rejects(installer.uninstall('dsh-plugin-x'), MarketExecutionError)
+
+    assert.equal(spawnImpl.calls.length, 1)
+    assert.ok(
+      lines.some((line) => line.includes('release-age policy rejected')),
+      'the log names the policy instead of leaving pnpm\'s output to speak alone',
+    )
   })
 
   it('still reports blocked build scripts through their own error', async () => {

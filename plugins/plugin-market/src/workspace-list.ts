@@ -1,11 +1,13 @@
 /**
  * One list key of the profile's pnpm-workspace.yaml, merged in place.
  *
- * Two pnpm supply-chain policies need a list in that file: the build-script
- * whitelist (`onlyBuiltDependencies`, see build-allow.ts) and the release-age
- * exclusion list (`minimumReleaseAgeExclude`, see release-age.ts). Both writes
- * must obey the same discipline, which is why the document surgery lives here
- * once:
+ * The build-script whitelist (`onlyBuiltDependencies`, see build-allow.ts) is the
+ * only list written here today. The release-age exclusion list
+ * (`minimumReleaseAgeExclude`) used to be the second one and is gone: measured on
+ * pnpm 11.7.0, the lockfile check that runs before every command ignores that list,
+ * so the market lifts the policy for the run itself instead (release-age.ts).
+ *
+ * The write discipline below is unchanged and lives here once:
  *
  *   - the target key is the ONLY thing the merge touches; a read-modify-write
  *     preserves every existing byte it does not own (user-edited settings,
