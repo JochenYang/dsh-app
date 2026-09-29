@@ -133,6 +133,32 @@ window.__dshStartupShowFailure = function (config) {
   }
 
   /* ------------------------------------------------------------------- film */
+  /*
+    Two elements, one file: the BACKDROP fills the window (`cover`) and is
+    blurred, the FILM on top is fitted whole (`contain`). Fitting leaves bands,
+    and bare bands read as letterboxing — a user reported exactly that — while
+    filling crops the wordmark's left edge (142px of width at the default
+    window, measured). Blurring the same clip behind the fitted frame gives both:
+    nothing is cut, and no band shows a flat colour. Two decoders run for the
+    length of a boot, which is the price of not shipping a second asset — and a
+    static image could not track the moving frames behind the bands anyway.
+  */
+  #startup-video-backdrop {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    /* Bright enough to READ as the film's own colour: at 0.45 the band was
+       rgb(6,11,27)..rgb(8,14,30) — flat enough to still look like a black bar
+       (measured), which is the complaint this layer exists to fix. The bottom
+       scrim, not this filter, is what keeps the dock legible. */
+    filter: blur(26px) saturate(1.25) brightness(0.85);
+    /* Keeps the blur's soft edge outside the viewport. */
+    transform: scale(1.08);
+    background: var(--startup-bg);
+    pointer-events: none;
+  }
   #startup-video {
     position: fixed;
     inset: 0;
@@ -143,24 +169,34 @@ window.__dshStartupShowFailure = function (config) {
       resizable from 900x600 to full screen, so `cover` filled it by CROPPING —
       measured 142px of width at the 1280x800 default (71px off each side, which
       is the wordmark tile's left edge and the first thing a user noticed),
-      167px at the 900x600 minimum and 178px at 1600x1000. Fitting instead of
-      filling leaves bands, and the bands are the film's own navy
-      (`--startup-bg`), so they read as part of it rather than as letterboxing.
+      167px at the 900x600 minimum and 178px at 1600x1000.
     */
     object-fit: contain;
-    background: var(--startup-bg);
+    background: transparent;
     /* Decorative and never in the way: no controls, no pointer events (a film
        that swallows a click is how the pause button stops working). */
     pointer-events: none;
   }
-  /* Legibility floor for the dock, painted over the film. Also carried into the
-     top strip: the native window controls need a consistent backdrop. */
+  /* Legibility floor over the film, in two pieces with different jobs.
+     The top one exists for the NATIVE window controls: the strip behind them is
+     transparent, so their light symbols sit on whatever the film is doing at the
+     top right — a bright sky there needs ~0.6 of depth to stay readable. It fades
+     out just under the strip (36px), which is what lets the band below it show
+     the film's own colours.
+     The bottom one is the dock's floor: dark where the text is, gone by 40% so
+     the blurred backdrop — not a black bar — is what the eye sees above it. */
   .scrim {
     position: fixed;
     inset: 0;
     background:
-      linear-gradient(to bottom, rgba(6, 11, 26, 0.55) 0, rgba(6, 11, 26, 0) 22%),
-      linear-gradient(to top, rgba(4, 9, 24, 0.92) 0, rgba(4, 9, 24, 0.72) 26%, rgba(4, 9, 24, 0) 58%);
+      linear-gradient(to bottom,
+        rgba(6, 11, 26, 0.62) 0,
+        rgba(6, 11, 26, 0.42) 36px,
+        rgba(6, 11, 26, 0) 15%),
+      linear-gradient(to top,
+        rgba(4, 9, 24, 0.86) 0,
+        rgba(4, 9, 24, 0.5) 14%,
+        rgba(4, 9, 24, 0) 40%);
   }
 
   /* Drag handle: the whole reserved strip moves the window. Controls inside it
@@ -447,10 +483,15 @@ window.__dshStartupShowFailure = function (config) {
 </style>
 </head>
 <body>
-  <!-- The opening film: muted, looping, cover. Muted autoplay needs no user
-       gesture (an unmuted one would be refused outright on a page nobody has
-       clicked yet), and the toggle below the title strip is what turns sound on
-       — that click IS the gesture Chromium wants. -->
+  <!-- The opening film, twice: the blurred backdrop that fills the window, then
+       the fitted frame on top of it (see the film rules in the stylesheet). Both
+       start muted, looping and autoplaying — a muted autoplay needs no user
+       gesture, and the toggle below the title strip is what turns sound on; it
+       controls the FOREGROUND only, so the backdrop can never be the louder
+       half of a stereo mix. -->
+  <video id="startup-video-backdrop" src="media/DSH-APP%20startup.mp4"
+         autoplay muted loop playsinline preload="auto"
+         aria-hidden="true" tabindex="-1"></video>
   <video id="startup-video" src="media/DSH-APP%20startup.mp4"
          autoplay muted loop playsinline preload="auto"
          aria-hidden="true" tabindex="-1"></video>
@@ -506,6 +547,7 @@ window.__dshStartupShowFailure = function (config) {
     var api = window.__dshStartup;
     var root = document.documentElement;
     var video = document.getElementById('startup-video');
+    var backdrop = document.getElementById('startup-video-backdrop');
     var audio = document.getElementById('startup-audio');
     var steps = document.querySelectorAll('#startup-steps li');
     var status = document.getElementById('startup-status');
@@ -567,10 +609,13 @@ window.__dshStartupShowFailure = function (config) {
     });
     paintAudio();
     // Reduced motion: hold the first frame instead of looping ten seconds of
-    // movement behind the status text.
+    // movement behind the status text. The backdrop holds with it — a still
+    // blurred frame is exactly as good a band-filler as a moving one.
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       video.autoplay = false;
+      backdrop.autoplay = false;
       try { video.pause(); } catch (error) { /* already paused */ }
+      try { backdrop.pause(); } catch (error) { /* already paused */ }
     }
 
     /**
