@@ -86,6 +86,10 @@ const ZH_CN = {
   'splash.step.window': '打开界面',
   'splash.pauseDownload': '暂停下载',
   'splash.resumeDownload': '继续下载',
+  // The sound toggle on the opening film. Labeled by the ACTION the click
+  // performs (as the pause control is), never by the state it is in.
+  'splash.soundOn': '开启声音',
+  'splash.soundOff': '关闭声音',
 
   // The line at the foot of the splash: a fixed wish, not fetched copy. The
   // English is a rendering of the Chinese rather than a translation of its pun
@@ -363,6 +367,8 @@ const EN_US: Record<MessageKey, string> = {
   'splash.step.window': 'Opening the interface',
   'splash.pauseDownload': 'Pause download',
   'splash.resumeDownload': 'Resume download',
+  'splash.soundOn': 'Turn sound on',
+  'splash.soundOff': 'Turn sound off',
 
   'splash.saying': 'Stay healthy first. Everything else comes second.',
   // --------------------------------------- shell status lines (card, tooltip)

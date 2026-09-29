@@ -31,13 +31,17 @@ import { readThemePreference, readThemePreferenceFromPatch, resolveThemeMode, ty
 const SPLASH_PAGE = path.join(__dirname, '..', 'static', 'startup.html')
 
 /**
- * Window background per theme. These are the resolved values of the UI's own
- * `--dsw-alias-bg-base` (see static/startup.html, which carries the same pair
- * with their token names): the window paints before the page does, and a
- * mismatched background is the one flash the splash cannot cover up.
+ * The window background while the splash is up: what shows before the page
+ * paints and behind it, so it cannot be sampled from the page.
+ *
+ * One value for both themes, because the page is the opening film now and the
+ * film's own navy (`static/startup.html` `--startup-bg`) is what the page paints
+ * in either theme — a per-theme pair here is exactly the white flash a
+ * light-theme machine showed before the first frame decoded. The native
+ * window-control strip is not set here at all: the page's own sampler owns it
+ * (see `applyWindowTheme`), and it reads this same navy off the page.
  */
-const SPLASH_BG_LIGHT = '#ffffff'
-const SPLASH_BG_DARK = '#151517'
+const SPLASH_BG = '#0d1424'
 
 /**
  * Failure-card actions. index.ts owns what each one DOES; this module only
@@ -89,7 +93,16 @@ interface StartupView {
    * HTML cannot know the language. Built lazily: `t()` must run after
    * `initLocale()`, which is why this is not a module-level constant.
    */
-  skeleton?: { steps: string[]; hint: string; failureHint: string; pause: string; resume: string }
+  skeleton?: {
+    steps: string[]
+    hint: string
+    failureHint: string
+    pause: string
+    resume: string
+    /** Sound toggle labels, by the action the click performs. */
+    soundOn: string
+    soundOff: string
+  }
   /**
    * True while the download in flight can be paused (the shell keeps a promise
    * parked on the page's control; this is what ends it), and true when that
@@ -126,6 +139,8 @@ function buildSkeleton(): Required<Pick<StartupView, 'skeleton'>>['skeleton'] {
     failureHint: t('splash.failureHint'),
     pause: t('splash.pauseDownload'),
     resume: t('splash.resumeDownload'),
+    soundOn: t('splash.soundOn'),
+    soundOff: t('splash.soundOff'),
   }
 }
 
@@ -392,13 +407,6 @@ function readThemePreferenceAcrossLines(): ThemePreference | null {
 }
 
 /**
- * Paint the window chrome in {@link currentTheme}: the window background (what
- * shows before the page does) and the native overlay strip behind the window
- * buttons. Both have to follow a live theme switch, or the buttons float on a
- * strip that no longer matches the page under it.
- */
-
-/**
  * Paint the window's own background for the current theme.
  *
  * Background only, and deliberately NOT the title-bar overlay: the strip has a
@@ -406,17 +414,21 @@ function readThemePreferenceAcrossLines(): ThemePreference | null {
  * reads whatever is actually painted under the window controls and applies it.
  * The shell writing that strip as well is what broke it: two writers, two
  * caches, and the loser's colour stuck (a white strip over a dark app, even
- * behind modal masks). The splash page paints its own themed background, so the
+ * behind modal masks). The splash page paints its own background, so the
  * sampler follows the splash for free — no shell-side theme knowledge needed.
  *
  * The window `backgroundColor` is different: it shows before the page paints
- * (and behind it), so it cannot be sampled and must be set here.
+ * (and behind it), so it cannot be sampled and must be set here. While the
+ * splash is up that value is the film's navy in either theme ({@link SPLASH_BG})
+ * — the page follows the user's theme for its dialog surfaces, not its
+ * background, and a light-theme machine must not flash white before the first
+ * frame decodes.
  */
 function applyWindowTheme(): void {
   const win = splash
   if (win === null || win.isDestroyed()) return
   if (!isShowingLoadingPage(win)) return
-  win.setBackgroundColor(currentTheme === 'dark' ? SPLASH_BG_DARK : SPLASH_BG_LIGHT)
+  win.setBackgroundColor(SPLASH_BG)
 }
 
 /**

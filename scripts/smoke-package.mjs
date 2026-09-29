@@ -33,8 +33,16 @@ const REQUIRED_ASAR_ENTRIES = [
   'node_modules/semver/package.json',
 ]
 
-/** The splash is the only file static/ may ship (a stale setup UI regressed once). */
+/** The splash, plus the opening film's own directory, under `dist/static`.
+ *
+ * The single-file rule exists because a stale setup UI once shipped here; the
+ * film is a deliberate second entry, so the exception is spelled out as a
+ * SUBDIRECTORY instead of a second filename: everything the splash needs beyond
+ * itself lives under `static/media/`, and nothing else may appear at the top. */
 const STATIC_DIR = 'dist/static/'
+const STATIC_MEDIA_DIR = `${STATIC_DIR}media/`
+/** The opening film the splash page loads; a build without it plays nothing. */
+const SPLASH_VIDEO = `${STATIC_MEDIA_DIR}DSH-APP startup.mp4`
 
 /** Files electron-builder's `extraResources` filter is allowed to place there. */
 const REQUIRED_KERNEL_FILES = ['kernel.tgz', 'kernel.tgz.sha512', 'manifest.json']
@@ -127,11 +135,14 @@ async function main() {
       check(`asar has ${required}`, entries.includes(required))
     }
     const staticEntries = entries.filter((entry) => entry.startsWith(STATIC_DIR) && entry !== STATIC_DIR)
+    const unexpected = staticEntries.filter((entry) => entry !== `${STATIC_DIR}startup.html` && !entry.startsWith(STATIC_MEDIA_DIR))
     check(
-      'asar ships only the splash under dist/static',
-      staticEntries.length === 1 && staticEntries[0] === `${STATIC_DIR}startup.html`,
-      `found ${staticEntries.join(', ') || '(none)'}`,
+      'asar ships only the splash and static/media under dist/static',
+      unexpected.length === 0,
+      unexpected.length === 0 ? '' : `unexpected: ${unexpected.join(', ')}`,
     )
+    check('asar ships the splash page', staticEntries.includes(`${STATIC_DIR}startup.html`), `found ${staticEntries.join(', ') || '(none)'}`)
+    check('asar ships the opening film', staticEntries.includes(SPLASH_VIDEO), `found ${staticEntries.filter((entry) => entry.startsWith(STATIC_MEDIA_DIR)).join(', ') || '(nothing under static/media)'}`)
     if (entries.includes('package.json')) {
       const pkg = JSON.parse(extractFile(asarPath, 'package.json').toString('utf8'))
       check('package.json main points at the built entry', pkg.main === 'dist/main/index.js', String(pkg.main))
