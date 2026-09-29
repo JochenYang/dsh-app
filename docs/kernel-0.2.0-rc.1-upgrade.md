@@ -216,6 +216,7 @@ npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 | 客户端版本注入 | 我们已有 `DSH_APP_SHELL_VERSION`（随 kernelEnv 传给子进程），语义等价 |
 | macOS 录音权限 entitlement | 我们本来就没有录音功能；将来要做才需要 |
 | 上游自身的依赖钉版与构建脚本调整 | 不是我们的依赖、不是我们的脚本 |
+| 桌面端的整包升级（外壳 + 运行时 + pnpm 一个签名更新单元、`quitAndInstall` 整壳重启） | 我们刻意是**两条解耦通道**：外壳走安装器（就绪 → 立即重启/立即安装），内核走制品链（下载带进度与暂停/继续 → sha512 校验 → 写 `current.json` → **只重启 host 子进程**并重载窗口）。内核升级因此不必重启整个 Electron，按线的滚动也更细。上游那种「先下好再问」的中间态我们不做：我们的下载在用户点选之后（有进度、可暂停），不擅自占带宽 |
 
 ---
 
@@ -435,6 +436,8 @@ npm run check:plugins -- --kernel <新产物> --home …   → 通过 — 内核
 | 界面侧回归（自动化部分） | `probe-launch-folder.mjs --kernel <新 runtime>` **22 项 PASS**（这条是 AGENTS.md 指定的换线后必跑）；`probe-settings-nav.cjs --lang en-US --sweep` 修掉形状假设后**全绿**：13 条导航行全在面板内、可滚动、合并的「维护设置」一行一图标、两个 tab 顺序与 tab order 正确、可见面板恰好一个且 `children=1`（页面真的挂了）、切走的 tab 仍留在 DOM（`hidden=true, children=1`，状态不丢）、**en-US 下 13 个分区零中文残留** | `scratch/probe-settings-nav6.log` 的 `RESULT: PASS`；窗口截图在 `scratch/shots/` |
 | 第三方 `dshmarket` 被新线拒 | **已自解**：作者当天发 `1.66.4`/`1.66.5` 并把 `^0.2.0-rc.1` 加进 peer 范围；你的 `npm run dev`（跑的就是本工作树的新市场代码，它把冷静期覆盖放在命令本身）把它从 `1.66.3` 更新到 `1.66.5` | 真实 profile 锁文件 `dshmarket@1.66.3` → `1.66.5`（mtime 09-29 00:20）；已装包 `peerDependencies` 现含 `^0.2.0-rc.1`；`--dump-config` 里那条 `skipping profile bundle "dshmarket"` 消失 |
 | 安全模式下的残留行 | **已修**：`stripSuiteRows` 加 `isSpentFlipRow`（三条件：id 由当前 overlay 以 insert 声明、无 `config`、`disabled` 缺失或恰为 `false`），把老外壳写的「启用」残留摘掉；带 config 的行与 `disabled: true` 的用户决定一律保留 | 真实 profile 副本：`removed: ["ui-schedule"]`、patch 1337 → 1335 行且 diff 只有那两行、`.pre-suite-layer-*` 备份保留、组合树不变；副本切安全模式（`overlay: ''`）后 dump 的 stderr **为空**。新增 5 个单测（含「带 config 的行不摘」「`disabled: true` 不摘」「只被 override 的 id 不摘」） |
+| 上游「安装并重启」的一键升级 | **已适配，且更细**：内核卡片正文已写「更新将下载新运行时并重启服务」（`locale.ts:168`），手动弹窗写「服务将会重启」（`:152`）；外壳通道有上游同形的「更新就绪 / 更新已下载完成，将在退出时安装 / 立即重启」（`:184-187`、`:210-211`）。区别只是上游整包升级所以重启整壳，我们只重启 host（见 §3） | `src/main/window.ts:626-654`（内核卡片）、`src/main/updater.ts:179-202`（ready → `quitAndInstall`）、`:851-855`（Windows 安装器 + 重启说明）；内核侧 `manager.ts:512` 校验在激活前、`:799` 写 `current.json`、`index.ts:1603` 安装后立刻重启 host |
+| 账号模型免配 Key 就能网页搜索（0.2.0 变更项） | **已适配**，机制不同：上游这条走 `deepseek-official` provider（账号登录或 `DEEPSEEK_API_KEY`，**每次搜索是一次完整模型回合**的延迟与 token，因为 DeepSeek 没有独立搜索端点）；我们默认的 `dsh-app` 链**本来就免 Key**——五个引擎全在 free 层（Bing 抓公开结果页、AnySearch 匿名 API、SearXNG 自建、Parallel/Exa），无 key 的引擎在规范化时被丢弃（`wire.ts:409,425`）。官方 provider 仍挂载注册（`web-search-deepseek` 在组合树里），设置页可两者切换（`ws.provider.official`） | `npm run verify -- --tgz <0.2.0 产物>` 里的真实搜索项在**全新 home（无任何 key）**下通过：`websearch: search through ctx.web resolves to the brand provider` + `returns sources`（`scratch/verify.log:46-47`）；官方 provider 行在 `dump-realcpy2.yml:1392` |
 
 **界面探针自身修掉一条形状假设**（tooling，不是内核线回归）：它把「面板已渲染」判为
 `panel.querySelector('section') !== null`，而 presets 页的根是 `<div class="dshPresets-section">`
