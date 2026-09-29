@@ -560,6 +560,14 @@ jobs:
     name: mirror runtime to ModelScope
     needs: [resolve, runtime]
     runs-on: ubuntu-latest
+    env:
+      # This job has no checkout (it needs nothing from the tree), so `gh` cannot
+      # infer the repository from a git remote and every call fails with
+      # "fatal: not a git repository" — measured on v0.14.4's run: the job went
+      # red, the runtime was never mirrored, and the SOP's own backfill path
+      # could not fix it either (see publish-mirror.yml's mirror-runtime). One
+      # env var is the whole fix; `gh` honours GH_REPO.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Verify this run's runtime set
         shell: bash

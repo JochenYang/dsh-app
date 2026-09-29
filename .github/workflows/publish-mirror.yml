@@ -374,14 +374,21 @@ jobs:
     # 45 min of waiting for the matrix plus a ~2.5 GB upload; the bound exists so
     # a stuck run cannot hold the shared concurrency slot for 6 hours.
     timeout-minutes: 180
-    if: ${{ github.event_name == 'release' && github.event.release && !github.event.release.draft && startsWith(github.event.release.tag_name, 'runtime-') }}
+    if: ${{ (github.event_name == 'release' && github.event.release && !github.event.release.draft && startsWith(github.event.release.tag_name, 'runtime-')) || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'runtime-')) }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
       MODELSCOPE_REPO: ${{ vars.MODELSCOPE_REPO }}
       # Pinned deliberately: same SDK version as the shell job (header comment).
       MODELSCOPE_SDK_VERSION: '1.40.0'
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      # `inputs.tag` is the dispatch fallback, and it is what makes the SOP's own
+      # backfill work: `gh workflow run publish-mirror.yml -f
+      # tag=runtime-<dshVersion>` used to be SKIPPED silently, because this job's
+      # condition only accepted a `release` event — measured on 0.2.0-rc.1, where
+      # the run reported success with 'modelscope mirror (runtime): skipped' and
+      # the runtime stayed unmirrored. The condition accepts a dispatched
+      # `runtime-` tag now, so the documented recovery path is a real one.
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
       # The six cells release.yml builds; the same list is asserted there. Keep
       # in sync with the `mirror` job's copy (which is what a dispatch uses).
       RUNTIME_PLATFORMS: 'win32-x64 win32-arm64 darwin-x64 darwin-arm64 linux-x64 linux-arm64'
