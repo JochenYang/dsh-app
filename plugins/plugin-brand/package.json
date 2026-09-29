@@ -31,13 +31,13 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-settings": "^0.2.0-rc.1"
+    "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.2.0-rc.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-settings": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.2.0-rc.2",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   },

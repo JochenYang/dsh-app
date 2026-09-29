@@ -149,3 +149,74 @@ frame 的 `padding-top`、折叠侧栏轨道移除、16px 圆角、`::before` �
   要靠新的 `suiteVersion`/`dshVersion`（见 `docs/agents/release-checklist.md` 的两条教训）。
 - **不做**：fork 内核、打开整包升级、把官方 preload 的私有通道搬进我们的壳（`account-preload.ts`
   只暴露一个冻结标记，任何新通道都要过安全评审，见根 `AGENTS.md` §4）。
+
+---
+
+## 6 实测台账（2026-09-30）
+
+升线本体按 §1.1 走完，产物已建。本节只记数字与判据来源，方便下次换线照抄。
+
+### 6.1 依赖与产物 `[实测]`
+
+| 项 | 值 |
+|---|---|
+| spec 改动 | 304 处 `^0.2.0-rc.1` → `^0.2.0-rc.2`（根 23 + 16 插件 281）；`@deepseek-ai/cordis` 保持 `^4.0.4` |
+| 重装 | 旧 lockfile 直接 `npm install` **ERESOLVE**：`peer @deepseek-ai/dsh-agent@"0.2.0-rc.1" from …preset-registry@0.2.0-rc.1`；清根与 16 插件 `node_modules`+lockfile 后全部 exit 0，根与插件本地都解析到 `0.2.0-rc.2`（无版本偏斜） |
+| 运行时产物 | `runtime-dist/dsh-runtime-win32-x64-0.2.0-rc.2.tgz` 96.6 MB / 13076 文件（293.0 MB 展开）；`office-payload-win32-x64-0.2.0-rc.2.tgz` 0.1.2 / 70.5 MB |
+| manifest | `dshVersion 0.2.0-rc.2`、`suiteVersion 7ca94399`（插件代码未动，版本未 bump，故 suiteVersion 不变）、`node 24.18.0` |
+| 树内版本 | `app/node_modules/@deepseek-ai/dsh` = `0.2.0-rc.2`，`dsh-web-frontend` = `0.2.0-rc.2` |
+| host 源 | `D:\codes\deepseek-harness` 在 tag `dsh-v0.2.0-rc.2` 的一次性 worktree（commit `639ed01539`，`build-runtime.mjs` 自己建、用完删；**不需要手工建 worktree**） |
+
+### 6.2 门禁
+
+| 门禁 | 结果 |
+|---|---|
+| `npm run typecheck` | 0 error |
+| `npm test` | 485 用例 / 484 pass / 1 skipped / 0 fail |
+| `npm run check:graph` | `ok — no violations`（`followed line ^0.2.0-rc.2`） |
+| 16 个插件套件 | 全部 ok（如 websearch 92 pass、brand 31 pass） |
+| `npm run verify -- --tgz …rc.2.tgz` | `smoke: all checks passed`（mode=tgz，逐条路由与 artifact 断言全绿） |
+| `npm run check:plugins -- --kernel …rc.2.tgz --home scratch/realcpy2` | 通过，内核 5.1s 就绪、无失败信号 |
+
+§1.2 的两条专属门禁：
+
+1. **schedule**：树内 `dsh-schedule` 与 `dsh-client-ui-schedule` 都在（`tar -tzf`）；`scratch/probe-schedule-ui.mjs`
+   对着新解出的 rc.2 树 **PASS** —— client 半在服务端 index 里、`skipped-patch lines: (none)`、
+   `activation failures: (none)`、`log lines mentioning ui-schedule: (none)`。插入式两行在 rc.2 上不再产生
+   `patch: entry "ui-schedule" not found`。
+2. **遥测**：`dsh-host-product-telemetry-otel` 仍在树内（所以 overlay 的 `disabled: true` 仍是必需的），
+   真机启动**零条** `did not activate`。
+
+> 注意 `check-plugin-compat.mjs` 的失败规则里**没有** `patch: entry … not found` 这一类文案（规则只收
+> `ERR_*` / `Cannot find module` / `duplicate …` / `failed to load|start` / 缩进堆栈行），所以它“通过”
+> 不能替代这两条；要显式 grep 启动日志。
+
+### 6.3 真机 M1
+
+全新 `DSH_HOME`（`scratch/fresh-home-rc2`）+ `DSH_APP_DEV_KERNEL=<新解出的 rc.2 树>`：
+
+```
+[kernel] local kernel: dsh 0.2.0-rc.2+suite 7ca94399
+[host]   dsh host: argv shape runtime-and-project (host package 0.2.0-rc.2)
+[host]   dsh host ready (web transport)          ← 约 3s
+```
+
+`did not activate` / `patch: entry` / `ERR_` / `Cannot find module` / `duplicate` 各 0 条。
+
+### 6.4 一条会误导人的环境现象
+
+换线清 `node_modules` 后第一次 `npm test` 有 4 个文件红（`home-rows` / `host-arg-shape` /
+`host-stream-auth` / `log-redaction`），报的是 `Electron failed to install correctly` +
+`failed to create …\electron\dist\locales\*.pak: 拒绝访问 / 文件存在`。原因是重装后 electron 的
+`dist/` 还没解出来，而 node 的测试运行器**并发**跑这四个文件，四个进程各自触发
+`node_modules/electron/index.js` 的 `install.js`，在同一目录里互相踩踏。`dist/` 补齐（55 locales +
+`electron.exe`）后单独重跑这 4 个文件 59 pass，再跑整套 485 全绿 —— **不是 rc.2 回归**，换线后
+要么先手动补 `dist/`，要么不要并发起跑。
+
+### 6.5 未做
+
+- `bundled-kernel/` 仍是本地旧产物（dev 日志里的 `bundled 0.2.0-rc.1` 来自它）：它是打包期由
+  `prepare-bundled-kernel.mjs` 从 `runtime-dist/` 里**最高 semver** 的 tgz 生成的（现在已是 rc.2），
+  不需要提交，也没有仓库内改动。
+- §3 的移植候选（P0 标题栏标记、P2 归档页「未命名」、深色开关 token 覆盖、更新文案）本轮未实施，
+  它们与升线解耦，各自单独提交。
