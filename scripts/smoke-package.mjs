@@ -41,6 +41,8 @@ const REQUIRED_ASAR_ENTRIES = [
  * itself lives under `static/media/`, and nothing else may appear at the top. */
 const STATIC_DIR = 'dist/static/'
 const STATIC_MEDIA_DIR = `${STATIC_DIR}media/`
+/** The media DIRECTORY's own asar entry, which carries no trailing slash. */
+const STATIC_MEDIA_ENTRY = STATIC_MEDIA_DIR.replace(/\/$/u, '')
 /** The opening film the splash page loads; a build without it plays nothing. */
 const SPLASH_VIDEO = `${STATIC_MEDIA_DIR}DSH-APP startup.mp4`
 
@@ -135,7 +137,12 @@ async function main() {
       check(`asar has ${required}`, entries.includes(required))
     }
     const staticEntries = entries.filter((entry) => entry.startsWith(STATIC_DIR) && entry !== STATIC_DIR)
-    const unexpected = staticEntries.filter((entry) => entry !== `${STATIC_DIR}startup.html` && !entry.startsWith(STATIC_MEDIA_DIR))
+    // `dist/static/media` itself is one of those entries — asar lists the
+    // DIRECTORY (no trailing slash) as well as the files under it. Measured on a
+    // packaged 0.14.4 build: without this line the gate failed the very change it
+    // was added for, one directory entry short of correct.
+    const unexpected = staticEntries.filter((entry) =>
+      entry !== `${STATIC_DIR}startup.html` && entry !== STATIC_MEDIA_ENTRY && !entry.startsWith(STATIC_MEDIA_DIR))
     check(
       'asar ships only the splash and static/media under dist/static',
       unexpected.length === 0,
