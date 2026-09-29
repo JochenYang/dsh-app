@@ -74,6 +74,11 @@ Plugin builds and tests: `plugins/AGENTS.md`.
   after a kernel-line bump; `probe-settings-nav.cjs --lang en-US [--sweep]` after
   touching a settings section; `probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
   `src/main/window.ts` — **keep the two in sync**.
+- **A machine's profiles after a kernel-line move**: `npm run profiles:audit`
+  (stale `minimumReleaseAgeExclude` entries) → `npm run profiles:prune`, and
+  `npm run profiles:peers` for plugins whose peers cap below the new line.
+  `docs/agents/profile-supply-chain.md` is the procedure; the tool never writes
+  `minimumReleaseAge` and never runs an exemption for you.
 - **A probe running inside Electron must pass `windowsHide: true` to every
   `spawn`** — else each console child pops a terminal onto the user's desktop.
 - Dependency installs: root changes use plain `npm install`; plugin-local
