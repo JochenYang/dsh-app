@@ -95,6 +95,18 @@ const ZH_CN = {
   // English is a rendering of the Chinese rather than a translation of its pun
   // (「其次」 is a play on "second"), so the two read as the same sentiment.
   'splash.saying': '首先您要健康，其次才是其次',
+
+  // ------------------------------------------------- home-layer row conflicts
+  // The kernel refuses an app-side write when the same setting also lives in
+  // `$DSH_HOME/cordis.patch.yml` (see src/main/home-layer-rows.ts), so the only
+  // remedy is moving that row. The wording says what is kept, what is given up,
+  // and where the backups are — this dialog touches a file that belongs to every
+  // profile on the machine.
+  'homeLayer.title': '有一行机器级设置挡住了应用内的修改',
+  'homeLayer.message': '{ids} 的值由 {file} 提供；应用里改它会被内核拒绝（overridden by a home patch）。',
+  'homeLayer.detail': '移入本 profile 后，这一行的值保持不变（按原样写入本 profile 的补丁），应用内从此可以修改它；其它 profile 会回落到各自的默认值。两个文件都会先备份。',
+  'homeLayer.move': '移入本 profile',
+  'homeLayer.moved': '已把 {ids} 移入本 profile，现在可以在设置里修改它了。',
   // --------------------------------------- shell status lines (card, tooltip)
   'status.startingServer': '正在启动 dsh 服务…',
   'status.installingMissing': '正在把缺失的包装进当前档案…',
@@ -371,6 +383,12 @@ const EN_US: Record<MessageKey, string> = {
   'splash.soundOff': 'Turn sound off',
 
   'splash.saying': 'Stay healthy first. Everything else comes second.',
+
+  'homeLayer.title': 'A machine-level setting blocks changes in the app',
+  'homeLayer.message': '{ids} comes from {file}, so changing it in the app is refused by the kernel (overridden by a home patch).',
+  'homeLayer.detail': 'Moving it into this profile keeps the value exactly as it is (written into this profile\'s patch byte for byte) and lets the app change it from now on; other profiles fall back to their own defaults. Both files are backed up first.',
+  'homeLayer.move': 'Move into this profile',
+  'homeLayer.moved': 'Moved {ids} into this profile — it can be changed in Settings now.',
   // --------------------------------------- shell status lines (card, tooltip)
   'status.startingServer': 'Starting the dsh server…',
   'status.installingMissing': 'Installing the missing packages into the current profile…',

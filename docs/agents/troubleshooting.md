@@ -21,6 +21,7 @@ holds the full detail — read it before acting on the signal.
 | ~30 min to hours — npm dist-tag goes live **before** the runtime matrix finishes uploading, so "安装包尚未发布" in that window is expected | CI |
 | `scripts/publish-modelscope.mjs`, `scripts/diagnose-modelscope-upload.mjs` — manual mirror drills; CI uses the Python SDK in `.github/scripts/` | `scripts/` |
 | `办公文档转换引擎尚未安装` (code `unavailable`) — the runtime's kit shim ran: the office payload is not installed (or `DSH_APP_OFFICE_PAYLOAD` was not published). A MISSING SHIM instead makes the provider fail to load, which surfaces as a plugin-tree activation fault | `src/kernel/office-payload.ts`, `scripts/runtime-stubs/` |
+| `Configuration for "…" is overridden by a home patch or command-line overlay` — somebody set that entry's `config` in `$DSH_HOME/cordis.patch.yml`, which composes AFTER the profile's own patch, so the app's write would not be the value in effect and the editor refuses it (before writing anything). The shell offers to move such a row into this profile once per boot — value kept verbatim, home layer backed up; other profiles then fall back to their own defaults. Accepting the offer needs no restart: the editor re-reads the patch before every edit | `src/main/home-layer-rows.ts`, `dsh-config-editor/lib/index.js:122` |
 
 ## Reading a stuck boot
 

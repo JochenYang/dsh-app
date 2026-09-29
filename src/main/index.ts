@@ -25,8 +25,9 @@ import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
 import { installCrashLogging } from './crash-log'
 import { appendRotatingLog } from './log-file'
 import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
-import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, type PatchSpecifier } from './brand-suite'
+import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, writePatchAtomically, type PatchSpecifier } from './brand-suite'
 import { SUITE_LAYER_PACKAGE, installSuiteLayer, readShippedOverlay } from './suite-layer'
+import { applyHomeLayerMoves, collectEntryIds, planHomeLayerMoves, readHomeLayerConflicts, readPatchText } from './home-layer-rows'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { activeThemeMode, attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
 import {
@@ -1611,6 +1612,90 @@ async function applyKernelUpdate(option: KernelUpdateOption): Promise<void> {
   }
 }
 
+/**
+ * Offer to move a home-layer row that the app can never write past.
+ *
+ * The kernel composes a profile as `bundle layers → profile patch → HOME layer
+ * ($DSH_HOME/cordis.patch.yml) → command-line overlays`, and when a setting also
+ * lives in the home layer the configuration editor REFUSES the app's write
+ * outright (`Configuration for "…" is overridden by a home patch or command-line
+ * overlay`, `dsh-config-editor/lib/index.js:122`, checked before anything is
+ * written). The composition order belongs to the launcher, which this project does
+ * not fork, so the only remedy is to move that row — with the user's consent,
+ * because the home layer applies to every profile on the machine.
+ *
+ * What "move" keeps, exactly: the row's own lines are appended to this profile's
+ * patch, so the value the user has been seeing stays in effect for THIS profile,
+ * and the app can then take it over (the editor re-reads the patch before every
+ * edit). Other profiles fall back to their own defaults, which is what the dialog
+ * says — and both files are backed up first.
+ *
+ * Runs once per boot, after the app is up. A machine with no such row costs one
+ * file read.
+ *
+ * @param win - the window the dialog belongs to.
+ */
+async function offerHomeLayerMove(win: BrowserWindow | null): Promise<void> {
+  const home = resolveDshHome()
+  const homeLayerPath = path.join(home, 'cordis.patch.yml')
+  const homeLayerText = readPatchText(homeLayerPath)
+  if (homeLayerText.trim() === '') return
+  const profileDir = path.join(home, 'profiles', SUITE_PROFILE)
+  const profilePatchPath = path.join(profileDir, PROFILE_PATCH_FILENAME)
+  const profilePatchText = readPatchText(profilePatchPath)
+
+  // Which ids this profile's composition actually carries: its own patch, our
+  // overlay, and every bundle layer its manifest names. Offering a row this
+  // profile does not mount would only earn a `patch: entry "…" not found` warning
+  // on every later start.
+  const bundleTexts: string[] = []
+  try {
+    const manifest = JSON.parse(readPatchText(path.join(profileDir, 'package.json'))) as { dsh?: { profile?: { bundles?: unknown } } }
+    const modules = path.join(activeRuntimeDir(), 'app', 'node_modules')
+    for (const bundle of Array.isArray(manifest.dsh?.profile?.bundles) ? manifest.dsh.profile.bundles : []) {
+      if (typeof bundle !== 'string') continue
+      bundleTexts.push(readPatchText(path.join(modules, bundle, 'cordis.patch.yml')))
+    }
+  } catch {
+    // A manifest or layer this cannot read only narrows the set — never widen it.
+  }
+  const entryIds = collectEntryIds([profilePatchText, await readShippedOverlay(), ...bundleTexts])
+  const conflicts = readHomeLayerConflicts({ homeLayerText, profileEntryIds: entryIds })
+  if (conflicts.length === 0) return
+  const ids = conflicts.map((conflict) => conflict.id)
+  logKernel(`[home-layer] ${String(ids.length)} row(s) shadow app-writable settings: ${ids.join(', ')} (${homeLayerPath})`)
+
+  const picked = await promptThemedConfirm<'move' | 'later'>(
+    win,
+    {
+      title: t('homeLayer.title'),
+      message: t('homeLayer.message', { ids: ids.join(', '), file: homeLayerPath }),
+      detail: t('homeLayer.detail'),
+      buttons: [{ label: t('common.later'), value: 'later' }, { label: t('homeLayer.move'), value: 'move', primary: true }],
+      cancelValue: 'later',
+      enterValue: 'move',
+    },
+    {
+      type: 'question',
+      title: t('homeLayer.title'),
+      message: t('homeLayer.message', { ids: ids.join(', '), file: homeLayerPath }),
+      detail: t('homeLayer.detail'),
+      buttons: [t('homeLayer.move'), t('common.later')],
+      defaultId: 0,
+      cancelId: 1,
+    },
+    (value, nativeResponse) => (value !== '' ? (value as 'move' | 'later') : nativeResponse === 0 ? 'move' : 'later'),
+  )
+  if (picked !== 'move') return
+
+  const plan = planHomeLayerMoves({ homeLayerText, profilePatchText, ids })
+  if (plan.moved.length === 0) return
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/gu, '')
+  const backups = await applyHomeLayerMoves({ plan, homeLayerPath, profilePatchPath, stamp, write: writePatchAtomically })
+  logKernel(`[home-layer] moved ${plan.moved.join(', ')} into ${profilePatchPath}; backups: ${backups.homeBackup}${backups.profileBackup === undefined ? '' : `, ${backups.profileBackup}`}`)
+  void showToastWhenLoaded(win, t('homeLayer.moved', { ids: plan.moved.join(', ') }), 'success', 5_000)
+}
+
 // ------------------------------------------------------------------ boot
 
 /** Resolved kernel log file for this run (see {@link logKernel}). */
@@ -1849,6 +1934,9 @@ async function boot(): Promise<void> {
   // update-check runs, so an install failure is never silent.
   void consumeUpdaterInstallResult(mainWindow)
   setTimeout(() => checkShellUpdate(false, mainWindow), 10_000)
+  // After the app is up, not during the wait: this one is about a setting the user
+  // will try to change, and a dialog over a booting screen would only be in the way.
+  setTimeout(() => { void offerHomeLayerMove(mainWindow) }, 4_000)
   setInterval(() => {
     if (!quitting && !isDev) void checkKernelUpdate(false)
   }, KERNEL_CHECK_INTERVAL_MS)
