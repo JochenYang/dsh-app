@@ -35,11 +35,13 @@ const SPLASH_PAGE = path.join(__dirname, '..', 'static', 'startup.html')
  * paints and behind it, so it cannot be sampled from the page.
  *
  * One value for both themes, because the page is the opening film now and the
- * film's own navy (`static/startup.html` `--startup-bg`) is what the page paints
- * in either theme — a per-theme pair here is exactly the white flash a
- * light-theme machine showed before the first frame decoded. The native
- * window-control strip is not set here at all: the page's own sampler owns it
- * (see `applyWindowTheme`), and it reads this same navy off the page.
+ * film's own navy (`static/startup.html` `--startup-bg`, painted on the ROOT
+ * element) is what the page falls back to in either theme — a per-theme pair here
+ * is exactly the white flash a light-theme machine showed before the first frame
+ * decoded. The native window-control strip is not set here at all: the page's own
+ * sampler owns it (see `applyWindowTheme`), and while the splash is up it resolves
+ * a TRANSPARENT strip — the page paints nothing under those controls, so the film
+ * shows through them instead of an opaque bar.
  */
 const SPLASH_BG = '#0d1424'
 

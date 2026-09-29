@@ -109,10 +109,23 @@ window.__dshStartupShowFailure = function (config) {
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; }
+  /*
+    The backdrop lives on the ROOT element and `body` stays transparent, on
+    purpose. The shell paints the native window-control strip with the colour it
+    samples from the page: it walks up from the element under those controls to
+    the first non-transparent background and applies THAT (window.ts, SAMPLE_FN).
+    With the film behind everything the honest answer there is "nothing painted",
+    so the walk has to fall through to `body`'s own transparent value — the strip
+    is then applied with alpha 0 and the film shows through the buttons. Painting
+    the navy on `body` is what made that strip an opaque near-black bar over the
+    film; measured on Windows, `#00000000` is see-through and `#0d1424` is not
+    (scratch/probe-overlay-alpha.mjs).
+  */
+  html { background: var(--startup-bg); }
   body {
     position: relative;
     overflow: hidden;
-    background: var(--startup-bg);
+    background: transparent;
     color: var(--dock-fg);
     font: 13px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
     -webkit-user-select: none;
@@ -125,7 +138,16 @@ window.__dshStartupShowFailure = function (config) {
     inset: 0;
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    /*
+      `contain`, not `cover`: the film is 16:9 (2048x1152) and this window is
+      resizable from 900x600 to full screen, so `cover` filled it by CROPPING —
+      measured 142px of width at the 1280x800 default (71px off each side, which
+      is the wordmark tile's left edge and the first thing a user noticed),
+      167px at the 900x600 minimum and 178px at 1600x1000. Fitting instead of
+      filling leaves bands, and the bands are the film's own navy
+      (`--startup-bg`), so they read as part of it rather than as letterboxing.
+    */
+    object-fit: contain;
     background: var(--startup-bg);
     /* Decorative and never in the way: no controls, no pointer events (a film
        that swallows a click is how the pause button stops working). */

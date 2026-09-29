@@ -21,19 +21,37 @@ const WINDOW_CONTROLS_WIDTH = 140
 /** Last overlay color applied per window, so identical samples are no-ops. */
 const appliedChromeColors = new WeakMap<BrowserWindow, string>()
 
-/** Parse 'rgb(r, g, b)' / 'rgba(...)' into [r, g, b]; null when unparseable. */
-function parseRgb(color: string): [number, number, number] | null {
-  const m = color.match(/\d+/g)
+/**
+ * Parse 'rgb(r, g, b)' / 'rgba(r, g, b, a)' into components; null when
+ * unparseable. The alpha is part of the value on purpose — see {@link rgbToHex}.
+ */
+function parseRgb(color: string): [number, number, number, number] | null {
+  const m = color.match(/-?[\d.]+/g)
   if (!m || m.length < 3) return null
   const [r, g, b] = m.slice(0, 3).map(Number)
-  return [r, g, b]
+  const a = m.length > 3 ? Number(m[3]) : 1
+  return [r, g, b, Number.isFinite(a) ? Math.min(1, Math.max(0, a)) : 1]
 }
 
-/** '#rrggbb' from 'rgb(r, g, b)' / 'rgba(...)' strings. */
+/**
+ * '#rrggbb' — or '#rrggbbaa' when the sampled colour is not opaque — from a
+ * `rgb()` / `rgba()` string.
+ *
+ * The alpha branch exists because of the splash: its opening film IS the window
+ * background, so the page paints no colour under the window controls and the
+ * sampler resolves a transparent strip. Dropping alpha here turned that case into
+ * a solid black bar over the film (what a user reported). Measured on Windows /
+ * Electron 44 (`scratch/probe-overlay-alpha.mjs`): `#0d142400` lets the page show
+ * through the control area, `#0d1424` does not. An opaque sample still emits the
+ * six-digit form, byte for byte, so nothing about the app's own pages changes.
+ */
 function rgbToHex(rgb: string): string {
   const parsed = parseRgb(rgb)
   if (!parsed) return '#ffffff'
-  return `#${parsed.map((n) => Math.round(n).toString(16).padStart(2, '0')).join('')}`
+  const [r, g, b, a] = parsed
+  const hex = [r, g, b].map((n) => Math.round(n).toString(16).padStart(2, '0')).join('')
+  if (a >= 1) return `#${hex}`
+  return `#${hex}${Math.round(a * 255).toString(16).padStart(2, '0')}`
 }
 
 /** Choose a readable window-button color for a given background. */
