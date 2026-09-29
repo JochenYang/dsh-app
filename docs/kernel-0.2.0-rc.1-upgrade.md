@@ -343,9 +343,29 @@ product-analytics (@deepseek-ai/dsh-client-product-analytics):
   所以 `auditStartupEntries` 不抛错，host 正常 ready；
 - **我们的 16 个套件插件一个都没报错**（日志里搜 `plugin-*` 为空）。
 
-处置：**本轮不改**（这是上游新增的可选遥测行，对我们无功能影响，且界面能正常起来）。
-若将来要消除这条告警，最直接的做法是给子进程注入 `DSH_CLIENT_VERSION`（用我们的 shell 版本），
-但那属于产品决策，记入 §5 待办。
+**2026-09-29 更正（当天漏掉的一半，也是这两行「为什么会加载」的答案）** `[实测]`：那句
+`disabled` 判据在我们这儿**是假**，所以这两行不是「被禁用的可选行」，而是**真的在加载**：
+
+```
+dsh-desktop-host/lib/index.js:225   const application = runProfile({ profile: "desktop", resolvedProfile: { profile, installAnchor }, … })
+```
+
+桌面宿主在解析**我们自己的** profile 目录（`loadProfileDirectory(...)`，名字来自目录名 `dsh-app`）
+之后，仍按**上游自己的 profile 名** `desktop` 去 `runProfile`，于是组合出的
+`ctx.get('profileContext').name === 'desktop'` → 上游的
+`name !== 'desktop'` 判据为假 → 两行进入加载 → `serviceVersion` 取不到 → 校验失败。
+同一件事也解释了另一处历史判断：`plugins/dsh-app.patch.yml` 里 `deepseek-account` 那行的注释
+原先写「上游只在 profile 名为 `desktop` 时设 `desktopPlatform`，而本壳启的是 `dsh-app`」——
+在这条线上那句是错的（宿主报的就是 `desktop`），基线 bundle 自己的受守护行本来就会生效；
+我们的行留着只对「按目录名解析 profile 名」的宿主有用（`:949`），注释已按实测改正。
+
+处置（2026-09-29）：**在套件层显式关掉这两行**（`plugins/dsh-app.patch.yml`，两条
+`- id: … / disabled: true`）。为什么不改用「注入 `DSH_CLIENT_VERSION` 让它校验通过」：
+那会让导出器**真的跑起来**，把本客户端的使用事件按官方应用的服务名
+（`serviceName: deepseek-harness-desktop`）发到 `https://dsh-otel-collector.deepseeksvc.com/v1/logs`；
+且在**安全模式**下套件层按设计写空，这两行会真的上报——那是没人同意过的默认行为。
+代价：用户若在插件页手动启用它们，依旧会因缺 `DSH_CLIENT_VERSION` 校验失败（这是安全方向）。
+新增 `test/overlay-telemetry.test.mjs` 锁住「两行必须是字面量 `disabled: true`」。
 
 ### 阶段 3（续）— 收尾当天补的两项与 M2 `[实测]`
 
@@ -438,6 +458,7 @@ npm run check:plugins -- --kernel <新产物> --home …   → 通过 — 内核
 | 安全模式下的残留行 | **已修**：`stripSuiteRows` 加 `isSpentFlipRow`（三条件：id 由当前 overlay 以 insert 声明、无 `config`、`disabled` 缺失或恰为 `false`），把老外壳写的「启用」残留摘掉；带 config 的行与 `disabled: true` 的用户决定一律保留 | 真实 profile 副本：`removed: ["ui-schedule"]`、patch 1337 → 1335 行且 diff 只有那两行、`.pre-suite-layer-*` 备份保留、组合树不变；副本切安全模式（`overlay: ''`）后 dump 的 stderr **为空**。新增 5 个单测（含「带 config 的行不摘」「`disabled: true` 不摘」「只被 override 的 id 不摘」） |
 | 上游「安装并重启」的一键升级 | **已适配，且更细**：内核卡片正文已写「更新将下载新运行时并重启服务」（`locale.ts:168`），手动弹窗写「服务将会重启」（`:152`）；外壳通道有上游同形的「更新就绪 / 更新已下载完成，将在退出时安装 / 立即重启」（`:184-187`、`:210-211`）。区别只是上游整包升级所以重启整壳，我们只重启 host（见 §3） | `src/main/window.ts:626-654`（内核卡片）、`src/main/updater.ts:179-202`（ready → `quitAndInstall`）、`:851-855`（Windows 安装器 + 重启说明）；内核侧 `manager.ts:512` 校验在激活前、`:799` 写 `current.json`、`index.ts:1603` 安装后立刻重启 host |
 | 账号模型免配 Key 就能网页搜索（0.2.0 变更项） | **已适配**，机制不同：上游这条走 `deepseek-official` provider（账号登录或 `DEEPSEEK_API_KEY`，**每次搜索是一次完整模型回合**的延迟与 token，因为 DeepSeek 没有独立搜索端点）；我们默认的 `dsh-app` 链**本来就免 Key**——五个引擎全在 free 层（Bing 抓公开结果页、AnySearch 匿名 API、SearXNG 自建、Parallel/Exa），无 key 的引擎在规范化时被丢弃（`wire.ts:409,425`）。官方 provider 仍挂载注册（`web-search-deepseek` 在组合树里），设置页可两者切换（`ws.provider.official`） | `npm run verify -- --tgz <0.2.0 产物>` 里的真实搜索项在**全新 home（无任何 key）**下通过：`websearch: search through ctx.web resolves to the brand provider` + `returns sources`（`scratch/verify.log:46-47`）；官方 provider 行在 `dump-realcpy2.yml:1392` |
+| 上游两条产品遥测行显示「启动失败」（用户 2026-09-29 报） | **已修**：宿主报 `profile: "desktop"`（`dsh-desktop-host/lib/index.js:225`）→ 上游那句 `name !== 'desktop'` 判据为假 → 两行真的加载并因缺 `DSH_CLIENT_VERSION` 校验失败；套件层现在显式 `disabled: true` 关掉它们（不用「注入版本号让它通过」：那会让导出器真的往 DeepSeek 采集端点上报，安全模式下更会实跑） | 真实 profile 副本 `--dump-config`：两行都是 `disabled: true`、stderr 为空；真机启动（隔离 home）**零条 `did not activate`**（修前为 `2 entries did not activate`）且 host ready；新增 `test/overlay-telemetry.test.mjs` 锁住字面量 `disabled: true`（负向对照：对旧 overlay 跑同一判据会红） |
 
 **界面探针自身修掉一条形状假设**（tooling，不是内核线回归）：它把「面板已渲染」判为
 `panel.querySelector('section') !== null`，而 presets 页的根是 `<div class="dshPresets-section">`

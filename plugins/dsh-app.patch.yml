@@ -201,12 +201,18 @@
     searchProvider: dsh-app
     fetchProvider: http
 
-# The account provider's identity header. The upstream row sets
-# `desktopPlatform` only when the booted profile is NAMED `desktop`
-# (`packages/bundle/base/cordis.patch.yml`), which is the official app's profile;
-# this shell boots `dsh-app`, so without this row the platform would see an
-# unidentified client even though the window IS a desktop one (`x-client-platform`
-# stays unset — `deepseek-account-platform/src/index.ts` builds it from this flag).
+# The account provider's identity header. The base bundle's own row sets
+# `desktopPlatform` behind `ctx.get('profileContext')?.name === 'desktop'`
+# (`packages/bundle/base/cordis.patch.yml:115`), and on this line that guard is
+# TRUE: the desktop host launches the Web application with `profile: "desktop"`
+# (`dsh-desktop-host/lib/index.js:225`) while resolving OUR profile directory, so
+# the composed name is `desktop` and not the directory's `dsh-app`.
+#
+# The row is kept anyway, unguarded: a host that resolves the profile name from
+# the directory (`basename(dir)`, `dsh-app-boot/lib/index.js:949`) would otherwise
+# leave `x-client-platform` unset and the platform would see an unidentified
+# client even though the window IS a desktop one
+# (`deepseek-account-platform/src/index.ts` builds that header from this flag).
 #
 # Patch semantics replace the WHOLE config object, so the field set here is the
 # row's entire configuration. `null` on a platform the provider does not name is
@@ -215,6 +221,34 @@
 - id: deepseek-account
   config:
     desktopPlatform: !!js "['darwin', 'win32'].includes(process.platform) ? process.platform : null"
+
+# Upstream's product-telemetry pair, switched OFF here on purpose.
+#
+# Both rows are browser/desktop-only upstream (`disabled: !!js "ctx.get(
+# 'profileContext')?.name !== 'desktop'"`) and export product usage events to
+# DeepSeek's own collector (`dsh-host-product-telemetry-otel`, default endpoint
+# `https://dsh-otel-collector.deepseeksvc.com/v1/logs`). That guard does NOT
+# protect us: the desktop host reports `profile: "desktop"` (see above), so both
+# rows load here — and the exporter then failed its config validation
+# (`$.serviceVersion missing required value`, its `serviceVersion` reads
+# `process.env.DSH_CLIENT_VERSION`, which only the official app sets). Measured
+# 2026-09-29: the Plugins page showed `desktop-product-telemetry` as 启动失败 and
+# every start logged `2 entries did not activate`.
+#
+# Disabling beats satisfying that config: publishing `DSH_CLIENT_VERSION` (the
+# shell's own version is the honest value) would have made the row VALIDATE and
+# then EXPORT — reporting this third-party client's usage to DeepSeek's collector
+# as `deepseek-harness-desktop`, which is not a default anyone consented to. It
+# would also open a hole in SAFE MODE, where the suite layer is written empty by
+# design and these two rows would then run for real. So the shell publishes only
+# `DSH_APP_SHELL_VERSION`, and a deliberate enable from the Plugins page still
+# fails this validation — which is the safe direction, and the reason these rows
+# are disabled here instead of being made valid.
+- id: desktop-product-telemetry
+  disabled: true
+
+- id: product-analytics
+  disabled: true
 
 # Session full-text search: override the base/web-app row's openAt from
 # 'never' to 'first-search' (the sqlite handle is created lazily on the
