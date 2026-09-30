@@ -157,26 +157,41 @@
 
   DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY}"
   DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY}"
-  DeleteRegKey HKCU "${INSTALL_REGISTRY_KEY}"
-  DeleteRegKey HKLM "${INSTALL_REGISTRY_KEY}"
+  ; InstallLocation is deliberately LEFT in place — see dshPreclearPreviousInstall.
 !macroend
 
-; B. Installer side: take the registry entries away before the stock code reads
-; them, so it never finds a previous install to run an uninstaller for.
+; B. Installer side: take the UNINSTALL STRING away before the stock code reads
+; it, so it never finds a previous install to run an uninstaller for.
 ;
-; Why this works where removing files did not: `uninstallOldVersion` resolves
-; the target from `${INSTALL_REGISTRY_KEY}` InstallLocation and returns
-; immediately when the uninstall string is absent (installUtil.nsh:155-164).
-; No entry, no uninstaller, no retry loop, no dialog — and the installer writes
-; fresh entries at the end of a successful install, so nothing is left missing.
+; Why this works where removing files did not: `uninstallOldVersion` reads
+; `${UNINSTALL_REGISTRY_KEY}` UninstallString and returns immediately when it is
+; absent (installUtil.nsh:155-164). No uninstall string, no uninstaller, no
+; retry loop, no dialog — and the installer writes fresh entries at the end of a
+; successful install, so nothing is left missing.
+;
+; WHY InstallLocation SURVIVES — this is the fix for a real regression:
+; `setInstallModePerUser`/`setInstallModePerAllUsers` resolve the install
+; directory from `${INSTALL_REGISTRY_KEY}` InstallLocation, and fall back to
+; `$LocalAppData\Programs\<app>` when it is empty (multiUser.nsh:26-47). That
+; read happens when the directory page runs its pre-function, which is AFTER
+; this hook. Deleting the whole `${INSTALL_REGISTRY_KEY}` therefore erased the
+; user's chosen path before it was read, and an in-app update silently
+; reinstalled into the default location — reported as "the update installed to
+; C: instead of where I had it". Measured: the key is read twice, once here for
+; the old install's location and once by the mode selection for the new one, and
+; only the SECOND read feeds $INSTDIR.
+;
+; The two keys are therefore treated differently on purpose:
+;   - UninstallString (both hives)      -> removed, so no old uninstaller runs;
+;   - InstallLocation (both hives)      -> kept, so the path is remembered.
+; The old tree itself is removed by path, which is what InstallLocation gave us.
 ;
 ; Called from `customInit` (.onInit), which matters for the elevated path: a
 ; per-machine install elevates through UAC and the INNER instance runs
 ; `.onInit` again (initMultiUser → setInstallModePerAllUsers → UAC_RunElevated),
 ; while the install section's running-process check is skipped for that inner
 ; instance. `.onInit` is therefore the one place both the normal and the
-; elevated instance pass through, and `$INSTDIR` is already resolved by
-; initMultiUser when customInit runs.
+; elevated instance pass through.
 ;
 ; The per-machine entry is read from HKLM first: an elevated instance sees the
 ; machine hive, and a per-user instance must still find an HKLM install it is
@@ -188,12 +203,16 @@
       ReadRegStr $R2 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
     ${endif}
     ${if} $R2 != ""
-      DetailPrint "removing the previous install at $R2 (registry first, so its uninstaller is never run)"
+      DetailPrint "removing the previous install at $R2 (uninstall string first, so its uninstaller is never run)"
       DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY}"
       DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY}"
-      DeleteRegKey HKCU "${INSTALL_REGISTRY_KEY}"
-      DeleteRegKey HKLM "${INSTALL_REGISTRY_KEY}"
       RMDir /r $R2
+    ${else}
+      ; No recorded path (a first install, or a tree whose key is already gone):
+      ; still drop any uninstall string, so a stale entry cannot summon an
+      ; uninstaller for a directory this installer is not touching.
+      DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY}"
+      DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY}"
     ${endif}
   !endif
 !macroend
