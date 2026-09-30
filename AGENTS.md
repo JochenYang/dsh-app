@@ -246,13 +246,16 @@ Plugin builds and tests: `plugins/AGENTS.md`.
   `docs/agents/build-and-release.md`.
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing
   secrets must be supplied as CI secrets; `resources/icon.png` is a placeholder.
-- **The `0.1.7-alpha.1` host line is not shipped-ready** — a LOCALLY built runtime
-  of it has been smoked end to end in this tree (`npm run verify -- --tgz` all
-  green against `runtime-dist/dsh-runtime-win32-x64-0.1.7-alpha.1.tgz`, plus a real
-  app start on `DSH_APP_DEV_KERNEL`), but no RELEASED artifact of that line has
-  been cut or verified, and the delivery model that would retire the `kernel/`
-  tree, activation file and profile mirror is still planned in
+- **The `0.1.7-alpha.1` host line is history** — that line's runtime was superseded
+  twice over (`runtime-0.1.7-rc.2` and `runtime-0.2.0-rc.1` are both published
+  prereleases; the shell now follows `0.2.0-rc.2`), so nothing about it is
+  pending. What remains from it is the delivery model that would retire the
+  `kernel/` tree, activation file and profile mirror — still planned in
   `docs/capability-roadmap/kernel-package-set.md`.
+- **The app update path asks the host before it kills it** — `DshHost.inspectQuit`
+  / `askHostTasks` use the child's own `quit-inspection` and `update-tasks`
+  control, and every failure reads as "work is in flight" (see
+  `src/main/updater.ts` `confirmNoActiveTasks`).
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version
   upgrades.
 

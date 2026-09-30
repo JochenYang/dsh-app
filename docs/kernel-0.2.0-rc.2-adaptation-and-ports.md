@@ -213,10 +213,25 @@ frame 的 `padding-top`、折叠侧栏轨道移除、16px 圆角、`::before` �
 `electron.exe`）后单独重跑这 4 个文件 59 pass，再跑整套 485 全绿 —— **不是 rc.2 回归**，换线后
 要么先手动补 `dist/`，要么不要并发起跑。
 
-### 6.5 未做
+### 6.5 M2 / M4 / M5 回归
 
-- `bundled-kernel/` 仍是本地旧产物（dev 日志里的 `bundled 0.2.0-rc.1` 来自它）：它是打包期由
-  `prepare-bundled-kernel.mjs` 从 `runtime-dist/` 里**最高 semver** 的 tgz 生成的（现在已是 rc.2），
-  不需要提交，也没有仓库内改动。
+M1 已在 §6.3 验过；升线后补跑另外三条（rc.1 那轮同样跑过这三条）。
+
+| 编号 | 结果 | 证据 |
+|---|---|---|
+| M2 | 通过 | `scratch/probe-m2-settings.mjs`（按内核 `dsh-config-editor` 的写法写设置，再从**组合树**读回）：`profile patch: 1 row(s) for ui-theme; last = {"preference":"dark"}`、`composed tree: 1 row(s); last = {"preference":"dark"}`、`compose warnings: (none)`，结论行 `设置写后存活? 是  组合后生效? 是`。另做一次真实二次启动（同一 home）：patch 文件字节前后一致，`host ready (web transport)` 正常 |
+| M4 | 通过 | `plugin-market` 套件 210 pass / 0 fail。两条语义都有断言级覆盖：`enabling removes only OUR row, not the settings row sharing its id`（`tests/toggle.test.ts:167`，另加 `:182` 覆盖块内首/中/尾/双设置行四种位置、`:190` 覆盖夹在中间的注释）、`disabling still writes when the block already holds a settings row for that id`（`:175`，注释记录了旧缺陷「the toggle silently did nothing while the panel reported success」）；文件级往返与幂等在 `:213`、`:222` |
+| M5 | 通过 | 新 tgz 三处关键物齐全：`runtime/runtime/office-skills/scripts/check_office.py`、`runtime/app/node_modules/@deepseek-ai/dsh/package.json`、`runtime/app/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js`（注意 office-skills 在**内核树内**、tgz 顶层之下，即双层 `runtime/runtime/`，对应 `build-runtime.mjs` 的 `OFFICE_SKILLS_DIR = 'runtime/office-skills'`）；payload 产物 `office-payload-win32-x64-0.2.0-rc.2.tgz` 存在，其 json 的 `dshVersion` = `0.2.0-rc.2`；真机 argv 把 `…\dsh-app-office\primary-runtime` 交给宿主且 `web transport ready` —— 0.1.6+ 宿主缺 `check_office.py` 会直接拒启，ready 即契约成立 |
+
+**M2 探针在 rc.2 上需要一处修正**（只改 `scratch/`，不进仓库）：它无条件 `readFileSync` profile
+patch，而 rc.2 上全新 profile **没有** `cordis.patch.yml` —— 外壳在 web 线已停止写该文件
+（`src/main/brand-suite.ts` 注释明说 "the profile patch belongs to the kernel, so nothing is
+written into it here"），内核的配置编辑器把 ENOENT 当空序列
+（`dsh-config-editor`：`if (error.code !== 'ENOENT') throw error; before = '[]\n'`）。探针照抄了这个
+处理，不是掩盖问题：不修的话它在「写设置」之前就崩，而内核在这种 profile 上本来就能正常写。
+
+### 6.6 未做
+
+- `bundled-kernel/` 是打包期产物、不入库；它已随 `prepare-bundled-kernel.mjs` 更新到 rc.2。
 - §3 的移植候选（P0 标题栏标记、P2 归档页「未命名」、深色开关 token 覆盖、更新文案）本轮未实施，
   它们与升线解耦，各自单独提交。
