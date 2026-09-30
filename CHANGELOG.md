@@ -8,6 +8,26 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.14.5] - 2026-09-30
+
+### 中文
+- 家层里带 config 的设置行不再让应用永远改不动：内核组装顺序是「bundle 层 → profile 补丁 → 家层（`$DSH_HOME/cordis.patch.yml`）→ 命令行 overlay」，家层排在后面就会把应用写进 profile 补丁的值压住，配置编辑器因此在写入前直接拒绝（`overridden by a home patch`）。现在启动就绪后检测这类行，经你确认把它移入本 profile——值按原字节保留，两个文件都先备份，其它 profile 回落到各自默认值；无需重启即可在设置里修改。
+- 跟随内核线到 0.2.0-rc.2：根 23 个 `@deepseek-ai/dsh-*` spec 与 16 个插件的 peer/dev 一起升到 `^0.2.0-rc.2`，并按换线规程清空根与全部插件的 `node_modules`/lockfile 重装（保留旧 lockfile 会 ERESOLVE 失败）；运行时按新线重建，全部门禁与真机检查重跑。
+- 内核运行时构建会在开始前清掉本机 `runtime-dist/` 里**同一目标平台**的旧版本产物（旧 runtime 与旧 office payload 及其 sha512 附属文件），只保留本次要构建的版本。此前每次换线都会留下约 400 MB 再也读不回来的文件（三个线累积到 1.9 GB）。
+- 启动页的留白带不再是黑条：片子保持**完整放下**（不裁切），同一条片子在背后铺一层放大模糊的底衬把窗口填满，并重调两层遮罩——顶部 36px 保持足够深度让原生窗口按钮的浅色符号可读，中段随即淡出，底部只压 dock 文字那一段。实测：顶部留白带走片上颜色（左暗墙到右亮窗，采样跨度 70），控件条亮度 30/53 仍可读。
+- 标题栏配色在所有状态下都与页面主题一致：启动即是正确颜色（不再等主题变化才纠正）、打开自己的对话框或插件市场时同样跟随，深色下不再出现右上角发黑的一块。此前启动时采样早于主题写入、标题栏底带被内容层盖住、对话框遮罩写死黑色且铺满视口，三者叠加成了这几个现象。
+- 打开「添加插件」这类对话框时，右上角窗口按钮所在的标题栏不再被遮罩压成深色，颜色继续跟随页面主题（浅色页面白色标题栏、深色页面深色标题栏）。原因是内核的模态遮罩靠 `--dsh-frame-chrome-top` 避开标题栏，而外壳从未发布该变量，遮罩因此盖住了标题栏。
+- 应用更新在替换进程前先问内核有没有任务在跑：宿主自己的 `quit-inspection` / `update-tasks` 回答（正在生成、跑工具、子智能体、排队消息、后台作业都算），有任务时先警告再让用户决定；宿主答不上来一律按「有任务」处理。此前是直接启动安装向导并退出，会把正在进行的对话静默切断。
+
+### English
+- A home-layer row that carries a config no longer blocks the app for ever: the kernel composes `bundle layers → profile patch → home layer ($DSH_HOME/cordis.patch.yml) → command-line overlays`, so a row in the home layer shadows what the app writes into the profile patch and the configuration editor refuses the write before touching anything (`overridden by a home patch`). The shell now detects those rows once the app is up and, with your confirmation, moves them into this profile — the value is kept byte for byte, both files are backed up first, other profiles fall back to their own defaults, and the setting becomes editable without a restart.
+- The kernel line is followed to 0.2.0-rc.2: the root's 23 `@deepseek-ai/dsh-*` specs and the 16 plugins' peer/dev ranges move to `^0.2.0-rc.2` together, with the documented clean reinstall (keeping the old lockfile ERESOLVEs), and the runtime is rebuilt on the new line with every gate and the real-machine checks re-run.
+- The kernel runtime build now retires this machine's `runtime-dist/` artifacts of OTHER versions for the same target cell before it starts (the old runtime, the old office payload and their sha512 sidecars), keeping only the version being built. Each kernel-line bump used to leave ~400 MB nothing could ever read back again (1.9 GB after three lines).
+- The splash's letterbox bands are no longer black bars: the film still fits WHOLE (never cropped), the same clip runs blurred and filling behind it, and the two scrims are retuned — depth kept over the 36px control strip so its light symbols stay readable, a fade immediately under it, and a floor only where the dock's text sits. Measured: the top band carries the film's own colours (dark wall to bright window, a 70-level spread across the samples), and the strip stays at luma 30/53.
+- The title bar matches the page theme in every state: it is correct from the first paint instead of only after a theme change, it follows when a dialog or the plugin market is open, and the dark block at its right end is gone. Three causes stacked up: sampling ran before the theme was written, the band was painted over by the content column, and the dialog scrim was a hardcoded black spanning the whole viewport.
+- Opening a dialog such as "add plugin" no longer darkens the title bar that holds the window buttons: the strip keeps following the page theme (white on a light page, dark on a dark one). The kernel's modal mask reserves the caption through `--dsh-frame-chrome-top`, which the shell never published, so the scrim painted over the title bar.
+- The app update now asks the kernel whether work is in flight before it replaces the process: the host's own `quit-inspection` / `update-tasks` answers it (generating, running a tool, subagents, queued messages and background jobs all count), the user is warned and decides when there is work, and an unanswerable host always reads as "work in flight". It used to spawn the installer and quit outright, cutting a running conversation in half.
+
 ## [v0.14.4] - 2026-09-29
 
 ### 中文
