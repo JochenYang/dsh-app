@@ -19,6 +19,7 @@ const { spawn, spawnSync } = require('node:child_process')
 const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 const { app, BrowserWindow, session } = require('electron')
 
@@ -134,8 +135,16 @@ async function main() {
   // Boot the kernel from the BUILT runtime artifact (the same bytes a user's
   // kernel update installs), not from a source checkout — the artifact is what
   // ships, and it carries the suite plugins itself. Extract to a temp work dir.
+  //
+  // The version is DISCOVERED, never spelled here: this probe used to name one
+  // line's tarball (`…-0.1.7-rc.2.tgz`), so after the next bump it failed with
+  // "no runtime artifact" while a perfectly good build sat beside it.
   const cell = `${process.platform}-${process.arch}`
-  const tgz = path.join(root, 'runtime-dist', `dsh-runtime-${cell}-0.1.7-rc.2.tgz`)
+  const distDir = path.join(root, 'runtime-dist')
+  const { newestRuntimeTarball } = await import(pathToFileURL(path.join(root, 'scripts', 'lib', 'runtime-artifacts.mjs')).href)
+  const tgzName = newestRuntimeTarball(readdirSync(distDir, { throwIfNoEntry: false }) ?? [], process.platform, process.arch)
+  if (tgzName === null) throw new Error(`no runtime artifact for ${cell} in ${distDir} (build one: npm run runtime:build)`)
+  const tgz = path.join(distDir, tgzName)
   if (!existsSync(tgz)) throw new Error(`no runtime artifact for ${cell}: ${tgz} (build one: npm run runtime:build)`)
   const work = mkdtempSync(path.join(os.tmpdir(), 'dsh-chrome-probe-runtime-'))
   spawnSync('tar', ['--force-local', '-xzf', tgz, '-C', work], { stdio: 'inherit' })

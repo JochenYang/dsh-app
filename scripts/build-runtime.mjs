@@ -89,6 +89,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { c as createTar, t as listTar, x as extractTar } from 'tar'
 import { collectTreeEntries } from './lib/tree-entry.mjs'
+import { newestRuntimeTarball, staleCellArtifacts } from './lib/runtime-artifacts.mjs'
 import {
   createOfficePayloadManifest,
   kitEnginePackage,
@@ -1818,12 +1819,53 @@ async function directorySize(dir) {
   return total
 }
 
+/**
+ * Delete this cell's artifacts of versions other than the one being built.
+ *
+ * See the call site in {@link main} for why this exists. Kept a thin I/O shell
+ * around {@link staleCellArtifacts}: the selection is pure and tested, and this
+ * only lists, unlinks and logs. A failure to remove one file is reported and
+ * skipped — the build it is part of must not fail over housekeeping.
+ */
+async function retireStaleArtifacts() {
+  const dir = path.join(root, 'runtime-dist')
+  const names = await readdir(dir).catch(() => [])
+  const stale = staleCellArtifacts(names, { platform, arch, keepVersion: DSH_VERSION })
+  if (stale.length === 0) return
+  let bytes = 0
+  const removed = []
+  for (const name of stale) {
+    const file = path.join(dir, name)
+    try {
+      bytes += statSync(file, { throwIfNoEntry: false })?.size ?? 0
+      await rm(file, { force: true })
+      removed.push(name)
+    } catch (err) {
+      console.warn(`[build-runtime] could not retire ${name}: ${err.message}`)
+    }
+  }
+  if (removed.length > 0) {
+    console.log(`[build-runtime] retired ${removed.length} artifact(s) of other versions: ${removed.join(', ')} (${formatBytes(bytes)} freed)`)
+  }
+}
+
 async function main() {
   const work = path.join(root, 'runtime-dist', 'work')
   const runtimeDir = path.join(work, 'runtime')
   await rm(work, { recursive: true, force: true })
   await mkdir(path.join(runtimeDir, 'node'), { recursive: true })
   await mkdir(path.join(runtimeDir, 'app'), { recursive: true })
+
+  // 0. Retire this cell's artifacts of every OTHER version. A kernel-line bump
+  //    leaves a ~100 MB runtime and a ~70 MB payload that nothing can ever read
+  //    back (the shell resolves a kernel through release metadata, and
+  //    prepare-bundled-kernel takes the highest version present), so without
+  //    this the directory grows by a line's worth of bytes per bump — 1.9 GB
+  //    after three. Narrow on purpose: only `<prefix><cell>-<version>.tgz`
+  //    names of THIS cell, deleted as files (never recursively), and never the
+  //    version being built. Failure is not fatal — a stale artifact costs disk,
+  //    and refusing to build over one would be worse.
+  await retireStaleArtifacts()
 
   // 1. Node.js binary for the TARGET platform/arch (not the runner's own node).
   //    Copying process.execPath produced wrong-arch binaries when the runner
