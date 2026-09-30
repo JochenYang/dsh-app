@@ -52,6 +52,11 @@ const FALLBACKS = {
    */
   primaryFill: '#1f2328',
   primaryInk: '#ffffff',
+  /**
+   * The scrim, matching the theme's own mask (`--dsw-alias-bg-mask-1`). A
+   * hardcoded black was wrong in the light theme, where this app never paints one.
+   */
+  mask: 'rgba(0, 0, 0, 0.24)',
 }
 
 /** Build the one-shot in-page script for a config. */
@@ -90,6 +95,12 @@ export const inFrameDialogScript = (config: InFrameDialogConfig): string => `(fu
   var primaryFill = token('--dsw-alias-button-primary-fill', ${JSON.stringify(FALLBACKS.primaryFill)});
   var primaryInk = token('--dsw-alias-label-primary-foreground', ${JSON.stringify(FALLBACKS.primaryInk)});
 
+  // The scrim is the theme's OWN mask token, never a hardcoded black: ours used
+  // rgba(0,0,0,.35) for both themes, so in a light theme the mask was a dark wash
+  // the app never paints — and it sat over the caption strip too (see below).
+  var maskFill = token('--dsw-alias-bg-mask-1', ${JSON.stringify(FALLBACKS.mask)});
+  var chromeTop = token('--dsh-frame-chrome-top', '0px');
+
   function style(el, css) { el.style.cssText = css; }
   function button(spec) {
     var btn = document.createElement('button');
@@ -115,12 +126,22 @@ export const inFrameDialogScript = (config: InFrameDialogConfig): string => `(fu
   var oldMask = document.getElementById(ROOT_ID);
   if (oldMask && oldMask.parentNode) oldMask.parentNode.removeChild(oldMask);
 
+  // Two things matter on the mask, and both were wrong:
+  //   * its FILL is the theme's own mask token, not a hardcoded black — a black
+  //     wash is not what this app paints in a light theme;
+  //   * its TOP starts below the caption (the --dsh-frame-chrome-top variable that
+  //     the shell publishes in installFrameMetrics), exactly as the kernel's own
+  //     Modal does with inset top. With inset:0 the scrim covered the native
+  //     window buttons, so the strip went dark over a light page whenever this
+  //     dialog was up — the reported close-popup colour.
+  // The dark wash a user saw was that hardcoded black at 35% over the caption.
   var mask = document.createElement('div');
   mask.id = ROOT_ID;
   mask.setAttribute('role', 'presentation');
   style(mask,
-    'position:fixed;inset:0;z-index:2147483646;display:flex;align-items:center;' +
-    'justify-content:center;background:rgba(0,0,0,.35);' +
+    'position:fixed;left:0;right:0;bottom:0;top:' + chromeTop + ';z-index:2147483646;' +
+    'display:flex;align-items:center;' +
+    'justify-content:center;background:' + maskFill + ';' +
     'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;');
   // Click on the mask itself = cancel (the card stops propagation).
   mask.addEventListener('click', function (event) {

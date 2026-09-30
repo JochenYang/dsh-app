@@ -19,17 +19,9 @@ body [class*="_titleRow"] button,
 body [class*="_titleRow"] a,
 body [class*="_titleRow"] input,
 body [class*="_titleRow"] [role="button"] { -webkit-app-region: no-drag; }
-body [class*="_titleRow"] { position: relative; }
-body [class*="_titleRow"]::after {
-  content: "";
-  position: absolute;
-  top: 0; right: 0;
-  width: ${WINDOW_CONTROLS_WIDTH}px;
-  height: 100%;
-  -webkit-app-region: no-drag;
+html[data-windows-titlebar] [class*="_frame"]::before {
+  z-index: 20;
 }
-body [data-details-collapsed] [class*="_headerUtilities"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
-body [class*="_titleRow"]:has([data-conversation-header-corner]) [data-conversation-header-corner] { margin-right: ${WINDOW_CONTROLS_WIDTH}px; }
 body [class*="_centerCol"] { position: relative; }
 body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
   content: "";
@@ -38,14 +30,6 @@ body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
   height: ${OVERLAY_HEIGHT}px;
   -webkit-app-region: drag;
   z-index: 5;
-}
-body [data-shortcut-modal="settings"]::before {
-  content: "";
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 20px;
-  -webkit-app-region: drag;
-  z-index: 0;
 }
 body [data-shortcut-modal="settings"] [class*="_header"] { -webkit-app-region: drag; }
 body [data-shortcut-modal="settings"] button[class*="_header"] { -webkit-app-region: no-drag; }
@@ -63,14 +47,6 @@ body [data-shortcut-modal="settings"] [class*="Close"] { -webkit-app-region: no-
    exactly as before. */
 body [class*="_footerActions"] { flex-direction: column; align-items: stretch; }
 body [class*="_footerActions"] > * { flex: none; width: 100%; }
-/* rc.2 right dock sidebar: its tab strip carries the split / fullscreen /
-   collapse buttons at the panel's top-right — under the native window
-   controls. Pad the strip so they clear them (measured: the collapse button's
-   right edge sat 42px past the strip's left edge). */
-body [class*="_tabStrip"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
-/* rc.2 schedule catalog (the 自动化任务 surface): its page heading carries the
-   right-aligned create button under the native controls — pad the heading. */
-body [class*="_pageHeading"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
 html body {
   --dsw-menu-surface-fill: rgba(248, 249, 250, 0.96);
   --dsw-specific-menu: rgba(248, 249, 250, 0.96);

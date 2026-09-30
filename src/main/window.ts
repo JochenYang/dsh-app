@@ -130,8 +130,6 @@ function initialWindowGeometry(): WindowSize & { x?: number, y?: number } {
  */
 const SAMPLE_FN = `
   function sample() {
-    const meta = document.querySelector('meta[name="theme-color"]');
-    const base = (meta && meta.content) || getComputedStyle(document.body).backgroundColor || 'rgb(255, 255, 255)';
     const parse = (c) => {
       const m = /rgba?\\(([^)]+)\\)/.exec(c);
       if (!m) return null;
@@ -146,14 +144,82 @@ const SAMPLE_FN = `
         Math.round(f.g * a + b.g * (1 - a)) + ', ' +
         Math.round(f.b * a + b.b * (1 - a)) + ')';
     };
+    const meta = document.querySelector('meta[name="theme-color"]');
+    const base = (meta && meta.content) || getComputedStyle(document.body).backgroundColor || 'rgb(255, 255, 255)';
+    // The rule, in order:
+    //
+    //   1. an element that PAINTS over the sample point wins — it is what is
+    //      visible there, whatever the frame would have drawn.
+    //   2. otherwise the frame's caption colour, which is NOT readable from the
+    //      DOM: the kernel paints it on a PSEUDO-element, so the walk falls
+    //      through to the body. The kernel names it
+    //      --dsw-specific-sidebar-fill ("Sidebar column and title-row
+    //      background", ui-theme/src/client/index.ts:145), and the token and the
+    //      painted band agree exactly in both themes (dark #1b1b1c / light
+    //      #f9fafb).
+    //
+    // Only STRUCTURAL ancestors are skipped, never a painting element. Two
+    // measured cases fix the boundary:
+    //
+    //   * the plugin market's panel is INSIDE the frame (frame.contains(panel) is
+    //     true) and spans y 0..900, so it covers the caption's right end while
+    //     painting rgb(35,35,36). Skipping everything inside the frame was wrong:
+    //     it answered with the caption colour and left the strip darker than the
+    //     panel under it.
+    //   * the settings overlay is portalled to BODY, so its chain never passes
+    //     through the frame; treating BODY as a cover answered with the page
+    //     background (#151517) instead of the caption's (#1b1b1c).
+    //
+    // So an element is skipped only when it is the frame itself, or a plain box
+    // that merely CONTAINS the frame (a layout wrapper — never the painted
+    // surface), and BODY/documentElement are never covers.
     const x = Math.max(0, window.innerWidth - ${WINDOW_CONTROLS_WIDTH} / 2);
     const y = Math.floor(${OVERLAY_HEIGHT} / 2);
-    let el = document.elementFromPoint(x, y);
-    let color = null;
-    while (el && el !== document.documentElement) {
+    const frame = document.querySelector('[class*="_frame"]');
+    let covering = null;
+    for (let el = document.elementFromPoint(x, y); el !== null && el !== document.documentElement; el = el.parentElement) {
+      if (el === document.body || el === frame) break;
+      if (frame !== null && el.contains(frame)) break;
       const bg = getComputedStyle(el).backgroundColor;
+      if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') { covering = bg; break; }
+    }
+    if (covering !== null) return over(covering, base);
+    // Normalized to rgb() before it leaves this function, and that is load-bearing:
+    // a custom property's computed value keeps whatever syntax the theme wrote
+    // (these are hex), while the shell's consumers parse rgb() NUMBERS. Returning
+    // the hex raw made parseRgb read "#1b1b1c" as [1, 1, 1] — the strip was painted
+    // #010101, which is the "pure black in dark theme" that was reported, and
+    // "#f9fafb" failed to parse at all and fell back to #ffffff.
+    const toRgbColor = (value) => {
+      const v = String(value || '').trim();
+      if (v === '') return null;
+      if (/^rgba?\\(/i.test(v)) return v;
+      const hex = /^#([0-9a-f]+)$/i.exec(v);
+      if (hex === null) return null;
+      let h = hex[1];
+      if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('');
+      if (h.length !== 6 && h.length !== 8) return null;
+      const n = (i) => parseInt(h.slice(i, i + 2), 16);
+      const alpha = h.length === 8 ? n(6) / 255 : 1;
+      return alpha >= 1
+        ? 'rgb(' + n(0) + ', ' + n(2) + ', ' + n(4) + ')'
+        : 'rgba(' + n(0) + ', ' + n(2) + ', ' + n(4) + ', ' + alpha + ')';
+    };
+    // Read from BODY, not documentElement: measured, the token is declared on
+    // body (the theme presenter writes its variables there) and documentElement
+    // resolves to the empty string — which silently fell back to the DOM walk and
+    // put the settings overlay's colour on the strip.
+    const caption = toRgbColor(getComputedStyle(document.body).getPropertyValue('--dsw-specific-sidebar-fill'));
+    if (caption !== null) return caption;
+    // No caption (a kernel that predates the token, or a window without the
+    // marker): fall back to the plain page walk, which is correct there because
+    // nothing paints over the strip.
+    let el2 = document.elementFromPoint(x, y);
+    let color = null;
+    while (el2 && el2 !== document.documentElement) {
+      const bg = getComputedStyle(el2).backgroundColor;
       if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') { color = bg; break; }
-      el = el.parentElement;
+      el2 = el2.parentElement;
     }
     return color ? over(color, base) : base;
   }
@@ -243,7 +309,18 @@ function applyOverlayColor(win: BrowserWindow, color: string): void {
   })
 }
 
-/** Read the strip color once (initial load, did-finish-load, window show). */
+/**
+ * Read the strip color once (initial load, did-finish-load, window show).
+ *
+ * Retried, and the retry is load-bearing: at `did-finish-load` the theme presenter
+ * has not necessarily written its tokens yet, so the sampler resolves the caption
+ * token to the empty string and falls back to the page background — a colour one
+ * step off the band it is meant to match. Measured: on a cold start in dark theme
+ * the native strip read rgb(21,21,23) (the page bg-base) while the band and the
+ * token both said rgb(27,27,28), and it stayed wrong until some later theme change
+ * fired the observer. The bounded retry below closes that window without polling
+ * forever: the observer still owns every change after it.
+ */
 async function syncOverlayOnce(win: BrowserWindow): Promise<void> {
   if (win.isDestroyed()) return
   try {
@@ -251,6 +328,19 @@ async function syncOverlayOnce(win: BrowserWindow): Promise<void> {
     if (typeof color === 'string') applyOverlayColor(win, color)
   } catch {
     // Page not ready yet; the observer loop retries on the next beat.
+  }
+}
+
+/**
+ * Re-read the strip a few times right after a document loads, so the first paint
+ * does not keep a pre-theme colour until something else happens to change. The
+ * last read always wins, and `applyOverlayColor` drops identical samples, so a
+ * settled page costs nothing.
+ * @param win - the window whose strip should settle.
+ */
+function settleOverlayColor(win: BrowserWindow): void {
+  for (const delay of [250, 750, 2000]) {
+    setTimeout(() => { void syncOverlayOnce(win) }, delay).unref?.()
   }
 }
 
@@ -292,6 +382,10 @@ function startChromeSync(win: BrowserWindow): void {
     installDesktopChrome(win)
     reinjectKernelProgress(win)
     sync()
+    // The theme presenter may not have written its tokens at did-finish-load yet;
+    // settle the strip over the next couple of seconds rather than leaving a
+    // pre-theme colour until some later change (see settleOverlayColor).
+    settleOverlayColor(win)
   })
   sync()
 }
@@ -322,30 +416,35 @@ body [class*="_titleRow"] button,
 body [class*="_titleRow"] a,
 body [class*="_titleRow"] input,
 body [class*="_titleRow"] [role="button"] { -webkit-app-region: no-drag; }
-/* The titleRow drag region spans the row's full box, which runs underneath the
-   native window controls (min/max/close) — a drag region there swallows the
-   mouse, so the buttons lose their hover. Punch a no-drag hole over the
-   control strip: the topmost region wins, and this is the same pseudo-element
-   mechanism the welcome-state drag bar above already relies on. The row gets
-   position:relative so the hole anchors to the row, not to a tall ancestor. */
-body [class*="_titleRow"] { position: relative; }
-body [class*="_titleRow"]::after {
-  content: "";
-  position: absolute;
-  top: 0; right: 0;
-  width: ${WINDOW_CONTROLS_WIDTH}px;
-  height: 100%;
-  -webkit-app-region: no-drag;
+/* The window-frame metrics the kernel's caption layout keys on are published by
+   installFrameMetrics (data-windows-titlebar + --dsh-windows-titlebar-height).
+   With them the frame reserves the caption and every surface positions itself, so
+   the hand-written clearances that used to live here — a no-drag hole punched over
+   the control strip, padding-right 140px on the header utilities, a margin-right
+   on the conversation header's corner seat, and the same padding on the right
+   dock's tab strip and the schedule page heading — are all gone.
+   Measured with the marker on: no control intrudes into the native window-button
+   zone, and the dock's tab strip lands inside the caption band instead of being
+   pushed 337px clear of it by a patch (which is what looked wrong). */
+/* The sidebar's collapse toggle stays in the caption band, where the kernel puts
+   it ([data-windows-titlebar] .toggle: fixed at the caption's centre-left). The
+   brand keeps its own row below, so the band holds the toggle alone — the
+   arrangement asked for explicitly, after an attempt to pull the toggle back into
+   the brand row was rejected for exactly that reason. */
+/* Lift the caption band above the frame's own content.
+   The kernel paints the band with a ::before on the frame element — full width,
+   the caption's height — but leaves it at z-index auto, while the center column
+   carries an OPAQUE var(--dsw-alias-bg-base) background. Same stacking context, so
+   the column paints OVER the band wherever the column reaches, which on Windows is
+   everything right of the sidebar. Measured in dark theme: the band's own colour
+   rgb(27,27,28) survived only over the sidebar, while the rest of it — the whole
+   right end, window buttons included — read rgb(21,21,23), the column's
+   background. That is the dark block reported at the caption's right end.
+   The band is a drag surface and the window buttons sit on top of it, so raising it
+   above the content is both the correct paint order and harmless to interaction. */
+html[data-windows-titlebar] [class*="_frame"]::before {
+  z-index: 20;
 }
-body [data-details-collapsed] [class*="_headerUtilities"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
-/* Alpha.1 removed the details column and added a far-right corner seat
-   (data-conversation-header-corner, e.g. the sidebar expand button) that
-   sits flush against the header's right edge — directly under the native
-   window controls. Push the corner seat left of the controls; the flex row
-   carries utilities along, and the vacated zone stays draggable via the
-   titleRow drag region. (The details-collapsed rule above covers older
-   kernels.) */
-body [class*="_titleRow"]:has([data-conversation-header-corner]) [data-conversation-header-corner] { margin-right: ${WINDOW_CONTROLS_WIDTH}px; }
 /* Fallback drag bar for the main column: the session title bar only exists
    once a session is open, so on the welcome/empty state the whole top strip
    right of the sidebar had no drag region. :has() scopes the bar to that
@@ -359,31 +458,13 @@ body [class*="_centerCol"]:not(:has([class*="_titleRow"]))::before {
   -webkit-app-region: drag;
   z-index: 5;
 }
-/* The settings dialog floats above the frame, so the frame's drag regions are
-   masked while it is open; give the dialog its own title strip instead. The
-   strip stops at the header's own top padding (20px) so it never covers the
-   header buttons: an absolutely positioned ::before paints above normal flow,
-   and a drag strip overlapping a button would swallow clicks on its upper
-   half even with the button marked no-drag. Below the strip the header row
-   itself carries the drag region (blank areas drag, buttons opt back out).
-   Geometry keeps everything clear of the native window controls for free:
-   the centered panel always starts >=24px below the viewport top and the
-   header padding adds 20 more, so buttons sit at >=44px — below the 36px
-   overlay strip — at every window size.
-   Scoped by the dialog's own data-shortcut-modal="settings" marker, never
-   by [class*="_panel"]: that matched every *_panel* class in the app —
-   including the Team panel, whose skin is itself a ::before — and the strip's
-   height/z-index overrode the skin, leaving the panel see-through (the skin
-   only painted a 20px band). Measured: eleven elements matched, three of them
-   unrelated overlays. */
-body [data-shortcut-modal="settings"]::before {
-  content: "";
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 20px;
-  -webkit-app-region: drag;
-  z-index: 0;
-}
+/* The settings dialog used to get its own 20px drag strip here, because the frame's
+   drag regions were masked while it was open. That is obsolete: the caption marker
+   makes the frame reserve the top 36px as a drag region of its own, and the dialog
+   floats BELOW it (measured: the dialog's top edge sits at y=56, well clear of the
+   36px caption). Keeping the strip only put a second, competing drag region over
+   the caption — and, being an element the sampler could hit, it was what put the
+   overlay's colour on the native strip with settings open. */
 /* Header blank areas drag the window; controls opt back out (same pattern as
    the frame's logoRow/titleRow). This restores the native layout: buttons
    return to their original position, on the same axis as the nav title. */
@@ -408,14 +489,11 @@ body [data-shortcut-modal="settings"] [class*="Close"] { -webkit-app-region: no-
    exactly as before. */
 body [class*="_footerActions"] { flex-direction: column; align-items: stretch; }
 body [class*="_footerActions"] > * { flex: none; width: 100%; }
-/* rc.2 right dock sidebar: its tab strip carries the split / fullscreen /
-   collapse buttons at the panel's top-right — under the native window
-   controls. Pad the strip so they clear them (measured: the collapse button's
-   right edge sat 42px past the strip's left edge). */
-body [class*="_tabStrip"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
-/* rc.2 schedule catalog (the 自动化任务 surface): its page heading carries the
-   right-aligned create button under the native controls — pad the heading. */
-body [class*="_pageHeading"] { padding-right: ${WINDOW_CONTROLS_WIDTH}px; }
+/* The right dock's tab strip and the schedule page heading used to be padded
+   clear of the native window controls here (140px each). The caption marker makes
+   the frame reserve that strip, so the kernel positions both itself — and the
+   padding is what pushed the dock's buttons 337px away from the controls instead
+   of letting them sit in the caption band. See installFrameMetrics. */
 /* Overlay skins in this kernel are painted on a ::before: a semi-transparent
    fill plus backdrop-filter (MenuSurface and the Team panel share the shape).
    This shell's window does not render that blur — measured on Windows: the
@@ -453,35 +531,39 @@ function installDesktopChrome(win: BrowserWindow): void {
 }
 
 /**
- * Keep the kernel's MODAL MASK off the native caption strip (Windows only).
+ * Publish the window-frame metrics the kernel's own layout is written against.
  *
- * The kernel paints its mask as `inset: var(--dsh-frame-chrome-top, 0px) 0 0`
- * (`packages/client/ui-primitives/src/Modal.module.css:20`, and the settings
- * overlay the same way), so it reserves exactly that much at the top and leaves
- * the caption alone. The variable is declared upstream only under
- * `html[data-windows-titlebar]` (`AppFrame.module.css:100`) — a marker the
- * official desktop's own Windows preload sets (`apps/desktop/src/preload-windows.ts`)
- * and this shell never did.
+ * The harness web UI ships a complete Windows caption layout — the caption row,
+ * the frame's top padding, the main panel's rounded corner, the sidebar's brand
+ * row, the right dock's tab strip and the floating overlays — and every rule is
+ * gated on two values a document cannot know by itself
+ * (`packages/client/ui-layout/src/client/AppFrame.module.css:98-112`):
  *
- * Measured consequence (scripts/probe-overlay-modal.cjs, and the same A/B in the
- * running app): with the marker absent the mask's computed top inset is 0px, so
- * the scrim paints over the caption — the strip goes near-black over the page
- * (reported as the window controls "not following the theme" with the add-plugin
- * dialog open).
+ *   html[data-windows-titlebar]                  — a caption exists
+ *   --dsh-windows-titlebar-height: <caption px>  — how tall it is
  *
- * Only `--dsh-frame-chrome-top` is published, deliberately. Setting the full
- * `data-windows-titlebar` marker would also hand the kernel
- * `--dsh-frame-top-clearance` and `--dsh-frame-overlay-top`, and upstream's
- * AppFrame then reserves a 36px caption row, pads the frame and rounds the main
- * panel's corner — a layout change nobody asked for here, measured in the running
- * window (frame `padding-top` 0px → 36px). This variable is consumed by the two
- * mask rules and nothing else, so the fix stays where the defect is.
+ * The official desktop supplies both from its Windows preload
+ * (`apps/desktop/src/preload-windows.ts`), and `data-platform` from
+ * `preload-platform.ts` (which macOS rules read). This shell set NONE of them, so
+ * every one of those rules was inert: the kernel laid itself out as if the window
+ * had no caption, and this stylesheet spent eight separate `padding-right` patches
+ * holding content clear of the window buttons by hand — the per-surface shimming
+ * that made the right dock's tab strip look wrong (its buttons ended 2px from the
+ * native zone with 337px of empty strip in front of them, measured).
  *
- * Zeroed in fullscreen, like upstream: the caption is hidden there, and a
- * reserved strip would leave a gap under a mask that has nothing to avoid.
+ * Publishing the marker hands that job to the kernel: the frame reserves the
+ * caption, and each surface positions itself. The patches this replaces are gone
+ * from {@link DESKTOP_CHROME_CSS}.
+ *
+ * `data-fullscreen` mirrors the state so the kernel drops the clearance when the
+ * caption is hidden (upstream does the same from `syncWindowFullscreen`).
+ *
+ * Runs on every document load — a navigation replaces the root's attributes — and
+ * again on a fullscreen transition. The writes are constants, so a repeat is a
+ * no-op.
  */
 function installFrameMetrics(win: BrowserWindow): void {
-  if (process.platform !== 'win32') return
+  if (process.platform !== 'win32' && process.platform !== 'darwin') return
   const apply = (fullscreen: boolean): void => {
     if (win.isDestroyed()) return
     win.webContents
@@ -489,7 +571,11 @@ function installFrameMetrics(win: BrowserWindow): void {
         `(function () {
           const root = document.documentElement;
           if (root === null) return false;
-          root.style.setProperty('--dsh-frame-chrome-top', ${fullscreen ? "'0px'" : `'${OVERLAY_HEIGHT}px'`});
+          root.dataset.platform = ${JSON.stringify(process.platform)};
+          root.dataset.windowsTitlebar = '';
+          root.style.setProperty('--dsh-windows-titlebar-height', '${OVERLAY_HEIGHT}px');
+          if (${fullscreen ? 'true' : 'false'}) root.dataset.fullscreen = 'true';
+          else delete root.dataset.fullscreen;
           return true;
         })()`,
       )
