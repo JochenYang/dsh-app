@@ -261,7 +261,28 @@ const WHALE_CSS = `
 @media (prefers-reduced-motion: reduce) {
   #dshapp-whale-bg { transition: none; }
 }
-body [class*="_frame"] { background: transparent; }
+/* The kernel's Windows caption layout repaints TWO containers opaquely the
+   moment our shell publishes html[data-windows-titlebar]:
+     [data-windows-titlebar] .…_frame     { background: var(--dsw-specific-sidebar-fill) }
+     [data-windows-titlebar] .…_centerCol { background: var(--dsw-alias-bg-base) }
+   (macOS repaints the column the same way through [data-platform=darwin].)
+   The whale paints at z-index -1 behind the frame, so those two fills are what
+   bury it: measured with the marker on, hiding the canvas changed 0 pixels of
+   the rendered page, and 5192 pixels with it off.
+   The marker has to appear in THESE selectors too. A plain body-prefixed rule
+   scores (0,1,1) against the kernel rules' (0,2,0) and loses, which is why the
+   whale stayed buried however the plain rule was written.
+   Going transparent costs nothing visually: each fill is a copy of a colour
+   already behind it — the column's matches the body background exactly in both
+   themes (measured: rgb(255,255,255) light, rgb(21,21,23) dark) and the frame's
+   is the sidebar's own. The caption band is the frame's ::before and keeps its
+   paint, and the column keeps its 16px rounded top corner. */
+html[data-windows-titlebar] body [class*="_frame"],
+html[data-platform=darwin] body [class*="_frame"],
+body [class*="_frame"],
+html[data-windows-titlebar] body [class*="_centerCol"],
+html[data-platform=darwin] body [class*="_centerCol"],
+body [class*="_centerCol"] { background: transparent; }
 body [class*="_centerCol"] [data-phase='hero'],
 body [class*="_centerCol"] [data-phase='active'],
 body [class*="_centerCol"] [data-phase='settling'] { background: transparent; }

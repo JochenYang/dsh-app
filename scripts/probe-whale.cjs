@@ -205,6 +205,60 @@ app.whenReady().then(async () => {
     await shot('4-light-hero-pointer')
   }
 
+  // ---- occlusion under the shell's caption marker ---------------------------
+  // The canvas's OWN pixels stay healthy while something opaque covers it, so
+  // every read above can pass on a whale the user cannot see. Measured on
+  // v0.14.5: publishing html[data-windows-titlebar] (installFrameMetrics,
+  // src/main/window.ts) turns on kernel fills for the frame AND the center
+  // column, which buried the whale completely with all of the above still
+  // green. The tell is a differential: capture the canvas's own box with it
+  // painted, then hidden. A whale the user can see changes the page; a buried
+  // one changes exactly zero pixels.
+  await win.webContents.executeJavaScript(
+    `document.documentElement.setAttribute('data-windows-titlebar',''); 'ok'`,
+  )
+  await sleep(900)
+  const box = JSON.parse(await win.webContents.executeJavaScript(`(() => {
+    const c = document.getElementById('dshapp-whale-bg')
+    if (c === null) return 'null'
+    const r = c.getBoundingClientRect()
+    return JSON.stringify({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) })
+  })()`))
+  if (box !== null) {
+    const rect = {
+      x: Math.max(0, box.x + 12), y: Math.max(0, box.y + 12),
+      width: Math.max(1, box.w - 24), height: Math.max(1, box.h - 24),
+    }
+    const contribution = async () => {
+      const painted = await win.webContents.capturePage(rect)
+      await win.webContents.executeJavaScript(`document.getElementById('dshapp-whale-bg').style.display='none'; 'ok'`)
+      await sleep(350)
+      const hidden = await win.webContents.capturePage(rect)
+      await win.webContents.executeJavaScript(`document.getElementById('dshapp-whale-bg').style.display=''; 'ok'`)
+      await sleep(350)
+      const a = painted.getBitmap(); const b = hidden.getBitmap()
+      let n = 0
+      for (let i = 0; i < a.length; i += 4) {
+        if (Math.abs(a[i] - b[i]) > 8 || Math.abs(a[i + 1] - b[i + 1]) > 8 || Math.abs(a[i + 2] - b[i + 2]) > 8) n += 1
+      }
+      return { differing: n, share: +(n / (a.length / 4)).toFixed(4) }
+    }
+    const on = await contribution()
+    log('[marker-occlusion]', JSON.stringify({
+      marker: true, ...on,
+      verdict: on.differing > 0 ? 'visible' : 'BURIED — an opaque fill covers the canvas',
+    }))
+    await win.webContents.executeJavaScript(
+      `document.documentElement.removeAttribute('data-windows-titlebar'); 'ok'`,
+    )
+    await sleep(900)
+    const off = await contribution()
+    log('[marker-off-occlusion]', JSON.stringify({
+      marker: false, ...off,
+      verdict: off.differing > 0 ? 'visible' : 'BURIED',
+    }))
+  }
+
   win.webContents.debugger.detach()
   app.exit(0)
 }).catch((err) => {
