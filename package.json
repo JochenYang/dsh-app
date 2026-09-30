@@ -28,7 +28,7 @@
     "runtime:build": "node scripts/build-runtime.mjs",
     "smoke:package": "node scripts/smoke-package.mjs",
     "start": "npm run build && electron .",
-    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "test": "npm run build && node scripts/ensure-electron.mjs && node --test \"test/*.test.mjs\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "node scripts/smoke-suite.mjs"
   },
