@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.14.6] - 2026-09-30
+
+### 中文
+- 应用内更新不再把新版本装到默认位置：此前安装器会先删掉记录安装路径的注册表项，再按该键去读路径，读到空值便回落到 `C:\Program Files`——你装在别的盘上时，更新就静默换了地方。现在只清掉用于调用旧卸载器的那个键，记录路径的键保留，旧目录仍按它给的路径删除。
+- 办公组件：内核只要求套件本身时，磁盘上「同一套件 + Python 集」的产物直接算满足要求，不再提示更新；诊断页的「已安装」判定改按 shell 的结论，而不是版本字符串是否相等。
+- 鲸鱼背景在 v0.14.5 之后消失：外壳开始发布 `data-windows-titlebar`（标题栏适配要用），于是内核标题栏布局的两条规则生效——frame 与中列各自被刷成不透明底色。鲸鱼画布在最底层（`z-index: -1`），被整片盖住。现在鲸鱼的样式表按同等优先级把这两处底色改为透明；实测量：标记打开时，隐藏画布对页面像素的影响从 0 个恢复到 2485 个（与关闭标记时完全一致），两种主题下的底色与原先相同。
+
+### English
+- An in-app update no longer installs into the default location: the installer used to delete the registry entry that records the install path before reading it, so it read an empty value and fell back to `C:\Program Files` — an install on another drive silently moved. Only the entry that summons the previous uninstaller is cleared now, the path entry is kept, and the old directory is still removed by the path it holds.
+- Office components: a payload carrying the kit plus its Python set now serves a kernel that requires the kit alone, so the row stops offering an update whose only possible outcome was the same payload again, and the diagnostics page reads "installed" from the shell's verdict instead of comparing version strings.
+- The whale background disappeared after v0.14.5: publishing `data-windows-titlebar` (which the caption adaptation needs) activated two kernel rules that fill the frame and the center column opaquely, and the canvas paints in the lowest layer, so it was buried whole. The whale's own stylesheet now makes both fills transparent at matching specificity; measured, with the marker on, hiding the canvas went from changing 0 page pixels to the same 2485 it changes with the marker off, and the base colour is unchanged in both themes.
+
 ## [v0.14.5] - 2026-09-30
 
 ### 中文
