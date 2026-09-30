@@ -449,6 +449,55 @@ function installDesktopChrome(win: BrowserWindow): void {
       })()`,
     )
     .catch(() => undefined)
+  installFrameMetrics(win)
+}
+
+/**
+ * Keep the kernel's MODAL MASK off the native caption strip (Windows only).
+ *
+ * The kernel paints its mask as `inset: var(--dsh-frame-chrome-top, 0px) 0 0`
+ * (`packages/client/ui-primitives/src/Modal.module.css:20`, and the settings
+ * overlay the same way), so it reserves exactly that much at the top and leaves
+ * the caption alone. The variable is declared upstream only under
+ * `html[data-windows-titlebar]` (`AppFrame.module.css:100`) — a marker the
+ * official desktop's own Windows preload sets (`apps/desktop/src/preload-windows.ts`)
+ * and this shell never did.
+ *
+ * Measured consequence (scripts/probe-overlay-modal.cjs, and the same A/B in the
+ * running app): with the marker absent the mask's computed top inset is 0px, so
+ * the scrim paints over the caption — the strip goes near-black over the page
+ * (reported as the window controls "not following the theme" with the add-plugin
+ * dialog open).
+ *
+ * Only `--dsh-frame-chrome-top` is published, deliberately. Setting the full
+ * `data-windows-titlebar` marker would also hand the kernel
+ * `--dsh-frame-top-clearance` and `--dsh-frame-overlay-top`, and upstream's
+ * AppFrame then reserves a 36px caption row, pads the frame and rounds the main
+ * panel's corner — a layout change nobody asked for here, measured in the running
+ * window (frame `padding-top` 0px → 36px). This variable is consumed by the two
+ * mask rules and nothing else, so the fix stays where the defect is.
+ *
+ * Zeroed in fullscreen, like upstream: the caption is hidden there, and a
+ * reserved strip would leave a gap under a mask that has nothing to avoid.
+ */
+function installFrameMetrics(win: BrowserWindow): void {
+  if (process.platform !== 'win32') return
+  const apply = (fullscreen: boolean): void => {
+    if (win.isDestroyed()) return
+    win.webContents
+      .executeJavaScript(
+        `(function () {
+          const root = document.documentElement;
+          if (root === null) return false;
+          root.style.setProperty('--dsh-frame-chrome-top', ${fullscreen ? "'0px'" : `'${OVERLAY_HEIGHT}px'`});
+          return true;
+        })()`,
+      )
+      .catch(() => undefined)
+  }
+  win.on('enter-full-screen', () => apply(true))
+  win.on('leave-full-screen', () => apply(false))
+  apply(win.isFullScreen())
 }
 
 /**
