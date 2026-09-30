@@ -8,7 +8,12 @@
 //   * a mismatched or corrupt artifact must NOT replace a working install;
 //   * a payload installed for another kernel must not be reported as installed;
 //   * the version directory is a CONTENT identity, so a kernel update reuses
-//     what is already on disk instead of downloading 115 MiB again.
+//     what is already on disk instead of downloading 115 MiB again;
+//   * a requirement is served by the payload that carries AT LEAST it (the kit
+//     alone is served by the kit plus its Python set), and the directory the
+//     child is told about has to be the one that payload is actually in —
+//     reporting the requirement met while naming an empty path leaves
+//     conversion broken with the row looking satisfied.
 // All of it runs against a fake release (a stubbed `fetch`) and a payload
 // tarball built here, so there is no network and no real kit.
 // Run after the build: node --test test/   (or: npm test)
@@ -176,7 +181,7 @@ test('a kernel that declares no payload reports unsupported, never a download', 
   // A download for an unsupported kernel is a no-op, not an error: nothing can
   // resolve, so the row must not offer it and no file may appear.
   assert.equal((await value.download()).supported, false)
-  assert.equal(value.expectedDir(), null)
+  assert.equal(await value.expectedDir(), null)
   assert.equal(await value.installedDir(), null)
 })
 
@@ -190,8 +195,9 @@ test('the required version is reported, and the directory the shim is told about
   assert.equal(status.phase, 'idle')
   // The child is told the path whether or not it is installed: that is what
   // makes a payload downloaded while the kernel runs usable without a restart.
-  assert.equal(value.expectedDir(), path.join(userData, OFFICE_ROOT_DIR, OFFICE_PAYLOAD_DIR, PAYLOAD_VERSION))
-  assert.equal(existsSync(value.expectedDir()), false)
+  const announced = await value.expectedDir()
+  assert.equal(announced, path.join(userData, OFFICE_ROOT_DIR, OFFICE_PAYLOAD_DIR, PAYLOAD_VERSION))
+  assert.equal(existsSync(announced), false)
 })
 
 test('a download installs the payload, verifies it, and reports it installed', async () => {
@@ -403,6 +409,52 @@ test('a payload of another kernel is never reported as installed', async () => {
     // and reporting only `installed: null` showed them an untouched machine's
     // download flow instead of an update.
     assert.equal(status.installedOnDisk, PAYLOAD_VERSION)
+  } finally {
+    release.restore()
+  }
+})
+
+test('a payload carrying the Python set a kernel does not ask for serves it', async () => {
+  const userData = newUserData()
+  const work = mkdtempSync(path.join(tmpdir(), 'dsh-office-fixture-'))
+  roots.push(work)
+  // One build's payload, two spellings of its content: the artifact published
+  // for a cell is `<kit>-py<python>`, while a kernel that staged no Python set
+  // requires `<kit>` alone. The payload must serve it — and the engine must be
+  // reachable at the path the child is told about, which is the half a
+  // version-only reading of "installed" gets wrong: reporting the requirement
+  // met while naming a directory nothing is in leaves conversion broken.
+  const carrying = build.officePayloadVersion(KIT_VERSION, PYTHON_VERSION)
+  const manifest = payloadManifest(carrying, {
+    components: { kit: KIT_VERSION, engine: ENGINE, python: PYTHON_VERSION },
+  })
+  const tarball = await makePayloadTarball(work, { manifest })
+  const release = stubRelease(tarball, { manifest })
+  try {
+    const carryingKernel = manager(userData, () => targetFor(carrying))
+    await carryingKernel.value.download()
+    const installed = await settled(carryingKernel.value)
+    assert.equal(installed.installed, carrying)
+    const dir = path.join(userData, OFFICE_ROOT_DIR, OFFICE_PAYLOAD_DIR, carrying)
+    assert.equal(await carryingKernel.value.installedDir(), dir)
+    const callsAfterInstall = release.calls.length
+
+    const kitOnly = manager(userData, () => targetFor(PAYLOAD_VERSION))
+    const status = await kitOnly.value.status()
+    assert.equal(status.required, PAYLOAD_VERSION)
+    assert.equal(status.installed, carrying, 'the requirement is met by the payload that carries more')
+    assert.equal(status.installedOnDisk, carrying, 'and there is no upgrade left to report')
+    // The directory the shim loads the engine from is where the payload IS, not
+    // the name the requirement happens to use.
+    assert.equal(await kitOnly.value.expectedDir(), dir)
+    assert.equal(await kitOnly.value.installedDir(), dir)
+    // The carried set is handed to the host exactly as the payload's own
+    // manifest declares it: the requirement says nothing about it either way.
+    assert.equal(await kitOnly.value.primaryRuntimeDir(), path.join(dir, 'primary-runtime'))
+    // And the retry the row used to offer — which could only ever end in this
+    // same payload — now fetches nothing at all.
+    assert.equal((await kitOnly.value.download()).installed, carrying)
+    assert.equal(release.calls.length, callsAfterInstall, 'a served requirement downloads nothing')
   } finally {
     release.restore()
   }
@@ -636,6 +688,14 @@ test('the build and the shell agree on every name and on the manifest rules', ()
     ['no engine', payloadManifest(PAYLOAD_VERSION, { components: { kit: KIT_VERSION, engine: null, python: null } }), ['engine']],
     ['another engine', payloadManifest(PAYLOAD_VERSION, { components: { kit: KIT_VERSION, engine: 'darwin-arm64', python: null } }), ['engine']],
     ['no kit version', payloadManifest(PAYLOAD_VERSION, { components: { kit: '', engine: ENGINE, python: null } }), ['kit']],
+    // A requirement naming the kit alone is served by that same kit PLUS a
+    // Python set — one build's payload, two spellings of its content — but only
+    // when the payload's own version describes what it carries. Both halves of
+    // the contract have to agree on that, which is what this fixture is for.
+    ['a payload carrying the Python set the target does not ask for',
+      payloadManifest(build.officePayloadVersion(KIT_VERSION, PYTHON_VERSION), { components: { kit: KIT_VERSION, engine: ENGINE, python: PYTHON_VERSION } }), []],
+    ['a version that does not describe its own components',
+      payloadManifest(`${PAYLOAD_VERSION}-py9.9.9`, { components: { kit: KIT_VERSION, engine: ENGINE, python: PYTHON_VERSION } }), ['version']],
   ]
   for (const [label, manifest, expected] of cases) {
     const shellProblems = manifestProblems(manifest, target)

@@ -1172,7 +1172,7 @@ async function startServerAndOpenWindow(): Promise<void> {
   // conversion, so a payload downloaded while the kernel runs is picked up
   // without a restart — and a kernel that declares no payload sets nothing, so
   // the shim's own actionable refusal is what the user gets.
-  const officePayloadDir = officePayload.expectedDir()
+  const officePayloadDir = await officePayload.expectedDir()
   // A payload that carries a Python set is what the host's own
   // `load_workspace_dependencies` tool installs; without one the child keeps the
   // fixed leaf beside the office skills (and the tool reports the path it

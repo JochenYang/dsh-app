@@ -107,7 +107,17 @@ export interface OfficePayloadStatus {
   supported: boolean
   /** Payload version the active kernel requires, or null when unsupported. */
   required: string | null
-  /** Installed payload version that satisfies {@link required}, or null. */
+  /**
+   * The content version of the payload that satisfies {@link required}, or null
+   * when nothing on disk does.
+   *
+   * Non-null IS the answer to "is it installed" — this field never holds a
+   * version that does not serve the kernel. It names the payload's OWN version,
+   * which is not necessarily the spelling {@link required} uses: a requirement
+   * naming the kit alone is served by that kit plus its Python set (see
+   * `payloadVersionServes`), and a caller must therefore key on null-ness
+   * rather than on equality with {@link required}.
+   */
   installed: string | null
   /**
    * A payload version that IS on disk and verifies, whether or not it is the
@@ -237,23 +247,30 @@ export class OfficePayloadManager {
    * The payload directory the kernel child is told about, whether or not it is
    * installed yet: the runtime's loader shim reads it per conversion, so a
    * payload installed while the kernel runs takes effect without a restart.
+   *
+   * The directory this kernel's own version NAMES, or — when that one is absent
+   * while a payload that satisfies the same requirement already sits under
+   * another version name — the directory that payload is in. The child loads
+   * the engine from the path it is given, so a payload that satisfies a kernel
+   * has to be REACHABLE by the path, not merely counted as satisfying it.
+   *
    * @returns the directory, or null when this kernel declares no payload.
    */
-  expectedDir(): string | null {
+  async expectedDir(): Promise<string | null> {
     const target = this.opts.target()
-    return target === null ? null : this.installDir(target.payloadVersion)
+    if (target === null) return null
+    return (await this.servingPayload(target))?.dir ?? this.installDir(target.payloadVersion)
   }
 
   /**
-   * The installed payload directory, or null when the required version is not
-   * on disk — or is on disk but unusable, which is reported the same way
-   * because "download it again" is the actionable answer to both.
+   * The installed payload directory, or null when nothing on disk satisfies the
+   * requirement — or something is there but unusable, which is reported the
+   * same way because "download it again" is the actionable answer to both.
    */
   async installedDir(): Promise<string | null> {
     const target = this.opts.target()
     if (target === null) return null
-    const dir = this.installDir(target.payloadVersion)
-    return (await this.verify(dir, target)) === null ? null : dir
+    return (await this.servingPayload(target))?.dir ?? null
   }
 
   /**
@@ -287,10 +304,10 @@ export class OfficePayloadManager {
    * arch and engine — the question {@link verify} answers while ignoring which
    * content version the directory carries.
    *
-   * Used only to report an install that exists while the required version has
-   * moved past it. It must never satisfy a download: the kit and engine a
-   * kernel needs are named by its OWN target's version, so a stale payload is
-   * still a download.
+   * Used only to report an install that exists while NO payload serves the
+   * requirement. {@link verify} is what decides whether a target is served;
+   * this looser test only decides what to say about a payload that does not
+   * serve it, and it must never answer that question on its own.
    */
   private async shapeOk(dir: string, target: OfficePayloadTarget): Promise<boolean> {
     const manifest = await readManifest(dir)
@@ -302,21 +319,58 @@ export class OfficePayloadManager {
   }
 
   /**
-   * The newest payload version on disk that is complete for this target, or
-   * null when none is. "Newest" is by name order of the version directories,
-   * which is only ever used to pick WHICH name to show when several are
-   * present (the install path prunes the others) — never to decide whether to
-   * download, which stays {@link installed}/{@link OfficePayloadStatus.required}.
+   * Every version-shaped directory under the payload root, by name.
+   *
+   * Ordering is only ever used to pick WHICH name to show or serve when several
+   * are present (the install path prunes the others after it commits) — never
+   * to decide whether to download, which stays {@link OfficePayloadStatus.required}.
+   */
+  private async versionDirectories(): Promise<string[]> {
+    const entries = await fs.readdir(this.payloadRoot(), { withFileTypes: true }).catch(() => [])
+    return entries
+      .filter((entry) => entry.isDirectory() && isVersionDirectory(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+  }
+
+  /**
+   * The payload that SERVES this target: the directory to load the engine from,
+   * and the content version that payload's own manifest declares.
+   *
+   * The directory the requirement names first — the ordinary case, and the only
+   * one a fresh install ever produces. Then any other version directory that
+   * {@link verify} accepts, newest name first: a requirement may be satisfied by
+   * a payload the kernel's own version string does not spell
+   * ({@link payloadVersionServes}), and the engine still has to be found where
+   * the payload actually is.
+   *
+   * This is the ONE answer to "which payload serves this kernel": the status
+   * path, the directory the child is told about, the download short-circuit and
+   * the spawn-time hand-off all read it, so they cannot disagree about whether
+   * the requirement is met or about where the engine is.
+   */
+  private async servingPayload(target: OfficePayloadTarget): Promise<{ dir: string; version: string } | null> {
+    const named = this.installDir(target.payloadVersion)
+    const namedVersion = await this.verify(named, target)
+    if (namedVersion !== null) return { dir: named, version: namedVersion }
+    for (const name of (await this.versionDirectories()).reverse()) {
+      const dir = this.installDir(name)
+      const version = await this.verify(dir, target)
+      if (version !== null) return { dir, version }
+    }
+    return null
+  }
+
+  /**
+   * The newest payload version on disk that is SHAPED for this target — the
+   * question {@link shapeOk} answers while ignoring which content version the
+   * directory carries — or null when none is.
    */
   private async installedOnDisk(target: OfficePayloadTarget): Promise<string | null> {
-    const entries = await fs.readdir(this.payloadRoot(), { withFileTypes: true }).catch(() => [])
-    const candidates: string[] = []
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !isVersionDirectory(entry.name)) continue
-      if (await this.shapeOk(this.installDir(entry.name), target)) candidates.push(entry.name)
+    for (const name of (await this.versionDirectories()).reverse()) {
+      if (await this.shapeOk(this.installDir(name), target)) return name
     }
-    if (candidates.length === 0) return null
-    return candidates.sort().at(-1) ?? null
+    return null
   }
 
   /**
@@ -328,10 +382,11 @@ export class OfficePayloadManager {
     if (target === null) {
       return { supported: false, required: null, installed: null, installedOnDisk: null, phase: 'idle', progress: null, error: null }
     }
-    const installed = await this.verify(this.installDir(target.payloadVersion), target)
-    // Only scanned when the required version is NOT installed: a satisfied
-    // kernel has nothing to distinguish, and the scan is the expensive half
-    // (it reads every other version directory's manifest).
+    const serving = await this.servingPayload(target)
+    const installed = serving?.version ?? null
+    // Only scanned when nothing serves the requirement: a satisfied kernel has
+    // nothing to distinguish, and the scan is the expensive half (it reads
+    // every other version directory's manifest).
     const installedOnDisk = installed !== null ? installed : await this.installedOnDisk(target)
     const task = this.task
     return {
@@ -355,8 +410,13 @@ export class OfficePayloadManager {
     const target = this.opts.target()
     if (target === null) return this.status()
     if (this.task?.running === true) return this.status()
-    if ((await this.verify(this.installDir(target.payloadVersion), target)) !== null) {
-      this.log(`payload ${target.payloadVersion} is already installed`)
+    const serving = await this.servingPayload(target)
+    if (serving !== null) {
+      // Nothing to fetch: a payload that serves this kernel is what a download
+      // would end up with. This is also what makes the row's retry honest — a
+      // requirement already met is answered here instead of re-fetching the
+      // artifact that satisfies it.
+      this.log(`payload ${serving.version} is already installed for ${target.payloadVersion}`)
       return this.status()
     }
     const task: PayloadTask = { phase: 'downloading', progress: 0, error: null, abort: new AbortController(), running: true }
@@ -652,11 +712,48 @@ export function requiredFiles(engine: string, pythonVersion: string | null = nul
  */
 export function manifestProblems(manifest: KernelOfficePayloadManifest, target: OfficePayloadTarget): string[] {
   const problems: string[] = []
-  if (manifest.payloadVersion !== target.payloadVersion) {
+  if (!payloadVersionServes(manifest, target.payloadVersion)) {
     problems.push(`the payload is version ${String(manifest.payloadVersion)}, but this kernel requires ${target.payloadVersion}`)
   }
   problems.push(...payloadShapeProblems(manifest, target))
   return problems
+}
+
+/**
+ * Whether one payload's content version answers a requirement; the version half
+ * of {@link manifestProblems}.
+ *
+ * Both sides use the same spelling (`officePayloadVersion` in
+ * `scripts/lib/office-payload.mjs`): `<kitVersion>` when no Python set is
+ * carried, `<kitVersion>-py<python>` when one is, so equality is the ordinary
+ * answer.
+ *
+ * The one relaxation is a payload that carries MORE than the kernel asks for. A
+ * kernel that needs the kit alone is served by that same kit plus a Python set:
+ * the set is additive — the conversion engine is the `components.engine` both
+ * sides already agree on, and a kernel that requires no Python set has nothing
+ * to look up inside one. Without this, a requirement of `0.1.2` against the only
+ * published artifact (`0.1.2-py3.12.14`, the same kit with its set) is refused,
+ * and the row is left offering an update whose only possible outcome is the
+ * same refusal again.
+ *
+ * The extra content is accepted only when the manifest's own version describes
+ * it, so a manifest cannot claim a version its components do not add up to. The
+ * reverse is never accepted: a kernel that requires a Python set is not served
+ * by a payload without one, and a different Python version is not a substitute
+ * for the one the kit was staged with.
+ *
+ * KEEP IN SYNC with `payloadVersionServes` in `scripts/lib/office-payload.mjs`.
+ */
+export function payloadVersionServes(manifest: KernelOfficePayloadManifest, required: string): boolean {
+  if (manifest.payloadVersion === required) return true
+  const components = manifest.components
+  if (typeof components !== 'object' || components === null) return false
+  const kit = components.kit
+  const python = components.python
+  if (typeof kit !== 'string' || kit === '' || kit !== required) return false
+  if (typeof python !== 'string' || python === '') return false
+  return manifest.payloadVersion === `${kit}-py${python}`
 }
 
 /**

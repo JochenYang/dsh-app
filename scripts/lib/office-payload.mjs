@@ -108,6 +108,42 @@ export function createOfficePayloadManifest(input) {
   }
 }
 
+/**
+ * Whether one payload's content version answers a requirement; the version half
+ * of {@link officePayloadManifestProblems}.
+ *
+ * Both sides use the same spelling (`officePayloadVersion` above):
+ * `<kitVersion>` when no Python set is carried, `<kitVersion>-py<python>` when
+ * one is, so equality is the ordinary answer.
+ *
+ * The one relaxation is a payload that carries MORE than the target asks for. A
+ * target that needs the kit alone is served by that same kit plus a Python set:
+ * the set is additive — the conversion engine is the `components.engine` both
+ * sides already agree on — so a kernel whose requirement names only the kit
+ * must not be left refusing the only artifact published for it. The extra
+ * content is accepted only when the manifest's own version describes it, so a
+ * manifest cannot claim a version its components do not add up to. The reverse
+ * is never accepted: a target that requires a Python set is not served by a
+ * payload without one.
+ *
+ * KEEP IN SYNC with `payloadVersionServes` in `src/kernel/office-payload.ts` —
+ * one contract, two implementations (see the module note above).
+ *
+ * @param record - parsed payload manifest.
+ * @param required - payload version the target requires.
+ * @returns whether this payload serves that requirement.
+ */
+export function payloadVersionServes(record, required) {
+  if (record.payloadVersion === required) return true
+  const components = record.components
+  if (typeof components !== 'object' || components === null || Array.isArray(components)) return false
+  const kit = components.kit
+  const python = components.python
+  if (typeof kit !== 'string' || kit === '' || kit !== required) return false
+  if (typeof python !== 'string' || python === '') return false
+  return record.payloadVersion === `${kit}-py${python}`
+}
+
 /** Fields the reader requires, and their accepted shapes. */
 const COMPONENT_KEYS = ['kit', 'engine', 'python']
 
@@ -131,7 +167,7 @@ export function officePayloadManifestProblems(value, target, expectedVersion) {
   const record = value
   if (typeof record.payloadVersion !== 'string' || !/^[0-9A-Za-z][0-9A-Za-z._+-]*$/u.test(record.payloadVersion)) {
     problems.push('manifest.payloadVersion is missing or not a version-shaped string')
-  } else if (expectedVersion !== undefined && expectedVersion !== null && record.payloadVersion !== expectedVersion) {
+  } else if (expectedVersion !== undefined && expectedVersion !== null && !payloadVersionServes(record, expectedVersion)) {
     problems.push(`the payload is version ${record.payloadVersion}, but this kernel requires ${expectedVersion}`)
   }
   if (typeof record.dshVersion !== 'string' || record.dshVersion === '') problems.push('manifest.dshVersion is missing')

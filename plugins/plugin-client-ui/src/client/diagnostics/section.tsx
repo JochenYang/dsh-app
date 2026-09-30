@@ -384,7 +384,12 @@ export function DiagnosticsSection({ t }: DiagnosticsSectionProps): ReactNode {
   const payloadSupported = payloadState !== undefined && payloadState.supported !== false
   const payloadInstalled = payloadState?.installed ?? null
   const payloadRequired = payloadState?.required ?? null
-  const payloadInstalledNow = payloadInstalled !== null && payloadInstalled === payloadRequired
+  // Non-null IS "installed": the shell publishes a version only when it
+  // satisfies the requirement, and that version need not be the spelling
+  // `required` uses — a kernel requiring the kit alone is served by that kit
+  // plus its Python set. Keying on equality here reported that served case as an
+  // update, and the update could only ever end in the same payload again.
+  const payloadInstalledNow = payloadInstalled !== null
   // A complete payload on disk while the kernel requires a different version:
   // an upgrade, not a first install. The two read very differently ("update to
   // v0.1.2" vs "download v0.1.2") and only the shell can tell them apart, so the
