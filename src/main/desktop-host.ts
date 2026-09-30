@@ -188,12 +188,13 @@ const RESPONSE_FRAME_ERROR = 4
  * `ready` belong to the transport the shell started the child on (the frames
  * one reports a protocol version and the dsh version, the web one a URL and the
  * index injection table), and `handleMessage` refuses whichever pair does not
- * match. `shutdown-complete` and `update-tasks` are the web transport's own
- * messages — the first is upstream's teardown acknowledgement, the second its
- * update handoff, which this shell's updater does not use. `platform-session`
- * is upstream's account-session report, which this shell has no surface for
- * (see {@link handleMessage}); it is listed so the union stays the complete
- * set of messages the 0.1.7 host line sends.
+ * match. `shutdown-complete`, `update-tasks` and `quit-inspection` are the web
+ * transport's own messages: the first is the teardown acknowledgement, and the
+ * other two are the child's answers to the task questions the shell asks before
+ * it replaces the app (see {@link DshHost.inspectQuit} / {@link DshHost.askHostTasks}).
+ * `platform-session` is upstream's account-session report, which this shell has
+ * no surface for (see {@link handleMessage}); it is listed so the union stays the
+ * complete set of messages the 0.1.7 host line sends.
  *
  * An unknown tag is NOT a fatal condition — see {@link DshHost.startAttempt}.
  */
@@ -214,9 +215,34 @@ type HostEvent = {
   readonly active: boolean
   readonly error?: string
 } | {
+  readonly type: 'quit-inspection'
+  readonly requestId: number
+  readonly activeTasks: boolean
+  readonly scheduledTasks: boolean
+  readonly error?: string
+} | {
   readonly type: 'platform-session'
   readonly session: unknown
 }
+
+/**
+ * What the child answers to a question the shell asked it. Both are one shape
+ * for the caller: whether stopping the host now would interrupt work, and what
+ * the child said if it could not tell.
+ */
+export interface HostTaskAnswer {
+  /** True when stopping the host would interrupt work — the safe reading when unknown. */
+  readonly active: boolean
+  /** The child's own diagnostic when it could not answer; absent on a clean answer. */
+  readonly error?: string
+}
+
+/**
+ * The question kinds this shell asks the host. `inspect` reports whether work
+ * would be interrupted; `lock` does the same after refusing new API requests and
+ * draining the ones already admitted; `unlock` releases that refusal.
+ */
+export type HostTaskAction = 'inspect' | 'lock' | 'unlock'
 
 /** One decoded response-pipe frame. */
 type ResponseFrame = {
@@ -1129,6 +1155,14 @@ export class DshHost implements DshAppTarget {
   private exitPromise: Promise<void> | undefined
   private settleReady!: () => void
   private failReady!: (error: Error) => void
+  /**
+   * In-flight `update-tasks` / `quit-inspection` exchanges, by request id. The
+   * child answers each on the IPC channel with the same id; a request that is
+   * never answered must not hang a quit, so every wait is bounded by the
+   * caller's own timeout (see {@link askHostTasks}).
+   */
+  private readonly hostQuestions = new Map<number, (event: HostTaskAnswer) => void>()
+  private nextQuestionId = 1
   private readyPromise = new Promise<void>((resolve, reject) => {
     this.settleReady = resolve
     this.failReady = reject
@@ -1481,6 +1515,100 @@ export class DshHost implements DshAppTarget {
     return forwardHostWebRequest(request, session)
   }
 
+  /**
+   * Ask the host whether stopping it now would interrupt work, optionally
+   * locking admission first.
+   *
+   * This is the host's OWN answer, not a guess: the child counts a generating or
+   * tool-running agent (subagents and turns waiting for approval included),
+   * queued inbox messages, and running or stopping background jobs (see its
+   * `hasDesktopActiveTasks`). The shell needs it because quitting to install
+   * kills whatever is running, and that must not happen silently.
+   *
+   * A `lock` additionally refuses NEW API requests and drains the admitted ones
+   * before answering, which is what makes the answer the final word: nothing can
+   * start between the answer and the quit.
+   *
+   * Every failure reads as ACTIVE. The child treats an unanswerable inspection
+   * the same way ("the shell treats an unknown state as interruptible work and
+   * asks before quitting"), and so must we: the caller is deciding whether to
+   * kill a process, so the safe default is the one that does not.
+   *
+   * @param action - `inspect` to ask, `lock` to ask and hold, `unlock` to release.
+   * @param timeoutMs - how long to wait for the answer before reading it as active.
+   * @returns the child's answer, or `{ active: true }` when it could not be read.
+   */
+  async askHostTasks(action: HostTaskAction, timeoutMs: number): Promise<HostTaskAnswer> {
+    const child = this.child
+    // A frames-transport child (≤0.1.5) has no such control, and a child that is
+    // already gone has no work left to interrupt — the second is a clean `false`,
+    // the first must read as active because its work is invisible to us.
+    if (child === undefined || child.exitCode !== null || child.killed || !child.connected) {
+      return { active: child !== undefined }
+    }
+    if (this.transport !== 'web') return { active: true }
+    const requestId = this.nextQuestionId++
+    const answer = new Promise<HostTaskAnswer>((resolve) => {
+      this.hostQuestions.set(requestId, resolve)
+    })
+    try {
+      child.send({ type: 'update-tasks', requestId, action })
+    } catch (err) {
+      this.hostQuestions.delete(requestId)
+      return { active: true, error: (err as Error).message }
+    }
+    // The timer is what keeps a lost answer from hanging a quit forever; the
+    // entry is removed here rather than by the answer, so a late reply finds
+    // nothing and cannot settle a later question.
+    const timeout = new Promise<HostTaskAnswer>((resolve) => {
+      setTimeout(() => {
+        if (this.hostQuestions.delete(requestId)) resolve({ active: true, error: 'the host did not answer in time' })
+      }, timeoutMs).unref?.()
+    })
+    return Promise.race([answer, timeout])
+  }
+
+  /**
+   * Ask the host whether it is holding work a quit would destroy.
+   *
+   * `quit-inspection` is the child's quit-specific question (0.1.7-rc.2 and later;
+   * it also reports scheduled tasks). A host that predates it IGNORES the request
+   * rather than refusing it, so the fallback cannot be a caught send error — it is
+   * the timeout: a question that went unanswered is re-asked through
+   * `update-tasks`, which every web-transport host line has answered. If that also
+   * goes unanswered the answer is still `active: true`, exactly as
+   * {@link askHostTasks} reads it.
+   *
+   * @param timeoutMs - how long to wait for each question before reading it as active.
+   * @returns whether a quit would interrupt work.
+   */
+  async inspectQuit(timeoutMs: number): Promise<HostTaskAnswer> {
+    const child = this.child
+    if (child === undefined || child.exitCode !== null || child.killed || !child.connected) {
+      return { active: child !== undefined }
+    }
+    if (this.transport !== 'web') return { active: true }
+    const requestId = this.nextQuestionId++
+    const answer = new Promise<HostTaskAnswer>((resolve) => {
+      this.hostQuestions.set(requestId, resolve)
+    })
+    try {
+      child.send({ type: 'quit-inspection', requestId })
+    } catch (err) {
+      this.hostQuestions.delete(requestId)
+      return this.askHostTasks('inspect', timeoutMs)
+    }
+    const timeout = new Promise<HostTaskAnswer | null>((resolve) => {
+      setTimeout(() => {
+        if (this.hostQuestions.delete(requestId)) resolve(null)
+      }, timeoutMs).unref?.()
+    })
+    const settled = await Promise.race([answer, timeout])
+    // A null here is the timeout: the request was ignored (a host older than
+    // 0.1.7-rc.2) or the host is stuck. Re-ask the way every line answers.
+    return settled ?? this.askHostTasks('inspect', timeoutMs)
+  }
+
   /** Request teardown and wait for the child to be gone. */
   async stop(): Promise<void> {
     const child = this.child
@@ -1754,12 +1882,25 @@ export class DshHost implements DshAppTarget {
         this.fail(new Error(redact(message.message)))
         return
       case 'shutdown-complete':
-      case 'update-tasks':
-        // The web transport's own handshake extras. The shutdown acknowledgement
-        // needs no bookkeeping (stop() waits for the process itself, which is
-        // what proves the teardown), and the update-task control is upstream's
-        // update handoff — this shell's updater replaces the app, not the host.
+        // The shutdown acknowledgement needs no bookkeeping: stop() waits for the
+        // process itself, which is what proves the teardown.
         return
+      case 'update-tasks':
+      case 'quit-inspection': {
+        // An ANSWER to a question this shell asked (see `askHostTasks` and
+        // `inspectQuit`). Both carry the same two fields, and both are read the
+        // same way: `active` / `activeTasks` says whether work is in flight, and
+        // `error` is the child's diagnostic when it could not tell. A request id
+        // nobody is waiting on is dropped — a late answer after a timeout must
+        // not settle a later question.
+        const waiting = this.hostQuestions.get(message.requestId)
+        if (waiting === undefined) return
+        this.hostQuestions.delete(message.requestId)
+        waiting(message.type === 'update-tasks'
+          ? { active: message.active, ...(message.error === undefined ? {} : { error: message.error }) }
+          : { active: message.activeTasks, ...(message.error === undefined ? {} : { error: message.error }) })
+        return
+      }
       case 'platform-session':
         // Upstream's account-session report (0.1.7+): the credential snapshot an
         // embedded Platform view (usage / top-up) needs. Upstream delivers it over
@@ -1840,6 +1981,10 @@ function isHostEvent(message: unknown): message is HostEvent {
       return true
     case 'update-tasks':
       return Number.isSafeInteger(message.requestId) && typeof message.active === 'boolean'
+        && (message.error === undefined || typeof message.error === 'string')
+    case 'quit-inspection':
+      return Number.isSafeInteger(message.requestId) && typeof message.activeTasks === 'boolean'
+        && typeof message.scheduledTasks === 'boolean'
         && (message.error === undefined || typeof message.error === 'string')
     case 'platform-session':
       // The payload is deliberately unread (see `handleMessage`): accepting the

@@ -162,6 +162,24 @@ if (problems.length > 0) {
   })
   process.on('message', (message) => {
     if (message && message.type === 'shutdown') { server.close(); process.exit(0) }
+    // The two task questions the shell now asks before it replaces the app (see
+    // DshHost.inspectQuit / askHostTasks). Answered here the way the real host
+    // answers them, so the shell's own exchange is exercised end to end rather
+    // than against a stub of our own making: FAKE_WEB_TASKS picks the verdict,
+    // and an absent env var leaves the request unanswered — which is how the
+    // "the host never answers" path gets tested.
+    if (message && message.type === 'quit-inspection' && process.env.FAKE_WEB_TASKS !== 'silent') {
+      // 'no-quit-inspection' models a host older than 0.1.7-rc.2: it IGNORES the
+      // tag rather than refusing it, so the shell must fall back on its own.
+      if (process.env.FAKE_WEB_TASKS !== 'no-quit-inspection') {
+        process.send({ type: 'quit-inspection', requestId: message.requestId,
+          activeTasks: process.env.FAKE_WEB_TASKS === 'busy', scheduledTasks: false })
+      }
+    }
+    if (message && message.type === 'update-tasks' && process.env.FAKE_WEB_TASKS !== 'silent') {
+      process.send({ type: 'update-tasks', requestId: message.requestId,
+        active: process.env.FAKE_WEB_TASKS === 'busy' })
+    }
   })
 }
 `
@@ -609,4 +627,94 @@ test('the leaf follows the payload when it moves, and holds the interpreter when
   assert.equal(existsSync(path.join(leaf, 'runtime.json')), false, 'the pruned set is no longer reachable through the leaf')
   assert.ok(existsSync(path.join(leaf, LEAF_INTERPRETER)), 'the interpreter the child stats is there')
   assert.ok(existsSync(path.join(dataDirOf(runtime), 'office-skills', 'scripts', 'check_office.py')), 'the skills stay materialized')
+})
+
+// ---------------------------------------------- the task questions before a quit
+
+// Why these exist: the shell replaces the app by spawning the NSIS wizard and
+// quitting, and a quit kills whatever the host is running. The verdict must come
+// from the child's OWN answer (`quit-inspection` / `update-tasks` lock) rather
+// than from the shell's guess about itself. Every failure has to read as "work is
+// in flight" — the caller is deciding whether to kill a process — and that safe
+// direction is what these pin.
+
+test('an idle host answers both task questions with no work in flight', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2')
+  const run = await start(runtime, [], webStartOptions(runtime))
+  try {
+    assert.deepEqual(await run.host.inspectQuit(5_000), { active: false })
+    assert.deepEqual(await run.host.askHostTasks('lock', 5_000), { active: false })
+    assert.deepEqual(await run.host.askHostTasks('unlock', 5_000), { active: false })
+  } finally {
+    await run.host.stop()
+  }
+})
+
+test('a host with work in flight says so, and the answer is the child\'s', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2', 'accept', { FAKE_WEB_TASKS: 'busy' })
+  const run = await start(runtime, [], webStartOptions(runtime))
+  try {
+    // The verdict must come from the CHILD, not from the shell's own idea of
+    // whether it is busy: a shell that answered this itself would report `false`
+    // here while the host was mid-turn.
+    assert.equal((await run.host.inspectQuit(5_000)).active, true)
+    assert.equal((await run.host.askHostTasks('lock', 5_000)).active, true)
+  } finally {
+    await run.host.stop()
+  }
+})
+
+test('a host that never answers is read as busy, and the wait is bounded', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2', 'accept', { FAKE_WEB_TASKS: 'silent' })
+  const run = await start(runtime, [], webStartOptions(runtime))
+  try {
+    const started = Date.now()
+    const quit = await run.host.inspectQuit(700)
+    const elapsed = Date.now() - started
+    // `active: true` is the safe reading; the error names why, so the warning the
+    // user sees can say the host did not answer instead of pretending it was busy.
+    assert.equal(quit.active, true)
+    assert.match(String(quit.error), /did not answer/u)
+    // Bounded: an unanswerable question must not turn "install now" into a hang.
+    assert.ok(elapsed < 5_000, `the wait was bounded (took ${String(elapsed)}ms)`)
+  } finally {
+    await run.host.stop()
+  }
+})
+
+test('a host that is already gone has no work to interrupt', async () => {
+  const runtime = fakeWebRuntime('0.1.6-alpha.2')
+  const run = await start(runtime, [], webStartOptions(runtime))
+  await run.host.stop()
+  // A clean `false`, not an error and not `true`: there is no child left to
+  // destroy work in, and reading this as busy would make every quit warn.
+  assert.deepEqual(await run.host.inspectQuit(5_000), { active: false })
+})
+
+test('the frames transport is read as busy, because its work is invisible to us', async () => {
+  // A ≤0.1.5 host has no task control at all. Reporting `false` would let an
+  // install cut a running turn in half without a word; the shell cannot see that
+  // line's work, so the only safe answer is the warning.
+  const runtime = fakeRuntime('0.1.5-rc.2', 'accept')
+  const logs = []
+  const run = await start(runtime, logs)
+  try {
+    assert.equal((await run.host.inspectQuit(5_000)).active, true)
+  } finally {
+    await run.host.stop()
+  }
+})
+
+test('a host that ignores quit-inspection is re-asked through update-tasks', async () => {
+  // 0.1.7-rc.2 introduced `quit-inspection`; an older web host IGNORES the tag
+  // instead of refusing it, so no send error marks the gap — the timeout does.
+  // Without the fallback this host would always read as busy, and every install
+  // would warn for no reason on a perfectly idle machine.
+  const runtime = fakeWebRuntime('0.1.6-alpha.2', 'accept', { FAKE_WEB_TASKS: 'no-quit-inspection' })
+  const run = await start(runtime, [], webStartOptions(runtime))
+  try {
+    assert.deepEqual(await run.host.inspectQuit(700), { active: false })
+  } finally {
+    await run.host.stop()
+  }
 })

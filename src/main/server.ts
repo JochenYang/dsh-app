@@ -13,7 +13,7 @@
 import { app } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { DshHost, type DshHostOptions, type PlatformSession } from './desktop-host'
+import { DshHost, type DshHostOptions, type HostTaskAnswer, type PlatformSession } from './desktop-host'
 import { redact } from './redact'
 
 export interface ServerEvents {
@@ -104,6 +104,35 @@ export class DshServer {
     const host = this.host
     if (host === null) return Promise.reject(new Error('dsh host is not running'))
     return host.fetch(request)
+  }
+
+  /**
+   * Ask the host whether quitting now would interrupt work.
+   *
+   * The host's own answer, not a guess — see {@link DshHost.inspectQuit}. A
+   * shell with no host running has no work to interrupt, which is a clean `false`
+   * rather than an error: the caller asks this on the way out, where a failure
+   * must never block the quit.
+   *
+   * @param timeoutMs - how long to wait for the answer before reading it as active.
+   * @returns whether a quit would interrupt work, and the child's diagnostic if not.
+   */
+  inspectQuit(timeoutMs: number): Promise<HostTaskAnswer> {
+    return this.host === null ? Promise.resolve({ active: false }) : this.host.inspectQuit(timeoutMs)
+  }
+
+  /**
+   * Ask the host to refuse new API requests and report whether work is in flight.
+   *
+   * The lock is what makes the answer the final word: the host drains the
+   * requests it already admitted before answering, so nothing can start between
+   * the answer and the quit. See {@link DshHost.askHostTasks}.
+   *
+   * @param timeoutMs - how long to wait for the answer before reading it as active.
+   * @returns whether work is in flight, and the child's diagnostic if not.
+   */
+  lockHostForInstall(timeoutMs: number): Promise<HostTaskAnswer> {
+    return this.host === null ? Promise.resolve({ active: false }) : this.host.askHostTasks('lock', timeoutMs)
   }
 
   /**

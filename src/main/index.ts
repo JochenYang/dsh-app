@@ -42,8 +42,8 @@ import { closeDialogScript, type CloseDialogChoice } from './close-dialog'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
-import { initShellUpdater, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
-import { KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
+import { initShellUpdater, setHostTaskInspector, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
+import { HOST_TASK_INSPECT_TIMEOUT_MS, KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { healLogLine, healProfileDependencies, installIntoProfile, isInstallablePackageName, type ProfileHealOutcome } from './profile-heal'
 import { alignWindowStateWithLine } from './client-state'
@@ -1930,6 +1930,12 @@ async function boot(): Promise<void> {
   }
 
   initShellUpdater()
+  // The updater asks the HOST whether work is in flight before it replaces the
+  // app (see confirmNoActiveTasks): upstream's own install path inspects and
+  // locks the host first, and without this a silent install could cut a running
+  // turn in half. The question is answered by the live child, so the inspector
+  // reads `server` at call time rather than capturing it.
+  setHostTaskInspector(() => server.inspectQuit(HOST_TASK_INSPECT_TIMEOUT_MS))
   // Surface the previous silent-install result (if any) before the first
   // update-check runs, so an install failure is never silent.
   void consumeUpdaterInstallResult(mainWindow)

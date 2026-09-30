@@ -116,6 +116,16 @@ export const KERNEL_CHECK_INTERVAL_MS = 1000 * 60 * 60 * 6 // 6 hours
 export const HOST_READY_TIMEOUT_MS = 90_000
 
 /**
+ * How long the shell waits for the host to answer whether work is in flight
+ * before an app install replaces the process (see `DshHost.inspectQuit`).
+ *
+ * Bounded because the answer gates a quit the user already asked for: an
+ * unanswerable question must not turn "install now" into a hang. A timeout reads
+ * as "work is in flight", which surfaces the warning instead of skipping it.
+ */
+export const HOST_TASK_INSPECT_TIMEOUT_MS = 5_000
+
+/**
  * Grace period after `{type:'shutdown'}` plus closing the request pipe, before
  * the host is signalled. It has to cover a full plugin-tree dispose.
  */

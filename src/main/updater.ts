@@ -26,6 +26,87 @@ let initialized = false
 let busy = false
 
 /**
+ * Asks the kernel host whether work is in flight, injected by the shell at boot
+ * (see `setHostTaskInspector`).
+ *
+ * Injected rather than imported so this module keeps knowing nothing about the
+ * server: the updater decides WHEN to ask, the shell decides HOW. Unset means the
+ * question cannot be answered, which is read as "work may be in flight" — the
+ * safe direction for a decision that kills a process.
+ */
+let inspectHostTasks: (() => Promise<{ active: boolean; error?: string }>) | null = null
+
+/**
+ * Hand the updater a way to ask the host whether a quit would interrupt work.
+ * Called once at boot with the live server's own inspector.
+ * @param inspector - the shell's host-task question, or null to disable it.
+ */
+export function setHostTaskInspector(inspector: (() => Promise<{ active: boolean; error?: string }>) | null): void {
+  inspectHostTasks = inspector
+}
+
+/**
+ * Whether installing right now would interrupt work, and the diagnostic when the
+ * host could not say. A missing inspector or a failed one both read as active —
+ * this gates a quit that kills a running turn.
+ * @returns the verdict, with `unknown` set when it came from a failure.
+ */
+async function hostTasksActive(): Promise<{ active: boolean; detail?: string }> {
+  if (inspectHostTasks === null) return { active: true, detail: 'no host inspector is registered' }
+  try {
+    const answer = await inspectHostTasks()
+    return answer.error === undefined ? { active: answer.active } : { active: true, detail: answer.error }
+  } catch (err) {
+    return { active: true, detail: (err as Error).message }
+  }
+}
+
+/**
+ * The last gate before the installer replaces the running app: warn when the host
+ * still holds work.
+ *
+ * Installing spawns the NSIS wizard and quits, and a quit kills whatever the host
+ * is running — a generating reply, a tool call, a background job. Without this
+ * check that happens silently, so the user is told before the process goes away.
+ * The prompt is a warning rather than a veto: the update is theirs to take, but
+ * it must never be silent.
+ *
+ * @param win - the window hosting the prompt.
+ * @returns true when the install should go ahead.
+ */
+async function confirmNoActiveTasks(win: BrowserWindow | null): Promise<boolean> {
+  const { active, detail } = await hostTasksActive()
+  if (!active) return true
+  const message = detail === undefined
+    ? t('updater.tasksRunningMessage')
+    : t('updater.tasksUnknown', { detail })
+  const proceed = await confirmInFrame(
+    {
+      title: t('updater.tasksRunningTitle', { app: APP_NAME }),
+      message,
+      detail: t('updater.tasksRunningDetail'),
+      buttons: [
+        { label: t('updater.tasksRunningWait'), value: 'wait' },
+        { label: t('updater.tasksRunningInstallAnyway'), value: 'install', primary: true },
+      ],
+      cancelValue: 'wait',
+      enterValue: 'install',
+    },
+    {
+      type: 'warning',
+      title: t('updater.tasksRunningTitle', { app: APP_NAME }),
+      message,
+      detail: t('updater.tasksRunningDetail'),
+      buttons: [t('updater.tasksRunningInstallAnyway'), t('updater.tasksRunningWait')],
+      defaultId: 1,
+      cancelId: 1,
+    },
+    'install',
+  )
+  return proceed
+}
+
+/**
  * macOS/Linux (`electron-updater`) flow state. Those listeners are registered
  * once at boot, before any window exists and before any check knows whether
  * the user asked for it, so the check has to be remembered for them: `manual`
@@ -922,6 +1003,9 @@ async function downloadAndInstallPackage(
     'install',
   )
   if (!install) return
+  // The last gate before the app is replaced: a host that still holds work must
+  // be named, not silently killed (see confirmNoActiveTasks).
+  if (!await confirmNoActiveTasks(win)) return
   // VISIBLE NSIS install: the app must be closed so the installer can
   // replace the running binaries; the wizard then shows the same flow as a
   // first-time install (user clicks through, completion page relaunches

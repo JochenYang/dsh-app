@@ -241,6 +241,12 @@ const ZH_CN = {
   'updater.devCheckSame': '开发模式下不支持自动更新应用（当前运行的是未打包构建）。\n当前版本 v{current}，远端为同一版本。',
   'updater.devCheckFailed': '开发模式下不支持自动更新应用，且远端版本检查失败：{detail}',
   'updater.previousIncomplete': '上次应用更新未完成（当前仍为 v{current}），可从托盘「检查应用更新」重试',
+  'updater.tasksRunningTitle': '{app} 正在处理任务',
+  'updater.tasksRunningMessage': '检测到仍有任务在运行（生成回复、调用工具或后台作业）。',
+  'updater.tasksRunningDetail': '现在安装会中断这些任务。可以稍后安装，或仍然继续。',
+  'updater.tasksRunningInstallAnyway': '仍然继续',
+  'updater.tasksRunningWait': '稍后安装',
+  'updater.tasksUnknown': '无法确认是否有任务在运行（{detail}），已按「有任务」处理。',
 
   // --------------------------------------------------- kernel runtime copy
   // Errors thrown while resolving/installing a kernel. Actionable, and free of
@@ -523,6 +529,12 @@ const EN_US: Record<MessageKey, string> = {
   'updater.devCheckSame': 'Automatic app updates are not supported in dev mode (this is an unpackaged build).\nCurrent version v{current}; the remote offers the same version.',
   'updater.devCheckFailed': 'Automatic app updates are not supported in dev mode, and the remote version check failed: {detail}',
   'updater.previousIncomplete': 'The last app update did not complete (still running v{current}); retry from the tray menu via "Check for app updates"',
+  'updater.tasksRunningTitle': '{app} is working on a task',
+  'updater.tasksRunningMessage': 'Tasks are still running (generating a reply, calling a tool, or a background job).',
+  'updater.tasksRunningDetail': 'Installing now interrupts them. You can install later, or continue anyway.',
+  'updater.tasksRunningInstallAnyway': 'Continue anyway',
+  'updater.tasksRunningWait': 'Install later',
+  'updater.tasksUnknown': 'Could not confirm whether tasks are running ({detail}); treated as if they are.',
 
   // --------------------------------------------------- kernel runtime copy
   'kernel.devCheckoutMissing': 'Dev mode needs devCheckoutDir (the local deepseek-harness source directory)',
