@@ -38,14 +38,19 @@ import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 export type SwarmItemStatus = 'completed' | 'failed' | 'aborted'
 
 /**
- * Why a failed item failed. Only `transport` feeds adaptive scheduling and
- * automatic retry: it names provider/network conditions the batch can outlast.
+ * Why a failed item failed. `transport` names provider/network conditions the
+ * batch can outlast and `capacity` names the kernel's own live-child limit —
+ * both feed adaptive scheduling, because in both cases the batch is asking for
+ * more concurrency than the deployment currently grants. They differ on retry:
+ * a transport failure is worth an automatic follow-up, while a capacity
+ * rejection must NOT be retried on its own (the slot is still taken; the same
+ * launch fails identically) — the item goes back to the queue instead.
  * `content` names the task itself (refusal, token ceiling, model-side error) —
  * throttling the pool for it would punish healthy children. `structural` names
- * an unsound call (launch rejection, capability violation) — retrying the same
+ * an unsound call (capability violation, malformed request) — retrying the same
  * call fails identically.
  */
-export type SwarmFailureKind = 'transport' | 'content' | 'structural'
+export type SwarmFailureKind = 'transport' | 'content' | 'structural' | 'capacity'
 
 /**
  * Provider-neutral failure codes that name transient transport conditions
@@ -72,6 +77,14 @@ const RETRYABLE_FAILURE_CODES: ReadonlySet<string> = new Set([
   'SERVER',
   'EMPTY_RESPONSE',
 ])
+
+/**
+ * The kernel's live-child limit rejection (`dsh-subagent`'s `ActivationPool`).
+ * A batch that asks for more children than the pool grants gets this code; the
+ * slot is still held by a resident child, so the correct response is to shrink
+ * the pool and re-queue, never to retry the same launch immediately.
+ */
+const ACTIVATION_LIMIT_CODE = 'ACTIVATION_LIMIT_REACHED'
 
 /** One item's aggregated outcome. */
 export interface SwarmItemOutcome {
@@ -194,6 +207,21 @@ export interface SwarmBatchOptions {
   readonly itemMaxRetries?: number
   /** Base backoff before the first item retry, doubling per attempt (ms). */
   readonly itemRetryDelayMs?: number
+  /**
+   * Base backoff before a capacity-rejected item is offered to the pool again,
+   * growing linearly per requeue up to `capacityRequeueDelayCapMs`. Defaults to
+   * `CAPACITY_REQUEUE_DELAY_MS`; injectable so a test does not wait out the
+   * real schedule.
+   */
+  readonly capacityRequeueDelayMs?: number
+  /** Ceiling the capacity requeue backoff grows to (ms). */
+  readonly capacityRequeueDelayCapMs?: number
+  /**
+   * How many times one item may be re-queued against the kernel's live-child
+   * limit before the batch reports it as a capacity failure. Defaults to
+   * `MAX_CAPACITY_REQUEUES`.
+   */
+  readonly maxCapacityRequeues?: number
   /** Optional child model routing. */
   readonly agentOptions?: AgentOptions
   /**
@@ -363,9 +391,10 @@ function liveChildSession(ctx: Context, childId: string): ChildSessionSlice | un
   }
 }
 
-/** Classify a settled failure: only transport feeds throttling and retry. */
+/** Classify a settled failure: transport and capacity both feed throttling. */
 function classifySettle(stopReason: SubagentResult['stopReason'], code: string | undefined): SwarmFailureKind {
   if (code !== undefined) {
+    if (code === ACTIVATION_LIMIT_CODE) return 'capacity'
     return TRANSPORT_FAILURE_CODES.has(code) ? 'transport' : 'content'
   }
   // No code recoverable: `max-tokens`/`refusal` are content by definition; a
@@ -377,8 +406,9 @@ function classifySettle(stopReason: SubagentResult['stopReason'], code: string |
 /** Classify a launch-phase rejection (start/sendMessage threw). */
 function classifyLaunchError(error: unknown): SwarmFailureKind {
   const code = (error as { code?: unknown }).code
-  if (typeof code === 'string' && TRANSPORT_FAILURE_CODES.has(code)) return 'transport'
-  return 'structural'
+  if (typeof code !== 'string') return 'structural'
+  if (code === ACTIVATION_LIMIT_CODE) return 'capacity'
+  return TRANSPORT_FAILURE_CODES.has(code) ? 'transport' : 'structural'
 }
 
 /** Whether a failed outcome qualifies for the automatic retry lane. */
@@ -483,6 +513,26 @@ const ADAPTIVE_GROW_STREAK = 4
 const ADAPTIVE_STAGGER_CAP_MS = 30_000
 
 /**
+ * Delay before a capacity-rejected item is offered to the pool again, and the
+ * ceiling that delay grows to. The rejection means every slot was taken, so the
+ * batch waits for a resident child to settle instead of spinning. Kept well
+ * under the item-retry delay: this waits for a slot to free, not for an outage
+ * to pass.
+ */
+const CAPACITY_REQUEUE_DELAY_MS = 500
+const CAPACITY_REQUEUE_DELAY_CAP_MS = 5_000
+
+/**
+ * How many times one item may be re-queued against the kernel's live-child
+ * limit before the batch reports it. The limit is shared with the model's own
+ * delegations, so an item can legitimately outlast several waves while the
+ * gate shrinks toward the capacity actually available; the bound exists so a
+ * permanently saturated pool degrades to an honest per-item capacity failure
+ * instead of an unbounded wait.
+ */
+const MAX_CAPACITY_REQUEUES = 20
+
+/**
  * Follow-up message that revives an error-settled child for an automatic
  * retry. The child's session is intact, so this tells it to resume from the
  * interruption point instead of redoing finished work.
@@ -581,6 +631,28 @@ export class AdaptiveGate {
     this.active = Math.max(0, this.active - 1)
     const next = this.waiters.values().next()
     if (!next.done) next.value()
+  }
+
+  /**
+   * Feed one capacity rejection back into the limit.
+   *
+   * Unlike a transport failure, this says nothing about the deployment's
+   * sustainable rate: the kernel's live-child pool is shared with the model's
+   * own delegations, so the wall moves as unrelated children settle. Shrink
+   * the live limit now — the batch must stop asking for more than it can get —
+   * but leave the learned ceiling and the exploration bound alone, so the
+   * clean-streak growth can re-probe once slots free.
+   * @returns whether the limit actually shrank, for launch pacing.
+   */
+  noteCapacity(): 'shrunk' | undefined {
+    if (!this.enabled) return undefined
+    this.streak = 0
+    const shrunken = Math.max(1, Math.floor(this.limit / 2))
+    if (shrunken < this.limit) {
+      this.limit = shrunken
+      return 'shrunk'
+    }
+    return undefined
   }
 
   /**
@@ -970,6 +1042,9 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
   const gate = new AdaptiveGate(options.concurrency, ceiling, adaptive, exploreCeiling)
   const maxRetries = Math.max(0, options.itemMaxRetries ?? 0)
   const retryDelayMs = Math.max(0, options.itemRetryDelayMs ?? 15_000)
+  const capacityRequeueBaseMs = Math.max(0, options.capacityRequeueDelayMs ?? CAPACITY_REQUEUE_DELAY_MS)
+  const capacityRequeueCapMs = Math.max(0, options.capacityRequeueDelayCapMs ?? CAPACITY_REQUEUE_DELAY_CAP_MS)
+  const maxCapacityRequeues = Math.max(0, options.maxCapacityRequeues ?? MAX_CAPACITY_REQUEUES)
   const tokenBudget = Math.max(0, options.tokenBudget ?? 0)
   let budgetStop = false
   let usageSeen = false
@@ -977,6 +1052,8 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
   let batchOutput = 0
   let batchTotal = 0
   let cursor = 0
+  /** Per-item capacity requeues, so one item cannot spin against the wall forever. */
+  const capacityAttempts = new Map<number, number>()
   interface RetryEntry {
     readonly task: SwarmTask
     readonly retries: number
@@ -1074,6 +1151,40 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
         gate.release()
       }
       accountUsage(outcome)
+      // Capacity backpressure is not the item's failure: the kernel refused the
+      // reservation because every live-child slot was already taken (its pool is
+      // shared with the model's own delegations, not owned by this batch). Shrink
+      // the pool so the batch stops asking for more than the deployment grants,
+      // then put the item back in the queue for a later wave. Retrying it
+      // immediately would hit the same wall, and charging it to the item retry
+      // budget would blame the item for a limit it does not control.
+      if (outcome.status === 'failed' && outcome.failureKind === 'capacity' && !budgetStop) {
+        const attempts = (capacityAttempts.get(task.index) ?? 0) + 1
+        capacityAttempts.set(task.index, attempts)
+        if (attempts <= maxCapacityRequeues) {
+          retryQueue.push({
+            task,
+            retries,
+            notBefore: Date.now() + Math.min(capacityRequeueBaseMs * attempts, capacityRequeueCapMs),
+          })
+          // The rejection is real concurrency feedback: shrink the live limit
+          // now and let the clean-streak growth re-probe as slots free. The
+          // learned ceiling is deliberately left intact (see noteCapacity).
+          const adjustment = gate.noteCapacity()
+          if (adjustment === 'shrunk') {
+            clock.setStagger(Math.min(clock.stagger * 2, ADAPTIVE_STAGGER_CAP_MS))
+          }
+          continue
+        }
+        // Patience exhausted: record it as the capacity failure it is, with the
+        // bound named so the model can decide to resume later rather than
+        // reading it as a task-level defect.
+        outcomes[task.index] = {
+          ...outcome,
+          error: `${outcome.error ?? 'launch rejected'}; still at the kernel's live-child limit after ${maxCapacityRequeues} requeues — resume this item once other children finish`,
+        }
+        continue
+      }
       // An error-settled continuable child is a retry candidate: its session
       // survives the error, so a follow-up continues from where it stopped.
       // Only retryable transport failures qualify — retrying a content

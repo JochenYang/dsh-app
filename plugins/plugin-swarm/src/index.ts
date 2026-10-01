@@ -23,6 +23,14 @@
  * no context prototype mutation, no process-wide state. A kernel without the
  * subagent provider simply never mounts the tool or the command.
  *
+ * Capacity discipline: the kernel's continuable-child pool is keyed per ROOT
+ * agent, so a batch shares it with the model's own delegations rather than
+ * owning it. Reaching that limit is therefore treated as backpressure, not as
+ * an item failure: the pool shrinks and the item is re-queued (see
+ * `runSwarmBatch` and `AdaptiveGate.noteCapacity`). The `subagent` row's
+ * `maxActiveSubagents` and this plugin's `maxConcurrency` are tuned together
+ * in `dsh-app.patch.yml`.
+ *
  * @module @dsh-app/plugin-swarm
  */
 
@@ -79,6 +87,13 @@ const SWARM_SECTION_ORDER = 116.6
  * max_concurrency: clean streaks at the configured ceiling may probe upward
  * to this value. Matches the default maxItems — a pool larger than the batch
  * is pointless anyway.
+ *
+ * This bounds what the batch will TRY, not what the deployment grants: the
+ * kernel's own live-child limit (`dsh-subagent` `maxActiveSubagents`) is
+ * shared with the model's delegations, and a rejection past it is handled as
+ * capacity backpressure (the pool shrinks and the item is re-queued) rather
+ * than a failed item. A batch only ever reaches this value by proving the
+ * headroom wave by wave.
  */
 const SWARM_EXPLORE_CEILING = 64
 
@@ -106,13 +121,17 @@ export interface Config {
   maxItems: Volatile<number>
   /** Worker-pool size when the model does not request one (default 4). */
   defaultConcurrency: Volatile<number>
-  /** Hard cap on worker-pool size (default 8). */
+  /** Hard cap on worker-pool size (default 8). Keep this at or below the
+   * `subagent` row's `maxActiveSubagents` minus a margin: the kernel's pool is
+   * shared with the model's own delegations. */
   maxConcurrency: Volatile<number>
   /**
    * Adaptive scheduling: item failures halve the live pool (floor 1) and
    * double the start stagger (cap 30s); a streak of clean completions grows
    * the pool back toward maxConcurrency and eases the stagger to base
-   * (default true).
+   * (default true). A kernel capacity rejection (its live-child limit, shared
+   * with the model's own delegations) halves the pool the same way but leaves
+   * the learned ceiling intact, and re-queues the item instead of failing it.
    */
   adaptive: Volatile<boolean>
   /**
@@ -587,9 +606,11 @@ export function apply(ctx: Context, baseConfig: Config): void {
                   error: { type: 'string' },
                   // Why a failed item failed: transport (provider/network;
                   // throttles the pool, auto-retried unless terminal like
-                  // QUOTA), content (the task itself), structural (the call
-                  // was unsound).
-                  failureKind: { type: 'string', enum: ['transport', 'content', 'structural'] },
+                  // QUOTA), capacity (the kernel's live-child limit was
+                  // reached; throttles the pool and the item is re-queued
+                  // rather than retried in place), content (the task itself),
+                  // structural (the call was unsound).
+                  failureKind: { type: 'string', enum: ['transport', 'content', 'structural', 'capacity'] },
                   // The provider-neutral failure code (e.g. RATE_LIMIT).
                   failureCode: { type: 'string' },
                   // Wall time of this item's settled attempt(s) in ms.
@@ -732,14 +753,18 @@ export function apply(ctx: Context, baseConfig: Config): void {
           // Every child failed: surface the batch as a tool error so the model
           // retries or escalates instead of treating the batch as a success.
           // The dominant failure class decides the advice: transport outages
-          // are worth a wholesale resume, content failures need better items.
+          // are worth a wholesale resume, capacity saturation needs the batch
+          // to run smaller, content failures need better items.
           const failures = outcome.items.filter(item => item.status === 'failed')
           const transportCount = failures.filter(item => item.failureKind === 'transport').length
+          const capacityCount = failures.filter(item => item.failureKind === 'capacity').length
           const advice = failures.every(item => item.failureCode === 'QUOTA')
             ? 'the account quota/balance is exhausted — top up or switch provider, then resume the failed children via resume_entries'
-            : transportCount === failures.length
-              ? 'all failures look transient (provider/network); wait a moment, then resume the failed children via resume_entries'
-              : 'failures are content/structural, not transient — revise the failing items instead of retrying them unchanged'
+            : capacityCount === failures.length
+              ? 'every failure was the kernel\'s live-child limit, not the tasks — rerun with a smaller max_concurrency, or resume the failed children via resume_entries once other children have finished'
+              : transportCount === failures.length
+                ? 'all failures look transient (provider/network); wait a moment, then resume the failed children via resume_entries'
+                : 'failures are content/structural, not transient — revise the failing items instead of retrying them unchanged'
           const detail = failures
             .map(item => `[${item.index}] ${item.item}: ${item.error ?? 'unknown failure'}`)
             .join('\n')

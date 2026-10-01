@@ -125,18 +125,25 @@
         # so the pool discovers gateway headroom on its own; a probe failure
         # relearns the ceiling below the failed level. An explicit
         # max_concurrency tool argument pins the pool (no exploration).
+        # maxConcurrency is held at 12 against the `subagent` row's
+        # maxActiveSubagents of 16 (see that row): the four-slot margin keeps
+        # the model's own delegations from competing with a full batch for the
+        # last slot. The 64-level probe above that ceiling is still reachable
+        # only by clean streaks, and a probe past the kernel's pool is handled
+        # as capacity backpressure — the item is re-queued, not failed.
         # Item-level auto-retry stacks on top: an item whose turn dies to a
         # transient provider error is followed up on the preserved child
         # session after an exponential backoff (15s, 30s), continuing from
         # the interruption point rather than restarting. Provider-level
         # request retries absorb sub-minute hiccups; this turn-level lane
         # absorbs the outages that exhaust them. Failures classify as
-        # transport/content/structural from the child session's turn/end
-        # error code — only transport failures throttle the pool and qualify
-        # for auto-retry.
+        # transport/capacity/content/structural from the child session's
+        # turn/end error code — transport and capacity failures throttle the
+        # pool, and only transport qualifies for auto-retry (a capacity
+        # rejection re-queues the item instead, since the slot is still held).
         adaptive: true
         defaultConcurrency: 8
-        maxConcurrency: 16
+        maxConcurrency: 12
         startStaggerMs: 1000
         itemMaxRetries: 2
         itemRetryDelayMs: 15000
@@ -279,6 +286,27 @@
   config:
     path: ':memory:'
     openAt: first-search
+
+# Continuable-subagent capacity, raised from the kernel's default of 8.
+#
+# This pool is SHARED, not swarm's own: the kernel keys it per root agent
+# (`dsh-subagent` `ContinuableActivationRegistry.rootPool`), so the model's own
+# delegations and every `swarm` batch draw on the same slots. The default of 8
+# is also exactly what the swarm row's steady-state pool asks for, which left
+# the adaptive pool's upward probes with nowhere to go: a probe that crossed 8
+# was rejected with ACTIVATION_LIMIT_REACHED.
+#
+# 16 with swarm capped at 12 keeps a deliberate margin — four slots stay free
+# for the model's own delegation while a full batch runs, so the two paths stop
+# competing for the last slot. Raising this number raises the ceiling for the
+# WHOLE process, not just for swarm; that is the trade being made here.
+#
+# The base bundle's own row carries no config, so this patch adds the field
+# rather than replacing one. Patch semantics replace a row's whole `config`, so
+# any field a future kernel line adds to that row must be copied here.
+- id: subagent
+  config:
+    maxActiveSubagents: 16
 
 # Schedule: session-scoped reminders (schedule_create/list/delete tools +
 # read-only schedule directory in the session header). Only the schedule

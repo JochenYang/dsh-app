@@ -104,6 +104,21 @@ test('AdaptiveGate: disabled mode pins the limit and feedback is a no-op', () =>
   assert.equal(gate.noteSettled('completed'), undefined)
 })
 
+test('AdaptiveGate: noteCapacity halves the live limit but leaves the ceiling and exploration bound alone', () => {
+  const gate = new AdaptiveGate(8, 12, true, 64)
+  assert.equal(gate.noteCapacity(), 'shrunk') // 8 → 4
+  assert.equal(gate.noteCapacity(), 'shrunk') // 4 → 2
+  assert.equal(gate.noteCapacity(), 'shrunk') // 2 → 1
+  assert.equal(gate.noteCapacity(), undefined) // floor 1
+  // The learned ceiling must NOT move: capacity is shared and transient, so the
+  // clean-streak growth has to be able to re-probe once slots free.
+  assert.equal(gate.learnedCeiling, 12)
+  // Contrast with a transport failure, which DOES lower the learned ceiling.
+  const transport = new AdaptiveGate(8, 12, true, 64)
+  transport.noteSettled('failed')
+  assert.equal(transport.learnedCeiling, 7)
+})
+
 // --- runSwarmBatch over a mocked seam ----------------------------------------
 
 interface MockChild {
@@ -254,6 +269,89 @@ test('runSwarmBatch (one-shot): the token budget stops launching; unstarted item
   assert.equal(outcome.budgetExhausted, true)
   assert.ok(outcome.items[2].error!.includes('budget'))
   assert.equal(outcome.usage!.totalTokens, 200)
+})
+
+// --- capacity backpressure ---------------------------------------------------
+
+/**
+ * One-shot ctx whose `start` rejects the first `rejects` launches with the
+ * kernel's live-child limit code, then succeeds. Models a pool that is
+ * saturated while other children hold slots and frees as they settle.
+ */
+function mockCapacityCtx(children: Record<string, MockChild>, rejects: number): {
+  readonly ctx: Context
+  readonly launches: () => number
+} {
+  const projections = mockSessionProjections()
+  let launches = 0
+  const ctx = {
+    get: (name: string) => name === 'sessionProjections' ? projections.service : undefined,
+    sessionProjections: projections.service,
+    subagents: {
+      getProvider: () => ({}),
+      start: async (_provider: string, req: { prompt: readonly { text: string }[] }) => {
+        launches += 1
+        if (launches <= rejects) {
+          const error = new Error('subagent limit reached (active child limit: 8); wait for an existing child to finish or complete this work with the current agents')
+          Object.assign(error, { code: 'ACTIVATION_LIMIT_REACHED' })
+          throw error
+        }
+        const text = req.prompt[0].text
+        const key = Object.keys(children).find(k => text.includes(k))
+        assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
+        const spec = children[key]
+        return {
+          result: Promise.resolve({
+            stopReason: spec.stopReason,
+            output: spec.text === undefined ? [] : [{ type: 'text', text: spec.text }],
+          }),
+          localAgent: { session: projections.track({ snapshotEvents: () => spec.events ?? [] }, spec) },
+          dispose: async () => {},
+        }
+      },
+    },
+    logger: { warn: () => {} },
+  }
+  return { ctx: ctx as unknown as Context, launches: () => launches }
+}
+
+test('runSwarmBatch (one-shot): a capacity rejection is re-queued, not failed, and the item still completes', async () => {
+  const { ctx, launches } = mockCapacityCtx({ alpha: { stopReason: 'completed', text: 'alpha done' } }, 2)
+  const outcome = await runSwarmBatch(ctx, {
+    ...baseOptions(),
+    tasks: tasksOf('alpha'),
+    // Requeue schedule compressed so the test does not wait out the real one.
+    capacityRequeueDelayMs: 1,
+    capacityRequeueDelayCapMs: 2,
+  })
+  // The item survived two rejections and completed on the third attempt.
+  assert.equal(outcome.completed, 1)
+  assert.equal(outcome.failed, 0)
+  assert.equal(outcome.items[0].status, 'completed')
+  assert.equal(outcome.items[0].output, 'alpha done')
+  assert.equal(launches(), 3)
+  // A capacity requeue is NOT charged to the item retry budget.
+  assert.equal(outcome.items[0].retries, undefined)
+})
+
+test('runSwarmBatch (one-shot): capacity patience is bounded and reports the limit, not a task defect', async () => {
+  // Every launch is rejected: the item must end as a failed CAPACITY item whose
+  // message names the bound, rather than spinning forever.
+  const { ctx } = mockCapacityCtx({ alpha: { stopReason: 'completed', text: 'alpha done' } }, Number.MAX_SAFE_INTEGER)
+  const outcome = await runSwarmBatch(ctx, {
+    ...baseOptions(),
+    tasks: tasksOf('alpha'),
+    capacityRequeueDelayMs: 1,
+    capacityRequeueDelayCapMs: 2,
+    maxCapacityRequeues: 3,
+  })
+  assert.equal(outcome.failed, 1)
+  assert.equal(outcome.completed, 0)
+  const item = outcome.items[0]
+  assert.equal(item.status, 'failed')
+  assert.equal(item.failureKind, 'capacity')
+  assert.equal(item.failureCode, 'ACTIVATION_LIMIT_REACHED')
+  assert.ok(item.error!.includes("live-child limit after 3 requeues"))
 })
 
 // --- continuable backend: retry classification -------------------------------

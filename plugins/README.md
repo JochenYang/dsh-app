@@ -12,7 +12,7 @@ working.
 | `plugin-brand` | host | **partial scaffold** — settings namespace and app-info service are declared but not wired yet; the desktop bridge's shell side (action route + connection routes) IS wired, while the plugin-side facades (settings page rows, appInfo service) are not |
 | `plugin-client-ui` | client | brand theme, brand Models settings section, Diagnostics page (desktop-feature status, kernel log tail, diagnostics export, office-components row) |
 | `plugin-sidebar` | dual | Git panel as a native conversation-view tab (the file tree was retired: upstream ships file management natively) |
-| `plugin-swarm` | dual | batch parallel subagent orchestration (`swarm` tool + `/swarm` command), adaptive concurrency, per-item retry |
+| `plugin-swarm` | dual | batch parallel subagent orchestration (`swarm` tool + `/swarm` command), adaptive concurrency, per-item retry, kernel-capacity backpressure (a rejection at the shared live-child limit shrinks the pool and re-queues the item instead of failing it) |
 | `plugin-usage` | dual | usage capture over session logs + settings-page balance card, heatmap, daily trend chart |
 | `plugin-archives` | dual | session archive manager (list/delete routes + settings-page section grouped by project) |
 | `plugin-memory` | dual | cross-session memory (project-scoped card files injected per prompt, memory_save/recall/forget tools the model calls itself, background curator over existing cards plus a per-project "curate now" button, settings page with per-entry pin/delete; the global scope was retired and its cards migrated into a `legacy-global` project) |
