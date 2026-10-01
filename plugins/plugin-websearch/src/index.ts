@@ -2,21 +2,32 @@
  * DSH APP web search plugin — host half.
  *
  * Registers ONE `ctx.web` search provider (id `dsh-app`) whose internal engine
- * chain falls back across Bing / AnySearch / SearXNG / Exa / Parallel. The
- * model-facing `web_search` tool is upstream's and never changes: swapping
- * engines is a provider-level concern, so this plugin adds no tool, and the
- * chain's fallback is invisible to the model apart from the note naming the
- * engine that answered.
+ * chain falls back across Bing / AnySearch / SearXNG / Exa / Parallel, and
+ * ONE `ctx.web` fetch provider (id `dsh-app-fetch`) that serves `web_fetch`.
+ * The model-facing `web_search` / `web_fetch` tools are upstream's and never
+ * change: swapping engines or the fetch transport is a provider-level
+ * concern, so this plugin adds no tool, and both chains' fallback is
+ * invisible to the model apart from the note naming the engine that answered.
  *
- * The upstream DeepSeek provider (`deepseek-official`) stays registered and
- * untouched. Which of the two `ctx.web` resolves is a single field — the
- * settings page's 原生/品牌 switch writes it and the runtime re-points
- * immediately, so the user can compare the two without editing overlay files
- * or restarting.
+ * The fetch provider exists because the host's own one cannot cross a
+ * fake-IP network: it resolves through the system resolver, sees
+ * 198.18.0.0/15, and refuses the fetch before a packet moves
+ * (`WEB_BLOCKED_URL`) — which is what a TUN client hands every process. Ours
+ * keeps the host's contract (URL policy, same-origin redirects, byte caps,
+ * error codes) and picks the address set by verdict: a proxy route when the
+ * shell injected one, the system resolver when it is clean, DNS-over-HTTPS
+ * when it is poisoned. See `fetch/` for the mechanism.
+ *
+ * The upstream DeepSeek search provider (`deepseek-official`) stays
+ * registered and untouched. Which of the two `ctx.web` search providers
+ * resolves is a single field — the settings page's 原生/品牌 switch writes it
+ * and the runtime re-points immediately, so the user can compare the two
+ * without editing overlay files or restarting.
  *
  * Stability discipline: a kernel without the `ctx.web` seam degrades to
  * `seamAvailable: false` (routes still answer, nothing is registered) instead
- * of failing the boot. Engine failures are contained per engine by the chain.
+ * of failing the boot. Engine failures are contained per engine by the chain;
+ * fetch failures are per-request coded errors.
  *
  * @module @dsh-app/plugin-websearch
  */
@@ -32,9 +43,10 @@ import type {} from '@deepseek-ai/dsh-web'
 import { ChainExhaustedError, runChainCached, SearchCache, type ChainStep } from './chain.ts'
 import { AccountingBox } from './accounting.ts'
 import { createEngine } from './engines/index.ts'
+import { createWebFetchProvider } from './fetch/provider.ts'
 import { registerWebSearchRoutes } from './routes.ts'
 import { WebSearchStore } from './store.ts'
-import { activeEngines, BRAND_PROVIDER_ID, UPSTREAM_PROVIDER_ID, type EngineEntry, type WebSearchFile } from './wire.ts'
+import { activeEngines, BRAND_PROVIDER_ID, BRAND_FETCH_PROVIDER_ID, FETCH_PROBE_URL, UPSTREAM_PROVIDER_ID, type EngineEntry, type WebSearchFile } from './wire.ts'
 
 export const name = 'plugin-websearch'
 
@@ -83,6 +95,11 @@ interface WebSeamLike {
     available(): boolean
     search(request: { query: string, maxResults?: number }, signal?: AbortSignal): Promise<unknown>
   }): () => void
+  registerFetchProvider?(provider: {
+    id: string
+    available(): boolean
+    fetch(request: { url: string }, signal?: AbortSignal): Promise<unknown>
+  }): () => void
   searchProviderId?: string
   search?(request: { query: string, maxResults?: number }, signal?: AbortSignal): Promise<unknown>
   /**
@@ -91,6 +108,17 @@ interface WebSeamLike {
    * page's availability badges — nothing here depends on it at search time.
    */
   searchProviders?: Map<string, { available(): boolean }>
+  /**
+   * The seam's fetch execution, read structurally like the search one. The
+   * self-check's fetch probe goes through it so the answer names the same
+   * provider the model's `web_fetch` tool resolves.
+   */
+  fetch?(request: { url: string }, signal?: AbortSignal): Promise<unknown>
+  /**
+   * The seam's private fetch registry, read the same structural way as the
+   * search one — availability badges only.
+   */
+  fetchProviders?: Map<string, { available(): boolean }>
 }
 
 /** One search's chain accounting (not part of the seam's portable result shape). */
@@ -176,6 +204,21 @@ export function apply(ctx: Context, config: Config): void {
 
   /** Whether the provider is actually live (drives the settings-page banner). */
   const seamAvailable = (): boolean => seam !== undefined && typeof seam.registerSearchProvider === 'function'
+
+  /**
+   * The fetch provider, created even when the seam cannot register it: the
+   * self-check reads its network verdict either way, so a kernel without
+   * `registerFetchProvider` still reports why the network looks the way it
+   * does instead of silently falling back to the host provider.
+   */
+  const fetchProvider = createWebFetchProvider()
+  const registerFetch = seam?.registerFetchProvider
+  if (seam !== undefined && typeof registerFetch === 'function') {
+    ctx.effect(() => registerFetch.call(seam, fetchProvider), 'plugin-websearch: fetch provider')
+    log.info(`websearch: fetch provider ${BRAND_FETCH_PROVIDER_ID} registered`)
+  } else {
+    log.warn('websearch: this kernel cannot register a fetch provider; web_fetch keeps the host provider')
+  }
 
   /**
    * Point `ctx.web` at the configured provider.
@@ -278,6 +321,35 @@ export function apply(ctx: Context, config: Config): void {
           failedEngines: accounting.failed,
         },
         ...typeof result?.content === 'string' && result.content !== '' ? { note: result.content } : {},
+      }
+    },
+    /**
+     * The fetch transport's verdict for the self-check line.
+     *
+     * `refresh` re-runs the canary (one neutral probe host, never a user URL)
+     * so pressing the self-check re-judges the network instead of reporting a
+     * decision from up to a TTL window ago. A proxied fetch does not consult
+     * the verdict, but the line still reports it: a user about to drop the
+     * proxy needs to know what happens next. The refresh is best-effort — a
+     * probe that fails leaves the previous verdict rather than blanking it.
+     */
+    networkStatus: () => fetchProvider.status({ refresh: true }),
+    /**
+     * One real fetch through the seam. `ctx.web.fetch` resolves the provider
+     * exactly like the model's `web_fetch` tool does — if the overlay pin or
+     * the provider's availability were broken, this is where it surfaces. A
+     * kernel without the fetch method on the seam falls back to our provider
+     * directly, so the answer stays real on old lines too.
+     */
+    fetchProbe: async () => {
+      const startedAt = Date.now()
+      const result = seam !== undefined && typeof seam.fetch === 'function'
+        ? await seam.fetch({ url: FETCH_PROBE_URL }) as { statusCode?: unknown, body?: { content?: unknown } }
+        : await fetchProvider.fetch({ url: FETCH_PROBE_URL })
+      return {
+        statusCode: typeof result.statusCode === 'number' ? result.statusCode : 0,
+        bytes: typeof result.body?.content === 'string' ? result.body.content.length : 0,
+        latencyMs: Date.now() - startedAt,
       }
     },
   }), 'plugin-websearch: api routes')

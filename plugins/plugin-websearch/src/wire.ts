@@ -13,6 +13,21 @@
 /** The provider id this plugin registers. Stable: it is persisted in overlay config. */
 export const BRAND_PROVIDER_ID = 'dsh-app'
 
+/**
+ * The fetch provider id this plugin registers. Stable for the same reason:
+ * the overlay's `web` row pins `fetchProvider` here, so a rename is a
+ * coordinated overlay change, not a code-only one.
+ */
+export const BRAND_FETCH_PROVIDER_ID = 'dsh-app-fetch'
+
+/**
+ * The URL the settings self-check fetches to prove `web_fetch` works on the
+ * current network. A neutral, tiny, always-public page: it must not depend on
+ * any member engine or key, and it must be the same URL in both locales so a
+ * user's screenshot is comparable.
+ */
+export const FETCH_PROBE_URL = 'https://example.com/'
+
 /** The upstream DeepSeek provider id (the "原生" switch). */
 export const UPSTREAM_PROVIDER_ID = 'deepseek-official'
 

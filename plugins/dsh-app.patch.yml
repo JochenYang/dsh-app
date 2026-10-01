@@ -75,14 +75,19 @@
 #   fail the boot.
 # - websearch: web search manager — registers ONE ctx.web search provider
 #   whose engine chain (anysearch / bing / parallel / exa / searxng, in that
-#   preference order) falls back automatically, plus a settings-page section
-#   that orders engines, stores keys and switches between the brand chain and
-#   the upstream DeepSeek provider. The model-facing web_search tool is
-#   upstream's and is never replaced: only the provider behind it changes.
+#   preference order) falls back automatically, plus ONE ctx.web fetch
+#   provider that serves web_fetch with the host's contract plus a
+#   fake-IP-safe resolution layer (proxy route when injected, system
+#   resolver when clean, DNS-over-HTTPS when a canary probes the network as
+#   poisoned), plus a settings-page section that orders engines, stores keys
+#   and switches between the brand chain and the upstream DeepSeek provider.
+#   The model-facing web_search / web_fetch tools are upstream's and are
+#   never replaced: only the providers behind them change.
 #   User state lives in
 #   $DSH_HOME/storages/dsh-app-plugin-websearch/config.json (the overlay is
 #   rewritten by the shell on every start). Engine failures are contained per
-#   engine by the chain and never fail the boot.
+#   engine by the chain and never fail the boot; a fetch failure is a coded
+#   per-request error, never a boot failure.
 
 - insert:
     - id: brand
@@ -182,7 +187,7 @@
     - id: websearch
       name: '@dsh-app/plugin-websearch'
 
-# Web search seam: point BOTH capabilities at the suite's provider.
+# Web search seam: point BOTH capabilities at the suite's providers.
 #
 # This row is written as a PAIR on purpose. Patch semantics REPLACE the whole
 # config object rather than merging into it (learned on dsh 0.1.2+), so a row
@@ -195,11 +200,22 @@
 # provider stays mounted and registered; the settings page switches between
 # the two at runtime by rewriting this field, so a user can compare them
 # without editing this file or restarting. Setting it back to
-# `deepseek-official` here restores the stock behavior.
+# `deepseek-official` here restores the stock search behavior.
+#
+# `fetchProvider: dsh-app-fetch` is the plugin's fetch provider, which serves
+# `web_fetch` with the host's own contract (URL policy, same-origin redirects,
+# byte/char caps, error codes) plus a resolution layer the host provider does
+# not have: the host resolves through the system resolver and refuses a
+# fake-IP answer (198.18.0.0/15, which a TUN client hands every process), so
+# on such networks its `web_fetch` fails before a packet moves. Ours sends
+# through the injected proxy when one applies, keeps the system resolver when
+# it is clean, and switches to DNS-over-HTTPS when a canary probes it as
+# poisoned. Setting this field back to `http` restores the host provider
+# exactly — the two are drop-in substitutes for each other.
 - id: web
   config:
     searchProvider: dsh-app
-    fetchProvider: http
+    fetchProvider: dsh-app-fetch
 
 # The account provider's identity header. The base bundle's own row sets
 # `desktopPlatform` behind `ctx.get('profileContext')?.name === 'desktop'`

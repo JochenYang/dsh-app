@@ -100,6 +100,27 @@ interface SelfTestResponse {
   readonly note?: string
   readonly error?: HostText
   readonly chainExhausted?: boolean
+  /**
+   * The fetch transport's verdict, reported by the host's fetch provider.
+   * Carries no user URLs: the canary only ever probes a neutral host.
+   */
+  readonly network?: {
+    readonly route: 'proxy' | 'direct'
+    readonly resolver: 'system' | 'doh' | 'unknown'
+    readonly verdict: 'poisoned' | 'clean' | 'inconclusive' | 'unknown'
+    readonly checkedAt: number | null
+  }
+  /**
+   * One real fetch through the seam, run by the same self-check: proof that
+   * the path the verdict line names actually works right now.
+   */
+  readonly fetch?: {
+    readonly ok: boolean
+    readonly statusCode?: number
+    readonly bytes?: number
+    readonly latencyMs?: number
+    readonly error?: HostText
+  }
 }
 
 /** A failure carrying the host's coded message, when one came with it. */
@@ -130,6 +151,28 @@ const PROVIDER_KEYS: Readonly<Record<string, WebSearchKey>> = {
 function providerLabel(id: string, t: TranslateNS<typeof NS>): string {
   const key = PROVIDER_KEYS[id]
   return key === undefined ? id : t(key)
+}
+
+/**
+ * The fetch-network line of the self-check: which transport the next
+ * `web_fetch` uses. The three states are the whole story a user needs — a
+ * proxied egress, a clean system resolver, or DoH after a poisoning
+ * verdict — and "unknown" before the first fetch says so instead of
+ * guessing.
+ */
+function networkLine(
+  network: SelfTestResponse['network'],
+  t: TranslateNS<typeof NS>,
+): string {
+  if (network === undefined) return ''
+  if (network.route === 'proxy') return t('ws.net.proxy')
+  if (network.resolver === 'doh') {
+    return network.verdict === 'inconclusive'
+      ? t('ws.net.doh.inconclusive')
+      : t('ws.net.doh.poisoned')
+  }
+  if (network.resolver === 'system') return t('ws.net.system')
+  return t('ws.net.unknown')
 }
 
 /**
@@ -541,6 +584,30 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
         {selfTest !== null && (
           <div className="dshWs-probeList">
             <div className="dshWs-hint">{t('ws.chain.selftestQuery', { query: selfTest.query })}</div>
+            {selfTest.network !== undefined && (
+              <div className="dshWs-probeRow">
+                <span className="dshWs-probeName">{t('ws.net.title')}</span>
+                <span className="dshWs-engineStatusOk">{networkLine(selfTest.network, t)}</span>
+              </div>
+            )}
+            {selfTest.fetch !== undefined && (
+              <div className="dshWs-probeRow">
+                <span className="dshWs-probeName">{t('ws.fetch.title')}</span>
+                {selfTest.fetch.ok === true ? (
+                  <span className="dshWs-engineStatusOk">
+                    {t('ws.fetch.summary', {
+                      status: selfTest.fetch.statusCode ?? 0,
+                      bytes: selfTest.fetch.bytes ?? 0,
+                      latency: selfTest.fetch.latencyMs ?? 0,
+                    })}
+                  </span>
+                ) : (
+                  <span className="dshWs-engineStatusErr">
+                    {routeErrorCopy(t, selfTest.fetch.error, t('ws.fetch.failed'))}
+                  </span>
+                )}
+              </div>
+            )}
             {selfTest.error === undefined ? (
               <>
                 <div className="dshWs-probeRow">

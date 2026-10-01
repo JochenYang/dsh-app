@@ -4,7 +4,8 @@
  *   GET  /config        — the masked config + per-engine status + active provider
  *   POST /config/save   — validate + persist + re-point the live provider
  *   POST /engine/test   — probe ONE engine (or all of them) with a real query
- *   POST /selftest      — run one search through `ctx.web.search` itself
+ *   POST /selftest      — run one search through `ctx.web.search` itself,
+ *                         plus the fetch transport's network verdict
  *
  * Trust is the carrier's: the Connection transport applies its Host/Origin
  * fence and browser authentication before a route handler runs (see
@@ -21,6 +22,7 @@
  */
 
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
+import type { FetchNetworkStatus } from './fetch/provider.ts'
 import { WebSearchStore } from './store.ts'
 import {
   activeEngines,
@@ -96,6 +98,21 @@ export interface RouteDeps {
     failedEngines?: readonly string[]
     note?: string
   }>
+  /**
+   * The fetch transport's current verdict: which route (proxy / direct) and
+   * resolver (system / DoH) the NEXT `web_fetch` will use, refreshed so the
+   * answer is current rather than up to a TTL window old. Carries no user
+   * URLs — the canary only ever probes a neutral host.
+   */
+  networkStatus(): Promise<FetchNetworkStatus>
+  /**
+   * Fetch one fixed, small URL through the REAL seam (`ctx.web.fetch`), so
+   * the self-check exercises the exact path the model's `web_fetch` tool
+   * takes — provider resolution included. The verdict line above says which
+   * path a fetch will use; this proves the path works right now. Throws on
+   * failure; the route maps it onto a coded result.
+   */
+  fetchProbe(): Promise<{ readonly statusCode: number, readonly bytes: number, readonly latencyMs: number }>
 }
 
 function sendJson(status: number, body: Record<string, unknown>): Response {
@@ -377,15 +394,39 @@ export function registerWebSearchRoutes(
         const query = typeof body.query === 'string' && body.query.trim() !== ''
           ? body.query.trim()
           : 'DeepSeek Harness'
+        // The verdict is refreshed ONCE, before either half runs: the fetch
+        // probe should meet the same decision the line reports, not a second
+        // canary pass of its own.
+        const network = await deps.networkStatus()
         try {
           const outcome = await deps.searchThroughSeam(query)
-          return ok({ query, ...outcome })
+          try {
+            const probe = await deps.fetchProbe()
+            return ok({ query, ...outcome, network, fetch: { ok: true, ...probe } })
+          } catch (fetchError) {
+            // A fetch that cannot run is a result too — and it is the whole
+            // point of the check: the verdict line says which path the next
+            // fetch uses, this line says whether that path works right now.
+            return ok({
+              query,
+              ...outcome,
+              network,
+              fetch: {
+                ok: false,
+                error: {
+                  code: 'selftest.fetchFailed',
+                  text: fetchError instanceof Error ? fetchError.message : String(fetchError),
+                },
+              },
+            })
+          }
         } catch (error) {
           // A self-test that cannot run is a result, not a server error:
           // the message is what the user needs to read.
           return ok({
             query,
             ok: false,
+            network,
             error: {
               code: deps.isChainExhausted(error) ? 'selftest.chainExhausted' : 'selftest.failed',
               text: error instanceof Error ? error.message : String(error),

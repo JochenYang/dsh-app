@@ -83,7 +83,7 @@ export function providerReasonCopy(t: T, reason: HostText | undefined): string {
 }
 
 /** Codes whose sentence interpolates the host's own diagnostic. */
-const DETAIL_CODES = new Set(['route.writeFailed', 'route.invalidBody'])
+const DETAIL_CODES = new Set(['route.writeFailed', 'route.invalidBody', 'selftest.fetchFailed'])
 
 /**
  * Save/route failure copy: the validation codes a rejected write can carry plus
@@ -117,5 +117,6 @@ export function routeErrorCopy(t: T, host: HostText | undefined, fallback: strin
     'route.invalidBody': t('ws.host.invalidBody', { detail }),
     'selftest.chainExhausted': t('ws.chain.chainExhausted'),
     'selftest.failed': t('ws.chain.selftestFailed'),
+    'selftest.fetchFailed': t('ws.fetch.failed', { detail }),
   }, fallback)
 }

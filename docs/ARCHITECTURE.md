@@ -118,11 +118,30 @@ fence of its own. `plugin-sidebar`'s git routes (`git-routes.ts`) still use
 
 **Web search is a provider, not a tool** (`plugin-websearch`): the suite
 registers one `ctx.web` search provider (`dsh-app`) whose engine chain
-(anysearch / bing / parallel / exa / searxng) falls back per call; the
+(anysearch / bing / parallel / exa / searxng) falls back per call, and one
+`ctx.web` fetch provider (`dsh-app-fetch`) that serves `web_fetch`. The
 model-facing `web_search` / `web_fetch` tools stay upstream's, so the kernel
-upgrades its tools while the brand chain keeps answering behind them. A host
-route never sends user-visible prose — only a stable code the client maps to
-its own dictionary plus an English diagnostic (`src/wire.ts`).
+upgrades its tools while the brand providers keep answering behind them. A
+host route never sends user-visible prose — only a stable code the client
+maps to its own dictionary plus an English diagnostic (`src/wire.ts`).
+
+**web_fetch's resolution layer** (`plugin-websearch/src/fetch/`): the host's
+own fetch provider resolves through `dns/promises` and refuses a non-public
+answer (`WEB_BLOCKED_URL`), which on a TUN/fake-IP network — every hostname
+answering 198.18.0.0/15 — fails before a packet moves. The shell's injected
+proxy already covers machines with a local proxy (the dispatcher resolves
+for the provider); the brand provider covers the rest without widening that
+dependency: a canary probes one neutral host, a poisoned verdict routes
+fetch resolution through DNS-over-HTTPS (domestic-first pool) whose public
+answer set passes the identical guard, and a clean verdict keeps the system
+resolver with zero behavior change. There is no process-wide `dns.lookup`
+patch — that form is not what the host provider reads, and patching it would
+reach every lookup in the kernel child. The provider mirrors the host's whole
+contract (URL policy, same-origin redirect hop cap, 5 MB / 100k-char body
+caps, charset decoding, the `WEB_*` error taxonomy), so the two are drop-in
+substitutes. The settings self-check proves the path rather than asserting
+it: beyond the verdict line it runs one real fetch through `ctx.web` and
+reports status, bytes and latency (or the failure code).
 
 ## 4. Kernel runtime layout
 

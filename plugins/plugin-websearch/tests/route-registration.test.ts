@@ -58,6 +58,8 @@ function harness(overrides: Partial<RouteDeps> = {}): Harness {
     resolveKey: () => undefined,
     seamAvailable: () => true,
     searchThroughSeam: async () => ({ provider: 'dsh-app', resultCount: 5, latencyMs: 7 }),
+    networkStatus: async () => ({ route: 'direct', resolver: 'system', verdict: 'clean', checkedAt: null }),
+    fetchProbe: async () => ({ statusCode: 200, bytes: 1256, latencyMs: 42 }),
     upstreamStatus: () => ({ registered: true, usable: true }),
     ...overrides,
   }
@@ -191,5 +193,31 @@ describe('web search route registration', () => {
     const value = body.value as Record<string, unknown>
     assert.equal(value.chainExhausted, true)
     assert.equal((value.error as Record<string, unknown>).code, 'selftest.chainExhausted')
+  })
+
+  it('reports the fetch probe next to the search verdict', async () => {
+    const { call } = harness()
+    const { body } = await call(`${ROUTE_PREFIX}/selftest`, post({ query: 'dsh' }))
+    const value = body.value as Record<string, unknown>
+    const fetch = value.fetch as Record<string, unknown>
+    assert.equal(fetch.ok, true)
+    assert.equal(fetch.statusCode, 200)
+    assert.equal(fetch.bytes, 1256)
+    const network = value.network as Record<string, unknown>
+    assert.equal(network.resolver, 'system')
+  })
+
+  it('reports a failing fetch probe as a coded result, still 200', async () => {
+    const { call } = harness({
+      fetchProbe: async () => { throw new Error('URL hostname resolves to a non-public IP address') },
+    })
+    const { status, body } = await call(`${ROUTE_PREFIX}/selftest`, post({ query: 'dsh' }))
+    assert.equal(status, 200)
+    const value = body.value as Record<string, unknown>
+    const fetch = value.fetch as Record<string, unknown>
+    assert.equal(fetch.ok, false)
+    assert.equal((fetch.error as Record<string, unknown>).code, 'selftest.fetchFailed')
+    // The search half still reports: a fetch failure must not swallow it.
+    assert.equal((value.provider as string), 'dsh-app')
   })
 })

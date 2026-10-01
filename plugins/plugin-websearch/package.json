@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-websearch",
-  "description": "DSH APP web search manager: registers a single ctx.web search provider whose engine chain (Bing / DuckDuckGo / SearXNG / Exa / Parallel) falls back automatically, plus a settings page to order engines, store keys and switch between the brand provider and the upstream DeepSeek one.",
-  "version": "0.1.8",
+  "description": "DSH APP web search manager: registers a single ctx.web search provider whose engine chain (Bing / AnySearch / SearXNG / Exa / Parallel) falls back automatically, plus a ctx.web fetch provider that serves web_fetch with the host's contract and a fake-IP-safe resolution layer (proxy route when injected, system resolver when clean, DNS-over-HTTPS when poisoned), plus a settings page to order engines, store keys and switch between the brand provider and the upstream DeepSeek one.",
+  "version": "0.1.9",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -42,6 +42,9 @@
     "build": "node build.mjs",
     "test": "node scripts/test.mjs",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ipaddr.js": "2.5.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",

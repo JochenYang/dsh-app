@@ -71,6 +71,12 @@ describe('host message rendering', () => {
       routeErrorCopy(t, { code: 'route.invalidBody', text: 'Unexpected token <' }, 'x'),
       '请求无法解析：Unexpected token <',
     )
+    // The fetch probe's failure carries the host's diagnostic (the WebError
+    // message), so the user sees WHAT failed, not just that it did.
+    assert.equal(
+      routeErrorCopy(t, { code: 'selftest.fetchFailed', text: 'WEB_BLOCKED_URL: non-public address' }, 'x'),
+      '抓取探测失败：WEB_BLOCKED_URL: non-public address',
+    )
     // A `{detail}` sentence handed no detail renders empty rather than literal.
     assert.doesNotMatch(routeErrorCopy(t, { code: 'route.writeFailed' }, 'x'), PLACEHOLDER)
   })

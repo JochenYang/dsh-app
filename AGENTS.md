@@ -221,7 +221,14 @@ Plugin builds and tests: `plugins/AGENTS.md`.
   every kernel-line bump; detail in `docs/kernel-0.1.7-alpha.1-regression.md` §12.13.
 - **Web search is a provider, not a tool** — `web_search`/`web_fetch` stay
   upstream's; register a `ctx.web` provider (one per call), so fallback lives
-  inside it.
+  inside it. Both capabilities are the brand plugin's now: `plugin-websearch`
+  also serves `web_fetch` (`fetchProvider: dsh-app-fetch`), keeping the host
+  provider's whole contract and adding one thing — a poisoned resolver
+  (TUN/fake-IP) is detected by canary and bypassed with DoH, which is the
+  only way the host's own provider can pass its own public-address guard on
+  such a network. It never patches `dns.lookup` process-wide: that form is
+  not what the host provider reads (`dns/promises` is), and a patch that wide
+  would reach every lookup in the kernel child.
 - **The `- id: web` overlay row is a PAIR** — patch semantics replace the whole
   object, so naming only `searchProvider` drops `fetchProvider` and kills the
   tree on a duplicate loader entry.
