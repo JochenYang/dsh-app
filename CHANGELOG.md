@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.14.7] - 2026-10-01
+
+### 中文
+- 网页搜索插件：**开 TUN/虚拟网卡时 `web_fetch` 不再必然失败**。宿主自己的抓取实现用系统解析、并对解析结果做公网校验，而 TUN 客户端把所有域名解析成 `198.18.0.0/15`，于是请求在发出前就被拒（`WEB_BLOCKED_URL`）。现在 `web_fetch` 由套件自己的 provider 承接：保留宿主原有的 URL 策略、同源重定向、字节与字符上限、字符集解码和全部错误码，只换地址来源——有代理时走代理（不在本地解析），网络干净时仍用系统解析（行为零变化），探到投毒时改走 DoH 加密解析。代理路由同步对齐内核策略（loopback 与非法 scheme 一律直连，NO_PROXY 支持端口与 `*.` 前缀）。
+- 网页搜索插件：**修掉一个公网校验的绕过**。地址判定换用宿主同款 `ipaddr.js` 复刻其谓词；此前手写的前缀表认不出 IPv4-mapped IPv6 等写法，`http://[::ffff:7f00:1]/` 这类 URL 会被放行并直连本机回环服务（浏览器把 `::ffff:127.0.0.1` 规范成这种十六进制形态，所以这不是理论构造）。6to4、Teredo、NAT64 包装的回环地址与 TEST-NET 等保留段也一并不再放行，与宿主判定完全一致。
+- 网页搜索插件：设置页「端到端自检」现在给的是**证据而不是断言**：新增「抓取网络」一行（说明下一次 `web_fetch` 会走哪条解析路径，按下按钮即重新判定，不再复用最长十分钟的旧结论）与「抓取探测」一行（经 `ctx.web` 真抓一次网页，报告状态码、字节数与耗时，失败则带错误码）。
+
+### English
+- Web search plugin: **`web_fetch` no longer fails outright on a TUN/fake-IP network**. The host's own fetch provider resolves through the system resolver and validates the answer, while a TUN client resolves every hostname into `198.18.0.0/15` — so the request is refused before a packet moves (`WEB_BLOCKED_URL`). `web_fetch` is now served by the suite's own provider: the host's URL policy, same-origin redirects, byte and char caps, charset decoding and the whole error taxonomy are kept, and only the address source changes — an injected proxy wins (nothing resolved locally), a clean network keeps the system resolver with zero behaviour change, and a poisoned one moves to DNS-over-HTTPS. Proxy routing was aligned with the kernel's policy (loopback and rejected schemes stay direct, NO_PROXY honours ports and a `*.` prefix).
+- Web search plugin: **a public-address check bypass is closed**. Address classification now reproduces the host's own predicate through the same library it uses (`ipaddr.js`); the hand-written prefix table could not recognise IPv4-mapped IPv6 and similar spellings, so a URL like `http://[::ffff:7f00:1]/` was allowed through and reached a loopback service — and browsers normalise `::ffff:127.0.0.1` into exactly that hex form, so this was not a theoretical construction. 6to4, Teredo and NAT64-wrapped loopback addresses and reserved blocks such as TEST-NET are refused too, matching the host exactly.
+- Web search plugin: the settings page's end-to-end self-check now reports **evidence instead of an assertion**: a "fetch network" line (which resolution path the next `web_fetch` will take, re-judged on every press rather than reusing a verdict up to ten minutes old) and a "fetch probe" line (one real fetch through `ctx.web`, with status code, byte count and latency, or a coded failure).
+
 ## [v0.14.6] - 2026-09-30
 
 ### 中文
