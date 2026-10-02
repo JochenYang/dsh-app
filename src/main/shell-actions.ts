@@ -115,6 +115,11 @@ const STAMP_HEADERS = [INITIATOR_HEADER, WINDOW_HEADER, STAMP_HEADER]
  * asks for — show the state, start the download, stop it — because each is a
  * separate gesture in the row and none of them reads a body: the shell already
  * knows which kernel is active and therefore which payload it needs.
+ *
+ * `about-info` and the two `check-*` actions back the settings page's
+ * 「关于 DSH-APP」 section: the same three things the tray offers, reachable
+ * from inside the window. `restart-server` is the tray's own action, named the
+ * same way here so one word means one thing in both surfaces.
  */
 export const SHELL_ACTIONS = [
   'open-logs',
@@ -124,6 +129,10 @@ export const SHELL_ACTIONS = [
   'office-payload-download',
   'office-payload-cancel',
   'config-check',
+  'about-info',
+  'check-app-update',
+  'check-kernel-update',
+  'restart-server',
 ] as const
 
 /** One of {@link SHELL_ACTIONS}. */
@@ -185,8 +194,55 @@ export interface ShellActionDeps {
    * reads as "all clear", which is the one wrong answer here.
    */
   configCheck?: () => Promise<ConfigSchemaReport>
+  /**
+   * The versions and paths the 「关于 DSH-APP」 page shows. Absent in tests;
+   * `about-info` then answers `shellAction.failed` rather than an empty object,
+   * which would render as a page of blanks.
+   */
+  aboutInfo?: () => AboutInfo
+  /**
+   * Start a shell-update check, exactly as the tray's row does. Resolves when
+   * the check has been STARTED, not when it finishes: the check downloads a
+   * ~200 MB installer and prompts, so awaiting it would hold the request open
+   * for minutes and the page would look hung.
+   */
+  checkAppUpdate?: () => void
+  /** Start a kernel-update check (the tray's own row). */
+  checkKernelUpdate?: () => void
+  /** Restart the kernel child (the tray's 重启服务). */
+  restartServer?: () => void
   /** One shell log line (English, log-only). */
   log?(line: string): void
+}
+
+/**
+ * What the About page renders, as an explicit allowlist rather than a dump of
+ * whatever the shell happens to know: a version, the kernel's line, where the
+ * user's data lives, and whether an update check is even meaningful in this
+ * build. Nothing here is read from the environment.
+ */
+export interface AboutInfo {
+  /** This Electron app's version (`app.getVersion()`), or '' when unreadable. */
+  readonly shellVersion: string
+  /** The active kernel's `manifest.dshVersion`, or '' when no kernel is active. */
+  readonly kernelVersion: string
+  /** The active kernel's `manifest.channel`, or '' when unknown. */
+  readonly kernelChannel: string
+  /** The user's data directory (`$DSH_HOME`), for a "where is my stuff" answer. */
+  readonly dshHome: string
+  /** The shell's log directory. */
+  readonly logDir: string
+  /** Electron's own version — the runtime the window is drawn by. */
+  readonly electronVersion: string
+  /** Node's version inside the main process. */
+  readonly nodeVersion: string
+  /** The OS as Electron reports it (`process.platform`). */
+  readonly platform: string
+  /**
+   * False in a dev run (`DSH_APP_DEV`) and in a build with no updater: the page
+   * then says so instead of offering a button that cannot work.
+   */
+  readonly updateSupported: boolean
 }
 
 /**
@@ -502,6 +558,42 @@ async function dispatch(action: ShellAction, request: Request, deps: ShellAction
       // was ours.
       deps.log?.(`[shell-action] ${action}: profile=${report.profile} complete=${String(report.complete)} entries=${String(report.entries)} diagnostics=${String(report.diagnostics.length)} suite=${String(report.origins.suite)} migratedPreset=${String(report.origins.migratedPreset)} foreign=${String(report.origins.foreign)}`)
       return sendJson(200, { ok: true, report })
+    }
+    case 'about-info': {
+      // The body is deliberately not read, like open-logs: everything here is
+      // the shell's own knowledge, so a caller cannot ask about another install.
+      const info = deps.aboutInfo
+      if (info === undefined) {
+        deps.log?.(`[shell-action] ${action}: this shell cannot answer`)
+        return fail(500, 'shellAction.failed')
+      }
+      const value = info()
+      // Versions only, never the paths: `dshHome` and `logDir` name this user's
+      // directories, and the log is shared with the diagnostics export.
+      deps.log?.(`[shell-action] ${action}: shell=${value.shellVersion} kernel=${value.kernelVersion} channel=${value.kernelChannel}`)
+      return sendJson(200, { ok: true, info: value })
+    }
+    case 'check-app-update':
+    case 'check-kernel-update':
+    case 'restart-server': {
+      // The body is deliberately not read: which update to check, or which
+      // server to restart, is this shell's own state.
+      const run = action === 'check-app-update'
+        ? deps.checkAppUpdate
+        : action === 'check-kernel-update'
+          ? deps.checkKernelUpdate
+          : deps.restartServer
+      if (run === undefined) {
+        deps.log?.(`[shell-action] ${action}: this shell cannot answer`)
+        return fail(500, 'shellAction.failed')
+      }
+      // STARTED, not finished: an app-update check downloads a large installer
+      // and raises its own dialogs, so awaiting it would hold this request open
+      // for minutes. The page reports "started" and the shell's own progress UI
+      // takes over — the same thing the tray row does.
+      run()
+      deps.log?.(`[shell-action] ${action}: started`)
+      return sendJson(200, { ok: true, started: true })
     }
     default:
       action satisfies never

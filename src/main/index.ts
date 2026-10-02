@@ -1864,6 +1864,29 @@ async function boot(): Promise<void> {
         suitePrefixes: [`${PLUGIN_SCOPE}/`],
       })
     },
+    // The 「关于 DSH-APP」 page's facts. An explicit allowlist: versions, the two
+    // paths the page offers to reveal, and whether an update check can do
+    // anything here. Read per call so a kernel that changed under a running
+    // window reports its new version.
+    aboutInfo: () => ({
+      shellVersion: app.getVersion(),
+      kernelVersion: kernel.getCurrent()?.manifest.dshVersion ?? '',
+      kernelChannel: kernel.getCurrent()?.manifest.channel ?? '',
+      dshHome: resolveDshHome(),
+      logDir: resolveLogDir(),
+      electronVersion: process.versions.electron ?? '',
+      nodeVersion: process.versions.node,
+      platform: process.platform,
+      // A dev run has no published artifact to update to, and a build without
+      // the updater wired has nothing to check with; both must say so instead
+      // of offering a button whose only outcome is a confusing failure.
+      updateSupported: !isDev,
+    }),
+    // The tray's own three actions, so the page and the tray cannot drift: each
+    // entry point calls the same function.
+    checkAppUpdate: () => { void checkShellUpdate(true, mainWindow) },
+    checkKernelUpdate: () => { void checkKernelUpdate(true) },
+    restartServer: () => { void startServerAndOpenWindow() },
     log: (line) => { logKernel(line) },
   })
   // BOTH session jobs go through ONE install. Electron keeps only the last

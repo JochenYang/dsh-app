@@ -30,6 +30,9 @@ import type { AdvancedModelsState } from './client/models-advanced/store.ts'
 import { DiagnosticsSection } from './client/diagnostics/section.tsx'
 import { en as diagnosticsEn, zh as diagnosticsZh } from './client/diagnostics/locales.ts'
 import type { DiagnosticsKey } from './client/diagnostics/locales.ts'
+import { AboutSection } from './client/about/section.tsx'
+import { en as aboutEn, zh as aboutZh } from './client/about/locales.ts'
+import type { AboutKey } from './client/about/locales.ts'
 import { MaintenanceSection } from './client/maintenance/section.tsx'
 import type { MaintenanceInjected, MaintenanceTabRow } from './client/maintenance/section.tsx'
 import { en as maintenanceEn, zh as maintenanceZh } from './client/maintenance/locales.ts'
@@ -52,8 +55,8 @@ import type { SettingsDescribeFace, SettingsSchemaService } from '@deepseek-ai/d
 // dictionaries; their `diag.` / `maint.` / `adv.` key prefixes keep them apart.
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Brand client-plugin copy: the maintenance container, its diagnostics tab, and Advanced Models. */
-    [NS]: DiagnosticsKey | MaintenanceKey | AdvancedModelsKey
+    /** Brand client-plugin copy: the maintenance container, its diagnostics tab, Advanced Models, and About. */
+    [NS]: DiagnosticsKey | MaintenanceKey | AdvancedModelsKey | AboutKey
   }
 }
 
@@ -101,6 +104,9 @@ const MAINTENANCE_SECTION_ID = 'dsh-app-maintenance'
 
 /** Tab identity of the diagnostics page inside 维护 (its label is `diag.nav`). */
 const DIAGNOSTICS_TAB_ID = 'dsh-app-diagnostics'
+
+/** Nav identity of the 关于 DSH-APP row (its label is the `about.nav` key). */
+const ABOUT_SECTION_ID = 'dsh-app-about'
 
 /**
  * Brand theme: a dark-first variant built on the alias-token layer.
@@ -173,6 +179,20 @@ const NAV_ICON_MAINTENANCE_SVG = [
   '</svg>',
 ].join('')
 
+/**
+ * The About row's glyph: an information circle, drawn on the same 16 grid with
+ * the same 1.4 stroke as the other two. Without it the row would wear the
+ * generic gear upstream falls back to, which is the same gear every unnamed
+ * section gets.
+ */
+const NAV_ICON_ABOUT_SVG = [
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">',
+  '<circle cx="8" cy="8" r="6.1" fill="none" stroke="#000" stroke-width="1.4"/>',
+  '<path d="M8 7.1v4" fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round"/>',
+  '<circle cx="8" cy="4.9" r="0.85" fill="#000"/>',
+  '</svg>',
+].join('')
+
 export function apply(ctx: ClientContext): void {
   // --- Dictionaries first: every seat below resolves through this namespace,
   // and the effect disposes the pair with this plugin's fiber. All three page
@@ -180,8 +200,8 @@ export function apply(ctx: ClientContext): void {
   // per namespace. ---
   ctx.effect(
     () => ctx.locale.register(NS, {
-      zh: { ...maintenanceZh, ...diagnosticsZh, ...advancedZh },
-      en: { ...maintenanceEn, ...diagnosticsEn, ...advancedEn },
+      zh: { ...maintenanceZh, ...diagnosticsZh, ...advancedZh, ...aboutZh },
+      en: { ...maintenanceEn, ...diagnosticsEn, ...advancedEn, ...aboutEn },
     }),
     'dsh-app plugin-client-ui: dictionaries',
   )
@@ -334,6 +354,21 @@ export function apply(ctx: ClientContext): void {
     label: () => t('diag.nav'),
   }, DiagnosticsSection))
 
+  // --- 关于 DSH-APP: the versions, the two paths, and the three gestures the
+  // tray also offers. Its own rail row (order 26) rather than a fourth tab of
+  // 维护: "what am I running" is a question about the INSTALL, not about the
+  // suite's health, and it is the one settings page a user looks for by name.
+  // 26 puts it last of this suite's rows, after 维护 (24) and after upstream's
+  // pinned 已归档会话 row (25) — the rail then reads: data → system → about. ---
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: ABOUT_SECTION_ID,
+    order: 26,
+    // `locale:` puts the namespace-bound `t` seat on the component's props.
+    locale: NS,
+    label: () => t('about.nav'),
+  }, AboutSection))
+
   // --- Launch folder: the shell may be started with a directory (open-with, a
   // folder dropped on the app icon, a path argument). It cannot register a
   // workspace itself, so it calls the global this installs — the only seam
@@ -354,12 +389,13 @@ export function apply(ctx: ClientContext): void {
       ctx.remote.$on('llm/adapters-updated', refresh),
       ctx.on('connection/reset', refresh),
     ]
-    // Settings rail: real glyphs for our two rows (upstream would give both the
+    // Settings rail: real glyphs for our rows (upstream would give each the
     // generic gear). The rail's own scrolling is upstream's job now — see
     // settings-nav.ts for why our rule was removed.
     const disposeNav = mountSettingsNav([
       { label: () => t('adv.nav'), cls: 'dshAmaAdvNav', svg: NAV_ICON_SVG },
       { label: () => t('maint.nav'), cls: 'dshMaintNav', svg: NAV_ICON_MAINTENANCE_SVG },
+      { label: () => t('about.nav'), cls: 'dshAboutNav', svg: NAV_ICON_ABOUT_SVG },
     ])
     // Brand whale background: Canvas 2D port of the DeepSeek hero digitile
     // whale (assembles on load, swims idly, scatters from the pointer),

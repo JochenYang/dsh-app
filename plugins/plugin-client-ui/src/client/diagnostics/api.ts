@@ -355,7 +355,7 @@ export async function callBrandRoute<T extends RouteEnvelope>(
  * @param body - the action's JSON body, shaped exactly like the plugin route's.
  * @returns the outcome; never throws — a route that does not answer is `failed`.
  */
-async function callShellAction<T extends ShellActionAnswer>(url: string, body: unknown): Promise<RouteOutcome<T>> {
+export async function callShellAction<T extends ShellActionAnswer>(url: string, body: unknown): Promise<RouteOutcome<T>> {
   let response: Response
   try {
     response = await fetch(url, {
@@ -391,7 +391,7 @@ async function callShellAction<T extends ShellActionAnswer>(url: string, body: u
  * Narrowed to the URL alone, so no caller can be tempted to call something the
  * checks below did not pass.
  */
-type DelegateOutcome =
+export type DelegateOutcome =
   | { readonly kind: 'ok'; readonly url: string }
   | { readonly kind: 'unsupported'; readonly notice: RouteNotice }
   | { readonly kind: 'failed'; readonly notice: RouteNotice }
@@ -408,7 +408,7 @@ type DelegateOutcome =
  * @param body - the action's fields, validated by the host.
  * @returns the URL to call, or the outcome that refuses it.
  */
-async function delegateAction(pathname: string, body: unknown): Promise<DelegateOutcome> {
+export async function delegateAction(pathname: string, body: unknown): Promise<DelegateOutcome> {
   const answer = await callBrandRoute<DelegateAnswer>(pathname, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

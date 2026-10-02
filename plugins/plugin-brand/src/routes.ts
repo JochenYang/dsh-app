@@ -151,6 +151,13 @@ const DELEGATED_ACTIONS = [
   'office-payload-download',
   'office-payload-cancel',
   'config-check',
+  // The 「关于 DSH-APP」 page's four: read the versions, and the three actions the
+  // tray also offers. None takes a field — which install to describe, or which
+  // update to check, is the shell's own state.
+  'about-info',
+  'check-app-update',
+  'check-kernel-update',
+  'restart-server',
 ] as const satisfies readonly ShellAction[]
 
 /** One of {@link DELEGATED_ACTIONS}. */
@@ -185,6 +192,13 @@ const DELEGATED_FIELDS: Record<DelegatedAction, readonly FieldSpec[]> = {
   // The config check takes no field either: the profile it checks is the one
   // this shell boots, so a caller cannot ask about a different one.
   'config-check': [],
+  // The About page's four: everything they answer or act on is the shell's own
+  // state (which install, which update), so there is nothing for a caller to
+  // pass and nothing to validate.
+  'about-info': [],
+  'check-app-update': [],
+  'check-kernel-update': [],
+  'restart-server': [],
 }
 
 /** The only desktop action whose body carries a path. */

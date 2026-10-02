@@ -265,6 +265,12 @@ test('the shell-performed actions answer the coordinates the client must call', 
       ['office-payload-state', {}],
       ['office-payload-download', {}],
       ['office-payload-cancel', {}],
+      // The About page's four, likewise fieldless: which install to describe or
+      // which update to check is the shell's own state.
+      ['about-info', {}],
+      ['check-app-update', {}],
+      ['check-kernel-update', {}],
+      ['restart-server', {}],
     ]) {
       const answer = await post(host, `/desktop/${action}`, body)
       assert.equal(answer.status, 200, action)
@@ -375,7 +381,10 @@ test('an unknown path, an unknown method and the old web-server prefix are the c
 
 test('the registered routes are removed by the returned disposer', async () => {
   const host = await startHost()
-  assert.equal(host.registered(), 12, 'status + log tail + export + nine actions')
+  // 5 fixed (status, log tail, export, open-in-folder, pick-directory) + 11
+  // delegated actions (the office-payload trio, the diagnostics gestures, and
+  // the About page's four).
+  assert.equal(host.registered(), 16, 'status + log tail + export + eleven actions')
   await host.close()
   assert.equal(host.registered(), 0)
 })

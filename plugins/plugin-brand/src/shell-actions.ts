@@ -55,6 +55,10 @@ export type ShellAction =
   | 'office-payload-download'
   | 'office-payload-cancel'
   | 'config-check'
+  | 'about-info'
+  | 'check-app-update'
+  | 'check-kernel-update'
+  | 'restart-server'
 
 /** Read one environment variable, tolerating an unset value. */
 function envValue(name: string): string {

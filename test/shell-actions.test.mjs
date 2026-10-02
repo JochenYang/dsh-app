@@ -452,6 +452,67 @@ test('isSafeFileName accepts ordinary names and refuses path shapes', () => {
   }
 })
 
+test('about-info answers the page\'s facts, or fails rather than returning blanks', async () => {
+  const info = {
+    shellVersion: '1.2.3',
+    kernelVersion: '0.2.0-rc.2',
+    kernelChannel: 'beta',
+    dshHome: 'C:/Users/x/.dsh',
+    logDir: 'C:/logs',
+    electronVersion: '44.4.1',
+    nodeVersion: '22.23.2',
+    platform: 'win32',
+    updateSupported: true,
+  }
+  const { value, calls } = deps({ aboutInfo: () => info })
+  const handler = createShellActionHandler(value)
+
+  const answer = await call(handler, request('about-info'))
+  assert.equal(answer.status, 200)
+  assert.equal(answer.body.ok, true)
+  assert.deepEqual(answer.body.info, info)
+  // Versions reach the log; the two paths must not (the log is shared with the
+  // diagnostics export, which is written for someone else to read).
+  const logged = calls.filter(([kind]) => kind === 'log').map(([, line]) => line).join('\n')
+  assert.match(logged, /shell=1\.2\.3/)
+  assert.doesNotMatch(logged, /\.dsh/)
+  assert.doesNotMatch(logged, /C:\/logs/)
+
+  // A shell that cannot answer says so, instead of a page of blanks.
+  const { value: bare } = deps()
+  const bareAnswer = await call(createShellActionHandler(bare), request('about-info'))
+  assert.equal(bareAnswer.status, 500)
+  assert.equal(bareAnswer.body.code, 'shellAction.failed')
+})
+
+test('the tray actions are STARTED, never awaited', async () => {
+  const started = []
+  let released
+  const pending = new Promise((resolve) => { released = resolve })
+  const { value } = deps({
+    checkAppUpdate: () => { started.push('app'); return pending },
+    checkKernelUpdate: () => { started.push('kernel'); return pending },
+    restartServer: () => { started.push('server'); return pending },
+  })
+  const handler = createShellActionHandler(value)
+
+  for (const action of ['check-app-update', 'check-kernel-update', 'restart-server']) {
+    const answer = await call(handler, request(action))
+    assert.equal(answer.status, 200, action)
+    assert.equal(answer.body.started, true, action)
+  }
+  assert.deepEqual(started, ['app', 'kernel', 'server'], 'each action ran its own callback')
+
+  // The requests resolved while the callbacks are still pending: an app-update
+  // check downloads a large installer, so awaiting it would hold the request
+  // open for minutes and the page would read as hung.
+  released()
+  const { value: bare } = deps()
+  const bareAnswer = await call(createShellActionHandler(bare), request('check-app-update'))
+  assert.equal(bareAnswer.status, 500)
+  assert.equal(bareAnswer.body.code, 'shellAction.failed')
+})
+
 test('initiatorVerdict fails closed on every missing or foreign stamp', () => {
   const stamped = (initiator, window) => {
     const headers = new Headers(STAMPS)
