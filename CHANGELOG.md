@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.14.8] - 2026-10-02
+
+### 中文
+- 设置页新增「关于 DSH-APP」一行（order 26，本套件最后一行）：这里回答「这台机器上装的是什么」——外壳版本、内核版本与它所在的通道、Electron 与 Node 版本、平台，以及数据目录与日志目录（可复制数据目录路径、一键打开日志目录）。三个操作（检查应用更新、检查内核更新、重启服务）**与托盘右键菜单调的是同一个函数**，两处入口不会各自漂移；开发运行、或没有接更新器的构建会直接说明，而不是给一个点了必然失败的按钮。
+- 外壳：**内核目录被磁盘清理工具按名字删掉文件时不再「看起来完整」**——启动前核对制品自带的文件清单（`runtime/app/runtime-files.json`），缺文件即按损坏安装处理（本机实测比此前多发现 10 个被删文件），且不再退回同样损坏的上一版内核，改为直接重新展开安装包内的内核。无法判定的情形（清单缺失或损坏、路径过长）一律放行，避免把完好安装锁死。
+- 并行子代理：**内核的子代理槽位上限不再让条目直接失败**。撞到上限的条目改为缩池并重新排队，重试预算只留给真正的传输失败——此前一次拒绝就是一个永久失败项，而批次仍以同样的宽度继续压上去；`subagent` 行的 `maxActiveSubagents` 抬到 16，swarm 并发对齐到 12，余下 4 个槽位留给模型自己的委派（池按根代理计，两条路径此前在抢同样 8 个槽位）。
+- 外壳：**更新包下载完、但用户选择「稍后」或因还有任务在跑而放弃安装时会被删除**。此前这两条路径直接返回，而待安装记录只在真正安装时才写入，于是没有任何代码再认领这个文件——一次推迟就在系统临时目录里留下约 200 MB 的安装包。
+
+### English
+- Settings gains an "About DSH-APP" row (order 26, the last one of the suite): it answers what this machine has installed — the shell version, the kernel version and its channel, the Electron and Node versions, the platform, and the data and log directories (copy the data path, open the logs in one click). Its three actions (check app updates, check kernel updates, restart the service) **call the same function the tray menu does**, so the two entry points cannot drift; a dev run, or a build with no updater wired, says so instead of offering a button that can only fail.
+- Shell: **a kernel directory whose files a disk cleaner removed by name no longer passes as complete** — the start checks the artifact's own file inventory (`runtime/app/runtime-files.json`) and treats a missing file as a broken install (10 deleted files it previously missed), and it no longer rolls back into an equally damaged previous kernel, going straight to re-extracting the bundled one. Anything it cannot judge (no inventory, a corrupt one, an over-long path) is allowed through, so a healthy install is never locked out.
+- Swarm: **the kernel's live-child limit no longer fails items outright**. An item that hits the ceiling now shrinks the pool and re-queues, leaving the retry budget to genuine transport failures — one rejection used to become a permanently failed item while the batch kept launching at the same width. The `subagent` row's `maxActiveSubagents` rises to 16, with swarm's ceiling aligned to 12, leaving four slots for the model's own delegations (the pool is keyed per root agent, so the two paths were competing for the same eight slots).
+- Shell: **a downloaded update package is deleted when the user picks "later", or abandons the install because work is still in flight**. Both paths used to return, and the pending-install record is written on the install path only, so nothing ever claimed the file again — one deferral left a ~200 MB installer in the system temp directory.
+
 ## [v0.14.7] - 2026-10-01
 
 ### 中文
