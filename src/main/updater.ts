@@ -1002,10 +1002,24 @@ async function downloadAndInstallPackage(
     },
     'install',
   )
-  if (!install) return
+  if (!install) {
+    // The user chose "later": the download is already on disk and nothing else
+    // will ever collect it. The pending-install record is only written on the
+    // install path, so without this removal the file sits in the temp directory
+    // until the OS cleans it — measured 2026-10-02: nothing else in the shell
+    // names this file (a ~200 MB installer per deferred update, never reused
+    // because the name carries the version).
+    await fs.rm(dest, { force: true }).catch(() => undefined)
+    return
+  }
   // The last gate before the app is replaced: a host that still holds work must
   // be named, not silently killed (see confirmNoActiveTasks).
-  if (!await confirmNoActiveTasks(win)) return
+  if (!await confirmNoActiveTasks(win)) {
+    // Same reason as above: nothing will collect this file if the install never
+    // happens, and the app stays running so no next-boot cleanup applies.
+    await fs.rm(dest, { force: true }).catch(() => undefined)
+    return
+  }
   // VISIBLE NSIS install: the app must be closed so the installer can
   // replace the running binaries; the wizard then shows the same flow as a
   // first-time install (user clicks through, completion page relaunches
