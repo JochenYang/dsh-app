@@ -8,11 +8,11 @@
 // disk. This module is what keeps the two lines from reading each other's state.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const { CLIENT_STATE_MARKER, alignWindowStateWithLine, kernelLine } = require('../dist/main/client-state.js')
@@ -24,7 +24,7 @@ function fakeSession() {
 }
 
 function markerDir(line) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-window-line-'))
+  const dir = scratchDir('dsh-window-line-')
   if (line !== undefined) {
     writeFileSync(path.join(dir, CLIENT_STATE_MARKER), `${JSON.stringify({ line, at: 'x' })}\n`)
   }

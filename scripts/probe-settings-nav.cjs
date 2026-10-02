@@ -52,12 +52,33 @@ const record = (name, ok, detail) => {
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * Scratch directories this run created under the system temp, removed on the
+ * way out. Without it every run left a scratch DSH_HOME and its links behind —
+ * this machine had accumulated thousands of these directories (measured
+ * 2026-10-02: 41,570 of our own entries and ~640 MB in %TEMP%).
+ *
+ * Removal goes through the link-safe walker: the home holds junctions into the
+ * repository's own `plugins/` tree, and a sync recursive delete descends
+ * THROUGH a junction instead of unlinking it (scripts/lib/remove-tree.mjs holds
+ * the measurement).
+ */
+const scratch = []
+
+/** Remove the scratch directories, best effort — a locked file must not fail the probe. */
+async function cleanup() {
+  const { removeTree } = await import('./lib/remove-tree.mjs')
+  for (const dir of scratch) {
+    try { await removeTree(dir) } catch { /* best effort */ }
+  }
+}
+
 /** Hard stop: a probe that hung must exit with a verdict, not sit forever. */
 const WATCHDOG_MS = Number(process.env.PROBE_WATCHDOG_MS ?? 240_000)
 const watchdog = setTimeout(() => {
   console.error(`probe watchdog fired after ${WATCHDOG_MS} ms — treating as FAIL`)
   lines.push('FAIL watchdog timeout')
-  app.exit(1)
+  void cleanup().finally(() => app.exit(1))
 }, WATCHDOG_MS)
 watchdog.unref?.()
 
@@ -263,6 +284,8 @@ async function shot(page, name) {
 async function main() {
   const dshHome = mkdtempSync(path.join(os.tmpdir(), 'dsh-nav-probe-home-'))
   const logDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-nav-probe-log-'))
+  // Registered before the links are made, in the order cleanup removes them.
+  scratch.push(dshHome, logDir)
   const logPath = path.join(logDir, 'kernel.log')
   // The suite plugins are linked into BOTH scopes, mirroring the product's own
   // src/main/brand-suite.ts. The profile-local one is what actually loads them:
@@ -614,7 +637,10 @@ async function main() {
 app.whenReady().then(() => main().catch((error) => {
   console.error('\nprobe failed:', error)
   lines.push('FAIL ' + String(error))
-}).finally(() => {
+}).finally(async () => {
   clearTimeout(watchdog)
+  // `app.exit()` is immediate — it runs no pending `finally` — so the scratch
+  // removal happens here, in the caller, rather than anywhere after it.
+  await cleanup()
   app.exit(lines.every((line) => line.startsWith('PASS')) ? 0 : 1)
 }))

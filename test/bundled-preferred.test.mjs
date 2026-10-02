@@ -4,11 +4,12 @@
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const {
@@ -81,7 +82,7 @@ test('the channel default comes from the bundled manifest', () => {
 })
 
 test('the bundled kernel is read from the first directory that has one', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'dsh-bundled-'))
+  const root = scratchDir('dsh-bundled-')
   try {
     const first = path.join(root, 'first')
     const second = path.join(root, 'second')
@@ -119,7 +120,7 @@ test('the bundled kernel is read from the first directory that has one', async (
 })
 
 test('a partial bundle is not a bundle: the search continues', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'dsh-bundled-'))
+  const root = scratchDir('dsh-bundled-')
   try {
     const half = path.join(root, 'half')
     const other = path.join(root, 'other')
@@ -138,7 +139,7 @@ test('a partial bundle is not a bundle: the search continues', async () => {
 })
 
 test('an unreadable manifest is null, not a crash', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'dsh-bundled-'))
+  const root = scratchDir('dsh-bundled-')
   try {
     const dir = path.join(root, 'broken')
     mkdirSync(dir, { recursive: true })

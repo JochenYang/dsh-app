@@ -11,13 +11,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { MemoryRoot, normalizeForMatch, projectSlug } from '../src/memory-store.ts'
 import { renderMemoryText, selectCards } from '../src/prompt.ts'
+import { scratchRoot } from './scratch.ts'
 
-const fresh = (): MemoryRoot => new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-e2e-')))
+const fresh = (): MemoryRoot => scratchRoot('dshm-e2e-')
 
 test('e2e: a workspace write lands in the project scope and never in the root one', async () => {
   const root = fresh()

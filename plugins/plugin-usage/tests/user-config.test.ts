@@ -13,9 +13,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { scratchDir } from './scratch.ts'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { apply, type Config } from '../src/index.ts'
 import {
@@ -30,9 +30,9 @@ import type { UsagePrice } from '../src/types.ts'
 /** One price row, as a personal gateway user would write it. */
 const ROW: UsagePrice = { provider: 'my-gateway', model: 'gpt-x', input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1 }
 
-/** A temporary directory of this test's own. */
+/** A temporary directory of this test's own, removed when the run finishes. */
 function tempDir(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix))
+  return scratchDir(prefix)
 }
 
 // --- projectUsageConfig (the projection every write goes through) --------------

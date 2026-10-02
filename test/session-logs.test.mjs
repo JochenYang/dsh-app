@@ -9,18 +9,19 @@
 // (`<root>/<project>/<session-id>/session[.vN].<ext>`) rather than a flat list.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const { countV4SessionLogs } = require('../dist/main/session-logs.js')
 
 /** A sessions tree with one project and one session directory. */
 function tree(...entries) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-session-logs-'))
+  const root = scratchDir('dsh-session-logs-')
   const dir = path.join(root, '--D-codes-example--', '1a21a13e-5356-4d5c-8088-2b5b0795a4d0')
   mkdirSync(dir, { recursive: true })
   for (const name of entries) writeFileSync(path.join(dir, name), '')

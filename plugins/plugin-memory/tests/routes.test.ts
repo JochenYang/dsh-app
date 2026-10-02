@@ -10,10 +10,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+
 import { join } from 'node:path'
-import { MemoryRoot, projectSlug } from '../src/memory-store.ts'
+import { projectSlug } from '../src/memory-store.ts'
+import { scratchRoot } from './scratch.ts'
 import type { MemoryArchiveRow, MemoryLedgerResponse } from '../src/types.ts'
 import { registerMemoryRoutes, ROUTE_PREFIX } from '../src/routes.ts'
 
@@ -33,7 +33,7 @@ function register(): { readonly routes: RegisteredRoute[], readonly dispose: () 
       routes.push(route)
       return () => Promise.resolve()
     },
-  } as never, new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-'))))
+  } as never, scratchRoot('dshm-routes-'))
   return { routes, dispose }
 }
 
@@ -66,7 +66,7 @@ test('every settings route owns one exact path, its own methods, and a buffered 
 
 test('POST /curate runs the hook for the project the page names', async () => {
   const routes: RegisteredRoute[] = []
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-curate-')))
+  const root = scratchRoot('dshm-routes-curate-')
   const asked: string[] = []
   const dispose = registerMemoryRoutes({
     register: (route: RegisteredRoute) => {
@@ -111,7 +111,7 @@ test('POST /curate runs the hook for the project the page names', async () => {
 
 test('POST /curate without the maintenance half answers a coded unavailable', async () => {
   const routes: RegisteredRoute[] = []
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-curate-off-')))
+  const root = scratchRoot('dshm-routes-curate-off-')
   const dispose = registerMemoryRoutes({
     register: (route: RegisteredRoute) => {
       routes.push(route)
@@ -170,7 +170,7 @@ test('GET /status answers the envelope the settings page reads', async () => {
 
 test('GET /archive lists archived cards; POST /restore brings one back', async () => {
   const routes: RegisteredRoute[] = []
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-arch-')))
+  const root = scratchRoot('dshm-routes-arch-')
   const dispose = registerMemoryRoutes({
     register: (route: RegisteredRoute) => {
       routes.push(route)
@@ -234,7 +234,7 @@ test('GET /archive lists archived cards; POST /restore brings one back', async (
 
 test('GET /ledger serves the consolidation events the panels read', async () => {
   const routes: RegisteredRoute[] = []
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-ledger-')))
+  const root = scratchRoot('dshm-routes-ledger-')
   const dispose = registerMemoryRoutes({
     register: (route: RegisteredRoute) => {
       routes.push(route)
@@ -272,7 +272,7 @@ test('GET /archive lists EVERY project, and never the retired root scope', async
   // so a copy still sitting there is deliberately not listed: restoring it
   // would address a store nothing reads.
   const routes: RegisteredRoute[] = []
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-allscope-')))
+  const root = scratchRoot('dshm-routes-allscope-')
   const dispose = registerMemoryRoutes({
     register: (route: RegisteredRoute) => {
       routes.push(route)
@@ -328,7 +328,7 @@ test('GET /archive lists EVERY project, and never the retired root scope', async
 
 test('POST /archive-delete and /archive-clear drop copies without touching live cards', async () => {
   const routes: RegisteredRoute[] = []
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-routes-archdrop-')))
+  const root = scratchRoot('dshm-routes-archdrop-')
   const dispose = registerMemoryRoutes({
     register: (route: RegisteredRoute) => {
       routes.push(route)

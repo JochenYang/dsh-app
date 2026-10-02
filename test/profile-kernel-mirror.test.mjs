@@ -11,8 +11,9 @@
 // junction case below is that regression, kept as a test.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { scratchDir } from './scratch.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -27,7 +28,7 @@ const {
 
 /** A runtime tree with the two shapes that matter: a scoped kernel package and a vendor package. */
 function fakeRuntime() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-kernel-runtime-'))
+  const root = scratchDir('dsh-kernel-runtime-')
   const scoped = path.join(root, 'node_modules', '@deepseek-ai', 'dsh')
   mkdirSync(path.join(scoped, 'lib'), { recursive: true })
   writeFileSync(path.join(scoped, 'package.json'), '{"name":"@deepseek-ai/dsh","version":"0.1.5-rc.2"}\n')
@@ -40,7 +41,7 @@ function fakeRuntime() {
 
 /** A seeded suite profile: the manifest plus whatever node_modules it already has. */
 function fakeProfile() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-kernel-profile-'))
+  const dir = scratchDir('dsh-kernel-profile-')
   mkdirSync(dir, { recursive: true })
   writeFileSync(path.join(dir, 'package.json'), '{"name":"dsh-profile-dsh-app","private":true}\n')
   return dir
@@ -438,7 +439,7 @@ snapshots:
 
 /** A runtime carrying the two packages the market also installed, plus one it does not. */
 function runtimeOverMarketInstall() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-kernel-runtime-'))
+  const root = scratchDir('dsh-kernel-runtime-')
   const write = (rel, body) => {
     const file = path.join(root, 'node_modules', ...rel.split('/'))
     mkdirSync(path.dirname(file), { recursive: true })

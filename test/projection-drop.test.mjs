@@ -21,8 +21,29 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import { removeTree } from '../scripts/lib/remove-tree.mjs'
+
+/**
+ * Every scratch root this run created, removed when it finishes.
+ *
+ * Why the removal is registered here rather than written after each test: the
+ * five tests below each build their own tree, and only one of them called
+ * `removeTree(root)` — an assertion that failed earlier in any of the others
+ * skipped it entirely, so those runs left `dsh-projection-*` directories behind
+ * (part of the 41,570 of our own entries measured in the system temp on
+ * 2026-10-02).
+ *
+ * Through the link-safe walker, because each root holds the junctions the tests
+ * plant (see the note in `scratch()`).
+ */
+const created = []
+
+after(async () => {
+  for (const dir of created.splice(0)) {
+    try { await removeTree(dir) } catch { /* best effort */ }
+  }
+})
 
 const require = createRequire(import.meta.url)
 const { dropForeignProjection } = require('../dist/main/suite-profile.js')
@@ -34,6 +55,7 @@ const { dropForeignProjection } = require('../dist/main/suite-profile.js')
  */
 function scratch() {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-projection-'))
+  created.push(root)
   const profile = path.join(root, 'profiles', 'dsh-app')
   const ownTree = path.join(root, 'kernel', 'dsh-0.1.7-alpha.2+suite-aaaa1111')
   const otherTree = path.join(root, 'kernel', 'dsh-0.1.6-alpha.2+suite-bbbb2222')
@@ -110,7 +132,6 @@ test('the projected package is what the profile resolved before the drop, and no
   assert.equal(JSON.parse(readFileSync(resolved, 'utf8')).version, '0.0.1')
   await dropForeignProjection(profile, ownTree)
   assert.equal(existsSync(resolved), false)
-  // Through the link-safe walker: this scratch tree HOLDS the junctions the
-  // tests planted, and a sync recursive delete descends through them.
-  await removeTree(root)
+  // The root is removed by the module-level `after` hook (through the
+  // link-safe walker, since this tree HOLDS the junctions the tests planted).
 })

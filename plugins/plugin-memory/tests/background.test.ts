@@ -9,16 +9,16 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, existsSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { MAX_TOPIC_BODY_CHARS, MemoryRoot, MemoryStore, cardFingerprint, contentHash, projectSlug, type LedgerEntry } from '../src/memory-store.ts'
+import { scratchRoot, scratchStore, scratchDir } from './scratch.ts'
 import { CARD_TEXT_DISCIPLINE } from '../src/card-discipline.ts'
 import { CURATE_BUDGET, MemoryCurator, buildCuratePrompt, serializeStore } from '../src/curator.ts'
 import { apply as applyHost } from '../src/index.ts'
 
-const tmpRoot = (): MemoryRoot => new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
-const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
+const tmpRoot = (): MemoryRoot => scratchRoot('dshm-bg-')
+const tmpStore = (): MemoryStore => scratchStore('dshm-bg-')
 
 /** The workspace the curator probes run in. */
 const PROJECT_CWD = 'D:/proj'
@@ -502,7 +502,7 @@ test('serializeStore: a blocking card reached BY ROTATION is also reported, not 
 })
 
 test('curate stall: the counter accumulates, clears, and is per-scope', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
+  const root = scratchRoot('dshm-bg-')
   assert.equal(root.recordCurateStall('global'), 1)
   assert.equal(root.recordCurateStall('global'), 2, 'consecutive no-progress passes accumulate')
   assert.equal(root.recordCurateStall('other-scope'), 1, 'scopes count independently')
@@ -516,7 +516,7 @@ test('curate stall: the counter accumulates, clears, and is per-scope', () => {
 // --- curate cursor (truncation rotation) --------------------------------------
 
 test('curate cursor: absent state reads as no anchor and a whole-store pass clears it', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
+  const root = scratchRoot('dshm-bg-')
   assert.equal(root.curateCursorOf('global'), undefined, 'no state → start at the top')
   root.recordCurateCursor('global', 'card-42')
   assert.equal(root.curateCursorOf('global'), 'card-42')
@@ -525,14 +525,14 @@ test('curate cursor: absent state reads as no anchor and a whole-store pass clea
 })
 
 test('curate cursor: an empty anchor clears rather than storing a blank key', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
+  const root = scratchRoot('dshm-bg-')
   root.recordCurateCursor('global', 'card-42')
   root.recordCurateCursor('global', '')
   assert.equal(root.curateCursorOf('global'), undefined)
 })
 
 test('curate cursor: per-scope anchors do not bleed into each other', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
+  const root = scratchRoot('dshm-bg-')
   root.recordCurateCursor('global', 'g-card')
   root.recordCurateCursor('skills-6ebc1ea8', 's-card')
   assert.equal(root.curateCursorOf('global'), 'g-card')
@@ -541,7 +541,7 @@ test('curate cursor: per-scope anchors do not bleed into each other', () => {
 })
 
 test('curate cursor: an old numeric cursor (pre-anchor state) degrades to no anchor', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-bg-')))
+  const root = scratchRoot('dshm-bg-')
   // State written by the first cut of this feature stored an offset.
   root.recordCurateCursor('global', 'placeholder')
   assert.equal(root.curateCursorOf('global'), 'placeholder')
@@ -1077,7 +1077,7 @@ function hostStub(): { ctx: never, mounted: { events: string[], effects: string[
 }
 
 test('host apply: nothing subscribes to the session event feed', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dshm-apply-'))
+  const dir = scratchDir('dshm-apply-')
   const { ctx, mounted } = hostStub()
   await applyHost(ctx, { storePath: dir })
   // A subscription is what armed the quiet timer, and the timer is what spent
@@ -1092,7 +1092,7 @@ test('host apply: nothing subscribes to the session event feed', async () => {
 })
 
 test('host apply: the boot migration runs before anything mounts', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dshm-apply-migrate-'))
+  const dir = scratchDir('dshm-apply-migrate-')
   const root = new MemoryRoot(dir)
   await seed(root.global, 'leftover-global', '旧全局卡的内容')
   const { ctx } = hostStub()

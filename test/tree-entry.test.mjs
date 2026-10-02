@@ -13,7 +13,7 @@
 // tree that really holds one.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -27,6 +27,7 @@ import {
   TREE_ENTRY_LINK,
   TREE_ENTRY_OTHER,
 } from '../scripts/lib/tree-entry.mjs'
+import { scratchDir } from './scratch.mjs'
 
 /** A readdir/lstat shape: only the three answers the classifier asks for. */
 const shape = ({ file = false, dir = false, link = false }) => ({
@@ -68,7 +69,7 @@ test('classifyTreeEntry tells a file, a directory, a link and an other apart', (
 })
 
 test('classifyTreeEntry reads what readdir actually reports', async (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), 'dsh-tree-entry-'))
+  const root = scratchDir('dsh-tree-entry-')
   t.after(() => rm(root, { recursive: true, force: true }))
   mkdirSync(path.join(root, 'sub'))
   writeFileSync(path.join(root, 'file.txt'), 'x')
@@ -97,7 +98,7 @@ test('linkTargetWithinTree keeps an in-tree link relative to itself', () => {
 })
 
 test('collectTreeEntries records a link instead of refusing the tree', async (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), 'dsh-tree-entry-'))
+  const root = scratchDir('dsh-tree-entry-')
   t.after(() => rm(root, { recursive: true, force: true }))
   const bin = path.join(root, 'app', 'node_modules', '.bin')
   const pkg = path.join(root, 'app', 'node_modules', 'pkg')
@@ -125,8 +126,8 @@ test('collectTreeEntries records a link instead of refusing the tree', async (t)
 })
 
 test('collectTreeEntries refuses a link that leaves the tree', async (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), 'dsh-tree-entry-'))
-  const outside = mkdtempSync(path.join(tmpdir(), 'dsh-outside-'))
+  const root = scratchDir('dsh-tree-entry-')
+  const outside = scratchDir('dsh-outside-')
   t.after(() => rm(root, { recursive: true, force: true }))
   t.after(() => rm(outside, { recursive: true, force: true }))
   mkdirSync(path.join(root, 'app'))

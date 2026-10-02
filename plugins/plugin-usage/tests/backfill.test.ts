@@ -12,16 +12,16 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { scratchDir } from './scratch.ts'
 import { listedSessionId, runBackfill, type BackfillPersistence } from '../src/backfill.ts'
 import { foldEvents, type FoldEvent } from '../src/fold.ts'
 import { UsageStore } from '../src/store.ts'
 import type { UsageRow } from '../src/types.ts'
 
-const tmpDir = (): string => mkdtempSync(join(tmpdir(), 'dshu-backfill-'))
+const tmpDir = (): string => scratchDir('dshu-backfill-')
 
 const newStore = (dir: string, log: (message: string) => void = () => {}): UsageStore => {
   const store = new UsageStore({ dir, log })

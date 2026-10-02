@@ -8,11 +8,11 @@
 //
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const { installCrashLogging, isTransportFailure, reportEscapedError } = require('../dist/main/crash-log.js')
@@ -98,7 +98,7 @@ test('both listeners are installed, and neither re-raises', () => {
 // ---------------------------------------------------------------- log rotation
 
 test('the diagnostics log keeps exactly one previous generation', () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-log-'))
+  const dir = scratchDir('dsh-app-log-')
   const file = path.join(dir, 'nested', 'dsh-kernel.log')
   // The directory is created on demand: the log's own path is the first thing a
   // fresh install writes to.

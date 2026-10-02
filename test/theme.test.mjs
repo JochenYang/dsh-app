@@ -9,12 +9,13 @@
 // block, unknown value) onto the setting's own default, `system`.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -68,7 +69,7 @@ test('parseThemePreference rejects anything unusable', () => {
 })
 
 test('readThemePreference survives a missing or unreadable document', () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-theme-test-'))
+  const dir = scratchDir('dsh-theme-test-')
   assert.equal(readThemePreference(path.join(dir, 'nope.yaml')), null)
   const file = path.join(dir, 'settings.yaml')
   writeFileSync(file, document('ui-theme:\n  preference: dark'), 'utf8')

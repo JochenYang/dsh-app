@@ -7,11 +7,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { scratchRoot } from './scratch.ts'
 import { extractJson, resolveLlm, streamJson } from '../src/llm-direct.ts'
-import { MemoryRoot, repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
+import { repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
 import { buildCuratePrompt } from '../src/curator.ts'
 
 test('extractJson parses bare objects', () => {
@@ -127,7 +125,7 @@ test('repairDoublePrefix leaves clean files byte-identical', () => {
 })
 
 test('recordLlmAudit round-trips newest-first', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-audit-')))
+  const root = scratchRoot('dshm-audit-')
   assert.deepEqual(root.llmAudit(), [])
   root.recordLlmAudit({ at: 1000, source: 'curate', session: 'abc123', status: 'ok', inputTokens: 100, outputTokens: 20, durationMs: 500 })
   root.recordLlmAudit({ at: 2000, source: 'curate', session: 'def456', status: 'error', inputTokens: 90, outputTokens: 10, durationMs: 400, error: 'unparseable JSON response' })

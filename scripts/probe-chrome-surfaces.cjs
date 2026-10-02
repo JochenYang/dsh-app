@@ -131,7 +131,50 @@ const CLICK_TEXT = (text) => `(function () {
   return true
 })()`
 
+/**
+ * Scratch directories this run created under the system temp, removed on the
+ * way out. Without the removal a run left ~18 MB of extracted runtime plus a
+ * scratch home behind EVERY time, which is how this machine accumulated
+ * thousands of `dsh-*-runtime-*` directories (measured 2026-10-02: 41,570 of
+ * our own entries and ~640 MB in %TEMP%). Removal goes through the link-safe
+ * walker because the scratch home holds junctions into the extracted runtime —
+ * a sync recursive delete descends THROUGH them and would empty the runtime's
+ * own package directories (scripts/lib/remove-tree.mjs holds the measurement).
+ */
+const scratch = []
+
+/**
+ * Remove every scratch directory, then exit.
+ *
+ * `app.exit()` is immediate (it does not run pending `finally` blocks — verified
+ * here with the equivalent `process.exit`), so cleanup has to happen in the
+ * caller rather than in a `finally` around the exit itself.
+ *
+ * Order does not matter for correctness but the home is registered FIRST and
+ * removed in that order: it holds the junctions, so unlinking them before the
+ * tree they point at keeps every intermediate state valid. (Both orders are
+ * safe — the walker unlinks a link instead of descending it, and tolerates one
+ * already dangling — this one never even creates the dangling case.)
+ *
+ * @param {number} code process exit code.
+ */
+async function exitAfterCleanup(code) {
+  const { removeTree } = await import('./lib/remove-tree.mjs')
+  for (const dir of scratch) {
+    try { await removeTree(dir) } catch { /* best effort: a locked file must not fail the probe */ }
+  }
+  app.exit(code)
+}
 async function main() {
+  try {
+    return await run()
+  } catch (error) {
+    console.error(error.message || error)
+    await exitAfterCleanup(1)
+  }
+}
+
+async function run() {
   // Boot the kernel from the BUILT runtime artifact (the same bytes a user's
   // kernel update installs), not from a source checkout — the artifact is what
   // ships, and it carries the suite plugins itself. Extract to a temp work dir.
@@ -147,6 +190,7 @@ async function main() {
   const tgz = path.join(distDir, tgzName)
   if (!existsSync(tgz)) throw new Error(`no runtime artifact for ${cell}: ${tgz} (build one: npm run runtime:build)`)
   const work = mkdtempSync(path.join(os.tmpdir(), 'dsh-chrome-probe-runtime-'))
+  scratch.push(work)
   spawnSync('tar', ['--force-local', '-xzf', tgz, '-C', work], { stdio: 'inherit' })
   const runtimeDir = path.join(work, 'runtime')
   const nodeBin = path.join(runtimeDir, process.platform === 'win32' ? 'node/node.exe' : 'node/node')
@@ -155,6 +199,9 @@ async function main() {
 
   const dshHome = mkdtempSync(path.join(os.tmpdir(), 'dsh-chrome-probe-home-'))
   const logDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-chrome-probe-log-'))
+  // Registered before `work` (see `exitAfterCleanup`): the home holds the
+  // junctions into the runtime, so it is unlinked first.
+  scratch.unshift(dshHome, logDir)
   const logPath = path.join(logDir, 'kernel.log')
   const port = await freePort()
   console.log(`runtime  : ${tgz}`)
@@ -194,7 +241,7 @@ async function main() {
     env: { ...process.env, DSH_HOME: dshHome, DSH_APP_PROFILE: 'dsh-app' },
     windowsHide: true,
   })
-  const watchdog = setTimeout(() => { console.error('probe watchdog fired'); app.exit(1) }, 300_000)
+  const watchdog = setTimeout(() => { console.error('probe watchdog fired'); void exitAfterCleanup(1) }, 300_000)
   watchdog.unref?.()
 
   try {
@@ -283,8 +330,8 @@ async function main() {
   } finally {
     clearTimeout(watchdog)
     try { child.kill() } catch { /* already gone */ }
-    app.exit(0)
+    await exitAfterCleanup(0)
   }
 }
 
-main().catch((error) => { console.error(error.message || error); app.exit(1) })
+main().catch(async (error) => { console.error(error.message || error); await exitAfterCleanup(1) })

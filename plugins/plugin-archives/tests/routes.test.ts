@@ -22,6 +22,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { after } from 'node:test'
 import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import {
   registerArchiveRoutes,
@@ -29,6 +30,23 @@ import {
   type ArchiveRoutesOptions,
 } from '../src/routes.ts'
 import type { ArchiveDeleteResult, ArchiveList } from '../src/types.ts'
+
+/**
+ * Scratch roots this run created, removed when it finishes.
+ *
+ * Why: the fixture roots below are built with `mkdtemp` and were never removed,
+ * so repeated runs accumulated thousands of `dshar-*` directories in the system
+ * temp (measured 2026-10-02 on this project's machine: 41,570 of our own
+ * entries). Accumulating scratch is not a test failure, so nothing caught it.
+ */
+const created: string[] = []
+
+after(async () => {
+  const { rm } = await import('node:fs/promises')
+  for (const dir of created.splice(0)) {
+    try { await rm(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
+})
 
 // --- harness -----------------------------------------------------------------
 
@@ -112,6 +130,7 @@ async function scenario(options: {
   activity?: ArchiveRoutesOptions['activity']
 }) {
   const root = await mkdtemp(join(tmpdir(), 'dshar-test-'))
+  created.push(root)
   const logs = new Map<string, string>()
   for (const id of options.ids) logs.set(id, await sessionDir(root, id))
   const listed: unknown[] = Object.keys(Object.fromEntries(logs)).map((id) => ({
@@ -151,6 +170,7 @@ async function legacyScenario(
   exposure: 'root' | 'config' | 'none' = 'root',
 ) {
   const root = await mkdtemp(join(tmpdir(), 'dshar-legacy-'))
+  created.push(root)
   for (const entry of stored) {
     const dir = join(root, entry.project, entry.id)
     await mkdir(dir, { recursive: true })
@@ -357,6 +377,7 @@ test('prune: keeps a record whose log this kernel cannot list but which is still
   // user archived, for good, and nothing re-creates it. The filesystem has the
   // last word: the directory is there, the session is not gone.
   const root = await mkdtemp(join(tmpdir(), 'dshar-unlisted-'))
+  created.push(root)
   const dir = join(root, '--D-codes-example--', 'session-hidden')
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, 'session.v4.jsonl.zstd'), 'x')

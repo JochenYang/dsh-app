@@ -8,9 +8,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { scratchRoot, scratchStore } from './scratch.ts'
 import {
   ARCHIVE_MAX_FILES,
   ARCHIVE_RETENTION_DAYS,
@@ -38,8 +38,8 @@ import { SAVE_TOOL_DESCRIPTION } from '../src/tools.ts'
 import { buildCuratePrompt } from '../src/curator.ts'
 import type { MemoryCategory } from '../src/types.ts'
 
-const tmpStore = (): MemoryStore => new MemoryStore(mkdtempSync(join(tmpdir(), 'dshm-test-')))
-const tmpRoot = (): MemoryRoot => new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-root-')))
+const tmpStore = (): MemoryStore => scratchStore('dshm-test-')
+const tmpRoot = (): MemoryRoot => scratchRoot('dshm-root-')
 
 /** Save one well-formed card in one call. */
 const save = async (store: MemoryStore, name: string, body: string, category: MemoryCategory = 'lesson', summary = ''): Promise<void> => {

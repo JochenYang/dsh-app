@@ -3,11 +3,11 @@
 // into the "this zip holds plaintext keys" notice. Run by the plugin's own
 // scripts/test.mjs (esbuild-bundled, node --test).
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { unzipSync } from 'fflate'
+import { scratchDir } from './scratch.ts'
 
 import { registerBackupRoutes } from '../src/routes.ts'
 import type { HostConnectionFetch, ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
@@ -28,7 +28,7 @@ function registryMock(): { fetch: HostConnectionFetch, routes: Map<string, Conne
 }
 
 function scratchHome(label: string): string {
-  return mkdtempSync(join(tmpdir(), `dsh-presets-routes-${label}-`))
+  return scratchDir(`dsh-presets-routes-${label}-`)
 }
 
 async function exportAnswer(home: string): Promise<Response> {

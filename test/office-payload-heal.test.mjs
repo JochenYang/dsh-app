@@ -7,11 +7,11 @@
 // is the child dying with ENOENT several seconds into its boot.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const { prepareOfficePayload } = require('../dist/main/desktop-host.js')
@@ -30,7 +30,7 @@ const LEAF_INTERPRETER = path.join(
 
 /** A payload source: the marker the child validates, plus one skill file. */
 function fakeSource() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-src-'))
+  const dir = scratchDir('dsh-office-src-')
   mkdirSync(path.join(dir, 'scripts'), { recursive: true })
   writeFileSync(path.join(dir, 'scripts', 'check_office.py'), 'print("ok")\n')
   writeFileSync(path.join(dir, 'skill.md'), 'skill\n')
@@ -44,7 +44,7 @@ function materialized(dataDir) {
 
 test('a complete payload is materialized once and answered with the fixed leaf', async () => {
   const source = fakeSource()
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-data-'))
+  const dataDir = scratchDir('dsh-office-data-')
   const leaf = await prepareOfficePayload(source, dataDir, undefined, INTERPRETER)
   // The leaf is not the payload: the child derives its asset root from the
   // leaf's own dirname, so answering with the payload's inner path would move
@@ -56,7 +56,7 @@ test('a complete payload is materialized once and answered with the fixed leaf',
 
 test('a leaf with no Python set still carries the interpreter the child checks', async () => {
   const source = fakeSource()
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-data-'))
+  const dataDir = scratchDir('dsh-office-data-')
   const leaf = await prepareOfficePayload(source, dataDir, undefined, INTERPRETER)
   // Nothing linked the payload's own set, so `load_workspace_dependencies` finds
   // no runtime.json here. What must exist is the interpreter: the child stats it
@@ -70,7 +70,7 @@ test('a leaf with no Python set still carries the interpreter the child checks',
 
 test('a start that names no placeable interpreter is refused', async () => {
   const source = fakeSource()
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-data-'))
+  const dataDir = scratchDir('dsh-office-data-')
   await assert.rejects(
     () => prepareOfficePayload(source, dataDir, undefined, path.join(dataDir, 'no-such-node')),
     /no Node to place/u,
@@ -83,7 +83,7 @@ test('a start that names no placeable interpreter is refused', async () => {
 
 test('a half-copied payload is refreshed instead of being trusted for good', async () => {
   const source = fakeSource()
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-data-'))
+  const dataDir = scratchDir('dsh-office-data-')
   // What an interrupted copy leaves: a directory that exists, is NEWER than the
   // source, and has no marker in it. mtime alone would call this fresh forever.
   mkdirSync(materialized(dataDir), { recursive: true })
@@ -97,8 +97,8 @@ test('a half-copied payload is refreshed instead of being trusted for good', asy
 })
 
 test('a source that is not a payload is refused before anything is written', async () => {
-  const empty = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-empty-'))
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-data-'))
+  const empty = scratchDir('dsh-office-empty-')
+  const dataDir = scratchDir('dsh-office-data-')
   await assert.rejects(() => prepareOfficePayload(empty, dataDir, undefined, INTERPRETER), /missing or incomplete/u)
   assert.equal(existsSync(materialized(dataDir)), false)
 })

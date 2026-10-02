@@ -19,6 +19,7 @@ import {
   type SwarmTask,
 } from '../src/orchestrator.ts'
 import { expandTasks } from '../src/expand.ts'
+import { scratchDir } from './scratch.ts'
 import {
   projectSwarmConfig,
   readRetiredSwarmConfig,
@@ -661,10 +662,9 @@ test('projectSwarmConfig: a cleared field returns to the layer value, or to the 
 })
 
 test('readRetiredSwarmConfig: a missing, malformed, or partial store degrades to what it can import', async () => {
-  const { mkdtempSync, writeFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
+  const { writeFileSync } = await import('node:fs')
   const { join } = await import('node:path')
-  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
+  const dir = scratchDir('dshs-test-')
   const warnings: string[] = []
   const log = (m: string): void => { warnings.push(m) }
 
@@ -686,10 +686,9 @@ test('readRetiredSwarmConfig: a missing, malformed, or partial store degrades to
 })
 
 test('retireSwarmConfigFile: the retired store is renamed aside and kept verbatim', async () => {
-  const { existsSync, mkdtempSync, readFileSync, writeFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
+  const { existsSync, readFileSync, writeFileSync } = await import('node:fs')
   const { join } = await import('node:path')
-  const dir = mkdtempSync(join(tmpdir(), 'dshs-test-'))
+  const dir = scratchDir('dshs-test-')
   const file = join(dir, 'config.json')
   writeFileSync(file, '{"maxItems": 32}', 'utf8')
 

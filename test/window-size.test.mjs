@@ -23,10 +23,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import os from 'node:os'
+import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const {
@@ -188,7 +188,7 @@ test('the persisted shape is validated field by field', () => {
 })
 
 test('the state file survives a round trip and tolerates a broken one', () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-window-bounds-'))
+  const dir = scratchDir('dsh-window-bounds-')
   const file = windowStateFile(dir)
   assert.equal(readWindowBounds(file), undefined, 'nothing written yet')
 

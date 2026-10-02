@@ -8,11 +8,11 @@
 // restored the file by hand. These tests pin what travels, and what is refused.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const { migrateSuiteProfile, SUITE_PROFILE_MARKER } = require('../dist/main/suite-profile.js')
@@ -22,7 +22,7 @@ const PLUGIN = 'export default { id: "local-provider" }\n'
 
 /** A fake `$DSH_HOME` whose old `web` profile carries the row and the file. */
 function fakeHome({ withPlugin = true, patch = ROW } = {}) {
-  const home = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-seed-'))
+  const home = scratchDir('dsh-app-seed-')
   const legacy = path.join(home, 'profiles', 'web')
   mkdirSync(path.join(legacy, 'local-plugins'), { recursive: true })
   writeFileSync(path.join(legacy, 'cordis.patch.yml'), patch)

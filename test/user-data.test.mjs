@@ -10,18 +10,18 @@
 //
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const { USER_DATA_DIR_NAME, alignUserDataDir } = require('../dist/main/user-data.js')
 
 /** A throwaway application-data root, with the data directory under one spelling. */
 function fixture(existingName) {
-  const appDataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-userdata-'))
+  const appDataDir = scratchDir('dsh-app-userdata-')
   const dir = path.join(appDataDir, existingName)
   mkdirSync(dir, { recursive: true })
   writeFileSync(path.join(dir, 'settings.json'), '{"keep":true}\n')
@@ -29,7 +29,7 @@ function fixture(existingName) {
 }
 
 test('a data root that does not exist yet gets the brand spelling', () => {
-  const missing = path.join(mkdtempSync(path.join(os.tmpdir(), 'dsh-app-userdata-')), 'never-created')
+  const missing = path.join(scratchDir('dsh-app-userdata-'), 'never-created')
   assert.equal(alignUserDataDir(missing), path.join(missing, USER_DATA_DIR_NAME))
 })
 

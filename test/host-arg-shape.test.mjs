@@ -15,11 +15,12 @@
 // exchange, the forward and the index rendering all run for real.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 const {
@@ -186,12 +187,12 @@ if (problems.length > 0) {
 
 /** A runtime tree whose host package reports `version` and enforces `contract`. */
 function fakeRuntime(version, contract) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-arg-shape-'))
+  const root = scratchDir('dsh-arg-shape-')
   const dir = desktopHostDir(root)
   mkdirSync(path.join(dir, 'lib'), { recursive: true })
   writeFileSync(path.join(dir, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/dsh-desktop-host', version })}\n`)
   writeFileSync(path.join(dir, 'lib', 'index.js'), FAKE_HOST)
-  return { root, contract, projectDir: mkdtempSync(path.join(os.tmpdir(), 'dsh-arg-shape-profile-')) }
+  return { root, contract, projectDir: scratchDir('dsh-arg-shape-profile-') }
 }
 
 /**
@@ -201,14 +202,14 @@ function fakeRuntime(version, contract) {
  */
 function fakeWebRuntime(version, contract = 'accept', env = {}) {
   const runtime = fakeRuntime(version, undefined)
-  const officeSource = mkdtempSync(path.join(os.tmpdir(), 'dsh-office-assets-'))
+  const officeSource = scratchDir('dsh-office-assets-')
   mkdirSync(path.join(officeSource, 'scripts'), { recursive: true })
   writeFileSync(path.join(officeSource, 'scripts', 'check_office.py'), '# fake office check\n')
   writeFileSync(path.join(desktopHostDir(runtime.root), 'lib', 'index.js'), FAKE_WEB_HOST)
   return {
     ...runtime,
     officeSource,
-    dataDir: mkdtempSync(path.join(os.tmpdir(), 'dsh-web-data-')),
+    dataDir: scratchDir('dsh-web-data-'),
     env: { FAKE_WEB_CONTRACT: contract, ...env },
   }
 }
@@ -556,7 +557,7 @@ const LEAF_INTERPRETER = path.join(
  * is linked into the leaf has to model it.
  */
 function fakePayloadRuntime() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'dsh-payload-'))
+  const dir = scratchDir('dsh-payload-')
   const interpreter = path.join(dir, LEAF_INTERPRETER)
   mkdirSync(path.dirname(interpreter), { recursive: true })
   writeFileSync(interpreter, '')

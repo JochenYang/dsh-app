@@ -10,10 +10,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+
 import { join } from 'node:path'
 import { MemoryRoot, type MemoryStore } from '../src/memory-store.ts'
+import { scratchRoot } from './scratch.ts'
 import { registerMemoryTools } from '../src/tools.ts'
 
 /** Minimal tool registrar capturing the definitions as they register. */
@@ -70,7 +70,7 @@ const saveTool = (tools: Map<string, unknown>): { execute(args: unknown, exec: u
   tools.get('memory_save') as { execute(args: unknown, exec: unknown): Promise<SaveResult> }
 
 test('memory_save: create → update → unchanged, firing the trigger only on change', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-')))
+  const root = scratchRoot('dshm-tools-')
   const { ctx, tools } = stubCtx()
   const fired: string[] = []
   registerMemoryTools(ctx, root, (_parent, sessionId) => { fired.push(String(sessionId)) })
@@ -94,7 +94,7 @@ test('memory_save: create → update → unchanged, firing the trigger only on c
 })
 
 test('the scope parameter of all three tools no longer offers the retired global scope', () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-scope-')))
+  const root = scratchRoot('dshm-tools-scope-')
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   // `parameters` is the compiled JSON schema: the per-property entries live
@@ -114,7 +114,7 @@ test('the scope parameter of all three tools no longer offers the retired global
 })
 
 test('memory_save: scope "global" is refused with a stable code, whatever the session', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-global-')))
+  const root = scratchRoot('dshm-tools-global-')
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const save = saveTool(tools)
@@ -136,7 +136,7 @@ test('memory_save: scope "global" is refused with a stable code, whatever the se
 })
 
 test('memory_save: a session with no workspace has no scope to save into', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-nocwd-')))
+  const root = scratchRoot('dshm-tools-nocwd-')
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const save = saveTool(tools)
@@ -156,7 +156,7 @@ test('memory_save: a session with no workspace has no scope to save into', async
 })
 
 test('memory_save: creating a near-duplicate under a NEW key is rejected with a pointer', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-dup-')))
+  const root = scratchRoot('dshm-tools-dup-')
   await projectStore(root).upsert({ name: 'pnpm11-allowscripts', category: 'lesson', summary: 'pnpm 11 白名单', body: 'pnpm 11 白名单必须写进 pnpm-workspace.yaml 才生效' })
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
@@ -175,7 +175,7 @@ test('memory_save: creating a near-duplicate under a NEW key is rejected with a 
 })
 
 test('memory_save: invalid topic / missing summary / credentials are rejected with guidance', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-rej-')))
+  const root = scratchRoot('dshm-tools-rej-')
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const save = saveTool(tools)
@@ -198,7 +198,7 @@ test('memory_save: invalid topic / missing summary / credentials are rejected wi
 })
 
 test('memory_save strips a commit id out of the content before persisting', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-cid-')))
+  const root = scratchRoot('dshm-tools-cid-')
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const save = saveTool(tools)
@@ -214,7 +214,7 @@ test('memory_save strips a commit id out of the content before persisting', asyn
 })
 
 test('memory_save: an update-path validation failure returns a structured reason, never a throw', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-upd-')))
+  const root = scratchRoot('dshm-tools-upd-')
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
   const save = saveTool(tools)
@@ -230,7 +230,7 @@ test('memory_save: an update-path validation failure returns a structured reason
 })
 
 test('memory_save survives an unavailable agents service', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-noagent-')))
+  const root = scratchRoot('dshm-tools-noagent-')
   const tools = new Map<string, unknown>()
   const ctx = {
     tools: { register: (d: { name: string }) => { tools.set(d.name, d); return () => undefined } },
@@ -247,7 +247,7 @@ interface RecallScopeView { found?: boolean, card?: { topic: string, body: strin
 interface RecallResult { project?: RecallScopeView, reason?: string, code?: string }
 
 test('memory_recall: topic fetch, keyword filter, and full-scope listing', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-recall-')))
+  const root = scratchRoot('dshm-tools-recall-')
   await projectStore(root).upsert({ name: 'pnpm-typecheck', category: 'lesson', summary: 'pnpm 跑检查', body: '用 pnpm 跑 typecheck' })
   await projectStore(root).upsert({ name: 'tokyo-servers', category: 'fact', summary: '东京服务器', body: '服务器在东京' })
   const { ctx, tools } = stubCtx()
@@ -277,7 +277,7 @@ test('memory_recall: topic fetch, keyword filter, and full-scope listing', async
 })
 
 test('memory_recall: the retired scope and a workspace-less session are refused with codes', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-recall-scope-')))
+  const root = scratchRoot('dshm-tools-recall-scope-')
   await root.global.upsert({ name: 'old-global-card', category: 'fact', summary: '旧全局', body: '这张卡在根目录里' })
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)
@@ -293,7 +293,7 @@ test('memory_recall: the retired scope and a workspace-less session are refused 
 })
 
 test('memory_forget: topic key deletes one card; text sweeps by content', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-forget-')))
+  const root = scratchRoot('dshm-tools-forget-')
   await projectStore(root).upsert({ name: 'pnpm-typecheck', category: 'lesson', summary: 'pnpm 跑检查', body: '用 pnpm 跑 typecheck' })
   await projectStore(root).upsert({ name: 'tokyo-servers', category: 'fact', summary: '东京服务器', body: '服务器在东京' })
   const { ctx, tools } = stubCtx()
@@ -311,7 +311,7 @@ test('memory_forget: topic key deletes one card; text sweeps by content', async 
 })
 
 test('memory_forget: the retired scope and a workspace-less session are refused with codes', async () => {
-  const root = new MemoryRoot(mkdtempSync(join(tmpdir(), 'dshm-tools-forget-scope-')))
+  const root = scratchRoot('dshm-tools-forget-scope-')
   await root.global.upsert({ name: 'keep-me', category: 'fact', summary: '旧全局', body: '不该被这个工具删掉' })
   const { ctx, tools } = stubCtx()
   registerMemoryTools(ctx, root)

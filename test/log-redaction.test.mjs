@@ -12,11 +12,11 @@
 //     must survive the skip so the user can install the package and re-enable it.
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
 
@@ -253,7 +253,7 @@ test('a non-empty flow section is kept visible but inert', () => {
 
 /** A throwaway profile under a fake $DSH_HOME layout. */
 function fixtureProfile() {
-  const home = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-patch-'))
+  const home = scratchDir('dsh-app-patch-')
   const profileDir = path.join(home, 'profiles', 'dsh-app')
   mkdirSync(profileDir, { recursive: true })
   const install = (packageName, into = path.join(profileDir, 'node_modules')) => {
@@ -580,7 +580,7 @@ test('a nested composition is not judged against the profile, so one bad name ca
 
   // With the installation closure in play the own name resolves too, and the row
   // survives verbatim — the shape the real home layer has.
-  const closure = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-preset-closure-'))
+  const closure = scratchDir('dsh-app-preset-closure-')
   installInto(path.join(closure, '@deepseek-ai', 'dsh-agent-preset'), '@deepseek-ai/dsh-agent-preset')
   const kept = filterUnresolvableRows(row, profileDir, [closure])
   assert.deepEqual(kept.skipped, [])
@@ -598,7 +598,7 @@ test('the installation closure is a resolution position, and a subpath resolves 
   // the mirror still held the 0.1.6-era set while lacking three packages 0.1.7
   // ships, so the shell reported resolvable rows as unresolvable.
   const { profileDir } = fixtureProfile()
-  const closure = mkdtempSync(path.join(os.tmpdir(), 'dsh-app-closure-'))
+  const closure = scratchDir('dsh-app-closure-')
   installInto(path.join(closure, '@deepseek-ai', 'dsh-agent-preset'), '@deepseek-ai/dsh-agent-preset')
   installInto(path.join(closure, '@deepseek-ai', 'dsh-plugin-manager'), '@deepseek-ai/dsh-plugin-manager')
 

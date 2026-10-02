@@ -8,15 +8,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { scratchDir } from './scratch.ts'
 import { foldEvents, foldLiveEvent, type FoldEvent } from '../src/fold.ts'
 import { UsageStore } from '../src/store.ts'
 import type { UsageRow } from '../src/types.ts'
 
 const tmpStore = (): UsageStore => {
-  const store = new UsageStore({ dir: mkdtempSync(join(tmpdir(), 'dshu-test-')), log: () => {} })
+  const store = new UsageStore({ dir: scratchDir('dshu-test-'), log: () => {} })
   store.load()
   return store
 }

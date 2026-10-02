@@ -41,9 +41,36 @@ const record = (name, ok, detail) => {
   console.log(line)
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Scratch directories this run created under the system temp, removed on the
+ * way out. Without it every run left a scratch DSH_HOME and its junctions
+ * behind (this machine had accumulated thousands of these; measured
+ * 2026-10-02: 41,570 of our own entries and ~640 MB in %TEMP%).
+ *
+ * Removal goes through the link-safe walker: the home holds junctions into the
+ * runtime tree, and a sync recursive delete descends THROUGH a junction instead
+ * of unlinking it (scripts/lib/remove-tree.mjs holds the measurement).
+ */
+const scratch = []
+
+/** Remove the scratch directories, best effort. */
+async function cleanup() {
+  const { removeTree } = await import('./lib/remove-tree.mjs')
+  for (const dir of scratch) {
+    try { await removeTree(dir) } catch { /* best effort */ }
+  }
+}
+
+/** Remove scratch, then exit — `app.exit()` is immediate and runs no `finally`. */
+async function exitAfterCleanup(code) {
+  await cleanup()
+  app.exit(code)
+}
+
 const watchdog = setTimeout(() => {
   console.error('probe watchdog fired — treating as FAIL')
-  app.exit(1)
+  void exitAfterCleanup(1)
 }, Number(process.env.PROBE_WATCHDOG_MS ?? 240_000))
 watchdog.unref?.()
 
@@ -73,6 +100,7 @@ const STRIP_REPORT = `(function () {
 
 async function main() {
   const home = mkdtempSync(path.join(os.tmpdir(), 'dsh-overlay-probe-home-'))
+  scratch.push(home)
   const profileDir = path.join(home, 'profiles', PROFILE)
   mkdirSync(profileDir, { recursive: true })
   writeFileSync(path.join(profileDir, 'package.json'), `${JSON.stringify({
@@ -175,10 +203,10 @@ async function main() {
       `frame padding-top=${String(fixed.framePaddingTop)} titlebarMarker=${String(fixed.titlebarMarker)}`)
 
     console.log(`\n${lines.filter((l) => l.startsWith('FAIL')).length === 0 ? 'RESULT: PASS' : 'RESULT: FAIL'}`)
-    app.exit(lines.some((l) => l.startsWith('FAIL')) ? 1 : 0)
+    await exitAfterCleanup(lines.some((l) => l.startsWith('FAIL')) ? 1 : 0)
   } catch (error) {
     console.error(error)
-    app.exit(1)
+    await exitAfterCleanup(1)
   } finally {
     clearTimeout(watchdog)
     try { if (process.platform === 'win32') spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }) } catch { /* gone */ }
