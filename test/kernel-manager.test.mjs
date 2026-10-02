@@ -32,7 +32,7 @@ function sha512Hex(file) {
  * and the shipped `manifest.json` sit beside the tarball, exactly like
  * `resources/kernel/` inside the installer.
  */
-async function makeRuntimeBundle(dir, { dshVersion, suiteVersion, platform = PLATFORM, arch = ARCH, shippedManifest = true }) {
+async function makeRuntimeBundle(dir, { dshVersion, suiteVersion, platform = PLATFORM, arch = ARCH, shippedManifest = true, inventory = true }) {
   const runtime = path.join(dir, 'src', 'runtime')
   mkdirSync(path.join(runtime, 'node'), { recursive: true })
   mkdirSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
@@ -42,6 +42,25 @@ async function makeRuntimeBundle(dir, { dshVersion, suiteVersion, platform = PLA
   // both entries before it reuses an installed kernel.
   mkdirSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib'), { recursive: true })
   writeFileSync(path.join(runtime, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js'), '// host')
+  // A LEAF file no entry-point check would notice — the shape a disk cleaner
+  // leaves behind when it removes a directory by name (`undici/lib/cache`).
+  mkdirSync(path.join(runtime, 'app', 'node_modules', 'undici', 'lib', 'cache'), { recursive: true })
+  writeFileSync(path.join(runtime, 'app', 'node_modules', 'undici', 'lib', 'cache', 'memory-cache-store.js'), '// leaf')
+  writeFileSync(path.join(runtime, 'app', 'node_modules', 'undici', 'lib', 'cache', 'sqlite-cache-store.js'), '// leaf')
+  if (inventory) {
+    // The per-file inventory every real artifact ships (`writeFileInventory`),
+    // which is what lets `load()`/`rollback()` see a missing leaf. Both listed
+    // files are shipped above, so a fresh bundle is COMPLETE — tests that want
+    // the damaged shape delete one.
+    writeFileSync(path.join(runtime, 'app', 'runtime-files.json'), JSON.stringify({
+      algorithm: 'sha256',
+      fileCount: 2,
+      files: [
+        { path: 'app/node_modules/undici/lib/cache/memory-cache-store.js' },
+        { path: 'app/node_modules/undici/lib/cache/sqlite-cache-store.js' },
+      ],
+    }))
+  }
   const manifest = { dshVersion, suiteVersion, channel: 'stable', platform, arch, integrity: '', source: 'artifact' }
   writeFileSync(path.join(runtime, 'manifest.json'), JSON.stringify(manifest))
 
@@ -304,6 +323,75 @@ test('load() refuses a tree that lost the host package, not just a missing one',
     artifactOwner: 'owner', artifactRepo: 'repo',
   })
   assert.equal(await fresh.load(), null)
+})
+
+test('load() refuses a tree that lost a LEAF file, not just an entry point', async (t) => {
+  const h = await harness(t, 'dsh-kernel-lostleaf-')
+  const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
+  await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
+
+  // Measured on a real machine (2026-10-01): a disk cleaner removes directories
+  // BY NAME, so `undici/lib/cache/` and `undici/lib/web/cache/` were emptied
+  // while `node/node.exe` and the host entry survived — `load()` accepted the
+  // tree and the boot died several seconds later with `Cannot find module
+  // '../cache/memory-cache-store'` out of the shell's own proxy bootstrap.
+  rmSync(path.join(h.root, 'dsh-1.0.0+suite-s1', 'app', 'node_modules', 'undici', 'lib', 'cache', 'memory-cache-store.js'), { force: true })
+  const fresh = new KernelManager({
+    runtimeRoot: h.userData, platform: PLATFORM, arch: ARCH, source: 'artifact', channel: 'stable',
+    artifactOwner: 'owner', artifactRepo: 'repo',
+  })
+
+  assert.equal(await fresh.load(), null, 'a tree missing an inventoried file is reported like a broken install')
+})
+
+test('a tree with no inventory is still accepted (older artifacts)', async (t) => {
+  const h = await harness(t, 'dsh-kernel-noinv-')
+  const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1', inventory: false })
+  await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
+
+  // Refusing to boot over a missing LIST would turn the guard into a
+  // regression for every artifact built before the inventory existed.
+  assert.ok(await h.manager.load(), 'no inventory means nothing to verify, not a broken tree')
+})
+
+test('rollback refuses to step into a damaged previous tree', async (t) => {
+  const h = await harness(t, 'dsh-kernel-rollback-damaged-')
+  const first = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
+  const second = await h.bundle({ dshVersion: '2.0.0', suiteVersion: 's2' })
+  await h.manager.installFromLocalTarball(first.tarball, first.sidecar)
+  await h.manager.installFromLocalTarball(second.tarball, second.sidecar)
+
+  // The single crash the guard exists for: the fresh kernel dies, and the
+  // previous one is the tree the cleaner damaged — stepping back would boot
+  // the SAME failure, forever. Returning null instead routes the caller into
+  // its existing bundled-reinstall recovery.
+  rmSync(path.join(h.root, 'dsh-1.0.0+suite-s1', 'app', 'node_modules', 'undici', 'lib', 'cache'), { recursive: true, force: true })
+  const fresh = new KernelManager({
+    runtimeRoot: h.userData, platform: PLATFORM, arch: ARCH, source: 'artifact', channel: 'stable',
+    artifactOwner: 'owner', artifactRepo: 'repo',
+  })
+  fresh.current = h.readCurrent()
+
+  assert.equal(await fresh.rollback(), null, 'nothing usable to roll back to')
+  assert.equal(h.readCurrent().active, 'dsh-2.0.0+suite-s2',
+    'current.json still points at the version that failed, not at the damaged tree')
+  assert.ok(existsSync(path.join(h.root, 'dsh-1.0.0+suite-s1')), 'the damaged tree is left as evidence, not deleted')
+})
+
+test('an unreadable inventory fails OPEN rather than condemning the tree', async (t) => {
+  const h = await harness(t, 'dsh-kernel-badinv-')
+  const bundle = await h.bundle({ dshVersion: '1.0.0', suiteVersion: 's1' })
+  await h.manager.installFromLocalTarball(bundle.tarball, bundle.sidecar)
+
+  // A half-written inventory must not lock the user out of a working install:
+  // the guard exists to catch damage, not to become damage of its own.
+  writeFileSync(path.join(h.root, 'dsh-1.0.0+suite-s1', 'app', 'runtime-files.json'), '{ "files": [ { "path": "app/undici/lib/')
+  const fresh = new KernelManager({
+    runtimeRoot: h.userData, platform: PLATFORM, arch: ARCH, source: 'artifact', channel: 'stable',
+    artifactOwner: 'owner', artifactRepo: 'repo',
+  })
+
+  assert.ok(await fresh.load(), 'an inventory that cannot be parsed is not evidence of damage')
 })
 
 test('the installed kernel carries the runtime tree the shell boots from', async (t) => {

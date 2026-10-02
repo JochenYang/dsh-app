@@ -153,3 +153,16 @@ export const KERNEL_REQUIRED_ENTRIES: readonly (readonly string[])[] = [
   ['node', KERNEL_NODE_NAME],
   ['app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js'],
 ]
+
+/**
+ * The per-file inventory the runtime build writes INSIDE every artifact, at
+ * `app/<this name>` (see `scripts/build-runtime.mjs` `writeFileInventory`).
+ *
+ * It exists for release-time audits, and the shell reads it for one more
+ * purpose: verifying that an installed tree still holds every file it shipped
+ * with. A disk cleaner that removes directories BY NAME takes leaves out of a
+ * tree while its entry points survive, so a check limited to those entry points
+ * accepts a tree that cannot boot (measured: `undici/lib/cache/` emptied, boot
+ * dies with `Cannot find module '../cache/memory-cache-store'`).
+ */
+export const RUNTIME_INVENTORY_FILE = 'runtime-files.json'

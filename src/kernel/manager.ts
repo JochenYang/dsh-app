@@ -11,7 +11,7 @@ import type {
   KernelStatusPayload,
   UpdateCheckResult,
 } from '../shared/types'
-import { KERNEL_REQUIRED_ENTRIES, KERNEL_ROOT_DIR, LAYERS_DIR, LAYER_STAGING_DIR, STAGING_DIR, TARBALL_FILE } from '../shared/constants'
+import { KERNEL_REQUIRED_ENTRIES, KERNEL_ROOT_DIR, LAYERS_DIR, LAYER_STAGING_DIR, RUNTIME_INVENTORY_FILE, STAGING_DIR, TARBALL_FILE } from '../shared/constants'
 import { t } from '../shared/locale'
 import { exists, loadCurrentKernel, readRuntimeManifest, saveCurrentKernel } from './manifest'
 import { sha512File, verifyIntegrity } from './integrity'
@@ -27,6 +27,14 @@ import { GitHubArtifactResolver } from './sources/artifact'
 import { readDevManifest } from './sources/dev'
 
 /**
+ * `CurrentKernel.active` sentinel for a runtime tree booted in place (see
+ * {@link KernelManager.initLocal}). It is deliberately not a directory name
+ * under `runtimeRoot` — nothing is installed for such a run — so every path that
+ * would treat `active` as one checks it first.
+ */
+const LOCAL_ACTIVE = 'local'
+
+/**
  * The first entry a kernel tree no longer carries, or undefined when it is
  * complete enough to start.
  *
@@ -35,17 +43,67 @@ import { readDevManifest } from './sources/dev'
  * thousands of files on every boot, and a tree that lost a leaf file fails in
  * its own diagnostics with the path in hand.
  */
-/**
- * `CurrentKernel.active` sentinel for a runtime tree booted in place (see
- * {@link KernelManager.initLocal}). It is deliberately not a directory name
- * under `runtimeRoot` — nothing is installed for such a run — so every path that
- * would treat `active` as one checks it first.
- */
-const LOCAL_ACTIVE = 'local'
-
 async function missingKernelEntry(dir: string): Promise<string | undefined> {
   for (const entry of KERNEL_REQUIRED_ENTRIES) {
     if (!(await exists(path.join(dir, ...entry)))) return entry.join('/')
+  }
+  return undefined
+}
+
+/**
+ * The first leaf file a kernel tree has LOST, or undefined when every path its
+ * own inventory names is still there.
+ *
+ * Why the two-entry check above is not enough: it answers "can this tree start
+ * at all", and a cleaner that removes directories BY NAME takes leaves out from
+ * under a tree that still looks complete to it. Measured on this project's own
+ * machine: `undici/lib/cache/` and `undici/lib/web/cache/` were emptied by a
+ * disk cleaner, which left 161 of the package's 166 files in place — both
+ * required entries survived, so `load()` accepted the tree, and the boot then
+ * died several seconds in with `Cannot find module
+ * '../cache/memory-cache-store'` from the host's own proxy bootstrap. The
+ * rollback made it worse: it stepped back INTO the same damage, which is what
+ * `rollback()` now guards against.
+ *
+ * The inventory is the artifact's own `runtime/app/runtime-files.json`, shipped
+ * inside every runtime since the file was introduced, so no extra file or
+ * network is needed and the check costs ~1s over 13k paths (measured). It is
+ * existence-only on purpose: a corrected-then-reused file is not what a cleaner
+ * produces, and hashing 13k files on a boot path would cost far more than the
+ * failure it catches.
+ *
+ * A tree without an inventory (an older artifact, or a hand-built runtime) is
+ * reported as complete: refusing to boot over a missing LIST would turn this
+ * guard into a regression of its own. For the same reason the per-file probe
+ * fails OPEN on any error that is not "the path is absent" — see the code.
+ *
+ * @param dir - the kernel tree root (the directory holding `app/` and `node/`).
+ * @returns the first missing path, relative to the tree root, or undefined.
+ */
+async function lostKernelFiles(dir: string): Promise<string | undefined> {
+  let inventory: { files?: readonly { path?: unknown }[] }
+  try {
+    inventory = JSON.parse(await fs.readFile(path.join(dir, 'app', RUNTIME_INVENTORY_FILE), 'utf8')) as typeof inventory
+  } catch {
+    return undefined
+  }
+  const files = Array.isArray(inventory.files) ? inventory.files : []
+  for (const entry of files) {
+    if (typeof entry.path !== 'string' || entry.path.length === 0) continue
+    try {
+      await fs.access(path.join(dir, ...entry.path.split('/')))
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      // FAIL-OPEN on anything that is not "the path is absent". The longest
+      // shipped path is already ~250 characters on a normal Windows profile, so
+      // a longer user name can push it past MAX_PATH and `fs.access` then
+      // answers something other than ENOENT; permission errors and transient
+      // I/O faults read the same way. Only ENOENT/ENOTDIR — what a cleaner and
+      // a truncated extraction actually produce — count as damage, because
+      // refusing a healthy tree locks the user out of a working install.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return undefined
+      return entry.path
+    }
   }
   return undefined
 }
@@ -198,8 +256,17 @@ export class KernelManager {
     // missing tree sends the caller down the reinstall path it already has.
     const broken = await missingKernelEntry(dir)
     if (broken === undefined) {
-      this.log(`active kernel ${this.current.active} present`)
-      return this.current
+      // A tree can pass that check and still be missing files a cleaner took
+      // by directory name (see `lostKernelFiles`). The inventory check is the
+      // slower one, so it runs second and only for a tree that could start.
+      const lost = await lostKernelFiles(dir)
+      if (lost === undefined) {
+        this.log(`active kernel ${this.current.active} present`)
+        return this.current
+      }
+      this.log(`active kernel ${this.current.active} is incomplete (${lost} is missing) — reinstall`)
+      this.current = null
+      return null
     }
     this.log(`active kernel ${this.current.active} is incomplete (${broken} is missing) — reinstall`)
     this.current = null
@@ -1192,12 +1259,35 @@ export class KernelManager {
   /**
    * Point current.json back at the previous kernel version. Called by the
    * shell when the freshly activated kernel fails to boot.
+   *
+   * The previous tree is verified before it is adopted, because a rollback is
+   * the one moment this shell has no alternative: stepping INTO a damaged tree
+   * turns one failed boot into a boot loop with no way forward (measured on
+   * this project's machine — a disk cleaner emptied two of undici's `cache`
+   * directories, the fresh kernel failed on that, and the rollback stepped back
+   * into the SAME damage because only the entry points were ever checked).
+   *
+   * A previous tree that fails the check is reported by returning null, exactly
+   * like having no previous tree at all: the caller's existing recovery — the
+   * bundled-tarball reinstall — is the correct next step, and a throw here
+   * would abort it. The damaged directory is deliberately LEFT on disk: it is
+   * still evidence, and cleanup() reclaims it once it is no longer current or
+   * previous.
+   *
+   * @returns the kernel record now active, or null when there is nothing usable
+   *   to roll back to.
    */
   async rollback(): Promise<CurrentKernel | null> {
     if (!this.current?.previous) return null
     const previousDir = this.current.previous
-    const manifest = await readRuntimeManifest(this.kernelDir(previousDir))
+    const previousTree = this.kernelDir(previousDir)
+    const manifest = await readRuntimeManifest(previousTree)
     if (!manifest) throw new Error(t('kernel.rollbackManifestMissing', { dir: previousDir }))
+    const damaged = await missingKernelEntry(previousTree) ?? await lostKernelFiles(previousTree)
+    if (damaged !== undefined) {
+      this.log(`previous kernel ${previousDir} is incomplete (${damaged} is missing) — not rolling back into it`)
+      return null
+    }
     const rollbackTo: CurrentKernel = {
       active: previousDir,
       previous: null,

@@ -1309,11 +1309,12 @@ async function handleServerDown(reason: string): Promise<void> {
       await startServerAndOpenWindow()
       return
     }
-    // No previous version to roll back to (e.g. a broken first install from
-    // an earlier release). Try reinstalling from the bundled tarball before
-    // giving up — this recovers users who upgraded over a bad v0.1.1 kernel.
-    // Tried at most once per run: if the reinstall still crashes we fall
-    // through to the give-up branch below.
+    // No previous version to roll back to — either there is none (a broken
+    // first install from an earlier release) or the previous tree is itself
+    // incomplete, which `rollback()` now refuses rather than stepping into the
+    // same damage. Both cases take the same recovery: reinstall from the
+    // bundled tarball before giving up. Tried at most once per run: if the
+    // reinstall still crashes we fall through to the give-up branch below.
     const bundled = bundledTarball(bundledKernel)
     if (!bundledReinstallTried && bundled !== null) {
       bundledReinstallTried = true
