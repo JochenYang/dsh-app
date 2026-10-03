@@ -98,6 +98,10 @@ export function saveSources(path: string, sources: readonly string[]): void {
 export interface CachedSourceState {
   readonly entries: readonly CatalogEntry[]
   readonly failed?: HostText
+  /** The origin's ETag for this body; sent back as `If-None-Match`. */
+  readonly etag?: string
+  /** The origin's Last-Modified; sent back as `If-Modified-Since`. */
+  readonly modified?: string
 }
 
 /**
@@ -111,13 +115,19 @@ export interface CachedSourceState {
  * Version 3 made `failed` a coded message (v2 stored the pre-i18n Chinese
  * sentence); the gate above is exactly what keeps that prose off the panel.
  */
-export const CACHE_FORMAT_VERSION = 3
+export const CACHE_FORMAT_VERSION = 4
 
 /**
  * The persisted catalog snapshot (`catalog-cache.json`) behind the
  * cache-first panel open: `{ version, fetchedAt, sources: { [url]: state } }`.
  * Entries inside were validated when they were first parsed from their
  * source; the cache only re-checks the load-bearing display fields on read.
+ *
+ * Each source row also carries the validators the origin served with the
+ * body (`etag` / `modified`), so the next refresh can revalidate with
+ * `If-None-Match` / `If-Modified-Since` instead of re-downloading a 5 MB
+ * catalog to learn nothing changed (the primary source is GitHub Pages
+ * behind Fastly and answers a 304 in ~0.5 s; measured 2026-10-03).
  */
 export interface CatalogCache {
   readonly version: number
@@ -159,22 +169,50 @@ function cachedSourceStateOf(value: unknown): CachedSourceState | undefined {
     ? record.entries.map(usableEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
     : []
   if (entries.length === 0 && failed === undefined) return undefined
-  return failed === undefined ? { entries } : { entries, failed }
+  return {
+    entries,
+    ...(failed === undefined ? {} : { failed }),
+    // Validators are optional metadata: an absent/garbage one just means the
+    // next fetch goes unconditional. Only sane header values are kept.
+    ...(typeof record.etag === 'string' && record.etag !== '' && record.etag.length <= 256
+      ? { etag: record.etag }
+      : {}),
+    ...(typeof record.modified === 'string' && record.modified !== '' && record.modified.length <= 64
+      ? { modified: record.modified }
+      : {}),
+  }
 }
 
 /**
  * Build a cache snapshot from per-source fetch results (source order kept).
  * Total entries are capped at the merged-catalog limit; per-source caps were
- * already enforced at parse time, so no re-slicing per source here.
+ * already enforced at parse time, so no re-slicing per source here. Response
+ * validators (etag / last-modified) travel with their source's row so the
+ * next refresh can revalidate instead of re-downloading. A revalidated row
+ * (304) keeps its prior cached state verbatim — entries AND validators —
+ * keyed by the source URL the caller resolved it for.
  */
-export function buildCatalogCache(fetchedAt: number, results: ReadonlyArray<SourceFetchResult>): CatalogCache {
+export function buildCatalogCache(
+  fetchedAt: number,
+  results: ReadonlyArray<SourceFetchResult>,
+  revalidated: Readonly<Record<string, CachedSourceState>> = {},
+): CatalogCache {
   const sources: Record<string, CachedSourceState> = {}
   let budget = MAX_ENTRIES_TOTAL
   for (const result of results) {
     if ('entries' in result) {
       const entries = result.entries.slice(0, Math.max(budget, 0))
       budget -= entries.length
-      sources[result.url] = { entries }
+      sources[result.url] = {
+        entries,
+        ...(result.etag !== undefined ? { etag: result.etag } : {}),
+        ...(result.modified !== undefined ? { modified: result.modified } : {}),
+      }
+    } else if ('notModified' in result) {
+      // The cached copy is confirmed current: write it back verbatim, so the
+      // next refresh revalidates against the same validators again.
+      const row = revalidated[result.url]
+      if (row !== undefined) sources[result.url] = row
     } else {
       sources[result.url] = { entries: [], failed: result.reason }
     }

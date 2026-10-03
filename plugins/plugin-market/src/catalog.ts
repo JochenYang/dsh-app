@@ -35,6 +35,7 @@
  * @module @dsh-app/plugin-market/catalog
  */
 
+import { gunzipSync } from 'node:zlib'
 import { MarketExecutionError, type HostText } from './errors.ts'
 import { PACKAGE_NAME_PATTERN } from './npm.ts'
 
@@ -490,7 +491,16 @@ export function mergeCatalogs(lists: ReadonlyArray<readonly CatalogEntry[]>): Ca
 
 /** Result of fetching one source (failures never throw across sources). */
 export type SourceFetchResult =
-  | { readonly url: string, readonly entries: readonly CatalogEntry[] }
+  | {
+    readonly url: string
+    readonly entries: readonly CatalogEntry[]
+    /** The origin's ETag, when it served one; the cache persists it. */
+    readonly etag?: string
+    /** The origin's Last-Modified, when it served one; the cache persists it. */
+    readonly modified?: string
+  }
+  /** The origin answered 304 Not Modified: the caller's cached copy stands. */
+  | { readonly url: string, readonly notModified: true }
   | { readonly url: string, readonly reason: HostText }
 
 /** Longest reason detail echoed to the panel; a hostile or huge message is cut. */
@@ -504,14 +514,18 @@ function reasonDetail(message: string): string {
 /**
  * Read the response body enforcing the byte cap DURING the transfer, not
  * after: a rogue source must not be able to buffer an unbounded body in host
- * memory before the slice happens.
+ * memory before the slice happens. Returns BYTES, not text — the caller may
+ * need to gunzip (a proxy that strips the encoding header), and a string
+ * round-trip through the default UTF-8 TextDecoder destroys those bytes
+ * irrecoverably (0x80-0x9F are not valid UTF-8 continuations; measured:
+ * `Buffer.from(TextDecoder().decode(gz), 'latin1')` does NOT restore the
+ * original gzip).
  */
-async function readBodyCapped(response: Response): Promise<string> {
+async function readBodyCapped(response: Response): Promise<Buffer> {
   const body = response.body
-  if (body === null) return ''
+  if (body === null) return Buffer.alloc(0)
   const reader = body.getReader()
-  const decoder = new TextDecoder()
-  let text = ''
+  const chunks: Buffer[] = []
   let bytes = 0
   for (;;) {
     const { done, value } = await reader.read()
@@ -529,39 +543,77 @@ async function readBodyCapped(response: Response): Promise<string> {
         'catalog',
       )
     }
-    text += decoder.decode(value, { stream: true })
+    chunks.push(Buffer.from(value))
   }
-  return text
+  return Buffer.concat(chunks)
+}
+
+/**
+ * Decode a response body that arrived gzip-encoded WITHOUT a declared
+ * `content-encoding` — the broken-proxy shape measured on a real machine
+ * (the proxy strips response headers, the origin compresses anyway, and
+ * undici then hands back raw gzip bytes). When the origin declared the
+ * encoding, undici has already decoded it and this passes through. When
+ * nothing was declared and the first two bytes are gzip magic (0x1f 0x8b),
+ * the bytes are decompressed here — so the old failure mode ("JSON.parse
+ * rejects gzip bytes → the source is reported broken") is answered at the
+ * transport, in the BYTE layer: a string round-trip of gzip bytes through
+ * the UTF-8 TextDecoder is lossy and cannot be recovered afterwards.
+ * @param body - the (already size-capped) response bytes.
+ * @param declared - the response's own `content-encoding` header, when any.
+ * @returns the decoded JSON text.
+ */
+function maybeGunzip(body: Buffer, declared: string | null): string {
+  if (declared !== null && declared !== 'identity') return body.toString('utf8') // undici decoded it
+  if (body.length >= 2 && body[0] === 0x1f && body[1] === 0x8b) return gunzipSync(body).toString('utf8')
+  return body.toString('utf8')
 }
 
 /**
  * Fetch + parse one catalog source. Only https URLs are honored; the response
  * is size-capped and the parse is strict. Any failure degrades to
  * `{ url, reason }` — a source can never break the whole catalog view.
+ *
+ * Revalidation: when the caller holds validators (etag / last-modified) from
+ * the previous download, they ride as `If-None-Match` / `If-Modified-Since`;
+ * a 304 answers the cached entries without moving the 5 MB body (the primary
+ * source is GitHub Pages behind Fastly: 0 bytes and ~0.5 s on a 304, versus
+ * 5.05 MB and ~6 s unconditional — measured 2026-10-03).
+ *
+ * Transfer encoding: the request ADVERTISES gzip. The previous unconditional
+ * `identity` guarded against a proxy that strips response headers while the
+ * origin still compresses, leaving undici to hand back undecoded gzip bytes
+ * that `JSON.parse` rejects. The guard is now adaptive: the response is
+ * decoded by what it DECLARES when headers exist, and a body whose first
+ * bytes are gzip magic with no declared encoding is decompressed explicitly
+ * — so the decompression failure can never masquerade as "the source is
+ * broken" while the bandwidth cost drops ~4x on the primary source.
  * @param url - a previously validated https URL string.
+ * @param validators - validators from the previous download, when held.
  * @returns per-source result.
  */
-export async function fetchCatalog(url: string): Promise<SourceFetchResult> {
+export async function fetchCatalog(
+  url: string,
+  validators: { readonly etag?: string, readonly modified?: string } = {},
+): Promise<SourceFetchResult> {
   const check = validateSourceUrl(url)
   if (!check.ok) return { url, reason: check.reason }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS)
   try {
-    // Ask for an UNCOMPRESSED body, deliberately.
-    //
-    // Measured on a real machine behind a local proxy whose responses arrive with
-    // NO headers at all (`headers: []` — the proxy strips them): the origin still
-    // compresses because the request advertised gzip, and with the encoding gone
-    // from the response nothing can decode it. `JSON.parse` then rejects a body of
-    // raw gzip bytes and this function reports `catalog.notJson`, which reads to
-    // the user as "the catalog source is broken" — blaming the user's source list
-    // for a transport problem. With `identity` the same request answered 95,330 B
-    // of valid JSON (that source) and 3,918,492 B with 4183 entries (the other).
-    //
-    // The cost is bandwidth (those two are ~1 MB and ~4 MB compressed), well under
-    // MAX_BYTES_PER_SOURCE, and a source that ignores the header behaves exactly as
-    // before — undici decodes what the response declares.
-    const response = await fetch(check.url, { signal: controller.signal, redirect: 'error', headers: { 'accept-encoding': 'identity' } })
+    const headers: Record<string, string> = { 'accept-encoding': 'gzip, deflate, br' }
+    // ETag first: it is exact, while a date has one-second resolution. Only
+    // one is sent — an origin given both must satisfy both, which turns a
+    // weak ETag match into an unnecessary 200.
+    if (validators.etag !== undefined) headers['if-none-match'] = validators.etag
+    else if (validators.modified !== undefined) headers['if-modified-since'] = validators.modified
+    const response = await fetch(check.url, { signal: controller.signal, redirect: 'error', headers })
+    if (response.status === 304) {
+      // The caller resolves 304 against its own cached entries; the signal
+      // rides as a dedicated result kind so the caller cannot confuse it
+      // with a parse.
+      return { url, notModified: true } as SourceFetchResult
+    }
     if (!response.ok) {
       // A status code reads the same in every locale: code plus diagnostic,
       // no dictionary copy.
@@ -574,7 +626,16 @@ export async function fetchCatalog(url: string): Promise<SourceFetchResult> {
         },
       }
     }
-    return { url, entries: parseCatalog(await readBodyCapped(response)) }
+    const bytes = await readBodyCapped(response)
+    const body = maybeGunzip(bytes, response.headers.get('content-encoding'))
+    return {
+      url,
+      entries: parseCatalog(body),
+      ...(response.headers.get('etag') !== null ? { etag: response.headers.get('etag')! } : {}),
+      ...(response.headers.get('last-modified') !== null
+        ? { modified: response.headers.get('last-modified')! }
+        : {}),
+    }
   } catch (error) {
     // A parse/size failure already speaks in codes; pass its own message on.
     if (error instanceof MarketExecutionError) return { url, reason: error.host }

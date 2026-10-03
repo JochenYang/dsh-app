@@ -7,6 +7,7 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { gzipSync } from 'node:zlib'
 import { describe, it } from 'node:test'
 import { MarketExecutionError } from '../src/errors.ts'
 import {
@@ -453,12 +454,14 @@ describe('fetchCatalog (offline behavior)', () => {
     assert.equal('reason' in result, true)
   })
 
-  it('asks the source for an UNCOMPRESSED body', async () => {
-    // The header is the whole defence against a proxy that answers with the
-    // origin's compressed bytes but drops the `content-encoding` that says so:
-    // measured here, such a response arrives as 1,036,056 bytes of gzip and
-    // `JSON.parse` rejects it, and the user is told their catalog source is
-    // broken. Nothing else in this suite can see the request's headers.
+  it('advertises gzip but survives a proxy that strips the encoding header', async () => {
+    // The old defence was unconditional `identity` (5 MB on the primary
+    // source). The defence is now the BODY, not the header: gzip is
+    // advertised, and a proxy that answers with the origin's compressed
+    // bytes but drops the `content-encoding` that says so is handled by the
+    // magic-byte gunzip inside fetchCatalog — measured 2026-10-03, such a
+    // response arrives as ~1 MB of gzip and `JSON.parse` rejects it, so the
+    // decode must happen before the parse.
     const original = globalThis.fetch
     let seen: RequestInit | undefined
     globalThis.fetch = (async (_input: unknown, init?: RequestInit): Promise<Response> => {
@@ -468,7 +471,44 @@ describe('fetchCatalog (offline behavior)', () => {
     try {
       const result = await fetchCatalog('https://example.test/catalog.json')
       assert.equal('entries' in result, true)
-      assert.deepEqual(seen?.headers, { 'accept-encoding': 'identity' })
+      const headers = seen?.headers as Record<string, string>
+      assert.match(headers['accept-encoding'], /gzip/)
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('returns notModified on a 304 and carries validators on the request', async () => {
+    const original = globalThis.fetch
+    const seen: { init?: RequestInit } = {}
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit): Promise<Response> => {
+      seen.init = init
+      return new Response(null, { status: 304 })
+    }) as typeof fetch
+    try {
+      const result = await fetchCatalog('https://example.test/catalog.json', { etag: 'W/"abc123"' })
+      assert.equal('notModified' in result && result.notModified, true)
+      const headers = seen.init?.headers as Record<string, string>
+      assert.equal(headers['if-none-match'], 'W/"abc123"')
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('gunzips a body whose encoding the proxy stripped, instead of failing the parse', async () => {
+    // The broken-proxy shape: the origin compresses, the proxy drops the
+    // header, undici hands back raw gzip bytes. The magic-byte check must
+    // decompress before the JSON parse.
+    const original = globalThis.fetch
+    const gz = gzipSync(Buffer.from('{"plugins":[{"id":"a","name":"A","description":"d","package":"@x/a"}]}', 'utf8'))
+    globalThis.fetch = (async (): Promise<Response> => {
+      // A body of raw bytes with NO content-encoding header at all.
+      return new Response(gz, { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      const result = await fetchCatalog('https://example.test/catalog.json')
+      assert.equal('entries' in result, true)
+      if ('entries' in result) assert.equal(result.entries.length, 1)
     } finally {
       globalThis.fetch = original
     }
