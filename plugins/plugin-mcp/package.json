@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-mcp",
   "description": "DSH APP MCP manager: settings-page CRUD over external MCP servers, dynamically mounting @deepseek-ai/dsh-mcp-client instances from $DSH_HOME/storages/dsh-app-plugin-mcp/servers.json so their tools register as native mcp__<server>__<tool> tools without hand-editing overlay rows.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -47,6 +47,7 @@
     "@deepseek-ai/cordis": "^4.0.4",
     "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-locale": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.2",

@@ -24,6 +24,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
@@ -266,19 +267,20 @@ function CardRow(props: {
   const { card, body, expanded, busy, t, onToggle, onPin, onForget } = props
   return (
     <div className="dshm_entryRow">
-      <button
-        type="button"
-        className="dshm_entryMain"
-        aria-expanded={expanded}
-        title={expanded ? t('memory.card.collapse') : t('memory.card.expand')}
-        onClick={onToggle}
-      >
+      <Tooltip label={expanded ? t('memory.card.collapse') : t('memory.card.expand')} side="top">
+        <button
+          type="button"
+          className="dshm_entryMain"
+          aria-expanded={expanded}
+          onClick={onToggle}
+        >
         <span className="dshm_entryText">{card.pinned ? '📌 ' : ''}{summaryLine(card.summary)}</span>
         <span className="dshm_entryMeta">{t('memory.card.meta', { category: categoryLabel(card.category, t), topic: card.topic, updated: card.updated })}</span>
         {expanded
           ? <span className="dshm_entryBody">{body ?? t('memory.card.bodyLoading')}</span>
           : null}
-      </button>
+        </button>
+      </Tooltip>
       <button
         type="button"
         className={card.pinned ? 'dshm_pinBtn dshm_pinBtnOn' : 'dshm_pinBtn'}
@@ -733,7 +735,9 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
             {status.projects.map(project => (
               <div key={project.slug} className="dshm_projectBlock">
                 <div className="dshm_projectRow">
-                  <span className="dshm_projectName" title={project.cwd === '' ? project.slug : project.cwd}>{projectTitle(project)}</span>
+                  <Tooltip label={project.cwd === '' ? project.slug : project.cwd} side="top" maxWidth={640}>
+                    <span className="dshm_projectName">{projectTitle(project)}</span>
+                  </Tooltip>
                   <span className="dshm_projectMeta">{t('memory.projects.meta', { cards: String(project.cards), size: fmtBytes(project.sizeBytes) })}</span>
                   <button
                     type="button"

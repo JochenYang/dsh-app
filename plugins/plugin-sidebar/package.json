@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-sidebar",
   "description": "DSH APP sidebar dock: dual-face plugin (host git routes + client Git view tab) for repository status, diff, log, and sync actions.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -48,6 +48,7 @@
     "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-locale": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-session": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.2",

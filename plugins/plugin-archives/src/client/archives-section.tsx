@@ -26,6 +26,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, HostText } from '../types.ts'
 import { NS, type ArchivesKey } from './locales.ts'
@@ -80,11 +81,23 @@ function fmtDate(ms: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-/** Row title: the projection title, or a shortened id when untitled. */
+/** Row title: the projection title, or a shortened id when untitled. The id
+ * itself travels in the Tooltip — a native title= cannot carry it when the
+ * visible text already is the id. */
 function rowTitle(id: string, title: string): ReactNode {
-  if (title !== '') return <span className="dshar_rowTitle" title={id}>{title}</span>
+  if (title !== '') {
+    return (
+      <Tooltip label={id} side="top">
+        <span className="dshar_rowTitle">{title}</span>
+      </Tooltip>
+    )
+  }
   const short = id.length > 22 ? `${id.slice(0, 14)}…${id.slice(-6)}` : id
-  return <span className="dshar_rowTitle dshar_rowTitleUnnamed" title={id}>{short}</span>
+  return (
+    <Tooltip label={id} side="top">
+      <span className="dshar_rowTitle dshar_rowTitleUnnamed">{short}</span>
+    </Tooltip>
+  )
 }
 
 /**
@@ -211,7 +224,11 @@ function GroupPanel({ group, busy, onDeleteSessions, t }: {
       >
         <span className="dshar_caret" aria-hidden="true" />
         <span className="dshar_groupTitle">{groupHeading(group, t)}</span>
-        {group.cwd !== '' && <span className="dshar_groupPath" title={group.cwd}>{group.cwd}</span>}
+        {group.cwd !== '' && (
+          <Tooltip label={group.cwd} side="top" maxWidth={640}>
+            <span className="dshar_groupPath">{group.cwd}</span>
+          </Tooltip>
+        )}
         <span className="dshar_groupMeta">
           <span>{t('archives.group.sessions', { count: group.sessions.length })}</span>
           <span>{fmtBytes(group.totalBytes)}</span>
@@ -386,20 +403,22 @@ export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
             : t('archives.sub.summary', { count: list.archivedCount, bytes: fmtBytes(list.totalBytes), projects: list.groups.length })}
         </span>
         {list.staleCount > 0 && (
-          <span className="dshar_staleHint" title={t('archives.stale.hint')}>
-            {t('archives.stale.count', { count: list.staleCount })}
-            <button
-              type="button"
-              className="dshar_button"
-              disabled={busy}
-              onClick={() => {
-                setNotice(null)
-                setConfirm({ kind: 'prune', count: list.staleCount })
-              }}
-            >
-              {t('archives.prune')}
-            </button>
-          </span>
+          <Tooltip label={t('archives.stale.hint')} side="bottom">
+            <span className="dshar_staleHint">
+              {t('archives.stale.count', { count: list.staleCount })}
+              <button
+                type="button"
+                className="dshar_button"
+                disabled={busy}
+                onClick={() => {
+                  setNotice(null)
+                  setConfirm({ kind: 'prune', count: list.staleCount })
+                }}
+              >
+                {t('archives.prune')}
+              </button>
+            </span>
+          </Tooltip>
         )}
       </div>
 
@@ -425,11 +444,15 @@ export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
           {searchResults.items.length === 0
             ? <div className="dshar_empty">{t('archives.search.empty')}</div>
             : searchResults.items.map((hit) => (
-              <div key={hit.id} className="dshar_searchHit" title={hit.id}>
+              <div key={hit.id} className="dshar_searchHit">
                 {rowTitle(hit.id, hit.title)}
                 <span className="dshar_rowMeta">
                   <span>{fmtDate(hit.createdAt)}</span>
-                  {hit.cwd !== '' && <span title={hit.cwd}>{hit.cwd}</span>}
+                  {hit.cwd !== '' && (
+                    <Tooltip label={hit.cwd} side="top" maxWidth={640}>
+                      <span>{hit.cwd}</span>
+                    </Tooltip>
+                  )}
                 </span>
                 {hit.snippet !== '' && <div className="dshar_searchSnippet">{hit.snippet}</div>}
               </div>

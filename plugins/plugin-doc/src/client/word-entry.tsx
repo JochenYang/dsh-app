@@ -27,6 +27,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, StandardSourceBinding } from '@deepseek-ai/dsh-client-ui-slots'
 import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { docModeApi } from './api.ts'
@@ -250,19 +251,20 @@ export const WordOfficeEntry = memo(function WordOfficeEntry(props: {
 
   return (
     <>
-      <span className={resolved.enabled ? 'dshWordCapsule dshWordCapsuleActive' : 'dshWordCapsule'}>
-        <button
-          type="button"
-          className="dshWordCapsuleBody"
-          title={hint}
-          aria-pressed={resolved.enabled}
-          disabled={busy}
-          onClick={toggle}
-        >
-          <DocIcon />
-          <span className="dshWordCapsuleLabel">{t('capsule.label')}</span>
-        </button>
-      </span>
+      <Tooltip label={hint} side="top">
+        <span className={resolved.enabled ? 'dshWordCapsule dshWordCapsuleActive' : 'dshWordCapsule'}>
+          <button
+            type="button"
+            className="dshWordCapsuleBody"
+            aria-pressed={resolved.enabled}
+            disabled={busy}
+            onClick={toggle}
+          >
+            <DocIcon />
+            <span className="dshWordCapsuleLabel">{t('capsule.label')}</span>
+          </button>
+        </span>
+      </Tooltip>
       {error !== undefined && <span className="dshWordCapsuleError" role="alert">{error}</span>}
       {showNotice && <span className="dshWordCapsuleNotice" role="status">{t('capsule.pendingNotice')}</span>}
       {skillHint !== undefined && (

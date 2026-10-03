@@ -23,6 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { HostText, UsageAgg, UsageBalance, UsageBalanceSnapshot, UsageHeatmap, UsageModelAgg, UsageSummary } from '../types.ts'
 import { NS, type UsageKey } from './locales.ts'
@@ -247,7 +248,11 @@ function Cards({ totals, t }: { totals: UsageAgg; t: UsageTranslate }): ReactNod
         <div className="dshau_card" key={label}>
           <div className="dshau_cardLabel">{label}</div>
           <div className="dshau_cardValue">{value}</div>
-          {sub !== '' && <div className="dshau_cardSub" title={sub}>{sub}</div>}
+          {sub !== '' && (
+            <Tooltip label={sub} side="top">
+              <div className="dshau_cardSub">{sub}</div>
+            </Tooltip>
+          )}
         </div>
       ))}
     </div>
@@ -336,7 +341,9 @@ function BalanceCard({ t }: { t: UsageTranslate }): ReactNode {
     >
       <div className="dshau_cardLabel">{t('usage.balance.label')}{queriedAt}</div>
       <div className="dshau_cardValue">{value}</div>
-      <div className={subClass} title={sub}>{sub}</div>
+      <Tooltip label={sub} side="top">
+        <div className={subClass}>{sub}</div>
+      </Tooltip>
     </div>
   )
 }
@@ -849,7 +856,9 @@ function ModelTable({ models, t }: { models: UsageModelAgg[]; t: UsageTranslate 
         <tbody>
           {models.map((model) => (
             <tr key={`${model.provider}/${model.model}`}>
-              <td title={model.provider}>{model.model}</td>
+              <Tooltip label={model.provider} side="top">
+                <td>{model.model}</td>
+              </Tooltip>
               <td>{fmtInt(model.requests)}</td>
               <td>{fmtTokens(model.inputTokens)}</td>
               <td>{fmtTokens(model.outputTokens)}</td>

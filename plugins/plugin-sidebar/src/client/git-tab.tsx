@@ -22,6 +22,7 @@
 
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { FsApiError, gitApi } from './api.ts'
 import type { GitActionValue, GitBranchList, GitStatusEntry, HostText } from './api.ts'
@@ -611,23 +612,29 @@ export function GitTab(props: GitTabProps): ReactNode {
     const canRestore = !readonly && !cached && !entry.untracked && entry.worktreeStatus !== ' '
     return (
       <div className="dshAsbGit-row">
-        <button type="button" className="dshAsbGit-rowPath" title={pathTitle}
-          onClick={() => { openDiff(entry.path, cached, entry.untracked) }}>
-          <span className={`dshAsbGit-letter${letter === 'U' ? ' dshAsbGit-letterNew' : cached ? ' dshAsbGit-letterStaged' : ''}`}>{letter}</span>
-          <span className="dshAsbGit-path">{entry.path}</span>
-        </button>
+        <Tooltip label={pathTitle} side="top">
+          <button type="button" className="dshAsbGit-rowPath"
+            onClick={() => { openDiff(entry.path, cached, entry.untracked) }}>
+            <span className={`dshAsbGit-letter${letter === 'U' ? ' dshAsbGit-letterNew' : cached ? ' dshAsbGit-letterStaged' : ''}`}>{letter}</span>
+            <span className="dshAsbGit-path">{entry.path}</span>
+          </button>
+        </Tooltip>
         {!readonly ? (
           <span className="dshAsbGit-rowActions">
-            <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined} title={t(cached ? 'sidebar.action.unstage' : 'sidebar.action.stage', { path: entry.path })} aria-label={t(cached ? 'sidebar.action.unstage' : 'sidebar.action.stage', { path: entry.path })}
-              onClick={() => { void run(() => gitApi.action(cached ? 'unstage' : 'stage', cwd, entry.path, undefined, sessionId), t(cached ? 'sidebar.action.unstaged' : 'sidebar.action.staged')) }}>
-              {cached ? '−' : '+'}
-            </button>
+            <Tooltip label={t(cached ? 'sidebar.action.unstage' : 'sidebar.action.stage', { path: entry.path })} side="bottom">
+              <button type="button" className="dshAsbGit-link" disabled={busy || sessionId === undefined} aria-label={t(cached ? 'sidebar.action.unstage' : 'sidebar.action.stage', { path: entry.path })}
+                onClick={() => { void run(() => gitApi.action(cached ? 'unstage' : 'stage', cwd, entry.path, undefined, sessionId), t(cached ? 'sidebar.action.unstaged' : 'sidebar.action.staged')) }}>
+                {cached ? '−' : '+'}
+              </button>
+            </Tooltip>
             {canRestore
               ? (
-                <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger" disabled={busy || sessionId === undefined} title={t('sidebar.action.restore', { path: entry.path })} aria-label={t('sidebar.action.restore', { path: entry.path })}
-                  onClick={() => { setRestoreFor(entry.path) }}>
-                  ↺
-                </button>
+                <Tooltip label={t('sidebar.action.restore', { path: entry.path })} side="bottom">
+                  <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger" disabled={busy || sessionId === undefined} aria-label={t('sidebar.action.restore', { path: entry.path })}
+                    onClick={() => { setRestoreFor(entry.path) }}>
+                    ↺
+                  </button>
+                </Tooltip>
               )
               : null}
           </span>
@@ -680,12 +687,13 @@ export function GitTab(props: GitTabProps): ReactNode {
             placeholder={t('sidebar.commit.placeholder')} aria-label={t('sidebar.commit.label')}
             onChange={(event) => { setCommitMessage(event.target.value) }}
           />
-          <button type="button" className="dshAsbGit-primary" disabled={busy || statusLoading || sessionId === undefined || commitMessage.trim() === '' || staged.length === 0}
-            title={t('sidebar.commit.title')}
-            onClick={() => {
-              void run(() => gitApi.action('commit', cwd, undefined, commitMessage, sessionId), t('sidebar.commit.done'))
-                .then(success => { if (success) setCommitMessage('') })
-            }}>{busy ? '…' : t('sidebar.commit.action')}</button>
+          <Tooltip label={t('sidebar.commit.title')} side="bottom">
+            <button type="button" className="dshAsbGit-primary" disabled={busy || statusLoading || sessionId === undefined || commitMessage.trim() === '' || staged.length === 0}
+              onClick={() => {
+                void run(() => gitApi.action('commit', cwd, undefined, commitMessage, sessionId), t('sidebar.commit.done'))
+                  .then(success => { if (success) setCommitMessage('') })
+              }}>{busy ? '…' : t('sidebar.commit.action')}</button>
+          </Tooltip>
         </div>
         <div className="dshAsbGit-head">
           <div className="dshAsbGit-seg" role="tablist" aria-label={t('sidebar.list.aria')}>
@@ -705,8 +713,10 @@ export function GitTab(props: GitTabProps): ReactNode {
               onClick={() => { void run(() => gitApi.action('stage', cwd, undefined, undefined, sessionId), t('sidebar.stageAll.done')) }}>{t('sidebar.stageAll')}</button>
             <button type="button" className="dshAsbGit-link" disabled={busy || statusLoading || sessionId === undefined || staged.length === 0}
               onClick={() => { void run(() => gitApi.action('unstage', cwd, undefined, undefined, sessionId), t('sidebar.unstageAll.done')) }}>{t('sidebar.unstageAll')}</button>
-            <button type="button" className="dshAsbGit-link" disabled={busy || filesLoading || statusLoading || sessionId === undefined} aria-label={t('sidebar.refreshAria')} title={t('sidebar.refreshAria')}
-              onClick={refresh}>{t('sidebar.refresh')}</button>
+            <Tooltip label={t('sidebar.refreshAria')} side="bottom">
+              <button type="button" className="dshAsbGit-link" disabled={busy || filesLoading || statusLoading || sessionId === undefined} aria-label={t('sidebar.refreshAria')}
+                onClick={refresh}>{t('sidebar.refresh')}</button>
+            </Tooltip>
           </div>
         </div>
         {listMode === 'files'
@@ -751,7 +761,9 @@ export function GitTab(props: GitTabProps): ReactNode {
           ? <p className="dshAsb-hint">{t('sidebar.detail.empty')}</p>
           : (
             <>
-              <p className="dshAsbGit-diffPath" title={diffFor.path}>{diffFor.path}</p>
+              <Tooltip label={diffFor.path} side="top" maxWidth={640}>
+                <p className="dshAsbGit-diffPath">{diffFor.path}</p>
+              </Tooltip>
               {diffFor.error !== undefined ? <p className="dshAsb-error">{diffFor.error}</p> : null}
               {diffFor.text === undefined && diffFor.error === undefined ? <p className="dshAsb-hint">{t('sidebar.loading')}</p> : null}
               {diffFor.text !== undefined ? <DiffView text={diffFor.text} truncated={diffFor.truncated} t={t} /> : null}
@@ -786,7 +798,9 @@ export function GitTab(props: GitTabProps): ReactNode {
                 ? (
                   <div className="dshAsbGit-diffBlock">
                     <button type="button" className="dshAsbGit-link" onClick={() => { setShowFor(undefined) }}>{t('sidebar.graph.back')}</button>
-                    <p className="dshAsbGit-diffPath" title={String(showFor.sha)}>{t('sidebar.graph.commit', { sha: String(showFor.sha).slice(0, 8) })}</p>
+                    <Tooltip label={String(showFor.sha)} side="top">
+                      <p className="dshAsbGit-diffPath">{t('sidebar.graph.commit', { sha: String(showFor.sha).slice(0, 8) })}</p>
+                    </Tooltip>
                     <pre className="dshAsbGit-commitMsg">{String(showFor.message ?? '')}</pre>
                     {String(showFor.message ?? '').trim().split('\n').length <= 1
                       ? <p className="dshAsb-hint">{t('sidebar.graph.noBody')}</p>
@@ -802,12 +816,14 @@ export function GitTab(props: GitTabProps): ReactNode {
                       return sha === undefined
                         ? <span key={index} className="dshAsbGraph-plain">{line}</span>
                         : (
-                          <button key={index} type="button" className="dshAsbGraph-line" title={t('sidebar.graph.rowTitle')}
-                            onClick={() => {
-                              if (cwd !== undefined) {
-                                openCommit(sha)
-                              }
-                            }}>{line}</button>
+                          <Tooltip label={t('sidebar.graph.rowTitle')} side="top">
+                            <button key={index} type="button" className="dshAsbGraph-line"
+                              onClick={() => {
+                                if (cwd !== undefined) {
+                                  openCommit(sha)
+                                }
+                              }}>{line}</button>
+                          </Tooltip>
                         )
                     })}
                   </pre>
@@ -825,13 +841,15 @@ export function GitTab(props: GitTabProps): ReactNode {
       {cwd !== undefined ? (
         <div className="dshAsbGit-top">
           <div className="dshAsbGit-branchWrap" ref={branchMenuRef}>
-            <button type="button" className="dshAsbGit-branchBtn" title={t('sidebar.branch.switch')} aria-label={t('sidebar.branch.switch')}
-              aria-expanded={branchPanelOpen} disabled={sessionId === undefined} onClick={toggleBranchPanel}>
-              <span className="dshAsbGit-branchText" title={branchLabel}>{branchLabel}</span>
-              {aheadCount > 0 ? <span className="dshAsbGit-diverge" title={t('sidebar.branch.ahead', { count: aheadCount })}>{`↑${String(aheadCount)}`}</span> : null}
-              {behindCount > 0 ? <span className="dshAsbGit-diverge" title={t('sidebar.branch.behind', { count: behindCount })}>{`↓${String(behindCount)}`}</span> : null}
-              <span className="dshAsbGit-branchCaret" aria-hidden>▾</span>
-            </button>
+            <Tooltip label={t('sidebar.branch.switch')} side="bottom">
+              <button type="button" className="dshAsbGit-branchBtn" aria-label={t('sidebar.branch.switch')}
+                aria-expanded={branchPanelOpen} disabled={sessionId === undefined} onClick={toggleBranchPanel}>
+                <span className="dshAsbGit-branchText">{branchLabel}</span>
+                {aheadCount > 0 ? <span className="dshAsbGit-diverge">{`↑${String(aheadCount)}`}</span> : null}
+                {behindCount > 0 ? <span className="dshAsbGit-diverge">{`↓${String(behindCount)}`}</span> : null}
+                <span className="dshAsbGit-branchCaret" aria-hidden>▾</span>
+              </button>
+            </Tooltip>
             {branchPanelOpen ? (
               <div className="dshAsbGit-branchMenu" role="dialog" aria-label={t('sidebar.branch.switch')}>
                 <p className="dshAsbGit-branchMenuTitle">{t('sidebar.branch.local')}</p>
@@ -844,14 +862,15 @@ export function GitTab(props: GitTabProps): ReactNode {
                 ) : null}
                 {branchList !== undefined && branchList.branches.length === 0 && branchesError === undefined ? <p className="dshAsb-hint">{t('sidebar.branch.empty')}</p> : null}
                 {(branchList?.branches ?? []).map(name => (
-                  <button key={name} type="button"
-                    className={`dshAsbGit-branchItem${name === currentBranch ? ' dshAsbGit-branchItemCur' : ''}`}
-                    disabled={busy || sessionId === undefined}
-                    title={name === currentBranch ? t('sidebar.branch.current', { name }) : t('sidebar.branch.switchTo', { name })}
-                    onClick={() => { checkoutBranch(name) }}>
-                    <span className="dshAsbGit-branchItemMark" aria-hidden>{name === currentBranch ? '✓' : ''}</span>
-                    <span className="dshAsbGit-branchItemName">{name}</span>
-                  </button>
+                  <Tooltip key={name} label={name === currentBranch ? t('sidebar.branch.current', { name }) : t('sidebar.branch.switchTo', { name })} side="right">
+                    <button type="button"
+                      className={`dshAsbGit-branchItem${name === currentBranch ? ' dshAsbGit-branchItemCur' : ''}`}
+                      disabled={busy || sessionId === undefined}
+                      onClick={() => { checkoutBranch(name) }}>
+                      <span className="dshAsbGit-branchItemMark" aria-hidden>{name === currentBranch ? '✓' : ''}</span>
+                      <span className="dshAsbGit-branchItemName">{name}</span>
+                    </button>
+                  </Tooltip>
                 ))}
                 <div className="dshAsbGit-branchCreate">
                   <input className="dshAsbGit-input" type="text" value={newBranchName} placeholder={t('sidebar.branch.newName')} aria-label={t('sidebar.branch.newName')}
@@ -864,23 +883,33 @@ export function GitTab(props: GitTabProps): ReactNode {
           </div>
           <div className="dshAsbGit-topActions">
             <span className="dshAsbGit-syncGroup" role="group" aria-label={t('sidebar.sync.group')}>
-              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title={t('sidebar.pull.title')} aria-label={t('sidebar.pull.aria')}
-                onClick={() => { void run(() => gitApi.action('pull', cwd, undefined, undefined, sessionId), value => t(pullNotice(value)), 'pull') }}>{pendingOp === 'pull' ? '…' : t('sidebar.pull.action')}</button>
-              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title={t('sidebar.push.title')} aria-label={t('sidebar.push.aria')}
-                onClick={() => { void run(() => gitApi.action('push', cwd, undefined, undefined, sessionId), value => t(pushNotice(value)), 'push') }}>{pendingOp === 'push' ? '…' : t('sidebar.push.action')}</button>
-              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title={t('sidebar.fetch.title')} aria-label={t('sidebar.fetch.aria')}
-                onClick={() => { void run(() => gitApi.action('fetch', cwd, undefined, undefined, sessionId), t('sidebar.fetch.done'), 'fetch') }}>{pendingOp === 'fetch' ? '…' : t('sidebar.fetch.action')}</button>
+              <Tooltip label={t('sidebar.pull.title')} side="bottom">
+                <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                  aria-label={t('sidebar.pull.aria')}
+                  onClick={() => { void run(() => gitApi.action('pull', cwd, undefined, undefined, sessionId), value => t(pullNotice(value)), 'pull') }}>{pendingOp === 'pull' ? '…' : t('sidebar.pull.action')}</button>
+              </Tooltip>
+              <Tooltip label={t('sidebar.push.title')} side="bottom">
+                <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                  aria-label={t('sidebar.push.aria')}
+                  onClick={() => { void run(() => gitApi.action('push', cwd, undefined, undefined, sessionId), value => t(pushNotice(value)), 'push') }}>{pendingOp === 'push' ? '…' : t('sidebar.push.action')}</button>
+              </Tooltip>
+              <Tooltip label={t('sidebar.fetch.title')} side="bottom">
+                <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                  aria-label={t('sidebar.fetch.aria')}
+                  onClick={() => { void run(() => gitApi.action('fetch', cwd, undefined, undefined, sessionId), t('sidebar.fetch.done'), 'fetch') }}>{pendingOp === 'fetch' ? '…' : t('sidebar.fetch.action')}</button>
+              </Tooltip>
             </span>
             <span className="dshAsbGit-syncGroup" role="group" aria-label={t('sidebar.stash.group')}>
-              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title={t('sidebar.stash.pushTitle')} aria-label={t('sidebar.stash.pushAria')}
-                onClick={() => { void run(() => gitApi.action('stash.push', cwd, undefined, undefined, sessionId), t('sidebar.stash.pushDone'), 'stash.push') }}>{pendingOp === 'stash.push' ? '…' : t('sidebar.stash.push')}</button>
-              <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
-                title={t('sidebar.stash.popTitle')} aria-label={t('sidebar.stash.popAria')}
-                onClick={() => { void run(() => gitApi.action('stash.pop', cwd, undefined, undefined, sessionId), t('sidebar.stash.popDone'), 'stash.pop') }}>{pendingOp === 'stash.pop' ? '…' : t('sidebar.stash.pop')}</button>
+              <Tooltip label={t('sidebar.stash.pushTitle')} side="bottom">
+                <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                  aria-label={t('sidebar.stash.pushAria')}
+                  onClick={() => { void run(() => gitApi.action('stash.push', cwd, undefined, undefined, sessionId), t('sidebar.stash.pushDone'), 'stash.push') }}>{pendingOp === 'stash.push' ? '…' : t('sidebar.stash.push')}</button>
+              </Tooltip>
+              <Tooltip label={t('sidebar.stash.popTitle')} side="bottom">
+                <button type="button" className="dshAsbGit-syncBtn" disabled={busy || statusLoading || sessionId === undefined}
+                  aria-label={t('sidebar.stash.popAria')}
+                  onClick={() => { void run(() => gitApi.action('stash.pop', cwd, undefined, undefined, sessionId), t('sidebar.stash.popDone'), 'stash.pop') }}>{pendingOp === 'stash.pop' ? '…' : t('sidebar.stash.pop')}</button>
+              </Tooltip>
             </span>
             <button type="button" className="dshAsbGit-ghostBtn" disabled={statusLoading || sessionId === undefined} onClick={openGraph}>{t('sidebar.graph.open')}</button>
           </div>

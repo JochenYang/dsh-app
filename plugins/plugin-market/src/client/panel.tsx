@@ -25,6 +25,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Spinner } from './spinner.tsx'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { normalizeNpmName } from '../identity.ts'
@@ -206,18 +207,19 @@ export function MarketFooterAction(props: MarketFooterActionProps): ReactNode {
   const [open, setOpen] = useState(false)
   return (
     <>
-      <button
-        type="button"
-        className={wide ? 'dshMkt-rowBtn' : 'dshMkt-iconBtn'}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={t('mkt.nav')}
-        title={t('mkt.nav')}
-        onClick={() => setOpen(true)}
-      >
-        <MarketGlyph size={wide ? 16 : 18} />
-        {wide ? <span>{t('mkt.nav')}</span> : null}
-      </button>
+      <Tooltip label={t('mkt.nav')} side="right">
+        <button
+          type="button"
+          className={wide ? 'dshMkt-rowBtn' : 'dshMkt-iconBtn'}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-label={t('mkt.nav')}
+          onClick={() => setOpen(true)}
+        >
+          <MarketGlyph size={wide ? 16 : 18} />
+          {wide ? <span>{t('mkt.nav')}</span> : null}
+        </button>
+      </Tooltip>
       {open ? <MarketPanel onClose={() => setOpen(false)} t={t} /> : null}
     </>
   )
@@ -661,17 +663,18 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
           browsing a catalog is not a modal decision. The collapse control is
           the edge handle (centered on the left border), so no control has to
           live near the native window buttons or the drag strip. */}
-      <button
-        type="button"
-        className="dshMkt-handle"
-        onClick={requestClose}
-        aria-label={t('mkt.close.aria')}
-        title={t('mkt.close.title')}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
+      <Tooltip label={t('mkt.close.title')} side="right">
+        <button
+          type="button"
+          className="dshMkt-handle"
+          onClick={requestClose}
+          aria-label={t('mkt.close.aria')}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      </Tooltip>
       <div className="dshMkt-panel" role="dialog" aria-modal="false" aria-label={t('mkt.nav')}>
         <div className="dshMkt-head">
           <h2 className="dshMkt-title">{t('mkt.nav')}</h2>
@@ -688,9 +691,11 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
             >
               {key === 'installed' ? t('mkt.tab.installedCount', { count: installed.length }) : t(labelKey)}
               {key === 'installed' && updateCount > 0 ? (
-                <span className="dshMkt-tabBadge" title={t('mkt.updates.title', { count: updateCount })}>
-                  {updateCount > 99 ? '99+' : updateCount}
-                </span>
+                <Tooltip label={t('mkt.updates.title', { count: updateCount })} side="bottom">
+                  <span className="dshMkt-tabBadge">
+                    {updateCount > 99 ? '99+' : updateCount}
+                  </span>
+                </Tooltip>
               ) : null}
             </button>
           ))}
@@ -995,38 +1000,41 @@ function CatalogTab({
           <div key={entry.package} className="dshMkt-card">
             <div className="dshMkt-cardHead">
               {entry.homepage !== undefined ? (
-                <button
-                  type="button"
-                  className="dshMkt-pkgName dshMkt-linkName"
-                  title={t('mkt.card.homepage')}
-                  onClick={openHomepage}
-                >
-                  {entry.name}
-                </button>
+                <Tooltip label={t('mkt.card.homepage')} side="bottom">
+                  <button
+                    type="button"
+                    className="dshMkt-pkgName dshMkt-linkName"
+                    onClick={openHomepage}
+                  >
+                    {entry.name}
+                  </button>
+                </Tooltip>
               ) : (
                 <span className="dshMkt-pkgName">{entry.name}</span>
               )}
               <span className="dshMkt-cardAction">
                 {sourceOnly ? null : localPkg !== undefined ? (
-                  <span className="dshMkt-badge dshMkt-badgeOn" title={localTitle}>{localBadge}</span>
+                  <Tooltip label={localTitle ?? ''} side="bottom">
+                    <span className="dshMkt-badge dshMkt-badgeOn">{localBadge}</span>
+                  </Tooltip>
                 ) : state.kind === 'cross-origin' ? (
                   <span className="dshMkt-actionPair">
-                    <span
-                      className="dshMkt-badge dshMkt-badgeWarn"
-                      title={t('mkt.card.crossOriginTitle')}
-                    >
-                      {t('mkt.card.crossOriginBadge')}
-                    </span>
-                    <button
-                      type="button"
-                      className="dshMkt-button dshMkt-buttonPrimary"
-                      disabled={busyPackage !== null}
-                      title={t('mkt.card.forceTitle')}
-                      onClick={() => onInstall(entry, true)}
-                    >
-                      {busy ? <Spinner /> : null}
-                      {busy ? t('mkt.install.busy') : t('mkt.install.action')}
-                    </button>
+                    <Tooltip label={t('mkt.card.crossOriginTitle')} side="bottom">
+                      <span className="dshMkt-badge dshMkt-badgeWarn">
+                        {t('mkt.card.crossOriginBadge')}
+                      </span>
+                    </Tooltip>
+                    <Tooltip label={t('mkt.card.forceTitle')} side="bottom">
+                      <button
+                        type="button"
+                        className="dshMkt-button dshMkt-buttonPrimary"
+                        disabled={busyPackage !== null}
+                        onClick={() => onInstall(entry, true)}
+                      >
+                        {busy ? <Spinner /> : null}
+                        {busy ? t('mkt.install.busy') : t('mkt.install.action')}
+                      </button>
+                    </Tooltip>
                   </span>
                 ) : pkg === undefined ? (
                   <button
@@ -1039,18 +1047,19 @@ function CatalogTab({
                     {busy ? t('mkt.install.busy') : t('mkt.install.action')}
                   </button>
                 ) : updatable ? (
-                  <button
-                    type="button"
-                    className="dshMkt-button dshMkt-buttonPrimary"
-                    disabled={busyPackage !== null}
-                    title={pkg.latest !== undefined
-                      ? t('mkt.update.toLatest', { version: pkg.latest })
-                      : t('mkt.update.toNpmLatest')}
-                    onClick={() => onUpdate(pkg)}
-                  >
-                    {busy ? <Spinner /> : null}
-                    {busy ? t('mkt.update.busy') : t('mkt.update.action')}
-                  </button>
+                  <Tooltip label={pkg.latest !== undefined
+                    ? t('mkt.update.toLatest', { version: pkg.latest })
+                    : t('mkt.update.toNpmLatest')} side="bottom">
+                    <button
+                      type="button"
+                      className="dshMkt-button dshMkt-buttonPrimary"
+                      disabled={busyPackage !== null}
+                      onClick={() => onUpdate(pkg)}
+                    >
+                      {busy ? <Spinner /> : null}
+                      {busy ? t('mkt.update.busy') : t('mkt.update.action')}
+                    </button>
+                  </Tooltip>
                 ) : (
                   <span className="dshMkt-badge dshMkt-badgeOn">{t('mkt.installed.badge')}</span>
                 )}
@@ -1062,20 +1071,23 @@ function CatalogTab({
             <div className="dshMkt-cardTags">
               {entry.category !== undefined ? <span className="dshMkt-badge">{entry.category}</span> : null}
               {sourceOnly ? (
-                <span
-                  className="dshMkt-badge dshMkt-badgeOff"
-                  title={entry.homepage !== undefined
-                    ? t('mkt.card.sourceOnlyHome', { homepage: entry.homepage })
-                    : t('mkt.card.sourceOnlyNoHome')}
-                >
-                  {t('mkt.card.sourceOnly')}
-                </span>
+                <Tooltip label={entry.homepage !== undefined
+                  ? t('mkt.card.sourceOnlyHome', { homepage: entry.homepage })
+                  : t('mkt.card.sourceOnlyNoHome')} side="bottom">
+                  <span className="dshMkt-badge dshMkt-badgeOff">
+                    {t('mkt.card.sourceOnly')}
+                  </span>
+                </Tooltip>
               ) : null}
               {entry.version !== undefined ? (
-                <span className="dshMkt-badge" title={t('mkt.card.versionTitle')}>v{entry.version}</span>
+                <Tooltip label={t('mkt.card.versionTitle')} side="bottom">
+                  <span className="dshMkt-badge">v{entry.version}</span>
+                </Tooltip>
               ) : null}
               {state.kind === 'local-git' && state.sameRepo ? (
-                <span className="dshMkt-badge" title={t('mkt.card.sameRepoTitle')}>{t('mkt.card.sameRepo')}</span>
+                <Tooltip label={t('mkt.card.sameRepoTitle')} side="bottom">
+                  <span className="dshMkt-badge">{t('mkt.card.sameRepo')}</span>
+                </Tooltip>
               ) : null}
             </div>
           </div>
@@ -1180,23 +1192,23 @@ function InstalledTab({
           <div key={pkg.name} className="dshMkt-card">
             <div className="dshMkt-cardHead">
               <span className="dshMkt-pkgName">{pkg.name}</span>
-              <span className="dshMkt-badge" title={t('mkt.installed.declared', { version: pkg.version })}>
-                {pkg.installedVersion ?? pkg.version}
-              </span>
+              <Tooltip label={t('mkt.installed.declared', { version: pkg.version })} side="bottom">
+                <span className="dshMkt-badge">
+                  {pkg.installedVersion ?? pkg.version}
+                </span>
+              </Tooltip>
               {updatable && pkg.latest !== undefined && pkg.installedVersion !== undefined ? (
-                <span
-                  className="dshMkt-badge dshMkt-badgeUpdate"
-                  title={t('mkt.installed.updateTitle')}
-                >
-                  {t('mkt.installed.updateBadge', { from: pkg.installedVersion, to: pkg.latest })}
-                </span>
+                <Tooltip label={t('mkt.installed.updateTitle')} side="bottom">
+                  <span className="dshMkt-badge dshMkt-badgeUpdate">
+                    {t('mkt.installed.updateBadge', { from: pkg.installedVersion, to: pkg.latest })}
+                  </span>
+                </Tooltip>
               ) : local ? (
-                <span
-                  className="dshMkt-badge dshMkt-badgeOn"
-                  title={pkg.source === 'git' ? t('mkt.installed.gitTitle') : t('mkt.installed.localTitle')}
-                >
-                  {pkg.source === 'git' ? t('mkt.installed.git') : t('mkt.installed.local')}
-                </span>
+                <Tooltip label={pkg.source === 'git' ? t('mkt.installed.gitTitle') : t('mkt.installed.localTitle')} side="bottom">
+                  <span className="dshMkt-badge dshMkt-badgeOn">
+                    {pkg.source === 'git' ? t('mkt.installed.git') : t('mkt.installed.local')}
+                  </span>
+                </Tooltip>
               ) : null}
               <span className={pkg.bundled ? 'dshMkt-badge dshMkt-badgeOn' : 'dshMkt-badge dshMkt-badgeOff'}>
                 {pkg.bundled ? t('mkt.installed.mounted') : t('mkt.installed.unmounted')}
@@ -1207,39 +1219,43 @@ function InstalledTab({
               {installedOwnerBadge(pkg) === 'suite' ? (
                 <span className="dshMkt-badge">{t('mkt.installed.suite')}</span>
               ) : (
-                <span className="dshMkt-badge" title={t('mkt.installed.thirdPartyTitle')}>{t('mkt.installed.thirdParty')}</span>
+                <Tooltip label={t('mkt.installed.thirdPartyTitle')} side="bottom">
+                  <span className="dshMkt-badge">{t('mkt.installed.thirdParty')}</span>
+                </Tooltip>
               )}
             </div>
             <div className="dshMkt-cardFoot">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={pkg.enabled}
-                className={pkg.enabled ? 'dshMkt-switch dshMkt-switchOn' : 'dshMkt-switch'}
-                disabled={pkg.suite || actionsBusy}
-                title={pkg.suite
-                  ? t('mkt.installed.suiteTitle')
-                  : (pkg.enabled ? t('mkt.toggle.disableTitle') : t('mkt.toggle.enableTitle'))}
-                onClick={() => onToggle(pkg)}
-              >
-                {toggling ? <Spinner /> : (
-                  <span className="dshMkt-switchTrack" aria-hidden="true"><span className="dshMkt-switchThumb" /></span>
-                )}
-                {pkg.enabled ? t('mkt.installed.enabled') : t('mkt.installed.disabled')}
-              </button>
-              {updatable ? (
+              <Tooltip label={pkg.suite
+                ? t('mkt.installed.suiteTitle')
+                : (pkg.enabled ? t('mkt.toggle.disableTitle') : t('mkt.toggle.enableTitle'))} side="bottom">
                 <button
                   type="button"
-                  className="dshMkt-button dshMkt-buttonPrimary"
-                  disabled={actionsBusy}
-                  title={pkg.latest !== undefined
-                    ? t('mkt.update.toLatest', { version: pkg.latest })
-                    : t('mkt.update.toNpmLatest')}
-                  onClick={() => onUpdate(pkg)}
+                  role="switch"
+                  aria-checked={pkg.enabled}
+                  className={pkg.enabled ? 'dshMkt-switch dshMkt-switchOn' : 'dshMkt-switch'}
+                  disabled={pkg.suite || actionsBusy}
+                  onClick={() => onToggle(pkg)}
                 >
-                  {busy ? <Spinner /> : null}
-                  {busy ? t('mkt.update.busy') : t('mkt.update.action')}
+                  {toggling ? <Spinner /> : (
+                    <span className="dshMkt-switchTrack" aria-hidden="true"><span className="dshMkt-switchThumb" /></span>
+                  )}
+                  {pkg.enabled ? t('mkt.installed.enabled') : t('mkt.installed.disabled')}
                 </button>
+              </Tooltip>
+              {updatable ? (
+                <Tooltip label={pkg.latest !== undefined
+                  ? t('mkt.update.toLatest', { version: pkg.latest })
+                  : t('mkt.update.toNpmLatest')} side="bottom">
+                  <button
+                    type="button"
+                    className="dshMkt-button dshMkt-buttonPrimary"
+                    disabled={actionsBusy}
+                    onClick={() => onUpdate(pkg)}
+                  >
+                    {busy ? <Spinner /> : null}
+                    {busy ? t('mkt.update.busy') : t('mkt.update.action')}
+                  </button>
+                </Tooltip>
               ) : null}
               <button
                 type="button"

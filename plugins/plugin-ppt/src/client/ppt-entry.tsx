@@ -41,6 +41,7 @@
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, StandardSourceBinding, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { pptModeApi } from './api.ts'
@@ -535,33 +536,35 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: {
 
   return (
     <>
-      <span className={state.enabled ? 'dshPptCapsule dshPptCapsuleActive' : 'dshPptCapsule'}>
-        <button
-          type="button"
-          className="dshPptCapsuleBody"
-          title={hint}
-          aria-pressed={state.enabled}
-          disabled={busy}
-          onClick={toggle}
-        >
-          <DeckIcon />
-          <span className="dshPptCapsuleLabel">{state.label}</span>
-        </button>
-        {state.caret && (
+      <Tooltip label={hint} side="top">
+        <span className={state.enabled ? 'dshPptCapsule dshPptCapsuleActive' : 'dshPptCapsule'}>
           <button
             type="button"
-            className="dshPptCapsuleCaret"
-            title={t('capsule.templateAria')}
-            aria-label={t('capsule.templateAria')}
-            aria-haspopup="dialog"
-            aria-expanded={panelOpen}
+            className="dshPptCapsuleBody"
+            aria-pressed={state.enabled}
             disabled={busy}
-            onClick={openPanel}
+            onClick={toggle}
           >
-            <CaretGlyph />
+            <DeckIcon />
+            <span className="dshPptCapsuleLabel">{state.label}</span>
           </button>
-        )}
-      </span>
+          {state.caret && (
+            <Tooltip label={t('capsule.templateAria')} side="top">
+              <button
+                type="button"
+                className="dshPptCapsuleCaret"
+                aria-label={t('capsule.templateAria')}
+                aria-haspopup="dialog"
+                aria-expanded={panelOpen}
+                disabled={busy}
+                onClick={openPanel}
+              >
+                <CaretGlyph />
+              </button>
+            </Tooltip>
+          )}
+        </span>
+      </Tooltip>
       {error !== undefined && <span className="dshPptCapsuleError" role="alert">{error}</span>}
       {parkedNotice !== undefined && <span className="dshPptCapsuleNotice" role="status">{t(parkedNotice)}</span>}
       {skillHint !== undefined && <span className="dshPptCapsuleNotice" role="status">{t(skillHint.notice.key, skillHint.notice.params)}</span>}

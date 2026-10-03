@@ -17,6 +17,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { HostText } from '../wire.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
@@ -329,7 +330,11 @@ export function HooksSection({ t }: HooksSectionProps): ReactNode {
           )
         })}
       </div>
-      {data !== null ? <p className="dshHk-path" title={data.filePath}>{t('hooks.path', { path: data.filePath })}</p> : null}
+      {data !== null ? (
+        <Tooltip label={data.filePath} side="top" maxWidth={640}>
+          <p className="dshHk-path">{t('hooks.path', { path: data.filePath })}</p>
+        </Tooltip>
+      ) : null}
       <ConfirmDialog
         open={confirmTarget !== null}
         title={t('hooks.confirm.deleteTitle')}

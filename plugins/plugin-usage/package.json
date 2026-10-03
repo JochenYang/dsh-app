@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-usage",
   "description": "DSH APP usage statistics: dual-face plugin (host capture/aggregation routes + the maintenance section's usage tab with heatmap and daily trend chart) over session logs.",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -47,6 +47,7 @@
     "@deepseek-ai/cordis": "^4.0.4",
     "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-locale": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.2",

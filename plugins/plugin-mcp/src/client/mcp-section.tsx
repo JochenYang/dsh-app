@@ -22,6 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { entryToExternal, mapExternalServer, parseMcpServersJson } from '../wire.ts'
 import type { HostText } from '../wire.ts'
@@ -802,7 +803,11 @@ export function McpSection({ t }: McpSectionProps): ReactNode {
         })}
       </div>
 
-      {data !== null ? <p className="dshMcp-path" title={data.filePath}>{t('mcp.path', { path: data.filePath })}</p> : null}
+      {data !== null ? (
+        <Tooltip label={data.filePath} side="top" maxWidth={640}>
+          <p className="dshMcp-path">{t('mcp.path', { path: data.filePath })}</p>
+        </Tooltip>
+      ) : null}
 
       <ConfirmDialog
         open={confirmTarget !== null}

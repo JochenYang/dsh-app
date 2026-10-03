@@ -27,6 +27,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, StandardSourceBinding } from '@deepseek-ai/dsh-client-ui-slots'
 import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { pdfModeApi } from './api.ts'
@@ -250,19 +251,20 @@ export const PdfOfficeEntry = memo(function PdfOfficeEntry(props: {
 
   return (
     <>
-      <span className={resolved.enabled ? 'dshPdfCapsule dshPdfCapsuleActive' : 'dshPdfCapsule'}>
-        <button
-          type="button"
-          className="dshPdfCapsuleBody"
-          title={hint}
-          aria-pressed={resolved.enabled}
-          disabled={busy}
-          onClick={toggle}
-        >
-          <PdfIcon />
-          <span className="dshPdfCapsuleLabel">{t('capsule.label')}</span>
-        </button>
-      </span>
+      <Tooltip label={hint} side="top">
+        <span className={resolved.enabled ? 'dshPdfCapsule dshPdfCapsuleActive' : 'dshPdfCapsule'}>
+          <button
+            type="button"
+            className="dshPdfCapsuleBody"
+            aria-pressed={resolved.enabled}
+            disabled={busy}
+            onClick={toggle}
+          >
+            <PdfIcon />
+            <span className="dshPdfCapsuleLabel">{t('capsule.label')}</span>
+          </button>
+        </span>
+      </Tooltip>
       {error !== undefined && <span className="dshPdfCapsuleError" role="alert">{error}</span>}
       {showNotice && <span className="dshPdfCapsuleNotice" role="status">{t('capsule.pendingNotice')}</span>}
       {skillHint !== undefined && (

@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { HostText } from '../wire.ts'
 import { NS } from './locales.ts'
@@ -358,7 +359,11 @@ export function SwarmSection({ t }: SwarmSectionProps): ReactNode {
       </div>
 
       {config !== null && config.filePath !== ''
-        ? <p className="dshs_path" title={config.filePath}>{t('swarm.path', { path: config.filePath })}</p>
+        ? (
+          <Tooltip label={config.filePath} side="top" maxWidth={640}>
+            <p className="dshs_path">{t('swarm.path', { path: config.filePath })}</p>
+          </Tooltip>
+        )
         : null}
     </div>
   )
