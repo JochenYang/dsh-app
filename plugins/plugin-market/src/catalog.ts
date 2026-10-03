@@ -378,6 +378,17 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
     const homepage = rawHomepage !== undefined && /^https?:\/\//.test(rawHomepage) ? rawHomepage : undefined
     const npm = plainString(record.npm, MAX_NAME_LENGTH)
     const installable = npm !== undefined && PACKAGE_NAME_PATTERN.test(npm)
+    // A name carrying '#' (e.g. `archify#integrations/deepseek-harness`) is a
+    // REPO PATH the source uses as an entry id for example/template
+    // directories, not a plugin title. Where a real npm name exists, the npm
+    // name becomes the display title; entries with no npm name AND a
+    // path-shaped name are dropped outright — they are not installable and
+    // their "title" is a fragment of a repository tree, never a plugin name.
+    let displayName = name
+    if (name.includes('#')) {
+      if (installable && npm !== undefined) displayName = npm
+      else continue
+    }
     const version = plainString(record.version, 100)
     const owner = plainString(record.owner, 100)
     const stars = safeCountOf(record.stars)
@@ -389,7 +400,7 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
     const key = installable ? npm : (page ?? homepage ?? name)
     entries.push({
       id: page ?? homepage ?? name,
-      name,
+      name: displayName,
       description,
       package: key,
       installable,

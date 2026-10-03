@@ -52,15 +52,17 @@ const cssText = `
 .dshMkt-iconBtn:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dshMkt-glyph { flex: none; }
 .dshMkt-drawer {
-  /* A right-edge drawer, not a modal: no page-wide dimming, so the workspace
-   * stays readable behind it. It runs to the window's top edge on purpose:
-   * the shell tints the native window-control strip by sampling the element
-   * at the strip's top-right, so a drawer covering that point hands the strip
-   * the drawer's own background — the two read as one continuous surface
-   * instead of two bands. The strip's own buttons are painted over the
-   * drawer's top 36px, which carries no controls. */
+  /* A full-surface page, not a side drawer: browsing a catalog of 4400+
+   * entries is a primary activity, so the panel takes the whole document and
+   * the grid gets real width. It still runs to the window's top edge on
+   * purpose: the shell tints the native window-control strip by sampling the
+   * element at the strip's top-right, so the panel's own background makes the
+   * strip read as one continuous surface. The strip's buttons paint over the
+   * panel's top 36px, which carries no controls. Entry/exit are a quick fade
+   * plus a slight rise — page-like arrival, not a drawer sliding in. */
   position: fixed;
   top: 0;
+  left: 0;
   right: 0;
   bottom: 0;
   z-index: 2147483646;
@@ -69,10 +71,10 @@ const cssText = `
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   /* Transition, not keyframes: the same rule covers the exit (the component
    * flips the state class before unmounting), so entry and exit read alike. */
-  transform: translateX(100%);
-  opacity: .6;
-  transition: transform .22s cubic-bezier(.22, 1, .36, 1), opacity .22s ease-out;
-  will-change: transform;
+  transform: translateY(10px);
+  opacity: 0;
+  transition: transform .18s cubic-bezier(.22, 1, .36, 1), opacity .18s ease-out;
+  will-change: transform, opacity;
 }
 
 .dshMkt-drawerOn {
@@ -84,45 +86,19 @@ const cssText = `
   -webkit-app-region: no-drag;
 }
 
-/* Collapse control: a handle centered on the drawer's left border. */
-.dshMkt-handle {
-  position: absolute;
-  left: -22px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 22px;
-  height: 64px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(15, 23, 42, 0.08));
-  border-right: none;
-  border-radius: 10px 0 0 10px;
-  background: var(--dsw-alias-bg-layer-1, #ffffff);
-  color: var(--dsw-alias-label-secondary, #64748b);
-  box-shadow: -6px 0 16px rgba(0, 0, 0, .10);
-  cursor: pointer;
-}
-
-.dshMkt-handle:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .05));
-  color: var(--dsw-alias-label-primary, #0f172a);
-}
-
 .dshMkt-panel {
   display: flex;
   flex-direction: column;
   position: relative;
   box-sizing: border-box;
-  width: 460px;
-  max-width: calc(100vw - 48px);
+  /* Full width: the panel IS the page now. Content inside is capped and
+   * centered so rows do not stretch absurdly wide on large windows. */
+  width: 100%;
   height: 100%;
   /* Clears the native window-control buttons, which paint over this band. */
   padding-top: 36px;
   background: var(--dsw-alias-bg-layer-1, #ffffff);
-  border-left: 1px solid var(--dsw-alias-border-l1, rgba(15, 23, 42, 0.06));
-  box-shadow: -14px 0 36px rgba(0, 0, 0, .14);
+  box-shadow: none;
 }
 .dshMkt-head {
   display: flex;
@@ -133,11 +109,37 @@ const cssText = `
    * head keeps its natural spacing: no reserve is needed here. */
   padding: 10px 14px 10px 16px;
 }
+/* The page-form close button: top-right of the panel header, symmetric with
+ * the native window buttons but clearly a page control (border, hover fill). */
+.dshMkt-pageClose {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+.dshMkt-pageClose:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
 .dshMkt-title {
   margin: 0;
   font-size: 15px;
   font-weight: 650;
   color: var(--dsw-alias-label-primary, #0f172a);
+}
+/* Full-page form: cap the interactive rows so a 1600px window does not
+ * stretch the search bar and grid edge to edge; centered to read as one
+ * content column. */
+.dshMkt-head, .dshMkt-tabs, .dshMkt-body {
+  max-width: 1080px;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
 }
 .dshMkt-tabs {
   display: flex;
@@ -278,15 +280,15 @@ const cssText = `
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 10px;
 }
-/* Card head identity: avatar block + owner/name column. */
+/* Card head identity: avatar dot + owner/name column. */
 .dshMkt-avatar {
   flex: none;
-  width: 34px;
-  height: 34px;
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
-  font-size: 15px;
+  border-radius: 50%;
+  font-size: 10px;
   font-weight: 700;
   color: #ffffff;
 }
@@ -315,6 +317,20 @@ const cssText = `
 }
 /* Card footer: tags left, stars right, pinned to the bottom of the card so
  * unequal description heights do not scatter the foot rows. */
+/* Bottom tag row: category chip + source-only + declared-version chips. */
+.dshMkt-cardTags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.dshMkt-pkgName {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-all;
+}
 .dshMkt-cardFoot {
   display: flex;
   align-items: center;
@@ -342,20 +358,7 @@ const cssText = `
   flex: none;
 }
 /* Row-2 byline: author · stars / 30-day installs · category, muted so the title leads. */
-.dshMkt-cardByline {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11.5px;
-  line-height: 16px;
-  word-break: break-word;
-}
-/* Bottom tag row: category chip + source-only + declared-version chips. */
-.dshMkt-cardTags {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.dshMkt-pkgName {
+.dshMkt-cardFoot {
   font-size: 13.5px;
   font-weight: 600;
   color: var(--dsw-alias-label-primary);

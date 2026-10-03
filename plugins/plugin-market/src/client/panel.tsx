@@ -673,25 +673,21 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
 
   return (
     <div className={shown && !closing ? 'dshMkt-drawer dshMkt-drawerOn' : 'dshMkt-drawer'} role="presentation">
-      {/* The drawer slides in over the right edge without dimming the page:
-          browsing a catalog is not a modal decision. The collapse control is
-          the edge handle (centered on the left border), so no control has to
-          live near the native window buttons or the drag strip. */}
-      <Tooltip label={t('mkt.close.title')} side="right">
-        <button
-          type="button"
-          className="dshMkt-handle"
-          onClick={requestClose}
-          aria-label={t('mkt.close.aria')}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
-      </Tooltip>
+      {/* A full-surface page: the close control lives in the panel header
+          (top-right, clear of the native window buttons), Escape also closes. */}
       <div className="dshMkt-panel" role="dialog" aria-modal="false" aria-label={t('mkt.nav')}>
         <div className="dshMkt-head">
           <h2 className="dshMkt-title">{t('mkt.nav')}</h2>
+          <button
+            type="button"
+            className="dshMkt-pageClose"
+            onClick={requestClose}
+            aria-label={t('mkt.close.aria')}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
         </div>
         <div className="dshMkt-tabs" role="tablist">
           {([['catalog', 'mkt.tab.catalog'], ['installed', 'mkt.tab.installed'], ['sources', 'mkt.tab.sources']] as const).map(([key, labelKey]) => (
