@@ -25,9 +25,12 @@ describe('sources store', () => {
   })
   afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-  it('presets both default directories for a missing file (first run)', () => {
+  it('presets the npm-mirror catalog first, then the two https directories', () => {
     assert.deepEqual(loadSources(path, () => {}), [...DEFAULT_SOURCE_URLS])
-    assert.equal(DEFAULT_SOURCE_URLS.length, 2)
+    // The npm-package catalog is the FIRST request the panel makes — it is
+    // the China-fast path — so it must lead the preset list.
+    assert.equal(DEFAULT_SOURCE_URLS.length, 3)
+    assert.match(DEFAULT_SOURCE_URLS[0], /^npm:/)
   })
 
   it('respects an existing empty list (no preset re-injection)', () => {

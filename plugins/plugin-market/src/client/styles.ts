@@ -269,13 +269,71 @@ const cssText = `
   padding: 12px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-2);
+  background: var(--dsh-app-market-card-bg, var(--dsw-alias-bg-layer-2));
+}
+/* The catalog grid: responsive multi-column, one card per cell. Auto-fill
+ * keeps narrow windows at a single column without media queries. */
+.dshMkt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+/* Card head identity: avatar block + owner/name column. */
+.dshMkt-avatar {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #ffffff;
+}
+/* Six deterministic pastel-dark avatar palettes; the hash picks one per
+ * owner so the same author always reads as the same colour. */
+.dshMkt-avatar0 { background: #4f6bed; }
+.dshMkt-avatar1 { background: #0e9f8a; }
+.dshMkt-avatar2 { background: #c2603c; }
+.dshMkt-avatar3 { background: #7a5bd6; }
+.dshMkt-avatar4 { background: #b04f6e; }
+.dshMkt-avatar5 { background: #2e8f6b; }
+.dshMkt-cardId {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.dshMkt-cardOwner {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Card footer: tags left, stars right, pinned to the bottom of the card so
+ * unequal description heights do not scatter the foot rows. */
+.dshMkt-cardFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+}
+.dshMkt-cardStars {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .dshMkt-cardHead {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  min-width: 0;
 }
 /* Row-1 action of a catalog card (install / update / installed badge) pinned
  * to the right edge, clear of a long wrapped title. */
@@ -339,13 +397,13 @@ const cssText = `
 .dshMkt-desc {
   margin: 0;
   color: var(--dsw-alias-label-secondary);
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 12.5px;
+  line-height: 18px;
   word-break: break-word;
-  /* Four-line clamp: the relaxed size keeps full feature copy readable while
-   * a 3500-row directory stays scannable. */
+  /* Three-line clamp in the grid card: full copy lives in the entry's page,
+   * and an equal card height keeps the multi-column rhythm readable. */
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }

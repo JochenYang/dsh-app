@@ -31,7 +31,7 @@ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
 import type { CatalogEntry, CatalogValue, InstalledPackage, LegacyValue, SourcesValue, UpdateValue } from './api.ts'
-import { categoryOptionsOf, entryMatchesQuery } from './catalog-filter.ts'
+import { categoryOptionsOf, searchEntries } from './catalog-filter.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { installedOwnerBadge, sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
 import { type HostText } from '../errors.ts'
@@ -98,6 +98,20 @@ function isUpdatesBannerDismissed(): boolean {
 
 function isLongOutput(output: string): boolean {
   return output.split(/\r?\n/).length > LOG_COLLAPSE_LINES || output.length > LOG_COLLAPSE_CHARS
+}
+
+/**
+ * A small deterministic hash for the avatar colour pick: the same owner always
+ * lands on the same colour across renders and sessions, and different owners
+ * spread across the six palettes. FNV-1a — tiny, stable, no dependencies.
+ */
+function hashCodeOf(text: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return hash >>> 0
 }
 
 /** Humanized cache age for the hint ("3 分钟前"); sub-minute reads as fresh. */
@@ -845,14 +859,6 @@ interface CatalogTabProps {
 const CLOSE_ANIMATION_MS = 220
 const CATALOG_PAGE_SIZE = 100
 
-/** "作者 · 下载量/ stars · 分类" byline of a catalog card (parts may be absent). */
-function cardByline(entry: CatalogEntry, t: Translate): string {
-  const metric = entry.installs30d !== undefined
-    ? t('mkt.card.installs30d', { count: entry.installs30d })
-    : (entry.stars !== undefined ? `★ ${String(entry.stars)}` : undefined)
-  return [entry.owner, metric, entry.category].filter(part => part !== undefined).join(' · ')
-}
-
 function CatalogTab({
   loading, loadError, entries, failedSources, installedByName, busyPackage, cacheInfo, onRefresh, onGoSources, onInstall, onUpdate, t,
 }: CatalogTabProps): ReactNode {
@@ -866,10 +872,18 @@ function CatalogTab({
   const categories = categoryOptionsOf(entries)
 
   // Client-side narrowing only — the host already merged and capped the rows.
+  // The needle ranks (weighted, multi-term AND); the category filter narrows
+  // afterwards, so a category pick never resurrects a non-matching row.
+  // Browse mode (no needle) sorts by the source's own popularity signal —
+  // stars first, then npm downloads — so the default view leads with what the
+  // community already uses, matching every mainstream marketplace.
   const needle = query.trim().toLowerCase()
-  const filtered = entries.filter((entry) => {
+  const ranked = needle === ''
+    ? [...entries].sort((left, right) => (right.stars ?? 0) - (left.stars ?? 0) || (right.downloads ?? 0) - (left.downloads ?? 0))
+    : searchEntries(entries, needle)
+  const filtered = ranked.filter((entry) => {
     if (category !== '' && (entry.categoryId ?? entry.category) !== category) return false
-    return entryMatchesQuery(entry, needle)
+    return true
   })
 
   // A new filter resets the page window, so a fresh search starts at the top.
@@ -970,7 +984,9 @@ function CatalogTab({
         </div>
       ) : filtered.length === 0 ? (
         <div className="dshMkt-empty">{t('mkt.catalog.noMatch')}</div>
-      ) : filtered.slice(0, visible).map(entry => {
+      ) : (
+        <div className="dshMkt-grid">
+        {filtered.slice(0, visible).map(entry => {
         const pkg = installedByName.get(normalizeNpmName(entry.package))
         const busy = busyPackage === entry.package
         const sourceOnly = entry.installable === false
@@ -999,43 +1015,39 @@ function CatalogTab({
         return (
           <div key={entry.package} className="dshMkt-card">
             <div className="dshMkt-cardHead">
-              {entry.homepage !== undefined ? (
-                <Tooltip label={t('mkt.card.homepage')} side="bottom">
-                  <button
-                    type="button"
-                    className="dshMkt-pkgName dshMkt-linkName"
-                    onClick={openHomepage}
-                  >
-                    {entry.name}
-                  </button>
-                </Tooltip>
-              ) : (
-                <span className="dshMkt-pkgName">{entry.name}</span>
-              )}
+              <span className={`dshMkt-avatar dshMkt-avatar${hashCodeOf(entry.owner ?? entry.name) % 6}`} aria-hidden="true">
+                {(entry.owner ?? entry.name).slice(0, 1).toUpperCase()}
+              </span>
+              <span className="dshMkt-cardId">
+                {entry.homepage !== undefined ? (
+                  <Tooltip label={t('mkt.card.homepage')} side="bottom">
+                    <button
+                      type="button"
+                      className="dshMkt-pkgName dshMkt-linkName"
+                      onClick={openHomepage}
+                    >
+                      {entry.name}
+                    </button>
+                  </Tooltip>
+                ) : (
+                  <span className="dshMkt-pkgName">{entry.name}</span>
+                )}
+              </span>
               <span className="dshMkt-cardAction">
                 {sourceOnly ? null : localPkg !== undefined ? (
                   <Tooltip label={localTitle ?? ''} side="bottom">
                     <span className="dshMkt-badge dshMkt-badgeOn">{localBadge}</span>
                   </Tooltip>
                 ) : state.kind === 'cross-origin' ? (
-                  <span className="dshMkt-actionPair">
-                    <Tooltip label={t('mkt.card.crossOriginTitle')} side="bottom">
-                      <span className="dshMkt-badge dshMkt-badgeWarn">
-                        {t('mkt.card.crossOriginBadge')}
-                      </span>
-                    </Tooltip>
-                    <Tooltip label={t('mkt.card.forceTitle')} side="bottom">
-                      <button
-                        type="button"
-                        className="dshMkt-button dshMkt-buttonPrimary"
-                        disabled={busyPackage !== null}
-                        onClick={() => onInstall(entry, true)}
-                      >
-                        {busy ? <Spinner /> : null}
-                        {busy ? t('mkt.install.busy') : t('mkt.install.action')}
-                      </button>
-                    </Tooltip>
-                  </span>
+                  <button
+                    type="button"
+                    className="dshMkt-button dshMkt-buttonPrimary"
+                    disabled={busyPackage !== null}
+                    onClick={() => onInstall(entry, true)}
+                  >
+                    {busy ? <Spinner /> : null}
+                    {busy ? t('mkt.install.busy') : t('mkt.install.action')}
+                  </button>
                 ) : pkg === undefined ? (
                   <button
                     type="button"
@@ -1065,35 +1077,40 @@ function CatalogTab({
                 )}
               </span>
             </div>
-            <div className="dshMkt-cardByline">{cardByline(entry, t)}</div>
             <p className="dshMkt-desc">{entry.description === '' ? t('mkt.card.noDescription') : entry.description}</p>
-            <div className="dshMkt-meta">{entry.package}</div>
-            <div className="dshMkt-cardTags">
-              {entry.category !== undefined ? <span className="dshMkt-badge">{entry.category}</span> : null}
-              {sourceOnly ? (
-                <Tooltip label={entry.homepage !== undefined
-                  ? t('mkt.card.sourceOnlyHome', { homepage: entry.homepage })
-                  : t('mkt.card.sourceOnlyNoHome')} side="bottom">
-                  <span className="dshMkt-badge dshMkt-badgeOff">
-                    {t('mkt.card.sourceOnly')}
-                  </span>
-                </Tooltip>
-              ) : null}
-              {entry.version !== undefined ? (
-                <Tooltip label={t('mkt.card.versionTitle')} side="bottom">
-                  <span className="dshMkt-badge">v{entry.version}</span>
-                </Tooltip>
-              ) : null}
-              {state.kind === 'local-git' && state.sameRepo ? (
-                <Tooltip label={t('mkt.card.sameRepoTitle')} side="bottom">
-                  <span className="dshMkt-badge">{t('mkt.card.sameRepo')}</span>
-                </Tooltip>
-              ) : null}
+            <div className="dshMkt-cardFoot">
+              <span className="dshMkt-cardTags">
+                {entry.category !== undefined ? <span className="dshMkt-badge">{entry.category}</span> : null}
+                {sourceOnly ? (
+                  <Tooltip label={entry.homepage !== undefined
+                    ? t('mkt.card.sourceOnlyHome', { homepage: entry.homepage })
+                    : t('mkt.card.sourceOnlyNoHome')} side="bottom">
+                    <span className="dshMkt-badge dshMkt-badgeOff">
+                      {t('mkt.card.sourceOnly')}
+                    </span>
+                  </Tooltip>
+                ) : null}
+                {entry.version !== undefined ? (
+                  <Tooltip label={t('mkt.card.versionTitle')} side="bottom">
+                    <span className="dshMkt-badge">v{entry.version}</span>
+                  </Tooltip>
+                ) : null}
+                {state.kind === 'local-git' && state.sameRepo ? (
+                  <Tooltip label={t('mkt.card.sameRepoTitle')} side="bottom">
+                    <span className="dshMkt-badge">{t('mkt.card.sameRepo')}</span>
+                  </Tooltip>
+                ) : null}
+              </span>
+              <span className="dshMkt-cardStars">
+                ★ {entry.stars ?? 0}
+              </span>
             </div>
           </div>
         )
       })
       }
+      </div>
+      )}
       {filtered.length > visible ? (
         <button type="button" className="dshMkt-button" onClick={() => setVisible(count => count + CATALOG_PAGE_SIZE)}>
           {t('mkt.catalog.showMore', { count: filtered.length - visible })}

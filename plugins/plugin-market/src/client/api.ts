@@ -79,6 +79,13 @@ export interface CatalogEntry {
   readonly installable?: boolean
   /** Source-declared star count (community schemas; display only). */
   readonly stars?: number
+  /**
+   * Source-declared npm downloads over the source's reporting window (the
+   * npm-mirror catalog schema; display and search-ranking only). Absent
+   * means the source does not track it for this entry — a coverage gap,
+   * never a zero.
+   */
+  readonly downloads?: number
   /** Store-declared 30-day install count (only the store schema carries it). */
   readonly installs30d?: number
 }

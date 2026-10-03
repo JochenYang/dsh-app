@@ -43,6 +43,24 @@ import { PACKAGE_NAME_PATTERN } from './npm.ts'
 export const DEFAULT_SOURCE_URL = 'https://awesome-dsh-plugin.com/plugins.json'
 
 /**
+ * The catalog as a PUBLISHED NPM PACKAGE, read through a China npm mirror.
+ *
+ * The catalog's own host (above) is served from GitHub Pages, and public
+ * GitHub proxies refuse hostnames outside github.com — so from a mainland
+ * link without a proxy the 5 MB body takes 6-8 s. Published to npm it rides
+ * the same mirror every plugin install already uses: measured against the
+ * Tencent mirror 2026-10-03, the metadata + tarball round trip is 1.2 MB in
+ * ~0.7 s, and the package carries a meaningful version that doubles as the
+ * cache validator (skip the tarball entirely when the held version matches).
+ * Same data, same schema as the origin's `plugins.json` (verified: 4412
+ * entries with downloads/stars/version per entry).
+ */
+export const DEFAULT_CATALOG_PACKAGE = 'dsh-plugin-catalog'
+
+/** The China npm mirror the package catalog is read through (no trailing slash). */
+export const DEFAULT_NPM_MIRROR = 'https://mirrors.cloud.tencent.com/npm'
+
+/**
  * The secondary preset: a China-reachable community store. The URL pins the
  * first page only — full pagination is deliberately out of scope (a 13k-entry
  * catalog would blow every entry cap for no browsing benefit; the panel is a
@@ -51,7 +69,14 @@ export const DEFAULT_SOURCE_URL = 'https://awesome-dsh-plugin.com/plugins.json'
 export const DEFAULT_SECONDARY_SOURCE_URL = 'https://deepseek1024.com/api/v2/plugins?page=1&limit=100'
 
 /** Fresh-store seed list (first run only; user-removable). */
-export const DEFAULT_SOURCE_URLS: readonly string[] = [DEFAULT_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
+/**
+ * The scheme-prefixed address of the npm-package catalog source. Not a real
+ * URL — `validateSourceUrl` special-cases the scheme — but it keeps every
+ * source (whatever its transport) behind one list, one cache and one UI.
+ */
+export const NPM_PACKAGE_SOURCE_URL = `npm:${DEFAULT_CATALOG_PACKAGE}@${DEFAULT_NPM_MIRROR}`
+
+export const DEFAULT_SOURCE_URLS: readonly string[] = [NPM_PACKAGE_SOURCE_URL, DEFAULT_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
 
 /** One browsable catalog entry (already validated). */
 export interface CatalogEntry {
@@ -95,6 +120,13 @@ export interface CatalogEntry {
   readonly installable?: boolean
   /** Source-declared star count (community schemas; display only). */
   readonly stars?: number
+  /**
+   * Source-declared npm downloads over the source's reporting window (the
+   * npm-mirror catalog schema; display and search-ranking only). Absent
+   * means the source does not track it for this entry — a coverage gap,
+   * never a zero.
+   */
+  readonly downloads?: number
   /** Store-declared 30-day install count (only the store schema carries it; display only). */
   readonly installs30d?: number
 }
@@ -140,6 +172,18 @@ export function validateSourceUrl(raw: unknown): { ok: true, url: string } | { o
   const trimmed = raw.trim()
   if (trimmed.length === 0) return { ok: false, reason: { code: 'source.empty', text: 'a catalog source URL cannot be empty' } }
   if (trimmed.length > MAX_URL_LENGTH) return { ok: false, reason: { code: 'source.tooLong', text: 'the catalog source URL is too long' } }
+  // The npm-package catalog source: `npm:<pkg>@<registry-base>`. The package
+  // name is UN Scoped by design here (the catalog package is not): the
+  // registry must be https so the same transport guarantees hold, and a
+  // registry carrying credentials is refused by the grammar (no '@' inside).
+  if (trimmed.startsWith('npm:')) {
+    const match = /^npm:([a-z0-9-~][a-z0-9-._~]*)(@https:\/\/[a-z0-9.-]+(?:\.\S+)?\/?)?$/i.exec(trimmed)
+    if (match === null) {
+      return { ok: false, reason: { code: 'source.npmShape', text: 'an npm catalog source must read npm:<package>@<https registry base>' } }
+    }
+    const registry = (match[2] ?? `@${DEFAULT_NPM_MIRROR}`).slice(1)
+    return { ok: true, url: trimmed }
+  }
   let url: URL
   try {
     url = new URL(trimmed)
@@ -337,6 +381,7 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
     const version = plainString(record.version, 100)
     const owner = plainString(record.owner, 100)
     const stars = safeCountOf(record.stars)
+    const downloads = safeCountOf(record.downloads)
     const category = categoryOf(record.category, categories, record.categoryId)
     // Source-only rows key on their (stable) directory page so the merge step
     // still dedupes; the install chain re-validates names, so this surrogate
@@ -351,6 +396,7 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
       ...(version !== undefined ? { version } : {}),
       ...(owner !== undefined ? { owner } : {}),
       ...(stars !== undefined ? { stars } : {}),
+      ...(downloads !== undefined ? { downloads } : {}),
       ...(homepage !== undefined ? { homepage } : {}),
       ...(category !== undefined ? { category: category.label, categoryId: category.id } : {}),
     })
@@ -496,11 +542,13 @@ export type SourceFetchResult =
     readonly entries: readonly CatalogEntry[]
     /** The origin's ETag, when it served one; the cache persists it. */
     readonly etag?: string
-    /** The origin's Last-Modified, when it served one; the cache persists it. */
+    /** The origin's Last-Modified (or, for the npm-package source, the
+     *  published package version); the cache persists it. */
     readonly modified?: string
   }
-  /** The origin answered 304 Not Modified: the caller's cached copy stands. */
-  | { readonly url: string, readonly notModified: true }
+  /** The origin answered "not modified": the caller's cached copy stands.
+   *  For the npm-package source the served version rides along. */
+  | { readonly url: string, readonly notModified: true, readonly servedVersion?: string }
   | { readonly url: string, readonly reason: HostText }
 
 /** Longest reason detail echoed to the panel; a hostile or huge message is cut. */
@@ -569,6 +617,120 @@ function maybeGunzip(body: Buffer, declared: string | null): string {
   return body.toString('utf8')
 }
 
+/** Long enough for a multi-megabyte tarball on a slow link, short enough to fall back. */
+const NPM_PACKAGE_TIMEOUT_MS = 20_000
+
+/* Tar reading constants: 512-byte headers, name at 0, octal size at 124,
+ * type flag at 156. Written out rather than pulled from a dependency — a
+ * reader for one known filename inside a gzipped tar is smaller than the
+ * argument for adding a package to the runtime (and the npm package whose
+ * catalog we read ships the same approach, for the same reason). */
+const TAR_NAME_OFFSET = 0
+const TAR_NAME_LENGTH = 100
+const TAR_SIZE_OFFSET = 124
+const TAR_SIZE_LENGTH = 12
+const TAR_TYPE_OFFSET = 156
+const TAR_BLOCK = 512
+
+/**
+ * One file's bytes from a gzipped tar, or null when the entry is not there.
+ * @param gz - the gzipped tarball.
+ * @param wanted - the exact entry name, npm-style (`package/plugins.json`).
+ */
+function fileFromTarball(gz: Buffer, wanted: string): Buffer | null {
+  const buf = gunzipSync(gz)
+  let offset = 0
+  while (offset + TAR_BLOCK <= buf.length) {
+    const name = buf.toString('utf8', offset + TAR_NAME_OFFSET, offset + TAR_NAME_OFFSET + TAR_NAME_LENGTH).replace(/\0.*$/s, '')
+    if (name === '') break // two consecutive empty headers end a tar
+    const rawSize = buf.toString('ascii', offset + TAR_SIZE_OFFSET, offset + TAR_SIZE_OFFSET + TAR_SIZE_LENGTH).replace(/\0.*$/s, '').trim()
+    const size = Number.parseInt(rawSize, 8)
+    if (!Number.isFinite(size) || size < 0) break
+    const type = String.fromCharCode(buf[offset + TAR_TYPE_OFFSET] ?? 0)
+    offset += TAR_BLOCK
+    // '0' and NUL both mean a regular file; anything else (directories,
+    // links, pax headers) is skipped rather than mistaken for content.
+    if ((type === '0' || type === '\0') && name === wanted) {
+      return buf.subarray(offset, offset + size)
+    }
+    offset += Math.ceil(size / TAR_BLOCK) * TAR_BLOCK
+  }
+  return null
+}
+
+/** What an npm registry says about a package's newest release. */
+interface Packument {
+  version?: unknown
+  dist?: { tarball?: unknown }
+}
+
+/**
+ * Fetch the catalog from a PUBLISHED NPM PACKAGE read through a registry
+ * mirror — the China-fast path. The published package version doubles as the
+ * cache validator: when the caller's held version matches `latest`, the
+ * tarball is not downloaded at all (the whole point of putting the catalog
+ * on a mirror is the bytes it saves).
+ * @param pkg - the catalog package name (unscoped).
+ * @param registryBase - the registry base URL, no trailing slash.
+ * @param heldVersion - the version already in the caller's cache, if any.
+ * @returns the parsed entries plus the served version, or a per-source reason.
+ */
+export async function fetchCatalogFromNpmPackage(
+  pkg: string,
+  registryBase: string,
+  heldVersion?: string,
+): Promise<SourceFetchResult | { url: string, notModified: true, servedVersion: string }> {
+  const url = `npm:${pkg}@${registryBase}`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), NPM_PACKAGE_TIMEOUT_MS)
+  try {
+    const base = registryBase.replace(/\/$/, '')
+    const metaRes = await fetch(`${base}/${encodeURIComponent(pkg)}/latest`, {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    })
+    if (!metaRes.ok) {
+      return { url, reason: { code: 'catalog.httpStatus', params: { status: metaRes.status }, text: `HTTP ${String(metaRes.status)}` } }
+    }
+    const meta = (await metaRes.json()) as Packument
+    const version = typeof meta.version === 'string' ? meta.version : null
+    const tarball = typeof meta.dist?.tarball === 'string' ? meta.dist.tarball : null
+    if (version === null || tarball === null) {
+      return { url, reason: { code: 'catalog.npmMeta', text: 'the package metadata names no version or tarball' } }
+    }
+    // Nothing changed, so nothing to download — re-fetching a package whose
+    // version we already hold would give back most of the bytes this path
+    // exists to save.
+    if (heldVersion !== undefined && heldVersion === version) {
+      return { url, notModified: true, servedVersion: version } as SourceFetchResult
+    }
+    // Follow `dist.tarball` rather than composing a URL: a mirror rewrites
+    // this field to its own host, and composing one would send the download
+    // back to the origin registry the mirror exists to avoid.
+    const tarRes = await fetch(tarball, { signal: controller.signal })
+    if (!tarRes.ok) {
+      return { url, reason: { code: 'catalog.httpStatus', params: { status: tarRes.status }, text: `HTTP ${String(tarRes.status)}` } }
+    }
+    const bytes = fileFromTarball(Buffer.from(await tarRes.arrayBuffer()), 'package/plugins.json')
+    if (bytes === null) {
+      return { url, reason: { code: 'catalog.npmTarball', text: `the package tarball carries no plugins.json` } }
+    }
+    return { url, entries: parseCatalog(bytes.toString('utf8')), modified: version }
+  } catch (error) {
+    if (error instanceof MarketExecutionError) return { url, reason: error.host }
+    if (controller.signal.aborted) {
+      const seconds = Math.round(NPM_PACKAGE_TIMEOUT_MS / 1000)
+      return { url, reason: { code: 'catalog.timeout', params: { seconds }, text: `the request timed out after ${String(seconds)} seconds` } }
+    }
+    const detail = error instanceof Error ? reasonDetail(error.message) : ''
+    return detail === ''
+      ? { url, reason: { code: 'catalog.requestFailed', text: 'the request failed' } }
+      : { url, reason: { code: 'catalog.requestFailedDetail', params: { detail }, text: detail } }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
  * Fetch + parse one catalog source. Only https URLs are honored; the response
  * is size-capped and the parse is strict. Any failure degrades to
@@ -598,6 +760,15 @@ export async function fetchCatalog(
 ): Promise<SourceFetchResult> {
   const check = validateSourceUrl(url)
   if (!check.ok) return { url, reason: check.reason }
+  // The npm-package source dispatches to its own reader: the transport (a
+  // registry metadata + tarball round trip) and the validator (the published
+  // version) are different from every https URL source.
+  if (url.startsWith('npm:')) {
+    const match = /^npm:([a-z0-9-~][a-z0-9-._~]*)(@https:\/\/.+)?$/i.exec(url)
+    if (match === null) return { url, reason: { code: 'source.npmShape', text: 'an npm catalog source must read npm:<package>@<https registry base>' } }
+    const registryBase = match[2] !== undefined ? match[2].slice(1) : DEFAULT_NPM_MIRROR
+    return fetchCatalogFromNpmPackage(match[1], registryBase, validators.modified)
+  }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS)
   try {

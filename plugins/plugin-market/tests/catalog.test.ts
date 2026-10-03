@@ -19,6 +19,7 @@ import {
   MAX_ENTRIES_TOTAL,
   MAX_SOURCES,
   fetchCatalog,
+  fetchCatalogFromNpmPackage,
   mergeCatalogs,
   parseCatalog,
   validateSourceUrl,
@@ -32,6 +33,14 @@ describe('validateSourceUrl', () => {
     assert.equal(validateSourceUrl('https://example.com/plugins.json').ok, true)
     const normalized = validateSourceUrl('  https://example.com/list ')
     assert.equal(normalized.ok && normalized.url, 'https://example.com/list')
+  })
+
+  it('accepts the npm-package catalog scheme and refuses malformed forms', () => {
+    assert.equal(validateSourceUrl('npm:dsh-plugin-catalog@https://mirrors.cloud.tencent.com/npm').ok, true)
+    assert.equal(validateSourceUrl('npm:dsh-plugin-catalog').ok, true)
+    // The registry must be https, and the shape must carry a package name.
+    assert.equal(validateSourceUrl('npm:dsh-plugin-catalog@http://mirrors.example.com/npm').ok, false)
+    assert.equal(validateSourceUrl('npm:').ok, false)
   })
 
   it('rejects non-https schemes, garbage, and credential URLs', () => {
@@ -521,3 +530,64 @@ describe('source list limits', () => {
     assert.equal(MAX_ENTRIES_TOTAL >= MAX_ENTRIES_PER_SOURCE, true)
   })
 })
+
+describe('fetchCatalogFromNpmPackage', () => {
+  it('skips the tarball when the held version matches latest', async () => {
+    const original = globalThis.fetch
+    let tarballFetched = false
+    globalThis.fetch = (async (input: unknown): Promise<Response> => {
+      const url = String(input)
+      if (url.endsWith('/latest')) {
+        return new Response(JSON.stringify({ version: '1.2.3', dist: { tarball: 'https://mirror.example.com/pkg-1.2.3.tgz' } }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      tarballFetched = true
+      return new Response(Buffer.alloc(0), { status: 200 })
+    }) as typeof fetch
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', '1.2.3')
+      assert.equal('notModified' in result && result.notModified, true)
+      assert.equal('notModified' in result && result.servedVersion, '1.2.3')
+      assert.equal(tarballFetched, false)
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('extracts plugins.json from the tarball and returns entries with the version', async () => {
+    const original = globalThis.fetch
+    const catalog = JSON.stringify({ plugins: [{ name: 'p', owner: 'o', url: 'https://r', page: 'https://r/p', category: 'c', description: { en: 'd', zh: '说' }, npm: '@s/p', stars: 3, downloads: 9, version: '1.0.0' }] })
+    // Build a minimal gzipped tar carrying package/plugins.json.
+    const blocks: Buffer[] = []
+    const catalogBytes = Buffer.from(catalog, 'utf8')
+    const header = Buffer.alloc(512)
+    header.write('package/plugins.json', 0, 'utf8')
+    header.write(octalPadded(catalogBytes.length), 124, 12, 'ascii')
+    blocks.push(header, catalogBytes)
+    const pad = (512 - (catalogBytes.length % 512)) % 512
+    if (pad !== 0) blocks.push(Buffer.alloc(pad))
+    blocks.push(Buffer.alloc(1024)) // two empty headers end the tar
+    const tarball = gzipSync(Buffer.concat(blocks))
+    globalThis.fetch = (async (input: unknown): Promise<Response> => {
+      const url = String(input)
+      if (url.endsWith('/latest')) {
+        return new Response(JSON.stringify({ version: '9.9.9', dist: { tarball: 'https://mirror.example.com/pkg-9.9.9.tgz' } }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(tarball, { status: 200 })
+    }) as typeof fetch
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm')
+      assert.equal('entries' in result, true)
+      if ('entries' in result) {
+        assert.equal(result.entries.length, 1)
+        assert.equal(result.modified, '9.9.9')
+      }
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})
+
+/** An octal size in tar's 11-char field form. */
+function octalPadded(size: number): string {
+  return size.toString(8).padStart(11, '0') + '\0'
+}
