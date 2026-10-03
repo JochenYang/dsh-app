@@ -10,6 +10,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   COMPOSER_CARD_SELECTOR,
   OFFICE_BAR_CLASS,
@@ -23,6 +26,9 @@ import { capsuleState, SHEET_FORMAT } from '../src/client/capsule-state.ts'
 import { pendingMode } from '../src/client/pending-mode.ts'
 import { ROUTE_PREFIX } from '../src/client/api.ts'
 import { ROUTE_PREFIX as HOST_ROUTE_PREFIX } from '../src/routes.ts'
+
+/** Repository root of this plugin, for the source-reading assertions below. */
+const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 test('office bar: the Excel format is contributed under the shared contract', () => {
   assert.equal(SHEET_FORMAT, 'excel')
@@ -86,4 +92,20 @@ test('pending slot: a hero toggle is consumed exactly once by the session-bound 
 test('client and host halves agree on the route prefix', () => {
   assert.equal(ROUTE_PREFIX, HOST_ROUTE_PREFIX)
   assert.equal(ROUTE_PREFIX, '/api/plugins/dsh-app/plugin-sheet')
+})
+
+// The stylesheet is injected ONCE by apply() and nothing owns its lifetime:
+// measured on a live install 2026-10-03, the document dropped all four office
+// <style> tags under a running mount and the bar rendered as a bare div
+// (display block, four stacked hosts, no width, no margin). The reconcile pass
+// re-injects it, so the entry file must hand adoptStyles to the bar as its
+// third argument — this file pins the DOM-free half only, so the wiring is
+// asserted where it lives rather than re-derived in a DOM double.
+test('office bar: the entry hands the bar its style self-heal hook', () => {
+  const entry = readFileSync(join(pluginRoot, 'src', 'client', 'office-entry.tsx'), 'utf8')
+  assert.match(entry, /import \{ adoptStyles \} from '\.\/styles\.ts'/u)
+  assert.match(
+    entry,
+    /contributeOfficeCapsule\(\s*SHEET_FORMAT,[\s\S]*?\},\s*adoptStyles\s*\)/u,
+  )
 })

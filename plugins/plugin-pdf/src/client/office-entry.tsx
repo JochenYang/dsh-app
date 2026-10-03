@@ -24,6 +24,7 @@ import { PDF_FORMAT, contributeOfficeCapsule } from './office-bar.ts'
 import type { LocaleSeat } from './locale-seat.ts'
 import { PdfOfficeEntry } from './pdf-entry.tsx'
 import type { SessionSource } from './pdf-entry.tsx'
+import { adoptStyles } from './styles.ts'
 
 /**
  * Contribute the PDF capsule to the office bar and keep it anchored under the
@@ -37,5 +38,5 @@ export function mountPdfOfficeBar(sessionSource: SessionSource, locale: LocaleSe
     const root = createRoot(slot)
     root.render(<PdfOfficeEntry sessionSource={sessionSource} locale={locale} />)
     return () => { root.unmount() }
-  })
+  }, adoptStyles)
 }

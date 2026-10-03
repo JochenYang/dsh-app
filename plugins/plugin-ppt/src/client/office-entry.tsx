@@ -20,6 +20,7 @@ import { PPT_FORMAT } from './capsule-state.ts'
 import { contributeOfficeCapsule } from './office-bar.ts'
 import { PptOfficeEntry } from './ppt-entry.tsx'
 import type { CapsuleSeat, SessionSource } from './ppt-entry.tsx'
+import { adoptStyles } from './styles.ts'
 
 /**
  * Contribute the PPT capsule to the office bar and keep it anchored under the
@@ -33,5 +34,5 @@ export function mountPptOfficeBar(sessionSource: SessionSource, seat: CapsuleSea
     const root = createRoot(slot)
     root.render(<PptOfficeEntry sessionSource={sessionSource} seat={seat} />)
     return () => { root.unmount() }
-  })
+  }, adoptStyles)
 }

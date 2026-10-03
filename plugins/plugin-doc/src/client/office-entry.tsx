@@ -24,6 +24,7 @@ import { contributeOfficeCapsule, WORD_FORMAT } from './office-bar.ts'
 import type { LocaleSeat } from './locale-seat.ts'
 import { WordOfficeEntry } from './word-entry.tsx'
 import type { SessionSource } from './word-entry.tsx'
+import { adoptStyles } from './styles.ts'
 
 /**
  * Contribute the Word capsule to the office bar and keep it anchored under the
@@ -37,5 +38,5 @@ export function mountWordOfficeBar(sessionSource: SessionSource, locale: LocaleS
     const root = createRoot(slot)
     root.render(<WordOfficeEntry sessionSource={sessionSource} locale={locale} />)
     return () => { root.unmount() }
-  })
+  }, adoptStyles)
 }

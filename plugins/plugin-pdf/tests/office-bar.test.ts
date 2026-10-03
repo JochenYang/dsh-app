@@ -11,6 +11,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   COMPOSER_CARD_SELECTOR,
   OFFICE_BAR_CLASS,
@@ -49,4 +52,21 @@ test('office bar: placement detaches without a card, inserts when unanchored, ke
   // The termination rule: an anchored bar must produce no write, or the pass
   // would schedule itself forever.
   assert.equal(officeBarPlacement({ cardPresent: true, barPresent: true, barAnchored: true }), 'keep')
+})
+
+// The stylesheet is injected ONCE by apply() and nothing owns its lifetime:
+// measured on a live install 2026-10-03, the document dropped all four office
+// <style> tags under a running mount and the bar rendered as a bare div
+// (display block, four stacked hosts, no width, no margin). The reconcile pass
+// re-injects it, so the entry file must hand adoptStyles to the bar as its
+// third argument. This file pins the DOM-free half only (see its header), so
+// the wiring is asserted where it lives rather than re-derived in a DOM double.
+test('office bar: the entry hands the bar its style self-heal hook', () => {
+  const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)))
+  const entry = readFileSync(join(pluginRoot, 'src', 'client', 'office-entry.tsx'), 'utf8')
+  assert.match(entry, /import \{ adoptStyles \} from '\.\/styles\.ts'/u)
+  assert.match(
+    entry,
+    /contributeOfficeCapsule\(\s*PDF_FORMAT,[\s\S]*?\},\s*adoptStyles\s*\)/u,
+  )
 })

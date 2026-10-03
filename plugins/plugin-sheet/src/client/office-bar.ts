@@ -166,17 +166,28 @@ function adoptOfficeSlot(bar: HTMLElement, slot: HTMLElement, format: string): v
  *
  * @param format - stable format id, written to `data-office-format`.
  * @param mount - creates the capsule inside the host; returns its unmount.
+ * @param ensureStyles - re-injects the plugin's stylesheet when the document
+ *   dropped it; called on every pass (see reconcile).
  * @returns the disposer that stops the observer and unmounts the capsule.
  */
 export function contributeOfficeCapsule(
   format: string,
   mount: (slot: HTMLElement) => () => void,
+  ensureStyles?: () => void,
 ): () => void {
   let slot: HTMLElement | undefined
   let unmount: (() => void) | undefined
   let bar: HTMLElement | undefined
 
   const reconcile = (): void => {
+    // The stylesheet is injected ONCE by apply() and nothing else owns its
+    // lifetime. Measured 2026-10-03 on a live install: the document dropped
+    // all four office <style> tags under a running mount, and the bar then
+    // rendered as a bare div — display block, four stacked hosts, no width,
+    // no margin. Nothing re-injected it because apply() never runs again.
+    // This pass already observes the whole document and runs on every DOM
+    // mutation, so re-checking here heals the bar on the next frame.
+    ensureStyles?.()
     const card = document.querySelector<HTMLElement>(COMPOSER_CARD_SELECTOR)
     const placement = officeBarPlacement({
       cardPresent: card !== null,

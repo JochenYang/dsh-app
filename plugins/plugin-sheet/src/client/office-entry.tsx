@@ -24,6 +24,7 @@ import { SHEET_FORMAT } from './capsule-state.ts'
 import type { LocaleSeat } from './locale-seat.ts'
 import { contributeOfficeCapsule } from './office-bar.ts'
 import { SheetOfficeEntry } from './sheet-entry.tsx'
+import { adoptStyles } from './styles.ts'
 import type { SessionSource } from './sheet-entry.tsx'
 
 /**
@@ -38,5 +39,5 @@ export function mountSheetOfficeBar(sessionSource: SessionSource, locale: Locale
     const root = createRoot(slot)
     root.render(<SheetOfficeEntry sessionSource={sessionSource} locale={locale} />)
     return () => { root.unmount() }
-  })
+  }, adoptStyles)
 }

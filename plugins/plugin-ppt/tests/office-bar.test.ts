@@ -334,3 +334,28 @@ test('office bar: a foreign host of the same format is residue and is dropped', 
   assert.deepEqual(fake(bar).children, [host])
   dispose()
 })
+
+// The stylesheet is injected ONCE by apply() and nothing else owns its
+// lifetime: a document that dropped it leaves the bar laid out as a bare div
+// (measured on a live install 2026-10-03 — display block, four stacked hosts,
+// no width, no margin). The reconcile pass observes the whole document, so the
+// re-injection hook rides along on every pass rather than trusting the one.
+test('office bar: every pass re-asserts the stylesheet so a dropped tag heals', (t) => {
+  const dom = installFakeDom()
+  t.after(dom.restore)
+  cardIn(dom.document)
+  let calls = 0
+  const dispose = contributeOfficeCapsule('ppt', () => () => {}, () => { calls += 1 })
+
+  // The mount pass, and every later pass that a DOM mutation schedules.
+  assert.equal(calls, 1)
+  dom.mutate()
+  dom.flush()
+  assert.equal(calls, 2)
+  dom.document.append(dom.document.createElement('span'))
+  dom.mutate()
+  dom.flush()
+  assert.equal(calls, 3)
+
+  dispose()
+})
