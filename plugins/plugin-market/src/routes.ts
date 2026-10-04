@@ -80,7 +80,7 @@ import {
   type CatalogEntry,
   type SourceFetchResult,
 } from './catalog.ts'
-import { installSkill, listInstalledSkills, searchSkills, uninstallSkill } from './skills.ts'
+import { installSkill, listInstalledSkills, searchSkills, skillDetail, uninstallSkill } from './skills.ts'
 import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
 import { repoKeyOf, sameOrigin as sameRepoOrigin } from './identity.ts'
 import type { PluginInstaller } from './installer.ts'
@@ -1161,6 +1161,20 @@ export function registerMarketRoutes(
           const category = url.searchParams.get('category') ?? ''
           const page = Number(url.searchParams.get('page') ?? '1')
           return ok(await searchSkills(query, category, Number.isFinite(page) ? page : 1))
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
+        }
+      },
+    }),
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/skills/detail`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const url = new URL(request.url)
+          return ok(await skillDetail(url.searchParams.get('slug') ?? ''))
         } catch (error: unknown) {
           const mapped = errorStatus(error)
           return fail(mapped.status, mapped.code, mapped.host)

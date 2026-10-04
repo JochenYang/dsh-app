@@ -34,6 +34,7 @@ import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
 import type { CatalogEntry, CatalogValue, InstalledPackage, LegacyValue, SourcesValue, UpdateValue } from './api.ts'
 import { categoryOptionsOf, searchEntries } from './catalog-filter.ts'
+import { CategoryStrip } from './category-strip.tsx'
 import { SkillsTab } from './skills-tab.tsx'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { installedOwnerBadge, sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
@@ -1050,18 +1051,16 @@ function CatalogTab({
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-        <select
-          className="dshMkt-input dshMkt-select"
-          aria-label={t('mkt.category.aria')}
-          value={category}
-          onChange={(event) => setCategory(event.target.value)}
-        >
-          <option value="">{t('mkt.category.all')}</option>
-          {categories.map(option => (
-            <option key={option.key} value={option.key}>{t('mkt.category.option', { label: option.label, count: option.count })}</option>
-          ))}
-        </select>
       </div>
+      {/* The same sliding-strip filter the skills tab uses, over the catalog's
+          own category options (each label carries its row count). */}
+      <CategoryStrip
+        items={[{ key: '', label: t('mkt.category.all') },
+          ...categories.map(option => ({ key: option.key, label: t('mkt.category.option', { label: option.label, count: option.count }) }))]}
+        value={category}
+        label={t('mkt.category.aria')}
+        onChange={setCategory}
+      />
       <div className="dshMkt-rowBetween">
         <span className="dshMkt-hint">
           {filtered.length === entries.length

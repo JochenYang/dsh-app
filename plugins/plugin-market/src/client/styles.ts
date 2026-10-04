@@ -155,6 +155,13 @@ const cssText = `
   color: var(--dsw-alias-label-primary-foreground);
   font-weight: 600;
 }
+.dshMkt-tab:hover:not(.dshMkt-tabOn) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dshMkt-tabOn:hover {
+  background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary));
+}
 /* Update badge pinned to the installed tab's top-right corner: the tab label
  * already counts every installed package, so the pending-update backlog gets
  * its own corner signal instead of competing with that number in the text. */
@@ -327,6 +334,28 @@ const cssText = `
   color: var(--dsw-alias-label-primary);
   word-break: break-all;
 }
+/* The card name doubles as the affordance that opens the detail card: it is a
+ * real button, so it starts from the same text and adopts the hover colour. */
+.dshMkt-pkgNameBtn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.dshMkt-pkgNameBtn:hover {
+  color: var(--dsw-alias-brand-primary);
+  text-decoration: underline;
+}
+.dshMkt-pkgNameBtn:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+  border-radius: var(--dsw-radius-xs);
+}
 .dshMkt-cardFoot {
   display: flex;
   align-items: center;
@@ -340,6 +369,22 @@ const cssText = `
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+/* The quiet meta line the cards share: size/counts at the card's bottom-right,
+ * aligned with the ★ of a catalog card so both grids read the same. */
+.dshMkt-inlineMeta {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dshMkt-skillSource {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 16px;
 }
 .dshMkt-cardHead {
   display: flex;
@@ -510,6 +555,14 @@ const cssText = `
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
   font-size: 12px;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+/* The base hover every variant inherits: the shared interactive fill. Each
+ * variant below overrides it where its own surface needs a different one. */
+.dshMkt-button:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-color: var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
+  color: var(--dsw-alias-label-primary);
 }
 .dshMkt-button:disabled { opacity: 0.5; cursor: not-allowed; }
 .dshMkt-buttonPrimary {
@@ -518,7 +571,20 @@ const cssText = `
   border-color: transparent;
   font-weight: 600;
 }
+/* The primary fill uses the theme's own hover token for that surface, so it
+ * stays the brand colour rather than swapping to the neutral interactive fill
+ * the base rule applies. */
+.dshMkt-buttonPrimary:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary));
+  color: var(--dsw-alias-label-primary-foreground);
+  border-color: transparent;
+}
 .dshMkt-buttonDanger { color: var(--dsw-alias-state-error-primary, #dc2626); }
+.dshMkt-buttonDanger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-interactive-bg-hover));
+  color: var(--dsw-alias-state-error-primary, #dc2626);
+  border-color: var(--dsw-alias-state-error-primary, #dc2626);
+}
 /* Confirm-dialog pair on the neutral system: install = white emphasized
  * (white surface, dark label, hairline border, faint gray hover); uninstall =
  * the dark inverted half. Deliberately no red — install is not destructive. */
@@ -563,10 +629,6 @@ const cssText = `
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-.dshMkt-select {
-  flex: 0 0 auto;
-  max-width: 180px;
 }
 .dshMkt-rowBetween {
   display: flex;
@@ -684,6 +746,163 @@ const cssText = `
   justify-content: flex-end;
   margin-top: 16px;
 }
+/* The skill detail card: the confirm dialog's surface, widened for the counts
+ * row and the description the list page truncates. */
+.dshMkt-detailCard {
+  width: 460px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(15, 23, 42, 0.06));
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .28);
+}
+.dshMkt-detailLoading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  padding: 8px 0;
+}
+.dshMkt-detailHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.dshMkt-detailId {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dshMkt-detailName {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-word;
+}
+.dshMkt-detailSlug {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 16px;
+  word-break: break-all;
+}
+.dshMkt-detailDesc {
+  margin: 14px 0 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.dshMkt-detailStats {
+  display: flex;
+  gap: 24px;
+  margin-top: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+.dshMkt-detailStat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dshMkt-detailStatValue {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+.dshMkt-detailStatLabel {
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dshMkt-detailMeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.dshMkt-detailCard .dshMkt-dialogActions {
+  align-items: center;
+}
+/* The shared category filter (both the plugin catalog and the skills catalog):
+ * ONE track that wraps to a second line, with one sliding indicator carrying
+ * the kernel SegmentedControl's look and motion. SegmentedControl itself
+ * cannot serve here: its indicator is arithmetic over equal tracks in a
+ * single row, so a long label set overflows the panel, and splitting it into
+ * two controls leaves one live highlight per row (both measured in the
+ * running app). The indicator below is positioned from the selected label's
+ * measured box, which is what lets the track wrap. */
+.dshMkt-catStrip {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dshMkt-catIndicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--dshMkt-catOnW, 0);
+  height: var(--dshMkt-catOnH, 0);
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-soft);
+  transform: translate(var(--dshMkt-catOnX, 0), var(--dshMkt-catOnY, 0));
+  transition: transform 160ms ease, width 160ms ease, height 160ms ease;
+  pointer-events: none;
+}
+.dshMkt-catSegment {
+  box-sizing: border-box;
+  position: relative;
+  z-index: 1;
+  height: 28px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.dshMkt-catSegment:hover,
+.dshMkt-catSegment[data-active='true'] {
+  color: var(--dsw-alias-label-primary);
+}
+.dshMkt-catSegment:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+/* The first placement after mount is applied without motion: the indicator
+ * starts unsized, so animating to the measured box would read as an entrance
+ * effect on every tab switch. The strip flips this attribute after one frame. */
+.dshMkt-catStrip[data-instant='true'] .dshMkt-catIndicator {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dshMkt-catIndicator,
+  .dshMkt-catSegment {
+    transition: none;
+  }
+}
 `
 
 /** Inject once per document (id-guarded, safe across HMR re-mounts). */
@@ -694,4 +913,3 @@ export function adoptStyles(): void {
   style.textContent = cssText
   document.head.append(style)
 }
-

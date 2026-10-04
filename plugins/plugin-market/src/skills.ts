@@ -16,6 +16,7 @@
 
 import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
+import { parse } from 'yaml'
 import { MarketExecutionError, type HostText } from './errors.ts'
 
 /** The SkillHub public API base (https, China-reachable; measured ~0.3 s/list page). */
@@ -47,8 +48,18 @@ export interface SkillCard {
   readonly stars: number
   /** The author handle the API reports (display only). */
   readonly owner?: string
+  /**
+   * The author-qualified identity (`@handle/slug`). A slug alone is NOT unique
+   * per page: two authors publish the same one (measured — `dev-expert` twice,
+   * `anti-fraud` three times on the browse page), and a page-keyed list that
+   * keys on the slug then renders stale rows. Absent only when the source
+   * declares no namespace.
+   */
+  readonly canonical?: string
   /** The upstream github repo, when the source declares one. */
   readonly homepage?: string
+  /** The source's icon (a https CDN URL; display only, loaded lazily). */
+  readonly iconUrl?: string
 }
 
 /** One installed skill, as the on-disk listing reports it. */
@@ -58,6 +69,29 @@ export interface InstalledSkill {
   readonly description: string
   readonly files: number
   readonly bytes: number
+}
+
+/** One skill's detail, as the source's own detail endpoint reports it. */
+export interface SkillDetail {
+  readonly slug: string
+  readonly name: string
+  readonly description: string
+  readonly category: string
+  readonly version: string
+  readonly downloads: number
+  readonly stars: number
+  readonly versions: number
+  /** Install count as the source's own stats report it (0 when untracked). */
+  readonly installs: number
+  readonly owner?: string
+  readonly iconUrl?: string
+  readonly homepage?: string
+  /** Sub-category labels, in source order. */
+  readonly subCategories: readonly string[]
+  /** The author's own page for this skill. */
+  readonly sourceUrl?: string
+  /** Unix ms of the last update, when the source declares it. */
+  readonly updatedAt?: number
 }
 
 /**
@@ -106,6 +140,10 @@ export function skillCardOf(raw: unknown): SkillCard | null {
   const description = field(record.description_zh, 1200) ?? field(record.description, 1200) ?? ''
   const rawCategory = field(record.category, 60) ?? ''
   const category = rawCategory
+  const namespace = typeof record.namespace === 'object' && record.namespace !== null
+    ? record.namespace as Record<string, unknown>
+    : undefined
+  const canonical = field(namespace?.canonicalName, 200)
   return {
     slug,
     name,
@@ -115,6 +153,8 @@ export function skillCardOf(raw: unknown): SkillCard | null {
     downloads: countOf(record.downloads) ?? 0,
     stars: countOf(record.stars) ?? 0,
     ...(field(record.ownerName, 80) !== undefined ? { owner: field(record.ownerName, 80) } : {}),
+    ...(canonical !== undefined ? { canonical } : {}),
+    ...(field(record.iconUrl, 500) !== undefined && /^https:\/\//.test(field(record.iconUrl, 500)!) ? { iconUrl: field(record.iconUrl, 500) } : {}),
     ...(field(record.homepage, 300) !== undefined && /^https:\/\//.test(field(record.homepage, 300)!) ? { homepage: field(record.homepage, 300) } : {}),
   }
 }
@@ -167,12 +207,66 @@ export async function searchSkills(query: string, category: string, page: number
   const body = envelopeData(await fetchJson(`${SKILLHUB_API_BASE}/api/skills?${params.toString()}`))
   const record = (typeof body === 'object' && body !== null ? body : {}) as { skills?: unknown, total?: unknown }
   const rawItems = Array.isArray(record.skills) ? record.skills : []
+  // The source's own category filter is exact (measured: a `category=dev-programming`
+  // page answers 24 rows, all of them `dev-programming`), so the page is taken
+  // as it arrives rather than filtered again here.
   const items = rawItems.map(skillCardOf).filter((card): card is SkillCard => card !== null)
   return {
     items,
     total: typeof record.total === 'number' && Number.isFinite(record.total) ? Math.floor(record.total) : items.length,
     page: Math.max(1, Math.floor(page)),
     pageSize: 24,
+  }
+}
+
+/**
+ * One skill's detail, from the source's own detail endpoint. Every field is
+ * re-validated here (the remote body is DATA ONLY, like the list endpoint):
+ * counters are non-negative integers, the icon and the two link fields must
+ * be https, and the sub-category labels are capped strings.
+ *
+ * The endpoint is addressed by the BARE slug (`/api/v1/skills/<slug>`); an
+ * author-qualified form is refused with 405 (measured), and the source
+ * resolves a repeated slug to its own first-published row — so the card's
+ * owner handle may differ from the detail's for a duplicated slug. The list
+ * card remains the authority on which row the user clicked.
+ *
+ * @param slug - a validated slug.
+ * @returns the validated detail.
+ */
+export async function skillDetail(slug: string): Promise<SkillDetail> {
+  const id = parseSkillSlug(slug)
+  // NOTE the envelope differs from the list endpoint: `/api/skills` answers
+  // `{ code, data }` (see {@link envelopeData}), while `/api/v1/skills/<slug>`
+  // answers the detail object DIRECTLY with no code wrapper (both measured).
+  // Running the detail body through the list unwrapper reads `code` as
+  // undefined and fails every call with "answered code undefined".
+  const body = await fetchJson(`${SKILLHUB_API_BASE}/api/v1/skills/${encodeURIComponent(id)}`)
+  const top = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>
+  const skill = (typeof top.skill === 'object' && top.skill !== null ? top.skill : {}) as Record<string, unknown>
+  const stats = (typeof skill.stats === 'object' && skill.stats !== null ? skill.stats : {}) as Record<string, unknown>
+  const namespace = (typeof top.namespace === 'object' && top.namespace !== null ? top.namespace : {}) as Record<string, unknown>
+  const subCategories = Array.isArray(skill.subCategories)
+    ? skill.subCategories
+      .map(entry => (typeof entry === 'object' && entry !== null ? field((entry as Record<string, unknown>).name, 60) : undefined))
+      .filter((label): label is string => label !== undefined)
+    : []
+  const updatedAt = typeof skill.updatedAt === 'number' && Number.isFinite(skill.updatedAt) ? Math.floor(skill.updatedAt) : undefined
+  return {
+    slug: field(top.slug, 128) ?? id,
+    name: field(skill.displayName, 120) ?? field(slug, 120) ?? id,
+    description: field(skill.summary_zh, 2000) ?? field(skill.summary, 2000) ?? '',
+    category: field(skill.category, 60) ?? '',
+    version: field((typeof top.latestVersion === 'object' && top.latestVersion !== null ? (top.latestVersion as Record<string, unknown>).version : undefined), 40) ?? '',
+    downloads: countOf(stats.downloads) ?? 0,
+    stars: countOf(stats.stars) ?? 0,
+    versions: countOf(stats.versions) ?? 0,
+    installs: countOf(stats.installs) ?? 0,
+    ...(field(namespace.displayName, 80) !== undefined ? { owner: field(namespace.displayName, 80) } : {}),
+    ...(field(skill.iconUrl, 500) !== undefined && /^https:\/\//.test(field(skill.iconUrl, 500)!) ? { iconUrl: field(skill.iconUrl, 500) } : {}),
+    ...(field(skill.sourceUrl, 300) !== undefined && /^https:\/\//.test(field(skill.sourceUrl, 300)!) ? { sourceUrl: field(skill.sourceUrl, 300) } : {}),
+    subCategories,
+    ...(updatedAt !== undefined ? { updatedAt } : {}),
   }
 }
 
@@ -232,16 +326,29 @@ export function skillDir(skillsDir: string, slug: string): string {
   return target
 }
 
-/** Parse a SKILL.md front matter's name/description (best-effort display). */
-function skillMetaOf(skillMd: string | undefined, fallbackSlug: string): { name: string, description: string } {
+/**
+ * Parse a SKILL.md front matter's name/description for display. The `yaml`
+ * package does the parsing — the kernel's own skill provider reads front
+ * matter the same way, and a hand-rolled `key: value` regex reads a YAML block
+ * scalar (`description: >-`, which real skills use) as the literal ">-".
+ * Best-effort: a body without front matter falls back to the slug.
+ */
+export function skillMetaOf(skillMd: string | undefined, fallbackSlug: string): { name: string, description: string } {
   if (skillMd === undefined) return { name: fallbackSlug, description: '' }
   const frontMatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd)
   if (frontMatter === null) return { name: fallbackSlug, description: '' }
-  const read = (key: string): string => {
-    const line = new RegExp(`^${key}:\\s*(.+)$`, 'm').exec(frontMatter[1])
-    return line !== null ? line[1].trim().slice(0, 200) : ''
+  let parsed: unknown
+  try {
+    parsed = parse(frontMatter[1])
+  } catch {
+    return { name: fallbackSlug, description: '' }
   }
-  return { name: read('name') || fallbackSlug, description: read('description') }
+  if (typeof parsed !== 'object' || parsed === null) return { name: fallbackSlug, description: '' }
+  const record = parsed as Record<string, unknown>
+  const name = typeof record.name === 'string' ? record.name.trim().slice(0, 200) : ''
+  // A folded/literal description arrives with its newlines collapsed already.
+  const description = typeof record.description === 'string' ? record.description.replace(/\s+/g, ' ').trim().slice(0, 400) : ''
+  return { name: name === '' ? fallbackSlug : name, description }
 }
 
 /**

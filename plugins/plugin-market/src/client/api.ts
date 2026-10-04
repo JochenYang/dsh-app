@@ -201,7 +201,14 @@ export interface SkillEntry {
   readonly downloads: number
   readonly stars: number
   readonly owner?: string
+  /**
+   * The author-qualified identity (`@handle/slug`) — the list key. A slug
+   * alone repeats within one page (two authors publish `dev-expert`), so it
+   * cannot identify a row.
+   */
+  readonly canonical?: string
   readonly homepage?: string
+  readonly iconUrl?: string
 }
 
 /** GET /skills/search payload. */
@@ -215,7 +222,34 @@ export interface SkillSearchValue {
 /** GET /skills/installed payload. */
 export interface SkillsInstalledValue {
   readonly skillsDir: string
-  readonly items: readonly { readonly slug: string, readonly name: string, readonly description: string, readonly files: number, readonly bytes: number }[]
+  readonly items: readonly {
+    readonly slug: string
+    readonly name: string
+    readonly description: string
+    readonly files: number
+    readonly bytes: number
+  }[]
+}
+
+/** One skill's detail (mirror of the host's SkillDetail). */
+export interface SkillDetailEntry {
+  readonly slug: string
+  readonly name: string
+  readonly description: string
+  readonly category: string
+  readonly version: string
+  readonly downloads: number
+  readonly stars: number
+  /** How many versions the author has published. */
+  readonly versions: number
+  readonly installs: number
+  readonly owner?: string
+  readonly iconUrl?: string
+  readonly sourceUrl?: string
+  /** Sub-category labels, in source order. */
+  readonly subCategories: readonly string[]
+  /** Unix ms of the last update, when the source declares it. */
+  readonly updatedAt?: number
 }
 
 /** POST /skills/install and /skills/uninstall payload. */
@@ -344,6 +378,11 @@ export const marketApi = {
   skillSearch(query: string, category: string, page: number): Promise<SkillSearchValue> {
     const params = new URLSearchParams({ q: query, category, page: String(page) })
     return request<SkillSearchValue>(`${ROUTE_PREFIX}/skills/search?${params.toString()}`)
+  },
+  /** One skill's detail (name, description, counts, sub-categories). */
+  skillDetail(slug: string): Promise<SkillDetailEntry> {
+    const params = new URLSearchParams({ slug })
+    return request<SkillDetailEntry>(`${ROUTE_PREFIX}/skills/detail?${params.toString()}`)
   },
   /** The installed skills (on-disk listing of $DSH_HOME/skills). */
   skillsInstalled(): Promise<SkillsInstalledValue> {
