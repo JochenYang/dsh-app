@@ -52,19 +52,15 @@ const cssText = `
 .dshMkt-iconBtn:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dshMkt-glyph { flex: none; }
 .dshMkt-drawer {
-  /* A full-surface page, not a side drawer: browsing a catalog of 4400+
-   * entries is a primary activity, so the panel takes the whole document and
-   * the grid gets real width. It still runs to the window's top edge on
-   * purpose: the shell tints the native window-control strip by sampling the
-   * element at the strip's top-right, so the panel's own background makes the
-   * strip read as one continuous surface. The strip's buttons paint over the
-   * panel's top 36px, which carries no controls. Entry/exit are a quick fade
-   * plus a slight rise — page-like arrival, not a drawer sliding in. */
+  /* A page pinned over the conversation area: top/left/width/height come as
+   * inline styles from the conversation box (useConversationBox), so the
+   * rules here only fix the positioning MODE (fixed), the stacking, and the
+   * page-like arrival (fade + slight rise). The panel inside fills this box
+   * and caps its own content width. The native window-control strip paints
+   * over the box's top 36px only when the conversation column reaches the
+   * window's right edge — the shell samples the same element, so the two
+   * read as one surface. */
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
   z-index: 2147483646;
   display: flex;
   -webkit-app-region: no-drag;
@@ -91,14 +87,11 @@ const cssText = `
   flex-direction: column;
   position: relative;
   box-sizing: border-box;
-  /* Full width: the panel IS the page now. Content inside is capped and
-   * centered so rows do not stretch absurdly wide on large windows. */
+  /* The panel fills the conversation box exactly; content inside is capped
+   * and centered so rows do not stretch absurdly wide on large windows. */
   width: 100%;
   height: 100%;
-  /* Clears the native window-control buttons, which paint over this band. */
-  padding-top: 36px;
   background: var(--dsw-alias-bg-layer-1, #ffffff);
-  box-shadow: none;
 }
 .dshMkt-head {
   display: flex;

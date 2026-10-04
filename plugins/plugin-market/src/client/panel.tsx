@@ -25,8 +25,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Spinner } from './spinner.tsx'
+import { conversationRoot, useConversationBox, type ConversationBox } from './conversation-box.ts'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
@@ -219,6 +221,43 @@ function MarketGlyph({ size }: { size: number }): ReactNode {
 export function MarketFooterAction(props: MarketFooterActionProps): ReactNode {
   const { wide, t } = props
   const [open, setOpen] = useState(false)
+  const [hint, setHint] = useState('')
+  const box = useConversationBox(open)
+  const close = useCallback((): void => { setOpen(false) }, [])
+
+  // The page covers the conversation area, so it needs one: a footer press
+  // with no conversation on screen (settings open, no session) says so
+  // instead of opening a page over nothing.
+  useEffect(() => {
+    if (!open) return
+    if (conversationRoot() !== null) return
+    setOpen(false)
+    setHint(t('mkt.noSession'))
+  }, [open, t])
+
+  const requestClose = useCallback((): void => { close() }, [close])
+
+  // The conversation anchor disappearing (session closed, settings opened)
+  // is a navigation: the page closes instead of hovering over nothing and
+  // reappearing over whatever renders there next.
+  useEffect(() => {
+    if (!open) return
+    if (box === null) close()
+  }, [open, box, close])
+
+  // Escape closes the page (the effect only lives while the page is open).
+  useEffect(() => {
+    if (!open) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        requestClose()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey) }
+  }, [open, requestClose])
+
   return (
     <>
       <Tooltip label={t('mkt.nav')} side="right">
@@ -228,13 +267,23 @@ export function MarketFooterAction(props: MarketFooterActionProps): ReactNode {
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-label={t('mkt.nav')}
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            if (open) { close(); return }
+            if (conversationRoot() === null) { setHint(t('mkt.noSession')); return }
+            setOpen(true)
+          }}
         >
           <MarketGlyph size={wide ? 16 : 18} />
           {wide ? <span>{t('mkt.nav')}</span> : null}
         </button>
       </Tooltip>
-      {open ? <MarketPanel onClose={() => setOpen(false)} t={t} /> : null}
+      {hint !== '' ? <div className="dshMkt-hint" role="status">{hint}</div> : null}
+      {open ? createPortal(
+        box === null
+          ? null
+          : <MarketPanel onClose={requestClose} t={t} box={box} />,
+        document.body,
+      ) : null}
     </>
   )
 }
@@ -243,7 +292,7 @@ export function MarketFooterAction(props: MarketFooterActionProps): ReactNode {
  * The drawer body. Mounts only while open (the entry above unmounts it), so
  * every open starts from fresh data.
  */
-function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): ReactNode {
+function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, box: ConversationBox }): ReactNode {
   const [tab, setTab] = useState<Tab>('catalog')
   const [strip, setStrip] = useState<Strip | null>(null)
   const [loading, setLoading] = useState(true)
@@ -296,14 +345,8 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
     window.setTimeout(onClose, CLOSE_ANIMATION_MS)
   }, [onClose])
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') requestClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('keydown', onKey) }
-  }, [requestClose])
-
+  // Escape is handled by the entry component (MarketFooterAction) while the
+  // page is open; nothing extra to register here.
   // Success strips self-clear so a settled action never lingers; each new
   // strip (object identity) restarts the timer, unmount cancels it. A strip
   // carrying a blocked-builds warning stays up: it carries the pending
@@ -672,10 +715,16 @@ function MarketPanel({ onClose, t }: { onClose: () => void, t: Translate }): Rea
   }
 
   return (
-    <div className={shown && !closing ? 'dshMkt-drawer dshMkt-drawerOn' : 'dshMkt-drawer'} role="presentation">
-      {/* A full-surface page: the close control lives in the panel header
-          (top-right, clear of the native window buttons), Escape also closes. */}
-      <div className="dshMkt-panel" role="dialog" aria-modal="false" aria-label={t('mkt.nav')}>
+    <div
+      className={shown && !closing ? 'dshMkt-drawer dshMkt-drawerOn' : 'dshMkt-drawer'}
+      role="dialog"
+      aria-modal="false"
+      aria-label={t('mkt.nav')}
+      style={{ top: box.top, left: box.left, width: box.width, height: box.height }}
+    >
+      {/* The page covers the conversation area exactly (the box above); the
+          close control lives in the panel header, Escape also closes. */}
+      <div className="dshMkt-panel" role="presentation">
         <div className="dshMkt-head">
           <h2 className="dshMkt-title">{t('mkt.nav')}</h2>
           <button
