@@ -34,6 +34,7 @@ import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
 import type { CatalogEntry, CatalogValue, InstalledPackage, LegacyValue, SourcesValue, UpdateValue } from './api.ts'
 import { categoryOptionsOf, searchEntries } from './catalog-filter.ts'
+import { SkillsTab } from './skills-tab.tsx'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { installedOwnerBadge, sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
 import { type HostText } from '../errors.ts'
@@ -43,7 +44,7 @@ import { hostMessage, sourceReasonOf, type Translate } from './messages.ts'
 /** Props delivered by the sidebar slot: column state + this panel's `t` seat. */
 export type MarketFooterActionProps = { wide: boolean } & PropsLocale<typeof NS>
 
-type Tab = 'catalog' | 'installed' | 'sources'
+type Tab = 'catalog' | 'skills' | 'installed' | 'sources'
 
 /** One line of the dismissible status strip (error or success notice). */
 interface Strip {
@@ -114,6 +115,39 @@ function hashCodeOf(text: string): number {
     hash = Math.imul(hash, 0x01000193)
   }
   return hash >>> 0
+}
+
+/**
+ * The card avatar: the author's real GitHub avatar when the entry carries a
+ * github repo page (every entry of the npm-mirror catalog does — the avatar
+ * is derivable as `github.com/<owner>.png`), falling back to the first
+ * letter of the OWNER on load error, then to the plugin name. The letter
+ * fallback reads the owner, not the (possibly rewritten) title, so the
+ * mark and the byline always name the same author.
+ */
+function MarketAvatar({ entry }: { entry: CatalogEntry }): ReactNode {
+  const [failed, setFailed] = useState(false)
+  const owner = entry.owner ?? entry.name
+  const repoUrl = entry.homepage ?? ''
+  const repoMatch = /^https:\/\/github\.com\/([A-Za-z0-9-]{1,39})(?:\/|$)/.exec(repoUrl)
+  const avatarUrl = repoMatch !== null ? `https://github.com/${repoMatch[1]}.png` : ''
+  const src = !failed && avatarUrl !== '' ? avatarUrl : ''
+  if (src !== '') {
+    return (
+      <img
+        className="dshMkt-avatar dshMkt-avatarImg"
+        src={src}
+        alt=""
+        loading="lazy"
+        onError={() => { setFailed(true) }}
+      />
+    )
+  }
+  return (
+    <span className={`dshMkt-avatar dshMkt-avatar${hashCodeOf(owner) % 6}`} aria-hidden="true">
+      {owner.slice(0, 1).toUpperCase()}
+    </span>
+  )
 }
 
 /** Humanized cache age for the hint ("3 分钟前"); sub-minute reads as fresh. */
@@ -237,12 +271,22 @@ export function MarketFooterAction(props: MarketFooterActionProps): ReactNode {
 
   const requestClose = useCallback((): void => { close() }, [close])
 
-  // The conversation anchor disappearing (session closed, settings opened)
-  // is a navigation: the page closes instead of hovering over nothing and
-  // reappearing over whatever renders there next.
+  // The conversation anchor disappearing MID-OPEN (session closed, settings
+  // opened over it) is a navigation: the page closes instead of hovering over
+  // nothing and reappearing over whatever renders there next. The FIRST null
+  // is not this — the box is measured a frame after open — so only a box we
+  // have already held triggers the close (seenBoxRef below).
+  const seenBoxRef = useRef(false)
   useEffect(() => {
-    if (!open) return
-    if (box === null) close()
+    if (!open) {
+      seenBoxRef.current = false
+      return
+    }
+    if (box !== null) {
+      seenBoxRef.current = true
+      return
+    }
+    if (seenBoxRef.current) close()
   }, [open, box, close])
 
   // Escape closes the page (the effect only lives while the page is open).
@@ -739,7 +783,7 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
           </button>
         </div>
         <div className="dshMkt-tabs" role="tablist">
-          {([['catalog', 'mkt.tab.catalog'], ['installed', 'mkt.tab.installed'], ['sources', 'mkt.tab.sources']] as const).map(([key, labelKey]) => (
+          {([['catalog', 'mkt.tab.catalog'], ['skills', 'mkt.tab.skills'], ['installed', 'mkt.tab.installed'], ['sources', 'mkt.tab.sources']] as const).map(([key, labelKey]) => (
             <button
               key={key}
               type="button"
@@ -781,6 +825,10 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
                 />
               ) : null}
             </div>
+          ) : null}
+
+          {tab === 'skills' ? (
+            <SkillsTab t={t} />
           ) : null}
 
           {tab === 'catalog' ? (
@@ -1060,10 +1108,9 @@ function CatalogTab({
         return (
           <div key={entry.package} className="dshMkt-card">
             <div className="dshMkt-cardHead">
-              <span className={`dshMkt-avatar dshMkt-avatar${hashCodeOf(entry.owner ?? entry.name) % 6}`} aria-hidden="true">
-                {(entry.owner ?? entry.name).slice(0, 1).toUpperCase()}
-              </span>
+              <MarketAvatar entry={entry} />
               <span className="dshMkt-cardId">
+                {entry.owner !== undefined && <span className="dshMkt-cardOwner">{entry.owner}</span>}
                 {entry.homepage !== undefined ? (
                   <Tooltip label={t('mkt.card.homepage')} side="bottom">
                     <button

@@ -191,6 +191,41 @@ export interface ToggleValue {  readonly package: string
   readonly enabled: boolean
 }
 
+/** One skills-catalog card (mirror of the host's SkillCard). */
+export interface SkillEntry {
+  readonly slug: string
+  readonly name: string
+  readonly description: string
+  readonly category: string
+  readonly version: string
+  readonly downloads: number
+  readonly stars: number
+  readonly owner?: string
+  readonly homepage?: string
+}
+
+/** GET /skills/search payload. */
+export interface SkillSearchValue {
+  readonly items: readonly SkillEntry[]
+  readonly total: number
+  readonly page: number
+  readonly pageSize: number
+}
+
+/** GET /skills/installed payload. */
+export interface SkillsInstalledValue {
+  readonly skillsDir: string
+  readonly items: readonly { readonly slug: string, readonly name: string, readonly description: string, readonly files: number, readonly bytes: number }[]
+}
+
+/** POST /skills/install and /skills/uninstall payload. */
+export interface SkillInstallValue {
+  readonly installed: boolean
+  readonly slug: string
+  /** True = the kernel discovers the skill on its next scan (restart hint). */
+  readonly restartHint?: boolean
+}
+
 /** Host of the paged preset source (its panel row explains the top-100 slice). */
 export const PAGED_SOURCE_HOST = 'deepseek1024.com'
 
@@ -303,6 +338,31 @@ export const marketApi = {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ package: pkg, entryId, enable }),
+    })
+  },
+  /** One page of the skills catalog (server-side search/sort/paging). */
+  skillSearch(query: string, category: string, page: number): Promise<SkillSearchValue> {
+    const params = new URLSearchParams({ q: query, category, page: String(page) })
+    return request<SkillSearchValue>(`${ROUTE_PREFIX}/skills/search?${params.toString()}`)
+  },
+  /** The installed skills (on-disk listing of $DSH_HOME/skills). */
+  skillsInstalled(): Promise<SkillsInstalledValue> {
+    return request<SkillsInstalledValue>(`${ROUTE_PREFIX}/skills/installed`)
+  },
+  /** Install one skill (zip download + staged extract into $DSH_HOME/skills). */
+  skillInstall(slug: string): Promise<SkillInstallValue> {
+    return request<SkillInstallValue>(`${ROUTE_PREFIX}/skills/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug }),
+    })
+  },
+  /** Uninstall one skill (removes its directory from $DSH_HOME/skills). */
+  skillUninstall(slug: string): Promise<SkillInstallValue> {
+    return request<SkillInstallValue>(`${ROUTE_PREFIX}/skills/uninstall`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug }),
     })
   },
 }

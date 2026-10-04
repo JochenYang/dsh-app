@@ -287,6 +287,9 @@ const cssText = `
 }
 /* Six deterministic pastel-dark avatar palettes; the hash picks one per
  * owner so the same author always reads as the same colour. */
+.dshMkt-avatarImg {
+  object-fit: cover;
+}
 .dshMkt-avatar0 { background: #4f6bed; }
 .dshMkt-avatar1 { background: #0e9f8a; }
 .dshMkt-avatar2 { background: #c2603c; }

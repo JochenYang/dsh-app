@@ -80,6 +80,7 @@ import {
   type CatalogEntry,
   type SourceFetchResult,
 } from './catalog.ts'
+import { installSkill, listInstalledSkills, searchSkills, uninstallSkill } from './skills.ts'
 import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
 import { repoKeyOf, sameOrigin as sameRepoOrigin } from './identity.ts'
 import type { PluginInstaller } from './installer.ts'
@@ -1141,6 +1142,74 @@ export function registerMarketRoutes(
         } catch (error: unknown) {
           const mapped = errorStatus(error)
           return fail(mapped.status, mapped.code, mapped.host, errorExtras(error))
+        }
+      },
+    }),
+
+    // ── Skills (the SkillHub catalog): server-side search/paging, zip install
+    // into $DSH_HOME/skills, installed listing, uninstall. The API is DATA
+    // ONLY; every field is re-validated in skills.ts before it reaches the
+    // panel, and archive paths are checked per entry at extract time. ──
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/skills/search`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const url = new URL(request.url)
+          const query = url.searchParams.get('q') ?? ''
+          const category = url.searchParams.get('category') ?? ''
+          const page = Number(url.searchParams.get('page') ?? '1')
+          return ok(await searchSkills(query, category, Number.isFinite(page) ? page : 1))
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
+        }
+      },
+    }),
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/skills/installed`,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: async () => {
+        try {
+          const skillsDir = join(resolveDshHome(), 'skills')
+          return ok({ skillsDir, items: await listInstalledSkills(skillsDir) })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
+        }
+      },
+    }),
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/skills/install`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request) as { slug?: unknown }
+          const skillsDir = join(resolveDshHome(), 'skills')
+          await installSkill(skillsDir, String(body.slug ?? ''))
+          return ok({ installed: true, slug: body.slug, restartHint: true })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
+        }
+      },
+    }),
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/skills/uninstall`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await readJsonBody(request) as { slug?: unknown }
+          const skillsDir = join(resolveDshHome(), 'skills')
+          await uninstallSkill(skillsDir, String(body.slug ?? ''))
+          return ok({ installed: false, slug: body.slug })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
         }
       },
     }),
