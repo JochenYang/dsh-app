@@ -386,6 +386,16 @@ const cssText = `
   font-size: 11.5px;
   line-height: 16px;
 }
+/* The installed-skills heading: one level below the panel title (15px/650),
+ * quiet because the count is the message — the browser-default h3 this had
+ * before read as a stray document heading inside the panel. */
+.dshMkt-sectionTitle {
+  margin: 18px 0 10px;
+  font-size: 13.5px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #0f172a);
+}
 .dshMkt-cardHead {
   display: flex;
   align-items: center;
