@@ -1,0 +1,7 @@
+---
+shell: none
+plugins: plugin-market
+---
+
+插件市场：修复卡片 tooltip 悬停后出现在离锚点很远的位置，以及技能标题的气泡延迟。抽屉的入场动画让 `.dshMkt-drawerOn` 停在恒等矩阵、且 `will-change: transform` 常驻——CSS 规定带 transform 的祖先会成为内部所有 `position: fixed` 后代的包含块，于是 kernel Tooltip 的视口坐标被塞进抽屉的坐标系解释，气泡永远错位（实测悬停不同卡片都亮在同一错点）。打开态改为 `transform: none` 并去掉 `will-change`（不透明的 opacity 不构成包含块，入场动画保留）；技能标题的气泡延迟从 500ms 改回默认即显（它是「这是什么」的说明，不是防扫过的工具栏按钮）。同时补上「已安装技能」节标题的样式——`dshMkt-sectionTitle` 自技能页签落地（8e4f703）起只存在于 JSX、样式表从未定义，一直靠浏览器默认 h3 渲染。
+Market plugin: fixes card tooltips landing far from the anchor they describe, and the delayed bubble on skill names. The drawer's entrance animation left `.dshMkt-drawerOn` at an identity matrix with `will-change: transform` permanently set — CSS makes any transformed ancestor the containing block for all `position: fixed` descendants, so the kernel Tooltip's viewport coordinates were reinterpreted in the drawer's box and every bubble lit the same wrong spot (measured: different anchors, one wrong position). The open state now ends at `transform: none` without `will-change` (opacity alone creates no containing block, so the arrival animation survives), and the skill-name bubble drops its 500 ms delay for the immediate default (it is a "what is this" reveal, not a toolbar sweep). Also styles the installed-skills heading — `dshMkt-sectionTitle` existed in the JSX only since 8e4f703 and was never defined in the stylesheet, rendering as a browser-default h3.

@@ -268,8 +268,9 @@ export function SkillsTab({ t, onStripped }: { t: T, onStripped?: (kind: 'ok' | 
                         button, so it is reachable and announced as one. The
                         hint rides the kernel Tooltip (a native title= is
                         against this suite's convention — 0314be5 moved 61 of
-                        them onto the primitive). */}
-                    <Tooltip label={t('mkt.skill.detailHint')} side="bottom" delayMs={500}>
+                        them onto the primitive) with no delay: the name is a
+                        "what is this" reveal, not a toolbar sweep. */}
+                    <Tooltip label={t('mkt.skill.detailHint')} side="bottom">
                       <button
                         type="button"
                         className="dshMkt-pkgName dshMkt-pkgNameBtn"

@@ -66,15 +66,20 @@ const cssText = `
   -webkit-app-region: no-drag;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   /* Transition, not keyframes: the same rule covers the exit (the component
-   * flips the state class before unmounting), so entry and exit read alike. */
+   * flips the state class before unmounting), so entry and exit read alike.
+   * The open state MUST end at transform: none (not an identity matrix):
+   * any transform — and will-change: transform too — makes this drawer the
+   * containing block for every position:fixed descendant, which desyncs the
+   * kernel Tooltip's viewport-coordinate bubbles (measured: a bubble pinned
+   * to one wrong spot for every anchor). opacity alone carries no containing
+   * block, so the arrival animation survives intact. */
   transform: translateY(10px);
   opacity: 0;
   transition: transform .18s cubic-bezier(.22, 1, .36, 1), opacity .18s ease-out;
-  will-change: transform, opacity;
 }
 
 .dshMkt-drawerOn {
-  transform: translateX(0);
+  transform: none;
   opacity: 1;
 }
 
