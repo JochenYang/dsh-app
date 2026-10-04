@@ -16,11 +16,11 @@
  * @module @dsh-app/plugin-market/client/category-strip
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 
 /** One selectable category: a stable value plus its display text. */
-export interface CategoryStripItem {
+interface CategoryStripItem {
   readonly key: string
   readonly label: string
 }
@@ -40,7 +40,7 @@ export function CategoryStrip({ items, value, onChange, label }: {
   label: string
 }): ReactNode {
   const trackRef = useRef<HTMLDivElement | null>(null)
-  const [indicatorStyle, setIndicatorStyle] = useState<Record<string, string>>({})
+  const indicatorRef = useRef<HTMLSpanElement | null>(null)
   // The FIRST placement is instant: the indicator starts with no size, so
   // animating to the measured box would read as an entrance effect every time
   // the tab mounts. Later placements slide, which is the point of the motion.
@@ -49,27 +49,34 @@ export function CategoryStrip({ items, value, onChange, label }: {
   // The highlight follows the selected label's measured box. Re-measured on a
   // selection change AND on resize: a re-wrap moves every box after the first
   // line, so a stale measurement would leave the highlight on the wrong row.
+  //
+  // The placement and the flag are written straight to the DOM rather than
+  // through state, because suppressing the first transition needs the browser
+  // to compute that placement while the transition is still off — a re-render
+  // would put the flag and the position in the same commit with nothing
+  // forcing the computation in between. The forced reflow below is what makes
+  // it deterministic; a rAF or a timer would depend on the frame clock, and a
+  // background window throttles those (measured: the flag then stayed on).
   useEffect(() => {
     const track = trackRef.current
-    if (track === null) return undefined
+    const indicator = indicatorRef.current
+    if (track === null || indicator === null) return undefined
     const measure = (): void => {
       const active = track.querySelector<HTMLElement>('[data-active="true"]')
       if (active === null) return
       const box = active.getBoundingClientRect()
       const base = track.getBoundingClientRect()
       const first = !placed.current
+      if (first) track.dataset.instant = 'true'
+      indicator.style.setProperty('--dshMkt-catOnX', `${String(box.left - base.left)}px`)
+      indicator.style.setProperty('--dshMkt-catOnY', `${String(box.top - base.top)}px`)
+      indicator.style.setProperty('--dshMkt-catOnW', `${String(box.width)}px`)
+      indicator.style.setProperty('--dshMkt-catOnH', `${String(box.height)}px`)
+      if (!first) return
       placed.current = true
-      track.dataset.instant = first ? 'true' : 'false'
-      setIndicatorStyle({
-        '--dshMkt-catOnX': `${String(box.left - base.left)}px`,
-        '--dshMkt-catOnY': `${String(box.top - base.top)}px`,
-        '--dshMkt-catOnW': `${String(box.width)}px`,
-        '--dshMkt-catOnH': `${String(box.height)}px`,
-      })
-      if (first) {
-        // One frame without the transition, then motion is allowed again.
-        requestAnimationFrame(() => { track.dataset.instant = 'false' })
-      }
+      // Compute this one placement with motion off, then re-enable it.
+      void track.offsetWidth
+      track.dataset.instant = 'false'
     }
     measure()
     if (typeof ResizeObserver === 'undefined') return undefined
@@ -80,7 +87,7 @@ export function CategoryStrip({ items, value, onChange, label }: {
 
   return (
     <div className="dshMkt-catStrip" ref={trackRef} role="group" aria-label={label}>
-      <span className="dshMkt-catIndicator" aria-hidden="true" style={indicatorStyle} />
+      <span className="dshMkt-catIndicator" aria-hidden="true" ref={indicatorRef} />
       {items.map(item => {
         const active = item.key === value
         return (

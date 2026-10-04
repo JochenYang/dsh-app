@@ -85,7 +85,6 @@ export interface SkillDetail {
   readonly installs: number
   readonly owner?: string
   readonly iconUrl?: string
-  readonly homepage?: string
   /** Sub-category labels, in source order. */
   readonly subCategories: readonly string[]
   /** The author's own page for this skill. */

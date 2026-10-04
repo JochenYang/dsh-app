@@ -265,15 +265,20 @@ export function SkillsTab({ t, onStripped }: { t: T, onStripped?: (kind: 'ok' | 
                   <span className="dshMkt-cardId">
                     {skill.owner !== undefined && <span className="dshMkt-cardOwner">{skill.owner}</span>}
                     {/* The name is the affordance for the detail view: a
-                        button, so it is reachable and announced as one. */}
-                    <button
-                      type="button"
-                      className="dshMkt-pkgName dshMkt-pkgNameBtn"
-                      title={t('mkt.skill.detailHint')}
-                      onClick={() => { void openDetail(skill.slug) }}
-                    >
-                      {skill.name}
-                    </button>
+                        button, so it is reachable and announced as one. The
+                        hint rides the kernel Tooltip (a native title= is
+                        against this suite's convention — 0314be5 moved 61 of
+                        them onto the primitive). */}
+                    <Tooltip label={t('mkt.skill.detailHint')} side="bottom" delayMs={500}>
+                      <button
+                        type="button"
+                        className="dshMkt-pkgName dshMkt-pkgNameBtn"
+                        aria-label={t('mkt.skill.detailHint')}
+                        onClick={() => { void openDetail(skill.slug) }}
+                      >
+                        {skill.name}
+                      </button>
+                    </Tooltip>
                   </span>
                   <span className="dshMkt-cardAction">
                     {installedInfo === undefined ? (
