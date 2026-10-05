@@ -10,6 +10,7 @@ start — and when a document and the code disagree, re-read the code.
 | [`docs/agents/build-and-release.md`](docs/agents/build-and-release.md) | the runtime artifact, the office payload, the bundled kernel, cutting or recovering a release, the ModelScope mirror |
 | [`docs/agents/environment.md`](docs/agents/environment.md) | an environment variable's meaning, or adding one |
 | [`docs/agents/troubleshooting.md`](docs/agents/troubleshooting.md) | a timeout, an error code or a log line you cannot place |
+| [`docs/agents/kernel-line-regression.md`](docs/agents/kernel-line-regression.md) | a kernel-line move: the pre-flight touchpoint scan, the gates and what each one cannot see, the rendering-side blind spot, the checklist |
 | [`plugins/AGENTS.md`](plugins/AGENTS.md) | anything under `plugins/` (also auto-loaded there) |
 | [`plugins/README.md`](plugins/README.md) | which plugin owns a capability |
 | the module's own JSDoc header | that module — it states constraints the code cannot show |

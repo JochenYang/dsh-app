@@ -100,5 +100,6 @@ Upstream API drift is the standing risk: slices and `as unknown as` casts bypass
 the type gate, so a kernel-deleted API leaves tests green while the runtime
 throws. After every kernel-line bump, verify each plugin end to end —
 `npm run verify` and `npm run check:plugins -- --kernel <runtime.tgz>` — rather
-than trusting a green compile. Detail: the repository-root `AGENTS.md` §3 and
+than trusting a green compile. Detail: the repository-root `AGENTS.md` §3, the
+kernel-line regression procedure in `docs/agents/kernel-line-regression.md`, and
 `docs/agents/build-and-release.md`.
