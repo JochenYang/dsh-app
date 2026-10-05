@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "scope": "heuristic",
+  "note": "Touchpoint patterns for docs/agents/kernel-line-regression.md section 1. A hit is a place to look, not a defect: the scanner answers 'which of our surfaces does this kernel-line move touch', and zero hits in a class mean only that the current patterns did not match. Keep patterns anchored to identifiers this repository actually uses — a pattern that matches prose produces noise and gets ignored.",
+  "classes": [
+    {
+      "id": 1,
+      "slug": "composition-rows",
+      "name": "组合层补丁行",
+      "why": "行 id 会在 bundle 层之间移动，override 因此失去目标且静默 no-op",
+      "patterns": [
+        "patch\\.yml",
+        "patchedDependencies",
+        "^\\s*-\\s+insert:",
+        "^\\s*-\\s+id:\\s*[a-z]",
+        "disabled:\\s*(true|!!js)"
+      ]
+    },
+    {
+      "id": 2,
+      "slug": "session-events",
+      "name": "会话事件与投影",
+      "why": "事件名与投影 stateVersion 变动不会让编译失败，只让监听器永不触发",
+      "patterns": [
+        "SessionEvent",
+        "session/event",
+        "ctx\\.on\\(",
+        "sessionProjections?",
+        "subagent/",
+        "connection/reset"
+      ]
+    },
+    {
+      "id": 3,
+      "slug": "services-and-remote",
+      "name": "服务键与 Remote",
+      "why": "ctx.get('键') 与 inject 里的字符串是类型看不见的运行期坐标",
+      "patterns": [
+        "ctx\\.get\\(\\s*'",
+        "ctx\\.remote",
+        "inject\\s*[:=]",
+        "@Remote",
+        "ctx\\.connection\\."
+      ]
+    },
+    {
+      "id": 4,
+      "slug": "host-paths",
+      "name": "宿主目录直读写",
+      "why": "profile 布局、载荷目录与日志目录是外壳与内核之间的隐式契约",
+      "patterns": [
+        "DSH_HOME",
+        "\\.dsh[/\\\\]",
+        "profiles[/\\\\]",
+        "homedir\\(",
+        "office-skills",
+        "primary-runtime"
+      ]
+    },
+    {
+      "id": 5,
+      "slug": "client-registration",
+      "name": "客户端注册面与工具注册",
+      "why": "未声明的 slot 注册会抛、已退役的 slot 静默无操作，两者都不在编译期",
+      "patterns": [
+        "ctx\\.slots\\.",
+        "__ModuleLoader__",
+        "ctx\\.tools\\.register",
+        "settings\\.section",
+        "data-plugin-css"
+      ]
+    },
+    {
+      "id": 6,
+      "slug": "custom-channels",
+      "name": "自定义 HTTP / DOM / CSS 通道",
+      "why": "注入的样式与脚本直接依赖宿主 DOM 与 token，宿主改版即静默失效",
+      "patterns": [
+        "createServer\\(",
+        "MutationObserver",
+        "insertRule",
+        "executeJavaScript",
+        "dsh-app://",
+        "connection\\.fetch\\.register"
+      ]
+    },
+    {
+      "id": 7,
+      "slug": "subprocess",
+      "name": "子进程与输出解析",
+      "why": "argv 形状、PATH 继承与退出码语义是跨进程契约，且随宿主环境变化",
+      "patterns": [
+        "node:child_process",
+        "spawn\\(",
+        "execFile",
+        "execFileSync",
+        "spawnSync",
+        "windowsHide"
+      ]
+    }
+  ]
+}

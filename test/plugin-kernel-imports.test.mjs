@@ -24,6 +24,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { exportsOf } from '../scripts/lib/kernel-exports.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -63,34 +64,6 @@ function kernelImports(source) {
   return found
 }
 
-/** The entry file a package's `exports`/`module`/`main` points at, or null. */
-function entryOf(pkgDir) {
-  const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'))
-  let entry = manifest.exports?.['.'] ?? manifest.module ?? manifest.main
-  if (typeof entry === 'object' && entry !== null) entry = entry.import ?? entry.default ?? entry.require
-  if (typeof entry !== 'string') return null
-  const full = join(pkgDir, entry)
-  return existsSync(full) ? full : null
-}
-
-/** Exported names of a built entry: `export { … }` lists plus inline declarations. */
-function exportsOf(pkgDir) {
-  const entry = entryOf(pkgDir)
-  if (entry === null) return null
-  const code = readFileSync(entry, 'utf8')
-  const names = new Set()
-  for (const match of code.matchAll(/export\s*\{([^}]+)\}/gu)) {
-    for (const raw of match[1].split(',')) {
-      const exported = raw.trim().split(/\s+as\s+/u).pop().trim()
-      if (exported !== '') names.add(exported)
-    }
-  }
-  for (const match of code.matchAll(/export\s+(?:async\s+)?(?:function|const|let|var|class)\s+([A-Za-z0-9_$]+)/gu)) {
-    names.add(match[1])
-  }
-  return names
-}
-
 test('every `@deepseek-ai/*` name the plugins import at runtime exists in the installed line', () => {
   const pluginsDir = join(ROOT, 'plugins')
   const plugins = readdirSync(pluginsDir, { withFileTypes: true })
@@ -98,19 +71,39 @@ test('every `@deepseek-ai/*` name the plugins import at runtime exists in the in
     .map((entry) => entry.name)
   assert.ok(plugins.length >= 16, `expected the whole suite, saw ${String(plugins.length)}`)
 
+  // Package resolution, per importing plugin: a plugin's own `node_modules`
+  // FIRST, then the root tree.
+  //
+  // Why not the root tree alone: plugins install locally (`plugins/AGENTS.md`
+  // §2), so a package only the client halves use — `dsh-client-ui-primitives`
+  // (13 plugins) and `dsh-web` (plugin-websearch) — lives in the plugin's own
+  // `node_modules` and NOT at the root. A root-only lookup answers `null` for
+  // them, and `null` means "not installed, not judged": 17 named runtime imports
+  // went unjudged that way, silently, which is the one outcome this test exists
+  // to prevent. Both were intact when this was fixed; the point is that nothing
+  // would have said so.
   const cache = new Map()
   const uninstalled = new Set()
   const missing = []
   let checked = 0
+
+  /** The directory a package resolves to for one plugin, or null. */
+  const packageDirFor = (plugin, spec) => {
+    const key = `${plugin}\u0000${spec}`
+    if (cache.has(key)) return cache.get(key)
+    const candidates = [join(pluginsDir, plugin, 'node_modules', spec), join(ROOT, 'node_modules', spec)]
+    const found = candidates.find((candidate) => existsSync(candidate)) ?? null
+    cache.set(key, found)
+    return found
+  }
+
   for (const plugin of plugins) {
     for (const file of walk(join(pluginsDir, plugin, 'src'))) {
       for (const found of kernelImports(readFileSync(file, 'utf8'))) {
         checked += 1
-        if (!cache.has(found.pkg)) {
-          const pkgDir = join(ROOT, 'node_modules', found.pkg)
-          cache.set(found.pkg, existsSync(pkgDir) ? exportsOf(pkgDir) : null)
-        }
-        const exports = cache.get(found.pkg)
+        const pkgDir = packageDirFor(plugin, found.pkg)
+        if (pkgDir === null) { uninstalled.add(found.pkg); continue }
+        const exports = exportsOf(pkgDir)
         if (exports === null) { uninstalled.add(found.pkg); continue }
         if (!exports.has(found.name)) missing.push(`${plugin}: ${found.name} from ${found.pkg}`)
       }
