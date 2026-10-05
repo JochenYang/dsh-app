@@ -84,6 +84,16 @@ jobs:
               (cd "$dir" && npm test)
             fi
           done
+      # Slot registration check: every `ctx.slots.inject` / `.register` id our
+      # client halves name must still exist in the followed line. An undeclared
+      # slot throws and a retired one silently renders nothing, so this is the
+      # half of the rendering-side failure decidable without a browser.
+      # It runs AFTER the per-plugin installs above: a seat's declaring package
+      # can live only in a plugin's own node_modules (`sidebar.footer.action` is
+      # declared by dsh-client-ui-sidebar, present only under plugin-market),
+      # and with those absent the check would report registrations as unjudged.
+      - name: Slot registrations (static)
+        run: npm run check:slots
 
   smoke:
     name: suite smoke probe (real kernel)

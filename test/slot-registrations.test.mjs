@@ -102,12 +102,22 @@ test('every registration resolves against the followed line', () => {
 
   assert.ok(report.declaredSlotCount > 20, `only ${String(report.declaredSlotCount)} slots were discovered, which cannot be the whole surface`)
   assert.ok(report.registrations > 5, `only ${String(report.registrations)} registrations were found in our client halves`)
-
   assert.deepEqual(
     report.undeclared,
     [],
     'a client half registers into a seat the followed line does not declare — an undeclared slot throws, a retired one silently renders nothing',
   )
+
+  // A registration the checker could not judge must be reported, not dropped.
+  // "Not installed" and "retired" are different answers, and a silent skip is
+  // the one result that could hide a real retirement.
+  assert.ok(Array.isArray(report.unjudged), 'the report must carry the unjudged registrations, even when empty')
+  assert.deepEqual(
+    report.unjudged,
+    [],
+    'this working tree has every plugin installed, so nothing should be unjudged',
+  )
+
   assert.equal(status, 0)
 })
 
@@ -190,6 +200,44 @@ test('a tree with no installed line exits 2, not 0', async () => {
     const result = spawnSync(process.execPath, [CHECKER, '--repo', dir], { encoding: 'utf8' })
     assert.equal(result.status, 2, 'an absent installed line must be a usage error, not a clean bill')
     assert.match(result.stderr ?? '', /install the followed line first/)
+  } finally {
+    await cleanup(dir)
+  }
+})
+
+test('a plugin with no local install is reported as unjudged, not retired', async () => {
+  // The regression this pins, measured against a CI-shaped tree (root
+  // `node_modules` present, per-plugin installs not yet run): the checker
+  // reported `sidebar.footer.action` as UNDECLARED, because its declaring
+  // package `dsh-client-ui-sidebar` lives only under
+  // `plugins/plugin-market/node_modules`. Nothing was broken; the declaration
+  // was simply not on disk.
+  //
+  // "Not installed" and "retired" must never be the same answer, so a plugin
+  // whose local tree is absent is skipped and LISTED rather than failed.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-slots-nolocal-'))
+  try {
+    mkdirSync(join(dir, 'plugins'), { recursive: true })
+    // Root scope: the real installed line, so the check has something to read.
+    cpSync(join(ROOT, 'node_modules', '@deepseek-ai'), join(dir, 'node_modules', '@deepseek-ai'), { recursive: true, dereference: false })
+    // One plugin WITHOUT its own node_modules.
+    cpSync(join(ROOT, 'plugins', 'plugin-market'), join(dir, 'plugins', 'plugin-market'), {
+      recursive: true,
+      dereference: false,
+      filter: (source) => !source.includes(`${join('plugin-market', 'node_modules')}`),
+    })
+
+    const result = spawnSync(process.execPath, [CHECKER, '--json', '--repo', dir], { encoding: 'utf8' })
+    assert.equal(result.status, 0, 'a plugin that is not installed is not a broken seat')
+    const report = JSON.parse(result.stdout)
+    assert.ok(
+      report.unjudged.some((row) => row.id === 'sidebar.footer.action'),
+      'the skipped registration must appear under unjudged',
+    )
+    assert.ok(
+      !report.undeclared.some((row) => row.id === 'sidebar.footer.action'),
+      'an uninstalled plugin must not be reported as a retired seat',
+    )
   } finally {
     await cleanup(dir)
   }

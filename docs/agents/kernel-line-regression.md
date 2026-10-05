@@ -111,6 +111,22 @@ npm run check:slots
 因此一个座位“消失”的判据是**所有副本都不再声明它**，而不是根里没有。写回归记录时
 要按这个口径写。
 
+#### 2.2.2 “未安装”与“已退役”不能是同一个答案 `[实测]`
+
+座位的**声明包可能只装在插件自己的 `node_modules` 里**。实测：`sidebar.footer.action`
+由 `@deepseek-ai/dsh-client-ui-sidebar` 声明，而该包只存在于 `plugins/plugin-market`
+本地，根作用域没有。
+
+后果：在一棵“根依赖已装、插件本地未装”的树（正是 CI `gate` 作业在跑单测那一刻的状态）
+上，声明根本不在磁盘上，检查器把该座位报成**未声明**——而那个树上什么都没坏。
+
+所以注册方所在插件没有本地 `node_modules` 时，该注册进 **`unjudged`** 列表：检查器
+既不判它通过也不判它断裂，并在人类可读输出里逐条列出、附上补齐命令。两者混为一谈会
+把假阳性变成习惯，习惯之后真退役就没人看了。
+
+这也是它必须放在 **CI 的 per-plugin 安装之后**的原因（`ci.yml` 的 `gate` 作业里紧跟
+`Plugin unit tests`）——放前面就只能报一堆 `unjudged`，什么也没验。
+
 客户端注册 id 必须等于包名，否则插件静默掉出启动图。本项目的注册 id 由
 `plugins/build-lib.mjs` 的 `clientBanner(id)` 从包名注入 `__ModuleLoader__.load({ id, … })`，
 结构上写不错，因此这一条不需要独立门禁——但改 `build-lib.mjs` 时它是回归面。
@@ -173,12 +189,13 @@ npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 | `check:graph` | 五处套件名单一致、core 包是 peer 不是 dependency、peer 范围没漂 | 运行期行为 |
 | `verify --tgz` | 真内核起得来；每个插件的设置路由 200；客户端 bundle 非空；MCP 挂载链路通 | **不驱动浏览器**：`slot entry crashed` 恰恰在路由 200 且 bundle 非空时发生 |
 | `check:plugins` | 用给定内核以临时 `DSH_HOME` 短启动，扫启动输出的失败信号 | 它的失败规则收窄为 `ERR_*` / `Cannot find module` / `duplicate …` / `failed to load\|start` / 缩进堆栈行——**不含** `patch: entry … not found` 这类文案，所以它"通过"不能替代对启动日志的显式检索 |
+| `check:slots` | 客户端半注册的每个座位在跟随线上仍然存在（**已在 CI 里**，见 §2.2.2） | 组件真的渲染了吗；注册方插件未安装时该注册进 `unjudged` 而不是判定 |
 
 因此第 3 节的结论必须与第 6 节的渲染面判定合起来看，缺一条就不算覆盖。
 
 本轮交付时这六条的实际结果 `[实测]`：`typecheck` exit 0、`check:graph` `ok — no violations`、
-`npm test` 530 用例 / 529 pass / 1 skipped / 0 fail；`verify --tgz` 与 `check:plugins` 需一份
-runtime 产物或真实 `DSH_HOME`，本轮未跑。
+`npm test` 531 用例 / 530 pass / 1 skipped / 0 fail、`check:slots` exit 0；`verify --tgz` 与
+`check:plugins` 需一份 runtime 产物或真实 `DSH_HOME`，本轮未跑。
 
 ---
 

@@ -239,6 +239,26 @@ function main() {
   const slots = declaredSlots(repoRoot)
   const found = registrations(repoRoot)
 
+  // A registration whose plugin has no local `node_modules` cannot be judged.
+  //
+  // The package declaring a seat may live ONLY in that plugin's local tree —
+  // measured: `sidebar.footer.action` is declared by
+  // `@deepseek-ai/dsh-client-ui-sidebar`, which exists under
+  // `plugins/plugin-market/node_modules` and nowhere at the root. On a tree
+  // where that plugin is not installed yet (CI's `gate` job installs per plugin
+  // AFTER the unit tests run) the declaration is simply absent from disk, and
+  // the seat looks retired: the check reported 1 undeclared registration on a
+  // tree where nothing was broken.
+  //
+  // "Not installed" and "retired" must never be the same answer. The plugin's
+  // own install state tells them apart, and that is decidable; inferring it
+  // from the id would not be.
+  const hasLocalScope = (file) => {
+    const plugin = file.split('/')[1]
+    return plugin !== undefined && existsSync(path.join(repoRoot, 'plugins', plugin, 'node_modules'))
+  }
+  const unjudged = found.filter((registration) => !hasLocalScope(registration.file))
+  const judged = found.filter((registration) => hasLocalScope(registration.file))
   // One verdict per REGISTRATION, keyed by id + file + line.
   //
   // Keying on id + file alone collapsed three separate registrations in
@@ -248,7 +268,7 @@ function main() {
   // undercount how much of a surface a retired seat takes out.
   const seen = new Set()
   const rows = []
-  for (const registration of found) {
+  for (const registration of judged) {
     const key = `${registration.id}\u0000${registration.file}\u0000${String(registration.line)}`
     if (seen.has(key)) continue
     seen.add(key)
@@ -263,15 +283,24 @@ function main() {
     process.stdout.write(`${JSON.stringify({
       declaredSlotCount: slots.size,
       registrations: rows.length,
+      unjudged: unjudged.map((row) => ({ id: row.id, file: row.file })),
       undeclared: undeclared.map((row) => ({ id: row.id, file: row.file, line: row.line })),
       rows,
     }, null, 2)}\n`)
   } else {
-    console.log(`slot registrations — ${slots.size} slots declared by the installed line, ${rows.length} registrations in our client halves`)
+    console.log(`slot registrations — ${slots.size} slots declared, ${rows.length} registrations judged, ${unjudged.length} not judged`)
     console.log('')
     for (const row of rows) {
       const mark = row.declared ? 'OK  ' : 'MISS'
       console.log(`${mark} ${row.id.padEnd(42)} ${row.file}:${row.line}${row.kind === null ? '' : `  (${row.kind})`}`)
+    }
+    if (unjudged.length > 0) {
+      // Printed, never silently dropped: a skipped registration is the one
+      // result that could hide a real retirement, so the reader has to see it.
+      console.log('')
+      console.log(`not judged — the plugin has no local node_modules, so a declaration it may own is not on disk (${unjudged.length}):`)
+      for (const row of unjudged) console.log(`      ${row.id.padEnd(42)} ${row.file}:${row.line}`)
+      console.log('      run `npm install` inside those plugin directories and re-run to judge them')
     }
   }
 
