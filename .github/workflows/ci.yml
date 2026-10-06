@@ -59,10 +59,16 @@ jobs:
       - name: Plugin graph (static)
         run: npm run check:graph
       # Root suites cover the shell updater chain and the kernel manager. They
-      # require dist/ (npm test builds first), and until now they only ran by
-      # hand — a broken unit test could sit on main indefinitely.
-      - name: Shell + kernel unit tests
-        run: npm test
+      # require dist/ (npm test builds first).
+      #
+      # This step runs AFTER the per-plugin installs below, not before: two of
+      # these suites (`kernel-surface`, `slot-registrations`) resolve packages
+      # that exist ONLY inside a plugin's own node_modules — a seat's declaring
+      # package, and a kernel package imported by the client halves but never
+      # depended on at the root. Run first, they see an empty plugin tree and
+      # fail on "imported by our plugins but the report does not list it" /
+      # "only 0 registrations were found", which reads like a real defect and
+      # is purely a step-order artifact.
       - name: Build suite plugins
         run: |
           # Each plugin owns its dependencies (docx, exceljs, pptxgenjs, ...),
@@ -73,6 +79,8 @@ jobs:
               (cd "$dir" && npm install --no-audit --no-fund --legacy-peer-deps && npm run build)
             fi
           done
+      - name: Shell + kernel unit tests
+        run: npm test
       - name: Plugin unit tests
         run: |
           # Every suite that has one, not a fixed pair: eleven suites previously
