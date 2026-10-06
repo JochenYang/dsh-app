@@ -64,6 +64,30 @@ const LOCK = JSON.parse(readFileSync(path.join(root, 'scripts', 'primary-runtime
 /** Release the Python archives come from (astral-sh/python-build-standalone). */
 const PYTHON_RELEASE_BASE = 'https://github.com/astral-sh/python-build-standalone/releases/download'
 
+/**
+ * Public GitHub proxies that wrap a release URL, tried after the official host.
+ *
+ * The same two the shell's own kernel/installer chain uses
+ * (`DEFAULT_GITHUB_MIRRORS` in src/kernel/sources/artifact.ts) — this build
+ * runs on GitHub-hosted runners, whose link to github.com occasionally drops a
+ * large download outright (`fetch failed` with no status). That was measured on
+ * a `runtime-<v>` run: one cell died at the Python archive while every other
+ * cell succeeded on the same revision, and the tag had to be re-run.
+ *
+ * A proxy is a transport, never a trust source: every candidate is verified
+ * against the pinned digest, so a proxy serving different bytes fails and the
+ * chain moves on. `DSH_APP_GITHUB_MIRRORS` overrides the list (empty = none),
+ * matching the shell's own env switch.
+ */
+const GITHUB_MIRRORS = process.env.DSH_APP_GITHUB_MIRRORS === undefined
+  ? ['https://ghfast.top/', 'https://gh-proxy.com/']
+  : process.env.DSH_APP_GITHUB_MIRRORS.split(',').map((entry) => entry.trim()).filter(Boolean)
+
+/** Official URL first, then each proxy prefix wrapping that same URL. */
+function withGithubMirrors(officialUrl) {
+  return [officialUrl, ...GITHUB_MIRRORS.map((prefix) => `${prefix}${officialUrl}`)]
+}
+
 /** Official Node.js distribution host. */
 const NODE_DIST_BASE = 'https://nodejs.org/dist'
 
@@ -433,7 +457,7 @@ export async function buildPrimaryRuntime({ platform, arch, outDir }) {
 
     // --- Python: python-build-standalone, extracted as `dependencies/python/` --
     const pythonArchive = await fetchPinnedFrom(
-      [`${PYTHON_RELEASE_BASE}/${LOCK.pythonRelease}/${encodeURIComponent(pythonArchiveName)}`],
+      withGithubMirrors(`${PYTHON_RELEASE_BASE}/${LOCK.pythonRelease}/${encodeURIComponent(pythonArchiveName)}`),
       entry.pythonSha256,
       'sha256',
     )
