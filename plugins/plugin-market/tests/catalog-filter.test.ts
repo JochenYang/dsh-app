@@ -8,7 +8,7 @@
 
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
-import { categoryKeyOf, categoryOptionsOf, entryMatchesQuery, searchEntries, type FilterableEntry } from '../src/client/catalog-filter.ts'
+import { categoryKeyOf, categoryOptionsOf, entryMatchesQuery, searchEntries, type FilterableEntry } from '../src/catalog-filter.ts'
 
 /** One row with the label always resolved (the panel never sees raw ids alone). */
 const row = (overrides: Partial<FilterableEntry>): FilterableEntry => ({

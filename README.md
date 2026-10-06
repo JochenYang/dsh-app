@@ -49,7 +49,7 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
    开发源是仓库 `plugins/*`，生产源是激活内核里的 `app/node_modules/@dsh-app/*`。
 2. **套件自有 profile**：内核以 `--profile dsh-app` 启动，你在终端里的 `dsh` / `dsh web` 仍用 `web`。
    首次运行会在后台建好新 profile 并把你手写的 patch 层（禁用行、MCP 行）带过去；
-   **第三方包不搬**——它们在应用内的插件市场里重装到新 profile，因为市场才懂 pnpm 的发布冷静期策略、
+   **第三方包不搬**——插件市场（或内核 CLI）在新 profile 里重新安装它们，因为市场才懂 pnpm 的发布冷静期策略、
    构建脚本放行和失效规格这些事（搬整棵树的两种做法都实测过并被否决：复制会被 Windows 的
    `.pnpm` 符号链接权限卡住，按 lockfile 重装会撞 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`）。
    建好并落 marker 后下次启动才切换；失败则继续用 `web` 启动并在下次重试。生效的 profile 通过

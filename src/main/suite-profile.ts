@@ -40,12 +40,16 @@
  * away (see {@link mirrorWitnessGap}).
  *
  * Third-party packages declared on the old profile are deliberately NOT carried
- * over: the in-app market reinstalls them into the new profile, and it is the
- * component that already knows how to satisfy pnpm's supply-chain policies,
- * prompt for build scripts and handle a spec no longer resolves. That decision
- * is about the PACKAGE TREE; a file the user's own patch names travels, and it
- * is copied one path at a time rather than by moving the profile across, so
- * neither the package-manager state nor `node_modules` is ever dragged along.
+ * over: the market is the component that knows how to satisfy pnpm's
+ * supply-chain policies, prompt for build scripts and handle a spec no longer
+ * resolves, so a package is installed fresh there instead of copied. (The
+ * market used to diff the two profiles and offer the old list for one-click
+ * install; that offer is gone — the suite's plugins are installed per profile
+ * now — so the packages simply stay on the old profile.)
+ * That decision is about the PACKAGE TREE; a file the user's own patch names
+ * travels, and it is copied one path at a time rather than by moving the
+ * profile across, so neither the package-manager state nor `node_modules` is
+ * ever dragged along.
  * Two "carry the tree" variants were measured and rejected first:
  *
  *   - COPYING `profiles/web` across: pnpm's `.pnpm` virtual store holds
@@ -97,7 +101,7 @@ export function hasSuiteProfileManifest(home = resolveDshHome()): boolean {
 export interface MigrationOutcome {
   /** `already` — marker present; `seeded` — profile created now; `failed` — see detail. */
   status: 'already' | 'seeded' | 'failed'
-  /** Package names the old profile declares (they stay there; the market reinstalls). */
+  /** Package names the old profile declares (they stay there and are not carried here). */
   legacyPackages: number
   /** Whether the user's own patch layer was carried over. */
   carriedPatch: boolean

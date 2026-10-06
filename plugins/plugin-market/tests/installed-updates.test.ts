@@ -36,7 +36,6 @@ function harness(probe: (names: readonly string[]) => Promise<Record<string, str
     catalogCachePath: join(tmpdir(), 'unused-catalog-cache.json'),
     installer: {} as PluginInstaller,
     profile: 'web',
-    legacyProfile: 'web',
     latestVersions: (names) => {
       probeCalls.push([...names])
       return probe(names)

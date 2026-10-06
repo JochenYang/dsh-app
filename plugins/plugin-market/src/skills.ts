@@ -199,7 +199,15 @@ export async function searchSkills(query: string, category: string, page: number
   const keyword = query.trim()
   if (keyword !== '') params.set('keyword', keyword)
   if (category !== '') params.set('category', category)
-  params.set('sortBy', keyword === '' ? 'downloads' : 'relevance')
+  // `score` is the relevance value the source accepts today. It used to be
+  // `relevance`, which the endpoint now REJECTS with HTTP 400 (`参数错误：sortBy
+  // 不支持 (updated_at/downloads/stars/installs/score)`), and the failure is
+  // total: a keyword search answered an error envelope, so the panel's skills
+  // tab showed nothing for every query. Measured 2026-10-06 against the live
+  // endpoint: `score` + keyword answers 200 with the relevance ranking
+  // ("ppt" → PPT, ppt-generator-skill, pptx), while `downloads` stays the
+  // browse (no keyword) sort.
+  params.set('sortBy', keyword === '' ? 'downloads' : 'score')
   params.set('order', 'desc')
   params.set('page', String(Math.max(1, Math.floor(page))))
   params.set('pageSize', '24')

@@ -55,13 +55,14 @@ Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
 2. **A profile of its own**: the kernel boots `--profile dsh-app`, while your
    own `dsh` / `dsh web` runs keep `web`. On first run the shell creates that
    profile in the background and carries your own patch layer over (hand-written
-   disables, MCP rows); **third-party packages are not carried** — the in-app
-   market reinstalls them into the new profile, because it is the component that
-   handles pnpm's supply-chain policy, build-script approval and specs that no
-   longer resolve (both "carry the tree" variants were measured and rejected:
-   copying trips over Windows' `.pnpm` symlink privilege, reinstalling trips
-   over `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`). The boot switches only after
-   the profile is ready; a failure keeps booting `web` and retries next launch.
+   disables, MCP rows); **third-party packages are not carried** — the plugin
+   market (or the kernel CLI) installs them again in the new profile, because the
+   market is the component that handles pnpm's supply-chain policy, build-script
+   approval and specs that no longer resolve (both "carry the tree" variants were
+   measured and rejected: copying trips over Windows' `.pnpm` symlink privilege,
+   reinstalling trips over `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`). The boot
+   switches only after the profile is ready; a failure keeps booting `web` and
+   retries next launch.
    The profile in force is exported as `DSH_APP_PROFILE`, so the plugin market
    and presets always install into the profile the app actually reads.
 3. **Loader overlay**: `plugins/dsh-app.patch.yml` is copied into userData and

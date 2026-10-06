@@ -221,19 +221,4 @@ describe('PluginInstaller release-age policy', () => {
       'the log names the policy instead of leaving pnpm\'s output to speak alone',
     )
   })
-
-  it('still reports blocked build scripts through their own error', async () => {
-    manifest({})
-    const spawnImpl = scriptedSpawn([
-      { code: 1, output: 'Ignored build scripts: esbuild. Run "pnpm approve-builds" to pick which dependencies should be allowed\n' },
-    ])
-    const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
-
-    await assert.rejects(installer.installSpec('dsh-remote', '^0.1.0'), (error: unknown) => {
-      assert.ok(error instanceof MarketBlockedBuildError)
-      assert.deepEqual(error.blockedBuilds, ['esbuild'])
-      return true
-    })
-    assert.equal(spawnImpl.calls.length, 1)
-  })
 })

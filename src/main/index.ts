@@ -819,7 +819,7 @@ function suiteProfileLogLine(outcome: MigrationOutcome): string {
       ? ''
       : `; the shell declined to carry ${outcome.refusedFiles.map((file) => `"${file}"`).join(', ')} (outside the old profile, behind a link that leaves it, the shell's own state, or over an allowance) — those rows stay out of the boot`
     return `[suite-profile] "${SUITE_PROFILE}" profile created${outcome.carriedPatch ? ' (your patch layer carried over)' : ''}`
-      + `; the ${String(outcome.legacyPackages)} package(s) declared on "${LEGACY_PROFILE}" stay there — reinstall them from the plugin market`
+      + `; the ${String(outcome.legacyPackages)} package(s) declared on "${LEGACY_PROFILE}" stay there — install them again in "${SUITE_PROFILE}" from the plugin market or the CLI`
       + carried + unresolved + refused
   }
   return `[suite-profile] "${SUITE_PROFILE}" profile already present`
@@ -1182,7 +1182,6 @@ async function startServerAndOpenWindow(): Promise<void> {
     ...proxyEnv,
     DSH_APP_DESKTOP: '1',
     DSH_APP_PROFILE: SUITE_PROFILE,
-    DSH_APP_LEGACY_PROFILE: LEGACY_PROFILE,
     // Absolute path of the kernel CLI the suite's own installers drive
     // (`dsh plugin --profile <p> add/remove …`). They resolve it from their own
     // location otherwise, which works in a packaged runtime (the CLI is a

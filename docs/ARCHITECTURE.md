@@ -65,9 +65,10 @@ Three pieces are stitched at every server start (`src/main/brand-suite.ts`,
    `dsh web` runs keep `web`. On first run the shell creates that profile from
    the shipped template's bundle list and carries the user's own patch layer
    across (hand-written disables, MCP rows); third-party packages are NOT
-   carried — the in-app market reinstalls them into the new profile, because it
-   is the component that already handles pnpm's supply-chain policy,
-   build-script approval and specs that no longer resolve (carrying the tree was
+   carried — the plugin market (or the kernel CLI) installs them into the new
+   profile, because the market is the component that already handles pnpm's
+   supply-chain policy, build-script approval and specs that no longer resolve
+   (carrying the tree was
    measured and rejected: copying hits `EPERM` on pnpm's `.pnpm` symlinks on
    Windows, reinstalling hits `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`). The
    work runs in the background and the boot switches only once a marker records
