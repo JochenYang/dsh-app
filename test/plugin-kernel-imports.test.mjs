@@ -9,7 +9,7 @@
 // the user's third-party `dshmarket@1.48.0` imports 17 icons that the 0.1.6 line
 // exports (3-4 occurrences each in its `dsh-client-ui-primitives`) and the 0.1.7
 // line does not (0 occurrences), so its whole settings page collapses into an
-// error card. Our own sixteen plugins import 45 such names and all 45 survive,
+// error card. Our own seventeen plugins import 68 such names and all 68 survive,
 // which is exactly the kind of statement that should be re-checked by a machine
 // after every kernel-line bump rather than remembered.
 //

@@ -173,7 +173,7 @@ function isInsertRow(row: readonly string[]): boolean {
  * The entry ids a row defines.
  *
  * An `insert:` row carries its entries as indented `- id:` children (the shipped
- * overlay writes all sixteen plugins in ONE such block, so the unit of removal is
+ * overlay writes all seventeen plugins in ONE such block, so the unit of removal is
  * the block, not the line); any other row carries its own id in its first line.
  */
 function rowEntryIds(row: readonly string[]): string[] {
@@ -252,7 +252,7 @@ export function overlayInsertOwnedIds(overlayText: string): Set<string> {
  * (`git show 3b2ce94~1:plugins/dsh-app.patch.yml:153`, and the residue survives in
  * `scratch/backup-kernel-0.1.7-20260922/profiles-dsh-app/cordis.patch.yml`). With
  * rule (1) alone that block never qualifies again — the roster will never contain
- * `fff` — so it stays forever: sixteen live ids duplicated against the layer, the
+ * `fff` — so it stays forever: seventeen live ids duplicated against the layer, the
  * block composing AFTER the layer and permanently masking it, and a dead `fff` row
  * warning on every start. The residue is exactly the population this migration
  * exists for.

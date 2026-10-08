@@ -12,12 +12,14 @@
 // A THIRD copy (plugin-usage) used to carry the block as a tab contributor. The
 // usage page is its own rail section now, so that copy is gone and plugin-usage
 // declares no maintenance slot at all — which this test asserts, because a stale
-// copy left behind would keep the file looking like a contributor.
+// copy left behind would keep the file looking like a contributor. plugin-rewind
+// later became a contributor (its quarantine manager is a tab), so it carries a
+// copy of its own and is compared here too.
 //
 // Line endings are normalized before the comparison: git stores every one of
-// the three files with LF, but `core.autocrlf` hands a checkout CRLF for the
-// files it has re-written and LF for the ones it has not, so equal CONTENT can
-// reach this test with different endings.
+// the files with LF, but `core.autocrlf` hands a checkout CRLF for the files it
+// has re-written and LF for the ones it has not, so equal CONTENT can reach this
+// test with different endings.
 //
 // Paths resolve against the bundled test's own location (`<plugin>/.test-dist/`,
 // see scripts/test.mjs), so they hold from any working directory.
@@ -30,11 +32,16 @@ const START = '// BEGIN maintenance-tab-slot'
 const END = '// END maintenance-tab-slot'
 const SLOT = 'settings.dsh-app-maintenance.tab'
 
-/** The two client entries carrying the block, keyed by the half they belong to. */
+/** The client entries carrying the block, keyed by the half they belong to. */
 function copies(): Record<string, string> {
   const files = {
     'plugin-client-ui (the section owner)': new URL('../src/client.ts', import.meta.url),
     'plugin-presets': new URL('../../plugin-presets/src/client.ts', import.meta.url),
+    // plugin-rewind's quarantine manager is a tab contributor too, so it carries
+    // its own copy: the owner declares the slot from one program and each
+    // contributor's `inject`/`register` is type-checked against its own, so a
+    // drift in one copy compiles and fails only at runtime.
+    'plugin-rewind': new URL('../../plugin-rewind/src/client.ts', import.meta.url),
   }
   const found: Record<string, string> = {}
   for (const [name, url] of Object.entries(files)) {
@@ -48,7 +55,7 @@ function copies(): Record<string, string> {
 }
 
 describe('maintenance tab slot', () => {
-  it('declares the same augmentation in both client entries, line for line', () => {
+  it('declares the same augmentation in every client entry, line for line', () => {
     const found = copies()
     const names = Object.keys(found)
     for (const name of names.slice(1)) {

@@ -194,6 +194,9 @@
     - id: websearch
       name: '@dsh-app/plugin-websearch'
 
+    - id: rewind
+      name: '@dsh-app/plugin-rewind'
+
 # Web search seam: point BOTH capabilities at the suite's providers.
 #
 # This row is written as a PAIR on purpose. Patch semantics REPLACE the whole

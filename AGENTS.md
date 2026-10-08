@@ -34,7 +34,7 @@ halves; `npm` here, `pnpm` in the harness checkout; Node 22+.
 
 - `src/main/` shell (Electron main), `src/kernel/` kernel manager,
   `src/shared/` cross-cutting types, constants and the locale table.
-- `plugins/` the sixteen-plugin brand suite — see `plugins/AGENTS.md`.
+- `plugins/` the seventeen-plugin brand suite — see `plugins/AGENTS.md`.
 - `scripts/` build, smoke and probe tooling; `test/` root suites;
   `changesets/` the release-input fragments (see §7).
 - `static/` startup page, `resources/` icons, `docs/` documentation.
@@ -113,6 +113,19 @@ Plugin builds and tests: `plugins/AGENTS.md`.
 - **No native dialogs in client UI** (`window.alert` / `confirm` / `prompt`) —
   use the modal idiom (mask + card, Esc/mask = cancel, Enter = primary;
   `src/main/in-frame-dialog.ts`).
+- **Client UI composes the host's primitives; it never redraws them** — a dialog
+  is `Modal` (+ `Button`), a diff is `DiffBlock`, an announcement is `Toast`, all
+  from `@deepseek-ai/dsh-client-ui-primitives`. Check that package's export list
+  BEFORE writing a surface: the mask, blur, elevation, focus handling, Escape,
+  modal layer, fade timing and layering come with the primitive, and a hand-rolled
+  one reads as subtly off-theme beside every other dialog. Override a primitive
+  through its own documented seat (`className`, `anchor`, `holdMs`), never by
+  redrawing it. `RiskConfirmation` is the same package's destructive-action
+  variant, but it demands an acknowledgement checkbox — reserve it for genuinely
+  irreversible choices, and prefer a described change (per-item rows + confirm)
+  otherwise. A message that must be READ before acting holds 8s (the kernel's own
+  refusal value), not the 3s announcement default.
+  `plugin-rewind`'s `client/confirm-dialog.tsx` is the reference.
 - **Failure paths**: user-facing errors are stable, actionable, zh-CN, leak no
   sensitive detail.
 - **Security invariants** (design context: `docs/ARCHITECTURE.md`):

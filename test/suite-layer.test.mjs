@@ -44,7 +44,7 @@ const INSERTED = overlayInsertOwnedIds(OVERLAY)
 test('the overlay\'s id roster is read off the overlay itself', () => {
   // The roster is derived, never listed in the module: a copy could only rot.
   // The two shapes both have to be found — a root-level row (`- id: web`) and an
-  // insert block's indented children (the sixteen plugins live in ONE block).
+  // insert block's indented children (the seventeen plugins live in ONE block).
   assert.ok(OWNED.has('web'), 'a root-level row of the overlay')
   assert.ok(OWNED.has('brand'), 'an indented child of the overlay\'s insert block')
   assert.ok(OWNED.has('schedule'), 'a child of the overlay\'s SECOND insert block')
@@ -276,7 +276,7 @@ test('a block from an OLDER roster is still attributed to the suite', () => {
   // whose patch an earlier shell generated carries a block of SEVENTEEN ids
   // including `fff` (`git show 3b2ce94~1:plugins/dsh-app.patch.yml:153`). Matching
   // against the CURRENT roster alone would never qualify that block again — the
-  // roster will never contain `fff` — so it would stay forever: sixteen live ids
+  // roster will never contain `fff` — so it would stay forever: seventeen live ids
   // duplicated against the layer, composing after it and masking it, plus a dead
   // row warning on every start. The `@dsh-app/` scope is the fallback that keeps
   // those profiles migratable.

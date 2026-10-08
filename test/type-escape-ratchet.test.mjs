@@ -31,6 +31,7 @@ const BASELINE = {
   'plugin-pdf': 9,
   'plugin-ppt': 12,
   'plugin-presets': 0,
+  'plugin-rewind': 0,
   'plugin-sheet': 5,
   'plugin-sidebar': 2,
   'plugin-swarm': 4,

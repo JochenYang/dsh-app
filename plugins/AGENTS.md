@@ -7,7 +7,7 @@ plugin's own JSDoc header before changing its internals.
 
 ## 1. What the suite is
 
-Sixteen dsh plugins layered on top of the upstream kernel **without forking
+Seventeen dsh plugins layered on top of the upstream kernel **without forking
 it** — that is what keeps the desktop app updateable when upstream moves.
 `plugins/README.md` is the roster: which plugin owns which capability, and each
 one's host/client role. `plugins/dsh-app.patch.yml` is the loader overlay that
@@ -34,12 +34,12 @@ for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run bu
 for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; done
 ```
 
-- **Build**: fifteen plugins run `node build.mjs` (esbuild bundles both halves).
+- **Build**: sixteen plugins run `node build.mjs` (esbuild bundles both halves).
   `plugin-brand` is the one exception — `tsc -p tsconfig.json` into `lib/`.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
-  result. All sixteen plugins have suites.
+  result. All seventeen plugins have suites.
 - **CI runs every plugin with a `tests/` directory** (`.github/workflows/ci.yml`
   loops over `plugins/*/`), so a suite that passes locally also gates the PR.
   The root `test/plugin-version-bump.test.mjs` additionally fails any plugin
@@ -71,6 +71,25 @@ than copying them into the artifact by hand.
 - **A suite plugin must be linked into the booted profile's
   `node_modules/@dsh-app`** — the shared link alone yields a silently vanilla
   UI. `brand-suite.ts` re-links both scopes every start.
+- **Client UI composes the host's primitives; it never redraws them.** A dialog
+  is `Modal` (+ `Button`), a diff is `DiffBlock`, an announcement is `Toast`, a
+  chart/table/markdown body has its own — all from
+  `@deepseek-ai/dsh-client-ui-primitives`. Check that package's export list BEFORE
+  writing any surface: the mask, blur, elevation, focus handling, Escape, modal
+  layer, fade timing and layering all come with the primitive, and a hand-rolled
+  one gets the tokens right and the composition wrong, so it reads as subtly
+  off-theme beside every other dialog. This has happened three times in one plugin
+  (mask+card, a two-column "diff", a fixed note div) — every time because the
+  primitive was not looked for first. Style only the content you add, with
+  `var(--dsw-*)` tokens, and override a primitive through its own documented seat
+  (`className`, `anchor`, `holdMs`) rather than by redrawing it.
+  `RiskConfirmation` is the same package's destructive variant, but it requires an
+  acknowledgement checkbox: reserve it for genuinely irreversible choices, and
+  prefer a described change (per-item rows + confirm) otherwise. A message that
+  must be READ before acting gets the kernel's own hold (8s, the agent-preset
+  refusal value), not the 3s announcement default. Reference:
+  `plugin-rewind/src/client/{confirm-dialog,recall-note-host}.tsx`, whose tests
+  assert the primitives are used and no frame is redrawn.
 
 ## 5. Adding, removing or renaming a plugin
 

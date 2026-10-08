@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Message recall",
+    "description": "Cut the conversation back to before a message you already sent: it and everything after it leave the model's context, disappear from the transcript, and its original text returns to the composer for editing and re-sending. Nothing is deleted from the log."
+  }
+}
