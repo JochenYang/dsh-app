@@ -52,6 +52,32 @@ function versionAt(rev, dir) {
   }
 }
 
+/**
+ * Would this plugin's change go unshipped behind an unchanged suite hash?
+ *
+ * `atTag` is '' when the plugin did not exist at the last release. That is NEW,
+ * not stale, and the distinction is the whole point of this predicate: a new
+ * plugin cannot "bump its version in the same commit as its code" because it
+ * has no earlier version — and it does not need to, because
+ * `computeSuiteVersion` joins `${name}@${version}` per plugin into the hashed
+ * string, so the entry's arrival moves the hash by construction. Measured on
+ * `plugin-rewind` (absent at v0.15.1, first shipped by a9c1057): treating ''
+ * as stale failed the suite for a plugin that was already unshippable-proof.
+ *
+ * @param {string} atTag - the plugin's version at the last release, '' if new.
+ * @param {string} now - the plugin's version in the working tree.
+ * @returns {boolean} true when the change reaches nobody.
+ */
+function unshipped(atTag, now) {
+  return atTag !== '' && atTag === now
+}
+
+test('the unshipped rule treats a plugin new since the release as new, not stale', () => {
+  assert.equal(unshipped('', '0.1.0'), false, 'a plugin absent at the tag is new')
+  assert.equal(unshipped('0.4.5', '0.4.5'), true, 'an unchanged version ships nothing')
+  assert.equal(unshipped('0.4.5', '0.5.0'), false, 'a bumped version ships')
+})
+
 test('every suite plugin whose code changed since the last release bumped its version', () => {
   const tag = newestReleaseTag()
   if (tag === '') {
@@ -72,7 +98,7 @@ test('every suite plugin whose code changed since the last release bumped its ve
     if (changed === '') continue
     const atTag = versionAt(tag, dir)
     const now = JSON.parse(readFileSync(join(ROOT, 'plugins', dir, 'package.json'), 'utf8')).version
-    if (atTag === '' || atTag === now) stale.push(`${dir} (${changed.split(/\r?\n/u).length} file(s), version ${now})`)
+    if (unshipped(atTag, now)) stale.push(`${dir} (${changed.split(/\r?\n/u).length} file(s), version ${now})`)
   }
   assert.deepEqual(stale, [], `since ${tag} these plugins changed code without a version bump, so the suite hash is unchanged and NO installation will ever receive them: ${stale.join(', ')}. Bump the plugin's version in the same commit as its code.`)
 })
