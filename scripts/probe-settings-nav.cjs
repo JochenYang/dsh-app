@@ -10,7 +10,7 @@
 //   - the ACTIVE section pane's untranslated copy in English mode.
 // The last one is the automated half of "这个页面的 i18n 不完整": it lists every
 // string the pane renders that still contains Han characters — walking the
-// merged section's tabs, so its second and third pages are covered too.
+// merged section's tabs, so every page behind one is covered too.
 //
 // Run: node_modules/.bin/electron scripts/probe-settings-nav.cjs [--lang en-US|zh-CN] [--section <label substring>]
 // A checkout without the documented ../deepseek-harness sibling needs a kernel
@@ -144,7 +144,9 @@ const MERGED_ROW = /^(?:Maintenance|维护设置)$/
 /** The rail labels the merge retired (each is a tab inside 维护 now). */
 const RETIRED_ROWS = new Set(['Presets', '预设包', 'Diagnostics', '诊断'])
 /** The tab labels of 维护, in order, either locale. */
-const TAB_LABELS = [/^(?:Presets|预设包)$/u, /^(?:Diagnostics|诊断)$/u]
+const TAB_LABELS = [/^(?:Presets|预设包)$/u, /^(?:Diagnostics|诊断)$/u, /^(?:Recall quarantine|撤回隔离区)$/u]
+/** The diagnostics tab's index in {@link TAB_LABELS} — the sub-check's target. */
+const DIAGNOSTICS_TAB_INDEX = 1
 /** The tab strip of the ACTIVE pane — the merged section's own, not a page's inner one. */
 const MERGED_TABS = `(function () {
   const pane = document.querySelector('[class*="options"]')
@@ -205,9 +207,11 @@ const TABS_REPORT = `(function () {
 
 /**
  * The Han copy of the ACTIVE pane, walking every tab of the merged section when
- * that is what is open — its three pages are tabs now, so a single read would
- * only ever see the first one. Leaves the pane on its LAST tab (诊断), which is
- * where the diagnostics sub-check below expects to find its button.
+ * that is what is open — its pages are tabs now, so a single read would only
+ * ever see the first one. It finishes by clicking BACK to the diagnostics tab,
+ * which is where the diagnostics sub-check below expects to find its button: a
+ * walk that simply stopped on the last tab did that only while diagnostics
+ * happened to be last, and plugin-rewind's tab took that place.
  * @param page - the probe window.
  * @returns the distinct strings and whether a pane was found at all.
  */
@@ -227,6 +231,10 @@ async function paneHanCopy(page) {
       continue
     }
     for (const text of report.strings ?? []) strings.add(text)
+  }
+  if (tabs > DIAGNOSTICS_TAB_INDEX) {
+    await page.webContents.executeJavaScript(CLICK_TAB(DIAGNOSTICS_TAB_INDEX))
+    await sleep(900)
   }
   return { missing, strings: [...strings] }
 }
@@ -439,11 +447,12 @@ async function main() {
 
     await shot(win, 'settings-nav')
 
-    // --- The merge itself: two plugins contribute tabs, the section owner
-    // draws the strip and mounts one panel at a time, and every visited panel
-    // stays mounted (that is what preserves a page's state across switches).
-    // 用量统计 was the third contributor and is its own rail row now, so it is
-    // checked as a ROW (see the rail-order assertion) rather than as a tab. ---
+    // --- The merge itself: the section owner draws the strip and mounts one
+    // panel at a time, and every visited panel stays mounted (that is what
+    // preserves a page's state across switches). 预设包, 诊断 and (since
+    // plugin-rewind) 撤回隔离区 are the three contributors; 用量统计 was the
+    // original third and is its own rail row now, so it is checked as a ROW
+    // (see the rail-order assertion) rather than as a tab. ---
     const openedMerged = await win.webContents.executeJavaScript(CLICK_MERGED)
     record('the merged 维护设置 row opens its section', openedMerged === true)
     await sleep(1200)
@@ -453,8 +462,9 @@ async function main() {
     console.log(`aria-label: ${JSON.stringify(strip.aria)}`)
     for (const tab of strip.tabs ?? []) console.log(`  ${tab.text.padEnd(18)} selected=${String(tab.selected).padEnd(5)} tabIndex=${tab.tabIndex} controls=${tab.controls}`)
     for (const panel of strip.panels ?? []) console.log(`  panel ${panel.id} hidden=${String(panel.hidden).padEnd(5)} rendered=${panel.rendered} children=${panel.children} labelledBy=${panel.labelledBy}`)
-    record('维护 holds its two remaining pages as tabs, in order',
-      tabLabels.length === 2 && TAB_LABELS.every((pattern, index) => pattern.test(tabLabels[index] ?? '')),
+    record('维护 holds its suite pages as tabs, in order',
+      tabLabels.length === TAB_LABELS.length
+        && TAB_LABELS.every((pattern, index) => pattern.test(tabLabels[index] ?? '')),
       JSON.stringify(tabLabels))
     record('exactly one tab is selected, and it is the only one in the tab order',
       (strip.tabs ?? []).filter((tab) => tab.selected).length === 1
@@ -534,8 +544,8 @@ async function main() {
         // The diagnostics pane's one interactive control that has no side
         // effect: re-checking the desktop bridge. Reported defect: clicking it
         // changed nothing on screen, because the badge never entered its
-        // checking state. The pane is on 诊断 by the time the walk above ends
-        // (it is the LAST tab), whether the merge is what was asked for or not.
+        // checking state. `paneHanCopy` above clicks back to 诊断 before it
+        // returns, so the pane is on it whichever section was asked for.
         if (/diagnostic|诊断|maintenance|维护/i.test(SECTION)) {
           const CLICK_RECHECK = `(function () {
             const button = [...document.querySelectorAll('button')]
