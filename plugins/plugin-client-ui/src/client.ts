@@ -346,8 +346,9 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.dsh-app-maintenance.tab', () => ctx.slots.register({
     name: 'settings.dsh-app-maintenance.tab',
     id: DIAGNOSTICS_TAB_ID,
-    // 3 = the last of the two report pages (usage 1, presets 2). plugin-rewind's
-    // quarantine manager sits at 4, after it.
+    // 3 = after the presets tab (2). Order 1 is vacant: the usage tab that held
+    // it is its own rail row now (order 21). plugin-rewind's quarantine manager
+    // sits at 4, after this.
     order: 3,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: NS,

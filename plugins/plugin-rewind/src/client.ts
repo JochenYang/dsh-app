@@ -291,8 +291,9 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.dsh-app-maintenance.tab', () => ctx.slots.register({
     name: 'settings.dsh-app-maintenance.tab',
     id: QUARANTINE_TAB_ID,
-    // 4 = after 用量统计 (1), 预设包 (2) and 诊断 (3). The existing three are the
-    // suite's upkeep set; this extends it rather than reordering it.
+    // 4 = after presets (2) and diagnostics (3). Order 1 is vacant — the usage
+    // tab that held it is its own rail row now (order 21) — so this extends the
+    // upkeep set rather than reordering it.
     order: 4,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: REWIND_NS,
