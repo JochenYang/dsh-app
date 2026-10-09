@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.0] - 2026-10-09
+
+### 中文
+- 新增消息撤回（`/rewind`）：会话回退到某条已发送消息之前，该消息及其之后的内容退出模型上下文并从对话里隐藏，原文回到输入框可改后重发；该段之后**由写入工具（`write` / `edit` / `str_replace_editor`）改动过的文件**同时恢复原状，shell 命令的改动会逐个列出并标注无法恢复。入口是用户消息下方悬停可见的图标与 `/rewind` 命令（留空弹可撤回消息列表），点图标先弹逐文件确认框（含前后对比与无法恢复的数量），确认后才执行；被移走的内容留在 `$DSH_HOME/storages/dsh-app-plugin-rewind/quarantine/`，由维护设置新增的第三个页签「撤回隔离区」按项删除。
+- 启动页重做：去掉开机视频与声音开关，改为自带品牌标记的独立页面——鲸鱼马赛克（取自会话页）在主题底色上入场，背景只保留一层呼吸光晕。启动进度条改为**单一变量驱动**：填充用裁剪而非改宽度（渐变几何不再漂移，前沿颜色不随进度变化），前沿辉光跟随同一个变量（不再有跨出轨道的光带），阶段刻度落回轨道内且按位置点亮，数值按浮点指数缓动推进而不再按整数百分比跳；窗口底色改为跟随主题（浅色机器不再先闪一帧深色）。主窗口交接前把「打开界面」这一步走完再交，进度条能读到 100%。
+
+### English
+- Add message recall (`/rewind`): cut the conversation back to before a message you already sent, so it and everything after it leave the model's context and disappear from the transcript, and its text returns to the composer to edit and re-send; the files that range then changed through a write tool (`write` / `edit` / `str_replace_editor`) are put back, while a shell command's writes are listed one by one as unrestorable. The entry points are a hover icon under each user message and the `/rewind` command (bare = a picker), the icon confirming per file first (with a before/after comparison and a count of what cannot be restored), and the recall runs only once that is confirmed; what a recall displaces stays in `$DSH_HOME/storages/dsh-app-plugin-rewind/quarantine/`, discarded per item from the third tab of Maintenance.
+- Reworked the startup page: the opening video and its sound toggle are gone, replaced by a self-contained page carrying its own brand mark — the whale mosaic (taken from the session page) assembles over the theme background, which keeps one breathing halo only. The boot rail is now driven by ONE variable: the fill is clipped rather than resized (so the gradient's geometry never drifts and the leading edge keeps its colour), the bloom follows that same variable (no streak can leave the track), the stage ticks sit inside it and light by position, and the value eases as a float instead of stepping by whole percent; the window background follows the theme, so a light-theme machine no longer flashes the dark colour first. The handoff to the main window now completes the "opening the interface" step before it happens, so the rail can read 100%.
+
 ## [v0.15.1] - 2026-10-06
 
 ### 中文
