@@ -34,16 +34,15 @@ const SPLASH_PAGE = path.join(__dirname, '..', 'static', 'startup.html')
  * The window background while the splash is up: what shows before the page
  * paints and behind it, so it cannot be sampled from the page.
  *
- * One value for both themes, because the page is the opening film now and the
- * film's own navy (`static/startup.html` `--startup-bg`, painted on the ROOT
- * element) is what the page falls back to in either theme — a per-theme pair here
- * is exactly the white flash a light-theme machine showed before the first frame
- * decoded. The native window-control strip is not set here at all: the page's own
- * sampler owns it (see `applyWindowTheme`), and while the splash is up it resolves
- * a TRANSPARENT strip — the page paints nothing under those controls, so the film
- * shows through them instead of an opaque bar.
+ * One value per theme, matching `static/startup.html` `--bg-base` exactly, so
+ * the window background and the page's first paint agree. The native
+ * window-control strip is not set here at all: the page's own sampler owns it
+ * (see `applyWindowTheme`), and the page passes a ZERO-ALPHA `theme-color` so
+ * the strip stays transparent and the page shows through it rather than
+ * becoming an opaque bar.
  */
-const SPLASH_BG = '#0d1424'
+const SPLASH_BG_DARK = '#070a13'
+const SPLASH_BG_LIGHT = '#f0f5fd'
 
 /**
  * Failure-card actions. index.ts owns what each one DOES; this module only
@@ -101,9 +100,6 @@ interface StartupView {
     failureHint: string
     pause: string
     resume: string
-    /** Sound toggle labels, by the action the click performs. */
-    soundOn: string
-    soundOff: string
   }
   /**
    * True while the download in flight can be paused (the shell keeps a promise
@@ -141,8 +137,6 @@ function buildSkeleton(): Required<Pick<StartupView, 'skeleton'>>['skeleton'] {
     failureHint: t('splash.failureHint'),
     pause: t('splash.pauseDownload'),
     resume: t('splash.resumeDownload'),
-    soundOn: t('splash.soundOn'),
-    soundOff: t('splash.soundOff'),
   }
 }
 
@@ -421,16 +415,15 @@ function readThemePreferenceAcrossLines(): ThemePreference | null {
  *
  * The window `backgroundColor` is different: it shows before the page paints
  * (and behind it), so it cannot be sampled and must be set here. While the
- * splash is up that value is the film's navy in either theme ({@link SPLASH_BG})
- * — the page follows the user's theme for its dialog surfaces, not its
- * background, and a light-theme machine must not flash white before the first
- * frame decodes.
+ * splash is up that value is the page's own `--bg-base` for the theme in force
+ * ({@link SPLASH_BG_DARK} / {@link SPLASH_BG_LIGHT}), so the window and the
+ * page's first paint agree instead of flashing the other theme's colour.
  */
 function applyWindowTheme(): void {
   const win = splash
   if (win === null || win.isDestroyed()) return
   if (!isShowingLoadingPage(win)) return
-  win.setBackgroundColor(SPLASH_BG)
+  win.setBackgroundColor(currentTheme === 'light' ? SPLASH_BG_LIGHT : SPLASH_BG_DARK)
 }
 
 /**

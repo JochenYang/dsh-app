@@ -1235,22 +1235,33 @@ async function startServerAndOpenWindow(): Promise<void> {
   // is handed over, one already showing the UI (kernel update, crash recovery,
   // tray restart) is reloaded. The URL is the same in every case — the UI lives
   // at one fixed origin, so there is no port for a restart to change.
-  if (isShowingLoadingPage(mainWindow)) loadAppIntoWindow(mainWindow)
-  else void mainWindow.loadURL(APP_URL)
-  mainWindow.show()
-  // A launch the updater started (NSIS relaunches with `--updated`) must not sit
-  // behind whatever the user was looking at: the update they just approved is
-  // the reason this window exists. `show()` above only un-hides; on Windows a
-  // relaunched process can still land behind the foreground window, so the
-  // focus is explicit and comes after the document is in place.
-  if (process.argv.includes(UPDATED_ARGV)) {
-    mainWindow.focus()
-    logKernel('[shell-updater] launched after an update; window brought to the front')
+  if (isShowingLoadingPage(mainWindow)) {
+    updateStartupWindow({ phase: 'ready', message: t('splash.openingUi'), progress: 1 })
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    if (mainWindow !== null && !mainWindow.isDestroyed()) {
+      loadAppIntoWindow(mainWindow)
+    }
+  } else {
+    if (mainWindow !== null && !mainWindow.isDestroyed()) {
+      void mainWindow.loadURL(APP_URL)
+    }
   }
-  // The loading page is gone now; the standalone splash (if one was ever
-  // created) is closed and unhooked. Nothing else about mainWindow's lifecycle
-  // — the close dialog, the 'closed' handler, reuse across restarts — changes.
-  handoffToMainWindow(mainWindow)
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    // A launch the updater started (NSIS relaunches with `--updated`) must not sit
+    // behind whatever the user was looking at: the update they just approved is
+    // the reason this window exists. `show()` above only un-hides; on Windows a
+    // relaunched process can still land behind the foreground window, so the
+    // focus is explicit and comes after the document is in place.
+    if (process.argv.includes(UPDATED_ARGV)) {
+      mainWindow.focus()
+      logKernel('[shell-updater] launched after an update; window brought to the front')
+    }
+    // The loading page is gone now; the standalone splash (if one was ever
+    // created) is closed and unhooked. Nothing else about mainWindow's lifecycle
+    // — the close dialog, the 'closed' handler, reuse across restarts — changes.
+    handoffToMainWindow(mainWindow)
+  }
   // A folder argument opens as a workspace once the page can answer; the
   // delivery retries while the client plugin is still loading, so calling it
   // here (rather than on a load event) loses nothing. Both branches above are

@@ -26,7 +26,16 @@ const appliedChromeColors = new WeakMap<BrowserWindow, string>()
  * unparseable. The alpha is part of the value on purpose — see {@link rgbToHex}.
  */
 function parseRgb(color: string): [number, number, number, number] | null {
-  const m = color.match(/-?[\d.]+/g)
+  const trimmed = color.trim()
+  if (trimmed.startsWith('#')) {
+    let hex = trimmed.slice(1)
+    if (hex.length === 3 || hex.length === 4) hex = hex.split('').map((c) => c + c).join('')
+    if (hex.length !== 6 && hex.length !== 8) return null
+    const n = (i: number) => parseInt(hex.slice(i, i + 2), 16)
+    const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1
+    return [n(0), n(2), n(4), a]
+  }
+  const m = trimmed.match(/-?[\d.]+/g)
   if (!m || m.length < 3) return null
   const [r, g, b] = m.slice(0, 3).map(Number)
   const a = m.length > 3 ? Number(m[3]) : 1
@@ -144,8 +153,23 @@ const SAMPLE_FN = `
         Math.round(f.g * a + b.g * (1 - a)) + ', ' +
         Math.round(f.b * a + b.b * (1 - a)) + ')';
     };
+    const toRgbColor = (value) => {
+      const v = String(value || '').trim();
+      if (v === '') return null;
+      if (/^rgba?\\(/i.test(v)) return v;
+      const hex = /^#([0-9a-f]+)$/i.exec(v);
+      if (hex === null) return null;
+      let h = hex[1];
+      if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('');
+      if (h.length !== 6 && h.length !== 8) return null;
+      const n = (i) => parseInt(h.slice(i, i + 2), 16);
+      const alpha = h.length === 8 ? n(6) / 255 : 1;
+      return alpha >= 1
+        ? 'rgb(' + n(0) + ', ' + n(2) + ', ' + n(4) + ')'
+        : 'rgba(' + n(0) + ', ' + n(2) + ', ' + n(4) + ', ' + alpha + ')';
+    };
     const meta = document.querySelector('meta[name="theme-color"]');
-    const base = (meta && meta.content) || getComputedStyle(document.body).backgroundColor || 'rgb(255, 255, 255)';
+    const base = toRgbColor(meta && meta.content) || getComputedStyle(document.body).backgroundColor || 'rgb(255, 255, 255)';
     // The rule, in order:
     //
     //   1. an element that PAINTS over the sample point wins — it is what is
@@ -184,27 +208,6 @@ const SAMPLE_FN = `
       if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') { covering = bg; break; }
     }
     if (covering !== null) return over(covering, base);
-    // Normalized to rgb() before it leaves this function, and that is load-bearing:
-    // a custom property's computed value keeps whatever syntax the theme wrote
-    // (these are hex), while the shell's consumers parse rgb() NUMBERS. Returning
-    // the hex raw made parseRgb read "#1b1b1c" as [1, 1, 1] — the strip was painted
-    // #010101, which is the "pure black in dark theme" that was reported, and
-    // "#f9fafb" failed to parse at all and fell back to #ffffff.
-    const toRgbColor = (value) => {
-      const v = String(value || '').trim();
-      if (v === '') return null;
-      if (/^rgba?\\(/i.test(v)) return v;
-      const hex = /^#([0-9a-f]+)$/i.exec(v);
-      if (hex === null) return null;
-      let h = hex[1];
-      if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('');
-      if (h.length !== 6 && h.length !== 8) return null;
-      const n = (i) => parseInt(h.slice(i, i + 2), 16);
-      const alpha = h.length === 8 ? n(6) / 255 : 1;
-      return alpha >= 1
-        ? 'rgb(' + n(0) + ', ' + n(2) + ', ' + n(4) + ')'
-        : 'rgba(' + n(0) + ', ' + n(2) + ', ' + n(4) + ', ' + alpha + ')';
-    };
     // Read from BODY, not documentElement: measured, the token is declared on
     // body (the theme presenter writes its variables there) and documentElement
     // resolves to the empty string — which silently fell back to the DOM walk and

@@ -33,18 +33,25 @@ const REQUIRED_ASAR_ENTRIES = [
   'node_modules/semver/package.json',
 ]
 
-/** The splash, plus the opening film's own directory, under `dist/static`.
+/** What the splash ships beside itself, under `dist/static`.
  *
- * The single-file rule exists because a stale setup UI once shipped here; the
- * film is a deliberate second entry, so the exception is spelled out as a
- * SUBDIRECTORY instead of a second filename: everything the splash needs beyond
- * itself lives under `static/media/`, and nothing else may appear at the top. */
+ * The single-file rule exists because a stale setup UI once shipped here. The
+ * splash is now self-contained apart from its brand mark, so the exception is
+ * spelled out as an exact filename rather than a subdirectory: a build that
+ * grows a second asset has to say so here, which is what keeps a retired UI
+ * from slipping back in. */
 const STATIC_DIR = 'dist/static/'
-const STATIC_MEDIA_DIR = `${STATIC_DIR}media/`
-/** The media DIRECTORY's own asar entry, which carries no trailing slash. */
-const STATIC_MEDIA_ENTRY = STATIC_MEDIA_DIR.replace(/\/$/u, '')
-/** The opening film the splash page loads; a build without it plays nothing. */
-const SPLASH_VIDEO = `${STATIC_MEDIA_DIR}DSH-APP startup.mp4`
+/** The splash page itself. */
+const SPLASH_PAGE = `${STATIC_DIR}startup.html`
+/** The brand mark the splash renders (`<img id="startup-logo" src=...>`).
+ *
+ * The tag carries a data-URI fallback for a build that lost the file, so this
+ * is not load-bearing for the page to paint — it is here because shipping the
+ * real asset is the intent, and a silent regression to the fallback is exactly
+ * the kind of drift this gate exists to catch. */
+const SPLASH_LOGO = `${STATIC_DIR}app-logo.png`
+/** Every entry `dist/static` may hold at its top level. */
+const STATIC_ALLOWED = [SPLASH_PAGE, SPLASH_LOGO]
 
 /** Files electron-builder's `extraResources` filter is allowed to place there. */
 const REQUIRED_KERNEL_FILES = ['kernel.tgz', 'kernel.tgz.sha512', 'manifest.json']
@@ -137,19 +144,14 @@ async function main() {
       check(`asar has ${required}`, entries.includes(required))
     }
     const staticEntries = entries.filter((entry) => entry.startsWith(STATIC_DIR) && entry !== STATIC_DIR)
-    // `dist/static/media` itself is one of those entries — asar lists the
-    // DIRECTORY (no trailing slash) as well as the files under it. Measured on a
-    // packaged 0.14.4 build: without this line the gate failed the very change it
-    // was added for, one directory entry short of correct.
-    const unexpected = staticEntries.filter((entry) =>
-      entry !== `${STATIC_DIR}startup.html` && entry !== STATIC_MEDIA_ENTRY && !entry.startsWith(STATIC_MEDIA_DIR))
+    const unexpected = staticEntries.filter((entry) => !STATIC_ALLOWED.includes(entry))
     check(
-      'asar ships only the splash and static/media under dist/static',
+      'asar ships only the splash and its brand mark under dist/static',
       unexpected.length === 0,
       unexpected.length === 0 ? '' : `unexpected: ${unexpected.join(', ')}`,
     )
-    check('asar ships the splash page', staticEntries.includes(`${STATIC_DIR}startup.html`), `found ${staticEntries.join(', ') || '(none)'}`)
-    check('asar ships the opening film', staticEntries.includes(SPLASH_VIDEO), `found ${staticEntries.filter((entry) => entry.startsWith(STATIC_MEDIA_DIR)).join(', ') || '(nothing under static/media)'}`)
+    check('asar ships the splash page', staticEntries.includes(SPLASH_PAGE), `found ${staticEntries.join(', ') || '(none)'}`)
+    check('asar ships the splash brand mark', staticEntries.includes(SPLASH_LOGO), `found ${staticEntries.join(', ') || '(none)'}`)
     if (entries.includes('package.json')) {
       const pkg = JSON.parse(extractFile(asarPath, 'package.json').toString('utf8'))
       check('package.json main points at the built entry', pkg.main === 'dist/main/index.js', String(pkg.main))

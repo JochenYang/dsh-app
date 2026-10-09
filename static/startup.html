@@ -1,50 +1,29 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
-<!--
-  `media-src` is what lets the opening film load at all: `default-src 'none'`
-  blocks every resource without a directive of its own, and a <video> is a
-  media resource — dropping the file into static/media/ without this line
-  renders an empty frame with no error anywhere (the same trap the finished-step
-  check hit, below). `'self'` is the file: document's own directory; `file:` is
-  spelled out because a file: URL's origin is opaque, so which of the two the
-  engine matches is not something to bet on.
--->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; media-src 'self' file:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data: file:;">
+<!-- Alpha 0 lets the native window controls on Windows stay 100% transparent while sampling the right luminance -->
+<meta name="theme-color" content="rgba(240, 245, 253, 0)">
 <title>DSH APP</title>
 <script>
-/*
-  Startup page (first-launch visibility). Loaded by src/main/startup-window.ts
-  through file:// from inside app.asar; it must stay self-contained — no
-  framework, no external resource, no network.
-
-  State contract with the shell (all pushes arrive through
-  webContents.executeJavaScript; there is no preload and no IPC):
-
-    window.__dshStartupUpdate(view)         view = { stage, message, progress,
-                                                     skeleton, brand, theme,
-                                                     digest?, pausable?, paused?,
-                                                     saying? }
-    window.__dshStartupShowFailure(config)  config = { title, detail, actions }
-                                            -> Promise<action id | null>
-
-  Both entry points are defined here, before the markup exists, and QUEUE
-  anything that arrives early; the renderer script at the end of the body
-  installs the handlers and drains the queue. "stage" is 1-based and indexes
-  the <li> list below, which the shell maps its status wording onto. "brand",
-  "theme" and "skeleton" ride every push, so a page reload reproduces the same
-  row, the same appearance and the same language.
-*/
+(function() {
+  try {
+    var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (isDark) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      var m = document.querySelector('meta[name="theme-color"]');
+      if (m) m.setAttribute('content', 'rgba(7, 10, 19, 0)');
+    }
+  } catch (e) {}
+})();
 window.__dshStartup = { view: null, failure: null, onView: null, onFailure: null };
-
 window.__dshStartupUpdate = function (view) {
   var api = window.__dshStartup;
   if (api.onView) { api.onView(view); return true; }
   api.view = view;
   return false;
 };
-
 window.__dshStartupShowFailure = function (config) {
   var api = window.__dshStartup;
   if (api.onFailure) return api.onFailure(config);
@@ -54,694 +33,1243 @@ window.__dshStartupShowFailure = function (config) {
 };
 </script>
 <style>
-  /*
-    Boot film + status dock.
-
-    The window is the MAIN window (min 900x600, resizable, up to full screen), so
-    the film is a full-bleed cover layer — never a fixed-size box — and everything
-    the boot has to say sits in one dock at the foot, over a scrim that keeps it
-    readable on any frame of the film. The frame's own wordmark is part of the
-    film, so the page does not repeat it: the brand row is demoted to a quiet
-    build stamp in the dock.
-
-    Colours: the film is dark in every frame, so the dock's text is light in both
-    themes and `body` is painted the film's own navy — that background is what
-    the shell samples for the native window-control strip (window.ts
-    `startChromeSync`) and what shows before the first frame decodes, so a light
-    theme cannot flash white at either place. The failure card is the one surface
-    that still follows the user's theme (it is a dialog, not part of the film).
-  */
+  /* ========================================================== Design System Tokens */
   :root {
-    /* Dock palette, fixed: it sits on the film. */
-    --dock-fg: rgb(244, 247, 255);
-    --dock-fg-dim: rgba(232, 238, 252, 0.72);
-    --dock-track: rgba(233, 240, 255, 0.18);
-    --dock-accent: rgb(96, 150, 255);
-    --dock-accent-soft: rgb(150, 196, 255);
-    --dock-glass: rgba(10, 17, 38, 0.55);
-    --dock-glass-hover: rgba(18, 29, 58, 0.72);
-    --dock-hairline: rgba(226, 234, 255, 0.22);
-    --dock-shadow: 0 10px 30px rgba(3, 8, 22, 0.45);
-    /* The page's own background: the film's navy. */
-    --startup-bg: rgb(13, 20, 36);
-
-    /* Failure card tokens, from the shell's own design platform
-       (`--dsw-alias-*`, light: body / dark: body[data-ds-dark-theme]) so the one
-       dialog on this page matches the app it is opening. */
-    --dsw-alias-bg-layer-1: rgb(255, 255, 255);
-    --dsw-alias-label-primary: rgb(15, 17, 21);
-    --dsw-alias-label-secondary: rgb(60, 60, 61);
-    --dsw-alias-border-l2: rgba(0, 0, 0, 0.1);
-    --dsw-alias-interactive-bg-hover: rgba(38, 49, 72, 0.06);
-    --dsw-alias-button-primary-fill: rgb(15, 17, 21);
-    --dsw-alias-label-primary-foreground: rgb(255, 255, 255);
+    /* Light Theme (Ethereal Sky — Default matching Reference Mockup)
+     *
+     * The secondary layer is deliberately NOT the pale end of the slate ramp it
+     * used to be (#94a3b8 and a 0.07-alpha rail): on #f0f5fd those sat at 2.0-2.6
+     * to 1, so the rail read as one continuous line and the footer, the pending
+     * steps and the "APP" wordmark all looked washed out rather than quiet. Every
+     * value below is measured against #f0f5fd: body text >= 4.5:1, and the rail's
+     * fill against its own track >= 3:1 (WCAG 1.4.11 — the graph carries the
+     * progress, so its boundary is not decoration). */
+    --bg-base: #f0f5fd;
+    --bg-gradient: radial-gradient(circle at 50% 32%, #ffffff 0%, #edf4fe 52%, #e5effc 100%);
+    --text-title: #0f172a;
+    --text-subtitle: #5b6a80;
+    --text-dim: #78879b;
+    --brand-dsh: #0f172a;
+    --brand-app: #0284c7;
+    --brand-accent: #2563eb;
+    --pill-border: rgba(100, 116, 139, 0.45);
+    --pill-text: #5b6a80;
+    --rail-bg: rgba(15, 23, 42, 0.11);
+    --rail-border: rgba(15, 23, 42, 0.10);
+    --rail-fill: linear-gradient(90deg, #2563eb 0%, #1e40af 100%);
+    /* A white bloom, not a blue one: the leading edge is the one thing worth
+       looking at, and on a deep blue fill a second blue has nothing to say. */
+    --rail-bloom: rgba(255, 255, 255, 0.22);
+    --rail-sweep: rgba(37, 99, 235, 0.28);
+    /* A tick is a CUT in the bar, so it takes the page's own colours: a slate
+       notch on the empty channel, a white one on the deep blue fill. The crossed
+       values are the trap — a pale tick on the pale track, or a white one on a
+       bright fill, disappears exactly where it is needed. */
+    --node-inactive: #475569;
+    --node-done: rgba(255, 255, 255, 0.72);
+    --check-done: #059669;
+    --check-active: #2563eb;
+    --step-done-text: #334155;
+    --step-active-text: #0f172a;
+    --step-pending-text: #78879b;
+    --divider: rgba(100, 116, 139, 0.35);
+    --footer-line: rgba(100, 116, 139, 0.30);
+    --footer-text: #78879b;
+    --sphere-halo: radial-gradient(circle, rgba(59, 130, 246, 0.18) 0%, rgba(147, 197, 253, 0.12) 48%, transparent 72%);
+    --modal-bg: rgba(255, 255, 255, 0.95);
+    --modal-border: rgba(15, 23, 42, 0.08);
+    --btn-bg: rgba(15, 23, 42, 0.04);
+    --btn-border: rgba(15, 23, 42, 0.12);
+    --btn-text: #0f172a;
+    --btn-primary-bg: #0f172a;
+    --btn-primary-fg: #ffffff;
   }
+
   html[data-theme="dark"] {
-    --dsw-alias-bg-layer-1: rgb(35, 35, 36);
-    --dsw-alias-label-primary: rgb(249, 250, 251);
-    --dsw-alias-label-secondary: rgb(207, 211, 214);
-    --dsw-alias-border-l2: rgba(255, 255, 255, 0.12);
-    --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.08);
-    --dsw-alias-button-primary-fill: rgb(249, 250, 251);
-    --dsw-alias-label-primary-foreground: rgb(15, 17, 21);
+    /* Dark Theme (Abyssal Cosmic Midnight) */
+    --bg-base: #070a13;
+    --bg-gradient: radial-gradient(circle at 50% 32%, #111a30 0%, #0a0e1c 55%, #05070e 100%);
+    --text-title: #f8fafc;
+    --text-subtitle: #94a3b8;
+    --text-dim: #7c8da4;
+    --brand-dsh: #ffffff;
+    --brand-app: #38bdf8;
+    --brand-accent: #38bdf8;
+    --pill-border: rgba(255, 255, 255, 0.15);
+    --pill-text: #94a3b8;
+    /* A 0.07-alpha track is all but invisible over #070a13, which made the bar
+       look shorter than it is; 0.10 draws the whole channel without competing
+       with the fill. */
+    --rail-bg: rgba(255, 255, 255, 0.10);
+    --rail-border: rgba(255, 255, 255, 0.06);
+    --rail-fill: linear-gradient(90deg, #38bdf8 0%, #2563eb 100%);
+    --rail-bloom: rgba(125, 211, 252, 0.50);
+    --rail-sweep: rgba(56, 189, 248, 0.22);
+    --node-inactive: rgba(255, 255, 255, 0.45);
+    /* Dark-on-bright-fill, the mirror of the light theme: this line's fill runs
+       to a bright cyan, where a white notch measures 1.8:1 and vanishes. */
+    --node-done: rgba(7, 10, 19, 0.68);
+    --check-done: #10b981;
+    --check-active: #38bdf8;
+    --step-done-text: #cbd5e1;
+    --step-active-text: #ffffff;
+    --step-pending-text: #8b98a9;
+    --divider: rgba(255, 255, 255, 0.14);
+    --footer-line: rgba(255, 255, 255, 0.12);
+    --footer-text: #7c8da4;
+    --sphere-halo: radial-gradient(circle, rgba(30, 58, 138, 0.38) 0%, rgba(56, 189, 248, 0.12) 50%, transparent 72%);
+    --modal-bg: rgba(15, 23, 42, 0.94);
+    --modal-border: rgba(255, 255, 255, 0.12);
+    --btn-bg: rgba(255, 255, 255, 0.08);
+    --btn-border: rgba(255, 255, 255, 0.14);
+    --btn-text: #f8fafc;
+    --btn-primary-bg: #38bdf8;
+    --btn-primary-fg: #070a13;
   }
 
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  html, body { height: 100%; margin: 0; }
-  /*
-    The backdrop lives on the ROOT element and `body` stays transparent, on
-    purpose. The shell paints the native window-control strip with the colour it
-    samples from the page: it walks up from the element under those controls to
-    the first non-transparent background and applies THAT (window.ts, SAMPLE_FN).
-    With the film behind everything the honest answer there is "nothing painted",
-    so the walk has to fall through to `body`'s own transparent value — the strip
-    is then applied with alpha 0 and the film shows through the buttons. Painting
-    the navy on `body` is what made that strip an opaque near-black bar over the
-    film; measured on Windows, `#00000000` is see-through and `#0d1424` is not
-    (scratch/probe-overlay-alpha.mjs).
-  */
-  html { background: var(--startup-bg); }
+  html, body { height: 100%; margin: 0; padding: 0; }
+
+  /* html paints the background; body stays transparent for native window-controls sampling */
+  html {
+    background: var(--bg-base);
+    transition: background-color 0.45s ease;
+  }
+
   body {
     position: relative;
     overflow: hidden;
     background: transparent;
-    color: var(--dock-fg);
-    font: 13px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: var(--text-title);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
     -webkit-user-select: none;
     user-select: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
   }
 
-  /* ------------------------------------------------------------------- film */
-  /*
-    Two elements, one file: the BACKDROP fills the window (`cover`) and is
-    blurred, the FILM on top is fitted whole (`contain`). Fitting leaves bands,
-    and bare bands read as letterboxing — a user reported exactly that — while
-    filling crops the wordmark's left edge (142px of width at the default
-    window, measured). Blurring the same clip behind the fitted frame gives both:
-    nothing is cut, and no band shows a flat colour. Two decoders run for the
-    length of a boot, which is the price of not shipping a second asset — and a
-    static image could not track the moving frames behind the bands anyway.
-  */
-  #startup-video-backdrop {
-    position: fixed;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    /* Bright enough to READ as the film's own colour: at 0.45 the band was
-       rgb(6,11,27)..rgb(8,14,30) — flat enough to still look like a black bar
-       (measured), which is the complaint this layer exists to fix. The bottom
-       scrim, not this filter, is what keeps the dock legible. */
-    filter: blur(26px) saturate(1.25) brightness(0.85);
-    /* Keeps the blur's soft edge outside the viewport. */
-    transform: scale(1.08);
-    background: var(--startup-bg);
-    pointer-events: none;
-  }
-  #startup-video {
-    position: fixed;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    /*
-      `contain`, not `cover`: the film is 16:9 (2048x1152) and this window is
-      resizable from 900x600 to full screen, so `cover` filled it by CROPPING —
-      measured 142px of width at the 1280x800 default (71px off each side, which
-      is the wordmark tile's left edge and the first thing a user noticed),
-      167px at the 900x600 minimum and 178px at 1600x1000.
-    */
-    object-fit: contain;
-    background: transparent;
-    /* Decorative and never in the way: no controls, no pointer events (a film
-       that swallows a click is how the pause button stops working). */
-    pointer-events: none;
-  }
-  /* Legibility floor over the film, in two pieces with different jobs.
-     The top one exists for the NATIVE window controls: the strip behind them is
-     transparent, so their light symbols sit on whatever the film is doing at the
-     top right — a bright sky there needs ~0.6 of depth to stay readable. It fades
-     out just under the strip (36px), which is what lets the band below it show
-     the film's own colours.
-     The bottom one is the dock's floor: dark where the text is, gone by 40% so
-     the blurred backdrop — not a black bar — is what the eye sees above it. */
-  .scrim {
-    position: fixed;
-    inset: 0;
-    background:
-      linear-gradient(to bottom,
-        rgba(6, 11, 26, 0.62) 0,
-        rgba(6, 11, 26, 0.42) 36px,
-        rgba(6, 11, 26, 0) 15%),
-      linear-gradient(to top,
-        rgba(4, 9, 24, 0.86) 0,
-        rgba(4, 9, 24, 0.5) 14%,
-        rgba(4, 9, 24, 0) 40%);
-  }
-
-  /* Drag handle: the whole reserved strip moves the window. Controls inside it
-     would need -webkit-app-region: no-drag, and there are none — the audio
-     toggle sits BELOW it (see #startup-audio), clear of the native buttons. */
+  /* Titlebar Drag Strip — 140px on right kept clear for native window controls */
   #startup-titlebar {
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
-    height: 36px;
-    /* Stop short of the native window controls (the main window reserves the
-       same width): a drag region underneath them is how the close button ended
-       up showing two stacked tooltips. */
+    height: 38px;
     padding-right: 140px;
     -webkit-app-region: drag;
-    z-index: 3;
+    z-index: 60;
   }
 
-  /* ----------------------------------------------------------- audio toggle */
-  #startup-audio {
+  /* Atmospheric Background: one soft radial field, no decorative linework.
+     A horizon arc used to be drawn here as an SVG overlay; at common window
+     aspect ratios it crossed the boot rail and ran out past the track, so it
+     read as a stray streak rather than an orbit. The field alone carries the
+     depth without ever colliding with content. */
+  #bg-ambient {
     position: fixed;
-    top: 48px;
-    right: 20px;
-    z-index: 4;
-    display: grid;
-    place-items: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    border: 1px solid var(--dock-hairline);
-    border-radius: 50%;
-    background: var(--dock-glass);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
-    color: var(--dock-fg);
-    cursor: pointer;
-    transition: background .15s ease, transform .15s ease;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 1;
+    background: var(--bg-gradient);
+    transition: background 0.5s ease;
   }
-  #startup-audio:hover { background: var(--dock-glass-hover); }
-  #startup-audio:active { transform: scale(.94); }
-  #startup-audio:focus-visible { outline: 2px solid var(--dock-accent-soft); outline-offset: 3px; }
-  #startup-audio svg { width: 18px; height: 18px; display: block; }
-  /* One icon pair, swapped by state: the slash is hidden while sound is on. */
-  #startup-audio[aria-pressed="true"] .slash { display: none; }
 
-  /* -------------------------------------------------------------------- dock */
-  .dock {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 2;
+  /* ========================================================== Monolithic Layout */
+  .stage-monolith {
+    position: relative;
+    z-index: 10;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    align-items: center;
+    justify-content: center;
     width: 100%;
     max-width: 680px;
-    margin: 0 auto;
-    padding: 0 28px 22px;
+    padding: 0 24px;
     text-align: center;
+    animation: stageFadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
+
+  @keyframes stageFadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ========================================================== Center Stage: Whale + Orbitals */
+  .whale-stage-wrap {
+    position: relative;
+    width: min(50vmin, 380px);
+    height: min(44vmin, 330px);
+    margin-bottom: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sphere-halo-back {
+    position: absolute;
+    width: 320px;
+    height: 320px;
+    border-radius: 50%;
+    background: var(--sphere-halo);
+    pointer-events: none;
+    z-index: 1;
+    animation: haloBreathe 7s ease-in-out infinite;
+  }
+
+  @keyframes haloBreathe {
+    0%, 100% { transform: scale(1); opacity: 0.85; }
+    50% { transform: scale(1.08); opacity: 1; }
+  }
+
+  #whale-canvas {
+    position: relative;
+    z-index: 3;
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: default;
+  }
+
+  /* ========================================================== Brand Row */
+  .brand-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .brand-logo-badge {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+    background: transparent;
+    flex-shrink: 0;
+  }
+  .brand-logo-badge .brand-logo-img {
+    width: 28px;
+    height: 28px;
+    display: block;
+    object-fit: cover;
+    border-radius: 7px;
+  }
+
+  .brand-title {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    line-height: 1;
+  }
+
+  .brand-dsh {
+    font-size: 23px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--brand-dsh);
+  }
+
+  .brand-app {
+    font-size: 23px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--brand-app);
+  }
+
+  .version-pill {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--pill-border);
+    color: var(--pill-text);
+    background: transparent;
+  }
+
+  /* ========================================================== Status Headline & Subtitle */
   #startup-status {
-    margin: 0;
+    margin: 0 0 6px;
     font-size: 17px;
     font-weight: 600;
-    letter-spacing: .01em;
-    text-shadow: 0 1px 12px rgba(3, 8, 22, 0.8);
+    letter-spacing: 0.01em;
+    color: var(--text-title);
+    min-height: 25px;
+    transition: opacity 0.2s ease, transform 0.2s ease;
   }
-  .hint { margin: 0; font-size: 12px; color: var(--dock-fg-dim); }
-  #startup-hint { margin-top: -6px; }
 
-  /* Custom progress bar: a hairline track with a lit fill. Determinate carries
-     the real ratio; indeterminate (extraction has no denominator yet) sweeps a
-     soft comet, because a frozen bar over that span reads as a hang. */
-  .bar-row { display: flex; align-items: center; gap: 12px; }
-  #startup-bar {
+  #startup-status.fade-trans {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  #startup-hint {
+    margin: 0 0 26px;
+    font-size: 12.5px;
+    color: var(--text-subtitle);
+    font-weight: 400;
+    letter-spacing: 0.01em;
+  }
+
+  /* ========================================================== Boot Rail */
+  /* One instrument, not a bar with decorations on it. The track CLIPS
+     everything it paints (`overflow: hidden`), so a glow, a milestone mark or
+     the indeterminate sweep can never reach outside the rail — an escaped
+     glow reads as a stray streak across the page. */
+  .progress-section {
+    width: min(520px, 94%);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 22px;
+  }
+
+  .progress-bar-wrap {
     position: relative;
     flex: 1 1 auto;
     height: 6px;
     border-radius: 999px;
-    background: var(--dock-track);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    background: var(--rail-bg);
+    box-shadow: inset 0 0 0 1px var(--rail-border);
     overflow: hidden;
-  }
-  #startup-bar-fill {
-    display: block;
-    width: 0;
-    height: 100%;
-    border-radius: inherit;
-    background: linear-gradient(90deg, var(--dock-accent) 0%, var(--dock-accent-soft) 100%);
-    box-shadow: 0 0 12px rgba(96, 150, 255, 0.55);
-    transition: width .24s cubic-bezier(.2, .8, .3, 1);
-  }
-  #startup-bar[data-mode="indeterminate"] #startup-bar-fill {
-    width: 34%;
-    background: linear-gradient(90deg,
-      rgba(96, 150, 255, 0) 0%,
-      var(--dock-accent-soft) 45%,
-      rgba(96, 150, 255, 0) 100%);
-    box-shadow: none;
-    animation: startup-sweep 1.5s cubic-bezier(.4, 0, .6, 1) infinite;
-  }
-  #startup-percent {
-    flex: 0 0 auto;
-    min-width: 42px;
-    text-align: right;
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    color: var(--dock-fg-dim);
+    isolation: isolate;
   }
 
-  /* Step rail: the five stages the shell maps its status onto, as one
-     horizontal row. Kept visible (not a bare "3/5") because it is what tells a
-     first-launch user how much of a long wait is left, and because the failure
-     card points back at it. */
-  #startup-steps {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 6px 18px;
-    margin: 2px 0 0;
-    padding: 0;
-    list-style: none;
-    font-size: 12px;
-    color: var(--dock-fg-dim);
+  /* The fill is a full-size gradient revealed by a CLIP, not a box that
+     changes width. Clipping leaves the gradient's own geometry untouched, so
+     the leading edge keeps the same colour at every value — resizing a box
+     slides the gradient and the head colour drifts as it travels.
+     `--rail-p` is the single source of truth, written by one animator. */
+  #startup-bar-fill {
+    position: absolute;
+    inset: 0;
+    background: var(--rail-fill);
+    clip-path: inset(0 calc(100% - var(--rail-p, 0%)) 0 0 round 999px);
   }
-  #startup-steps li { display: flex; align-items: center; gap: 7px; position: relative; }
-  #startup-steps li::before {
-    content: "";
-    flex: 0 0 auto;
-    width: 11px;
-    height: 11px;
-    border: 1.5px solid var(--dock-hairline);
-    border-radius: 50%;
-    transition: background-color .16s ease, border-color .16s ease;
+
+  /* Bloom at the leading edge. It rides `--rail-p`, the same value the fill
+     clips to, so the two cannot drift apart. */
+  #startup-bar-head {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--rail-p, 0%);
+    width: 40px;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, var(--rail-bloom));
+    pointer-events: none;
   }
-  #startup-steps li[data-state="current"] { color: var(--dock-fg); font-weight: 600; }
-  #startup-steps li[data-state="current"]::before {
-    border-color: var(--dock-accent);
-    border-top-color: transparent;
-    animation: startup-spin 1s linear infinite;
-  }
-  /* A finished step: the app's success token with a WHITE check drawn on top.
-     The check is a rotated border shape, NOT a background image: the page's CSP
-     blocks every resource without a directive, `img-src` among them — an
-     SVG-background check renders as an empty green disc with no error anywhere
-     (found the hard way, from a user's screenshot). */
-  #startup-steps li[data-state="done"]::before {
-    background-color: rgb(34, 197, 94);
-    border-color: rgb(34, 197, 94);
-  }
-  #startup-steps li[data-state="done"]::after {
+
+  /* Indeterminate says one thing only: no denominator has arrived. The fill
+     still follows `--rail-p` — which the placeholder crawl drives — and the
+     SWEEP is what marks the value as a guess. It used to be forced across the
+     whole track at 45% opacity instead, which contradicted the readout beside
+     it: a bar lit end to end sitting next to "3%", with the crawl's motion
+     happening underneath and therefore invisible. */
+  .progress-bar-wrap[data-mode="indeterminate"]::after {
     content: "";
     position: absolute;
-    left: 5.5px;
-    top: 50%;
-    width: 3px;
-    height: 6px;
-    border-right: 1.8px solid #fff;
-    border-bottom: 1.8px solid #fff;
-    transform: translate(-50%, -62%) rotate(45deg);
+    inset: 0;
+    background: linear-gradient(90deg, transparent 0%, var(--rail-sweep) 50%, transparent 100%);
+    animation: railSweep 1.9s cubic-bezier(0.45, 0, 0.55, 1) infinite;
   }
 
-  /* ---------------------------------------------------------------- dock foot */
-  .dock-foot { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  #startup-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-  #startup-digest {
-    margin: 0;
-    font-size: 11.5px;
-    color: var(--dock-fg-dim);
-    font-variant-numeric: tabular-nums;
-    word-break: break-all;
+  @keyframes railSweep {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
   }
-  /* The fixed wish, quietest thing on the page: it carries no state. */
+
+  /* Stage boundaries, drawn as hairlines INSIDE the track so they line up
+     with the values they mark and cannot spill past the caps. */
+  .progress-nodes {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  /* Stage boundaries, drawn INSIDE the track so they line up with the values
+     they mark and cannot spill past the caps. Two pixels rather than a hairline:
+     on a 6px track a 1px tick is invisible at 1x, and these are the only marks
+     that say the bar is segmented into stages. */
+  .p-node {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    transform: translateX(-50%);
+  }
+
+  .p-dot {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: var(--node-inactive);
+    transition: background-color 0.4s ease;
+  }
+
+  /* A passed tick sits ON the fill, an upcoming one on the empty channel — two
+     surfaces that need opposite notch colours, which the two tokens above carry.
+     Using one value for both is what hides half the ticks. */
+  .p-node.done .p-dot {
+    background: var(--node-done);
+  }
+
+  #startup-percent {
+    flex: 0 0 auto;
+    min-width: 44px;
+    text-align: right;
+    font-size: 13.5px;
+    font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    /* The rail's own hue, so the number reads as part of the bar rather than as a
+       separate badge next to it. */
+    color: var(--brand-accent);
+    letter-spacing: 0.02em;
+  }
+
+  /* ========================================================== Horizontal 5-Step Checklist with Dividers */
+  .step-rail {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    list-style: none;
+    margin: 0 0 28px;
+    padding: 0;
+    width: 100%;
+  }
+
+  .step-rail li.step-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--step-pending-text);
+    transition: color 0.3s ease;
+  }
+
+  .step-badge {
+    font-size: 11px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+  }
+
+  /* Done step */
+  .step-rail li.step-item[data-state="done"] {
+    color: var(--step-done-text);
+  }
+  .step-rail li.step-item[data-state="done"] .step-badge {
+    color: var(--check-done);
+    font-weight: 700;
+  }
+
+  /* Current step */
+  .step-rail li.step-item[data-state="current"] {
+    color: var(--step-active-text);
+    font-weight: 600;
+  }
+  .step-rail li.step-item[data-state="current"] .step-badge {
+    color: var(--check-active);
+    font-size: 13px;
+    animation: activeBadgeGlow 1.6s ease-in-out infinite;
+  }
+
+  @keyframes activeBadgeGlow {
+    0%, 100% { transform: scale(1); filter: drop-shadow(0 0 3px var(--brand-accent)); }
+    50% { transform: scale(1.2); filter: drop-shadow(0 0 6px var(--brand-accent)); }
+  }
+
+  /* Pending step */
+  .step-rail li.step-item[data-state="pending"] .step-badge {
+    color: var(--text-dim);
+  }
+
+  /* Vertical Divider */
+  .step-rail li.sep {
+    width: 1px;
+    height: 11px;
+    background: var(--divider);
+  }
+
+  /* ========================================================== Footer Section */
+  .footer-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    width: 100%;
+    margin-top: 4px;
+  }
+
+  .footer-rule {
+    flex: 0 1 48px;
+    height: 1px;
+    background: var(--footer-line);
+  }
+
   #startup-saying {
     margin: 0;
     font-size: 11.5px;
-    color: var(--dock-fg-dim);
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    overflow: hidden;
+    color: var(--footer-text);
+    letter-spacing: 0.03em;
   }
-  .brand-stamp {
-    margin: 0;
+
+  /* Action Buttons & Provenance */
+  .footer-sub {
     display: flex;
-    gap: 8px;
-    align-items: baseline;
-    font-size: 11px;
-    color: rgba(232, 238, 252, 0.5);
-    font-variant-numeric: tabular-nums;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
   }
-  #startup-name { font-weight: 600; letter-spacing: .06em; }
 
-  /* ------------------------------------------------------------------ buttons */
-  button {
-    padding: 7px 16px;
-    min-height: 32px;
-    border: 1px solid var(--dock-hairline);
+  #startup-pause {
+    padding: 4px 14px;
     border-radius: 999px;
-    background: var(--dock-glass);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
-    color: var(--dock-fg);
-    font: inherit;
+    border: 1px solid var(--btn-border);
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    font-size: 11px;
     cursor: pointer;
-    transition: background .15s ease, border-color .15s ease;
+    transition: all 0.2s ease;
   }
-  button:hover:not(:disabled) { background: var(--dock-glass-hover); }
-  button:disabled { opacity: .5; cursor: default; }
-  button:focus-visible { outline: 2px solid var(--dock-accent-soft); outline-offset: 2px; }
+  #startup-pause:hover:not(:disabled) {
+    background: var(--btn-border);
+  }
 
-  /* ------------------------------------------------------------- failure card
-     A dialog, not part of the film: centred over its own mask, in the user's
-     theme, so it reads as the app telling them something rather than as part of
-     the opening. */
+  #startup-digest {
+    margin: 0;
+    font-size: 10.5px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    color: var(--text-dim);
+  }
+
+  /* ========================================================== Failure Dialog */
   #startup-error {
     position: fixed;
-    z-index: 5;
+    z-index: 100;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    width: min(560px, calc(100vw - 64px));
-    max-height: calc(100vh - 96px);
+    width: min(520px, calc(100vw - 48px));
+    max-height: calc(100vh - 80px);
     overflow: auto;
-    padding: 18px 20px;
-    border: 1px solid var(--dsw-alias-border-l2);
-    border-radius: 16px;
-    background: var(--dsw-alias-bg-layer-1);
-    color: var(--dsw-alias-label-primary);
-    box-shadow: var(--dock-shadow);
+    padding: 24px 28px;
+    border-radius: 20px;
+    background: var(--modal-bg);
+    border: 1px solid var(--modal-border);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
     text-align: left;
-    animation: startup-rise .18s ease-out;
+    animation: modalRise 0.24s cubic-bezier(0.16, 1, 0.3, 1);
   }
-  #startup-error::before {
-    content: "";
+
+  /* The scrim is its own element, not `#startup-error::before`. A `::before`
+     with a negative z-index paints inside the CARD's stacking context (a
+     `position: fixed` box creates one), so it darkened the card's own surface
+     and left the page behind it undimmed — measured: the background was
+     pixel-identical with the card up. A sibling dims what it should. */
+  #startup-error-mask {
     position: fixed;
     inset: 0;
-    z-index: -1;
-    background: rgba(4, 9, 24, 0.66);
+    z-index: 99;
+    background: rgba(0, 0, 0, 0.45);
+    animation: maskFade 0.24s ease;
   }
-  #startup-error-title { margin: 0 0 6px; font-weight: 600; font-size: 14px; }
-  #startup-error-detail {
-    margin: 0 0 12px;
-    font-size: 12px;
-    color: var(--dsw-alias-label-secondary);
-    word-break: break-all;
-    white-space: pre-line;
-  }
-  #startup-error .hint { margin: 10px 0 0; font-size: 11.5px; color: var(--dsw-alias-label-secondary); }
-  #startup-error-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
-  #startup-error button {
-    border-radius: 10px;
-    border-color: var(--dsw-alias-border-l2);
-    background: transparent;
-    color: var(--dsw-alias-label-primary);
-  }
-  #startup-error button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
-  /* The primary pair from the app's own buttons (primitives/Button.module.css):
-     fill and foreground flip together, so the label can never vanish. */
-  #startup-error button[data-primary] {
-    background: var(--dsw-alias-button-primary-fill);
-    border-color: var(--dsw-alias-button-primary-fill);
-    color: var(--dsw-alias-label-primary-foreground);
-  }
-  #startup-error button[data-primary]:hover:not(:disabled) { opacity: .9; }
 
-  @keyframes startup-spin { to { transform: rotate(360deg); } }
-  @keyframes startup-sweep {
-    0% { transform: translateX(-120%); }
-    100% { transform: translateX(320%); }
+  @keyframes maskFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
-  @keyframes startup-rise {
-    from { opacity: 0; transform: translate(-50%, calc(-50% + 4px)); }
-    to { opacity: 1; transform: translate(-50%, -50%); }
+
+  #startup-error-title {
+    margin: 0 0 8px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-title);
   }
+
+  #startup-error-detail {
+    margin: 0 0 16px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-subtitle);
+    white-space: pre-line;
+    word-break: break-all;
+  }
+
+  #startup-error-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  #startup-error button {
+    padding: 7px 16px;
+    border-radius: 10px;
+    border: 1px solid var(--btn-border);
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  #startup-error button[data-primary="true"] {
+    background: var(--btn-primary-bg);
+    border-color: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
+    font-weight: 500;
+  }
+
+  #startup-error .hint {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
+
+  @keyframes modalRise {
+    from { opacity: 0; transform: translate(-50%, calc(-50% + 12px)) scale(0.96); }
+    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  }
+
+  /* ========================================================== Reduced Motion */
   @media (prefers-reduced-motion: reduce) {
-    #startup-bar-fill { transition: none; }
-    #startup-bar[data-mode="indeterminate"] #startup-bar-fill { width: 60%; animation: none; }
-    #startup-steps li[data-state="current"]::before { animation: none; border-top-color: var(--dock-accent); }
+    .stage-monolith { animation: none; }
+    .sphere-halo-back { animation: none; }
+    .progress-bar-wrap[data-mode="indeterminate"]::after { animation: none; }
+    .step-rail li.step-item[data-state="current"] .step-badge { animation: none; }
     #startup-error { animation: none; }
+    #startup-error-mask { animation: none; }
   }
 </style>
 </head>
 <body>
-  <!-- The opening film, twice: the blurred backdrop that fills the window, then
-       the fitted frame on top of it (see the film rules in the stylesheet). Both
-       start muted, looping and autoplaying — a muted autoplay needs no user
-       gesture, and the toggle below the title strip is what turns sound on; it
-       controls the FOREGROUND only, so the backdrop can never be the louder
-       half of a stereo mix. -->
-  <video id="startup-video-backdrop" src="media/DSH-APP%20startup.mp4"
-         autoplay muted loop playsinline preload="auto"
-         aria-hidden="true" tabindex="-1"></video>
-  <video id="startup-video" src="media/DSH-APP%20startup.mp4"
-         autoplay muted loop playsinline preload="auto"
-         aria-hidden="true" tabindex="-1"></video>
-  <div class="scrim" aria-hidden="true"></div>
   <div id="startup-titlebar"></div>
+  <div id="bg-ambient" aria-hidden="true"></div>
 
-  <button id="startup-audio" type="button" aria-pressed="false">
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none"
-         stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M11 5 6.5 8.5H3.5v7h3L11 19z"/>
-      <path class="waves" d="M15.5 8.5a5 5 0 0 1 0 7"/>
-      <path class="waves" d="M18 6a8.5 8.5 0 0 1 0 12"/>
-      <path class="slash" d="M4 4l16 16"/>
-    </svg>
-  </button>
-
-  <main class="dock">
-    <p id="startup-status" role="status" aria-live="polite">正在启动 DSH APP…</p>
-    <p id="startup-hint" class="hint">首次启动需要准备运行环境，可能需要几十秒。</p>
-    <div class="bar-row">
-      <div id="startup-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" data-mode="indeterminate">
-        <span id="startup-bar-fill"></span>
-      </div>
-      <span id="startup-percent" hidden></span>
+  <!-- Monolithic Unified Stage matching Reference Mockup -->
+  <main class="stage-monolith">
+    <!-- Center Graphic: Dotted Whale -->
+    <div class="whale-stage-wrap">
+      <div class="sphere-halo-back" aria-hidden="true"></div>
+      <canvas id="whale-canvas" aria-hidden="true"></canvas>
     </div>
-    <!-- Step labels: index order must match stageForMessage() in startup-window.ts. -->
-    <ol id="startup-steps">
-      <li>准备运行时</li>
-      <li>解压运行时</li>
-      <li>激活运行时</li>
-      <li>启动内核服务</li>
-      <li>打开界面</li>
-    </ol>
-    <div class="dock-foot">
-      <div id="startup-actions">
-        <button id="startup-pause" type="button" hidden></button>
+
+    <!-- Brand Row: DeepSeek Logo Badge + DSH APP + Version Pill -->
+    <div class="brand-row">
+      <div class="brand-logo-badge" aria-hidden="true">
+        <img class="brand-logo-img" id="startup-logo" src="app-logo.png" alt="DSH APP" onerror="this.onerror=null;this.src='data:image/png;base64,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'" />
       </div>
+      <div class="brand-title">
+        <span class="brand-dsh" id="startup-name">DSH</span>
+        <span class="brand-app">APP</span>
+      </div>
+      <span id="startup-version" class="version-pill">v0.15.1</span>
+    </div>
+
+    <!-- Status Headline & Subtitle -->
+    <h1 id="startup-status" role="status" aria-live="polite">正在启动 DSH 服务...</h1>
+    <p id="startup-hint">正在为您准备最佳的开发环境，请稍候...</p>
+
+    <!-- Segmented Progress Bar -->
+    <div class="progress-section">
+      <div class="progress-bar-wrap" id="startup-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" data-mode="indeterminate">
+        <div id="startup-bar-fill"></div>
+        <div id="startup-bar-head"></div>
+        <div class="progress-nodes" id="startup-nodes">
+          <div class="p-node" style="left: 25%" data-at="25"><div class="p-dot"></div></div>
+          <div class="p-node" style="left: 50%" data-at="50"><div class="p-dot"></div></div>
+          <div class="p-node" style="left: 75%" data-at="75"><div class="p-dot"></div></div>
+        </div>
+      </div>
+      <span id="startup-percent">0%</span>
+    </div>
+
+    <!-- Horizontal 5-Step Checklist with Vertical Dividers -->
+    <ul class="step-rail" id="startup-steps">
+      <li class="step-item" data-state="current">
+        <span class="step-badge">●</span>
+        <span class="step-text">准备运行时</span>
+      </li>
+      <li class="sep" aria-hidden="true"></li>
+      <li class="step-item" data-state="pending">
+        <span class="step-badge">○</span>
+        <span class="step-text">解压运行时</span>
+      </li>
+      <li class="sep" aria-hidden="true"></li>
+      <li class="step-item" data-state="pending">
+        <span class="step-badge">○</span>
+        <span class="step-text">激活运行时</span>
+      </li>
+      <li class="sep" aria-hidden="true"></li>
+      <li class="step-item" data-state="pending">
+        <span class="step-badge">○</span>
+        <span class="step-text">启动内核服务</span>
+      </li>
+      <li class="sep" aria-hidden="true"></li>
+      <li class="step-item" data-state="pending">
+        <span class="step-badge">○</span>
+        <span class="step-text">打开界面</span>
+      </li>
+    </ul>
+
+    <!-- Footer Quote with subtle hairline rules -->
+    <div class="footer-wrap">
+      <span class="footer-rule" aria-hidden="true"></span>
+      <span id="startup-saying">首先您要健康，其次才是其次</span>
+      <span class="footer-rule" aria-hidden="true"></span>
+    </div>
+
+    <div class="footer-sub">
+      <button id="startup-pause" type="button" hidden>暂停下载</button>
       <p id="startup-digest" hidden></p>
-      <p id="startup-saying">首先您要健康，其次才是其次</p>
-      <p class="brand-stamp"><span id="startup-name">DSH APP</span><span id="startup-version"></span></p>
     </div>
   </main>
 
+  <!-- Failure Card -->
+  <div id="startup-error-mask" hidden></div>
   <section id="startup-error" hidden>
-    <p id="startup-error-title"></p>
+    <h2 id="startup-error-title"></h2>
     <p id="startup-error-detail" hidden></p>
     <div id="startup-error-actions"></div>
-    <p class="hint">可重试启动，或打开日志目录查看最新日志。</p>
+    <p class="hint">若多次重试未果，可打开日志目录查看详细排障信息。</p>
   </section>
 
   <script>
   (function () {
+    'use strict';
+
     var api = window.__dshStartup;
     var root = document.documentElement;
-    var video = document.getElementById('startup-video');
-    var backdrop = document.getElementById('startup-video-backdrop');
-    var audio = document.getElementById('startup-audio');
-    var steps = document.querySelectorAll('#startup-steps li');
-    var status = document.getElementById('startup-status');
-    var bar = document.getElementById('startup-bar');
-    var fill = document.getElementById('startup-bar-fill');
-    var percent = document.getElementById('startup-percent');
-    var actions = document.getElementById('startup-actions');
-    var errorBox = document.getElementById('startup-error');
+    var metaTheme = document.querySelector('meta[name="theme-color"]');
+
+    // DOM Elements
+    var statusEl = document.getElementById('startup-status');
+    var hintEl = document.getElementById('startup-hint');
+    var barWrap = document.getElementById('startup-bar');
+    var barFill = document.getElementById('startup-bar-fill');
+    var percentEl = document.getElementById('startup-percent');
+    var pNodes = document.querySelectorAll('#startup-nodes .p-node');
+    var stepItems = document.querySelectorAll('#startup-steps li.step-item');
+    var pauseBtn = document.getElementById('startup-pause');
+    var digestEl = document.getElementById('startup-digest');
+    var sayingEl = document.getElementById('startup-saying');
+    var nameEl = document.getElementById('startup-name');
+    var versionEl = document.getElementById('startup-version');
+
+    // Error Box Elements
+    var errorSheet = document.getElementById('startup-error');
+    var errorMask = document.getElementById('startup-error-mask');
     var errorTitle = document.getElementById('startup-error-title');
     var errorDetail = document.getElementById('startup-error-detail');
     var errorActions = document.getElementById('startup-error-actions');
-    var digest = document.getElementById('startup-digest');
-    var saying = document.getElementById('startup-saying');
-    var name = document.getElementById('startup-name');
-    var version = document.getElementById('startup-version');
-    // Skeleton copy targets, addressed structurally so the static markup keeps
-    // its own Chinese fallbacks for the moment before the first injection.
-    var headerHint = document.getElementById('startup-hint');
     var failureHint = document.querySelector('#startup-error .hint');
-    var pauseButton = document.getElementById('startup-pause');
-    /** Labels for the sound toggle, replaced by the shell's language on push. */
-    var soundLabels = { on: '开启声音', off: '关闭声音' };
-    /** Resolver armed by the shell for exactly one click; see awaitPause. */
+
+    // ========================================================== Digitile Whale Base64 Data
+    var WHALE_GRID = 60;
+    var ART_CELLS_X = 60;
+    var ART_CELLS_Y = 45;
+    var CELL = 0.18;
+    var TILE_SIZE = 0.06;
+    var GRID_CENTER = (WHALE_GRID - 1) / 2;
+
+    var WHALE_B64 = [
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAOIABAAAAAPgH',
+      'OAAAAPD/P8ADAADg//8B/AAwgP//H8A/gAP8//8D/Mc/4P//f8B//wP///8P+P8/+P///4H//8H///9/8P8f/P///w///+D/',
+      '////4P8H/v///x/8P+D/////h/8A///////4AfCA/////x8AD8D/////AfAA8P/D/x8ADwD8//n/APAAgP8f/w8AHwDw/+P/',
+      'APABAP4f/g8AHwDA/8N/APADAPh//AcAPwAA//8/AOADAOD//wMAfgAA/v8/AOAHAMD//wEA/AAA+P8PAMAfAAD//wAA+AMY',
+      '8P8HAIB/wAf+PwAA8A/4wP8DAAD+gT/4HwAAwD/wB/8HAAD4n//g/wEAAP//P/w/AADg/////wMAAPz//8cfAAAA//8/AAAA',
+      'AMD//wAAAAAA8P8DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      'AAAAAAAAAAAAAAAAAAAAAAAAxVRjZJTzRJPj8vHw8qTi8YRkk7PD09PDs5OD0vHw8PDw8YNE8fDidNPy8fDw8PDw8PDw8PDw',
+      '8PDw8OJj8PDx8oS0pFTS8fDw8PDw8PDw8PDw8PDw8PDw8NJz8PDw8PHiZMPx05Px8PDw8PDw8PDw8PDw8PDw8PDw8PDxU2Pw',
+      '8PDw8PDxZGSDg6Pi8fCzs/Hw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8XNE8fDw8PDw8NKE8vHw8PDw8PCTo/Hw8PDw8PDw8PDw',
+      '8PDw8PDw8PDw8PDw8PDxs+Lw8PDw8PDxwfHw8PDw8PDw8VSD8fDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8dOk8fDw8PDw',
+      '8PDw8PDw8PDw8OI08fDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDx4jTy8PDw8PDw8PDw8PDw8PDxdMLw8PDw8PDw8PDw',
+      '8PDw8PDw8PDw8PDw8PDw8PDw8PDw4TR08fDw8PDw8PDw8PDw8PGzRPHw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw',
+      '8OKT8fDw8PDw8PDw8PDxw7Pw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDx43Px8PDw8PDw8PHylPLw8PDw8PDw',
+      '8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8eI0svDw8PDx8tOEZPHw8fLTs7PD8/Lx8PDw8PDw8PDw8PDw8PDw8PDw8PDw',
+      '8PDw8PDxY+Lw8PDwopPw8OJ0s/Lx8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8bJDUvHw8PDwg8Pw8NN04vHw8PDw8PDw8PDw',
+      '8PDxwnOD0vHw8PDw8PDw8PDw8PDwY+Pw8ON04vHw8PDw8PDw8PDw8YPx8PDw8PDw8PDw8PDxRPPw8POz8fDw8PDw8PDw8PHS',
+      'o0Rz8fDw8PDw8PDw8PDy8/Dw8nPx8PDw8PDw8PDwsJDyk/Hw8PDw8PDw8PDT4/Dw8WRD4fDw8PDw8PDwgGDyNMLw8PDw8PDw',
+      '8PCT0/Dw8KMz4fDw8PDw8PDw8PE08fDw8PDw8PDxVLPw8PDiQ/Hw8PDw8PDw8PFjsvDw8PDw8PDik/Dw8PFEY/Hw8PDw8PDw',
+      '8OFDovDw8PDw8PGUZPHw8PCjk/Hw8PDw8PDw8PGyo9Lx8PDw8PDw8vLw8PDy0vDw8PDw8PDw8PDw8PDw8PDw8PCzw/Dw8PGU',
+      'NPHw8PDw8PDw8PDw8PDw8PDw8PFEdPHw8PDyg/Hw8PDw8PDw8PDw8PDw8PDxo+Lw8PDxw8Px8PDw8PDw8PDw8PDw8PDyhPHw',
+      '8PDxc/Lw8PDw8PDw8PDw8PDw8XTi8PDw8PFDdERk8fDw8PDw8PDw8PDw8cNk8fDw8PDhQ0Ty8cJEo/Hw8PDw8PDw8PDw4rPx',
+      '8PDw8OFT8vDw8ZPD8fDw8PDw8PDw8VTT8fDw8PDxc5Tx8PDx0jTT8fDw8PDw8PCR4/Hw8PDw8bPx8PDw8PFj0/Hw8PDw8PDx',
+      'wmTj8fDw8PDx8pNEc/Hw8PDw8PGjw/Hw8PDw8PDw8eKE0/Hw8PDw8PDx8vLx8PDw8PDw8PHSZJHw8PDw8PDw8PDxxLPx8PDw',
+      '8PDw8PDw8PDw8PDw8PDw8fLTs7Ky0sPy8fDw8PDw8ZRk4vHw8PDw8PDw8PDw8PDw8PDw8PDw8PGzVHODk4NjNJTy8fDw8PDw',
+      '8PDw8PDw8PDw8PDx4mSE4vHw8PDw8PDw8PDw8PDx0nREg7PT8/Pz8/Pj06NzNA=='
+    ].join('');
+
+    function decodeTiles() {
+      var bin = atob(WHALE_B64);
+      var bitmapBytes = Math.ceil((WHALE_GRID * WHALE_GRID) / 8);
+      var tiles = [];
+      var attr = bitmapBytes;
+      for (var row = 0; row < WHALE_GRID; row++) {
+        for (var col = 0; col < WHALE_GRID; col++) {
+          var bit = row * WHALE_GRID + col;
+          if (((bin.charCodeAt(bit >> 3) >> (bit & 7)) & 1) === 0) continue;
+          var a = bin.charCodeAt(attr++);
+          tiles.push({
+            gx: (col - GRID_CENTER) / ART_CELLS_X,
+            gy: (GRID_CENTER - row) / ART_CELLS_X,
+            lum: (a >> 4) / 15,
+            edge: (a & 7) / 7,
+            // Fixed per-tile face scale, matching the session page's renderer
+            // (whale-background.ts `scale: 0.5 + Math.random()`). A uniform size
+            // reads as a printed halftone; the variation is what makes the
+            // mosaic look like physical tiles.
+            scale: 0.5 + Math.random(),
+            seed: Math.random(),
+            origDist: Math.hypot((col - GRID_CENTER) / ART_CELLS_X, (GRID_CENTER - row) / ART_CELLS_X)
+          });
+        }
+      }
+      return tiles;
+    }
+
+    var TILES = decodeTiles();
+
+    // ========================================================== Canvas 2D Engine with 3D Orbital Rings
+    var canvas = document.getElementById('whale-canvas');
+    var ctx = canvas.getContext('2d');
+    var DPR = Math.min(2, window.devicePixelRatio || 1);
+    var canvasW = 0, canvasH = 0;
+    var scale = 0;
+    var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function resizeCanvas() {
+      var cssW = canvas.clientWidth || 360;
+      var cssH = canvas.clientHeight || 300;
+      canvasW = cssW;
+      canvasH = cssH;
+      canvas.width = Math.round(cssW * DPR);
+      canvas.height = Math.round(cssH * DPR);
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      scale = cssW / ART_CELLS_X;
+    }
+
+    // Pointer dynamics
+    var pointer = { x: -999, y: -999, active: false };
+    window.addEventListener('pointermove', function (e) {
+      var rect = canvas.getBoundingClientRect();
+      var px = e.clientX - rect.left;
+      var py = e.clientY - rect.top;
+      pointer.x = (px - canvasW / 2) / (ART_CELLS_X * scale);
+      pointer.y = (canvasH / 2 - py) / (ART_CELLS_X * scale);
+      pointer.active = (px >= -20 && px <= canvasW + 20 && py >= -20 && py <= canvasH + 20);
+    });
+
+    var START_TIME = performance.now();
+    var ENTER_DURATION = 1100;
+    var assembled = false;
+    var lastFrame = 0;
+    var FPS = 24;
+
+    function renderAnimation(now) {
+      requestAnimationFrame(renderAnimation);
+
+      if (now - lastFrame < 1000 / FPS) return;
+      lastFrame = now;
+
+      ctx.clearRect(0, 0, canvasW, canvasH);
+
+      var isDark = root.getAttribute('data-theme') === 'dark';
+      var time = now / 1000;
+      var cx = canvasW / 2;
+      var cy = canvasH / 2 + 6;
+
+      // Digitile Whale Mosaic
+      var enterProgress = reduced ? 1 : Math.min(1, (now - START_TIME) / ENTER_DURATION);
+      if (enterProgress >= 1) assembled = true;
+      var baseS = (TILE_SIZE / CELL) * scale;
+
+      for (var i = 0; i < TILES.length; i++) {
+        var tl = TILES[i];
+        var ox = 0, oy = 0, alphaMod = 1, scaleMod = 1;
+
+        if (!assembled) {
+          var delay = Math.min(0.5, tl.origDist * 1.4);
+          var ep = Math.max(0, Math.min(1, (enterProgress - delay) / (1 - delay)));
+          if (ep <= 0) continue;
+          var ease = 1 - Math.pow(1 - ep, 3);
+          var angle = Math.atan2(tl.gy, tl.gx || 1e-4) + (1 - ease) * 0.9;
+          var dist = (1 - ease) * (0.45 + tl.seed * 0.6) * ART_CELLS_X * scale * 0.5;
+          ox = Math.cos(angle) * dist;
+          oy = Math.sin(angle) * dist;
+          alphaMod = ease;
+          scaleMod = 0.5 + ease * 0.5;
+        }
+
+        // Ambient fluid shimmer
+        var wave = Math.sin(time * 1.5 + (tl.gx + tl.gy) * 5.8);
+        var lum = tl.lum * (1 + wave * 0.12);
+
+        // Interactive pointer displacement
+        var px = 0, py = 0;
+        if (pointer.active) {
+          var dx = tl.gx - pointer.x;
+          var dy = tl.gy - pointer.y;
+          var d = Math.hypot(dx, dy);
+          if (d < 0.24 && d > 1e-4) {
+            var f = (1 - d / 0.24) * 0.04 * ART_CELLS_X * scale;
+            px = (dx / d) * f;
+            py = -(dy / d) * f;
+          }
+        }
+
+        var tx = cx + tl.gx * ART_CELLS_X * scale + ox + px;
+        var ty = cy - tl.gy * ART_CELLS_X * scale + oy + py;
+        // Per-tile face scale (matches the session page). While the entry
+        // animation is still running the size stays fractional so tiles grow
+        // smoothly; once assembled it snaps to whole device pixels, which is
+        // what keeps the resting mosaic crisp instead of softly anti-aliased.
+        var currentS = baseS * tl.scale * scaleMod;
+        if (assembled) currentS = Math.max(1, Math.round(currentS));
+
+        // Theme colors matching reference
+        if (isDark) {
+          var rD = Math.round(56 + lum * 120);
+          var gD = Math.round(150 + lum * 90);
+          var bD = Math.round(245 + lum * 10);
+          ctx.fillStyle = 'rgba(' + rD + ',' + gD + ',' + bD + ',' + (alphaMod * Math.min(1, 0.45 + tl.lum * 0.55)) + ')';
+        } else {
+          // Pure DeepSeek electric blue dots on crisp light background
+          var rL = Math.round(25 + (1 - lum) * 20);
+          var gL = Math.round(75 + (1 - lum) * 45);
+          var bL = Math.round(210 + (1 - lum) * 35);
+          ctx.fillStyle = 'rgba(' + rL + ',' + gL + ',' + bL + ',' + (alphaMod * Math.min(1, 0.65 + tl.lum * 0.35)) + ')';
+        }
+
+        ctx.fillRect(tx - currentS / 2, ty - currentS / 2, currentS, currentS);
+      }
+    }
+
+    // ========================================================== Multi-Stage Linear Progress Engine
+    var STAGES = [
+      { id: 1, name: '准备运行时', from: 0.00, to: 0.25 },
+      { id: 2, name: '解压运行时', from: 0.25, to: 0.50 },
+      { id: 3, name: '激活运行时', from: 0.50, to: 0.75 },
+      { id: 4, name: '启动内核服务', from: 0.75, to: 0.95 },
+      { id: 5, name: '打开界面', from: 0.95, to: 1.00 }
+    ];
+
+    var currentStage = 1;
+    var displayedProgress = 0;
+    var targetProgress = 0;
+    var stageStartTime = Date.now();
+    var progressAnim = false;
+    /**
+     * Denominator reported by the CURRENT stage, or null while it has none.
+     * Most kernel statuses carry `progress: null` (activation, cache verify,
+     * the head of extraction), so the crawl below stands in for them. The
+     * moment a real one arrives it owns the bar for that stage — a placeholder
+     * must never outrun, or be contradicted by, a number the kernel sent.
+     */
+    var stageRealProgress = null;
+    /**
+     * How far into its own band the placeholder crawl may travel. A stage with
+     * no denominator is not "85% done" — the cap keeps the bar from claiming it
+     * is while still showing that work is moving.
+     */
+    var CRAWL_CAP = 0.85;
+    /**
+     * Time for the placeholder crawl to reach {@link CRAWL_CAP} of a band.
+     *
+     * Deliberately far longer than any stage really takes. The crawl exists for
+     * phases that report no denominator at all, where it is the only sign of
+     * life; a short ramp would instead make it a confident-looking estimate that
+     * races ahead of the kernel and then sits there. Slow enough that real
+     * progress — which arrives within a second for downloads and extraction —
+     * always outruns it and takes the bar over.
+     */
+    var CRAWL_RAMP_MS = 25000;
+
+    /**
+     * Light the stage boundaries the fill has already passed.
+     *
+     * Keyed to the POSITION, not to the current stage: the fill is what the eye
+     * follows, and a tick that stays dark after the fill has run past it reads as
+     * a stalled stage — at stage 4 the 75% mark used to sit unlit under a bar
+     * already at 90%. One rule for both, so bar and ticks can never disagree.
+     *
+     * Only interior boundaries exist as elements (25 / 50 / 75%): the 0% and
+     * 100% ends are the track's own caps, and drawing a mark on top of a cap
+     * reads as a rendering error rather than a milestone.
+     */
+    function setMilestoneNodes(fraction) {
+      var position = fraction * 100;
+      for (var i = 0; i < pNodes.length; i++) {
+        var at = Number(pNodes[i].getAttribute('data-at'));
+        pNodes[i].classList.toggle('done', position >= at);
+      }
+    }
+
+    function updateStepRail(stageId, isFinished) {
+      for (var s = 0; s < stepItems.length; s++) {
+        var item = stepItems[s];
+        var badge = item.querySelector('.step-badge');
+        if (isFinished || s + 1 < stageId) {
+          item.setAttribute('data-state', 'done');
+          badge.textContent = '✔';
+        } else if (s + 1 === stageId) {
+          item.setAttribute('data-state', 'current');
+          badge.textContent = '●';
+        } else {
+          item.setAttribute('data-state', 'pending');
+          badge.textContent = '○';
+        }
+      }
+    }
+
+    /**
+     * The ONE animator that moves the rail.
+     *
+     * It is time-based and frame-rate independent: each frame advances a fixed
+     * share of the REMAINING distance toward the target, and the value written
+     * is a float. The old version added a fixed 0.2-2% per frame and rounded to
+     * whole percent before painting, so it moved in visible steps and its speed
+     * depended on how many frames the machine happened to deliver.
+     *
+     * Nothing else may animate the rail: a CSS `transition` on the same
+     * property would fight this loop, and the two easing curves together read
+     * as the bar lagging and then lurching.
+     */
+    var RAIL_EASE = 0.14;
+    function animateBar() {
+      if (progressAnim) return;
+      progressAnim = true;
+
+      requestAnimationFrame(function step() {
+        var diff = targetProgress - displayedProgress;
+        if (Math.abs(diff) < 0.0005) {
+          displayedProgress = targetProgress;
+          paintProgress();
+          progressAnim = false;
+          return;
+        }
+        displayedProgress += diff * RAIL_EASE;
+        paintProgress();
+        requestAnimationFrame(step);
+      });
+    }
+
+    function paintProgress() {
+      // The exact value drives the rail; only the READOUT is rounded, so the
+      // bar itself never steps by whole percent.
+      var clamped = Math.min(1, Math.max(0, displayedProgress));
+      barWrap.style.setProperty('--rail-p', (clamped * 100).toFixed(3) + '%');
+
+      var pct = Math.round(clamped * 100);
+      percentEl.textContent = pct + '%';
+      barWrap.setAttribute('aria-valuenow', String(pct));
+
+      var isFinished = pct >= 100;
+      setMilestoneNodes(clamped);
+      updateStepRail(currentStage, isFinished);
+    }
+
+    /**
+     * Placeholder crawl for a stage that reports no denominator.
+     *
+     * It is a SHOW, never a claim: the bar drifts toward `CRAWL_CAP` of the
+     * stage's own band so a long silent phase still reads as alive, but it
+     * stops short of the band end — the next stage's arrival is what advances
+     * the bar past it. A stage that has sent a real number is left alone, so
+     * the ticker can never push the bar past the truth or backwards from it.
+     */
+    function crawlTarget() {
+      var stageMeta = STAGES[currentStage - 1] || STAGES[0];
+      var elapsed = Date.now() - stageStartTime;
+      var ratio = Math.min(CRAWL_CAP, elapsed / CRAWL_RAMP_MS);
+      return stageMeta.from + (stageMeta.to - stageMeta.from) * ratio;
+    }
+
+    setInterval(function () {
+      if (currentStage >= 5 && targetProgress >= 1.0) return;
+      if (stageRealProgress !== null) return;
+      var next = crawlTarget();
+      if (next > targetProgress) {
+        targetProgress = next;
+        animateBar();
+      }
+    }, 35);
+
+    // ========================================================== Reactive State Dispatcher
     var pendingPause = null;
-    pauseButton.addEventListener('click', function () {
+
+    function render(view) {
+      var nextStage = Math.max(1, Math.min(stepItems.length, view.stage || 1));
+      if (nextStage !== currentStage) {
+        currentStage = nextStage;
+        stageStartTime = Date.now();
+        // A new stage starts with no denominator until it reports one.
+        stageRealProgress = null;
+      }
+
+      // 1. Status Headline
+      var newMsg = view.message || '正在启动 DSH 服务...';
+      if (statusEl.textContent !== newMsg) {
+        statusEl.classList.add('fade-trans');
+        setTimeout(function () {
+          statusEl.textContent = newMsg;
+          statusEl.classList.remove('fade-trans');
+        }, 100);
+      }
+
+      // 2. Theme Adaptation & Transparent Titlebar Color Sync
+      var theme = view.theme === 'dark' ? 'dark' : 'light';
+      root.setAttribute('data-theme', theme);
+      if (metaTheme) {
+        // Sets alpha 0 so window controls stay 100% transparent on Windows while passing luminance
+        metaTheme.content = theme === 'dark' ? 'rgba(7, 10, 19, 0)' : 'rgba(240, 245, 253, 0)';
+      }
+
+      // 3. Progress calculation (Linear & Guaranteed 100% on Stage 5)
+      var stageMeta = STAGES[currentStage - 1] || STAGES[0];
+
+      if (currentStage >= 5 && (view.progress === 1 || view.stage === 5)) {
+        stageRealProgress = 1;
+        targetProgress = 1.00;
+        barWrap.setAttribute('data-mode', 'determinate');
+      } else if (typeof view.progress === 'number' && isFinite(view.progress)) {
+        var bounded = Math.max(0, Math.min(1, view.progress));
+        stageRealProgress = bounded;
+        var mapped = stageMeta.from + (stageMeta.to - stageMeta.from) * bounded;
+        // Never regress: a stage that reported no denominator may already have
+        // crawled forward, and the first real number can land behind that
+        // placeholder. Showing it would read as the bar going backwards.
+        targetProgress = Math.max(targetProgress, mapped);
+        barWrap.setAttribute('data-mode', 'determinate');
+      } else {
+        barWrap.setAttribute('data-mode', 'indeterminate');
+        if (stageRealProgress === null) {
+          var linearTarget = crawlTarget();
+          if (linearTarget > targetProgress) targetProgress = linearTarget;
+        }
+      }
+      animateBar();
+
+      // 5. Brand stamp & Version
+      if (view.brand) {
+        if (view.brand.name) nameEl.textContent = 'DSH';
+        versionEl.textContent = view.brand.version ? 'v' + view.brand.version : 'v0.15.1';
+      }
+      if (typeof view.saying === 'string' && view.saying !== '') {
+        sayingEl.textContent = view.saying;
+      }
+
+      // 6. Localization
+      if (view.skeleton) {
+        for (var k = 0; k < stepItems.length && k < view.skeleton.steps.length; k++) {
+          var stepText = stepItems[k].querySelector('.step-text');
+          if (stepText) stepText.textContent = view.skeleton.steps[k];
+        }
+        if (hintEl && view.skeleton.hint) hintEl.textContent = view.skeleton.hint;
+        if (failureHint && view.skeleton.failureHint) failureHint.textContent = view.skeleton.failureHint;
+      }
+
+      // 7. Pause control
+      pauseBtn.hidden = view.pausable !== true;
+      pauseBtn.textContent = view.paused === true
+        ? (view.skeleton ? view.skeleton.resume : '继续下载')
+        : (view.skeleton ? view.skeleton.pause : '暂停下载');
+
+      if (view.pausable !== true && pendingPause !== null) {
+        var settle = pendingPause;
+        pendingPause = null;
+        settle(false);
+      }
+
+      // 8. Provenance
+      digestEl.textContent = view.digest ? '运行时已校验 · ' + view.digest : '';
+      digestEl.hidden = !view.digest;
+    }
+
+    pauseBtn.addEventListener('click', function () {
       if (pendingPause === null) return;
       var resolve = pendingPause;
       pendingPause = null;
       resolve(true);
     });
 
-    /**
-     * Sound is OFF on entry and the film plays muted, because a first-launch
-     * page has had no user gesture: an unmuted autoplay would be refused
-     * outright. This click is that gesture, so turning sound ON works — and it
-     * costs nothing but a preference-free toggle (nothing is persisted: the next
-     * start opens muted again, which is what "default quiet" means).
-     */
-    function paintAudio() {
-      var on = video.muted !== true;
-      audio.setAttribute('aria-pressed', on ? 'true' : 'false');
-      var label = on ? soundLabels.off : soundLabels.on;
-      audio.setAttribute('aria-label', label);
-      audio.title = label;
-    }
-    audio.addEventListener('click', function () {
-      if (video.muted === true) {
-        video.muted = false;
-        // The gesture is in hand; a rejected play() would only mean the element
-        // never started, so put it back in motion and re-mute on failure.
-        var started = video.play();
-        if (started && typeof started.catch === 'function') {
-          started.catch(function () { video.muted = true; paintAudio(); });
-        }
-      } else {
-        video.muted = true;
-      }
-      paintAudio();
-    });
-    paintAudio();
-    // Reduced motion: hold the first frame instead of looping ten seconds of
-    // movement behind the status text. The backdrop holds with it — a still
-    // blurred frame is exactly as good a band-filler as a moving one.
-    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      video.autoplay = false;
-      backdrop.autoplay = false;
-      try { video.pause(); } catch (error) { /* already paused */ }
-      try { backdrop.pause(); } catch (error) { /* already paused */ }
-    }
-
-    /**
-     * Arm the control for exactly one click. Resolves true when clicked, false
-     * when the boot settles it because the download moved on — the shell AWAITS
-     * this promise, so it must settle on every path or the main process waits
-     * forever for a click that can no longer happen. Visibility and labels come
-     * from the pushed state (see render), never from here: the state is the
-     * single source of truth for what the user sees.
-     */
     window.__dshStartupAwaitPause = function () {
       return new Promise(function (resolve) { pendingPause = resolve; });
     };
 
-    function render(view) {
-      var stage = Math.max(0, Math.min(steps.length, view.stage || 0));
-      for (var i = 0; i < steps.length; i += 1) {
-        var state = stage === 0 ? '' : i + 1 < stage ? 'done' : i + 1 === stage ? 'current' : 'pending';
-        if (state === '') steps[i].removeAttribute('data-state');
-        else steps[i].setAttribute('data-state', state);
-      }
-      status.textContent = view.message || '';
-      // Appearance and brand: pushed like everything else, so a reloaded page
-      // (the replay path) comes back in the same theme with the same version.
-      root.setAttribute('data-theme', view.theme === 'dark' ? 'dark' : 'light');
-      if (view.brand) {
-        if (view.brand.name) name.textContent = view.brand.name;
-        version.textContent = view.brand.version ? 'v' + view.brand.version : '';
-      }
-      // Skeleton copy: the page ships Chinese fallbacks so it renders before
-      // any injection; these replace them with the shell's language.
-      if (view.skeleton) {
-        for (var s = 0; s < steps.length && s < view.skeleton.steps.length; s += 1) {
-          steps[s].textContent = view.skeleton.steps[s];
-        }
-        if (headerHint) headerHint.textContent = view.skeleton.hint;
-        if (failureHint) failureHint.textContent = view.skeleton.failureHint;
-        if (view.skeleton.soundOn) soundLabels.on = view.skeleton.soundOn;
-        if (view.skeleton.soundOff) soundLabels.off = view.skeleton.soundOff;
-        paintAudio();
-      }
-      // The pause control belongs to the download step only. Its visibility and
-      // label follow the pushed state, so a status change is always reflected
-      // even when no awaiter is parked at that instant.
-      pauseButton.hidden = view.pausable !== true;
-      actions.hidden = view.pausable !== true;
-      pauseButton.textContent = view.paused === true
-        ? (view.skeleton ? view.skeleton.resume : '继续下载')
-        : (view.skeleton ? view.skeleton.pause : '暂停下载');
-      // The shell keeps a promise parked on the control: settling it as "not
-      // applicable" here is what stops that promise from leaking when the
-      // download ends or the boot fails.
-      if (view.pausable !== true && pendingPause !== null) {
-        var settle = pendingPause;
-        pendingPause = null;
-        settle(false);
-      }
-      // Verification note: only ever shown when the shell has something true to
-      // say (a recorded digest for this install), never as a generic badge.
-      digest.textContent = view.digest ? '运行时已校验 · ' + view.digest : '';
-      digest.hidden = !view.digest;
-      if (typeof view.saying === 'string' && view.saying !== '') saying.textContent = view.saying;
-      var progress = view.progress;
-      if (typeof progress === 'number' && isFinite(progress)) {
-        var whole = Math.min(100, Math.max(0, Math.round(progress * 100)));
-        bar.setAttribute('data-mode', 'determinate');
-        bar.setAttribute('aria-valuenow', String(whole));
-        fill.style.width = whole + '%';
-        percent.textContent = whole + '%';
-        percent.hidden = false;
-      } else {
-        // Indeterminate: extraction lists the archive before it can report a
-        // denominator, and a frozen bar over that span reads as a hang.
-        bar.setAttribute('data-mode', 'indeterminate');
-        bar.removeAttribute('aria-valuenow');
-        fill.style.width = '';
-        percent.hidden = true;
-      }
-    }
-
     function showFailure(config) {
       return new Promise(function (resolve) {
-        errorTitle.textContent = config.title || '';
+        errorTitle.textContent = config.title || '系统启动未能完成';
         errorDetail.textContent = config.detail || '';
         errorDetail.hidden = !config.detail;
         errorActions.textContent = '';
         var answered = false;
         var buttons = config.actions || [];
         buttons.forEach(function (action) {
-          var button = document.createElement('button');
-          button.type = 'button';
-          button.textContent = action.label;
-          if (action.primary) button.setAttribute('data-primary', 'true');
-          button.addEventListener('click', function () {
-            // One answer per card: the injected promise must settle once.
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = action.label;
+          if (action.primary) btn.setAttribute('data-primary', 'true');
+          btn.addEventListener('click', function () {
             if (answered) return;
             answered = true;
-            for (var i = 0; i < errorActions.children.length; i += 1) {
-              errorActions.children[i].disabled = true;
+            for (var m = 0; m < errorActions.children.length; m++) {
+              errorActions.children[m].disabled = true;
             }
             resolve(action.id);
           });
-          errorActions.appendChild(button);
+          errorActions.appendChild(btn);
         });
-        errorBox.hidden = false;
-        // The card is the only thing left to act on; the step rail and the bar
-        // behind it are history, so take the focus to the primary answer.
-        var primary = errorActions.querySelector('button[data-primary]');
-        if (primary) primary.focus();
+        errorSheet.hidden = false;
+        errorMask.hidden = false;
+        var primaryBtn = errorActions.querySelector('button[data-primary="true"]');
+        if (primaryBtn) primaryBtn.focus();
       });
     }
 
     api.onView = function (view) {
-      // A new progress state means the boot moved on (e.g. the retry after a
-      // failure); the stale failure card must not stay on screen.
-      errorBox.hidden = true;
+      errorSheet.hidden = true;
+      errorMask.hidden = true;
       render(view);
     };
     api.onFailure = showFailure;
 
-    if (api.view) { var view = api.view; api.view = null; api.onView(view); }
-    if (api.failure) {
-      var pending = api.failure;
-      api.failure = null;
-      showFailure(pending.config).then(pending.resolve);
+    // Drain early calls
+    if (api.view) {
+      var qv = api.view;
+      api.view = null;
+      api.onView(qv);
     }
+    if (api.failure) {
+      var qf = api.failure;
+      api.failure = null;
+      showFailure(qf.config).then(qf.resolve);
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    setMilestoneNodes(0);
+    requestAnimationFrame(renderAnimation);
   })();
   </script>
 </body>
