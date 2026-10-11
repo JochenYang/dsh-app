@@ -47,6 +47,12 @@ body [data-shortcut-modal="settings"] [class*="Close"] { -webkit-app-region: no-
    exactly as before. */
 body [class*="_footerActions"] { flex-direction: column; align-items: stretch; }
 body [class*="_footerActions"] > * { flex: none; width: 100%; }
+/* Image lightbox: its close control is painted at the viewport's top-right corner
+   (position: fixed; top: 20px), the box this frameless window's native buttons
+   own, so it renders under them. Drop it below the caption band. */
+html[data-windows-titlebar]:not([data-fullscreen]) [class*="_backdrop"] > [class*="_close"] {
+  top: calc(${OVERLAY_HEIGHT}px + 20px);
+}
 html body {
   --dsw-menu-surface-fill: rgba(248, 249, 250, 0.96);
   --dsw-specific-menu: rgba(248, 249, 250, 0.96);

@@ -98,6 +98,35 @@ test('the caption layout is the kernel\'s job, not a pile of per-surface padding
   }
 })
 
+// The image lightbox's CLOSE CONTROL, and why the shell has to move it.
+//
+// Measured on the installed 0.2.0-rc.2 build: the primitive paints the control
+// `position: fixed; top: 20px; right: 20px` — the viewport's top-right corner,
+// which in this frameless window is the box the native window buttons own
+// (`titleBarOverlay`), so the control renders underneath them and reads as a
+// clipped circle (reported from a packaged build by opening an image in a
+// conversation). The kernel's other overlays already clear the caption: Modal's
+// close is in-flow inside its dialog and its mask starts at
+// `--dsh-frame-chrome-top`. Fullscreen has no window buttons, so the correction
+// must drop there — upstream's own rule does the same by zeroing that inset.
+test('the image lightbox\'s close control clears the caption band', () => {
+  // Comments stripped: the prose above names the selectors this test asserts on.
+  const css = literal(readFileSync(path.join(ROOT, 'src/main/window.ts'), 'utf8'), 'DESKTOP_CHROME_CSS')
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+  // Slice from the selector to the rule's own closing line: a brace-matching
+  // regex would stop inside the declaration's `${...}` interpolation.
+  const at = css.indexOf('html[data-windows-titlebar]:not([data-fullscreen]) [class*="_backdrop"]')
+  assert.notEqual(at, -1,
+    'without an offset the lightbox close renders under the native window buttons')
+  const end = css.indexOf('\n}', at)
+  assert.notEqual(end, -1, 'the lightbox rule must be a rule of its own')
+  const rule = css.slice(at, end + 2)
+  assert.match(rule, /\[class\*="_backdrop"\]\s*>\s*\[class\*="_close"\]\s*\{/u,
+    'scope it to the lightbox close: other `_close` controls are in-flow inside their own dialogs')
+  assert.match(rule, /top:\s*calc\(\$\{OVERLAY_HEIGHT\}px \+ 20px\);/u,
+    'the control must move below the caption band, keeping its own 20px gap')
+})
+
 // The caption band's COLOUR, and why the sampler must not walk the DOM for it.
 //
 // The kernel paints the caption row with `--dsw-specific-sidebar-fill` — its own

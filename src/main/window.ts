@@ -492,6 +492,20 @@ body [data-shortcut-modal="settings"] [class*="Close"] { -webkit-app-region: no-
    exactly as before. */
 body [class*="_footerActions"] { flex-direction: column; align-items: stretch; }
 body [class*="_footerActions"] > * { flex: none; width: 100%; }
+/* The image lightbox's close control lands in the window-button zone.
+   Measured on the installed 0.2.0-rc.2 build: the primitive paints it
+   position: fixed; top: 20px; right: 20px — the viewport's top-right corner, which
+   is the box the native window buttons own in this frameless window, so the control
+   renders underneath them and reads as a clipped circle (reported from a packaged
+   build by opening an image in a conversation). The kernel's other overlays already
+   clear the caption: Modal's close is in-flow inside its dialog, and the modal mask
+   starts at the frame-chrome-top variable. Drop the lightbox's control below the
+   band; fullscreen has no window buttons, so it keeps the primitive's own 20px. A
+   later kernel line reworks this markup — the control moves into a stage already
+   inset by that same variable — where this selector stops matching on its own. */
+html[data-windows-titlebar]:not([data-fullscreen]) [class*="_backdrop"] > [class*="_close"] {
+  top: calc(${OVERLAY_HEIGHT}px + 20px);
+}
 /* The right dock's tab strip and the schedule page heading used to be padded
    clear of the native window controls here (140px each). The caption marker makes
    the frame reserve that strip, so the kernel positions both itself — and the
