@@ -512,21 +512,27 @@ function listsOf(
 ): {
   lists: CatalogEntry[][]
   failed: Array<{ url: string, reason: HostText }>
+  /** Sources whose contribution is LIVE (fresh entries or a confirmed 304). */
+  served: number
   /** Rows whose origin answered 304, keyed by URL: their cached state survives as-is. */
   revalidated: Readonly<Record<string, CachedSourceState>>
 } {
   const lists: CatalogEntry[][] = []
   const failed: Array<{ url: string, reason: HostText }> = []
   const revalidated: Record<string, CachedSourceState> = {}
+  let served = 0
   for (const result of results) {
-    if ('entries' in result) lists.push([...result.entries])
-    else if ('notModified' in result) {
+    if ('entries' in result) {
+      lists.push([...result.entries])
+      served += 1
+    } else if ('notModified' in result) {
       // The cached copy is confirmed current: reuse it, validators included
       // (the next refresh revalidates against the same origin state).
       const cached = cache?.sources[result.url]
       if (cached !== undefined) {
         lists.push([...cached.entries])
         revalidated[result.url] = cached
+        served += 1
       } else {
         // A 304 without a local copy cannot render anything; treat it as a
         // failure so the panel's normal failure path reports it.
@@ -535,9 +541,27 @@ function listsOf(
           reason: { code: 'catalog.notModifiedNoCache', text: 'the source answered "not modified" but no cached copy exists' },
         })
       }
-    } else failed.push({ url: result.url, reason: result.reason })
+    } else {
+      failed.push({ url: result.url, reason: result.reason })
+      // A failed source with a cached row still lends its rows — but only
+      // into THIS payload: the flow below keys the live/stale decision on
+      // `served`, so a wholesale outage still takes the stale-rescue branch
+      // (same rows via cachePayload, marked `stale`, nothing written). The
+      // measured shape here: one dead 4282-row source must not shrink the
+      // list to the survivors. Known trade, accepted: the lent rows ride a
+      // payload stamped `cachedAt: now`, so the panel's age hint reads
+      // fresher than those rows are; the failure reason alongside tells the
+      // user which source did not refresh. Also the merge-order note: the
+      // lent rows enter `lists` in source order, so a failed FIRST source's
+      // rows outrank a later source's live same-package rows (npm names are
+      // the merge key) — last write wins stays with the leading source.
+      const cached = cache?.sources[result.url]
+      if (cached !== undefined && cached.failed === undefined && cached.entries.length > 0) {
+        lists.push([...cached.entries])
+      }
+    }
   }
-  return { lists, failed, revalidated }
+  return { lists, failed, served, revalidated }
 }
 
 /**
@@ -609,8 +633,11 @@ export interface CatalogResolution {
  * 2. otherwise fetch all sources concurrently, each with its cached
  *    validators (`If-None-Match` / `If-Modified-Since`) — a 304 keeps the
  *    cached entries at zero bytes transferred, any success replaces that
- *    source's rows;
- * 3. every source failed → fall back to the stale cache (marked `stale`);
+ *    source's rows, and a failed source with a cached row lends its rows to
+ *    THIS payload (its failure still reaches `failed`, and the refreshed
+ *    cache records the failure so the next open retries it);
+ * 3. every source failed with nothing live → fall back to the stale cache
+ *    (marked `stale`, nothing written);
  * 4. no cache either → render the bundled offline snapshot (`snapshot`);
  * 5. nothing at all → an empty payload whose failed list drives the panel's
  *    prominent reload box.
@@ -640,16 +667,23 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
     return { ...(row.etag !== undefined ? { etag: row.etag } : {}), ...(row.modified !== undefined ? { modified: row.modified } : {}) }
   }
   const results = await Promise.all(sources.map(url => deps.fetchSource(url, validatorsOf(url))))
-  const { lists, failed, revalidated } = listsOf(results, cache)
-  if (lists.length > 0) {
+  const { lists, failed, served, revalidated } = listsOf(results, cache)
+  if (served > 0) {
+    // At least one source answered live (fresh entries or a confirmed 304):
+    // this is a refresh, so stamp a new timestamp and persist — including the
+    // per-source failure rows a partial outage leaves behind. A source that
+    // failed but LENT its cached rows counts as unserved: the next open must
+    // retry it, and its old rows stay in the cache for that retry to read.
     const fetchedAt = deps.now()
     return {
       payload: { plugins: withRepoKeys(mergeCatalogs(lists)), failed, sources, cachedAt: fetchedAt },
       cacheToWrite: buildCatalogCache(fetchedAt, results, revalidated),
     }
   }
-  // Every source failed: the last good snapshot (even an expired one) beats an
-  // empty panel, and the current failure reasons still reach the user.
+  // Every source failed with nothing live: the last good snapshot (even an
+  // expired one) beats an empty panel, and the current failure reasons still
+  // reach the user. Nothing is written — the old rows stay the cache, so a
+  // later open retries from the same base.
   if (cache !== null) {
     const payload = cachePayload(cache, sources, false)
     return { payload: { ...payload, failed }, cacheToWrite: null }

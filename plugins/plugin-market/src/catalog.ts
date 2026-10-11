@@ -39,21 +39,32 @@ import { gunzipSync } from 'node:zlib'
 import { MarketExecutionError, type HostText } from './errors.ts'
 import { PACKAGE_NAME_PATTERN } from './npm.ts'
 
-/** The primary directory preset into a fresh store (first run only; user-removable). */
+/**
+ * The offline-snapshot source: `scripts/generate-market-snapshot.mjs` fetches
+ * this document to build the plugin's bundled recovery snapshot
+ * (`src/catalog-snapshot.json`), and `src/snapshot-builder.ts` labels it. NOT a
+ * preset source any more (removed from {@link DEFAULT_SOURCE_URLS} on
+ * 2026-10-11): the host is GitHub Pages behind Fastly, which public proxies
+ * refuse (hostnames outside github.com) and a mainland link without a proxy
+ * serves in 6-8 s for 5 MB — an expired catalog open waited on it and was the
+ * reported "the market takes forever to open". The npm mirror below carries the
+ * byte-identical document (verified 2026-10-11: sha256 equal), so dropping this
+ * from the live source list costs at most a day of entry lag; a user who wants
+ * it back adds it on the panel's Sources tab.
+ */
 export const DEFAULT_SOURCE_URL = 'https://awesome-dsh-plugin.com/plugins.json'
 
 /**
  * The catalog as a PUBLISHED NPM PACKAGE, read through a China npm mirror.
  *
- * The catalog's own host (above) is served from GitHub Pages, and public
- * GitHub proxies refuse hostnames outside github.com — so from a mainland
- * link without a proxy the 5 MB body takes 6-8 s. Published to npm it rides
- * the same mirror every plugin install already uses: measured against the
- * Tencent mirror 2026-10-03, the metadata + tarball round trip is 1.2 MB in
- * ~0.7 s, and the package carries a meaningful version that doubles as the
- * cache validator (skip the tarball entirely when the held version matches).
- * Same data, same schema as the origin's `plugins.json` (verified: 4412
- * entries with downloads/stars/version per entry).
+ * This is the LIVE source list's comprehensive directory. It carries the same
+ * document the GitHub-Pages origin ({@link DEFAULT_SOURCE_URL}) serves —
+ * published there daily, byte-identical (verified 2026-10-11: sha256 equal) —
+ * but rides the same mirror every plugin install already uses: measured
+ * against the Tencent mirror 2026-10-03, the metadata + tarball round trip is
+ * 1.2 MB in ~0.7 s, and the package carries a meaningful version that doubles
+ * as the cache validator (skip the tarball entirely when the held version
+ * matches).
  */
 export const DEFAULT_CATALOG_PACKAGE = 'dsh-plugin-catalog'
 
@@ -64,11 +75,11 @@ export const DEFAULT_NPM_MIRROR = 'https://mirrors.cloud.tencent.com/npm'
  * The secondary preset: a China-reachable community store. The URL pins the
  * first page only — full pagination is deliberately out of scope (a 13k-entry
  * catalog would blow every entry cap for no browsing benefit; the panel is a
- * discovery surface, the primary source stays the comprehensive one).
+ * discovery surface, the npm-package catalog above stays the comprehensive
+ * one).
  */
 export const DEFAULT_SECONDARY_SOURCE_URL = 'https://deepseek1024.com/api/v2/plugins?page=1&limit=100'
 
-/** Fresh-store seed list (first run only; user-removable). */
 /**
  * The scheme-prefixed address of the npm-package catalog source. Not a real
  * URL — `validateSourceUrl` special-cases the scheme — but it keeps every
@@ -76,7 +87,19 @@ export const DEFAULT_SECONDARY_SOURCE_URL = 'https://deepseek1024.com/api/v2/plu
  */
 export const NPM_PACKAGE_SOURCE_URL = `npm:${DEFAULT_CATALOG_PACKAGE}@${DEFAULT_NPM_MIRROR}`
 
-export const DEFAULT_SOURCE_URLS: readonly string[] = [NPM_PACKAGE_SOURCE_URL, DEFAULT_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
+/**
+ * Fresh-store seed list (first run only; user-removable).
+ *
+ * Two sources, both China-reachable without a proxy. The npm-package catalog
+ * (byte-identical to the GitHub-Pages document, verified 2026-10-11) leads; the
+ * community store follows. The GitHub-Pages origin
+ * ({@link DEFAULT_SOURCE_URL}) is deliberately ABSENT — see its doc comment:
+ * it is the snapshot builder's fetch source, and an expired open must not wait
+ * on a 5 MB body the mirror already serves (measured on a mainland link with a
+ * proxy off: the mirror round-trips in under a second, the origin in 6-8 s or
+ * not at all — an expired open then stalls on it alone, the original report).
+ */
+export const DEFAULT_SOURCE_URLS: readonly string[] = [NPM_PACKAGE_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
 
 /** One browsable catalog entry (already validated). */
 export interface CatalogEntry {

@@ -25,12 +25,22 @@ describe('sources store', () => {
   })
   afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-  it('presets the npm-mirror catalog first, then the two https directories', () => {
+  it('presets the npm-mirror catalog first, then the community store', () => {
     assert.deepEqual(loadSources(path, () => {}), [...DEFAULT_SOURCE_URLS])
     // The npm-package catalog is the FIRST request the panel makes — it is
     // the China-fast path — so it must lead the preset list.
-    assert.equal(DEFAULT_SOURCE_URLS.length, 3)
+    assert.equal(DEFAULT_SOURCE_URLS.length, 2)
     assert.match(DEFAULT_SOURCE_URLS[0], /^npm:/)
+  })
+
+  it('presets NO GitHub-Pages source (the expired-open stall)', () => {
+    // The awesome-dsh-plugin.com origin was dropped from the preset list on
+    // 2026-10-11: behind Fastly, refused by public proxies, 5 MB in 6-8 s on a
+    // mainland link — an expired open waited on it alone. It survives only as
+    // the OFFLINE-SNAPSHOT fetch source (see DEFAULT_SOURCE_URL's doc), which
+    // runs at snapshot-build time, never on the request path.
+    assert.ok(DEFAULT_SOURCE_URLS.every(url => !url.includes('awesome-dsh-plugin.com')),
+      'the GitHub-Pages origin must not re-enter the live preset list')
   })
 
   it('respects an existing empty list (no preset re-injection)', () => {

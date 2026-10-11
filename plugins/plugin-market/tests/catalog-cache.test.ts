@@ -209,6 +209,80 @@ describe('resolveCatalog (TTL cache flow)', () => {
     assert.deepEqual(cacheToWrite?.sources[URL_A], { entries: [entry('pkg-a')] })
   })
 
+  it('a failed source with a cached row lends its rows instead of shrinking the list', async () => {
+    // The measured shape this guards: the 4282-row npm mirror dies while the
+    // 100-row community store answers — the panel must not quietly become the
+    // 100-row list. The failure is still reported, and the rebuilt cache
+    // records the failure so the next open retries the dead source instead of
+    // trusting the lent rows.
+    const cache = buildCatalogCache(10_000 - CATALOG_CACHE_TTL_MS, [
+      okSource(URL_A, ['pkg-a1', 'pkg-a2']),
+      okSource(URL_B, ['pkg-b']),
+    ])
+    const { fetches, run } = harness({
+      cache,
+      results: [failedSource(URL_A, TIMEOUT_REASON), okSource(URL_B, ['pkg-b'])],
+    })
+    const { payload, cacheToWrite } = await run()
+    assert.deepEqual(fetches, sources)
+    // A live refresh (rows landed), so neither cached nor stale marks.
+    assert.equal(payload.cached, undefined)
+    assert.equal(payload.stale, undefined)
+    assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a1', 'pkg-a2', 'pkg-b'])
+    assert.deepEqual(payload.failed, [{ url: URL_A, reason: TIMEOUT_REASON }])
+    // The rebuilt cache keeps the failure row for the dead source — the lent
+    // rows are a payload convenience, never a substitute for a retry.
+    assert.deepEqual(cacheToWrite?.sources[URL_A], { entries: [], failed: TIMEOUT_REASON })
+    assert.deepEqual(cacheToWrite?.sources[URL_B], { entries: [entry('pkg-b')] })
+  })
+
+  it('does not lend rows from a cached row that was itself a failure', async () => {
+    // URL_A's cached row is a failure row (it failed last open too): there is
+    // nothing to lend, so the payload carries the surviving source alone.
+    const cache = buildCatalogCache(10_000 - CATALOG_CACHE_TTL_MS, [
+      failedSource(URL_A, FAILED_REASON),
+      okSource(URL_B, ['pkg-b']),
+    ])
+    const { run } = harness({ cache, results: [failedSource(URL_A, TIMEOUT_REASON), okSource(URL_B, ['pkg-b'])] })
+    const { payload, cacheToWrite } = await run()
+    assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-b'])
+    assert.deepEqual(payload.failed, [{ url: URL_A, reason: TIMEOUT_REASON }])
+    assert.deepEqual(cacheToWrite?.sources[URL_A], { entries: [], failed: TIMEOUT_REASON })
+  })
+
+  it('every source failed keeps the stale-rescue branch: stale payload, nothing written', async () => {
+    // The lending rule is payload-only: with NO live source anywhere the flow
+    // must not write a snapshot of pure failure rows over the last good cache
+    // (that write would hide the old rows from the next open's retry).
+    const cache = buildCatalogCache(10_000, [
+      okSource(URL_A, ['pkg-a', 'pkg-b']),
+      okSource(URL_B, ['pkg-c']),
+    ])
+    const { fetches, run } = harness({
+      cache,
+      now: () => 10_000 + CATALOG_CACHE_TTL_MS + 1,
+      results: [failedSource(URL_A, TIMEOUT_REASON), failedSource(URL_B, FAILED_REASON)],
+    })
+    const { payload, cacheToWrite } = await run()
+    assert.deepEqual(fetches, sources)
+    assert.equal(cacheToWrite, null)
+    assert.equal(payload.stale, true)
+    assert.equal(payload.cachedAt, 10_000)
+    assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a', 'pkg-b', 'pkg-c'])
+    assert.deepEqual(payload.failed, [
+      { url: URL_A, reason: TIMEOUT_REASON },
+      { url: URL_B, reason: FAILED_REASON },
+    ])
+  })
+
+  it('a partial outage stamps a fresh cachedAt (the panel shows live data)', async () => {
+    const cache = buildCatalogCache(10_000 - CATALOG_CACHE_TTL_MS, [okSource(URL_A, ['pkg-old'])])
+    const { run } = harness({ cache, results: [okSource(URL_A, ['pkg-a']), failedSource(URL_B, FAILED_REASON)] })
+    const { payload } = await run()
+    assert.equal(payload.cachedAt, 10_000)
+    assert.equal(payload.stale, undefined)
+  })
+
   it('falls back to the stale cache when every source fails', async () => {
     // The cache is expired (beyond the TTL) — exactly the "stale rescue" case.
     const cache = buildCatalogCache(10_000, [

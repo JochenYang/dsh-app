@@ -120,18 +120,27 @@ function hashCodeOf(text: string): number {
 
 /**
  * The card avatar: the author's real GitHub avatar when the entry carries a
- * github repo page (every entry of the npm-mirror catalog does — the avatar
- * is derivable as `github.com/<owner>.png`), falling back to the first
- * letter of the OWNER on load error, then to the plugin name. The letter
- * fallback reads the owner, not the (possibly rewritten) title, so the
- * mark and the byline always name the same author.
+ * github repo page (every entry of the npm-mirror catalog does), falling back
+ * to the first letter of the OWNER on load error, then to the plugin name.
+ * The letter fallback reads the owner, not the (possibly rewritten) title, so
+ * the mark and the byline always name the same author.
+ *
+ * The URL hits `avatars.githubusercontent.com` DIRECTLY, never the
+ * `github.com/<owner>.png` redirect (measured 2026-10-11 on a proxyless
+ * mainland link: the avatars host answers in ~0.3 s while github.com — the
+ * redirect's first hop — times out at 10-21 s, so every avatar's first load
+ * spent its whole budget on a hop that carries no image). The owner-name form
+ * of the avatars host serves the same picture; `size=96` matches dsh-market's
+ * choice, comfortably above the 20px the card renders.
  */
 function MarketAvatar({ entry }: { entry: CatalogEntry }): ReactNode {
   const [failed, setFailed] = useState(false)
   const owner = entry.owner ?? entry.name
   const repoUrl = entry.homepage ?? ''
   const repoMatch = /^https:\/\/github\.com\/([A-Za-z0-9-]{1,39})(?:\/|$)/.exec(repoUrl)
-  const avatarUrl = repoMatch !== null ? `https://github.com/${repoMatch[1]}.png` : ''
+  const avatarUrl = repoMatch !== null
+    ? `https://avatars.githubusercontent.com/${encodeURIComponent(repoMatch[1])}?size=96`
+    : ''
   const src = !failed && avatarUrl !== '' ? avatarUrl : ''
   if (src !== '') {
     return (
