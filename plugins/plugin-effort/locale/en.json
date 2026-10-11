@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Reasoning effort",
+    "description": "A draggable reasoning-effort track on the model menu's effort row: pick a level in one drag instead of drilling in and clicking. Levels come from the current model's own list and are resolved by id, so a model or provider switch cannot misplace the knob."
+  }
+}

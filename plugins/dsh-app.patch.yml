@@ -88,6 +88,18 @@
 #   rewritten by the shell on every start). Engine failures are contained per
 #   engine by the chain and never fail the boot; a fetch failure is a coded
 #   per-request error, never a boot failure.
+# - effort: a draggable reasoning-effort track placed on the OFFICIAL model
+#   menu's 推理等级 row. The kernel's model-selection package contributes no slot
+#   inside that menu, so the browser half injects ONE container beside that row
+#   and leaves the official DOM untouched (no inline styles, no class edits); it
+#   identifies the row from the kernel's OWN dictionary, and when neither the
+#   label nor the two-row structure matches it injects nothing at all — a missing
+#   track costs nothing, a track on the wrong row is a wrong control. Levels come
+#   from the current model's own advertised list and are resolved by id, never by
+#   position; the value is written through `ctx.modelDirectories`, the same
+#   per-session directory the official seat and the /model popup read. It also
+#   re-triggers the official menu's own placement after growing the card, which
+#   is what keeps the menu from overlapping the composer.
 
 - insert:
     - id: brand
@@ -196,6 +208,9 @@
 
     - id: rewind
       name: '@dsh-app/plugin-rewind'
+
+    - id: effort
+      name: '@dsh-app/plugin-effort'
 
 # Web search seam: point BOTH capabilities at the suite's providers.
 #

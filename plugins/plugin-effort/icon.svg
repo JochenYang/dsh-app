@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" fill="none">
+  <defs>
+    <linearGradient id="dshAppEffortGauge" x1="5" y1="20" x2="31" y2="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5B9BF8" />
+      <stop offset="0.5" stop-color="#3F77D8" />
+      <stop offset="1" stop-color="#4B3FD6" />
+    </linearGradient>
+  </defs>
+  <!-- The dial: three band segments with even gaps, over the top half of a
+       circle centred on the needle's pivot. -->
+  <path d="M5 22A13 13 0 0 1 10 11.76L12.71 15.22A8.6 8.6 0 0 0 9.4 22Z" fill="url(#dshAppEffortGauge)" />
+  <path d="M11.5 10.74A13 13 0 0 1 24.5 10.74L22.3 14.55A8.6 8.6 0 0 0 13.7 14.55Z" fill="url(#dshAppEffortGauge)" />
+  <path d="M26 11.76A13 13 0 0 1 31 22L26.6 22A8.6 8.6 0 0 0 23.3 15.22Z" fill="url(#dshAppEffortGauge)" />
+  <!-- The needle (a tapered wedge, broad at the pivot) and its ring. -->
+  <path d="M17.77 20.73L25.09 14.7L25.83 15.38L20.33 23.11Z" fill="#3A31B8" />
+  <circle cx="18.5" cy="22.5" r="3.4" fill="#3A31B8" />
+  <circle cx="18.5" cy="22.5" r="1.3" fill="#fff" />
+  <!-- Motion sparks, in the suite's accent. -->
+  <g stroke="#67C7FE" stroke-width="1.9" stroke-linecap="round">
+    <path d="M26.9 10.2V7.3" />
+    <path d="M28.9 12.9 30.9 10.9" />
+    <path d="M29.6 16.7H32" />
+  </g>
+</svg>

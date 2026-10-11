@@ -34,7 +34,7 @@ halves; `npm` here, `pnpm` in the harness checkout; Node 22+.
 
 - `src/main/` shell (Electron main), `src/kernel/` kernel manager,
   `src/shared/` cross-cutting types, constants and the locale table.
-- `plugins/` the seventeen-plugin brand suite — see `plugins/AGENTS.md`.
+- `plugins/` the eighteen-plugin brand suite — see `plugins/AGENTS.md`.
 - `scripts/` build, smoke and probe tooling; `test/` root suites;
   `changesets/` the release-input fragments (see §7).
 - `static/` startup page, `resources/` icons, `docs/` documentation.

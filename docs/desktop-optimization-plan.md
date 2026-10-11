@@ -572,7 +572,7 @@ browser」——**UI 的语言由 UI 自己的设置/浏览器语言决定，与
 预设包 → 诊断 → 撤回隔离区、只有一个页签被选中且只有它留在 tab 顺序里、选中的页签对应一个可见页签面板，
 以及**切到第二个页签后第一个仍挂载**（`hidden` 而已，状态不丢）；`--sweep` 与 `--section 维护设置` 会依次点开三个页签分别统计残留汉字，
 所以原本单独成行的诊断页仍在扫。探针链接套件插件到**两个** scope（照 `src/main/brand-suite.ts`）——只链共享 fallback 时，
-内核的 profile 解析器不认套件包，十七个条目会全部以「Cannot find package」激活失败。
+内核的 profile 解析器不认套件包，十八个条目会全部以「Cannot find package」激活失败。
 
 **注意**：探针在 Electron（无控制台）里 `spawn` 控制台子进程，**必须带 `windowsHide: true`**，
 否则 Windows 会给它新开一个可见的控制台窗口（用户桌面会闪出终端）——已修，并在 AGENTS.md 记下这条。

@@ -24,6 +24,7 @@ const BASELINE = {
   'plugin-brand': 0,
   'plugin-client-ui': 1,
   'plugin-doc': 6,
+  'plugin-effort': 0,
   'plugin-hooks': 2,
   'plugin-market': 1,
   'plugin-mcp': 1,
