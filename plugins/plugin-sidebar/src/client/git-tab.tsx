@@ -26,6 +26,7 @@ import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { FsApiError, gitApi } from './api.ts'
 import type { GitActionValue, GitBranchList, GitStatusEntry, HostText } from './api.ts'
+import { groupByTopDir, rowPathOf, type GitListGroup, type GitListShape } from './git-list.ts'
 import { NS, type SidebarKey } from './locales.ts'
 
 /** The tab's namespace-bound translate, handed to the render helpers below. */
@@ -195,6 +196,8 @@ export function GitTab(props: GitTabProps): ReactNode {
   const [diffFor, setDiffFor] = useState<{ path: string, cached: boolean, text: string | undefined, truncated?: boolean, error: string | undefined, requestId: number } | undefined>(undefined)
   /** 变更 | 仓库文件 selection + the tracked-file listing. */
   const [listMode, setListMode] = useState<'changes' | 'files'>('changes')
+  /** Tree (grouped by top-level directory) or a flat list of full paths. */
+  const [shape, setShape] = useState<GitListShape>('tree')
   const [repoFiles, setRepoFiles] = useState<readonly string[] | undefined>(undefined)
   const [repoFilesTruncated, setRepoFilesTruncated] = useState(false)
   const [filesLoading, setFilesLoading] = useState(false)
@@ -586,25 +589,10 @@ export function GitTab(props: GitTabProps): ReactNode {
           ? t('sidebar.branch.unnamed')
           : t('sidebar.branch.named', { branch })
 
-  /** Group an entry list by its top-level directory (VS Code SCM tree view). */
-  const dirGroups = (list: readonly GitStatusEntry[]): { key: string, files: GitStatusEntry[] }[] => {
-    const byDir = new Map<string, GitStatusEntry[]>()
-    for (const entry of list) {
-      const slash = entry.path.indexOf('/')
-      const key = slash === -1 ? '' : entry.path.slice(0, slash)
-      const bucket = byDir.get(key) ?? []
-      bucket.push(entry)
-      byDir.set(key, bucket)
-    }
-    return [...byDir.entries()]
-      .sort(([a], [b]) => (a === '' ? '\uffff' : a).localeCompare(b === '' ? '\uffff' : b))
-      .map(([key, files]) => ({ key, files }))
-  }
-
   // Render-function row/group builders, CALLED DIRECTLY (never used as JSX
   // component tags): as inline components their identity would change every
   // render, remounting the whole list subtree and resetting its scroll.
-  const groupRow = (entry: GitStatusEntry, cached: boolean, readonly = false): ReactNode => {
+  const groupRow = (entry: GitStatusEntry, cached: boolean, readonly = false, label = entry.path): ReactNode => {
     // VS Code-style status letter: U untracked / M modified / D deleted / A added.
     const status = cached ? entry.indexStatus : entry.untracked ? '?' : entry.worktreeStatus
     const letter = status === '?' ? 'U' : status === ' ' ? '·' : status
@@ -616,7 +604,7 @@ export function GitTab(props: GitTabProps): ReactNode {
           <button type="button" className="dshAsbGit-rowPath"
             onClick={() => { openDiff(entry.path, cached, entry.untracked) }}>
             <span className={`dshAsbGit-letter${letter === 'U' ? ' dshAsbGit-letterNew' : cached ? ' dshAsbGit-letterStaged' : ''}`}>{letter}</span>
-            <span className="dshAsbGit-path">{entry.path}</span>
+            <span className="dshAsbGit-path">{label}</span>
           </button>
         </Tooltip>
         {!readonly ? (
@@ -644,8 +632,10 @@ export function GitTab(props: GitTabProps): ReactNode {
   }
 
   /** One directory group: expandable header + indented file rows (DEFAULT
-   * expanded — the tree opens fully so nothing is hidden behind a fold). */
-  const groupBlock = (group: { key: string, files: GitStatusEntry[] }, cached: boolean, readonly = false): ReactNode => {
+   * expanded — the tree opens fully so nothing is hidden behind a fold). The
+   * row label drops the group's own prefix: the header above it names that
+   * directory, so repeating it in every row is noise. */
+  const groupBlock = (group: GitListGroup<GitStatusEntry>, cached: boolean, readonly = false): ReactNode => {
     if (group.key === '') {
       return <>{group.files.map(entry => <Fragment key={entry.path}>{groupRow(entry, cached, readonly)}</Fragment>)}</>
     }
@@ -667,13 +657,29 @@ export function GitTab(props: GitTabProps): ReactNode {
         {open
           ? group.files.map(entry => (
               <div key={entry.path} className="dshAsbGit-fileRow">
-                {groupRow(entry, cached, readonly)}
+                {groupRow(entry, cached, readonly, rowPathOf(entry.path, group.key))}
               </div>
             ))
           : null}
       </>
     )
   }
+
+  /**
+   * Render one entry list in the chosen shape.
+   *
+   * `tree` groups by top-level directory (collapsible headers, rows labelled
+   * relative to their group); `flat` is one row per file carrying its FULL
+   * path, which is what a reader wants when they are hunting for a path they
+   * already know. The shape governs presentation only — the same rows, the
+   * same actions, the same click-to-diff behaviour either way.
+   */
+  const renderList = (list: readonly GitStatusEntry[], cached: boolean, readonly = false, keyPrefix = ''): ReactNode =>
+    shape === 'flat'
+      ? list.map(entry => <Fragment key={`${keyPrefix}${entry.path}`}>{groupRow(entry, cached, readonly)}</Fragment>)
+      : groupByTopDir(list).map(group => (
+          <Fragment key={`${keyPrefix}${group.key}`}>{groupBlock(group, cached, readonly)}</Fragment>
+        ))
 
   // --- status view: left = change list, right = diff preview (SAME two-column
   // pattern as the file view: clicking a row previews in the right pane,
@@ -708,6 +714,31 @@ export function GitTab(props: GitTabProps): ReactNode {
                 }
               }}>{t('sidebar.list.files')}</button>
             </div>
+          {/* Shape toggle: the same rows presented as a directory tree or as a
+              flat path list. Not a `tablist`: it changes how the current list
+              is drawn, not which list is shown, so `aria-pressed` is the
+              honest role and the content/file tabs above keep owning selection. */}
+          <div className="dshAsbGit-shape" role="group" aria-label={t('sidebar.shape.aria')}>
+            <Tooltip label={t('sidebar.shape.treeTitle')} side="bottom">
+              <button type="button" aria-pressed={shape === 'tree'} aria-label={t('sidebar.shape.tree')}
+                className={`dshAsbGit-shapeBtn${shape === 'tree' ? ' dshAsbGit-shapeOn' : ''}`}
+                onClick={() => { setShape('tree') }}>
+                <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                  <path d="M1 2h3M1 6h5M1 10h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none" />
+                  <path d="M5.5 2H11M6.5 6v-4M6.5 10V6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none" />
+                </svg>
+              </button>
+            </Tooltip>
+            <Tooltip label={t('sidebar.shape.listTitle')} side="bottom">
+              <button type="button" aria-pressed={shape === 'flat'} aria-label={t('sidebar.shape.list')}
+                className={`dshAsbGit-shapeBtn${shape === 'flat' ? ' dshAsbGit-shapeOn' : ''}`}
+                onClick={() => { setShape('flat') }}>
+                <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                  <path d="M1 3h10M1 6h10M1 9h10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none" />
+                </svg>
+              </button>
+            </Tooltip>
+          </div>
           <div className="dshAsbGit-tools">
             <button type="button" className="dshAsbGit-link" disabled={busy || statusLoading || sessionId === undefined || unstaged.length === 0}
               onClick={() => { void run(() => gitApi.action('stage', cwd, undefined, undefined, sessionId), t('sidebar.stageAll.done')) }}>{t('sidebar.stageAll')}</button>
@@ -727,11 +758,9 @@ export function GitTab(props: GitTabProps): ReactNode {
               {filesError !== undefined ? <p className="dshAsb-error" role="alert">{filesError} <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadRepoFiles(cwd, sessionId, viewGeneration.current) }}>{t('sidebar.retry')}</button></p> : null}
               {repoFilesTruncated ? <p className="dshAsbGit-warning">{t('sidebar.files.truncated')}</p> : null}
               {repoFiles !== undefined && repoFiles.length === 0 && filesError === undefined ? <p className="dshAsb-hint">{t('sidebar.files.empty')}</p> : null}
-              {dirGroups((repoFiles ?? []).map<GitStatusEntry>(path => ({
+              {renderList((repoFiles ?? []).map<GitStatusEntry>(path => ({
                 path, xy: '  ', indexStatus: ' ', worktreeStatus: ' ', staged: false, untracked: false,
-              }))).map(group => (
-                <Fragment key={`f:${group.key}`}>{groupBlock(group, false, true)}</Fragment>
-              ))}
+              })), false, true, 'f:')}
             </>
           )
           : (
@@ -741,14 +770,10 @@ export function GitTab(props: GitTabProps): ReactNode {
               {notice !== undefined ? <p className="dshAsb-notice" role="status">{notice}</p> : null}
               {error === undefined && !(statusLoading && entries.length === 0) ? (
                 <>
-                  {dirGroups(unstaged).map(group => (
-                    <Fragment key={`u:${group.key}`}>{groupBlock(group, false)}</Fragment>
-                  ))}
+                  {renderList(unstaged, false, false, 'u:')}
                   {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">{t('sidebar.status.clean')}</p> : null}
                   {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">{t('sidebar.status.staged', { count: staged.length })}</p> : null}
-                  {dirGroups(staged).map(group => (
-                    <Fragment key={`s:${group.key}`}>{groupBlock(group, true)}</Fragment>
-                  ))}
+                  {renderList(staged, true, false, 's:')}
                   {!statusLoading && entries.length > 0 && staged.length === 0 ? <p className="dshAsb-hint">{t('sidebar.status.noStaged')}</p> : null}
                 </>
               ) : null}
@@ -982,6 +1007,22 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit-segBtn { padding: 2px 0; border: none; border-bottom: 2px solid transparent; background: none; color: var(--dsw-alias-label-secondary, #64748b); cursor: pointer; font-size: 12px; }
 .dshAsbGit-segBtn:hover { color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAsbGit-segActive { color: var(--dsw-alias-brand-primary, #2563eb); border-bottom-color: var(--dsw-alias-brand-primary, #2563eb); }
+/* Shape toggle (tree / flat): two icon buttons on the head's right side of the
+   content tabs. Bordered so the pair reads as one control, filled for the
+   active shape — the seg tabs above are underline-only because they switch
+   CONTENT, while this pair switches PRESENTATION. */
+.dshAsbGit-shape { display: flex; gap: 0; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 7px; overflow: hidden; }
+.dshAsbGit-shapeBtn { display: grid; place-items: center; width: 22px; height: 20px; padding: 0; border: none; background: none; color: var(--dsw-alias-label-secondary, #64748b); cursor: pointer; }
+/* Hover must stay WEAKER than the selected fill, or hovering the inactive
+   shape reads as "this one is on" — the first version filled both with the same
+   grey and the selected state became unreadable. Selected = solid brand chip
+   with the primary button's foreground token (the commit button in this same
+   panel uses the pair), and its own hover is a no-op so the meaning never
+   flickers. */
+.dshAsbGit-shapeBtn:hover { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
+.dshAsbGit-shapeOn,
+.dshAsbGit-shapeOn:hover { background: var(--dsw-alias-brand-primary, #2563eb); color: var(--dsw-alias-label-primary-foreground, #fff); }
+.dshAsbGit-shapeBtn + .dshAsbGit-shapeBtn { border-left: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
 .dshAsbGit-hint { margin: 0; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11px; }
 .dshAsbGit-reviewFile { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border: none; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; font-size: 12.5px; width: 100%; min-width: 0; }
 .dshAsbGit-reviewFile:hover { background: rgba(148, 163, 184, 0.16); }
@@ -1048,6 +1089,6 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsb-error { margin: 2px 0; color: var(--dsw-alias-state-error-primary, #dc2626); font-size: 12px; }
 .dshAsb-notice { margin: 2px 0; color: var(--dsw-alias-state-success-primary, #16a34a); font-size: 12px; }
 .dshAsbGit-warning { margin: 2px 0; padding: 6px 8px; border-radius: 6px; background: rgba(234, 179, 8, .14); color: var(--dsw-alias-state-warn-primary, #a16207); font-size: 11px; }
-.dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible, .dshAsbGit-branchBtn:focus-visible, .dshAsbGit-syncBtn:focus-visible, .dshAsbGit-branchItem:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
+.dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-shapeBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible, .dshAsbGit-branchBtn:focus-visible, .dshAsbGit-syncBtn:focus-visible, .dshAsbGit-branchItem:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
 @media (hover: none), (pointer: coarse) { .dshAsbGit-rowActions { visibility: visible; opacity: 1; pointer-events: auto; } }
 `
