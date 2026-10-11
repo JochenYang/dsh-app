@@ -20,6 +20,7 @@ import {
   MAX_SOURCES,
   fetchCatalog,
   fetchCatalogFromNpmPackage,
+  gitTargetOf,
   mergeCatalogs,
   parseCatalog,
   validateSourceUrl,
@@ -232,16 +233,37 @@ describe('parseCatalog (aggregated directory format)', () => {
       name: 'x',
       categories: {},
       plugins: [
-        aggregatedEntry('NoNpm', { npm: null }),
+        // npm: null WITH a git install command is the real directory's shape
+        // for a git-only plugin — installable, not source-only.
+        aggregatedEntry('NoNpm', { npm: null, install: 'dsh plugin --profile web add github:someone/NoNpm' }),
         aggregatedEntry('BadNpm', { npm: 'not a package name' }),
         aggregatedEntry('EmptyNpm', { npm: '' }),
       ],
     }))
     assert.equal(entries.length, 3)
-    for (const entry of entries) {
+    const [gitRow] = entries
+    assert.deepEqual(gitRow, {
+      ...gitRow,
+      installable: true,
+      package: 'https://dir.example.com/p/someone/NoNpm/',
+      gitTarget: 'github:someone/NoNpm',
+    })
+    for (const entry of entries.slice(1)) {
       assert.equal(entry.installable, false)
       assert.equal(entry.package, `https://dir.example.com/p/someone/${entry.name}/`)
+      assert.equal(entry.gitTarget, undefined)
     }
+  })
+
+  it('an npm-less row whose install command is NOT a git target stays source-only', () => {
+    const entries = parseCatalog(JSON.stringify({
+      name: 'x',
+      categories: {},
+      plugins: [aggregatedEntry('NoNpm', { npm: null })],
+    }))
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0]?.installable, false)
+    assert.equal(entries[0]?.gitTarget, undefined)
   })
 
   it('falls the description back from zh to en, truncates long copy, and drops unusable entries', () => {
@@ -356,6 +378,9 @@ describe('parseCatalog (store directory format)', () => {
 
   it('degrades git-specifier and malformed install commands to source-only rows keyed by the store id', () => {
     const entries = parseCatalog(storeDocument([
+      // `#path:` stays source-only: monorepo subpaths are outside the accepted
+      // git-target shape, and rewriting one would promise a target the
+      // install chain cannot verify.
       storeEntry('GitOnly', { install: 'dsh plugin --profile web add github:someone/GitOnly#path:packages/x' }),
       storeEntry('NotDsh', { install: 'npm install pkg-not-dsh' }),
       storeEntry('BadTarget', { install: 'dsh plugin --profile web add "not a name"' }),
@@ -363,6 +388,25 @@ describe('parseCatalog (store directory format)', () => {
     assert.equal(entries.length, 3)
     for (const entry of entries) assert.equal(entry.installable, false)
     assert.deepEqual(entries.map(item => item.package), ['someone/GitOnly', 'someone/NotDsh', 'someone/BadTarget'])
+  })
+
+  it('a plain github target makes a store row installable with gitTarget set', () => {
+    const SHA = 'c3319d9d3e78a18191e1381461b69e84bc547575'
+    const entries = parseCatalog(storeDocument([
+      storeEntry('GitPlug', { install: `dsh plugin --profile web add github:someone/GitPlug#${SHA}` }),
+    ]))
+    assert.equal(entries.length, 1)
+    assert.deepEqual(entries[0], {
+      ...entries[0],
+      id: 'someone/GitPlug',
+      name: 'GitPlug',
+      package: 'someone/GitPlug',
+      installable: true,
+      gitTarget: `github:someone/GitPlug#${SHA}`,
+    })
+    // The surrogate key stays the store id — the merge/dedupe key is NOT the
+    // git target, so an npm row and a git row of the same plugin keep their
+    // own rows instead of colliding on the slug.
   })
 
   it('strips a version suffix from the target, scope-aware', () => {
@@ -424,6 +468,42 @@ describe('parseCatalog (store directory format)', () => {
     assert.equal(secondary.hostname, 'deepseek1024.com')
     assert.equal(secondary.searchParams.get('page'), '1')
     assert.equal(secondary.searchParams.get('limit'), '100')
+  })
+})
+
+describe('gitTargetOf (git install targets from install commands)', () => {
+  const SHA = 'c3319d9d3e78a18191e1381461b69e84bc547575'
+  const cmd = (target: string): string => `dsh plugin --profile web add ${target}`
+
+  it('extracts the repo from the real directory command shape', () => {
+    assert.deepEqual(gitTargetOf(cmd('github:lemonorangeapple/dsh-effort-switcher')), {
+      repo: 'lemonorangeapple/dsh-effort-switcher',
+    })
+  })
+
+  it('keeps an existing commit pin and folds it to lowercase', () => {
+    assert.deepEqual(gitTargetOf(cmd(`github:O/R#${SHA.toUpperCase()}`)), { repo: 'O/R', commit: SHA })
+  })
+
+  it('refuses everything the install chain cannot honor verbatim', () => {
+    // Mutable selectors would need re-pinning here to be honest — refused instead.
+    for (const target of [`github:o/r#main`, `github:o/r#path:/pkg`, `github:o/r#not-a-sha`]) {
+      assert.equal(gitTargetOf(cmd(target)), undefined, target)
+    }
+    // Hosts and spellings outside the accepted shape.
+    for (const target of ['git+https://github.com/o/r', 'git@github.com:o/r', 'https://github.com/o/r', 'github:o', 'github:o/r/tree/main']) {
+      assert.equal(gitTargetOf(cmd(target)), undefined, target)
+    }
+  })
+
+  it('refuses malformed commands and non-strings', () => {
+    for (const raw of ['github:o/r', 'npm install github:o/r', 'dsh plugin add', 'dsh plugin --profile web remove github:o/r', 42, null, undefined]) {
+      assert.equal(gitTargetOf(raw), undefined, String(raw))
+    }
+    // A target token with trailing garbage never parses: the token is the
+    // whole word, so shell metacharacters cannot smuggle a second command.
+    assert.equal(gitTargetOf(cmd('github:o/r;rm -rf /')), undefined)
+    assert.equal(gitTargetOf(cmd('github:o/r & echo pwned')), undefined)
   })
 })
 

@@ -84,8 +84,13 @@ type MarketHit = {
   /** True when this machine already has it (a skill directory, a profile dependency). */
   readonly installed: boolean
   /**
-   * Plugins only: false for a source-only catalog row (no npm package to
-   * install), so the model never promises a one-click install that will fail.
+   * Plugins only: false for a row this tool cannot install — a source-only
+   * row (no install target at all) and a git-only row alike, because the
+   * model-facing install tool is npm-only (`installPluginByName` resolves a
+   * registry version). The flag exists so the model never promises a
+   * one-click install that will fail; a git row the PANEL can install is
+   * still not something this tool can, and the panel is where the user
+   * installs it.
    */
   readonly installable?: boolean
 }
@@ -151,8 +156,9 @@ export function skillHitOf(card: SkillCard, installed: ReadonlySet<string>): Mar
 /**
  * Project one catalog entry onto a hit, through the SAME weighted ranker the
  * panel's search box uses. Pure and exported for the suite; `installed`
- * decides the flag, and `installable: false` (a source-only row) is carried
- * through so the model never promises an install that must fail.
+ * decides the flag, and `installable: false` is carried through for every row
+ * this tool cannot install — a source-only row and a git-only row alike — so
+ * the model never promises an install that must fail.
  */
 export function pluginHitOf(entry: CatalogEntry, installed: ReadonlySet<string>): MarketHit {
   return {
@@ -167,7 +173,10 @@ export function pluginHitOf(entry: CatalogEntry, installed: ReadonlySet<string>)
     ...(entry.stars !== undefined ? { stars: entry.stars } : {}),
     ...(entry.downloads !== undefined ? { downloads: entry.downloads } : {}),
     installed: installed.has(entry.package),
-    installable: entry.installable !== false,
+    // A git row is installable from the PANEL only: this bridge's install tool
+    // is npm-only, so reporting it as installable here would be a promise the
+    // tool refuses a moment later.
+    installable: entry.installable !== false && entry.gitTarget === undefined,
   }
 }
 

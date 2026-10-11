@@ -29,6 +29,7 @@
 import { spawn } from 'node:child_process'
 import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
 import { RELEASE_AGE_OVERRIDE, isReleaseAgeFailure } from './release-age.ts'
+import { GIT_TARGET_PATTERN } from './catalog.ts'
 import {
   PACKAGE_NAME_PATTERN,
   resolveDshBin,
@@ -121,6 +122,45 @@ export interface CliRunResult {
   readonly blockedBuilds?: readonly string[]
 }
 
+/**
+ * Validate a git install target and hand it to the CLI verbatim.
+ *
+ * The shape is re-validated here even though the catalog already did: the
+ * value travels through the panel and back over HTTP, and the CLI argv is
+ * where an unvalidated string would do damage.
+ *
+ * The target is NOT re-pinned to a commit here. An earlier version resolved
+ * HEAD through `api.github.com/repos/<repo>/commits/HEAD` and installed
+ * `github:owner/repo#<sha>`; measured on a plain link, that endpoint answers
+ * 403 with `x-ratelimit-remaining: 0` (the unauthenticated limit is 60 per
+ * hour per IP, and behind the app's proxy the egress IP is shared), while
+ * `codeload.github.com` — what pnpm actually fetches — answered 200 in 540 ms.
+ * So the pin was the ONLY thing that could fail, and it failed on ordinary
+ * use. The alternative channel (parsing the `info/refs` pkt-line
+ * advertisement, i.e. what `git ls-remote` does over HTTPS) means
+ * hand-writing a protocol parser, which this repository's rules forbid.
+ *
+ * Nothing is lost by not pinning: `github:owner/repo` is the exact form the
+ * catalog's own install command carries, pnpm resolves HEAD itself and
+ * records the resolved commit in the profile's `pnpm-lock.yaml`, and every
+ * later install reproduces that commit through the lockfile. The profile
+ * manifest keeps the floating shortcut, which is what a re-install should
+ * follow.
+ *
+ * @param gitTarget - the catalog-provided target, `github:owner/repo`
+ *   (a `#<40-hex>` pin is accepted and passed through untouched).
+ * @returns the validated target, verbatim.
+ */
+export function resolveGitInstallTarget(gitTarget: unknown): string {
+  if (typeof gitTarget !== 'string' || !GIT_TARGET_PATTERN.test(gitTarget)) {
+    throw new MarketValidationError({
+      code: 'install.gitTargetInvalid',
+      text: 'the git install target must read github:owner/repo (optionally #commit)',
+    })
+  }
+  return gitTarget
+}
+
 /** One finished CLI invocation, successful or not (see runOnce). */
 interface CliRunOutcome {
   /** Process exit code. */
@@ -163,6 +203,34 @@ export class PluginInstaller {
       const { output, blockedBuilds } = await this.runCli(['add', `${name}@${exact}`])
       this.log(`plugin-market: installed ${name}@${exact} into profile ${this.profile}`)
       return { version: exact, output, ...(blockedBuilds !== null ? { blockedBuilds } : {}) }
+    })
+  }
+
+  /**
+   * Install one plugin from its GitHub source.
+   *
+   * The target is re-validated here (the panel could have been fed a stale
+   * catalog) and handed to the CLI verbatim: `github:owner/repo`, which is
+   * the form the catalog's own install command carries. pnpm resolves HEAD
+   * and records the resolved commit in the profile's lockfile, so the
+   * install stays reproducible without this host depending on a commit-lookup
+   * service (see {@link resolveGitInstallTarget} for the measurement that
+   * retired the API-based pin).
+   *
+   * No registry step: a git source has no npm version to resolve, which is
+   * the point of the path. The spec IS the version identity, and the panel's
+   * installed view classifies the result as a git source (no npm update is
+   * ever offered for it).
+   *
+   * @param gitTarget - `github:owner/repo` or `github:owner/repo#<40-hex>`.
+   * @returns the target as the version identity and the CLI output tail.
+   */
+  async installGit(gitTarget: unknown): Promise<CliRunResult> {
+    const target = resolveGitInstallTarget(gitTarget)
+    return this.enqueue(async () => {
+      const { output, blockedBuilds } = await this.runCli(['add', target])
+      this.log(`plugin-market: installed ${target} into profile ${this.profile}`)
+      return { version: target, output, ...(blockedBuilds !== null ? { blockedBuilds } : {}) }
     })
   }
 

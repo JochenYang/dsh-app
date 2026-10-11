@@ -134,6 +134,14 @@ describe('pluginHitOf', () => {
     assert.equal(pluginHitOf(entry({ installable: true }), new Set()).installable, true)
   })
 
+  it('downgrades a git row too: this bridge installs from npm only', () => {
+    // The PANEL can install a git row; market_install_plugin resolves a
+    // registry version and refuses it, so reporting installable here would
+    // promise a one-click install that fails a moment later.
+    const gitRow = entry({ installable: true, gitTarget: 'github:o/r', package: 'https://dir.example.com/p/o/r/' })
+    assert.equal(pluginHitOf(gitRow, new Set()).installable, false)
+  })
+
   it('flags a package the profile already declares', () => {
     assert.equal(pluginHitOf(entry(), new Set(['dsh-plugin-x'])).installed, true)
     assert.equal(pluginHitOf(entry(), new Set(['dsh-plugin-y'])).installed, false)

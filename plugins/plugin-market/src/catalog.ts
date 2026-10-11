@@ -141,6 +141,13 @@ export interface CatalogEntry {
   readonly owner?: string
   /** Whether the entry carries an installable npm package (custom-schema sources always do). */
   readonly installable?: boolean
+  /**
+   * GitHub install target for an entry with no npm package (`github:owner/repo`,
+   * optionally `#<40-hex commit>`). Present only when the source's install
+   * command named one; the install chain re-validates it and pins the commit,
+   * so a mutable selector can never reach the CLI from here.
+   */
+  readonly gitTarget?: string
   /** Source-declared star count (community schemas; display only). */
   readonly stars?: number
   /**
@@ -400,7 +407,13 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
     const rawHomepage = plainString(record.url)
     const homepage = rawHomepage !== undefined && /^https?:\/\//.test(rawHomepage) ? rawHomepage : undefined
     const npm = plainString(record.npm, MAX_NAME_LENGTH)
-    const installable = npm !== undefined && PACKAGE_NAME_PATTERN.test(npm)
+    const npmValid = npm !== undefined && PACKAGE_NAME_PATTERN.test(npm)
+    // A row with no npm package can still be installable: the aggregated
+    // schema's `install` command names the real target, and for `npm: null`
+    // entries that target is a GitHub shortcut. Same extraction contract as
+    // the store path — the command is never retained or executed.
+    const git = gitTargetOf(record.install)
+    const installable = npmValid || git !== undefined
     // A name carrying '#' (e.g. `archify#integrations/deepseek-harness`) is a
     // REPO PATH the source uses as an entry id for example/template
     // directories, not a plugin title. Where a real npm name exists, the npm
@@ -409,7 +422,7 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
     // their "title" is a fragment of a repository tree, never a plugin name.
     let displayName = name
     if (name.includes('#')) {
-      if (installable && npm !== undefined) displayName = npm
+      if (installable && npmValid && npm !== undefined) displayName = npm
       else continue
     }
     const version = plainString(record.version, 100)
@@ -417,16 +430,20 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
     const stars = safeCountOf(record.stars)
     const downloads = safeCountOf(record.downloads)
     const category = categoryOf(record.category, categories, record.categoryId)
-    // Source-only rows key on their (stable) directory page so the merge step
-    // still dedupes; the install chain re-validates names, so this surrogate
-    // key can never be installed even if it leaked past the panel.
-    const key = installable ? npm : (page ?? homepage ?? name)
+    // The merge/dedupe key stays the npm name where one exists and the
+    // directory page otherwise — unchanged by git installability, so merging
+    // an npm row and a git row of the same plugin still picks the npm one
+    // (source order decides). Source-only rows key on their (stable) page; a
+    // git row's key is its page too, with the real target riding `gitTarget`.
+    const key = npmValid && npm !== undefined ? npm : (page ?? homepage ?? name)
+    const gitTarget = git === undefined ? undefined : `github:${git.repo}${git.commit === undefined ? '' : `#${git.commit}`}`
     entries.push({
       id: page ?? homepage ?? name,
       name: displayName,
       description,
       package: key,
       installable,
+      ...(gitTarget !== undefined ? { gitTarget } : {}),
       ...(version !== undefined ? { version } : {}),
       ...(owner !== undefined ? { owner } : {}),
       ...(stars !== undefined ? { stars } : {}),
@@ -480,6 +497,50 @@ function npmTargetOf(raw: unknown): string | undefined {
 }
 
 /**
+ * Grammar of the ONE git install target this build accepts: a GitHub
+ * owner/repository shortcut with an optional commit pin. Deliberately narrow —
+ * the catalog's own install commands use exactly this shape (`npm: null` rows
+ * carry `dsh plugin … add github:owner/repo`), so anything else (other hosts,
+ * `git+https://`, branch or tag selectors, `#path:` monorepo fragments) stays
+ * source-only until it is wanted. A commit pin IS accepted and preserved: it is
+ * immutable, which is what the install chain wants to hand the CLI verbatim;
+ * everything mutable (branches, tags) is refused rather than re-pinned here,
+ * because a selector this parser would rewrite is a promise the source made
+ * that the install chain cannot keep.
+ */
+export const GIT_TARGET_PATTERN = /^github:([A-Za-z0-9-]{1,39})\/([A-Za-z0-9-._]{1,100}?)(?:#([0-9a-f]{40}))?$/i
+
+/** The pieces of a validated git install target. */
+export interface GitTarget {
+  /** Repository slug, `owner/repo`, in the source's own casing. */
+  readonly repo: string
+  /** 40-hex commit pin, when the source's command carried one. */
+  readonly commit?: string
+}
+
+/**
+ * Extract a git install target from a store install command. Same contract as
+ * {@link npmTargetOf}: only the trailing token of `dsh plugin … add <target>`
+ * is read, the command itself is never retained or executed, and a non-git
+ * target answers undefined so the row keeps its npm path (or degrades to
+ * source-only).
+ */
+export function gitTargetOf(raw: unknown): GitTarget | undefined {
+  if (typeof raw !== 'string') return undefined
+  const tokens = raw.trim().split(/\s+/)
+  if (tokens.length < 4 || tokens[0] !== 'dsh' || tokens[1] !== 'plugin' || tokens[tokens.length - 2] !== 'add') {
+    return undefined
+  }
+  const target = tokens[tokens.length - 1]!
+  const match = GIT_TARGET_PATTERN.exec(target)
+  if (match === null) return undefined
+  return {
+    repo: `${match[1]}/${match[2]}`,
+    ...(match[3] !== undefined ? { commit: match[3].toLowerCase() } : {}),
+  }
+}
+
+/**
  * Store-directory path (the second preset source). Entries without a usable
  * npm target stay browsable as source-only rows keyed by the store entry id
  * (unique per row, unlike the repository url several entries may share);
@@ -501,18 +562,21 @@ function storeEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry
     const homepage = rawHomepage !== undefined && /^https?:\/\//.test(rawHomepage) ? rawHomepage : undefined
     const category = categoryOf(record.category, categories, record.categoryId)
     const npm = npmTargetOf(record.install)
-    const installable = npm !== undefined
+    const git = gitTargetOf(record.install)
+    const installable = npm !== undefined || git !== undefined
     const installs30d = safeCountOf(record.installs30d)
     const owner = plainString(record.owner, 100)
     const stars = safeCountOf(record.stars)
     const id = plainString(record.id, 200) ?? homepage ?? name
-    const key = installable ? npm : id
+    const key = npm ?? id
+    const gitTarget = git === undefined ? undefined : `github:${git.repo}${git.commit === undefined ? '' : `#${git.commit}`}`
     entries.push({
       id,
       name,
       description,
       package: key,
       installable,
+      ...(gitTarget !== undefined ? { gitTarget } : {}),
       ...(installs30d !== undefined ? { installs30d } : {}),
       ...(owner !== undefined ? { owner } : {}),
       ...(stars !== undefined ? { stars } : {}),

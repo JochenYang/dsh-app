@@ -10,7 +10,7 @@
  * @module @dsh-app/plugin-market/client/installed-projection
  */
 
-import { normalizeNpmName, sameOrigin } from '../identity.ts'
+import { normalizeNpmName, repoKeyOf, sameOrigin } from '../identity.ts'
 
 /** The InstalledPackage slice the update projections need. */
 export interface UpdatableProbe {
@@ -119,7 +119,6 @@ export function sameNameStateOf(
 
 /** Which ownership badge an installed row carries, if any. */
 export type InstalledOwnerBadge = 'suite' | 'third-party' | null
-
 /**
  * The ownership badge for one installed row.
  *
@@ -136,4 +135,54 @@ export type InstalledOwnerBadge = 'suite' | 'third-party' | null
  */
 export function installedOwnerBadge(pkg: { readonly suite?: boolean }): InstalledOwnerBadge {
   return pkg.suite === true ? 'suite' : 'third-party'
+}
+
+/**
+ * Index the installed rows by repository identity.
+ *
+ * A git catalog entry has no npm name to look up — its `package` is the
+ * directory page — so the only thing it shares with the installed view is the
+ * repo identity. Both keys are read here, in this order:
+ *
+ *  1. the DEPENDENCY SPEC (`pkg.version`), because that is what this host
+ *     wrote when it installed the plugin, and it is the only evidence that
+ *     exists for a plugin whose own manifest declares no `repository`;
+ *  2. the installed package's own manifest (`pkg.repoKey`), the pre-existing
+ *     evidence, for a git install the user made by hand from a URL the spec
+ *     does not spell out.
+ *
+ * Measured: the first git-only plugin tried declares NEITHER `repository` nor
+ * `homepage` in its package.json, so keying on the manifest alone left its
+ * card showing a fresh install button after it was installed.
+ *
+ * @param installed - the installed view rows.
+ * @returns repo key → row, later rows winning a duplicate key.
+ */
+export function installedRepoIndex<T extends { readonly version?: string, readonly repoKey?: string }>(
+  installed: readonly T[],
+): Map<string, T> {
+  const index = new Map<string, T>()
+  for (const pkg of installed) {
+    const key = repoKeyOf(pkg.version) ?? pkg.repoKey
+    if (key !== undefined && key !== null) index.set(key, pkg)
+  }
+  return index
+}
+
+/**
+ * The package name a blocked-build-scripts retry should target, or undefined
+ * when no retry can work.
+ *
+ * The retry re-installs from the registry (`POST /allow-build` resolves an npm
+ * version and refuses a local/git target outright), so a git catalog row has
+ * no retry: its `package` field is the directory page, which the route's
+ * package-name validation rejects, and the row's own install never came from
+ * npm. Returning undefined hides the button instead of offering one that
+ * cannot succeed.
+ *
+ * @param entry - the catalog entry the strip is reporting on.
+ * @returns the npm package name, or undefined for a git row.
+ */
+export function blockedRetryTarget(entry: { readonly package: string, readonly gitTarget?: string }): string | undefined {
+  return entry.gitTarget === undefined ? entry.package : undefined
 }

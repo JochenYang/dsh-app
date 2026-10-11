@@ -767,20 +767,41 @@ export function checkUpdateTarget(
  * confirmation. The refusal and the force-confirmed log name both sides
  * (`host/owner/repo`, 未知来源 when a side is unprovable) so the replacement
  * is an informed, auditable decision rather than a silent overwrite.
+ *
+ * The two install paths ask different questions of a same-repo collision, so
+ * `incomingIsGit` selects between them: a git install re-pinning its own
+ * repository passes (the repo key IS its identity, and its manifest name is
+ * not knowable before the CLI reads the repo), while an npm install over an
+ * existing local/git copy keeps the refusal — that copy is the user-managed
+ * dev install, and silently replacing it with an npm release is what the
+ * confirmLocal gate exists to prevent.
+ *
  * @param current - the installed row for the requested name (undefined = no collision).
  * @param incomingRepoKey - the incoming package's claimed repo key (null = unclaimed/unknown).
  * @param force - the caller's explicit replacement confirmation.
+ * @param incomingIsGit - true when the incoming install is a git source.
  */
 export function installGateOf(
   current: InstalledPackageView | undefined,
   incomingRepoKey: string | null,
   force: boolean,
+  incomingIsGit = false,
 ): { action: 'allow' } | { action: 'refuse', reason: HostText } | { action: 'confirm', log: string } {
   if (current === undefined) return { action: 'allow' }
   // An unprovable side travels as a nested code, not as the word 未知来源: the
   // sentence is the dictionary's in either language.
   const installedRepo = current.repoKey ?? 'repo.unknown'
   const incomingRepo = incomingRepoKey ?? 'repo.unknown'
+  // A same-repo collision is the same plugin, but the two install paths ask
+  // different questions of it. A GIT install keys its guard on the repo
+  // identity itself — a git source's manifest name is not knowable before
+  // the CLI reads the repo — so re-pinning the same repository passes here.
+  // An NPM install over an existing local/git copy keeps the old refusal:
+  // that copy is the user-managed dev install, and silently replacing it
+  // with an npm release is what the confirmLocal gate exists to prevent.
+  if (incomingIsGit && sameRepoOrigin(incomingRepoKey, current.repoKey ?? null)) {
+    return { action: 'allow' }
+  }
   if (current.source === 'registry' && sameRepoOrigin(incomingRepoKey, current.repoKey ?? null)) {
     return { action: 'allow' }
   }
@@ -963,26 +984,51 @@ export function registerMarketRoutes(
       fetch: async (request) => {
         try {
           const body = await readJsonBody(request)
-          const name = validatePackageName(body.package)
-          // Same-name guard: the npm name is not an identity — the
-          // normalized repo key is. The panel sends the catalog entry's
-          // claim; repoKeyOf re-derives the canonical key so a tampered or
-          // absent claim degrades to the unknown side. A local/git dev
-          // install or a repo mismatch (unknown side included) reads as a
-          // different plugin sharing the name and requires the explicit
-          // `force` confirmation; see installGateOf for the verdict texts.
+          // A git install carries `gitTarget` INSTEAD of a package name: the
+          // target names a repository, whose manifest dependency name only
+          // exists AFTER the CLI reads it — so the same-name guard below
+          // cannot key on `name` for this path. It keys on the repo identity
+          // instead: the incoming entry's `repoKey` (the panel sends the
+          // catalog claim; repoKeyOf re-derives it) is compared against every
+          // installed package's own repo key, and a match with a DIFFERENT
+          // source or a same-name stranger requires the explicit `force`
+          // confirmation, exactly like the npm path's gate.
+          const isGit = typeof body.gitTarget === 'string' && body.gitTarget !== ''
           const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
-          const current = readInstalled(profileDir, deps.profile).packages.find(pkg => pkg.name === name)
-          const incomingRepoKey = repoKeyOf(typeof body.repoKey === 'string' ? body.repoKey : null)
-          const gate = installGateOf(current, incomingRepoKey, body.force === true)
+          const installed = readInstalled(profileDir, deps.profile).packages
+          let gate: ReturnType<typeof installGateOf>
+          let current: InstalledPackageView | undefined
+          if (isGit) {
+            const incomingRepoKey = repoKeyOf(typeof body.repoKey === 'string' ? body.repoKey : null)
+            if (incomingRepoKey === null) {
+              throw new MarketValidationError({
+                code: 'install.gitTargetInvalid',
+                text: 'a git install requires the catalog entry repoKey (the repository identity)',
+              })
+            }
+            // Same repo already installed → allow (a re-pin of the same
+            // source). A same-name package from a DIFFERENT side (npm name or
+            // another repo) is the stranger the gate exists for.
+            current = installed.find(pkg => pkg.repoKey !== undefined && sameRepoOrigin(pkg.repoKey, incomingRepoKey))
+              ?? installed.find(pkg => pkg.name === body.package)
+            gate = installGateOf(current, incomingRepoKey, body.force === true, true)
+          } else {
+            const name = validatePackageName(body.package)
+            current = installed.find(pkg => pkg.name === name)
+            const incomingRepoKey = repoKeyOf(typeof body.repoKey === 'string' ? body.repoKey : null)
+            gate = installGateOf(current, incomingRepoKey, body.force === true)
+          }
           if (gate.action === 'refuse') throw new MarketValidationError(gate.reason)
           if (gate.action === 'confirm') log(gate.log)
           const replacedLocal = gate.action === 'confirm' && current !== undefined && current.source !== 'registry'
-          const result = await deps.installer.install(name, body.version)
+          const result = isGit
+            ? await deps.installer.installGit(body.gitTarget)
+            : await deps.installer.install(validatePackageName(body.package), body.version)
           return ok({
             installed: true,
             version: result.version,
             output: result.output,
+            ...(isGit ? { gitInstall: true } : {}),
             ...(replacedLocal ? { replacedLocal: true } : {}),
             ...(result.blockedBuilds !== undefined ? { blockedBuilds: result.blockedBuilds } : {}),
           })

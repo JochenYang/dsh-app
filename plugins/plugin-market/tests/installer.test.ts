@@ -18,8 +18,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import { spawn } from 'node:child_process'
-import { MarketBlockedBuildError, MarketExecutionError } from '../src/errors.ts'
-import { PluginInstaller, blockedBuildsOf } from '../src/installer.ts'
+import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError } from '../src/errors.ts'
+import { PluginInstaller, blockedBuildsOf, resolveGitInstallTarget } from '../src/installer.ts'
 
 describe('blockedBuildsOf', () => {
   it('answers null when no blocked signal is present', () => {
@@ -93,7 +93,7 @@ function scriptedSpawn(runs: readonly ScriptedRun[]): { impl: typeof spawn, call
   return { impl: impl as unknown as typeof spawn, calls }
 }
 
-describe('PluginInstaller release-age policy', () => {
+describe('PluginInstaller (CLI runs over one profile)', () => {
   let home: string
   let profileDir: string
   let workspacePath: string
@@ -221,4 +221,49 @@ describe('PluginInstaller release-age policy', () => {
       'the log names the policy instead of leaving pnpm\'s output to speak alone',
     )
   })
+
+  it('hands the CLI the catalog target verbatim, with no commit lookup', async () => {
+    const spawnImpl = scriptedSpawn([{ code: 0, output: 'packages: + github:o/r\nDone in 2.0s\n' }])
+    const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
+    const result = await installer.installGit('github:o/r')
+    // The spec the catalog's own install command carries IS what reaches the
+    // CLI: pnpm resolves HEAD and records the commit in the profile lockfile,
+    // so this host needs no commit-lookup service (the api.github.com pin this
+    // replaced answered 403 with zero quota left on a plain link).
+    assert.equal(result.version, 'github:o/r')
+    assert.equal(spawnImpl.calls.length, 1)
+    const add = spawnImpl.calls[0]!
+    assert.deepEqual(add.slice(-2), ['add', 'github:o/r'])
+    assert.ok(add.every(arg => arg !== '--force'))
+  })
+
+  it('passes an existing commit pin through untouched', async () => {
+    const SHA = 'c3319d9d3e78a18191e1381461b69e84bc547575'
+    const spawnImpl = scriptedSpawn([{ code: 0, output: 'Done in 2.0s\n' }])
+    const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
+    const result = await installer.installGit(`github:o/r#${SHA}`)
+    assert.equal(result.version, `github:o/r#${SHA}`)
+    assert.deepEqual(spawnImpl.calls[0]!.slice(-2), ['add', `github:o/r#${SHA}`])
+  })
+
+  it('refuses a target outside the accepted grammar before any spawn', async () => {
+    const spawnImpl = scriptedSpawn([])
+    const installer = new PluginInstaller('dsh-app', undefined, spawnImpl.impl, () => {})
+    for (const bad of ['git+https://github.com/o/r', 'github:o', 'github:o/r#main', 'github:o/r#path:/pkg', 42, undefined]) {
+      await assert.rejects(installer.installGit(bad), MarketValidationError)
+    }
+    assert.equal(spawnImpl.calls.length, 0, 'nothing reached the CLI')
+  })
+
+  it('resolveGitInstallTarget validates without touching the network', () => {
+    // Pure and synchronous: a regression that reintroduced a lookup service
+    // would have to make this async, which the signature itself forbids.
+    assert.equal(resolveGitInstallTarget('github:o/r'), 'github:o/r')
+    assert.equal(resolveGitInstallTarget('github:o/r#c3319d9d3e78a18191e1381461b69e84bc547575'),
+      'github:o/r#c3319d9d3e78a18191e1381461b69e84bc547575')
+    assert.throws(() => resolveGitInstallTarget('git+https://github.com/o/r'), MarketValidationError)
+    assert.throws(() => resolveGitInstallTarget(undefined), MarketValidationError)
+  })
+
 })
+

@@ -114,8 +114,12 @@ export interface CachedSourceState {
  *
  * Version 3 made `failed` a coded message (v2 stored the pre-i18n Chinese
  * sentence); the gate above is exactly what keeps that prose off the panel.
+ * Version 5 added the entry's `gitTarget` (v4 rows carry `installable: false`
+ * for every git-only row and no target at all), which is not merely display
+ * data: without the refetch those rows keep rendering as source-only and the
+ * new install path stays invisible until the 6 h TTL lapses.
  */
-export const CACHE_FORMAT_VERSION = 4
+export const CACHE_FORMAT_VERSION = 5
 
 /**
  * The persisted catalog snapshot (`catalog-cache.json`) behind the

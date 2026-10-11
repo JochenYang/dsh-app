@@ -37,7 +37,7 @@ import { categoryOptionsOf, searchEntries } from '../catalog-filter.ts'
 import { CategoryStrip } from './category-strip.tsx'
 import { SkillsTab } from './skills-tab.tsx'
 import { ConfirmDialog } from './confirm-dialog.tsx'
-import { installedOwnerBadge, sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
+import { blockedRetryTarget, installedOwnerBadge, installedRepoIndex, sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
 import { type HostText } from '../errors.ts'
 import { NS } from './locales.ts'
 import { hostMessage, sourceReasonOf, type Translate } from './messages.ts'
@@ -130,8 +130,8 @@ function hashCodeOf(text: string): number {
  * mainland link: the avatars host answers in ~0.3 s while github.com — the
  * redirect's first hop — times out at 10-21 s, so every avatar's first load
  * spent its whole budget on a hop that carries no image). The owner-name form
- * of the avatars host serves the same picture; `size=96` matches dsh-market's
- * choice, comfortably above the 20px the card renders.
+ * of the avatars host serves the same picture; `size=96` renders well above
+ * the 20px the card draws.
  */
 function MarketAvatar({ entry }: { entry: CatalogEntry }): ReactNode {
   const [failed, setFailed] = useState(false)
@@ -206,7 +206,10 @@ function StripOutput({ output, t }: { output: string, t: Translate }): ReactNode
  * build scripts pnpm skipped and offers the allow-and-retry action. When no
  * name could be extracted from the pnpm message the button stays hidden —
  * retrying with an empty whitelist could not change anything — and the copy
- * points at the manual fix instead.
+ * points at the manual fix instead. The same hidden-button state covers a git
+ * install (retryPackage undefined): the retry re-installs from the registry,
+ * which that plugin never came from, so the strip explains the manual route
+ * rather than offering a button that must fail.
  */
 function BlockedBuildBar({
   names, retryPackage, busyPackage, onRetry, t,
@@ -234,6 +237,9 @@ function BlockedBuildBar({
           {busyPackage === retryPackage ? <Spinner /> : null}
           {busyPackage === retryPackage ? t('mkt.blocked.busy') : t('mkt.blocked.retry')}
         </button>
+      ) : null}
+      {names.length > 0 && retryPackage === undefined ? (
+        <span className="dshMkt-stripText">{t('mkt.blocked.gitManual')}</span>
       ) : null}
     </div>
   )
@@ -498,6 +504,10 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
   // Keys are normalized npm names: a catalog source's casing must never hide
   // a same-name collision.
   const installedByName = new Map(installed.map(pkg => [normalizeNpmName(pkg.name), pkg]))
+  // A second index by repository identity (dependency spec first, the
+  // package's own manifest second): a GIT catalog entry has no npm name to
+  // look up, so this is the only way its card learns it is already installed.
+  const installedByRepo = installedRepoIndex(installed)
   const updatable = updatablePackages(installed)
   const updateCount = updatable.length
 
@@ -545,12 +555,18 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
     if (!saved) setSources(previous)
   }
 
-  /** Blocked-builds fields of a result/error, for the strip's warning bar. */
-  const blockedStripFields = (blockedBuilds: readonly string[] | undefined, retryPackage: string) =>
+  /**
+   * Blocked-builds fields of a result/error, for the strip's warning bar. A
+   * git install passes an undefined retry target: the retry re-installs from
+   * the registry, which that plugin never came from, so the button would only
+   * ever fail (see blockedRetryTarget).
+   */
+  const blockedStripFields = (blockedBuilds: readonly string[] | undefined, retryPackage: string | undefined) =>
     (blockedBuilds !== undefined ? { blockedBuilds, retryPackage } : {})
 
   const install = async (target: { readonly entry: CatalogEntry, readonly crossOrigin: boolean }): Promise<void> => {
     const { entry, crossOrigin } = target
+    const gitTarget = entry.gitTarget
     setBusyPackage(entry.package)
     setInstallTarget(null)
     setStrip(null)
@@ -558,7 +574,9 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
       // A cross-origin replacement rides the force path: the flag satisfies
       // the host's same-name gate, and the entry's repo key lets the gate's
       // refusal/log name both sides of the comparison.
-      const result = await marketApi.install(entry.package, undefined, crossOrigin ? true : undefined, entry.repoKey)
+      const result = gitTarget !== undefined
+        ? await marketApi.installGit(gitTarget, entry.package, crossOrigin ? true : undefined, entry.repoKey)
+        : await marketApi.install(entry.package, undefined, crossOrigin ? true : undefined, entry.repoKey)
       void loadInstalled()
       const replacedNote = result.replacedLocal === true
         ? t('mkt.install.replacedLocal')
@@ -566,19 +584,22 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
       setStrip({
         kind: 'ok',
         text: t('mkt.install.done', {
-          package: entry.package,
-          version: result.version === undefined ? '' : `@${result.version}`,
+          // A git row's `package` is its directory page, so the entry NAME is
+          // the label a user should read; its "version" is the spec
+          // (`github:owner/repo`), which the install log below already shows.
+          package: gitTarget === undefined ? entry.package : entry.name,
+          version: gitTarget === undefined && result.version !== undefined ? `@${result.version}` : '',
           note: replacedNote,
         }),
         output: result.output,
-        ...blockedStripFields(result.blockedBuilds, entry.package),
+        ...blockedStripFields(result.blockedBuilds, blockedRetryTarget(entry)),
       })
     } catch (error) {
       const blocked = error instanceof MarketApiError ? error.blockedBuilds : undefined
       setStrip({
         kind: 'error',
         text: t('mkt.install.failed', { message: messageOf(error, t) }),
-        ...blockedStripFields(blocked, entry.package),
+        ...blockedStripFields(blocked, blockedRetryTarget(entry)),
       })
     } finally {
       setBusyPackage(null)
@@ -715,7 +736,9 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
    * Install confirm copy. A cross-origin install leads with the replacement
    * warning — the locally installed repo when provable, 未知来源 when not —
    * so the confirm button reads as an informed replacement decision, never
-   * a plain install.
+   * a plain install. A git install adds its supply-chain note: the source is
+   * a GitHub repository (no npm registry behind it), and the version is the
+   * commit the host pins at install time.
    */
   const installConfirmMessage = (): string => {
     if (installTarget === null) return ''
@@ -723,7 +746,10 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
     const warning = installTarget.crossOrigin && installed !== undefined
       ? t('mkt.install.crossOrigin', { repo: installed.repoKey ?? t('mkt.unknownRepo') })
       : ''
-    return `${warning}${t('mkt.install.confirm', {
+    const gitNote = installTarget.entry.gitTarget !== undefined
+      ? t('mkt.install.gitNote', { repo: installTarget.entry.gitTarget })
+      : ''
+    return `${warning}${gitNote}${t('mkt.install.confirm', {
       package: installTarget.entry.package,
       name: installTarget.entry.name,
     })}`
@@ -809,6 +835,7 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
               entries={entries}
               failedSources={failedSources}
               installedByName={installedByName}
+              installedByRepo={installedByRepo}
               busyPackage={busyPackage}
               cacheInfo={cacheInfo}
               onRefresh={() => { void refreshCatalog() }}
@@ -903,6 +930,8 @@ interface CatalogTabProps {
   entries: readonly CatalogEntry[]
   failedSources: ReadonlyArray<{ url: string, reason: HostText }>
   installedByName: ReadonlyMap<string, InstalledPackage>
+  /** Repo-key index of the installed view: a git entry's only shared identity. */
+  installedByRepo: ReadonlyMap<string, InstalledPackage>
   busyPackage: string | null
   cacheInfo: ServedCatalogInfo | null
   onRefresh: () => void
@@ -919,7 +948,7 @@ const CLOSE_ANIMATION_MS = 220
 const CATALOG_PAGE_SIZE = 100
 
 function CatalogTab({
-  loading, loadError, entries, failedSources, installedByName, busyPackage, cacheInfo, onRefresh, onGoSources, onInstall, onUpdate, t,
+  loading, loadError, entries, failedSources, installedByName, installedByRepo, busyPackage, cacheInfo, onRefresh, onGoSources, onInstall, onUpdate, t,
 }: CatalogTabProps): ReactNode {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('')
@@ -1044,7 +1073,15 @@ function CatalogTab({
       ) : (
         <div className="dshMkt-grid">
         {filtered.slice(0, visible).map(entry => {
-        const pkg = installedByName.get(normalizeNpmName(entry.package))
+        // A git entry has no npm name to key on: its `package` is the
+        // directory page. The repo key is the identity it shares with the
+        // installed view, so git rows look there first and fall back to the
+        // name index (which also catches a git row whose plugin later
+        // published to npm under the same name).
+        const pkg = entry.gitTarget !== undefined
+          ? (entry.repoKey !== undefined ? installedByRepo.get(entry.repoKey) : undefined)
+            ?? installedByName.get(normalizeNpmName(entry.package))
+          : installedByName.get(normalizeNpmName(entry.package))
         const busy = busyPackage === entry.package
         const sourceOnly = entry.installable === false
         // Same-name verdict: the npm name alone never proves identity — the
@@ -1144,6 +1181,10 @@ function CatalogTab({
                     <span className="dshMkt-badge dshMkt-badgeOff">
                       {t('mkt.card.sourceOnly')}
                     </span>
+                  </Tooltip>
+                ) : entry.gitTarget !== undefined ? (
+                  <Tooltip label={t('mkt.card.gitSourceTitle', { repo: entry.gitTarget })} side="bottom">
+                    <span className="dshMkt-badge">{t('mkt.card.gitSource')}</span>
                   </Tooltip>
                 ) : null}
                 {entry.version !== undefined ? (

@@ -77,6 +77,12 @@ export interface CatalogEntry {
   readonly owner?: string
   /** False = source-only row without an npm package (install disabled). */
   readonly installable?: boolean
+  /**
+   * GitHub install target for an entry with no npm package
+   * (`github:owner/repo`, optionally `#<40-hex commit>`); the host pins the
+   * commit when the target lacks one. Absent on npm and source-only rows.
+   */
+  readonly gitTarget?: string
   /** Source-declared star count (community schemas; display only). */
   readonly stars?: number
   /**
@@ -306,6 +312,25 @@ export const marketApi = {
       body: JSON.stringify({
         package: pkg,
         ...(version !== undefined ? { version } : {}),
+        ...(force === true ? { force: true } : {}),
+        ...(repoKey !== undefined ? { repoKey } : {}),
+      }),
+    })
+  },
+  /**
+   * Install `gitTarget` (`github:owner/repo`, optionally `#commit`) from its
+   * GitHub source; the host pins the commit when the target lacks one.
+   * `repoKey` carries the entry's repo identity for the same-repo guard, and
+   * `package` is the entry's display key (the host's same-name fallback
+   * lookup reads it; it never reaches the CLI).
+   */
+  installGit(gitTarget: string, pkg: string, force: boolean | undefined, repoKey: string | undefined): Promise<InstallValue> {
+    return request<InstallValue>(`${ROUTE_PREFIX}/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        gitTarget,
+        package: pkg,
         ...(force === true ? { force: true } : {}),
         ...(repoKey !== undefined ? { repoKey } : {}),
       }),

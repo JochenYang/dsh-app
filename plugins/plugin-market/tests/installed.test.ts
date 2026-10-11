@@ -390,4 +390,21 @@ describe('installGateOf (POST /install force gate)', () => {
     assert.ok(gate.log.includes('github.com/o/pkg-a'))
     assert.ok(gate.log.includes('github.com/x/pkg-a'))
   })
+
+  it('a git install finds its own earlier install by repoKey (not by name)', () => {
+    // The git path's guard keys on repo identity: a manifest dependency name
+    // only exists after the CLI reads the repo, so `name` is not queryable
+    // beforehand. The same repo re-pins silently (incomingIsGit); the npm path's
+    // semantics. A same-NAME package from another repo is the stranger the
+    // repo-keyed lookup exists to catch.
+    const sameRepo = installed({ name: 'dsh-some-name', source: 'git', version: 'github.com/o/pkg-a#c3319d9', repoKey: 'github.com/o/pkg-a' })
+    assert.equal(installGateOf(sameRepo, 'github.com/o/pkg-a', false, true).action, 'allow')
+    // An NPM install over the same git copy keeps the old refusal: that copy
+    // is user-managed, and silently replacing it with an npm release is what
+    // the confirmLocal gate exists to prevent (regression guard for the
+    // incomingIsGit split).
+    assert.equal(installGateOf(sameRepo, 'github.com/o/pkg-a', false).action, 'refuse')
+    const stranger = installed({ name: 'pkg-a', source: 'registry', repoKey: 'github.com/x/pkg-a' })
+    assert.equal(installGateOf(stranger, 'github.com/o/pkg-a', false, true).action, 'refuse')
+  })
 })

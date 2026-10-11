@@ -7,7 +7,7 @@
 
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
-import { installedOwnerBadge, sameNameStateOf, updatablePackages, mergeUpdateFacts } from '../src/client/installed-projection.ts'
+import { blockedRetryTarget, installedOwnerBadge, installedRepoIndex, sameNameStateOf, updatablePackages, mergeUpdateFacts } from '../src/client/installed-projection.ts'
 
 describe('updatablePackages', () => {
   it('counts only non-suite packages with a pending update', () => {
@@ -126,5 +126,48 @@ describe('installedOwnerBadge', () => {
     // A row that does not carry the flag at all is not a suite plugin either:
     // the shell sets it explicitly on the plugins it ships.
     assert.equal(installedOwnerBadge({}), 'third-party')
+  })
+})
+
+describe('installedRepoIndex', () => {
+  it('keys a git install by its DEPENDENCY SPEC, the host’s own record', () => {
+    // The measured case: the installed plugin declares neither `repository`
+    // nor `homepage`, so its manifest carries no repo key at all. The spec is
+    // what this host wrote, and it is the only evidence that exists.
+    const rows = [
+      { name: 'dsh-effort-switcher', version: 'github:o/dsh-effort-switcher' },
+      { name: 'dsh-other', version: '^1.2.0' },
+    ]
+    const index = installedRepoIndex(rows)
+    assert.equal(index.get('github.com/o/dsh-effort-switcher')?.name, 'dsh-effort-switcher')
+    // A registry range yields no repo key: nothing to index, no false match.
+    assert.equal(index.size, 1)
+  })
+
+  it('falls back to the package manifest key, and prefers the spec', () => {
+    const byManifest = installedRepoIndex([{ name: 'hand-installed', version: '1.0.0', repoKey: 'github.com/o/hand' }])
+    assert.equal(byManifest.get('github.com/o/hand')?.name, 'hand-installed')
+    // Both present and disagreeing: the spec wins (it is what we installed).
+    const both = installedRepoIndex([{ name: 'x', version: 'github:o/spec', repoKey: 'github.com/o/manifest' }])
+    assert.equal(both.has('github.com/o/spec'), true)
+    assert.equal(both.has('github.com/o/manifest'), false)
+  })
+
+  it('skips rows with no repo evidence instead of indexing undefined', () => {
+    assert.equal(installedRepoIndex([{ name: 'plain', version: '^2.0.0' }]).size, 0)
+    assert.equal(installedRepoIndex([]).size, 0)
+  })
+})
+
+describe('blockedRetryTarget', () => {
+  it('offers the npm package for a registry row', () => {
+    assert.equal(blockedRetryTarget({ package: 'dsh-plugin-x' }), 'dsh-plugin-x')
+  })
+
+  it('offers nothing for a git row: the retry re-installs from the registry', () => {
+    // Its `package` field is the directory page, which the route’s package-name
+    // validation rejects — and even with a valid name the host refuses to
+    // reinstall a git-sourced plugin. A hidden button beats one that must fail.
+    assert.equal(blockedRetryTarget({ package: 'https://dir.example.com/p/o/r/', gitTarget: 'github:o/r' }), undefined)
   })
 })
