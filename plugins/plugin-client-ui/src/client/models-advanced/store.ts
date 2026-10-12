@@ -15,7 +15,7 @@
  */
 
 import type {
-  LlmConfigurableProvider, LlmDiscoveredModel, LlmModelDiscoveryRequest, LlmProviderInfo,
+  CredentialInfo, LlmConfigurableProvider, LlmDiscoveredModel, LlmModelDiscoveryRequest, LlmProviderInfo,
   RemoteResult, SettingsNamespaceView, SettingsPathOpView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only, and it must be here: 0.1.7 moved the settings vocabulary
@@ -59,6 +59,27 @@ export interface AdvancedModelsRemote {
       ops: SettingsPathOpView[],
       expectedRevision: number | undefined,
     ): Promise<RemoteResult<SettingsNamespaceView>>
+  }
+  credentials: {
+    /**
+     * Whether the references a route names currently resolve. Batched and
+     * status-only: no call on this face ever returns a secret value.
+     */
+    describe(refs: string[]): Promise<RemoteResult<Record<string, CredentialInfo>>>
+  }
+  session: {
+    /**
+     * The LIVE model catalog: which models each route can actually serve right
+     * now. This is the list the chat's model picker shows, so it is the only
+     * honest source for "which model am I overriding" — the page's own store no
+     * longer receives a per-provider model list (upstream removed it in 0.1.2).
+     */
+    modelCatalog(): Promise<RemoteResult<{
+      readonly groups: readonly {
+        readonly id: string
+        readonly models: readonly { readonly id: string, readonly name?: string }[]
+      }[]
+    }>>
   }
 }
 
@@ -225,6 +246,13 @@ export class AdvancedModelsStore {
   ) {}
 
   /**
+   * The in-flight catalog refresh. The official Models page mounts one provider
+   * card per route and every one of them asks for the same snapshot, so the
+   * promise is shared rather than repeated per card.
+   */
+  private loading: Promise<void> | undefined
+
+  /**
    * Refresh the page snapshot: the provider directory and the settings mirror
    * in parallel, exactly the official Models page's join. Only pi-ai routes
    * are kept — the advanced fields (reasoningEfforts / input / compat) are
@@ -232,6 +260,18 @@ export class AdvancedModelsStore {
    * @returns nothing; the snapshot carries the outcome.
    */
   async load(): Promise<void> {
+    if (this.loading !== undefined) return this.loading
+    const run = this.runLoad()
+    this.loading = run
+    try {
+      await run
+    } finally {
+      this.loading = undefined
+    }
+  }
+
+  /** One refresh; the promise {@link load} hands to concurrent callers. */
+  private async runLoad(): Promise<void> {
     const generation = ++this.generation
     this.store.update((s) => { s.status = 'loading'; s.error = null })
     try {

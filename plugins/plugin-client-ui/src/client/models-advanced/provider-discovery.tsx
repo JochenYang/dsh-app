@@ -14,6 +14,7 @@ import type { ModelDraft } from './fields.ts'
 import type { AdvancedModelsRemote } from './store.ts'
 import { message, messageText } from './messages.ts'
 import type { PageMessage, Translate } from './messages.ts'
+import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Draft target used by the built-in dsh discovery endpoint. */
 export interface ProviderDiscoveryTarget {
@@ -151,20 +152,33 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
 
   if (!open || target === undefined) return null
   const label = target.provider ?? t('adv.discovery.draftRoute')
+  // The shell is the kernel's `Modal` (portal, mask, Escape, focus trap and focus
+  // return); the discovered list is long, so the scroll lives in `contentClassName`
+  // and the footer stays put.
   return (
-    <div className="dshAma-modalMask" role="presentation" onClick={onClose}>
-      <div
-        className="dshAma-modal dshAma-discoveryModal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('adv.discovery.title')}
-        onClick={(event) => { event.stopPropagation() }}
-      >
-        <div className="dshAma-modalHead">
-          <span className="dshAma-modalTitle">{t('adv.discovery.title')}</span>
-          <button type="button" className="dshAma-iconButton" aria-label={t('adv.common.close')} onClick={onClose}>✕</button>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t('adv.discovery.title')}
+      closeLabel={t('adv.common.close')}
+      className="dshAma-discoveryModal"
+      contentClassName="dshAma-modalScroll"
+      footer={(
+        <div className="dshAma-footer">
+          <Button type="button" variant="outline" size="sm" onClick={onClose}>{t('adv.common.cancel')}</Button>
+          <Button
+            type="button" variant="primary" size="sm"
+            disabled={busy || picked.size === 0}
+            onClick={() => {
+              const adopted = (models ?? []).filter(model => picked.has(model.id)).map(draftOf)
+              if (adopted.length === 0) return
+              onAdopt(adopted)
+              onClose()
+            }}
+          >{t('adv.import.adopt', { count: picked.size })}</Button>
         </div>
-        <div className="dshAma-modalBody">
+      )}
+    >
           <div className="dshAma-discoverySource">
             <span className="dshAma-discoverySourceLabel">{t('adv.discovery.source')}</span>
             <code>{label}</code>
@@ -176,8 +190,8 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
             ? (
               <label className="dshAma-field">
                 <span className="dshAma-fieldLabel">{t('adv.discovery.apiKeyLabel')}</span>
-                <input
-                  className="dshAma-input"
+                <Input
+                  className="dshAma-inputWrap"
                   type="password"
                   autoComplete="off"
                   value={apiKey}
@@ -194,10 +208,10 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
               ? (
                 <div className="dshAma-error">
                   <p>{t('adv.discovery.failed', { message: messageText(failure, t) })}</p>
-                  <button
-                    type="button" className="dshAma-button"
+                  <Button
+                    type="button" variant="outline" size="sm"
                     onClick={() => { void discover(apiKey) }}
-                  >{t('adv.common.retry')}</button>
+                  >{t('adv.common.retry')}</Button>
                 </div>
               )
               : busy
@@ -205,18 +219,18 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
                 : (
                   <>
                     <div className="dshAma-discoveryToolbar">
-                      <input
-                        className="dshAma-input"
+                      <Input
+                        className="dshAma-inputWrap"
                         type="search"
                         value={query}
                         placeholder={t('adv.discovery.filterPlaceholder')}
                         aria-label={t('adv.discovery.filterAria')}
                         onChange={(event) => { setQuery(event.target.value) }}
                       />
-                      <button
-                        type="button" className="dshAma-button"
+                      <Button
+                        type="button" variant="outline" size="sm"
                         onClick={() => { void discover(apiKey) }}
-                      >{t('adv.discovery.refresh')}</button>
+                      >{t('adv.discovery.refresh')}</Button>
                     </div>
                     <div className="dshAma-discoveryList">
                       {visibleModels.map(model => {
@@ -258,22 +272,6 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
                     </div>
                   </>
                 )}
-        </div>
-        <div className="dshAma-modalFoot">
-          <button type="button" className="dshAma-button" onClick={onClose}>{t('adv.common.cancel')}</button>
-          <button
-            type="button"
-            className="dshAma-button dshAma-buttonPrimary"
-            disabled={busy || picked.size === 0}
-            onClick={() => {
-              const adopted = (models ?? []).filter(model => picked.has(model.id)).map(draftOf)
-              if (adopted.length === 0) return
-              onAdopt(adopted)
-              onClose()
-            }}
-          >{t('adv.import.adopt', { count: picked.size })}</button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

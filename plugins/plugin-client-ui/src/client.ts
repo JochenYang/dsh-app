@@ -91,7 +91,8 @@ interface MaintenanceTabOwnerProps {
 // namespace services must be declared here — Cordis refuses `remote.*` access
 // that is not in this plugin's `inject`.
 export const inject = [
-  'theme', 'slots', 'locale', 'remote', 'remote.llm', 'remote.settings', 'configForms', 'settingsSchema',
+  'theme', 'slots', 'locale', 'remote', 'remote.llm', 'remote.settings', 'remote.credentials',
+  'remote.session', 'configForms', 'settingsSchema',
 ]
 
 export const BRAND_THEME_ID = 'dsh-app-brand'

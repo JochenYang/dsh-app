@@ -12,6 +12,7 @@ import { describeFetchFailure, fetchModelsDev, mapProviderModels, searchModels, 
 import type { ModelsDevModelHit, ModelsDevProvider } from './models-dev.ts'
 import { messageText, wireText } from './messages.ts'
 import type { PageMessage, Translate } from './messages.ts'
+import { Button, Checkbox, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Props of {@link ModelsDevImportDialog}. */
 export interface ModelsDevImportDialogProps {
@@ -102,38 +103,52 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
     ))
   }
 
-  if (!open) return null
+  // The shell is the kernel's `Modal`: it owns the portal, the mask, Escape, the
+  // focus trap and the focus return, and the long feed list scrolls inside it.
   return (
-    <div className="dshAma-modalMask" role="presentation" onClick={onClose}>
-      {/* Stop-mask-click container: clicks inside the dialog must not close it. */}
-      <div
-        className="dshAma-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('adv.import.title')}
-        onClick={(event) => { event.stopPropagation() }}
-      >
-        <div className="dshAma-modalHead">
-          <span className="dshAma-modalTitle">{t('adv.import.title')}</span>
-          <button type="button" className="dshAma-iconButton" aria-label={t('adv.common.close')} onClick={onClose}>✕</button>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t('adv.import.title')}
+      closeLabel={t('adv.common.close')}
+      className="dshAma-importModal"
+      contentClassName="dshAma-modalScroll"
+      footer={(
+        <div className="dshAma-footer">
+          <Button type="button" variant="outline" size="sm" onClick={onClose}>{t('adv.common.cancel')}</Button>
+          <Button
+            type="button" variant="primary" size="sm"
+            disabled={adoptCount === 0}
+            onClick={() => {
+              if (pickedHits.length > 0) {
+                onAdopt(pickedHits.map(hit => hit.draft))
+              } else if (expanded !== undefined && picked.size > 0) {
+                onAdopt(expanded.models.filter(model => picked.has(model.id)).map(model => model.draft))
+              } else {
+                return
+              }
+              onClose()
+            }}
+          >{t('adv.import.adopt', { count: adoptCount })}</Button>
         </div>
-        <div className="dshAma-modalBody">
+      )}
+    >
           {failure !== undefined
             ? (
               <div className="dshAma-error">
                 <p>{t('adv.import.unreachable', { message: messageText(failure, t) })}</p>
-                <button
-                  type="button" className="dshAma-button"
+                <Button
+                  type="button" variant="outline" size="sm"
                   onClick={() => { setProviders(undefined); setFailure(undefined) }}
-                >{t('adv.common.retry')}</button>
+                >{t('adv.common.retry')}</Button>
               </div>
             )
             : busy || providers === undefined
               ? <p className="dshAma-hint">{t('adv.import.loading')}</p>
               : (
                 <>
-                  <input
-                    className="dshAma-input"
+                  <Input
+                    className="dshAma-inputWrap"
                     type="text"
                     value={query}
                     placeholder={t('adv.import.searchPlaceholder')}
@@ -156,28 +171,23 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                           const name = typeof hit.draft.name === 'string' ? hit.draft.name : ''
                           return (
                             <li key={key} className="dshAma-candidate">
-                              <label className="dshAma-check">
-                                <input
-                                  type="checkbox"
-                                  checked={pickedModels.has(key)}
-                                  onChange={() => {
-                                    setPickedModels(current => {
-                                      const next = new Set(current)
-                                      if (!next.delete(key)) next.add(key)
-                                      return next
-                                    })
-                                  }}
-                                />
-                                <span>
-                                  {name !== '' && name !== hit.modelId
-                                    ? t('adv.import.nameWithId', { name, id: hit.modelId })
-                                    : hit.modelId}
-                                </span>
-                                <span className="dshAma-muted">{t('adv.import.providerSuffix', { provider: hit.providerId })}</span>
-                                {existingIds.has(hit.modelId)
-                                  ? <span className="dshAma-muted">{t('adv.import.configured')}</span>
-                                  : null}
-                              </label>
+                              <Checkbox
+                                checked={pickedModels.has(key)}
+                                label={name !== '' && name !== hit.modelId
+                                  ? t('adv.import.nameWithId', { name, id: hit.modelId })
+                                  : hit.modelId}
+                                onChange={() => {
+                                  setPickedModels(current => {
+                                    const next = new Set(current)
+                                    if (!next.delete(key)) next.add(key)
+                                    return next
+                                  })
+                                }}
+                              />
+                              <span className="dshAma-muted">{t('adv.import.providerSuffix', { provider: hit.providerId })}</span>
+                              {existingIds.has(hit.modelId)
+                                ? <span className="dshAma-muted">{t('adv.import.configured')}</span>
+                                : null}
                             </li>
                           )
                         })}
@@ -211,23 +221,20 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                       <ul className="dshAma-candidateList">
                         {expanded.models.map(model => (
                           <li key={model.id} className="dshAma-candidate">
-                            <label className="dshAma-check">
-                              <input
-                                type="checkbox"
-                                checked={picked.has(model.id)}
-                                onChange={() => {
-                                  setPicked(current => {
-                                    const next = new Set(current)
-                                    if (!next.delete(model.id)) next.add(model.id)
-                                    return next
-                                  })
-                                }}
-                              />
-                              <span>{model.id}</span>
-                              {existingIds.has(model.id)
-                                ? <span className="dshAma-muted">{t('adv.import.configured')}</span>
-                                : null}
-                            </label>
+                            <Checkbox
+                              checked={picked.has(model.id)}
+                              label={model.id}
+                              onChange={() => {
+                                setPicked(current => {
+                                  const next = new Set(current)
+                                  if (!next.delete(model.id)) next.add(model.id)
+                                  return next
+                                })
+                              }}
+                            />
+                            {existingIds.has(model.id)
+                              ? <span className="dshAma-muted">{t('adv.import.configured')}</span>
+                              : null}
                           </li>
                         ))}
                         {expanded.models.length === 0
@@ -238,26 +245,6 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                   )}
                 </>
               )}
-        </div>
-        <div className="dshAma-modalFoot">
-          <button type="button" className="dshAma-button" onClick={onClose}>{t('adv.common.cancel')}</button>
-          <button
-            type="button"
-            className="dshAma-button dshAma-buttonPrimary"
-            disabled={adoptCount === 0}
-            onClick={() => {
-              if (pickedHits.length > 0) {
-                onAdopt(pickedHits.map(hit => hit.draft))
-              } else if (expanded !== undefined && picked.size > 0) {
-                onAdopt(expanded.models.filter(model => picked.has(model.id)).map(model => model.draft))
-              } else {
-                return
-              }
-              onClose()
-            }}
-          >{t('adv.import.adopt', { count: adoptCount })}</button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

@@ -22,13 +22,14 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { NS } from '../namespace.ts'
-import { cloneDraft, defaultReasoningEfforts, getPath, modelRowFailure, parseHeaders, parseRetryPolicy, readHeaders, readRetryPolicy, RETRY_POLICY_DEFAULTS, REASONING_LEVELS } from './fields.ts'
+import { cloneDraft, defaultReasoningEfforts, getPath, modelRowFailure } from './fields.ts'
 import { enrichDraftsFromModelsDev, fetchModelsDev } from './models-dev.ts'
-import type { HeaderRow, ModelDraft, RetryPolicyDraft } from './fields.ts'
+import type { ModelDraft } from './fields.ts'
 import { IconChevron, IconTrash, ModelEntryEditor } from './entry-editor.tsx'
 import { AdvancedModelsStore, messageOf, protocolChoices, writeOps } from './store.ts'
 import type { AdvancedModelsRemote, AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
@@ -37,6 +38,7 @@ import { ProviderModelDiscoveryDialog } from './provider-discovery.tsx'
 import type { ProviderDiscoveryTarget } from './provider-discovery.tsx'
 import { message, messageText, wireText } from './messages.ts'
 import type { PageMessage, Translate } from './messages.ts'
+import { RouteAdvancedCard } from './route-advanced.tsx'
 
 /** The inject face the registering apply supplies (declared via `hooks`). */
 export interface AdvancedModelsInjected {
@@ -160,6 +162,24 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
   const [modelsDraft, setModelsDraft] = useState<readonly ModelDraft[] | undefined>(undefined)
   const [overridesDraft, setOverridesDraft] = useState<Record<string, ModelDraft> | undefined>(undefined)
+  // The LIVE model catalog, fetched once for the override picker. Which models a
+  // route serves right now is what the chat's own picker lists, so it is the only
+  // honest source for "the model I want to correct" — the store no longer receives
+  // a per-provider model list (upstream removed it in 0.1.2, which is why this page
+  // used to have no way to add an override at all).
+  const [catalogIds, setCatalogIds] = useState<readonly string[]>([])
+  const [overrideDraftId, setOverrideDraftId] = useState('')
+  useEffect(() => {
+    let live = true
+    void api.session.modelCatalog().then(
+      (response) => {
+        if (!live || !response.ok) return
+        setCatalogIds(response.value.groups.flatMap(group => group.models.map(model => model.id)))
+      },
+      () => { /* the picker stays free-text */ },
+    )
+    return () => { live = false }
+  }, [api])
   // Expanded-row keys are string-scoped per list ('m3' model row 3, 'o:id'
   // one override, 'n1' one create-card row) so lists never alias state.
   const [openRows, setOpenRows] = useState<ReadonlySet<string>>(new Set())
@@ -304,15 +324,22 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       setBusy(false)
       return
     }
-    const outcome = await writeOps(api, ops, namespace.revision)
-    setBusy(false)
+    let outcome = await writeOps(api, ops, namespace.revision)
     if (outcome.kind === 'conflict') {
-      setFailure(message('adv.failure.conflictReloaded'))
-      setModelsDraft(undefined)
-      setOverridesDraft(undefined)
+      // Another surface wrote first. Every op addresses one of this route's own
+      // paths, so reloading for a fresh revision and re-applying them is what
+      // the user asked for — and it beats dropping an edited screen. One
+      // automatic retry; a second conflict keeps the draft and asks.
       await controller.load()
-      return
+      const fresh = controller.store.getSnapshot().namespaces.get('llm-pi-ai')?.revision
+      outcome = await writeOps(api, ops, fresh)
+      if (outcome.kind === 'conflict') {
+        setBusy(false)
+        setFailure(message('adv.failure.conflictRetained'))
+        return
+      }
     }
+    setBusy(false)
     if (outcome.kind === 'failure') {
       setFailure(outcome.message)
       return
@@ -598,31 +625,21 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           })}
         </select>
         </div>
-        <button
-          type="button"
-          className="dshAma-iconButton dshAma-refreshButton"
+        <Button
+          type="button" variant="ghost" size="sm" icon="⟳"
+          className="dshAma-iconAction dshAma-refreshButton"
           aria-label={t('adv.picker.refresh')}
           title={t('adv.picker.refresh')}
           disabled={state.status === 'loading'}
           onClick={() => { void controller.load() }}
-        >⟳</button>
+        />
       </div>
 
       {row === undefined ? null : (
         <>
           {routeInfo(row)}
-          <RouteReasoningCard
-            key={`${row.entry.provider}-reasoning`}
-            row={row} disabled={disabled} api={api} t={t}
-            namespace={namespace} controller={controller}
-          />
-          <RetryPolicyCard
-            key={row.entry.provider}
-            row={row} disabled={disabled} api={api} t={t}
-            namespace={namespace} controller={controller}
-          />
-          <HeadersCard
-            key={`${row.entry.provider}-headers`}
+          <RouteAdvancedCard
+            key={`${row.entry.provider}-advanced`}
             row={row} disabled={disabled} api={api} t={t}
             namespace={namespace} controller={controller}
           />
@@ -697,22 +714,24 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                 {models.map((model, index) => (
                   <div key={index} className="dshAma-entry">
                     <div className="dshAma-entryHead">
-                      <button
-                        type="button" className="dshAma-iconButton" aria-expanded={openRows.has(`m${String(index)}`)}
+                      <Button
+                        type="button" variant="ghost" size="sm" icon={<IconChevron open={openRows.has('m' + String(index))} />}
+                        className="dshAma-iconAction" aria-expanded={openRows.has(`m${String(index)}`)}
                         aria-label={t('adv.list.expandModel', { index: index + 1 })}
                         onClick={() => { toggleOpen(`m${String(index)}`) }}
-                      ><IconChevron open={openRows.has('m' + String(index))} /></button>
+                      />
                       <span className="dshAma-entryId">
                         {typeof model.id === 'string' && model.id !== '' ? model.id : t('adv.list.unnamed')}
                       </span>
                       <span className="dshAma-entryName">
                         {typeof model.name === 'string' ? model.name : ''}
                       </span>
-                      <button
-                        type="button" className="dshAma-iconButton dshAma-iconButtonDanger" aria-label={t('adv.list.removeModel', { index: index + 1 })}
+                      <Button
+                        type="button" variant="ghost" size="sm" icon={<IconTrash />}
+                        className="dshAma-iconAction dshAma-iconDanger" aria-label={t('adv.list.removeModel', { index: index + 1 })}
                         disabled={disabled}
                         onClick={() => { collapseAll(); setModelsDraft(models.filter((_model, at) => at !== index)) }}
-                      ><IconTrash /></button>
+                      />
                     </div>
                     {openRows.has(`m${String(index)}`)
                       ? (
@@ -734,7 +753,52 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
               <>
                 <div className="dshAma-listHead">
                   <span className="dshAma-listTitle">{t('adv.overrides.title', { count: overrideIds.length })}</span>
-                  <span className="dshAma-hint">{t('adv.overrides.catalogUnavailable')}</span>
+                  <span className="dshAma-hint">{t('adv.overrides.addHint')}</span>
+                </div>
+                {/* Adding an override is the whole point of this mode — "correct one
+                    model, keep the other thirty-seven" — so the entry lives here
+                    rather than behind a catalog list the page never had. The id is
+                    free text with suggestions: a model the catalog has not picked up
+                    yet (a typo'd deployment, a route added a second ago) must still
+                    be correctable. */}
+                <div className="dshAma-inline">
+                  <Input
+                    id="dshAma-overrideId"
+                    className="dshAma-inputWrap dshAma-addOverride"
+                    type="text"
+                    list="dshAma-overrideCandidates"
+                    value={overrideDraftId}
+                    disabled={disabled}
+                    placeholder={t('adv.overrides.addPlaceholder')}
+                    onChange={(event) => { setOverrideDraftId(event.target.value) }}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter') return
+                      event.preventDefault()
+                      const id = overrideDraftId.trim()
+                      if (id === '') return
+                      setOverridesDraft({ ...overrides, [id]: {} })
+                      setOverrideDraftId('')
+                      setOpenRows(new Set([`o:${id}`]))
+                    }}
+                  />
+                  <datalist id="dshAma-overrideCandidates">
+                    {catalogIds.filter(id => !(id in overrides)).map(id => (
+                      <option key={id} value={id} />
+                    ))}
+                  </datalist>
+                  <Button
+                    type="button" variant="primary" size="sm"
+                    disabled={disabled || overrideDraftId.trim() === ''}
+                    onClick={() => {
+                      const id = overrideDraftId.trim()
+                      // An override starts INHERITING everything: adding one is a
+                      // declaration of intent ("I am about to correct this model"),
+                      // and it writes nothing until a field actually changes.
+                      setOverridesDraft({ ...overrides, [id]: {} })
+                      setOverrideDraftId('')
+                      setOpenRows(new Set([`o:${id}`]))
+                    }}
+                  >{t('adv.overrides.add')}</Button>
                 </div>
                 {overrideIds.length === 0
                   ? <p className="dshAma-hint">{t('adv.overrides.empty')}</p>
@@ -742,22 +806,24 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                 {overrideIds.map(id => (
                   <div key={id} className="dshAma-entry">
                     <div className="dshAma-entryHead">
-                      <button
-                        type="button" className="dshAma-iconButton"
+                      <Button
+                        type="button" variant="ghost" size="sm" icon={<IconChevron open={openRows.has('o:' + id)} />}
+                        className="dshAma-iconAction"
                         aria-expanded={openRows.has(`o:${id}`)}
                         aria-label={t('adv.overrides.expand', { id })}
                         onClick={() => { toggleOpen(`o:${id}`) }}
-                       ><IconChevron open={openRows.has('o:' + id)} /></button>
-                       <span className="dshAma-entryId">{id}</span>
-                      <button
-                        type="button" className="dshAma-iconButton dshAma-iconButtonDanger" aria-label={t('adv.overrides.remove', { id })}
+                      />
+                      <span className="dshAma-entryId">{id}</span>
+                      <Button
+                        type="button" variant="ghost" size="sm" icon={<IconTrash />}
+                        className="dshAma-iconAction dshAma-iconDanger" aria-label={t('adv.overrides.remove', { id })}
                         disabled={disabled}
                         onClick={() => {
                           const next = { ...overrides }
                           delete next[id]
                           setOverridesDraft(next)
                         }}
-                      ><IconTrash /></button>
+                      />
                     </div>
                     {openRows.has(`o:${id}`)
                       ? (
@@ -782,20 +848,20 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
               ? <p className="dshAma-error">{messageText(rowsFailure, t)}</p>
               : null}
             {notice !== undefined ? <p className="dshAma-notice">{messageText(notice, t)}</p> : null}
-            <button
-              type="button" className="dshAma-button dshAma-buttonPrimary"
+            <Button
+              type="button" variant="primary" size="sm"
               disabled={disabled || rowsFailure !== undefined || !canSave}
               onClick={() => { void save() }}
-            >{busy ? t('adv.save.busy') : t('adv.save.action')}</button>
-            <button
-              type="button" className="dshAma-button"
+            >{busy ? t('adv.save.busy') : t('adv.save.action')}</Button>
+            <Button
+              type="button" variant="outline" size="sm"
               disabled={disabled || !canSave}
               onClick={() => {
                 setModelsDraft(undefined)
                 setOverridesDraft(undefined)
                 collapseAll()
               }}
-            >{t('adv.reset')}</button>
+            >{t('adv.reset')}</Button>
           </div>
         </>
       )}
@@ -814,10 +880,10 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           </p>
           {newRoute === undefined
             ? (
-              <button
-                type="button" className="dshAma-button"
+              <Button
+                type="button" variant="outline" size="sm"
                 onClick={() => { setNewRoute({ ...EMPTY_NEW_ROUTE }); setFailure(undefined) }}
-              >{t('adv.newRoute.start')}</button>
+              >{t('adv.newRoute.start')}</Button>
             )
             : (
               <>
@@ -844,12 +910,12 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                 <div className="dshAma-grid">
                   <label className="dshAma-field">
                     <span className="dshAma-fieldLabel">{t('adv.newRoute.id')}</span>
-                    <input className="dshAma-input" type="text" value={newRoute.id} placeholder={t('adv.newRoute.idPlaceholder')}
+                    <Input className="dshAma-inputWrap" type="text" value={newRoute.id} placeholder={t('adv.newRoute.idPlaceholder')}
                       aria-label={t('adv.newRoute.id')} onChange={(event) => { setNewRoute({ ...newRoute, id: event.target.value }) }} />
                   </label>
                   <label className="dshAma-field">
                     <span className="dshAma-fieldLabel">{t('adv.entry.name')}</span>
-                    <input className="dshAma-input" type="text" value={newRoute.displayName} placeholder={t('adv.newRoute.displayNamePlaceholder')}
+                    <Input className="dshAma-inputWrap" type="text" value={newRoute.displayName} placeholder={t('adv.newRoute.displayNamePlaceholder')}
                       aria-label={t('adv.entry.name')} disabled={upsertTarget !== undefined}
                       onChange={(event) => { setNewRoute({ ...newRoute, displayName: event.target.value }) }} />
                   </label>
@@ -866,13 +932,13 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                   </label>
                   <label className="dshAma-field">
                     <span className="dshAma-fieldLabel">baseURL</span>
-                    <input className="dshAma-input" type="text" value={newRoute.baseURL} placeholder="https://…/v1"
+                    <Input className="dshAma-inputWrap" type="text" value={newRoute.baseURL} placeholder="https://…/v1"
                       aria-label="baseURL" disabled={upsertTarget !== undefined}
                       onChange={(event) => { setNewRoute({ ...newRoute, baseURL: event.target.value }) }} />
                   </label>
                   <label className="dshAma-field">
                     <span className="dshAma-fieldLabel">{t('adv.newRoute.apiKeyEnv')}</span>
-                    <input className="dshAma-input" type="text" value={newRoute.apiKeyEnv} placeholder="MY_GATEWAY_API_KEY"
+                    <Input className="dshAma-inputWrap" type="text" value={newRoute.apiKeyEnv} placeholder="MY_GATEWAY_API_KEY"
                       aria-label={t('adv.newRoute.apiKeyEnvAria')} disabled={upsertTarget !== undefined}
                       onChange={(event) => { setNewRoute({ ...newRoute, apiKeyEnv: event.target.value }) }} />
                   </label>
@@ -900,18 +966,20 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                 {newRoute.rows.map((model, index) => (
                   <div key={index} className="dshAma-entry">
                     <div className="dshAma-entryHead">
-                      <button type="button" className="dshAma-iconButton" aria-label={t('adv.newRoute.expandRow', { index: index + 1 })}
+                      <Button type="button" variant="ghost" size="sm" icon={<IconChevron open={openRows.has('n' + String(index))} />}
+                        className="dshAma-iconAction" aria-label={t('adv.newRoute.expandRow', { index: index + 1 })}
                         aria-expanded={openRows.has(`n${String(index)}`)}
-                        onClick={() => { toggleOpen(`n${String(index)}`) }}><IconChevron open={openRows.has('n' + String(index))} /></button>
+                        onClick={() => { toggleOpen(`n${String(index)}`) }} />
                       <span className="dshAma-entryId">
                         {typeof model.id === 'string' && model.id !== '' ? model.id : t('adv.list.unnamed')}
                       </span>
-                      <button type="button" className="dshAma-iconButton dshAma-iconButtonDanger"
+                      <Button type="button" variant="ghost" size="sm" icon={<IconTrash />}
+                        className="dshAma-iconAction dshAma-iconDanger"
                         aria-label={t('adv.newRoute.removeRow', { index: index + 1 })} disabled={disabled}
                         onClick={() => {
                           collapseAll()
                           setNewRoute({ ...newRoute, rows: newRoute.rows.filter((_m, at) => at !== index) })
-                        }}><IconTrash /></button>
+                        }} />
                     </div>
                     {openRows.has(`n${String(index)}`)
                       ? (
@@ -931,7 +999,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                 ))}
                 <div className="dshAma-footer">
                   {failure !== undefined ? <p className="dshAma-error">{messageText(failure, t)}</p> : null}
-                  <button type="button" className="dshAma-button dshAma-buttonPrimary"
+                  <Button type="button" variant="primary" size="sm"
                     disabled={disabled || (upsertTarget !== undefined && upsertTarget.entry.declared !== true)}
                     onClick={() => { void createRoute() }}>
                     {busy
@@ -939,7 +1007,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                       : upsertTarget === undefined
                         ? t('adv.newRoute.create')
                         : upsertTarget.entry.declared === true ? t('adv.newRoute.append') : t('adv.newRoute.cannotAppend')}
-                  </button>
+                  </Button>
                 </div>
               </>
             )}
@@ -991,449 +1059,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   )
 }
 
-/** A blank retry-policy draft: every field "use the schema default". */
-const BLANK_RETRY: RetryPolicyDraft = {
-  mode: 'normal', maxRetries: '', initialDelayMs: '', maxDelayMs: '', jitterRatio: '',
-}
-
-/** One summary fragment for a customized policy, or the default label. */
-function retrySummary(base: RetryPolicyDraft | undefined): PageMessage {
-  if (base === undefined) return message('adv.retry.summaryDefault')
-  if (base.mode === 'always') return message('adv.retry.summaryAlways')
-  const retries = base.maxRetries.trim() === '' ? String(RETRY_POLICY_DEFAULTS.maxRetries) : base.maxRetries.trim()
-  return message('adv.retry.summaryRetries', { count: retries })
-}
-
-/**
- * Route-level default reasoning effort (`providers.<route>.reasoning`).
- * Not a capability declaration — it only seeds the effort when a call omits
- * one. Unsupported levels fail the request, so the picker offers only the
- * canonical levels and the copy says so.
- */
-function RouteReasoningCard(props: {
-  row: RouteRow
-  disabled: boolean
-  api: Pick<AdvancedModelsRemote, 'settings'>
-  namespace: SettingsNamespaceView | undefined
-  controller: AdvancedModelsStore
-  t: Translate
-}): ReactNode {
-  const { row, api, namespace, controller, t } = props
-  const base = typeof row.userProfile?.reasoning === 'string' ? row.userProfile.reasoning as string : ''
-  const [draft, setDraft] = useState<string | undefined>(undefined)
-  const [busy, setBusy] = useState(false)
-  const [failure, setFailure] = useState<PageMessage | undefined>(undefined)
-  const [notice, setNotice] = useState<PageMessage | undefined>(undefined)
-  const effective = draft ?? base
-  const changed = draft !== undefined && draft !== base
-  const fieldDisabled = props.disabled || busy
-
-  const run = async (ops: readonly SettingsPathOpView[], doneNotice: PageMessage): Promise<void> => {
-    if (namespace === undefined) return
-    setBusy(true)
-    setFailure(undefined)
-    setNotice(undefined)
-    const outcome = await writeOps(api, ops, namespace.revision)
-    setBusy(false)
-    if (outcome.kind === 'conflict') {
-      setFailure(message('adv.failure.conflictReloadedPlain'))
-      setDraft(undefined)
-      await controller.load()
-      return
-    }
-    if (outcome.kind === 'failure') {
-      setFailure(outcome.message)
-      return
-    }
-    setDraft(undefined)
-    setNotice(doneNotice)
-    await controller.load()
-  }
-
-  const save = async (): Promise<void> => {
-    if (draft === undefined) return
-    await run(
-      draft === ''
-        ? [{ op: 'unset', path: [...row.entry.settingsPath, 'reasoning'] }]
-        : [{ op: 'set', path: [...row.entry.settingsPath, 'reasoning'], value: draft as JsonValue }],
-      message('adv.reasoningCard.saved'),
-    )
-  }
-
-  return (
-    <details className="dshAma-newRoute dshAma-retryCard">
-      <summary className="dshAma-newRouteSummary">
-        {t('adv.reasoningCard.title')}{base === '' ? t('adv.reasoningCard.summaryDefault') : t('adv.reasoningCard.summaryLevel', { level: base })}
-      </summary>
-      <div className="dshAma-newRouteBody">
-        <p className="dshAma-hint">
-          {t('adv.reasoningCard.hint')}
-        </p>
-        <label className="dshAma-field">
-          <span className="dshAma-fieldLabel">{t('adv.reasoningCard.field')}</span>
-          <select
-            className="dshAma-input dshAma-select" value={effective}
-            aria-label={t('adv.reasoningCard.aria')} disabled={fieldDisabled}
-            onChange={(event) => { setDraft(event.target.value) }}
-          >
-            <option value="">{t('adv.reasoningCard.unset')}</option>
-            {REASONING_LEVELS.map(level => (
-              <option key={level} value={level}>{level}</option>
-            ))}
-          </select>
-        </label>
-        <div className="dshAma-footer">
-          {failure !== undefined ? <p className="dshAma-error">{messageText(failure, t)}</p> : null}
-          {notice !== undefined ? <p className="dshAma-notice">{messageText(notice, t)}</p> : null}
-          <button
-            type="button" className="dshAma-button dshAma-buttonPrimary"
-            disabled={fieldDisabled || !changed}
-            onClick={() => { void save() }}
-          >{busy ? t('adv.save.busy') : t('adv.reasoningCard.save')}</button>
-          {changed ? (
-            <button
-              type="button" className="dshAma-button"
-              disabled={fieldDisabled}
-              onClick={() => { setDraft(undefined); setFailure(undefined); setNotice(undefined) }}
-            >{t('adv.undo')}</button>
-          ) : null}
-        </div>
-      </div>
-    </details>
-  )
-}
-
-/**
- * The provider-level retry-policy editor for the selected route. Saved on its
- * own button (a `set`/`unset` at `providers.<route>.retryPolicy`), separate
- * from the model-list save below — the two edit different levels of the same
- * profile and must not fence each other's writes.
- */
-function RetryPolicyCard(props: {
-  row: RouteRow
-  disabled: boolean
-  api: Pick<AdvancedModelsRemote, 'settings'>
-  namespace: SettingsNamespaceView | undefined
-  controller: AdvancedModelsStore
-  t: Translate
-}): ReactNode {
-  const { row, api, namespace, controller, t } = props
-  const base = readRetryPolicy(row.userProfile?.retryPolicy)
-  const [draft, setDraft] = useState<RetryPolicyDraft | undefined>(undefined)
-  const [busy, setBusy] = useState(false)
-  const [failure, setFailure] = useState<PageMessage | undefined>(undefined)
-  const [notice, setNotice] = useState<PageMessage | undefined>(undefined)
-  const effective = draft ?? base
-  const changed = draft !== undefined
-    && (base === undefined || JSON.stringify(draft) !== JSON.stringify(base))
-  const fieldDisabled = props.disabled || busy
-  /** Bind one string field of the draft, starting from blank on first edit. */
-  const bind = (key: 'maxRetries' | 'initialDelayMs' | 'maxDelayMs' | 'jitterRatio') => ({
-    value: effective?.[key] ?? '',
-    onChange: (value: string) => { setDraft({ ...(effective ?? BLANK_RETRY), [key]: value }) },
-  })
-
-  const run = async (ops: readonly SettingsPathOpView[], doneNotice: PageMessage): Promise<void> => {
-    if (namespace === undefined) return
-    setBusy(true)
-    setFailure(undefined)
-    setNotice(undefined)
-    const outcome = await writeOps(api, ops, namespace.revision)
-    setBusy(false)
-    if (outcome.kind === 'conflict') {
-      setFailure(message('adv.failure.conflictReloadedPlain'))
-      setDraft(undefined)
-      await controller.load()
-      return
-    }
-    if (outcome.kind === 'failure') {
-      setFailure(outcome.message)
-      return
-    }
-    setDraft(undefined)
-    setNotice(doneNotice)
-    await controller.load()
-  }
-
-  const save = async (): Promise<void> => {
-    if (draft === undefined) return
-    const parsed = parseRetryPolicy(draft)
-    if (!parsed.ok) {
-      setFailure(parsed.failure)
-      setNotice(undefined)
-      return
-    }
-    await run(
-      [{ op: 'set', path: [...row.entry.settingsPath, 'retryPolicy'], value: parsed.value as JsonValue }],
-      message('adv.retry.saved'),
-    )
-  }
-
-  const restoreDefault = async (): Promise<void> => {
-    if (base === undefined) return
-    await run(
-      [{ op: 'unset', path: [...row.entry.settingsPath, 'retryPolicy'] }],
-      message('adv.retry.restored'),
-    )
-  }
-
-  const maxRetries = bind('maxRetries')
-  const initialDelayMs = bind('initialDelayMs')
-  const maxDelayMs = bind('maxDelayMs')
-  const jitterRatio = bind('jitterRatio')
-  return (
-    <details className="dshAma-newRoute dshAma-retryCard">
-      <summary className="dshAma-newRouteSummary">
-        {t('adv.retry.title')}{messageText(retrySummary(base), t)}
-      </summary>
-      <div className="dshAma-newRouteBody">
-        <p className="dshAma-hint">
-          {t('adv.retry.hint', {
-            maxRetries: RETRY_POLICY_DEFAULTS.maxRetries,
-            initialDelayMs: RETRY_POLICY_DEFAULTS.initialDelayMs,
-            maxDelayMs: RETRY_POLICY_DEFAULTS.maxDelayMs,
-            jitterPercent: Math.round(RETRY_POLICY_DEFAULTS.jitterRatio * 100),
-          })}
-        </p>
-        <div className="dshAma-grid">
-          <label className="dshAma-field">
-            <span className="dshAma-fieldLabel">{t('adv.retry.mode')}</span>
-            <select
-              className="dshAma-input dshAma-select" value={effective?.mode ?? 'normal'}
-              aria-label={t('adv.retry.modeAria')} disabled={fieldDisabled}
-              onChange={(event) => {
-                setDraft({ ...(effective ?? BLANK_RETRY), mode: event.target.value as RetryPolicyDraft['mode'] })
-              }}
-            >
-              <option value="normal">{t('adv.retry.modeNormal')}</option>
-              <option value="always">{t('adv.retry.modeAlways')}</option>
-            </select>
-          </label>
-          {effective?.mode === 'always'
-            ? null
-            : (
-              <label className="dshAma-field">
-                <span className="dshAma-fieldLabel">{t('adv.retry.maxRetries')}</span>
-                <input
-                  className="dshAma-input" type="text" inputMode="numeric"
-                  value={maxRetries.value}
-                  placeholder={t('adv.retry.placeholder', { value: RETRY_POLICY_DEFAULTS.maxRetries })}
-                  aria-label={t('adv.retry.maxRetriesAria')} disabled={fieldDisabled}
-                  onChange={(event) => { maxRetries.onChange(event.target.value) }}
-                />
-              </label>
-            )}
-          <label className="dshAma-field">
-            <span className="dshAma-fieldLabel">{t('adv.retry.initialDelay')}</span>
-            <input
-              className="dshAma-input" type="text" inputMode="numeric"
-              value={initialDelayMs.value}
-              placeholder={t('adv.retry.placeholder', { value: RETRY_POLICY_DEFAULTS.initialDelayMs })}
-              aria-label={t('adv.retry.initialDelayAria')} disabled={fieldDisabled}
-              onChange={(event) => { initialDelayMs.onChange(event.target.value) }}
-            />
-          </label>
-          <label className="dshAma-field">
-            <span className="dshAma-fieldLabel">{t('adv.retry.maxDelay')}</span>
-            <input
-              className="dshAma-input" type="text" inputMode="numeric"
-              value={maxDelayMs.value}
-              placeholder={t('adv.retry.placeholder', { value: RETRY_POLICY_DEFAULTS.maxDelayMs })}
-              aria-label={t('adv.retry.maxDelayAria')} disabled={fieldDisabled}
-              onChange={(event) => { maxDelayMs.onChange(event.target.value) }}
-            />
-          </label>
-          <label className="dshAma-field">
-            <span className="dshAma-fieldLabel">{t('adv.retry.jitter')}</span>
-            <input
-              className="dshAma-input" type="text" inputMode="decimal"
-              value={jitterRatio.value}
-              placeholder={t('adv.retry.placeholder', { value: RETRY_POLICY_DEFAULTS.jitterRatio })}
-              aria-label={t('adv.retry.jitterAria')} disabled={fieldDisabled}
-              onChange={(event) => { jitterRatio.onChange(event.target.value) }}
-            />
-          </label>
-        </div>
-        {effective?.mode === 'always'
-          ? (
-            <p className="dshAma-error">
-              {t('adv.retry.alwaysWarning')}
-            </p>
-          )
-          : null}
-        <div className="dshAma-footer">
-          {failure !== undefined ? <p className="dshAma-error">{messageText(failure, t)}</p> : null}
-          {notice !== undefined ? <p className="dshAma-notice">{messageText(notice, t)}</p> : null}
-          <button
-            type="button" className="dshAma-button dshAma-buttonPrimary"
-            disabled={fieldDisabled || !changed}
-            onClick={() => { void save() }}
-          >{busy ? t('adv.save.busy') : t('adv.retry.save')}</button>
-          {base === undefined ? null : (
-            <button
-              type="button" className="dshAma-button"
-              disabled={fieldDisabled}
-              onClick={() => { void restoreDefault() }}
-            >{t('adv.retry.restore')}</button>
-          )}
-          {changed ? (
-            <button
-              type="button" className="dshAma-button"
-              disabled={fieldDisabled}
-              onClick={() => { setDraft(undefined); setFailure(undefined); setNotice(undefined) }}
-            >{t('adv.undo')}</button>
-          ) : null}
-        </div>
-      </div>
-    </details>
-  )
-}
-
-/**
- * The provider-level request-header editor for the selected route. Writes
- * `providers.<route>.headers` as its own set/unset (same fence discipline as
- * RetryPolicyCard). Useful for gateways that require a custom header — e.g.
- * OpenCode Go's `x-opencode-session` — until upstream injects a per-session
- * value automatically. Attribution reserved names still win at request time.
- */
-function HeadersCard(props: {
-  row: RouteRow
-  disabled: boolean
-  api: Pick<AdvancedModelsRemote, 'settings'>
-  namespace: SettingsNamespaceView | undefined
-  controller: AdvancedModelsStore
-  t: Translate
-}): ReactNode {
-  const { row, api, namespace, controller, t } = props
-  const base = readHeaders(row.userProfile?.headers)
-  const [draft, setDraft] = useState<HeaderRow[] | undefined>(undefined)
-  const [busy, setBusy] = useState(false)
-  const [failure, setFailure] = useState<PageMessage | undefined>(undefined)
-  const [notice, setNotice] = useState<PageMessage | undefined>(undefined)
-  const effective = draft ?? base
-  const changed = draft !== undefined && JSON.stringify(draft) !== JSON.stringify(base)
-  const fieldDisabled = props.disabled || busy
-
-  const run = async (ops: readonly SettingsPathOpView[], doneNotice: PageMessage): Promise<void> => {
-    if (namespace === undefined) return
-    setBusy(true)
-    setFailure(undefined)
-    setNotice(undefined)
-    const outcome = await writeOps(api, ops, namespace.revision)
-    setBusy(false)
-    if (outcome.kind === 'conflict') {
-      setFailure(message('adv.failure.conflictReloadedPlain'))
-      setDraft(undefined)
-      await controller.load()
-      return
-    }
-    if (outcome.kind === 'failure') {
-      setFailure(outcome.message)
-      return
-    }
-    setDraft(undefined)
-    setNotice(doneNotice)
-    await controller.load()
-  }
-
-  const save = async (): Promise<void> => {
-    if (draft === undefined) return
-    const parsed = parseHeaders(draft)
-    if (!parsed.ok) {
-      setFailure(parsed.failure)
-      setNotice(undefined)
-      return
-    }
-    await run(
-      Object.keys(parsed.value).length === 0
-        ? [{ op: 'unset', path: [...row.entry.settingsPath, 'headers'] }]
-        : [{ op: 'set', path: [...row.entry.settingsPath, 'headers'], value: parsed.value as JsonValue }],
-      message('adv.headers.saved'),
-    )
-  }
-
-  const restoreDefault = async (): Promise<void> => {
-    if (base.length === 0) return
-    await run(
-      [{ op: 'unset', path: [...row.entry.settingsPath, 'headers'] }],
-      message('adv.headers.cleared'),
-    )
-  }
-
-  const patchRow = (index: number, patch: Partial<HeaderRow>): void => {
-    const next = effective.map((entry, i) => (i === index ? { ...entry, ...patch } : entry))
-    setDraft(next)
-  }
-
-  return (
-    <details className="dshAma-newRoute dshAma-retryCard">
-      <summary className="dshAma-newRouteSummary">
-        {t('adv.headers.title')}{base.length === 0 ? t('adv.headers.summaryDefault') : t('adv.headers.summaryCustom', { count: base.length })}
-      </summary>
-      <div className="dshAma-newRouteBody">
-        <p className="dshAma-hint">
-          {t('adv.headers.hint')}
-          <code> x-opencode-session</code>{t('adv.headers.hintAfterCode')}
-          <code>User-Agent</code>{t('adv.headers.hintTail')}
-        </p>
-        {effective.length === 0
-          ? <p className="dshAma-hint">{t('adv.headers.empty')}</p>
-          : effective.map((entry, index) => (
-            <div key={index} className="dshAma-kvRow">
-              <input
-                className="dshAma-input" type="text" value={entry.name}
-                placeholder="x-opencode-session" aria-label={t('adv.headers.nameAria', { index: index + 1 })}
-                disabled={fieldDisabled}
-                onChange={(event) => { patchRow(index, { name: event.target.value }) }}
-              />
-              <input
-                className="dshAma-input" type="text" value={entry.value}
-                placeholder="value" aria-label={t('adv.headers.valueAria', { index: index + 1 })}
-                disabled={fieldDisabled}
-                onChange={(event) => { patchRow(index, { value: event.target.value }) }}
-              />
-              <button
-                type="button" className="dshAma-iconButton dshAma-iconButtonDanger"
-                aria-label={t('adv.headers.removeAria', { index: index + 1 })} disabled={fieldDisabled}
-                onClick={() => {
-                  setDraft(effective.filter((_, i) => i !== index))
-                }}
-              >×</button>
-            </div>
-          ))}
-        <div className="dshAma-footer">
-          {failure !== undefined ? <p className="dshAma-error">{messageText(failure, t)}</p> : null}
-          {notice !== undefined ? <p className="dshAma-notice">{messageText(notice, t)}</p> : null}
-          <button
-            type="button" className="dshAma-button"
-            disabled={fieldDisabled}
-            onClick={() => { setDraft([...effective, { name: '', value: '' }]) }}
-          >{t('adv.headers.add')}</button>
-          <button
-            type="button" className="dshAma-button dshAma-buttonPrimary"
-            disabled={fieldDisabled || !changed}
-            onClick={() => { void save() }}
-          >{busy ? t('adv.save.busy') : t('adv.headers.save')}</button>
-          {base.length === 0 ? null : (
-            <button
-              type="button" className="dshAma-button"
-              disabled={fieldDisabled}
-              onClick={() => { void restoreDefault() }}
-            >{t('adv.headers.clear')}</button>
-          )}
-          {changed ? (
-            <button
-              type="button" className="dshAma-button"
-              disabled={fieldDisabled}
-              onClick={() => { setDraft(undefined); setFailure(undefined); setNotice(undefined) }}
-            >{t('adv.undo')}</button>
-          ) : null}
-        </div>
-      </div>
-    </details>
-  )
-}
-
 /** Page styles (class prefix dshAma-), injected inline — the brand bundle has no CSS pipeline. */
 const ADVANCED_CSS = `
 .dshAma-root { display: flex; flex-direction: column; gap: 10px; padding-top: 16px; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); }
@@ -1473,30 +1098,24 @@ const ADVANCED_CSS = `
 .dshAma-badgeCatalog { background: rgba(59, 130, 246, .12); color: #2563eb; }
 .dshAma-badgeCustom { background: rgba(22, 163, 74, .12); color: #16a34a; }
 .dshAma-entryBody { display: flex; flex-direction: column; gap: 10px; padding: 10px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
-.dshAma-iconButton { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: none; color: var(--dsw-alias-label-secondary, #64748b); cursor: pointer; font-size: 10px; }
-.dshAma-iconButton:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2, rgba(148,163,184,.15)); }
-.dshAma-iconButtonDanger:hover:not(:disabled) { color: #dc2626; }
-.dshAma-iconButton:disabled { opacity: .5; cursor: default; }
-.dshAma-kvRow { display: grid; grid-template-columns: minmax(120px, 200px) 1fr 24px; gap: 6px; align-items: center; }
+/* The icon actions are the kernel's Button primitive (ghost/sm) carrying the
+   page's own compact 24px footprint, which the row grids below are sized against. */
+.dshAma-iconAction { width: 24px; padding: 0; }
+.dshAma-iconDanger:hover:not(:disabled) { color: #dc2626; }
+.dshAma-kvRow { display: grid; grid-template-columns: minmax(120px, 200px) 1fr auto; gap: 6px; align-items: center; }
 .dshAma-kvKey { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); }
 .dshAma-readonlyValue { font-size: 12px; color: var(--dsw-alias-label-secondary, #94a3b8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dshAma-check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .dshAma-levelGrid { display: flex; flex-wrap: wrap; gap: 10px 14px; padding: 6px 0; }
 .dshAma-invalid { color: #dc2626; }
 .dshAma-footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
-.dshAma-button { padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; cursor: pointer; font-size: 12.5px; }
-.dshAma-button:disabled { opacity: .5; cursor: default; }
-.dshAma-buttonPrimary { border-color: transparent; background: var(--dsw-alias-brand-primary, #3b82f6); color: var(--dsw-alias-label-primary-foreground, #fff); }
 .dshAma-newRoute { border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 8px; margin-top: 8px; }
 .dshAma-retryCard { margin-top: 0; }
 .dshAma-newRouteSummary { padding: 8px 10px; cursor: pointer; color: var(--dsw-alias-label-secondary, #475569); font-size: 12.5px; }
 .dshAma-newRouteBody { display: flex; flex-direction: column; gap: 10px; padding: 10px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
-.dshAma-modalMask { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(15, 23, 42, .45); }
-.dshAma-modal { display: flex; flex-direction: column; width: min(560px, calc(100vw - 48px)); max-height: min(560px, calc(100vh - 48px)); border-radius: 10px; background: var(--dsw-alias-bg-overlay, #fff); box-shadow: 0 20px 50px rgba(15, 23, 42, .25); }
-.dshAma-modalHead { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
-.dshAma-modalTitle { font-weight: 600; }
-.dshAma-modalBody { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; overflow: auto; }
-.dshAma-modalFoot { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
+/* The two dialogs are the kernel's Modal; these three rules are the seats it
+   documents for sizing and for a long scrolling body. */
+.dshAma-importModal { width: min(560px, calc(100vw - 48px)); max-height: 100%; }
+.dshAma-modalScroll { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
 .dshAma-providerList { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; }
 .dshAma-providerRow { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; padding: 6px 10px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 8px; background: none; cursor: pointer; text-align: left; color: inherit; }
 .dshAma-providerRowActive { border-color: var(--dsw-alias-brand-primary, #3b82f6); }
@@ -1504,14 +1123,14 @@ const ADVANCED_CSS = `
 .dshAma-providerMeta { color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11.5px; }
 .dshAma-candidateBlock { display: flex; flex-direction: column; gap: 6px; }
 .dshAma-candidateList { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0 0 0 4px; list-style: none; max-height: 200px; overflow: auto; }
-.dshAma-candidate { font-size: 12.5px; }
+.dshAma-candidate { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 12.5px; }
 .dshAma-capabilityHint { padding: 6px 8px; border-left: 2px solid var(--dsw-alias-brand-primary, #3b82f6); background: var(--dsw-alias-bg-layer-2, #f1f5f9); color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.5; }
-.dshAma-discoveryModal { width: min(640px, calc(100vw - 48px)); }
+.dshAma-discoveryModal { width: min(640px, calc(100vw - 48px)); max-height: 100%; }
 .dshAma-discoverySource { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .dshAma-discoverySourceLabel { color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; }
 .dshAma-discoverySource code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshAma-discoveryToolbar { display: flex; gap: 8px; align-items: center; }
-.dshAma-discoveryToolbar .dshAma-input { flex: 1; min-width: 0; }
+.dshAma-discoveryToolbar .dshAma-inputWrap { flex: 1; min-width: 0; }
 .dshAma-discoveryList { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; }
 .dshAma-discoveryRow { display: flex; gap: 8px; align-items: flex-start; padding: 7px 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 6px; cursor: pointer; }
 .dshAma-discoveryRow:hover { background: var(--dsw-alias-bg-layer-2, #f1f5f9); }
@@ -1519,4 +1138,15 @@ const ADVANCED_CSS = `
 .dshAma-discoveryModel strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .dshAma-discoveryModel small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11.5px; }
 .dshAma-error p { margin: 0 0 6px; }
+
+/* --- Advanced parameters card (see route-advanced.tsx) --- */
+.dshAma-fieldHead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dshAma-fieldHint { margin: 0; color: var(--dsw-alias-label-secondary, #94a3b8); font-size: 11.5px; line-height: 1.5; }
+.dshAma-fieldError { margin: 0; color: #dc2626; font-size: 11.5px; }
+.dshAma-badgeOverridden { background: rgba(100, 116, 139, .14); color: var(--dsw-alias-label-secondary, #475569); }
+.dshAma-groupSummary { margin-left: 6px; color: var(--dsw-alias-label-secondary, #94a3b8); font-weight: 400; }
+.dshAma-input[aria-invalid="true"] { border-color: #dc2626; }
+/* The kernel's Input carries no error state of its own: the native input keeps
+   aria-invalid, and the wrapper it renders is what shows the refusal. */
+.dshAma-inputWrap:has([aria-invalid="true"]) { border-color: #dc2626; }
 `

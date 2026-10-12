@@ -10,6 +10,7 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
+import { Button, Checkbox, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   COMPAT_PRESETS, MODALITIES, REASONING_LEVELS,
   compatFieldsForApi, formatCapacity, parseCapacity, readReasoning, reasoningCompatFill,
@@ -180,11 +181,11 @@ function ReasoningEditor(props: {
         </select>
         {mode === 'inherit' && handDeclared
           ? (
-            <button
-              type="button" className="dshAma-button dshAma-buttonPrimary"
+            <Button
+              type="button" variant="primary" size="sm"
               disabled={disabled}
               onClick={enableReasoning}
-            >{t('adv.entry.enableReasoning')}</button>
+            >{t('adv.entry.enableReasoning')}</Button>
           )
           : null}
       </div>
@@ -212,15 +213,13 @@ function ReasoningEditor(props: {
           <>
             <div className="dshAma-levelGrid" role="group" aria-label={t('adv.entry.levelGroupAria', { index: index + 1 })}>
               {REASONING_LEVELS.map(level => (
-                <label key={level} className="dshAma-check">
-                  <input
-                    type="checkbox"
-                    checked={enabled.has(level)}
-                    disabled={disabled}
-                    onChange={(event) => { toggleLevel(level, event.target.checked) }}
-                  />
-                  <span>{level}</span>
-                </label>
+                <Checkbox
+                  key={level}
+                  checked={enabled.has(level)}
+                  disabled={disabled}
+                  label={level}
+                  onChange={(on) => { toggleLevel(level, on) }}
+                />
               ))}
             </div>
             <div className="dshAma-hint">
@@ -236,8 +235,8 @@ function ReasoningEditor(props: {
             {spellable.map(([level, spelling]) => (
               <div key={level} className="dshAma-kvRow">
                 <span className="dshAma-kvKey">{level}</span>
-                <input
-                  className="dshAma-input"
+                <Input
+                  className="dshAma-inputWrap"
                   type="text"
                   value={spelling ?? ''}
                   placeholder={t('adv.entry.spellingPlaceholder')}
@@ -248,12 +247,13 @@ function ReasoningEditor(props: {
                     onChange({ ...dict, [level]: raw === '' ? null : raw })
                   }}
                 />
-                <button
-                  type="button" className="dshAma-iconButton"
+                <Button
+                  type="button" variant="ghost" size="sm" icon={<IconTrash />}
+                  className="dshAma-iconAction"
                   aria-label={t('adv.entry.removeLevelAria', { level })}
                   disabled={disabled}
                   onClick={() => { toggleLevel(level, false) }}
-                ><IconTrash /></button>
+                />
               </div>
             ))}
           </div>
@@ -382,12 +382,13 @@ function CompatEditor(props: {
           <span className="dshAma-readonlyValue">
             {t('adv.compat.notApplicable', { api: api ?? t('adv.compat.currentProtocol') })}
           </span>
-          <button
-            type="button" className="dshAma-iconButton dshAma-iconButtonDanger"
+          <Button
+            type="button" variant="ghost" size="sm" icon="×"
+            className="dshAma-iconAction dshAma-iconDanger"
             aria-label={t('adv.compat.removeInvalidAria', { key })}
             disabled={disabled}
             onClick={() => { removeKey(key) }}
-          >×</button>
+          />
         </div>
       ))}
       {Object.entries(dict).map(([key, current]) => {
@@ -399,12 +400,13 @@ function CompatEditor(props: {
             {meta === undefined
               ? <span className="dshAma-readonlyValue">{JSON.stringify(current)}</span>
               : valueControl(meta, current)}
-            <button
-              type="button" className="dshAma-iconButton"
+            <Button
+              type="button" variant="ghost" size="sm" icon={<IconTrash />}
+              className="dshAma-iconAction"
               aria-label={t('adv.compat.removeAria', { key })}
               disabled={disabled}
               onClick={() => { removeKey(key) }}
-            ><IconTrash /></button>
+            />
           </div>
         )
       })}
@@ -461,8 +463,8 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
         : (
           <label className="dshAma-field">
             <span className="dshAma-fieldLabel">{t('adv.entry.modelId')}</span>
-            <input
-              className="dshAma-input"
+            <Input
+              className="dshAma-inputWrap"
               type="text"
               value={stringAt('id')}
               placeholder={t('adv.entry.modelIdPlaceholder')}
@@ -474,8 +476,8 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
         )}
       <label className="dshAma-field">
         <span className="dshAma-fieldLabel">{t('adv.entry.name')}</span>
-        <input
-          className="dshAma-input"
+        <Input
+          className="dshAma-inputWrap"
           type="text"
           value={stringAt('name')}
           placeholder={t('adv.entry.namePlaceholder')}
@@ -487,8 +489,8 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
       <div className="dshAma-capacityRow">
         <label className="dshAma-field">
           <span className="dshAma-fieldLabel">{t('adv.field.contextWindow')}</span>
-          <input
-            className="dshAma-input"
+          <Input
+            className="dshAma-inputWrap"
             type="text"
             inputMode="numeric"
             value={contextText}
@@ -500,8 +502,8 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
         </label>
         <label className="dshAma-field">
           <span className="dshAma-fieldLabel">{t('adv.field.maxTokens')}</span>
-          <input
-            className="dshAma-input"
+          <Input
+            className="dshAma-inputWrap"
             type="text"
             inputMode="numeric"
             value={maxTokensText}
@@ -516,15 +518,13 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
         <span className="dshAma-fieldLabel">{t('adv.entry.input')}</span>
         <div className="dshAma-inline">
           {MODALITIES.map(modality => (
-            <label key={modality} className="dshAma-check">
-              <input
-                type="checkbox"
-                checked={input.includes(modality)}
-                disabled={disabled}
-                onChange={() => { toggleModality(modality) }}
-              />
-              <span>{modality === 'text' ? t('adv.entry.inputText') : t('adv.entry.inputImage')}</span>
-            </label>
+            <Checkbox
+              key={modality}
+              checked={input.includes(modality)}
+              disabled={disabled}
+              label={modality === 'text' ? t('adv.entry.inputText') : t('adv.entry.inputImage')}
+              onChange={() => { toggleModality(modality) }}
+            />
           ))}
         </div>
         <div className="dshAma-hint">{t('adv.entry.inputHint')}</div>
