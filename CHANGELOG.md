@@ -8,6 +8,28 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.1] - 2026-10-12
+
+### 中文
+- 新增推理等级滑条：在官方模型菜单的「推理等级」那一行下方直接拖动即可切换档位，档位按当前模型自己公布的 id 解析（换模型或换服务商不会错位），只有一个档位的模型显示为满格；配色改为 DeepSeek 品牌蓝系渐变，最高档有方块马赛克扫过。
+- 桌面端：图片预览的关闭按钮此前落在原生窗口按钮的区域内、显示不全，现在压到标题栏下方；全屏时保持原样。
+- 插件市场：默认目录源去掉 GitHub Pages 源（国内无代理时 5 MB 要 6-8 秒、公开代理拒绝该域名，缓存过期后打开市场就在等它），只留 npm 镜像包目录与社区源；单个目录源失败不再让列表静默缩水——失败源用自己上次的缓存行参与渲染，失败原因仍会提示，下一次打开仍会重试该源；卡片头像改直连 GitHub 头像域，不再绕行 github.com 跳转（无代理时该跳转连接超时 10-21 秒，是头像加载慢的原因），加载失败仍回退首字母色块。
+- 插件市场：目录里未发布 npm 包的 GitHub 仓库源码插件（实测 1774 条）现在可以直接安装——目标按白名单校验为 `github:owner/repo` 后原样交给内核 CLI，具体提交由 pnpm 解析并记录进本 profile 的 lockfile；安装确认弹窗说明来源是仓库源码而非 npm registry，卡片新增「GitHub 源码」徽章，安装后卡片通过仓库身份与已安装视图对上并显示「Git 安装」。npm 安装路径行为不变，模型面安装工具仍只装 npm 包（对这类条目如实报告不可安装）。
+- 模型高级设置页重做：新增「高级参数」卡片，把此前全应用都没有入口的路由级字段（凭据变量名与解析状态、推理档与思考预算、重试策略、请求超时、默认上下文/输出上限/输入模态、缓存保留、流式传输、图片请求预算、自定义请求头）收进一张分组折叠的卡，字段级报错、只写改动的键、冲突自动带新版本重试并保留输入；原来三张各自保存的路由卡随之删除，覆盖模式补上「添加覆盖」入口（候选来自实时模型目录）；整页交互控件（按钮/输入框/复选框）与两个对话框改用内核 UI primitive。
+- 插件图标改为新的「回退卡片」造型：圆角卡片配回退箭头与循环线，配色改用品牌蓝与浅青。
+- 侧边栏 Git 页签新增「树形 / 列表」查看切换：树形按顶层目录分组、可折叠（分组标题已写出目录名，组内行只显示相对路径，不再每行重复目录前缀）；列表把每个文件排成一行并显示完整路径，适合已知路径时直接找。切换只改变呈现方式，不改变行内容、操作按钮与点击查看差异的行为。
+- 启动页：去掉鲸鱼背后那层固定 320px 的光圈（它比鲸鱼窄、又比鲸鱼高，两侧的尾鳍与左弧一定跨到光圈外），鲸鱼改为按自身墨迹包围盒居中——改前偏左 1 格、偏上 1.5 格，另有一个固定 6px 的下推；指针推散手感、配色与帧率与会话页统一（30fps 相位累加，改前实际只有 20fps）。
+
+### English
+- New reasoning-effort slider: drag the track injected under the official model menu's effort row to switch levels; a position resolves from the current model's own level ids (so a model or provider switch cannot misplace it), a single-level model reads as full, and the colours are a DeepSeek brand-blue ramp with a square mosaic sweep at the top levels.
+- Desktop: the image preview's close control no longer lands in the native window-button zone; it clears the caption band, and fullscreen is unchanged.
+- Market plugin: the default catalog sources drop the GitHub Pages origin (5 MB in 6-8 s on a proxyless mainland link, refused by public proxies — an expired open waited on it), keeping the npm-mirror package catalog and the community store; a failed source no longer silently shrinks the list — it lends its cached rows to the panel while its failure is still reported, and the next open retries it; card avatars load straight from GitHub's avatar host instead of the github.com redirect (whose first hop timed out in 10-21 s without a proxy — the slow-avatar report), with the letter-block fallback unchanged.
+- Market plugin: catalog entries that publish no npm package (1774 rows measured) can now be installed from their GitHub repository source — the target is whitelist-validated as `github:owner/repo` and handed to the kernel CLI unchanged, with pnpm resolving the commit and recording it in this profile's lockfile. The confirm dialog states the source is repository code rather than an npm release, cards gain a "GitHub source" badge, and an installed git plugin matches its card through the repository identity. The npm install path is unchanged, and the model-facing install tool still installs npm packages only (it reports these rows as not installable).
+- Advanced Models is reworked: a new "Advanced parameters" card gathers the route-level fields that previously had no editing surface anywhere (the credential variable and whether it resolves, the reasoning effort and thinking budgets, retry policy, request timeouts, default context/output limits and input modalities, cache retention, streaming transport, image request budgets, custom headers) into one collapsible, grouped card — validated in place, writing only the keys the user changed, and keeping the draft across a conflict while retrying with a fresh revision. The three cards that each saved on their own are gone, the override mode gains an "add an override" entry fed by the live model catalog, and the page's controls (buttons, inputs, checkboxes) plus both dialogs now compose the kernel's UI primitives.
+- The plugin icon is redrawn as a "recall card": a rounded card carrying a back arrow and a loop, in the brand blue and a light cyan.
+- Sidebar Git tab gains a Tree / List view toggle: the tree groups by top-level directory with collapsible headers and labels each row relative to its group (the header already names the directory, so rows stop repeating it); the list puts every file on one row with its full path, which is what you want when you already know the path. The toggle changes presentation only — same rows, same actions, same click-to-diff behaviour.
+- Startup page: the fixed 320px halo behind the whale is gone (narrower than the whale and taller than it, so the fluke and the left arc always crossed it), and the mosaic is centred on its own ink box — it had sat 1 cell left and 1.5 cells above the canvas centre, plus a fixed 6px nudge. The pointer push, the palette and the frame rate now match the session page (30fps behind a phase accumulator; the old gate measured 20fps).
+
 ## [v0.16.0] - 2026-10-09
 
 ### 中文
