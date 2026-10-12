@@ -67,8 +67,15 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
  * looks healthy and a track that never appears. The locale namespace the row
  * labels are read from is registered by the model-selection package, which is
  * why it is also listed in this package's `dsh.client.inject`.
+ *
+ * `remote` and `remote.session` are here for a call this plugin does not make
+ * itself: `directoryFor` builds a session's directory from `ctx.remote.session`,
+ * and cordis attributes that access to the CALLER — so without these two the
+ * first call for a session throws `cannot get property "remote.session" without
+ * inject` and the track is missing until some other consumer has created that
+ * directory. The official seat declares the same pair for the same reason.
  */
-export const inject = ['slots', 'locale', 'modelDirectories']
+export const inject = ['slots', 'locale', 'modelDirectories', 'remote', 'remote.session']
 
 /** Locale namespace of the OFFICIAL model menu, whose row labels we match against. */
 const OFFICIAL_NS = 'model'

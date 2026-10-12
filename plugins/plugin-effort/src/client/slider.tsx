@@ -6,11 +6,17 @@
  * and this file renders through a portal into that container. What it does own is
  * the interaction and the three rules that keep the position honest:
  *
- *   1. **Nothing is committed while dragging.** The pointer moves the knob and
- *      nothing else; the level is written once, on release. The official
- *      directory has no change-detection of its own (every `select` is an RPC),
- *      so a slider that wrote continuously would put one request per pointer
- *      sample on the wire for a single gesture.
+ *   1. **A crossing is one write, and one write at a time.** The pointer moves
+ *      the knob, and the level is asked for when it crosses into another level's
+ *      band — not on every pointer sample, and not only on release. Both extremes
+ *      are wrong for the same reason: the official directory has no
+ *      change-detection of its own (every `select` is an RPC), so a write per
+ *      sample would put a request on the wire every few milliseconds; and the row
+ *      above this track renders the SESSION's value rather than our draft, so a
+ *      slider that wrote only on release left that row naming the old level for
+ *      the whole gesture. Crossings that arrive while one write is in flight are
+ *      collapsed into the next one (see `write`), which is what keeps the row in
+ *      step without a burst of host selections behind a fast drag.
  *   2. **The position shown is the position that will be used.** A committed
  *      level stays on screen until the host's own frame reports a value, and a
  *      frame that never arrives rolls the display back with a reason instead of
@@ -94,8 +100,19 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const bridgeRef = useRef<EffortBridge | null>(null)
   const draggingRef = useRef(false)
   const draftRef = useRef<number | null>(null)
-  /** The effort id in place when the last commit was sent; a change means the host answered. */
-  const beforeRef = useRef<string | undefined>(undefined)
+  /** The level the pointer last landed on: what the next write should ask for. */
+  const wantedRef = useRef<number | null>(null)
+  /**
+   * The level the last write asked for, held until the session's own value
+   * catches up with it. It is what stops a release that lands between the
+   * response and the frame from asking for the same level twice — `committedIndex`
+   * cannot answer that, because it lags a whole frame behind the request.
+   */
+  const requestedRef = useRef<number | null>(null)
+  /** One write at a time; see `write` for why two in flight is the thing to avoid. */
+  const inFlightRef = useRef(false)
+  /** The current `write`, so a settled one can start the next without recursing by name. */
+  const writeRef = useRef<(index: number) => void>(() => {})
   /** Read by the bridge on every scan, so a locale switch re-labels without a remount. */
   const labelsRef = useRef(officialLabels)
   const activeRef = useRef(false)
@@ -114,22 +131,38 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   // One level list, one set of transient values. See rule 3 in the header.
   useEffect(() => {
     draftRef.current = null
+    wantedRef.current = null
     draggingRef.current = false
+    requestedRef.current = null
+    inFlightRef.current = false
     setDraft(null)
     setPending(null)
     setFailure(null)
   }, [identity])
 
-  // Rule 2: the host's own frame ends the pending commit, whichever level it names.
+  // Rule 2: the host's own frame ends the pending commit. What ends it is the
+  // session reporting the level this request ASKED FOR — not merely a value that
+  // changed: a frame belonging to an earlier write can arrive after this one was
+  // sent, and treating that as the answer drops the display back a level while the
+  // request it belongs to is still outstanding. It also retires the request, so a
+  // later ask for the same level is a real ask rather than a duplicate.
   useEffect(() => {
     if (pending === null) return
-    if (snapshot.current?.reasoningEffort !== beforeRef.current) setPending(null)
-  }, [snapshot, pending])
+    const requested = requestedRef.current
+    if (requested === null) return
+    if (snapshot.current?.reasoningEffort !== levels[requested]?.id) return
+    requestedRef.current = null
+    setPending(null)
+  }, [levels, pending, snapshot])
 
   // Rule 2's backstop: a commit nothing ever answers is reported, not left standing.
+  // The slot is freed so the control is not wedged, but the level is not re-asked:
+  // a host that has stopped answering is not one to retry into.
   useEffect(() => {
     if (pending === null) return undefined
     const handle = window.setTimeout(() => {
+      inFlightRef.current = false
+      requestedRef.current = null
       setPending(null)
       setFailure({ code: 'effort.error.timeout' })
     }, COMMIT_TIMEOUT_MS)
@@ -167,22 +200,60 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const shownName = shownIndex >= 0 ? levels[shownIndex]?.name : undefined
   const visibleTiles = tileCountFor(shownPct)
 
-  const commit = useCallback((index: number): void => {
+  /**
+   * Ask the host for one level. At most ONE write is on the wire: a crossing that
+   * arrives while one is in flight only moves `wantedRef`, and the response that
+   * finishes starts the next one. Two in flight is what this shape exists to
+   * prevent — the earlier answer clears the `pending` the later one set, and the
+   * display then falls back to a level the user has already left.
+   *
+   * @param index - the level to ask for.
+   */
+  const write = useCallback((index: number): void => {
+    if (inFlightRef.current) return
     const level = levels[index]
     if (level === undefined) return
-    // Nothing to write: the session is already on this level. The directory's
-    // `select` has no change-detection of its own, so this check is the only thing
-    // between a re-selected level and a pointless RPC.
-    if (index === committedIndex) return
-    beforeRef.current = snapshot.current?.reasoningEffort
+    // Nothing to ask for: this is the level the last request asked for, or the
+    // session is already on it AND nothing else is on its way. The directory's
+    // `select` has no change-detection of its own, so these two checks are the
+    // whole distance between a crossing and a duplicate RPC. The second is
+    // conditioned on the request being clear because a write in flight means the
+    // session is heading somewhere else — dragging back to where it started is a
+    // change of mind, not a no-op.
+    if (index === requestedRef.current) return
+    if (requestedRef.current === null && index === committedIndex) return
+    inFlightRef.current = true
+    requestedRef.current = index
     setFailure(null)
     setPending(index)
     void select(level.id).then((outcome) => {
-      if (outcome.ok) return
-      setPending(null)
-      setFailure({ code: outcome.code, ...outcome.params === undefined ? {} : { params: outcome.params } })
+      inFlightRef.current = false
+      if (!outcome.ok) {
+        // A refusal frees the level again, so releasing over it retries.
+        requestedRef.current = null
+        setPending(null)
+        setFailure({ code: outcome.code, ...outcome.params === undefined ? {} : { params: outcome.params } })
+      }
+      // The pointer may have crossed on while this one was on the wire; that
+      // crossing is the next write, and the only one. Consuming it here rather
+      // than waiting for the host's frame is what keeps a crossing from being
+      // dropped when the frame is slow to arrive.
+      const next = wantedRef.current
+      if (next !== null && next !== index) writeRef.current(next)
     })
-  }, [committedIndex, levels, select, snapshot])
+  }, [committedIndex, levels, select])
+  writeRef.current = write
+
+  /**
+   * Record where the pointer wants to be, and write it unless one is already on
+   * the wire — in which case that write's response picks this up.
+   *
+   * @param index - the level the pointer is on.
+   */
+  const commit = useCallback((index: number): void => {
+    wantedRef.current = index
+    writeRef.current(index)
+  }, [])
 
   const pctAtEvent = useCallback((clientX: number): number | null => {
     const node = trackRef.current
@@ -194,9 +265,14 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     const pct = pctAtEvent(clientX)
     if (pct === null) return
     const index = indexFromPct(pct, count)
+    // Only a crossing is news: the same band means the same level.
+    if (index === draftRef.current) return
     draftRef.current = index
     setDraft(index)
-  }, [count, pctAtEvent])
+    // Rule 1: the row above renders the SESSION's value, not this draft, so the
+    // write rides the crossing instead of waiting for the release.
+    commit(index)
+  }, [commit, count, pctAtEvent])
 
   const onPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     if (mode !== 'interactive') return
@@ -217,7 +293,11 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     moveTo(event.clientX)
   }, [mode, moveTo])
 
-  /** End the gesture and write the level the pointer settled on. */
+  /**
+   * End the gesture. The release records the level the pointer stopped on, which
+   * is the retry when a crossing's write was refused, and the whole of the work
+   * when the drag never left the band it started in.
+   */
   const endDrag = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     if (!draggingRef.current) return
     event.stopPropagation()
