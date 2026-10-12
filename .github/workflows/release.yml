@@ -502,7 +502,7 @@ jobs:
       # runtime — "not named by any layer index" — until they were deleted by
       # hand. Each cell prunes ITS OWN platform's unreferenced layer assets, so
       # the six cells never race on a name.
-      - name: Prune superseded layer assets
+      - name: Prune superseded layer assets and check the index
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -515,12 +515,30 @@ jobs:
             const index = require("./" + process.argv[1])
             for (const layer of index.layers) console.log(layer.name)
           ' "$INDEX" | sort > "$RUNNER_TEMP/claimed.txt"
-          gh release view "$TAG" --json assets --jq '.assets[].name' \
-            | grep -E "^((meta|vendor|node|suite)-.*-${PLATFORM}-${ARCH}\\.tgz)$" | sort > "$RUNNER_TEMP/present.txt" || true
+          # One listing, two views of it: every asset name, and the layer names
+          # this platform may prune. `dsh-<version>-<cell>.tgz` is deliberately
+          # not in the prune view (a rebuild replaces that name in place), but it
+          # IS in the check below — it is one of the five layers an index names.
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > "$RUNNER_TEMP/assets.txt"
+          grep -E "^((meta|vendor|node|suite)-.*-${PLATFORM}-${ARCH}\.tgz)$" "$RUNNER_TEMP/assets.txt" > "$RUNNER_TEMP/present.txt" || true
           comm -13 "$RUNNER_TEMP/claimed.txt" "$RUNNER_TEMP/present.txt" | while read -r name; do
             echo "removing superseded layer asset $name" >&2
             gh release delete-asset "$TAG" "$name" --yes
           done
+          # The other direction, and the one nothing checked: an index that names
+          # a layer this release does not carry. Measured on v0.16.2 — a 5xx
+          # during this cell's upload left `dsh-0.2.0-rc.2-darwin-arm64.tgz`
+          # absent while the index still named it, and every later release reused
+          # the set, because the reuse check reads asset NAMES rather than the set
+          # those names describe. The mirror refuses the opposite case (assets no
+          # index names) — this is the pair to it, and the reason it is checked
+          # here is that both lists already exist at this point.
+          comm -23 "$RUNNER_TEMP/claimed.txt" "$RUNNER_TEMP/assets.txt" > "$RUNNER_TEMP/absent.txt" || true
+          if [ -s "$RUNNER_TEMP/absent.txt" ]; then
+            echo "::error::the layer index names assets this release does not carry:" >&2
+            sed 's/^/  /' "$RUNNER_TEMP/absent.txt" >&2
+            exit 1
+          fi
 
       # Also expose the tgz as a workflow artifact so the app job can bundle it
       # into the installer without re-downloading from the (still-draft) release.
