@@ -418,12 +418,27 @@ jobs:
           # losing create is harmless (upload --clobber below is idempotent),
           # so swallow create failures and only let the upload fail loudly.
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --prerelease || true
+          # `gh release upload` has no retry of its own, and the API answers 5xx
+          # often enough to matter: measured on v0.16.2, one cell died fourteen
+          # minutes in on `HTTP 500` while replacing an asset, and a layer set no
+          # index named was left behind for the reuse check to trust. `--clobber`
+          # is what makes a repeat safe — an attempt that failed partway is
+          # re-sent whole, so the retry is the same command.
+          upload() {
+            local attempt
+            for attempt in 1 2 3; do
+              if gh release upload "$@" --clobber; then return 0; fi
+              echo "gh release upload failed (attempt ${attempt}/3); retrying" >&2
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
           # manifest.json carries platform/arch: name it per matrix cell so the
           # parallel cells never clobber the same asset name (a --clobber race
           # previously 404'd on a concurrently-deleted asset) nor leave the
           # last-writer's platform in the shared name.
           cp runtime-dist/manifest.json "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
-          gh release upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 "runtime-dist/manifest-${PLATFORM}-${ARCH}.json" --clobber
+          upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
           # The office payload (the LibreOffice engine the runtime no longer
           # carries): uploaded here, with the cell that built it. Its absence is
           # invisible to the runtime install — the tree boots fine without an
@@ -435,7 +450,7 @@ jobs:
           # which would fail the whole cell with a misleading "file not found"
           # for a tree that is legitimately engine-less.
           if compgen -G "runtime-dist/office-payload-*.tgz" > /dev/null; then
-            gh release upload "$TAG" runtime-dist/office-payload-*.tgz runtime-dist/office-payload-*.tgz.sha512 "runtime-dist/office-payload-${PLATFORM}-${ARCH}.json" --clobber
+            upload "$TAG" runtime-dist/office-payload-*.tgz runtime-dist/office-payload-*.tgz.sha512 "runtime-dist/office-payload-${PLATFORM}-${ARCH}.json"
           else
             echo "no office payload for ${PLATFORM}-${ARCH}: this kernel line publishes none"
           fi
@@ -459,12 +474,25 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
           ARCH: ${{ matrix.arch }}
         run: |
+          # Same retry as the step above; this is the upload that failed on
+          # v0.16.2, and its failure is the quiet kind — the index can land while
+          # a layer it names does not, and the reuse check reads names, not the
+          # set they describe.
+          upload() {
+            local attempt
+            for attempt in 1 2 3; do
+              if gh release upload "$@" --clobber; then return 0; fi
+              echo "gh release upload failed (attempt ${attempt}/3); retrying" >&2
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
           # Layer names already carry platform/arch; the INDEX name must too —
           # six cells build the same layers.json, and a shared name would leave
           # the last writer's platform in every cell's index. Keep the name in
           # sync with layerIndexAssetName() in src/kernel/layers.ts.
           cp runtime-dist/layers/layers.json "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json"
-          gh release upload "$TAG" runtime-dist/layers/*.tgz "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json" --clobber
+          upload "$TAG" runtime-dist/layers/*.tgz "runtime-dist/layers/layers-${PLATFORM}-${ARCH}.json"
 
       # A rebuilt runtime produces new layer names (they carry content digests),
       # and `--clobber` cannot remove the ones its predecessor left: layer names
