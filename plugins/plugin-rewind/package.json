@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-rewind",
   "description": "Message recall for DSH: cut the conversation back to before a chosen user message so it leaves the model's context, hide it in the transcript, and put its original text back in the composer. Works through the kernel's own surface-replacement mechanism, so nothing is deleted from the session log.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
