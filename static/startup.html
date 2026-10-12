@@ -44,13 +44,13 @@ window.__dshStartupShowFailure = function (config) {
      * value below is measured against #f0f5fd: body text >= 4.5:1, and the rail's
      * fill against its own track >= 3:1 (WCAG 1.4.11 — the graph carries the
      * progress, so its boundary is not decoration). */
-    --bg-base: #f0f5fd;
-    --bg-gradient: radial-gradient(circle at 50% 32%, #ffffff 0%, #edf4fe 52%, #e5effc 100%);
+    --bg-base: #f8fafc;
+    --bg-gradient: radial-gradient(circle at 50% 32%, #ffffff 0%, #f1f5ff 52%, #e7effc 100%);
     --text-title: #0f172a;
     --text-subtitle: #5b6a80;
     --text-dim: #78879b;
     --brand-dsh: #0f172a;
-    --brand-app: #0284c7;
+    --brand-app: #2563eb;
     --brand-accent: #2563eb;
     --pill-border: rgba(100, 116, 139, 0.45);
     --pill-text: #5b6a80;
@@ -75,7 +75,6 @@ window.__dshStartupShowFailure = function (config) {
     --divider: rgba(100, 116, 139, 0.35);
     --footer-line: rgba(100, 116, 139, 0.30);
     --footer-text: #78879b;
-    --sphere-halo: radial-gradient(circle, rgba(59, 130, 246, 0.18) 0%, rgba(147, 197, 253, 0.12) 48%, transparent 72%);
     --modal-bg: rgba(255, 255, 255, 0.95);
     --modal-border: rgba(15, 23, 42, 0.08);
     --btn-bg: rgba(15, 23, 42, 0.04);
@@ -87,14 +86,14 @@ window.__dshStartupShowFailure = function (config) {
 
   html[data-theme="dark"] {
     /* Dark Theme (Abyssal Cosmic Midnight) */
-    --bg-base: #070a13;
-    --bg-gradient: radial-gradient(circle at 50% 32%, #111a30 0%, #0a0e1c 55%, #05070e 100%);
+    --bg-base: #0d1220;
+    --bg-gradient: radial-gradient(circle at 50% 32%, #16203a 0%, #101728 55%, #0a0f1c 100%);
     --text-title: #f8fafc;
     --text-subtitle: #94a3b8;
     --text-dim: #7c8da4;
     --brand-dsh: #ffffff;
-    --brand-app: #38bdf8;
-    --brand-accent: #38bdf8;
+    --brand-app: #60a5fa;
+    --brand-accent: #60a5fa;
     --pill-border: rgba(255, 255, 255, 0.15);
     --pill-text: #94a3b8;
     /* A 0.07-alpha track is all but invisible over #070a13, which made the bar
@@ -102,28 +101,27 @@ window.__dshStartupShowFailure = function (config) {
        with the fill. */
     --rail-bg: rgba(255, 255, 255, 0.10);
     --rail-border: rgba(255, 255, 255, 0.06);
-    --rail-fill: linear-gradient(90deg, #38bdf8 0%, #2563eb 100%);
-    --rail-bloom: rgba(125, 211, 252, 0.50);
-    --rail-sweep: rgba(56, 189, 248, 0.22);
+    --rail-fill: linear-gradient(90deg, #60a5fa 0%, #2563eb 100%);
+    --rail-bloom: rgba(147, 197, 253, 0.45);
+    --rail-sweep: rgba(96, 165, 250, 0.22);
     --node-inactive: rgba(255, 255, 255, 0.45);
     /* Dark-on-bright-fill, the mirror of the light theme: this line's fill runs
        to a bright cyan, where a white notch measures 1.8:1 and vanishes. */
     --node-done: rgba(7, 10, 19, 0.68);
     --check-done: #10b981;
-    --check-active: #38bdf8;
+    --check-active: #60a5fa;
     --step-done-text: #cbd5e1;
     --step-active-text: #ffffff;
     --step-pending-text: #8b98a9;
     --divider: rgba(255, 255, 255, 0.14);
     --footer-line: rgba(255, 255, 255, 0.12);
     --footer-text: #7c8da4;
-    --sphere-halo: radial-gradient(circle, rgba(30, 58, 138, 0.38) 0%, rgba(56, 189, 248, 0.12) 50%, transparent 72%);
     --modal-bg: rgba(15, 23, 42, 0.94);
     --modal-border: rgba(255, 255, 255, 0.12);
     --btn-bg: rgba(255, 255, 255, 0.08);
     --btn-border: rgba(255, 255, 255, 0.14);
     --btn-text: #f8fafc;
-    --btn-primary-bg: #38bdf8;
+    --btn-primary-bg: #60a5fa;
     --btn-primary-fg: #070a13;
   }
 
@@ -200,7 +198,7 @@ window.__dshStartupShowFailure = function (config) {
     to { opacity: 1; transform: translateY(0); }
   }
 
-  /* ========================================================== Center Stage: Whale + Orbitals */
+  /* ========================================================== Center Stage: Whale */
   .whale-stage-wrap {
     position: relative;
     width: min(50vmin, 380px);
@@ -209,22 +207,6 @@ window.__dshStartupShowFailure = function (config) {
     display: flex;
     align-items: center;
     justify-content: center;
-  }
-
-  .sphere-halo-back {
-    position: absolute;
-    width: 320px;
-    height: 320px;
-    border-radius: 50%;
-    background: var(--sphere-halo);
-    pointer-events: none;
-    z-index: 1;
-    animation: haloBreathe 7s ease-in-out infinite;
-  }
-
-  @keyframes haloBreathe {
-    0%, 100% { transform: scale(1); opacity: 0.85; }
-    50% { transform: scale(1.08); opacity: 1; }
   }
 
   #whale-canvas {
@@ -654,7 +636,6 @@ window.__dshStartupShowFailure = function (config) {
   /* ========================================================== Reduced Motion */
   @media (prefers-reduced-motion: reduce) {
     .stage-monolith { animation: none; }
-    .sphere-halo-back { animation: none; }
     .progress-bar-wrap[data-mode="indeterminate"]::after { animation: none; }
     .step-rail li.step-item[data-state="current"] .step-badge { animation: none; }
     #startup-error { animation: none; }
@@ -670,7 +651,6 @@ window.__dshStartupShowFailure = function (config) {
   <main class="stage-monolith">
     <!-- Center Graphic: Dotted Whale -->
     <div class="whale-stage-wrap">
-      <div class="sphere-halo-back" aria-hidden="true"></div>
       <canvas id="whale-canvas" aria-hidden="true"></canvas>
     </div>
 
@@ -787,10 +767,8 @@ window.__dshStartupShowFailure = function (config) {
     // ========================================================== Digitile Whale Base64 Data
     var WHALE_GRID = 60;
     var ART_CELLS_X = 60;
-    var ART_CELLS_Y = 45;
     var CELL = 0.18;
     var TILE_SIZE = 0.06;
-    var GRID_CENTER = (WHALE_GRID - 1) / 2;
 
     var WHALE_B64 = [
       'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAOIABAAAAAPgH',
@@ -820,19 +798,47 @@ window.__dshStartupShowFailure = function (config) {
       '8PDw8PDw8PDw8PDx4mSE4vHw8PDw8PDw8PDw8PDx0nREg7PT8/Pz8/Pj06NzNA=='
     ].join('');
 
+    /**
+     * Centre of the cells the bitmap actually paints, in grid coordinates. The
+     * asset letterboxes a 24:18 artwork inside a 60x60 square, and its ink is
+     * not concentric with that square (columns 0..57, rows 7..49): drawing from
+     * the grid's own centre put the whale 1 cell left and 1.5 cells above the
+     * canvas centre, i.e. off the stage it is meant to sit in the middle of.
+     */
+    function inkCentre(bin) {
+      var minCol = WHALE_GRID;
+      var maxCol = -1;
+      var minRow = WHALE_GRID;
+      var maxRow = -1;
+      for (var row = 0; row < WHALE_GRID; row++) {
+        for (var col = 0; col < WHALE_GRID; col++) {
+          var bit = row * WHALE_GRID + col;
+          if (((bin.charCodeAt(bit >> 3) >> (bit & 7)) & 1) === 0) continue;
+          if (col < minCol) minCol = col;
+          if (col > maxCol) maxCol = col;
+          if (row < minRow) minRow = row;
+          if (row > maxRow) maxRow = row;
+        }
+      }
+      return { col: (minCol + maxCol) / 2, row: (minRow + maxRow) / 2 };
+    }
+
     function decodeTiles() {
       var bin = atob(WHALE_B64);
       var bitmapBytes = Math.ceil((WHALE_GRID * WHALE_GRID) / 8);
       var tiles = [];
       var attr = bitmapBytes;
+      var centre = inkCentre(bin);
       for (var row = 0; row < WHALE_GRID; row++) {
         for (var col = 0; col < WHALE_GRID; col++) {
           var bit = row * WHALE_GRID + col;
           if (((bin.charCodeAt(bit >> 3) >> (bit & 7)) & 1) === 0) continue;
           var a = bin.charCodeAt(attr++);
+          var gx = (col - centre.col) / ART_CELLS_X;
+          var gy = (centre.row - row) / ART_CELLS_X;
           tiles.push({
-            gx: (col - GRID_CENTER) / ART_CELLS_X,
-            gy: (GRID_CENTER - row) / ART_CELLS_X,
+            gx: gx,
+            gy: gy,
             lum: (a >> 4) / 15,
             edge: (a & 7) / 7,
             // Fixed per-tile face scale, matching the session page's renderer
@@ -841,7 +847,7 @@ window.__dshStartupShowFailure = function (config) {
             // mosaic look like physical tiles.
             scale: 0.5 + Math.random(),
             seed: Math.random(),
-            origDist: Math.hypot((col - GRID_CENTER) / ART_CELLS_X, (GRID_CENTER - row) / ART_CELLS_X)
+            origDist: Math.hypot(gx, gy)
           });
         }
       }
@@ -869,35 +875,127 @@ window.__dshStartupShowFailure = function (config) {
       scale = cssW / ART_CELLS_X;
     }
 
-    // Pointer dynamics
-    var pointer = { x: -999, y: -999, active: false };
+    // Pointer dynamics. The feel is the session page's: the tracked position is
+    // smoothed toward the real one, and the push strength ramps up and then
+    // DECAYS back to zero after the pointer leaves — a hard reset to 0 made the
+    // mosaic snap flat instead of settling.
+    var pointer = { tx: -999, ty: -999, sx: -999, sy: -999, over: false, push: 0 };
+    var MOUSE_DECAY = 0.2;
     window.addEventListener('pointermove', function (e) {
       var rect = canvas.getBoundingClientRect();
       var px = e.clientX - rect.left;
       var py = e.clientY - rect.top;
-      pointer.x = (px - canvasW / 2) / (ART_CELLS_X * scale);
-      pointer.y = (canvasH / 2 - py) / (ART_CELLS_X * scale);
-      pointer.active = (px >= -20 && px <= canvasW + 20 && py >= -20 && py <= canvasH + 20);
+      pointer.tx = (px - canvasW / 2) / (ART_CELLS_X * scale);
+      pointer.ty = (canvasH / 2 - py) / (ART_CELLS_X * scale);
+      pointer.over = (px >= -20 && px <= canvasW + 20 && py >= -20 && py <= canvasH + 20);
     });
 
     var START_TIME = performance.now();
     var ENTER_DURATION = 1100;
     var assembled = false;
     var lastFrame = 0;
-    var FPS = 24;
+    // 30fps, the session page's rate: on a 60Hz display that is exactly every
+    // second frame. 24fps is 41.7ms, which no 16.7ms grid can hit evenly — it
+    // lands as alternating 50/33ms steps, i.e. visible judder.
+    var FPS = 30;
+    var FRAME_MS = 1000 / FPS;
+    var accumulator = 0;
+
+    // Push parameters in WORLD units, exactly the session page's numbers.
+    // 1 gx unit = ART_CELLS_X cells = ART_CELLS_X·CELL world units, so a 2.4-world
+    // radius is 2.4/(60·0.18) = 0.222 in gx units — 44% of the whale's half-width.
+    var PUSH_RADIUS = 2.4 / (ART_CELLS_X * CELL);
+    var PUSH_STRENGTH = 0.8;
+    var PUSH_DISTORT = 5;
+
+    /**
+     * Per-tile push, the session page's math verbatim:
+     *   · a CUBIC falloff, so only the tiles near the pointer move;
+     *   · a per-tile noise angle of up to ±MOUSE_DISTORT radians, which ROTATES the
+     *     radial direction — tiles end up travelling in near-random directions, so
+     *     neighbours cross and the mosaic locally tangles and squeezes instead of
+     *     bulging outward as one shell;
+     *   · a per-tile hash on the travel distance, so tiles at one radius do not all
+     *     land on the same ring.
+     * The displacement is snapped to whole pixels, which is what keeps the moved
+     * tiles as crisp as the resting ones.
+     */
+    function pushOffset(tl, index, time) {
+      if (pointer.push < 0.002) return [0, 0];
+      var dx = tl.gx - pointer.sx;
+      var dy = tl.gy - pointer.sy;
+      var md = Math.hypot(dx, dy);
+      if (md >= PUSH_RADIUS) return [0, 0];
+      var k = 1 - md / PUSH_RADIUS;
+      var force = k * k * k * PUSH_STRENGTH * pointer.push;
+      if (force < 0.002) return [0, 0];
+      var na = Math.sin(index * 0.37 + time * 0.5) * PUSH_DISTORT;
+      var ca = Math.cos(na);
+      var sa = Math.sin(na);
+      var hash = Math.abs((Math.sin(index * 12.9898) * 43758.5453) % 1);
+      var push = force * 1.2 * (0.35 + 0.65 * hash);
+      var rx = dx / (md || 1e-4);
+      var ry = dy / (md || 1e-4);
+      // push is in world units; one gx unit is ART_CELLS_X·CELL of them, and one
+      // gx unit is ART_CELLS_X·scale pixels.
+      var travel = push * scale / CELL;
+      return [Math.round((rx * ca - ry * sa) * travel), Math.round((rx * sa + ry * ca) * travel)];
+    }
+
+    /**
+     * Tile fill, by the session page's rule: the base color is the theme's INK
+     * mixed toward the BRAND blue (30% on dark, 50% on light), then shaded by the
+     * tile's own luminance (0.2 + 0.916·l²), with a 0.7x floor on light so no tile
+     * sinks dark on a pale background. The brand values are the desktop theme's
+     * own tokens, written out because this page runs before the theme loads.
+     */
+    var INK_DARK = [230, 235, 245], BRAND_DARK = [96, 165, 250], ALPHA_DARK = 0.58;
+    var INK_LIGHT = [15, 23, 42], BRAND_LIGHT = [59, 130, 246], ALPHA_LIGHT = 0.66;
+    function tileFill(isDark, lum, alphaMod) {
+      var ink = isDark ? INK_DARK : INK_LIGHT;
+      var brand = isDark ? BRAND_DARK : BRAND_LIGHT;
+      var k = isDark ? 0.3 : 0.5;
+      var vLight = 0.2 + 0.916 * lum * lum;
+      var shade = isDark ? vLight : 0.7 + 0.3 * vLight;
+      var rgb = [0, 0, 0];
+      for (var c = 0; c < 3; c++) {
+        rgb[c] = Math.round(Math.min(255, (ink[c] + (brand[c] - ink[c]) * k) * shade));
+      }
+      var alpha = (isDark ? ALPHA_DARK : ALPHA_LIGHT) * alphaMod;
+      return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(3) + ')';
+    }
 
     function renderAnimation(now) {
       requestAnimationFrame(renderAnimation);
 
-      if (now - lastFrame < 1000 / FPS) return;
+      // Phase accumulator instead of `now - lastFrame < period`: the naive gate
+      // drops whichever vsync tick lands just short of the period and then
+      // catches up on the next one, so the achieved interval alternates around
+      // the target. Carrying the remainder keeps every frame one period apart.
+      var delta = now - lastFrame;
       lastFrame = now;
+      accumulator += delta;
+      if (accumulator < FRAME_MS) return;
+      // A tab that was hidden, or a long GC pause, leaves a backlog; dropping it
+      // (keeping only the phase) resumes evenly instead of bursting.
+      accumulator %= FRAME_MS;
 
       ctx.clearRect(0, 0, canvasW, canvasH);
 
       var isDark = root.getAttribute('data-theme') === 'dark';
       var time = now / 1000;
+      // The canvas centre, and nothing else: the tiles already carry the ink's
+      // own offset (see inkCentre), so the mosaic is centred here by
+      // construction. The fixed +6px this replaces was an eyeball correction
+      // for a shift that scales with the stage — wrong at every size but one.
       var cx = canvasW / 2;
-      var cy = canvasH / 2 + 6;
+      var cy = canvasH / 2;
+
+      // The session page's pointer feel: the tracked point eases toward the real
+      // one, and the strength decays back to nothing once the pointer leaves.
+      pointer.sx += (pointer.tx - pointer.sx) * MOUSE_DECAY;
+      pointer.sy += (pointer.ty - pointer.sy) * MOUSE_DECAY;
+      pointer.push += ((pointer.over ? 1 : 0) - pointer.push) * MOUSE_DECAY;
 
       // Digitile Whale Mosaic
       var enterProgress = reduced ? 1 : Math.min(1, (now - START_TIME) / ENTER_DURATION);
@@ -923,20 +1021,11 @@ window.__dshStartupShowFailure = function (config) {
 
         // Ambient fluid shimmer
         var wave = Math.sin(time * 1.5 + (tl.gx + tl.gy) * 5.8);
-        var lum = tl.lum * (1 + wave * 0.12);
+        var lum = Math.max(0, Math.min(1, tl.lum * (1 + wave * 0.12)));
 
-        // Interactive pointer displacement
-        var px = 0, py = 0;
-        if (pointer.active) {
-          var dx = tl.gx - pointer.x;
-          var dy = tl.gy - pointer.y;
-          var d = Math.hypot(dx, dy);
-          if (d < 0.24 && d > 1e-4) {
-            var f = (1 - d / 0.24) * 0.04 * ART_CELLS_X * scale;
-            px = (dx / d) * f;
-            py = -(dy / d) * f;
-          }
-        }
+        // Interactive pointer displacement (see pushOffset).
+        var offset = pushOffset(tl, i, time);
+        var px = offset[0], py = offset[1];
 
         var tx = cx + tl.gx * ART_CELLS_X * scale + ox + px;
         var ty = cy - tl.gy * ART_CELLS_X * scale + oy + py;
@@ -947,19 +1036,7 @@ window.__dshStartupShowFailure = function (config) {
         var currentS = baseS * tl.scale * scaleMod;
         if (assembled) currentS = Math.max(1, Math.round(currentS));
 
-        // Theme colors matching reference
-        if (isDark) {
-          var rD = Math.round(56 + lum * 120);
-          var gD = Math.round(150 + lum * 90);
-          var bD = Math.round(245 + lum * 10);
-          ctx.fillStyle = 'rgba(' + rD + ',' + gD + ',' + bD + ',' + (alphaMod * Math.min(1, 0.45 + tl.lum * 0.55)) + ')';
-        } else {
-          // Pure DeepSeek electric blue dots on crisp light background
-          var rL = Math.round(25 + (1 - lum) * 20);
-          var gL = Math.round(75 + (1 - lum) * 45);
-          var bL = Math.round(210 + (1 - lum) * 35);
-          ctx.fillStyle = 'rgba(' + rL + ',' + gL + ',' + bL + ',' + (alphaMod * Math.min(1, 0.65 + tl.lum * 0.35)) + ')';
-        }
+        ctx.fillStyle = tileFill(isDark, lum, alphaMod);
 
         ctx.fillRect(tx - currentS / 2, ty - currentS / 2, currentS, currentS);
       }
