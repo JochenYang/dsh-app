@@ -36,6 +36,15 @@ for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; do
 
 - **Build**: seventeen plugins run `node build.mjs` (esbuild bundles both halves).
   `plugin-brand` is the one exception — `tsc -p tsconfig.json` into `lib/`.
+- **A plugin passes three checks before its `lib/` can enter an artifact** — its
+  own `npm run typecheck`; a refusal of a `lib/` older than the plugin's own
+  inputs; and a refusal of a build that produced none of the entries its manifest
+  declares (`scripts/lib/plugin-gates.mjs`, run by `build-runtime.mjs`, by
+  `release.yml`'s pre-build loop and by `ci.yml`'s `gate` job — the two workflows
+  through `node scripts/plugin-gates.mjs <plugin-dir>`). esbuild does not type
+  check and npm drops a missing directory silently: a client half calling an
+  export its own module stopped exporting bundles fine, ships, and stops the app
+  in the renderer instead.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the

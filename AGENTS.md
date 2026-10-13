@@ -69,7 +69,17 @@ npm run verify -- --tgz runtime-dist/dsh-runtime-linux-x64-*.tgz
 npm run check:plugins -- --kernel <runtime.tgz> --home <real profile dir>
 ```
 
-Plugin builds and tests: `plugins/AGENTS.md`.
+Plugin builds and tests: `plugins/AGENTS.md`. Every suite plugin also passes three
+checks before its `lib/` can enter an artifact, all decided in
+`scripts/lib/plugin-gates.mjs` and run by `build-runtime.mjs`, by `release.yml`'s
+pre-build loop, and by `ci.yml`'s `gate` job in its per-plugin build loop — the CI
+pass is the one that catches a break before a merge: its own `npm run typecheck`
+(esbuild does not type check, so a client half calling a removed export used to
+reach users as a renderer `ReferenceError`); the build's DECLARED outputs must
+exist and be non-empty (npm omits a missing `files` directory from the tarball
+without a word); and `lib/` must not be older than the plugin's own inputs. On a
+clean checkout the freshness check passes by construction, so the type gate and
+the presence check are what CI proves.
 
 - Hand-run probes (`scripts/probe-*.mjs` / `.cjs`): `probe-launch-folder.mjs`
   after a kernel-line bump; `probe-settings-nav.cjs --lang en-US [--sweep]` after

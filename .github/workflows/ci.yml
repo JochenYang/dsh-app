@@ -74,9 +74,20 @@ jobs:
           # Each plugin owns its dependencies (docx, exceljs, pptxgenjs, ...),
           # so the workspace install above is not enough: install per plugin
           # first, exactly like the release job does.
+          #
+          # Each plugin's type gate runs here, after its build: `npm run build`
+          # is esbuild, which does not type check, so a client half calling a
+          # symbol its own module stopped exporting compiles fine, passes every
+          # other gate, and throws in the renderer on the user's first click.
+          # Per plugin rather than one pass afterwards, so the failure names the
+          # culprit; and this is the only place such a plugin can be stopped
+          # BEFORE a release runs — the smoke job below reaches build-runtime.mjs,
+          # which runs the same two gates itself, but only after its own installs.
+          # Verdicts and the freshness input set live in scripts/lib/plugin-gates.mjs.
           for dir in plugins/*/; do
             if [ -f "$dir/package.json" ]; then
               (cd "$dir" && npm install --no-audit --no-fund --legacy-peer-deps && npm run build)
+              node scripts/plugin-gates.mjs "$dir"
             fi
           done
       - name: Shell + kernel unit tests

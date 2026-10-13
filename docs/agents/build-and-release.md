@@ -46,6 +46,70 @@ ships.
 **Runtime resources come from each plugin's own `package.json` `files` field**,
 never a hand list; `smoke-suite.mjs` asserts what a bare `ok:true` cannot.
 
+**Every suite plugin passes three checks before its `lib/` can enter an
+artifact** (`scripts/lib/plugin-gates.mjs`). `build-runtime.mjs` runs all three
+itself: the type gate and the presence check in its per-plugin build loop, the
+freshness check in its `packPlugin`. `.github/workflows/release.yml`'s pre-build
+loop runs the same three one plugin at a time through
+`node ../scripts/plugin-gates.mjs "$p"`, so a break stops the job before the
+runtime assembly starts. The verdicts exist once, in that module.
+
+`.github/workflows/ci.yml` runs the same script per plugin in the `gate` job's
+per-plugin build loop — that is the call site that matters most, since it is the
+only one that fires before a merge. The `smoke` job's identical pre-pass is
+deliberately left alone: `build-runtime.mjs` runs its own checks a few steps later
+in that same job.
+
+**The artifact checks sit on different sides of the build**, which is why they are
+two and not one:
+
+- *before the build* — the only decidable question is staleness; a missing `lib/`
+  means "never built", which is not a stale artifact;
+- *after the build, before the pack* — absence is a failure: whatever the plugin's
+  own manifest declares must be there, because the build was just supposed to
+  write it.
+
+Every call site runs the script after that plugin's build, so both halves are
+meaningful there. What each call site can SEE still differs, and it matters when
+reading a green run: on a CLEAN checkout there is no `lib/` at all, so the
+freshness half passes by construction in CI and only ever bites a tree that was
+already built (a developer's machine, or a machine running `runtime:build` on
+sources edited after the last build) — the type gate and the presence check are
+what a clean-checkout run actually proves. The local `runtime:build` loop is the
+one that could pack a suite missing whole plugins, so it runs all three itself:
+the type gate and the presence check in its per-plugin loop (the check right after
+that plugin's build), the freshness check in `packPlugin`.
+
+- **Type gate** — the plugin's own `npm run typecheck`. `plugins/build-lib.mjs`
+  bundles with esbuild, which does not type check, and `npm pack` ships what
+  esbuild wrote: `plugin-effort`'s client half called `pctAt` while its
+  `geometry.ts` no longer exported it, and the result was
+  `Uncaught ReferenceError: pctAt is not defined` in the renderer on the user's
+  first drag — read out of the artifact, never out of a log. A plugin without a
+  `typecheck` script is refused unless its build script is `tsc` (`plugin-brand`),
+  which type-checks as it compiles; a plugin whose `node_modules` is missing is
+  refused with the install command, because tsc would otherwise answer with a
+  wall of unresolved imports.
+- **Presence check** — the build's declared outputs must exist. The declarations
+  come from the plugin's own manifest: the `files` entries that name `lib` (the
+  entry `lib` must exist and hold a file; a pattern must match one) plus `main`
+  and the `exports` targets under `lib/` — the paths npm and the dsh loader
+  resolve at LOAD time. `exports[…].types` targets are deliberately NOT required:
+  the seventeen esbuild plugins emit no `.d.ts`, and requiring them would refuse
+  the whole suite. Without this check a build that writes nothing is silent —
+  npm's `files` field omits a missing directory from the tarball without a word,
+  and this repository has already shipped a suite that was missing plugins with
+  every gate green.
+- **Freshness gate** — refuse a `lib/` older than the newest file that feeds it.
+  `lib/` is gitignored, so the tree a pack reads and the tree a developer runs
+  are two build products from two different moments. Inputs are every file under
+  the plugin except `node_modules`, `lib`, `dist`, `.test-dist`, `.git`,
+  `package-lock.json`, `*.log` and `*.tsbuildinfo` — `src/**` above all, plus the
+  plugin's own `build.mjs`/`tsconfig.json`/`package.json`. An unbuilt plugin (no
+  `lib/` at all) is not stale, and a tie is not stale. Cost on the maintainer's
+  machine: ~27 s serial for the seventeen typechecks, against a runtime build
+  measured in minutes.
+
 **The installer pre-extracts the bundled kernel** (`scripts/installer/
 installer-hooks.nsh`, wired through `nsis.include` in electron-builder.yml):
 an NSIS `customInstall` hook unpacks `resources/kernel/kernel.tgz` into

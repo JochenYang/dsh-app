@@ -36,7 +36,12 @@
  * The suite plugins (@dsh-app/plugin-*) join the runtime as tarballs produced
  * by `npm pack`, referenced through file: specs that `overrides` also point at,
  * so no @dsh-app package can resolve from the registry; switch them to registry
- * versions once they are published.
+ * versions once they are published. Each one is type-checked by its own
+ * `npm run typecheck` before it is built, its declared outputs are verified right
+ * after the build, and its lib/ is checked for freshness before it is packed —
+ * esbuild neither type-checks, nor notices that lib/ is older than the sources it
+ * came from, nor complains when a build wrote nothing at all
+ * (scripts/lib/plugin-gates.mjs).
  *
  * Two more packages the desktop shell needs are part of the same tree:
  *   - @deepseek-ai/dsh-web-frontend — published per kernel line (mind the
@@ -90,6 +95,7 @@ import { fileURLToPath } from 'node:url'
 import { c as createTar, t as listTar, x as extractTar } from 'tar'
 import { collectTreeEntries } from './lib/tree-entry.mjs'
 import { newestRuntimeTarball, staleCellArtifacts } from './lib/runtime-artifacts.mjs'
+import { assertPluginLibFresh, assertPluginOutputs, runPluginTypecheck } from './lib/plugin-gates.mjs'
 import {
   createOfficePayloadManifest,
   kitEnginePackage,
@@ -1147,6 +1153,10 @@ async function packDesktopHost(destDir, workRoot, runtimeDir) {
  */
 async function packPlugin(shortName, destDir) {
   const srcDir = path.join(root, 'plugins', shortName)
+  // Nothing packs a plugin's lib/ without this: the file that goes into the
+  // tarball must be the one the build loop just wrote, not one left over from
+  // another moment (lib/ is gitignored). See scripts/lib/plugin-gates.mjs.
+  assertPluginLibFresh(srcDir)
   const pkg = JSON.parse(readFileSync(path.join(srcDir, 'package.json'), 'utf8'))
   const expectedResources = declaredResourceEntries(shortName, pkg)
   run(npmBin(), ['pack', '--pack-destination', destDir, '--silent'], srcDir)
@@ -1907,7 +1917,19 @@ async function main() {
   //    plugins declare (react, react-dom) now exist in the tree; before, they
   //    were skipped silently.
   for (const name of SUITE_PLUGINS) {
-    run(npmBin(), ['run', 'build'], path.join(root, 'plugins', name.replace('@dsh-app/', '')))
+    const pluginDir = path.join(root, 'plugins', name.replace('@dsh-app/', ''))
+    // The type gate first: esbuild does not type check, so a client half calling
+    // a name its own module stopped exporting bundles fine, ships, and throws in
+    // the renderer on first use. run() throws on a non-zero exit.
+    runPluginTypecheck(pluginDir, { runNpm: (args, cwd) => run(npmBin(), args, cwd) })
+    // Build, then verify what the build declared it produces — the order the
+    // timeline in scripts/lib/plugin-gates.mjs requires: after a build, an absent
+    // declared output is a failure, not "never built". This is the loop a local
+    // `runtime:build` takes, and the loop that could pack a suite missing whole
+    // plugins with every other gate green — npm's `files` field drops a missing
+    // directory from the tarball without a word.
+    run(npmBin(), ['run', 'build'], pluginDir)
+    assertPluginOutputs(pluginDir)
   }
   const projectDir = path.join(work, 'assemble')
   const pkgsDir = path.join(projectDir, 'pkgs')
