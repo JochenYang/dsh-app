@@ -136,18 +136,16 @@ Both artifact checks depend on no peer and keep running regardless.
   `import('x')` is read like any other import. A computed specifier
   (``import(`./${name}`)``) and a CommonJS `require('x')` are outside the gate.
 
-  **Measured when the gate landed, and the reason the first run is not green**:
-  476 package imports across the eighteen plugins, none of them UNDECLARED, and
-  seven kernel imports that are runtime imports declared only as devDependencies
-  — `@deepseek-ai/schemastery` in `plugin-market` and `plugin-presets`;
-  `@deepseek-ai/dsh-home-paths` in `plugin-memory` and `plugin-rewind`;
-  `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-llm` in `plugin-rewind`. Each
-  is fixed by adding the package to that plugin's `peerDependencies` (the suite's
-  convention also carries it in `devDependencies`, so the type gate keeps
-  resolving), and each plugin's version needs a bump with it. Until then
-  `runtime:build`, `release.yml` and `ci.yml`'s `gate` job refuse those four
-  plugins — which is the rule working, not a false positive: every one of the
-  seven is a value import the kernel has to answer at load time.
+  **Measured over the suite**: 476 package imports across the eighteen plugins,
+  none of them UNDECLARED, and ONE kernel import that is a runtime import
+  declared only as a devDependency: `@deepseek-ai/schemastery` in
+  `plugin-market`. Six others were closed by adding the missing peer (with the
+  matching `devDependencies` row, so the type gate keeps resolving) to
+  `plugin-presets`, `plugin-memory` and `plugin-rewind`, each plugin's version
+  bumped with it. Until `plugin-market` is fixed the same way,
+  `runtime:build`, `release.yml` and `ci.yml`'s `gate` job refuse that one
+  plugin — which is the rule working, not a false positive: it is a value import
+  the kernel has to answer at load time.
 - **Type gate** — the plugin's own `npm run typecheck`. `plugins/build-lib.mjs`
   bundles with esbuild, which does not type check, and `npm pack` ships what
   esbuild wrote: `plugin-effort`'s client half called `pctAt` while its

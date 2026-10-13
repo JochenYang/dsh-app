@@ -16,7 +16,7 @@
 // for a filesystem timestamp would be slow and still flaky on a coarse clock.
 // `utimesSync` takes seconds, so the timestamps are whole seconds.
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -660,27 +660,57 @@ test('importGateSummary says how much of a run rested on the @types clause', () 
   assert.match(weaker, /1 only through their @types\/ sibling \(react-dom\)/su)
 })
 
-test('no plugin in the real suite imports a package nothing accounts for', () => {
-  // The 18 real manifests and 18 real `src/` trees, not a fixture of them. The
-  // kernel-peer half is deliberately NOT asserted here: it is a per-plugin
-  // declaration the suite has to keep true, and a test that pinned today's
-  // answers would go red for the fix rather than for the defect.
+test('every import gap the real suite reports is a real one', () => {
+  // The 18 real manifests and 18 real `src/` trees, not a fixture of them.
+  //
+  // The suite is red on exactly one plugin as this lands: plugin-market imports
+  // `@deepseek-ai/schemastery` for runtime and declares it nowhere (its manifest
+  // is being edited by a parallel change, so it is deliberately left for that
+  // one). This case does NOT pin that remainder — an expectation listing today's
+  // gaps would go red for the FIX rather than for a defect, and would then be
+  // relaxed instead of read. What it pins is that no gap is a FALSE POSITIVE,
+  // which is the property that keeps the gate's red meaningful: each one names a
+  // package the plugin really imports, at a file:line that really holds that
+  // import, and the field the gate says is missing really does not name it.
   const pluginsRoot = path.join(ROOT, 'plugins')
   const names = readdirSync(pluginsRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('plugin-'))
     .map((entry) => entry.name)
   assert.ok(names.length >= 18, `the suite has ${names.length} plugin directories, expected at least 18`)
   let checked = 0
+  const reported = []
   for (const name of names) {
-    const report = pluginImportGaps(path.join(pluginsRoot, name))
+    const pluginDir = path.join(pluginsRoot, name)
+    const report = pluginImportGaps(pluginDir)
     checked += report.checked
     assert.deepEqual(
       report.gaps.filter((gap) => gap.rule === 'undeclared'),
       [],
       `${name}: imports a package no dependency field or resolution chain accounts for`,
     )
+    const manifest = JSON.parse(readFileSync(path.join(pluginDir, 'package.json'), 'utf8'))
+    for (const gap of report.gaps) {
+      reported.push(`${name}:${gap.pkg}`)
+      assert.equal(gap.rule, 'kernel-peer', `${name}: an unexpected rule for ${gap.pkg}`)
+      assert.ok(gap.pkg.startsWith('@deepseek-ai/'), `${name}: ${gap.pkg} is not a kernel package`)
+      assert.ok(
+        !(gap.pkg in (manifest.peerDependencies ?? {})),
+        `${name}: ${gap.pkg} is reported as a missing peer, but peerDependencies names it`,
+      )
+      const file = path.join(pluginDir, gap.file)
+      assert.ok(existsSync(file), `${name}: the gap points at ${gap.file}, which does not exist`)
+      const specifiers = importSpecifiers(readFileSync(file, 'utf8'))
+      assert.ok(
+        specifiers.some((found) => found.specifier === gap.specifier && found.line === gap.line),
+        `${name}: ${gap.file}:${String(gap.line)} does not import ${gap.specifier}`,
+      )
+    }
   }
   assert.ok(checked > 300, `the gate read ${checked} package imports from the suite, expected the whole suite's`)
+  // Today's remainder, named so a reader of a red run knows what is left and a
+  // reader of a green one knows the exception is gone — NOT asserted, for the
+  // reason above.
+  assert.ok(reported.length <= 1, `the suite reports ${reported.join(', ')} — more than the one known remainder`)
 })
 
 test('every call site that builds or packs a plugin runs the shared gates', () => {

@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-presets",
   "description": "DSH APP preset packages: export locally authored agent presets as shareable .dshpreset archives (zip + manifest) and import them back into the user preset root, from the preset-packages tab of the maintenance settings section, with entry-whitelist, path-traversal and size/count safety checks.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -55,6 +55,7 @@
     "@deepseek-ai/dsh-client-ui-settings": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-home-paths": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4",
     "react": "^18.2.0"
   },
   "devDependencies": {
@@ -65,6 +66,7 @@
     "@deepseek-ai/dsh-client-ui-settings": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-home-paths": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^22.10.2",
     "@types/react": "18.3.1",
     "@types/react-dom": "^18.3.1",

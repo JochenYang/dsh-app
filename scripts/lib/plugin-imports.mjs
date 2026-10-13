@@ -37,10 +37,11 @@
  * esbuild bundles. Tests, `build.mjs` and `scripts/` run in the repository, not
  * in a user's profile, and are outside this gate.
  *
- * Measured when this gate first ran over the suite: 476 package imports across
- * the eighteen plugins, none UNDECLARED, and seven kernel packages imported for
- * runtime while declared only as devDependencies — four plugins, all of them red
- * until each declares the peer. Detail and the list:
+ * Measured over the suite: 476 package imports across the eighteen plugins, none
+ * UNDECLARED, and one kernel package imported for runtime while declared only as
+ * a devDependency — `@deepseek-ai/schemastery` in `plugin-market`, which is red
+ * until it declares the peer. Six others were closed the same way in
+ * `plugin-presets`, `plugin-memory` and `plugin-rewind`. Detail:
  * `docs/agents/build-and-release.md`.
  *
  * @module dsh-app/scripts/lib/plugin-imports
