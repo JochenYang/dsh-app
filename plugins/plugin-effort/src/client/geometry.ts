@@ -23,16 +23,6 @@ export const KNOB_SIZE = TRACK_HEIGHT
 /** Knob radius in px: the travel inset at each end of the track. */
 export const KNOB_RADIUS = KNOB_SIZE / 2
 
-/**
- * Horizontal padding the injected row borrows from the official cell, in px.
- *
- * The official effort row is `padding: 0 8px` inside a menu that carries its own
- * 4px padding, and our row is that row's SIBLING. Copying the cell's inline
- * padding is what puts the track's left edge on the label's left edge instead of
- * 8px to its left.
- */
-export const ROW_PADDING_INLINE = 8
-
 /** Fractions are rounded to this many decimals before they enter a CSS expression. */
 const FRACTION_DIGITS = 4
 

@@ -15,10 +15,14 @@
  *
  * Measured contrast (WCAG 2.x, relative luminance): the light ramp's lightest
  * stop is 3.37:1 on white — above the 3:1 floor for a graphical object — and its
- * darkest is 7.04:1. The dark ramp runs 6.25:1 to 6.90:1 on #292929. The text
- * tones are the ones that carry copy, so they clear the 4.5:1 body threshold:
- * #3A5BD9 is 5.71:1 on white and 5.24:1 on #F5F5F5; #9DBBFF is 7.61:1 on
- * #292929 and 8.41:1 on #212123.
+ * darkest is 7.04:1. The dark ramp runs 5.42:1 to 7.62:1 on the dark cards.
+ *
+ * These stops are NOT defined here: `./value-color.ts` owns them and this sheet
+ * interpolates them into the gradient below, because the level name and the
+ * capsule's edge are the same ramp read at the current position (lifted to text
+ * contrast where the ramp's own colour is too light to carry copy). One ramp,
+ * three surfaces, one file — the alternative is three copies of eight hex values
+ * that drift apart the first time a colour is adjusted.
  *
  * ## Why the fill is clipped rather than sized
  *
@@ -38,6 +42,7 @@
  */
 
 import { KNOB_SIZE, TRACK_HEIGHT } from './geometry.ts'
+import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from './value-color.ts'
 
 /** Id of the injected stylesheet, so a second mount is a no-op. */
 const STYLE_ID = 'dsh-app-plugin-effort-style'
@@ -45,16 +50,31 @@ const STYLE_ID = 'dsh-app-plugin-effort-style'
 const cssText = `
 .dshAppEffort {
   box-sizing: border-box;
+  /* The container lives inside the row's button, which the bridge makes wrap
+     (flex-wrap); a width of 100% is what gives the track a line of its own
+     instead of sharing the label's. */
   width: 100%;
   min-width: 0;
-  /* Light theme: brand blue deepening toward indigo as effort rises. */
-  --dshAppEffort-fill: linear-gradient(90deg, #5686FE 0%, #4176E6 42%, #3A5BD9 72%, #4B3FD6 100%);
+  /* The row is a flex box with a 6px gap, which is what separates the two lines
+     once it wraps; this is the small amount of extra air above the track. */
+  margin-top: 2px;
+  /* The container is the React portal's root, so React's delegated listeners are
+     attached to this very node and a click handler of ours here would race them
+     (stopPropagation only takes effect at the NEXT node). Instead the container
+     is removed from hit-testing: a pointer that lands on its own box — the
+     corners the capsule's radius cuts off, the strip the note's margin occupies —
+     passes through to the official row underneath, which is the row's own
+     behaviour, and the track below takes its own area back. */
+  pointer-events: none;
+  /* Light theme: brand blue deepening toward indigo as effort rises. The stops
+     live in value-color.ts, with the level name and the capsule ring. */
+  --dshAppEffort-fill: ${fillGradient(FILL_RAMP_LIGHT)};
   --dshAppEffort-glow: rgb(75 63 214 / 42%);
   --dshAppEffort-ring: rgb(75 63 214 / 55%);
 }
 body[data-ds-dark-theme] .dshAppEffort {
   /* Dark theme: brand blue brightening toward a light violet. */
-  --dshAppEffort-fill: linear-gradient(90deg, #7AAAFF 0%, #8FB0FF 45%, #A98BFF 78%, #B9A6FF 100%);
+  --dshAppEffort-fill: ${fillGradient(FILL_RAMP_DARK)};
   --dshAppEffort-glow: rgb(185 166 255 / 50%);
   --dshAppEffort-ring: rgb(185 166 255 / 62%);
 }
@@ -68,6 +88,9 @@ body[data-ds-dark-theme] .dshAppEffort {
 .dshAppEffort-track {
   position: relative;
   box-sizing: border-box;
+  /* The container above is taken out of hit-testing; the track is the one part
+     of it that belongs to the user. */
+  pointer-events: auto;
   height: ${TRACK_HEIGHT}px;
   border-radius: 999px;
   background: var(--dsw-alias-border-l1, rgb(15 17 21 / 8%));

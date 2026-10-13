@@ -1,6 +1,7 @@
 /**
  * Row identification, pinned: this is the rule that decides WHICH row of the
- * official menu the track is placed on.
+ * official menu the track is placed on — and, by the same rule, which node inside
+ * it the level name's colour is written to.
  *
  * The failure it guards against is a fallback: an earlier implementation of this
  * idea matched the row by label and, when the label did not match, placed the
@@ -13,7 +14,7 @@
 
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
-import { pickEffortRowIndex, type MenuRow } from '../src/client/bridge.ts'
+import { pickEffortRowIndex, valueChildOf, type MenuRow } from '../src/client/bridge.ts'
 
 /** The labels the official dictionary publishes in zh-CN. */
 const ZH = { model: '模型', effort: '推理等级' }
@@ -61,5 +62,42 @@ describe('pickEffortRowIndex', () => {
 
   it('never matches the model row as the effort row', () => {
     assert.equal(pickEffortRowIndex([row('模型'), row('模型')], ZH), -1)
+  })
+})
+
+/** A button whose second child is `second`, as far as `valueChildOf` looks. */
+const button = (count: number, second?: { tagName?: string }) => ({
+  children: {
+    length: count,
+    item: (index: number) => (index === 1 && second !== undefined ? second : { index }),
+  },
+})
+
+describe('valueChildOf', () => {
+  it('is the row\'s second child, and nothing else', () => {
+    assert.deepEqual(valueChildOf(button(2)), { index: 1 })
+    // The official row is [label, value, chevron] and the container is appended
+    // fourth: neither moves the cell, which is second by construction.
+    assert.deepEqual(valueChildOf(button(4)), { index: 1 })
+  })
+
+  it('refuses the chevron, which is what index 1 becomes without a value cell', () => {
+    // The official row renders the drill chevron as an `<svg>`; recolouring it
+    // would paint the level's colour on an icon instead of on the name.
+    assert.equal(valueChildOf(button(3, { tagName: 'svg' })), null)
+    assert.equal(valueChildOf(button(3, { tagName: 'SVG' })), null)
+    assert.deepEqual(valueChildOf(button(3, { tagName: 'span' })), { tagName: 'span' })
+  })
+
+  it('refuses a node the caller marks as its own', () => {
+    const container = { index: 1 }
+    assert.equal(valueChildOf(button(2, container), container as unknown as Element), null)
+  })
+
+  it('answers null for the row shapes the label match already refuses', () => {
+    // The same predicate `hasValue` is decided by, so a row this refuses cannot be
+    // a row whose name gets tinted.
+    assert.equal(valueChildOf(button(1)), null)
+    assert.equal(valueChildOf(button(0)), null)
   })
 })

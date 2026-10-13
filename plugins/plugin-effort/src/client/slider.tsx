@@ -27,6 +27,11 @@
  *      that meant `max` a moment ago is never drawn against a list where it means
  *      something else.
  *
+ * The container this file portals into is the SECOND LINE of the official row's
+ * capsule, and the capsule's edge and the row's value cell carry the current
+ * level's colour. All of that is the bridge's writes and the bridge's restores;
+ * all this file decides is which colours, from the position it is already showing.
+ *
  * @module @dsh-app/plugin-effort/client/slider
  */
 
@@ -36,7 +41,7 @@ import { createPortal } from 'react-dom'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import { createEffortBridge, type EffortBridge, type EffortBridgeHost, type EffortRowLabels } from './bridge.ts'
+import { createEffortBridge, type EffortBridge, type EffortBridgeHost, type EffortRowLabels, type LevelColors } from './bridge.ts'
 import { fillClip, indexFromPct, offsetExpr, pctAt, pctFromIndex } from './geometry.ts'
 import { commitIndexFor, levelKey, resolveEffort, trackModeOf } from './levels.ts'
 import {
@@ -48,6 +53,7 @@ import {
   energyFor,
 } from './mosaic.ts'
 import { NS, type EffortKey } from './locales.ts'
+import { isDarkTheme, ringColorAt, textColorAt } from './value-color.ts'
 
 /** How long a committed level may stay unconfirmed before the display rolls back. */
 const COMMIT_TIMEOUT_MS = 10_000
@@ -118,8 +124,38 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const activeRef = useRef(false)
   labelsRef.current = officialLabels
   activeRef.current = state.kind !== 'absent'
+  /**
+   * The position the capsule's colours are read from, refreshed on every render.
+   * The bridge asks for them at PAINT time, which can be later than the render
+   * that moved the level, so the callback reads this pair rather than colours
+   * captured here.
+   */
+  const tintRef = useRef<{ index: number, count: number }>({ index: -1, count: 0 })
 
   const tiles = useMemo(() => mosaicTiles(), [])
+
+  /**
+   * The colours the official row should carry right now: the level name's text
+   * colour and the capsule ring's.
+   *
+   * Both come from the track's own ramp at this position — the name lifted to text
+   * contrast, the ring the same colour at its alpha — so the capsule's edge and
+   * the name move with the track instead of being a fixed theme accent.
+   *
+   * Null when there is no position to speak for: the bridge then puts the cell's
+   * own colour back and gives the capsule a neutral edge. The theme is read here
+   * rather than captured, so a paint that follows a theme switch carries the right
+   * ramp.
+   *
+   * @returns the colours, or null when the session has no position on this scale.
+   */
+  const levelColorsOf = useCallback((): LevelColors | null => {
+    const { index, count: total } = tintRef.current
+    if (index < 0) return null
+    const dark = isDarkTheme(typeof document === 'undefined' ? null : document)
+    const pct = pctFromIndex(index, total)
+    return { text: textColorAt(pct, dark), ring: ringColorAt(pct, dark) }
+  }, [])
 
   // The catalog is shared with the official seat, whose load may not have run for
   // a session this entry mounted into first. Asking again is cheap: the store
@@ -176,6 +212,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
       anchor: () => anchorRef.current,
       labels: () => labelsRef.current(),
       active: () => activeRef.current,
+      levelColors: levelColorsOf,
       onHost: setHost,
     })
     if (bridge === null) return undefined
@@ -185,7 +222,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
       bridgeRef.current = null
       bridge.dispose()
     }
-  }, [])
+  }, [levelColorsOf])
 
   // The levels arrive AFTER the menu is already open (the catalog loads late), and
   // that changes no DOM the observer watches. Re-scan on the two facts that decide
@@ -199,6 +236,15 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const energy = energyFor(shownPct)
   const shownName = shownIndex >= 0 ? levels[shownIndex]?.name : undefined
   const visibleTiles = tileCountFor(shownPct)
+  tintRef.current = { index: shownIndex, count }
+
+  // The level's colours follow the position. A level change inserts nothing into
+  // the DOM, so the observer never sees it: this is the direct path, and the
+  // scan-time re-assert covers the other direction (something else clearing the
+  // inline style).
+  useEffect(() => {
+    bridgeRef.current?.paint()
+  }, [shownIndex, count])
 
   /**
    * Ask the host for one level. At most ONE write is on the wire: a crossing that
@@ -322,6 +368,28 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     moveTo(event.clientX)
   }, [endDrag, moveTo])
 
+  /**
+   * Swallow the `click` the browser fires after a press-and-release on the track.
+   *
+   * The track's own handling is `pointer*`, so a drag is entirely ours — but the
+   * browser also emits a `click` for a down-and-up on the same element, and that
+   * click bubbles out of the container into the official row, whose own `onClick`
+   * drills into the level list. Without this, letting go of the knob opens the
+   * picker over the capsule.
+   *
+   * `stopPropagation` is enough HERE, and only here: React's delegated listener
+   * sits on the portal container (this track's parent), so a click stopped at the
+   * track never reaches that container, the row, or the kernel's own listener on
+   * the body. A listener on the container itself could not do this — React's
+   * listener shares that node, and every listener on one node runs.
+   *
+   * A click anywhere else in the capsule is deliberately left alone: the row keeps
+   * its own behaviour there, which is what the official row does.
+   */
+  const onTrackClick = useCallback((event: React.MouseEvent<HTMLDivElement>): void => {
+    event.stopPropagation()
+  }, [])
+
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>): void => {
     // Escape belongs to the menu (it closes, or backs out of a drilled pane).
     if (event.key === 'Escape') return
@@ -376,6 +444,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
             onPointerMove={onPointerMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
+            onClick={onTrackClick}
             onKeyDown={onKeyDown}
           >
             <div className="dshAppEffort-fill" style={{ clipPath: fillClip(shownPct) }} />
