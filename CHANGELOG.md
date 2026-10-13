@@ -8,6 +8,22 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.4] - 2026-10-13
+
+### 中文
+- 启动失败事件改为只记录派生字段（错误类别与错误码），同一口径也用在被包裹操作的失败行、内核更新检查失败与更新安装失败上，不再把可能含 feed URL、命令行、路径或凭据的原始错误消息写进用户会外发的 `dsh-events.jsonl`；作为 detail 值传入的 Error 改记 `[error]` 标记，原始文本仍进本机 `dsh-kernel.log`（经 `redact()`）与失败提示卡。
+- 新增插件静态 import 门禁：插件 `src/**` 里 import 的包必须出现在自己的依赖字段中，`@deepseek-ai/*` 的运行时 import 必须是 peerDependency。
+- 三个插件把运行时由内核提供的包声明为 peerDependency，并同步补进 devDependencies（`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-session`、`@deepseek-ai/dsh-llm`），新增的静态 import 门禁不再拒绝它们。
+- 插件市场：npm 目录源的 registry 元数据与 tarball 两条读取补上字节上限（超限即失败并给出本地化文案，读取在越过上限的当下停止）；`/install-intent` 签发按 profile 加令牌桶限流（突发 8 次、每秒回填 1 次），安装确认的过期改由单调时钟判定，系统时间回拨不再延长有效期；插件导入的 `@deepseek-ai/schemastery` 补声明为 peerDependency，并同步补进 devDependencies。
+- 构建输入：11 个插件的 `devDependencies` 补上 `@deepseek-ai/dsh-client-ui-primitives`（与既有 3 个插件同 spec），使 CI 的 `--legacy-peer-deps` 树上也能解析到它，从而让插件类型门禁在全部 18 个插件上真正生效。不改变任何插件的行为、不 bump 版本、不改依赖范围。
+
+### English
+- A failed boot records derived fields only (error class and code), and the same rule now covers a wrapped operation's failure line, a kernel update check and a shell installer spawn: no raw message — which can hold a feed URL, a command line, a path or a credential — reaches the shareable `dsh-events.jsonl`. An Error passed as a detail value is the marker `[error]`, and the text still reaches the local `dsh-kernel.log` (through `redact()`) and the failure card.
+- Added a static import gate: every package a plugin's `src/**` imports must be declared in its own dependency fields, and a runtime `@deepseek-ai/*` import must be a peerDependency.
+- Three plugins now declare the kernel-provided packages they import as peerDependencies, with the matching devDependency so the type check keeps resolving (`@deepseek-ai/schemastery`, `@deepseek-ai/dsh-home-paths`, `@deepseek-ai/dsh-session`, `@deepseek-ai/dsh-llm`).
+- Market plugin: the npm catalog source's registry-metadata and tarball reads are now byte-capped (past the cap they fail with localized copy, and the read stops where the cap is crossed); `/install-intent` issuance is rate-fenced per profile (burst 8, refill 1/s), and an install confirmation's expiry is decided on a monotonic clock, so a wall clock set back no longer extends it; the `@deepseek-ai/schemastery` import is now declared as a peerDependency, with the matching devDependency.
+- Build input: eleven plugins now declare `@deepseek-ai/dsh-client-ui-primitives` in their own `devDependencies` (the spec the three plugins that already did use), so it resolves on CI's `--legacy-peer-deps` tree and the plugin type gate runs for all eighteen. No plugin behaviour, version or range changes.
+
 ## [v0.16.3] - 2026-10-13
 
 ### 中文
