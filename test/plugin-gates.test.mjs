@@ -1,13 +1,16 @@
-// The two plugin packaging gates: the type gate, and the `lib/` freshness gate.
+// The plugin packaging gates: the type gate, the import gate, and the `lib/`
+// freshness gate.
 //
 // What this suite is here for: `plugins/build-lib.mjs` bundles with esbuild,
-// which does not type check, and `scripts/build-runtime.mjs` packs whatever
-// esbuild wrote. A client half calling a function its own module stopped
-// exporting (`plugin-effort`'s slider and `geometry.ts`) therefore shipped and
-// threw `ReferenceError` in the renderer — and `lib/` is gitignored, so the tree
-// a pack reads and the tree a developer runs are two build products from two
-// moments. The gates live in `scripts/lib/plugin-gates.mjs`; this file pins
-// their decisions and the two call sites that must keep running them.
+// which does not type check and resolves no EXTERNAL specifier (`@deepseek-ai/*`,
+// react, react-dom), and `scripts/build-runtime.mjs` packs whatever esbuild
+// wrote. A client half calling a function its own module stopped exporting
+// (`plugin-effort`'s slider and `geometry.ts`) therefore shipped and threw
+// `ReferenceError` in the renderer — and `lib/` is gitignored, so the tree a pack
+// reads and the tree a developer runs are two build products from two moments.
+// The gates live in `scripts/lib/plugin-gates.mjs` and
+// `scripts/lib/plugin-imports.mjs`; this file pins their decisions and the call
+// sites that must keep running them.
 //
 // Everything here is built from fixtures with explicit mtimes: a test that slept
 // for a filesystem timestamp would be slow and still flaky on a coarse clock.
@@ -17,6 +20,14 @@ import { mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import {
+  assertPluginImports,
+  explainSpecifier,
+  importGateSummary,
+  importSpecifiers,
+  packageNameOf,
+  pluginImportGaps,
+} from '../scripts/lib/plugin-imports.mjs'
 import {
   assertPluginLibFresh,
   assertPluginOutputs,
@@ -439,15 +450,250 @@ test('the walker reads a real plugin directory and keeps out of lib/ and node_mo
   }
 })
 
+// ------------------------------------------------- the import gate (static)
+
+/**
+ * A plugin fixture shaped for the import gate: a manifest carrying the three
+ * dependency fields, plus the given sources.
+ *
+ * @param fields - `{ dependencies, peerDependencies, devDependencies, files }`,
+ *   each omitted when not given.
+ * @returns the created plugin directory.
+ */
+function importFixture({ dependencies, peerDependencies, devDependencies, files = {} } = {}) {
+  return fixture({
+    'package.json': JSON.stringify({
+      name: '@dsh-app/plugin-fixture',
+      version: '0.0.1',
+      ...(dependencies === undefined ? {} : { dependencies }),
+      ...(peerDependencies === undefined ? {} : { peerDependencies }),
+      ...(devDependencies === undefined ? {} : { devDependencies }),
+    }),
+    ...files,
+  })
+}
+
+test('importSpecifiers reads the four shapes that must resolve, with their lines', () => {
+  const source = [
+    "import { a } from '@fixture/a'", // 1
+    "import type { B } from '@fixture/b'", // 2
+    "import 'fixture-c'", // 3
+    "export { c } from '@fixture/d'", // 4
+    "export type { D } from '@fixture/e'", // 5
+    "const f = await import('@fixture/f')", // 6
+    "const g = await import(`@fixture/${'g'}`)", // 7 — computed, not decidable
+    "const h = await import('./local.ts')", // 8 — relative
+    "const i = require('@fixture/require')", // 9 — CommonJS, out of scope
+    "const j = import.meta.url", // 10
+  ].join('\n')
+  assert.deepEqual(importSpecifiers(source), [
+    { specifier: '@fixture/a', line: 1, typeOnly: false },
+    { specifier: '@fixture/b', line: 2, typeOnly: true },
+    { specifier: 'fixture-c', line: 3, typeOnly: false },
+    { specifier: '@fixture/d', line: 4, typeOnly: false },
+    { specifier: '@fixture/e', line: 5, typeOnly: true },
+    { specifier: '@fixture/f', line: 6, typeOnly: false },
+    { specifier: './local.ts', line: 8, typeOnly: false },
+  ])
+})
+
+test('a specifier quoted in a comment, a JSDoc block or a string is not an import', () => {
+  const source = [
+    "// import { gone } from '@fixture/commented'",
+    "/* import { gone } from '@fixture/blocked' */",
+    '/**',
+    " * import { gone } from '@fixture/jsdocked'",
+    ' */',
+    "const text = \"from '@fixture/quoted'\"",
+    "const doc = `import x from '@fixture/templated'`",
+    "const re = /from '@fixture/regexed'/u",
+  ].join('\n')
+  assert.deepEqual(importSpecifiers(source), [])
+})
+
+test('packageNameOf reduces a subpath to its package and refuses what names none', () => {
+  assert.equal(packageNameOf('react-dom/client'), 'react-dom')
+  assert.equal(packageNameOf('@deepseek-ai/dsh-session/types'), '@deepseek-ai/dsh-session')
+  assert.equal(packageNameOf('react'), 'react')
+  // A builtin is not a package to declare, bare or prefixed.
+  assert.equal(packageNameOf('node:fs'), null)
+  assert.equal(packageNameOf('fs/promises'), null)
+  assert.equal(packageNameOf('path'), null)
+  assert.equal(packageNameOf('./local.ts'), null)
+  assert.equal(packageNameOf('../sibling.ts'), null)
+  assert.equal(packageNameOf('/absolute/path.ts'), null)
+  assert.equal(packageNameOf('@scope'), null)
+  assert.equal(packageNameOf('@scope/'), null)
+})
+
+test('a package is explained by any of the three fields, by an ancestor manifest, or by being installed', () => {
+  // Each of the three fields, one per specifier: the rule is "declared", never
+  // "declared as a peer".
+  const dir = importFixture({
+    dependencies: { '@fixture/dep': '^1.0.0' },
+    peerDependencies: { '@fixture/peer': '^1.0.0' },
+    devDependencies: { '@fixture/dev': '^1.0.0' },
+    files: {
+      'src/index.ts': [
+        "import '@fixture/dep'\n",
+        "import '@fixture/peer'\n",
+        "import '@fixture/dev'\n",
+      ].join(''),
+    },
+  })
+  assert.deepEqual(pluginImportGaps(dir).gaps, [])
+  assert.equal(pluginImportGaps(dir).checked, 3)
+  assert.equal(explainSpecifier(dir, '@fixture/dep').via, 'own')
+
+  // An ancestor's manifest counts: the repository root carries the kernel
+  // packages, and a plugin importing one is not importing something nobody has.
+  const root = fixture({ 'package.json': JSON.stringify({ devDependencies: { '@fixture/root-only': '^1.0.0' } }) })
+  const nested = path.join(root, 'plugins', 'plugin-x')
+  mkdirSync(path.join(nested, 'src'), { recursive: true })
+  writeFileSync(path.join(nested, 'package.json'), JSON.stringify({ name: '@dsh-app/plugin-x', version: '0.0.1' }))
+  writeFileSync(path.join(nested, 'src', 'index.ts'), "import '@fixture/root-only'\n")
+  assert.deepEqual(pluginImportGaps(nested).gaps, [])
+  assert.equal(explainSpecifier(nested, '@fixture/root-only').via, 'ancestor-manifest')
+
+  // Installed, and nothing declares it: still present, and a non-external import
+  // is resolved and inlined by the build, so its absence could not reach a user.
+  const installed = importFixture({
+    files: {
+      'src/index.ts': "import '@fixture/installed'\n",
+      'node_modules/@fixture/installed/package.json': '{"name":"@fixture/installed"}\n',
+    },
+  })
+  assert.deepEqual(pluginImportGaps(installed).gaps, [])
+  assert.equal(explainSpecifier(installed, '@fixture/installed').via, 'installed')
+})
+
+test('a package nothing accounts for is an undeclared gap, named with file, line and field', () => {
+  const dir = importFixture({ files: { 'src/client/panel.tsx': "import { a } from '@fixture/nobody'\n" } })
+  const report = pluginImportGaps(dir)
+  assert.deepEqual(report.gaps, [
+    {
+      file: 'src/client/panel.tsx',
+      line: 1,
+      specifier: '@fixture/nobody',
+      pkg: '@fixture/nobody',
+      rule: 'undeclared',
+      suggestion: 'declare "@fixture/nobody" in dependencies, peerDependencies or devDependencies',
+    },
+  ])
+  assert.throws(
+    () => assertPluginImports(dir),
+    new RegExp(`${path.basename(dir)}: 1 import\\(s\\).*src/client/panel\\.tsx:1 imports "@fixture/nobody" — declare "@fixture/nobody" in dependencies, peerDependencies or devDependencies`, 'su'),
+  )
+})
+
+test('the DefinitelyTyped sibling explains a package, and is reported as the weaker footing it is', () => {
+  // The `react-dom` shape: twelve plugins import it, esbuild marks it external,
+  // the host answers it, and every one of them declares `@types/react-dom`
+  // instead of the package itself.
+  const dir = importFixture({
+    devDependencies: { '@types/fixture-hosted': '^18.0.0' },
+    files: { 'src/client.ts': "import { createPortal } from 'fixture-hosted'\n" },
+  })
+  const report = pluginImportGaps(dir)
+  assert.deepEqual(report.gaps, [])
+  assert.deepEqual(report.typesOnly, ['fixture-hosted'])
+  assert.equal(explainSpecifier(dir, 'fixture-hosted').via, 'own-types')
+  assert.equal(explainSpecifier(dir, 'fixture-hosted').typesOnly, true)
+  // The scoped spelling DefinitelyTyped publishes, which is the other half of
+  // the same mapping.
+  const scoped = importFixture({
+    devDependencies: { '@types/fixture__hosted': '^18.0.0' },
+    files: { 'src/client.ts': "import '@fixture/hosted'\n" },
+  })
+  assert.deepEqual(pluginImportGaps(scoped).typesOnly, ['@fixture/hosted'])
+})
+
+test('a @deepseek-ai package imported for runtime must be a peer, not a devDependency', () => {
+  const value = "import { SessionSeq } from '@deepseek-ai/dsh-session'\n"
+  const devOnly = importFixture({ devDependencies: { '@deepseek-ai/dsh-session': '^0.2.0-rc.2' }, files: { 'src/index.ts': value } })
+  const report = pluginImportGaps(devOnly)
+  assert.equal(report.gaps.length, 1)
+  assert.equal(report.gaps[0].rule, 'kernel-peer')
+  assert.match(report.gaps[0].suggestion, /declare "@deepseek-ai\/dsh-session" in peerDependencies as well/su)
+  assert.throws(() => assertPluginImports(devOnly), /kernel package the kernel provides at load time|in peerDependencies as well/su)
+
+  // The same import with the peer declared passes, and so does an ancestor
+  // declaration for the OTHER rule — a package the root tree has is not
+  // undeclared, it is simply not this plugin's peer.
+  assert.deepEqual(
+    pluginImportGaps(importFixture({
+      peerDependencies: { '@deepseek-ai/dsh-session': '^0.2.0-rc.2' },
+      files: { 'src/index.ts': value },
+    })).gaps,
+    [],
+  )
+  const ancestorPeer = fixture({ 'package.json': JSON.stringify({ peerDependencies: { '@deepseek-ai/dsh-session': '^0.2.0-rc.2' } }) })
+  const nested = path.join(ancestorPeer, 'plugins', 'plugin-x')
+  mkdirSync(path.join(nested, 'src'), { recursive: true })
+  writeFileSync(path.join(nested, 'package.json'), JSON.stringify({ name: '@dsh-app/plugin-x', version: '0.0.1' }))
+  writeFileSync(path.join(nested, 'src', 'index.ts'), value)
+  assert.deepEqual(pluginImportGaps(nested).gaps.map((gap) => gap.rule), ['kernel-peer'])
+})
+
+test('a type-only kernel import needs no peer: esbuild deletes it', () => {
+  // The Context-merge idiom seventeen plugins use, and a type-only import of a
+  // package the plugin otherwise leaves to tsc.
+  const dir = importFixture({
+    devDependencies: { '@deepseek-ai/dsh-client-connection': '^0.2.0-rc.2' },
+    files: {
+      'src/index.ts': [
+        "import type {} from '@deepseek-ai/dsh-client-connection'\n",
+        "import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'\n",
+      ].join(''),
+    },
+  })
+  assert.deepEqual(pluginImportGaps(dir).gaps, [])
+  assert.equal(pluginImportGaps(dir).checked, 2)
+})
+
+test('importGateSummary says how much of a run rested on the @types clause', () => {
+  assert.match(
+    importGateSummary(18, 476, []),
+    /import gate: 476 package import\(s\) across 18 plugins, all declared in a dependency field or installed on the resolution chain/su,
+  )
+  const weaker = importGateSummary(18, 476, ['react-dom'])
+  assert.match(weaker, /1 only through their @types\/ sibling \(react-dom\)/su)
+})
+
+test('no plugin in the real suite imports a package nothing accounts for', () => {
+  // The 18 real manifests and 18 real `src/` trees, not a fixture of them. The
+  // kernel-peer half is deliberately NOT asserted here: it is a per-plugin
+  // declaration the suite has to keep true, and a test that pinned today's
+  // answers would go red for the fix rather than for the defect.
+  const pluginsRoot = path.join(ROOT, 'plugins')
+  const names = readdirSync(pluginsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('plugin-'))
+    .map((entry) => entry.name)
+  assert.ok(names.length >= 18, `the suite has ${names.length} plugin directories, expected at least 18`)
+  let checked = 0
+  for (const name of names) {
+    const report = pluginImportGaps(path.join(pluginsRoot, name))
+    checked += report.checked
+    assert.deepEqual(
+      report.gaps.filter((gap) => gap.rule === 'undeclared'),
+      [],
+      `${name}: imports a package no dependency field or resolution chain accounts for`,
+    )
+  }
+  assert.ok(checked > 300, `the gate read ${checked} package imports from the suite, expected the whole suite's`)
+})
+
 test('every call site that builds or packs a plugin runs the shared gates', () => {
   // A gate nothing calls is green forever. Each file below is read as TEXT —
   // running a workflow is not this suite's job — and each is a place a plugin
   // can be built, packed, or merged without otherwise being type-checked.
   const build = readFileSync(path.join(ROOT, 'scripts', 'build-runtime.mjs'), 'utf8')
   assert.match(build, /from '\.\/lib\/plugin-gates\.mjs'/)
-  // All three judgements, in this file: the local `runtime:build` loop is where
+  assert.match(build, /from '\.\/lib\/plugin-imports\.mjs'/)
+  // All four judgements, in this file: the local `runtime:build` loop is where
   // a suite missing whole plugins would be packed, so it cannot run a subset.
   assert.match(build, /runPluginTypecheck\(/)
+  assert.match(build, /assertPluginImports\(/)
   assert.match(build, /assertPluginOutputs\(/)
   assert.match(build, /assertPluginLibFresh\(/)
   // The presence check is the one that must sit after the build, not before it.
@@ -456,14 +702,21 @@ test('every call site that builds or packs a plugin runs the shared gates', () =
   // for the order it is about.
   assert.match(build, /run\(npmBin\(\), \['run', 'build'\], pluginDir\)\r?\n\s*assertPluginOutputs\(pluginDir\)/u)
 
+  // The CLI both workflows reach, and the only place the two new summary lines
+  // are printed: a run's coverage has to be readable from its log.
+  const cli = readFileSync(path.join(ROOT, 'scripts', 'plugin-gates.mjs'), 'utf8')
+  assert.match(cli, /assertPluginImports\(/)
+  assert.match(cli, /importGateSummary\(/)
+
   const release = readFileSync(path.join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8')
   assert.match(release, /node \.\.\/scripts\/plugin-gates\.mjs/)
 
-  // The PR gate. This is the one call site whose teeth are the TYPE gate and the
-  // presence check: a clean checkout has no lib/ at all, so the freshness half
-  // passes by construction and only guards a tree that was already built. The
-  // `"$dir"` argument pins the call inside the per-plugin loop (`$dir` exists
-  // only there), so the gate cannot be moved out of the loop that builds.
+  // The PR gate. This is the one call site whose teeth are the TYPE gate, the
+  // import gate and the presence check: a clean checkout has no lib/ at all, so
+  // the freshness half passes by construction and only guards a tree that was
+  // already built. The `"$dir"` argument pins the call inside the per-plugin
+  // loop (`$dir` exists only there), so the gate cannot be moved out of the loop
+  // that builds.
   const ci = readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
   assert.match(ci, /for dir in plugins\/\*\/; do/u)
   assert.match(ci, /node scripts\/plugin-gates\.mjs "\$dir"/u)

@@ -69,21 +69,27 @@ npm run verify -- --tgz runtime-dist/dsh-runtime-linux-x64-*.tgz
 npm run check:plugins -- --kernel <runtime.tgz> --home <real profile dir>
 ```
 
-Plugin builds and tests: `plugins/AGENTS.md`. Every suite plugin also passes three
+Plugin builds and tests: `plugins/AGENTS.md`. Every suite plugin also passes four
 checks before its `lib/` can enter an artifact, all decided in
-`scripts/lib/plugin-gates.mjs` and run by `build-runtime.mjs`, by `release.yml`'s
-pre-build loop, and by `ci.yml`'s `gate` job in its per-plugin build loop: its own
-`npm run typecheck` (esbuild does not type check, so a client half calling a
-removed export used to reach users as a renderer `ReferenceError`); the build's
-DECLARED outputs must exist and be non-empty (npm omits a missing `files`
-directory from the tarball without a word); and `lib/` must not be older than the
-plugin's own inputs. One is weaker on a CI tree, and a green log must not be read
-as more: the freshness check passes by construction on a clean checkout (there is
-no `lib/` yet). The other two hold there — and the type gate only because a plugin
-that IMPORTS a package installed only by a peer must declare it in its own
-`devDependencies` too: `npm install --legacy-peer-deps`, what both workflows run,
-installs dependencies and devDependencies and no peer, so that declaration is what
-lets tsc resolve the import. (Fourteen plugins import
+`scripts/lib/plugin-gates.mjs` and `scripts/lib/plugin-imports.mjs` and run by
+`build-runtime.mjs`, by `release.yml`'s pre-build loop, and by `ci.yml`'s `gate`
+job in its per-plugin build loop: every package its `src/**` imports must be
+accounted for by a dependency field of its own manifest, of an ancestor's, or by
+being installed on its resolution chain — with `@deepseek-ai/*` imported for
+runtime required in `peerDependencies` (esbuild marks those specifiers external,
+so a plugin that never declared one ships a load-time failure nothing else on the
+packaging path can see); its own `npm run typecheck` (esbuild does not type check,
+so a client half calling a removed export used to reach users as a renderer
+`ReferenceError`); the build's DECLARED outputs must exist and be non-empty (npm
+omits a missing `files` directory from the tarball without a word); and `lib/`
+must not be older than the plugin's own inputs. One is weaker on a CI tree, and a
+green log must not be read as more: the freshness check passes by construction on
+a clean checkout (there is no `lib/` yet). The other three hold there — and the
+type gate only because a plugin that IMPORTS a package installed only by a peer
+must declare it in its own `devDependencies` too: `npm install
+--legacy-peer-deps`, what both workflows run, installs dependencies and
+devDependencies and no peer, so that declaration is what lets tsc resolve the
+import. (Fourteen plugins import
 `@deepseek-ai/dsh-client-ui-primitives` and all fourteen declare it in both fields
 now.) A peer that nothing installs still makes the gate SKIP that plugin — per
 plugin, naming the packages, never silently — and every run ends with a count of

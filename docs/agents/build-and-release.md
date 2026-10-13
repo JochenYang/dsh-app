@@ -46,13 +46,15 @@ ships.
 **Runtime resources come from each plugin's own `package.json` `files` field**,
 never a hand list; `smoke-suite.mjs` asserts what a bare `ok:true` cannot.
 
-**Every suite plugin passes three checks before its `lib/` can enter an
-artifact** (`scripts/lib/plugin-gates.mjs`). `build-runtime.mjs` runs all three
-itself: the type gate and the presence check in its per-plugin build loop, the
-freshness check in its `packPlugin`. `.github/workflows/release.yml`'s pre-build
-loop runs the same three one plugin at a time through
-`node ../scripts/plugin-gates.mjs "$p"`, so a break stops the job before the
-runtime assembly starts. The verdicts exist once, in that module.
+**Every suite plugin passes four checks before its `lib/` can enter an
+artifact** (`scripts/lib/plugin-gates.mjs` for the type gate and the two artifact
+checks, `scripts/lib/plugin-imports.mjs` for the import gate).
+`build-runtime.mjs` runs all four itself: the type gate, the import gate and the
+presence check in its per-plugin build loop, the freshness check in its
+`packPlugin`. `.github/workflows/release.yml`'s pre-build loop runs the same four
+one plugin at a time through `node ../scripts/plugin-gates.mjs "$p"`, so a break
+stops the job before the runtime assembly starts. The verdicts exist once, in
+those two modules.
 
 `.github/workflows/ci.yml` runs the same script per plugin in the `gate` job's
 per-plugin build loop — that is the call site that matters most, since it is the
@@ -75,11 +77,12 @@ when reading a green run: on a CLEAN checkout there is no `lib/` at all, so the
 freshness half passes by construction in CI and only ever bites a tree that was
 already built (a developer's machine, or a machine running `runtime:build` on
 sources edited after the last build) — a clean-checkout run proves the **presence
-check** and, now that each plugin declares the packages it imports in its own
-`devDependencies`, the **type gate** as well, but never freshness. The local
-`runtime:build` loop is the one that could pack a suite missing whole plugins, so it
-runs all three itself: the type gate and the presence check in its per-plugin loop
-(the check right after that plugin's build), the freshness check in `packPlugin`.
+check**, the **import gate** (which needs nothing installed) and, now that each
+plugin declares the packages it imports in its own `devDependencies`, the **type
+gate** as well, but never freshness. The local `runtime:build` loop is the one that
+could pack a suite missing whole plugins, so it runs all four itself: the type
+gate, the import gate and the presence check in its per-plugin loop (the checks
+right after that plugin's build), the freshness check in `packPlugin`.
 
 **The type gate has a precondition, and a release once failed on it.** It needs
 the plugin's own imports to resolve; both packaging paths install each plugin's
@@ -111,6 +114,40 @@ ran anyway failed a whole release on
 
 Both artifact checks depend on no peer and keep running regardless.
 
+- **Import gate** — every package a plugin's `src/**` imports must be accounted
+  for by a dependency field, and a `@deepseek-ai/*` package imported for RUNTIME
+  must be a `peerDependency`. `plugins/build-lib.mjs` marks `@deepseek-ai/*`,
+  `react` and `react-dom` external, so esbuild resolves none of them: it writes
+  the specifier into the bundle and the composed loader answers it at load time.
+  Nothing else on the packaging path sees one — tsc reads the root tree, esbuild
+  resolves nothing for an external, `--legacy-peer-deps` installs no peer — which
+  is the `plugin-effort`/`pctAt` failure's nearest relative: a green log
+  vouching for a bundle whose import nothing declared. Three explanations count,
+  in this order: a dependency field of the plugin's own manifest names the
+  package; an ANCESTOR manifest does (the repository root carries the kernel
+  packages as devDependencies); or a `node_modules/<name>/package.json` exists on
+  the plugin's resolution chain, which covers a transitively installed package
+  such as `@deepseek-ai/schemastery`. The package's DefinitelyTyped sibling
+  (`@types/react-dom` for `react-dom`) also counts, and the run says so: twelve
+  plugins import `react-dom`, the host answers it, and every one of them declares
+  the types package instead — `importGateSummary` names those packages so a green
+  line cannot be read as "plainly declared". An `import type` needs no peer
+  (esbuild deletes it; a devDependency is what tsc needs); a dynamic
+  `import('x')` is read like any other import. A computed specifier
+  (``import(`./${name}`)``) and a CommonJS `require('x')` are outside the gate.
+
+  **Measured when the gate landed, and the reason the first run is not green**:
+  476 package imports across the eighteen plugins, none of them UNDECLARED, and
+  seven kernel imports that are runtime imports declared only as devDependencies
+  — `@deepseek-ai/schemastery` in `plugin-market` and `plugin-presets`;
+  `@deepseek-ai/dsh-home-paths` in `plugin-memory` and `plugin-rewind`;
+  `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-llm` in `plugin-rewind`. Each
+  is fixed by adding the package to that plugin's `peerDependencies` (the suite's
+  convention also carries it in `devDependencies`, so the type gate keeps
+  resolving), and each plugin's version needs a bump with it. Until then
+  `runtime:build`, `release.yml` and `ci.yml`'s `gate` job refuse those four
+  plugins — which is the rule working, not a false positive: every one of the
+  seven is a value import the kernel has to answer at load time.
 - **Type gate** — the plugin's own `npm run typecheck`. `plugins/build-lib.mjs`
   bundles with esbuild, which does not type check, and `npm pack` ships what
   esbuild wrote: `plugin-effort`'s client half called `pctAt` while its

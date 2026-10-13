@@ -380,10 +380,11 @@ jobs:
             # loader-wrapped bundle). A bare `npx tsc` would neither produce the
             # client bundle the dsh loader expects nor match published typings.
             (cd $p && npm install --no-audit --no-fund --legacy-peer-deps && npm run build)
-            # The type gate and the lib/ freshness gate, from the one place that
-            # decides both (the same module build-runtime.mjs runs) — so a client
-            # half calling a symbol its own module no longer exports fails HERE,
-            # before the runtime assembly, instead of in the renderer.
+            # The type gate, the import gate and the lib/ freshness gate, from the
+            # one place that decides them (the same modules build-runtime.mjs
+            # runs) — so a client half calling a symbol its own module no longer
+            # exports, or importing a package its own manifest never declared,
+            # fails HERE, before the runtime assembly, instead of in the renderer.
             node ../scripts/plugin-gates.mjs "$p"
           done
 

@@ -75,15 +75,18 @@ jobs:
           # so the workspace install above is not enough: install per plugin
           # first, exactly like the release job does.
           #
-          # Each plugin's type gate runs here, after its build: `npm run build`
-          # is esbuild, which does not type check, so a client half calling a
-          # symbol its own module stopped exporting compiles fine, passes every
-          # other gate, and throws in the renderer on the user's first click.
+          # Each plugin's type gate and import gate run here, after its build:
+          # `npm run build` is esbuild, which does not type check and resolves no
+          # external specifier, so a client half calling a symbol its own module
+          # stopped exporting compiles fine, passes every other gate, and throws
+          # in the renderer on the user's first click — and a half importing a
+          # package its own manifest never declared does the same at load.
           # Per plugin rather than one pass afterwards, so the failure names the
           # culprit; and this is the only place such a plugin can be stopped
           # BEFORE a release runs — the smoke job below reaches build-runtime.mjs,
-          # which runs the same two gates itself, but only after its own installs.
-          # Verdicts and the freshness input set live in scripts/lib/plugin-gates.mjs.
+          # which runs the same gates itself, but only after its own installs.
+          # Verdicts and the freshness input set live in scripts/lib/plugin-gates.mjs;
+          # the import verdicts in scripts/lib/plugin-imports.mjs.
           for dir in plugins/*/; do
             if [ -f "$dir/package.json" ]; then
               (cd "$dir" && npm install --no-audit --no-fund --legacy-peer-deps && npm run build)

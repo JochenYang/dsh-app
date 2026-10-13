@@ -36,23 +36,34 @@ for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; do
 
 - **Build**: seventeen plugins run `node build.mjs` (esbuild bundles both halves).
   `plugin-brand` is the one exception — `tsc -p tsconfig.json` into `lib/`.
-- **A plugin passes three checks before its `lib/` can enter an artifact** — its
+- **A plugin passes four checks before its `lib/` can enter an artifact** — every
+  package its `src/**` imports must be accounted for by a dependency field, its
   own `npm run typecheck`; a refusal of a `lib/` older than the plugin's own
   inputs; and a refusal of a build that produced none of the entries its manifest
-  declares (`scripts/lib/plugin-gates.mjs`, run by `build-runtime.mjs`, by
-  `release.yml`'s pre-build loop and by `ci.yml`'s `gate` job — the two workflows
-  through `node scripts/plugin-gates.mjs <plugin-dir>`). esbuild does not type
+  declares (`scripts/lib/plugin-gates.mjs` and `scripts/lib/plugin-imports.mjs`,
+  run by `build-runtime.mjs`, by `release.yml`'s pre-build loop and by `ci.yml`'s
+  `gate` job — the two workflows through
+  `node scripts/plugin-gates.mjs <plugin-dir>`). esbuild does not type
   check and npm drops a missing directory silently: a client half calling an
   export its own module stopped exporting bundles fine, ships, and stops the app
-  in the renderer instead. The type gate needs this plugin's declared peers to be
-  resolvable, and `npm install --legacy-peer-deps` (what both workflows run)
-  installs dependencies and devDependencies but NO peer: a package this plugin
-  imports must therefore ALSO be in its own `devDependencies` — the suite's
+  in the renderer instead. **Every package you `import` in `src/` must also appear
+  in one of this plugin's own `dependencies` / `peerDependencies` /
+  `devDependencies`** (a package declared only at the repository root, or only
+  present transitively, does not count as your declaration) — and a
+  `@deepseek-ai/*` package you import for RUNTIME must be in
+  `peerDependencies`: the kernel provides those at load time, esbuild marks them
+  external so nothing else resolves them, and a devDependency satisfies tsc while
+  shipping nothing. A type-only import (`import type {} from '…'`, the
+  Context-merge idiom) needs no peer — esbuild deletes it. The type gate needs
+  this plugin's declared peers to be resolvable, and `npm install
+  --legacy-peer-deps` (what both workflows run) installs dependencies and
+  devDependencies but NO peer: a package this plugin imports must therefore ALSO
+  be in its own `devDependencies` — the suite's
   convention is both fields with the same spec, which is what
   `@deepseek-ai/dsh-client-ui-primitives` does in all fourteen plugins that import
   it. With that, every plugin's type gate runs in CI. A peer that nothing installs
   makes the gate SKIP this plugin — one line naming the packages, never silently —
-  instead of failing a release over an import nobody installed; the other two
+  instead of failing a release over an import nobody installed; the other three
   checks need no peer and always run.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
