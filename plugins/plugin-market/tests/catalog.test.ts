@@ -7,8 +7,10 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { gzipSync } from 'node:zlib'
+import { createServer, type RequestListener, type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { describe, it } from 'node:test'
+import { gzipSync } from 'node:zlib'
 import { MarketExecutionError } from '../src/errors.ts'
 import {
   CATALOG_TIMEOUT_MS,
@@ -69,6 +71,52 @@ describe('validateSourceUrl', () => {
     const check = validateSourceUrl('not a url')
     assert.deepEqual(check.ok ? undefined : check.params, undefined)
     assert.equal(check.ok ? '' : check.reason.params?.url, 'not a url')
+  })
+
+  it('refuses a source that names a private, loopback or metadata host', () => {
+    const codeOf = (raw: unknown): string | undefined => {
+      const check = validateSourceUrl(raw)
+      return check.ok ? undefined : check.reason.code
+    }
+    for (const raw of [
+      'https://127.0.0.1/x',
+      'https://10.0.0.1/x',
+      'https://172.16.0.1/x',
+      'https://192.168.1.1/x',
+      'https://169.254.169.254/x',
+      'https://0.0.0.0/x',
+      'https://[::1]/x',
+      'https://[fc00::1]/x',
+      'https://[fe80::1]/x',
+    ]) {
+      assert.equal(codeOf(raw), 'source.privateAddress', raw)
+    }
+    // The npm-package form names a registry host too, and the same policy
+    // applies there: the default mirror is public and untouched.
+    assert.equal(codeOf('npm:dsh-plugin-catalog@https://10.0.0.5/npm'), 'source.privateAddress')
+    // A bracketed IPv6 registry never reaches the address check: the npm
+    // grammar admits only hostname characters, so it stops as a shape error
+    // (the older, narrower refusal — unaffected by this policy).
+    assert.equal(codeOf('npm:dsh-plugin-catalog@https://[::1]/npm'), 'source.npmShape')
+    assert.equal(validateSourceUrl('npm:dsh-plugin-catalog@https://mirrors.cloud.tencent.com/npm').ok, true)
+    // The reason names the host, and carries no sentence of its own.
+    const check = validateSourceUrl('https://192.168.1.1/x')
+    assert.equal(check.ok ? '' : check.reason.params?.host, '192.168.1.1')
+    assert.match(check.ok ? '' : check.reason.text ?? '', /private, loopback or link-local/)
+  })
+
+  it('keeps the fake-IP block, public literals and the scheme rule', () => {
+    // 198.18.0.0/15 is this machine's own network shape: refusing it would
+    // refuse every source, the presets included (src/source-address.ts).
+    assert.equal(validateSourceUrl('https://198.18.0.57/x').ok, true)
+    assert.equal(validateSourceUrl('npm:dsh-plugin-catalog@https://198.18.0.57/npm').ok, true)
+    // A public literal is a legal source.
+    assert.equal(validateSourceUrl('https://93.184.216.34/x').ok, true)
+    assert.equal(validateSourceUrl('https://[2606:4700:4700::1111]/x').ok, true)
+    // The scheme rule is decided first: an http private host is reported as
+    // "not https" (the tightening must not change the older diagnosis).
+    const http = validateSourceUrl('http://127.0.0.1/x')
+    assert.equal(http.ok ? '' : http.reason.code, 'source.notHttps')
   })
 })
 
@@ -530,6 +578,14 @@ describe('mergeCatalogs', () => {
 })
 
 describe('fetchCatalog (offline behavior)', () => {
+  /**
+   * A resolver seam that answers one fixed set. Every case below injects it:
+   * the address check otherwise resolves the real host, which is neither
+   * deterministic nor offline.
+   */
+  const answering = (...addresses: readonly string[]): { resolve: () => Promise<readonly string[]> } =>
+    ({ resolve: async () => addresses })
+
   it('rejects non-https URLs without any network activity', async () => {
     const result = await fetchCatalog('http://example.com/list')
     assert.equal('reason' in result, true)
@@ -558,7 +614,7 @@ describe('fetchCatalog (offline behavior)', () => {
       return new Response('{"plugins":[]}', { status: 200, headers: { 'content-type': 'application/json' } })
     }) as typeof fetch
     try {
-      const result = await fetchCatalog('https://example.test/catalog.json')
+      const result = await fetchCatalog('https://example.test/catalog.json', {}, answering('93.184.216.34'))
       assert.equal('entries' in result, true)
       const headers = seen?.headers as Record<string, string>
       assert.match(headers['accept-encoding'], /gzip/)
@@ -575,7 +631,7 @@ describe('fetchCatalog (offline behavior)', () => {
       return new Response(null, { status: 304 })
     }) as typeof fetch
     try {
-      const result = await fetchCatalog('https://example.test/catalog.json', { etag: 'W/"abc123"' })
+      const result = await fetchCatalog('https://example.test/catalog.json', { etag: 'W/"abc123"' }, answering('93.184.216.34'))
       assert.equal('notModified' in result && result.notModified, true)
       const headers = seen.init?.headers as Record<string, string>
       assert.equal(headers['if-none-match'], 'W/"abc123"')
@@ -595,7 +651,7 @@ describe('fetchCatalog (offline behavior)', () => {
       return new Response(gz, { status: 200, headers: { 'content-type': 'application/json' } })
     }) as typeof fetch
     try {
-      const result = await fetchCatalog('https://example.test/catalog.json')
+      const result = await fetchCatalog('https://example.test/catalog.json', {}, answering('93.184.216.34'))
       assert.equal('entries' in result, true)
       if ('entries' in result) assert.equal(result.entries.length, 1)
     } finally {
@@ -603,6 +659,123 @@ describe('fetchCatalog (offline behavior)', () => {
     }
   })
 })
+
+describe('fetchCatalog (source address policy)', () => {
+  const answering = (...addresses: readonly string[]): { resolve: () => Promise<readonly string[]> } =>
+    ({ resolve: async () => addresses })
+
+  /** One stubbed transport that records whether it was reached. */
+  function stubFetch(body = '{"plugins":[]}'): { reached: () => boolean, restore: () => void } {
+    const original = globalThis.fetch
+    let reached = false
+    globalThis.fetch = (async (): Promise<Response> => {
+      reached = true
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    return { reached: () => reached, restore: () => { globalThis.fetch = original } }
+  }
+
+  it('sends the source request without following redirects', async () => {
+    // Pinned because nothing pinned it: deleting the option left the whole
+    // suite green, while the behaviour it buys is real — `redirect: 'error'`
+    // rejects on a 3xx, and the default follows the Location to wherever it
+    // points, including an address this policy just refused.
+    const original = globalThis.fetch
+    let seen: RequestInit | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit): Promise<Response> => {
+      seen = init
+      return new Response('{"plugins":[]}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      const result = await fetchCatalog('https://example.test/catalog.json', {}, answering('93.184.216.34'))
+      assert.equal('entries' in result, true)
+      assert.equal(seen?.redirect, 'error')
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('refuses a name whose answers are private, before the request is sent', async () => {
+    const transport = stubFetch()
+    try {
+      const result = await fetchCatalog('https://internal.example.com/catalog.json', {}, answering('10.0.0.1'))
+      assert.equal('reason' in result, true)
+      assert.equal('reason' in result ? result.reason.code : '', 'source.privateResolution')
+      assert.equal('reason' in result ? result.reason.params?.host : '', 'internal.example.com')
+      assert.equal(transport.reached(), false)
+    } finally {
+      transport.restore()
+    }
+  })
+
+  it('refuses an answer set with one private address, and one metadata answer', async () => {
+    for (const answer of [['93.184.216.34', '10.0.0.1'], ['169.254.169.254'], ['::ffff:127.0.0.1'], ['fe80::1']]) {
+      const transport = stubFetch()
+      try {
+        const result = await fetchCatalog('https://mixed.example.com/catalog.json', {}, answering(...answer))
+        assert.equal('reason' in result, true, answer.join(','))
+        assert.equal('reason' in result ? result.reason.code : '', 'source.privateResolution')
+        assert.equal(transport.reached(), false, answer.join(','))
+      } finally {
+        transport.restore()
+      }
+    }
+  })
+
+  it('lets the fake-IP block through and carries the request on', async () => {
+    // The machine's own network shape: a TUN resolver answers 198.18.0.0/15
+    // for every name. A strict policy here refuses every source there.
+    const transport = stubFetch()
+    try {
+      const result = await fetchCatalog('https://example.com/catalog.json', {}, answering('198.18.0.57'))
+      assert.equal('entries' in result, true)
+      assert.equal(transport.reached(), true)
+    } finally {
+      transport.restore()
+    }
+  })
+
+  it('does not consult the resolver for a literal host, refused or public', async () => {
+    let asked = 0
+    const resolve = async (): Promise<readonly string[]> => { asked += 1; return [] }
+    const refused = await fetchCatalog('https://127.0.0.1/catalog.json', {}, { resolve })
+    assert.equal('reason' in refused && refused.reason.code, 'source.privateAddress')
+    assert.equal(asked, 0)
+    const transport = stubFetch()
+    try {
+      const allowed = await fetchCatalog('https://198.18.0.57/catalog.json', {}, { resolve })
+      assert.equal('entries' in allowed, true)
+    } finally {
+      transport.restore()
+    }
+    assert.equal(asked, 0)
+  })
+
+  it('runs the request when the resolver fails — NXDOMAIN is not a private answer', async () => {
+    const transport = stubFetch()
+    try {
+      const result = await fetchCatalog('https://example.com/catalog.json', {}, {
+        resolve: async () => { throw new Error('getaddrinfo ENOTFOUND example.com') },
+      })
+      // The fetch itself reports the failure in its own words; the address
+      // check must not claim a private answer it never saw.
+      assert.equal('entries' in result, true)
+      assert.equal(transport.reached(), true)
+    } finally {
+      transport.restore()
+    }
+  })
+
+  it('holds an npm catalog source to the same policy on its registry host', async () => {
+    // A literal registry host is caught at validation.
+    const literal = await fetchCatalog('npm:dsh-plugin-catalog@https://10.0.0.5/npm')
+    assert.equal('reason' in literal && literal.reason.code, 'source.privateAddress')
+    // A named one is caught once its answers are known.
+    const named = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://internal.example.com/npm', undefined, answering('10.0.0.1'))
+    assert.equal('reason' in named && named.reason.code, 'source.privateResolution')
+  })
+})
+
 
 describe('source list limits', () => {
   it('documents the source cap shared with the routes', () => {
@@ -612,6 +785,37 @@ describe('source list limits', () => {
 })
 
 describe('fetchCatalogFromNpmPackage', () => {
+  /**
+   * The resolver seam every case here injects: without it the registry and the
+   * tarball host are resolved for real, which is neither offline nor
+   * deterministic.
+   */
+  const answering = (...addresses: readonly string[]): { resolve: () => Promise<readonly string[]> } =>
+    ({ resolve: async () => addresses })
+
+  /** One registry answer, shaped like the mirror's own packument. */
+  const packument = (version: string, tarball: string): Response =>
+    new Response(JSON.stringify({ version, dist: { tarball } }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  /**
+   * A stubbed transport that records each request's URL AND redirect mode: for
+   * this path the destination is the thing under test, so a helper that only
+   * counts calls cannot express the assertions.
+   */
+  function recordingFetch(handler: (url: string) => Response): {
+    readonly calls: Array<{ readonly url: string, readonly redirect: unknown }>
+    readonly restore: () => void
+  } {
+    const original = globalThis.fetch
+    const calls: Array<{ url: string, redirect: unknown }> = []
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = String(input)
+      calls.push({ url, redirect: init?.redirect })
+      return handler(url)
+    }) as typeof fetch
+    return { calls, restore: () => { globalThis.fetch = original } }
+  }
+
   it('skips the tarball when the held version matches latest', async () => {
     const original = globalThis.fetch
     let tarballFetched = false
@@ -624,7 +828,7 @@ describe('fetchCatalogFromNpmPackage', () => {
       return new Response(Buffer.alloc(0), { status: 200 })
     }) as typeof fetch
     try {
-      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', '1.2.3')
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', '1.2.3', answering('93.184.216.34'))
       assert.equal('notModified' in result && result.notModified, true)
       assert.equal('notModified' in result && result.servedVersion, '1.2.3')
       assert.equal(tarballFetched, false)
@@ -634,38 +838,257 @@ describe('fetchCatalogFromNpmPackage', () => {
   })
 
   it('extracts plugins.json from the tarball and returns entries with the version', async () => {
-    const original = globalThis.fetch
     const catalog = JSON.stringify({ plugins: [{ name: 'p', owner: 'o', url: 'https://r', page: 'https://r/p', category: 'c', description: { en: 'd', zh: '说' }, npm: '@s/p', stars: 3, downloads: 9, version: '1.0.0' }] })
-    // Build a minimal gzipped tar carrying package/plugins.json.
-    const blocks: Buffer[] = []
-    const catalogBytes = Buffer.from(catalog, 'utf8')
-    const header = Buffer.alloc(512)
-    header.write('package/plugins.json', 0, 'utf8')
-    header.write(octalPadded(catalogBytes.length), 124, 12, 'ascii')
-    blocks.push(header, catalogBytes)
-    const pad = (512 - (catalogBytes.length % 512)) % 512
-    if (pad !== 0) blocks.push(Buffer.alloc(pad))
-    blocks.push(Buffer.alloc(1024)) // two empty headers end the tar
-    const tarball = gzipSync(Buffer.concat(blocks))
-    globalThis.fetch = (async (input: unknown): Promise<Response> => {
-      const url = String(input)
-      if (url.endsWith('/latest')) {
-        return new Response(JSON.stringify({ version: '9.9.9', dist: { tarball: 'https://mirror.example.com/pkg-9.9.9.tgz' } }), { status: 200, headers: { 'content-type': 'application/json' } })
-      }
-      return new Response(tarball, { status: 200 })
-    }) as typeof fetch
+    const tarball = catalogTarball(catalog)
+    const transport = recordingFetch(url => url.endsWith('/latest')
+      ? packument('9.9.9', 'https://mirror.example.com/pkg-9.9.9.tgz')
+      : new Response(tarball, { status: 200 }))
     try {
-      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm')
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
       assert.equal('entries' in result, true)
       if ('entries' in result) {
         assert.equal(result.entries.length, 1)
         assert.equal(result.modified, '9.9.9')
       }
     } finally {
-      globalThis.fetch = original
+      transport.restore()
+    }
+  })
+
+  it('judges each hop\'s destination, and sends neither of them following redirects', async () => {
+    // The tarball hop is the registry's own data: before this policy existed it
+    // was requested verbatim, whatever address it named, and a 302 from it was
+    // followed (measured against two loopback servers: the request reached the
+    // address in `Location`, `127.0.0.1` included).
+    const transport = recordingFetch(url => url.endsWith('/latest')
+      ? packument('1.0.0', 'https://cdn.example.com/pkg-1.0.0.tgz')
+      : new Response(catalogTarball('{"plugins":[]}'), { status: 200 }))
+    try {
+      await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
+      assert.deepEqual(transport.calls, [
+        { url: 'https://mirror.example.com/npm/dsh-plugin-catalog/latest', redirect: 'manual' },
+        { url: 'https://cdn.example.com/pkg-1.0.0.tgz', redirect: 'manual' },
+      ])
+    } finally {
+      transport.restore()
+    }
+  })
+
+  it('refuses a tarball URL naming a refused address, without requesting it', async () => {
+    // Each of these is an address class the source policy refuses for an https
+    // source — the metadata endpoint included, which is what an SSRF attempt
+    // against a registry actually names.
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['http://127.0.0.1:9/pkg.tgz', '127.0.0.1'],
+      ['http://[::1]/pkg.tgz', '[::1]'],
+      ['https://169.254.169.254/latest/meta-data/', '169.254.169.254'],
+      ['https://10.0.0.9/pkg.tgz', '10.0.0.9'],
+    ]
+    for (const [tarball, host] of cases) {
+      const transport = recordingFetch(() => packument('1.0.0', tarball))
+      try {
+        const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
+        assert.equal('reason' in result && result.reason.code, 'source.privateAddress', tarball)
+        assert.equal('reason' in result && result.reason.params?.host, host, tarball)
+        // Only the metadata hop was sent: the tarball URL never reached fetch.
+        assert.equal(transport.calls.length, 1, tarball)
+      } finally {
+        transport.restore()
+      }
+    }
+  })
+
+  it('refuses a tarball host that resolves to a refused address, without requesting it', async () => {
+    const transport = recordingFetch(() => packument('1.0.0', 'https://cdn.internal.example.com/pkg.tgz'))
+    const resolve = async (hostname: string): Promise<readonly string[]> =>
+      hostname === 'cdn.internal.example.com' ? ['10.0.0.1'] : ['93.184.216.34']
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, { resolve })
+      assert.equal('reason' in result && result.reason.code, 'source.privateResolution')
+      assert.equal('reason' in result && result.reason.params?.host, 'cdn.internal.example.com')
+      assert.equal(transport.calls.length, 1)
+    } finally {
+      transport.restore()
+    }
+  })
+
+  it('fails closed on a hop it cannot judge, rather than sending it unjudged', async () => {
+    // A URL this host cannot parse, a scheme that is not http(s) (undici would
+    // fetch a `data:` URL happily), and an answer set the resolver could not
+    // produce. All three are refusals: the tarball URL is the source's data,
+    // so nothing here may fall through to an unjudged request.
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['not a url', 'source.unparsable'],
+      ['data:application/gzip;base64,H4sIAAAAAAAA', 'source.notHttps'],
+      ['file:///etc/hosts', 'source.notHttps'],
+    ]
+    for (const [tarball, code] of cases) {
+      const transport = recordingFetch(() => packument('1.0.0', tarball))
+      try {
+        const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
+        assert.equal('reason' in result && result.reason.code, code, tarball)
+        assert.equal(transport.calls.length, 1, tarball)
+      } finally {
+        transport.restore()
+      }
+    }
+    // The resolver cannot answer for the tarball host: refused, and never as a
+    // private address (that would be a claim the user cannot check).
+    const unresolved = recordingFetch(() => packument('1.0.0', 'https://cdn.example.com/pkg.tgz'))
+    try {
+      const resolve = async (hostname: string): Promise<readonly string[]> => {
+        if (hostname === 'cdn.example.com') throw new Error('getaddrinfo ENOTFOUND cdn.example.com')
+        return ['93.184.216.34']
+      }
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, { resolve })
+      assert.equal('reason' in result && result.reason.code, 'source.unresolved')
+      assert.equal('reason' in result && result.reason.params?.host, 'cdn.example.com')
+      assert.equal(unresolved.calls.length, 1)
+    } finally {
+      unresolved.restore()
+    }
+    // The registry hop fails closed the same way, before any request is sent.
+    const unreachable = recordingFetch(() => packument('1.0.0', 'https://cdn.example.com/pkg.tgz'))
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, {
+        resolve: async () => { throw new Error('getaddrinfo ENOTFOUND') },
+      })
+      assert.equal('reason' in result && result.reason.code, 'source.unresolved')
+      assert.equal(unreachable.calls.length, 0)
+    } finally {
+      unreachable.restore()
+    }
+  })
+
+  it('refuses a registry base it cannot parse instead of skipping the check', async () => {
+    // The older shape skipped the address check whenever the base would not
+    // parse — a fail-open branch. A base this host cannot turn into a URL
+    // cannot be requested either, so it is a refusal.
+    const transport = recordingFetch(() => packument('1.0.0', 'https://cdn.example.com/pkg.tgz'))
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'not a url', undefined, answering('93.184.216.34'))
+      assert.equal('reason' in result && result.reason.code, 'source.unparsable')
+      assert.equal(transport.calls.length, 0)
+    } finally {
+      transport.restore()
+    }
+  })
+
+  it('takes a literal hop address as its own answer, without asking the resolver', async () => {
+    // The policy's own rule for a literal ("a public literal is its own answer
+    // set"), and the reason it matters here: a resolver that cannot answer must
+    // not turn an address nobody needs looked up into a refusal.
+    const transport = recordingFetch(url => url.endsWith('/latest')
+      ? packument('1.0.0', 'https://93.184.216.34/pkg.tgz')
+      : new Response(catalogTarball('{"plugins":[]}'), { status: 200 }))
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://93.184.216.34/npm', undefined, {
+        resolve: async () => { throw new Error('the resolver must not be asked about a literal') },
+      })
+      assert.equal('entries' in result, true)
+      assert.equal(transport.calls.length, 2)
+    } finally {
+      transport.restore()
     }
   })
 })
+
+describe('fetchCatalogFromNpmPackage (redirects, real HTTP)', () => {
+  /**
+   * These cases use REAL loopback servers, because the behaviour under test is
+   * undici's own: a stubbed `fetch` never follows a `Location`, so only a real
+   * 302 can show that one is refused. The URLs name `localhost` (a NAME, so the
+   * injected resolver judges it) while the socket goes to `127.0.0.1` — the
+   * same seam the reviewer's probe used.
+   */
+  const answering = (...addresses: readonly string[]): { resolve: () => Promise<readonly string[]> } =>
+    ({ resolve: async () => addresses })
+
+  /** A loopback server, listening on an ephemeral port. */
+  function listen(handler: RequestListener): Promise<Server> {
+    const server = createServer(handler)
+    return new Promise(resolve => { server.listen(0, '127.0.0.1', () => resolve(server)) })
+  }
+
+  /** A `localhost` URL for one server (a name, so the resolver seam applies). */
+  function urlOf(server: Server, path: string): string {
+    return `http://localhost:${String((server.address() as AddressInfo).port)}${path}`
+  }
+
+  const close = (servers: readonly Server[]): void => { for (const server of servers) server.close() }
+
+  it('follows ONE redirect to a destination the policy allows — the mirror CDN shape', async () => {
+    // Measured 2026-10-13: registry.npmmirror.com answers a tarball request with
+    // `302 … cdn.npmmirror.com`. Refusing every redirect would refuse a mirror
+    // users actually add, so the Location is judged and the hop is followed.
+    const cdnHits: string[] = []
+    const cdn = await listen((req, res) => {
+      cdnHits.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ version: '1.2.3', dist: { tarball: 'https://mirror.example.com/x.tgz' } }))
+    })
+    const front = await listen((_req, res) => {
+      res.writeHead(302, { location: urlOf(cdn, '/moved/latest') })
+      res.end()
+    })
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', urlOf(front, '/npm'), '1.2.3', answering('93.184.216.34'))
+      assert.equal('notModified' in result && result.servedVersion, '1.2.3')
+      assert.deepEqual(cdnHits, ['/moved/latest'])
+    } finally {
+      close([front, cdn])
+    }
+  })
+
+  it('refuses a metadata redirect whose Location names a refused address', async () => {
+    const targetHits: string[] = []
+    const target = await listen((req, res) => { targetHits.push(req.url ?? ''); res.writeHead(200); res.end('{}') })
+    const front = await listen((_req, res) => {
+      res.writeHead(302, { location: `http://127.0.0.1:${String((target.address() as AddressInfo).port)}/latest/meta-data/` })
+      res.end()
+    })
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', urlOf(front, '/npm'), undefined, answering('93.184.216.34'))
+      assert.equal('reason' in result && result.reason.code, 'source.privateAddress')
+      assert.equal('reason' in result && result.reason.params?.host, '127.0.0.1')
+      assert.deepEqual(targetHits, [])
+    } finally {
+      close([front, target])
+    }
+  })
+
+  it('refuses a tarball redirect whose Location names a refused address', async () => {
+    const targetHits: string[] = []
+    const target = await listen((req, res) => { targetHits.push(req.url ?? ''); res.writeHead(200); res.end() })
+    const redirector = await listen((_req, res) => {
+      res.writeHead(302, { location: `http://127.0.0.1:${String((target.address() as AddressInfo).port)}/sneaky.tgz` })
+      res.end()
+    })
+    const registry = await listen((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ version: '9.9.9', dist: { tarball: urlOf(redirector, '/pkg.tgz') } }))
+    })
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', urlOf(registry, '/npm'), undefined, answering('93.184.216.34'))
+      assert.equal('reason' in result && result.reason.code, 'source.privateAddress')
+      assert.equal('reason' in result && result.reason.params?.host, '127.0.0.1')
+      assert.deepEqual(targetHits, [])
+    } finally {
+      close([registry, redirector, target])
+    }
+  })
+})
+
+/** A minimal gzipped tar carrying one regular file, npm-style `package/plugins.json`. */
+function catalogTarball(catalog: string): Buffer {
+  const body = Buffer.from(catalog, 'utf8')
+  const header = Buffer.alloc(512)
+  header.write('package/plugins.json', 0, 'utf8')
+  header.write(octalPadded(body.length), 124, 12, 'ascii')
+  const pad = (512 - (body.length % 512)) % 512
+  // Two empty headers end the tar.
+  return gzipSync(Buffer.concat([header, body, Buffer.alloc(pad), Buffer.alloc(1024)]))
+}
 
 /** An octal size in tar's 11-char field form. */
 function octalPadded(size: number): string {

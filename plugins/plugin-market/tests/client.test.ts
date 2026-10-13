@@ -16,6 +16,7 @@ import { describe, it } from 'node:test'
 import { hostMessage, sourceReasonOf } from '../src/client/messages.ts'
 import { zh } from '../src/client/locales.ts'
 import { validateSourceUrl } from '../src/catalog.ts'
+import { privateResolutionReason, unresolvedReason } from '../src/source-address.ts'
 import { checkUpdateTarget } from '../src/routes.ts'
 
 /**
@@ -96,6 +97,23 @@ describe('hostMessage (market)', () => {
     assert.equal(rejected.ok, false)
     assert.equal(rejected.ok ? '' : hostMessage(rejected.reason, t), '目录源必须是 https:// 地址')
 
+    // The address policy's two refusals: a literal private host, and a name
+    // that answers with one. Both sentences name the host the user typed.
+    const privateHost = validateSourceUrl('https://192.168.1.1/list')
+    assert.equal(privateHost.ok, false)
+    assert.equal(
+      privateHost.ok ? '' : hostMessage(privateHost.reason, t),
+      '目录源不能指向内网、本机或链路本地地址：192.168.1.1',
+    )
+    assert.equal(
+      hostMessage(privateResolutionReason('internal.example.com', '10.0.0.1', 'private'), t),
+      '目录源域名 internal.example.com 解析到内网、本机或链路本地地址，已跳过该源',
+    )
+    assert.equal(
+      hostMessage(unresolvedReason('cdn.example.com'), t),
+      '目录源域名 cdn.example.com 无法解析，已跳过该源',
+    )
+
     const refusal = checkUpdateTarget(undefined, undefined)
     assert.equal(refusal.ok, false)
     assert.equal(refusal.ok ? '' : hostMessage(refusal.reason, t), '该插件尚未安装，无法更新')
@@ -107,11 +125,20 @@ describe('hostMessage (market)', () => {
       'HTTP 503',
       'an HTTP status reads the same in every locale, so it carries no dictionary copy',
     )
-    assert.equal(
-      hostMessage({ code: 'catalog.requestFailedDetail', params: { detail: 'fetch failed' }, text: 'fetch failed' }, t),
-      'fetch failed',
-    )
     assert.equal(hostMessage({ code: 'registry.futureCode', text: 'registry said no' }, t), 'registry said no')
+  })
+
+  it('renders its own sentence for a code whose text can quote the responding server', () => {
+    // The measured shape: the fetch library's message carries the leading bytes
+    // of a body this host fetched. Rendering it would hand whatever address the
+    // request reached a read channel of up to MAX_REASON_DETAIL characters, so
+    // the detail stays in the host's diagnostic and the panel renders a
+    // sentence of its own.
+    const upstream = 'Unexpected token \'p\', "package/pl"... is not valid JSON'
+    const rendered = hostMessage({ code: 'catalog.requestFailedDetail', params: { detail: upstream }, text: upstream }, t)
+    assert.equal(rendered, '目录源请求失败')
+    assert.equal(rendered.includes('package/pl'), false)
+    assert.equal(rendered.includes('Unexpected token'), false)
   })
 
   it('never renders blank in the source-failure list', () => {

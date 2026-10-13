@@ -28,11 +28,18 @@ export type Translate = TranslateNS<typeof NS>
  *
  * Some codes are deliberately absent, because the host's English diagnostic IS
  * the message in every locale: `catalog.httpStatus` (an HTTP status reads the
- * same everywhere), `catalog.requestFailedDetail` (the fetch library's own
- * words), `route.crossOrigin` / `route.methodOnly` (only a cross-site or
- * protocol-violating caller can trigger them) and `route.bodyTooLarge` /
+ * same everywhere), `route.crossOrigin` / `route.methodOnly` (only a cross-site
+ * or protocol-violating caller can trigger them) and `route.bodyTooLarge` /
  * `route.invalidBody` (transport-level, about the request itself).
  * {@link hostMessage} renders their `text`, never a blank line.
+ *
+ * `catalog.requestFailedDetail` is mapped for the OPPOSITE reason: its `text`
+ * is the fetch library's own words, and those words QUOTE THE RESPONDING
+ * SERVER (measured: `Unexpected token 'p', "package/pl"... is not valid JSON`
+ * — the leading bytes of a body this host fetched). Leaking that to a rendered
+ * sentence turns any reached address into a 120-character read channel, so the
+ * code renders a sentence of its own and the detail stays in the host's
+ * diagnostic for whoever reads the wire.
  */
 const HOST_COPY: Readonly<Record<string, MarketKey>> = {
   'error.network': 'mkt.host.networkError',
@@ -59,10 +66,14 @@ const HOST_COPY: Readonly<Record<string, MarketKey>> = {
   'source.unparsable': 'mkt.host.sourceUnparsable',
   'source.notHttps': 'mkt.host.sourceNotHttps',
   'source.hasCredentials': 'mkt.host.sourceHasCredentials',
+  'source.privateAddress': 'mkt.host.sourcePrivateAddress',
+  'source.privateResolution': 'mkt.host.sourcePrivateResolution',
+  'source.unresolved': 'mkt.host.sourceUnresolved',
   'source.notArray': 'mkt.host.sourceNotArray',
   'source.tooMany': 'mkt.host.sourceTooMany',
   'catalog.timeout': 'mkt.host.catalogTimeout',
   'catalog.requestFailed': 'mkt.error.request',
+  'catalog.requestFailedDetail': 'mkt.host.catalogRequestFailedDetail',
   'catalog.notJson': 'mkt.host.catalogNotJson',
   'catalog.notObject': 'mkt.host.catalogNotObject',
   'catalog.responseTooLarge': 'mkt.host.catalogResponseTooLarge',

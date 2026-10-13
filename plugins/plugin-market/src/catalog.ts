@@ -32,12 +32,33 @@
  * the package name so a non-installable entry's surrogate key can never reach
  * the CLI.
  *
+ * Address stance: a source URL must be an https URL naming a globally
+ * routable destination. A literal private host is refused at validation, and a
+ * hostname whose answers are private is refused at request time — the policy,
+ * and the one deliberate exception (the RFC 2544 block a TUN/fake-IP network
+ * answers for every name), live in `src/source-address.ts`. The npm-package
+ * source has TWO source-controlled hops (the registry's metadata URL and the
+ * `dist.tarball` URL that metadata names) and both are held to the same
+ * policy, failing closed on anything that cannot be judged; neither hop
+ * follows a redirect blindly — see {@link judgedFetch}. The one public-address
+ * gap this leaves open, and it is shared with the suite's fetch provider, is
+ * recorded in `src/source-address.ts` (an IPv4-compatible literal).
+ *
  * @module @dsh-app/plugin-market/catalog
  */
 
+import { lookup } from 'node:dns/promises'
 import { gunzipSync } from 'node:zlib'
 import { MarketExecutionError, type HostText } from './errors.ts'
 import { PACKAGE_NAME_PATTERN } from './npm.ts'
+import {
+  blockedAddressOf,
+  literalAddressOf,
+  literalAddressReason,
+  privateResolutionReason,
+  unresolvedReason,
+  type AddressResolver,
+} from './source-address.ts'
 
 /**
  * The offline-snapshot source: `scripts/generate-market-snapshot.mjs` fetches
@@ -194,6 +215,12 @@ const MAX_NAME_LENGTH = 214
 
 /**
  * Validate one user-supplied source URL.
+ *
+ * The URL half of the source-address policy lives here (a literal private,
+ * loopback or link-local host is refused, both in an https source and in an
+ * npm registry base); the resolution half runs at request time in
+ * {@link fetchCatalog}, because it needs a resolver and a deadline.
+ *
  * @param raw - the client-supplied value.
  * @returns the normalized URL string, or a coded rejection reason.
  */
@@ -212,6 +239,12 @@ export function validateSourceUrl(raw: unknown): { ok: true, url: string } | { o
       return { ok: false, reason: { code: 'source.npmShape', text: 'an npm catalog source must read npm:<package>@<https registry base>' } }
     }
     const registry = (match[2] ?? `@${DEFAULT_NPM_MIRROR}`).slice(1)
+    // The registry base is user input like any other host: a literal private
+    // address there is refused on the same grounds as one in an https source
+    // (the default mirror and every public registry pass untouched).
+    const registryLiteral = registryHostOf(registry)
+    const registryReason = registryLiteral === undefined ? undefined : literalAddressReason(registryLiteral)
+    if (registryReason !== undefined) return { ok: false, reason: registryReason }
     return { ok: true, url: trimmed }
   }
   let url: URL
@@ -229,7 +262,18 @@ export function validateSourceUrl(raw: unknown): { ok: true, url: string } | { o
   if (url.username !== '' || url.password !== '') {
     return { ok: false, reason: { code: 'source.hasCredentials', text: 'a catalog source URL must not carry a username or password' } }
   }
+  const literalReason = literalAddressReason(url.hostname)
+  if (literalReason !== undefined) return { ok: false, reason: literalReason }
   return { ok: true, url: url.toString() }
+}
+
+/** The hostname of a registry base, or undefined when it does not parse. */
+function registryHostOf(registry: string): string | undefined {
+  try {
+    return new URL(registry).hostname
+  } catch {
+    return undefined
+  }
 }
 
 /** A plain non-empty string within the field cap. */
@@ -718,6 +762,230 @@ function maybeGunzip(body: Buffer, declared: string | null): string {
 /** Long enough for a multi-megabyte tarball on a slow link, short enough to fall back. */
 const NPM_PACKAGE_TIMEOUT_MS = 20_000
 
+/**
+ * The system resolver behind the source-address check — `dns.lookup`, so the
+ * hosts file and the platform's own resolver config (including a TUN client's
+ * fake-IP answers) are what the check sees.
+ *
+ * It is deliberately the LOCAL resolver and not a hook on the connection: the
+ * request that follows re-resolves the name inside undici — through the
+ * dispatcher the kernel installed, which on a desktop start is the proxy the
+ * shell injected. See {@link resolveWithinDeadline} and the module header of
+ * `src/source-address.ts` for what that costs.
+ */
+const systemAddressResolver: AddressResolver = async hostname =>
+  (await lookup(hostname, { all: true, order: 'verbatim' })).map(entry => entry.address)
+
+/**
+ * The resolver's answer for one hostname, or undefined when it failed or the
+ * request's deadline expired.
+ *
+ * The race is what keeps this check from becoming a new way to hang — and why
+ * the lookup is not simply awaited: `dns.lookup` takes no signal, so the
+ * bounding comes from the deadline timer that already guards the fetch. A
+ * resolver failure answers `undefined`, never a rejection; what the CALLER does
+ * with that is the policy: the user-typed https source runs the request and
+ * lets it fail in its own words (turning a transient NXDOMAIN into "your source
+ * points at a private address" would be a lie), while the npm path's
+ * source-controlled hops refuse with the honest `source.unresolved` reason
+ * (see {@link hopAddressReason}). Neither ever reports a lookup failure as a
+ * private answer.
+ *
+ * @param hostname - the host to resolve.
+ * @param resolve - the resolver seam.
+ * @param signal - the request's deadline signal.
+ * @returns the answer set, or undefined when there is nothing to judge.
+ */
+function resolveWithinDeadline(
+  hostname: string,
+  resolve: AddressResolver,
+  signal: AbortSignal,
+): Promise<readonly string[] | undefined> {
+  if (signal.aborted) return Promise.resolve(undefined)
+  return new Promise<readonly string[] | undefined>((settle) => {
+    let done = false
+    const finish = (value: readonly string[] | undefined): void => {
+      if (done) return
+      done = true
+      signal.removeEventListener('abort', onAbort)
+      settle(value)
+    }
+    const onAbort = (): void => { finish(undefined) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    resolve(hostname).then(addresses => { finish(addresses) }, () => { finish(undefined) })
+  })
+}
+
+/**
+ * The source-address reason for one hostname, or undefined when it passes.
+ *
+ * A literal host is judged without a lookup (and a public literal is its own
+ * answer set). Everything else is resolved and judged against the same policy:
+ * a name that answers with a private, loopback, link-local or metadata address
+ * is refused before the request is sent.
+ *
+ * WHAT THIS COVERS, AND WHAT IT DOES NOT. This is a check-then-connect, not a
+ * pin: the request that follows resolves the name again inside undici, so a
+ * name that answers differently the second time is not caught here (the suite's
+ * fetch provider pins the connection instead, over `node:http(s)`; doing that
+ * for the catalog would fork the transfer semantics below — the advertised
+ * gzip, the declared-vs-stripped `content-encoding` handling, the byte-capped
+ * read — and would have to re-implement the proxy routing, because on a desktop
+ * start the shell injects a local proxy and the connection must keep using it).
+ * When that proxy is in play, the connection's DNS happens at the PROXY: this
+ * check then judges the local resolver's answer alone, and on a TUN/fake-IP
+ * machine (every name answers `198.18.0.0/15`) the exception in
+ * `src/source-address.ts` lets that answer through. The refusal that still
+ * holds on such a machine is the URL half — a literal private host — plus a
+ * name the LOCAL resolver answers privately (an intranet name, which is the
+ * case a user actually types).
+ *
+ * @param hostname - the host to judge.
+ * @param resolve - the resolver seam.
+ * @param signal - the request's deadline signal.
+ * @returns the coded reason, or undefined.
+ */
+async function sourceAddressReason(
+  hostname: string,
+  resolve: AddressResolver,
+  signal: AbortSignal,
+): Promise<HostText | undefined> {
+  const literal = literalAddressReason(hostname)
+  if (literal !== undefined) return literal
+  if (literalAddressOf(hostname) !== undefined) return undefined
+  const addresses = await resolveWithinDeadline(hostname, resolve, signal)
+  if (addresses === undefined) return undefined
+  const blocked = blockedAddressOf(addresses)
+  return blocked === undefined ? undefined : privateResolutionReason(hostname, blocked.address, blocked.range)
+}
+
+/** Statuses that ask a client to fetch somewhere else. */
+const REDIRECT_STATUSES: readonly number[] = [301, 302, 303, 307, 308]
+
+/**
+ * The destination judgement for one SOURCE-CONTROLLED hop (the npm path's
+ * registry metadata URL and the `dist.tarball` URL its answer names), or
+ * undefined when the hop may be sent.
+ *
+ * Same policy as {@link sourceAddressReason} — a literal is judged on its own,
+ * a name on its answers — with two deliberate differences:
+ *
+ * 1. FAIL CLOSED. A URL that does not parse, a scheme that is not http(s) (a
+ *    registry could otherwise answer `dist.tarball: data:…` and have this host
+ *    fetch bytes that never crossed the network), and an answer set the
+ *    resolver could not produce are all refused. These URLs are the SOURCE's
+ *    data, not the user's, and the user cannot check a claim about them: a
+ *    refusal that names the host is better than a request nobody judged. The
+ *    user-typed https source keeps the opposite default — see
+ *    {@link resolveWithinDeadline}.
+ * 2. The whole URL is judged, host and scheme together, so the check travels
+ *    with the request it guards.
+ *
+ * @param raw - the absolute URL about to be requested.
+ * @param resolve - the resolver seam.
+ * @param signal - the request's deadline signal.
+ * @returns the coded reason, or undefined.
+ */
+async function hopAddressReason(
+  raw: string,
+  resolve: AddressResolver,
+  signal: AbortSignal,
+): Promise<HostText | undefined> {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    const echoed = reasonDetail(raw)
+    return { code: 'source.unparsable', params: { url: echoed }, text: `the catalog source URL cannot be parsed: "${echoed}"` }
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { code: 'source.notHttps', text: 'a catalog source must be an https:// URL' }
+  }
+  const literal = literalAddressReason(url.hostname)
+  if (literal !== undefined) return literal
+  // A public literal is its own answer set: nothing to resolve, and no reason
+  // a lookup could fail on its behalf (same short-circuit as
+  // {@link sourceAddressReason}).
+  if (literalAddressOf(url.hostname) !== undefined) return undefined
+  const addresses = await resolveWithinDeadline(url.hostname, resolve, signal)
+  if (addresses === undefined) {
+    // An aborted signal is the request's own deadline, not an unresolvable
+    // host: reporting "could not be resolved" for a name the resolver was
+    // never given a chance to answer would be the same kind of lie as
+    // reporting a private answer.
+    if (signal.aborted) {
+      const seconds = Math.round(NPM_PACKAGE_TIMEOUT_MS / 1000)
+      return { code: 'catalog.timeout', params: { seconds }, text: `the request timed out after ${String(seconds)} seconds` }
+    }
+    return unresolvedReason(url.hostname)
+  }
+  const blocked = blockedAddressOf(addresses)
+  return blocked === undefined ? undefined : privateResolutionReason(url.hostname, blocked.address, blocked.range)
+}
+
+/** One judged hop: the response it produced, or the coded refusal. */
+type JudgedHop =
+  | { readonly response: Response }
+  | { readonly reason: HostText }
+
+/**
+ * Send one request whose destination is judged FIRST, following at most ONE
+ * redirect of it.
+ *
+ * Redirects are not refused outright (`redirect: 'error'`) the way the
+ * user-typed https source refuses them: a registry mirror legitimately answers
+ * a tarball request with a 302 to its own CDN — measured 2026-10-13,
+ * `registry.npmmirror.com` answers `302 … cdn.npmmirror.com`, and with
+ * `redirect: 'error'` the same source comes back `catalog.requestFailedDetail
+ * (fetch failed)` in 107 ms while the Tencent mirror and registry.npmjs.org are
+ * unaffected, so refusing the hop outright would break a mirror users actually
+ * add — and the tarball URL is the registry's own data, so its destination is
+ * judged like the first one. The chain stops there: the second request runs
+ * with `redirect: 'error'`, and a 3xx with no usable `Location` is returned
+ * as-is (the caller reports its status).
+ *
+ * @param raw - the URL to request.
+ * @param init - request options, minus the signal and the redirect mode.
+ * @param resolve - the resolver seam.
+ * @param signal - the request's deadline signal.
+ * @returns the response, or the reason no request was made.
+ */
+async function judgedFetch(
+  raw: string,
+  init: RequestInit,
+  resolve: AddressResolver,
+  signal: AbortSignal,
+): Promise<JudgedHop> {
+  const first = await hopAddressReason(raw, resolve, signal)
+  if (first !== undefined) return { reason: first }
+  const response = await fetch(raw, { ...init, signal, redirect: 'manual' })
+  if (!REDIRECT_STATUSES.includes(response.status)) return { response }
+  const location = response.headers.get('location')
+  if (location === null || location.trim() === '') return { response }
+  let target: string
+  try {
+    target = new URL(location, raw).toString()
+  } catch {
+    const echoed = reasonDetail(location)
+    return { reason: { code: 'source.unparsable', params: { url: echoed }, text: `the catalog source URL cannot be parsed: "${echoed}"` } }
+  }
+  const second = await hopAddressReason(target, resolve, signal)
+  if (second !== undefined) return { reason: second }
+  return { response: await fetch(target, { ...init, signal, redirect: 'error' }) }
+}
+
+/**
+ * Injected seams of the catalog fetch. Tests supply the resolver so the
+ * address check runs without a socket.
+ */
+export interface CatalogFetchDeps {
+  /**
+   * The resolver behind the source-address check. Defaults to the system
+   * resolver.
+   */
+  readonly resolve?: AddressResolver
+}
+
 /* Tar reading constants: 512-byte headers, name at 0, octal size at 124,
  * type flag at 156. Written out rather than pulled from a dependency — a
  * reader for one known filename inside a gzipped tar is smaller than the
@@ -768,25 +1036,40 @@ interface Packument {
  * cache validator: when the caller's held version matches `latest`, the
  * tarball is not downloaded at all (the whole point of putting the catalog
  * on a mirror is the bytes it saves).
+ *
+ * BOTH requests this makes are source-controlled and both go through
+ * {@link judgedFetch}: the metadata URL is built from the user's registry base,
+ * and the tarball URL is whatever that registry's answer names. This is the
+ * source that ships enabled (`DEFAULT_SOURCE_URLS[0]`), so a second hop nobody
+ * judges is a request to any address a registry chooses — including a
+ * redirected one. A hop the policy cannot judge is refused, not sent.
+ *
  * @param pkg - the catalog package name (unscoped).
  * @param registryBase - the registry base URL, no trailing slash.
  * @param heldVersion - the version already in the caller's cache, if any.
+ * @param deps - injected seams (the address-check resolver; tests supply it).
  * @returns the parsed entries plus the served version, or a per-source reason.
  */
 export async function fetchCatalogFromNpmPackage(
   pkg: string,
   registryBase: string,
   heldVersion?: string,
+  deps: CatalogFetchDeps = {},
 ): Promise<SourceFetchResult | { url: string, notModified: true, servedVersion: string }> {
   const url = `npm:${pkg}@${registryBase}`
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), NPM_PACKAGE_TIMEOUT_MS)
+  const resolve = deps.resolve ?? systemAddressResolver
   try {
     const base = registryBase.replace(/\/$/, '')
-    const metaRes = await fetch(`${base}/${encodeURIComponent(pkg)}/latest`, {
-      signal: controller.signal,
-      headers: { accept: 'application/json' },
-    })
+    const metaHop = await judgedFetch(
+      `${base}/${encodeURIComponent(pkg)}/latest`,
+      { headers: { accept: 'application/json' } },
+      resolve,
+      controller.signal,
+    )
+    if ('reason' in metaHop) return { url, reason: metaHop.reason }
+    const metaRes = metaHop.response
     if (!metaRes.ok) {
       return { url, reason: { code: 'catalog.httpStatus', params: { status: metaRes.status }, text: `HTTP ${String(metaRes.status)}` } }
     }
@@ -798,14 +1081,19 @@ export async function fetchCatalogFromNpmPackage(
     }
     // Nothing changed, so nothing to download — re-fetching a package whose
     // version we already hold would give back most of the bytes this path
-    // exists to save.
+    // exists to save. (The tarball URL is judged below, where it is used: a
+    // source that needs no download should not be refused over a destination
+    // nothing is about to connect to.)
     if (heldVersion !== undefined && heldVersion === version) {
       return { url, notModified: true, servedVersion: version } as SourceFetchResult
     }
     // Follow `dist.tarball` rather than composing a URL: a mirror rewrites
     // this field to its own host, and composing one would send the download
-    // back to the origin registry the mirror exists to avoid.
-    const tarRes = await fetch(tarball, { signal: controller.signal })
+    // back to the origin registry the mirror exists to avoid. Its destination
+    // is judged exactly like the metadata hop's.
+    const tarHop = await judgedFetch(tarball, {}, resolve, controller.signal)
+    if ('reason' in tarHop) return { url, reason: tarHop.reason }
+    const tarRes = tarHop.response
     if (!tarRes.ok) {
       return { url, reason: { code: 'catalog.httpStatus', params: { status: tarRes.status }, text: `HTTP ${String(tarRes.status)}` } }
     }
@@ -848,13 +1136,21 @@ export async function fetchCatalogFromNpmPackage(
  * bytes are gzip magic with no declared encoding is decompressed explicitly
  * — so the decompression failure can never masquerade as "the source is
  * broken" while the bandwidth cost drops ~4x on the primary source.
+ *
+ * Address policy: the URL half (a literal private host) is enforced by
+ * {@link validateSourceUrl}; the resolution half runs here, before the request
+ * is sent, against the host's answers — see `src/source-address.ts` for what is
+ * refused and for the one deliberate exception (the RFC 2544 block, which a
+ * TUN/fake-IP network answers for every name).
  * @param url - a previously validated https URL string.
  * @param validators - validators from the previous download, when held.
+ * @param deps - injected seams (the address-check resolver; tests supply it).
  * @returns per-source result.
  */
 export async function fetchCatalog(
   url: string,
   validators: { readonly etag?: string, readonly modified?: string } = {},
+  deps: CatalogFetchDeps = {},
 ): Promise<SourceFetchResult> {
   const check = validateSourceUrl(url)
   if (!check.ok) return { url, reason: check.reason }
@@ -865,11 +1161,17 @@ export async function fetchCatalog(
     const match = /^npm:([a-z0-9-~][a-z0-9-._~]*)(@https:\/\/.+)?$/i.exec(url)
     if (match === null) return { url, reason: { code: 'source.npmShape', text: 'an npm catalog source must read npm:<package>@<https registry base>' } }
     const registryBase = match[2] !== undefined ? match[2].slice(1) : DEFAULT_NPM_MIRROR
-    return fetchCatalogFromNpmPackage(match[1], registryBase, validators.modified)
+    return fetchCatalogFromNpmPackage(match[1], registryBase, validators.modified, deps)
   }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS)
   try {
+    const addressReason = await sourceAddressReason(
+      new URL(check.url).hostname,
+      deps.resolve ?? systemAddressResolver,
+      controller.signal,
+    )
+    if (addressReason !== undefined) return { url, reason: addressReason }
     const headers: Record<string, string> = { 'accept-encoding': 'gzip, deflate, br' }
     // ETag first: it is exact, while a date has one-second resolution. Only
     // one is sent — an origin given both must satisfy both, which turns a
