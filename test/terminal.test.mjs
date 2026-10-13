@@ -11,6 +11,22 @@
  * case marked REAL SPAWN below, which runs a real child to exercise the Windows
  * outcome judgement.
  *
+ * HOW THIS FILE STAYS OFF ITS HOST. Every plan input is injected — platform,
+ * environment, paths, and a resolver that is the plan's ONLY door to the
+ * filesystem — so the Windows and POSIX shapes are asserted on any machine, and
+ * no expectation is spelled with the host's path module (`path.win32`, or a
+ * literal, because `path.join` on a Linux host joins with `/`). Three things
+ * cannot be injected away, and each is keyed on `process.platform` with its
+ * reason at the case:
+ *
+ *   - a REAL child process (REAL SPAWN: only a Windows host has `cmd.exe`);
+ *   - the console code page (the non-ASCII case: a cmd fact, pinned with `chcp`);
+ *   - an open-level test of the WINDOWS plan, which needs a host that can be
+ *     given the shim directory the plan spells in Windows form (`\tmp\…` is not
+ *     a path on Linux). The plan itself is asserted everywhere; what those cases
+ *     add is the spawn boundary. The same boundary is covered for the host's own
+ *     branch by the cases that inject nothing platform-specific.
+ *
  * WHAT THIS FILE CANNOT SEE, AND WHY. On Windows the console belongs to the
  * system from the moment `start` runs (`terminal.ts`, module header): no
  * assertion here — and none through the spawn seam — can observe a window. That
@@ -44,6 +60,7 @@ import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
 const {
@@ -61,6 +78,16 @@ const CLI = 'C:\\rt\\app\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
 const SHIM_DIR = 'C:\\Users\\u\\AppData\\Roaming\\DSH APP\\terminal-bin'
 const PNPM_DIR = 'C:\\rt\\pnpm\\bin'
 const CMD = 'C:\\Windows\\System32\\cmd.exe'
+/**
+ * The launcher the Windows plan writes, as a LITERAL. `path.join` here is the
+ * HOST's separator: on a Linux machine it yields `…/open.cmd` while the plan
+ * spells `…\open.cmd`, which is exactly how these cases turned red on CI while
+ * passing on Windows. Nothing in a Windows expectation may come from the host's
+ * path module.
+ */
+const LAUNCHER = `${SHIM_DIR}\\open.cmd`
+/** The program a plan for THIS host resolves, injected: it never has to exist. */
+const HOST_TERMINAL = process.platform === 'win32' ? 'C:\\host\\cmd.exe' : '/usr/bin/host-terminal'
 
 /** A resolver backed by a table: every lookup a plan makes is spelled out. */
 function resolverFor(table) {
@@ -134,10 +161,15 @@ function canonical(target) {
   }
 }
 
+/** The file name part of a path, in either spelling — what an outcome reports. */
+function baseNameOf(target) {
+  return target.split(/[\\/]+/u).filter((part) => part !== '').pop() ?? target
+}
+
 // ------------------------------------------------------------------ Windows
 
 /** The one argv every Windows plan must produce. */
-function windowsArgs(cmd = CMD, launcher = path.join(SHIM_DIR, 'open.cmd')) {
+function windowsArgs(cmd = CMD, launcher = LAUNCHER) {
   return ['/d', '/c', 'start', '', cmd, '/d', '/k', 'call', launcher]
 }
 
@@ -145,6 +177,21 @@ function windowsArgs(cmd = CMD, launcher = path.join(SHIM_DIR, 'open.cmd')) {
 function launcherLines(plan) {
   return fileOf(plan, 'open.cmd').text.split('\r\n').filter((line) => line !== '')
 }
+
+test('no Windows expectation in this file is spelled with the HOST path module', () => {
+  // THE CLASS THAT REDDENED CI. Every Windows case here passed on a Windows
+  // machine and failed on the ubuntu runner, because an expectation built with
+  // `path.join` joins with `\` here and `/` there (and `path.join('C:\\a', 'b')`
+  // on Linux is not even the same string). A Windows path is a LITERAL or
+  // `path.win32.join`; the host module may only spell paths this machine will
+  // actually touch (a throwaway directory under `os.tmpdir()`).
+  const source = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const offenders = source.split('\n')
+    .map((text, index) => ({ text: text.trim(), number: index + 1 }))
+    .filter(({ text }) => !text.startsWith('*') && !text.startsWith('//'))
+    .filter(({ text }) => /path\.join\(/u.test(text) && /SHIM_DIR|C:\\\\/u.test(text))
+  assert.deepEqual(offenders, [], 'a Windows path must not be built with the host path module')
+})
 
 test('Windows asks cmd.exe for a console through `start`, and the shim directory holds all five files', () => {
   const plan = terminalPlan(windowsInput())
@@ -164,7 +211,7 @@ test('Windows Terminal is not invoked: the OS routes the `start`ed console to it
   // start. A resolver that offers it must not change the plan. (It can still be
   // what the user SEES: `start` hands the new console to the default terminal
   // application — that is the OS routing it, not this module running wt.exe.)
-  const wt = path.join('C:\\Users\\u\\AppData\\Local\\Microsoft\\WindowsApps', 'wt.exe')
+  const wt = 'C:\\Users\\u\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe'
   const plan = terminalPlan(windowsInput({
     resolve: resolverFor({ 'wt.exe': wt, 'cmd.exe': CMD, [NODE]: NODE, [CLI]: CLI }),
   }))
@@ -469,21 +516,16 @@ test('an unresolvable Node fails the plan instead of writing a shim that cannot 
 test('no kernel at all is a state, not a missing file: the message says what to do', async () => {
   // `kernelCliPath()` answers '' exactly when this machine has no active kernel,
   // and the message used to end at ": " — an empty path and nothing to act on.
-  const plan = () => terminalPlan(windowsInput({ cliPath: '', resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE }) }))
-  assert.throws(plan, /no usable kernel yet/u)
-  assert.throws(plan, /finish a first start/u)
+  // Checked for BOTH branches: "no kernel" is not a platform fact.
+  const windows = () => terminalPlan(windowsInput({ cliPath: '', resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE }) }))
+  assert.throws(windows, /no usable kernel yet/u)
+  assert.throws(windows, /finish a first start/u)
   const userDataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-nokernel-'))
   try {
-    const outcome = await openManagedTerminal({
-      userDataDir,
-      nodeBinary: NODE,
-      cliPath: '',
-      dshHome: 'D:\\home',
-      profile: 'dsh-app',
-      env: { Path: 'C:\\Windows', ComSpec: CMD },
-      resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE }),
+    assert.throws(() => terminalPlan(hostInput(userDataDir, { cliPath: '' })), /no usable kernel yet/u)
+    const outcome = await openManagedTerminal(openOptions(hostInput(userDataDir, { cliPath: '' }), userDataDir, {
       spawnImpl: () => { throw new Error('must not be reached') },
-    })
+    }))
     assert.equal(outcome.status, 'failed')
     // The code is what the caller picks the user-visible line by; the detail is
     // log-only English.
@@ -590,13 +632,49 @@ test('resolveExecutable honours PATH, PATHEXT and absolute candidates', () => {
   }
 })
 
-test('openManagedTerminal writes the shim directory and starts the planned console', async () => {
+/**
+ * The facts a plan for THIS host needs, every lookup injected — the same idea as
+ * `windowsInput`/`posixInput`, for whichever branch this machine takes. The
+ * injected resolver is the plan's only door to the filesystem, so nothing here
+ * depends on what the machine has installed (`PATH` is emptied for the same
+ * reason), and the shim directory is derived from the throwaway user-data
+ * directory exactly as `openManagedTerminal` derives it, so the plan and the
+ * write agree on ONE spelling.
+ */
+function hostInput(userDataDir, overrides = {}) {
+  const table = { [NODE]: NODE, [CLI]: CLI, '/bin/sh': '/bin/sh' }
+  if (process.platform === 'win32') table['cmd.exe'] = HOST_TERMINAL
+  if (process.platform === 'darwin') { table['/bin/zsh'] = '/bin/zsh'; table.open = '/usr/bin/open' }
+  if (process.platform === 'linux') table['x-terminal-emulator'] = HOST_TERMINAL
+  return {
+    platform: process.platform,
+    env: process.platform === 'win32' ? { Path: '', PATHEXT: '.EXE;.CMD' } : { PATH: '' },
+    shimDir: path.join(userDataDir, TERMINAL_BIN_DIR_NAME),
+    nodeBinary: NODE,
+    cliPath: CLI,
+    dshHome: 'D:\\home',
+    profile: 'dsh-app',
+    cwd: userDataDir,
+    resolve: resolverFor(table),
+    ...overrides,
+  }
+}
+
+/**
+ * The `openManagedTerminal` options for a plan input. `shimDir` is DROPPED here:
+ * `openManagedTerminal` derives it from the user-data directory instead, and
+ * {@link hostInput} derives the same string, so the spelling the plan uses is the
+ * one that gets written.
+ */
+function openOptions(input, userDataDir, extra = {}) {
+  const { shimDir, ...options } = input
+  return { ...options, userDataDir, ...extra }
+}
+
+test('openManagedTerminal writes the shim directory and starts the console this host plans', async () => {
   const userDataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-open-'))
+  const input = hostInput(userDataDir)
   const calls = []
-  // The Windows contract: the spawned process is the `start` wrapper, so the
-  // outcome settles on its EXIT, not on `spawn` (see startConsole). A stub that
-  // only emits `spawn` would be a plan that never settles — which is exactly what
-  // the timeout case below asserts.
   const spawnStub = (command, args, options) => {
     calls.push({ command, args, options })
     const child = new EventEmitter()
@@ -604,70 +682,103 @@ test('openManagedTerminal writes the shim directory and starts the planned conso
     return child
   }
   try {
-    const outcome = await openManagedTerminal({
-      userDataDir,
-      nodeBinary: NODE,
-      cliPath: CLI,
-      dshHome: 'D:\\home',
-      profile: 'dsh-app',
-      pnpmBinDir: PNPM_DIR,
-      cwd: 'C:\\Users\\u',
-      env: { Path: 'C:\\Windows\\System32', ComSpec: CMD },
-      resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE, [CLI]: CLI }),
-      spawnImpl: spawnStub,
-    })
-    assert.deepEqual(outcome, { status: 'opened', terminal: 'cmd.exe' })
+    const plan = terminalPlan(input)
+    const outcome = await openManagedTerminal(openOptions(input, userDataDir, { spawnImpl: spawnStub }))
+    assert.equal(outcome.status, 'opened')
+    // Windows reports the wrapper's exit, POSIX the `spawn` event; the stub emits
+    // both, so this one case covers either branch of startConsole.
+    assert.equal(outcome.terminal, baseNameOf(HOST_TERMINAL))
     const shimDir = path.join(userDataDir, TERMINAL_BIN_DIR_NAME)
-    assert.deepEqual(readdirSync(shimDir).sort(), ['dsh', 'dsh.cmd', 'node', 'node.cmd', 'open.cmd'])
-    assert.ok(readFileSync(path.join(shimDir, 'open.cmd'), 'utf8').includes('set "DSH_APP_PROFILE=dsh-app"'))
+    const launcher = process.platform === 'win32' ? 'open.cmd' : 'open.sh'
+    assert.deepEqual(readdirSync(shimDir).sort(), plan.files.map((file) => file.name).sort())
+    assert.ok(readFileSync(path.join(shimDir, launcher), 'utf8').includes('dsh-app'))
     if (process.platform !== 'win32') {
       // Windows has no executable bit; `chmod` there only toggles read-only.
       assert.ok((statSync(path.join(shimDir, 'dsh')).mode & 0o111) !== 0, 'the shims must be executable')
     }
+    // The boundary: what reaches `spawn` is the plan, command, argv and all.
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].command, CMD)
-    // What actually reaches spawn, launcher path and all — the shape the window
-    // depends on, checked at the boundary rather than only in the plan.
-    assert.deepEqual(calls[0].args, windowsArgs(CMD, path.join(shimDir, 'open.cmd')))
+    assert.equal(calls[0].command, plan.command)
+    assert.deepEqual(calls[0].args, plan.args)
     assert.equal(calls[0].options.windowsHide, false, 'the console is a window the user asked for')
     assert.equal(calls[0].options.env.DSH_APP_PROFILE, 'dsh-app')
 
     // Idempotent: a second open rewrites nothing and opens exactly one more.
-    const before = readFileSync(path.join(shimDir, 'dsh.cmd'), 'utf8')
-    const second = await openManagedTerminal({
-      userDataDir,
-      nodeBinary: NODE,
-      cliPath: CLI,
-      dshHome: 'D:\\home',
-      profile: 'dsh-app',
-      env: { Path: 'C:\\Windows\\System32', ComSpec: CMD },
-      resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE, [CLI]: CLI }),
-      spawnImpl: spawnStub,
-    })
+    const before = readFileSync(path.join(shimDir, launcher), 'utf8')
+    const second = await openManagedTerminal(openOptions(input, userDataDir, { spawnImpl: spawnStub }))
     assert.equal(second.status, 'opened')
-    assert.equal(readFileSync(path.join(shimDir, 'dsh.cmd'), 'utf8'), before)
+    assert.equal(readFileSync(path.join(shimDir, launcher), 'utf8'), before)
     assert.equal(calls.length, 2)
   } finally {
     rmSync(userDataDir, { recursive: true, force: true })
   }
 })
 
+test('REAL-SHAPE: the Windows plan reaches spawn as the `start` shape, and the wrapper exit decides', {
+  skip: process.platform === 'win32' ? false : 'the plan spells its shim directory in Windows form, which this host cannot be given as a path',
+}, async (t) => {
+  // Only the WINDOWS plan is asserted here, and it needs a Windows host for one
+  // reason: `joinFor('win32', …)` spells the shim directory `\tmp\…`, which is not
+  // a path a POSIX filesystem can be handed. Everything the plan DECIDES is
+  // asserted on every host above; what this case adds is the plan as spawn sees it
+  // (the shape the window depends on), plus the Windows half of startConsole.
+  const userDataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-win-'))
+  t.after(() => { rmSync(userDataDir, { recursive: true, force: true }) })
+  const shimDir = path.join(userDataDir, TERMINAL_BIN_DIR_NAME)
+  const input = windowsInput({ shimDir, env: { Path: '', PATHEXT: '.EXE;.CMD' } })
+  const calls = []
+  // The Windows contract: the spawned process is the `start` wrapper, so the
+  // outcome settles on its EXIT, not on `spawn` (see startConsole).
+  const spawnStub = (command, args, options) => {
+    calls.push({ command, args, options })
+    const child = new EventEmitter()
+    setImmediate(() => { child.emit('spawn'); child.emit('exit', 0, null) })
+    return child
+  }
+  const first = await openManagedTerminal(openOptions(input, userDataDir, { spawnImpl: spawnStub }))
+  assert.deepEqual(first, { status: 'opened', terminal: 'cmd.exe' })
+  assert.deepEqual(readdirSync(shimDir).sort(), ['dsh', 'dsh.cmd', 'node', 'node.cmd', 'open.cmd'])
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, CMD)
+  assert.deepEqual(calls[0].args, windowsArgs(CMD, path.win32.join(shimDir, 'open.cmd')),
+    'the `start` shape, at the boundary rather than only in the plan')
+  assert.equal(calls[0].options.windowsHide, false, 'the console is a window the user asked for')
+
+  // Idempotent: a second open rewrites nothing and opens exactly one more.
+  const before = readFileSync(path.join(shimDir, 'dsh.cmd'), 'utf8')
+  const second = await openManagedTerminal(openOptions(input, userDataDir, { spawnImpl: spawnStub }))
+  assert.equal(second.status, 'opened')
+  assert.equal(readFileSync(path.join(shimDir, 'dsh.cmd'), 'utf8'), before)
+  assert.equal(calls.length, 2)
+
+  // The judgement itself: a wrapper that exits non-zero, or is killed, must not be
+  // reported as success — `start` failing is the one part of the request still
+  // observable from here. (The real child that proves the exit code end to end is
+  // the REAL SPAWN case at the end of this file.)
+  const exited = await openManagedTerminal(openOptions(input, userDataDir, {
+    spawnImpl: () => { const c = new EventEmitter(); setImmediate(() => { c.emit('spawn'); c.emit('exit', 3, null) }); return c },
+  }))
+  assert.equal(exited.status, 'failed', 'a wrapper that exits non-zero must not report success')
+  assert.equal(exited.code, 'spawn')
+  assert.match(exited.detail, /the console wrapper exited with code 3/u)
+  const killed = await openManagedTerminal(openOptions(input, userDataDir, {
+    spawnImpl: () => { const c = new EventEmitter(); setImmediate(() => { c.emit('spawn'); c.emit('exit', null, 'SIGKILL') }); return c },
+  }))
+  assert.equal(killed.status, 'failed')
+  assert.equal(killed.code, 'spawn')
+  assert.match(killed.detail, /the console wrapper was killed by SIGKILL/u)
+})
+
 test('a click while a console is still starting is ignored, and a hung one gives up', async () => {
   const userDataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-busy-'))
   try {
-    const options = {
-      userDataDir,
-      nodeBinary: NODE,
-      cliPath: CLI,
-      dshHome: 'D:\\home',
-      profile: 'dsh-app',
-      env: { Path: 'C:\\Windows', ComSpec: CMD },
-      resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE, [CLI]: CLI }),
-      // A wrapper that neither exits nor errors: the second click must not stack
-      // a window, and the entry must not stay blocked forever.
+    const input = hostInput(userDataDir)
+    const options = openOptions(input, userDataDir, {
+      // A child that neither exits nor errors: the second click must not stack a
+      // window, and the entry must not stay blocked forever.
       spawnImpl: () => new EventEmitter(),
       spawnTimeoutMs: 20,
-    }
+    })
     const first = openManagedTerminal(options)
     const during = await openManagedTerminal(options)
     assert.deepEqual(during, { status: 'busy' })
@@ -686,45 +797,26 @@ test('a click while a console is still starting is ignored, and a hung one gives
   }
 })
 
-test('a refused, throwing or non-zero-ended start is reported, never thrown, and never opens', async () => {
+test('a refused or throwing spawn is reported, never thrown, and never opens', async () => {
   const userDataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-fail-'))
   try {
-    const base = {
-      userDataDir,
-      nodeBinary: NODE,
-      cliPath: CLI,
-      dshHome: 'D:\\home',
-      profile: 'dsh-app',
-      env: { Path: 'C:\\Windows', ComSpec: CMD },
-      resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE, [CLI]: CLI }),
-    }
-    const refused = await openManagedTerminal({
-      ...base,
+    const input = hostInput(userDataDir)
+    const refused = await openManagedTerminal(openOptions(input, userDataDir, {
       spawnImpl: () => { const child = new EventEmitter(); setImmediate(() => child.emit('error', new Error('EPERM'))); return child },
-    })
+    }))
     assert.equal(refused.status, 'failed')
     assert.equal(refused.code, 'spawn')
     assert.match(refused.detail, /the console refused to start: EPERM/u)
-    // The Windows half of the outcome: the wrapper's EXIT CODE is judged, because
-    // whether `start` itself worked is the one part of the request still
-    // observable from here (see startConsole). These stubs are the judgement in
-    // isolation; the real child that proves it end to end is at the end of file.
-    const exited = await openManagedTerminal({
-      ...base,
-      spawnImpl: () => { const c = new EventEmitter(); setImmediate(() => { c.emit('spawn'); c.emit('exit', 3, null) }); return c },
-    })
-    assert.equal(exited.status, 'failed', 'a wrapper that exits non-zero must not report success')
-    assert.equal(exited.code, 'spawn')
-    assert.match(exited.detail, /the console wrapper exited with code 3/u)
-    const killed = await openManagedTerminal({
-      ...base,
-      spawnImpl: () => { const c = new EventEmitter(); setImmediate(() => { c.emit('spawn'); c.emit('exit', null, 'SIGKILL') }); return c },
-    })
-    assert.equal(killed.status, 'failed')
-    assert.match(killed.detail, /the console wrapper was killed by SIGKILL/u)
-    const threw = await openManagedTerminal({ ...base, spawnImpl: () => { throw new Error('no such console') } })
+    const threw = await openManagedTerminal(openOptions(input, userDataDir, {
+      spawnImpl: () => { throw new Error('no such console') },
+    }))
     assert.deepEqual(threw, { status: 'failed', code: 'unknown', detail: 'no such console' })
-    const noPlan = await openManagedTerminal({ ...base, nodeBinary: 'node' })
+    // A plan that cannot be built never reaches spawn, and the injected resolver is
+    // its only door to this machine — so an unresolvable Node fails the same way
+    // whatever this host happens to have installed.
+    const noPlan = await openManagedTerminal(openOptions({ ...input, nodeBinary: 'node' }, userDataDir, {
+      spawnImpl: () => { throw new Error('must not be reached') },
+    }))
     assert.equal(noPlan.code, 'no-node')
     assert.match(noPlan.detail, /the Node that runs the kernel CLI could not be resolved/u)
   } finally {
@@ -750,18 +842,14 @@ test('the shim directory lives in the shell data directory, spelled per platform
 test('a shim directory that cannot be created is a failure, not a silent no-op', async () => {
   const userDataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-file-'))
   try {
-    // A FILE where the shim directory must go: `mkdir` fails with ENOTDIR/EEXIST.
-    writeFileSync(path.join(userDataDir, TERMINAL_BIN_DIR_NAME), 'not a directory')
-    const outcome = await openManagedTerminal({
-      userDataDir,
-      nodeBinary: NODE,
-      cliPath: CLI,
-      dshHome: 'D:\\home',
-      profile: 'dsh-app',
-      env: { Path: 'C:\\Windows', ComSpec: CMD },
-      resolve: resolverFor({ 'cmd.exe': CMD, [NODE]: NODE, [CLI]: CLI }),
+    // `hostInput` derives the shim directory from this same root, so the plan aims
+    // at it whatever branch this host takes. A FILE where the directory must go
+    // makes `mkdir` fail with ENOTDIR/EEXIST.
+    const input = hostInput(userDataDir)
+    writeFileSync(input.shimDir, 'not a directory')
+    const outcome = await openManagedTerminal(openOptions(input, userDataDir, {
       spawnImpl: () => { throw new Error('must not be reached') },
-    })
+    }))
     assert.equal(outcome.status, 'failed')
     assert.equal(outcome.code, 'shim-write', 'an unwritable shim directory is its own advice')
     assert.ok(outcome.detail !== '', 'the reason is reported for the log')
@@ -788,7 +876,7 @@ test('a real plan does not touch the user environment it was derived from', () =
 // header) after any change to `planWindows`.
 
 test('REAL SPAWN: a real Windows wrapper is judged by its exit code', {
-  skip: process.platform === 'win32' ? false : 'the wrapper is a cmd.exe shape',
+  skip: process.platform === 'win32' ? false : 'a real child here means cmd.exe, which only a Windows host has',
 }, async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-real-'))
   t.after(() => { rmSync(root, { recursive: true, force: true }) })
@@ -840,7 +928,7 @@ test('REAL SPAWN: a real Windows wrapper is judged by its exit code', {
 // moment its NUL stdin reads EOF, and leaves no trace a child process can query —
 // which is exactly how the bug survived three rounds of green tests. What DOES
 // turn red is the shape assertion: `plan.args` must contain `start` (see the first
-// Windows case, and the argv checked at the spawn boundary above). Removing it
-// from `planWindows` fails those cases; that was verified by doing it. The window
-// itself is only ever proven by hand —
+// Windows case, and the argv REAL-SHAPE checks at the spawn boundary above).
+// Removing it from `planWindows` fails those cases on any host; that was verified
+// by doing it. The window itself is only ever proven by hand —
 // `node_modules/.bin/electron scratch/window-probe`.
