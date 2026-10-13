@@ -95,9 +95,9 @@ const ZH_CN = {
   'splash.pauseDownload': '暂停下载',
   'splash.resumeDownload': '继续下载',
 
-  // The wishes at the foot of the splash: fixed copy, not fetched, rotated by
-  // the page in the order below (static/startup.html owns the timing). The
-  // English of the first is a rendering of the Chinese rather than a
+  // The wishes at the foot of the splash: fixed copy, not fetched, one of which
+  // the shell draws per start (SPLASH_SAYING_KEYS in src/main/startup-window.ts).
+  // The English of the first is a rendering of the Chinese rather than a
   // translation of its pun (「其次」 is a play on "second"), so the two read as
   // the same sentiment; the second is a plain rendering.
   'splash.saying.health': '首先您要健康，其次才是其次',

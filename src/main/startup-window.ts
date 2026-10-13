@@ -23,6 +23,7 @@ import { isShowingLoadingPage, resetOverlayColor } from './window'
 import path from 'node:path'
 import type { KernelStatusPayload, KernelStatusStep } from '../shared/types'
 import { t, ZH_KERNEL_STATUS_STEP_KEYWORDS, type MessageKey } from '../shared/locale'
+import { pickSaying } from '../shared/pick-saying'
 import { resolveDshHome, PROFILE_PATCH_FILENAME } from './brand-suite'
 import { SUITE_PROFILE } from '../shared/constants'
 import { readThemePreference, readThemePreferenceFromPatch, resolveThemeMode, type ThemeMode, type ThemePreference } from './theme'
@@ -114,14 +115,13 @@ interface StartupView {
   /** Brand row: what this app is, and which build is running. */
   brand: { name: string; version: string }
   /**
-   * The wishes at the foot of the page, in the order the page rotates them.
-   * Pushed (not baked into the HTML) because the page's own markup cannot know
-   * the shell's language, and pushed every time for the same reason the brand
-   * row is: a reloaded page replays it. The shell owns the wording, the page
-   * owns the timing (it is the one that knows `prefers-reduced-motion` and can
-   * stop the timer when its own document goes away).
+   * The one wish at the foot of the page for THIS run (see
+   * `SPLASH_SAYING_KEY`). Pushed (not baked into the HTML) because the page's
+   * own markup cannot know the shell's language, and pushed every time for the
+   * same reason the brand row is: a reloaded page replays it. Empty when the
+   * shell has no wish to show, which leaves the page's own fallback in place.
    */
-  sayings: readonly string[]
+  saying: string
   /** Appearance the page mirrors onto its root element. */
   theme: ThemeMode
 }
@@ -320,14 +320,22 @@ function isActionId(value: unknown): value is StartupActionId {
 }
 
 /** Everything a push carries; brand, theme, skeleton and digest are push-owned. */
-type StartupPush = Omit<StartupView, 'brand' | 'theme' | 'skeleton' | 'digest' | 'sayings'>
+type StartupPush = Omit<StartupView, 'brand' | 'theme' | 'skeleton' | 'digest' | 'saying'>
 
 /**
- * The splash's wishes, in rotation order. A list rather than one key because the
- * page rotates them; adding a line here is the whole change (the page's own
- * fallback only has to agree with the first one).
+ * Every wish the splash can show, in one place: adding a line is one entry here,
+ * and the page's own fallback text only has to agree with the first one.
  */
 const SPLASH_SAYING_KEYS: readonly MessageKey[] = ['splash.saying.health', 'splash.saying.want']
+
+/**
+ * This run's wish, drawn ONCE — at module load, so a fresh start draws again but
+ * nothing within a start does. It must not move into `push()`: that runs several
+ * times a second while the kernel boots, and a draw per push would make the line
+ * jump between two wishes on screen. A key rather than the text, because `t()`
+ * must run after `initLocale()` (same reason as `lastSkeleton`).
+ */
+const SPLASH_SAYING_KEY = pickSaying(SPLASH_SAYING_KEYS)
 
 function push(view: StartupPush): void {
   // The skeleton is built lazily and only once: `t()` resolves against the
@@ -343,7 +351,9 @@ function push(view: StartupPush): void {
     skeleton: lastSkeleton,
     brand: brandRow(),
     theme: currentTheme,
-    sayings: SPLASH_SAYING_KEYS.map((key) => t(key)),
+    // An empty `SPLASH_SAYING_KEYS` means no wish at all; `''` is that value the
+    // page understands (it keeps its own fallback), not a blank line.
+    saying: SPLASH_SAYING_KEY === undefined ? '' : t(SPLASH_SAYING_KEY),
   }
   lastView = next
   const win = splash
