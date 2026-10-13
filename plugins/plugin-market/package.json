@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-market",
   "description": "DSH APP plugin market: a sidebar footer entry that opens a market panel over catalog sources (https JSON directories) to browse and install/uninstall npm-packaged dsh plugins into the current profile via the kernel's own plugin CLI.",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -58,6 +58,7 @@
     "@deepseek-ai/dsh-home-paths": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-system-prompt": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4",
     "react": "^18.2.0"
   },
   "devDependencies": {
@@ -72,6 +73,7 @@
     "@deepseek-ai/dsh-system-prompt": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-util-values": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^22.10.2",
     "@types/react": "18.3.1",
     "@types/react-dom": "^18.3.1",

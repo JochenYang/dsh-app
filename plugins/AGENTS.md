@@ -54,9 +54,9 @@ for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; do
   `peerDependencies`: the kernel provides those at load time, esbuild marks them
   external so nothing else resolves them, and a devDependency satisfies tsc while
   shipping nothing. A type-only import (`import type {} from '…'`, the
-  Context-merge idiom) needs no peer — esbuild deletes it. One plugin still
-  misses one such peer — `plugin-market`'s `@deepseek-ai/schemastery` — so the
-  gate refuses that plugin until it is added; every other plugin is green. The
+  Context-merge idiom) needs no peer — esbuild deletes it. Every runtime
+  `@deepseek-ai/*` import the suite makes now carries its peer, so the gate
+  refuses no plugin. The
   type gate needs
   this plugin's declared peers to be resolvable, and `npm install
   --legacy-peer-deps` (what both workflows run) installs dependencies and
