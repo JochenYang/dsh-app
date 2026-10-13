@@ -46,6 +46,13 @@ ships.
 **Runtime resources come from each plugin's own `package.json` `files` field**,
 never a hand list; `smoke-suite.mjs` asserts what a bare `ok:true` cannot.
 
+**An optional loader entry that did not activate is printed BY NAME** — the
+kernel's count line is expanded to one `<entry id> (<package>): <reason>` line
+per entry it names, and a suite package among them fails the probe (the audit is
+the only place a suite entry with no route of its own would surface). A REQUIRED
+entry failing is unchanged: the kernel refuses to boot, so the probe never gets
+past its health wait.
+
 **Every suite plugin passes four checks before its `lib/` can enter an
 artifact** (`scripts/lib/plugin-gates.mjs` for the type gate and the two artifact
 checks, `scripts/lib/plugin-imports.mjs` for the import gate).

@@ -16,15 +16,20 @@
  *
  * What is asserted:
  *   1. health: GET / answers 200 within 90 s;
- *   2. every suite plugin's settings routes answer 200 with ok:true, PLUS the
+ *   2. the loader audit's optional-entry warning is expanded to every entry it
+ *      names (id, package, reason), and a suite package among them fails the
+ *      probe — the audit is the only place a suite entry with no route of its
+ *      own (plugin-effort's host half is empty by design) would show up;
+ *   3. every suite plugin's settings routes answer 200 with ok:true, PLUS the
  *      bundled-resource facts a bare ok:true cannot see: the PPT template
  *      catalog is non-empty and every listed template carries a cover preview,
  *      the bundled PDF CJK font asset resolves, and (--tgz) the extracted
  *      artifact really contains plugin-ppt/templates/, plugin-pdf/assets/ and
  *      plugin-market/docs/ (the catalog-source contract an external author
  *      reads);
- *   3. every dual-face plugin's client bundle is served non-empty;
- *   4. the plugin-mcp dynamic-mount chain works end to end: create a stdio
+ *   4. every dual-face plugin's client bundle is served non-empty, including
+ *      plugin-effort's, whose served combo must carry its own slot code;
+ *   5. the plugin-mcp dynamic-mount chain works end to end: create a stdio
  *      server pointing at scripts/fixtures/minimal-mcp-server.mjs, poll until
  *      it reports mounted with >= 1 live mcp__<server>__* tool, then delete
  *      it (leaving the store empty).
@@ -286,6 +291,61 @@ function formatBytes(bytes) {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${String(bytes)} B`
+}
+
+/**
+ * Shape of the kernel's optional-entry warning.
+ *
+ * The loader audit prints ONE warning: a count line, then one line per inactive
+ * entry — `<entry id> (<package>): <reason>` — whose reason runs on over
+ * further lines. A reason is an error stack, so its continuation lines are
+ * indented frames (`    at …`) or a NESTED error's own `<Name>Error: …` header,
+ * which Node prints at column 0 (`formatActivationError` renders an
+ * AggregateError's members one after another that way — measured: one
+ * `typert-loader` entry whose reason is 22 nested `Error:` headers).
+ *
+ * The kernel writes the whole warning in a single stderr write, so in the log
+ * the block is contiguous and it ends at the first line that is neither.
+ */
+const ACTIVATION_SUMMARY = /^.+?: warning: (\d+) entr(?:y|ies) did not activate$/u
+const ACTIVATION_ENTRY = /^(\S+) \((.+)\): (.*)$/u
+const ACTIVATION_CONTINUATION = /^(?:\s|[A-Za-z]*Error\b)/u
+
+/**
+ * Read every activation warning out of the kernel log: the count the kernel
+ * declared plus the entries it named under it.
+ *
+ * Echoing only the count line left "1 entry did not activate" unable to say
+ * WHICH entry, so a suite plugin that stopped mounting stayed invisible
+ * whenever no route probe covered its surface.
+ *
+ * @param logPath - the kernel child's captured stdout/stderr.
+ * @returns one record per warning, in log order.
+ */
+function readActivationWarnings(logPath) {
+  const lines = readFileSync(logPath, 'utf8').split(/\r?\n/u)
+  const warnings = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const summary = ACTIVATION_SUMMARY.exec(lines[index])
+    if (summary === null) continue
+    const entries = []
+    let cursor = index + 1
+    while (cursor < lines.length && lines[cursor].trim() !== '') {
+      const line = lines[cursor]
+      const entry = /^\s/u.test(line) ? null : ACTIVATION_ENTRY.exec(line)
+      if (entry === null) {
+        if (!ACTIVATION_CONTINUATION.test(line)) break
+        // A continuation line belongs to the reason above it.
+        if (entries.length > 0) entries[entries.length - 1].detail.push(line)
+      } else {
+        entries.push({ id: entry[1], name: entry[2], detail: [entry[3]] })
+      }
+      cursor += 1
+    }
+    warnings.push({ summary: lines[index], declared: Number(summary[1]), entries })
+    index = cursor - 1
+  }
+  return warnings
 }
 
 // --- probes ------------------------------------------------------------------
@@ -557,11 +617,30 @@ async function main() {
     console.log(`smoke: server healthy at ${base}, probing suite surfaces`)
 
     // The loader's activation verdict, echoed before the route probes: with a
-    // suite entry inactive every route below answers 404, and the reason is in
-    // this one line (the count plus the failing entry names).
-    const activation = readFileSync(logPath, 'utf8').split(/\r?\n/u)
-      .filter((line) => /did not activate/.test(line) || /failed to import/.test(line))
-    for (const line of activation) console.log(`smoke: kernel said: ${line}`)
+    // suite entry inactive every route below answers 404, and the kernel names
+    // the culprit — entry id, package and reason — under its count line. Every
+    // name is printed, not just the count, and a SUITE package among them fails
+    // the probe: some suite entries have no route of their own (plugin-effort's
+    // host half is empty by design), so the audit is the only place their
+    // failure would surface.
+    const warnings = readActivationWarnings(logPath)
+    for (const warning of warnings) {
+      console.log(`smoke: kernel said: ${warning.summary}`)
+      for (const entry of warning.entries) {
+        console.log(`smoke: kernel said: ${entry.id} (${entry.name}): ${entry.detail[0]}`)
+        for (const line of entry.detail.slice(1)) console.log(`smoke: kernel said: ${line}`)
+      }
+    }
+    const named = warnings.flatMap((warning) => warning.entries)
+    const suitePackages = new Set(SUITE_DIRS.map((dir) => `@dsh-app/${dir}`))
+    const inactiveSuite = named.filter((entry) => suitePackages.has(entry.name))
+    check('activation: every suite plugin entry activated', inactiveSuite.length === 0,
+      inactiveSuite.map((entry) => `${entry.id} (${entry.name}): ${entry.detail[0]}`).join('; '))
+    // A count the parser could not expand would let the check above pass by
+    // reading nothing, so the two numbers have to agree.
+    const unnamed = warnings.filter((warning) => warning.entries.length !== warning.declared)
+    check('activation: every inactive entry is named in the log', unnamed.length === 0,
+      unnamed.map((warning) => `${warning.summary} — parsed ${String(warning.entries.length)}`).join('; '))
 
     for (const [route, name] of [
       ['/api/plugins/dsh-app/plugin-usage/status', 'usage: status route'],
@@ -625,6 +704,30 @@ async function main() {
         `HTTP ${sidebar.status}: ${sidebar.text.slice(0, 200)}`)
     }
 
+    // plugin-rewind's host half is its quarantine manager, and the list route is
+    // its only host surface — it owns no settings section and no tool, so
+    // nothing else here would notice the plugin missing. A throwaway home holds
+    // no quarantine root at all, so the answer must be the empty listing.
+    {
+      const quarantine = await getJson(base, '/api/plugins/dsh-app/plugin-rewind/quarantine')
+      const listing = quarantine.body?.value
+      check('rewind: quarantine route lists the empty store',
+        quarantine.status === 200 && quarantine.body?.ok === true
+          && Array.isArray(listing?.groups) && listing.groups.length === 0 && listing.entries === 0,
+        `HTTP ${quarantine.status}: ${quarantine.text.slice(0, 200)}`)
+    }
+
+    // plugin-brand's host half: the desktop-bridge status route the diagnostics
+    // page reads. `bridge` reports whether the SHELL published its action route,
+    // which is false under this probe (no desktop host) — the assertion is the
+    // coded answer itself, not its value.
+    {
+      const brand = await getJson(base, '/api/plugins/dsh-app/plugin-brand/status')
+      check('brand: desktop status route answers with a bridge flag',
+        brand.status === 200 && brand.body?.ok === true && typeof brand.body?.bridge === 'boolean',
+        `HTTP ${brand.status}: ${brand.text.slice(0, 200)}`)
+    }
+
     // Client bundles are served only as revisioned combo URLs composed from
     // the boot graph injected into the index page (a plain
     // /plugins/<id>/client.js path 404s by design). So verify the dual-face
@@ -674,6 +777,29 @@ async function main() {
       check('client: combo bundles include plugin-websearch', comboUnion.includes('@dsh-app/plugin-websearch/client.js'))
       const served = await getJson(base, combo)
       check('client: combo bundle serves 200', served.status === 200, `HTTP ${served.status} for ${combo.slice(0, 120)}`)
+    }
+
+    // plugin-effort has no host surface at all: `apply()` is a documented no-op,
+    // and its whole contribution is a client-side slot (the reasoning-effort
+    // track in the official model menu). So the observable half is the CLIENT
+    // bundle, and naming it in the boot graph is not enough — the bundle the
+    // graph advertises has to be served, carrying this plugin's own code.
+    {
+      const effortBundle = '@dsh-app/plugin-effort/client.js'
+      // Either shape serves: the batch a package lands in, or its own combo row.
+      const effortCombo = advertised.find((ref) => ref.split('&')[0].includes(effortBundle))
+      check('effort: client bundle advertised in a combo', effortCombo !== undefined,
+        `no advertised combo lists ${effortBundle}`)
+      if (effortCombo !== undefined) {
+        const served = await getJson(base, effortCombo.startsWith('/') ? effortCombo : `/${effortCombo}`)
+        // The id of the slot registration the client half makes — a literal in
+        // its own built bundle, so finding it proves the served bytes are this
+        // package's code rather than a same-named empty module.
+        const marker = 'dsh-app-effort-anchor'
+        check('effort: served combo carries the effort slider code',
+          served.status === 200 && served.text.includes(marker),
+          `HTTP ${served.status}: ${String(served.text.length)} bytes, ${marker} ${served.text.includes(marker) ? 'present' : 'absent'}`)
+      }
     }
 
     await probeMcpChain(base)
