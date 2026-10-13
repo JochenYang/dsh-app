@@ -1,7 +1,0 @@
----
-shell: none
-plugins: plugin-market
----
-
-插件市场：安装改为一次性意图令牌——面板只提交目录条目的标识，宿主从自己的目录快照里取出包名、版本、来源与目标 profile 并签发一次性 token，`POST /install` 只提交该 token（请求体里的包名、版本、force、仓库键、git 目标一律被忽略，因此精确版本钉选与任意 git 目标这两项权限被移除；目录源列表仍可由渲染进程修改，这一层不在本次收紧范围内）；令牌用过即废（重放被拒），过期、profile 或数据目录变化都被拒并给出稳定文案，弹窗停留超过有效期时确认会自动重签一次同一目录条目而不是直接失败，模型面 `market_install_plugin` 走同一签发与同一校验；`POST /allow-build` 改为只接受宿主自己记录过、且 pnpm 报告过构建脚本被拦截的安装尝试里的包名，未尝试过的包名不再能写进 profile 的白名单。
-Market plugin: installs now travel as a one-shot intent token — the panel submits only a catalog row's id, the host reads the package, version, source and target profile out of its own catalog snapshot and mints the token, and `POST /install` submits that token alone (a package name, version, force flag, repo key or git target in the body is ignored, which removes exactly two powers: exact-version pinning and an arbitrary git target — the catalog source list stays renderer-editable and is outside this tightening); a token is spent on first use (replays refused), expiry and a profile or data-directory change are refused with stable copy, a confirmation confirmed after its TTL now re-mints once for the same row instead of failing, and the model-facing `market_install_plugin` rides the same issuance and the same checks; `POST /allow-build` now accepts only package names from a blocked build-script install the host itself recorded and pnpm itself reported, so a name it never attempted can no longer be written into the profile's whitelist.
