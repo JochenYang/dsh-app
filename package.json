@@ -18,6 +18,8 @@
     "check:touchpoints:gate": "node scripts/check-touchpoints.mjs --check",
     "check:surface": "node scripts/kernel-surface.mjs",
     "check:slots": "node scripts/check-slot-registrations.mjs",
+    "check:suites": "node scripts/check-suites-drift.mjs",
+    "check:suites:gate": "node scripts/check-suites-drift.mjs --check",
     "dev": "node scripts/dev.mjs",
     "dist": "npm run build && node scripts/prepare-bundled-kernel.mjs && electron-builder",
     "dist:linux": "npm run build && node scripts/prepare-bundled-kernel.mjs linux && electron-builder --linux",

@@ -102,6 +102,15 @@ jobs:
       # and with those absent the check would report registrations as unjudged.
       - name: Slot registrations (static)
         run: npm run check:slots
+      # Suite-drift gate: the suite roster is written down five times (the
+      # overlay's insert rows, SUITE_PLUGINS, SUITE_PLUGIN_DIRS, SUITE_DIRS and
+      # the release workflow's pre-build loop) and AGENTS.md requires all five to
+      # move in one commit. Nothing enforced it. This step only reads the five
+      # sources as text plus the imported SUITE_PLUGINS, so it needs no kernel,
+      # no network and no built plugins — unlike the step above, whose own
+      # comment explains why THAT one has to run after the per-plugin installs.
+      - name: Suite roster drift (static)
+        run: npm run check:suites:gate
 
   smoke:
     name: suite smoke probe (real kernel)

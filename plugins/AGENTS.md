@@ -104,6 +104,12 @@ network: a roster entry with no package on disk, a core package declared as a
 dependency instead of a peer, a packaged `node_modules`, or a peer range that
 drifts from the followed kernel line.
 
+`npm run check:suites:gate` is the other half: it reads the five copies above
+and fails when they do not name the same set of plugins, so a roster change that
+touched one copy and not the others stops being a silent vanilla boot. A copy
+written in a shape the reader does not recognise is exit 2 rather than a pass,
+so a row the gate cannot read is red instead of counting as absent.
+
 **Any change under `plugins/` needs a version bump in that plugin**, and the
 patch field is a SINGLE digit: a tenth change carries into the minor
 (`0.8.9` → `0.9.0`), never `0.8.10`. `suiteVersion` hashes plugin `package.json`

@@ -213,6 +213,10 @@ Plugin builds and tests: `plugins/AGENTS.md`.
   `src/main/brand-suite.ts` (`SUITE_PLUGIN_DIRS`), `scripts/smoke-suite.mjs`
   (`SUITE_DIRS`), `.github/workflows/release.yml` (pre-build loop); update all
   five in one commit, then `smoke-suite.mjs --tgz` a fresh build.
+  `npm run check:suites:gate` is the executable half of that sentence: it reads
+  all five and fails when they do not name the same set of plugins. A copy it
+  cannot read in the shape it is written in is exit 2, never a pass — a reader
+  that read four copies would otherwise report agreement it did not check.
 - **Upstream API drift**: slices and `as unknown as` casts bypass the type gate —
   a kernel-deleted API leaves tests green while the runtime throws; verify each
   plugin end-to-end after every kernel-line bump (`npm run verify`,
