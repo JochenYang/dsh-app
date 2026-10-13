@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/JochenYang/dsh-app/main/plugins/plugin-market/docs/catalog-source.schema.json",
+  "title": "DSH APP plugin-market catalog source",
+  "description": "The published document contract of a plugin-market catalog source: an https URL answering a JSON object with a `plugins` array. Three document shapes are accepted; the parser sniffs the shape from the FIRST object row of `plugins` (store first, then aggregated, custom otherwise), so a document must be homogeneous. This schema is the machine-readable half of docs/catalog-source.md and is bound to the implementation by tests/catalog-contract.test.ts: every field name the parser reads appears here, the install-command grammar is the parser's own npm and git grammars spliced together, and the null forms the primary source actually publishes are accepted. Where this schema is stricter than the parser, docs/catalog-source.md says so in the 'Strictness' section — a document that fails this schema is not necessarily refused by the parser, but it is not a conforming source.",
+  "anyOf": [
+    { "$ref": "#/$defs/customDocument" },
+    { "$ref": "#/$defs/aggregatedDocument" },
+    { "$ref": "#/$defs/storeDocument" }
+  ],
+  "$defs": {
+    "npmPackageName": {
+      "title": "npm package name",
+      "description": "A name the install chain will accept as an install target. The parser re-checks every candidate against this grammar (PACKAGE_NAME_PATTERN in src/npm.ts) and refuses the row when it does not match.",
+      "type": "string",
+      "maxLength": 214,
+      "pattern": "^(@[a-z0-9-*~][a-z0-9-*._~]*\\/)?[a-z0-9-*~][a-z0-9-._~]*$"
+    },
+    "installCommand": {
+      "title": "install command",
+      "description": "A `dsh plugin … add <target>` command. Only the trailing target token is extracted — the command itself is never retained and never executed. The pattern is derived, not hand-written: it is the parser's own PACKAGE_NAME_PATTERN (with the optional npm version suffix it strips) and GIT_TARGET_PATTERN spliced into an install-target alternative, so a command it accepts names a target the install chain could actually use. The primary source publishes one command carrying flags between `add` and its target (`--allow-build=…`); the schema accepts it because the trailing token is a pinned-able GitHub shortcut, while the parser's extraction requires `add` to be the second-to-last token and leaves that row source-only — see the 'Strictness' section of docs/catalog-source.md.",
+      "type": "string",
+      "maxLength": 400,
+      "pattern": "^dsh plugin (?:\\S+ )*add (?:\\S+ )*(?:(@[a-z0-9-*~][a-z0-9-*._~]*\\/)?[a-z0-9-*~][a-z0-9-._~]*(?:@\\S+)?|github:([A-Za-z0-9-]{1,39})\\/([A-Za-z0-9-._]{1,100}?)(?:#([0-9a-f]{40}))?)$"
+    },
+    "httpUrl": {
+      "title": "http(s) URL",
+      "description": "An absolute http:// or https:// URL. In the custom shape an unusable value drops the whole row; in the aggregated and store shapes it is simply not carried onto the entry.",
+      "type": "string",
+      "maxLength": 400,
+      "pattern": "^https?://"
+    },
+    "localizedText": {
+      "title": "localized display copy",
+      "description": "Either a plain string, or an {en, zh} object the parser localizes (zh wins, en is the fallback). Over-length copy is truncated for display (with an ellipsis) rather than dropping the row, so there is no maximum length here.",
+      "anyOf": [
+        { "type": "string", "pattern": "\\S" },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "en": { "type": "string", "pattern": "\\S" },
+            "zh": { "type": "string", "pattern": "\\S" }
+          },
+          "anyOf": [{ "required": ["en"] }, { "required": ["zh"] }]
+        }
+      ]
+    },
+    "categoryLabel": {
+      "title": "category label (aggregated document)",
+      "description": "One entry of the aggregated shape's top-level `categories` object map, keyed by the category id a row names. Unknown keys are ignored by the parser.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "en": { "type": "string", "maxLength": 400, "pattern": "\\S" },
+        "zh": { "type": "string", "maxLength": 400, "pattern": "\\S" }
+      }
+    },
+    "storeCategory": {
+      "title": "category label (store document)",
+      "description": "One item of the store shape's top-level `categories` ARRAY. `id` is required — the array is what identifies the store shape — and further keys (the real store's `count`) are ignored.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 100, "pattern": "\\S" },
+        "en": { "type": "string", "maxLength": 400, "pattern": "\\S" },
+        "zh": { "type": "string", "maxLength": 400, "pattern": "\\S" }
+      }
+    },
+    "customRow": {
+      "title": "custom schema row",
+      "description": "The suite's own directory format: every row names a real npm package, and the row installs with no further qualification.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["package", "name", "description"],
+      "not": {
+        "title": "a custom row must not carry a routing field",
+        "description": "A row carrying `npm` or `category` is not a custom row: a first such row routes the WHOLE document into the aggregated shape, where this row's `package` is no longer an install target. The schema therefore refuses to describe such a row as a custom row — the document itself is then judged as an aggregated document, which is exactly what the parser does with it.",
+        "anyOf": [{ "required": ["npm"] }, { "required": ["category"] }]
+      },
+      "properties": {
+        "id": {
+          "description": "Stable entry id. Optional: it falls back to the package name.",
+          "type": "string",
+          "maxLength": 400,
+          "pattern": "\\S"
+        },
+        "name": {
+          "description": "Display name. Required.",
+          "type": "string",
+          "maxLength": 400,
+          "pattern": "\\S"
+        },
+        "description": {
+          "description": "One-line description. Required, and a plain string — an {en, zh} object is not localized in this shape and drops the row.",
+          "type": "string",
+          "maxLength": 400,
+          "pattern": "\\S"
+        },
+        "package": {
+          "description": "npm package name: the merge/dedupe key, the install target, and the fallback entry id.",
+          "$ref": "#/$defs/npmPackageName"
+        },
+        "version": {
+          "description": "Source-declared version. DISPLAY ONLY — never installed verbatim; the install chain resolves the real version from the registry. `null` means the source does not carry one, which is how the primary directory states it.",
+          "type": ["string", "null"],
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "homepage": {
+          "description": "Source-declared homepage. Must be an http(s) URL or the row is dropped.",
+          "$ref": "#/$defs/httpUrl"
+        }
+      }
+    },
+    "aggregatedRow": {
+      "title": "aggregated directory row",
+      "description": "The large community directory format: rows describe source-published plugins, the npm identity is optional, and a row without one is still browsable as a source-only row (or installable through a git target named by its install command).",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "description"],
+      "anyOf": [
+        {
+          "title": "the row carries an npm identity",
+          "required": ["npm"]
+        },
+        {
+          "title": "the row carries a category, which is what routes the document here",
+          "required": ["category"]
+        }
+      ],
+      "properties": {
+        "name": {
+          "description": "Display name. A name containing '#' is a repository path, not a plugin title: the row survives only when it is installable through a usable npm name, and then that name becomes the display title.",
+          "type": "string",
+          "maxLength": 400,
+          "pattern": "\\S"
+        },
+        "description": {
+          "description": "One-line description. Required in this shape; a row without usable copy is dropped.",
+          "$ref": "#/$defs/localizedText"
+        },
+        "page": {
+          "description": "The directory's own page for the row. The stable entry id, and the merge/dedupe key when there is no usable npm name.",
+          "type": "string",
+          "maxLength": 400,
+          "pattern": "\\S"
+        },
+        "url": {
+          "description": "Repository/homepage URL. Carried as the entry homepage, which is also where the install chain derives the repository identity from (github.com, gitlab.com, gitee.com only).",
+          "$ref": "#/$defs/httpUrl"
+        },
+        "npm": {
+          "description": "npm package name, or `null` when the plugin ships from a repository instead of npm. Without a usable name the row is source-only unless its install command names a pinned git target.",
+          "anyOf": [
+            { "$ref": "#/$defs/npmPackageName" },
+            { "type": "null" }
+          ]
+        },
+        "install": {
+          "description": "Optional `dsh plugin … add <target>` command naming the row's install target. Only the trailing token is read.",
+          "$ref": "#/$defs/installCommand"
+        },
+        "version": {
+          "description": "Source-declared version. DISPLAY ONLY — never installed verbatim. `null` is the primary directory's way of saying it carries none (2177 of its 4527 rows).",
+          "type": ["string", "null"],
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "owner": {
+          "description": "Author/maintainer handle. Display only.",
+          "type": ["string", "null"],
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "stars": {
+          "description": "Star count. Display and search-ranking only.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "downloads": {
+          "description": "npm downloads over the source's reporting window. Display and search-ranking only; `null` or absent means the source does not track it (a coverage gap, never a zero) — the primary directory publishes `null` on 2179 of its 4527 rows.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "category": {
+          "description": "Category id, resolved to a display label through the document's `categories` map. The empty string is uncategorized.",
+          "type": "string",
+          "maxLength": 100
+        },
+        "categoryId": {
+          "description": "Explicit stable category key. Wins over `category` as the filter key, which is what lets the label be presentation that may drift between refreshes.",
+          "type": "string",
+          "maxLength": 100,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "storeRow": {
+      "title": "store directory row",
+      "description": "The paged community store format: the npm identity is not a field at all, it is extracted from the row's install command, and a row whose command names no accepted target stays browsable as a source-only row keyed by its own store id.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "install"],
+      "properties": {
+        "id": {
+          "description": "Store entry id; unique per row, which is why it is this shape's fallback id and dedupe key (several rows may share one repository url).",
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "\\S"
+        },
+        "name": {
+          "description": "Display name. Required.",
+          "type": "string",
+          "maxLength": 400,
+          "pattern": "\\S"
+        },
+        "description": {
+          "description": "One-line description. Optional in this shape: a missing description stays empty and the panel renders its own placeholder.",
+          "$ref": "#/$defs/localizedText"
+        },
+        "url": {
+          "description": "Repository/homepage URL. Carried as the entry homepage, and the fallback id when the row has no store id.",
+          "$ref": "#/$defs/httpUrl"
+        },
+        "category": {
+          "description": "Category id, resolved to a display label through the document's `categories` array. The empty string is uncategorized.",
+          "type": "string",
+          "maxLength": 100
+        },
+        "categoryId": {
+          "description": "Explicit stable category key. Wins over `category` as the filter key.",
+          "type": "string",
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "install": {
+          "description": "The install command. Required: a store document is identified by its ARRAY `categories` map together with a first row whose install command reads `dsh plugin …`, and the command's trailing token is the only thing extracted from it.",
+          "$ref": "#/$defs/installCommand"
+        },
+        "installs30d": {
+          "description": "Store-declared 30-day install count. Display only.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "owner": {
+          "description": "Author/maintainer handle. Display only.",
+          "type": ["string", "null"],
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "stars": {
+          "description": "Star count. Display only.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "customDocument": {
+      "title": "custom schema document",
+      "description": "A document whose first `plugins` row carries neither `npm` nor `category`. Required keys: `plugins`.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["plugins"],
+      "properties": {
+        "plugins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/customRow" }
+        }
+      }
+    },
+    "aggregatedDocument": {
+      "title": "aggregated directory document",
+      "description": "A document whose first `plugins` row carries `npm` or `category`, and whose top-level `categories` (when present) is an OBJECT map. Required keys: `plugins`.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["plugins"],
+      "properties": {
+        "plugins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/aggregatedRow" }
+        },
+        "categories": {
+          "description": "id → {en, zh} label map. Optional: an id absent from the map still works as a key, and falls back to its own raw value as the label.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/categoryLabel" }
+        }
+      }
+    },
+    "storeDocument": {
+      "title": "store directory document",
+      "description": "A document whose top-level `categories` is an ARRAY and whose first `plugins` row carries a `dsh plugin …` install command. Required keys: `plugins`, `categories`.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["plugins", "categories"],
+      "properties": {
+        "plugins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/storeRow" }
+        },
+        "categories": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/storeCategory" }
+        }
+      }
+    }
+  }
+}

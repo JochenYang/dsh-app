@@ -1,0 +1,90 @@
+{
+  "categories": [
+    {
+      "id": "skill",
+      "en": "Skills",
+      "zh": "技能包",
+      "count": 1047
+    },
+    {
+      "id": "workflow",
+      "en": "Workflow & Automation",
+      "zh": "工作流与自动化",
+      "count": 776
+    }
+  ],
+  "plugins": [
+    {
+      "installCount": 0,
+      "installerCount": 0,
+      "firstInstallCount": 0,
+      "reinstallCount": 0,
+      "updateCount": 0,
+      "removeCount": 0,
+      "failureCount": 0,
+      "installs24h": 0,
+      "installs7d": 0,
+      "installs30d": 0,
+      "latestInstallAt": null,
+      "npmDownloads7d": null,
+      "npmDownloadsStart": null,
+      "npmDownloadsEnd": null,
+      "id": "yjh051108/dsh-routing-suite",
+      "name": "dsh-routing-suite",
+      "owner": "yjh051108",
+      "url": "https://github.com/yjh051108/dsh-routing-suite",
+      "repository": "dsh-routing-suite",
+      "category": "workflow",
+      "description": {
+        "en": "dsh-routing-suite — injector + router-standard kit: install the runtime injector first, then the task-aware reasoning-mode router preset (measured P1-P23).",
+        "zh": "安装运行时注入器与任务感知推理模式路由预设，实现自动化的多步骤路由流程。"
+      },
+      "install": "dsh plugin --profile web add --allow-build=@dsh-external/dsh-super-injector github:yjh051108/dsh-routing-suite",
+      "added": "2026-10-13",
+      "stars": 7021,
+      "forks": 186,
+      "pushedAt": "2026-09-18T23:10:58Z",
+      "updatedAt": "2026-10-13T02:51:12Z",
+      "latestReleaseAt": null,
+      "growth24h": 3,
+      "growth7d": 21,
+      "growth30d": -151
+    },
+    {
+      "installCount": 285,
+      "installerCount": 261,
+      "firstInstallCount": 265,
+      "reinstallCount": 14,
+      "updateCount": 0,
+      "removeCount": 0,
+      "failureCount": 151,
+      "installs24h": 3,
+      "installs7d": 17,
+      "installs30d": 90,
+      "latestInstallAt": "2026-10-13T00:35:40.829Z",
+      "npmDownloads7d": 11559,
+      "npmDownloadsStart": "2026-10-04",
+      "npmDownloadsEnd": "2026-10-10",
+      "id": "tt-a1i/archify/integrations/deepseek-harness",
+      "name": "deepseek-harness",
+      "owner": "tt-a1i",
+      "url": "https://github.com/tt-a1i/archify",
+      "repository": "archify",
+      "category": "skill",
+      "description": {
+        "en": "Generates self-contained, motion-rich diagrams for architecture, workflow, and data-flow with crisp export, packaged as an agent skill.",
+        "zh": "将架构、流程、时序、数据流等图表生成能力打包为技能，输出带动效的自包含 HTML 并支持清晰导出。"
+      },
+      "install": "dsh plugin --profile web add @tt-a1i/archify-dsh",
+      "added": "2026-10-13",
+      "stars": 82623,
+      "forks": 5573,
+      "pushedAt": "2026-10-12T14:08:52Z",
+      "updatedAt": "2026-10-13T03:27:23Z",
+      "latestReleaseAt": null,
+      "growth24h": 505,
+      "growth7d": 4549,
+      "growth30d": 22835
+    }
+  ]
+}

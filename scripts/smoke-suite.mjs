@@ -20,7 +20,9 @@
  *      bundled-resource facts a bare ok:true cannot see: the PPT template
  *      catalog is non-empty and every listed template carries a cover preview,
  *      the bundled PDF CJK font asset resolves, and (--tgz) the extracted
- *      artifact really contains plugin-ppt/templates/ and plugin-pdf/assets/;
+ *      artifact really contains plugin-ppt/templates/, plugin-pdf/assets/ and
+ *      plugin-market/docs/ (the catalog-source contract an external author
+ *      reads);
  *   3. every dual-face plugin's client bundle is served non-empty;
  *   4. the plugin-mcp dynamic-mount chain works end to end: create a stdio
  *      server pointing at scripts/fixtures/minimal-mcp-server.mjs, poll until
@@ -479,6 +481,13 @@ async function main() {
     const fonts = dirStats(pdfDir, name => /\.(?:ttf|otf)$/iu.test(name))
     check(`artifact: plugin-pdf/assets ships a bundled CJK font (${String(fonts.files)} file(s), ${formatBytes(fonts.bytes)})`,
       fonts.files >= 1, `no .ttf/.otf under ${pdfDir}`)
+    // plugin-market publishes the catalog-source contract for EXTERNAL authors
+    // (docs/catalog-source.md + .schema.json). A `files` entry the build drops
+    // is invisible to every in-repo gate — the schema's `$id` points at the
+    // repository copy — so the contract is asserted against the shipped tree.
+    const contract = dirStats(path.join(suiteNm, 'plugin-market', 'docs'), name => name === 'catalog-source.schema.json' || name === 'catalog-source.md')
+    check(`artifact: plugin-market/docs ships the catalog-source contract (${String(contract.files)} file(s), ${formatBytes(contract.bytes)})`,
+      contract.files >= 2, `found ${String(contract.files)} of 2 contract files under ${path.join(suiteNm, 'plugin-market', 'docs')}`)
   }
 
   const home = mkdtempSync(path.join(tmpdir(), 'dsh-smoke-home-'))

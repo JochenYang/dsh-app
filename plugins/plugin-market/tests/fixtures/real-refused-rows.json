@@ -1,0 +1,65 @@
+{
+  "categories": {
+    "ui": {
+      "en": "UI Enhancements",
+      "zh": "UI 增强"
+    }
+  },
+  "plugins": [
+    {
+      "name": "agent-body#dsh-anatomy-panel",
+      "owner": "1420079678-ctrl",
+      "url": "https://github.com/1420079678-ctrl/agent-body/tree/main/workspace/plugins/dsh-anatomy-panel",
+      "page": "https://awesome-dsh-plugin.com/p/1420079678-ctrl/agent-body--workspace-plugins-dsh-anatomy-panel/",
+      "category": "ui",
+      "description": {
+        "en": "Anatomy panel for the Agent-Body organs: serves a live vitals dashboard at /anatomy inside the harness itself - organs, heartbeat, healing ledger, self-training counters and the real pulse stream - read straight from the runtime files rather than retyped. Host-only, no client bundle and no build step.",
+        "zh": "Agent-Body 器官的解剖面板：在 harness 内部的 /anatomy 提供实时体征看板——器官、心跳、自愈账本、自训练计数与真实脉冲流，数据直接读自运行时文件而非誊写。仅 host 端，无客户端 bundle、无构建步骤。"
+      },
+      "npm": null,
+      "version": null,
+      "stars": 17,
+      "downloads": null,
+      "downloadsStart": null,
+      "downloadsEnd": null,
+      "downloadsCheckedAt": null,
+      "capabilities": [
+        "fs-read",
+        "env"
+      ],
+      "capabilityRedLines": [],
+      "capabilityCheckedAt": "2026-10-13T03:41:52.222Z",
+      "install": "dsh plugin --profile web add github:1420079678-ctrl/agent-body#path:/workspace/plugins/dsh-anatomy-panel",
+      "added": "2026-09-30"
+    },
+    {
+      "name": "amoji#amoji",
+      "owner": "5101good",
+      "url": "https://github.com/5101good/amoji/tree/main/adapters/dsh",
+      "page": "https://awesome-dsh-plugin.com/p/5101good/amoji--adapters-dsh/",
+      "category": "ui",
+      "description": {
+        "en": "AI-native expressions for two-way chat: people see images, while text-only models read fixed meanings; includes a picker, custom expressions, import/export, and two visual styles.",
+        "zh": "用于双向聊天的 AI 原生表情：人看图片，纯文本模型读取固定语义；支持表情选择、自建表情、导入导出和两套画风。"
+      },
+      "npm": null,
+      "tarball": "https://github.com/5101good/amoji/releases/download/v1.0.0/amoji-dsh-1.0.0.tgz",
+      "version": null,
+      "stars": 0,
+      "downloads": null,
+      "downloadsStart": null,
+      "downloadsEnd": null,
+      "downloadsCheckedAt": null,
+      "capabilities": [],
+      "capabilityRedLines": [],
+      "capabilityCheckedAt": "2026-09-24T17:02:46.730Z",
+      "install": "dsh plugin --profile web add \"https://github.com/5101good/amoji/releases/download/v1.0.0/amoji-dsh-1.0.0.tgz\"",
+      "added": "2026-09-23",
+      "screenshots": [
+        "https://raw.githubusercontent.com/5101good/amoji/HEAD/adapters/dsh/screenshots/classic.png",
+        "https://raw.githubusercontent.com/5101good/amoji/HEAD/adapters/dsh/screenshots/office.png",
+        "https://raw.githubusercontent.com/5101good/amoji/HEAD/adapters/dsh/screenshots/meaning.png"
+      ]
+    }
+  ]
+}

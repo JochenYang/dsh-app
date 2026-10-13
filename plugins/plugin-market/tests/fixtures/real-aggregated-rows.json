@@ -1,0 +1,88 @@
+{
+  "categories": {
+    "agi": {
+      "en": "AGI Architecture Exploration",
+      "zh": "AGI 架构探索"
+    },
+    "ui": {
+      "en": "UI Enhancements",
+      "zh": "UI 增强"
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-gungnir#dsh-plugin",
+      "owner": "Jonah-Wu23",
+      "url": "https://github.com/Jonah-Wu23/dsh-gungnir/tree/main/packages/dsh-plugin",
+      "page": "https://awesome-dsh-plugin.com/p/Jonah-Wu23/dsh-gungnir--packages-dsh-plugin/",
+      "category": "agi",
+      "description": {
+        "en": "Evidence-driven goal verification plugin for DeepSeek Harness. Locks goals via /ultragoal and verifies completion against command exit codes and generated artifacts, preventing the model from falsely reporting task completion.",
+        "zh": "面向 DeepSeek Harness 的证据驱动目标校验插件。通过 /ultragoal 锁定目标，并依据命令退出码与生成产物验证完成状态，防止模型虚报任务完成。"
+      },
+      "npm": "dsh-gungnir",
+      "version": "0.2.1",
+      "stars": 6,
+      "downloads": 1310,
+      "downloadsStart": "2026-09-13",
+      "downloadsEnd": "2026-10-12",
+      "downloadsCheckedAt": "2026-10-13",
+      "install": "dsh plugin --profile web add dsh-gungnir",
+      "added": "2026-09-03"
+    },
+    {
+      "name": "dsh-j-space",
+      "owner": "AnonyJcy",
+      "url": "https://github.com/AnonyJcy/dsh-j-space",
+      "page": "https://awesome-dsh-plugin.com/p/AnonyJcy/dsh-j-space/",
+      "category": "agi",
+      "description": {
+        "en": "J-Space Cognition Suite SV1 native agent preset and standalone Cordis plugin: 13 modules, persistent controller and decoupled workspace.",
+        "zh": "J-Space Cognition Suite SV1 原生智能体预设与 Cordis 插件：提供 13 大认知工程模块、持久化控制器与状态外化工作区。"
+      },
+      "npm": "@anonyjcy/dsh-j-space",
+      "version": "1.2.3",
+      "stars": 4,
+      "downloads": 1982,
+      "downloadsStart": "2026-09-13",
+      "downloadsEnd": "2026-10-12",
+      "downloadsCheckedAt": "2026-10-13",
+      "capabilities": [
+        "fs-write",
+        "fs-read",
+        "env"
+      ],
+      "capabilityRedLines": [],
+      "capabilityCheckedAt": "2026-10-13T03:41:52.222Z",
+      "install": "dsh plugin --profile web add @anonyjcy/dsh-j-space",
+      "added": "2026-09-20"
+    },
+    {
+      "name": "dsh-quality-review",
+      "owner": "CAI-MH",
+      "url": "https://github.com/CAI-MH/dsh-quality-review",
+      "page": "https://awesome-dsh-plugin.com/p/CAI-MH/dsh-quality-review/",
+      "category": "agi",
+      "description": {
+        "en": "Audit each finished assistant turn with an independent reviewer model and steer the agent to fix failed output, with at most 2 review rounds per turn and SOP-folder standards injected as an extra review dimension.",
+        "zh": "每轮回复结束时用独立审查模型审核输出，判定不合格则引导 agent 修复，每轮最多追问 2 次；可注入 SOP 文件夹标准作为额外审核维度。"
+      },
+      "npm": null,
+      "version": null,
+      "stars": 2,
+      "downloads": null,
+      "downloadsStart": null,
+      "downloadsEnd": null,
+      "downloadsCheckedAt": null,
+      "capabilities": [
+        "fs-read",
+        "env",
+        "llm"
+      ],
+      "capabilityRedLines": [],
+      "capabilityCheckedAt": "2026-10-13T03:41:52.222Z",
+      "install": "dsh plugin --profile web add github:CAI-MH/dsh-quality-review",
+      "added": "2026-09-06"
+    }
+  ]
+}
