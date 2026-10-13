@@ -320,3 +320,44 @@ A commit that reaches users (`src/`, a plugin's `src/` or `package.json`,
 whose behaviour changed — the gate in ci.yml refuses it otherwise, and
 `scripts/fold-changesets.mjs` consumes it at release time. Format and rules:
 `changesets/README.md`.
+
+## 8. Reporting a round's work
+
+Every rule below was paid for in this repository's own history, and they share
+one cause: treating the owner's attention as the place where open work waits.
+
+- **A round ends in one of two states**: done, verified and shipped — or
+  blocked, with the cause and the shortest path that unblocks it. There is no
+  third state, and "here are the decisions I left for you" is not a report.
+- **A defect is not a backlog item.** Before calling anything ready, sort every
+  open item into: harms a user, leaks something, or delays the next discovery —
+  a defect, fix it now; versus makes a future mistake visible earlier —
+  hardening, schedule it. Filing a defect as "next round" is how v0.16.3 went
+  out with unbounded catalog reads, a wall-clock token TTL and six plugins
+  importing packages they never declared, all three of which v0.16.4 then had
+  to fix.
+- **Decide, then state.** Four things are the owner's call: money, legal
+  exposure, an irreversible or outward-facing act, and a change to the product's
+  shape. Everything else — including "is this acceptable?" and "should this be
+  tighter?" — is decided here, written down with its reason, and reported as
+  fact.
+- **A record is not a question.** Something investigated and deliberately left
+  unchanged (why `electron-updater`'s version still reaches the event file; why
+  the smoke's `typert-loader` warning is a dev-checkout artifact, absent from
+  the packaged runtime) belongs in the commit and the document. Presented as an
+  open item it makes the reader re-ask a question that is already answered.
+- **Do not defer for the clock.** "Little context left" is not a reason to hand
+  work back: a round that landed six fixes in one evening is the proof the work
+  was always doable. Do it, then say what was done.
+- **Prove a gate where it runs.** A check wired into CI has to be exercised in
+  CI's own environment — a fresh `--legacy-peer-deps` tree with no peers and no
+  `lib/` — before it is called green; a local green is not that proof, and the
+  type gate shipped exactly that way once and stopped a release. The same holds
+  for a claim about a commit: name the tree hash, not the impression.
+- **A release is never announced ready with a known defect open**, and a failed
+  release is deleted and re-cut at the SAME version — delete the release object
+  and the tag, fix, re-tag the same version. Bumping instead invents a version
+  nobody ever shipped. Publish with `--notes-file` (the generated notes; a bare
+  draft flip leaves an empty release page), and after pushing, watch both `ci`
+  and `release`: green locally and red in CI is the ordinary case, not the rare
+  one.
