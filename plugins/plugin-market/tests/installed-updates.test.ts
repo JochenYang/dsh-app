@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import type { PluginInstaller } from '../src/installer.ts'
-import { registerMarketRoutes, ROUTE_PREFIX, wantsUpdates, type MarketDeps } from '../src/routes.ts'
+import { createInstallIntents, registerMarketRoutes, ROUTE_PREFIX, wantsUpdates, type MarketDeps } from '../src/routes.ts'
 
 /** The captured /installed route and the payload it last answered. */
 interface Harness {
@@ -36,6 +36,12 @@ function harness(probe: (names: readonly string[]) => Promise<Record<string, str
     catalogCachePath: join(tmpdir(), 'unused-catalog-cache.json'),
     installer: {} as PluginInstaller,
     profile: 'web',
+    installIntents: createInstallIntents({
+      profile: 'web',
+      sourcesPath: join(tmpdir(), 'unused-sources.json'),
+      catalogCachePath: join(tmpdir(), 'unused-catalog-cache.json'),
+      log: () => undefined,
+    }),
     latestVersions: (names) => {
       probeCalls.push([...names])
       return probe(names)

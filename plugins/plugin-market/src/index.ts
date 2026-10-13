@@ -15,6 +15,11 @@
  * desktop shell boots, so what the panel installs is what the app loads on
  * its next start.
  *
+ * Installs travel through ONE one-shot intent lane (see install-intent.ts):
+ * the panel submits a catalog-row selector and receives a token, `/install`
+ * consumes that token, and the model-facing install tool issues and consumes
+ * on the same store without an HTTP round-trip.
+ *
  * It also mounts ONE model-facing tool, `market_search` (see bridge.ts), so a
  * user asking for "a skill that does X" gets real catalog hits. That half needs
  * the `tools` + `systemPrompt` services and is attached through an optional
@@ -38,7 +43,7 @@ import { registerMarketBridge } from './bridge.ts'
 import { registerMarketInstallTools } from './bridge-install.ts'
 import { PluginInstaller } from './installer.ts'
 import { validateProfileName } from './npm.ts'
-import { registerMarketRoutes } from './routes.ts'
+import { createInstallIntents, registerMarketRoutes } from './routes.ts'
 
 export const name = 'plugin-market'
 
@@ -76,12 +81,25 @@ export function apply(ctx: Context, config: Config): void {
     : join(resolveDshHome(), 'storages', 'dsh-app-plugin-market')
   const profile = effectiveProfile(config.profile)
   const installer = new PluginInstaller(profile, process.argv[1], spawn, (message) => log.warn(message))
+  const sourcesPath = join(dir, 'sources.json')
+  const catalogCachePath = join(dir, 'catalog-cache.json')
+  // ONE intent lane for the whole host half: the panel's `/install-intent` +
+  // `/install` pair and the conversational `market_install_plugin` share this
+  // store, so a token minted by either is consumable by the other and there is
+  // a single place that decides what an install may act on.
+  const installIntents = createInstallIntents({
+    profile,
+    sourcesPath,
+    catalogCachePath,
+    log: (message) => log.warn(message),
+  })
 
   ctx.effect(() => registerMarketRoutes(ctx.connection.fetch, {
-    sourcesPath: join(dir, 'sources.json'),
-    catalogCachePath: join(dir, 'catalog-cache.json'),
+    sourcesPath,
+    catalogCachePath,
     installer,
     profile,
+    installIntents,
   }, (message) => log.warn(message)), 'plugin-market: api routes')
 
   // The model-facing bridge needs the tools + systemPrompt services, which a
@@ -90,14 +108,19 @@ export function apply(ctx: Context, config: Config): void {
   // rather than added to `inject` (which would gate the whole plugin).
   ctx.inject(['tools', 'systemPrompt'], bridgeCtx => {
     bridgeCtx.effect(() => registerMarketBridge(bridgeCtx, {
-      sourcesPath: join(dir, 'sources.json'),
-      catalogCachePath: join(dir, 'catalog-cache.json'),
+      sourcesPath,
+      catalogCachePath,
       profile,
+      catalogHold: installIntents.hold,
       log: (message) => log.warn(message),
     }), 'plugin-market: model bridge')
     // The write half rides the SAME serialized installer the panel drives, so
     // a conversational install and a drawer click can never run at once.
-    bridgeCtx.effect(() => registerMarketInstallTools(bridgeCtx, { installer, profile }), 'plugin-market: model install tools')
+    bridgeCtx.effect(() => registerMarketInstallTools(bridgeCtx, {
+      installer,
+      profile,
+      installIntents,
+    }), 'plugin-market: model install tools')
   })
 
   log.info(`plugin market: sources at ${join(dir, 'sources.json')} (profile ${profile})`)

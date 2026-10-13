@@ -158,6 +158,14 @@ export interface InstalledValue {
   readonly manifestAvailable: boolean
 }
 
+/** POST /install-intent payload: the one-shot install intent. */
+export interface InstallIntentValue {
+  /** Opaque token `POST /install` consumes; the panel only ever echoes it. */
+  readonly token: string
+  /** Unix ms after which the host refuses the token. */
+  readonly expiresAt: number
+}
+
 /** POST /install + POST /uninstall + POST /update payloads. */
 export interface InstallValue {
   readonly installed: boolean
@@ -300,40 +308,36 @@ export const marketApi = {
     return request<InstalledValue>(`${ROUTE_PREFIX}/installed${updates ? '?updates=1' : ''}`)
   },
   /**
-   * Install `pkg` from the registry. `force` confirms a same-name replacement
-   * the host's gate will not do silently (a local/git install or a repo
-   * mismatch — an unknown side included); `repoKey` carries the incoming
-   * entry's normalized repo key so the gate's refusal and log name both sides.
+   * Mint the one-shot install intent for one catalog row. The panel names the
+   * ROW (its `id`); the host resolves it inside its own catalog and answers an
+   * opaque token binding the package, version, force flag, repo identity and
+   * target profile. This CALL names no install target, and `POST /install`
+   * ignores a package, version, force or repo key in its body — so the exact
+   * version and the git target are the host's reading, never the caller's.
+   * `force` marks a same-name replacement the user confirmed in the install
+   * dialog.
    */
-  install(pkg: string, version?: string, force?: boolean, repoKey?: string): Promise<InstallValue> {
-    return request<InstallValue>(`${ROUTE_PREFIX}/install`, {
+  installIntent(entryId: string, force?: boolean): Promise<InstallIntentValue> {
+    return request<InstallIntentValue>(`${ROUTE_PREFIX}/install-intent`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        package: pkg,
-        ...(version !== undefined ? { version } : {}),
+        entryId,
         ...(force === true ? { force: true } : {}),
-        ...(repoKey !== undefined ? { repoKey } : {}),
       }),
     })
   },
   /**
-   * Install `gitTarget` (`github:owner/repo`, optionally `#commit`) from its
-   * GitHub source; the host pins the commit when the target lacks one.
-   * `repoKey` carries the entry's repo identity for the same-repo guard, and
-   * `package` is the entry's display key (the host's same-name fallback
-   * lookup reads it; it never reaches the CLI).
+   * Install what the intent bound. The body carries the token ALONE: package,
+   * version, force and repo key belong to the intent, and a token is consumed
+   * once — a retry must mint a fresh one (the panel re-issues when the
+   * confirmation is reopened).
    */
-  installGit(gitTarget: string, pkg: string, force: boolean | undefined, repoKey: string | undefined): Promise<InstallValue> {
+  install(token: string): Promise<InstallValue> {
     return request<InstallValue>(`${ROUTE_PREFIX}/install`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        gitTarget,
-        package: pkg,
-        ...(force === true ? { force: true } : {}),
-        ...(repoKey !== undefined ? { repoKey } : {}),
-      }),
+      body: JSON.stringify({ token }),
     })
   },
   /**

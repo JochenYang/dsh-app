@@ -6,7 +6,9 @@
  * the skill path resolves `$DSH_HOME` at CALL time (so a test's temp home is
  * honoured), an already-installed plugin name is refused WITHOUT reaching the
  * executor (this tool never replaces — the panel owns that, with a human
- * confirmation), a plugin install refuses rather than throwing when the
+ * confirmation), a plugin name the host's own catalog does not carry is refused
+ * before the executor too (the install target comes from a catalog row, see
+ * install-intent.ts), a plugin install refuses rather than throwing when the
  * executor fails, and the registration really puts all three names on the
  * context.
  *
@@ -23,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import type { PluginInstaller } from '../src/installer.ts'
+import { CatalogHold, InstallIntentStore } from '../src/install-intent.ts'
 import {
   INSTALL_TOOL_NAMES,
   installPluginByName,
@@ -30,6 +33,7 @@ import {
   registerMarketInstallTools,
   skillsDirOf,
   uninstallSkillBySlug,
+  type MarketInstallDeps,
 } from '../src/bridge-install.ts'
 
 let home: string
@@ -122,10 +126,33 @@ describe('installPluginByName', () => {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', dependencies }), 'utf8')
   }
 
+  /**
+   * The lane the tool rides: a store over a one-row catalog carrying
+   * `dsh-remote`. The tool resolves the name against this catalog exactly as
+   * the panel's route resolves its row, so the tests below exercise the real
+   * issuance path rather than a stub of it.
+   */
+  function installDeps(installer: PluginInstaller): MarketInstallDeps {
+    const hold = new CatalogHold(() => null)
+    hold.remember({
+      entries: [{ id: 'row-remote', name: 'Remote', description: 'a row', package: 'dsh-remote' }],
+      at: 1,
+      sourceOf: () => null,
+    })
+    return {
+      installer,
+      profile: 'dsh-app',
+      installIntents: new InstallIntentStore(
+        () => ({ profile: 'dsh-app', profileDir: join(home, 'profiles', 'dsh-app') }),
+        hold,
+      ),
+    }
+  }
+
   it('reports a clean install with its output and restart hint', async () => {
     profileWith({})
     const installer = stubInstaller({ result: { version: '1.2.3', output: 'Done in 2s\n' } })
-    const result = await installPluginByName(installer, 'dsh-app', 'dsh-remote')
+    const result = await installPluginByName(installDeps(installer), 'dsh-remote')
     assert.deepEqual(result, {
       ok: true,
       kind: 'plugin',
@@ -139,7 +166,7 @@ describe('installPluginByName', () => {
   it('carries blocked build scripts through for the allow-and-retry path', async () => {
     profileWith({})
     const installer = stubInstaller({ result: { version: '1.2.3', output: 'x', blockedBuilds: ['esbuild'] } })
-    const result = await installPluginByName(installer, 'dsh-app', 'dsh-remote')
+    const result = await installPluginByName(installDeps(installer), 'dsh-remote')
     assert.deepEqual(result.blockedBuilds, ['esbuild'])
   })
 
@@ -149,7 +176,7 @@ describe('installPluginByName', () => {
     const installer = {
       install: async () => { called = true; return { version: '1.0.0', output: '' } },
     } as unknown as PluginInstaller
-    const result = await installPluginByName(installer, 'dsh-app', '../evil')
+    const result = await installPluginByName(installDeps(installer), '../evil')
     assert.equal(result.ok, false)
     assert.equal(result.code, 'pkg.invalid')
     assert.equal(called, false, 'the executor must never see an unvalidated name')
@@ -163,7 +190,7 @@ describe('installPluginByName', () => {
     const installer = {
       install: async () => { called = true; return { version: '1.0.0', output: '' } },
     } as unknown as PluginInstaller
-    const result = await installPluginByName(installer, 'dsh-app', 'dsh-remote')
+    const result = await installPluginByName(installDeps(installer), 'dsh-remote')
     assert.equal(result.ok, false)
     assert.equal(result.code, 'install.alreadyInstalled')
     assert.equal(result.installed, false)
@@ -174,7 +201,7 @@ describe('installPluginByName', () => {
   it('turns an executor failure into a refusal rather than a throw', async () => {
     profileWith({})
     const installer = stubInstaller({ error: new Error('pnpm exited 1') })
-    const result = await installPluginByName(installer, 'dsh-app', 'dsh-remote')
+    const result = await installPluginByName(installDeps(installer), 'dsh-remote')
     assert.equal(result.ok, false)
     assert.equal(result.id, 'dsh-remote')
     assert.match(result.reason!, /pnpm exited 1/)
@@ -184,7 +211,16 @@ describe('installPluginByName', () => {
 describe('registerMarketInstallTools', () => {
   it('registers all three write tools and disposes them', () => {
     const { ctx, tools } = stubCtx()
-    const dispose = registerMarketInstallTools(ctx, { installer: stubInstaller({ result: {} }), profile: 'dsh-app' })
+    const installer = stubInstaller({ result: {} })
+    const hold = new CatalogHold(() => null)
+    const dispose = registerMarketInstallTools(ctx, {
+      installer,
+      profile: 'dsh-app',
+      installIntents: new InstallIntentStore(
+        () => ({ profile: 'dsh-app', profileDir: join(home, 'profiles', 'dsh-app') }),
+        hold,
+      ),
+    })
     assert.deepEqual([...tools.keys()].sort(), [...INSTALL_TOOL_NAMES].sort())
     dispose()
     assert.equal(tools.size, 0)

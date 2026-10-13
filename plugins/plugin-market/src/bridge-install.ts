@@ -8,10 +8,13 @@
  * the conversation and an install from the drawer are one path with one set of
  * checks:
  *
- *   - a plugin install resolves the exact version from the registry, refuses a
- *     name that is already installed, and goes through the serialized CLI
- *     executor (installer.ts) — so it can never run beside a panel action,
- *     and it targets the profile the app actually boots;
+ *   - a plugin install mints and consumes the SAME one-shot install intent the
+ *     panel's `POST /install` rides (install-intent.ts): the host resolves the
+ *     name against its own catalog, so the package that reaches the chain is
+ *     the host's reading of a row the catalog carries — never the caller's
+ *     string. It refuses a name that is already installed, and goes through the
+ *     serialized CLI executor (installer.ts), so it can never run beside a
+ *     panel action and it targets the profile the app actually boots;
  *   - a skill install is the same zip download, SKILL.md check and atomic
  *     rename into `$DSH_HOME/skills` the panel's button performs.
  *
@@ -27,6 +30,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { MarketExecutionError, MarketValidationError } from './errors.ts'
 import type { PluginInstaller } from './installer.ts'
+import type { InstallIntentStore } from './install-intent.ts'
 import { validatePackageName } from './npm.ts'
 import { readInstalled } from './routes.ts'
 import { installSkill, parseSkillSlug, uninstallSkill } from './skills.ts'
@@ -133,6 +137,14 @@ export async function uninstallSkillBySlug(slug: unknown): Promise<InstallOutcom
  * One plugin install, over the panel's own executor: registry-resolved exact
  * version, serialized CLI run.
  *
+ * It rides the SAME one-shot intent lane the panel's `POST /install` rides
+ * (`install-intent.ts`), in process: the host resolves the name it was handed
+ * against its own catalog and mints an intent, then consumes it — so the
+ * package that reaches the CLI is the host's reading of its catalog, and every
+ * check the panel's path applies (the row exists, it has an install target, the
+ * token is one-shot, unexpired and minted for this profile) applies here too.
+ * An install cannot be issued from a name the catalog does not carry.
+ *
  * The same-name check the panel applies runs here first, and it is STRICTER
  * than the panel's: the panel may replace an existing install once a human
  * confirms, while this tool never replaces anything. A name that is already
@@ -140,21 +152,20 @@ export async function uninstallSkillBySlug(slug: unknown): Promise<InstallOutcom
  * version and origin named, so the model tells the user "already installed"
  * instead of silently overwriting a local or Git development copy.
  *
- * @param installer - the serialized executor bound to the booted profile.
- * @param profile - the profile whose manifest backs the installed check.
+ * @param deps - the serialized executor, the profile, and the intent lane the
+ *   two halves share.
  * @param pkg - the caller's raw package name.
  * @returns the outcome; a refusal is returned, never thrown.
  */
 export async function installPluginByName(
-  installer: PluginInstaller,
-  profile: string,
+  deps: MarketInstallDeps,
   pkg: unknown,
 ): Promise<InstallOutcome> {
   const raw = typeof pkg === 'string' ? pkg.trim() : ''
   try {
     const name = validatePackageName(raw)
-    const profileDir = join(resolveDshHome(), 'profiles', profile)
-    const current = readInstalled(profileDir, profile).packages.find(pkg => pkg.name === name)
+    const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
+    const current = readInstalled(profileDir, deps.profile).packages.find(pkg => pkg.name === name)
     if (current !== undefined) {
       return {
         ok: false,
@@ -168,11 +179,27 @@ export async function installPluginByName(
           + 'existing install — the market panel offers that, with a confirmation',
       }
     }
-    const result = await installer.install(name)
+    const intent = deps.installIntents.consume(deps.installIntents.issue({ package: name }, false).token)
+    if (intent.gitTarget !== null) {
+      // The row installs from GitHub, and this tool resolves npm versions only:
+      // installing the npm name here would be a different source than the one
+      // the catalog row names. The panel installs a git row; say so.
+      return {
+        ok: false,
+        kind: 'plugin',
+        id: name,
+        installed: false,
+        restartHint: false,
+        code: 'install.gitOnly',
+        reason: `"${name}" installs from its GitHub source (${intent.gitTarget}); install it from the market `
+          + 'panel, which shows the confirmation for a git install',
+      }
+    }
+    const result = await deps.installer.install(intent.package)
     return {
       ok: true,
       kind: 'plugin',
-      id: name,
+      id: intent.package,
       installed: true,
       restartHint: true,
       output: result.output,
@@ -203,6 +230,8 @@ export interface MarketInstallDeps {
   readonly installer: PluginInstaller
   /** Profile name whose manifest backs the already-installed check. */
   readonly profile: string
+  /** The one-shot install-intent lane shared with the panel's own route. */
+  readonly installIntents: InstallIntentStore
 }
 
 /** The install/uninstall tool names, exported for the roster test. */
@@ -218,7 +247,7 @@ export const INSTALL_TOOL_NAMES = ['market_install_skill', 'market_uninstall_ski
  * they were called directly.
  *
  * @param ctx - the host plugin context (must expose `tools`).
- * @param deps - collaborators (the serialized installer).
+ * @param deps - collaborators (the serialized installer + the shared intent lane).
  * @returns disposer removing every registration.
  */
 export function registerMarketInstallTools(ctx: { tools: { register(definition: unknown): () => void } }, deps: MarketInstallDeps): () => void {
@@ -258,7 +287,7 @@ export function registerMarketInstallTools(ctx: { tools: { register(definition: 
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'market_install_plugin',
-    description: 'Install a dsh plugin from the plugin catalog into the profile this app boots. Call this ONLY after the user has chosen a plugin — name the exact package you are about to install in your reply and act on their instruction. Pass the npm package name `market_search` returned. It refuses when a plugin of that name is already installed, whatever its origin, instead of replacing it — installing over an existing copy is the market panel\u2019s job, where a confirmation is shown. A successful install needs a restart to take effect; say so in one short sentence.',
+    description: 'Install a dsh plugin from the plugin catalog into the profile this app boots. Call this ONLY after the user has chosen a plugin — name the exact package you are about to install in your reply and act on their instruction. Pass the npm package name `market_search` returned; the name must be one that catalog carried, because the install is resolved against the catalog row rather than the name alone. It refuses when a plugin of that name is already installed, whatever its origin, instead of replacing it — installing over an existing copy is the market panel\u2019s job, where a confirmation is shown — and it refuses a row that installs from GitHub, which only the panel can install. A successful install needs a restart to take effect; say so in one short sentence.',
     parameters: {
       package: {
         type: 'string',
@@ -268,7 +297,7 @@ export function registerMarketInstallTools(ctx: { tools: { register(definition: 
     },
     output: OUTCOME_OUTPUT,
     async execute(args: Record<string, unknown>): Promise<JsonValue> {
-      return await installPluginByName(deps.installer, deps.profile, args.package)
+      return await installPluginByName(deps, args.package)
     },
   })))
 

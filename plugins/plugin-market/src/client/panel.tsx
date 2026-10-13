@@ -32,11 +32,12 @@ import { conversationRoot, useConversationBox, type ConversationBox } from './co
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { normalizeNpmName } from '../identity.ts'
 import { marketApi, MarketApiError, PAGED_SOURCE_HOST } from './api.ts'
-import type { CatalogEntry, CatalogValue, InstalledPackage, SourcesValue, UpdateValue } from './api.ts'
+import type { CatalogEntry, CatalogValue, InstallIntentValue, InstalledPackage, SourcesValue, UpdateValue } from './api.ts'
 import { categoryOptionsOf, searchEntries } from '../catalog-filter.ts'
 import { CategoryStrip } from './category-strip.tsx'
 import { SkillsTab } from './skills-tab.tsx'
 import { ConfirmDialog } from './confirm-dialog.tsx'
+import { installFromRow } from './install-flow.ts'
 import { blockedRetryTarget, installedOwnerBadge, installedRepoIndex, sameNameStateOf, updatablePackages, mergeUpdateFacts } from './installed-projection.ts'
 import { type HostText } from '../errors.ts'
 import { NS } from './locales.ts'
@@ -373,10 +374,16 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
   const [confirmTarget, setConfirmTarget] = useState<InstalledPackage | null>(null)
   /**
    * The entry an install confirm is open for, with the cross-origin flag the
-   * card computed: it upgrades the confirm copy and turns the request into
-   * the force-confirmed replacement the host's gate requires.
+   * card computed (it upgrades the confirm copy and asks the host for the
+   * force-confirmed replacement) and the intent minted when the dialog opened.
+   * The token inside is what the confirm submits: the install acts on the row
+   * this dialog is about, not on anything the renderer names at click time.
    */
-  const [installTarget, setInstallTarget] = useState<{ readonly entry: CatalogEntry, readonly crossOrigin: boolean } | null>(null)
+  const [installTarget, setInstallTarget] = useState<{
+    readonly entry: CatalogEntry
+    readonly crossOrigin: boolean
+    readonly intent: Promise<InstallIntentValue>
+  } | null>(null)
   // Read once per panel mount: a same-day dismissal survives closing and
   // reopening the panel, a new day asks again.
   const [updatesDismissed, setUpdatesDismissed] = useState(isUpdatesBannerDismissed)
@@ -564,19 +571,48 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
   const blockedStripFields = (blockedBuilds: readonly string[] | undefined, retryPackage: string | undefined) =>
     (blockedBuilds !== undefined ? { blockedBuilds, retryPackage } : {})
 
-  const install = async (target: { readonly entry: CatalogEntry, readonly crossOrigin: boolean }): Promise<void> => {
-    const { entry, crossOrigin } = target
+  /**
+   * Open the install confirmation for one catalog row, minting its intent NOW.
+   *
+   * Minting at open (rather than at the confirm click) is what makes the token
+   * a binding rather than a formality: the host resolves the row while the user
+   * is reading the dialog, and the confirm consumes exactly that — the row on
+   * screen and the row the install acts on are one object. The confirm copy
+   * below still derives from the entry, so a token that dies with the dialog
+   * open costs one re-mint of the same row and nothing else (see
+   * `installFromRow`, which owns that retry).
+   *
+   * A mint failure is deliberately NOT shown here. The confirm retries the mint,
+   * so a refusal (a row the host's catalog no longer carries, a row with no
+   * install target, a name the install chain would reject) reaches the user
+   * through the same error strip an install failure always used.
+   */
+  const openInstallConfirm = (entry: CatalogEntry, crossOrigin: boolean): void => {
+    const intent = marketApi.installIntent(entry.id, crossOrigin ? true : undefined)
+    // Claim the rejection now: the confirm handler may await this promise long
+    // after it settles, and an unobserved rejection would surface in the
+    // console while the dialog is still open.
+    void intent.catch(() => undefined)
+    setInstallTarget({ entry, crossOrigin, intent })
+  }
+
+  const install = async (target: {
+    readonly entry: CatalogEntry
+    readonly crossOrigin: boolean
+    readonly intent: Promise<InstallIntentValue>
+  }): Promise<void> => {
+    const { entry, crossOrigin, intent } = target
     const gitTarget = entry.gitTarget
     setBusyPackage(entry.package)
     setInstallTarget(null)
     setStrip(null)
     try {
-      // A cross-origin replacement rides the force path: the flag satisfies
-      // the host's same-name gate, and the entry's repo key lets the gate's
-      // refusal/log name both sides of the comparison.
-      const result = gitTarget !== undefined
-        ? await marketApi.installGit(gitTarget, entry.package, crossOrigin ? true : undefined, entry.repoKey)
-        : await marketApi.install(entry.package, undefined, crossOrigin ? true : undefined, entry.repoKey)
+      // The token minted when this dialog opened is what this call submits; a
+      // mint that failed then, or a token that died while the dialog stood open
+      // (the TTL, a later mint's eviction), is re-minted once for the same row
+      // id — the host re-resolves it, so nothing about the install target comes
+      // from the renderer (see install-flow.ts).
+      const result = await installFromRow(intent, entry.id, crossOrigin ? true : undefined)
       void loadInstalled()
       const replacedNote = result.replacedLocal === true
         ? t('mkt.install.replacedLocal')
@@ -840,7 +876,7 @@ function MarketPanel({ onClose, t, box }: { onClose: () => void, t: Translate, b
               cacheInfo={cacheInfo}
               onRefresh={() => { void refreshCatalog() }}
               onGoSources={() => { setTab('sources') }}
-              onInstall={(entry, crossOrigin) => { setInstallTarget({ entry, crossOrigin }) }}
+              onInstall={openInstallConfirm}
               onUpdate={(pkg) => { void updatePackage(pkg) }}
               t={t}
             />

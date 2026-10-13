@@ -5,6 +5,12 @@
  * key appended to files without one, YAML-safety quoting for scoped names,
  * and idempotency at both the pure and the file level.
  *
+ * The last block goes through the REAL routes (`POST /allow-build` beside
+ * `POST /install`): the whitelist retry is authorized against the host's own
+ * record of the installs it ran, so a package name the host never attempted —
+ * and a name pnpm never reported — must be refused before the file is touched,
+ * while the retry for a blocked install must keep working.
+ *
  * @module plugin-market/tests/build-allow
  */
 
@@ -13,7 +19,12 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
-import { MarketValidationError } from '../src/errors.ts'
+import type { CatalogEntry } from '../src/catalog.ts'
+import { MarketBlockedBuildError, MarketValidationError } from '../src/errors.ts'
+import { CatalogHold, InstallIntentStore } from '../src/install-intent.ts'
+import type { PluginInstaller } from '../src/installer.ts'
+import { blockedBuildsOf } from '../src/installer.ts'
+import { registerMarketRoutes, ROUTE_PREFIX, type MarketDeps } from '../src/routes.ts'
 import { allowBuilds, withAllowedBuilds } from '../src/build-allow.ts'
 
 /** A realistic user-maintained workspace file the merge must not disturb. */
@@ -124,5 +135,186 @@ describe('allowBuilds (file level)', () => {
       readdirSync(join(path, '..')).filter(name => name.includes('.tmp')),
       [],
     )
+  })
+})
+
+// ── Route level: the whitelist retry is authorized by the HOST's own record ──
+
+/** The answer envelope `POST /allow-build` and its neighbours share. */
+interface Envelope {
+  ok: boolean
+  value?: Record<string, unknown>
+  error?: { code: string, host?: { code: string }, blockedBuilds?: readonly string[] }
+}
+
+/** The npm row every install below targets. */
+const ROW: CatalogEntry = {
+  id: 'row-npm',
+  package: 'dsh-remote',
+  name: 'Remote',
+  version: '1.2.3',
+  description: 'a row',
+  homepage: 'https://github.com/owner/dsh-remote',
+}
+
+/** Real pnpm wording for a blocked run (the pnpm ≤10 ignored-list form). */
+function pnpmBlocked(name: string): string {
+  return `Ignored build scripts: ${name}. Run "pnpm approve-builds" to pick which dependencies should be allowed to run scripts`
+}
+
+describe('POST /allow-build (the host’s own blocked-attempt record)', () => {
+  let home: string
+  let profileDir: string
+  let workspacePath: string
+  let previousHome: string | undefined
+  let installs: string[]
+  /** The pnpm output of each successive CLI run; exhausted = a clean run. */
+  let script: string[]
+  let post: (path: string, body: unknown) => Promise<{ status: number, body: Envelope }>
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'dsh-market-allow-route-'))
+    previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    profileDir = join(home, 'profiles', 'web')
+    workspacePath = join(profileDir, 'pnpm-workspace.yaml')
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dependencies: {} }), 'utf8')
+
+    installs = []
+    script = []
+    // The executor is scripted, but the ERROR is built the way the real one
+    // builds it: the blocked names come from `blockedBuildsOf` over real pnpm
+    // wording, so what the ledger records is what a blocked run produces.
+    const installer = {
+      install: async (pkg: unknown) => {
+        installs.push(String(pkg))
+        const output = script.shift()
+        if (output !== undefined) {
+          throw new MarketBlockedBuildError({
+            code: 'install.commandFailedLog',
+            params: { log: output },
+            text: `the command failed:\n${output}`,
+          }, blockedBuildsOf(output) ?? [])
+        }
+        return { version: '9.9.9', output: 'ok' }
+      },
+      installGit: async (target: unknown) => ({ version: String(target), output: 'ok' }),
+      exclusive: async (job: () => Promise<void> | void) => { await job() },
+    } as unknown as PluginInstaller
+
+    const hold = new CatalogHold(() => null)
+    hold.remember({ entries: [ROW], at: 42, sourceOf: () => null })
+    const store = new InstallIntentStore(() => ({ profile: 'web', profileDir }), hold)
+
+    const routes = new Map<string, (request: Request) => Promise<Response>>()
+    const connectionFetch = {
+      register(route: { path: string, fetch: (request: Request) => Promise<Response> }) {
+        routes.set(route.path, route.fetch)
+        return Promise.resolve()
+      },
+    }
+    const deps: MarketDeps = {
+      sourcesPath: join(home, 'sources.json'),
+      catalogCachePath: join(home, 'catalog-cache.json'),
+      installer,
+      profile: 'web',
+      installIntents: store,
+    }
+    registerMarketRoutes(connectionFetch as never, deps, () => undefined)
+
+    post = async (path, body) => {
+      const handler = routes.get(path)
+      assert.ok(handler !== undefined, `no route registered for ${path}`)
+      const response = await handler(new Request(`dsh-app://app${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }))
+      return { status: response.status, body: await response.json() as Envelope }
+    }
+  })
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  /** One real install attempt of the row the panel would show. */
+  async function installRow(): Promise<Envelope> {
+    const minted = await post(`${ROUTE_PREFIX}/install-intent`, { entryId: ROW.id })
+    assert.equal(minted.status, 200)
+    const token = minted.body.value!.token as string
+    return (await post(`${ROUTE_PREFIX}/install`, { token })).body
+  }
+
+  it('refuses a package the host never attempted, and writes no whitelist', async () => {
+    const refused = await post(`${ROUTE_PREFIX}/allow-build`, {
+      package: 'totally-arbitrary-pkg',
+      packages: ['totally-arbitrary-pkg'],
+    })
+    assert.equal(refused.status, 400)
+    assert.equal(refused.body.error?.host?.code, 'allowBuild.notBlockedInstall')
+    assert.deepEqual(installs, [], 'the executor must never be reached')
+    assert.equal(existsSync(workspacePath), false, 'pnpm-workspace.yaml must not be created')
+  })
+
+  it('still performs the retry after a blocked install — the reason the route exists', async () => {
+    script.push(pnpmBlocked('sharp'))
+    const blocked = await installRow()
+    assert.equal(blocked.ok, false)
+    assert.deepEqual(blocked.error?.blockedBuilds, ['sharp'], 'the panel learns what to offer the retry for')
+    assert.deepEqual(installs, ['dsh-remote'])
+    assert.equal(existsSync(workspacePath), false, 'a failed install writes no whitelist')
+
+    const retried = await post(`${ROUTE_PREFIX}/allow-build`, {
+      package: 'dsh-remote',
+      packages: ['sharp'],
+    })
+    assert.equal(retried.status, 200)
+    assert.deepEqual(retried.body.value?.allowed, ['sharp'])
+    assert.deepEqual(installs, ['dsh-remote', 'dsh-remote'], 'the retry re-runs the install the host ran')
+    assert.equal(readFileSync(workspacePath, 'utf8'), withAllowedBuilds(null, ['sharp']))
+  })
+
+  it('refuses a whitelist name pnpm never reported', async () => {
+    script.push(pnpmBlocked('sharp'))
+    await installRow()
+    const refused = await post(`${ROUTE_PREFIX}/allow-build`, {
+      package: 'dsh-remote',
+      packages: ['totally-arbitrary-pkg'],
+    })
+    assert.equal(refused.status, 400)
+    assert.equal(refused.body.error?.host?.code, 'allowBuild.notReported')
+    assert.deepEqual(installs, ['dsh-remote'], 'a refused request reaches no executor')
+    assert.equal(existsSync(workspacePath), false)
+  })
+
+  it('refuses a target that is not the install the host ran, reported name or not', async () => {
+    script.push(pnpmBlocked('sharp'))
+    await installRow()
+    const refused = await post(`${ROUTE_PREFIX}/allow-build`, {
+      package: 'some-other-pkg',
+      packages: ['sharp'],
+    })
+    assert.equal(refused.status, 400)
+    assert.equal(refused.body.error?.host?.code, 'allowBuild.notBlockedInstall')
+    assert.deepEqual(installs, ['dsh-remote'])
+  })
+
+  it('keeps a retry retryable: the retry is recorded like any other host install', async () => {
+    script.push(pnpmBlocked('sharp'), pnpmBlocked('native-x'))
+    await installRow()
+    const first = await post(`${ROUTE_PREFIX}/allow-build`, { package: 'dsh-remote', packages: ['sharp'] })
+    assert.equal(first.status, 502)
+    assert.deepEqual(first.body.error?.blockedBuilds, ['native-x'])
+
+    const second = await post(`${ROUTE_PREFIX}/allow-build`, { package: 'dsh-remote', packages: ['native-x'] })
+    assert.equal(second.status, 200)
+    assert.deepEqual(installs, ['dsh-remote', 'dsh-remote', 'dsh-remote'])
+    const workspace = readFileSync(workspacePath, 'utf8')
+    assert.ok(workspace.includes('  - sharp\n'), workspace)
+    assert.ok(workspace.includes('  - native-x\n'), workspace)
   })
 })

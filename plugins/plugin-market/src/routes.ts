@@ -29,24 +29,38 @@
  *   POST /toggle           — {package, entryId, enable}: add/remove a disable
  *                            row for the entry id in the profile's own patch
  *                            layer (managed marker block; hot-reloaded)
- *   POST /install          — {package, version?, force?, repoKey?}: registry-resolve the
- *                            exact version, then run the kernel's plugin CLI
- *                            `add`. The npm name is not an identity: a
- *                            same-name collision is the same plugin only
- *                            when the installed package's repo key matches
- *                            the incoming one (`repoKey`, the catalog
- *                            entry's claim, re-derived server-side). A
- *                            local/git dev install or a repo mismatch —
- *                            an unknown side included — requires
- *                            `force: true`, and the refusal plus the
- *                            force-confirmed override name both repos;
- *                            responses carry `blockedBuilds` when pnpm
- *                            skipped build scripts
+ *   POST /install-intent   — {entryId, force?}: mint the ONE-SHOT install
+ *                            intent for the catalog row that id names,
+ *                            resolved inside the host's OWN catalog (see
+ *                            install-intent.ts). The caller names a row, never
+ *                            a package or a version; the answer is
+ *                            {token, expiresAt}
+ *   POST /install          — {token}: consume the intent and run the install
+ *                            chain it bound — registry-resolve the exact
+ *                            version, then the kernel's plugin CLI `add`. The
+ *                            npm name is not an identity: a same-name
+ *                            collision is the same plugin only when the
+ *                            installed package's repo key matches the
+ *                            incoming one (`repoKey`, read from the resolved
+ *                            row by the host). A local/git dev install or a
+ *                            repo mismatch — an unknown side included —
+ *                            requires the intent's `force: true`, and the
+ *                            refusal plus the force-confirmed override name
+ *                            both repos; responses carry `blockedBuilds`
+ *                            when pnpm skipped build scripts. Any other
+ *                            field of the body is ignored: the package,
+ *                            version, force flag and repo key are the
+ *                            intent's, not the caller's
  *   POST /allow-build      — {packages, package}: merge the packages into the
  *                            profile's pnpm-workspace.yaml
  *                            `onlyBuiltDependencies` whitelist, then re-run
  *                            the install for `package` (the retry for a
- *                            blocked-builds result)
+ *                            blocked-builds result). Authorized against the
+ *                            host's OWN record of the installs it ran and
+ *                            pnpm's own report about them, so a target it never
+ *                            attempted — and a name pnpm never named — is
+ *                            refused before the whitelist is touched
+ *                            (build-allow.ts `BlockedBuildLedger`)
  *   POST /uninstall        — {package}: kernel plugin CLI `remove`
  *   POST /update           — {package}: verify the package is installed AND
  *                            outdated, then re-run the install chain at the
@@ -83,9 +97,14 @@ import {
 import { installSkill, listInstalledSkills, searchSkills, skillDetail, uninstallSkill } from './skills.ts'
 import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
 import { repoKeyOf, sameOrigin as sameRepoOrigin } from './identity.ts'
-import type { PluginInstaller } from './installer.ts'
+import type { CliRunResult, PluginInstaller } from './installer.ts'
+import {
+  CatalogHold,
+  InstallIntentStore,
+  type CatalogBuild,
+} from './install-intent.ts'
 import { compareVersions, latestVersionOf, latestVersionsOf, validatePackageName } from './npm.ts'
-import { allowBuilds } from './build-allow.ts'
+import { allowBuilds, BlockedBuildLedger } from './build-allow.ts'
 import {
   disabledIdsOf,
   insertedEntryIdOf,
@@ -120,6 +139,12 @@ export interface MarketDeps {
   readonly installer: PluginInstaller
   /** Profile whose package.json backs /installed and the CLI --profile. */
   readonly profile: string
+  /**
+   * The one-shot install-intent lane (`/install-intent` → `/install`). ONE
+   * instance serves the whole host half, so a token minted here is also the
+   * lane the model-facing tool consumes from.
+   */
+  readonly installIntents: InstallIntentStore
   /**
    * Registry `latest` prober for the update check; defaults to the cached npm
    * resolver. Injectable so tests never touch the network.
@@ -607,6 +632,95 @@ function isCacheFresh(cache: CatalogCache, sources: readonly string[], now: numb
   return sources.every(url => cache.sources[url] !== undefined)
 }
 
+/**
+ * Project catalog rows into the shape an install intent resolves against: the
+ * rows plus, per row, which directory source contributed it.
+ *
+ * Attribution walks `sources` in the order the merge used — the first source
+ * that carries a package owns that row — so the directory a token names is the
+ * one that actually supplied the row the user saw. A build with no cache behind
+ * it (the bundled offline snapshot) attributes nothing: an unknown origin is
+ * reported as unknown, never guessed.
+ *
+ * Exported because the model bridge feeds the same hold with the build its own
+ * search just made: two readers of one catalog must attribute rows by one rule.
+ */
+export function catalogBuildOf(
+  entries: readonly CatalogEntry[],
+  at: number | undefined,
+  sources: readonly string[],
+  cache: CatalogCache | null,
+): CatalogBuild {
+  return {
+    entries,
+    at: at ?? null,
+    sourceOf: cache === null ? () => null : (pkg: string) => {
+      for (const url of sources) {
+        const state = cache.sources[url]
+        if (state !== undefined && state.entries.some(entry => entry.package === pkg)) return url
+      }
+      return null
+    },
+  }
+}
+
+/**
+ * The host's own catalog as a disk read — the fallback for a process that has
+ * served nothing yet (a model-tool install in a session where the panel was
+ * never opened). Same order the panel's own chain uses, minus the network: the
+ * persisted cache in the current source order, then the bundled snapshot. Both
+ * are the host's data; neither is the caller's claim.
+ */
+function readCatalogBuild(
+  paths: { readonly sourcesPath: string, readonly catalogCachePath: string },
+  log: (message: string) => void,
+): CatalogBuild | null {
+  const sources = loadSources(paths.sourcesPath, log)
+  const cache = loadCatalogCache(paths.catalogCachePath, log)
+  if (cache !== null) {
+    return catalogBuildOf(cachePayload(cache, sources, true).plugins, cache.fetchedAt, sources, cache)
+  }
+  const snapshot = loadSnapshot()
+  if (snapshot === null) return null
+  const generated = snapshot.snapshotAt === undefined ? Number.NaN : Date.parse(snapshot.snapshotAt)
+  return {
+    entries: withRepoKeys([...snapshot.entries]),
+    at: Number.isFinite(generated) ? generated : null,
+    sourceOf: () => null,
+  }
+}
+
+/**
+ * Build the install-intent lane: the one-shot store plus the hold over the
+ * host's own catalog. The caller creates ONE and hands it to both the routes
+ * and the model-facing install tool, so a token minted by the panel is
+ * consumable in the conversation and vice versa.
+ *
+ * @param deps - the host's own paths (sources, catalog cache), the target
+ *   profile, and the diagnostic logger.
+ * @returns the store; `store.hold` is the catalog handle the readers feed.
+ */
+export function createInstallIntents(deps: {
+  readonly profile: string
+  readonly sourcesPath: string
+  readonly catalogCachePath: string
+  readonly log: (message: string) => void
+  /** Clock override; tests pin it to test the expiry fence. */
+  readonly now?: () => number
+  /** Token generator override; tests pin it to name a token instead of guessing one. */
+  readonly mintToken?: () => string
+}): InstallIntentStore {
+  const paths = { sourcesPath: deps.sourcesPath, catalogCachePath: deps.catalogCachePath }
+  const hold = new CatalogHold(() => readCatalogBuild(paths, deps.log))
+  return new InstallIntentStore(
+    () => ({ profile: deps.profile, profileDir: join(resolveDshHome(), 'profiles', deps.profile) }),
+    hold,
+    deps.now,
+    deps.mintToken,
+  )
+}
+
+
 /** Collaborators of the catalog resolution, injectable for tests. */
 export interface CatalogResolveDeps {
   readonly sources: readonly string[]
@@ -857,6 +971,43 @@ export function registerMarketRoutes(
   let toggleChain: Promise<unknown> = Promise.resolve()
 
   /**
+   * The host's own record of installs it ran whose build scripts pnpm skipped.
+   * `POST /allow-build` authorizes against this and nothing else (see
+   * BlockedBuildLedger), so the ledger is fed by every install this host runs —
+   * on success (pnpm warns and exits 0) and on failure (the blocked-builds
+   * error) alike, which are the two ways the panel learns to offer the retry.
+   */
+  const allowBuildLedger = new BlockedBuildLedger()
+
+  /**
+   * Run one install of this host's own and record a blocked-builds outcome
+   * before returning or rethrowing it.
+   *
+   * `target` is the package the HOST resolved (`undefined` for a git install:
+   * the retry reinstalls from the registry, which a git install never came
+   * from, so nothing about it is recorded). Recording here — rather than at
+   * each response — is what keeps the ledger consistent with the one place
+   * `blockedBuilds` can come from.
+   */
+  const runInstall = async (
+    target: string | undefined,
+    run: () => Promise<CliRunResult>,
+  ): Promise<CliRunResult> => {
+    try {
+      const result = await run()
+      if (target !== undefined && result.blockedBuilds !== undefined) {
+        allowBuildLedger.record(deps.profile, target, result.blockedBuilds)
+      }
+      return result
+    } catch (error: unknown) {
+      if (target !== undefined && error instanceof MarketBlockedBuildError) {
+        allowBuildLedger.record(deps.profile, target, error.blockedBuilds)
+      }
+      throw error
+    }
+  }
+
+  /**
    * One toggle job: validate, then add/remove the disable row in the profile
    * patch layer. The kernel's live patch reload applies the change without a
    * restart. Suite packages are refused — the shell's overlay re-applies them
@@ -930,17 +1081,31 @@ export function registerMarketRoutes(
       fetch: async (request) => {
         const sources = loadSources(deps.sourcesPath, log)
         try {
+          // The cache read is hoisted out of `resolveCatalog` because the
+          // answer is also the attribution source of the build remembered
+          // below: which directory contributed each row must come from the same
+          // snapshot the rows do.
+          const heldCache = loadCatalogCache(deps.catalogCachePath, log)
           const resolution = await resolveCatalog({
             sources,
             // ?refresh=1 is the panel's force reload: skip the cache and pay
             // the live fetch even when a fresh snapshot exists.
             refresh: wantsRefresh(request.url),
             fetchSource: fetchCatalog,
-            readCache: () => loadCatalogCache(deps.catalogCachePath, log),
+            readCache: () => heldCache,
             loadSnapshot,
             now: Date.now,
           })
           if (resolution.cacheToWrite !== null) persistCache(resolution.cacheToWrite)
+          // The answer becomes the host's own catalog for install-intent
+          // issuance: an intent can only ever name a row from a build the host
+          // itself made and served.
+          deps.installIntents.hold.remember(catalogBuildOf(
+            resolution.payload.plugins,
+            resolution.payload.cachedAt,
+            sources,
+            resolution.cacheToWrite ?? heldCache,
+          ))
           return ok(resolution.payload)
         } catch {
           // fetchCatalog never rejects across sources; this is a last-resort
@@ -978,52 +1143,71 @@ export function registerMarketRoutes(
       },
     }),
     connectionFetch.register({
+      path: `${ROUTE_PREFIX}/install-intent`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          // The caller names a catalog ROW (`entryId`) and whether it has
+          // confirmed a same-name replacement (`force`); everything the
+          // install chain will act on is read from the host's own catalog
+          // inside `issue`, which also refuses a row that is missing,
+          // uninstallable, or carries a target this host cannot verify.
+          const body = await readJsonBody(request)
+          const issued = deps.installIntents.issue({ entryId: body.entryId }, body.force === true)
+          return ok({ token: issued.token, expiresAt: issued.expiresAt })
+        } catch (error: unknown) {
+          const mapped = errorStatus(error)
+          return fail(mapped.status, mapped.code, mapped.host)
+        }
+      },
+    }),
+    connectionFetch.register({
       path: `${ROUTE_PREFIX}/install`,
       methods: ['POST'],
       requestBody: 'buffered',
       fetch: async (request) => {
         try {
           const body = await readJsonBody(request)
-          // A git install carries `gitTarget` INSTEAD of a package name: the
-          // target names a repository, whose manifest dependency name only
-          // exists AFTER the CLI reads it — so the same-name guard below
-          // cannot key on `name` for this path. It keys on the repo identity
-          // instead: the incoming entry's `repoKey` (the panel sends the
-          // catalog claim; repoKeyOf re-derives it) is compared against every
-          // installed package's own repo key, and a match with a DIFFERENT
-          // source or a same-name stranger requires the explicit `force`
-          // confirmation, exactly like the npm path's gate.
-          const isGit = typeof body.gitTarget === 'string' && body.gitTarget !== ''
-          const profileDir = join(resolveDshHome(), 'profiles', deps.profile)
-          const installed = readInstalled(profileDir, deps.profile).packages
+          // The body carries ONE field: `token`. Package, declared version,
+          // force flag, repo key and target profile are the facts the host
+          // bound at issuance (install-intent.ts) — consuming it is also the
+          // one-shot check, so a replayed body is refused here whatever the
+          // first attempt did.
+          const intent = deps.installIntents.consume(body.token)
+          // A git intent carries `gitTarget` INSTEAD of an npm name: the target
+          // names a repository, whose manifest dependency name only exists
+          // AFTER the CLI reads it — so the same-name guard below cannot key on
+          // `name` for this path. It keys on the repo identity instead, already
+          // normalized by the host at issuance, and a match with a DIFFERENT
+          // source or a same-name stranger requires the explicit `force` the
+          // user confirmed, exactly like the npm path's gate.
+          const isGit = intent.gitTarget !== null
+          const installed = readInstalled(intent.profileDir, intent.profile).packages
           let gate: ReturnType<typeof installGateOf>
           let current: InstalledPackageView | undefined
           if (isGit) {
-            const incomingRepoKey = repoKeyOf(typeof body.repoKey === 'string' ? body.repoKey : null)
-            if (incomingRepoKey === null) {
-              throw new MarketValidationError({
-                code: 'install.gitTargetInvalid',
-                text: 'a git install requires the catalog entry repoKey (the repository identity)',
-              })
-            }
+            const incomingRepoKey = intent.repoKey
             // Same repo already installed → allow (a re-pin of the same
             // source). A same-name package from a DIFFERENT side (npm name or
             // another repo) is the stranger the gate exists for.
             current = installed.find(pkg => pkg.repoKey !== undefined && sameRepoOrigin(pkg.repoKey, incomingRepoKey))
-              ?? installed.find(pkg => pkg.name === body.package)
-            gate = installGateOf(current, incomingRepoKey, body.force === true, true)
+              ?? installed.find(pkg => pkg.name === intent.package)
+            gate = installGateOf(current, incomingRepoKey, intent.force, true)
           } else {
-            const name = validatePackageName(body.package)
-            current = installed.find(pkg => pkg.name === name)
-            const incomingRepoKey = repoKeyOf(typeof body.repoKey === 'string' ? body.repoKey : null)
-            gate = installGateOf(current, incomingRepoKey, body.force === true)
+            current = installed.find(pkg => pkg.name === intent.package)
+            gate = installGateOf(current, intent.repoKey, intent.force)
           }
           if (gate.action === 'refuse') throw new MarketValidationError(gate.reason)
           if (gate.action === 'confirm') log(gate.log)
           const replacedLocal = gate.action === 'confirm' && current !== undefined && current.source !== 'registry'
-          const result = isGit
-            ? await deps.installer.installGit(body.gitTarget)
-            : await deps.installer.install(validatePackageName(body.package), body.version)
+          // The version installed is the registry's, resolved inside the
+          // executor: the intent's `version` is the row's source-declared
+          // display metadata and never reaches the CLI (see npm.ts).
+          const result = await runInstall(
+            isGit ? undefined : intent.package,
+            () => (isGit ? deps.installer.installGit(intent.gitTarget) : deps.installer.install(intent.package)),
+          )
           return ok({
             installed: true,
             version: result.version,
@@ -1047,6 +1231,15 @@ export function registerMarketRoutes(
           const body = await readJsonBody(request)
           const name = validatePackageName(body.package)
           const allowed = sanitizePackageList(body.packages)
+          // Authorization FIRST, and fail-closed. `body.package` is the
+          // renderer's string, so it is only ever a KEY into the host's own
+          // record of installs it ran (see BlockedBuildLedger): the request must
+          // name a package this host attempted to install, and every name it
+          // wants whitelisted must be one pnpm reported to this host. A name the
+          // host never attempted — installed or not, existing or not — is
+          // refused before the whitelist is touched.
+          const refusal = allowBuildLedger.permits(deps.profile, name, allowed)
+          if (refusal !== null) throw new MarketValidationError(refusal)
           // The retry reinstalls from npm, so a local/git install must never
           // be its target — the same guard as /install, without a force
           // escape: allow-build retries a blocked npm install, which a
@@ -1069,7 +1262,9 @@ export function registerMarketRoutes(
               log(`plugin-market: allowed build scripts for ${allowed.join(', ')} in profile ${deps.profile}`)
             }
           })
-          const result = await deps.installer.install(name)
+          // The retry is itself an install the host runs, so it goes through
+          // the same recording: a retry pnpm blocks again stays retryable.
+          const result = await runInstall(name, () => deps.installer.install(name))
           return ok({
             allowed,
             installed: true,
@@ -1132,7 +1327,10 @@ export function registerMarketRoutes(
           const current = installed.packages.find(pkg => pkg.name === name)
           const check = checkUpdateTarget(current, await latestVersionOf(name))
           if (!check.ok) throw new MarketValidationError(check.reason)
-          const result = await deps.installer.install(name, check.version)
+          // An update is an install the host ran, so a blocked outcome here is
+          // recorded too: the panel offers the same whitelist-and-retry path
+          // from the update strip.
+          const result = await runInstall(name, () => deps.installer.install(name, check.version))
           return ok({
             updated: true,
             version: result.version,

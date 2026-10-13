@@ -38,7 +38,8 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { searchEntries } from './catalog-filter.ts'
 import { fetchCatalog, type CatalogEntry } from './catalog.ts'
-import { readInstalled, resolveCatalog } from './routes.ts'
+import { catalogBuildOf, readInstalled, resolveCatalog } from './routes.ts'
+import type { CatalogHold } from './install-intent.ts'
 import { listInstalledSkills, searchSkills, type SkillCard } from './skills.ts'
 import { loadSnapshot } from './snapshot.ts'
 import { loadCatalogCache, loadSources } from './store.ts'
@@ -65,6 +66,14 @@ export interface MarketToolDeps {
   readonly profile: string
   /** Diagnostic logger (English; never model-facing). */
   readonly log: (message: string) => void
+  /**
+   * The catalog hold an install intent resolves from. The plugin branch feeds
+   * it the build it just made — which may be LIVE where the disk cache the
+   * issuance path would otherwise fall back to is older — so a name this tool
+   * returns stays installable a moment later. Absent = nothing is remembered
+   * (the issuance path falls back to the persisted cache and the snapshot).
+   */
+  readonly catalogHold?: CatalogHold
 }
 
 /** One search hit, in the shape the model reads. */
@@ -191,14 +200,28 @@ async function searchSkillsBranch(query: string, limit: number): Promise<MarketH
 async function searchPluginsBranch(deps: MarketToolDeps, query: string, limit: number): Promise<MarketHit[]> {
   // `refresh: false` on purpose: the tool answers from the cache or the bundled
   // snapshot when it can, so an offline user still gets a shortlist.
+  const sources = loadSources(deps.sourcesPath, deps.log)
+  const held = loadCatalogCache(deps.catalogCachePath, deps.log)
   const resolution = await resolveCatalog({
-    sources: loadSources(deps.sourcesPath, deps.log),
+    sources,
     refresh: false,
     fetchSource: fetchCatalog,
-    readCache: () => loadCatalogCache(deps.catalogCachePath, deps.log),
+    readCache: () => held,
     loadSnapshot,
     now: Date.now,
   })
+  // Hand the build to the install-intent hold: a live fetch here (stale cache)
+  // yields rows the persisted cache does not carry yet, and the model is about
+  // to name one of them back to us. The snapshot the rows came from is the one
+  // attribution must read — `cacheToWrite ?? held`, exactly as GET /catalog
+  // does: a refreshed build whose rows are live would otherwise name a source
+  // from the snapshot it just replaced (or none at all on a cold cache).
+  deps.catalogHold?.remember(catalogBuildOf(
+    resolution.payload.plugins,
+    resolution.payload.cachedAt,
+    sources,
+    resolution.cacheToWrite ?? held,
+  ))
   const installed = new Set(
     readInstalled(join(resolveDshHome(), 'profiles', deps.profile), deps.profile).packages.map(pkg => pkg.name),
   )
