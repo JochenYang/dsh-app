@@ -74,32 +74,40 @@ are meaningful there. What each call site can SEE still differs, and it matters
 when reading a green run: on a CLEAN checkout there is no `lib/` at all, so the
 freshness half passes by construction in CI and only ever bites a tree that was
 already built (a developer's machine, or a machine running `runtime:build` on
-sources edited after the last build) — what a clean-checkout run proves is the
-**presence check**, never freshness. The local `runtime:build` loop is the one that
-could pack a suite missing whole plugins, so it runs all three itself: the type
-gate and the presence check in its per-plugin loop (the check right after that
-plugin's build), the freshness check in `packPlugin`.
+sources edited after the last build) — a clean-checkout run proves the **presence
+check** and, now that each plugin declares the packages it imports in its own
+`devDependencies`, the **type gate** as well, but never freshness. The local
+`runtime:build` loop is the one that could pack a suite missing whole plugins, so it
+runs all three itself: the type gate and the presence check in its per-plugin loop
+(the check right after that plugin's build), the freshness check in `packPlugin`.
 
-**The type gate has a precondition, and CI is where it does not hold.** It needs
+**The type gate has a precondition, and a release once failed on it.** It needs
 the plugin's own imports to resolve; both packaging paths install each plugin's
-tree with `npm install --legacy-peer-deps`, which installs NO peer at all, and
-neither the root tree nor the ancestors provide
-`@deepseek-ai/dsh-client-ui-primitives` — a peer fourteen plugins import and only
-a peer of them. A gate that ran anyway failed a whole release on
+tree with `npm install --legacy-peer-deps`, which installs NO peer at all — so a
+package a plugin imports but declares ONLY as a peer is not there, and a gate that
+ran anyway failed a whole release on
 `error TS2307: Cannot find module '@deepseek-ai/dsh-client-ui-primitives'`
-(GitHub run 38377277084). So `pluginMissingPeers` — read from each plugin's own
-`peerDependencies`, never a list here — decides whether the gate may run:
+(GitHub run 38377277084). Two things followed, and both are load-bearing:
+
+1. **A plugin that imports a package installed only by a peer declares it in its
+   own `devDependencies` too** — `--legacy-peer-deps` installs dependencies AND
+   devDependencies, so this is what makes the gate runnable in CI. Fourteen plugins
+   import `@deepseek-ai/dsh-client-ui-primitives` and all fourteen now carry
+   `"@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2"` in both fields, the
+   spec the first three already used. Measured on fresh copies installed with the
+   workflows' own command: every one of the eighteen plugins RUNS the type gate
+   (none skips), where eleven used to skip.
+2. **`pluginMissingPeers` stays as the guard** — read from each plugin's own
+   `peerDependencies`, never a list here; a peer also counts as resolvable through
+   `@types/<name>` (what tsc actually reads, and how this tree resolves `react` in
+   fifteen plugins). It decides whether the gate may run:
 
 - peers resolvable → `npm run typecheck` runs, and a type error is a failure;
-- a peer missing → the gate **skips** that plugin, loudly (one line naming the
-  missing packages) and without failing the run. A `@types/<name>` package counts
-  as resolvable, because that is what tsc reads and what this repository's own tree
-  uses for `react` in fifteen plugins;
+- a peer that nothing installs → the gate **skips** that plugin, loudly (one line
+  naming the packages) and without failing the run, because failing over an import
+  the install never provided is what stopped the release above;
 - every run ends with `typecheckSkipSummary`, so a green log says how much of it
-  the type gate actually covered. In a CI tree that line reads `11 of 18 plugins
-  skipped it` — CI therefore PROVES the outputs (presence) and not the types, and
-  the type gate keeps its teeth on a tree that has the peers: a developer's full
-  tree, or a machine that installs them.
+  the type gate actually covered (`0 of 18 plugins skipped it` on a CI tree today).
 
 Both artifact checks depend on no peer and keep running regardless.
 

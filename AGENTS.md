@@ -77,13 +77,17 @@ pre-build loop, and by `ci.yml`'s `gate` job in its per-plugin build loop: its o
 removed export used to reach users as a renderer `ReferenceError`); the build's
 DECLARED outputs must exist and be non-empty (npm omits a missing `files`
 directory from the tarball without a word); and `lib/` must not be older than the
-plugin's own inputs. Two of them are weaker on a CI tree, and a green log must not
-be read as more: the type gate SKIPS — per plugin, naming the packages, never
-silently — where the plugin's declared peers are not installed (both workflows
-install with `--legacy-peer-deps`, which installs no peer, and 11 of the 18
-plugins import a peer this way), and every run ends with a count of those skips;
-the freshness check passes by construction on a clean checkout. What CI proves is
-the presence check, and the type gate on a tree that has the peers.
+plugin's own inputs. One is weaker on a CI tree, and a green log must not be read
+as more: the freshness check passes by construction on a clean checkout (there is
+no `lib/` yet). The other two hold there — and the type gate only because a plugin
+that IMPORTS a package installed only by a peer must declare it in its own
+`devDependencies` too: `npm install --legacy-peer-deps`, what both workflows run,
+installs dependencies and devDependencies and no peer, so that declaration is what
+lets tsc resolve the import. (Fourteen plugins import
+`@deepseek-ai/dsh-client-ui-primitives` and all fourteen declare it in both fields
+now.) A peer that nothing installs still makes the gate SKIP that plugin — per
+plugin, naming the packages, never silently — and every run ends with a count of
+those skips; on the current suite that count is `0 of 18` on a CI tree.
 
 - Hand-run probes (`scripts/probe-*.mjs` / `.cjs`): `probe-launch-folder.mjs`
   after a kernel-line bump; `probe-settings-nav.cjs --lang en-US [--sweep]` after

@@ -44,11 +44,16 @@ for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; do
   through `node scripts/plugin-gates.mjs <plugin-dir>`). esbuild does not type
   check and npm drops a missing directory silently: a client half calling an
   export its own module stopped exporting bundles fine, ships, and stops the app
-  in the renderer instead. The type gate needs this plugin's declared peers, which
-  `npm install --legacy-peer-deps` (what both workflows run) does not install: when
-  one is missing the gate SKIPS this plugin — one line naming the packages, plus a
-  count at the end of the run — instead of failing a release over an import nobody
-  installed. The other two checks need no peer and always run.
+  in the renderer instead. The type gate needs this plugin's declared peers to be
+  resolvable, and `npm install --legacy-peer-deps` (what both workflows run)
+  installs dependencies and devDependencies but NO peer: a package this plugin
+  imports must therefore ALSO be in its own `devDependencies` — the suite's
+  convention is both fields with the same spec, which is what
+  `@deepseek-ai/dsh-client-ui-primitives` does in all fourteen plugins that import
+  it. With that, every plugin's type gate runs in CI. A peer that nothing installs
+  makes the gate SKIP this plugin — one line naming the packages, never silently —
+  instead of failing a release over an import nobody installed; the other two
+  checks need no peer and always run.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
