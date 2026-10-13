@@ -50,11 +50,17 @@ const ZH_CN = {
   'tray.openApp': '打开 {app}',
   'tray.checkAppUpdate': '检查应用更新…',
   'tray.restartServer': '重启服务',
+  'tray.openTerminal': '打开终端（dsh 命令行）',
   'tray.rollbackApp': '回滚到上一版本',
   'tray.exitSafeMode': '退出安全模式',
   'tray.enterSafeMode': '以安全模式重启',
   'tray.quit': '退出',
   'tray.safeModeTag': '（安全模式）',
+  // The tray's "open terminal" item is the one entry that can fail for reasons
+  // the user has to fix, and the click is otherwise silent. `{detail}` is the
+  // English diagnostic `terminal.ts` produced — log-only elsewhere, shown here
+  // only because "the terminal did not open" is not actionable on its own.
+  'terminal.openFailed': '无法打开终端：{detail}。可在「维护 → 诊断」页打开日志目录查看原因。',
 
   // -------------------------------------------------------- close question
   'closeDialog.title': '关闭 DSH APP',
@@ -345,11 +351,13 @@ const EN_US: Record<MessageKey, string> = {
   'tray.openApp': 'Open {app}',
   'tray.checkAppUpdate': 'Check for app updates…',
   'tray.restartServer': 'Restart server',
+  'tray.openTerminal': 'Open terminal (dsh CLI)',
   'tray.rollbackApp': 'Roll back to the previous version',
   'tray.exitSafeMode': 'Leave safe mode',
   'tray.enterSafeMode': 'Restart in safe mode',
   'tray.quit': 'Quit',
   'tray.safeModeTag': ' (safe mode)',
+  'terminal.openFailed': 'Could not open the terminal: {detail}. The log can be opened from the Maintenance → Diagnostics page.',
 
   // -------------------------------------------------------- close question
   'closeDialog.title': 'Close DSH APP',

@@ -9,6 +9,12 @@ export interface TrayCallbacks {
   onCheckKernelUpdate: () => void
   onCheckAppUpdate: () => void
   onRestartServer: () => void
+  /**
+   * Open the user's own terminal with the shell's private `dsh`/`pnpm`/`node`
+   * shim in front of its `PATH` (see `terminal.ts`). Main-process work: no
+   * renderer channel is involved.
+   */
+  onOpenTerminal: () => void
   /** Write/clear the safe-mode marker, then relaunch the app. */
   onToggleSafeMode: () => void
   /** True while the shell runs in safe mode; picks the toggle's menu label. */
@@ -54,6 +60,10 @@ function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
     { label: t('tray.checkAppUpdate'), click: callbacks.onCheckAppUpdate },
     { type: 'separator' },
     { label: t('tray.restartServer'), click: callbacks.onRestartServer },
+    // Same group as the restart/rollback rows: this is the "work on the running
+    // installation" set, and the terminal it opens is the CLI fallback for a
+    // plugin operation the market could not complete.
+    { label: t('tray.openTerminal'), click: callbacks.onOpenTerminal },
     // Windows-only: rollback drives the custom shell-update chain (tagged
     // release assets + latest.yml + NSIS wizard); macOS/Linux update through
     // electron-updater, which has no per-release asset contract to lean on.

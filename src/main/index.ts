@@ -42,6 +42,7 @@ import { closeDialogScript, type CloseDialogChoice } from './close-dialog'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
+import { openManagedTerminal, terminalLogLine } from './terminal'
 import { initShellUpdater, setHostTaskInspector, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
 import { HOST_TASK_INSPECT_TIMEOUT_MS, KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
@@ -955,6 +956,64 @@ async function healProfileBeforeStart(profileDir: string): Promise<void> {
   const line = healLogLine(outcome, profileDir)
   if (line !== null) logKernel(line)
 }
+
+/**
+ * The active runtime's bundled pnpm shim directory, or undefined when there is
+ * no active runtime (or it carries no pnpm).
+ *
+ * The terminal puts it on `PATH` beside the shell's own shim directory: the
+ * kernel CLI spawns pnpm by NAME, so `dsh plugin --profile <name> install` typed
+ * by a user only works when a `pnpm` is findable, and the bundled one is the
+ * only version this app has reasons to trust. The `--profile` is not optional:
+ * the CLI's `plugin` subcommand declares it as a required option and does not
+ * read `DSH_APP_PROFILE`.
+ */
+function activePnpmBinDir(): string | undefined {
+  try {
+    return hostPnpmBinDir(kernel.getCurrentDir())
+  } catch {
+    // No active kernel: the kernel CLI is missing too, and openManagedTerminal
+    // reports that as the reason nothing opened.
+    return undefined
+  }
+}
+
+/**
+ * Tray action: the user's own terminal, with this shell's private shim in front
+ * of `PATH` so the `dsh` in it is the kernel this app is running (see
+ * `terminal.ts` for what that is for, and what it deliberately does not touch).
+ *
+ * A failure is BOTH logged and shown. `AGENTS.md` §4 forbids native client
+ * dialogs (`window.alert` / `confirm` / `prompt`), not telling the user what
+ * happened: a tray click that reports nothing reads as a broken menu item, and
+ * every reason this can fail — no kernel installed yet, an unwritable shim
+ * directory, no console to hand the launcher to — is one the user can act on.
+ * The notice is the shell's own themed card, the same channel the manual
+ * "check for kernel updates" path uses.
+ */
+async function openManagedTerminalFromTray(): Promise<void> {
+  const pnpmBinDir = activePnpmBinDir()
+  const outcome = await openManagedTerminal({
+    userDataDir: app.getPath('userData'),
+    // A real Node, never Electron's own — see hostNodeBinary. The same binary
+    // the shims name, so `dsh` in the terminal runs the CLI this shell drives.
+    nodeBinary: hostNodeBinary(),
+    cliPath: kernelCliPath(),
+    dshHome: resolveDshHome(),
+    profile: SUITE_PROFILE,
+    ...(pnpmBinDir === undefined ? {} : { pnpmBinDir }),
+    cwd: app.getPath('home'),
+  })
+  logKernel(terminalLogLine(outcome))
+  if (outcome.status !== 'failed') return
+  await promptNoticeThemed(
+    mainWindow,
+    'error',
+    'DSH APP',
+    t('terminal.openFailed', { detail: outcome.detail ?? t('common.unknownError') }),
+  )
+}
+
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
   // Ring reset: failure classification must reflect THIS startup attempt only.
@@ -1925,6 +1984,7 @@ async function boot(): Promise<void> {
     onCheckKernelUpdate: () => void checkKernelUpdate(true),
     onCheckAppUpdate: () => checkShellUpdate(true, mainWindow),
     onRestartServer: () => void startServerAndOpenWindow(),
+    onOpenTerminal: () => void openManagedTerminalFromTray(),
     onToggleSafeMode: () => void restartWithSafeMode(!safeModeActive),
     isSafeMode: () => safeModeActive,
     onRollbackApp: () => void rollbackShellUpdate(mainWindow),

@@ -22,6 +22,35 @@ holds the full detail — read it before acting on the signal.
 | `scripts/publish-modelscope.mjs`, `scripts/diagnose-modelscope-upload.mjs` — manual mirror drills; CI uses the Python SDK in `.github/scripts/` | `scripts/` |
 | `办公文档转换引擎尚未安装` (code `unavailable`) — the runtime's kit shim ran: the office payload is not installed (or `DSH_APP_OFFICE_PAYLOAD` was not published). A MISSING SHIM instead makes the provider fail to load, which surfaces as a plugin-tree activation fault | `src/kernel/office-payload.ts`, `scripts/runtime-stubs/` |
 | `Configuration for "…" is overridden by a home patch or command-line overlay` — somebody set that entry's `config` in `$DSH_HOME/cordis.patch.yml`, which composes AFTER the profile's own patch, so the app's write would not be the value in effect and the editor refuses it (before writing anything). The shell offers to move such a row into this profile once per boot — value kept verbatim, home layer backed up; other profiles then fall back to their own defaults. Accepting the offer needs no restart: the editor re-reads the patch before every edit | `src/main/home-layer-rows.ts`, `dsh-config-editor/lib/index.js:122` |
+| `[terminal] asked for a terminal via cmd.exe` — the request went out and the wrapper that issues it exited 0. It is NOT a claim that a window exists: on Windows `start` creates the console and hands it to the system, so nothing in the app holds a handle to it (see "Opening a terminal that does not appear") | `src/main/terminal.ts` |
+| `the console wrapper exited with code N` / `was killed by …` — `start` itself failed, the one half of a Windows open still observable from the app; the wrapper's exit code is judged instead of trusting `spawn` | `src/main/terminal.ts` |
+
+## Opening a terminal that does not appear
+
+The tray's "open terminal" is the one surface whose success cannot be seen from
+inside the app. On Windows the console is created by `start` and belongs to the
+system from that moment, so `openManagedTerminal` reports the REQUEST
+(`[terminal] asked for a terminal via cmd.exe`) and no test — with or without the
+spawn seam stubbed — can observe a window. A spawned console is not an option:
+with `stdio: 'ignore'` its stdin is NUL, an interactive shell reads EOF and exits
+before anything is painted, while the outcome still says `opened`. That is how a
+tray item that did nothing shipped with a green suite.
+
+Verify the window the only way it can be verified, from a real Electron parent
+with the real function:
+
+```sh
+node_modules/.bin/electron scratch/window-probe                       # window inventory before/after
+node_modules/.bin/electron scratch/window-probe/powershell-shape.js   # the PowerShell handoff
+node_modules/.bin/electron scratch/window-probe/shapes.js             # spawn shapes side by side
+```
+
+`main.js` prints every top-level window (through `windows.ps1`, invisible windows
+included) before and after the call and lists what is new. The shape in use adds a
+visible `CASCADIA_HOSTING_WINDOW_CLASS` window titled with the console's command
+line, plus a `PseudoConsoleWindow`; dropping `start` adds nothing at all. Each
+probe kills only the consoles it opened (`cmd.exe` carrying `terminal-bin\open.cmd`),
+never the terminal application itself — the user's other tabs stay up.
 
 ## Reading a stuck boot
 

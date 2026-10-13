@@ -159,6 +159,35 @@ test('the kernel wording keeps the frozen zh-CN text the other suites pin', () =
   }
 })
 
+test('the tray terminal failure notice exists in both languages and points at the log', (ctx) => {
+  // The tray's "open terminal" entry used to fail silently: the click did
+  // nothing and the reason only reached `<logs>/dsh-kernel.log`. The notice is
+  // now the user's only channel, so the key has to exist in both tables (the
+  // equality test above covers drift) and has to say where the log is.
+  for (const locale of LOCALES) {
+    const message = messagesFor(locale)['terminal.openFailed']
+    assert.ok(message !== undefined, `${locale} must carry terminal.openFailed`)
+    assert.ok(message.includes('{detail}'), `${locale} must interpolate the reason`)
+    assert.match(message, locale === 'zh-CN' ? /诊断/u : /Diagnostics/u,
+      `${locale} must name the page the log is opened from`)
+  }
+  // And the parameter is really substituted, in the language in force.
+  const before = process.env[LOCALE_ENV]
+  ctx.after(() => {
+    if (before === undefined) delete process.env[LOCALE_ENV]
+    else process.env[LOCALE_ENV] = before
+    initLocale()
+  })
+  delete process.env[LOCALE_ENV]
+  initLocale()
+  const zh = t('terminal.openFailed', { detail: 'boom' })
+  assert.ok(zh.includes('boom') && !zh.includes('{detail}'), zh)
+  process.env[LOCALE_ENV] = 'en-US'
+  initLocale()
+  const en = t('terminal.openFailed', { detail: 'boom' })
+  assert.ok(en.includes('boom') && !en.includes('{detail}'), en)
+})
+
 test('messageHead is the constant head of a template, in the current language', (ctx) => {
   // The kernel's download classifier recognizes its own lines through this, so
   // the shape (everything before the first `{param}`, no locale caching) is a
