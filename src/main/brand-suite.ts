@@ -1136,13 +1136,20 @@ export async function writeSuitePatchFile(
  * scanner or the search indexer, briefly — so the transient codes are retried
  * exactly as the kernel manager retries its own activation rename.
  *
- * @param target - absolute path of the profile's `cordis.patch.yml`.
- * @param content - the composed content to install.
+ * The mechanism is not patch-specific, and it is not duplicated: a config
+ * checkpoint puts stored bytes back through this same call (see
+ * `config-checkpoint.ts`), which is why `content` accepts a Buffer and is then
+ * written verbatim. A second staging-and-retry loop would be a second set of
+ * semantics for the same problem.
+ *
+ * @param target - absolute path of the file to install (the profile's
+ *   `cordis.patch.yml`, or one of the files a checkpoint restores).
+ * @param content - the composed content to install, or the exact bytes to write.
  * @throws when the rename cannot be made to land; the previous file is untouched.
  */
-export async function writePatchAtomically(target: string, content: string): Promise<void> {
+export async function writePatchAtomically(target: string, content: string | Buffer): Promise<void> {
   const staging = `${target}.${String(process.pid)}.tmp`
-  await fs.writeFile(staging, content, 'utf8')
+  await fs.writeFile(staging, content)
   for (let attempt = 1; ; attempt += 1) {
     try {
       await fs.rename(staging, target)

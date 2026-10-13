@@ -563,8 +563,12 @@ async function statOrUndefined(target: string): Promise<Stats | undefined> {
  * neither form is ever handed a path whose descendants can be links: a profile
  * is a directory users and package managers delete, and the correctness of a
  * delete must not rest on which spelling of the call someone reached for.
+ *
+ * Exported for the other shell module that deletes a tree it did not link into
+ * (`config-checkpoint.ts` removes a checkpoint generation): the shape lives in
+ * this file and in `scripts/lib/remove-tree.mjs` — two copies, not three.
  */
-async function removeWithoutLinks(target: string): Promise<void> {
+export async function removeWithoutLinks(target: string): Promise<void> {
   const stats = await statOrUndefined(target)
   if (stats === undefined) return
   if (stats.isSymbolicLink()) {

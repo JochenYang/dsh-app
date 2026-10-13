@@ -54,6 +54,7 @@ const ZH_CN = {
   'tray.rollbackApp': '回滚到上一版本',
   'tray.exitSafeMode': '退出安全模式',
   'tray.enterSafeMode': '以安全模式重启',
+  'tray.restoreConfig': '恢复上一次可用配置',
   'tray.quit': '退出',
   'tray.safeModeTag': '（安全模式）',
   // The tray's "open terminal" item is the one entry that can fail for reasons
@@ -83,6 +84,7 @@ const ZH_CN = {
   'splash.retry': '重试',
   'splash.openLogs': '打开日志目录',
   'splash.installMissing': '安装缺失的包并重启',
+  'splash.restoreConfig': '恢复上一次可用配置',
   'splash.hint': '首次启动需要准备运行环境，可能需要几十秒。',
   'splash.failureHint': '可重试启动，或打开日志目录查看最新日志。',
   'splash.step.prepare': '准备运行时',
@@ -133,6 +135,16 @@ const ZH_CN = {
   'serverFailure.homeRowsHint': '上面这些行会让插件树加载失败，应用因此打不开。把它们删掉或注释掉（或先把它们指向的包装进当前档案），再重试；配置的其他部分不会被改动。',
   'serverFailure.installNoCli': '找不到内核命令行，无法自动安装。请从托盘菜单执行「检查内核更新」重装内核后再试。',
   'serverFailure.installFailed': '自动安装没有成功：{detail}',
+
+  // ----------------------------------------------------- config checkpoints
+  // The restore entry and its three outcomes. `{detail}` is a stable English
+  // code from config-checkpoint.ts (`io-error (EPERM)`, `target-not-a-regular-file
+  // (home-patch)`), never a path or a raw system message: this text is shown to
+  // the user, and an fs error carries their own profile path.
+  'configCheckpoint.restoreHint': '恢复会先把这几个文件的当前内容另存为备份，然后重启应用。',
+  'configCheckpoint.none': '还没有可用的配置检查点：应用尚未成功启动过一次，或检查点已被清理。',
+  'configCheckpoint.invalid': '最近一次的配置检查点已损坏或不完整，无法用它恢复。',
+  'configCheckpoint.failed': '恢复配置没有成功（{detail}）。可打开日志目录查看详情后重试。',
 
   // ------------------------------------------------------------ dev mode
   'devMode.workspaceHint': '开发模式使用本地 deepseek-harness 工作区；若刚拉取上游代码，请先在该目录执行 pnpm install && pnpm run build',
@@ -355,6 +367,7 @@ const EN_US: Record<MessageKey, string> = {
   'tray.rollbackApp': 'Roll back to the previous version',
   'tray.exitSafeMode': 'Leave safe mode',
   'tray.enterSafeMode': 'Restart in safe mode',
+  'tray.restoreConfig': 'Restore the last working configuration',
   'tray.quit': 'Quit',
   'tray.safeModeTag': ' (safe mode)',
   'terminal.openFailed': 'Could not open the terminal: {detail}. The log can be opened from the Maintenance → Diagnostics page.',
@@ -380,6 +393,7 @@ const EN_US: Record<MessageKey, string> = {
   'splash.retry': 'Retry',
   'splash.openLogs': 'Open log folder',
   'splash.installMissing': 'Install the missing packages and restart',
+  'splash.restoreConfig': 'Restore the last working configuration',
   'splash.hint': 'The first launch prepares the runtime, which can take a while.',
   'splash.failureHint': 'Retry the launch, or open the log folder for the latest lines.',
   'splash.step.prepare': 'Preparing the runtime',
@@ -421,6 +435,12 @@ const EN_US: Record<MessageKey, string> = {
   'serverFailure.homeRowsHint': 'Those rows make the plugin tree fail to load, which is why the app does not open. Remove or comment them out (or install the packages they name into the current profile) and retry; nothing else in your configuration is changed.',
   'serverFailure.installNoCli': 'The kernel command line is not available, so the packages cannot be installed automatically. Run "Check for kernel updates" from the tray menu, then try again.',
   'serverFailure.installFailed': 'The automatic install did not succeed: {detail}',
+
+  // ----------------------------------------------------- config checkpoints
+  'configCheckpoint.restoreHint': 'Restoring saves the current contents of these files as backups first, then restarts the app.',
+  'configCheckpoint.none': 'There is no configuration checkpoint yet: the app has not completed a successful start, or the checkpoints were cleared.',
+  'configCheckpoint.invalid': 'The most recent configuration checkpoint is damaged or incomplete, so it cannot be used to restore.',
+  'configCheckpoint.failed': 'Restoring the configuration did not succeed ({detail}). Open the log folder for details, then try again.',
 
   // ------------------------------------------------------------ dev mode
   'devMode.workspaceHint': 'Dev mode runs the local deepseek-harness workspace; after pulling upstream code, run pnpm install && pnpm run build in that directory first',

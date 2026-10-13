@@ -48,7 +48,7 @@ const SPLASH_BG_LIGHT = '#f0f5fd'
  * Failure-card actions. index.ts owns what each one DOES; this module only
  * reports which button was pressed, and the labels are localized at call time.
  */
-export type StartupActionId = 'retry' | 'open-logs' | 'quit' | 'install-missing'
+export type StartupActionId = 'retry' | 'open-logs' | 'quit' | 'install-missing' | 'restore-config'
 
 interface StartupAction {
   id: StartupActionId
@@ -57,23 +57,26 @@ interface StartupAction {
 }
 
 /**
- * The action set: retry / open log folder / quit, plus a repair when one applies.
+ * The action set: retry / open log folder / quit, plus the repairs that apply to
+ * this failure.
  *
- * `install-missing` is offered only when the shell knows which packages are
- * missing (a home-layer row this profile cannot load), because the action is
- * "install the packages that row names" — without them it would have nothing to
- * install.
+ * An extra action is offered only when the shell can act on it: `install-missing`
+ * when it knows which packages are missing (a home-layer row this profile cannot
+ * load), `restore-config` when a verified configuration checkpoint exists (see
+ * `config-checkpoint.ts`). Both are extra ROWS in the same card, between the
+ * primary action and the two that always apply, so the button a user needs is
+ * never the one they have to look for.
  */
 function failureActions(extra: readonly StartupActionId[] = []): readonly StartupAction[] {
-  const actions: StartupAction[] = [
+  const repairs: StartupAction[] = []
+  if (extra.includes('install-missing')) repairs.push({ id: 'install-missing', label: t('splash.installMissing') })
+  if (extra.includes('restore-config')) repairs.push({ id: 'restore-config', label: t('splash.restoreConfig') })
+  return [
     { id: 'retry', label: t('splash.retry'), primary: true },
+    ...repairs,
     { id: 'open-logs', label: t('splash.openLogs') },
     { id: 'quit', label: t('tray.quit') },
   ]
-  if (extra.includes('install-missing')) {
-    actions.splice(1, 0, { id: 'install-missing', label: t('splash.installMissing') })
-  }
-  return actions
 }
 
 interface StartupView {
@@ -310,7 +313,7 @@ const STARTUP_FAILURE_SCRIPT = (failure: StartupFailure): string => `(function (
 
 /** Narrow a value returned by the page to a known action id. */
 function isActionId(value: unknown): value is StartupActionId {
-  return value === 'retry' || value === 'open-logs' || value === 'quit' || value === 'install-missing'
+  return value === 'retry' || value === 'open-logs' || value === 'quit' || value === 'install-missing' || value === 'restore-config'
 }
 
 /** Everything a push carries; brand, theme, skeleton and digest are push-owned. */
@@ -525,7 +528,8 @@ export function handoffToMainWindow(win: BrowserWindow): void {
  *   frozen wording from KernelManager / index.ts), reused verbatim.
  * @param detail - the error detail, when it says more than the message does.
  * @param extraActions - actions this failure can offer beyond the frozen set
- *   (only `install-missing`, and only when the shell knows the packages).
+ *   (`install-missing` when the shell knows the packages, `restore-config` when
+ *   a configuration checkpoint exists — see `failureActions`).
  * @returns the chosen action, or null when the splash is gone — a failure
  *   after the main window opened, where the existing recovery paths and
  *   dialogs own the failure — or when the window died before an answer.

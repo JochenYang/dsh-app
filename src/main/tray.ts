@@ -17,6 +17,12 @@ export interface TrayCallbacks {
   onOpenTerminal: () => void
   /** Write/clear the safe-mode marker, then relaunch the app. */
   onToggleSafeMode: () => void
+  /**
+   * Put the newest configuration checkpoint back and relaunch (see
+   * `config-checkpoint.ts`). The escape hatch for a configuration that fails the
+   * boot, reachable while the failure card is not on screen.
+   */
+  onRestoreConfig: () => void
   /** True while the shell runs in safe mode; picks the toggle's menu label. */
   isSafeMode: () => boolean
   /** Roll the shell app back to the previous recorded version. */
@@ -76,6 +82,11 @@ function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
     callbacks.isSafeMode()
       ? { label: t('tray.exitSafeMode'), click: callbacks.onToggleSafeMode }
       : { label: t('tray.enterSafeMode'), click: callbacks.onToggleSafeMode },
+    // The other configuration-level escape hatch, in the group that owns the
+    // running installation: safe mode skips the suite overlay, this puts the
+    // user's own files back. Always present — whether a checkpoint exists is a
+    // question the click answers, with a sentence rather than a dead row.
+    { label: t('tray.restoreConfig'), click: callbacks.onRestoreConfig },
     { type: 'separator' },
     { label: t('tray.quit'), click: () => app.quit() },
   ])

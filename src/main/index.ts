@@ -48,6 +48,7 @@ import { initShellUpdater, setHostTaskInspector, checkShellUpdate, consumeUpdate
 import { HOST_TASK_INSPECT_TIMEOUT_MS, KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { healLogLine, healProfileDependencies, installIntoProfile, isInstallablePackageName, type ProfileHealOutcome } from './profile-heal'
+import { captureConfigCheckpoint, hasRestorableConfigCheckpoint, restoreConfigCheckpoint, shouldCaptureCheckpoint, type ConfigCheckpointScope } from './config-checkpoint'
 import { alignWindowStateWithLine } from './client-state'
 import { countV4SessionLogs } from './session-logs'
 import { getLocale, initLocale, kernelChannelLabel, kernelUpdateOptionLabel, t } from '../shared/locale'
@@ -140,6 +141,14 @@ let homeRepair: { readonly profileDir: string, readonly rows: readonly PatchSpec
 let installRepairUnavailable = false
 /** Safe-mode marker read once per run; toggling always relaunches the app. */
 let safeModeActive = false
+/**
+ * True once this process has captured a configuration checkpoint. One per
+ * healthy start, not one per entry into the start path: the tray's restart, the
+ * proxy watchdog and the kernel rollback all re-enter `startServerAndOpenWindow`
+ * within one process, and none of them is a new configuration (see
+ * `shouldCaptureCheckpoint`).
+ */
+let configCheckpointCaptured = false
 /**
  * The proxy URL injected into the kernel at the last successful start, or
  * undefined when none was. The watchdog below only ever acts on a proxy THIS
@@ -250,6 +259,11 @@ function broadcastStatus(status: KernelStatusPayload): void {
  * died mid-way and a server that refused to start need different recovery
  * paths, and a relaunch is the one action that covers both without inventing
  * a second state machine (same path the safe-mode toggle already takes).
+ *
+ * Two repairs may join it, each only when the shell can really perform it: the
+ * packages the home layer names (`install-missing`), and the user's own
+ * configuration from the newest checkpoint (`restore-config` — the one action
+ * that changes the files a retry would boot again).
  */
 async function offerStartupRecovery(message: string, detail?: string): Promise<void> {
   // Do not repeat the message when the detail already IS the message line
@@ -274,16 +288,24 @@ async function offerStartupRecovery(message: string, detail?: string): Promise<v
       ? t('devMode.workspaceHint')
       : t('devMode.workspaceHintAt', { checkout: devCheckoutDir }))
   }
-  const choice = await showStartupFailure(
-    message,
-    lines.join('\n'),
-    installable.length > 0 && !installRepairUnavailable ? ['install-missing'] : [],
-  )
+  const extraActions: ('install-missing' | 'restore-config')[] = []
+  if (installable.length > 0 && !installRepairUnavailable) extraActions.push('install-missing')
+  // Asked only when a checkpoint exists and verifies, so the card never shows a
+  // button whose only outcome is "there is nothing to restore". This is one
+  // lstat and at most four digests, on the failure path only.
+  if (await hasRestorableConfigCheckpoint(configCheckpointScope(suiteProfileDir()))) {
+    extraActions.push('restore-config')
+    // What the action will do to files the user is looking at, before they pick it.
+    lines.push(t('configCheckpoint.restoreHint'))
+  }
+  const choice = await showStartupFailure(message, lines.join('\n'), extraActions)
   if (choice === 'retry') {
     app.relaunch()
     app.quit()
   } else if (choice === 'install-missing') {
     await installMissingPackages(installable)
+  } else if (choice === 'restore-config') {
+    await restoreLastWorkingConfig('failure-card')
   } else if (choice === 'open-logs') {
     // The action must not fail on a run that never wrote a log yet.
     try {
@@ -378,6 +400,84 @@ async function installMissingPackages(packages: readonly string[]): Promise<void
     t('serverFailure.summary', { advice: t('serverFailure.other') }),
     t('serverFailure.installFailed', { detail: outcome.detail ?? 'unknown error' }),
   )
+}
+
+// ------------------------------------------------------- config checkpoints
+
+/**
+ * The three directories a configuration checkpoint reads and writes (see
+ * config-checkpoint.ts). `profileDir` is recomputed rather than captured at
+ * boot: `ensureSuiteProfile()` always answers `<dshHome>/profiles/<profile>`, and
+ * the failure card can run before a boot resolved anything.
+ */
+function configCheckpointScope(profileDir: string): ConfigCheckpointScope {
+  return { userDataDir, profileDir, dshHome: resolveDshHome() }
+}
+
+/** The directory the suite profile always has, per `ensureSuiteProfile`. */
+function suiteProfileDir(): string {
+  return path.join(resolveDshHome(), 'profiles', SUITE_PROFILE)
+}
+
+/**
+ * Capture the configuration this healthy start booted from.
+ *
+ * Called once per process, from the one place that knows a start is healthy (see
+ * the `window.ready` milestone in `startServerAndOpenWindow`). Everything about
+ * WHEN is decided by `shouldCaptureCheckpoint`, and the capture itself never
+ * throws: a failure here is a log line, never a broken boot.
+ *
+ * @param profileDir - the profile the host was started on.
+ */
+function captureStartupCheckpoint(profileDir: string): void {
+  if (!shouldCaptureCheckpoint({
+    hostReady: true,
+    uiShown: true,
+    safeMode: safeModeActive,
+    alreadyCaptured: configCheckpointCaptured,
+  })) return
+  configCheckpointCaptured = true
+  void captureConfigCheckpoint({ ...configCheckpointScope(profileDir), log: logKernel })
+}
+
+/**
+ * Put the newest configuration checkpoint back, then relaunch.
+ *
+ * The ONLY path that restores anything, and it is entered only by an explicit
+ * user action: the failure card's own button, or the tray row. There is no
+ * automatic restore — the checkpoints exist because a configuration edit broke a
+ * boot, and silently replacing whatever the user is editing would be a second
+ * way to lose their work.
+ *
+ * A refusal (no checkpoint, one that does not verify, an I/O failure) becomes the
+ * localized sentence from `configCheckpoint.*`; `{detail}` is a path-free code
+ * from the checkpoint module, never an fs message carrying the user's profile
+ * path. The settings the user is looking at are not touched either way.
+ *
+ * @param origin - which entry point asked, which decides where the outcome is
+ *   shown: the failure card it came from, or a notice for the tray.
+ */
+async function restoreLastWorkingConfig(origin: 'failure-card' | 'tray'): Promise<void> {
+  const outcome = await restoreConfigCheckpoint({ ...configCheckpointScope(suiteProfileDir()), log: logKernel })
+  if (outcome.status === 'restored') {
+    // Relaunch, never an in-place reload: the four files are read when the host
+    // starts, and the shell has no way to recompose the running profile. Same
+    // path the safe-mode toggle takes.
+    logKernel(`[config-checkpoint] restored ${outcome.generation} (${String(outcome.backups.length)} backup(s) written); relaunching`)
+    app.relaunch()
+    app.quit()
+    return
+  }
+  const advice = outcome.status === 'none'
+    ? t('configCheckpoint.none')
+    : outcome.status === 'invalid'
+      ? t('configCheckpoint.invalid')
+      : t('configCheckpoint.failed', { detail: outcome.detail })
+  if (origin === 'tray') {
+    void promptNoticeThemed(mainWindow, 'warning', 'DSH APP', advice)
+    return
+  }
+  await offerStartupRecovery(t('serverFailure.summary', { advice }))
 }
 
 /**
@@ -1364,6 +1464,12 @@ async function startServerAndOpenWindow(): Promise<void> {
     // The window now shows the live UI rather than the loading page: the end of
     // the visible wait, and what `app.boot.ready`'s `ms` is really about.
     logEvent('window.ready', { ms: Date.now() - runStartedAt, detail: { firstUiLoad } })
+    // W7: this line is the one place that knows a start is healthy — the host
+    // answered `ready` above and the window has just been handed the live UI — so
+    // it is also where the configuration that booted is worth remembering. The
+    // rest of the rule (never in safe mode, once per process) is in
+    // `shouldCaptureCheckpoint`, and the capture never throws.
+    captureStartupCheckpoint(profile.dir)
   }
   // A folder argument opens as a workspace once the page can answer; the
   // delivery retries while the client plugin is still loading, so calling it
@@ -2086,6 +2192,7 @@ async function boot(): Promise<void> {
     onRestartServer: () => void startServerAndOpenWindow(),
     onOpenTerminal: () => void openManagedTerminalFromTray(),
     onToggleSafeMode: () => void restartWithSafeMode(!safeModeActive),
+    onRestoreConfig: () => void restoreLastWorkingConfig('tray'),
     isSafeMode: () => safeModeActive,
     onRollbackApp: () => void rollbackShellUpdate(mainWindow),
     getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
