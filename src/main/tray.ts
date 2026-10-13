@@ -15,6 +15,13 @@ export interface TrayCallbacks {
    * renderer channel is involved.
    */
   onOpenTerminal: () => void
+  /**
+   * Whether that terminal could open at all right now — the shell's answer to
+   * `kernelCliUsable(kernelCliPath())`, the same question the click's plan asks.
+   * `false` greys the row out; it is read when the menu is BUILT, so a state
+   * change needs a rebuild (see `updateTrayMenu`).
+   */
+  canOpenTerminal: () => boolean
   /** Write/clear the safe-mode marker, then relaunch the app. */
   onToggleSafeMode: () => void
   /**
@@ -55,11 +62,27 @@ export function createTray(callbacks: TrayCallbacks): Tray {
 
 /** Build the tray menu, stamping the current kernel version into its label. */
 function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
+  return Menu.buildFromTemplate(trayMenuTemplate(callbacks))
+}
+
+/**
+ * The menu's template: labels, order and which rows are clickable.
+ *
+ * Pure and exported for the test suite — it reads the callbacks and the locale
+ * table and nothing else, builds no `Menu` and holds no state, so a menu whose
+ * rows depend on the machine (the kernel version, the terminal's availability)
+ * can be asserted without an Electron process. {@link buildTrayMenu} is the
+ * half that needs Electron.
+ *
+ * @param callbacks - the shell's answers, read NOW (the template is a snapshot).
+ * @returns the template `Menu.buildFromTemplate` consumes.
+ */
+export function trayMenuTemplate(callbacks: TrayCallbacks): Electron.MenuItemConstructorOptions[] {
   const version = callbacks.getCurrentVersion()
   const kernelLabel = version
     ? t('tray.checkKernelUpdateWithVersion', { version })
     : t('tray.checkKernelUpdate')
-  return Menu.buildFromTemplate([
+  return [
     { label: t('tray.openApp', { app: APP_NAME }), click: callbacks.onOpen },
     { type: 'separator' },
     { label: kernelLabel, click: callbacks.onCheckKernelUpdate },
@@ -69,7 +92,16 @@ function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
     // Same group as the restart/rollback rows: this is the "work on the running
     // installation" set, and the terminal it opens is the CLI fallback for a
     // plugin operation the market could not complete.
-    { label: t('tray.openTerminal'), click: callbacks.onOpenTerminal },
+    {
+      label: t('tray.openTerminal'),
+      click: callbacks.onOpenTerminal,
+      // Greyed while there is no kernel CLI to hand the terminal: the click's
+      // own plan refuses that state (see `kernelCliUsable`), so a clickable row
+      // would only be a sentence in a dialog. Every other failure — no Node, no
+      // console, an unwritable shim directory — is decided later and still
+      // reports itself.
+      enabled: callbacks.canOpenTerminal(),
+    },
     // Windows-only: rollback drives the custom shell-update chain (tagged
     // release assets + latest.yml + NSIS wizard); macOS/Linux update through
     // electron-updater, which has no per-release asset contract to lean on.
@@ -89,12 +121,13 @@ function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
     { label: t('tray.restoreConfig'), click: callbacks.onRestoreConfig },
     { type: 'separator' },
     { label: t('tray.quit'), click: () => app.quit() },
-  ])
+  ]
 }
 
 /**
  * Rebuild the tray menu (e.g. after a kernel update changed the version
- * stamped into the menu label). No-op before createTray.
+ * stamped into the menu label, or after the active kernel appeared — which is
+ * what decides whether the terminal row is clickable). No-op before createTray.
  */
 export function updateTrayMenu(): void {
   if (!tray || !savedCallbacks) return

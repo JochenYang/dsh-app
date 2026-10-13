@@ -43,7 +43,7 @@ import { closeDialogScript, type CloseDialogChoice } from './close-dialog'
 import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
-import { openManagedTerminal, terminalLogLine } from './terminal'
+import { kernelCliUsable, openManagedTerminal, terminalLogLine } from './terminal'
 import { initShellUpdater, setHostTaskInspector, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
 import { HOST_TASK_INSPECT_TIMEOUT_MS, KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
@@ -361,7 +361,7 @@ function installLogLine(outcome: ProfileHealOutcome, packages: readonly string[]
  */
 async function installMissingPackages(packages: readonly string[]): Promise<void> {
   const bin = kernelCliPath()
-  if (bin === '' || !existsSync(bin)) {
+  if (!kernelCliUsable(bin)) {
     // No CLI, no repair: the card comes back without the button, so it cannot be
     // clicked again for the same answer.
     installRepairUnavailable = true
@@ -1019,6 +1019,13 @@ function activeRuntimeDir(): string {
  * child (`DSH_APP_DSH_BIN`, which the market and the shell's own repair step
  * resolve) and the repair step itself ask this question, so they answer it the
  * same way.
+ *
+ * The path alone does not say whether the file is there: that second half of the
+ * question — the tray row's enabled state, the repair step, the diagnostics
+ * config check — goes through `kernelCliUsable` (terminal.ts), which is also
+ * what the terminal's own plan refuses on. The empty string is kept as a
+ * distinct answer because `openManagedTerminal` turns it into the `no-kernel`
+ * failure code, whose message names a state rather than a path.
  */
 function kernelCliPath(): string {
   if (kernelIsCheckout && devCheckoutDir !== undefined) return path.join(devCheckoutDir, 'apps', 'cli', 'lib', 'bin.js')
@@ -1043,7 +1050,9 @@ function kernelCliPath(): string {
  */
 async function healProfileBeforeStart(profileDir: string): Promise<void> {
   const bin = kernelCliPath()
-  if (bin === '' || !existsSync(bin)) return
+  // The same question the tray row and `installMissingPackages` ask, from the
+  // one function that answers it (`kernelCliUsable`).
+  if (!kernelCliUsable(bin)) return
   // The bundled pnpm, so the repair does not depend on the user's own: this run's
   // parent is the shell, whose PATH never saw the host child's prefix.
   const pnpmBinDir = hostPnpmBinDir(kernel.getCurrentDir())
@@ -1096,10 +1105,15 @@ function activePnpmBinDir(): string | undefined {
  * A failure is BOTH logged and shown. `AGENTS.md` §4 forbids native client
  * dialogs (`window.alert` / `confirm` / `prompt`), not telling the user what
  * happened: a tray click that reports nothing reads as a broken menu item, and
- * every reason this can fail — no kernel installed yet, an unwritable shim
- * directory, no console to hand the launcher to — is one the user can act on.
- * The notice is the shell's own themed card, the same channel the manual
- * "check for kernel updates" path uses.
+ * every reason this can still fail — an unwritable shim directory, no console to
+ * hand the launcher to, no Node for the CLI, a console that refused to start —
+ * is one the user can act on. The notice is the shell's own themed card, the same
+ * channel the manual "check for kernel updates" path uses.
+ *
+ * Why "no kernel" is not in that list: the tray row is DISABLED in exactly that
+ * state (`canOpenTerminal`, which asks the same question this call's plan would
+ * — see `kernelCliUsable`), so the sentence about a missing kernel is the plan's
+ * own contract rather than a screen a user reaches through the menu.
  */
 async function openManagedTerminalFromTray(): Promise<void> {
   const pnpmBinDir = activePnpmBinDir()
@@ -1126,6 +1140,14 @@ async function openManagedTerminalFromTray(): Promise<void> {
 
 async function startServerAndOpenWindow(): Promise<void> {
   if (quitting) return
+  // The tray menu is a snapshot (see `updateTrayMenu`), and this is the first
+  // point every start path passes with the kernel already active and the tray
+  // already created: refreshing here means the terminal row is right BEFORE the
+  // start is attempted, including when the start below fails — the state the
+  // tray exists for (see the comment where it is created). Waiting for the end
+  // of a healthy start would leave a machine that HAS a kernel showing a greyed
+  // row for the rest of the session.
+  updateTrayMenu()
   // Ring reset: failure classification must reflect THIS startup attempt only.
   serverLogRing.length = 0
   broadcastStatus({ phase: 'starting', message: t('status.startingServer'), progress: null, step: 4 })
@@ -2128,7 +2150,7 @@ async function boot(): Promise<void> {
       // them: `kernelCliPath` knows the dev-checkout case, and `hostNodeBinary`
       // guarantees a real Node rather than Electron's own.
       const bin = kernelCliPath()
-      if (bin === '' || !existsSync(bin)) return Promise.reject(new Error('no kernel CLI in this shell'))
+      if (!kernelCliUsable(bin)) return Promise.reject(new Error('no kernel CLI in this shell'))
       return checkConfigSchema({
         bin,
         node: hostNodeBinary(),
@@ -2191,6 +2213,10 @@ async function boot(): Promise<void> {
     onCheckAppUpdate: () => checkShellUpdate(true, mainWindow),
     onRestartServer: () => void startServerAndOpenWindow(),
     onOpenTerminal: () => void openManagedTerminalFromTray(),
+    // The row is greyed when the plan the click would build must refuse with
+    // 'no-kernel' — one question, one implementation (`kernelCliUsable`), so the
+    // menu cannot offer an action that would only report itself.
+    canOpenTerminal: () => kernelCliUsable(kernelCliPath()),
     onToggleSafeMode: () => void restartWithSafeMode(!safeModeActive),
     onRestoreConfig: () => void restoreLastWorkingConfig('tray'),
     isSafeMode: () => safeModeActive,

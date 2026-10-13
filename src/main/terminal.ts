@@ -780,6 +780,38 @@ function planFor(
 }
 
 /**
+ * Whether the kernel CLI the shell resolved can be run at all (see
+ * `kernelCliPath` in index.ts).
+ *
+ * ONE question, answered in one place, because two very different callers have
+ * to agree on it. {@link terminalPlan} refuses with `no-kernel` exactly when
+ * this answers false: the shell always hands that plan an ABSOLUTE path, and
+ * `resolveExecutable` answers an absolute candidate with `isPresent`, which
+ * starts at `existsSync` (the candidate is a file inside the runtime tree, never
+ * a store-installed program, so the reparse-point case `isPresent` adds does not
+ * arise). And the tray row that opens the terminal is greyed by this same
+ * answer — so a greyed row and a click that could only report "no kernel" are
+ * one fact, not two rules that happen to agree. The shell's other callers that
+ * only need to know whether the CLI is there (the profile repair steps and the
+ * diagnostics config check, index.ts) ask it here too.
+ *
+ * An empty path is not a missing file, it is a state: `kernelCliPath()` answers
+ * '' exactly when this machine has no active kernel at all.
+ *
+ * Necessary, not sufficient for a TERMINAL: a missing Node, an unwritable shim
+ * directory or a platform with no console all fail later, inside the plan or the
+ * open, and those keep their notice (a disabled row would hide a reason the user
+ * can act on).
+ *
+ * @param cliPath - the active kernel's CLI entry, or '' when there is none.
+ * @returns whether that file is there to be started.
+ */
+export function kernelCliUsable(cliPath: string): boolean {
+  const candidate = cliPath.trim()
+  return candidate !== '' && existsSync(candidate)
+}
+
+/**
  * Build the plan for one managed terminal.
  *
  * Pure: it reads the injected environment, resolves executables through the
@@ -798,9 +830,9 @@ export function terminalPlan(input: TerminalPlanInput): TerminalPlan {
   }
   const cli = input.resolve(input.cliPath)
   if (cli === undefined) {
-    // An EMPTY path is not a missing file, it is a state: `kernelCliPath()`
-    // answers '' exactly when this machine has no active kernel at all, and
-    // "the CLI is not there: " tells the user nothing they can act on.
+    // The same question the tray row asks before it lets the user click (see
+    // kernelCliUsable): "the CLI is not there: " tells nobody anything they can
+    // act on, so the empty path gets the sentence about the state.
     throw new TerminalPlanError('no-kernel', input.cliPath.trim() === ''
       ? 'this machine has no usable kernel yet: let the app finish a first start, then try again'
       : `the active kernel's CLI is not there: ${input.cliPath}`)
