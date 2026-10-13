@@ -24,7 +24,7 @@ import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from '
 import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
 import { installCrashLogging } from './crash-log'
 import { appendRotatingLog } from './log-file'
-import { configureEventLog, logEvent, trackedEventOperation } from './event-log'
+import { configureEventLog, errorFactsDetail, logEvent, trackedEventOperation } from './event-log'
 import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, writePatchAtomically, type PatchSpecifier } from './brand-suite'
 import { SUITE_LAYER_PACKAGE, installSuiteLayer, readShippedOverlay } from './suite-layer'
@@ -2361,10 +2361,16 @@ if (!gotLock) {
   // escape — a dev run with no kernel to boot, an install that died before the
   // server path was even reached — into a surface that names the reason.
   void app.whenReady().then(boot).catch((error: unknown) => {
-    const detail = error instanceof Error ? error.message : String(error)
-    console.error('[boot] failed:', detail)
-    logEvent('app.boot.failed', { ms: Date.now() - runStartedAt, detail: { error: detail } })
-    void offerStartupRecovery(t('serverFailure.summary', { advice: detail }))
+    // The message is the USER's material and stays so: it is written to the
+    // local `dsh-kernel.log` (a packaged build has no console, so `console.error`
+    // alone left it nowhere) and shown on the failure card. It is deliberately
+    // NOT recorded as the event's `detail` — whatever escapes `boot()` is an
+    // arbitrary library's rejection, and `dsh-events.jsonl` is the file a user is
+    // asked to hand over. Derived facts only; see `errorFactsDetail`.
+    const message = error instanceof Error ? error.message : String(error)
+    logKernel(`[boot] failed: ${message}`)
+    logEvent('app.boot.failed', { ms: Date.now() - runStartedAt, detail: errorFactsDetail(error) })
+    void offerStartupRecovery(t('serverFailure.summary', { advice: message }))
   })
 
   app.on('before-quit', () => {

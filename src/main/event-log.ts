@@ -44,6 +44,10 @@
  * `dsh-server-*.log` tail is the full host path, the child's whole argv and the
  * account plugin's request lines. That tail stays where it already is
  * (`dsh-kernel.log`, `dsh-server-*.log`) and on the user-visible failure card.
+ * `app.boot.failed` is the same case one layer up — the rejection it catches is
+ * an arbitrary library's, not this codebase's — and records derived facts only
+ * too (see `errorFactsDetail`), with its message going to `dsh-kernel.log` and
+ * to the failure card instead.
  *
  * What does reach the sink is the shell's own material: it emits events at its
  * own milestones and every string value passes through `redact()` (see
@@ -551,6 +555,51 @@ export function configureEventLog(options: EventLogOptions): EventLog {
  */
 export function logEvent(event: string, options: { ms?: number; detail?: Record<string, unknown> } = {}): void {
   sink?.log(event, options)
+}
+
+/**
+ * A class name (`TypeError`, `AbortError`): the only shape a derived `how` may
+ * take besides `typeof` of a value that is not an Error.
+ */
+const ERROR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/
+
+/** A Node/undici error code (`ENOENT`, `UND_ERR_SOCKET`): the shape of a derived `code`. */
+const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,39}$/
+
+/**
+ * The `detail` of a failure whose Error the shell did NOT author. `app.boot.failed`
+ * is the one such event: whatever escapes `boot()` is an arbitrary library's
+ * rejection, and its message is exactly where a registry URL carrying userinfo,
+ * a whole command line or a `C:\Users\<name>\…` path rides out — into the file a
+ * user is asked to send. `hostStartFailureDetail` records the host's death this
+ * way for the same reason.
+ *
+ * What is recorded instead: `how` — the error's own class name, or the `typeof`
+ * of a value that is not an Error — and `code`, when it carries an
+ * identifier-shaped one. Both are checked against a shape no path, command or
+ * credential can have, so a hostile `name` or `code` cannot smuggle text through
+ * the derived fields either. Nothing is lost: the message goes to the local
+ * `dsh-kernel.log` and to the failure card, which is where the user reads it.
+ *
+ * WHERE the boot failed is answered by the milestone events already in this
+ * file — `app.boot.begin`, `window.created`, `host.start.begin` / `ready` — so
+ * no phase counter is threaded through `boot()` for it.
+ *
+ * @param error - whatever was thrown (`app.boot.failed`'s rejection).
+ * @param context - the shell's own facts about the failure, merged in beside the derived ones.
+ * @returns the `detail` object, safe to record.
+ */
+export function errorFactsDetail(
+  error: unknown,
+  context: Record<string, EventDetailValue> = {},
+): Record<string, EventDetailValue> {
+  const name = error instanceof Error ? error.name : typeof error
+  const code = error !== null && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  return {
+    ...context,
+    how: ERROR_NAME_RE.test(name) ? name : error instanceof Error ? 'Error' : typeof error,
+    code: typeof code === 'string' && ERROR_CODE_RE.test(code) ? code : null,
+  }
 }
 
 /**

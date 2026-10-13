@@ -32,6 +32,7 @@ const {
   MAX_EVENT_DETAIL_KEYS,
   EventLog,
   configureEventLog,
+  errorFactsDetail,
   isRotatedEventFileName,
   logEvent,
   newRunId,
@@ -244,6 +245,54 @@ test("the child's own output never reaches the event file", () => {
   // the shareable file, and `redact()` still covers it.
   assert.equal(error.message.includes('bin.js'), true)
   assert.equal(error.message.includes('eyJhbGciOiJIUzI1NiJ9'), false, 'the tail is still redacted where it does go')
+})
+
+test('a boot failure records derived facts, never the message it carries', () => {
+  const dir = scratchDir('dsh-app-events-')
+  const sink = new EventLog({ dir, run: 'run-boot-failed' })
+  // What escapes `boot()` is an arbitrary library's rejection, and its message
+  // is where a registry URL carrying userinfo, the command that produced it and
+  // a profile path under the user's own name ride out — into the file a user is
+  // asked to hand over. All three are in this one message on purpose.
+  const error = new Error(
+    'npm ERR! code EACCES --registry https://user:pass@registry.example.com/ ' +
+      'while running node C:\\Users\\Administrator\\AppData\\Local\\dsh-app\\kernel\\0.2.0-rc.2\\bin.js',
+  )
+  error.name = 'BootRefused'
+  error.code = 'EACCES'
+  sink.log('app.boot.failed', { ms: 1200, detail: errorFactsDetail(error) })
+
+  const text = readFileSync(sink.file, 'utf8')
+  for (const fragment of ['user:pass', 'registry.example.com', 'Administrator', 'bin.js', 'npm ERR']) {
+    assert.equal(text.includes(fragment), false, `the boot rejection's message must not reach the event file: ${fragment}`)
+  }
+  assert.deepEqual(records(sink.file)[0].detail, { how: 'BootRefused', code: 'EACCES' })
+  // Nothing is thrown away: the message is what `dsh-kernel.log` and the failure
+  // card carry, so the caller still has it — it is only kept out of the
+  // shareable file.
+  assert.equal(error.message.includes('user:pass'), true)
+})
+
+test('a derived failure detail cannot be used to smuggle text either', () => {
+  const at = new Date('2026-10-13T09:12:04.512Z')
+  // `name` and `code` are text the throwing library chose, so the two fields are
+  // the whole vocabulary of a derived failure and both are shape-checked: a
+  // message hidden in either one is dropped rather than recorded.
+  const hostile = new Error('boom')
+  hostile.name = "ENOENT: open 'C:\\Users\\Administrator\\.dsh\\profiles'"
+  hostile.code = 'https://user:pass@host/registry'
+  const record = JSON.parse(renderEventLine({ event: 'app.boot.failed', detail: errorFactsDetail(hostile) }, identity, at))
+  assert.deepEqual(record.detail, { how: 'Error', code: null })
+  // A rejection that is not an Error at all still says what it was.
+  assert.deepEqual(errorFactsDetail('a thrown string'), { how: 'string', code: null })
+  assert.deepEqual(errorFactsDetail(undefined), { how: 'undefined', code: null })
+  assert.deepEqual(errorFactsDetail(null), { how: 'object', code: null })
+  // The shell's own facts ride beside the derived ones.
+  assert.deepEqual(errorFactsDetail(Object.assign(new Error('x'), { code: 'EPERM' }), { attempt: 2 }), {
+    attempt: 2,
+    how: 'Error',
+    code: 'EPERM',
+  })
 })
 
 test('a value holding newlines cannot forge a second event', () => {
