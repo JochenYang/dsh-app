@@ -44,13 +44,18 @@
  * gap this leaves open, and it is shared with the suite's fetch provider, is
  * recorded in `src/source-address.ts` (an IPv4-compatible literal).
  *
+ * Byte stance: every response this module reads — a directory document, the
+ * registry metadata, the tarball — is read through {@link readBodyCapped}, so
+ * a source that passes the address policy still cannot make the kernel child
+ * buffer an unbounded body. The three caps differ because the three reads do.
+ *
  * @module @dsh-app/plugin-market/catalog
  */
 
 import { lookup } from 'node:dns/promises'
 import { gunzipSync } from 'node:zlib'
 import { MarketExecutionError, type HostText } from './errors.ts'
-import { PACKAGE_NAME_PATTERN } from './npm.ts'
+import { PACKAGE_NAME_PATTERN, REGISTRY_MAX_BYTES } from './npm.ts'
 import {
   blockedAddressOf,
   literalAddressOf,
@@ -701,17 +706,31 @@ function reasonDetail(message: string): string {
   return message.length > MAX_REASON_DETAIL ? `${message.slice(0, MAX_REASON_DETAIL - 3)}…` : message
 }
 
+/** One capped read's refusal: the cap is stated in whole MB for the sentence. */
+function tooLargeReason(code: string, maxBytes: number): HostText {
+  const mb = Math.floor(maxBytes / 1_000_000)
+  return { code, params: { mb }, text: `the response exceeds the ${String(mb)} MB cap` }
+}
+
 /**
  * Read the response body enforcing the byte cap DURING the transfer, not
  * after: a rogue source must not be able to buffer an unbounded body in host
- * memory before the slice happens. Returns BYTES, not text — the caller may
- * need to gunzip (a proxy that strips the encoding header), and a string
- * round-trip through the default UTF-8 TextDecoder destroys those bytes
- * irrecoverably (0x80-0x9F are not valid UTF-8 continuations; measured:
- * `Buffer.from(TextDecoder().decode(gz), 'latin1')` does NOT restore the
- * original gzip).
+ * memory before the slice happens. The read stops and the body is cancelled at
+ * the chunk that crosses the cap — reading it all in and comparing afterwards
+ * would enforce nothing, since the bytes are already resident. Returns BYTES,
+ * not text — the caller may need to gunzip (a proxy that strips the encoding
+ * header), and a string round-trip through the default UTF-8 TextDecoder
+ * destroys those bytes irrecoverably (0x80-0x9F are not valid UTF-8
+ * continuations; measured: `Buffer.from(TextDecoder().decode(gz), 'latin1')`
+ * does NOT restore the original gzip).
+ *
+ * @param response - the response whose body to read.
+ * @param maxBytes - the cap for THIS read; callers differ (a directory
+ *   document, a registry manifest, a package tarball).
+ * @param tooLarge - the coded refusal a body past the cap produces.
+ * @throws MarketExecutionError carrying `tooLarge` when the cap is crossed.
  */
-async function readBodyCapped(response: Response): Promise<Buffer> {
+async function readBodyCapped(response: Response, maxBytes: number, tooLarge: HostText): Promise<Buffer> {
   const body = response.body
   if (body === null) return Buffer.alloc(0)
   const reader = body.getReader()
@@ -721,17 +740,9 @@ async function readBodyCapped(response: Response): Promise<Buffer> {
     const { done, value } = await reader.read()
     if (done) break
     bytes += value.byteLength
-    if (bytes > MAX_BYTES_PER_SOURCE) {
+    if (bytes > maxBytes) {
       await reader.cancel().catch(() => undefined)
-      const mb = Math.floor(MAX_BYTES_PER_SOURCE / 1_000_000)
-      throw new MarketExecutionError(
-        {
-          code: 'catalog.responseTooLarge',
-          params: { mb },
-          text: `the source response exceeds the ${String(mb)} MB cap`,
-        },
-        'catalog',
-      )
+      throw new MarketExecutionError(tooLarge, 'catalog')
     }
     chunks.push(Buffer.from(value))
   }
@@ -1044,6 +1055,15 @@ interface Packument {
  * judges is a request to any address a registry chooses — including a
  * redirected one. A hop the policy cannot judge is refused, not sent.
  *
+ * BOTH reads are byte-capped while they stream, and the cap is what makes the
+ * judging above worth anything: a registry that passes the address policy can
+ * still answer an endless body, so the metadata read is held to
+ * `REGISTRY_MAX_BYTES` (the same cap, imported, that `src/npm.ts` applies to
+ * the same `/latest` manifest) and the tarball to `MAX_BYTES_PER_SOURCE` — the
+ * document inside it is capped at that size once parsed, so a tarball past it
+ * could not yield a document this host would accept. Crossing a cap fails the
+ * source with `catalog.npmMetaTooLarge` / `catalog.npmTarballTooLarge`.
+ *
  * @param pkg - the catalog package name (unscoped).
  * @param registryBase - the registry base URL, no trailing slash.
  * @param heldVersion - the version already in the caller's cache, if any.
@@ -1073,7 +1093,17 @@ export async function fetchCatalogFromNpmPackage(
     if (!metaRes.ok) {
       return { url, reason: { code: 'catalog.httpStatus', params: { status: metaRes.status }, text: `HTTP ${String(metaRes.status)}` } }
     }
-    const meta = (await metaRes.json()) as Packument
+    // Both bodies are read with a cap enforced DURING the transfer. Every byte
+    // here comes from a URL a registry chose, so neither read may buffer an
+    // unbounded body in the kernel child's memory; the deadline is the same for
+    // both, because one controller already covers the metadata and the tarball
+    // hop (NPM_PACKAGE_TIMEOUT_MS, started above).
+    const metaBytes = await readBodyCapped(
+      metaRes,
+      REGISTRY_MAX_BYTES,
+      tooLargeReason('catalog.npmMetaTooLarge', REGISTRY_MAX_BYTES),
+    )
+    const meta = JSON.parse(metaBytes.toString('utf8')) as Packument
     const version = typeof meta.version === 'string' ? meta.version : null
     const tarball = typeof meta.dist?.tarball === 'string' ? meta.dist.tarball : null
     if (version === null || tarball === null) {
@@ -1097,7 +1127,12 @@ export async function fetchCatalogFromNpmPackage(
     if (!tarRes.ok) {
       return { url, reason: { code: 'catalog.httpStatus', params: { status: tarRes.status }, text: `HTTP ${String(tarRes.status)}` } }
     }
-    const bytes = fileFromTarball(Buffer.from(await tarRes.arrayBuffer()), 'package/plugins.json')
+    const tarballBytes = await readBodyCapped(
+      tarRes,
+      MAX_BYTES_PER_SOURCE,
+      tooLargeReason('catalog.npmTarballTooLarge', MAX_BYTES_PER_SOURCE),
+    )
+    const bytes = fileFromTarball(tarballBytes, 'package/plugins.json')
     if (bytes === null) {
       return { url, reason: { code: 'catalog.npmTarball', text: `the package tarball carries no plugins.json` } }
     }
@@ -1197,7 +1232,11 @@ export async function fetchCatalog(
         },
       }
     }
-    const bytes = await readBodyCapped(response)
+    const bytes = await readBodyCapped(
+      response,
+      MAX_BYTES_PER_SOURCE,
+      tooLargeReason('catalog.responseTooLarge', MAX_BYTES_PER_SOURCE),
+    )
     const body = maybeGunzip(bytes, response.headers.get('content-encoding'))
     return {
       url,

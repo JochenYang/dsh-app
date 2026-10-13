@@ -34,7 +34,9 @@
  *                            resolved inside the host's OWN catalog (see
  *                            install-intent.ts). The caller names a row, never
  *                            a package or a version; the answer is
- *                            {token, expiresAt}
+ *                            {token, expiresAt}, and issuance is rate-fenced
+ *                            per profile (a burst of mints would otherwise
+ *                            evict the confirmation the user has open)
  *   POST /install          — {token}: consume the intent and run the install
  *                            chain it bound — registry-resolve the exact
  *                            version, then the kernel's plugin CLI `add`. The
@@ -102,6 +104,7 @@ import {
   CatalogHold,
   InstallIntentStore,
   type CatalogBuild,
+  type IntentClock,
 } from './install-intent.ts'
 import { compareVersions, latestVersionOf, latestVersionsOf, validatePackageName } from './npm.ts'
 import { allowBuilds, BlockedBuildLedger } from './build-allow.ts'
@@ -705,8 +708,8 @@ export function createInstallIntents(deps: {
   readonly sourcesPath: string
   readonly catalogCachePath: string
   readonly log: (message: string) => void
-  /** Clock override; tests pin it to test the expiry fence. */
-  readonly now?: () => number
+  /** Clock override; tests pin it to drive the expiry fence and the rate bucket. */
+  readonly clock?: IntentClock
   /** Token generator override; tests pin it to name a token instead of guessing one. */
   readonly mintToken?: () => string
 }): InstallIntentStore {
@@ -715,7 +718,7 @@ export function createInstallIntents(deps: {
   return new InstallIntentStore(
     () => ({ profile: deps.profile, profileDir: join(resolveDshHome(), 'profiles', deps.profile) }),
     hold,
-    deps.now,
+    deps.clock,
     deps.mintToken,
   )
 }

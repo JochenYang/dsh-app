@@ -50,8 +50,12 @@ export const REGISTRY_HOST = REGISTRY_HOSTS[0]
 /** Registry lookup timeout (ms) — the panel must stay responsive. */
 export const REGISTRY_TIMEOUT_MS = 10_000
 
-/** Registry response cap; a single-version manifest is far smaller. */
-const REGISTRY_MAX_BYTES = 1_000_000
+/**
+ * Registry response cap; a single-version manifest is far smaller. Exported
+ * because the catalog's own npm-package source reads a registry manifest too
+ * (`src/catalog.ts`) and one number is what keeps the two reads agreeing.
+ */
+export const REGISTRY_MAX_BYTES = 1_000_000
 
 /**
  * Validate and normalize a requested package name.

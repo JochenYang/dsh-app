@@ -13,18 +13,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import { MAX_ENTRIES_TOTAL, type CatalogEntry, type SourceFetchResult } from '../src/catalog.ts'
+import type { HostText } from '../src/errors.ts'
 import { CATALOG_CACHE_TTL_MS, resolveCatalog, type CatalogResolveDeps, type CatalogResolution } from '../src/routes.ts'
 import { buildCatalogCache, CACHE_FORMAT_VERSION, loadCatalogCache, saveCatalogCache } from '../src/store.ts'
 
 const entry = (pkg: string, name = pkg): CatalogEntry => ({ id: pkg, name, description: `${name} 描述`, package: pkg })
 
-/** A source failure's coded reason (the host's wire shape). */
-const FAILED_REASON = { code: 'catalog.httpStatus', params: { status: 503 }, text: 'HTTP 503' }
+/**
+ * A source failure's coded reason (the host's wire shape). Both are typed as
+ * `HostText` rather than left to inference: a literal's inferred type fixes
+ * `params` to that one reason's keys, so a second reason with different params
+ * would not be passable to the same helper.
+ */
+const FAILED_REASON: HostText = { code: 'catalog.httpStatus', params: { status: 503 }, text: 'HTTP 503' }
 const TIMEOUT_REASON = { code: 'catalog.timeout', params: { seconds: 30 }, text: 'the request timed out after 30 seconds' }
 
 const okSource = (url: string, packages: readonly string[]): SourceFetchResult =>
   ({ url, entries: packages.map(pkg => entry(pkg)) })
-const failedSource = (url: string, reason = FAILED_REASON): SourceFetchResult => ({ url, reason })
+const failedSource = (url: string, reason: HostText = FAILED_REASON): SourceFetchResult => ({ url, reason })
 
 describe('buildCatalogCache', () => {
   it('keeps entry lists and per-source failure rows side by side', () => {

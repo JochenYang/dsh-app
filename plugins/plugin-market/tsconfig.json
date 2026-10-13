@@ -14,8 +14,6 @@
   },
   "include": [
     "src",
-    "tests/catalog-contract.test.ts",
-    "tests/catalog-drift-scan.ts",
-    "tests/schema-validator.ts"
+    "tests"
   ]
 }

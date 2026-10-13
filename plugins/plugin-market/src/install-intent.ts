@@ -35,6 +35,15 @@
  * (`installPluginByName` issues and consumes without an HTTP round-trip), so
  * the conversational path cannot skip a check the panel's path applies.
  *
+ * Two properties of the lane that the checks above do not give it, and which
+ * are enforced here rather than by a caller:
+ *
+ * - The expiry is measured on a MONOTONIC clock, so a wall clock moved
+ *   backwards cannot extend a minted intent's authority (see
+ *   {@link IntentClock}).
+ * - Issuance is rate-fenced per profile, so a burst of mints cannot evict the
+ *   confirmation the user has open (see {@link ISSUE_BUCKET_CAPACITY}).
+ *
  * @module @dsh-app/plugin-market/install-intent
  */
 
@@ -57,8 +66,46 @@ import { validatePackageName } from './npm.ts'
  * than the 6 h catalog cache TTL: past that point the row an intent was
  * resolved from may have been rebuilt, and re-opening the confirmation is one
  * click.
+ *
+ * The interval is counted on the MONOTONIC clock — see {@link IntentClock}.
  */
 export const INSTALL_INTENT_TTL_MS = 15 * 60 * 1000
+
+/**
+ * The two clocks one intent lives on.
+ *
+ * `wall` stamps the intent: `issuedAt`, the `expiresAt` the panel is shown, and
+ * the audit trail. `monotonic` is the ONLY clock an expiry is decided on, and
+ * the only one the issue-rate fence reads. A wall clock is adjustable — the
+ * user, an NTP correction or a timezone-shaped bug can move it backwards — and
+ * a deadline computed from it moves with it, so a system clock set back ten
+ * minutes would hand a minted intent ten more minutes of authority. The whole
+ * point of the TTL is that the authority is SHORT, so the fence reads a clock
+ * that cannot be moved from outside the process.
+ *
+ * Both are injected together (the store takes one {@link IntentClock}), because
+ * a test that moves one and not the other is exactly the case worth pinning:
+ * with the clocks split, "the wall clock moved, the monotonic one did not" is
+ * expressible, and so is the reverse.
+ */
+export interface IntentClock {
+  /** Milliseconds since the Unix epoch: the stamp and the deadline shown to the panel. */
+  readonly wall: () => number
+  /** Monotonic milliseconds from an arbitrary origin; never moves backwards. */
+  readonly monotonic: () => number
+}
+
+/**
+ * The process's own clocks: `Date.now` for the stamp, `process.hrtime.bigint()`
+ * for the fence. `hrtime` is the platform's monotonic clock, so no wall-clock
+ * adjustment reaches it. The nanosecond count is divided before it is
+ * converted: ms-since-boot fits a double exactly for every uptime that matters,
+ * while the raw nanosecond count would lose whole milliseconds after ~104 days.
+ */
+const processClock: IntentClock = {
+  wall: () => Date.now(),
+  monotonic: () => Number(process.hrtime.bigint() / 1_000_000n),
+}
 
 /**
  * Pending-intent ceiling. Every intent leaves on use or on expiry, so this only
@@ -68,6 +115,40 @@ export const INSTALL_INTENT_TTL_MS = 15 * 60 * 1000
  * entry, and eviction fails safe: its consume reports `install.tokenUnknown`.
  */
 export const MAX_PENDING_INTENTS = 64
+
+/**
+ * Issue-rate fence: a token bucket per profile.
+ *
+ * WHY IT EXISTS. A pending intent is one slot in the {@link MAX_PENDING_INTENTS}
+ * map, and that map's overflow rule drops the OLDEST entry — which is the
+ * user's own confirmation whenever they have one open, since it was minted when
+ * the dialog opened and the flood came after it. Measured in review: 64 issues
+ * arrive in about 10 ms, so anything able to reach the route could evict a live
+ * confirmation faster than the person in front of it can press the button. The
+ * bucket bounds how fast that map can be filled.
+ *
+ * CAPACITY 8. One confirmation costs one token, and the panel's own recovery
+ * costs a second one when the token died while the dialog stood open, so eight
+ * covers several confirmations back to back — a user confirming row by row, or
+ * the model-facing tool installing a handful of plugins in one turn. It is also
+ * far below the 64-entry ceiling, so a refused flood cannot fill the map, let
+ * alone push out the entry at its head.
+ *
+ * REFILL 1/s. The work behind a confirmation is a kernel CLI run, so a real
+ * sequence of installs is paced by seconds and never by this bucket; sustained
+ * issuance above one per second is not a person doing anything. Past the burst
+ * the fence therefore answers at human speed, while a flood is held to a crawl:
+ * evicting 64 entries takes about a minute instead of 10 ms.
+ */
+export const ISSUE_BUCKET_CAPACITY = 8
+export const ISSUE_BUCKET_REFILL_PER_SECOND = 1
+
+/** One profile's bucket: whole tokens, refilled from the monotonic clock. */
+interface IssueBucket {
+  tokens: number
+  /** Monotonic ms of the last refill. */
+  at: number
+}
 
 /** Random in, opaque out: a token is a capability, never a value to parse. */
 function randomToken(): string {
@@ -164,8 +245,22 @@ export interface InstallIntent extends InstallIntentFacts {
   readonly profileDir: string
   /** Per-intent random value (audit: distinguishes two intents with equal facts). */
   readonly nonce: string
+  /** Wall clock (ms since the epoch) at issuance: audit and display only. */
   readonly issuedAt: number
+  /**
+   * Wall-clock deadline shown to the panel: `issuedAt` plus the TTL. It is NOT
+   * the fence — see {@link IntentClock}: the refusal is decided on the
+   * monotonic deadline kept beside this intent, so a wall clock moved backwards
+   * cannot extend the intent's authority however far it is moved.
+   */
   readonly expiresAt: number
+}
+
+/** One pending intent, with the deadline the expiry fence actually reads. */
+interface PendingIntent {
+  readonly intent: InstallIntent
+  /** Monotonic ms past which `consume` refuses — the fence. */
+  readonly expiresAtMono: number
 }
 
 /** What issuance hands back: the token the renderer holds, and its deadline. */
@@ -224,7 +319,9 @@ function selectorLabel(selector: IntentSelector): string {
  * `$DSH_HOME`).
  */
 export class InstallIntentStore {
-  private readonly pending = new Map<string, InstallIntent>()
+  private readonly pending = new Map<string, PendingIntent>()
+  /** One bucket per profile: a flood on one profile cannot spend another's quota. */
+  private readonly buckets = new Map<string, IssueBucket>()
 
   constructor(
     private readonly currentTarget: () => InstallTargetIdentity,
@@ -234,7 +331,8 @@ export class InstallIntentStore {
      * build they just made.
      */
     readonly hold: CatalogHold,
-    private readonly now: () => number = Date.now,
+    /** Both clocks, injected together so a test can move either one alone. */
+    private readonly clock: IntentClock = processClock,
     private readonly mintToken: () => string = randomToken,
   ) {}
 
@@ -247,15 +345,22 @@ export class InstallIntentStore {
    * CURRENT profile is refused here, where the user can still see the reason
    * beside the row they clicked.
    *
+   * The rate fence runs FIRST, before the row is even resolved: what it bounds
+   * is the filling of the pending map, and that map is filled by any mint that
+   * gets past the fence — so the fence has to be the first thing a mint passes.
+   *
    * @param selector - the row to install (entry id, else npm package name).
    * @param force - the user's confirmed replacement of a same-name install.
    * @returns the token and its deadline.
-   * @throws MarketValidationError with a coded reason when the row cannot be installed.
+   * @throws MarketValidationError with a coded reason when the row cannot be
+   *   installed, or `install.rateLimited` when this profile has spent its burst.
    */
   issue(selector: IntentSelector, force: boolean): IssuedIntent {
-    const facts = this.factsOf(selector, force)
-    const issuedAt = this.now()
     const target = this.currentTarget()
+    const monoNow = this.clock.monotonic()
+    this.spendIssueToken(target.profile, monoNow)
+    const facts = this.factsOf(selector, force)
+    const issuedAt = this.clock.wall()
     const entry: InstallIntent = {
       ...facts,
       profile: target.profile,
@@ -265,9 +370,37 @@ export class InstallIntentStore {
       expiresAt: issuedAt + INSTALL_INTENT_TTL_MS,
     }
     const token = this.mintToken()
-    this.pending.set(token, entry)
-    this.evict(issuedAt)
+    this.pending.set(token, { intent: entry, expiresAtMono: monoNow + INSTALL_INTENT_TTL_MS })
+    this.evict(monoNow)
     return { token, expiresAt: entry.expiresAt }
+  }
+
+  /**
+   * Take one token out of the profile's bucket, refilling it for the time that
+   * passed first. The refill is computed on demand rather than by a timer, so
+   * the elapsed monotonic time is the only input it needs.
+   * @throws MarketValidationError `install.rateLimited` when the bucket is empty.
+   */
+  private spendIssueToken(profile: string, monoNow: number): void {
+    const bucket = this.buckets.get(profile) ?? { tokens: ISSUE_BUCKET_CAPACITY, at: monoNow }
+    const elapsed = monoNow - bucket.at
+    if (elapsed > 0) {
+      bucket.tokens = Math.min(
+        ISSUE_BUCKET_CAPACITY,
+        bucket.tokens + (elapsed / 1000) * ISSUE_BUCKET_REFILL_PER_SECOND,
+      )
+      bucket.at = monoNow
+    }
+    this.buckets.set(profile, bucket)
+    if (bucket.tokens < 1) {
+      const seconds = Math.max(1, Math.ceil((1 - bucket.tokens) / ISSUE_BUCKET_REFILL_PER_SECOND))
+      throw new MarketValidationError({
+        code: 'install.rateLimited',
+        params: { seconds },
+        text: `install confirmations are being issued too fast; try again in ${String(seconds)} second(s)`,
+      })
+    }
+    bucket.tokens -= 1
   }
 
   /**
@@ -287,21 +420,24 @@ export class InstallIntentStore {
         text: 'the install request must carry the token the market issued',
       })
     }
-    const intent = this.pending.get(value)
-    if (intent === undefined) {
+    const entry = this.pending.get(value)
+    if (entry === undefined) {
       throw new MarketValidationError({
         code: 'install.tokenUnknown',
         text: 'this install confirmation is no longer valid (it was already used, or the market restarted); reopen the confirmation and try again',
       })
     }
     this.pending.delete(value)
-    if (this.now() >= intent.expiresAt) {
+    // The monotonic deadline, not `intent.expiresAt`: the wall clock the panel
+    // is shown may have been moved, and this is the check that must not move.
+    if (this.clock.monotonic() >= entry.expiresAtMono) {
       throw new MarketValidationError({
         code: 'install.tokenExpired',
         params: { minutes: Math.round(INSTALL_INTENT_TTL_MS / 60_000) },
         text: `this install confirmation expired (${String(Math.round(INSTALL_INTENT_TTL_MS / 60_000))} minutes); reopen the confirmation and try again`,
       })
     }
+    const intent = entry.intent
     const target = this.currentTarget()
     if (target.profile !== intent.profile) {
       throw new MarketValidationError({
@@ -319,10 +455,14 @@ export class InstallIntentStore {
     return intent
   }
 
-  /** Drop what has expired; past the cap, drop the oldest pending intent. */
-  private evict(now: number): void {
-    for (const [token, intent] of this.pending) {
-      if (now >= intent.expiresAt) this.pending.delete(token)
+  /**
+   * Drop what has expired; past the cap, drop the oldest pending intent. The
+   * deadline it reads is the monotonic one, the same the fence uses, so a
+   * moved wall clock cannot keep a dead entry resident either.
+   */
+  private evict(monoNow: number): void {
+    for (const [token, entry] of this.pending) {
+      if (monoNow >= entry.expiresAtMono) this.pending.delete(token)
     }
     while (this.pending.size > MAX_PENDING_INTENTS) {
       const oldest = this.pending.keys().next()

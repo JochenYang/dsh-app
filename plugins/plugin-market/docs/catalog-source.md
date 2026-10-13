@@ -45,7 +45,11 @@ both a fetched body and the bundled offline snapshot flow through).
   `npm:<package>@<registry base>`, which reads the same document out of a
   published npm tarball entry (`package/plugins.json`). A source's URL — https
   only, no credentials, no private host — is validated by `validateSourceUrl`
-  and is **not** part of this schema.
+  and is **not** part of this schema. The npm transport's two reads are
+  byte-capped like every other response this module reads: the registry
+  metadata at 1 MB (`REGISTRY_MAX_BYTES`, shared with `src/npm.ts`) and the
+  tarball at 8 MB (`MAX_BYTES_PER_SOURCE`), refused with
+  `catalog.npmMetaTooLarge` / `catalog.npmTarballTooLarge`.
 
 ## 2. Document shapes and how they are sniffed
 

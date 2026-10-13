@@ -36,8 +36,10 @@ import {
   CatalogHold,
   INSTALL_INTENT_TTL_MS,
   InstallIntentStore,
+  ISSUE_BUCKET_CAPACITY,
   MAX_PENDING_INTENTS,
   type CatalogBuild,
+  type IntentClock,
 } from '../src/install-intent.ts'
 import {
   createInstallIntents,
@@ -98,17 +100,26 @@ function reasonOf(run: () => unknown): string | undefined {
   }
 }
 
+/**
+ * A clock the test drives: both hands read the same source, which is what a
+ * test that only needs "time passed" wants. The tests that pin the fence itself
+ * (a moved wall clock, a rate bucket) build the two hands separately instead.
+ */
+function drivenClock(read: () => number): IntentClock {
+  return { wall: read, monotonic: read }
+}
+
 /** A store over one fixed build, with a clock the test drives. */
 function storeOver(
   entries: readonly CatalogEntry[],
-  options: { now?: () => number, profile?: () => string, profileDir?: () => string } = {},
+  options: { clock?: IntentClock, profile?: () => string, profileDir?: () => string } = {},
 ): InstallIntentStore {
   const hold = new CatalogHold(() => null)
   hold.remember(buildOf(entries))
   return new InstallIntentStore(
     () => ({ profile: options.profile?.() ?? 'web', profileDir: options.profileDir?.() ?? '/home/first/profiles/web' }),
     hold,
-    options.now,
+    options.clock,
   )
 }
 
@@ -127,7 +138,7 @@ describe('InstallIntentStore (issuance)', () => {
     store = new InstallIntentStore(
       () => ({ profile: 'web', profileDir: '/home/first/profiles/web' }),
       hold,
-      () => now,
+      drivenClock(() => now),
     )
   })
 
@@ -196,7 +207,7 @@ describe('InstallIntentStore (issuance)', () => {
     const empty = new InstallIntentStore(
       () => ({ profile: 'web', profileDir: '/home/first/profiles/web' }),
       new CatalogHold(() => null),
-      () => now,
+      drivenClock(() => now),
     )
     assert.equal(reasonOf(() => empty.issue({ entryId: 'row-npm' }, false)), 'install.catalogUnavailable')
   })
@@ -217,7 +228,7 @@ describe('InstallIntentStore (consumption)', () => {
     store = new InstallIntentStore(
       () => ({ profile, profileDir: join(home, 'profiles', profile) }),
       hold,
-      () => now,
+      drivenClock(() => now),
     )
   })
 
@@ -262,6 +273,10 @@ describe('InstallIntentStore (consumption)', () => {
   it('keeps a bounded number of pending intents, dropping the oldest', () => {
     const tokens: string[] = []
     for (let index = 0; index <= MAX_PENDING_INTENTS; index += 1) {
+      // A second per mint: what this test measures is EVICTION, and the
+      // issue-rate fence (one token a second) would otherwise refuse long
+      // before the ceiling is reached.
+      now += 1_000
       tokens.push(store.issue({ entryId: 'row-npm' }, false).token)
     }
     assert.equal(reasonOf(() => store.consume(tokens[0]!)), 'install.tokenUnknown')
@@ -274,6 +289,86 @@ describe('InstallIntentStore (consumption)', () => {
     const fresh = store.issue({ entryId: 'row-npm' }, false).token
     assert.equal(reasonOf(() => store.consume(stale)), 'install.tokenUnknown')
     assert.equal(store.consume(fresh).package, 'dsh-remote')
+  })
+})
+
+// ── The two clock hands, and the issue-rate fence ───────────────────────────
+
+describe('InstallIntentStore (monotonic fence and issue rate)', () => {
+  /** A store whose two clock hands the test moves independently. */
+  function splitStore(): {
+    readonly store: InstallIntentStore
+    readonly wall: { ms: number }
+    readonly mono: { ms: number }
+  } {
+    const wall = { ms: 1_000_000 }
+    const mono = { ms: 5_000 }
+    const hold = new CatalogHold(() => null)
+    hold.remember(buildOf([NPM_ROW]))
+    return {
+      store: new InstallIntentStore(
+        () => ({ profile: 'web', profileDir: '/home/first/profiles/web' }),
+        hold,
+        { wall: () => wall.ms, monotonic: () => mono.ms },
+      ),
+      wall,
+      mono,
+    }
+  }
+
+  it('expires on the monotonic clock, so a wall clock set back cannot extend a token', () => {
+    const { store, wall, mono } = splitStore()
+    const issued = store.issue({ entryId: 'row-npm' }, false)
+    // The system clock goes back an hour. The deadline the panel was shown is a
+    // wall stamp and moves with it — which is exactly why it is not the fence.
+    wall.ms -= 60 * 60 * 1000
+    assert.equal(issued.expiresAt, 1_000_000 + INSTALL_INTENT_TTL_MS, 'the panel is still shown a wall deadline')
+    mono.ms += INSTALL_INTENT_TTL_MS
+    assert.equal(reasonOf(() => store.consume(issued.token)), 'install.tokenExpired')
+  })
+
+  it('stays usable while the monotonic clock is inside the window, however far the wall clock jumps', () => {
+    const { store, wall } = splitStore()
+    const { token } = store.issue({ entryId: 'row-npm' }, false)
+    wall.ms += 30 * 24 * 60 * 60 * 1000
+    assert.equal(store.consume(token).package, 'dsh-remote')
+  })
+
+  it('refuses a burst of mints, so it cannot evict the confirmation the user has open', () => {
+    const { store } = splitStore()
+    const live = store.issue({ entryId: 'row-npm' }, false).token
+    // The measured attack: MAX_PENDING_INTENTS mints back to back in one
+    // instant, which used to push the live entry — the OLDEST — out of the map.
+    const codes = Array.from(
+      { length: MAX_PENDING_INTENTS },
+      () => reasonOf(() => store.issue({ entryId: 'row-npm' }, false)),
+    )
+    assert.equal(codes.filter(code => code === undefined).length, ISSUE_BUCKET_CAPACITY - 1, 'the burst spends what the bucket held')
+    assert.equal(
+      codes.filter(code => code === 'install.rateLimited').length,
+      MAX_PENDING_INTENTS - (ISSUE_BUCKET_CAPACITY - 1),
+      'and is refused past it',
+    )
+    assert.equal(store.consume(live).package, 'dsh-remote', 'the confirmation that was open is still usable')
+  })
+
+  it('refills with the monotonic clock, so a normal pace is never refused', () => {
+    const { store, mono } = splitStore()
+    for (let index = 0; index < ISSUE_BUCKET_CAPACITY * 3; index += 1) {
+      mono.ms += 1_000
+      assert.equal(reasonOf(() => store.issue({ entryId: 'row-npm' }, false)), undefined, `mint ${String(index)}`)
+    }
+  })
+
+  it('fences per profile, so one profile\'s burst does not spend another\'s quota', () => {
+    let profile = 'web'
+    const store = storeOver([NPM_ROW], { profile: () => profile })
+    for (let index = 0; index < ISSUE_BUCKET_CAPACITY; index += 1) {
+      assert.equal(reasonOf(() => store.issue({ entryId: 'row-npm' }, false)), undefined, `mint ${String(index)}`)
+    }
+    assert.equal(reasonOf(() => store.issue({ entryId: 'row-npm' }, false)), 'install.rateLimited')
+    profile = 'dev'
+    assert.equal(reasonOf(() => store.issue({ entryId: 'row-npm' }, false)), undefined, 'the other profile has its own bucket')
   })
 })
 
@@ -657,7 +752,7 @@ describe('market_install_plugin (model path)', () => {
     const counted = new InstallIntentStore(
       () => ({ profile: 'web', profileDir }),
       hold,
-      () => Date.now(),
+      drivenClock(() => Date.now()),
       () => { minted += 1; return `token-${String(minted)}` },
     )
     const result = await installPluginByName({ installer, profile: 'web', installIntents: counted }, 'dsh-remote')

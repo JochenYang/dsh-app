@@ -36,43 +36,52 @@ function seat(dict: Readonly<Record<string, string>>): Parameters<typeof hostMes
 
 const t = seat(zh)
 
+/**
+ * The caller's fallback line, pinned for every assertion below: each one pins a
+ * code's OWN copy, so the fallback — the line shown when the host sent nothing
+ * this build knows — is never what comes back. It is passed because
+ * `hostMessage` requires it; a call site that forgot it is how a blank line
+ * reaches the screen, which is why the parameter is not optional.
+ */
+const noFallback = ''
+
 describe('hostMessage (market)', () => {
   it('renders a known code from the zh dictionary, byte-identical to the pre-i18n sentence', () => {
-    assert.equal(hostMessage({ code: 'pkg.empty' }, t), '包名不能为空')
+    assert.equal(hostMessage({ code: 'pkg.empty' }, t, noFallback), '包名不能为空')
     assert.equal(
-      hostMessage({ code: 'pkg.invalid', params: { name: 'not a package name' } }, t),
+      hostMessage({ code: 'pkg.invalid', params: { name: 'not a package name' } }, t, noFallback),
       '包名格式不合法：「not a package name」',
     )
     assert.equal(
-      hostMessage({ code: 'install.confirmLocal', params: { installed: 'github.com/o/pkg-a', incoming: 'github.com/x/pkg-a' } }, t),
+      hostMessage({ code: 'install.confirmLocal', params: { installed: 'github.com/o/pkg-a', incoming: 'github.com/x/pkg-a' } }, t, noFallback),
       '该插件是本地或 Git 安装的版本（本地：github.com/o/pkg-a），本次安装来自 npm（仓库：github.com/x/pkg-a），直接安装会覆盖现有版本；如确认要替换，请在请求中携带 force: true',
     )
     assert.equal(
-      hostMessage({ code: 'source.tooMany', params: { max: 20 } }, t),
+      hostMessage({ code: 'source.tooMany', params: { max: 20 } }, t, noFallback),
       '目录源最多 20 个',
     )
   })
 
   it('interpolates every value the sentence names, so no raw {param} can reach the screen', () => {
     assert.equal(
-      hostMessage({ code: 'registry.versionNotFound', params: { name: '@dsh-app/plugin-x', version: '9.9.9' } }, t),
+      hostMessage({ code: 'registry.versionNotFound', params: { name: '@dsh-app/plugin-x', version: '9.9.9' } }, t, noFallback),
       '版本不存在：「@dsh-app/plugin-x@9.9.9」',
     )
     assert.equal(
-      hostMessage({ code: 'registry.httpFailed', params: { status: 503 } }, t),
+      hostMessage({ code: 'registry.httpFailed', params: { status: 503 } }, t, noFallback),
       'registry 查询失败（HTTP 503）',
     )
     assert.equal(
-      hostMessage({ code: 'install.timeout', params: { seconds: 120 } }, t),
+      hostMessage({ code: 'install.timeout', params: { seconds: 120 } }, t, noFallback),
       '安装/卸载超时（120 秒），已终止命令，请稍后重试',
     )
     assert.equal(
-      hostMessage({ code: 'route.internalError', params: { detail: 'ENOSPC' } }, t),
+      hostMessage({ code: 'route.internalError', params: { detail: 'ENOSPC' } }, t, noFallback),
       '操作失败：ENOSPC',
     )
     // The CLI tail is data and keeps its own line break.
     assert.equal(
-      hostMessage({ code: 'install.commandFailedLog', params: { log: 'ERR_PNPM_NO_MATCHING_VERSION' } }, t),
+      hostMessage({ code: 'install.commandFailedLog', params: { log: 'ERR_PNPM_NO_MATCHING_VERSION' } }, t, noFallback),
       '命令失败：\nERR_PNPM_NO_MATCHING_VERSION',
     )
   })
@@ -81,15 +90,15 @@ describe('hostMessage (market)', () => {
     // An unprovable repo side and a missing OS error code travel as codes, so
     // neither language ever receives the other's words.
     assert.equal(
-      hostMessage({ code: 'install.confirmLocal', params: { installed: 'github.com/o/pkg-a', incoming: 'repo.unknown' } }, t),
+      hostMessage({ code: 'install.confirmLocal', params: { installed: 'github.com/o/pkg-a', incoming: 'repo.unknown' } }, t, noFallback),
       '该插件是本地或 Git 安装的版本（本地：github.com/o/pkg-a），本次安装来自 npm（仓库：未知来源），直接安装会覆盖现有版本；如确认要替换，请在请求中携带 force: true',
     )
     assert.equal(
-      hostMessage({ code: 'registry.lookupFailed', params: { detail: 'error.network' } }, t),
+      hostMessage({ code: 'registry.lookupFailed', params: { detail: 'error.network' } }, t, noFallback),
       'registry 查询失败：网络错误',
     )
     assert.equal(
-      hostMessage({ code: 'registry.lookupFailed', params: { detail: 'fetch failed' } }, t),
+      hostMessage({ code: 'registry.lookupFailed', params: { detail: 'fetch failed' } }, t, noFallback),
       'registry 查询失败：fetch failed',
       'a diagnostic that is not a dictionary code rides through verbatim',
     )
@@ -98,37 +107,37 @@ describe('hostMessage (market)', () => {
   it('renders the reasons the host functions actually produce', () => {
     const rejected = validateSourceUrl('http://example.com/list')
     assert.equal(rejected.ok, false)
-    assert.equal(rejected.ok ? '' : hostMessage(rejected.reason, t), '目录源必须是 https:// 地址')
+    assert.equal(rejected.ok ? '' : hostMessage(rejected.reason, t, noFallback), '目录源必须是 https:// 地址')
 
     // The address policy's two refusals: a literal private host, and a name
     // that answers with one. Both sentences name the host the user typed.
     const privateHost = validateSourceUrl('https://192.168.1.1/list')
     assert.equal(privateHost.ok, false)
     assert.equal(
-      privateHost.ok ? '' : hostMessage(privateHost.reason, t),
+      privateHost.ok ? '' : hostMessage(privateHost.reason, t, noFallback),
       '目录源不能指向内网、本机或链路本地地址：192.168.1.1',
     )
     assert.equal(
-      hostMessage(privateResolutionReason('internal.example.com', '10.0.0.1', 'private'), t),
+      hostMessage(privateResolutionReason('internal.example.com', '10.0.0.1', 'private'), t, noFallback),
       '目录源域名 internal.example.com 解析到内网、本机或链路本地地址，已跳过该源',
     )
     assert.equal(
-      hostMessage(unresolvedReason('cdn.example.com'), t),
+      hostMessage(unresolvedReason('cdn.example.com'), t, noFallback),
       '目录源域名 cdn.example.com 无法解析，已跳过该源',
     )
 
     const refusal = checkUpdateTarget(undefined, undefined)
     assert.equal(refusal.ok, false)
-    assert.equal(refusal.ok ? '' : hostMessage(refusal.reason, t), '该插件尚未安装，无法更新')
+    assert.equal(refusal.ok ? '' : hostMessage(refusal.reason, t, noFallback), '该插件尚未安装，无法更新')
   })
 
   it('falls back to the host English diagnostic for a code this build does not know', () => {
     assert.equal(
-      hostMessage({ code: 'catalog.httpStatus', params: { status: 503 }, text: 'HTTP 503' }, t),
+      hostMessage({ code: 'catalog.httpStatus', params: { status: 503 }, text: 'HTTP 503' }, t, noFallback),
       'HTTP 503',
       'an HTTP status reads the same in every locale, so it carries no dictionary copy',
     )
-    assert.equal(hostMessage({ code: 'registry.futureCode', text: 'registry said no' }, t), 'registry said no')
+    assert.equal(hostMessage({ code: 'registry.futureCode', text: 'registry said no' }, t, noFallback), 'registry said no')
   })
 
   it('renders its own sentence for a code whose text can quote the responding server', () => {
@@ -138,13 +147,14 @@ describe('hostMessage (market)', () => {
     // the detail stays in the host's diagnostic and the panel renders a
     // sentence of its own.
     const upstream = 'Unexpected token \'p\', "package/pl"... is not valid JSON'
-    const rendered = hostMessage({ code: 'catalog.requestFailedDetail', params: { detail: upstream }, text: upstream }, t)
+    const rendered = hostMessage({ code: 'catalog.requestFailedDetail', params: { detail: upstream }, text: upstream }, t, noFallback)
     assert.equal(rendered, '目录源请求失败')
     assert.equal(rendered.includes('package/pl'), false)
     assert.equal(rendered.includes('Unexpected token'), false)
   })
 
   it('never renders blank in the source-failure list', () => {
+    // `sourceReasonOf` supplies the fallback itself, so these calls stay 2-ary.
     assert.equal(sourceReasonOf({ code: 'catalog.timeout', params: { seconds: 30 } }, t), '请求超时（30 秒）')
     assert.equal(sourceReasonOf({ code: 'mkt.futureCode' }, t), '请求失败')
     assert.equal(sourceReasonOf({ code: 'catalog.requestFailed', text: 'the request failed' }, t), '请求失败')
@@ -155,48 +165,66 @@ describe('hostMessage (market)', () => {
     // host's coded reason — a code without copy would show English prose in a
     // zh panel, and a blank line for a code whose `text` is absent.
     assert.equal(
-      hostMessage({ code: 'install.tokenUnknown' }, t),
+      hostMessage({ code: 'install.tokenUnknown' }, t, noFallback),
       '这次安装确认已经失效（可能已经用过一次，或市场已重启），请重新打开确认后重试',
     )
     assert.equal(
-      hostMessage({ code: 'install.tokenExpired', params: { minutes: 15 } }, t),
+      hostMessage({ code: 'install.tokenExpired', params: { minutes: 15 } }, t, noFallback),
       '这次安装确认已过期（有效期 15 分钟），请重新打开确认后重试',
     )
     assert.equal(
-      hostMessage({ code: 'install.tokenProfileMismatch', params: { issued: 'web', current: 'dev' } }, t),
+      hostMessage({ code: 'install.tokenProfileMismatch', params: { issued: 'web', current: 'dev' } }, t, noFallback),
       '这次安装确认是为 profile「web」签发的，当前应用运行在「dev」，请重新打开确认',
     )
     assert.equal(
-      hostMessage({ code: 'install.entryUnknown', params: { id: 'row-gone' } }, t),
+      hostMessage({ code: 'install.entryUnknown', params: { id: 'row-gone' } }, t, noFallback),
       '目录中已经没有这次确认对应的条目（「row-gone」），请刷新目录后重试',
     )
     assert.equal(
-      hostMessage({ code: 'install.entryAmbiguous', params: { id: 'same', count: 2 } }, t),
+      hostMessage({ code: 'install.entryAmbiguous', params: { id: 'same', count: 2 } }, t, noFallback),
       '目录中有 2 个条目共用标识「same」，无法确定要安装哪一个；请刷新目录，或改从来源里标识唯一的条目安装',
     )
-    assert.equal(hostMessage({ code: 'install.tokenInvalid' }, t), '安装请求必须携带市场签发的令牌，请重新打开安装确认')
-    assert.equal(hostMessage({ code: 'install.tokenHomeChanged' }, t), '应用的数据目录在这次安装确认之后发生了变化，请重新打开确认')
+    assert.equal(hostMessage({ code: 'install.tokenInvalid' }, t, noFallback), '安装请求必须携带市场签发的令牌，请重新打开安装确认')
+    assert.equal(hostMessage({ code: 'install.tokenHomeChanged' }, t, noFallback), '应用的数据目录在这次安装确认之后发生了变化，请重新打开确认')
     assert.equal(
-      hostMessage({ code: 'install.catalogUnavailable' }, t),
+      hostMessage({ code: 'install.catalogUnavailable' }, t, noFallback),
       '市场还没有可用的目录数据，无法签发安装确认；请先打开一次市场',
     )
     assert.equal(
-      hostMessage({ code: 'install.notInstallable', params: { package: 'dsh-x' } }, t),
+      hostMessage({ code: 'install.notInstallable', params: { package: 'dsh-x' } }, t, noFallback),
       '目录条目「dsh-x」没有可安装的目标',
     )
     assert.equal(
-      hostMessage({ code: 'install.gitTargetInvalid' }, t),
+      hostMessage({ code: 'install.gitTargetInvalid' }, t, noFallback),
       'Git 安装目标必须是 github:owner/repo（可带 #commit），且指向宿主能识别的仓库',
+    )
+    assert.equal(
+      hostMessage({ code: 'install.rateLimited', params: { seconds: 1 } }, t, noFallback),
+      '安装确认签发过于频繁，请等待 1 秒后重试',
+    )
+  })
+
+  it('renders the two npm-catalog byte caps, which are not the directory source cap', () => {
+    // The registry metadata and the tarball are read by a different transport
+    // from an https directory source, so they carry their own codes; each names
+    // the read that crossed its cap, not "the source" in general.
+    assert.equal(
+      hostMessage({ code: 'catalog.npmMetaTooLarge', params: { mb: 1 } }, t, noFallback),
+      'npm 目录源的包元数据超过 1MB 上限',
+    )
+    assert.equal(
+      hostMessage({ code: 'catalog.npmTarballTooLarge', params: { mb: 8 } }, t, noFallback),
+      'npm 目录源的包压缩包超过 8MB 上限',
     )
   })
 
   it('renders the allow-build refusals of the host-attempt anchor', () => {
     assert.equal(
-      hostMessage({ code: 'allowBuild.notBlockedInstall', params: { package: 'totally-arbitrary-pkg' } }, t),
+      hostMessage({ code: 'allowBuild.notBlockedInstall', params: { package: 'totally-arbitrary-pkg' } }, t, noFallback),
       '宿主没有记录到这个包的构建脚本被拦截的安装尝试（totally-arbitrary-pkg）；请先在插件市场安装它，再使用构建脚本被拦截提示里的「放行并重试」',
     )
     assert.equal(
-      hostMessage({ code: 'allowBuild.notReported', params: { packages: 'totally-arbitrary-pkg' } }, t),
+      hostMessage({ code: 'allowBuild.notReported', params: { packages: 'totally-arbitrary-pkg' } }, t, noFallback),
       '放行列表里有这次安装尝试没有报告为被拦截的包：totally-arbitrary-pkg',
     )
   })

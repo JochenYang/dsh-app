@@ -35,10 +35,24 @@ describe('updatablePackages', () => {
 })
 
 describe('mergeUpdateFacts (two-phase installed load)', () => {
-  const rows = [
-    { name: 'pkg-a', version: '^1.0.0', source: 'registry' as const, installedVersion: '1.0.0' },
-    { name: 'pkg-b', version: '^2.0.0', source: 'registry' as const, installedVersion: '2.0.0' },
-    { name: 'pkg-local', version: 'file:../x.tgz', source: 'local' as const, installedVersion: '0.1.0' },
+  /**
+   * The installed rows as the panel holds them: the two update facts are
+   * OPTIONAL fields of the row (the panel's own `InstalledPackage` shape), which
+   * is what makes reading them back off the merge a type-level question too.
+   */
+  interface Row {
+    readonly name: string
+    readonly version: string
+    readonly source: 'registry' | 'local'
+    readonly installedVersion: string
+    readonly latest?: string
+    readonly updateAvailable?: boolean
+  }
+
+  const rows: readonly Row[] = [
+    { name: 'pkg-a', version: '^1.0.0', source: 'registry', installedVersion: '1.0.0' },
+    { name: 'pkg-b', version: '^2.0.0', source: 'registry', installedVersion: '2.0.0' },
+    { name: 'pkg-local', version: 'file:../x.tgz', source: 'local', installedVersion: '0.1.0' },
   ]
 
   it('keeps the same array reference when the probe changes nothing', () => {
@@ -119,10 +133,16 @@ describe('installedOwnerBadge', () => {
 
   it('marks every other row as the author\'s, whatever it came in as', () => {
     // npm, a git repo, a local tarball: all of them belong to whoever wrote the
-    // package, and the badge is what stops their breakage reading as ours.
-    assert.equal(installedOwnerBadge({ suite: false, source: 'registry' }), 'third-party')
-    assert.equal(installedOwnerBadge({ suite: false, source: 'git' }), 'third-party')
-    assert.equal(installedOwnerBadge({ suite: false, source: 'local' }), 'third-party')
+    // package, and the badge is what stops their breakage reading as ours. Each
+    // is bound as a whole installed row first — the badge's own parameter reads
+    // only the suite flag, and the point here is that the origin of a complete
+    // row cannot change the verdict.
+    const npmRow = { suite: false, source: 'registry' as const }
+    const gitRow = { suite: false, source: 'git' as const }
+    const localRow = { suite: false, source: 'local' as const }
+    assert.equal(installedOwnerBadge(npmRow), 'third-party')
+    assert.equal(installedOwnerBadge(gitRow), 'third-party')
+    assert.equal(installedOwnerBadge(localRow), 'third-party')
     // A row that does not carry the flag at all is not a suite plugin either:
     // the shell sets it explicitly on the plugins it ships.
     assert.equal(installedOwnerBadge({}), 'third-party')

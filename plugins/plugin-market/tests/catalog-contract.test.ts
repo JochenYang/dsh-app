@@ -908,7 +908,7 @@ describe('contract publication: the artefacts an outside author can reach', () =
     for (const name of ['catalog-source.md', 'catalog-source.schema.json']) {
       assert.equal(existsSync(fileURLToPath(new URL(`../docs/${name}`, import.meta.url))), true, `docs/${name} is missing`)
     }
-    assert.equal(MANIFEST.version, '0.6.5',
+    assert.equal(MANIFEST.version, '0.6.6',
       'shipping a new file to existing installations changes the plugin, so its version travels with the contract')
   })
 })

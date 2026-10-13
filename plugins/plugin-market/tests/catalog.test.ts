@@ -67,9 +67,10 @@ describe('validateSourceUrl', () => {
     assert.equal(codeOf('not a url'), 'source.unparsable')
     assert.equal(codeOf('http://example.com/list'), 'source.notHttps')
     assert.equal(codeOf('https://user:pass@example.com/l'), 'source.hasCredentials')
-    // The echoed value rides params, so no prose crosses the wire.
+    // The echoed value rides params, so no prose crosses the wire: the refusal
+    // is exactly `{ ok: false, reason }`, with nothing hoisted to its top level.
     const check = validateSourceUrl('not a url')
-    assert.deepEqual(check.ok ? undefined : check.params, undefined)
+    assert.equal(check.ok ? undefined : 'params' in check, false)
     assert.equal(check.ok ? '' : check.reason.params?.url, 'not a url')
   })
 
@@ -842,7 +843,7 @@ describe('fetchCatalogFromNpmPackage', () => {
     const tarball = catalogTarball(catalog)
     const transport = recordingFetch(url => url.endsWith('/latest')
       ? packument('9.9.9', 'https://mirror.example.com/pkg-9.9.9.tgz')
-      : new Response(tarball, { status: 200 }))
+      : new Response(new Uint8Array(tarball), { status: 200 }))
     try {
       const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
       assert.equal('entries' in result, true)
@@ -862,7 +863,7 @@ describe('fetchCatalogFromNpmPackage', () => {
     // address in `Location`, `127.0.0.1` included).
     const transport = recordingFetch(url => url.endsWith('/latest')
       ? packument('1.0.0', 'https://cdn.example.com/pkg-1.0.0.tgz')
-      : new Response(catalogTarball('{"plugins":[]}'), { status: 200 }))
+      : new Response(new Uint8Array(catalogTarball('{"plugins":[]}')), { status: 200 }))
     try {
       await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
       assert.deepEqual(transport.calls, [
@@ -980,13 +981,69 @@ describe('fetchCatalogFromNpmPackage', () => {
     // not turn an address nobody needs looked up into a refusal.
     const transport = recordingFetch(url => url.endsWith('/latest')
       ? packument('1.0.0', 'https://93.184.216.34/pkg.tgz')
-      : new Response(catalogTarball('{"plugins":[]}'), { status: 200 }))
+      : new Response(new Uint8Array(catalogTarball('{"plugins":[]}')), { status: 200 }))
     try {
       const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://93.184.216.34/npm', undefined, {
         resolve: async () => { throw new Error('the resolver must not be asked about a literal') },
       })
       assert.equal('entries' in result, true)
       assert.equal(transport.calls.length, 2)
+    } finally {
+      transport.restore()
+    }
+  })
+
+  /**
+   * A 200 whose body arrives in 256 KB chunks, counting the chunks the reader
+   * actually pulled. A body far larger than the cap plus this counter is what
+   * makes "the read stopped at the cap" a number instead of an inference from
+   * the refusal — a read that buffered first would pull every chunk.
+   */
+  function chunkedResponse(totalBytes: number, counter: { pulls: number }): Response {
+    const chunk = new Uint8Array(256_000).fill(120)
+    let sent = 0
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= totalBytes) {
+          controller.close()
+          return
+        }
+        sent += chunk.byteLength
+        counter.pulls += 1
+        controller.enqueue(chunk)
+      },
+    }), { status: 200 })
+  }
+
+  it('caps the registry metadata read, stopping where the cap is crossed', async () => {
+    // A registry that passes the address policy can still answer an endless
+    // body: 4 MB here against the 1 MB manifest cap, in 16 chunks.
+    const counter = { pulls: 0 }
+    const transport = recordingFetch(url => url.endsWith('/latest')
+      ? chunkedResponse(4_000_000, counter)
+      : new Response(new Uint8Array(catalogTarball('{"plugins":[]}')), { status: 200 }))
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
+      assert.equal('reason' in result && result.reason.code, 'catalog.npmMetaTooLarge')
+      assert.equal('reason' in result && result.reason.params?.mb, 1)
+      assert.equal(counter.pulls < 16, true, `pulled ${String(counter.pulls)} of 16 chunks`)
+      assert.equal(transport.calls.length, 1, 'the tarball is never asked for')
+    } finally {
+      transport.restore()
+    }
+  })
+
+  it('caps the tarball read, stopping where the cap is crossed', async () => {
+    // The tarball cap is the document cap (8 MB) — 16 MB of body is 64 chunks.
+    const counter = { pulls: 0 }
+    const transport = recordingFetch(url => url.endsWith('/latest')
+      ? packument('1.0.0', 'https://mirror.example.com/pkg-1.0.0.tgz')
+      : chunkedResponse(16_000_000, counter))
+    try {
+      const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
+      assert.equal('reason' in result && result.reason.code, 'catalog.npmTarballTooLarge')
+      assert.equal('reason' in result && result.reason.params?.mb, 8)
+      assert.equal(counter.pulls < 64, true, `pulled ${String(counter.pulls)} of 64 chunks`)
     } finally {
       transport.restore()
     }
