@@ -1094,6 +1094,72 @@ function errorOf(reason: unknown, fallback: string): Error {
   return reason instanceof Error ? reason : new Error(fallback)
 }
 
+/**
+ * How a child ended before it was ready: the derived facts of a failure whose
+ * message is the child's own output (see {@link hostExitError}).
+ */
+export interface HostExitFacts {
+  /** In words: `exit code 1`, `signal SIGKILL`. */
+  how: string
+  code: number | null
+  signal: NodeJS.Signals | null
+}
+
+/** Where the facts ride on the Error; not enumerable, so a printed Error is unchanged. */
+const HOST_EXIT_FACTS = Symbol('dsh-app.host-exit-facts')
+
+/** An Error carrying {@link HostExitFacts}. */
+interface HostExitError extends Error {
+  [HOST_EXIT_FACTS]?: HostExitFacts
+}
+
+/**
+ * The failure a dead child leaves behind: the MESSAGE is its own last words —
+ * redacted, because a provider can echo a key into stderr, and it ends up on the
+ * user-visible status line — and the FACTS ride beside it for anything durable.
+ *
+ * The message is deliberately NOT what a durable record reads. It is arbitrary
+ * child output: measured on a real `logs/dsh-server-*.log` tail it carries the
+ * full host path, the child's whole argv and the account plugin's request lines.
+ * That text belongs in `dsh-kernel.log` / `dsh-server-*.log`, which already hold
+ * it, and not in the event file the user is asked to send.
+ *
+ * @param facts - how it ended.
+ * @param tail - the child's stderr tail, already trimmed.
+ * @returns the Error `start()` rejects with.
+ */
+export function hostExitError(facts: HostExitFacts, tail: string): Error {
+  const message = tail === '' ? `dsh host stopped with ${facts.how}` : `dsh host ${facts.how}: ${tail}`
+  const error = new Error(redact(message)) as HostExitError
+  Object.defineProperty(error, HOST_EXIT_FACTS, { value: facts })
+  return error
+}
+
+/**
+ * The `detail` recorded for a failed host start: derived facts only, never the
+ * rejection's message (see {@link hostExitError}). An error that did not come
+ * from a child's exit contributes what can still be derived of it — its `name` —
+ * so the line always says WHY the start failed even when the why is only "it
+ * threw".
+ *
+ * @param error - whatever `DshServer.start()` rejected with.
+ * @param context - the shell's own counters for this attempt.
+ * @returns the `detail` object of the `host.start.failed` event.
+ */
+export function hostStartFailureDetail(
+  error: unknown,
+  context: { attempt: number; transport: string },
+): Record<string, string | number | null> {
+  const facts = error instanceof Error ? (error as HostExitError)[HOST_EXIT_FACTS] : undefined
+  return {
+    attempt: context.attempt,
+    transport: context.transport,
+    how: facts?.how ?? (error instanceof Error ? error.name : typeof error),
+    code: facts?.code ?? null,
+    signal: facts?.signal ?? null,
+  }
+}
+
 /** Race one settlement against a deadline without leaving a timer behind. */
 async function exitsWithin(exit: Promise<void>, milliseconds: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -1666,10 +1732,7 @@ export class DshHost implements DshAppTarget {
   /** The failure a dead child leaves behind, with its own last words. */
   private exitError(code: number | null, signal: NodeJS.Signals | null): Error {
     const how = code === null ? `signal ${String(signal)}` : `exit code ${String(code)}`
-    const tail = this.stderrTail.trim()
-    // The child's stderr can carry credential material (a provider echoing a
-    // key), and this message ends up in a user-visible status line.
-    return new Error(redact(tail === '' ? `dsh host stopped with ${how}` : `dsh host ${how}: ${tail}`))
+    return hostExitError({ how, code, signal }, this.stderrTail.trim())
   }
 
   private async pumpRequest(streamId: number, request: Request, hasBody: boolean): Promise<void> {

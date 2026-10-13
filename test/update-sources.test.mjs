@@ -22,6 +22,7 @@ const {
   pickAsset,
   releaseAssetCandidates,
   releaseLatestYamlCandidates,
+  sourceLabel,
 } = require('../dist/main/updater.js')
 const { MODELSCOPE_ENDPOINT, MODELSCOPE_RELEASES_URL, MODELSCOPE_REPO } = require('../dist/shared/constants.js')
 
@@ -77,6 +78,27 @@ test('asset candidates lead with the mirror for the bytes, official GitHub secon
   for (const prefix of MIRROR_PREFIXES) assert.ok(candidates.includes(`${prefix}${GITHUB_LATEST}/${asset}`))
   // The mirror is not appended twice.
   assert.equal(candidates.filter((url) => url.startsWith(MODELSCOPE_ENDPOINT)).length, 1)
+})
+
+test('a source label names the transport and can never carry userinfo', () => {
+  // `DSH_APP_GITHUB_MIRRORS` is USER CONFIGURATION, so a prefix candidate can
+  // carry credentials in its authority — and this label is what
+  // `shell.update.mirror` writes into `dsh-events.jsonl`, the file a user sends
+  // when an update misbehaves. Measured before the fix: the raw URL went in
+  // character for character.
+  const credentialed = 'https://alice:s3cr3t-pw@ghproxy.example/' + OFFICIAL_YAML
+  assert.equal(sourceLabel(credentialed), 'mirror:https://ghproxy.example')
+  for (const secret of ['alice', 's3cr3t-pw', 'https://github.com']) {
+    assert.equal(sourceLabel(credentialed).includes(secret), false, `the label must not carry ${secret}`)
+  }
+  // The other two candidates, in the shapes their own chains build.
+  assert.equal(sourceLabel(OFFICIAL_YAML), 'github')
+  assert.equal(sourceLabel(modelscopeReleaseFileUrl('releases/latest/latest.yml')), 'modelscope')
+  // A prefix that does not parse as a URL still yields a label, never the input.
+  assert.equal(sourceLabel('not a url at all'), 'mirror:unparseable')
+  // And a normal prefix stays identifiable, because that is the whole point of
+  // the label: which transport actually served the bytes.
+  assert.equal(sourceLabel(`${MIRROR_PREFIXES[0]}${OFFICIAL_YAML}`), 'mirror:https://ghfast.top')
 })
 
 test('every asset candidate is sha512-gated, so a lagging mirror copy falls through', async () => {

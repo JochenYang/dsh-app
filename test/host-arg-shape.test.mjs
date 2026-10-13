@@ -23,13 +23,16 @@ import { test } from 'node:test'
 import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
+const { EventLog } = require('../dist/main/event-log.js')
 const {
   DshHost,
   desktopHostDir,
   desktopHostEntry,
   hostArgShape,
+  hostExitError,
   hostPackageVersion,
   hostProfileAnchor,
+  hostStartFailureDetail,
   hostTransport,
 } = require('../dist/main/desktop-host.js')
 
@@ -45,7 +48,11 @@ const argv = process.argv.slice(2)
 const flag = argv[argv.length - 1] === '--allow-linked-profile'
 const positional = flag ? argv.slice(0, -1) : argv
 const expected = process.env.FAKE_HOST_CONTRACT === 'runtime-and-project' ? 2 : 1
-if (process.env.FAKE_HOST_CONTRACT === 'fail-other') {
+if (process.env.FAKE_HOST_CONTRACT === 'fail-with-stderr') {
+  process.stderr.write('node ' + __filename + ' --profile dsh-app --transport web\\n')
+  process.stderr.write('[deepseek-account] request { path: "/api/account/status", method: "GET" }\\n')
+  setTimeout(() => { process.exit(1) }, 10)
+} else if (process.env.FAKE_HOST_CONTRACT === 'fail-other') {
   process.send({ type: 'fatal', message: 'dsh desktop: composition did not provide connection, typertGateway, and clientModules' })
   setTimeout(() => { process.exit(1) }, 10)
 } else if (positional.length !== expected) {
@@ -130,7 +137,15 @@ if (argv[2] !== undefined) {
   const interpreter = path.join(argv[2], 'dependencies', 'node', 'bin', process.platform === 'win32' ? 'node.exe' : 'node')
   if (!fs.existsSync(interpreter)) problems.push('office interpreter missing at ' + interpreter)
 }
-if (problems.length > 0) {
+if (process.env.FAKE_WEB_CONTRACT === 'die') {
+  // A web child that dies before it reports ready, with its own words on stderr.
+  // The web transport has no frame pipes, so nothing else can produce the
+  // rejection: this is exactly the shape a real 0.1.6-alpha.2+ host leaves when
+  // it cannot compose, and the one the shell's own stderr tail rides out on.
+  process.stderr.write('node ' + __filename + ' --profile dsh-app --transport web\\n')
+  process.stderr.write('[deepseek-account] request { path: "/api/account/status", method: "GET" }\\n')
+  setTimeout(() => { process.exit(1) }, 10)
+} else if (problems.length > 0) {
   process.send({ type: 'fatal', message: 'dsh desktop: ' + problems.join('; ') })
   setTimeout(() => { process.exit(1) }, 10)
 } else {
@@ -416,6 +431,63 @@ test('a failure that is not about the shape is reported, never retried', async (
   const unmapped = fakeRuntime('local', 'fail-other')
   await assert.rejects(start(unmapped, unmappedLogs), /composition did not provide connection/u)
   assert.equal(shapes(unmappedLogs).length, 1)
+})
+
+test('a host that dies before ready never hands its stderr to the event detail', async () => {
+  // The path that carries the child's own words: a WEB child, whose transport
+  // has no frame pipes, so nothing else can produce the rejection — the exit is
+  // the only way out of `start()`, and `exitError` builds its message from the
+  // stderr tail. This is the shape a real 0.1.6-alpha.2+ host leaves when it
+  // cannot compose.
+  const runtime = fakeWebRuntime('0.1.6-alpha.2', 'die')
+  const error = await start(runtime, [], webStartOptions(runtime)).then(() => null, (thrown) => thrown)
+  assert.ok(error instanceof Error, 'a child that died before ready fails the start')
+  assert.match(error.message, /deepseek-account/u, 'the child\'s own words are what the message carries')
+  assert.match(error.message, /--transport web/u, 'the whole tail, not a summary of it')
+
+  const detail = hostStartFailureDetail(error, { attempt: 3, transport: 'web' })
+  assert.deepEqual(detail, {
+    attempt: 3,
+    transport: 'web',
+    how: 'exit code 1',
+    code: 1,
+    signal: null,
+  })
+  // And the file itself, written by the real sink: `host.start.failed` is the
+  // one event a user is asked to hand over, so the tail must not be in it.
+  const dir = scratchDir('dsh-app-events-')
+  const sink = new EventLog({ dir, run: 'run-host-died' })
+  sink.log('host.start.failed', { detail })
+  const written = readFileSync(sink.file, 'utf8')
+  for (const fragment of ['deepseek-account', '--transport', '--profile', 'node ']) {
+    assert.equal(written.includes(fragment), false, `the child's stderr must not reach the event file: ${fragment}`)
+  }
+  assert.deepEqual(JSON.parse(written.trim()).detail, detail)
+
+  // The frames transport has frame pipes, so its child's death races: the exit
+  // above, or the response pipe ending — this shell's own sentence. Either way
+  // the DERIVED detail is what is recorded, so the tail cannot ride out.
+  const frames = fakeRuntime('0.1.5-rc.2', 'fail-with-stderr')
+  const raced = await start(frames, []).then(() => null, (thrown) => thrown)
+  assert.ok(raced instanceof Error)
+  assert.deepEqual(
+    Object.keys(hostStartFailureDetail(raced, { attempt: 3, transport: 'frames' })),
+    ['attempt', 'transport', 'how', 'code', 'signal'],
+    'the detail is derived fields only, whichever half of the death won the race',
+  )
+
+  // An error that is not a child's exit still says how the start failed, and the
+  // facts ride on the Error as a Symbol, so nothing that prints an Error changes.
+  assert.deepEqual(
+    hostStartFailureDetail(new TypeError('dsh host response pipe ended'), { attempt: 1, transport: 'web' }),
+    { attempt: 1, transport: 'web', how: 'TypeError', code: null, signal: null },
+  )
+  assert.equal(hostStartFailureDetail('not an error', { attempt: 0, transport: 'web' }).how, 'string')
+  // The tail is still redacted where it DOES go (the message, which the failure
+  // card shows), so a provider key echoed by the child cannot show up there.
+  const withKey = hostExitError({ how: 'exit code 1', code: 1, signal: null }, 'refused api_key=sk-abcdefghij0123456789')
+  assert.equal(withKey.message.includes('sk-abcdefghij0123456789'), false)
+  assert.deepEqual(Object.keys(withKey), [], 'the facts are a Symbol, not an own string key')
 })
 
 test('a web-transport version starts on the child URL contract, office payload and all', async () => {

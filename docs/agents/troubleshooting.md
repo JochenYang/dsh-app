@@ -17,6 +17,7 @@ holds the full detail — read it before acting on the signal.
 | 6 h (`KERNEL_CHECK_INTERVAL_MS`) — background kernel check; never at startup, never auto-installing | `index.ts` |
 | 10 s after boot — the one automatic shell-update check; afterwards tray only | `index.ts` |
 | 2000 chars / 10 files (`MAX_LOG_LINE` / `MAX_KEPT_LOG_FILES`) — child-log redaction cap and pruning | `redact.ts` / `server.ts` |
+| `<logs>/dsh-events.jsonl` — the shell's own milestones as one JSON event per line (`ts`, `event`, `seq`, `run`, `pid`, optional `ms` and `detail`): filter by event type or by `run` to see one start; rotated at 2 MB and on a UTC day change, 4 generations kept, 10 MB ceiling | `src/main/event-log.ts` |
 | `GPU ≈ 0%` beside non-zero main + renderer — an injected script re-entering a loop per resolution, not a rendering problem | `window.ts` |
 | ~30 min to hours — npm dist-tag goes live **before** the runtime matrix finishes uploading, so "安装包尚未发布" in that window is expected | CI |
 | `scripts/publish-modelscope.mjs`, `scripts/diagnose-modelscope-upload.mjs` — manual mirror drills; CI uses the Python SDK in `.github/scripts/` | `scripts/` |

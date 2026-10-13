@@ -22,6 +22,18 @@ export function redact(line: string): string {
     // node's own inspect() prints an object, and a child's dump reaches the
     // logs verbatim.
     .replace(/('(?:api[_-]?key|authorization|token|secret|passwd|password|set-cookie)'\s*:\s*)'[^']*'/gi, "$1'[redacted]'")
+    // URL userinfo — `scheme://user:password@host`. No key name introduces it,
+    // so no rule below can see it, and it is how a CONFIGURED source carries
+    // credentials: `DSH_APP_GITHUB_MIRRORS` is user input spliced verbatim in
+    // front of a release URL, and a proxy setting has the same shape. Measured
+    // before this rule: `https://alice:s3cr3t-pw@ghproxy.example/…` came back
+    // character for character and landed in the shareable event file. It has to
+    // stand before the bare key=value rule, which would otherwise read the
+    // `token:` inside a userinfo as a key and swallow the rest of the URL.
+    // A user name holding a raw `:` is not a shape a URL produces (it is what
+    // percent-encoding is for), so requiring a colon-free user part keeps the
+    // rule off ordinary paths — `https://host:8080/` and `…/a/b` do not match.
+    .replace(/(\/\/)[^/\s@:]+:[^/\s@]+@/g, '$1[redacted]@')
     // A whole Set-Cookie header: every attribute after the name is session
     // material (sid=…, session=…), none of which a log needs. The bare form
     // runs to the end of the line — attributes are part of the value — and

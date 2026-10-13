@@ -18,6 +18,7 @@ import {
 import { githubMirrorPrefixes } from '../kernel/sources/artifact'
 import { t } from '../shared/locale'
 import { inFrameDialogScript } from './in-frame-dialog'
+import { logEvent, trackedEventOperation } from './event-log'
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
 import { noticeThemedDialog, promptThemedDialog, resolveDialogWindow } from './themed-dialog'
 import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
@@ -230,7 +231,11 @@ export function initShellUpdater(): void {
     electronDownloadVersion = info.version
     lastProgressEmit = 0
     try {
-      await autoUpdater.downloadUpdate()
+      await trackedEventOperation(
+        'shell.update.download',
+        { version: info.version, arch: process.arch, source: 'electron-updater' },
+        () => autoUpdater.downloadUpdate(),
+      )
     } catch (err) {
       // A cancelled download rejects without emitting 'error', so the card is
       // dropped here as well as in the listener below.
@@ -257,7 +262,9 @@ export function initShellUpdater(): void {
 
   autoUpdater.on('update-downloaded', async () => {
     // The transfer is over: nothing may outlive it, and the card would sit on
-    // top of the dialog below.
+    // top of the dialog below. The version is read out first because the event
+    // below names which update is being installed, and clearing drops it.
+    const downloadedVersion = electronDownloadVersion
     clearElectronDownload()
     const proceed = await confirmInFrame(
       {
@@ -280,7 +287,13 @@ export function initShellUpdater(): void {
       },
       'restart',
     )
-    if (proceed) autoUpdater.quitAndInstall()
+    if (proceed) {
+      // Same reason as the Windows installer path: this process quits into the
+      // install, so there is no `.end` to record — the next run's
+      // `app.boot.begin` (with its shell version) is what closes the story.
+      logEvent('shell.update.install.begin', { detail: { source: 'electron-updater', version: downloadedVersion } })
+      autoUpdater.quitAndInstall()
+    }
   })
 
   autoUpdater.on('error', (_err) => {
@@ -401,9 +414,37 @@ function isModelscopeSource(source: string): boolean {
   return source.startsWith(`${MODELSCOPE_ENDPOINT}/`)
 }
 
-/** Short diagnostic label for one source URL (no secrets on this chain). */
-function sourceLabel(url: string): string {
-  return isModelscopeSource(url) ? 'modelscope' : url
+/** The release owner's own host. */
+const OFFICIAL_ORIGIN = 'https://github.com/'
+
+/** `scheme://host` of a URL, or a marker when it does not parse as one. */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return 'unparseable'
+  }
+}
+
+/**
+ * Short diagnostic label for one source URL — never the URL itself.
+ *
+ * "No secrets on this chain" was wrong, and the wrongness was measured: the
+ * prefix candidates come from `DSH_APP_GITHUB_MIRRORS`, which is user
+ * configuration, so one of them can carry userinfo
+ * (`https://alice:pw@ghproxy.example/`). This label is not only a console line —
+ * `shell.update.mirror` records it in `dsh-events.jsonl`, the file a user is
+ * asked to send when an update misbehaves. So a prefix candidate is reduced to
+ * its origin, and only its origin: nothing a credential could ride in on
+ * survives the reduction.
+ *
+ * @param url - one candidate from a source chain.
+ * @returns `modelscope`, `github`, or `mirror:<origin>`.
+ */
+export function sourceLabel(url: string): string {
+  if (isModelscopeSource(url)) return 'modelscope'
+  if (url.startsWith(OFFICIAL_ORIGIN)) return 'github'
+  return `mirror:${originOf(url)}`
 }
 
 /**
@@ -961,22 +1002,37 @@ async function downloadAndInstallPackage(
   // is an executeJavaScript hop into the renderer, and the per-chunk stream
   // fires far faster than the eye can perceive.
   let lastEmit = 0
-  const downloadedFrom = await downloadWithFallback(
-    candidates,
-    dest,
-    asset.sha512,
-    (received, total) => {
-      const now = Date.now()
-      if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
-      lastEmit = now
-      showKernelProgress(win, {
-        phase: 'downloading',
-        message: t('updater.downloading', { app: APP_NAME, version }),
-        progress: total > 0 ? Math.min(1, received / total) : null,
-      })
-    },
+  // The installer download is the shell's largest transfer, so it is bracketed
+  // like the kernel's own: which mirror served it, and how long it took, are the
+  // two facts a "the update never finished" report needs.
+  const downloadedFrom = await trackedEventOperation(
+    'shell.update.download',
+    { version, arch: process.arch, source: 'windows-installer' },
+    () => downloadWithFallback(
+      candidates,
+      dest,
+      asset.sha512,
+      (received, total) => {
+        const now = Date.now()
+        if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
+        lastEmit = now
+        showKernelProgress(win, {
+          phase: 'downloading',
+          message: t('updater.downloading', { app: APP_NAME, version }),
+          progress: total > 0 ? Math.min(1, received / total) : null,
+        })
+      },
+    ),
   )
-  console.log(`[shell-updater] downloaded ${asset.url} from ${downloadedFrom}`)
+  // Which transport actually served the bytes. It only exists on the console
+  // line below, which a packaged Windows build has no console for — and the
+  // mirror chain is exactly what someone diagnosing a slow or dead update needs.
+  // The LABEL, not the URL: a prefix is user configuration and can carry
+  // userinfo, and this event is written to the file the user is asked to send
+  // (see `sourceLabel`).
+  const servedBy = sourceLabel(downloadedFrom)
+  logEvent('shell.update.mirror', { detail: { version, from: servedBy } })
+  console.log(`[shell-updater] downloaded ${asset.url} from ${servedBy}`)
   showUpdateToast(win, t('updater.downloadedToast', { app: APP_NAME, version }), 'success', 3_000)
 
   const install = await confirmInFrame(
@@ -1045,10 +1101,19 @@ async function downloadAndInstallPackage(
     `${JSON.stringify({ version, installerPath: dest } satisfies PendingInstall)}\n`,
     'utf8',
   )
+  // The install itself: an event pair would be a lie here — this process hands
+  // the wizard over and quits, so there is no end to observe. `install.begin`
+  // plus `install.spawned` (or `install.failed`) is the whole truth this run can
+  // report, and the next boot's own events say whether the version moved.
+  logEvent('shell.update.install.begin', { detail: { version, source: 'windows-installer', installer: path.basename(dest) } })
   const child = spawn(dest, [], { detached: true, stdio: 'ignore' })
   // Spawn failure is otherwise invisible (the app is about to quit).
-  child.on('error', (err) => { console.error('[shell-updater] installer spawn failed:', err.message) })
+  child.on('error', (err) => {
+    console.error('[shell-updater] installer spawn failed:', err.message)
+    logEvent('shell.update.install.failed', { detail: { version, error: err.message } })
+  })
   child.unref()
+  logEvent('shell.update.install.spawned', { detail: { version } })
   app.quit()
 }
 

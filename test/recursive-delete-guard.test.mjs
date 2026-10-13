@@ -58,6 +58,11 @@ const AUDIT = [
     why: 'kernel log rotation: unlinks the single file `<dsh-kernel.log>.1` in the app log dir, never a tree',
   },
   {
+    match: 'src/main/event-log.ts',
+    count: 1,
+    why: 'structured event-log retention: unlinks one GENERATION FILE the sink just matched by its own strict name pattern (`dsh-events.<stamp>.<nn>.jsonl`) in the app log dir — a file, never a directory, and no name outside that pattern is ever a candidate',
+  },
+  {
     match: 'scripts/smoke-suite.mjs',
     count: 1,
     why: 'the mkdtemp dir this probe unpacked a runtime tgz into: a tree the probe made, with no link pointing out of it. The scratch HOME — which DOES hold @dsh-app junctions into that runtime — goes through remove-tree.mjs instead (the extraction root is removed in the same finally, after the kernel child is gone)',

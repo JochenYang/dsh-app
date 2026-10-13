@@ -64,6 +64,24 @@ test('redact keeps the key name and drops the value in every shape we see', () =
   assert.equal(redact('using bearer auth for the upstream'), 'using bearer auth for the upstream')
   // An ordinary hyphenated word starting in "sk" is not a key.
   assert.equal(redact('task-tracking shows no problems'), 'task-tracking shows no problems')
+  // URL userinfo. No key name introduces it, so no rule above or below can see
+  // it — and it is how a CONFIGURED source carries credentials:
+  // `DSH_APP_GITHUB_MIRRORS` is user input spliced verbatim in front of a
+  // release URL, and a proxy setting has the same shape. Measured before this
+  // rule: the value came back character for character and `shell.update.mirror`
+  // wrote it into `dsh-events.jsonl`, the file a user is asked to send.
+  assert.equal(
+    redact('https://alice:s3cr3t-pw@ghproxy.example/https://github.com/o/r/DSH-APP.exe'),
+    'https://[redacted]@ghproxy.example/https://github.com/o/r/DSH-APP.exe',
+  )
+  assert.equal(redact('proxy set to http://bob:hunter2@10.0.0.1:8080/'), 'proxy set to http://[redacted]@10.0.0.1:8080/')
+  // It must not eat an ordinary URL: a port is not a password, a path is not a
+  // userinfo, and a configured prefix with no credentials stays readable.
+  assert.equal(redact('bound to http://127.0.0.1:8080/index.html'), 'bound to http://127.0.0.1:8080/index.html')
+  assert.equal(
+    redact('GET https://gh-proxy.com/https://github.com/o/r/DSH-APP.exe'),
+    'GET https://gh-proxy.com/https://github.com/o/r/DSH-APP.exe',
+  )
 })
 
 test('redact leaves ordinary output alone', () => {

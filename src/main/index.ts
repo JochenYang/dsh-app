@@ -13,7 +13,7 @@ import {
   preferredKernel,
 } from '../kernel/bundled'
 import { DshServer, resolveLogDir } from './server'
-import { APP_URL, desktopHostEntry, hostPackageVersion, hostPnpmBinDir, hostProfileAnchor, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor, type PlatformSession } from './desktop-host'
+import { APP_URL, desktopHostEntry, hostPackageVersion, hostPnpmBinDir, hostProfileAnchor, hostStartFailureDetail, hostTransport, installDshAppProtocol, registerDshAppScheme, type HostProfileAnchor, type PlatformSession } from './desktop-host'
 import { createShellActionHandler, shellActionStampRule, SHELL_ACTIONS_BASE, SHELL_ACTIONS_ENV } from './shell-actions'
 import { hostStreamAuthRule } from './host-stream-auth'
 import { installSessionHeaderRules } from './session-hooks'
@@ -24,6 +24,7 @@ import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from '
 import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
 import { installCrashLogging } from './crash-log'
 import { appendRotatingLog } from './log-file'
+import { configureEventLog, logEvent, trackedEventOperation } from './event-log'
 import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, writePatchAtomically, type PatchSpecifier } from './brand-suite'
 import { SUITE_LAYER_PACKAGE, installSuiteLayer, readShippedOverlay } from './suite-layer'
@@ -348,13 +349,17 @@ async function installMissingPackages(packages: readonly string[]): Promise<void
   // The same progress line the boot uses, so the card gives way to a step the
   // user can watch instead of an unchanging failure.
   broadcastStatus({ phase: 'starting', message: t('status.installingMissing'), progress: null, step: 4 })
-  const outcome = await installIntoProfile({
-    profileDir: homeRepair.profileDir,
-    profileName: SUITE_PROFILE,
-    dshHome: resolveDshHome(),
-    bin,
-    node: hostNodeBinary(),
-  }, packages)
+  const outcome = await trackedEventOperation(
+    'profile.install',
+    { trigger: 'home-layer-rows', profile: SUITE_PROFILE, packages: packages.length, names: packages.join(', ') },
+    () => installIntoProfile({
+      profileDir: homeRepair.profileDir,
+      profileName: SUITE_PROFILE,
+      dshHome: resolveDshHome(),
+      bin,
+      node: hostNodeBinary(),
+    }, packages),
+  )
   if (outcome.status === 'healed') {
     logKernel(installLogLine(outcome, packages))
     app.relaunch()
@@ -942,6 +947,7 @@ async function healProfileBeforeStart(profileDir: string): Promise<void> {
   // The bundled pnpm, so the repair does not depend on the user's own: this run's
   // parent is the shell, whose PATH never saw the host child's prefix.
   const pnpmBinDir = hostPnpmBinDir(kernel.getCurrentDir())
+  const healStartedAt = Date.now()
   const outcome = await healProfileDependencies({
     profileDir,
     profileName: SUITE_PROFILE,
@@ -953,6 +959,10 @@ async function healProfileBeforeStart(profileDir: string): Promise<void> {
     node: hostNodeBinary(),
     ...(pnpmBinDir === undefined ? {} : { pnpmBinDir }),
   })
+  // One event, not a bracket: this runs before EVERY host start and is a no-op
+  // read on a healthy profile, so a begin/end pair would be two lines per boot
+  // for nothing. `ms` plus the status says what the run cost when it did work.
+  logEvent('profile.heal', { ms: Date.now() - healStartedAt, detail: { status: outcome.status, profile: SUITE_PROFILE } })
   const line = healLogLine(outcome, profileDir)
   if (line !== null) logKernel(line)
 }
@@ -1278,6 +1288,19 @@ async function startServerAndOpenWindow(): Promise<void> {
       attachMainWindowHandlers(mainWindow)
     }
     ensurePlatformView()
+    // The host child's start: bracketed, because the wait for it is the longest
+    // part of a boot and a start that never answers is the failure this log has
+    // to be able to show.
+    hostStartedAt = Date.now()
+    logEvent('host.start.begin', {
+      detail: {
+        attempt: restartAttempts,
+        transport: hostTransportNow,
+        anchor: host.profileAnchor,
+        kernel: hostVersion,
+        profile: SUITE_PROFILE,
+      },
+    })
     await server.start({
       ...hostOptions,
       userDataDir,
@@ -1287,14 +1310,32 @@ async function startServerAndOpenWindow(): Promise<void> {
       proxyBootstrap: hasProxyEnv(kernelEnv),
     })
   } catch (err) {
+    // Derived facts only. The Error's own message is built from the child's
+    // stderr tail (see `DshHost.exitError`): on a real `dsh-server-*.log` tail
+    // that is the full host path, the child's whole argv and the account
+    // plugin's request lines — and `dsh-events.jsonl` is the file a user is
+    // asked to send. The tail already sits in `dsh-kernel.log` and
+    // `dsh-server-*.log`, and it still reaches the status line below, which is
+    // where the user has to read the reason.
+    logEvent('host.start.failed', {
+      ms: Date.now() - hostStartedAt,
+      detail: hostStartFailureDetail(err, { attempt: restartAttempts, transport: hostTransportNow }),
+    })
     await handleServerDown(t('status.serverStartFailed', { detail: (err as Error).message }))
     return
   }
+  // Readiness is the child's own `ready` (see server.ts), so this event means
+  // the host answered, not that a port took a connection.
+  logEvent('host.start.ready', {
+    ms: Date.now() - hostStartedAt,
+    detail: { attempt: restartAttempts, transport: hostTransportNow, kernel: hostVersion },
+  })
   // Both remaining cases end on the live UI: a window still on the loading page
   // is handed over, one already showing the UI (kernel update, crash recovery,
   // tray restart) is reloaded. The URL is the same in every case — the UI lives
   // at one fixed origin, so there is no port for a restart to change.
-  if (isShowingLoadingPage(mainWindow)) {
+  const firstUiLoad = isShowingLoadingPage(mainWindow)
+  if (firstUiLoad) {
     updateStartupWindow({ phase: 'ready', message: t('splash.openingUi'), progress: 1 })
     await new Promise((resolve) => setTimeout(resolve, 450))
     if (mainWindow !== null && !mainWindow.isDestroyed()) {
@@ -1320,6 +1361,9 @@ async function startServerAndOpenWindow(): Promise<void> {
     // created) is closed and unhooked. Nothing else about mainWindow's lifecycle
     // — the close dialog, the 'closed' handler, reuse across restarts — changes.
     handoffToMainWindow(mainWindow)
+    // The window now shows the live UI rather than the loading page: the end of
+    // the visible wait, and what `app.boot.ready`'s `ms` is really about.
+    logEvent('window.ready', { ms: Date.now() - runStartedAt, detail: { firstUiLoad } })
   }
   // A folder argument opens as a workspace once the page can answer; the
   // delivery retries while the client plugin is still loading, so calling it
@@ -1356,6 +1400,11 @@ async function handleServerDown(reason: string): Promise<void> {
   // in-process host restarts in one afternoon (19:58, 20:25, 20:30) and
   // `dsh-kernel.log` recorded none of them.
   logKernel(`[server] down: ${reason} (attempt ${restartAttempts})`)
+  // The restart attempt — the shell's own sequence counter. The `reason`
+  // argument is deliberately NOT recorded: it is a localized sentence, and its
+  // machine-readable half (the exit code and signal, or the start failure) is
+  // already in the `host.exit` / `host.start.failed` event that led here.
+  logEvent('host.down', { detail: { attempt: restartAttempts } })
   broadcastStatus({ phase: 'error', message: t('status.serverDown', { reason }), progress: null, error: reason })
 
   if (restartAttempts >= 2 && !isDev) {
@@ -1366,7 +1415,7 @@ async function handleServerDown(reason: string): Promise<void> {
     // sentence; the rollback happens either way, because a window that cannot
     // load is worse than a list that needs explaining.
     const hiddenSessions = await countV4SessionLogs(path.join(resolveDshHome(), 'sessions'))
-    const rolledBack = await kernel.rollback()
+    const rolledBack = await trackedEventOperation('kernel.rollback', { attempt: restartAttempts, trigger: 'host-down' }, () => kernel.rollback())
     if (rolledBack) {
       // No reset here: a recovery action that boots once can still crash on
       // the next start (e.g. a broken user patch layer). Only a genuinely
@@ -1389,7 +1438,11 @@ async function handleServerDown(reason: string): Promise<void> {
       bundledReinstallTried = true
       try {
         console.log('[kernel] server failed and no rollback available; reinstalling bundled kernel')
-        await kernel.installFromLocalTarball(bundled.tarball, bundled.sha512)
+        await trackedEventOperation(
+          'kernel.install',
+          { source: 'bundled', trigger: 'host-down-reinstall' },
+          () => kernel.installFromLocalTarball(bundled.tarball, bundled.sha512),
+        )
         await startServerAndOpenWindow()
         return
       } catch (err) {
@@ -1422,7 +1475,7 @@ function reportInstallFailure(err: unknown): void {
 
 async function installKernel(): Promise<void> {
   try {
-    await kernel.installLatest('installing')
+    await trackedEventOperation('kernel.install', { source: 'online', trigger: 'first-run' }, () => kernel.installLatest('installing'))
     await startServerAndOpenWindow()
   } catch (err) {
     reportInstallFailure(err)
@@ -1448,7 +1501,7 @@ async function installBundledKernel(): Promise<void> {
     return
   }
   try {
-    await kernel.installFromLocalTarball(files.tarball, files.sha512)
+    await trackedEventOperation('kernel.install', { source: 'bundled', trigger: 'first-run' }, () => kernel.installFromLocalTarball(files.tarball, files.sha512))
     await startServerAndOpenWindow()
   } catch (err) {
     // Activation can succeed and still throw afterwards (activateTarball's
@@ -1491,7 +1544,7 @@ async function installBootKernel(): Promise<void> {
   if (preferred !== null && preferred.source === 'resolved') {
     console.log(`[kernel] channel ${channel} resolves dsh ${preferred.version}, newer than the bundled ${bundledVersion ?? 'none'}; installing it`)
     try {
-      await kernel.installVersion(preferred.version)
+      await trackedEventOperation('kernel.install', { source: 'channel', trigger: 'first-run', version: preferred.version }, () => kernel.installVersion(preferred.version))
       await startServerAndOpenWindow()
       return
     } catch (err) {
@@ -1549,8 +1602,16 @@ async function checkKernelUpdate(manual: boolean): Promise<void> {
 }
 
 async function checkKernelUpdateInner(manual: boolean): Promise<void> {
+  const checkStartedAt = Date.now()
+  logEvent('kernel.check.begin', { detail: { manual } })
   try {
     const result = await kernel.checkForUpdate()
+    // The answer itself, not just the timing: `reason` is what the user's
+    // surface says, and `available/latest/current` is what it was computed from.
+    logEvent('kernel.check.end', {
+      ms: Date.now() - checkStartedAt,
+      detail: { manual, available: result.available, current: result.current, latest: result.latest, reason: result.reason },
+    })
     // Nothing installed is not "up to date": there is no update to offer
     // because there is no kernel, and the message switch below would report
     // the reassuring-but-wrong "the kernel is already the newest version" while
@@ -1660,6 +1721,10 @@ async function checkKernelUpdateInner(manual: boolean): Promise<void> {
       if (option) await applyKernelUpdate(option)
     }
   } catch (err) {
+    logEvent('kernel.check.failed', {
+      ms: Date.now() - checkStartedAt,
+      detail: { manual, error: (err as Error).message },
+    })
     if (manual) void promptNoticeThemed(mainWindow, 'error', 'DSH APP', t('kernelUpdate.checkFailed', { detail: (err as Error).message }))
   }
 }
@@ -1668,8 +1733,16 @@ async function applyKernelUpdate(option: KernelUpdateOption): Promise<void> {
   try {
     const files = bundledTarball(bundledKernel)
     const installed = option.bundled && files !== null
-      ? await kernel.installFromLocalTarball(files.tarball, files.sha512)
-      : await kernel.installVersion(option.version)
+      ? await trackedEventOperation(
+          'kernel.install',
+          { source: 'bundled', trigger: 'update', version: option.version },
+          () => kernel.installFromLocalTarball(files.tarball, files.sha512),
+        )
+      : await trackedEventOperation(
+          'kernel.install',
+          { source: 'channel', trigger: 'update', version: option.version },
+          () => kernel.installVersion(option.version),
+        )
     broadcastStatus({ phase: 'installing', message: t('status.kernelActivated', { version: installed.manifest.dshVersion }), progress: null })
     await startServerAndOpenWindow()
     // The server restart's own starting→ready cycle clears the card, so the
@@ -1792,6 +1865,17 @@ function logKernel(line: string): void {
 }
 
 async function boot(): Promise<void> {
+  // The run's first event. Everything below is a milestone against it, and the
+  // `detail` here is what a reader needs to know which build the run was.
+  logEvent('app.boot.begin', {
+    detail: {
+      shell: app.getVersion(),
+      channel,
+      dev: isDev,
+      kernelSource: kernelIsCheckout ? 'checkout' : 'artifact',
+      electron: process.versions.electron ?? '',
+    },
+  })
   // Language first: every string below (splash, tray, dialogs) is localized.
   // This is also the earliest moment the answer is trustworthy — before
   // Electron's app is ready, `app.getLocale()` reports nothing usable.
@@ -1817,6 +1901,9 @@ async function boot(): Promise<void> {
   // in-process flag cannot drift from the on-disk marker mid-session.
   safeModeActive = await isSafeModeEnabled()
   if (safeModeActive) console.log('[safe-mode] booting without the brand-suite overlay')
+  // The window exists and is painting the local loading page: this is the first
+  // thing the user sees, and the number to compare a slow start against.
+  logEvent('window.created', { ms: Date.now() - runStartedAt, detail: { safeMode: safeModeActive } })
   kernel = new KernelManager({
     runtimeRoot: app.getPath('userData'),
     platform: process.platform,
@@ -1868,7 +1955,20 @@ async function boot(): Promise<void> {
   })
 
   server = new DshServer({
-    onExit: (code, signal) => void handleServerDown(t('status.serverExited', { code: code ?? '?', signal: signal ?? '?' })),
+    onExit: (code, signal) => {
+      // The exit's own facts, before the restart machinery runs: the exit code
+      // and signal are what `handleServerDown`'s user-facing sentence is built
+      // from, and this is the machine-readable half of it.
+      logEvent('host.exit', {
+        detail: {
+          code,
+          signal,
+          uptimeMs: hostStartedAt === 0 ? null : Date.now() - hostStartedAt,
+          attempt: restartAttempts,
+        },
+      })
+      void handleServerDown(t('status.serverExited', { code: code ?? '?', signal: signal ?? '?' }))
+    },
     onLog: (line) => {
       console.log('[host]', line)
       recordServerLog(line)
@@ -2008,7 +2108,11 @@ async function boot(): Promise<void> {
       try {
         if (decideBundledAdoption(bundledManifest, current).adopt) {
           console.log('[kernel] bundled runtime not adopted yet; activating')
-          await kernel.installFromLocalTarball(bundled.tarball, bundled.sha512)
+          await trackedEventOperation(
+            'kernel.install',
+            { source: 'bundled', trigger: 'bundled-adoption', version: bundledManifest.dshVersion },
+            () => kernel.installFromLocalTarball(bundled.tarball, bundled.sha512),
+          )
         }
       } catch (err) {
         console.error(`[kernel] bundled content check failed: ${(err as Error).message}`)
@@ -2040,6 +2144,13 @@ async function boot(): Promise<void> {
   setInterval(() => {
     if (!quitting && !isDev) void checkKernelUpdate(false)
   }, KERNEL_CHECK_INTERVAL_MS)
+  // boot() has reached its end with a window and a host: from here the app is
+  // running, not starting. `ms` is the whole startup, which is the number a
+  // "it takes ages to open" report actually needs.
+  logEvent('app.boot.ready', {
+    ms: Date.now() - runStartedAt,
+    detail: { kernel: kernel.getCurrent()?.manifest.dshVersion ?? null, safeMode: safeModeActive },
+  })
 }
 
 // ---------------------------------------------------------------- app
@@ -2059,6 +2170,25 @@ if (path.basename(userDataDir) !== USER_DATA_DIR_NAME) {
   )
 }
 app.setPath('userData', userDataDir)
+
+// The structured event sink (`<logs>/dsh-events.jsonl`, see event-log.ts) is
+// installed HERE, at module load: every later call site — including modules this
+// file drives, like updater.ts — must find a sink rather than drop its event,
+// and the log directory only needs `userData` to be settled. `runStartedAt` is
+// this run's zero: the startup milestones report their `ms` against it.
+const runStartedAt = Date.now()
+configureEventLog({
+  dir: resolveLogDir(),
+  onFailure: (error) => {
+    // Reported ONCE per failure episode, into the log that already exists: a
+    // failed structured write must be visible somewhere, and must never fail a
+    // boot (see event-log.ts).
+    logKernel(`[events] the structured event log could not be written: ${error instanceof Error ? error.message : String(error)}`)
+  },
+})
+
+// The host child's start instant, for the `uptimeMs` of its `host.exit` event.
+let hostStartedAt = 0
 
 // Last-resort handlers, installed before any other work: an uncaught exception
 // in the main process otherwise raises a native error box with a raw stack and a
@@ -2100,12 +2230,16 @@ if (!gotLock) {
   void app.whenReady().then(boot).catch((error: unknown) => {
     const detail = error instanceof Error ? error.message : String(error)
     console.error('[boot] failed:', detail)
+    logEvent('app.boot.failed', { ms: Date.now() - runStartedAt, detail: { error: detail } })
     void offerStartupRecovery(t('serverFailure.summary', { advice: detail }))
   })
 
   app.on('before-quit', () => {
     quitting = true
     stopProxyWatchdog()
+    // The run's last event, and the only one that closes a run whose
+    // `app.boot.ready` never came: a start that failed, then quit.
+    logEvent('app.quit', { ms: Date.now() - runStartedAt })
   })
 
   app.on('will-quit', (event) => {
