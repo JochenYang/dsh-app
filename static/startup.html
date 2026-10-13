@@ -1192,6 +1192,66 @@ window.__dshStartupShowFailure = function (config) {
       }
     }, 35);
 
+    // ========================================================== Status Headline
+    /**
+     * The headline fades once per NEW message, never once per tick.
+     *
+     * The kernel re-sends this line on a throttle (~4/s, see
+     * KernelManager.throttledStatus) and during an extraction every one of
+     * those carries a fresh count in the text (`…（7894/15000）`). The old rule —
+     * "the text differs, so fade" — therefore restarted a fade on every tick,
+     * while `#startup-status` transitions opacity over 200ms and the class is
+     * held for only 100ms: the element never finished a fade and sat inside one
+     * for as long as the extraction ran, which is the reported blink.
+     *
+     * So a line whose only difference is a number INSIDE it is the same
+     * headline and is rewritten in place. A stage change is a new headline and
+     * keeps its one fade.
+     */
+
+    /* ===== headline-swap rules (pure: no state, no DOM) ===== */
+    function headlineIdentity(text) {
+      return String(text).replace(/[0-9]+/g, '#');
+    }
+
+    function headlineNeedsFade(shown, incoming) {
+      return shown !== incoming && headlineIdentity(shown) !== headlineIdentity(incoming);
+    }
+    /* ===== end headline-swap rules ===== */
+
+    /** How long the line stays faded before the new message is written into it. */
+    var STATUS_SWAP_MS = 100;
+
+    /** The fade in progress's pending swap, or null. At most one at a time. */
+    var statusSwap = null;
+
+    /**
+     * Write the headline, fading only when the message itself changed.
+     *
+     * A second message never stacks a second timer: it cancels the pending swap
+     * and takes over, so the newest text is the one that lands and no delayed
+     * write can land over it. Cancelling drops the class as well — a cancelled
+     * fade left applied is a line that stays invisible.
+     */
+    function setStatusText(text) {
+      if (statusSwap !== null) {
+        clearTimeout(statusSwap);
+        statusSwap = null;
+        statusEl.classList.remove('fade-trans');
+      }
+      if (statusEl.textContent === text) return;
+      if (!headlineNeedsFade(statusEl.textContent, text)) {
+        statusEl.textContent = text;
+        return;
+      }
+      statusEl.classList.add('fade-trans');
+      statusSwap = setTimeout(function () {
+        statusSwap = null;
+        statusEl.textContent = text;
+        statusEl.classList.remove('fade-trans');
+      }, STATUS_SWAP_MS);
+    }
+
     // ========================================================== Reactive State Dispatcher
     var pendingPause = null;
 
@@ -1205,14 +1265,7 @@ window.__dshStartupShowFailure = function (config) {
       }
 
       // 1. Status Headline
-      var newMsg = view.message || '正在启动 DSH 服务...';
-      if (statusEl.textContent !== newMsg) {
-        statusEl.classList.add('fade-trans');
-        setTimeout(function () {
-          statusEl.textContent = newMsg;
-          statusEl.classList.remove('fade-trans');
-        }, 100);
-      }
+      setStatusText(view.message || '正在启动 DSH 服务...');
 
       // 2. Theme Adaptation & Transparent Titlebar Color Sync
       var theme = view.theme === 'dark' ? 'dark' : 'light';
