@@ -69,16 +69,39 @@ two and not one:
   own manifest declares must be there, because the build was just supposed to
   write it.
 
-Every call site runs the script after that plugin's build, so both halves are
-meaningful there. What each call site can SEE still differs, and it matters when
-reading a green run: on a CLEAN checkout there is no `lib/` at all, so the
+Every call site runs the script after that plugin's build, so both artifact halves
+are meaningful there. What each call site can SEE still differs, and it matters
+when reading a green run: on a CLEAN checkout there is no `lib/` at all, so the
 freshness half passes by construction in CI and only ever bites a tree that was
 already built (a developer's machine, or a machine running `runtime:build` on
-sources edited after the last build) — the type gate and the presence check are
-what a clean-checkout run actually proves. The local `runtime:build` loop is the
-one that could pack a suite missing whole plugins, so it runs all three itself:
-the type gate and the presence check in its per-plugin loop (the check right after
-that plugin's build), the freshness check in `packPlugin`.
+sources edited after the last build) — what a clean-checkout run proves is the
+**presence check**, never freshness. The local `runtime:build` loop is the one that
+could pack a suite missing whole plugins, so it runs all three itself: the type
+gate and the presence check in its per-plugin loop (the check right after that
+plugin's build), the freshness check in `packPlugin`.
+
+**The type gate has a precondition, and CI is where it does not hold.** It needs
+the plugin's own imports to resolve; both packaging paths install each plugin's
+tree with `npm install --legacy-peer-deps`, which installs NO peer at all, and
+neither the root tree nor the ancestors provide
+`@deepseek-ai/dsh-client-ui-primitives` — a peer fourteen plugins import and only
+a peer of them. A gate that ran anyway failed a whole release on
+`error TS2307: Cannot find module '@deepseek-ai/dsh-client-ui-primitives'`
+(GitHub run 38377277084). So `pluginMissingPeers` — read from each plugin's own
+`peerDependencies`, never a list here — decides whether the gate may run:
+
+- peers resolvable → `npm run typecheck` runs, and a type error is a failure;
+- a peer missing → the gate **skips** that plugin, loudly (one line naming the
+  missing packages) and without failing the run. A `@types/<name>` package counts
+  as resolvable, because that is what tsc reads and what this repository's own tree
+  uses for `react` in fifteen plugins;
+- every run ends with `typecheckSkipSummary`, so a green log says how much of it
+  the type gate actually covered. In a CI tree that line reads `11 of 18 plugins
+  skipped it` — CI therefore PROVES the outputs (presence) and not the types, and
+  the type gate keeps its teeth on a tree that has the peers: a developer's full
+  tree, or a machine that installs them.
+
+Both artifact checks depend on no peer and keep running regardless.
 
 - **Type gate** — the plugin's own `npm run typecheck`. `plugins/build-lib.mjs`
   bundles with esbuild, which does not type check, and `npm pack` ships what
@@ -89,7 +112,8 @@ that plugin's build), the freshness check in `packPlugin`.
   `typecheck` script is refused unless its build script is `tsc` (`plugin-brand`),
   which type-checks as it compiles; a plugin whose `node_modules` is missing is
   refused with the install command, because tsc would otherwise answer with a
-  wall of unresolved imports.
+  wall of unresolved imports; a plugin whose declared peers are missing skips it
+  (see above).
 - **Presence check** — the build's declared outputs must exist. The declarations
   come from the plugin's own manifest: the `files` entries that name `lib` (the
   entry `lib` must exist and hold a file; a pattern must match one) plus `main`

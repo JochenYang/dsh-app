@@ -8,9 +8,12 @@
  * stays in the loop that names it.
  *
  * Every caller runs it AFTER the plugin's own build (see that module's header for
- * why the order matters), so all three checks are meaningful here: the source
- * type-checks, `lib/` is not older than its inputs, and `lib/` holds what the
- * plugin's manifest declares.
+ * why the order matters), so both artifact checks are meaningful here: `lib/` is
+ * not older than its inputs, and `lib/` holds what the plugin's manifest declares.
+ * The type gate is the one with a precondition — it needs the plugin's declared
+ * peers installed, which the workflows' `npm install --legacy-peer-deps` does not
+ * provide — so it SKIPS (loudly, and per plugin) rather than failing, and every run
+ * ends with the count of skips.
  *
  * Usage:
  *   node scripts/plugin-gates.mjs <plugin-dir> [...]
@@ -18,13 +21,19 @@
  * Example (inside plugins/, as the release loop runs it):
  *   node ../scripts/plugin-gates.mjs plugin-effort
  *
- * Exit: 0 every plugin passed; 1 a check refused a plugin; 2 usage.
+ * Exit: 0 every plugin passed what could run; 1 an artifact check (or a type gate
+ * that had its peers) refused a plugin; 2 usage.
  *
  * @module scripts/plugin-gates
  */
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
-import { assertPluginLibFresh, assertPluginOutputs, runPluginTypecheck } from './lib/plugin-gates.mjs'
+import {
+  assertPluginLibFresh,
+  assertPluginOutputs,
+  runPluginTypecheck,
+  typecheckSkipSummary,
+} from './lib/plugin-gates.mjs'
 
 const targets = process.argv.slice(2)
 if (targets.length === 0) {
@@ -54,10 +63,12 @@ function runNpm(args, cwd) {
   execFileSync(line, { cwd, stdio: 'inherit', shell: true, windowsHide: true })
 }
 
+let skippedTypechecks = 0
 for (const target of targets) {
   const pluginDir = path.resolve(target)
   const name = path.basename(pluginDir)
-  runPluginTypecheck(pluginDir, { runNpm })
+  const typecheck = runPluginTypecheck(pluginDir, { runNpm })
+  if (typecheck.skipped) skippedTypechecks += 1
   assertPluginLibFresh(pluginDir)
   const outputs = assertPluginOutputs(pluginDir)
   // What was actually measured, so this line cannot read as "the artifact is
@@ -66,5 +77,11 @@ for (const target of targets) {
   const artifact = outputs.libExists
     ? `lib/ present (${outputs.libFiles} file(s)), not older than its own inputs`
     : 'no lib/ output declared by this plugin'
-  console.log(`[plugin-gate] ${name}: type gate passed; ${artifact}`)
+  // The type verdict says which one happened — a skipped gate must never be
+  // reported as a passed one, and its detail line above names the missing peers.
+  const verdict = typecheck.skipped ? 'type gate skipped (declared peers missing)' : 'type gate passed'
+  console.log(`[plugin-gate] ${name}: ${verdict}; ${artifact}`)
 }
+// One line per run, even when nothing was skipped: "0 of 18" is the only
+// statement that a green log can be read as full type coverage.
+console.log(typecheckSkipSummary(targets.length, skippedTypechecks))

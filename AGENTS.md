@@ -72,14 +72,18 @@ npm run check:plugins -- --kernel <runtime.tgz> --home <real profile dir>
 Plugin builds and tests: `plugins/AGENTS.md`. Every suite plugin also passes three
 checks before its `lib/` can enter an artifact, all decided in
 `scripts/lib/plugin-gates.mjs` and run by `build-runtime.mjs`, by `release.yml`'s
-pre-build loop, and by `ci.yml`'s `gate` job in its per-plugin build loop — the CI
-pass is the one that catches a break before a merge: its own `npm run typecheck`
-(esbuild does not type check, so a client half calling a removed export used to
-reach users as a renderer `ReferenceError`); the build's DECLARED outputs must
-exist and be non-empty (npm omits a missing `files` directory from the tarball
-without a word); and `lib/` must not be older than the plugin's own inputs. On a
-clean checkout the freshness check passes by construction, so the type gate and
-the presence check are what CI proves.
+pre-build loop, and by `ci.yml`'s `gate` job in its per-plugin build loop: its own
+`npm run typecheck` (esbuild does not type check, so a client half calling a
+removed export used to reach users as a renderer `ReferenceError`); the build's
+DECLARED outputs must exist and be non-empty (npm omits a missing `files`
+directory from the tarball without a word); and `lib/` must not be older than the
+plugin's own inputs. Two of them are weaker on a CI tree, and a green log must not
+be read as more: the type gate SKIPS — per plugin, naming the packages, never
+silently — where the plugin's declared peers are not installed (both workflows
+install with `--legacy-peer-deps`, which installs no peer, and 11 of the 18
+plugins import a peer this way), and every run ends with a count of those skips;
+the freshness check passes by construction on a clean checkout. What CI proves is
+the presence check, and the type gate on a tree that has the peers.
 
 - Hand-run probes (`scripts/probe-*.mjs` / `.cjs`): `probe-launch-folder.mjs`
   after a kernel-line bump; `probe-settings-nav.cjs --lang en-US [--sweep]` after

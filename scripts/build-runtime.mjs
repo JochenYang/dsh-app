@@ -41,7 +41,11 @@
  * after the build, and its lib/ is checked for freshness before it is packed —
  * esbuild neither type-checks, nor notices that lib/ is older than the sources it
  * came from, nor complains when a build wrote nothing at all
- * (scripts/lib/plugin-gates.mjs).
+ * (scripts/lib/plugin-gates.mjs). The type gate SKIPS, loudly and with a count at
+ * the end of the loop, every plugin whose declared peers this tree does not have —
+ * tsc cannot resolve an import `--legacy-peer-deps` never installed, and failing
+ * the build over it would stop a release for a reason the build did not cause. The
+ * two artifact checks depend on no peer and always run.
  *
  * Two more packages the desktop shell needs are part of the same tree:
  *   - @deepseek-ai/dsh-web-frontend — published per kernel line (mind the
@@ -95,7 +99,7 @@ import { fileURLToPath } from 'node:url'
 import { c as createTar, t as listTar, x as extractTar } from 'tar'
 import { collectTreeEntries } from './lib/tree-entry.mjs'
 import { newestRuntimeTarball, staleCellArtifacts } from './lib/runtime-artifacts.mjs'
-import { assertPluginLibFresh, assertPluginOutputs, runPluginTypecheck } from './lib/plugin-gates.mjs'
+import { assertPluginLibFresh, assertPluginOutputs, runPluginTypecheck, typecheckSkipSummary } from './lib/plugin-gates.mjs'
 import {
   createOfficePayloadManifest,
   kitEnginePackage,
@@ -1916,12 +1920,19 @@ async function main() {
   //    below, not peer warnings. The visible consequence is that peers only our
   //    plugins declare (react, react-dom) now exist in the tree; before, they
   //    were skipped silently.
+  let skippedTypechecks = 0
   for (const name of SUITE_PLUGINS) {
     const pluginDir = path.join(root, 'plugins', name.replace('@dsh-app/', ''))
     // The type gate first: esbuild does not type check, so a client half calling
     // a name its own module stopped exporting bundles fine, ships, and throws in
     // the renderer on first use. run() throws on a non-zero exit.
-    runPluginTypecheck(pluginDir, { runNpm: (args, cwd) => run(npmBin(), args, cwd) })
+    //
+    // It SKIPS a plugin whose declared peers are not installed here (and says so,
+    // per plugin): tsc cannot resolve an import the install never provided, and a
+    // tree assembled with `--legacy-peer-deps` has no peers at all. The count below
+    // the loop is what keeps that skip from reading as "the types were checked".
+    const typecheck = runPluginTypecheck(pluginDir, { runNpm: (args, cwd) => run(npmBin(), args, cwd) })
+    if (typecheck.skipped) skippedTypechecks += 1
     // Build, then verify what the build declared it produces — the order the
     // timeline in scripts/lib/plugin-gates.mjs requires: after a build, an absent
     // declared output is a failure, not "never built". This is the loop a local
@@ -1931,6 +1942,7 @@ async function main() {
     run(npmBin(), ['run', 'build'], pluginDir)
     assertPluginOutputs(pluginDir)
   }
+  console.log(typecheckSkipSummary(SUITE_PLUGINS.length, skippedTypechecks))
   const projectDir = path.join(work, 'assemble')
   const pkgsDir = path.join(projectDir, 'pkgs')
   await mkdir(pkgsDir, { recursive: true })

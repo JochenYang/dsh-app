@@ -10,6 +10,16 @@
 // read out of the artifact, not out of any log. `plugin-effort`'s slider and
 // `geometry.ts` were the pair.
 //
+// That gate has a PRECONDITION, and the release is the place it was missing: the
+// typecheck needs the plugin's own imports to resolve, while both packaging paths
+// install a plugin's tree with `--legacy-peer-deps`, which installs NO peer — so a
+// gate that ran regardless failed a whole release on
+// `error TS2307: Cannot find module '@deepseek-ai/dsh-client-ui-primitives'`
+// (a peer fourteen plugins import and only a peer of them). `pluginMissingPeers`
+// is that precondition, and a plugin that fails it SKIPS the type gate loudly
+// rather than failing it; the artifact checks below do not depend on peers at all
+// and keep running.
+//
 // Why the two artifact checks exist, and why they are two: `lib/` is gitignored,
 // so the tree a developer runs and the tree a pack reads are two build products
 // from two different moments — and a build that writes nothing ships a package
@@ -305,6 +315,96 @@ export function assertPluginOutputs(pluginDir) {
 }
 
 /**
+ * Which of a plugin's declared peers nothing on its resolution path provides.
+ *
+ * The `typecheck` script is the ONLY check that needs them: esbuild bundles with
+ * every `@deepseek-ai/*` import marked external, so a missing peer costs nothing
+ * until tsc tries to read its types. Both packaging paths install a plugin's tree
+ * with `npm install --legacy-peer-deps`, which installs NO peer at all — on a CI
+ * tree fifteen of the eighteen plugins import a peer that is therefore absent
+ * (`@deepseek-ai/dsh-client-ui-primitives` in fourteen of them, `react` in most),
+ * and a gate that ran anyway failed the whole release with
+ * `error TS2307: Cannot find module '@deepseek-ai/dsh-client-ui-primitives'`.
+ * The set is the plugin's own declaration, never a list kept here: a peer added to
+ * a plugin is covered the day it is written.
+ *
+ * Resolution follows node's own chain — the plugin directory, then each ancestor,
+ * so a package the ROOT tree provides (`@deepseek-ai/dsh`) counts, and one only a
+ * sibling plugin has does not. A package is present only if it carries a
+ * `package.json`: an empty directory left by an interrupted install is not a
+ * resolution. `peerDependenciesMeta[…].optional` peers are skipped — an optional
+ * peer is exactly one that may legitimately be absent.
+ *
+ * Deliberately a TYPE question: a peer also counts as resolvable through
+ * `@types/<its DefinitelyTyped name>`, because that is what tsc reads for an
+ * import whose package is absent. Measured on this repository's own tree, fifteen
+ * of the eighteen plugins resolve `react` from `@types/react` alone, so a
+ * package-only reading would have skipped the gate on fifteen plugins locally —
+ * the place where the gate is actually run — and left it with no teeth at all.
+ * The remaining conservatism: a plugin whose types would resolve through some
+ * OTHER mechanism is still skipped, and skipping is the safe direction — a skipped
+ * gate leaves a release runnable, a gate that fails on an import nobody installed
+ * stops it (`TS2307`, release run 38377277084).
+ *
+ * @param pluginDir - absolute path of a plugin directory.
+ * @returns the missing peer names, sorted; empty when the gate may run.
+ */
+export function pluginMissingPeers(pluginDir) {
+  const manifestPath = path.join(pluginDir, 'package.json')
+  if (!existsSync(manifestPath)) return []
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  const optional = manifest.peerDependenciesMeta ?? {}
+  return Object.keys(manifest.peerDependencies ?? {})
+    .filter((name) => optional[name]?.optional !== true)
+    .filter((name) => !resolvesFrom(pluginDir, name))
+    .sort()
+}
+
+/**
+ * The DefinitelyTyped package a name's types would come from.
+ *
+ * `@types/react` for `react`; `@types/scope__pkg` for `@scope/pkg`, which is the
+ * name DefinitelyTyped actually publishes.
+ */
+function typesPackageFor(name) {
+  if (!name.startsWith('@')) return `@types/${name}`
+  const [scope, rest] = name.split('/')
+  return `@types/${scope.slice(1)}__${rest}`
+}
+
+/** Whether `name`, or the `@types` package tsc would read for it, resolves from `dir`. */
+function resolvesFrom(dir, name) {
+  const lookups = [name, typesPackageFor(name)]
+  for (let current = path.resolve(dir); ; current = path.dirname(current)) {
+    for (const lookup of lookups) {
+      if (existsSync(path.join(current, 'node_modules', lookup, 'package.json'))) return true
+    }
+    const parent = path.dirname(current)
+    if (parent === current) return false
+  }
+}
+
+/**
+ * The one line that must accompany a run in which plugins skipped the type gate.
+ *
+ * Its whole point is that a green build log cannot be read as "every plugin's
+ * types were checked": the skip is a decision, and this is the count that says how
+ * much of the run it covered. Both call sites print it whether or not anything was
+ * skipped — `0 of 18` is the sentence that means the gate really ran everywhere.
+ *
+ * @param total - plugins the run covered.
+ * @param skipped - how many of them skipped the type gate.
+ * @returns the log line, prefixed like every other verdict.
+ */
+export function typecheckSkipSummary(total, skipped) {
+  if (skipped === 0) {
+    return `[plugin-gate] type gate: 0 of ${total} plugins skipped it (their declared peers resolve here — every plugin was checked)`
+  }
+  return `[plugin-gate] type gate: ${skipped} of ${total} plugins skipped it (their declared peers are not installed here — `
+    + 'this run vouches for their outputs, not for their types)'
+}
+
+/**
  * Which type gate a plugin has, read from its own `package.json`.
  *
  * @param pluginDir - absolute path of a plugin directory.
@@ -337,19 +437,27 @@ export function pluginTypecheckPlan(pluginDir) {
  * to remove, and a plugin that reaches this point has no other check on the
  * packaging path.
  *
+ * A plugin of which that is not true still SKIPS when its declared peers are
+ * missing, because tsc would fail on an import the install never provided
+ * (`pluginMissingPeers`) — and the skip is LOUD, never silent: a caller that
+ * swallowed it would turn "nothing could check these types here" into "they
+ * passed". Both call sites also print `typecheckSkipSummary` once per run, so the
+ * count is in the log either way.
+ *
  * @param pluginDir - absolute path of a plugin directory.
  * @param options.runNpm - `(args, cwd) => void`; must throw on a non-zero exit.
  * @param options.log - one-line sink for the decisions (default `console.log`).
- * @returns the plan the gate acted on.
- * @throws {Error} when the plugin has no type gate, is not installed, or its
- *   typecheck fails.
+ * @returns `{ kind, script, skipped, missing }` — `skipped` true means the gate
+ *   did NOT run and `missing` holds the peers that stopped it.
+ * @throws {Error} when the plugin has no type gate at all, is not installed, or
+ *   its typecheck fails.
  */
 export function runPluginTypecheck(pluginDir, { runNpm, log = console.log }) {
   const dirName = path.basename(pluginDir)
   const plan = pluginTypecheckPlan(pluginDir)
   if (plan.kind === TYPECHECK_BUILD) {
     log(`[plugin-gate] ${dirName}: no typecheck script; its build is tsc (${plan.script}), which type-checks as it compiles`)
-    return plan
+    return { ...plan, skipped: false, missing: [] }
   }
   if (plan.kind === TYPECHECK_NONE) {
     throw new Error(
@@ -363,6 +471,15 @@ export function runPluginTypecheck(pluginDir, { runNpm, log = console.log }) {
       + `run (cd plugins/${dirName} && npm install --legacy-peer-deps) first.`,
     )
   }
+  const missing = pluginMissingPeers(pluginDir)
+  if (missing.length > 0) {
+    log(
+      `[plugin-gate] ${dirName}: type gate SKIPPED — its declared peers are not installed here `
+      + `(missing: ${missing.join(', ')}); npm --legacy-peer-deps omits them. `
+      + 'The output and freshness checks still ran.',
+    )
+    return { ...plan, skipped: true, missing }
+  }
   runNpm(['run', 'typecheck'], pluginDir)
-  return plan
+  return { ...plan, skipped: false, missing: [] }
 }

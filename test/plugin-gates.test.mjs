@@ -22,9 +22,11 @@ import {
   assertPluginOutputs,
   pluginDeclaredOutputs,
   pluginLibStaleness,
+  pluginMissingPeers,
   pluginOutputGap,
   pluginTypecheckPlan,
   runPluginTypecheck,
+  typecheckSkipSummary,
   TYPECHECK_BUILD,
   TYPECHECK_NONE,
   TYPECHECK_SCRIPT,
@@ -308,6 +310,104 @@ test('runPluginTypecheck refuses an uninstalled plugin with the command that fix
     () => runPluginTypecheck(dir, { runNpm: () => {}, log: () => {} }),
     /no node_modules.*npm install --legacy-peer-deps/su,
   )
+})
+
+// ------------------------------------- the type gate's precondition (peers)
+
+/** A plugin fixture that declares `peers` and has the given packages installed. */
+function peerFixture({ peers, optional = [], installed = [] }) {
+  return fixture({
+    'package.json': JSON.stringify({
+      scripts: { typecheck: 'tsc --noEmit' },
+      peerDependencies: Object.fromEntries(peers.map((name) => [name, '^1.0.0'])),
+      ...(optional.length === 0 ? {} : { peerDependenciesMeta: Object.fromEntries(optional.map((name) => [name, { optional: true }])) }),
+    }),
+    'node_modules/.keep': 'x\n',
+    ...Object.fromEntries(installed.map((name) => [`node_modules/${name}/package.json`, `{"name":"${name}"}\n`])),
+  })
+}
+
+test('pluginMissingPeers reads the plugin\'s own declaration, and a @types package counts', () => {
+  // Absent anything: every declared peer is missing, named as declared.
+  assert.deepEqual(
+    pluginMissingPeers(peerFixture({ peers: ['react', '@deepseek-ai/dsh-client-ui-primitives'] })),
+    ['@deepseek-ai/dsh-client-ui-primitives', 'react'],
+  )
+  // Installed as itself.
+  assert.deepEqual(pluginMissingPeers(peerFixture({ peers: ['react'], installed: ['react'] })), [])
+  // Installed only as its types — what tsc actually reads, and what this
+  // repository's own tree looks like for `react` in fifteen plugins.
+  assert.deepEqual(pluginMissingPeers(peerFixture({ peers: ['react'], installed: ['@types/react'] })), [])
+  // The DefinitelyTyped name for a scoped package is `@types/scope__pkg`.
+  assert.deepEqual(pluginMissingPeers(peerFixture({ peers: ['@scope/pkg'], installed: ['@types/scope__pkg'] })), [])
+  // An optional peer may legitimately be absent.
+  assert.deepEqual(pluginMissingPeers(peerFixture({ peers: ['react'], optional: ['react'] })), [])
+})
+
+test('a peer resolves through an ancestor\'s node_modules, and only as a real package', () => {
+  // The shape both call sites rely on: the ROOT tree carries the kernel packages
+  // while the plugin's own tree carries none of them.
+  const root = fixture({ 'node_modules/@deepseek-ai/dsh/package.json': '{"name":"@deepseek-ai/dsh"}\n' })
+  const plugin = path.join(root, 'plugins', 'plugin-x')
+  mkdirSync(plugin, { recursive: true })
+  writeFileSync(
+    path.join(plugin, 'package.json'),
+    JSON.stringify({ peerDependencies: { '@deepseek-ai/dsh': '^1.0.0', react: '^18.0.0' } }),
+  )
+  assert.deepEqual(pluginMissingPeers(plugin), ['react'])
+  // An empty directory left by an interrupted install is not a resolution...
+  mkdirSync(path.join(plugin, 'node_modules', 'react'), { recursive: true })
+  assert.deepEqual(pluginMissingPeers(plugin), ['react'])
+  // ...and the package itself, there, is.
+  writeFileSync(path.join(plugin, 'node_modules', 'react', 'package.json'), '{"name":"react"}\n')
+  assert.deepEqual(pluginMissingPeers(plugin), [])
+})
+
+test('a plugin whose peers are missing SKIPS the type gate — loudly, and not as a failure', () => {
+  const dir = peerFixture({ peers: ['react', '@deepseek-ai/dsh-client-ui-primitives'] })
+  const calls = []
+  const lines = []
+  const result = runPluginTypecheck(dir, { runNpm: (args) => calls.push(args), log: (line) => lines.push(line) })
+  // The capability that must not be lost is dropping nothing when it CAN run.
+  assert.deepEqual(calls, [])
+  assert.equal(result.skipped, true)
+  assert.deepEqual(result.missing, ['@deepseek-ai/dsh-client-ui-primitives', 'react'])
+  // Loud: the line names the peers, so a green run cannot be read as coverage.
+  assert.match(
+    lines.join('\n'),
+    /type gate SKIPPED — its declared peers are not installed here \(missing: @deepseek-ai\/dsh-client-ui-primitives, react\); npm --legacy-peer-deps omits them\./su,
+  )
+})
+
+test('a plugin whose peers resolve RUNS the type gate, and says so', () => {
+  const dir = peerFixture({ peers: ['react'], installed: ['@types/react'] })
+  const calls = []
+  const result = runPluginTypecheck(dir, { runNpm: (args, cwd) => calls.push([args, cwd]), log: () => {} })
+  assert.deepEqual(calls, [[['run', 'typecheck'], dir]])
+  assert.equal(result.skipped, false)
+  assert.deepEqual(result.missing, [])
+})
+
+test('typecheckSkipSummary says how much of a run the type gate covered', () => {
+  assert.match(typecheckSkipSummary(18, 0), /0 of 18 plugins skipped it.*every plugin was checked/)
+  const partial = typecheckSkipSummary(18, 11)
+  assert.match(partial, /11 of 18 plugins skipped it/)
+  assert.match(partial, /vouches for their outputs, not for their types/)
+})
+
+test('every plugin\'s missing-peer report names only peers that plugin declares', () => {
+  // True in any environment, unlike a count: the set is read from the manifest,
+  // never kept here. A CI tree (peers omitted by --legacy-peer-deps) and this one
+  // therefore differ in the answer, never in where the answer comes from.
+  const pluginsRoot = path.join(ROOT, 'plugins')
+  for (const entry of readdirSync(pluginsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('plugin-')) continue
+    const dir = path.join(pluginsRoot, entry.name)
+    const declared = Object.keys(JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')).peerDependencies ?? {})
+    for (const name of pluginMissingPeers(dir)) {
+      assert.ok(declared.includes(name), `${entry.name}: ${name} is reported missing but is not a declared peer`)
+    }
+  }
 })
 
 test('the walker reads a real plugin directory and keeps out of lib/ and node_modules', () => {
