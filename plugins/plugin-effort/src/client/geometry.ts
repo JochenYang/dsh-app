@@ -2,20 +2,41 @@
  * Track geometry and the two CSS expressions that place everything on it.
  *
  * One module owns the numbers because they have to agree in three places at
- * once: the stylesheet (track height, knob size), the React layer (knob offset,
- * fill clip, tick positions) and the pointer math (which maps a client x to a
- * percentage of the knob's travel). A single number changed in one of them and
- * not the others is the "knob sits off its tick" class of bug.
+ * once: the stylesheet (track height, knob size, the note line's band), the React
+ * layer (knob offset, fill clip, tick positions) and the pointer math (which maps
+ * a client x to a percentage of the knob's travel). A single number changed in one
+ * of them and not the others is the "knob sits off its tick" class of bug.
  *
  * The knob is deliberately the SAME size as the track: the track is 28px tall,
  * so a 28px knob reads as the track's own end cap rather than a bead riding on
  * top of it, and the travel inset is exactly the radius at both ends.
+ *
+ * The note under the track is the other half of that: its line height is also the
+ * floor its own box keeps, whether or not it has a sentence to show, because the
+ * injected container's height is what decides where the official menu places
+ * itself. See {@link NOTE_LINE_HEIGHT}.
  *
  * @module @dsh-app/plugin-effort/client/geometry
  */
 
 /** Track height in px; also the knob diameter. */
 export const TRACK_HEIGHT = 28
+
+/**
+ * The note line's height in px: its `line-height`, and the floor its box keeps.
+ *
+ * The floor is the point of it. The note explains the state when there is
+ * something to explain and stays silent when the track speaks for itself, so its
+ * sentence comes and goes while the container around it must not: the official
+ * menu is placed from its own height (`top = trigger.top − 8 − height`, read from
+ * the installed model-selection component), and a card that shrinks by this line
+ * is a card that jumps by it AND re-measures the track under the pointer. An empty
+ * `<p>` collapses to zero, so the reservation has to be declared.
+ */
+export const NOTE_LINE_HEIGHT = 16
+
+/** The air between the track and the note, in px — the note's own `margin-top`. */
+export const NOTE_MARGIN_TOP = 4
 
 /** Knob diameter in px — the track height, so the two can never disagree. */
 export const KNOB_SIZE = TRACK_HEIGHT
@@ -126,16 +147,76 @@ export function fillClip(pct: number): string {
   return `inset(0 calc(100% - ${KNOB_RADIUS}px - ${t} * (100% - ${KNOB_SIZE}px)) 0 0)`
 }
 
+/** The track's box, as far as the pointer math is concerned. */
+export interface TrackRect {
+  /** Viewport x of the track's left edge. */
+  readonly left: number
+  /** The track's width. */
+  readonly width: number
+}
+
 /**
  * The track fraction under a pointer, in the knob's own travel.
  *
  * @param clientX - pointer x in viewport coordinates.
- * @param rect - the track's bounding rect.
+ * @param rect - the track's box.
  * @returns the fraction, or null when the track has no usable width (hidden or
  *   mid-layout, where any answer would be a guess).
  */
-export function pctAt(clientX: number, rect: { readonly left: number, readonly width: number }): number | null {
+export function pctAt(clientX: number, rect: TrackRect): number | null {
   const usable = rect.width - KNOB_RADIUS * 2
   if (!(usable > 0)) return null
   return clamp01((clientX - rect.left - KNOB_RADIUS) / usable)
+}
+
+/** A gesture's mapping from the pointer to a position; see {@link createGestureMap}. */
+export interface GestureMap {
+  /** Open a gesture on the box the track has right now. */
+  begin(): void
+  /** Close it. Every sample until the next {@link GestureMap.begin} answers null. */
+  end(): void
+  /**
+   * The fraction of the travel under `clientX`.
+   * @param clientX - pointer x in viewport coordinates.
+   * @returns the fraction, or null when no gesture is open.
+   */
+  pctAt(clientX: number): number | null
+}
+
+/**
+ * One gesture's own mapping from a pointer x to a position on the track.
+ *
+ * The box is read ONCE, when the gesture opens, and every sample of that gesture
+ * goes through that one box. Re-measuring the track on every sample is the bug this
+ * exists to prevent: the box moves under a pointer that has not moved, because the
+ * card is placed from its own height and re-laid out from its own content — an
+ * error line arriving, a locale switch, the note's sentence changing length — and a
+ * sample re-mapped against the new box lands on a level the user never pointed at.
+ * In measured round numbers: a 310px track that becomes 224px with its right edge
+ * pinned moves the same `clientX` from 0.500 of the travel to 0.277 — and a press
+ * at 0.27 of that travel starts one level up and finishes at the lowest, so the knob
+ * walks out from under a stationary pointer and the host is asked for a level nobody
+ * chose.
+ *
+ * Holding the box for the length of one gesture makes the position a function of the
+ * pointer and of nothing else. A NEW gesture reads the box again, so the control is
+ * never stuck on a box that is already gone — and this is the only place that has to
+ * know either of those things.
+ *
+ * @param measure - reads the track's box right now, or null when there is no track.
+ * @returns the map.
+ */
+export function createGestureMap(measure: () => TrackRect | null): GestureMap {
+  let held: TrackRect | null = null
+  return {
+    begin(): void {
+      held = measure()
+    },
+    end(): void {
+      held = null
+    },
+    pctAt(clientX: number): number | null {
+      return held === null ? null : pctAt(clientX, held)
+    },
+  }
 }

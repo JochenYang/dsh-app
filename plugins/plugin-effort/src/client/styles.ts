@@ -32,6 +32,18 @@
  * {@link EFFORT_TEXT_ATTRIBUTE} for what the mark buys and why the colour itself is
  * a write rather than a rule.
  *
+ * ## One box, whatever the state
+ *
+ * The injected control must keep the SAME box in every shape, because the official
+ * menu is placed from its own height and re-laid out from its own content: a line
+ * that comes and goes moves the card, and a card that moves re-measures the track
+ * under the pointer. So the note line is always mounted with a height floor
+ * ({@link NOTE_LINE_HEIGHT}), and the container is taken out of its own inline
+ * intrinsic size (`contain: inline-size`) so its text can never decide the card's
+ * width. Both rules are load-bearing rather than cosmetic — with either one gone the
+ * card jumps by 20px vertically and 86px horizontally on the first drag, measured on
+ * the real app.
+ *
  * ## Why the fill is clipped rather than sized
  *
  * The fill layer spans the whole track and carries the full gradient; its
@@ -58,7 +70,7 @@
  * @module @dsh-app/plugin-effort/client/styles
  */
 
-import { BLOOM_WIDTH, KNOB_SIZE, TRACK_HEIGHT } from './geometry.ts'
+import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TRACK_HEIGHT } from './geometry.ts'
 import { DRIFT_AMPLITUDE, DRIFT_MS } from './mosaic.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from './value-color.ts'
 
@@ -93,6 +105,17 @@ const cssText = `
      instead of sharing the label's. */
   width: 100%;
   min-width: 0;
+  /* The note line must not decide how wide the card is.
+     The official menu is width: max-content, so anything inside it that has a
+     max-content width of its own pushes the card — and the track, which is 100%
+     of this container — wider. The note is the only child here with text, so its
+     sentence was the card's width: a 17-character caption made the card 334px and
+     the same card without the line 248px, which is a 86px jump of the track under
+     the pointer the moment a drag turned "following the default" into a level.
+     Inline-size containment takes the node's contents out of its own inline
+     intrinsic size, so the card is the same width in every shape while the note
+     still lays out and wraps at the width it actually gets. */
+  contain: inline-size;
   /* The row is a flex box with a 6px gap, which is what separates the two lines
      once it wraps; this is the small amount of extra air above the track. */
   margin-top: 2px;
@@ -299,10 +322,18 @@ body[data-ds-dark-theme] .dshAppEffort-square {
   transition: none;
 }
 
+/* The one line under the track: the sentence the current state needs, and — when
+   it needs none — the empty box of that line. The line is ALWAYS mounted, and its
+   box is what keeps the container the same height in every shape: the official
+   menu is placed from its own height, so a line that comes and goes moves the card
+   by its own 20px every time a drag turns "following the default" into a level. An
+   empty <p> collapses to 0, which is why the floor is declared rather than left to
+   the line-height. */
 .dshAppEffort-note {
-  margin: 4px 0 0;
+  margin: ${NOTE_MARGIN_TOP}px 0 0;
   font-size: 11px;
-  line-height: 16px;
+  line-height: ${NOTE_LINE_HEIGHT}px;
+  min-height: ${NOTE_LINE_HEIGHT}px;
   color: var(--dsw-alias-label-caption);
 }
 .dshAppEffort-note[data-tone="error"] {

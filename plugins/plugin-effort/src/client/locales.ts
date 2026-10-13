@@ -54,7 +54,7 @@ export const en: Record<EffortKey, string> = {
   'effort.ariaUnset': 'Reasoning effort: following the provider default',
   'effort.hint.keys': 'Left and right arrows change the level',
   'effort.noteSingle': 'This model advertises a single reasoning level.',
-  'effort.noteUnset': 'Following the provider default — drag to pin a level.',
+  'effort.noteUnset': 'Provider default — drag to pick a level.',
   'effort.noteUnknown': 'The level in use ({id}) is not in this model list.',
   'effort.error.timeout': 'The level switch timed out; the host never reported back (display rolled back).',
   'effort.error.unavailable': 'The model catalog is unavailable; the level was not written.',

@@ -17,6 +17,7 @@ import {
   KNOB_SIZE,
   TRACK_HEIGHT,
   clamp01,
+  createGestureMap,
   fillClip,
   headEdgeExpr,
   indexFromPct,
@@ -141,6 +142,68 @@ describe('pctAt', () => {
   it('refuses a track with no usable width', () => {
     assert.equal(pctAt(100, { left: 0, width: TRACK_HEIGHT }), null)
     assert.equal(pctAt(100, { left: 0, width: 0 }), null)
+  })
+})
+
+describe('createGestureMap', () => {
+  /**
+   * The two boxes one drag really went through, measured on the running app: the
+   * card was 334px wide while the track said "following the provider default" and
+   * 248px once a level was pinned, with its RIGHT edge pinned by the menu's own
+   * placement, so the track lost 86px and moved 87px right under a pointer that
+   * had not moved.
+   */
+  const WIDE = { left: 980.9, width: 310.5 }
+  const NARROW = { left: 1067.9, width: 224 }
+
+  it('maps every sample of one gesture through the box it started on', () => {
+    let box = WIDE
+    const gesture = createGestureMap(() => box)
+    gesture.begin()
+    const x = 1136.1
+    assert.equal(gesture.pctAt(x), pctAt(x, WIDE))
+    // The card re-lays itself out in the middle of the gesture.
+    box = NARROW
+    assert.equal(gesture.pctAt(x), pctAt(x, WIDE), 'the sample was re-mapped against the new box')
+  })
+
+  it('reads the box again for the next gesture', () => {
+    let box = WIDE
+    const gesture = createGestureMap(() => box)
+    gesture.begin()
+    box = NARROW
+    gesture.end()
+    gesture.begin()
+    assert.equal(gesture.pctAt(1136.1), pctAt(1136.1, NARROW))
+  })
+
+  it('answers nothing outside a gesture, and nothing without a track', () => {
+    const gesture = createGestureMap(() => WIDE)
+    assert.equal(gesture.pctAt(1136.1), null, 'a sample was mapped with no gesture open')
+    gesture.begin()
+    gesture.end()
+    assert.equal(gesture.pctAt(1136.1), null)
+    const gone = createGestureMap(() => null)
+    gone.begin()
+    assert.equal(gone.pctAt(1136.1), null, 'a track with no box still answered')
+  })
+
+  it('is what stops one pointer position from asking for two levels', () => {
+    // The regression, in one line: a press near the left of the wide track sits in
+    // the second level's band, and the same clientX after the re-layout sits in the
+    // first — so a per-sample measurement asks the host for a level the user never
+    // pointed at. Held at the press-time box, the answer cannot move.
+    const x = WIDE.left + KNOB_RADIUS + (WIDE.width - KNOB_RADIUS * 2) * 0.26
+    const before = indexFromPct(pctAt(x, WIDE)!, 3)
+    const after = indexFromPct(pctAt(x, NARROW)!, 3)
+    assert.notEqual(before, after, 'the two boxes agree, so this test proves nothing')
+    let box = WIDE
+    const gesture = createGestureMap(() => box)
+    gesture.begin()
+    const held = gesture.pctAt(x)!
+    box = NARROW
+    assert.equal(indexFromPct(gesture.pctAt(x)!, 3), before)
+    assert.equal(held, pctAt(x, WIDE))
   })
 })
 

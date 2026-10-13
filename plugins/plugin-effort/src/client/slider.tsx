@@ -26,6 +26,14 @@
  *      {@link levelKey}; when that identity changes they are dropped, so an index
  *      that meant `max` a moment ago is never drawn against a list where it means
  *      something else.
+ *   4. **The control's box does not depend on its shape.** The note line under the
+ *      track is drawn in every state — with an empty sentence when there is nothing
+ *      to explain — and every pointer sample of a gesture is mapped through the box
+ *      the gesture started on ({@link createGestureMap}). Both exist for the same
+ *      reason: the official menu places itself from its own height and re-lays out
+ *      from its own content, so a control whose box changed shape would move the
+ *      card AND move the scale under a pointer that never moved. The sheet's
+ *      `contain: inline-size` is the third leg of that (see `styles.ts`).
  *
  * The container this file portals into is the SECOND LINE of the official row's
  * capsule, and the capsule's edge and the row's value cell carry the current
@@ -42,7 +50,7 @@ import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { createEffortBridge, type EffortBridge, type EffortBridgeHost, type EffortRowLabels, type LevelColors } from './bridge.ts'
-import { fillClip, headEdgeExpr, indexFromPct, offsetExpr, pctAt, pctFromIndex } from './geometry.ts'
+import { createGestureMap, fillClip, headEdgeExpr, indexFromPct, offsetExpr, pctFromIndex } from './geometry.ts'
 import { commitIndexFor, levelKey, resolveEffort, trackModeOf } from './levels.ts'
 import {
   ENERGY_END,
@@ -56,6 +64,7 @@ import {
   tileStateFor,
 } from './mosaic.ts'
 import { NS, type EffortKey } from './locales.ts'
+import { controlShapeFor, type EffortFailure } from './shape.ts'
 import { isDarkTheme, ringColorAt, textColorAt } from './value-color.ts'
 
 /** How long a committed level may stay unconfirmed before the display rolls back. */
@@ -76,12 +85,6 @@ export type EffortEntryProps = PropsLocale<typeof NS> & {
   readonly select: (levelId: string) => Promise<EffortOutcome>
   /** The OFFICIAL row labels, read from the kernel's own dictionary at call time. */
   readonly officialLabels: () => EffortRowLabels
-}
-
-/** The error state, kept coded so the dictionary stays the only place with copy. */
-interface EffortFailure {
-  readonly code: EffortKey
-  readonly params?: Readonly<Record<string, unknown>>
 }
 
 /**
@@ -107,6 +110,16 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const anchorRef = useRef<HTMLSpanElement | null>(null)
   const trackRef = useRef<HTMLDivElement | null>(null)
   const bridgeRef = useRef<EffortBridge | null>(null)
+  /**
+   * The track box one GESTURE is mapped through, read when the gesture opens and
+   * held until it ends — see `createGestureMap`. Re-reading it per sample is what
+   * let a re-layout in the middle of a drag (the note line, an error arriving)
+   * re-map the same pointer position onto a different level.
+   */
+  const gesture = useMemo(() => createGestureMap(() => {
+    const node = trackRef.current
+    return node === null ? null : node.getBoundingClientRect()
+  }), [])
   const draggingRef = useRef(false)
   const draftRef = useRef<number | null>(null)
   /** The level the pointer last landed on: what the next write should ask for. */
@@ -322,14 +335,9 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     writeRef.current(index)
   }, [])
 
-  const pctAtEvent = useCallback((clientX: number): number | null => {
-    const node = trackRef.current
-    if (node === null) return null
-    return pctAt(clientX, node.getBoundingClientRect())
-  }, [])
-
   const moveTo = useCallback((clientX: number): void => {
-    const pct = pctAtEvent(clientX)
+    // The gesture's own box, not the track's right now: see `createGestureMap`.
+    const pct = gesture.pctAt(clientX)
     if (pct === null) return
     const index = indexFromPct(pct, count)
     // Only a crossing is news: the same band means the same level.
@@ -339,7 +347,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     // Rule 1: the row above renders the SESSION's value, not this draft, so the
     // write rides the crossing instead of waiting for the release.
     commit(index)
-  }, [commit, count, pctAtEvent])
+  }, [commit, count, gesture])
 
   const onPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     if (mode !== 'interactive') return
@@ -357,8 +365,12 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     // closes on a focus change that lands OUTSIDE its own menu, and this node is
     // inside it, so taking focus here is safe and makes the arrows work next.
     trackRef.current?.focus({ preventScroll: true })
+    // Freeze the box BEFORE the first sample: this position may itself be what
+    // re-lays the card out (the note line going away), and the samples that follow
+    // have to be read against the same scale the user pressed on.
+    gesture.begin()
     moveTo(event.clientX)
-  }, [mode, moveTo])
+  }, [gesture, mode, moveTo])
 
   /**
    * End the gesture. The release records the level the pointer stopped on, which
@@ -369,11 +381,12 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     if (!draggingRef.current) return
     event.stopPropagation()
     draggingRef.current = false
+    gesture.end()
     const index = draftRef.current
     draftRef.current = null
     setDraft(null)
     if (index !== null) commit(index)
-  }, [commit])
+  }, [commit, gesture])
 
   const onPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     if (!draggingRef.current) return
@@ -437,7 +450,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     if (target !== null) commit(target)
   }, [commit, count, host, mode, shownIndex])
 
-  const note = noteFor(state, failure, t)
+  const shape = controlShapeFor(state, failure, t, shownIndex)
   const ariaLabel = shownName === undefined ? t('effort.ariaUnset') : t('effort.aria', { name: shownName })
 
   return (
@@ -515,7 +528,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
                 )
               })}
             </div>
-            {mode === 'interactive' ? levels.map((level, index) => (
+            {shape.ticks ? levels.map((level, index) => (
               <span
                 key={level.id}
                 className="dshAppEffort-tick"
@@ -525,40 +538,20 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
             )) : null}
             {/* The knob marks a position, so it is absent while there is none —
                 an unset track with a knob parked at the left end would claim the
-                session is running at the lowest level. */}
-            {shownIndex >= 0 && mode !== 'static' ? <div className="dshAppEffort-knob" style={{ left: offsetExpr(shownPct) }} /> : null}
+                session is running at the lowest level. It is the ONLY layer that
+                tells an unset track from a ready one; see `controlShapeFor`. */}
+            {shape.knob ? <div className="dshAppEffort-knob" style={{ left: offsetExpr(shownPct) }} /> : null}
           </div>
-          {note === null ? null : (
-            <p className="dshAppEffort-note" data-tone={failure === null ? undefined : 'error'}>{note}</p>
-          )}
+          {/* The line is drawn in EVERY shape — an empty one included. Its box is
+              what keeps the container the same height, and the container's height is
+              what decides where the official menu places itself; unmounting the line
+              moves the whole card by 20px the moment a drag turns "following the
+              provider default" into a level. `controlShapeFor` says which sentence,
+              never whether there is one. */}
+          <p className="dshAppEffort-note" data-tone={shape.noteError ? 'error' : undefined}>{shape.note}</p>
         </>,
         host.container,
       )}
     </>
   )
-}
-
-/**
- * The one line under the track, when there is something to say.
- *
- * A failure always wins: it is the only case where what the user sees is not what
- * the session will use. Otherwise the track speaks for itself — a full track with
- * one level, or an empty one following the provider default, is already visible,
- * and the line only names the reason.
- *
- * @param state - the resolved state.
- * @param failure - the coded failure, if any.
- * @param t - this plugin's namespace-bound translate.
- * @returns the sentence, or null when the track needs no explanation.
- */
-function noteFor(
-  state: ReturnType<typeof resolveEffort>,
-  failure: EffortFailure | null,
-  t: EffortEntryProps['t'],
-): string | null {
-  if (failure !== null) return t(failure.code, failure.params)
-  if (state.kind === 'unset') return t('effort.noteUnset')
-  if (state.kind === 'unknown') return t('effort.noteUnknown', { id: state.raw })
-  if (state.kind === 'ready' && state.levels.length <= 1) return t('effort.noteSingle')
-  return null
 }

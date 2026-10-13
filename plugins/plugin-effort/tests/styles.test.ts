@@ -17,9 +17,9 @@
 
 import { strict as assert } from 'node:assert'
 import { afterEach, describe, it } from 'node:test'
-import { BLOOM_WIDTH, KNOB_SIZE, TRACK_HEIGHT } from '../src/client/geometry.ts'
+import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TRACK_HEIGHT } from '../src/client/geometry.ts'
 import { DRIFT_AMPLITUDE } from '../src/client/mosaic.ts'
-import { adoptStyles } from '../src/client/styles.ts'
+import { EFFORT_TEXT_ATTRIBUTE, EFFORT_TEXT_WEIGHT, adoptStyles } from '../src/client/styles.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from '../src/client/value-color.ts'
 
 /** Text of every stylesheet the module injected during one test. */
@@ -152,6 +152,67 @@ describe('adoptStyles', () => {
     )
     assert.ok(css.includes('--dshAppEffort-bloom: rgb(255 255 255 / 26%)'), 'the light bloom is missing')
     assert.ok(css.includes('--dshAppEffort-bloom: rgb(255 255 255 / 34%)'), 'the dark bloom is missing')
+  })
+
+  it('makes the composer capsule\'s level mark a heavier weight, and nothing else', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    // Spelled out rather than read from the constants: the selector IS the contract
+    // with the bridge's write, and an assertion against a shared constant would pass
+    // on a rename that left the two halves disagreeing.
+    assert.ok(
+      /\n\[data-dshAppEffort\] \{[^}]*font-weight: 600/u.test(css),
+      'the mark does not buy a heavier weight',
+    )
+    // One declaration and no more: the element is the kernel's own span, and the
+    // colour is a per-level value the bridge writes. A rule that set the colour, a
+    // size or a width here would be a second source for one of them.
+    const rule = /\n\[data-dshAppEffort\] \{([^}]*)\}/u.exec(css)
+    assert.ok(rule !== null, 'the mark rule is missing')
+    const declarations = (rule[1] ?? '').split(';').map(part => part.trim()).filter(part => part.length > 0)
+    assert.deepEqual(declarations, ['font-weight: 600'], `the mark rule declares more than the weight: ${declarations.join('; ')}`)
+    assert.equal(EFFORT_TEXT_ATTRIBUTE, 'data-dshAppEffort', 'the mark the bridge writes is not the one this sheet styles')
+    assert.equal(EFFORT_TEXT_WEIGHT, '600', 'the weight is not the one this sheet declares')
+  })
+
+  it('reserves the note line, so the shape cannot move the card', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    // The note's sentence comes and goes with the state while the LINE stays: the
+    // official menu is placed from its own height, so a line that un-mounted with
+    // the sentence would move the whole card by its own 20px on the first drag.
+    // An empty <p> collapses, so the floor is the load-bearing half — and it is the
+    // half a reading of the built bundle cannot confirm, because the sheet ships as
+    // a template literal. Measured instead, on the running app, in the state where
+    // the sentence is gone: the note's computed `min-height` is 16px, its
+    // `display` is block, its border box is 16px tall and it reports one client
+    // rect, so the container stays 48px and the row stays 96px in both shapes.
+    assert.ok(
+      /\n\.dshAppEffort-note \{[^}]*min-height: \d+px/u.test(css),
+      'the note line has no height floor, so an empty one collapses',
+    )
+    assert.ok(
+      css.includes(`min-height: ${NOTE_LINE_HEIGHT}px`),
+      'the note floor is not the geometry constant',
+    )
+    assert.ok(css.includes(`line-height: ${NOTE_LINE_HEIGHT}px`), 'the note line height is not the constant')
+    assert.ok(css.includes(`margin: ${NOTE_MARGIN_TOP}px 0 0`), 'the note margin is not the constant')
+  })
+
+  it('keeps the note out of the card\'s own width', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    // The menu is `width: max-content`: a note with text has a max-content width,
+    // and that width became the CARD's — 334px with the sentence, 248px without,
+    // measured on the running app. Inline-size containment is what stops a
+    // sentence from resizing the control under the pointer.
+    assert.ok(
+      /\n\.dshAppEffort \{[^}]*contain: inline-size/u.test(css),
+      'the container still contributes its contents\' inline size',
+    )
   })
 
   it('injects once per document', () => {
