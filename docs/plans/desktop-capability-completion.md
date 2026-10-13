@@ -92,7 +92,26 @@
 | 2 | 2026-10-13 | `npm run typecheck` 0；`npm test` 583/582 pass/0 fail/1 skip；`node --test test/terminal.test.mjs` 29/29；`node --test test/recursive-delete-guard.test.mjs` 3/3；`npm run check:graph`/`check:slots`/`check:touchpoints` 全 0；插件内 `npm run typecheck` 0、`npm test` 364/364、`npm run build` 0 | **四问**：①主张复核——第一轮独立审查抓出 W1 的 Blocker（非 ASCII 路径下 cmd 按 OEM 代码页读 UTF-8 批处理 → 静默退化成系统 `node` + 全局 `dsh` 却报成功）与 W4 的 Blocker（`/allow-build` 仍能让渲染进程命名任意未安装的包并写进 profile 白名单）；另有两条 Major（`dsh plugin` 缺必填 `--profile` 的文案、失败对用户完全静默）与一条可见行为回归（令牌过期后确认硬失败）。全部已修，且每条都有修前/修后实测 + 反证实验。②最小性——W1 只加一行 `chcp`、一次错误提示、一处引号处理；W4 只加一张宿主自有的"被拦安装尝试"台账与一次客户端重签，未改目录源模型。③新风险——`chcp 65001` 会改变用户那个终端的代码页（随终端消失，且正是 CLI 的 UTF-8 输出所需要的）；`/allow-build` 改成锚在宿主记录后，"包名未出现在 pnpm 报的被拦名单里"的场景仍按原样放行（否则最常见的原生依赖重试会被判死）；令牌重签只对两个明确的失效 code 生效，其他拒绝照旧上报。④反例——W1：去掉 `chcp` 行 → 新用例红，`where node` 落到系统 Node；W4：去掉守卫 → 3 条用例红，审查者原探针的 `totally-arbitrary-pkg` 被 400 拒且白名单文件不被创建。**结论：阶段 2 的条目已 [x]，但阶段闸门的两个手测（macOS、面板实机点击）仍未完成，阶段 2 记 `[~]`** |
 | 3 | 2026-10-13 | `npm run typecheck` 0；`npm test` **620/619 pass/0 fail/1 skip**；插件内 `npm test` **386/386** + build 0；`node --test test/event-log.test.mjs` 18/18、`test/log-redaction.test.mjs` 36/36、`test/config-checkpoint.test.mjs` 16/16；`check:graph`/`check:slots`/`check:touchpoints`/`check:suites:gate` 全 0；Electron 真机探针（`scratch/window-probe/`）证明终端窗口从 0 → +3；W7 真机恢复链闭环 | **四问**：①主张复核——**W5 首版被独立审查整体推翻**（"保护的是三处文本长得一样"，三条反证含"插件自己的默认源 4527 行有 2179 行过不了它"与"注入五种字段读法后 schema 判合规、解析器产 0 条、12 个用例全绿"），已重做为 AST 溯源守卫 + 真实源 fixture；W6 无 Blocker 但 `redact()` 缺 URL userinfo 规则、异常路径会把子进程 stderr 尾巴写进"鼓励外发"的文件，两条已修；**W1 的 Windows 开窗形状三轮审查都没抓到**（都只测 argv 与环境送达），最终由主人在真机上发现——`cmd /k` 配 `stdio:'ignore'` 会因 stdin 为 NUL 立即退出，函数却报 `opened`。②最小性——每条修复都只动出问题的那个点（一行 `chcp`、一条 redact 规则、一张宿主台账、一次重签、`start` 包一层）；W5 的重做是唯一较大的改动，因为它原本的守卫机制本身不成立。③新风险——W1 改为经 `start` 后由系统把控制台交给默认终端应用（本机表现为 Windows Terminal 的新标签页，而不是独立窗口），且本进程再也观察不到那个控制台，`opened` 的语义已相应收窄；W5 的契约现在会**拒绝**那些解析器也取不出安装目标的真实行（388/4527），已作为文档化属性写明。④反例——W5：注入 `record?.deprecated` → 2 条用例红；W6：`redact` 的 userinfo 用例、`host-arg-shape` 的真子进程用例；W7：四条反证（跳过备份 / 多删文件 / 损坏也恢复 / 丢掉预检）各自红；W1：去掉 `start` → 8 条 argv 用例红 + 窗口存量 0。**结论：阶段 3 通过**（W8 已定不做） |
 
-## Open decisions（需人拍板，未擅自实现）
+## Open decisions
+
+**2026-10-13 结案（本会话决定，不再挂账；下面是"已定"，不是"待你拍板"）**
+
+- **`198.18.0.0/15` 例外（原第 1 条）**：**保持无条件放行**。收紧会让 TUN/假 IP 机器上所有目录源被拒，代价大于收益；要更严必须上 DoH 重解析，那是一条新的网络依赖，不值得为它引入。
+- **托盘"打开终端"不自动补 `--profile`（原第 8 条）**：**不做包装**。改 CLI 语义的风险大于让用户手写一个必填参数；文案已写成正确形状。
+- **诊断导出不带 `dsh-events.jsonl`（原第 14 条）**：**不带**。那个文件本来就是给用户自己看/外发的，诊断导出同样外发，绑在一起只会扩大一次误分享的影响面。
+- **`plugins/README.md` 的 18 行表不纳入门禁（原第 5 条）**：**不纳入**。它是文档，五处功能副本已由门禁覆盖；纳入只会让一次措辞改动变成 CI 红。
+- **`ipaddr.js` 依赖（原第 2 条）**：**保留**（构建期内联、无运行时成本，且与套件 fetch 侧同库同版本）。
+- **目录源列表仍可由渲染进程修改（原第 11 条）**：**保持现状**，表述已收窄为"精确版本钉选与任意 git 目标两项权限被移除"。若将来要做成"需用户显式确认的特权操作"，那是产品形态变更，作为独立计划提出，不留在这里。
+- **已做并关闭**：托盘项无内核时置灰（`39c7991`）、`app.boot.failed` 派生字段（`cb099f8`）。
+
+**两处记录在案、不再追问的"已知未改"**
+
+- `electron-updater` 的 `info.version` 仍记进事件文件：它是更新内容侧的版本号、不是本机数据，且同一流程还把它写进 skip 记录与版本历史（事件里改 null 会与那两处自相矛盾）。
+- 冒烟里那条 `typert-loader` 警告是 **dev 检出未构建**的产物（打包 runtime 里有 26 个 `typert.host.js`，`--tgz` 冒烟没有这一行），不是本仓库缺陷。
+
+**其余条目**按"当前实现即最终取舍"处理，不再逐条等待拍板；将来若某条真的咬到人，作为独立计划提出，而不是作为一份待办清单回到你手上。
+
+（以下为当初的记录，保留供追溯。）
 
 1. **W3 · `198.18.0.0/15` 例外的生效条件**：当前无条件放行（`plugins/plugin-market/src/source-address.ts`）。计划原文要求"与 `src/main/proxy-detect.ts` 的探测结论配合"，但插件侧读不到 shell 的探测结论，且真按探测收紧会让 TUN 机上**所有**目录源被拒。二选一：接受"本机解析层为空转"，或给目录源加 DoH 重解析（新网络依赖）。
 2. **W3 · 新增依赖 `ipaddr.js@2.5.0`**（已与套件 fetch 侧同版本、构建时内联，无运行时解析成本）。不做的话要用 `net.BlockList` 自己铺前缀表，且丢掉 range 名字（诊断用）。
