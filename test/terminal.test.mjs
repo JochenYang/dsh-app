@@ -9,7 +9,10 @@
  * by the suite. The file/spawn boundary is covered through `openManagedTerminal`
  * with the spawn seam stubbed and a throwaway user-data directory — plus the one
  * case marked REAL SPAWN below, which runs a real child to exercise the Windows
- * outcome judgement.
+ * outcome judgement. THAT case is the only one here that puts a window on the
+ * user's desktop, so it does not run by default: set
+ * `DSH_APP_TERMINAL_REAL_SPAWN=1` to run it (the case itself says why
+ * `windowsHide` cannot cover it).
  *
  * HOW THIS FILE STAYS OFF ITS HOST. Every plan input is injected — platform,
  * environment, paths, and a resolver that is the plan's ONLY door to the
@@ -19,7 +22,8 @@
  * cannot be injected away, and each is keyed on `process.platform` with its
  * reason at the case:
  *
- *   - a REAL child process (REAL SPAWN: only a Windows host has `cmd.exe`);
+ *   - a REAL child process (REAL SPAWN: only a Windows host has `cmd.exe`), and
+ *     only when `DSH_APP_TERMINAL_REAL_SPAWN=1` — `start` opens a real console;
  *   - the console code page (the non-ASCII case: a cmd fact, pinned with `chcp`);
  *   - an open-level test of the WINDOWS plan, which needs a host that can be
  *     given the shim directory the plan spells in Windows form (`\tmp\…` is not
@@ -867,16 +871,35 @@ test('a real plan does not touch the user environment it was derived from', () =
 
 // --------------------------------------------------------------- REAL SPAWN
 //
-// THE ONE CASE THAT STARTS A REAL CHILD. Everything above proves the plan; this
-// proves the Windows OUTCOME judgement against a real process, which no
-// EventEmitter can do. It is still NOT a window test — `start` hands the console
-// to the system, so nothing here can see one. The argv is therefore rewritten to
-// a shape that opens a console for a moment and leaves nothing behind, and the
-// visible half is measured by hand in `scratch/window-probe/` (see this file's
-// header) after any change to `planWindows`.
+// THE ONE CASE THAT STARTS A REAL CHILD, AND THE ONLY ONE HERE THAT OPENS A
+// WINDOW. Everything above proves the plan; this proves the Windows OUTCOME
+// judgement against a real process, which no EventEmitter can do. It is still
+// NOT a window test — `start` hands the console to the system, so nothing here
+// can see one. The argv is therefore rewritten to a shape that opens a console
+// for a moment and leaves nothing behind, and the visible half is measured by
+// hand in `scratch/window-probe/` (see this file's header) after any change to
+// `planWindows`.
+//
+// WHY IT IS OFF BY DEFAULT. That console IS a window on the user's desktop:
+// `start` creates it with CREATE_NEW_CONSOLE, and the `windowsHide: false` the
+// plan spawns with is not what puts it there — `windowsHide` covers only the
+// DIRECT child, and the direct child is the wrapper asking for the console, not
+// the console. (Measured, `scratch/window-watch/watch.ps1`: the `start` shape
+// creates a console — a `PseudoConsoleWindow` and its console host — while the
+// same command without `start` creates none.) So a suite that runs this case by
+// default flashes a console at whoever is using the machine, on every run,
+// while the suite itself cannot see it. `DSH_APP_TERMINAL_REAL_SPAWN=1` is the
+// way in when this link really has to be verified.
+
+/** Whether the case that opens a real console may run; see the block above. */
+const REAL_SPAWN_ENABLED = process.env.DSH_APP_TERMINAL_REAL_SPAWN === '1'
+/** What a skipped run says: the case is reachable, and this is how to reach it. */
+const REAL_SPAWN_SKIP = 'needs a REAL console, which is a window on this desktop (Windows `start`): not run by default — set DSH_APP_TERMINAL_REAL_SPAWN=1 to run it'
 
 test('REAL SPAWN: a real Windows wrapper is judged by its exit code', {
-  skip: process.platform === 'win32' ? false : 'a real child here means cmd.exe, which only a Windows host has',
+  skip: process.platform === 'win32'
+    ? (REAL_SPAWN_ENABLED ? false : REAL_SPAWN_SKIP)
+    : 'a real child here means cmd.exe, which only a Windows host has',
 }, async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-terminal-real-'))
   t.after(() => { rmSync(root, { recursive: true, force: true }) })
