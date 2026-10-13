@@ -32,16 +32,26 @@
  * user drags — the bar would look like it was being repainted rather than
  * uncovered. See {@link ./geometry.fillClip}.
  *
+ * ## The two moving parts
+ *
+ * The mosaic's tiles sweep, and at the top of the energy range they also drift
+ * vertically. Both are driven by the component through the two variables the
+ * stylesheet exposes for them: the tile's own animation (duration, delay, and the
+ * `data-on` that pauses it) and the `data-drift` gate on the track.
+ *
  * ## Reduced motion
  *
  * The mosaic is decoration with no information the fill does not already carry,
  * so `prefers-reduced-motion` removes it outright rather than parking a cluster
- * of squares at the fill's edge.
+ * of squares at the fill's edge. The drift lives inside that layer, so it goes
+ * with it — the bloom does not, and does not need to: it is a static highlight,
+ * not motion.
  *
  * @module @dsh-app/plugin-effort/client/styles
  */
 
-import { KNOB_SIZE, TRACK_HEIGHT } from './geometry.ts'
+import { BLOOM_WIDTH, KNOB_SIZE, TRACK_HEIGHT } from './geometry.ts'
+import { DRIFT_AMPLITUDE, DRIFT_MS } from './mosaic.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from './value-color.ts'
 
 /** Id of the injected stylesheet, so a second mount is a no-op. */
@@ -71,12 +81,22 @@ const cssText = `
   --dshAppEffort-fill: ${fillGradient(FILL_RAMP_LIGHT)};
   --dshAppEffort-glow: rgb(75 63 214 / 42%);
   --dshAppEffort-ring: rgb(75 63 214 / 55%);
+  /* The leading edge's bloom. WHITE in both themes, for the reason the startup
+     page gives for its own: the edge is the one thing worth looking at, and on a
+     saturated blue-to-indigo fill a second blue has nothing to say. The alphas
+     differ because the fills do — measured as the step between the bloomed and
+     the plain fill under it, light 26% is 1.40–1.77:1 and dark 34% is 1.31–1.44:1
+     across the whole range. Below the light alpha the highlight disappears into
+     the fill at the deep indigo end; above the dark one it goes to near-white and
+     stops reading as a push. */
+  --dshAppEffort-bloom: rgb(255 255 255 / 26%);
 }
 body[data-ds-dark-theme] .dshAppEffort {
   /* Dark theme: brand blue brightening toward a light violet. */
   --dshAppEffort-fill: ${fillGradient(FILL_RAMP_DARK)};
   --dshAppEffort-glow: rgb(185 166 255 / 50%);
   --dshAppEffort-ring: rgb(185 166 255 / 62%);
+  --dshAppEffort-bloom: rgb(255 255 255 / 34%);
 }
 
 /* The anchor the bridge walks up from. It must stay in the DOM — an unmounted
@@ -119,6 +139,34 @@ body[data-ds-dark-theme] .dshAppEffort {
   background: var(--dshAppEffort-fill);
   pointer-events: none;
 }
+
+/* The bloom at the fill's visible leading edge. It rides the SAME variable the
+   knob's offset is written to, minus the radius the knob covers, so its bright end
+   lands on the edge the eye actually sees; the ramp fades back into the fill over
+   BLOOM_WIDTH. It is clipped to the fill like the layers beside it, which keeps the
+   flat part of the gradient — everything to the right of its last stop — off the
+   empty half of the track.
+
+   It does not compete with the other two glows in this area: the track's own glow
+   and the capsule's ring are box-shadows drawn OUTSIDE the track's border box, and
+   the knob's ring is on the knob. This one is inside the fill, ending where the
+   knob begins. */
+.dshAppEffort-bloom {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent calc(var(--dshAppEffort-head) - ${BLOOM_WIDTH}px),
+    var(--dshAppEffort-bloom) var(--dshAppEffort-head)
+  );
+  /* The same 160ms the mosaic layer uses, because the two fade in together and
+     read as one thing; without it the bloom would step at each level crossing
+     while the tiles beside it glided. */
+  transition: opacity 160ms ease;
+}
+
 .dshAppEffort-mosaic {
   position: absolute;
   inset: 0;
@@ -136,6 +184,12 @@ body[data-ds-dark-theme] .dshAppEffort {
   animation-timing-function: linear;
   animation-iteration-count: infinite;
 }
+/* A tile that is not part of the mosaic stays mounted and keeps its phase — it is
+   its square that fades. Paused as well: fourteen invisible elements sweeping is
+   fourteen elements' worth of compositing for nothing. */
+.dshAppEffort-tile[data-on="0"] {
+  animation-play-state: paused;
+}
 .dshAppEffort-square {
   position: absolute;
   left: 100%;
@@ -143,6 +197,10 @@ body[data-ds-dark-theme] .dshAppEffort {
   border-radius: 1px;
   background: #fff;
   transform: translate(-50%, -50%);
+  /* The fade is the whole point of keeping the tile mounted: the square's opacity
+     is its own tone while the tile is on and 0 while it is not, so it always comes
+     to rest exactly on the tone it had. */
+  transition: opacity 260ms ease;
 }
 body[data-ds-dark-theme] .dshAppEffort-square {
   background: #f2eeff;
@@ -150,6 +208,23 @@ body[data-ds-dark-theme] .dshAppEffort-square {
 @keyframes dshAppEffort-sweep {
   0% { transform: translate3d(0, 0, 0); }
   100% { transform: translate3d(-100%, 0, 0); }
+}
+
+/* The high-energy drift. Gated on the data-drift attribute, which is the TOP of
+   the energy range — not the same threshold as data-energy, which only says the
+   mosaic is on at all. It is gated on the lit tiles too, so an unlit one is not
+   drifting invisibly. The keyframe carries the centring transform as well: a
+   keyframe replaces the element's transform outright, so a drift that only wrote
+   the vertical offset would slide every square half a tile up and left. */
+@keyframes dshAppEffort-drift {
+  0%, 100% { transform: translate(-50%, -50%) translateY(${-DRIFT_AMPLITUDE}px); }
+  50% { transform: translate(-50%, -50%) translateY(${DRIFT_AMPLITUDE}px); }
+}
+.dshAppEffort-track[data-drift="1"] .dshAppEffort-tile[data-on="1"] .dshAppEffort-square {
+  animation-name: dshAppEffort-drift;
+  animation-duration: ${DRIFT_MS}ms;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
 }
 
 .dshAppEffort-tick {

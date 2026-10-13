@@ -12,28 +12,35 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import {
+  BLOOM_WIDTH,
   KNOB_RADIUS,
   KNOB_SIZE,
   TRACK_HEIGHT,
   clamp01,
   fillClip,
+  headEdgeExpr,
   indexFromPct,
   offsetExpr,
   pctAt,
   pctFromIndex,
 } from '../src/client/geometry.ts'
 import {
+  DRIFT_MS,
   ENERGY_START,
   MOSAIC_TILES,
   TILE_MAX_SIZE,
   TILE_MIN_SIZE,
+  driftDelayMsFor,
   energyFor,
   mosaicTiles,
   sweepDurationMsFor,
+  sweepPctFor,
   sweepSpeedFor,
   tileCountFor,
   tileDelayMsFor,
   tileLayerOpacityFor,
+  tileStateFor,
+  type MosaicTile,
 } from '../src/client/mosaic.ts'
 
 describe('geometry constants', () => {
@@ -100,6 +107,20 @@ describe('offsetExpr and fillClip', () => {
     assert.equal(offsetExpr(2), offsetExpr(1))
     assert.equal(offsetExpr(-1), offsetExpr(0))
     assert.equal(offsetExpr(0.123456789), 'calc(14px + 0.1235 * (100% - 28px))')
+  })
+
+  it('puts the bloom on the edge the eye sees, not on the clip', () => {
+    // The clip runs to the knob's CENTRE, and its last radius is behind the knob;
+    // this is that centre minus the radius, i.e. the knob's left rim.
+    assert.equal(headEdgeExpr(0), 'calc(0.0000 * (100% - 28px))')
+    assert.equal(headEdgeExpr(0.5), 'calc(0.5000 * (100% - 28px))')
+    assert.equal(headEdgeExpr(1), 'calc(1.0000 * (100% - 28px))')
+    assert.equal(headEdgeExpr(0.123456789), 'calc(0.1235 * (100% - 28px))')
+    assert.equal(headEdgeExpr(2), headEdgeExpr(1))
+    assert.equal(headEdgeExpr(-1), headEdgeExpr(0))
+    // The ramp has to fit in the fill's visible span, which is one knob short of
+    // the clip's.
+    assert.ok(BLOOM_WIDTH < KNOB_SIZE, 'the bloom is wider than the knob it hugs')
   })
 })
 
@@ -195,5 +216,73 @@ describe('mosaic curves', () => {
   it('clamps energy outside 0..1', () => {
     assert.equal(energyFor(-1), 0)
     assert.equal(energyFor(2), 1)
+  })
+})
+
+describe('sweepPctFor', () => {
+  it('reads the displayed position while the two are level', () => {
+    assert.equal(sweepPctFor(0.8, false, 0.2), 0.8)
+    assert.equal(sweepPctFor(0, false, 0.9), 0)
+  })
+
+  it('holds the settled position while a gesture is in flight', () => {
+    // The whole point of the freeze: `animation-duration` re-times a RUNNING
+    // animation rather than restarting it, so a duration that followed every
+    // crossing remapped each square's progress and moved it. A drag crosses one
+    // node per level, which was one jump per node.
+    assert.equal(sweepPctFor(0.8, true, 0.2), 0.2)
+    assert.equal(sweepPctFor(0, true, 0.2), 0.2)
+    assert.equal(sweepPctFor(1, true, 0.2), 0.2)
+    assert.equal(sweepPctFor(0.9, true, 0.9), 0.9)
+  })
+
+  it('clamps either position into the travel', () => {
+    assert.equal(sweepPctFor(2, false, 0), 1)
+    assert.equal(sweepPctFor(-1, false, 0), 0)
+    assert.equal(sweepPctFor(0.5, true, 4), 1)
+    assert.equal(sweepPctFor(0.5, true, Number.NaN), 0)
+  })
+})
+
+describe('tileStateFor', () => {
+  it('lights tiles in order, and an unlit one carries no opacity at all', () => {
+    const tiles = mosaicTiles()
+    for (const pct of [0, ENERGY_START, 0.5, 0.75, 1]) {
+      const count = tileCountFor(pct)
+      tiles.forEach((tile, index) => {
+        const state = tileStateFor(tile, index, pct)
+        assert.equal(state.on, index < count, `tile ${index} at ${pct}`)
+        // Not "a small opacity": 0, so the fade comes to rest on exactly the tone
+        // it returns to.
+        assert.equal(state.opacity, index < count ? tile.tone : 0, `opacity of tile ${index} at ${pct}`)
+      })
+    }
+  })
+
+  it('keeps a tile that is off in the table rather than dropping it', () => {
+    // The count is not a mount list: the component renders all MOSAIC_TILES and
+    // this decides which of them are lit. Unmounting instead made squares appear
+    // and vanish mid-track, because every tile starts partway through its sweep.
+    const tiles = mosaicTiles()
+    assert.equal(tiles.length, MOSAIC_TILES)
+    assert.equal(tileStateFor(tiles[0] as MosaicTile, 0, 0).opacity, 0)
+    assert.equal(tileStateFor(tiles[MOSAIC_TILES - 1] as MosaicTile, MOSAIC_TILES - 1, 0).on, false)
+  })
+
+  it('lights nothing below the energy floor and everything at the far end', () => {
+    const tiles = mosaicTiles()
+    assert.ok(tiles.every((tile, index) => !tileStateFor(tile, index, ENERGY_START).on))
+    assert.ok(tiles.every((tile, index) => tileStateFor(tile, index, 1).on))
+  })
+})
+
+describe('driftDelayMsFor', () => {
+  it('spreads the drift across the tiles instead of bobbing in lockstep', () => {
+    const delays = mosaicTiles().map(tile => driftDelayMsFor(tile))
+    assert.equal(new Set(delays.map(delay => delay.toFixed(3))).size, MOSAIC_TILES)
+    for (const delay of delays) {
+      assert.ok(delay <= 0, `delay ${delay}`)
+      assert.ok(delay > -DRIFT_MS, `delay ${delay} past one period`)
+    }
   })
 })

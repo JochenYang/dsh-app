@@ -23,6 +23,16 @@ export const KNOB_SIZE = TRACK_HEIGHT
 /** Knob radius in px: the travel inset at each end of the track. */
 export const KNOB_RADIUS = KNOB_SIZE / 2
 
+/**
+ * Width of the leading-edge bloom, in px.
+ *
+ * A ramp, not a bar: it fades back into the fill over this distance, so the
+ * highlight reads as the fill being pushed rather than as a second segment. Kept
+ * shorter than the knob's diameter (28px) so the whole ramp stays inside the
+ * fill's own visible span.
+ */
+export const BLOOM_WIDTH = 26
+
 /** Fractions are rounded to this many decimals before they enter a CSS expression. */
 const FRACTION_DIGITS = 4
 
@@ -78,6 +88,24 @@ export function indexFromPct(pct: number, count: number): number {
 export function offsetExpr(pct: number): string {
   const t = clamp01(pct).toFixed(FRACTION_DIGITS)
   return `calc(${KNOB_RADIUS}px + ${t} * (100% - ${KNOB_SIZE}px))`
+}
+
+/**
+ * Where the fill's VISIBLE leading edge is, as a CSS length.
+ *
+ * The fill's clip runs to the knob's CENTRE, so its last 14px sit behind the knob;
+ * what the eye reads as the edge is the knob's left rim. That rim is the knob's
+ * offset minus one radius, which collapses to `pct * (100% - KNOB_SIZE)` from the
+ * track's left end — the same travel the knob's own expression uses, without the
+ * radius term. The bloom anchors here rather than at the clip, so its bright end
+ * lands on the edge that is actually visible.
+ *
+ * @param pct - fraction of the travel, 0..1.
+ * @returns a `calc()` length, relative to the element's own width.
+ */
+export function headEdgeExpr(pct: number): string {
+  const t = clamp01(pct).toFixed(FRACTION_DIGITS)
+  return `calc(${t} * (100% - ${KNOB_SIZE}px))`
 }
 
 /**

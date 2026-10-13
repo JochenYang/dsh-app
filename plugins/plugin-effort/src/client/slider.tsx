@@ -42,15 +42,18 @@ import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { createEffortBridge, type EffortBridge, type EffortBridgeHost, type EffortRowLabels, type LevelColors } from './bridge.ts'
-import { fillClip, indexFromPct, offsetExpr, pctAt, pctFromIndex } from './geometry.ts'
+import { fillClip, headEdgeExpr, indexFromPct, offsetExpr, pctAt, pctFromIndex } from './geometry.ts'
 import { commitIndexFor, levelKey, resolveEffort, trackModeOf } from './levels.ts'
 import {
+  ENERGY_END,
+  driftDelayMsFor,
+  energyFor,
   mosaicTiles,
   sweepDurationMsFor,
-  tileCountFor,
+  sweepPctFor,
   tileDelayMsFor,
   tileLayerOpacityFor,
-  energyFor,
+  tileStateFor,
 } from './mosaic.ts'
 import { NS, type EffortKey } from './locales.ts'
 import { isDarkTheme, ringColorAt, textColorAt } from './value-color.ts'
@@ -131,6 +134,11 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
    * captured here.
    */
   const tintRef = useRef<{ index: number, count: number }>({ index: -1, count: 0 })
+  /**
+   * The position the mosaic's sweep timing was last read at. Held across a gesture
+   * so the animation is not re-timed under the pointer; see `sweepPctFor`.
+   */
+  const settledSweepRef = useRef(0)
 
   const tiles = useMemo(() => mosaicTiles(), [])
 
@@ -235,8 +243,16 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const shownPct = shownIndex >= 0 ? pctFromIndex(shownIndex, count) : 0
   const energy = energyFor(shownPct)
   const shownName = shownIndex >= 0 ? levels[shownIndex]?.name : undefined
-  const visibleTiles = tileCountFor(shownPct)
   tintRef.current = { index: shownIndex, count }
+
+  // The sweep's timing is frozen while the display is ahead of the session; see
+  // `sweepPctFor` for why reading it off the displayed position made the squares
+  // jump on every node a drag crossed. The ref is written with the value just
+  // used, so it tracks the position while the two are level and holds still while
+  // they are not.
+  const ahead = draft !== null || pending !== null
+  const sweepPct = sweepPctFor(shownPct, ahead, settledSweepRef.current)
+  settledSweepRef.current = sweepPct
 
   // The level's colours follow the position. A level change inserts nothing into
   // the DOM, so the observer never sees it: this is the direct path, and the
@@ -437,6 +453,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
             aria-disabled={mode !== 'interactive'}
             data-mode={mode}
             data-energy={energy > 0 ? '1' : '0'}
+            data-drift={shownPct > ENERGY_END ? '1' : '0'}
             data-dragging={draft !== null ? '1' : '0'}
             title={t('effort.hint.keys')}
             style={{ '--dshAppEffort-energy': String(energy) } as React.CSSProperties}
@@ -448,17 +465,32 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
             onKeyDown={onKeyDown}
           >
             <div className="dshAppEffort-fill" style={{ clipPath: fillClip(shownPct) }} />
+            {/* The leading edge's bloom. It fades in with the mosaic's own energy,
+                so the low end of the scale stays calm, and it is anchored on the
+                knob's rim rather than on the clip's edge — see `headEdgeExpr`. */}
+            <div
+              className="dshAppEffort-bloom"
+              style={{
+                '--dshAppEffort-head': headEdgeExpr(shownPct),
+                clipPath: fillClip(shownPct),
+                opacity: energy,
+              } as React.CSSProperties}
+            />
             <div
               className="dshAppEffort-mosaic"
               style={{ clipPath: fillClip(shownPct), opacity: tileLayerOpacityFor(shownPct) }}
             >
+              {/* Every tile is always rendered: the ones outside the count are faded
+                  out and paused rather than unmounted, which is what stopped them
+                  appearing and vanishing in the middle of the track. */}
               {tiles.map((tile, index) => {
-                if (index >= visibleTiles) return null
-                const duration = sweepDurationMsFor(shownPct, tile.tone)
+                const state = tileStateFor(tile, index, shownPct)
+                const duration = sweepDurationMsFor(sweepPct, tile.tone)
                 return (
                   <span
                     key={index}
                     className="dshAppEffort-tile"
+                    data-on={state.on ? '1' : '0'}
                     style={{
                       top: `${(tile.top * 100).toFixed(2)}%`,
                       animationDuration: `${duration.toFixed(0)}ms`,
@@ -467,7 +499,12 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
                   >
                     <span
                       className="dshAppEffort-square"
-                      style={{ width: tile.size, height: tile.size, opacity: tile.tone }}
+                      style={{
+                        width: tile.size,
+                        height: tile.size,
+                        opacity: state.opacity,
+                        animationDelay: `${driftDelayMsFor(tile).toFixed(0)}ms`,
+                      }}
                     />
                   </span>
                 )

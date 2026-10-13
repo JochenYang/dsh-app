@@ -11,8 +11,16 @@
  * assertable in a unit test and keeps a re-render from reshuffling the squares
  * under the pointer.
  *
- * Geometry lives in {@link ./geometry}; this module owns only the tile table and
- * the three curves (count, opacity, sweep speed) that read a position.
+ * Two of the rules here are about TIME rather than about a position, and both
+ * exist because the obvious implementation was visibly wrong:
+ *
+ *   - **A tile is faded, never unmounted** — {@link tileStateFor}.
+ *   - **The sweep's timing is frozen while a gesture is in flight** —
+ *     {@link sweepPctFor}.
+ *
+ * Geometry lives in {@link ./geometry}; this module owns the tile table, the
+ * curves that read a position (count, opacity, sweep speed) and the two that read
+ * a gesture (the frozen sweep position, the high-energy drift).
  *
  * @module @dsh-app/plugin-effort/client/mosaic
  */
@@ -39,6 +47,12 @@ export const SPEED_MAX = 2
 
 /** Per-tile duration jitter, as a fraction of the sweep duration. */
 export const TILE_SPREAD = 0.16
+
+/** The high-energy drift's amplitude, in px, either side of the tile's line. */
+export const DRIFT_AMPLITUDE = 1.5
+
+/** The drift's period, in ms. Slow on purpose: it reads as breathing, not as motion. */
+export const DRIFT_MS = 2400
 
 /** Low-discrepancy constant: any prefix of `(i + 1) * phi % 1` spreads evenly. */
 const GOLDEN_RATIO = 0.6180339887498949
@@ -114,6 +128,69 @@ export function energyFor(pct: number): number {
  */
 export function tileCountFor(pct: number): number {
   return Math.round(energyFor(pct) * MOSAIC_TILES)
+}
+
+/** One tile's presentation at a position. */
+export interface TileState {
+  /** Whether this tile is part of the mosaic here. */
+  readonly on: boolean
+  /** The square's opacity: its own tone while on, 0 while not. */
+  readonly opacity: number
+}
+
+/**
+ * One tile's presentation at a position.
+ *
+ * The count is NOT a mount list. Every tile starts partway through its own sweep
+ * (see {@link tileDelayMsFor}), so a tile added at a higher position pops into
+ * existence somewhere in the MIDDLE of the track, and one removed blinks out —
+ * which is what the mosaic used to do. Instead every tile stays mounted and the
+ * square fades between its own tone and 0, so the tile keeps its phase and comes
+ * back exactly where it left.
+ *
+ * @param tile - the tile.
+ * @param index - its position in the table.
+ * @param pct - fraction of the travel, 0..1.
+ * @returns whether it is on, and the opacity its square carries.
+ */
+export function tileStateFor(tile: MosaicTile, index: number, pct: number): TileState {
+  const on = index < tileCountFor(pct)
+  return { on, opacity: on ? tile.tone : 0 }
+}
+
+/**
+ * The drift delay for one tile, in ms.
+ *
+ * Its own phase, so the column breathes out of step: fourteen squares rising and
+ * falling together reads as the whole track twitching rather than as the mosaic
+ * being alive.
+ *
+ * @param tile - the tile.
+ * @returns the delay (zero or negative).
+ */
+export function driftDelayMsFor(tile: MosaicTile): number {
+  return -(tile.phase % 1) * DRIFT_MS
+}
+
+/**
+ * The position the sweep's TIMING is read from.
+ *
+ * `animation-duration` does not restart a running animation, it re-times it: every
+ * tile's progress is remapped onto the new duration, so the squares jump. A drag
+ * crosses one level per node, and the position changes on every one of those
+ * crossings, so reading the timing straight off the displayed position meant a jump
+ * per node. The timing therefore follows the position only while the display is
+ * level with the session: while a gesture (or the write it started) is in flight it
+ * stays where the last settled position left it, and changes once, when the level
+ * is actually adopted.
+ *
+ * @param shownPct - the position being displayed.
+ * @param ahead - whether the display is ahead of the session.
+ * @param settledPct - the last position the session adopted.
+ * @returns the position to read the sweep's timing from.
+ */
+export function sweepPctFor(shownPct: number, ahead: boolean, settledPct: number): number {
+  return clamp01(ahead ? settledPct : shownPct)
 }
 
 /**

@@ -17,7 +17,8 @@
 
 import { strict as assert } from 'node:assert'
 import { afterEach, describe, it } from 'node:test'
-import { KNOB_SIZE, TRACK_HEIGHT } from '../src/client/geometry.ts'
+import { BLOOM_WIDTH, KNOB_SIZE, TRACK_HEIGHT } from '../src/client/geometry.ts'
+import { DRIFT_AMPLITUDE } from '../src/client/mosaic.ts'
 import { adoptStyles } from '../src/client/styles.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from '../src/client/value-color.ts'
 
@@ -104,6 +105,53 @@ describe('adoptStyles', () => {
       /\n\.dshAppEffort-track \{[^}]*pointer-events: auto/u.test(css),
       'the track cannot take the pointer back from its container',
     )
+  })
+
+  it('keeps an unlit tile mounted, invisible and paused', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    // Unmounting an unlit tile is what made squares appear and vanish in the
+    // middle of the track; the fade needs the element to stay.
+    assert.ok(
+      /\.dshAppEffort-tile\[data-on="0"\] \{[^}]*animation-play-state: paused/u.test(css),
+      'an unlit tile keeps sweeping invisibly',
+    )
+    assert.ok(
+      /\n\.dshAppEffort-square \{[^}]*transition: opacity/u.test(css),
+      'the square cannot fade between its tone and nothing',
+    )
+  })
+
+  it('gates the drift on the top of the energy range, centring included', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    assert.ok(
+      /\.dshAppEffort-track\[data-drift="1"\] \.dshAppEffort-tile\[data-on="1"\] \.dshAppEffort-square \{[^}]*animation-name: dshAppEffort-drift/u.test(css),
+      'the drift is not gated on the track and on lit tiles',
+    )
+    // A keyframe replaces the element's transform outright: a drift that wrote
+    // only the vertical offset would slide every square half a tile up and left.
+    assert.ok(
+      css.includes('translate(-50%, -50%) translateY('),
+      'the drift keyframe dropped the centring transform',
+    )
+    assert.ok(css.includes(`translateY(${DRIFT_AMPLITUDE}px)`), 'the drift amplitude is not the constant')
+    assert.ok(css.includes(`translateY(${-DRIFT_AMPLITUDE}px)`), 'the drift has no other end')
+  })
+
+  it('anchors the bloom on the knob\'s rim, inside the fill', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    assert.ok(/\n\.dshAppEffort-bloom \{/u.test(css), 'the bloom layer is missing')
+    assert.ok(
+      css.includes(`var(--dshAppEffort-head) - ${BLOOM_WIDTH}px`),
+      'the bloom ramp is not the width constant',
+    )
+    assert.ok(css.includes('--dshAppEffort-bloom: rgb(255 255 255 / 26%)'), 'the light bloom is missing')
+    assert.ok(css.includes('--dshAppEffort-bloom: rgb(255 255 255 / 34%)'), 'the dark bloom is missing')
   })
 
   it('injects once per document', () => {
