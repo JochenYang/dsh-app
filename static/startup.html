@@ -510,6 +510,14 @@ window.__dshStartupShowFailure = function (config) {
     font-size: 11.5px;
     color: var(--footer-text);
     letter-spacing: 0.03em;
+    transition: opacity 0.2s ease;
+  }
+
+  /* The wish line's own fade seat. Deliberately not #startup-status's
+     `fade-trans`: the headline holds the one place that arms that class, and
+     the two lines fade on unrelated clocks. */
+  #startup-saying.fade-saying {
+    opacity: 0;
   }
 
   /* Action Buttons & Provenance */
@@ -640,6 +648,9 @@ window.__dshStartupShowFailure = function (config) {
     .step-rail li.step-item[data-state="current"] .step-badge { animation: none; }
     #startup-error { animation: none; }
     #startup-error-mask { animation: none; }
+    /* The wish line is replaced outright rather than faded here; the rotation
+       that would fade it does not run at all (see startSayings). */
+    #startup-saying { transition: none; }
   }
 </style>
 </head>
@@ -712,7 +723,9 @@ window.__dshStartupShowFailure = function (config) {
       </li>
     </ul>
 
-    <!-- Footer Quote with subtle hairline rules -->
+    <!-- Footer Quote with subtle hairline rules. The text is the first of the
+         lines the shell pushes (view.sayings[0]); it is what a page that never
+         got a push shows. -->
     <div class="footer-wrap">
       <span class="footer-rule" aria-hidden="true"></span>
       <span id="startup-saying">首先您要健康，其次才是其次</span>
@@ -1219,7 +1232,10 @@ window.__dshStartupShowFailure = function (config) {
     }
     /* ===== end headline-swap rules ===== */
 
-    /** How long the line stays faded before the new message is written into it. */
+    /**
+     * How long a line stays faded before the new text is written into it. Shared
+     * by the headline (setStatusText) and the wish line (setSayingText).
+     */
     var STATUS_SWAP_MS = 100;
 
     /** The fade in progress's pending swap, or null. At most one at a time. */
@@ -1250,6 +1266,135 @@ window.__dshStartupShowFailure = function (config) {
         statusEl.textContent = text;
         statusEl.classList.remove('fade-trans');
       }, STATUS_SWAP_MS);
+    }
+
+    // ========================================================== Saying Rotation
+    /**
+     * The wish line at the foot of the page, rotated through the lines the shell
+     * pushes (`view.sayings`).
+     *
+     * The timing is the PAGE's, not the shell's: the page is the only side that
+     * knows whether motion is welcome, it already owns the one-pending-write
+     * idiom below, and its timer dies with its own document — a shell-side timer
+     * would have to be cancelled on window close and would push a whole view
+     * every tick, which is the main<->renderer round-trip loop the chrome sync
+     * already avoids.
+     */
+
+    /* ===== saying-rotation rules (pure: no state, no DOM) ===== */
+    /**
+     * How long a line stands before the next one: 8s. Long enough to read a line
+     * rather than watch it flicker, and far longer than the 200ms fade, so a
+     * fade can never still be running when the next one starts; short enough
+     * that the only boot long enough to matter (a first launch, which prepares
+     * the runtime) sees the second line at 8s and the first again at 16s.
+     */
+    var SAYING_ROTATE_MS = 8000;
+
+    /** The lines worth showing: real strings, in the shell's order. */
+    function sayingLines(sayings) {
+      var lines = [];
+      if (!sayings) return lines;
+      for (var i = 0; i < sayings.length; i += 1) {
+        if (typeof sayings[i] === 'string' && sayings[i] !== '') lines.push(sayings[i]);
+      }
+      return lines;
+    }
+
+    /** The index after `index`; past the last line it wraps back to the first. */
+    function sayingIndexAfter(index, count) {
+      return count > 0 ? (index + 1) % count : 0;
+    }
+
+    /** A line is written only when it differs from the one on screen. */
+    function sayingNeedsWrite(shown, incoming) {
+      return shown !== incoming;
+    }
+
+    /**
+     * What to do with the pushed lines. `intervalMs` is null when the line must
+     * not rotate at all — fewer than two lines, or the user asked for reduced
+     * motion — and is otherwise the gap between two lines. `intervalMs` is
+     * injectable so a test can drive the rotation without waiting it out.
+     */
+    function sayingRotationPlan(sayings, reducedMotion, intervalMs) {
+      var lines = sayingLines(sayings);
+      var every = typeof intervalMs === 'number' ? intervalMs : SAYING_ROTATE_MS;
+      var rotates = lines.length > 1 && !reducedMotion;
+      return { lines: lines, intervalMs: rotates ? every : null };
+    }
+    /* ===== end saying-rotation rules ===== */
+
+    /** The rotation's tick, or null when it is not rotating. At most one. */
+    var sayingTimer = null;
+
+    /** The fade in progress's pending write, or null. At most one at a time. */
+    var sayingSwap = null;
+
+    /** The lines installed now, joined: a re-push of the same list is a no-op. */
+    var sayingKey = null;
+
+    /** Which line is on screen. */
+    var sayingIndex = 0;
+
+    /**
+     * Write the wish line, fading only when the line itself changed — the same
+     * rule and the same at-most-one-pending guarantee as the headline above: a
+     * newer write cancels the pending one instead of stacking a second timer,
+     * and the cancel drops the class as well, because a cancelled fade left
+     * applied is a line that stays invisible.
+     *
+     * `animated` is false when motion is not welcome. The line is then replaced
+     * outright: without a transition the fade's hold would show as a blank gap
+     * rather than a fade.
+     */
+    function setSayingText(text, animated) {
+      if (sayingSwap !== null) {
+        clearTimeout(sayingSwap);
+        sayingSwap = null;
+        sayingEl.classList.remove('fade-saying');
+      }
+      if (!sayingNeedsWrite(sayingEl.textContent, text)) return;
+      if (!animated) {
+        sayingEl.textContent = text;
+        return;
+      }
+      sayingEl.classList.add('fade-saying');
+      sayingSwap = setTimeout(function () {
+        sayingSwap = null;
+        sayingEl.textContent = text;
+        sayingEl.classList.remove('fade-saying');
+      }, STATUS_SWAP_MS);
+    }
+
+    /**
+     * Install the pushed lines and start the rotation.
+     *
+     * render() runs on every push — several times a second while the kernel
+     * reports progress — so this keys on the lines themselves: an identical list
+     * leaves the timer and the current index alone, which is what stops a status
+     * push from restarting the interval or skipping the line on screen. The
+     * first line is always the shell's first, and it is written without a fade
+     * when it is already the page's own fallback text.
+     */
+    function startSayings(sayings) {
+      var plan = sayingRotationPlan(sayings, reduced);
+      if (plan.lines.length === 0) return;
+      var key = plan.lines.join('\n');
+      if (key === sayingKey) return;
+      sayingKey = key;
+      if (sayingTimer !== null) {
+        clearInterval(sayingTimer);
+        sayingTimer = null;
+      }
+      sayingIndex = 0;
+      var rotating = plan.intervalMs !== null;
+      setSayingText(plan.lines[0], rotating);
+      if (!rotating) return;
+      sayingTimer = setInterval(function () {
+        sayingIndex = sayingIndexAfter(sayingIndex, plan.lines.length);
+        setSayingText(plan.lines[sayingIndex], true);
+      }, plan.intervalMs);
     }
 
     // ========================================================== Reactive State Dispatcher
@@ -1305,9 +1450,7 @@ window.__dshStartupShowFailure = function (config) {
         if (view.brand.name) nameEl.textContent = 'DSH';
         versionEl.textContent = view.brand.version ? 'v' + view.brand.version : 'v0.15.1';
       }
-      if (typeof view.saying === 'string' && view.saying !== '') {
-        sayingEl.textContent = view.saying;
-      }
+      if (view.sayings) startSayings(view.sayings);
 
       // 6. Localization
       if (view.skeleton) {

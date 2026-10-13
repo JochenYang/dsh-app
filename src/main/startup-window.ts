@@ -22,7 +22,7 @@ import { app, BrowserWindow, nativeTheme } from 'electron'
 import { isShowingLoadingPage, resetOverlayColor } from './window'
 import path from 'node:path'
 import type { KernelStatusPayload, KernelStatusStep } from '../shared/types'
-import { t, ZH_KERNEL_STATUS_STEP_KEYWORDS } from '../shared/locale'
+import { t, ZH_KERNEL_STATUS_STEP_KEYWORDS, type MessageKey } from '../shared/locale'
 import { resolveDshHome, PROFILE_PATCH_FILENAME } from './brand-suite'
 import { SUITE_PROFILE } from '../shared/constants'
 import { readThemePreference, readThemePreferenceFromPatch, resolveThemeMode, type ThemeMode, type ThemePreference } from './theme'
@@ -114,11 +114,14 @@ interface StartupView {
   /** Brand row: what this app is, and which build is running. */
   brand: { name: string; version: string }
   /**
-   * The fixed wish at the foot of the page. Pushed (not baked into the HTML)
-   * because the page's own markup cannot know the shell's language, and pushed
-   * every time for the same reason the brand row is: a reloaded page replays it.
+   * The wishes at the foot of the page, in the order the page rotates them.
+   * Pushed (not baked into the HTML) because the page's own markup cannot know
+   * the shell's language, and pushed every time for the same reason the brand
+   * row is: a reloaded page replays it. The shell owns the wording, the page
+   * owns the timing (it is the one that knows `prefers-reduced-motion` and can
+   * stop the timer when its own document goes away).
    */
-  saying: string
+  sayings: readonly string[]
   /** Appearance the page mirrors onto its root element. */
   theme: ThemeMode
 }
@@ -317,7 +320,14 @@ function isActionId(value: unknown): value is StartupActionId {
 }
 
 /** Everything a push carries; brand, theme, skeleton and digest are push-owned. */
-type StartupPush = Omit<StartupView, 'brand' | 'theme' | 'skeleton' | 'digest' | 'saying'>
+type StartupPush = Omit<StartupView, 'brand' | 'theme' | 'skeleton' | 'digest' | 'sayings'>
+
+/**
+ * The splash's wishes, in rotation order. A list rather than one key because the
+ * page rotates them; adding a line here is the whole change (the page's own
+ * fallback only has to agree with the first one).
+ */
+const SPLASH_SAYING_KEYS: readonly MessageKey[] = ['splash.saying.health', 'splash.saying.want']
 
 function push(view: StartupPush): void {
   // The skeleton is built lazily and only once: `t()` resolves against the
@@ -333,7 +343,7 @@ function push(view: StartupPush): void {
     skeleton: lastSkeleton,
     brand: brandRow(),
     theme: currentTheme,
-    saying: t('splash.saying'),
+    sayings: SPLASH_SAYING_KEYS.map((key) => t(key)),
   }
   lastView = next
   const win = splash

@@ -95,10 +95,13 @@ const ZH_CN = {
   'splash.pauseDownload': '暂停下载',
   'splash.resumeDownload': '继续下载',
 
-  // The line at the foot of the splash: a fixed wish, not fetched copy. The
-  // English is a rendering of the Chinese rather than a translation of its pun
-  // (「其次」 is a play on "second"), so the two read as the same sentiment.
-  'splash.saying': '首先您要健康，其次才是其次',
+  // The wishes at the foot of the splash: fixed copy, not fetched, rotated by
+  // the page in the order below (static/startup.html owns the timing). The
+  // English of the first is a rendering of the Chinese rather than a
+  // translation of its pun (「其次」 is a play on "second"), so the two read as
+  // the same sentiment; the second is a plain rendering.
+  'splash.saying.health': '首先您要健康，其次才是其次',
+  'splash.saying.want': '想要的太多，需要的不多',
 
   // ------------------------------------------------- home-layer row conflicts
   // The kernel refuses an app-side write when the same setting also lives in
@@ -404,7 +407,8 @@ const EN_US: Record<MessageKey, string> = {
   'splash.pauseDownload': 'Pause download',
   'splash.resumeDownload': 'Resume download',
 
-  'splash.saying': 'Stay healthy first. Everything else comes second.',
+  'splash.saying.health': 'Stay healthy first. Everything else comes second.',
+  'splash.saying.want': 'We want so much more than we need.',
 
   'homeLayer.title': 'A machine-level setting blocks changes in the app',
   'homeLayer.message': '{ids} comes from {file}, so changing it in the app is refused by the kernel (overridden by a home patch).',
