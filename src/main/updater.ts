@@ -18,7 +18,7 @@ import {
 import { githubMirrorPrefixes } from '../kernel/sources/artifact'
 import { t } from '../shared/locale'
 import { inFrameDialogScript } from './in-frame-dialog'
-import { logEvent, trackedEventOperation } from './event-log'
+import { errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation } from './event-log'
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
 import { noticeThemedDialog, promptThemedDialog, resolveDialogWindow } from './themed-dialog'
 import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
@@ -1109,8 +1109,13 @@ async function downloadAndInstallPackage(
   const child = spawn(dest, [], { detached: true, stdio: 'ignore' })
   // Spawn failure is otherwise invisible (the app is about to quit).
   child.on('error', (err) => {
-    console.error('[shell-updater] installer spawn failed:', err.message)
-    logEvent('shell.update.install.failed', { detail: { version, error: err.message } })
+    // A spawn error's message is the command line and the path it tried
+    // (`spawn C:\Users\…\dsh-app-update-0.16.4-x64.exe ENOENT`), so the event
+    // records derived facts and the text goes to the local log — which is where
+    // the `console.error` this replaces never landed, a packaged build having no
+    // console at all.
+    reportUnrecordedText(`[shell-updater] installer spawn failed: ${err.message}`)
+    logEvent('shell.update.install.failed', { detail: { version, ...errorFactsDetail(err) } })
   })
   child.unref()
   logEvent('shell.update.install.spawned', { detail: { version } })

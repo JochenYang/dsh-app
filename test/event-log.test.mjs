@@ -19,6 +19,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, 
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { scratchDir } from './scratch.mjs'
 
 const require = createRequire(import.meta.url)
@@ -58,6 +59,47 @@ function records(file) {
   assert.equal(text.endsWith('\n'), true, 'every event line is newline-terminated')
   assert.equal(text.includes('\n\n'), false, 'no blank line is written')
   return text.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+}
+
+/**
+ * The argument text of the call whose `(` is at `from`. Quote- and
+ * comment-aware, so a `)` inside a string is not read as the close; it is
+ * deliberately not a parser — the guard below only needs the arguments of calls
+ * this codebase writes in one shape.
+ */
+function balancedCall(source, from) {
+  let depth = 0
+  let quote = ''
+  for (let i = from; i < source.length; i += 1) {
+    const char = source[i]
+    if (quote !== '') {
+      if (char === '\\') i += 1
+      else if (char === quote) quote = ''
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue }
+    if (char === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i)
+      i = end === -1 ? source.length : end
+      continue
+    }
+    if (char === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2)
+      i = end === -1 ? source.length : end + 1
+      continue
+    }
+    if (char === '(') depth += 1
+    else if (char === ')') {
+      depth -= 1
+      if (depth === 0) return source.slice(from + 1, i)
+    }
+  }
+  return source.slice(from + 1)
+}
+
+/** 1-based line number of an offset, for a guard's failure message. */
+function lineOf(source, offset) {
+  return source.slice(0, offset).split('\n').length
 }
 
 // ---------------------------------------------------------------- pure rendering
@@ -112,14 +154,15 @@ test('detail is capped in key count, and the truncation is stated', () => {
     Array.from({ length: MAX_EVENT_DETAIL_KEYS - 1 }, (_, i) => `k${i}`),
     'exactly the fields the note accounts for are missing',
   )
-  // undefined drops the key; a non-finite number becomes null; an Error keeps
-  // its own identity instead of collapsing to `{}`.
+  // undefined drops the key; a non-finite number becomes null; an Error handed
+  // in as a VALUE is marked, not quoted — its message is the one thing the file
+  // a user is asked to send must not carry (see the case below).
   const mixed = JSON.parse(renderEventLine(
     { event: 'x', detail: { a: undefined, b: 1, c: Number.POSITIVE_INFINITY, d: new Error('boom') } },
     identity,
     at,
   )).detail
-  assert.deepEqual(mixed, { b: 1, c: null, d: 'Error: boom' })
+  assert.deepEqual(mixed, { b: 1, c: null, d: '[error]' })
   // A detail that fits exactly at the cap keeps every field and states nothing.
   const exact = {}
   for (let i = 0; i < MAX_EVENT_DETAIL_KEYS; i += 1) exact[`k${i}`] = i
@@ -156,6 +199,30 @@ test('a value with no JSON rendering is marked, not described as text', () => {
   assert.equal(detail.hostile, '[unserialisable]', 'so is one whose toJSON throws')
   assert.equal(detail.plain, '{"ok":true}', 'anything JSON can render is still rendered')
   assert.equal(detail.fn.includes('named'), true, 'a function has no JSON form, so its own text is kept')
+})
+
+test('an Error passed as a detail value is marked, never quoted', () => {
+  const dir = scratchDir('dsh-app-events-')
+  const sink = new EventLog({ dir, run: 'run-error-value' })
+  // The "just pass the error" shape, with the material a real one carries: a
+  // spawn line, a Windows path under the user's own name, and a credential.
+  const error = Object.assign(
+    new Error("spawn C:\\Users\\Administrator\\AppData\\Local\\Temp\\DSH-APP-0.16.4-x64.exe ENOENT --registry https://user:pass@host"),
+    { code: 'ENOENT' },
+  )
+  sink.log('test.error.value', { detail: { step: 'download', failure: error, note: 'kept' } })
+
+  const text = readFileSync(sink.file, 'utf8')
+  for (const fragment of ['Administrator', 'DSH-APP-0.16.4', 'user:pass', 'ENOENT --registry', 'spawn ']) {
+    assert.equal(text.includes(fragment), false, `an Error value must not quote its message: ${fragment}`)
+  }
+  // The marker says plainly that the caller passed an Error and did not derive
+  // anything from it; the class name is not written either, because a reader
+  // could not tell it from the string `"Error"`.
+  assert.deepEqual(records(sink.file)[0].detail, { step: 'download', failure: '[error]', note: 'kept' })
+  // A caller that wants facts asks for them, and gets the guarded ones.
+  sink.log('test.error.derived', { detail: { step: 'download', ...errorFactsDetail(error) } })
+  assert.deepEqual(records(sink.file)[1].detail, { step: 'download', how: 'Error', code: 'ENOENT' })
 })
 
 test('the run id and the rotated file name are stable, sortable forms', () => {
@@ -529,7 +596,8 @@ test('a failure while RENDERING takes the same guarded path as a failed write', 
 test('the process sink records a bracketed operation, pass-through intact', async () => {
   const dir = scratchDir('dsh-app-events-')
   const at = new Date('2026-10-13T09:12:04.512Z')
-  const sink = configureEventLog({ dir, run: 'run-bracket', now: () => at })
+  const diagnostics = []
+  const sink = configureEventLog({ dir, run: 'run-bracket', now: () => at, onDiagnostic: (line) => diagnostics.push(line) })
 
   const answer = await trackedEventOperation('kernel.install', { source: 'bundled' }, async () => 'installed')
   assert.equal(answer, 'installed', 'the wrapped value passes through')
@@ -551,7 +619,109 @@ test('the process sink records a bracketed operation, pass-through intact', asyn
   assert.deepEqual(parsed.map((record) => record.seq), [1, 2, 3, 4, 5], 'the helper shares the one sequence')
   assert.equal(parsed[0].ms, undefined, 'a begin has no duration of its own')
   assert.equal(typeof parsed[1].ms, 'number')
-  assert.equal(parsed[3].detail.error, 'sha512 mismatch')
+  // Derived facts on the `.failed` line, and the message only in the shell's own
+  // log: the operations wrapped here fail with a downloader's, a spawn's or a
+  // network stack's text as often as with a sentence of ours.
+  assert.deepEqual(parsed[3].detail, { source: 'channel', how: 'Error', code: null })
+  assert.equal(readFileSync(sink.file, 'utf8').includes('sha512 mismatch'), false, 'the message is not in the event file')
+  assert.deepEqual(diagnostics, ['[events] kernel.install.failed: sha512 mismatch'], 'it is handed to the local log instead')
   assert.deepEqual(parsed[3].detail.source, 'channel', 'every line of the triple names the operation')
   for (const record of parsed) assert.equal(record.run, 'run-bracket')
+})
+
+test('a wrapped operation records derived facts, never the downloader text', async () => {
+  const dir = scratchDir('dsh-app-events-')
+  const diagnostics = []
+  const sink = configureEventLog({ dir, run: 'run-op-failed', onDiagnostic: (line) => diagnostics.push(line) })
+  // The shape the update and kernel downloads really fail with: a feed URL
+  // carrying userinfo, an HTTP status, the mirror that served (or refused) it,
+  // and the command line of the process that was tried.
+  const failure = Object.assign(
+    new TypeError('fetch failed for https://user:pass@ghfast.top/https://github.com/x/dsh-app/releases/latest.yml (HTTP 502)'),
+    {
+      cause: Object.assign(new Error("getaddrinfo ENOTFOUND while spawning node C:\\Users\\Administrator\\.dsh\\bin.js"), { code: 'ENOTFOUND' }),
+    },
+  )
+  await assert.rejects(
+    trackedEventOperation('shell.update.download', { version: '0.16.4', arch: 'x64', source: 'windows-installer' }, async () => { throw failure }),
+    (thrown) => thrown === failure,
+    'the wrapped error is rethrown unchanged',
+  )
+
+  const text = readFileSync(sink.file, 'utf8')
+  for (const fragment of ['user:pass', 'ghfast.top', 'HTTP 502', 'github.com', 'Administrator', 'bin.js', 'fetch failed']) {
+    assert.equal(text.includes(fragment), false, `the downloader's text must not reach the event file: ${fragment}`)
+  }
+  const failed = records(sink.file).find((record) => record.event === 'shell.update.download.failed')
+  assert.deepEqual(failed.detail, {
+    version: '0.16.4',
+    arch: 'x64',
+    source: 'windows-installer',
+    how: 'TypeError',
+    code: 'ENOTFOUND',
+  })
+  // The errno rides on `cause` for every undici failure, so it is the one fact
+  // that makes the line say something; without walking the chain it would read
+  // `TypeError` and nothing else.
+  assert.equal(failed.detail.code, 'ENOTFOUND', 'the code is read off the cause chain')
+  // The message is kept where it belongs: the shell's own log, redacted, so the
+  // credential in it cannot ride out even there.
+  assert.equal(diagnostics.length, 1)
+  assert.match(diagnostics[0], /^\[events\] shell\.update\.download\.failed: /u)
+  assert.equal(diagnostics[0].includes('ghfast.top'), true, 'the local line keeps the diagnosis')
+  assert.equal(diagnostics[0].includes('user:pass'), false, 'and redact() still covers the credential')
+})
+
+test('a derived failure detail survives a hostile error object', () => {
+  const at = new Date('2026-10-13T09:12:04.512Z')
+  // `name`, `code` and `cause` belong to the object that was thrown, so every
+  // read of them has to be guarded: a getter that throws must not turn the
+  // derivation — or the `.failed` line built from it — into a second failure.
+  const hostile = {
+    get name() { throw new Error('name getter') },
+    get code() { throw new Error('code getter') },
+    get cause() { throw new Error('cause getter') },
+    get message() { throw new Error('message getter') },
+  }
+  assert.doesNotThrow(() => errorFactsDetail(hostile))
+  assert.deepEqual(errorFactsDetail(hostile), { how: 'object', code: null })
+  // A cycle in the chain terminates, and a code that is not identifier-shaped
+  // (a URL, a path, a sentence) is dropped rather than recorded.
+  const looping = { code: 'not a code' }
+  looping.cause = looping
+  assert.deepEqual(errorFactsDetail(looping), { how: 'object', code: null })
+  const deep = { cause: { cause: { cause: { code: 'ECONNRESET' } } } }
+  assert.equal(errorFactsDetail(deep).code, 'ECONNRESET', 'the chain is followed')
+  assert.deepEqual(
+    errorFactsDetail(Object.assign(new Error('x'), { cause: { code: 'C:\\Users\\Administrator' } })),
+    { how: 'Error', code: null },
+    'a cause code a path could be is refused like a top-level one',
+  )
+  // The whole thing still renders as one line.
+  assert.equal(typeof renderEventLine({ event: 'x', detail: errorFactsDetail(hostile) }, identity, at), 'string')
+})
+
+test('no event detail in the shell names an error message', () => {
+  // The two files whose events are written from failures that cannot be driven
+  // from a test: `index.ts` is the app entry (importing it boots Electron) and
+  // `updater.ts` reads `electron.app` lazily but registers its handlers behind
+  // electron-updater. So the CALL SITES are guarded here, as source text, and
+  // the mechanism they must use is exercised by the cases above.
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const offenders = []
+  for (const name of ['index.ts', 'updater.ts']) {
+    const source = readFileSync(path.join(root, 'src', 'main', name), 'utf8')
+    for (const call of ['logEvent(', 'trackedEventOperation(']) {
+      let from = source.indexOf(call)
+      while (from !== -1) {
+        const args = balancedCall(source, from + call.length - 1)
+        // `.message` / `.stack` is the text this codebase did not write, and the
+        // one thing these two helpers exist to keep out of the file. A derived
+        // helper (`errorFactsDetail`, `hostStartFailureDetail`) passes instead.
+        if (/\.(message|stack)\b/u.test(args)) offenders.push(`${name}:${String(lineOf(source, from))} ${call.trim()}`)
+        from = source.indexOf(call, from + call.length)
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], 'an event detail must not name an error message; hand it to reportUnrecordedText instead')
 })

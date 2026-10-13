@@ -24,7 +24,7 @@ import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from '
 import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
 import { installCrashLogging } from './crash-log'
 import { appendRotatingLog } from './log-file'
-import { configureEventLog, errorFactsDetail, logEvent, trackedEventOperation } from './event-log'
+import { configureEventLog, errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation } from './event-log'
 import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, writePatchAtomically, type PatchSpecifier } from './brand-suite'
 import { SUITE_LAYER_PACKAGE, installSuiteLayer, readShippedOverlay } from './suite-layer'
@@ -1849,11 +1849,17 @@ async function checkKernelUpdateInner(manual: boolean): Promise<void> {
       if (option) await applyKernelUpdate(option)
     }
   } catch (err) {
+    // Derived facts only, and the message to the local log: a check that failed
+    // on the network carries the registry's or the probe's own text (see
+    // `errorFactsDetail`). An automatic check has no card at all, so without the
+    // local line the reason would exist nowhere.
+    const reason = err instanceof Error ? err.message : String(err)
+    reportUnrecordedText(`[kernel] update check failed: ${reason}`)
     logEvent('kernel.check.failed', {
       ms: Date.now() - checkStartedAt,
-      detail: { manual, error: (err as Error).message },
+      detail: { manual, ...errorFactsDetail(err) },
     })
-    if (manual) void promptNoticeThemed(mainWindow, 'error', 'DSH APP', t('kernelUpdate.checkFailed', { detail: (err as Error).message }))
+    if (manual) void promptNoticeThemed(mainWindow, 'error', 'DSH APP', t('kernelUpdate.checkFailed', { detail: reason }))
   }
 }
 
@@ -2318,6 +2324,11 @@ configureEventLog({
     // boot (see event-log.ts).
     logKernel(`[events] the structured event log could not be written: ${error instanceof Error ? error.message : String(error)}`)
   },
+  // Text the event file must not carry — an error message from a downloader, a
+  // spawn or a child, as `errorFactsDetail` records it — is kept HERE instead,
+  // in the log that is this machine's own. A packaged build has no console, so
+  // a caller's `console.error` alone would leave it nowhere.
+  onDiagnostic: logKernel,
 })
 
 // The host child's start instant, for the `uptimeMs` of its `host.exit` event.

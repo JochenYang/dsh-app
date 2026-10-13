@@ -44,10 +44,11 @@
  * `dsh-server-*.log` tail is the full host path, the child's whole argv and the
  * account plugin's request lines. That tail stays where it already is
  * (`dsh-kernel.log`, `dsh-server-*.log`) and on the user-visible failure card.
- * `app.boot.failed` is the same case one layer up — the rejection it catches is
- * an arbitrary library's, not this codebase's — and records derived facts only
- * too (see `errorFactsDetail`), with its message going to `dsh-kernel.log` and
- * to the failure card instead.
+ * `app.boot.failed`, `kernel.check.failed`, `shell.update.install.failed` and
+ * every `<name>.failed` of `trackedEventOperation` are the same case one layer
+ * up — the error is an arbitrary library's, a spawn's or a network stack's, not
+ * this codebase's — so they record derived facts too (`errorFactsDetail`) and
+ * hand the message to the LOCAL log (`reportUnrecordedText`).
  *
  * What does reach the sink is the shell's own material: it emits events at its
  * own milestones and every string value passes through `redact()` (see
@@ -55,8 +56,8 @@
  * `[redacted]` and a payload-sized value truncated to 2 KB. The API has no
  * channel for content: a value is a scalar; a structured value with no JSON
  * rendering is recorded as a marker rather than as text that reads like a value
- * and says nothing (see `sanitizeDetailValue`); and an Error's own MESSAGE is
- * recorded only where this codebase wrote it (`trackedEventOperation`).
+ * and says nothing, and an Error handed in as a VALUE is a marker for the same
+ * reason — its message is not this codebase's (see `sanitizeDetailValue`).
  *
  * Every write is SYNCHRONOUS — `mkdirSync`, one `statSync`, one
  * `appendFileSync`, with nothing queued behind them — so the caller does wait
@@ -191,6 +192,17 @@ export interface EventLogOptions {
    * the shell's log (`index.ts` writes one `dsh-kernel.log` line).
    */
   onFailure?: (error: unknown) => void
+  /**
+   * Where text the EVENT FILE must not carry goes instead — one already-prefixed
+   * line, redacted and capped by {@link reportUnrecordedText}. Point it at the
+   * shell's own log, which is the file that already holds the child's raw output
+   * and is not the one a user is asked to send.
+   *
+   * Read by {@link configureEventLog}: the reporters are the module-level
+   * {@link reportUnrecordedText} and `trackedEventOperation`, so an `EventLog`
+   * built directly has no caller that would use it.
+   */
+  onDiagnostic?: (line: string) => void
 }
 
 /** UTC day of a moment, `yyyy-mm-dd`: the day rule's key. */
@@ -262,6 +274,20 @@ export function isRotatedEventFileName(name: string): boolean {
  */
 const UNSERIALISABLE = '[unserialisable]'
 
+/**
+ * What an Error handed to the sink as a VALUE is recorded as. A marker, not a
+ * message: an Error arriving here is a caller's "just pass the error", and its
+ * message is text this codebase did not write — the case that must not reach a
+ * file a user is asked to send. Facts about a failure belong in `detail` where
+ * the caller derived them (see {@link errorFactsDetail}); a caller that wants
+ * them must ask for them, and a marker says plainly that it did not.
+ *
+ * Naming the class here instead (`TypeError`) would be worse than saying
+ * nothing: a reader could not tell the caller's value from the string
+ * `"TypeError"`, which is the ambiguity {@link UNSERIALISABLE} exists to avoid.
+ */
+const ERROR_MARKER = '[error]'
+
 /** `String(value)`, guarded against a value whose own `toString` throws. */
 function safeText(value: unknown): string {
   try {
@@ -274,11 +300,11 @@ function safeText(value: unknown): string {
 /**
  * One `detail` value, made safe to serialize. Strings are redacted (which also
  * caps them at `MAX_LOG_LINE`); a non-finite number becomes null; an Error is
- * named by its message rather than by `{}`; a function or a symbol — the two
- * things JSON has no form for at all — keeps its own text; anything else is
- * rendered as JSON, and a value JSON cannot render is marked rather than
- * described as text. `undefined` drops the key, and no input can make this
- * throw: the caller was promised a sink that does not fail its boot.
+ * marked rather than named by its message (see {@link ERROR_MARKER}); a function
+ * or a symbol — the two things JSON has no form for at all — keeps its own text;
+ * anything else is rendered as JSON, and a value JSON cannot render is marked
+ * rather than described as text. `undefined` drops the key, and no input can
+ * make this throw: the caller was promised a sink that does not fail its boot.
  *
  * @param value - the caller's value.
  * @returns the serializable scalar, or undefined to drop the key.
@@ -288,7 +314,7 @@ function sanitizeDetailValue(value: unknown): EventDetailValue | undefined {
   if (value === null || typeof value === 'boolean') return value
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
   if (typeof value === 'string') return redact(value)
-  if (value instanceof Error) return redact(`${value.name}: ${value.message}`)
+  if (value instanceof Error) return ERROR_MARKER
   if (typeof value === 'function' || typeof value === 'symbol') return redact(safeText(value))
   try {
     const json = JSON.stringify(value)
@@ -532,15 +558,43 @@ export class EventLog {
 /** The process-wide sink, installed once by the shell's boot path. */
 let sink: EventLog | null = null
 
+/** Where text the event file must not carry goes; installed with the sink. */
+let diagnostics: ((line: string) => void) | null = null
+
+/**
+ * Hand one line to the shell's OWN log, because the EVENT FILE must not carry
+ * it. The caller has already decided the text is not this codebase's: an error
+ * message from a downloader, a spawn or a network stack, or a child's output.
+ *
+ * `redact()` still applies — a credential fragment must not reach a log file
+ * either — and it caps the line, so nothing handed here can grow the local log
+ * past `MAX_LOG_LINE`. A no-op before {@link configureEventLog}, like
+ * `logEvent`, and it never throws: a diagnostic must not replace the failure it
+ * describes.
+ *
+ * @param line - the line to keep locally, its prefix included.
+ */
+export function reportUnrecordedText(line: string): void {
+  if (diagnostics === null) return
+  try {
+    diagnostics(redact(line))
+  } catch {
+    // The reporter is the caller's own code (a log write): it must not turn a
+    // failure into a thrown one — the rule `onFailure` already follows.
+  }
+}
+
 /**
  * Install the process-wide sink. The shell calls this at module load
  * (`index.ts`), before any code that emits an event can run.
  *
- * @param options - where the family lives, and what to do on a write failure.
+ * @param options - where the family lives, what to do on a write failure, and
+ *   where text the event file must not carry goes instead.
  * @returns the sink, for a caller that wants its path or its sequence.
  */
 export function configureEventLog(options: EventLogOptions): EventLog {
   sink = new EventLog(options)
+  diagnostics = options.onDiagnostic ?? null
   return sink
 }
 
@@ -567,25 +621,73 @@ const ERROR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/
 const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,39}$/
 
 /**
- * The `detail` of a failure whose Error the shell did NOT author. `app.boot.failed`
- * is the one such event: whatever escapes `boot()` is an arbitrary library's
- * rejection, and its message is exactly where a registry URL carrying userinfo,
- * a whole command line or a `C:\Users\<name>\…` path rides out — into the file a
- * user is asked to send. `hostStartFailureDetail` records the host's death this
- * way for the same reason.
+ * A property read that cannot throw. `name`, `code` and `cause` belong to the
+ * object that was thrown, so a getter among them would otherwise escape from a
+ * derivation documented as total — the reason `safeText` exists for `toString`.
+ */
+function propertyOf(value: unknown, key: string): unknown {
+  if (value === null || typeof value !== 'object') return undefined
+  try {
+    return (value as Record<string, unknown>)[key]
+  } catch {
+    return undefined
+  }
+}
+
+/** How far a `cause` chain is walked for a code; a cycle must not hang a boot. */
+const MAX_CAUSE_DEPTH = 4
+
+/**
+ * The identifier-shaped `code` of an error, or of the nearest `cause` carrying
+ * one. Walking the chain matters: undici reports an aborted fetch as
+ * `TypeError: fetch failed` and puts `ECONNREFUSED` / `UND_ERR_*` on `cause`, so
+ * without it a download failure would record `TypeError` and nothing else.
+ */
+function codeOf(error: unknown): string | null {
+  let current: unknown = error
+  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth += 1) {
+    const code = propertyOf(current, 'code')
+    if (typeof code === 'string' && ERROR_CODE_RE.test(code)) return code
+    const cause = propertyOf(current, 'cause')
+    if (cause === undefined || cause === current) return null
+    current = cause
+  }
+  return null
+}
+
+/**
+ * An error's own message as text, for the LOCAL log only. Never throws: a
+ * `message` that is not a string falls back to the guarded `String()`.
+ */
+function messageTextOf(error: unknown): string {
+  const message = propertyOf(error, 'message')
+  return typeof message === 'string' ? message : safeText(error)
+}
+
+/**
+ * The `detail` of a failure whose Error the shell did NOT author. Every event
+ * that reports one uses this: `app.boot.failed` (whatever escapes `boot()`),
+ * `kernel.check.failed` (a registry or artifact probe),
+ * `shell.update.install.failed` (a spawn) and `trackedEventOperation`'s
+ * `<name>.failed` (a download, an extraction, a child). An arbitrary library's
+ * message is exactly where a feed URL carrying userinfo, a whole command line or
+ * a `C:\Users\<name>\…` path rides out — into the file a user is asked to send.
+ * `hostStartFailureDetail` records the host's death this way for the same reason.
  *
  * What is recorded instead: `how` — the error's own class name, or the `typeof`
- * of a value that is not an Error — and `code`, when it carries an
- * identifier-shaped one. Both are checked against a shape no path, command or
- * credential can have, so a hostile `name` or `code` cannot smuggle text through
- * the derived fields either. Nothing is lost: the message goes to the local
- * `dsh-kernel.log` and to the failure card, which is where the user reads it.
+ * of a value that is not an Error — and `code`, the nearest identifier-shaped
+ * code on the error or its `cause` chain. Both are checked against a shape no
+ * path, command or credential can have, so a hostile `name` or `code` cannot
+ * smuggle text through the derived fields either. Nothing is lost: the message
+ * goes to the local `dsh-kernel.log` through {@link reportUnrecordedText}, and
+ * to whatever surface the caller shows the user.
  *
- * WHERE the boot failed is answered by the milestone events already in this
- * file — `app.boot.begin`, `window.created`, `host.start.begin` / `ready` — so
- * no phase counter is threaded through `boot()` for it.
+ * WHERE a failure happened is answered by the events around it —
+ * `app.boot.begin` / `window.created` / `host.start.begin` for a boot, the
+ * `<name>.begin` of the same triple for an operation — so no phase counter is
+ * threaded anywhere for it.
  *
- * @param error - whatever was thrown (`app.boot.failed`'s rejection).
+ * @param error - whatever was thrown.
  * @param context - the shell's own facts about the failure, merged in beside the derived ones.
  * @returns the `detail` object, safe to record.
  */
@@ -593,12 +695,13 @@ export function errorFactsDetail(
   error: unknown,
   context: Record<string, EventDetailValue> = {},
 ): Record<string, EventDetailValue> {
-  const name = error instanceof Error ? error.name : typeof error
-  const code = error !== null && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  const name = propertyOf(error, 'name')
   return {
     ...context,
-    how: ERROR_NAME_RE.test(name) ? name : error instanceof Error ? 'Error' : typeof error,
-    code: typeof code === 'string' && ERROR_CODE_RE.test(code) ? code : null,
+    how: typeof name === 'string' && ERROR_NAME_RE.test(name)
+      ? name
+      : error instanceof Error ? 'Error' : typeof error,
+    code: codeOf(error),
   }
 }
 
@@ -609,6 +712,13 @@ export function errorFactsDetail(
  * thrown error pass through unchanged — this measures and records, it never
  * changes an outcome or an order — and `detail` is repeated on all three
  * lines so an end can be read without its begin.
+ *
+ * The error's MESSAGE is deliberately not recorded: the operations wrapped here
+ * fail with a downloader's, a spawn's or a network stack's text as often as with
+ * a sentence of ours (`kernel.install`, `shell.update.download`), and one helper
+ * cannot tell the two apart. Derived facts go in (`how`, `code` — see
+ * {@link errorFactsDetail}) and the message goes to the shell's own log through
+ * {@link reportUnrecordedText}.
  *
  * @param name - base event name (`kernel.install`).
  * @param detail - the facts that identify the operation.
@@ -627,9 +737,10 @@ export async function trackedEventOperation<T>(
     logEvent(`${name}.end`, { ms: Date.now() - started, detail })
     return result
   } catch (error) {
+    reportUnrecordedText(`[events] ${name}.failed: ${messageTextOf(error)}`)
     logEvent(`${name}.failed`, {
       ms: Date.now() - started,
-      detail: { ...detail, error: error instanceof Error ? error.message : String(error) },
+      detail: { ...detail, ...errorFactsDetail(error) },
     })
     throw error
   }
