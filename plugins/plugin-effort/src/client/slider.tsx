@@ -131,9 +131,10 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
    * The position the capsule's colours are read from, refreshed on every render.
    * The bridge asks for them at PAINT time, which can be later than the render
    * that moved the level, so the callback reads this pair rather than colours
-   * captured here.
+   * captured here. The level's own id travels with the pair: the composer's level
+   * text is marked with it, so the DOM says which level its colour belongs to.
    */
-  const tintRef = useRef<{ index: number, count: number }>({ index: -1, count: 0 })
+  const tintRef = useRef<{ index: number, count: number, level: string }>({ index: -1, count: 0, level: '' })
   /**
    * The position the mosaic's sweep timing was last read at. Held across a gesture
    * so the animation is not re-timed under the pointer; see `sweepPctFor`.
@@ -143,26 +144,29 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const tiles = useMemo(() => mosaicTiles(), [])
 
   /**
-   * The colours the official row should carry right now: the level name's text
+   * The colours the official surfaces should carry right now: the level name's text
    * colour and the capsule ring's.
    *
    * Both come from the track's own ramp at this position — the name lifted to text
    * contrast, the ring the same colour at its alpha — so the capsule's edge and
-   * the name move with the track instead of being a fixed theme accent.
+   * the name move with the track instead of being a fixed theme accent. The name's
+   * colour is ALSO what the composer capsule's own level text takes (the bridge
+   * writes it there too), which is what keeps the two readings of one level the
+   * same colour.
    *
    * Null when there is no position to speak for: the bridge then puts the cell's
-   * own colour back and gives the capsule a neutral edge. The theme is read here
-   * rather than captured, so a paint that follows a theme switch carries the right
-   * ramp.
+   * own colour back, gives the capsule a neutral edge, and takes its mark off the
+   * composer's text. The theme is read here rather than captured, so a paint that
+   * follows a theme switch carries the right ramp.
    *
    * @returns the colours, or null when the session has no position on this scale.
    */
   const levelColorsOf = useCallback((): LevelColors | null => {
-    const { index, count: total } = tintRef.current
-    if (index < 0) return null
+    const { index, count: total, level } = tintRef.current
+    if (index < 0 || level === '') return null
     const dark = isDarkTheme(typeof document === 'undefined' ? null : document)
     const pct = pctFromIndex(index, total)
-    return { text: textColorAt(pct, dark), ring: ringColorAt(pct, dark) }
+    return { level, text: textColorAt(pct, dark), ring: ringColorAt(pct, dark) }
   }, [])
 
   // The catalog is shared with the official seat, whose load may not have run for
@@ -243,7 +247,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const shownPct = shownIndex >= 0 ? pctFromIndex(shownIndex, count) : 0
   const energy = energyFor(shownPct)
   const shownName = shownIndex >= 0 ? levels[shownIndex]?.name : undefined
-  tintRef.current = { index: shownIndex, count }
+  tintRef.current = { index: shownIndex, count, level: shownIndex >= 0 ? levels[shownIndex]?.id ?? '' : '' }
 
   // The sweep's timing is frozen while the display is ahead of the session; see
   // `sweepPctFor` for why reading it off the displayed position made the squares
@@ -254,10 +258,11 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const sweepPct = sweepPctFor(shownPct, ahead, settledSweepRef.current)
   settledSweepRef.current = sweepPct
 
-  // The level's colours follow the position. A level change inserts nothing into
-  // the DOM, so the observer never sees it: this is the direct path, and the
-  // scan-time re-assert covers the other direction (something else clearing the
-  // inline style).
+  // The level's colours follow the position, on both official surfaces — the menu
+  // row's capsule and the composer capsule's own level text. A level change inserts
+  // nothing into the DOM, so the observer never sees it: this is the direct path,
+  // and the scan-time re-assert covers the other direction (something else clearing
+  // the inline style).
   useEffect(() => {
     bridgeRef.current?.paint()
   }, [shownIndex, count])

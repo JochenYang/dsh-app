@@ -11,6 +11,21 @@
  * assistive-technology name or an explanation of a state the track cannot show
  * by itself.
  *
+ * ## The note's length is a layout constraint
+ *
+ * The sentences that can appear on the line under the track are shown at 11px in
+ * the NARROWEST card the official menu allows (240px, its own `min-width`), which
+ * leaves 224px for the line. A sentence past that wraps to a second line and the
+ * card grows by 16px — which is the same class of bug the reserved line height
+ * exists to prevent, only in the other direction, so `effort.noteUnset` is kept
+ * short enough for that width. Measured in the app on 2026-10-13, each sentence set
+ * on the real note line at the narrowest card (224px available, 11px/16px):
+ * `effort.noteUnset` is 188.7px wide in English and 187px in Chinese, both ONE line
+ * — 35px of margin on the English side, which is the tighter of the two and the
+ * number to re-check before either sentence gains a word. The `unknown` and error
+ * sentences quote a level id or a host message and are allowed to wrap: they are
+ * not two shapes of one control, and a card that grows to fit a message is honest.
+ *
  * @module @dsh-app/plugin-effort/client/locales
  */
 

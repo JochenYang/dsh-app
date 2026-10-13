@@ -1,6 +1,7 @@
 /**
- * The colours the capsule takes from the level: the name's text colour and the
- * capsule's own ring.
+ * The colours a level gives the surfaces that carry it: the name's text colour —
+ * on the official menu row's value cell and on the composer capsule's own level
+ * text, one colour for both — and the capsule's own ring.
  *
  * ## One ramp, three surfaces
  *
@@ -9,6 +10,16 @@
  * {@link FILL_RAMP_DARK} are the stops the stylesheet's `--dshAppEffort-fill`
  * gradient is built from (see {@link fillGradient}), and the name and the ring
  * are that same ramp read at the current position.
+ *
+ * The NAME is drawn in two places — the official menu row's own value cell, and
+ * the composer capsule's own level text (the `… Max` beside the model name) — and
+ * it is ONE colour in both. A level that looked one way inside the menu and
+ * another way on the composer would be two signals out of one selection, and what
+ * the composer's text carried instead was the kernel's own caption tone
+ * (`--dsw-alias-label-caption`), which is exactly why it read pale beside a menu
+ * capsule that did not. The two places differ only in their surfaces, and the lift
+ * below is computed against the strictest surface of the theme across both of
+ * them, so a single colour clears the floor on every one.
  *
  * The ramp is a GRAPHICAL object's colours, though — its light-theme start,
  * `#5686FE`, is 3.37:1 on white, which is a deliberate choice for a 28px bar and
@@ -19,8 +30,8 @@
  *   - light: two of the four stops are lifted (`#5686FE` → `#4165BF`,
  *     `#4176E6` → `#3865C6`), the two that are already dark enough are not;
  *   - dark: three of the four stops are the track's own colours exactly, and the
- *     third (`#A98BFF` → `#AE92FF`) moves only because the row's hover background
- *     costs it contrast. See `Measured` below for why hover is in the basis.
+ *     third (`#A98BFF` → `#B297FF`) moves only because the surfaces it is drawn
+ *     on cost it contrast. See `Measured` below for why hover is in the basis.
  *
  * ## The one honest asymmetry
  *
@@ -35,10 +46,12 @@
  * ## Measured
  *
  * `raw` is the track's own colour at that stop; `name` is what the name actually
- * carries. Four surfaces per theme, and the last two are the strictest: the
- * official row paints `--dsw-alias-interactive-bg-hover` behind itself while the
- * pointer is over it or it has focus-visible, which is exactly when a level is
- * being dragged, and that colour darkens a light card and lightens a dark one.
+ * carries. Every surface the name can be drawn on is in the row, and the hover
+ * ones are the strictest: the official row paints
+ * `--dsw-alias-interactive-bg-hover` behind itself while the pointer is over it or
+ * it has focus-visible, and the composer's own model trigger paints the same token
+ * behind its level text on hover — which is exactly when a level is being read or
+ * dragged. That colour darkens a light card and lightens a dark one.
  *
  * | light stop | raw: white / #F5F5F5 / hover-white / hover-#F5F5F5 | name: same four |
  * |------------|-----------------------------------------------------|-----------------|
@@ -47,43 +60,52 @@
  * | `#3A5BD9`  | 5.71 / 5.24 / 5.14 / 4.71 | unchanged 5.71 / 5.24 / 5.14 / 4.71 |
  * | `#4B3FD6`  | 7.04 / 6.46 / 6.34 / 5.81 | unchanged 7.04 / 6.46 / 6.34 / 5.81 |
  *
- * | dark stop | raw: #292929 / #212123 / hover-#292929 / hover-#212123 | name |
- * |-----------|--------------------------------------------------------|------|
- * | `#7AAAFF` | 6.25 / 6.91 / 4.89 / 5.50 | unchanged |
- * | `#8FB0FF` | 6.80 / 7.52 / 5.32 / 5.98 | unchanged |
- * | `#A98BFF` | 5.42 / 5.99 / 4.24 / 4.77 | `#AE92FF` 5.79 / 6.40 / 4.53 / 5.09 |
- * | `#B9A6FF` | 6.90 / 7.62 / 5.40 / 6.07 | unchanged |
+ * The composer capsule draws its level text on `--dsw-specific-input-major`, which
+ * is `#FFFFFF` in the light theme — the white surface already in the table above,
+ * its hover included — and `#2C2C2E` in the dark one. That is NOT either of the
+ * menu's dark cards, and it is the LIGHTER of the three, so it is the dark theme's
+ * strictest surface; the two columns at the end of this table are what moved the
+ * dark basis:
+ *
+ * | dark stop | raw: #292929 / #212123 / hover-#292929 / hover-#212123 / #2C2C2E / hover-#2C2C2E | name |
+ * |-----------|-----------------------------------------------------------------------------------|------|
+ * | `#7AAAFF` | 6.25 / 6.91 / 4.89 / 5.50 / 5.99 / 4.66 | unchanged |
+ * | `#8FB0FF` | 6.80 / 7.52 / 5.32 / 5.98 / 6.52 / 5.07 | unchanged |
+ * | `#A98BFF` | 5.42 / 5.99 / 4.24 / 4.77 / 5.19 / 4.04 | `#B297FF` 6.07 / 6.71 / 4.75 / 5.34 / 5.82 / 4.53 |
+ * | `#B9A6FF` | 6.90 / 7.62 / 5.40 / 6.07 / 6.61 / 5.15 | unchanged 6.90 / 7.62 / 5.40 / 6.07 / 6.61 / 5.15 |
  *
  * Swept over the whole ramp rather than at the stops, the name never drops below
- * 4.50:1 — on the hover surface in both themes, which is the number the lift is
+ * 4.50:1 — on a hover surface in both themes, which is the number the lift is
  * computed to hold. Away from hover the same colours are never below 5.01:1
- * (light) / 5.76:1 (dark).
+ * (light) / 5.78:1 (dark).
  *
- * The lift is computed against the STRICTEST surface of the theme — the hover
- * colour over its darker card — because that is the moment the user is actually
+ * The lift is computed against the STRICTEST surface of the theme — the light
+ * theme's is the menu's hover over its darker card, the dark theme's is the
+ * composer's hover over its own — because that is the moment the user is actually
  * reading the level. Lifting against the plain card alone would leave the light
- * start at 4.29:1 and the dark third stop at 4.11:1 while the pointer is on the
- * row.
+ * start at 4.29:1 while the pointer is on the row; lifting the dark name against
+ * the menu's own hover alone left the composer at 4.29:1 while the pointer was on
+ * the trigger, which is the case this basis exists for.
  *
  * ## What these numbers hold for, and what they do not
  *
- * They are exact for the four opaque surfaces above, which are the two menu cards
- * this module has always measured against plus the row's own hover colour. They
- * do NOT cover a menu card drawn translucently over brighter content — the card
- * token is opaque today. Against a brighter surface every figure here falls, the
- * kernel's own tertiary copy included; a surface nobody has measured cannot be
- * lifted against.
+ * They are exact for the six opaque surfaces above: the two menu cards and the
+ * composer's own, each plain and hovered. They do NOT cover a card drawn
+ * translucently over brighter content — both card tokens are opaque today. Against
+ * a brighter surface every figure here falls, the kernel's own tertiary copy
+ * included; a surface nobody has measured cannot be lifted against.
  *
  * ## The ring
  *
  * The ring is the name's own colour at an alpha, so the capsule's edge and the
  * level name are one colour and the track is the un-lifted original. It is drawn
  * by a `box-shadow` with a spread — that is, OUTSIDE the row's border box — so
- * its surfaces are the two plain cards, never the row's hover colour.
+ * its surfaces are the two plain menu cards, never the row's hover colour, and the
+ * composer capsule (which this plugin does not ring) is not one of them.
  *
  * Composited over those cards, the worst stop measures 4.04:1 (light, white) /
- * 3.80:1 (light, #F5F5F5) at {@link RING_ALPHA_LIGHT}, and 3.89:1 (dark,
- * #292929) / 4.19:1 (dark, #212123) at {@link RING_ALPHA_DARK} — all clear of the
+ * 3.80:1 (light, #F5F5F5) at {@link RING_ALPHA_LIGHT}, and 4.19:1 (dark,
+ * #292929) / 4.51:1 (dark, #212123) at {@link RING_ALPHA_DARK} — all clear of the
  * 3:1 floor for a graphical object, which is what a 1px hairline has to clear to
  * read as an edge at all. The dark theme's alpha is lower because its ramp is
  * brighter throughout, so the same alpha would composite to a heavier edge there.
@@ -92,9 +114,10 @@
  *
  * Read from `document.body[data-ds-dark-theme]` — the same hook the stylesheet
  * switches on (see `styles.ts`). It is read when the colour is ASKED for rather
- * than captured, so the next paint after a theme switch carries the right ramp;
- * nothing observes the attribute itself, so a theme switch that produces no DOM
- * insertion is corrected on the next scan (see the bridge's own note).
+ * than captured, so the next paint after a theme switch carries the right ramp, and
+ * the bridge observes that one attribute (see {@link DARK_THEME_ATTRIBUTE}: a
+ * filtered `MutationObserver` on the body) so the flip is a paint rather than
+ * something the next unrelated DOM insertion has to correct.
  *
  * @module @dsh-app/plugin-effort/client/value-color
  */
@@ -150,16 +173,28 @@ const LIGHT_CARD = '#F5F5F5'
 const DARK_CARD = '#292929'
 
 /**
+ * The card the COMPOSER capsule draws on: `--dsw-specific-input-major`, which the
+ * installed theme resolves to `--dsw-static-neutral-bluish-00` (`#FFFFFF`) in the
+ * light theme and to `--dsw-static-neutral-bluish-850` (`#2C2C2E`) in the dark one.
+ *
+ * The level text the composer shows beside the model name (`… Max`) is drawn on
+ * this card, not on the menu's, and the two dark cards are not the same colour.
+ */
+const COMPOSER_CARD_LIGHT = '#FFFFFF'
+const COMPOSER_CARD_DARK = '#2C2C2E'
+
+/**
  * Every surface the NAME can be drawn on in the light theme.
  *
- * The row's own background is the card until the pointer arrives, and the hover
- * colour over the card afterwards. {@link TEXT_BASIS_LIGHT} is the strictest of
- * them, and is the one the lift is computed against.
+ * Both of the composer capsule's surfaces — its card and that card hovered — are
+ * already here: its card IS `#FFFFFF` and it hovers with the same token the menu
+ * row uses. {@link TEXT_BASIS_LIGHT} is the strictest of them, and is the one the
+ * lift is computed against.
  */
 export const TEXT_SURFACES_LIGHT: readonly string[] = [
-  '#FFFFFF',
+  COMPOSER_CARD_LIGHT,
   LIGHT_CARD,
-  over('#FFFFFF', HOVER_LIGHT),
+  over(COMPOSER_CARD_LIGHT, HOVER_LIGHT),
   over(LIGHT_CARD, HOVER_LIGHT),
 ]
 
@@ -169,21 +204,30 @@ export const TEXT_SURFACES_DARK: readonly string[] = [
   '#212123',
   over(DARK_CARD, HOVER_DARK),
   over('#212123', HOVER_DARK),
+  COMPOSER_CARD_DARK,
+  over(COMPOSER_CARD_DARK, HOVER_DARK),
 ]
 
 /**
  * The surface the light theme's name is lifted against: the strictest of
  * {@link TEXT_SURFACES_LIGHT} — the hover colour over the darker light card,
- * which is the least contrast dark text can have in this theme.
+ * which is the least contrast dark text can have in this theme. The composer's own
+ * card is the lighter of the two, so it is not the binding one here.
  */
 export const TEXT_BASIS_LIGHT = over(LIGHT_CARD, HOVER_LIGHT)
 
 /**
  * The surface the dark theme's name is lifted against: the strictest of
- * {@link TEXT_SURFACES_DARK} — the hover colour over the lighter dark card, which
- * is the least contrast light text can have in this theme.
+ * {@link TEXT_SURFACES_DARK} — the hover colour over the composer's card, which is
+ * the LIGHTEST surface light text can be drawn on in this theme and therefore the
+ * one that costs it the most contrast.
+ *
+ * It is the composer card and not the menu's for exactly that reason. Lifting
+ * against the menu's own hover (`#3A3A3A`) alone left the third stop's name at
+ * 4.29:1 while the pointer was over the composer's model trigger — the text the
+ * user reads a level from before ever opening the menu.
  */
-export const TEXT_BASIS_DARK = over(DARK_CARD, HOVER_DARK)
+export const TEXT_BASIS_DARK = over(COMPOSER_CARD_DARK, HOVER_DARK)
 
 /**
  * Every surface the RING is drawn on.
@@ -231,15 +275,25 @@ export const RING_ALPHA_DARK = 0.75
  */
 export const NEUTRAL_RING = 'var(--dsw-alias-label-tertiary, #6b7280)'
 
-/** The attribute the kernel toggles on `document.body` for the dark theme. */
-const DARK_THEME_ATTRIBUTE = 'data-ds-dark-theme'
+/**
+ * The attribute the kernel toggles on `document.body` for the dark theme
+ * (`document.body.toggleAttribute`, in `@deepseek-ai/dsh-client-ui-theme`).
+ *
+ * Exported because the bridge filters its mutation observer on this one name: a
+ * theme flip is an attribute change and produces no DOM insertion, so without that
+ * filter the composer capsule's level text would keep the other theme's colour
+ * until the next unrelated re-render.
+ */
+export const DARK_THEME_ATTRIBUTE = 'data-ds-dark-theme'
 
 /**
  * The name's colour for one position on the track.
  *
- * Lifted against the strictest surface the name can be drawn on in that theme —
- * the row's hover background over its darker card — so the floor holds while the
- * pointer is on the row, which is when a level is being dragged.
+ * Lifted against the strictest surface the name can be drawn on in that theme — in
+ * the light theme the menu row's hover background over its darker card, in the dark
+ * theme the composer's hover over its own — so the floor holds in the moment a level
+ * is actually being read: while the pointer is on the row, or on the composer's
+ * model trigger.
  *
  * @param pct - fraction of the travel, 0..1 (clamped).
  * @param dark - whether the dark theme is in effect.

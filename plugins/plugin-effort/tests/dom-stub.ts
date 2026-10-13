@@ -23,7 +23,15 @@
  *     distinction that made a same-node click guard the wrong tool.
  *   - **Timers that do not run by themselves**: `flush()` runs what the bridge
  *     queued, so a test asserts the re-measure happened without racing a real
- *     clock, and `node --test` never waits on a pending interval.
+ *     clock, and `node --test` never waits on a pending interval. `tickIntervals()`
+ *     is the same for the fallback sweep, which arms an interval instead.
+ *   - **A `MutationObserver` that RECORDS the options it was given**, because those
+ *     options are the contract that makes a theme flip a repaint. A window without a
+ *     constructor puts `start()` on the fallback sweep — so with the stub lacking
+ *     one, the branch the app actually runs was the branch no test entered, and a
+ *     misspelled `attributeFilter` (or a deleted `attributes: true`) kept the whole
+ *     suite green. The window withholds it only when a test says
+ *     `{ mutationObserver: false }`.
  *
  * One difference from a browser, so an assertion is not read as more than it is:
  * a stored style value comes back VERBATIM here, while a real
@@ -173,6 +181,13 @@ export class StubElement {
   }
 
   /**
+   * @param name - the attribute to remove.
+   */
+  removeAttribute(name: string): void {
+    this.attributes.delete(name)
+  }
+
+  /**
    * @param type - the event type.
    * @param handler - the listener.
    */
@@ -212,6 +227,25 @@ export class StubElement {
     return null
   }
 
+  /**
+   * Every descendant matching a selector, in document order — the plural of
+   * {@link querySelector}, which is what the candidate search over a card's menu
+   * buttons needs (one `querySelector` cannot see past a shape it cannot use).
+   *
+   * Descendants only, never this node, exactly as the DOM defines the method.
+   *
+   * @param selector - the selector.
+   * @returns the matches.
+   */
+  querySelectorAll(selector: string): StubElement[] {
+    const out: StubElement[] = []
+    for (const child of this.children) {
+      if (matchesSelector(child, selector)) out.push(child)
+      out.push(...child.querySelectorAll(selector))
+    }
+    return out
+  }
+
   /** The bridge only asks for focus; there is no focus model here. */
   focus(): void {}
 }
@@ -240,6 +274,80 @@ export class StubResizeObserver {
   /** Report a size change, as the browser would. */
   notify(): void {
     this.handler()
+  }
+}
+
+/** Every `MutationObserver` the bridge constructed, newest last. */
+export const mutationObservers: StubMutationObserver[] = []
+
+/** A mutation record, as far as a test needs one to hand to `fire`. */
+export interface StubMutationRecord {
+  /** What kind of change it is. */
+  readonly type?: string
+  /** The attribute's name, for an attribute record. */
+  readonly attributeName?: string | null
+}
+
+/** The `observe` options, as the bridge asked for them. */
+export interface StubObserveOptions {
+  readonly childList?: boolean
+  readonly subtree?: boolean
+  readonly attributes?: boolean
+  readonly attributeFilter?: readonly string[]
+}
+
+/**
+ * A mutation observer that notifies only when a test asks it to, and RECORDS the
+ * target and the options exactly as they were given.
+ *
+ * The recording is the point. The bridge's observer is what makes a theme flip a
+ * repaint, and the one thing that decides whether it fires is the options object:
+ * with a stub that dropped it, a misspelled `attributeFilter` name — or the whole
+ * `attributes: true` clause deleted — left every test in this suite green while the
+ * composer's level text silently kept the other theme's ramp. A test asserts the
+ * options; this stub is what makes that assertion possible.
+ *
+ * It deliberately does NOT filter the records a test hands {@link fire}: the
+ * bridge's callback ignores their contents, and a stub that filtered would be
+ * asserting the options it was given rather than the options the bridge asked for.
+ */
+export class StubMutationObserver {
+  private readonly handler: (records: readonly StubMutationRecord[]) => void
+  /** The node `observe` was called with. */
+  target: StubElement | null = null
+  /** The options `observe` was called with, verbatim. */
+  options: StubObserveOptions | null = null
+  /** Whether `disconnect` has been called. */
+  disconnected = false
+
+  /**
+   * @param handler - what the bridge wants called on a mutation.
+   */
+  constructor(handler: (records: readonly StubMutationRecord[]) => void) {
+    this.handler = handler
+    mutationObservers.push(this)
+  }
+
+  /**
+   * @param target - the node to observe.
+   * @param options - the options, recorded as given.
+   */
+  observe(target: StubElement, options: StubObserveOptions): void {
+    this.target = target
+    this.options = options
+  }
+
+  /** Stop observing. */
+  disconnect(): void {
+    this.disconnected = true
+  }
+
+  /**
+   * Report mutations, as the browser would.
+   * @param records - what is reported; the bridge ignores their contents.
+   */
+  fire(records: readonly StubMutationRecord[] = []): void {
+    this.handler(records)
   }
 }
 
@@ -283,16 +391,35 @@ export class StubDocument {
   }
 }
 
-/** The window face the bridge uses, with timers that only run on `flush()`. */
+/**
+ * The window face the bridge uses, with timers that only run when a test says so.
+ *
+ * `MutationObserver` is present by default, because it is present in every renderer
+ * this plugin ships in: a stub without one put `start()` on the fallback sweep, so
+ * the branch the app actually takes — the observer, and with it the theme filter —
+ * was the branch no test ever entered. `{ mutationObserver: false }` is how the
+ * sweep is reached on purpose.
+ */
 export class StubWindow {
   /** Every event dispatched through this window, in order. */
   readonly dispatched: string[] = []
   /** Event constructor, as the host window carries one. */
   readonly Event = StubEvent
-  /** Observer constructor; no `MutationObserver` here, so the sweep is the path. */
+  /** Observer constructor for the container's own height. */
   readonly ResizeObserver = StubResizeObserver
+  /** Mutation observer constructor; see the class note for why it is here by default. */
+  readonly MutationObserver?: typeof StubMutationObserver
   private readonly timeouts = new Map<number, () => void>()
+  private readonly intervals = new Map<number, () => void>()
   private nextHandle = 1
+
+  /**
+   * @param options - `mutationObserver: false` withholds the constructor, which is
+   * the only way `start()` reaches the fallback sweep.
+   */
+  constructor(options: { readonly mutationObserver?: boolean } = {}) {
+    if (options.mutationObserver !== false) this.MutationObserver = StubMutationObserver
+  }
 
   /**
    * @param handler - the callback.
@@ -313,16 +440,22 @@ export class StubWindow {
   }
 
   /**
-   * @returns a handle. The sweep never fires here: a test calls `scan()` itself.
+   * @param handler - the callback.
+   * @returns a handle. Nothing fires by itself; `tickIntervals()` does.
    */
-  setInterval(): number {
+  setInterval(handler: () => void): number {
     const handle = this.nextHandle
     this.nextHandle += 1
+    this.intervals.set(handle, handler)
     return handle
   }
 
-  /** Cancel an interval. */
-  clearInterval(): void {}
+  /**
+   * @param handle - the handle to cancel.
+   */
+  clearInterval(handle: number): void {
+    this.intervals.delete(handle)
+  }
 
   /**
    * @param event - the event.
@@ -340,15 +473,26 @@ export class StubWindow {
     for (const handler of queued) handler()
   }
 
+  /** Run one period of every armed interval, as the host would. */
+  tickIntervals(): void {
+    for (const handler of [...this.intervals.values()]) handler()
+  }
+
   /** How many callbacks are still queued. */
   get pending(): number {
     return this.timeouts.size
+  }
+
+  /** How many intervals are armed. */
+  get armed(): number {
+    return this.intervals.size
   }
 }
 
 /** Drop the observers a previous test constructed. */
 export function resetStubs(): void {
   resizeObservers.length = 0
+  mutationObservers.length = 0
 }
 
 /**

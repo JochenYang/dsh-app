@@ -24,6 +24,14 @@
  * three surfaces, one file — the alternative is three copies of eight hex values
  * that drift apart the first time a colour is adjusted.
  *
+ * ## The composer capsule's level text
+ *
+ * One rule in this sheet is about the kernel's DOM rather than the slider's: the
+ * level's name is rendered in the composer too (`… Max` beside the model name), and
+ * that text is styled from the same level colour the menu capsule carries — see
+ * {@link EFFORT_TEXT_ATTRIBUTE} for what the mark buys and why the colour itself is
+ * a write rather than a rule.
+ *
  * ## Why the fill is clipped rather than sized
  *
  * The fill layer spans the whole track and carries the full gradient; its
@@ -56,6 +64,26 @@ import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from './value-color.ts'
 
 /** Id of the injected stylesheet, so a second mount is a no-op. */
 const STYLE_ID = 'dsh-app-plugin-effort-style'
+
+/**
+ * The attribute this plugin marks the COMPOSER capsule's level text with, and the
+ * weight that text carries while marked.
+ *
+ * The attribute is the couple between the two halves of this feature: the bridge
+ * writes it (with the level id as its value) onto the kernel's own effort span, and
+ * this stylesheet is what the mark means. Naming it here keeps the rule and the
+ * write from drifting apart; the value is the level the colour was taken from, so
+ * the DOM says which level `color` belongs to.
+ *
+ * The COLOUR is not in this sheet. It is one value per level, computed from the
+ * ramp at the position in use (`value-color.ts`), and a stylesheet cannot
+ * enumerate levels a provider owns — the same reason the menu row's value cell is
+ * coloured by a write rather than by a rule.
+ */
+export const EFFORT_TEXT_ATTRIBUTE = 'data-dshAppEffort'
+
+/** The `font-weight` the marked text takes. Heavier than the trigger's own 400. */
+export const EFFORT_TEXT_WEIGHT = '600'
 
 const cssText = `
 .dshAppEffort {
@@ -103,6 +131,17 @@ body[data-ds-dark-theme] .dshAppEffort {
    node cannot reach its composer card — but it has no box of its own. */
 .dshAppEffortAnchor {
   display: none;
+}
+
+/* The composer capsule's own level text — the "… Max" the kernel renders beside
+   the model name — which this plugin STYLES and nothing else: no copy is added or
+   rewritten, and no property that decides the box is set, so the capsule's layout
+   is the kernel's. The weight is what the mark itself buys, and a declaration on
+   the element always beats the 400 it would inherit from the trigger, so this rule
+   does not depend on where in the head it lands. The COLOUR is written by the
+   bridge on the same element: it is one value per level, taken from the ramp. */
+[${EFFORT_TEXT_ATTRIBUTE}] {
+  font-weight: ${EFFORT_TEXT_WEIGHT};
 }
 
 .dshAppEffort-track {

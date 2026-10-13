@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-effort",
   "description": "Reasoning-effort slider for DSH: a draggable track inside the official model menu's effort row, so a level is one drag instead of a drill-in and a click. Levels come from the current model's own advertised list and are resolved by id, never by position.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",

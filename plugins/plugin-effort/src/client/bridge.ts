@@ -20,6 +20,31 @@
  * tinted with the current level's own text colour, and the ring is that same
  * colour at an alpha, so the capsule's edge carries the level too.
  *
+ * ## The second official surface: the composer capsule's level text
+ *
+ * The level is on screen before the menu is ever opened. The kernel's own model
+ * trigger in the composer renders it beside the model name (`global:… · Max`), in
+ * `--dsw-alias-label-caption` — a caption tone, deliberately pale — and it is the
+ * same level, read from the same store. {@link paintComposerText} marks that span
+ * with {@link EFFORT_TEXT_ATTRIBUTE} (whose value is the level id the colour came
+ * from), writes the SAME colour the menu's value cell carries, and the stylesheet
+ * makes the mark a heavier weight. One level, one colour, two surfaces — which is
+ * the whole point: the text a user reads a level from should not look like a
+ * different level than the menu does.
+ *
+ * "The same colour" is exact, and it is exact because both surfaces are painted
+ * from ONE reading of the level (the position the track is showing, which the
+ * slider re-reads on every render). While a drag is in flight that position can
+ * lead the session's own value by one write; the two surfaces lead together, which
+ * is the existing behaviour of the track and the reason neither of them is allowed
+ * a reading of its own here.
+ *
+ * Nothing about it is a copy of the kernel's text and nothing about its box moves:
+ * no text node is written or split, no position, size or flex property is touched.
+ * The one visible consequence is that a heavier weight is a slightly WIDER string,
+ * inside the trigger's own `min-width: 0` / `flex-shrink: 1000` elision — the
+ * kernel's behaviour for a long value, not this module's.
+ *
  * Every one of those writes is snapshotted BEFORE it is made (see
  * `snapshotRowStyle`) and restored verbatim by {@link detach}, so the row the
  * official component rendered is recoverable at any point — including when the
@@ -75,16 +100,33 @@
  *   - **It never guesses the value cell.** The cell is the row's second child —
  *     the same rule that decides the row has one (see {@link valueChildOf}) —
  *     never a class name, which the official build hashes.
+ *   - **It never guesses the composer's level span either.** That span is found by
+ *     shape, not by its hashed class (see {@link effortTextChildOf}), and a card
+ *     holding more than one menu trigger is not answered with "the first one":
+ *     every candidate is examined and only the first one whose children have the
+ *     shape the served kernel renders is coloured (see {@link pickEffortText}).
+ *     Where that rule runs out is stated there rather than papered over — two
+ *     candidates of the same shape that both carry the kernel's own open-state
+ *     marker are not distinguishable from the DOM, and neither the card nor a
+ *     hashed class can say which one is the model's.
  *
  * ## The residual: a style-only change is not observed
  *
- * The observer is `{ childList: true, subtree: true }` and stays that way. If the
- * official component disturbs the cell, it does so in one of two ways: it
- * re-renders it as a fresh node (a childList change, which is seen) or it rewrites
- * the inline style on the node it kept (an attribute change, which is not). The
- * second case is the residual: the geometry, the ring and the name's colour are
- * all re-asserted on every {@link paint} and every scan, so a style something else
- * cleared comes back on the next DOM insertion rather than at once.
+ * The observer is `{ childList: true, subtree: true }` plus the one attribute that
+ * is a REPAINT trigger rather than a style write —
+ * {@link DARK_THEME_ATTRIBUTE}, which the theme flips on the body with no DOM
+ * insertion at all (see {@link createEffortBridge}'s `start`). Nothing else is
+ * watched. If the official component disturbs the cell, it does so in one of two
+ * ways: it re-renders it as a fresh node (a childList change, which is seen) or it
+ * rewrites the inline style on the node it kept (an attribute change, which is
+ * not). The second case is the residual: the geometry, the ring and the names'
+ * colours are all re-asserted on every {@link paint} and every scan, so a style
+ * something else cleared comes back on the next DOM insertion rather than at once.
+ *
+ * That observer is also the only thing that makes the theme flip immediate. A host
+ * without one falls back to a sweep, which reads the theme at paint time like
+ * everything else and is therefore bounded by its own interval instead of by the
+ * flip; the branch and its measurement are in `start`.
  *
  * ## The other residual: the restore writes back what it captured
  *
@@ -95,6 +137,14 @@
  * `style` prop at all, so React never touches either attribute — which is why
  * this is a note and not a merge: a merge would need to know which of the five
  * properties someone else meant to keep.
+ *
+ * The composer capsule's level text is restored the same way (its own colour and
+ * its mark, put back by {@link releaseComposerText}, on dispose and whenever there
+ * is no level to carry), and its residual is the same one — with one guard the row
+ * does not need: what it puts back is the colour CAPTURED for the node it owns, and
+ * a node nothing was captured from is not written to at all (see that function). It
+ * is NOT restored by {@link detach}: closing the menu has nothing to do with the
+ * composer, and the colour has to stay on screen exactly then.
  *
  * ## The re-measure
  *
@@ -115,7 +165,8 @@
  * @module @dsh-app/plugin-effort/client/bridge
  */
 
-import { NEUTRAL_RING } from './value-color.ts'
+import { EFFORT_TEXT_ATTRIBUTE } from './styles.ts'
+import { DARK_THEME_ATTRIBUTE, NEUTRAL_RING } from './value-color.ts'
 
 /** One row of the menu's root pane, as far as identification is concerned. */
 export interface MenuRow {
@@ -168,9 +219,11 @@ export interface EffortBridgeWindow {
   ResizeObserver?: typeof ResizeObserver
 }
 
-/** The colours the current level gives the capsule. */
+/** The colours the current level gives the surfaces that carry it. */
 export interface LevelColors {
-  /** The value cell's text colour. */
+  /** The level id the two colours below were resolved from, for the DOM's own record. */
+  readonly level: string
+  /** The value cell's text colour — and the composer capsule's level text, which is one colour with it. */
   readonly text: string
   /** The capsule ring's colour — the same level, at the ring's own alpha. */
   readonly ring: string
@@ -190,8 +243,8 @@ export interface EffortBridgeOptions {
   readonly active: () => boolean
   /**
    * The colours the capsule should carry right now, or null when there is no
-   * position to take them from — the cell then keeps the official colour and the
-   * ring falls back to a neutral edge.
+   * position to take them from — the cell then keeps the official colour, the ring
+   * falls back to a neutral edge, and the composer's level text keeps its own.
    *
    * Asked for on every paint rather than passed once, because the level and the
    * theme can both move without this module being told.
@@ -214,12 +267,14 @@ export interface EffortBridge {
   /** Re-examine the DOM now. */
   scan(): void
   /**
-   * Paint the current level onto the row: the capsule's ring and the value cell's
-   * colour.
+   * Paint the current level onto every official surface that carries it: the
+   * capsule's ring, the value cell's colour, and the composer capsule's own level
+   * text.
    *
    * Separate from {@link EffortBridge.scan} because the two answer different
    * questions: a scan looks for the row, a paint only says what that row should
-   * look like. The level changing is a paint with no scan.
+   * look like. The level changing is a paint with no scan — and it is also the
+   * paint that reaches the composer, which is on screen whether or not the menu is.
    */
   paint(): void
   /** Remove the container and every observer. */
@@ -359,6 +414,142 @@ export function valueChildOf(row: {
 }
 
 /**
+ * The children of one button, as far as identification is concerned.
+ *
+ * Structural rather than `Element`: the shape rules below are decided from the
+ * child list alone, and a test can hand them a made-up list without a document.
+ */
+export interface TriggerChildren {
+  /** The button's children, with the DOM's own indexing. */
+  readonly children: { readonly length: number, item(index: number): Element | null }
+}
+
+/** One `button[aria-haspopup="menu"]` of the composer card. */
+export interface MenuTrigger extends TriggerChildren {
+  /** Whether one of the button's own attributes is present. */
+  hasAttribute(name: string): boolean
+}
+
+/**
+ * The child count of the trigger the served kernel renders, in every state.
+ *
+ * Not a minimum: see {@link effortTextChildOf} for why this is an equality, and
+ * re-read the installed `@deepseek-ai/dsh-client-ui-model-selection` client bundle
+ * before changing it.
+ */
+const TRIGGER_CHILD_COUNT = 4
+
+/**
+ * The composer capsule's own level text: the effort span inside the official model
+ * trigger, or null when the trigger is not that shape.
+ *
+ * The trigger the official component renders in the composer is
+ * `[svg icon, span modelLabel, span effortLabel, svg chevron]` — read from the
+ * installed `@deepseek-ai/dsh-client-ui-model-selection`'s own client bundle, whose
+ * fourth child is `busy ? StateDot : chevron` (an ongoing `StateDot` is an `svg`
+ * too), so the arity is four in every state. The effort span is therefore the third
+ * child, and it exists ONLY when the current model advertises levels
+ * (`effortLabel !== undefined`): without them the trigger has three children and
+ * index 2 is the chevron.
+ *
+ * So the rule is structural, in this order:
+ *
+ *   1. EXACTLY four children. The equality is the tested answer to a measured
+ *      failure, not a tidy-up: with "four or more" an element inserted between the
+ *      model name and the level text — `[svg, span, span(badge), span(effort),
+ *      svg]`, a future build's structure — left index 2 on the badge, so the
+ *      badge took the level's colour and the mark while the real level text kept
+ *      the kernel's caption tone. A wrong node coloured is the one outcome this
+ *      module exists to refuse; a missing colour is recoverable by reading the
+ *      menu. Any other arity is a trigger this module has not seen, and in it
+ *      index 2 is not known to be the level text;
+ *   2. the second child is a `span` — the model label;
+ *   3. the third child is a `span` — the level text.
+ *
+ * Rules 2 and 3 are what keep this from matching a different `aria-haspopup="menu"`
+ * button that happens to be inside the composer card (the hero's workspace chip is
+ * `[svg, span, svg]`). It is deliberately NOT a class match: the installed build
+ * hashes it (`_7KE1Ra_triggerEffort`), and a hashed name is the anchor that breaks
+ * silently on the next kernel build — the same reason {@link valueChildOf} exists.
+ *
+ * The price of the equality is stated rather than hidden: a kernel that renders the
+ * level text at index 2 of a five-child trigger takes the colour away instead of
+ * moving it. That is the same refusal the row rule makes for a root pane that is
+ * not the two rows it expects (`pickEffortRowIndex`), and it is the boundary to
+ * re-read on a kernel-line move — this rule and its test both name the arity.
+ *
+ * @param trigger - the composer's model trigger button.
+ * @returns the level text element, or null when the trigger is not that shape.
+ */
+export function effortTextChildOf(trigger: TriggerChildren): HTMLElement | null {
+  if (trigger.children.length !== TRIGGER_CHILD_COUNT) return null
+  const label = trigger.children.item(1)
+  const effort = trigger.children.item(2)
+  if (label === null || effort === null) return null
+  if (tagOf(label) !== 'span' || tagOf(effort) !== 'span') return null
+  return effort as HTMLElement
+}
+
+/**
+ * The attribute the kernel's own composer trigger publishes its open state with.
+ *
+ * `"aria-expanded": open` is on that button on EVERY render, open or closed, so it
+ * is the one stable kernel-owned marker that says "this is a menu trigger the
+ * kernel itself mounted". The two neighbours are not: `aria-controls` exists only
+ * while the menu is open, and `data-selection-focus` only while the selection pane
+ * holds focus — ranking on either would make the answer depend on the menu's state
+ * instead of on which button is the model's.
+ */
+const TRIGGER_OPEN_ATTRIBUTE = 'aria-expanded'
+
+/**
+ * The composer capsule's own level text among a card's menu triggers.
+ *
+ * A composer card can hold more than one `button[aria-haspopup="menu"]` — the model
+ * trigger, and whatever a future kernel or another plugin puts beside it — so "the
+ * first match" is not an answer this module can give. Two rules, one pass:
+ *
+ *   1. a candidate carrying {@link TRIGGER_OPEN_ATTRIBUTE} beats one that does not,
+ *      wherever the two sit in DOM order. The marker is the kernel's own, so a
+ *      shape-identical button someone placed in front of the model trigger cannot
+ *      take the colour by being first;
+ *   2. among equals, DOM order decides, and a candidate whose children are not the
+ *      shape is SKIPPED rather than answered with null. Skipping is the other half
+ *      of the same failure: the previous implementation queried the first
+ *      `aria-haspopup="menu"` and handed it to the shape rule, so a card whose
+ *      first menu button had three children coloured NOTHING at all — the real
+ *      trigger was never looked at.
+ *
+ * What this cannot do: two candidates of the same shape that both carry the marker
+ * are indistinguishable from the DOM, and the module colours the first of them.
+ * There is no further tie-break to invent — a hashed class is the one anchor that
+ * breaks silently on the next kernel build, which is the reason this rule is
+ * structural in the first place.
+ *
+ * @param candidates - every `button[aria-haspopup="menu"]` in the card, in DOM order.
+ * @returns the level text, or null when no candidate has that shape.
+ */
+export function pickEffortText(candidates: readonly MenuTrigger[]): HTMLElement | null {
+  let first: HTMLElement | null = null
+  for (const candidate of candidates) {
+    const text = effortTextChildOf(candidate)
+    if (text === null) continue
+    if (candidate.hasAttribute(TRIGGER_OPEN_ATTRIBUTE)) return text
+    if (first === null) first = text
+  }
+  return first
+}
+
+/**
+ * An element's lower-cased tag name, or `''` for a node that is not an element.
+ * @param node - the element.
+ * @returns the tag name.
+ */
+function tagOf(node: Element): string {
+  return typeof node.tagName === 'string' ? node.tagName.toLowerCase() : ''
+}
+
+/**
  * The row's own inline style, for the properties this bridge writes.
  *
  * A snapshot rather than a diff: the restore is `row.style.x = snapshot.x` for
@@ -462,6 +653,20 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
    */
   let valueCell: HTMLElement | null = null
   let valueCellColor = ''
+  /**
+   * The composer capsule's level text this bridge currently owns — that is, the
+   * node it may have written to — and, held apart from it, what was read off that
+   * node before the first write.
+   *
+   * The two are separate variables on purpose. `composerOwnColor === null` means
+   * "nothing was captured from the node being released", and the release then
+   * writes NO colour at all: a single variable cannot say both "the owner's own
+   * value was the empty string, so clear it" and "nobody read a value for this
+   * node", and reading it as the second when it means the first is how a restore
+   * clears an inline colour the kernel had set itself.
+   */
+  let composerText: HTMLElement | null = null
+  let composerOwnColor: string | null = null
   let observer: MutationObserver | null = null
   let resizer: ResizeObserver | null = null
   let timer: number | null = null
@@ -549,8 +754,9 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
   }
 
   /**
-   * Paint the current level onto the official row: the capsule's geometry, its
-   * ring, and the value cell's text colour.
+   * Paint the current level onto every surface that carries it: the capsule's
+   * geometry and ring, the value cell's text colour, and the composer capsule's own
+   * level text.
    *
    * Every one of these writes REPEATS rather than happening once at inject. What
    * this module can see is childList changes; a style attribute is not one, so a
@@ -575,8 +781,12 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
    * across our own track instead of onto a name.
    */
   function paint(): void {
-    if (row === null) return
     const colors = levelColors()
+    // The composer's own level text FIRST and unconditionally: it is on screen
+    // whether or not the menu is, so it must not sit behind the menu-row guard
+    // below — that guard is true for a handful of seconds in a session's life.
+    paintComposerText(colors)
+    if (row === null) return
     applyCapsule(row)
     // The ring comes before the cell: it does not depend on there being a cell to
     // write to, and a capsule with no edge at all would be the more visible
@@ -590,6 +800,86 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
       valueCellColor = cell.style.color ?? ''
     }
     cell.style.color = colors?.text ?? valueCellColor
+  }
+
+  /**
+   * Paint the composer capsule's level text: the mark, and the level's colour.
+   *
+   * The value is the level id, so the DOM records which level `color` belongs to
+   * rather than merely that something coloured it. Idempotent: the mark is one
+   * attribute written over itself, never a second attribute, and the write happens
+   * on the SAME node until the official component replaces it.
+   *
+   * A `colors` of null — no level, or a session whose model advertises none — is
+   * the fallback, and it is a RESTORE rather than a colour of our own: the text
+   * goes back to the kernel's caption tone and loses the mark, which is also what
+   * drops the weight. An unset scale then reads as unset on the composer exactly as
+   * it does on the track, instead of claiming the lowest level's colour.
+   *
+   * Called on every paint and every scan, from the level's own change as well as
+   * from the theme's, because the colour is read at paint time in both cases.
+   *
+   * @param colors - the level's colours, or null when there is no position to speak for.
+   */
+  function paintComposerText(colors: LevelColors | null): void {
+    const text = effortTextOf()
+    if (text !== composerText) {
+      releaseComposerText()
+      // Read BEFORE the first write, and only for the node just taken over: a
+      // re-render that replaced the span leaves the new node's own colour to be
+      // captured, and the old one's already restored. Ownership and the captured
+      // value move together here, which is the only place either is set.
+      if (text !== null) {
+        composerText = text
+        composerOwnColor = text.style.color ?? ''
+      }
+    }
+    if (text === null) return
+    if (colors === null) {
+      releaseComposerText()
+      return
+    }
+    text.setAttribute(EFFORT_TEXT_ATTRIBUTE, colors.level)
+    text.style.color = colors.text
+  }
+
+  /**
+   * The composer card's level text: the effort span of whichever menu trigger in
+   * the card has that shape, or null when none does.
+   *
+   * A query for the CANDIDATES and the shape rule for the answer; see
+   * {@link pickEffortText} for why the first `aria-haspopup="menu"` in the card is
+   * not the answer, and why a candidate that does not match is skipped instead of
+   * ending the search.
+   */
+  function effortTextOf(): HTMLElement | null {
+    const card = composerOf()
+    if (card === null || typeof card.querySelectorAll !== 'function') return null
+    return pickEffortText(Array.from(card.querySelectorAll('button[aria-haspopup="menu"]')))
+  }
+
+  /**
+   * Put the composer's level text back the way the official component rendered it:
+   * its own colour, and no mark of ours.
+   *
+   * The colour is written only when one was CAPTURED for the node being released
+   * ({@link composerOwnColor} is not null), never as a blanket clear. The captured
+   * value itself is the kernel's own when the kernel set one inline and `''` when
+   * it did not — `''` is a real answer here, and writing it is what removes the
+   * inline colour this bridge added. `null` is not an answer: it means this bridge
+   * never read a value for that node, and a release that treated it as `''` would
+   * be clearing an inline colour it does not own.
+   *
+   * The attribute is REMOVED rather than blanked — it is this plugin's own, so
+   * nobody else's value is at stake — and removal is what takes the stylesheet's
+   * weight back off with it.
+   */
+  function releaseComposerText(): void {
+    if (composerText === null) return
+    if (composerOwnColor !== null) composerText.style.color = composerOwnColor
+    composerText.removeAttribute(EFFORT_TEXT_ATTRIBUTE)
+    composerText = null
+    composerOwnColor = null
   }
 
   /**
@@ -675,13 +965,26 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
     remeasureNow()
   }
 
+  /**
+   * Look for both official surfaces and put them right.
+   *
+   * The two are independent: the menu row exists only while the menu is open, while
+   * the composer capsule is there for the whole session. So the composer's level
+   * text is painted first and unconditionally, and every early return below — no
+   * menu, no row, the wrong row, a shape we do not understand — takes the menu's
+   * writes out without touching it. The one exit that DOES release it is the
+   * "nothing to drive" one at the top, which is exactly the case with no colour to
+   * carry.
+   */
   function scan(): void {
     if (disposed) return
     try {
       if (!active()) {
         detach()
+        releaseComposerText()
         return
       }
+      paintComposerText(levelColors())
       const card = composerOf()
       const menu = card === null ? null : menuOf(card)
       if (menu === null) {
@@ -709,7 +1012,10 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
       detach()
       inject(target)
     } catch {
-      // Any DOM shape this module does not understand resolves to "no slider".
+      // Any DOM shape this module does not understand resolves to "no slider". The
+      // composer's text is deliberately NOT released here: its paint is independent
+      // of the menu's shape, and a menu this module cannot read is no reason to take
+      // a colour off a surface that is rendering correctly.
       detach()
     }
   }
@@ -722,15 +1028,41 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
       if (Mutation !== null) {
         try {
           const created = new Mutation(() => { scan() })
-          created.observe(hostDoc.body ?? hostDoc.documentElement, { childList: true, subtree: true })
+          created.observe(hostDoc.body ?? hostDoc.documentElement, {
+            childList: true,
+            subtree: true,
+            // The theme flip is an ATTRIBUTE on the body and inserts nothing, so
+            // without this the composer's level text would keep the other theme's
+            // ramp until some unrelated re-render happened to scan. The filter is
+            // what keeps it to that one name: every other attribute in the document
+            // — aria-expanded on a menu, a hashed class, an inline style — produces
+            // no callback at all.
+            attributes: true,
+            attributeFilter: [DARK_THEME_ATTRIBUTE],
+          })
           observer = created
           return
         } catch {
           observer = null
         }
       }
-      // No MutationObserver: a low-frequency sweep. Each pass is a handful of
-      // queries, and the container is only touched when it is missing.
+      // No MutationObserver: a low-frequency sweep — the LAST RESORT, not a second
+      // watcher. It is unreachable in this app (Electron's renderer always has
+      // MutationObserver, so the branch above is the one that runs) and exists so
+      // that a minimal host degrades instead of rendering nothing at all.
+      //
+      // What that costs, stated rather than implied: the theme flip is the one
+      // change that inserts nothing, so on this path the composer's level text
+      // keeps the OTHER theme's ramp for up to one interval — and that is a colour
+      // wrong in the expensive direction, the light ramp's deep indigo measuring
+      // 1.98:1 on the dark card. The interval is therefore the size of the
+      // mistake, and it must not grow.
+      //
+      // The sweep itself already reads the theme: every pass paints through
+      // `levelColors()`, which reads `body[data-ds-dark-theme]` at paint time, so
+      // the first pass after a flip carries the right ramp. Only a
+      // MutationObserver can close the window any sooner, and here there is never
+      // one — which is why this is a note on the interval and not a second poll.
       timer = hostWin.setInterval(() => { scan() }, 400)
     },
     scan,
@@ -748,6 +1080,10 @@ export function createEffortBridge(options: EffortBridgeOptions): EffortBridge |
         coalesce = null
       }
       detach()
+      // Both official surfaces go back, and the composer's is the one that has to:
+      // `detach` skips it (a closed menu is not a reason to drop the colour), so
+      // disposing the bridge is the only place it is released from here.
+      releaseComposerText()
     },
   }
 }

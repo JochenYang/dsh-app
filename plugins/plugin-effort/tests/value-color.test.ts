@@ -6,8 +6,9 @@
  * are asserted rather than assumed — that the WCAG implementation here agrees with
  * the contrast values the stylesheet's own header recorded (an independent
  * measurement made before this module existed), that the name and the ring clear
- * their floors on EVERY surface they can be drawn on (the row's hover background
- * included), and that the neutral ring's real token value does too.
+ * their floors on EVERY surface they can be drawn on (both hover backgrounds, and
+ * the composer capsule's own card among them), and that the neutral ring's real
+ * token value does too.
  *
  * The sweep is the point. Checking the stops would pass for a ramp whose middle is
  * too light, and the middle is where most levels sit; checking one surface would
@@ -58,6 +59,14 @@ const LABEL_TERTIARY = { light: '#81858c', dark: '#adb2b8' }
 
 /** The value the token falls back to when a host has no theme variables. */
 const NEUTRAL_FALLBACK = '#6b7280'
+
+/**
+ * `--dsw-specific-input-major` in the dark theme: the card the COMPOSER capsule
+ * draws on, read from `@deepseek-ai/dsh-client-ui-theme` on the installed line
+ * (`--dsw-static-neutral-bluish-850`). In the light theme that token is `#FFFFFF`,
+ * which is already in the light surface list.
+ */
+const COMPOSER_CARD = '#2C2C2E'
 
 /**
  * @param actual - the measured value.
@@ -116,6 +125,9 @@ describe('over', () => {
     assert.equal(over('#F5F5F5', '#2631480f'), '#E9E9EB')
     assert.equal(over('#292929', '#ffffff14'), '#3A3A3A')
     assert.equal(over('#212123', '#ffffff14'), '#323234')
+    // The composer capsule's own card (`--dsw-specific-input-major` in the dark
+    // theme) and its hover: the surface the dark basis is computed against.
+    assert.equal(over('#2C2C2E', '#ffffff14'), '#3D3D3E')
   })
 
   it('is the colour itself at full alpha, and the surface at none', () => {
@@ -221,14 +233,19 @@ describe('textColorAt', () => {
     }
   })
 
-  it('includes the row\'s hover background in those surfaces, as the strictest one', () => {
-    // The basis is not decoration: it is the hover colour over the darker card,
-    // and it is what the lift is computed against. Without it the dark third stop
-    // would sit at 4.24:1 exactly while the pointer is on the row.
+  it('includes the hover backgrounds in those surfaces, as the strictest ones', () => {
+    // The basis is not decoration: it is the hover colour over the worst card of the
+    // theme, and it is what the lift is computed against. Without it the dark third
+    // stop would sit at 4.04:1 exactly while the pointer is on the composer's model
+    // trigger — the surface the level is read from before the menu is ever opened.
     assert.equal(TEXT_BASIS_LIGHT, over('#F5F5F5', '#2631480f'))
-    assert.equal(TEXT_BASIS_DARK, over('#292929', '#ffffff14'))
+    assert.equal(TEXT_BASIS_DARK, over(COMPOSER_CARD, '#ffffff14'))
     assert.ok(TEXT_SURFACES_LIGHT.includes(TEXT_BASIS_LIGHT))
     assert.ok(TEXT_SURFACES_DARK.includes(TEXT_BASIS_DARK))
+    // The composer's card is one of the name's surfaces in both themes: in the light
+    // theme it IS the white surface, in the dark theme it is a third, lighter card.
+    assert.ok(TEXT_SURFACES_LIGHT.includes('#FFFFFF'))
+    assert.ok(TEXT_SURFACES_DARK.includes(COMPOSER_CARD))
     assert.ok(contrastRatio('#A98BFF', TEXT_BASIS_DARK) < TEXT_FLOOR)
     // And it IS the strictest: at every position the name is closer to the floor
     // on the basis than on any other surface of its theme.
@@ -264,7 +281,7 @@ describe('textColorAt', () => {
     )
     assert.deepEqual(
       FILL_RAMP_DARK.map(stop => textColorFor(stop.color, TEXT_BASIS_DARK)),
-      ['#7AAAFF', '#8FB0FF', '#AE92FF', '#B9A6FF'],
+      ['#7AAAFF', '#8FB0FF', '#B297FF', '#B9A6FF'],
     )
   })
 
