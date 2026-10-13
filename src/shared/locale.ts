@@ -96,12 +96,20 @@ const ZH_CN = {
   'splash.resumeDownload': '继续下载',
 
   // The wishes at the foot of the splash: fixed copy, not fetched, one of which
-  // the shell draws per start (SPLASH_SAYING_KEYS in src/main/startup-window.ts).
-  // The English of the first is a rendering of the Chinese rather than a
-  // translation of its pun (「其次」 is a play on "second"), so the two read as
-  // the same sentiment; the second is a plain rendering.
+  // the shell draws per start (SPLASH_SAYING_KEYS in src/main/startup-window.ts,
+  // which owns the order). The first English line is a rendering of the Chinese
+  // rather than a translation of its pun (「其次」 is a play on "second"), so
+  // the two read as the same sentiment; the rest are plain renderings.
   'splash.saying.health': '首先您要健康，其次才是其次',
   'splash.saying.want': '想要的太多，需要的不多',
+  'splash.saying.slowDown': '慢一点，路才看得见',
+  'splash.saying.ownRoad': '不必赢过谁，走完自己的路就好',
+  'splash.saying.today': '把今天过好，明天自会接上',
+  'splash.saying.sayNo': '真正的自由，是能说不',
+  'splash.saying.quiet': '心里有数，就不必声张',
+  'splash.saying.thisMoment': '与其追赶时间，不如把此刻做完',
+  'splash.saying.enough': '够用，就是富足',
+  'splash.saying.rest': '允许自己休息，也是一种努力',
 
   // ------------------------------------------------- home-layer row conflicts
   // The kernel refuses an app-side write when the same setting also lives in
@@ -409,6 +417,14 @@ const EN_US: Record<MessageKey, string> = {
 
   'splash.saying.health': 'Stay healthy first. Everything else comes second.',
   'splash.saying.want': 'We want so much more than we need.',
+  'splash.saying.slowDown': 'Slow down, and the road appears.',
+  'splash.saying.ownRoad': 'You need not outrun anyone — just finish your road.',
+  'splash.saying.today': 'Live today well, and tomorrow follows.',
+  'splash.saying.sayNo': 'Real freedom is being able to say no.',
+  'splash.saying.quiet': 'Knowing your own measure, you need not announce it.',
+  'splash.saying.thisMoment': 'Rather than chase time, finish this moment.',
+  'splash.saying.enough': 'Enough is abundance.',
+  'splash.saying.rest': 'Resting is also a kind of effort.',
 
   'homeLayer.title': 'A machine-level setting blocks changes in the app',
   'homeLayer.message': '{ids} comes from {file}, so changing it in the app is refused by the kernel (overridden by a home patch).',

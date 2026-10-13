@@ -2,19 +2,21 @@
  * The splash wish line: ONE wish per app start, drawn at random.
  *
  * The line at the foot of the splash used to be a single fixed sentence; it is
- * now one of several, and which one is drawn once per process. Two things have
- * to hold, and both are cheap to get wrong:
+ * now one of ten, and which one is drawn once per process. Three things have to
+ * hold, and all are cheap to get wrong:
  *
- *   - the draw obeys the source it is given (so a test can pin the ends of the
- *     range instead of living with a real random), and
+ *   - the SET is the ten the shell declares, present and non-blank in both
+ *     tables, with the first one still the line the page falls back to;
+ *   - the draw obeys the source it is given, and reaches every entry (so a test
+ *     can pin the range instead of living with a real random); and
  *   - the draw happens ONCE. `updateStartupWindow` pushes on every kernel
  *     status — several times a second during an extraction — and a draw per push
  *     would make the line jump between two wishes on screen.
  *
- * The second one is a property of the shell, not of a function, so it is read
- * off `src/main/startup-window.ts`: exactly one call, at module level, and
- * `push()` reading the constant. A copy of that rule written here would agree
- * with itself while the shell drifted.
+ * The last one is a property of the shell, not of a function, so it is read off
+ * `src/main/startup-window.ts`: exactly one call, at module level, and `push()`
+ * reading the constant. A copy of that rule written here would agree with itself
+ * while the shell drifted.
  *
  * Run after the build: node --test test/   (or: npm test)
  */
@@ -40,7 +42,11 @@ function pageScript() {
   return bodies.join('\n')
 }
 
-/** The wishes the shell may show, read from its own declaration. */
+/**
+ * The wishes the shell may show, read from its own declaration. Spelling the
+ * ten keys out in this file would agree with itself while the shell drifted, so
+ * the list is parsed and compared against the expected NAMES below instead.
+ */
 function shellSayingKeys() {
   const shell = readFileSync(SHELL, 'utf8')
   const listAt = shell.indexOf('const SPLASH_SAYING_KEYS: readonly MessageKey[] = [')
@@ -48,6 +54,49 @@ function shellSayingKeys() {
   return [...shell.slice(listAt, shell.indexOf(']', shell.indexOf('= [', listAt)))
     .matchAll(/'([^']+)'/gu)].map((m) => m[1])
 }
+
+/** The wish set, in the order the shell must declare it. */
+const EXPECTED_SAYING_KEYS = [
+  'splash.saying.health',
+  'splash.saying.want',
+  'splash.saying.slowDown',
+  'splash.saying.ownRoad',
+  'splash.saying.today',
+  'splash.saying.sayNo',
+  'splash.saying.quiet',
+  'splash.saying.thisMoment',
+  'splash.saying.enough',
+  'splash.saying.rest',
+]
+
+test('the wish set is exactly these ten, in both tables', () => {
+  assert.deepEqual(shellSayingKeys(), EXPECTED_SAYING_KEYS, 'the shell must declare the ten wishes, in order')
+  const tables = { 'zh-CN': require('../dist/shared/locale.js').messagesFor('zh-CN'),
+    'en-US': require('../dist/shared/locale.js').messagesFor('en-US') }
+  for (const [locale, table] of Object.entries(tables)) {
+    for (const key of EXPECTED_SAYING_KEYS) {
+      assert.equal(typeof table[key], 'string', `${locale} is missing ${key}`)
+      assert.notEqual(table[key].trim(), '', `${locale}:${key} must not be blank`)
+    }
+    // Ten keys, ten lines: a copy-pasted wish would still be "non-blank".
+    const lines = EXPECTED_SAYING_KEYS.map((key) => table[key])
+    assert.equal(new Set(lines).size, EXPECTED_SAYING_KEYS.length,
+      `${locale} repeats a wish: ${lines.length} keys, ${new Set(lines).size} distinct lines`)
+  }
+})
+
+test('every wish can be drawn, and each index lands on its own line', () => {
+  // Injected at the END of each entry's slice of [0, 1): index 0 answers 0/10,
+  // index 9 answers 9/10, and the top of the range clamps to the last entry.
+  // This is what "the set is really drawn from, not just declared" means.
+  const keys = shellSayingKeys()
+  keys.forEach((key, index) => {
+    const draw = index / keys.length
+    assert.equal(pickSaying(keys, () => draw), key, `a draw of ${draw} must land on ${key}`)
+  })
+  assert.equal(pickSaying(keys, () => 0.9999999), keys[keys.length - 1])
+  assert.equal(pickSaying(keys, () => 1), keys[keys.length - 1], 'a draw of exactly 1 clamps, never reads past the end')
+})
 
 test('the draw honours the source it is given, at both ends', () => {
   const keys = ['first', 'second', 'third']
@@ -60,9 +109,6 @@ test('the draw honours the source it is given, at both ends', () => {
   assert.equal(pickSaying(keys, () => 7), 'third')
   assert.equal(pickSaying(keys, () => -1), 'first')
   assert.equal(pickSaying(keys, () => Number.NaN), 'first')
-  // The whole range is reachable: a draw is not always pinned to one entry.
-  const swept = new Set([0, 0.2, 0.4, 0.6, 0.8].map((draw) => pickSaying(keys, () => draw)))
-  assert.equal(swept.size, 3, `every entry must be reachable, got ${[...swept].join(',')}`)
 })
 
 test('one entry, none, and the default source', () => {

@@ -323,10 +323,22 @@ function isActionId(value: unknown): value is StartupActionId {
 type StartupPush = Omit<StartupView, 'brand' | 'theme' | 'skeleton' | 'digest' | 'saying'>
 
 /**
- * Every wish the splash can show, in one place: adding a line is one entry here,
- * and the page's own fallback text only has to agree with the first one.
+ * Every wish the splash can show, in one place and in this order: adding a line
+ * is one entry here, and the page's own fallback text only has to agree with the
+ * first one.
  */
-const SPLASH_SAYING_KEYS: readonly MessageKey[] = ['splash.saying.health', 'splash.saying.want']
+const SPLASH_SAYING_KEYS: readonly MessageKey[] = [
+  'splash.saying.health',
+  'splash.saying.want',
+  'splash.saying.slowDown',
+  'splash.saying.ownRoad',
+  'splash.saying.today',
+  'splash.saying.sayNo',
+  'splash.saying.quiet',
+  'splash.saying.thisMoment',
+  'splash.saying.enough',
+  'splash.saying.rest',
+]
 
 /**
  * This run's wish, drawn ONCE — at module load, so a fresh start draws again but
