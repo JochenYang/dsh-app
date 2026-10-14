@@ -1,7 +1,0 @@
----
-shell: none
-plugins: plugin-rewind
----
-
-消息撤回：新增有界的工作区快照（在每回合第一个可能写文件的工具之前取，走 `tools/pre-execute`），shell 命令（`pwsh` / `run_code` / 模型运行的脚本 / office 渲染 / 子代理）改动过的文件现在也会被还原，二进制按字节还原（此前按 utf8 读写会把 PNG 弄坏）；还原目标按会话隔离（此前同一内核进程里另一个会话的同号回合会污染还原），并按写入顺序取首图；本段没有快照时不再报成成功，而是在结果与确认框里给出 `coverage` 与涉及的写入工具名。同时收紧了几处会让还原做错事的路径：快照里读不到的文件不再被当成「本段新建」而移出工作区，链接目录让快照判为 partial 而不是当成干净的一棵树，还原前会校验快照字节与清单里的 hash 一致，快照存储按回合数、清单年龄与总体积三重上限回收。
-Message recall: a bounded workspace snapshot (taken before a turn's first writing tool, through the `tools/pre-execute` gate) now puts back files a shell command (`pwsh` / `run_code` / a script the model ran / an office renderer / a subagent) changed, byte-exact for binary files (the old utf8 read/write corrupted a PNG); restore targets are scoped per session (another session's same-numbered turn used to contaminate a restore) and ordered by write sequence; and a range with no snapshot is no longer reported as a success — the result and the confirmation dialog carry a `coverage` verdict and the writing tools involved. Several paths that could have made a restore do the wrong thing are tightened too: a file the snapshot could not read is no longer mistaken for one the range created (which moved it out of the workspace), a linked directory marks the snapshot partial instead of passing as a clean tree, restored bytes are verified against the hash their manifest names, and the store is trimmed by per-session turn count, manifest age and total size.

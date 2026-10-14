@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.5] - 2026-10-14
+
+### 中文
+- 消息撤回现在也能还原 **shell 命令改动的文件**：新增有界的工作区快照，在每回合第一个可能写文件的工具之前取（`tools/pre-execute` 门，取完才放行），撤回时按「本段起点」的状态还原；写入工具（`write`/`edit`/`str_replace_editor`）仍走原有的精确 before-image，两份来源按路径合并。快照按内容寻址存在 `$DSH_HOME/storages/dsh-app-plugin-rewind/{trees,blobs}`，未变的文件每回合只多一个 hash、不多占字节。
+- 撤回的覆盖面变成可见的判定：`coverage`（`full`/`partial`/`none`）随结果与确认框返回，本段运行过 shell 类工具而没有快照时给出 `none` 与工具名——此前这种「看不到改了什么」的情况会报成一次干净的成功（实测那次撤回返回 `{"restored":6,"removed":8,"unrestorable":[]}`，而同一段里 27 条 shell 调用刚改写了精灵图与 `dist/`）。
+- 修复三处会让还原做错事或做不全的缺陷：还原目标按**会话**隔离（此前同一内核进程里另一个会话的同号回合会污染还原，把文件还原成别的会话的版本）；同一路径在一段里被写多次时按**写入顺序**取首图（此前按异步读取的完成顺序，可能取到较晚的那张，等于这一段的一次改动没撤销却报成功）；before-image 全程按**字节**处理（此前按 utf8 读写，还原 PNG 这类二进制会把文件弄坏）。
+- 快照自身的安全边界：不完整的扫描**永不**判定「本段新建」（那会把已存在的文件移出工作区）；看到但读不到、过大或链接的文件单独记录，变化时按无法还原上报；还原前校验快照字节与清单里的 hash 一致；存储按每会话回合数、清单年龄与总体积三重上限回收。
+
+### English
+- Message recall now puts back **files a shell command changed** too: a bounded workspace snapshot is taken before a turn's first writing tool (the `tools/pre-execute` gate, awaited before the tool runs), and a recall restores the state the range began in; the write tools (`write`/`edit`/`str_replace_editor`) keep their exact before-images and the two sources are merged by path. The snapshot is content-addressed under `$DSH_HOME/storages/dsh-app-plugin-rewind/{trees,blobs}`, so an unchanged file costs one hash per turn and no extra bytes.
+- A recall's coverage is now a visible verdict: `coverage` (`full`/`partial`/`none`) rides the result and the confirmation dialog, and a range that ran a shell-style tool with no snapshot reports `none` plus the tool names — this used to be a clean success for a range whose changes the plugin could not even name (measured: that recall answered `{"restored":6,"removed":8,"unrestorable":[]}` while 27 shell calls in the same range had just rewritten a sprite sheet and a `dist/` tree).
+- Three defects that made a restore do the wrong thing or only part of it are fixed: restore targets are scoped per **session** (another session's same-numbered turn used to contaminate a restore and put a file back to a different session's version); several writes to one path in one range take the before-image of the **earliest write** (the order the async reads finished in used to decide, so a later image could win — one change in the range was never undone while the report said it succeeded); and before-images are handled as **bytes** throughout (the old utf8 read/write corrupted a binary file such as a PNG).
+- The snapshot's own safety boundaries: an incomplete walk **never** decides that a file was created (that moves an existing file out of the workspace); a file the walk saw but could not read, was too large, or was a link is recorded separately and reported as unrestorable when it changes; restored bytes are verified against the hash their manifest names; and the store is trimmed by per-session turn count, manifest age and total size.
+
 ## [v0.16.4] - 2026-10-13
 
 ### 中文
