@@ -6,6 +6,9 @@
 >
 > **证据标记**：`[实测]` = 命令真跑过；`[静态]` = 源码阅读（上游检出 `D:\codes\deepseek-harness`
 > 已到 `0.2.0-rc.2`，HEAD `639ed01539`）。实施时逐条复验。
+>
+> **状态**：升线本体已完成（2026-09-30，数字与判据见 §6 台账），**§0 是升级前的基线快照**，
+> 读它时不要当成当前值。
 
 ---
 
@@ -90,7 +93,7 @@ caret 范围内）；真正钉住 rc.1 的是 **lockfile**。所以「跟不跟 
 
 ## 3 移植候选（按性价比）
 
-### P0 · 接入上游的标题栏标记（`#13`）
+### P0 · 接入上游的标题栏标记（`#13`）—— **已实施**（见 §6.6）
 
 **收益**：一处注入换掉我们现在**逐点补偿**的一长串规则（`window.ts:340,348,415,418,429-436`），
 让内核的菜单、下拉、弹窗、停靠浮窗在新线上**通用地**避开我们那 36px 原生控件条。
@@ -233,5 +236,8 @@ written into it here"），内核的配置编辑器把 ENOENT 当空序列
 ### 6.6 未做
 
 - `bundled-kernel/` 是打包期产物、不入库；它已随 `prepare-bundled-kernel.mjs` 更新到 rc.2。
-- §3 的移植候选（P0 标题栏标记、P2 归档页「未命名」、深色开关 token 覆盖、更新文案）本轮未实施，
-  它们与升线解耦，各自单独提交。
+- §3 的移植候选里，**P0（标题栏标记）已完成**（`src/main/window.ts` 注入
+  `data-windows-titlebar` 与 `--dsh-windows-titlebar-height`，`scripts/probe-drag.cjs` 同步，
+  `test/desktop-chrome-css.test.mjs` 读它）；其余候选（P2 归档页「未命名」、深色开关 token 覆盖、
+  更新文案）**仍未实施**——`plugins/plugin-archives/src/client/archives-section.tsx` 对无标题行
+  仍显示截短 id，`DESKTOP_CHROME_CSS` 里没有 `--dsw-alias-switch-thumb` 覆盖。

@@ -20,10 +20,10 @@ workflow/ralph、subagent(spawn/fork)、web 检索、审批、权限预设、轨
 
 | 优先级 | 文档 | 主题 | 状态 |
 |---|---|---|---|
-| P0 | [mcp-manager.md](mcp-manager.md) | MCP 服务器管理（UI 化配置 + 动态挂载） | ✅ 已落地（main 未 push） |
-| P1 | [hooks-bridge.md](hooks-bridge.md) | Hooks 桥 + DSH 原生规则 | ✅ 已落地（main 未 push，用户已实测拦截生效） |
-| P2 | [session-search.md](session-search.md) | 会话全文检索（sqlite 后端 + UI） | ✅ 已落地（main 未 push；agent 工具暂缓，见搁置区） |
-| P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 | ✅ 已落地（main 未 push，用户已实测投递生效；系统通知 V2 待 desktop bridge） |
+| P0 | [mcp-manager.md](mcp-manager.md) | MCP 服务器管理（UI 化配置 + 动态挂载） | ✅ 已落地 |
+| P1 | [hooks-bridge.md](hooks-bridge.md) | Hooks 桥 + DSH 原生规则 | ✅ 已落地（用户已实测拦截生效） |
+| P2 | [session-search.md](session-search.md) | 会话全文检索（sqlite 后端 + UI） | ✅ 已落地（agent 工具暂缓，见搁置区） |
+| P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 | ✅ 已落地（用户已实测投递生效；系统通知 V2 待 desktop bridge） |
 | — | [code-quality-enhancements.md](code-quality-enhancements.md) | 验收钩子（MVP 已验证，单门价值不足，停止投入；等效替代=原生 Hook 用户自配） | 📄 |
 | — | [desktop-shell-experience.md](desktop-shell-experience.md) | plugin-brand 落地 / 诊断中心 / 首启补全 | 📄 |
 | P2 | [kernel-package-set.md](kernel-package-set.md) | 内核交付改为包集（profile 自持核心，rc 线镜像与解压激活退场） | 📄 已立项（方向已定：只学装法，不绑定应用发布） |
@@ -56,9 +56,10 @@ dev-process-tooling 的套件冒烟探针 ── 建议先于 P0-P3 落地（否
    插件启动时读取，settings 页可写；overlay 是静态的、用户手改不保留，所以一切
    用户可编辑状态放 storages 配置文件（同 plugin-swarm / plugin-usage / plugin-memory）。
 3. **UI**：client 半 `ctx.slots.inject('settings.section', ...)`（参照
-   `plugins/plugin-client-ui/src/client.ts:188`），order 分配避开上游
+   `plugins/plugin-client-ui/src/client.ts:265`），order 分配避开上游
    （11=模型高级设置已占用，15=Plugins，20=agent-presets）：
-   **12=MCP 服务器，13=Hooks，14=诊断**。
+   **12=MCP 服务器，13=Hooks，14=网络搜索**。完整取值表见
+   `docs/desktop-optimization-plan.md` §3.1。
 4. **Host routes**：`/api/plugins/dsh-app/plugin-<name>/*`，注册在 Connection 的
    exact-Fetch 通道上（`ctx.connection.fetch.register`；只收 GET/HEAD/POST，路径段里
    不带 `@`）。围栏由 Connection 载体自身提供（Host/Origin 校验 + 浏览器认证），

@@ -1,7 +1,7 @@
 # Release checklist
 
 Expanded rules and the full walkthrough live in
-[`docs/agents/build-and-release.md`](../docs/agents/build-and-release.md) §4;
+[`docs/agents/build-and-release.md`](build-and-release.md) §4;
 this file is the order of operations for cutting a release, with the three
 mistakes that have each cost a release called out where they apply.
 

@@ -40,6 +40,8 @@
     plugin-websearch (dual-face) web_search/web_fetch as a provider: brand engine chain + self-check
     plugin-market (dual-face)  third-party plugin market: install/uninstall into the booted profile
     plugin-presets (dual-face) preset bundles: import/export of brand + upstream configuration
+    plugin-rewind (dual-face)  message recall + file revert, with a quarantine manager tab
+    plugin-effort (client)     reasoning-effort track on the official model menu's 推理等级 row
     plugin-doc / plugin-sheet / plugin-ppt / plugin-pdf (dual-face)
                                office_to_pdf conversion per source format: host tool + client skill
                                prefill, over the LibreOffice engine installed on demand (§4.1)
@@ -94,9 +96,12 @@ Client-side composition (all zero-upstream-change):
   model-level editors over llm-pi-ai providers, companion-route migration,
   models.dev prefill with gh-proxy mirror fallback.
 - **Maintenance settings section** (`plugin-client-ui`, one rail row at order
-  22): the suite's three upkeep pages — usage statistics (`plugin-usage`),
-  preset packages (`plugin-presets`) and diagnostics — as TABS of that one
-  section. The owner declares the child list slot
+  24): the suite's three system-level upkeep pages — preset packages
+  (`plugin-presets`, tab order 2), diagnostics (tab order 3) and the
+  quarantine manager (`plugin-rewind`, tab order 4) — as TABS of that one
+  section. Usage statistics (`plugin-usage`) is NOT one of them: it is its own
+  rail row at order 21, because it is a view of the user's own data rather
+  than of the suite's health. The owner declares the child list slot
   `settings.dsh-app-maintenance.tab` in the same `register()` call that
   contributes the section, draws the strip, and mounts one contribution per
   panel (`renderSlot(key, {}, { only: id })`); the contributors register into
@@ -415,7 +420,8 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 - `plugin-sidebar`: no automated test suite for the client components — the
   plugin is verified through tsc + esbuild + headless dsh server API smokes.
 - First-run UX: kernel download progress is wired into the in-window update
-  card; pause/resume and checksum display are not.
+  card, and the splash page offers pause/resume (`manager.ts`
+  `pauseDownload`/`resumeDownload`); checksum display is not.
 - Office payload: not bundled with the installer, so a first run with no network
   converts no documents until the 诊断 row downloads the engine; the Python set
   the office skills need travels in that same artifact and is staged per cell by

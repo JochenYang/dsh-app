@@ -41,5 +41,5 @@ kernel contains dsh + the suite in one immutable directory. Once the suite is
 published to npm, switch those references to version ranges.
 
 The loader overlay (`dsh-app.patch.yml`) is copied into userData at server
-start and passed to `dsh web --patch ...`; it inserts all seventeen suite entries
+start and passed to `dsh web --patch ...`; it inserts all eighteen suite entries
 after every bundle layer and the profile's own patch (last write wins).

@@ -173,8 +173,9 @@ smoke's assertions: [`docs/agents/testing.md`](docs/agents/testing.md).
   patch rows only; never modify harness source. Injected surfaces answer status tokens, never copy.
 - **Settings sections are one ordered rail.** The `order` values live in a table in
   `docs/desktop-optimization-plan.md` §3.1: **update that table in the same commit as an `order` change,
-  and never reuse a value that is taken.** Current suite rows: 模型高级设置 / Advanced models 11, 用量统计 /
-  Usage 21, 会话记忆 / Memory 22, 会话归档 / Archives 23, 维护设置 / Maintenance 24, 关于 DSH-APP / About 26;
+  and never reuse a value that is taken.** Current suite rows: 模型高级设置 / Advanced models 11, MCP 服务器 /
+  MCP 12, Hooks 13, 网络搜索 / Web search 14, 并行子代理 / Swarm 19, 用量统计 / Usage 21, 会话记忆 / Memory 22,
+  会话归档 / Archives 23, 维护设置 / Maintenance 24, 关于 DSH-APP / About 26;
   upstream owns 0, 10, 15, 20 and the pinned 25. 维护设置 is ONE section with three tabs — 预设包 / Presets 2,
   诊断 / Diagnostics 3, 撤回隔离区 / Quarantine 4 (order 1 is a vacant slot, kept vacant) — declared by the
   section owner through the `settings.dsh-app-maintenance.tab` child slot.

@@ -21,8 +21,8 @@ a short summary and points here.
   through tsc + esbuild + headless server API smokes.
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing secrets must be
   supplied as CI secrets; `resources/icon.png` is a placeholder.
-- **First-run UX**: kernel download progress is wired into the in-window update card; pause/resume
-  and checksum display are not.
+- **First-run UX**: kernel download progress is wired into the in-window update card, and the splash
+  page offers pause/resume (`manager.ts` `pauseDownload`/`resumeDownload`); checksum display is not.
 - **The `0.1.7-alpha.1` host line is history** — nothing about it is pending; what remains is the
   delivery model that would retire the `kernel/` tree, activation file and profile mirror, still
   planned in `docs/capability-roadmap/kernel-package-set.md`.
