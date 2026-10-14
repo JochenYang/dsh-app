@@ -27,11 +27,12 @@ documents below. Read the one your change touches, and when a document and the c
 DSH APP is a **branded Electron desktop client for
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)** — DeepSeek's coding-agent
 CLI/Web app. Windows / macOS / Linux, public release, MIT, hosted at GitHub `JochenYang/dsh-app`.
-Three constraints govern every change: **self-contained** (its own versioned dsh kernel, never a
-system-installed `dsh`; brand functionality is a plugin suite layered on the upstream kernel — §8 — never
-a fork), **two decoupled update channels** (the shell and the kernel are built, released and updated
-independently: `src/main/updater.ts` owns the shell channel, `src/kernel/manager.ts` the kernel one), and
-**Mainland China first** (every download has a mirror chain; ModelScope, not GitHub, is the primary source).
+Three constraints govern every change: **self-contained** (its own versioned dsh kernel, never depending
+on or detecting a system-installed `dsh`; brand functionality is a plugin suite layered on the upstream
+kernel — §8 — never a fork), **two decoupled update channels** (the shell and the kernel — dsh + the brand
+suite, packed into one runtime artifact — are built, released and updated independently:
+`src/main/updater.ts` owns the shell channel, `src/kernel/manager.ts` the kernel one), and **Mainland China
+first** (every download has a mirror chain; ModelScope, not GitHub, is the primary shell-update source).
 
 The kernel line has one source of truth: the spec every `@deepseek-ai/dsh*` dependency in the root
 `package.json` shares (`^0.2.0-rc.2` today), resolved and asserted by `scripts/kernel-line.mjs`;
@@ -148,7 +149,8 @@ smoke's assertions: [`docs/agents/testing.md`](docs/agents/testing.md).
   `src/shared/locale.ts` (zh/en; the en table is typed and `t()` throws on a missing key). Locale
   resolution is `DSH_APP_LOCALE` > `app.getLocale()` > zh-CN, and **the zh table is frozen** — only
   that one file under `src/` may hold Han characters, and each plugin owns its own dictionary.
-  `README*.md` stay in sync; `CHANGELOG.md` is bilingual, entries aligned one-to-one.
+  `README*.md` stay in sync; `CHANGELOG.md` is bilingual, entries aligned one-to-one between
+  `### 中文` and `### English`.
 - **TypeScript**: `strict`, avoid `any`. The shell is CommonJS with Node resolution; plugins are ESM
   with `moduleResolution: "Bundler"` and explicit local-import extensions. A `tsc`-only plugin build
   is the exception (`plugin-brand`); everything else builds with esbuild, which **does not type
@@ -259,17 +261,20 @@ Every rule below was paid for in this repository's own history, and they share o
 owner's attention as the place where open work waits.
 
 - **A round ends in one of two states**: done, verified and shipped — or blocked, with the cause and
-  the shortest path that unblocks it. Neither "here are the decisions I left for you" nor "little
-  context left" is a report — the work was always doable, so do it, then say what was done.
+  the shortest path that unblocks it. There is no third state, and neither "here are the decisions I
+  left for you" nor "little context left" is a report — the work was always doable, so do it, then say
+  what was done.
 - **A defect is not a backlog item.** Sort every open item into: harms a user, leaks something, or
   delays the next discovery — a defect, fix it now; versus makes a future mistake visible earlier —
   hardening, schedule it. Filing a defect as "next round" is how v0.16.3 shipped unbounded catalog
   reads, a wall-clock token TTL and six undeclared plugin imports — all fixed only in v0.16.4.
 - **Decide, then state.** Money, legal exposure, an irreversible or outward-facing act and a change to
-  the product's shape are the owner's call; everything else is decided here, written down with its
-  reason, and reported as fact. A thing investigated and deliberately left unchanged belongs in that
-  record too, not as an open item the reader has to re-ask.
+  the product's shape are the owner's call; everything else — including "is this acceptable?" and
+  "should this be tighter?" — is decided here, written down with its reason, and reported as fact. A
+  thing investigated and deliberately left unchanged belongs in that record too, not as an open item
+  the reader has to re-ask.
 - **Prove a gate where it runs.** A check wired into CI must be exercised in CI's own environment — a
   fresh `--legacy-peer-deps` tree with no peers and no `lib/` — before it is called green; a local green
-  is not that proof. For a claim about a commit, name the tree hash, not the impression. §12's three
-  release rules apply unchanged, including the re-cut at the same version.
+  is not that proof, and the type gate shipped exactly that way once and stopped a release. For a claim
+  about a commit, name the tree hash, not the impression. §12's three release rules apply unchanged,
+  including the re-cut at the same version.
