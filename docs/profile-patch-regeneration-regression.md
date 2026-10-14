@@ -276,8 +276,7 @@ $ node scratch/probe-dup-outcome.mjs                                     [实测
 而是静默遮蔽**：profile patch 里那份旧副本压住层里更新过的 config。这比崩溃更难发现——
 套件升级后改的行不生效，且没有任何报错。
 
-`CHANGELOG.md:468` 与 `docs/kernel-0.1.7-alpha.1-regression.md:3364` 里记的
-`duplicate loader entry id` 是**旧内核线**的行为，不是当前线。所以：
+`CHANGELOG.md` 里记的 `duplicate loader entry id` 是**旧内核线**的行为，不是当前线。所以：
 
 **第一次改判：不按 id 清单匹配** `[实测]`
 

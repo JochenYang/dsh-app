@@ -57,7 +57,7 @@ carries a one-line index of them.
   runtime pins `undici` to 8.10.2** (`scripts/build-runtime.mjs`): 8.11.0 narrowed the legacy
   wrapper's HTTP/1.1 downgrade to WebSocket upgrades, so with a proxy installed Node's BUILT-IN
   `fetch` read every provider response as header-less, undecoded bytes and every model list failed.
-  Re-verify the pin on every kernel-line bump (`docs/kernel-0.1.7-alpha.1-regression.md` §12.13).
+  Re-verify the pin on every kernel-line bump.
 - **Web search is a provider, not a tool** — `web_search` / `web_fetch` stay upstream's; register a
   `ctx.web` provider (one per call), so fallback lives inside it. Both capabilities are the brand
   plugin's now: `plugin-websearch` also serves `web_fetch` (`fetchProvider: dsh-app-fetch`), keeping
