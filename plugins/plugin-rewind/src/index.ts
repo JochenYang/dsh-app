@@ -29,6 +29,35 @@
  * turn while `deriveEventMessage` still keeps it on the surface. See
  * `placeholderData` in `./cut.ts`.
  *
+ * ## Putting the tree back — two sources, merged
+ *
+ * A recall also puts back the files the range changed, and no single seam sees
+ * all of them:
+ *
+ *   1. **The write waterfalls** (`fs/write-intent` / `fs/edit-intent`) give an
+ *      EXACT before-image for `write`, `edit` and `str_replace_editor` — the only
+ *      source that can see a write outside the workspace, and the only one that
+ *      covers a directory the workspace snapshot skips.
+ *   2. **The workspace snapshot** (`./trees.ts`) is a bounded copy of the
+ *      workspace taken before the first tool call of a turn that could write. It
+ *      is what covers everything the waterfalls cannot see: a shell command, a
+ *      script the model ran, an office renderer, a subagent's edits.
+ *
+ * For a path the snapshot covers, the snapshot's bytes are the range's starting
+ * state and win; everywhere else the recorder's before-image is used. See
+ * `mergeTargets`.
+ *
+ * ## Coverage is reported, never assumed
+ *
+ * The snapshot is taken lazily, so a range can predate it: a kernel child that
+ * restarted, a turn from before this feature existed, or a profile with the
+ * snapshot turned off. When the range ran a tool whose writes this plugin cannot
+ * see AND no snapshot exists for its first turn, the recall says so instead of
+ * reporting a clean success over a tree it only partly put back. That silence is
+ * the bug this reporting exists to end: measured on a real session, a recall
+ * answered `{restored: 6, removed: 8, unrestorable: []}` while 27 shell calls in
+ * the same range had just rewritten a sprite sheet and a `dist/` tree.
+ *
  * ## Guards
  *
  * A cut always starts on a user message, which is by construction the head of
@@ -44,13 +73,16 @@
  * text of the most recent cut. Projection state is checkpointed and, failing
  * that, rebuilt by replaying the log, so no separate vault file is needed: the
  * log itself is the durable record, and a recall never removes anything from it.
+ * The before-images live under `$DSH_HOME/storages/dsh-app-plugin-rewind/` — the
+ * quarantine (displaced bytes, never deleted) and the snapshot store.
  *
  * ## Stability discipline
  *
  * `commands` and `sessionProjections` are framework seams, so the plugin stays
  * inactive on a profile that lacks either instead of throwing at load. Nothing
  * here mutates a prototype, writes outside the plugin's own storage, or fails
- * the boot.
+ * the boot. Neither does it ever fail a tool call: the snapshot gate swallows its
+ * own errors and always forwards.
  *
  * @module @dsh-app/plugin-rewind
  */
@@ -63,14 +95,33 @@ import type { Session } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the ctx merges (commands / sessionProjections) into scope.
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-projection'
-import { listAnchors, placeholderData, planCut } from './cut.ts'
+import { listAnchors, placeholderData, planCut, type EventLike, type SessionLike } from './cut.ts'
 import { createRecorder, turnAt, type CaptureFailure, type RecordedChange, type Recorder } from './recorder.ts'
-import { captureBefore, quarantineRoot, restoreOne, type Unrestorable } from './snapshots.ts'
+import {
+  captureBefore,
+  quarantineRoot,
+  restoreOne,
+  textOf,
+  type Unrestorable,
+} from './snapshots.ts'
+import {
+  captureWorkspace,
+  DEFAULT_TREE_LIMITS,
+  diffWorkspace,
+  dropSnapshots,
+  latestSnapshotBefore,
+  pathKey,
+  pruneSnapshots,
+  readSnapshot,
+  type TreeLimits,
+  type TreeSnapshot,
+} from './trees.ts'
 import {
   hostText,
   MAX_ANCHORS,
   REWIND_COMMAND,
   type FileChangePreview,
+  type RevertCoverage,
   type RewindCode,
 } from './wire.ts'
 import { rewindProjection } from './projection.ts'
@@ -81,18 +132,25 @@ import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { registerQuarantineRoutes } from './routes.ts'
 
 /** What the file revert did, as the client reports it. */
-interface FileRevert {
+export interface FileRevert {
   /** Files whose bytes were quarantined and then restored to the before-image. */
   readonly restored: number
   /** Files the recalled range created, moved into the quarantine. */
   readonly removed: number
   /** Changes that could not be undone, each with its reason. */
   readonly unrestorable: readonly Unrestorable[]
+  /** How much of the range's file changes this recall could see. */
+  readonly coverage: RevertCoverage
+  /** Why coverage is not `full`, as a client dictionary code. */
+  readonly coverageReason?: string
+  /** Tools that ran in the range and can write files. */
+  readonly tools?: readonly string[]
 }
 
-// The two pre-write waterfalls. Declared here, not imported: they are dispatched
-// by `dsh-tool-fs`, which a plugin must not depend on, and cordis's `Events` map
-// is merge-extensible exactly for that (cordis README, "interface Events").
+// The two pre-write waterfalls, plus the tool-dispatch gate. Declared here, not
+// imported: they are dispatched by `dsh-tool-fs` and `dsh-tools`, which a plugin
+// must not depend on, and cordis's `Events` map is merge-extensible exactly for
+// that (cordis README, "interface Events").
 //
 // `target` is a resolved filesystem target (its `targetKey` is the absolute
 // path), `exec` is the tool executor, and `next` continues the chain — a listener
@@ -101,6 +159,15 @@ declare module '@deepseek-ai/cordis' {
   interface Events {
     'fs/write-intent'(target: unknown, exec: unknown, next: () => unknown): unknown
     'fs/edit-intent'(target: unknown, exec: unknown, next: () => unknown): unknown
+    /**
+     * The gate every tool dispatch passes through, before the tool runs.
+     *
+     * `exec` carries the tool name and the agent (hence the session and its
+     * cwd). The return value is a decision (`{ kind: 'allow' }` unless another
+     * listener answers), so a listener MUST forward: swallowing the chain here
+     * would deny every tool call.
+     */
+    'tools/pre-execute'(exec: unknown, next: () => unknown): unknown
   }
 }
 
@@ -128,10 +195,25 @@ export interface Config {
    * smaller value here silently truncates the picker's list.
    */
   maxAnchors: number
+  /**
+   * Whether to snapshot the workspace before a turn's first writing tool.
+   *
+   * This is what makes a shell command's changes revertible. Turning it off
+   * leaves the write-tool changes covered (and says so when a shell ran), at the
+   * cost of leaving everything a shell wrote in place.
+   */
+  snapshotWorkspace: boolean
+  /** File-count bound for one workspace snapshot; over it the recall reports partial. */
+  maxSnapshotFiles: number
+  /** Total-byte bound for one workspace snapshot; over it the recall reports partial. */
+  maxSnapshotBytes: number
 }
 
 export const Config: z<Config> = z.object({
   maxAnchors: z.natural().default(MAX_ANCHORS),
+  snapshotWorkspace: z.boolean().default(true),
+  maxSnapshotFiles: z.natural().default(DEFAULT_TREE_LIMITS.maxFiles),
+  maxSnapshotBytes: z.natural().default(DEFAULT_TREE_LIMITS.maxTotalBytes),
 })
 
 /** The parsed argument: bare lists, `plan <n>` previews, a number recalls. */
@@ -141,6 +223,26 @@ type Ordinal =
   /** Preview a recall of `n` without performing it. */
   | { readonly kind: 'plan', readonly n: number }
   | { readonly kind: 'bad' }
+
+/**
+ * Tools whose writes the recorder sees exactly, so a range that ran only these
+ * needs no workspace snapshot to be fully covered.
+ */
+const RECORDER_TOOLS = new Set(['write', 'edit', 'str_replace_editor'])
+
+/**
+ * Tools that cannot touch the workspace at all, so they never trigger a snapshot.
+ *
+ * This list is deliberately short and only holds readers: a tool wrongly listed
+ * here would silently lose its changes from a recall, while a tool wrongly left
+ * out only costs one walk. An unknown tool therefore errs toward taking a
+ * snapshot, which is the safe direction.
+ */
+const READ_ONLY_TOOLS = new Set([
+  'read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch',
+  'ask_user_question', 'todo_write', 'job_list', 'job_output',
+  'skill', 'present', 'memory_recall', 'session_search', 'session_event_search',
+])
 
 /**
  * Parse the argument.
@@ -195,10 +297,46 @@ function coded(
   })
 }
 
+/**
+ * The session facts one tool dispatch exposes, or undefined when it carries none.
+ *
+ * `cwd` is optional: a session header does not have to carry one, and the two
+ * readers here need different things from it — the recorder needs only the id and
+ * the turn, the workspace snapshot needs a root.
+ */
+interface SessionInfo {
+  readonly id: string
+  /** The session's working directory, when its header carries one. */
+  readonly cwd: string | undefined
+  readonly turn: number
+}
+
+/** The session facts a workspace snapshot needs: the same, with a root. */
+interface SnapshotTarget {
+  readonly id: string
+  readonly cwd: string
+  readonly turn: number
+}
+
+/** One file a recall will put back, with the bytes it will write. */
+interface RevertTarget {
+  readonly path: string
+  readonly before: Buffer | null
+}
+
+/** The cut a preview and a recall both work from. */
+type CutPlan = { readonly turns: readonly number[], readonly startSeq: number, readonly endSeq: number }
+
 export function apply(ctx: Context, config: Config): void {
   const log = ctx.logger(name)
   const maxAnchors = Number.isSafeInteger(config.maxAnchors) && config.maxAnchors >= 1 ? config.maxAnchors : MAX_ANCHORS
   const { recorder, record } = createRecorder()
+  const limits: TreeLimits = {
+    ...DEFAULT_TREE_LIMITS,
+    maxFiles: positive(config.maxSnapshotFiles, DEFAULT_TREE_LIMITS.maxFiles),
+    maxTotalBytes: positive(config.maxSnapshotBytes, DEFAULT_TREE_LIMITS.maxTotalBytes),
+  }
+  const snapshotWorkspace = config.snapshotWorkspace !== false
 
   // --- The quarantine manager rides the Connection exact-Fetch registry, the
   // same carrier every suite route uses. `connection` is declared in `inject`
@@ -225,18 +363,75 @@ export function apply(ctx: Context, config: Config): void {
   // the write's CAS guard and never calls `next()`, so a later listener never
   // runs — silently. See `./recorder.ts` for the measurement.
   //
-  // The events themselves are declared in the `Events` augmentation at the top of
-  // this module: they are dispatched by `dsh-tool-fs`, which a plugin does not
-  // depend on, so their signatures are stated here rather than imported. ---
+  // The capture is AWAITED before the write is released: a before-image read
+  // after the write landed is not a before-image, and the read is bounded (≤4 MB)
+  // so the cost is one small read per write call. ---
   const onIntent = (name: 'fs/write-intent' | 'fs/edit-intent'): void => {
-    ctx.effect(() => ctx.on(name, (target, exec, next) => {
+    ctx.effect(() => ctx.on(name, async (target, exec, next) => {
       const path = String((target as { targetKey?: unknown } | null)?.targetKey ?? '')
-      if (path !== '') record(path, turnOfExec(exec), seqOfExec(exec))
+      const info = sessionInfoOfExec(exec)
+      if (path !== '' && info !== undefined) {
+        try {
+          await record(info.id, path, info.turn, seqOfExec(exec))
+        } catch (error) {
+          // A capture failure must never block the user's write.
+          log.warn(`rewind: could not snapshot ${path}: ${messageOf(error)}`)
+        }
+      }
       return next()
     }, { prepend: true }), `plugin-rewind: ${name} recorder`)
   }
   onIntent('fs/write-intent')
   onIntent('fs/edit-intent')
+
+  // --- The workspace snapshot. Taken lazily, at the FIRST tool call of a turn
+  // that could write, and only once per turn: a turn of pure chat or reads costs
+  // nothing, and the snapshot is by construction the state before anything in
+  // that turn changed. `write` and `edit` DO trigger it — the write waterfalls
+  // cover their target exactly, but a turn that writes and then runs a shell
+  // command would otherwise be snapshotted AFTER the write, and the diff would
+  // then treat that write as part of the range's starting state. ---
+  const captured = new Set<string>()
+  ctx.effect(() => ctx.on('tools/pre-execute', async (exec, next) => {
+    const info = sessionInfoOfExec(exec)
+    const tool = String((exec as { name?: unknown } | null)?.name ?? '')
+    if (
+      snapshotWorkspace
+      && info !== undefined
+      && info.cwd !== undefined
+      && !READ_ONLY_TOOLS.has(tool)
+    ) {
+      // AWAITED, not fire-and-forget: the snapshot must describe the workspace
+      // BEFORE this tool runs. Started and not waited for, it would race the very
+      // write it exists to capture.
+      try {
+        await ensureSnapshot({ id: info.id, cwd: info.cwd, turn: info.turn }, signalOfExec(exec))
+      } catch (error) {
+        // A tool call is never failed over bookkeeping: the snapshot is a safety
+        // net, and a missing net must not stop the work.
+        log.warn(`rewind: workspace snapshot failed: ${messageOf(error)}`)
+      }
+    }
+    return next()
+  }, { prepend: true }), 'plugin-rewind: workspace snapshot gate')
+
+  /**
+   * Take this turn's workspace snapshot if it does not exist yet.
+   *
+   * The in-memory guard is claimed BEFORE the await so two concurrent tool calls
+   * of one step cannot both walk the tree, and it is never released: a snapshot
+   * that failed is not retried mid-turn, because the state it would capture is no
+   * longer the turn's starting state.
+   */
+  async function ensureSnapshot(info: SnapshotTarget, signal?: AbortSignal): Promise<void> {
+    const key = `${info.id}\u0000${String(info.turn)}`
+    if (captured.has(key)) return
+    captured.add(key)
+    const dshHome = resolveDshHome()
+    const previous = await latestSnapshotBefore(dshHome, info.id, info.turn)
+    await captureWorkspace(dshHome, info.id, info.turn, info.cwd, limits, previous, signal)
+    await pruneSnapshots(dshHome, info.id, limits)
+  }
 
   const handle = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const session = invocation.agent.session
@@ -285,10 +480,12 @@ export function apply(ctx: Context, config: Config): void {
       return { kind: 'error', text: coded(failureCode, failureParams) }
     }
 
+    const sessionId = String(session.header.id)
+
     // A preview stops here: it has answered what the recall would do, and it must
     // not have changed anything on the way.
     if (parsed.kind === 'plan') {
-      const preview = await previewRevert(String(session.header.id), plan.turns, recorder)
+      const preview = await previewRevert(session, sessionId, plan, recorder, limits)
       return {
         kind: 'success',
         text: coded('rewind.host.plan', undefined, undefined, {
@@ -301,19 +498,25 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     // Revert the files this turn range changed. This is deliberately NOT fatal:
-    // a file whose snapshot was never captured (a shell write, an oversized file)
-    // cannot be reported by refusing the whole recall, and the transcript really
-    // can go back even when the tree cannot. The report rides the result.
-    const turns = plan.turns
-    let revert: FileRevert | undefined
+    // a file whose before-image was never captured (an oversized file, a range
+    // from before this plugin could see it) cannot be reported by refusing the
+    // whole recall, and the transcript really can go back even when the tree
+    // cannot. The report rides the result.
+    let revert: FileRevert
     try {
-      revert = await revertFiles(String(session.header.id), turns, recorder, log)
+      revert = await revertFiles(session, sessionId, plan, recorder, limits, log)
     } catch (error) {
       // A revert that throws must not lose the recall: the transcript change is
       // the feature, and a failed restore is reported as such.
-      const detail = error instanceof Error ? error.message : String(error)
+      const detail = messageOf(error)
       log.warn(`rewind: file revert failed: ${detail}`)
-      revert = { restored: 0, removed: 0, unrestorable: [{ path: '(all)', reason: detail }] }
+      revert = {
+        restored: 0,
+        removed: 0,
+        unrestorable: [{ path: '(all)', reason: detail }],
+        coverage: 'none',
+        coverageReason: 'revertFailed',
+      }
     }
 
     let sourceEventSeq: SessionSeq
@@ -329,13 +532,19 @@ export function apply(ctx: Context, config: Config): void {
     } catch (error) {
       // The kernel's own message is the honest diagnostic; it travels as the
       // developer-facing fallback, never as user copy.
-      const detail = error instanceof Error ? error.message : String(error)
+      const detail = messageOf(error)
       log.warn(`rewind: replacement rejected: ${detail}`)
       return { kind: 'error', text: coded('rewind.host.rejected', undefined, detail) }
     }
 
-    // The recalled turns are off the surface, so their snapshots are dead weight.
-    recorder.forget(plan.turns)
+    // The recalled turns are off the surface, so their before-images are dead
+    // weight — in memory and on disk.
+    recorder.forget(sessionId, plan.turns)
+    try {
+      await dropSnapshots(resolveDshHome(), sessionId, plan.turns)
+    } catch (error) {
+      log.warn(`rewind: snapshot cleanup failed: ${messageOf(error)}`)
+    }
 
     return {
       kind: 'success',
@@ -344,7 +553,7 @@ export function apply(ctx: Context, config: Config): void {
       // The file revert's tally rides the same payload; see `coded`.
       text: coded('rewind.host.done', { n: parsed.n }, undefined, {
         prompt: plan.prompt,
-        ...(revert === undefined ? {} : { files: revert }),
+        files: revert,
       }),
       sourceEventSeq,
     }
@@ -362,22 +571,53 @@ export function apply(ctx: Context, config: Config): void {
   }), 'plugin-rewind: /rewind command')
 }
 
+/** A positive safe integer from config, or the fallback. */
+function positive(value: number, fallback: number): number {
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback
+}
+
+/** One error's message, for a log line. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** The session handle inside a tool executor, or undefined. */
+function sessionOfExec(exec: unknown): {
+  seq?: unknown
+  header?: { id?: unknown, cwd?: unknown }
+  ownEvents?: () => readonly { type?: unknown, seq?: unknown, data?: unknown }[]
+} | undefined {
+  const agent = (exec as { agent?: { session?: unknown } } | null)?.agent
+  const session = agent?.session
+  return typeof session === 'object' && session !== null ? session as never : undefined
+}
+
 /**
- * The turn a write belongs to, read off the tool executor's agent.
+ * The session facts a tool dispatch carries: id, workspace root, and the open
+ * turn.
  *
  * There is no public "current turn" accessor on a Session, so it comes from the
  * log — see `turnAt`. `exec.agent.session` is the same handle the `write` tool
  * itself reads its cwd from (`dsh-tool-fs/lib/index.js`), so this needs no extra
  * service.
  */
-function turnOfExec(exec: unknown): number | null {
+function sessionInfoOfExec(exec: unknown): SessionInfo | undefined {
   const session = sessionOfExec(exec)
-  if (session?.ownEvents === undefined) return null
+  if (session === undefined || session.ownEvents === undefined) return undefined
+  const id = session.header?.id
+  if (typeof id !== 'string' || id === '') return undefined
+  // `cwd` is optional HERE on purpose. The recorder needs only the session id and
+  // the turn, and a session whose header carries no cwd must still have its writes
+  // recorded; only the workspace SNAPSHOT needs a root. Requiring it here made a
+  // write-only range restore nothing at all — caught by re-running the probes.
+  const raw = session.header?.cwd
+  const cwd = typeof raw === 'string' && raw !== '' ? raw : undefined
   const seq = typeof session.seq === 'number' ? session.seq : Number.MAX_SAFE_INTEGER
   try {
-    return turnAt(session.ownEvents(), seq)
+    const turn = turnAt(session.ownEvents(), seq)
+    return turn === null ? undefined : { id, cwd, turn }
   } catch {
-    return null
+    return undefined
   }
 }
 
@@ -387,11 +627,18 @@ function seqOfExec(exec: unknown): number {
   return typeof seq === 'number' && Number.isSafeInteger(seq) ? seq : 0
 }
 
-/** The session handle inside a tool executor, or undefined. */
-function sessionOfExec(exec: unknown): { seq?: unknown, ownEvents?: () => readonly { type?: unknown, seq?: unknown, data?: unknown }[] } | undefined {
-  const agent = (exec as { agent?: { session?: unknown } } | null)?.agent
-  const session = agent?.session
-  return typeof session === 'object' && session !== null ? session as never : undefined
+/**
+ * The tool call's abort signal, when it carries one.
+ *
+ * The kernel requires an async gate on `tools/pre-execute` to observe it: a
+ * cancelled call is not abandoned by the kernel, so a walk that ignores the
+ * signal keeps working for a tool nobody is waiting for any more.
+ */
+function signalOfExec(exec: unknown): AbortSignal | undefined {
+  const signal = (exec as { signal?: unknown } | null)?.signal
+  return typeof signal === 'object' && signal !== null && 'aborted' in signal
+    ? signal as AbortSignal
+    : undefined
 }
 
 /**
@@ -403,19 +650,158 @@ function sessionOfExec(exec: unknown): { seq?: unknown, ownEvents?: () => readon
  * LAST one would leave the file as the range's own final write left it, which
  * undoes nothing.
  *
+ * @param sessionId - the session whose turns are being recalled.
  * @param turns - the turns the recall removes.
  * @param recorder - the file-change recorder.
  * @returns one entry per path, plus the changes that could not be captured.
  */
 function planPaths(
+  sessionId: string,
   turns: readonly number[],
   recorder: Recorder,
 ): { readonly targets: readonly RecordedChange[], readonly failures: readonly CaptureFailure[] } {
   const firstByPath = new Map<string, RecordedChange>()
-  for (const change of recorder.changesForTurns(turns)) {
+  for (const change of recorder.changesForTurns(sessionId, turns)) {
     if (!firstByPath.has(change.path)) firstByPath.set(change.path, change)
   }
-  return { targets: [...firstByPath.values()], failures: recorder.failuresForTurns(turns) }
+  return { targets: [...firstByPath.values()], failures: recorder.failuresForTurns(sessionId, turns) }
+}
+
+/**
+ * Merge the two before-image sources into the list to restore.
+ *
+ * The snapshot is authoritative for any path it COVERED — it holds the state at
+ * the moment the range's first turn began to change things, which is the target
+ * state by definition, and it is the only source that saw a shell command. The
+ * recorder is authoritative everywhere else: a write outside the workspace, a
+ * path under a directory the snapshot skips, or a file too large to snapshot.
+ *
+ * A covered path the diff found UNCHANGED is not restored at all, even when the
+ * recorder holds a before-image for it: the bytes are already the target bytes,
+ * and restoring them would only add a pointless quarantine copy.
+ *
+ * @param sessionId - the session being recalled.
+ * @param turns - the turns the recall removes.
+ * @param recorder - the write-waterfall recorder.
+ * @param diff - the diff of the current workspace against the range's snapshot,
+ *   when one exists.
+ * @returns the targets, plus everything the merge knows it could not cover.
+ */
+function mergeTargets(
+  sessionId: string,
+  turns: readonly number[],
+  recorder: Recorder,
+  diff: Awaited<ReturnType<typeof diffWorkspace>> | undefined,
+): { readonly targets: readonly RevertTarget[], readonly missed: readonly Unrestorable[] } {
+  const { targets: recorded, failures } = planPaths(sessionId, turns, recorder)
+  const missed: Unrestorable[] = []
+  const byPath = new Map<string, RevertTarget>()
+
+  if (diff !== undefined) {
+    for (const target of diff.restore) byPath.set(pathKey(target.path), target)
+    for (const path of diff.missing) {
+      missed.push({ path, reason: 'its before-image is no longer in the snapshot store' })
+    }
+    for (const path of diff.uncapturedChanged) {
+      missed.push({ path, reason: 'its earlier content was never kept (too large, unreadable, or a link)' })
+    }
+    // An incomplete walk is reported through `coverage: partial` rather than as a
+    // path: the plugin does not know WHICH files it never reached, and inventing a
+    // row for that reads as a file named "(files created in this range)".
+  }
+
+  for (const change of recorded) {
+    // The snapshot decided this path, so its bytes win — including the decision
+    // that the path did not change at all.
+    if (diff !== undefined && diff.coveredOf(change.path)) continue
+    // Keyed by `pathKey`, not by the raw string: the two sources spell one file
+    // differently (see `pathKey`), and a raw key would put the same file in the
+    // list twice — two quarantine copies for one restore.
+    const key = pathKey(change.path)
+    if (byPath.has(key)) continue
+    byPath.set(key, { path: change.path, before: change.before })
+  }
+
+  // A capture failure is only reported for a path the restore did not handle:
+  // otherwise a file the snapshot put back would be listed as both restored and
+  // unrestorable, which reads as a contradiction.
+  for (const failure of failures) {
+    if (byPath.has(pathKey(failure.path))) continue
+    if (diff !== undefined && diff.coveredOf(failure.path)) continue
+    missed.push({ path: failure.path, reason: failure.reason })
+  }
+  return { targets: [...byPath.values()], missed }
+}
+
+/**
+ * The tool names that ran inside one recalled range and can write files.
+ *
+ * Read from the session log, which is the durable record: an in-memory note
+ * would be empty exactly when it matters (a restarted kernel child), and the
+ * whole point of this list is to tell the user when a recall cannot see what a
+ * range did.
+ */
+function writingToolsInRange(session: SessionLike, startSeq: number, endSeq: number): string[] {
+  const names = new Set<string>()
+  for (let seq = startSeq; seq <= endSeq; seq += 1) {
+    const event: EventLike | undefined = session.eventAt(seq)
+    if (event === undefined || event.type !== 'tool/call') continue
+    const name = (event.data as { name?: unknown } | null)?.name
+    if (typeof name !== 'string' || name === '') continue
+    if (READ_ONLY_TOOLS.has(name)) continue
+    names.add(name)
+  }
+  return [...names]
+}
+
+/**
+ * How much of a range's file changes a recall can see, and why not.
+ *
+ * `full` means every path the range could have changed is accounted for: either
+ * the workspace snapshot covered the whole tree, or the only tools that ran are
+ * ones the recorder sees exactly. `none` means a tool that writes through its own
+ * handle ran and there is no snapshot for the range's first turn — the case that
+ * used to be reported as an unqualified success.
+ *
+ * @param session - the session being recalled.
+ * @param plan - the computed cut.
+ * @param snapshot - the range's first turn's snapshot, when there is one.
+ * @returns the coverage verdict, plus the tools that make it partial.
+ */
+function coverageOf(
+  session: SessionLike,
+  plan: CutPlan,
+  snapshot: TreeSnapshot | undefined,
+): { readonly coverage: RevertCoverage, readonly reason?: string, readonly tools?: readonly string[] } {
+  const tools = writingToolsInRange(session, plan.startSeq, plan.endSeq)
+  const blind = tools.filter((tool) => !RECORDER_TOOLS.has(tool))
+  if (blind.length === 0) return { coverage: 'full', ...(tools.length === 0 ? {} : { tools }) }
+  if (snapshot === undefined) return { coverage: 'none', reason: 'noSnapshot', tools: blind }
+  if (snapshot.complete) return { coverage: 'full', tools }
+  return { coverage: 'partial', reason: snapshot.reason ?? 'incomplete', tools: blind }
+}
+
+/**
+ * Read the range's snapshot and diff the current workspace against it.
+ *
+ * One helper so the preview and the recall cannot disagree about which turn's
+ * state the range starts from.
+ *
+ * @param sessionId - the session being recalled.
+ * @param plan - the computed cut.
+ * @param limits - the workspace-snapshot bounds.
+ * @returns the snapshot (when there is one) and its diff.
+ */
+async function snapshotDiff(
+  sessionId: string,
+  plan: CutPlan,
+  limits: TreeLimits,
+): Promise<{ readonly snapshot: TreeSnapshot | undefined, readonly diff: Awaited<ReturnType<typeof diffWorkspace>> | undefined }> {
+  const dshHome = resolveDshHome()
+  const first = plan.turns[0]
+  const snapshot = first === undefined ? undefined : await readSnapshot(dshHome, sessionId, first)
+  const diff = snapshot === undefined ? undefined : await diffWorkspace(snapshot, dshHome, limits)
+  return { snapshot, diff }
 }
 
 /**
@@ -428,42 +814,64 @@ function planPaths(
  *
  * The read is best-effort per file: a file that cannot be read now is still
  * listed for restore, with no diff, because refusing to preview it would hide a
- * change the recall is about to make.
+ * change the recall is about to make. Binary content has no diff to show — the
+ * kernel's own diff view is text — so those rows carry paths only.
  *
- * @param sessionId - the session being recalled.
- * @param turns - the turns the recall removes.
+ * @param session - the session being recalled.
+ * @param sessionId - the session being recalled, by id.
+ * @param plan - the computed cut.
  * @param recorder - the file-change recorder.
+ * @param limits - the workspace-snapshot bounds.
  * @returns the plan, as the client's dialog consumes it.
  */
 async function previewRevert(
+  session: SessionLike,
   sessionId: string,
-  turns: readonly number[],
+  plan: CutPlan,
   recorder: Recorder,
-): Promise<{ restore: FileChangePreview[], remove: FileChangePreview[], unrestorable: Unrestorable[] }> {
-  const { targets, failures } = planPaths(turns, recorder)
+  limits: TreeLimits,
+): Promise<{
+  restore: FileChangePreview[]
+  remove: FileChangePreview[]
+  unrestorable: readonly Unrestorable[]
+  coverage: RevertCoverage
+  coverageReason?: string
+  tools?: readonly string[]
+}> {
+  const { snapshot, diff } = await snapshotDiff(sessionId, plan, limits)
+  const { targets, missed } = mergeTargets(sessionId, plan.turns, recorder, diff)
   const restore: FileChangePreview[] = []
   const remove: FileChangePreview[] = []
   for (const target of targets) {
     const current = await captureBefore(target.path)
     const now = current.kind === 'captured' ? current.before : undefined
+    const nowText = textOf(now)
+    const nextText = textOf(target.before)
     if (target.before === null) {
       // The range created it; the recall moves it into the quarantine.
       remove.push({
         path: target.path,
         action: 'remove',
-        ...(now === null || now === undefined ? {} : { current: now }),
+        ...(nowText === undefined ? {} : { current: nowText }),
       })
       continue
     }
     restore.push({
       path: target.path,
       action: 'restore',
-      ...(now === null || now === undefined ? {} : { current: now }),
-      next: target.before,
+      ...(nowText === undefined ? {} : { current: nowText }),
+      ...(nextText === undefined ? {} : { next: nextText }),
     })
   }
-  void sessionId
-  return { restore, remove, unrestorable: failures.map((f) => ({ path: f.path, reason: f.reason })) }
+  const cover = coverageOf(session, plan, snapshot)
+  return {
+    restore,
+    remove,
+    unrestorable: missed,
+    coverage: cover.coverage,
+    ...(cover.reason === undefined ? {} : { coverageReason: cover.reason }),
+    ...(cover.tools === undefined ? {} : { tools: cover.tools }),
+  }
 }
 
 /**
@@ -473,37 +881,51 @@ async function previewRevert(
  * this range CREATED is moved there rather than deleted — the recall stays
  * reversible and nothing is destroyed. See `./snapshots.ts`.
  *
- * A change that could not be captured — a shell write, an oversized file — is
- * reported, never silently skipped, because the one outcome a user must not get
- * is a confident "reverted" over a tree that was only partly put back.
+ * A change that could not be captured — an oversized file, a range with no
+ * snapshot — is reported, never silently skipped, because the one outcome a user
+ * must not get is a confident "reverted" over a tree that was only partly put
+ * back.
  *
- * @param sessionId - the session being recalled, for the quarantine path.
- * @param turns - the turns the recall removes.
+ * @param session - the session being recalled.
+ * @param sessionId - the session being recalled, by id.
+ * @param plan - the computed cut.
  * @param recorder - the file-change recorder.
+ * @param limits - the workspace-snapshot bounds.
  * @param log - the plugin's logger.
  * @returns what happened, for the command result.
  */
 async function revertFiles(
+  session: SessionLike,
   sessionId: string,
-  turns: readonly number[],
+  plan: CutPlan,
   recorder: Recorder,
+  limits: TreeLimits,
   log: { warn(message: string): void },
 ): Promise<FileRevert> {
-  const { targets, failures } = planPaths(turns, recorder)
-  const dir = quarantineRoot(resolveDshHome(), sessionId)
+  const dshHome = resolveDshHome()
+  const { snapshot, diff } = await snapshotDiff(sessionId, plan, limits)
+  const { targets, missed } = mergeTargets(sessionId, plan.turns, recorder, diff)
+  const dir = quarantineRoot(dshHome, sessionId)
   const now = Date.now()
-  const unrestorable: Unrestorable[] = failures.map((f) => ({ path: f.path, reason: f.reason }))
+  const unrestorable: Unrestorable[] = [...missed]
   let restored = 0
   let removed = 0
-  for (const snapshot of targets) {
-    const outcome = await restoreOne({ path: snapshot.path, before: snapshot.before }, dir, now)
+  for (const target of targets) {
+    const outcome = await restoreOne({ path: target.path, before: target.before }, dir, now, limits.maxFileBytes)
     if (outcome.kind === 'restored') restored += 1
     else if (outcome.kind === 'removed') removed += 1
     else {
-      unrestorable.push({ path: snapshot.path, reason: outcome.reason ?? 'unknown' })
-      log.warn(`rewind: could not restore ${snapshot.path}: ${outcome.reason ?? 'unknown'}`)
+      unrestorable.push({ path: target.path, reason: outcome.reason ?? 'unknown' })
+      log.warn(`rewind: could not restore ${target.path}: ${outcome.reason ?? 'unknown'}`)
     }
   }
-  return { restored, removed, unrestorable }
+  const cover = coverageOf(session, plan, snapshot)
+  return {
+    restored,
+    removed,
+    unrestorable,
+    coverage: cover.coverage,
+    ...(cover.reason === undefined ? {} : { coverageReason: cover.reason }),
+    ...(cover.tools === undefined ? {} : { tools: cover.tools }),
+  }
 }
-

@@ -75,7 +75,7 @@ import { makeMessageActionView } from './client/message-action.tsx'
 import { RewindCommandRow } from './client/command-row.tsx'
 import { anchorsToOptions, type RewindView } from './client/popup.ts'
 import type { RecallOutcome } from './client/outcome.ts'
-import { hostCode } from './client/messages.ts'
+import { coverageSentence, hostCode, type FileReportLike } from './client/messages.ts'
 import type { Translate } from './client/messages.ts'
 import type { RevertPlan } from './wire.ts'
 import { QuarantineSection } from './client/quarantine-section.tsx'
@@ -587,15 +587,21 @@ async function recallByOrdinal(
 /**
  * Read the file revert's tally out of a success result.
  *
- * Reports ONLY the unrestorable ones. A recall that did what it said needs no
- * announcement — the message is gone from the transcript and the text is back in
- * the composer, which the user can see. A tally of restored/removed files is
- * noise on a success; measured on a real machine as a small red note over the
- * composer after a perfectly good recall, which reads as a problem.
+ * Reports only what went WRONG, and there are two shapes of wrong:
  *
- * The failure case is the opposite: a file this plugin could not see (a shell
- * command's write) leaves the tree half-reverted, and staying quiet about that
- * would make "reverted" a lie. So that one IS announced, with paths.
+ *   - `unrestorable` — files this plugin knows it could not put back, named
+ *     rather than counted, because "1 file could not be restored" without saying
+ *     WHICH one is not actionable;
+ *   - `coverage` other than `full` — the range ran a tool whose writes the
+ *     plugin cannot observe and there was no workspace snapshot to fall back on,
+ *     so it cannot even name what it missed. This is the case that used to be
+ *     reported as an unqualified success.
+ *
+ * A recall that did what it said needs no announcement — the message is gone from
+ * the transcript and the text is back in the composer, which the user can see. A
+ * tally of restored/removed files is noise on a success; measured on a real
+ * machine as a small red note over the composer after a perfectly good recall,
+ * which reads as a problem.
  *
  * @param raw - the command result's text, carrying the coded payload.
  * @param t - this plugin's locale-bound `t`.
@@ -613,19 +619,26 @@ function revertSummary(
     return undefined
   }
   if (typeof files !== 'object' || files === null) return undefined
-  const { unrestorable } = files as { unrestorable?: unknown }
-  if (!Array.isArray(unrestorable) || unrestorable.length === 0) return undefined
-  // Named, not counted: "1 file could not be restored" without saying WHICH one
-  // is not actionable. The sentence comes from the DICTIONARY — an English
-  // literal here showed up in a Chinese UI, which is the same rule the host half
-  // follows when it sends a code instead of prose.
-  const names = unrestorable
-    .map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { path?: unknown }).path : undefined))
-    .filter((p): p is string => typeof p === 'string')
-  return t('rewind.files.unrestorable', {
-    count: unrestorable.length,
-    paths: names.join(', '),
+  const parts: string[] = []
+  const coverage = coverageSentence(files as FileReportLike, t, {
+    none: 'rewind.files.coverageNone',
+    partial: 'rewind.files.coveragePartial',
   })
+  if (coverage !== undefined) parts.push(coverage)
+  const { unrestorable } = files as { unrestorable?: unknown }
+  if (Array.isArray(unrestorable) && unrestorable.length > 0) {
+    // The sentence comes from the DICTIONARY — an English literal here showed up
+    // in a Chinese UI, which is the same rule the host half follows when it sends
+    // a code instead of prose.
+    const names = unrestorable
+      .map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { path?: unknown }).path : undefined))
+      .filter((p): p is string => typeof p === 'string')
+    parts.push(t('rewind.files.unrestorable', {
+      count: unrestorable.length,
+      paths: names.join(', '),
+    }))
+  }
+  return parts.length === 0 ? undefined : parts.join(' ')
 }
 
 /**

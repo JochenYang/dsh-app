@@ -1,28 +1,38 @@
 /**
- * File snapshots for a recall: the before-image of every file a turn changed.
+ * File snapshots for a recall: the before-image of every file a recall put back.
  *
- * ## What this can and cannot see
+ * ## Where a before-image comes from
  *
- * The host gives a plugin two pre-write waterfalls — `fs/write-intent` and
- * `fs/edit-intent` — and exactly two packages dispatch them:
- * `dsh-tool-fs` (`write`, `edit`) and `dsh-tool-str-replace-editor`. Measured on
- * this machine's own session logs, those are 3481 of 15196 tool calls (22.9%).
+ * Two sources, merged by `planPaths` in `./index.ts`:
  *
- * A shell command that creates, moves, rewrites or deletes a file (`pwsh`,
- * `run_code`) never passes through here — 4772 calls (31.4%) — and neither does
- * any tool that writes through its own fs handle. Those changes are invisible to
- * this module by construction, and the restore step must say so rather than
- * pretend the tree was put back.
+ *   1. **The write waterfalls** (`fs/write-intent` / `fs/edit-intent`) — exact,
+ *      for the two packages that dispatch them (`dsh-tool-fs`, its `write` and
+ *      `edit`, and `dsh-tool-str-replace-editor`). This is the only source that
+ *      can see a write OUTSIDE the workspace.
+ *   2. **The workspace snapshot** (`./trees.ts`) — a bounded copy of the
+ *      workspace taken before the first tool call of a turn that could write.
+ *      This is what covers everything the waterfalls cannot see: a shell command
+ *      (`pwsh`, `run_code`), an office renderer, any tool holding its own fs
+ *      handle. Measured on a real session: 31% of tool calls write that way, and
+ *      a recall that ignored them reported a clean success over a tree it had
+ *      only partly put back.
+ *
+ * ## Bytes, not text
+ *
+ * Everything here is `Buffer`. An earlier version read and wrote `utf8`, which
+ * silently destroyed any non-text file it "restored" — a PNG read as utf8 and
+ * written back is not the PNG that was there. The write tools only ever write
+ * text, but the shell generates images and archives, so byte-exactness is the
+ * difference between a restore and a corruption. Text is produced only at the
+ * preview boundary, where a diff needs a string.
  *
  * ## Why a quarantine instead of undo
  *
  * Nothing is ever deleted. A restored file's CURRENT bytes are moved into the
  * quarantine directory before the before-image is written back, and a file the
- * recalled turn CREATED is moved there too instead of being unlinked. That keeps
- * the recall itself reversible: a wrong recall is recoverable by hand, and a file
- * the user changed during the turn is not lost. Deleting would make an
- * already-destructive action irreversible, which is the one thing a feature like
- * this must not do.
+ * recalled range CREATED is moved there too instead of being unlinked. That
+ * keeps the recall itself reversible: a wrong recall is recoverable by hand, and
+ * a file the user changed during the turn is not lost.
  *
  * @module @dsh-app/plugin-rewind/snapshots
  */
@@ -35,12 +45,12 @@ export interface Snapshot {
   /** Absolute path of the changed file. */
   readonly path: string
   /**
-   * The file's content before the change, or `null` when it did not exist.
+   * The file's bytes before the change, or `null` when it did not exist.
    *
    * `null` is how a CREATED file is recorded: restoring it means moving it out of
    * the way, not writing anything back.
    */
-  readonly before: string | null
+  readonly before: Buffer | null
 }
 
 /**
@@ -55,30 +65,51 @@ const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 
 /** The outcome of looking at one file before a change. */
 export type CaptureResult =
-  | { readonly kind: 'captured', readonly before: string | null }
+  | { readonly kind: 'captured', readonly before: Buffer | null }
   | { readonly kind: 'too-large' }
   | { readonly kind: 'unreadable', readonly reason: string }
 
 /**
- * Read a file's content for a snapshot.
+ * Read a file's bytes for a snapshot.
  *
  * An absent file is `captured` with `before: null` — that is the "this turn
  * created it" case, not an error. Any other read failure is reported rather than
  * guessed at, because a snapshot that is silently wrong is worse than none.
  *
  * @param path - absolute path of the file the write is about to change.
+ * @param maxBytes - size cap for this capture.
  * @returns what was captured, or why nothing was.
  */
-export async function captureBefore(path: string): Promise<CaptureResult> {
+export async function captureBefore(
+  path: string,
+  maxBytes: number = MAX_SNAPSHOT_BYTES,
+): Promise<CaptureResult> {
   try {
     const info = await stat(path)
     if (!info.isFile()) return { kind: 'unreadable', reason: 'not a regular file' }
-    if (info.size > MAX_SNAPSHOT_BYTES) return { kind: 'too-large' }
-    return { kind: 'captured', before: await readFile(path, 'utf8') }
+    if (info.size > maxBytes) return { kind: 'too-large' }
+    return { kind: 'captured', before: await readFile(path) }
   } catch (error) {
     if ((error as { code?: unknown }).code === 'ENOENT') return { kind: 'captured', before: null }
     return { kind: 'unreadable', reason: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/**
+ * Whether a byte image is text a diff can render.
+ *
+ * A NUL byte is the same test the kernel's own fs provider uses to refuse a
+ * binary read, and a lone surrogate would not survive a round trip through the
+ * wire. Anything else is shown as-is.
+ */
+export function isTextBytes(bytes: Buffer): boolean {
+  return !bytes.includes(0)
+}
+
+/** Decode a byte image for display, or `undefined` when it is not text. */
+export function textOf(bytes: Buffer | null | undefined): string | undefined {
+  if (bytes === null || bytes === undefined) return undefined
+  return isTextBytes(bytes) ? bytes.toString('utf8') : undefined
 }
 
 /** One change the restore could not put back, with the reason. */
@@ -154,16 +185,18 @@ export const MANIFEST_NAME = 'manifest.json'
  * @param snapshot - the captured before-image.
  * @param quarantineDir - where displaced content is kept.
  * @param now - clock for the quarantine slot name.
+ * @param maxBytes - size cap for quarantining the current bytes.
  * @returns a description of what happened, for the report.
  */
 export async function restoreOne(
   snapshot: Snapshot,
   quarantineDir: string,
   now: number,
+  maxBytes: number = MAX_SNAPSHOT_BYTES,
 ): Promise<{ readonly kind: 'restored' | 'removed' | 'failed', readonly reason?: string, readonly slot?: string }> {
   const slot = join(quarantineDir, `${stamp(now)}-${Math.abs(hash(snapshot.path))}`)
   try {
-    const current = await captureBefore(snapshot.path)
+    const current = await captureBefore(snapshot.path, maxBytes)
     if (current.kind === 'unreadable') return { kind: 'failed', reason: current.reason }
     if (current.kind === 'too-large') {
       return { kind: 'failed', reason: 'the current file is too large to quarantine safely' }
@@ -179,22 +212,22 @@ export async function restoreOne(
       )
 
     if (snapshot.before === null) {
-      // The turn created it. Its content is copied OUT and only then unlinked:
+      // The range created it. Its content is copied OUT and only then unlinked:
       // nothing is destroyed before a copy exists, and no rename is involved (see
-      // the module note on `EXDEV`).
+      // the note on `EXDEV`).
       if (present === null) return { kind: 'removed' }
-      await writeFile(join(slot, 'created'), present, 'utf8')
+      await writeFile(join(slot, 'created'), present)
       await writeManifest('created')
       await rm(snapshot.path, { force: true })
       return { kind: 'removed', slot }
     }
 
     if (present !== null) {
-      await writeFile(join(slot, 'replaced'), present, 'utf8')
+      await writeFile(join(slot, 'replaced'), present)
       await writeManifest('replaced')
     }
     await mkdir(dirname(snapshot.path), { recursive: true })
-    await writeFile(snapshot.path, snapshot.before, 'utf8')
+    await writeFile(snapshot.path, snapshot.before)
     return { kind: 'restored', slot }
   } catch (error) {
     return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) }

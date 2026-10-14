@@ -89,6 +89,60 @@ export function hostCode(raw: string | undefined): CodedAnswer | undefined {
 /** The dictionary key an unrecognised host code is reported under. */
 export const UNKNOWN_CODE: RewindKey = 'rewind.host.rejected'
 
+/** The file report as it rides a command result's `files` field. */
+export interface FileReportLike {
+  readonly coverage?: unknown
+  readonly coverageReason?: unknown
+  readonly tools?: unknown
+}
+
+/** The dictionary key naming why a workspace snapshot fell short. */
+export function coverageReasonKey(reason: unknown): RewindKey {
+  switch (reason) {
+    case 'noSnapshot': return 'rewind.files.reasonNoSnapshot'
+    case 'file-count': return 'rewind.files.reasonTooManyFiles'
+    case 'total-bytes': return 'rewind.files.reasonTooManyBytes'
+    case 'timeout': return 'rewind.files.reasonTimeout'
+    // A directory or file the walk could not read, or a link it refused to
+    // follow: the tree was looked at, but not all of it.
+    case 'unreadable-directory':
+    case 'unreadable-file':
+    case 'symlink': return 'rewind.files.reasonUnreadable'
+    default: return 'rewind.files.reasonOther'
+  }
+}
+
+/**
+ * The sentence for how much of a range's file changes a recall could see.
+ *
+ * `full` says nothing — a recall that did what it said needs no announcement —
+ * while `none` and `partial` are exactly the cases the user must hear about: the
+ * tree was only partly put back and this is the only place that says so. The
+ * shortfall's cause arrives as a code (`noSnapshot`, `file-count`, …) and is
+ * rendered here, because a host half never sends prose.
+ *
+ * @param files - the report from the command result, read defensively.
+ * @param t - this plugin's locale-bound `t`.
+ * @param keys - the two sentences this caller wants, so the transcript note and
+ *   the confirmation dialog can word the same fact differently.
+ * @returns the sentence, or undefined when coverage is full.
+ */
+export function coverageSentence(
+  files: FileReportLike | undefined,
+  t: Translate,
+  keys: { readonly none: RewindKey, readonly partial: RewindKey },
+): string | undefined {
+  const coverage = files?.coverage
+  if (coverage !== 'none' && coverage !== 'partial') return undefined
+  if (coverage === 'none') {
+    const tools = Array.isArray(files?.tools)
+      ? files.tools.filter((tool): tool is string => typeof tool === 'string').join(', ')
+      : ''
+    return t(keys.none, { tools: tools === '' ? '—' : tools })
+  }
+  return t(keys.partial, { reason: t(coverageReasonKey(files?.coverageReason)) })
+}
+
 /** Keep only the primitive values a sentence can interpolate. */
 function plainParams(raw: unknown): Record<string, string | number> | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined

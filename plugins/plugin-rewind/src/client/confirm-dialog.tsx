@@ -22,12 +22,22 @@
  * everything displaced lands in the quarantine — and the per-file preview below
  * is the confirmation the user actually needs.
  *
- * ## The unrestorable note is the point
+ * ## Two kinds of shortfall, both spoken
  *
  * A preview that lists only the changes it CAN make teaches the user to trust it.
- * A file a shell command touched is invisible to this plugin, so it cannot appear
- * as a row — but staying silent would read as "nothing else changed", which is
- * false. The note below the list is therefore always present, zero included.
+ * Two things can be missing, and they are different sentences:
+ *
+ *   - files the plugin knows it could not put back (too large to copy, an
+ *     oversized file, a before-image the store no longer holds) — these are named
+ *     in the count below;
+ *   - a range with NO workspace snapshot whose tools write through their own
+ *     handle, so the plugin cannot even name what it missed. That is the
+ *     `coverage` verdict, and it is the one that used to be reported as an
+ *     unqualified success.
+ *
+ * The note below the list is therefore always present, zero included: silence
+ * would read as "nothing else changed", which is exactly the claim a recall must
+ * not make when it cannot back it up.
  *
  * @module @dsh-app/plugin-rewind/client/confirm-dialog
  */
@@ -36,6 +46,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, DiffBlock, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FileChangePreview, RevertPlan } from '../wire.ts'
+import { coverageSentence } from './messages.ts'
 import type { RewindKey } from './locales.ts'
 
 /**
@@ -122,6 +133,18 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose }: Confi
   const remove = plan?.remove ?? []
   const unrestorable = plan?.unrestorable ?? []
   const rows: PreviewRow[] = [...restore, ...remove]
+  // A shortfall the plugin can NAME (files it could not put back) and one it can
+  // only quantify (a range with no snapshot, so it does not know what it missed)
+  // are different sentences, and both belong above the confirm button.
+  const coverage = coverageSentence(plan, t, {
+    none: 'rewind.confirm.coverageNone',
+    partial: 'rewind.confirm.coveragePartial',
+  })
+  const note = [
+    ...(coverage === undefined ? [] : [coverage]),
+    ...(unrestorable.length === 0 ? [] : [t('rewind.confirm.unrestorable', { n: unrestorable.length })]),
+  ].join(' ')
+  const warn = coverage !== undefined || unrestorable.length > 0
 
   return (
     <Modal
@@ -181,11 +204,10 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose }: Confi
       )}
 
       {/* Always present, zero included: silence here would read as "nothing else
-          changed", and a shell command's writes are exactly what this cannot see. */}
-      <p className="dshRewind-dialogNote" data-tone={unrestorable.length > 0 ? 'warn' : 'plain'}>
-        {unrestorable.length > 0
-          ? t('rewind.confirm.unrestorable', { n: unrestorable.length })
-          : t('rewind.confirm.note')}
+          changed", which is exactly the claim this plugin must not make when a
+          shortfall exists. */}
+      <p className="dshRewind-dialogNote" data-tone={warn ? 'warn' : 'plain'}>
+        {note === '' ? t('rewind.confirm.note') : note}
       </p>
     </Modal>
   )

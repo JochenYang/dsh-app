@@ -112,6 +112,17 @@ export interface FileChangePreview {
 }
 
 /**
+ * How much of a recalled range's file changes a recall can see.
+ *
+ * `full` — every path the range could have changed is accounted for.
+ * `partial` — the workspace snapshot hit one of its bounds.
+ * `none` — a tool whose writes this plugin cannot observe ran in the range and
+ * there is no snapshot for its first turn, so the recall cannot say what it
+ * missed. This is the verdict that used to be reported as a plain success.
+ */
+export type RevertCoverage = 'full' | 'partial' | 'none'
+
+/**
  * The whole file effect of one would-be recall — ONE definition, shared.
  *
  * The host builds it (`previewRevert` in `src/index.ts`) and the client's
@@ -123,12 +134,20 @@ export interface FileChangePreview {
  *
  * A change this plugin never saw — a shell command, an oversized file — is
  * `unrestorable` and named, never omitted: a preview that quietly leaves things
- * out is worse than no preview, because it teaches the user to trust it.
+ * out is worse than no preview, because it teaches the user to trust it. The
+ * `coverage` verdict carries the case where the plugin cannot even name what it
+ * missed.
  */
 export interface RevertPlan {
   readonly restore?: readonly FileChangePreview[]
   readonly remove?: readonly FileChangePreview[]
   readonly unrestorable?: readonly { readonly path: string, readonly reason: string }[]
+  /** How much of the range's file changes the recall could see. */
+  readonly coverage?: RevertCoverage
+  /** Why coverage is not `full`, as a client dictionary code. */
+  readonly coverageReason?: string
+  /** Tools that ran in the range and can write files. */
+  readonly tools?: readonly string[]
   /** Whether a recall at this ordinal is possible at all. */
   readonly ok?: boolean
   /** Why not, as a dictionary code, when `ok` is false. */

@@ -1,6 +1,26 @@
 /**
  * The file-change recorder: watches the two pre-write waterfalls and remembers
- * each file's before-image, keyed to the turn that changed it.
+ * each file's before-image, keyed to the SESSION, the turn and the WRITE that
+ * changed it.
+ *
+ * ## Why the session is part of the key
+ *
+ * Turn numbers are per session, and a kernel process runs every session the user
+ * opens — plus every subagent session a batch spawns. An earlier version keyed
+ * changes by turn number alone, so a recall in one session could match another
+ * session's turn 2: measured on a real harness, a recall in session B restored the
+ * file to session A's before-image, which is worse than restoring nothing.
+ *
+ * ## Why the write's sequence is part of the key, and of the record
+ *
+ * Two writes to one path inside one turn are the normal shape (`edit` then
+ * `edit`). The restore target is the state before the FIRST of them, and that was
+ * previously decided by the order the captures RESOLVED in — which the thread
+ * pool does not guarantee. A capture that finished second then won, and the recall
+ * put back the file as the first write had left it: the range's first change was
+ * never undone, and the report said `coverage: full`. The sequence is therefore
+ * stored on the record and the list is ordered by it, so "first" means the first
+ * WRITE.
  *
  * ## Why `prepend`
  *
@@ -19,15 +39,15 @@
  * `scratch/probe-fs-write-intent-real.mjs`: 7/7 checks, including that the write
  * still lands its exact bytes with the recorder installed.
  *
- * ## Why the capture is not awaited
+ * ## Why the capture IS awaited
  *
- * The waterfall is on the write's critical path — the `write` tool awaits it
- * before touching the file. Awaiting a full file read there would slow every
- * write in the session, so the read is started and the `next()` chain is returned
- * immediately. The ordering that matters is preserved: the read is STARTED
- * before the write happens, so it sees the pre-write bytes. A capture that is
- * still in flight when the turn is recalled is reported as unrestorable rather
- * than guessed at.
+ * The read has to finish before the write it guards is allowed to proceed, or it
+ * is not a before-image. Started and not awaited (the earlier design) the read is
+ * issued one I/O hop after `next()` releases the write, so it can observe the
+ * post-write bytes; measured 320/320 correct on an idle and a saturated thread
+ * pool, which is exactly the kind of "usually right" this feature must not rest
+ * on — a wrong before-image un-does nothing while reporting success. The cost is
+ * one bounded read (≤4 MB, refused past that) on the write path.
  *
  * @module @dsh-app/plugin-rewind/recorder
  */
@@ -36,16 +56,21 @@ import { captureBefore, type CaptureResult } from './snapshots.ts'
 
 /** One file's before-image, as the recorder holds it. */
 export interface RecordedChange {
+  /** Session whose turn changed the file. */
+  readonly sessionId: string
   /** Absolute path of the changed file. */
   readonly path: string
-  /** Content before the change, or null when the file did not exist. */
-  readonly before: string | null
+  /** Bytes before the change, or null when the file did not exist. */
+  readonly before: Buffer | null
   /** Turn the change belongs to, or null when none was open. */
   readonly turn: number | null
+  /** Log sequence of the write, so two writes to one path stay in WRITE order. */
+  readonly seq: number
 }
 
 /** A change that could not be captured, with the reason to report. */
 export interface CaptureFailure {
+  readonly sessionId: string
   readonly path: string
   readonly turn: number | null
   readonly reason: string
@@ -54,16 +79,16 @@ export interface CaptureFailure {
 /** What the recorder exposes to the recall path. */
 export interface Recorder {
   /**
-   * Every change recorded for one turn range, oldest first.
+   * Every change recorded for one session's turn range, EARLIEST WRITE FIRST.
    *
    * Two writes to the same path both appear: the earliest one holds the
    * before-image to restore, and the later ones are what the restore is undoing.
    */
-  changesForTurns(turns: readonly number[]): readonly RecordedChange[]
-  /** Captures that failed for one turn range, to report rather than hide. */
-  failuresForTurns(turns: readonly number[]): readonly CaptureFailure[]
+  changesForTurns(sessionId: string, turns: readonly number[]): readonly RecordedChange[]
+  /** Captures that failed for one session's turn range, to report rather than hide. */
+  failuresForTurns(sessionId: string, turns: readonly number[]): readonly CaptureFailure[]
   /** Drop everything for turns that are no longer on the surface. */
-  forget(turns: readonly number[]): void
+  forget(sessionId: string, turns: readonly number[]): void
   /** Everything still held, for tests and diagnostics. */
   size(): number
 }
@@ -72,62 +97,62 @@ export interface Recorder {
  * Create the recorder.
  *
  * @param capture - how to read a before-image; injected so tests can drive it.
- * @returns the recorder, plus the per-write entry point the hooks call.
+ * @returns the recorder, plus the per-write entry point the hooks await.
  */
 export function createRecorder(capture: (path: string) => Promise<CaptureResult> = captureBefore): {
   readonly recorder: Recorder
-  record(path: string, turn: number | null, seq: number): void
+  record(sessionId: string, path: string, turn: number | null, seq: number): Promise<void>
 } {
   const changes: RecordedChange[] = []
   const failures: CaptureFailure[] = []
-  // Keyed by `path\u0000seq` so a re-entrant hook cannot double-record one write.
+  // Keyed by `session\u0000path\u0000seq` so a re-entrant hook cannot double-record
+  // one write — a second capture would file a before-image taken AFTER the first
+  // write.
   const seen = new Set<string>()
 
   return {
     recorder: {
-      changesForTurns(turns) {
+      changesForTurns(sessionId, turns) {
         const wanted = new Set(turns)
-        return changes.filter((c) => c.turn !== null && wanted.has(c.turn))
+        return changes
+          .filter((c) => c.sessionId === sessionId && c.turn !== null && wanted.has(c.turn))
+          .sort((a, b) => a.seq - b.seq)
       },
-      failuresForTurns(turns) {
+      failuresForTurns(sessionId, turns) {
         const wanted = new Set(turns)
-        return failures.filter((f) => f.turn !== null && wanted.has(f.turn))
+        return failures.filter((f) => f.sessionId === sessionId && f.turn !== null && wanted.has(f.turn))
       },
-      forget(turns) {
+      forget(sessionId, turns) {
         const wanted = new Set(turns)
         for (let i = changes.length - 1; i >= 0; i -= 1) {
-          const turn = changes[i].turn
-          if (turn !== null && wanted.has(turn)) changes.splice(i, 1)
+          const change = changes[i]
+          if (change.sessionId !== sessionId) continue
+          if (change.turn !== null && wanted.has(change.turn)) changes.splice(i, 1)
         }
         for (let i = failures.length - 1; i >= 0; i -= 1) {
-          const turn = failures[i].turn
-          if (turn !== null && wanted.has(turn)) failures.splice(i, 1)
+          const failure = failures[i]
+          if (failure.sessionId !== sessionId) continue
+          if (failure.turn !== null && wanted.has(failure.turn)) failures.splice(i, 1)
         }
       },
       size() {
         return changes.length
       },
     },
-    record(path, turn, seq) {
-      // Keyed by path + the write's own sequence, so a re-entrant hook cannot
-      // record the same write twice — a second capture would file a before-image
-      // taken AFTER the first write. The sequence is used ONLY here; it is not
-      // stored on the record, because nothing orders by it (the restore groups by
-      // path and keeps the first before-image).
-      const key = `${path}\u0000${String(seq)}`
+    async record(sessionId, path, turn, seq) {
+      const key = `${sessionId}\u0000${path}\u0000${String(seq)}`
       if (seen.has(key)) return
       seen.add(key)
-      // Started here, resolved on its own: the write proceeds without waiting.
-      void capture(path).then((result) => {
-        if (result.kind === 'captured') {
-          changes.push({ path, before: result.before, turn })
-          return
-        }
-        failures.push({
-          path,
-          turn,
-          reason: result.kind === 'too-large' ? 'the file is too large to snapshot' : result.reason,
-        })
+      const result = await capture(path)
+      if (result.kind === 'captured') {
+        changes.push({ sessionId, path, before: result.before, turn, seq })
+        return
+      }
+      failures.push({
+        sessionId,
+        path,
+        turn,
+        reason: result.kind === 'too-large' ? 'the file is too large to snapshot' : result.reason,
       })
     },
   }
