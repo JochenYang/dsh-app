@@ -20,7 +20,7 @@
 │   src/main/window.ts       sandboxed main window + desktop chrome + update card
 │   src/main/tray.ts         tray menu
 │   src/main/updater.ts      shell channel: Windows mirror download + VISIBLE NSIS wizard; else electron-updater
-│   src/main/brand-suite.ts  suite wiring: $DSH_HOME plugin links + --patch loader overlay
+│   src/main/brand-suite.ts  suite wiring: $DSH_HOME plugin links + the overlay rows it writes into the profile patch
 │   src/main/update-card.ts  injected card script (message + progress bar)
 ├─ Kernel manager
 │   src/kernel/manager.ts    lifecycle: init / update / activate / rollback / cleanup
@@ -42,9 +42,16 @@
     plugin-presets (dual-face) preset bundles: import/export of brand + upstream configuration
     plugin-rewind (dual-face)  message recall + file revert, with a quarantine manager tab
     plugin-effort (client)     reasoning-effort track on the official model menu's 推理等级 row
+    plugin-workbench (client)  workbench hub: one sidebar entry plus one container that domain
+                               workbenches register their cards into
     plugin-doc / plugin-sheet / plugin-ppt / plugin-pdf (dual-face)
                                office_to_pdf conversion per source format: host tool + client skill
                                prefill, over the LibreOffice engine installed on demand (§4.1)
+    plugin-creative (dual-face) the seat a writing-oriented domain (fiction, short drama,
+                               interactive narrative, video recap) lands in; the host half, the
+                               four bundled knowledge domains under `knowledge/` and the creative
+                               workspace API on the Connection carrier's exact routes are in
+                               place, the browser half is not
 ```
 
 There is no setup renderer: the first run downloads/activates the kernel in the
@@ -77,10 +84,14 @@ Three pieces are stitched at every server start (`src/main/brand-suite.ts`,
    success; a failure keeps booting `web` and retries next launch. The profile
    in force is exported to the child as `DSH_APP_PROFILE`, so plugin-market and
    plugin-presets install into the profile the app reads.
-3. **Loader overlay** — `plugins/dsh-app.patch.yml` is copied into userData and
-   passed on the kernel command line (`dsh --profile <name> --patch <file>`); it
-   inserts the suite entries after the official bundle layers (last write wins),
-   so no upstream profile template is touched.
+3. **Loader overlay** — `plugins/dsh-app.patch.yml` is copied next to the main
+   bundle at build time and read at server start. The desktop host takes no
+   `--patch` and does not read the home layer, so the rows reach the profile as a
+   **bundle layer**: the profile declares `@dsh-app/suite-layer`, whose own
+   `cordis.patch.yml` carries the shipped rows, the rows that profile already
+   carried and `$DSH_HOME/cordis.patch.yml`. Only the frames line (host
+   `< 0.1.6-alpha.2`) still writes the profile's own `cordis.patch.yml`. Either
+   way no upstream profile template is touched.
 
 Every piece **degrades gracefully**: missing suite plugins (e.g. a rollback
 target kernel) boot vanilla — no links, no overlay, boot is never blocked.

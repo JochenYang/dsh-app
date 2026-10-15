@@ -575,6 +575,28 @@ async function main() {
             JSON.stringify(seen))
         }
 
+        // The Web search pane's provider cards. The Han sweep above cannot see
+        // this half: a provider id with no dictionary entry — or a billing
+        // sentence keyed to the wrong id — still renders clean English, so "no
+        // Han" says nothing about it. After kernel 0.2.1-rc.2 added
+        // `deepseek-search-api`, the card existed and its label/billing mapping
+        // had no assertion anywhere.
+        if (/web ?search|网络搜索/i.test(SECTION)) {
+          const expect = LANG === 'zh-CN'
+            ? { api: 'DeepSeek 官方（Search API）', billing: '起按 5 元 / 千次计费' }
+            : { api: 'DeepSeek official (Search API)', billing: 'then billed at CNY 5 per 1000 calls' }
+          const cards = await win.webContents.executeJavaScript(
+            `[...document.querySelectorAll('.dshWs-providerCard')].map((el) => el.textContent)`)
+          record('the Web search pane lists the brand chain and both official providers',
+            cards.length >= 3, `${cards.length} cards`)
+          const apiCard = cards.find((text) => text.includes(expect.api))
+          record('the Search API provider renders its own localized label, not a raw id',
+            apiCard !== undefined, apiCard ?? '(no card carries the label)')
+          const billed = cards.filter((text) => text.includes(expect.billing))
+          record('every billed DeepSeek card states the 2026-11-01 price',
+            billed.length >= 2, `${billed.length} cards carry the sentence`)
+        }
+
         // Our own composition-check card. This is the half the Han sweep CANNOT
         // see: "no Han" means nothing LEAKED, not that the card rendered — a card
         // that never mounted leaves the sweep green.

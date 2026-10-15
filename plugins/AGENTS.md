@@ -8,7 +8,7 @@ a plugin; read the plugin's own JSDoc header before changing its internals.
 
 ## 1. What the suite is
 
-Eighteen dsh plugins layered on top of the upstream kernel **without forking
+Twenty dsh plugins layered on top of the upstream kernel **without forking
 it** — that is what keeps the desktop app updateable when upstream moves.
 `plugins/README.md` is the roster: which plugin owns which capability, and each
 one's host/client role. `plugins/dsh-app.patch.yml` is the loader overlay that
@@ -22,7 +22,13 @@ sections, About row, nav icons), `plugin-sidebar` (Git view), `plugin-swarm`
 `plugin-pdf` (office generation, one capsule bar), `plugin-market`,
 `plugin-presets`, `plugin-websearch` (`web_search` / `web_fetch`),
 `plugin-rewind` (message recall + file revert), `plugin-effort` (reasoning
-effort).
+effort), `plugin-workbench` (workbench hub: one sidebar entry plus the container
+page domain workbenches register their cards into), `plugin-creative` (**host
+half landed, browser half still to come**: the seat a writing-oriented domain
+lands in — its ported host modules, the four bundled knowledge domains and the
+creative workspace API on the Connection carrier's exact routes are in `src/`
+and `knowledge/`; `video-project.ts` and `game-verification.ts` reach `lib/`
+through `workspace-route.ts`).
 
 Never modify harness source to make a plugin work: desktop adaptation stays
 shell-side (injected scripts, stylesheets, profile patch rows only).
@@ -45,12 +51,12 @@ for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run bu
 for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; done
 ```
 
-- **Build**: seventeen plugins run `node build.mjs` (esbuild bundles both halves).
+- **Build**: nineteen plugins run `node build.mjs` (esbuild bundles both halves).
   `plugin-brand` is the one exception — `tsc -p tsconfig.json` into `lib/`.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
-  result. All eighteen plugins have suites.
+  result. All twenty plugins have suites.
 - **CI runs every plugin with a `tests/` directory** (`.github/workflows/ci.yml`
   loops over `plugins/*/`), so a suite that passes locally also gates the PR.
   The root `test/plugin-version-bump.test.mjs` additionally fails any plugin
@@ -88,8 +94,9 @@ job in its per-plugin build loop — the two workflows through
    fourteen plugins that import it. A peer that nothing installs makes the gate
    SKIP that plugin — one line naming the packages, never silently, instead of
    failing a release over an import nobody installed — and every run ends with a
-   count of those skips (`0 of 18` on a CI tree). The other three checks need no
-   peer and always run.
+   count of those skips: `0 of <n> plugins skipped it` is what a CI tree prints,
+   where every plugin's declared peers resolve and none skips. The other three
+   checks need no peer and always run.
 3. **Presence check** — the build's DECLARED outputs must exist and be non-empty:
    the `files` entries naming `lib`, plus `main` and the `exports` targets under
    `lib/`. npm omits a missing `files` directory from the tarball without a word,

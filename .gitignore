@@ -10,6 +10,7 @@ bundled-kernel/
 runtime-layers/
 plugins/*/lib/
 plugins/*/.test-dist/
+scripts/fixtures/*/lib/
 
 # ---- Runtime artifacts ----
 *.tgz

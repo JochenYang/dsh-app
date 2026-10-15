@@ -45,6 +45,7 @@ capabilities:
 | Plugin market: settings-page browsing / install / uninstall of third-party dsh plugins (installed through the kernel CLI into the current profile; the market handles pnpm's supply-chain policy) | `@dsh-app/plugin-market` (dual-face) | `plugins/plugin-market/src/` |
 | Preset bundles: import / export of brand + upstream configuration sets from the settings page | `@dsh-app/plugin-presets` (dual-face) | `plugins/plugin-presets/src/` |
 | Brand bridge: app info, diagnostics facts and the desktop action route (the host half is still a scaffold) | `@dsh-app/plugin-brand` (host) | `plugins/plugin-brand/src/routes.ts` |
+| Workbench hub: a Workbench entry at the top of the sidebar (above Plugins) plus one full-page container that domain workbenches join by registering a card into either of two root-scoped extension seats — `workbench.item` (the card grid) and `workbench.view` (a domain's own page); a card has two entry shapes, a panel that swaps the view inside the container and a session entry that opens the chosen folder as a workspace and returns to the conversation. **Only the entry, the container and the seats exist today; no real domain workbench has landed yet** | `@dsh-app/plugin-workbench` (client) | `plugins/plugin-workbench/src/client.ts` |
 
 Suite wiring (performed at every server start, `src/main/brand-suite.ts`):
 

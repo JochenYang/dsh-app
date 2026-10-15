@@ -100,6 +100,21 @@
 #   per-session directory the official seat and the /model popup read. It also
 #   re-triggers the official menu's own placement after growing the card, which
 #   is what keeps the menu from overlapping the composer.
+# - workbench: the workbench hub — ONE row in the sidebar's global-panel list
+#   (`sidebar.panellist`, order -1, above the kernel's own 插件 and 自动化任务)
+#   and the full-page container the same id opens in the layout's root-scoped
+#   `main` keyed slot. The container owns the seat, the page and the extension
+#   slots; it owns no domain behaviour, so a new domain is a new card registered
+#   into it and never a change here. Client-only: the host half is an empty
+#   apply, and the row exists so the client-modules scan sees the package's
+#   `dsh.client` declaration.
+# - creative: the creative-domain plugin's seat — fiction, short drama,
+#   interactive narrative and video recap share it. The HOST half has landed:
+#   its ported modules, the four bundled knowledge domains and the creative
+#   workspace API on the Connection carrier's exact routes. The BROWSER half is
+#   still an empty `apply`, so the row is also what keeps the roster, the runtime
+#   install list and the client-modules scan pointed at the package until the
+#   domain UI arrives; nothing in the UI changes when it mounts.
 
 - insert:
     - id: brand
@@ -211,6 +226,9 @@
 
     - id: effort
       name: '@dsh-app/plugin-effort'
+
+    - id: workbench
+      name: '@dsh-app/plugin-workbench'
 
 # Web search seam: point BOTH capabilities at the suite's providers.
 #

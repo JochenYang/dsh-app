@@ -59,7 +59,7 @@
  * (`- name: …` inline, a flow mapping, a value on the following line) or a
  * list item re-quoted leaves the reader with a SHORTER list that still agrees
  * with the other four. A gate that reads nothing looks exactly like a gate that
- * finds nothing — and so does a gate that read seventeen rows out of eighteen.
+ * finds nothing — and so does a gate that read all but one row.
  *
  * The rules are, per source (see the readers below for the exact shapes, and
  * for what each one counts as "entry-shaped"):

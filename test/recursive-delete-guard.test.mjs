@@ -160,8 +160,12 @@ function scan() {
       const relative = path.relative(ROOT, full).split(path.sep).join('/')
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue
-        // A plugin's own build output is generated, not source.
-        if (/^plugins\/[^/]+\/lib$/.test(relative)) continue
+        // A plugin's own build output is generated, not source — and so is a
+        // probe fixture's, which the runtime build never packages but the probe
+        // bundles. Both are `lib` beside their own package.json; without the
+        // second shape a fixture that pulls in a dependency using `rmSync` fails
+        // this audit with a message about generated files.
+        if (/^(?:plugins\/[^/]+|scripts\/fixtures\/[^/]+)\/lib$/.test(relative)) continue
         walk(full)
         continue
       }

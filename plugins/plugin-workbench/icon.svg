@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" fill="none">
+  <defs>
+    <linearGradient id="dshAppWorkbenchTiles" x1="6" y1="6" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5B9BF8" />
+      <stop offset="0.5" stop-color="#3F77D8" />
+      <stop offset="1" stop-color="#4B3FD6" />
+    </linearGradient>
+  </defs>
+  <!-- Four benches: the container reads as several domains sharing one page.
+       Two of them are held back so the mark has a foreground and a background
+       rather than four equal tiles. -->
+  <rect x="6" y="6" width="10.5" height="10.5" rx="2.5" fill="url(#dshAppWorkbenchTiles)" />
+  <rect x="19.5" y="6" width="10.5" height="10.5" rx="2.5" fill="url(#dshAppWorkbenchTiles)" opacity="0.5" />
+  <rect x="6" y="19.5" width="10.5" height="10.5" rx="2.5" fill="url(#dshAppWorkbenchTiles)" opacity="0.5" />
+  <rect x="19.5" y="19.5" width="10.5" height="10.5" rx="2.5" fill="url(#dshAppWorkbenchTiles)" />
+  <!-- The suite's accent, marking the tile a press acts on. -->
+  <circle cx="31" cy="8.2" r="2" fill="#67C7FE" />
+</svg>

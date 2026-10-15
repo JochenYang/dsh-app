@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Workbench",
+    "description": "One sidebar entry and one full-page container. A domain workbench appears by registering into it, so adding a domain never changes the container."
+  }
+}

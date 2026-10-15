@@ -222,7 +222,7 @@ function globMatches(pattern, file) {
  *     negations under-requires and never refuses a plugin wrongly.
  *   - `main` and the `exports` targets that live under `lib/` — the paths npm and
  *     the dsh loader resolve at LOAD time. Their `types` targets are deliberately
- *     NOT outputs: the seventeen esbuild plugins emit no `.d.ts`, so requiring
+ *     NOT outputs: the nineteen esbuild plugins emit no `.d.ts`, so requiring
  *     them would refuse the whole suite over a pre-existing omission.
  *
  * The entry `lib` is a directory (it must exist and hold a file); `lib/x.js` is
@@ -320,8 +320,8 @@ export function assertPluginOutputs(pluginDir) {
  * The `typecheck` script is the ONLY check that needs them: esbuild bundles with
  * every `@deepseek-ai/*` import marked external, so a missing peer costs nothing
  * until tsc tries to read its types. Both packaging paths install a plugin's tree
- * with `npm install --legacy-peer-deps`, which installs NO peer at all — on a CI
- * tree fifteen of the eighteen plugins import a peer that is therefore absent
+ * with `npm install --legacy-peer-deps`, which installs NO peer at all — so on a
+ * CI tree a peer a plugin declares only as a peer is absent
  * (`@deepseek-ai/dsh-client-ui-primitives` in fourteen of them, `react` in most),
  * and a gate that ran anyway failed the whole release with
  * `error TS2307: Cannot find module '@deepseek-ai/dsh-client-ui-primitives'`.
@@ -338,7 +338,7 @@ export function assertPluginOutputs(pluginDir) {
  * Deliberately a TYPE question: a peer also counts as resolvable through
  * `@types/<its DefinitelyTyped name>`, because that is what tsc reads for an
  * import whose package is absent. Measured on this repository's own tree, fifteen
- * of the eighteen plugins resolve `react` from `@types/react` alone, so a
+ * of the nineteen plugins resolve `react` from `@types/react` alone, so a
  * package-only reading would have skipped the gate on fifteen plugins locally —
  * the place where the gate is actually run — and left it with no teeth at all.
  * The remaining conservatism: a plugin whose types would resolve through some
@@ -390,7 +390,8 @@ function resolvesFrom(dir, name) {
  * Its whole point is that a green build log cannot be read as "every plugin's
  * types were checked": the skip is a decision, and this is the count that says how
  * much of the run it covered. Both call sites print it whether or not anything was
- * skipped — `0 of 18` is the sentence that means the gate really ran everywhere.
+ * skipped — `0 of <n> plugins skipped it` is the sentence that means the gate
+ * really ran everywhere.
  *
  * @param total - plugins the run covered.
  * @param skipped - how many of them skipped the type gate.

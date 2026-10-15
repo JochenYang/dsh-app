@@ -9,7 +9,7 @@
 ## 0 三条前提 `[静态]`
 
 1. **只跟一条内核线。** 根 `package.json` 的 `@deepseek-ai/dsh*` 规格是唯一真源
-   （`scripts/kernel-line.mjs`），16 个插件的 peer/dev 随它一起动。因此本项目**不采用**
+   （`scripts/kernel-line.mjs`），19 个插件的 peer/dev 随它一起动。因此本项目**不采用**
    跨宿主世代的运行时兜底链（旧名字 → 新变体）：那会让"名字没了"这类断裂永远不报，
    把唯一真源变成两个。兼容性靠同步升级，不靠运行时分支。
 2. **编译绿不等于运行绿。** 类型门看不见三类断裂：内核停止导出的具名导出（编译期是
@@ -253,7 +253,7 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
   仍要渲染才能发现；
 - 组件自身抛错 → 内核的错误边界会卸载**整个 slot 条目**，控制台只有一行压缩记录。
 
-要覆盖这一半必须真实浏览器。**当前开发环境里这条路径不可用** `[实测]`：在 Electron 内用
+要覆盖这一半必须真实浏览器。**当时这条路径不可用** `[实测]`：在 Electron 内用
 `process.execPath` 起内核子进程拿到的是 electron.exe 而不是 Node，内核根本起不来（日志只
 填满 Electron 自己的 GPU 缓存错误）；本仓库的规则明确写了内核子进程必须用真正的 Node。
 已有的手动探针（如 `probe-settings-nav.cjs`）靠 `pnpm dsh web` + 已构建的检出启动，需要一份
@@ -262,6 +262,19 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
 本轮曾写过一个按此判据的探针，因上述原因无法验证，**已删除而非交付**——一个没跑过的
 脚本不能当作覆盖。
 
+**这条路径现在有了可用形态** `[实测]`：`scripts/probe-workbench.cjs` 自己解包 `runtime-dist/`
+里的 runtime 产物、用产物自带的 `runtime/node/`（不是 `process.execPath`）起内核子进程，再用
+`BrowserWindow` 加载内核打印的 `dsh web:` 地址跑 DOM 断言，**不需要构建好的 harness 检出**。
+它按 §6.4 重跑。两件踩过的事写在这里，别重犯：
+
+- 内核自己的首次运行弹窗（`预览版说明`）在启动后几秒才挂载，它开着的期间**整页 `inert`**，
+  容器里任何控件都拿不到焦点（实测报出 `back.closest('[inert]')` 为真）。用固定 sleep 去
+  等它是撞运气；探针的做法是每次加载装一个 MutationObserver，弹窗一出现就点掉。
+- 容器的页面在打开域视图时会 focus 自己的页面元素（`page.tsx` 的 `useEffect`），所以
+  `back.focus()` 可能输掉这一下；探针重试到焦点落住为止。
+
+覆盖范围是**该探针实际断言过的插件**（`plugin-workbench`），不等于每插件判定表。
+
 因此本轮的结论是**明确降级** `[实测]`，而不是假装覆盖：
 
 | 问题 | 判定方式 | 状态 |
@@ -269,7 +282,7 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
 | 注册的座位是否还存在 | `npm run check:slots` | 已自动化 |
 | 具名导出是否还存在 | `test/plugin-kernel-imports.test.mjs` | 已自动化 |
 | 客户端 bundle 是否被服务 | `npm run verify` | 已自动化 |
-| 组件是否真的渲染 | 真实浏览器探针 | **未覆盖** `[待验证]`，需一份构建好的 harness 检出 |
+| 组件是否真的渲染 | 真实浏览器探针 `scripts/probe-workbench.cjs` | 该探针断言过的插件**已覆盖** `[实测]`（49 项断言、exit 0）；其余插件仍未覆盖 `[待验证]` |
 
 ### 6.3 判定纪律
 
@@ -293,6 +306,29 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
 
 - `scripts/probe-drag.cjs` 镜像 `src/main/window.ts` 的 `DESKTOP_CHROME_CSS`，
   `test/desktop-chrome-css.test.mjs` 会读它；
+- `scripts/probe-workbench.cjs` 守 `plugin-workbench` 容器：改动该插件的座位、页面或侧边栏行之后，
+  以及升线之后，必须重跑。它自己解包 `runtime-dist/` 里的 runtime 产物、用产物自带的 `node/`
+  起内核子进程（不是 `process.execPath`），把容器与它的走查领域插件从**工作树**链进被启动
+  profile 的两个 `@dsh-app` scope；两半的 `lib/` 缺失或比 `src` 旧时直接拒绝并给出构建命令
+  （走查插件在 `scripts/fixtures/probe-workbench`，构建：
+  `node scripts/fixtures/probe-workbench/build.mjs`）；
+- `scripts/probe-routes.cjs` 守**路由载体**（内核侧行为）：Connection 载体 exact-only（S3）、`Range` 透传
+  （S4）与流式不缓冲（S4b）、宿主 `webServer` 的 `kind: 'prefix'` 服务深层子路径（S3），以及栅栏对照 ——
+  S5a：`/api` 无 cookie → 401、异源 `Origin` → 403；S5b：同一条 prefix 路由两者都 200；S6：**真实套件插件**
+  （`plugin-creative`）自己的路由在那道栅栏后面派发，且载体自己的 404/403 体是**纯文本**
+  （`not found` / `forbidden`），不是源那份 JSON —— 这条是「插件自己的路由真的接上了载体」的唯一端到端证据，
+  插件的单测直接驱动 handler，看不到载体的路径/方法回落。段标与断言标号
+  就是这里写的 S1…S6（输出里按同一个标号找）。**升线之后必须重跑**：它量的四条会随内核线变动，任一条
+  变了都会推翻 W14 的路由决策（`docs/plans/workbench-hub.md` 的 W14 条目与收尾项）。S5b 是单向检查：
+  上游哪天给 `webServer` 路由加上鉴权属于纯硬化，会让 S5b 变红，那是重做 W14 决策的信号，**不是**放宽
+  这条检查的理由。它启的是**真机 desktop-host 形态**（`webShapeArgs` 那组位置参数、**无 `--patch`**、
+  URL 从 `ready` 消息拿、cookie 用 shell 自己的 `authenticateHostWeb` 换），两个 fixture 在
+  `scripts/fixtures/probe-routes` 与 `scripts/fixtures/probe-wsinject`，构建：
+  `node scripts/fixtures/probe-routes/build.mjs` 与 `node scripts/fixtures/probe-wsinject/build.mjs`
+  （缺失或比 `src` 旧时直接拒绝）；它还要 shell 自己的 `dist/main/`（先跑 `npm run build`），以及
+  `plugins/` 里**每个名册包**的 `lib/` —— 名册取自 shell 的 `SUITE_PLUGIN_DIRS`，缺失或比 `src` 旧同样
+  直接拒绝，并在报错里给出该包的构建命令（`plugin-brand` 走 `tsc`，没有 `build.mjs`）；端口 19387 被占时
+  直接报错退出，不给假绿；
 - 探针运行在 Electron 内，**每个 `spawn` 必须传 `windowsHide: true`**，否则每起一个控制台
   子进程都会在用户桌面上弹窗。
 ---
@@ -395,7 +431,7 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
 - [ ] 第 3 节自动门禁裸跑全过
 - [ ] 第 4 节换线专属检查逐项过
 - [ ] 第 5 节 M1–M5
-- [ ] 第 6 节渲染面：探针跑一遍，按三条纪律出**每插件**判定表
+- [ ] 第 6 节渲染面：探针跑一遍（`scripts/probe-workbench.cjs` 与 `scripts/probe-routes.cjs` 都自带 runtime 产物与内核子进程，不需要检出，见 §6.4），按三条纪律出**每插件**判定表；路由载体那几条（`probe-routes.cjs` 输出里的 S1–S6 段，S6 是插件自己的路由）按它的 `RESULT` 行记账
 - [ ] 第 7 节记录成文，含负面证据
 - [ ] 改动落在 `changesets/` 片段里
 

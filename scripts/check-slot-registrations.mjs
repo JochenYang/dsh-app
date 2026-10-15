@@ -78,11 +78,18 @@ const REGISTER_NAME_RE = /ctx\.slots\.register\(\s*\{[^}]*?name:\s*['"]([^'"]+)[
  *     formatted across five.
  *
  * What keeps a stray quoted key from being read as a slot: the id must look like
- * a slot id (a dotted, lower-case path) AND appear inside a file that declares
- * `interface SlotMap`. A wrong answer here would be worse than a missing one —
- * the check's whole job is to say whether a seat exists.
+ * a slot id (a lower-case identifier, optionally dot-separated) AND appear inside
+ * a file that declares `interface SlotMap`. A wrong answer here would be worse
+ * than a missing one — the check's whole job is to say whether a seat exists.
+ *
+ * The dot-separated tail is OPTIONAL, and it used to be mandatory (the pattern
+ * required at least one `.`). That silently dropped every seat the kernel
+ * declares flat — `main`, `root`, `sidebar`, `rightbar` — so the first suite
+ * plugin to register into `main` was reported as using an undeclared slot while
+ * the layout package's own declaration sat in `node_modules`. Requiring the
+ * `interface SlotMap` block is what keeps a stray key out; the dot never did.
  */
-const SLOT_ID_SHAPE = /^[a-z][a-zA-Z0-9]*(?:\.[a-zA-Z0-9-]+)+$/u
+const SLOT_ID_SHAPE = /^[a-z][a-zA-Z0-9]*(?:\.[a-zA-Z0-9-]+)*$/u
 /**
  * Every slot id the installed line declares, with its kind when readable.
  *
@@ -152,6 +159,18 @@ function declaredSlots(repoRoot) {
       for (const block of blocks) {
         const idAt = /(['"])([^'"]+)\1\s*:\s*\{/gu
         for (const match of block.matchAll(idAt)) {
+          // Only a TOP-LEVEL key is a seat. A nested literal — an inline
+          // `keyProps: { 'x': { … } }` inside a seat — would otherwise be read as a
+          // declaration of `x`, and a fake declaration is the one thing that can
+          // MASK a real retirement, which is the failure this check exists to
+          // catch. The block is the SlotMap body without its outer braces, so a
+          // seat sits at depth 0.
+          let depth = 0
+          for (let index = 0; index < match.index; index += 1) {
+            if (block[index] === '{') depth += 1
+            else if (block[index] === '}') depth -= 1
+          }
+          if (depth !== 0) continue
           const id = match[2]
           if (!SLOT_ID_SHAPE.test(id)) continue
           // `kind` belongs to THIS entry, so it is read from the text that

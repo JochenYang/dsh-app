@@ -121,7 +121,22 @@ npm run verify -- --tgz runtime-dist/dsh-runtime-linux-x64-*.tgz
 **Hand-run probes** (`scripts/probe-*.mjs` / `.cjs`) — each mirrors a piece of shipped behaviour and must be re-run
 when that piece moves: `probe-launch-folder.mjs` after a kernel-line bump; `probe-settings-nav.cjs --lang en-US
 [--sweep]` after touching a settings section (it measures order, icons, scrolling and residual Han characters);
-`probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in `src/main/window.ts` — **keep the two in sync** (a root test
+`probe-workbench.cjs` (`node_modules/.bin/electron`) after touching `plugins/plugin-workbench`, its seats or the
+sidebar rail — it boots a real runtime artifact and asserts the container in a real window (the row, both child
+seats, the rendered page, the card frame, the panel-leave reset), links the container from the working tree, takes
+`scripts/fixtures/probe-workbench` as its walk-in domain plugin (build it first — the probe refuses a missing or
+stale `lib/` on either half and names the command); `probe-routes.cjs` (`node_modules/.bin/electron`) after a
+kernel-line bump or any move of the route carriers — it boots a real runtime artifact in the **desktop-host
+shape the shell actually spawns** and asserts what the W14 routing decision rests on: the Connection fetch
+carrier is exact-only (S3), passes `Range` through (S4) and streams rather than buffers (S4b), a `webServer`
+`kind: 'prefix'` route serves deep sub-paths (S3), and the fence comparison (S5a: the `/api` carrier answers 401
+with no cookie and 403 for a foreign `Origin`; S5b: the same prefix route answers both), plus one real suite
+plugin's own routes dispatching behind that fence and the carrier's own plain-text 404/403 bodies (S6), linking
+`scripts/fixtures/probe-routes` and `scripts/fixtures/probe-wsinject` into the booted profile. Run
+`npm run build` first — it `require`s the shell's own `dist/main/` modules, which a clean checkout does not have
+— and build the roster packages it links from `plugins/`: it refuses a missing or stale `lib/` on either
+fixture or on any roster package, naming the command to run; `probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
+`src/main/window.ts` — **keep the two in sync** (a root test
 already diffs them); the remaining `probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` /
 `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` cover the surfaces
 their names say; `scripts/capture.mjs` screenshots the running UI for visual work.
@@ -196,10 +211,12 @@ Each rule's reasoning: [`docs/agents/security-invariants.md`](docs/agents/securi
 
 ## 8. The brand plugin suite (`plugins/`)
 
-Eighteen dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
+Twenty dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
 desktop app updateable when upstream moves. Each is its own npm package with a host half, a client half,
 or both; `plugins/README.md` is the roster, `plugins/dsh-app.patch.yml` the loader overlay that mounts
-them, and desktop adaptation always stays shell-side — never a harness modification.
+them, and desktop adaptation always stays shell-side — never a harness modification. `plugin-creative`
+has its host half, its bundled knowledge assets and its workspace API on the Connection carrier's exact
+routes in place, and no browser half yet (`plugins/README.md` says so beside it).
 
 The suite's own rules — the roster's five copies and `check:suites:gate`, the four checks that gate a
 plugin's `lib/`, and the version-bump requirement — are in [`plugins/AGENTS.md`](plugins/AGENTS.md).

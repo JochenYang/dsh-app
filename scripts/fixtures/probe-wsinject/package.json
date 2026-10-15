@@ -1,0 +1,15 @@
+{
+  "name": "@dsh-app/probe-wsinject",
+  "description": "Probe fixture (never shipped): declares `inject: ['connection', 'webServer']`, so its own activation answers whether the `webServer` service exists in this composition.",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ]
+}

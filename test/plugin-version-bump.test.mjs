@@ -1,8 +1,8 @@
 /**
  * A plugin whose code changed but whose package version did not ships NOTHING.
  *
- * `computeSuiteVersion` (scripts/kernel-line.mjs) hashes the eighteen suite
- * plugins' versions; that hash names the kernel directory
+ * `computeSuiteVersion` (scripts/kernel-line.mjs) hashes the suite plugins'
+ * versions; that hash names the kernel directory
  * (`dsh-<dshVersion>+suite-<hash>`), and the shell installs a kernel by that
  * directory name — so a rebuild whose hash is unchanged is never picked up by
  * an existing installation, and a plugin change can sit in the repository while

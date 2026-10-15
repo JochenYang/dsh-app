@@ -1,0 +1,24 @@
+{
+  "name": "@dsh-app/probe-workbench",
+  "description": "Probe fixture (never shipped): a walk-in domain plugin that registers one card into the workbench container's `workbench.item` seat and one view into its `workbench.view` seat, so the seat contract can be exercised from the DOM.",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  }
+}

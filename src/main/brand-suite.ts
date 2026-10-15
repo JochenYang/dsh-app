@@ -49,15 +49,23 @@
  * (link mode), which honours it. Revisit if we ever package the kernel.
  *
  *   2. Composition — the loader overlay (plugins/dsh-app.patch.yml, copied
- *      next to the main bundle by copy-static.mjs) inserts the suite plugin
+ *      next to the main bundle by copy-static.mjs) supplies the suite plugin
  *      rows. The desktop host takes no `--patch` argument (it always loads its
- *      own package's config and nothing else), and it does not read the home
- *      layer either, so the shell writes BOTH into the suite profile's own
- *      `profiles/<profile>/cordis.patch.yml`: the shipped rows first, then the
- *      rows this profile already carried, then the user's home layer
- *      ($DSH_HOME/cordis.patch.yml — where the machine-local rows, MCP servers
- *      among them, live). The file is regenerated from those three sections on
- *      every start and written only when the result changed.
+ *      own package's config and nothing else) and does not read the home layer,
+ *      so the rows have to reach the profile another way — and which way depends
+ *      on the transport:
+ *      - the WEB line materializes them as a BUNDLE LAYER: the profile declares
+ *        `@dsh-app/suite-layer`, whose own `cordis.patch.yml` carries the shipped
+ *        rows, the rows this profile already carried and the user's home layer
+ *        ($DSH_HOME/cordis.patch.yml — where the machine-local rows, MCP servers
+ *        among them, live). NOTHING is written into the profile's own
+ *        `cordis.patch.yml` on this line: see the early return for
+ *        `options.layer === true` below, and `installSuiteLayer`, which runs
+ *        after the mirror step because the layer has to land in a tree that has
+ *        already settled.
+ *      - the FRAMES line (host < 0.1.6-alpha.2) still writes that file directly
+ *        through `writeSuitePatchFile`: the same three sections, regenerated on
+ *        every start and written only when the result changed.
  *
  *      The carried sections are not trusted blindly: a row naming a package
  *      this profile cannot resolve is *not* written into the composition.
@@ -87,7 +95,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /** Suite plugin directory names under dsh-app/plugins (and kernel node_modules). */
-export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort'] as const
+export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort', 'plugin-workbench'] as const
 
 /** npm scope shared by the suite plugins; also the scope the mirror drop must not take back. */
 export const PLUGIN_SCOPE = '@dsh-app'

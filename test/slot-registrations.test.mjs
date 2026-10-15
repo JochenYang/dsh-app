@@ -12,7 +12,7 @@
  *   - a slot id that used to be declared and no longer is does NOTHING — no
  *     error, no log, no render. The surface is simply absent.
  *
- * So this file pins four things:
+ * So this file pins five things:
  *
  *   1. the checker resolves the seats we actually register into. Today every one
  *      resolves; if a line move retires a seat, this is where it surfaces.
@@ -29,6 +29,10 @@
  *      the check, and removing a declaration from EVERY place it appears must
  *      fail it too. Both are exercised against a throwaway tree, so the working
  *      tree is never modified.
+ *   5. a FLAT seat id (no dot) resolves. The kernel declares `main`, `root`,
+ *      `sidebar` and `rightbar` that way, and the id shape used to require a
+ *      dot — so those four were never collected and the first plugin to register
+ *      into `main` was blamed for using a seat that was declared all along.
  *
  * Deliberately NOT asserted: the total number of declared slots. That grows with
  * the kernel and is not a fact about us.
@@ -237,6 +241,76 @@ test('a plugin with no local install is reported as unjudged, not retired', asyn
     assert.ok(
       !report.undeclared.some((row) => row.id === 'sidebar.footer.action'),
       'an uninstalled plugin must not be reported as a retired seat',
+    )
+  } finally {
+    await cleanup(dir)
+  }
+})
+
+test('a flat seat id resolves, like the kernel own main and sidebar', async () => {
+  // The regression this pins, found when the first suite plugin registered into
+  // `main`: the id shape required at least one dot, so every FLAT seat the
+  // kernel declares — `main`, `root`, `sidebar`, `rightbar` — was never
+  // collected. The plugin was then reported as using an undeclared slot while
+  // the layout package's own declaration sat in `node_modules`, i.e. the check
+  // blamed the registration for its own blind spot.
+  //
+  // The declaration and the registration are added to a copy of our own plugin,
+  // so the case does not depend on which flat seats the installed line happens
+  // to ship.
+  const dir = fixture()
+  try {
+    const file = join(dir, CLIENT_UI)
+    const text = readFileSync(file, 'utf8')
+    writeFileSync(file, `${text}
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    'workbench': { kind: 'list'; scope: 'root'; owner: Record<never, never> }
+  }
+}
+ctx.slots.inject('workbench', () => undefined)
+`)
+
+    const { status, stdout, stderr } = check(dir)
+    assert.equal(
+      status,
+      0,
+      `a dotless seat id must resolve (stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)})`,
+    )
+    assert.ok(
+      JSON.parse(stdout).rows.some((row) => row.id === 'workbench' && row.declared === true),
+      'the flat seat must be judged as declared',
+    )
+  } finally {
+    await cleanup(dir)
+  }
+})
+
+test('a nested literal inside a seat is not read as a declared seat', async () => {
+  // The failure this pins: a FAKE declaration MASKS a real retirement, which is
+  // the one thing this check exists to catch. `nested.fake` below exists only as
+  // a keyProps value inside another seat's body.
+  //
+  // The nested shape opens with `kind` on purpose. A realistic keyProps value
+  // (`{ sessionId: string }`) is skipped by the depth rule for a second reason as
+  // well; only a body that looks exactly like a seat distinguishes the two, so
+  // only this shape can fail when the depth rule is missing.
+  const dir = fixture()
+  try {
+    const file = join(dir, CLIENT_UI)
+    writeFileSync(file, `${readFileSync(file, 'utf8')}
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    'nested.owner': { kind: 'list'; scope: 'root'; keyProps: { 'nested.fake': { kind: 'list' } } }
+  }
+}
+ctx.slots.inject('nested.fake', () => undefined)
+`)
+    const { status, stdout } = check(dir)
+    assert.equal(status, 1, 'a nested literal must not count as a declaration')
+    assert.ok(
+      JSON.parse(stdout).undeclared.some((row) => row.id === 'nested.fake'),
+      'the registration must be reported undeclared',
     )
   } finally {
     await cleanup(dir)

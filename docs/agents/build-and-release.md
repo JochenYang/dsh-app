@@ -105,7 +105,7 @@ ran anyway failed a whole release on
    import `@deepseek-ai/dsh-client-ui-primitives` and all fourteen now carry
    `"@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2"` in both fields, the
    spec the first three already used. Measured on fresh copies installed with the
-   workflows' own command: every one of the eighteen plugins RUNS the type gate
+   workflows' own command: every one of the nineteen plugins RUNS the type gate
    (none skips), where eleven used to skip.
 2. **`pluginMissingPeers` stays as the guard** — read from each plugin's own
    `peerDependencies`, never a list here; a peer also counts as resolvable through
@@ -117,7 +117,7 @@ ran anyway failed a whole release on
   naming the packages) and without failing the run, because failing over an import
   the install never provided is what stopped the release above;
 - every run ends with `typecheckSkipSummary`, so a green log says how much of it
-  the type gate actually covered (`0 of 18 plugins skipped it` on a CI tree today).
+  the type gate actually covered (`0 of <n> plugins skipped it` on a CI tree today).
 
 Both artifact checks depend on no peer and keep running regardless.
 
@@ -143,9 +143,9 @@ Both artifact checks depend on no peer and keep running regardless.
   `import('x')` is read like any other import. A computed specifier
   (``import(`./${name}`)``) and a CommonJS `require('x')` are outside the gate.
 
-  **Measured over the suite**: 476 package imports across the eighteen plugins,
-  none of them UNDECLARED, and ONE kernel import that is a runtime import
-  declared only as a devDependency: `@deepseek-ai/schemastery` in
+  **Measured over the suite**: hundreds of package imports, none of them
+  UNDECLARED, and ONE kernel import that is a runtime import declared only as a
+  devDependency: `@deepseek-ai/schemastery` in
   `plugin-market`. Six others were closed by adding the missing peer (with the
   matching `devDependencies` row, so the type gate keeps resolving) to
   `plugin-presets`, `plugin-memory` and `plugin-rewind`, each plugin's version
@@ -169,7 +169,7 @@ Both artifact checks depend on no peer and keep running regardless.
   entry `lib` must exist and hold a file; a pattern must match one) plus `main`
   and the `exports` targets under `lib/` — the paths npm and the dsh loader
   resolve at LOAD time. `exports[…].types` targets are deliberately NOT required:
-  the seventeen esbuild plugins emit no `.d.ts`, and requiring them would refuse
+  the nineteen esbuild plugins emit no `.d.ts`, and requiring them would refuse
   the whole suite. Without this check a build that writes nothing is silent —
   npm's `files` field omits a missing directory from the tarball without a word,
   and this repository has already shipped a suite that was missing plugins with
@@ -181,8 +181,8 @@ Both artifact checks depend on no peer and keep running regardless.
   `package-lock.json`, `*.log` and `*.tsbuildinfo` — `src/**` above all, plus the
   plugin's own `build.mjs`/`tsconfig.json`/`package.json`. An unbuilt plugin (no
   `lib/` at all) is not stale, and a tie is not stale. Cost on the maintainer's
-  machine: ~27 s serial for the seventeen typechecks, against a runtime build
-  measured in minutes.
+  machine: ~27 s serial for the typechecks over the whole suite, against a runtime
+  build measured in minutes.
 
 **The installer pre-extracts the bundled kernel** (`scripts/installer/
 installer-hooks.nsh`, wired through `nsis.include` in electron-builder.yml):

@@ -173,7 +173,7 @@ function isInsertRow(row: readonly string[]): boolean {
  * The entry ids a row defines.
  *
  * An `insert:` row carries its entries as indented `- id:` children (the shipped
- * overlay writes all seventeen plugins in ONE such block, so the unit of removal is
+ * overlay writes all twenty plugins in ONE such block, so the unit of removal is
  * the block, not the line); any other row carries its own id in its first line.
  */
 function rowEntryIds(row: readonly string[]): string[] {

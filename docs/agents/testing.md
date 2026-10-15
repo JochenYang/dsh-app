@@ -14,7 +14,7 @@ gates themselves, the security invariants and the documentation-vs-code pairs (`
 
 **Plugin suites** — each plugin's own `scripts/test.mjs` bundles `plugins/plugin-*/tests/*.test.ts`
 with esbuild into `.test-dist/` (type-only framework imports stripped) and runs `node --test` over the
-result. All eighteen have suites; run one from its own directory per `plugins/AGENTS.md`.
+result. All twenty have suites; run one from its own directory per `plugins/AGENTS.md`.
 
 **Real-kernel smoke** — `npm run verify` (`scripts/smoke-suite.mjs`) boots an actual dsh kernel with the full
 suite overlay and asserts what a bare `ok:true` cannot: health, every suite route, every dual-face client

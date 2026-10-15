@@ -41,6 +41,7 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 插件市场：设置页浏览 / 安装 / 卸载第三方 dsh 插件（走内核 CLI 安装进当前 profile，pnpm 策略由市场处理） | `@dsh-app/plugin-market`（双面） | `plugins/plugin-market/src/` |
 | 预设包：设置页面板导入 / 导出品牌与上游配置组合 | `@dsh-app/plugin-presets`（双面） | `plugins/plugin-presets/src/` |
 | 品牌桥：应用信息、诊断事实源与桌面动作路由（host 半边仍在脚手架阶段） | `@dsh-app/plugin-brand`（host） | `plugins/plugin-brand/src/routes.ts` |
+| 工作台容器：侧边栏顶部一个「工作台」入口（排在「插件」之上）+ 一个整页容器，领域工作台向两个 root 作用域扩展座位注册卡片即可接入——`workbench.item`（卡片宫格）与 `workbench.view`（域自己的页面）；卡片有两种入口形态，面板型在容器内换视图，会话型把所选目录打开为工作区并回到会话。**目前只有入口、容器与座位，尚无任何真实领域工作台接入** | `@dsh-app/plugin-workbench`（client） | `plugins/plugin-workbench/src/client.ts` |
 
 套件接线（每次 server 启动自动完成，`src/main/brand-suite.ts`）：
 

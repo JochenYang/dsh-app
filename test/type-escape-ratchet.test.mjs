@@ -38,6 +38,7 @@ const BASELINE = {
   'plugin-swarm': 4,
   'plugin-usage': 0,
   'plugin-websearch': 0,
+  'plugin-workbench': 0,
 }
 
 /** Every source file under a plugin's src/, recursively. */

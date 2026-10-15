@@ -94,7 +94,7 @@ for (const target of targets) {
   const verdict = typecheck.skipped ? 'type gate skipped (declared peers missing)' : 'type gate passed'
   console.log(`[plugin-gate] ${name}: ${verdict}; ${String(imports.checked)} import(s) declared; ${artifact}`)
 }
-// One line per run, even when nothing was skipped: "0 of 18" is the only
-// statement that a green log can be read as full type coverage.
+// One line per run, even when nothing was skipped: "0 of <n> plugins skipped
+// it" is the only statement that a green log can be read as full type coverage.
 console.log(typecheckSkipSummary(targets.length, skippedTypechecks))
 console.log(importGateSummary(targets.length, checkedImports, [...typesOnlyPackages].sort()))
