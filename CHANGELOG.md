@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.7] - 2026-10-17
+
+### 中文
+- 撤回与侧栏 Git 的两处报错文案改准：撤回请求没能送达内核时（会话引用已释放、连接中断）不再显示「缺少必要的内核能力」，而是说明请求没送达并带上内核原话；侧栏 Git 在非仓库目录里不再把 git 的 stderr 包进「Git 操作失败」，而是直接说明该目录不是 Git 仓库，并且不再顺带发起同一次注定失败的历史读取。
+- 修复套件层被包管理器删掉后整套插件消失：profile 里跑一次 pnpm（插件页安装/卸载、`dsh plugin …`）会把 `node_modules/@dsh-app/suite-layer` 当多余目录清掉，而套件所有补丁行只走这一个 bundle，于是设置栏整排消失、插件页报「未安装」，直到重启应用才恢复。现在应用运行期间会盯着这个目录，被删就在一秒内重建（连同 profile 清单里的 bundle 声明），下一次组合即可读到。
+
+### English
+- Two error messages now say what happened. A recall request that never reached the kernel (a released session reference, a dropped connection) reports that it never arrived and carries the kernel's own message, instead of claiming a kernel capability is missing. The sidebar's Git tab reports a folder that is not a repository as that state — not as "Git failed" with git's stderr wrapped inside — and no longer issues the doomed history read that followed.
+- Fix the suite disappearing after a package manager prunes it: one pnpm run in the profile (`dsh plugin … install|remove`, the plugin manager's own page) removes `node_modules/@dsh-app/suite-layer` as an extraneous directory — and the suite's rows travel only through that bundle, so the whole settings rail vanished and the plugin page reported it as "not installed" until the app restarted. A keeper now watches that directory while the app runs and rebuilds it within a second (manifest entry included), so the next composition finds it.
+
 ## [v0.16.6] - 2026-10-17
 
 ### 中文
