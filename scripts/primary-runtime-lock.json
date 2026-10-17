@@ -100,9 +100,9 @@
       ]
     }
   },
-  "pnpmVersion": "11.7.0",
-  "pnpmTarball": "https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz",
-  "pnpmIntegrity": "sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==",
+  "pnpmVersion": "11.28.5",
+  "pnpmTarball": "https://registry.npmjs.org/pnpm/-/pnpm-11.28.5.tgz",
+  "pnpmIntegrity": "sha512-SEVj0wtMKtJ8tIqpT/KzAtvOvI/2vyiBbCWJiG4UbOf3bzVPO8GkOOb16XaMMCqgpvet2CMpA81M+BQmy8FNng==",
   "wheels": [
     {
       "url": "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
