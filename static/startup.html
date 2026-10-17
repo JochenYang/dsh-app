@@ -45,15 +45,22 @@ window.__dshStartupShowFailure = function (config) {
      * fill against its own track >= 3:1 (WCAG 1.4.11 — the graph carries the
      * progress, so its boundary is not decoration). */
     --bg-base: #f8fafc;
-    --bg-gradient: radial-gradient(circle at 50% 32%, #ffffff 0%, #f1f5ff 52%, #e7effc 100%);
+    /* Two faint corner washes (sky top-left, indigo bottom-right) sit over the
+       centre glow. The top-right corner is left plain on purpose: the native
+       window controls live there and sample its luminance. */
+    --bg-gradient:
+      radial-gradient(ellipse 60% 45% at 8% 0%, rgba(147, 197, 253, 0.28), transparent 70%),
+      radial-gradient(ellipse 55% 45% at 96% 100%, rgba(165, 180, 252, 0.22), transparent 70%),
+      radial-gradient(circle at 50% 32%, #ffffff 0%, #f1f5ff 52%, #e7effc 100%);
     --text-title: #0f172a;
     --text-subtitle: #5b6a80;
-    --text-dim: #78879b;
+    --text-dim: #5f6e82;
     --brand-dsh: #0f172a;
     --brand-app: #2563eb;
     --brand-accent: #2563eb;
     --pill-border: rgba(100, 116, 139, 0.45);
     --pill-text: #5b6a80;
+    --pill-bg: rgba(37, 99, 235, 0.08);
     --rail-bg: rgba(15, 23, 42, 0.11);
     --rail-border: rgba(15, 23, 42, 0.10);
     --rail-fill: linear-gradient(90deg, #2563eb 0%, #1e40af 100%);
@@ -69,12 +76,19 @@ window.__dshStartupShowFailure = function (config) {
     --node-done: rgba(255, 255, 255, 0.72);
     --check-done: #059669;
     --check-active: #2563eb;
+    --check-mark: #ffffff;
+    --step-ring: rgba(100, 116, 139, 0.55);
+    --step-current-bg: rgba(37, 99, 235, 0.08);
+    --step-current-ring: rgba(37, 99, 235, 0.14);
+    --whale-halo: rgba(59, 130, 246, 0.16);
+    --brand-app-gradient: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
+    --rail-sheen: rgba(255, 255, 255, 0.38);
     --step-done-text: #334155;
     --step-active-text: #0f172a;
-    --step-pending-text: #78879b;
+    --step-pending-text: #5f6e82;
     --divider: rgba(100, 116, 139, 0.35);
     --footer-line: rgba(100, 116, 139, 0.30);
-    --footer-text: #78879b;
+    --footer-text: #5f6e82;
     --modal-bg: rgba(255, 255, 255, 0.95);
     --modal-border: rgba(15, 23, 42, 0.08);
     --btn-bg: rgba(15, 23, 42, 0.04);
@@ -87,7 +101,10 @@ window.__dshStartupShowFailure = function (config) {
   html[data-theme="dark"] {
     /* Dark Theme (Abyssal Cosmic Midnight) */
     --bg-base: #0d1220;
-    --bg-gradient: radial-gradient(circle at 50% 32%, #16203a 0%, #101728 55%, #0a0f1c 100%);
+    --bg-gradient:
+      radial-gradient(ellipse 60% 45% at 8% 0%, rgba(59, 130, 246, 0.14), transparent 70%),
+      radial-gradient(ellipse 55% 45% at 96% 100%, rgba(99, 102, 241, 0.14), transparent 70%),
+      radial-gradient(circle at 50% 32%, #16203a 0%, #101728 55%, #0a0f1c 100%);
     --text-title: #f8fafc;
     --text-subtitle: #94a3b8;
     --text-dim: #7c8da4;
@@ -96,6 +113,7 @@ window.__dshStartupShowFailure = function (config) {
     --brand-accent: #60a5fa;
     --pill-border: rgba(255, 255, 255, 0.15);
     --pill-text: #94a3b8;
+    --pill-bg: rgba(96, 165, 250, 0.12);
     /* A 0.07-alpha track is all but invisible over #070a13, which made the bar
        look shorter than it is; 0.10 draws the whole channel without competing
        with the fill. */
@@ -110,6 +128,13 @@ window.__dshStartupShowFailure = function (config) {
     --node-done: rgba(7, 10, 19, 0.68);
     --check-done: #10b981;
     --check-active: #60a5fa;
+    --check-mark: #052e22;
+    --step-ring: rgba(255, 255, 255, 0.30);
+    --step-current-bg: rgba(96, 165, 250, 0.12);
+    --step-current-ring: rgba(96, 165, 250, 0.22);
+    --whale-halo: rgba(96, 165, 250, 0.14);
+    --brand-app-gradient: linear-gradient(135deg, #93c5fd 0%, #3b82f6 100%);
+    --rail-sheen: rgba(255, 255, 255, 0.30);
     --step-done-text: #cbd5e1;
     --step-active-text: #ffffff;
     --step-pending-text: #8b98a9;
@@ -209,6 +234,17 @@ window.__dshStartupShowFailure = function (config) {
     justify-content: center;
   }
 
+  /* Halo: sized from the stage, so it stays centred behind the mosaic at every
+     window size. It sits below the canvas (z-index 3) and never takes input. */
+  .whale-stage-wrap::before {
+    content: "";
+    position: absolute;
+    inset: -18% -22%;
+    z-index: 1;
+    pointer-events: none;
+    background: radial-gradient(closest-side, var(--whale-halo) 0%, transparent 100%);
+  }
+
   #whale-canvas {
     position: relative;
     z-index: 3;
@@ -235,7 +271,7 @@ window.__dshStartupShowFailure = function (config) {
     justify-content: center;
     border-radius: 7px;
     overflow: hidden;
-    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28), 0 0 0 1px rgba(37, 99, 235, 0.12);
     background: transparent;
     flex-shrink: 0;
   }
@@ -265,7 +301,12 @@ window.__dshStartupShowFailure = function (config) {
     font-size: 23px;
     font-weight: 700;
     letter-spacing: -0.01em;
+    /* Solid colour first: it is what shows if background-clip is unsupported. */
     color: var(--brand-app);
+    background: var(--brand-app-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
   }
 
   .version-pill {
@@ -276,7 +317,8 @@ window.__dshStartupShowFailure = function (config) {
     border-radius: 999px;
     border: 1px solid var(--pill-border);
     color: var(--pill-text);
-    background: transparent;
+    background: var(--pill-bg);
+    font-variant-numeric: tabular-nums;
   }
 
   /* ========================================================== Status Headline & Subtitle */
@@ -337,6 +379,26 @@ window.__dshStartupShowFailure = function (config) {
     inset: 0;
     background: var(--rail-fill);
     clip-path: inset(0 calc(100% - var(--rail-p, 0%)) 0 0 round 999px);
+  }
+
+  /* Sheen: a highlight that travels across the FILLED part only. Its right edge
+     follows `--rail-p`, so it is clipped to the fill by construction and cannot
+     reach the empty channel. Determinate mode only; the indeterminate sweep
+     already says "no denominator" and a second moving highlight would blur it. */
+  .progress-bar-wrap[data-mode="determinate"] #startup-bar-fill::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: calc(100% - var(--rail-p, 0%));
+    background: linear-gradient(100deg, transparent 30%, var(--rail-sheen) 50%, transparent 70%) 0 0 / 220% 100% no-repeat;
+    animation: railSheen 2.4s linear infinite;
+  }
+
+  @keyframes railSheen {
+    from { background-position: 160% 0; }
+    to { background-position: -60% 0; }
   }
 
   /* Bloom at the leading edge. It rides `--rail-p`, the same value the fill
@@ -425,7 +487,10 @@ window.__dshStartupShowFailure = function (config) {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 12px;
+    /* 4px gap + 8px item padding = the original 12px spacing between a label and
+       its divider, so the row keeps its width; the padding is what the current
+       step's pill is drawn on. */
+    gap: 4px;
     list-style: none;
     margin: 0 0 28px;
     padding: 0;
@@ -436,50 +501,79 @@ window.__dshStartupShowFailure = function (config) {
     display: flex;
     align-items: center;
     gap: 6px;
+    padding: 4px 8px;
+    /* The negative margin cancels the vertical padding, so the row is exactly as
+       tall as before and nothing above or below it moves. */
+    margin: -4px 0;
+    border-radius: 999px;
     font-size: 12px;
     color: var(--step-pending-text);
-    transition: color 0.3s ease;
+    transition: color 0.3s ease, background-color 0.3s ease;
   }
 
+  /* The badge is drawn in CSS. `updateStepRail` still writes a glyph into it
+     (✔ ● ○); font-size 0 hides that text, so the script needs no change and the
+     shapes no longer depend on which font supplies those glyphs. */
   .step-badge {
-    font-size: 11px;
-    line-height: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    position: relative;
+    flex: none;
+    font-size: 0;
+    line-height: 0;
+    display: inline-block;
     width: 13px;
     height: 13px;
     border-radius: 50%;
+    transition: background-color 0.3s ease, box-shadow 0.3s ease;
   }
 
   /* Done step */
   .step-rail li.step-item[data-state="done"] {
     color: var(--step-done-text);
   }
+  /* Done: a filled disc with a drawn check mark. */
   .step-rail li.step-item[data-state="done"] .step-badge {
-    color: var(--check-done);
-    font-weight: 700;
+    background: var(--check-done);
+  }
+  .step-rail li.step-item[data-state="done"] .step-badge::after {
+    content: "";
+    position: absolute;
+    box-sizing: border-box;
+    left: 4.6px;
+    top: 1.5px;
+    width: 4px;
+    height: 7px;
+    border: solid var(--check-mark);
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(45deg);
   }
 
-  /* Current step */
+  /* Current step: a pill behind the label, and a dot that emits a soft ring. */
   .step-rail li.step-item[data-state="current"] {
     color: var(--step-active-text);
     font-weight: 600;
+    background: var(--step-current-bg);
   }
   .step-rail li.step-item[data-state="current"] .step-badge {
-    color: var(--check-active);
-    font-size: 13px;
-    animation: activeBadgeGlow 1.6s ease-in-out infinite;
+    background: radial-gradient(circle, var(--check-active) 0 3.5px, transparent 4px);
+    box-shadow: inset 0 0 0 1.5px var(--check-active);
+  }
+  .step-rail li.step-item[data-state="current"] .step-badge::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    box-shadow: 0 0 0 0 var(--step-current-ring);
+    animation: activeBadgePulse 1.8s ease-out infinite;
   }
 
-  @keyframes activeBadgeGlow {
-    0%, 100% { transform: scale(1); filter: drop-shadow(0 0 3px var(--brand-accent)); }
-    50% { transform: scale(1.2); filter: drop-shadow(0 0 6px var(--brand-accent)); }
+  @keyframes activeBadgePulse {
+    0% { box-shadow: 0 0 0 0 var(--step-current-ring); }
+    70%, 100% { box-shadow: 0 0 0 6px transparent; }
   }
 
-  /* Pending step */
+  /* Pending step: an empty ring. */
   .step-rail li.step-item[data-state="pending"] .step-badge {
-    color: var(--text-dim);
+    box-shadow: inset 0 0 0 1.5px var(--step-ring);
   }
 
   /* Vertical Divider */
@@ -507,7 +601,7 @@ window.__dshStartupShowFailure = function (config) {
 
   #startup-saying {
     margin: 0;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--footer-text);
     letter-spacing: 0.03em;
   }
@@ -637,7 +731,8 @@ window.__dshStartupShowFailure = function (config) {
   @media (prefers-reduced-motion: reduce) {
     .stage-monolith { animation: none; }
     .progress-bar-wrap[data-mode="indeterminate"]::after { animation: none; }
-    .step-rail li.step-item[data-state="current"] .step-badge { animation: none; }
+    .step-rail li.step-item[data-state="current"] .step-badge::after { animation: none; }
+    .progress-bar-wrap[data-mode="determinate"] #startup-bar-fill::after { animation: none; }
     #startup-error { animation: none; }
     #startup-error-mask { animation: none; }
   }
@@ -946,23 +1041,39 @@ window.__dshStartupShowFailure = function (config) {
     }
 
     /**
-     * Tile fill, by the session page's rule: the base color is the theme's INK
-     * mixed toward the BRAND blue (30% on dark, 50% on light), then shaded by the
+     * Tile fill, adapted from the session page's rule: the base color is the
+     * theme's INK mixed toward a BRAND blue that varies with the tile's height
+     * (50% on dark, 70% on light; stronger than the session page so the splash's
+     * hero reads at a glance), then shaded by the
      * tile's own luminance (0.2 + 0.916·l²), with a 0.7x floor on light so no tile
-     * sinks dark on a pale background. The brand values are the desktop theme's
-     * own tokens, written out because this page runs before the theme loads.
+     * sinks dark on a pale background. The colours are written out here, not read
+     * from the desktop theme, because this page runs before the theme loads; the
+     * gradient ends are this page's own choice and are not theme tokens.
      */
-    var INK_DARK = [230, 235, 245], BRAND_DARK = [96, 165, 250], ALPHA_DARK = 0.58;
-    var INK_LIGHT = [15, 23, 42], BRAND_LIGHT = [59, 130, 246], ALPHA_LIGHT = 0.66;
-    function tileFill(isDark, lum, alphaMod) {
+    var INK_DARK = [230, 235, 245], ALPHA_DARK = 0.64;
+    var INK_LIGHT = [15, 23, 42], ALPHA_LIGHT = 0.76;
+    // The brand colour is not one value: it runs from a lighter blue at the
+    // whale's back to a deeper one at its belly, which gives the flat mosaic a
+    // lit-from-above read. The two themes need opposite handling: on the pale
+    // field the belly goes DEEPER (more contrast); on the dark field both ends
+    // stay bright and only the saturation changes, because a darker belly there
+    // would lose contrast instead of gaining depth.
+    var BRAND_LIGHT_TOP = [110, 175, 255], BRAND_LIGHT_BOTTOM = [37, 80, 200];
+    var BRAND_DARK_TOP = [191, 219, 254], BRAND_DARK_BOTTOM = [96, 165, 250];
+    // Tile rows span roughly gy = -0.35 .. +0.35; this maps that to 0 (top) .. 1.
+    var GRADIENT_SPAN = 0.7;
+    function tileFill(isDark, lum, alphaMod, gy) {
       var ink = isDark ? INK_DARK : INK_LIGHT;
-      var brand = isDark ? BRAND_DARK : BRAND_LIGHT;
-      var k = isDark ? 0.3 : 0.5;
+      var top = isDark ? BRAND_DARK_TOP : BRAND_LIGHT_TOP;
+      var bottom = isDark ? BRAND_DARK_BOTTOM : BRAND_LIGHT_BOTTOM;
+      var v = Math.max(0, Math.min(1, 0.5 - gy / GRADIENT_SPAN));
+      var k = isDark ? 0.5 : 0.7;
       var vLight = 0.2 + 0.916 * lum * lum;
       var shade = isDark ? vLight : 0.7 + 0.3 * vLight;
       var rgb = [0, 0, 0];
       for (var c = 0; c < 3; c++) {
-        rgb[c] = Math.round(Math.min(255, (ink[c] + (brand[c] - ink[c]) * k) * shade));
+        var brand = top[c] + (bottom[c] - top[c]) * v;
+        rgb[c] = Math.round(Math.min(255, (ink[c] + (brand - ink[c]) * k) * shade));
       }
       var alpha = (isDark ? ALPHA_DARK : ALPHA_LIGHT) * alphaMod;
       return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(3) + ')';
@@ -1039,9 +1150,21 @@ window.__dshStartupShowFailure = function (config) {
         var currentS = baseS * tl.scale * scaleMod;
         if (assembled) currentS = Math.max(1, Math.round(currentS));
 
-        ctx.fillStyle = tileFill(isDark, lum, alphaMod);
+        ctx.fillStyle = tileFill(isDark, lum, alphaMod, tl.gy);
 
-        ctx.fillRect(tx - currentS / 2, ty - currentS / 2, currentS, currentS);
+        var drawX = tx - currentS / 2;
+        var drawY = ty - currentS / 2;
+        // Size already snaps once assembled (above); position must too. A tile
+        // of 1-3px drawn at a fractional position is anti-aliased across its
+        // neighbours at a fraction of its alpha, which washes the whole mosaic
+        // out regardless of the colour chosen. Snapped to device pixels, every
+        // tile paints at full alpha. Skipped during the entry animation so the
+        // tiles still glide smoothly into place.
+        if (assembled) {
+          drawX = Math.round(drawX * DPR) / DPR;
+          drawY = Math.round(drawY * DPR) / DPR;
+        }
+        ctx.fillRect(drawX, drawY, currentS, currentS);
       }
     }
 
