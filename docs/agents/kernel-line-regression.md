@@ -327,10 +327,14 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
   `node scripts/fixtures/probe-routes/build.mjs` 与 `node scripts/fixtures/probe-wsinject/build.mjs`
   （缺失或比 `src` 旧时直接拒绝）；它还要 shell 自己的 `dist/main/`（先跑 `npm run build`），以及
   `plugins/` 里**每个名册包**的 `lib/` —— 名册取自 shell 的 `SUITE_PLUGIN_DIRS`，缺失或比 `src` 旧同样
-  直接拒绝，并在报错里给出该包的构建命令（`plugin-brand` 走 `tsc`，没有 `build.mjs`）；端口 19387 被占时
-  直接报错退出，不给假绿；
+  直接拒绝，并在报错里给出该包的构建命令（`plugin-brand` 走 `tsc`，没有 `build.mjs`）。**端口不再是固定的**：
+  0.2.1 起 `dsh-desktop-host` 传 `--port 0`，A2/S2 比对的是 `ready` URL 里的端口，不再有 19387 这个常量；
+  办公载荷的契约也换成了七个 `<skill>/SKILL.md`，`assertRuntimeTree` 跟着改过；
 - 探针运行在 Electron 内，**每个 `spawn` 必须传 `windowsHide: true`**，否则每起一个控制台
   子进程都会在用户桌面上弹窗。
+- `probe-settings-nav.cjs` 的「设置入口」有两个形状：直连按钮（`aria-haspopup="dialog"`，仅当
+  `settings.launcher` 座位空着）与**账号菜单里的设置项**（0.2.1 起 `ui-settings-account` 占了那个座位，
+  `aria-haspopup="menu"`）。只找直连按钮的版本在这一行上每次都会红在“设置对话框没渲染出 navList”。
 ---
 
 ## 7 记录与判定规则

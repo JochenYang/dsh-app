@@ -92,8 +92,9 @@
  * and installs the session cookie, and that path is unchanged by anything
  * measured here.
  *
- * Preconditions refuse rather than degrade: port 19387 is hardcoded by the host
- * package, so an occupied one is a hard failure naming it; a directory that is
+ * Preconditions refuse rather than degrade: the host binds an OS-ASSIGNED port on
+ * this line (`dsh-desktop-host` passes `--port 0`, so a fixed one is neither
+ * reserved nor asserted here — a directory that is
  * not a runtime tree, a missing or STALE `lib/` — on the two probe fixtures AND
  * on every roster package under `plugins/`, which this probe links from the
  * working tree (the same freshness rule as the four plugin gates,
@@ -135,8 +136,18 @@ const officeRoot = path.join(dshHome, 'dsh-app-office')
 /** Which artifact the extraction under `rtRoot` came from. */
 const marker = path.join(rtRoot, 'extracted-from.txt')
 
-/** The host package's own fixed port (`dsh-desktop-host/lib/index.js` passes `--port 19387`). */
-const HOST_PORT = 19387
+/**
+ * The port the host actually bound, learned from its `ready` URL.
+ *
+ * Kernel 0.2.1 moved the desktop host to an OS-assigned port (`--port 0`), so a
+ * fixed constant no longer exists to assert against; every port comparison below
+ * derives from what the child reported.
+ */
+function portOf(reportedUrl) {
+  const port = Number(new URL(reportedUrl).port)
+  if (!Number.isInteger(port) || port <= 0) throw new Error(`the host reported no usable port: ${reportedUrl}`)
+  return port
+}
 
 /** How long the child may take to report `ready` (its first boot composes the whole profile). */
 const HOST_READY_TIMEOUT_MS = 300_000
@@ -222,27 +233,37 @@ function parseArgs(argv) {
   return args
 }
 
-/** Refuse a directory that is not a runtime tree, naming the file that decides it. */
+/**
+ * Refuse a directory that is not a runtime tree, naming the file that decides it.
+ *
+ * The office payload's contract moved with kernel 0.2.1: `skill-office` reads
+ * `<assetRoot>/<skill>/SKILL.md` for every name in its `SKILL_NAMES`, and the
+ * single `scripts/check_office.py` marker no longer exists anywhere. Asserting
+ * the old marker rejected every artifact of this line.
+ */
+const OFFICE_SKILL_NAMES = [
+  'office',
+  'office-docx',
+  'office-pptx',
+  'office-xlsx',
+  'office-render',
+  'office-recalculate',
+  'office-export-pdf',
+]
+
 function assertRuntimeTree(dir, source) {
   const bin = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   const nodeBin = path.join(dir, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
   const hostEntry = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js')
-  const officeSkills = path.join(dir, 'runtime', 'office-skills', 'scripts', 'check_office.py')
-  for (const file of [bin, nodeBin, hostEntry, officeSkills]) {
+  const officeSkills = path.join(dir, 'runtime', 'office-skills')
+  for (const file of [bin, nodeBin, hostEntry]) {
     if (!fs.existsSync(file)) throw new Error(`${source} is not a runtime tree: ${file} is missing`)
   }
-  return { nodeBin, bin, hostEntry, officeSkills: path.dirname(path.dirname(officeSkills)) }
-}
-
-/** A port is free when a listener can be bound to it — the child binds its own. */
-function assertPortFree(port) {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer()
-    server.once('error', (error) => {
-      reject(new Error(`port ${String(port)} is taken (${error.code ?? String(error)}); the desktop host hardcodes it, so a running DSH APP must be closed first`))
-    })
-    server.listen(port, '127.0.0.1', () => { server.close(() => resolve()) })
-  })
+  for (const name of OFFICE_SKILL_NAMES) {
+    const skill = path.join(officeSkills, name, 'SKILL.md')
+    if (!fs.existsSync(skill)) throw new Error(`${source} is not a runtime tree: ${skill} is missing`)
+  }
+  return { nodeBin, bin, hostEntry, officeSkills }
 }
 
 /**
@@ -680,8 +701,8 @@ async function run() {
   console.log('runtime tree   : ' + tree + ' (' + runtime.source + ')')
   console.log('host package   : ' + hostPackage.name + '@' + hostPackage.version)
   console.log('entry          : ' + treeFiles.hostEntry)
-  await assertPortFree(HOST_PORT)
-  console.log('port           : ' + String(HOST_PORT) + ' (free)')
+  // No port precondition: the host binds 0 and the OS assigns one. The reported
+  // URL is the only source of truth, and it is checked at A2 below.
 
   const prepared = await prepareHome(tree, treeFiles)
   console.log('DSH_HOME       : ' + dshHome)
@@ -709,9 +730,11 @@ async function run() {
     // The shell's own exchange: one manual fetch, the `set-cookie` of its 303.
     const { authenticateHostWeb } = shellModule('host-web.js')
     const auth = await authenticateHostWeb(message.url)
+    const hostPort = portOf(message.url)
     section('session (the shell\'s own `authenticateHostWeb`)', { origin: auth.origin, cookie: auth.cookie })
     check('A1 the shell\'s own authentication exchange bought a session cookie', auth.cookie.startsWith('dsh-auth-'))
-    check('A2 the host origin is the host package\'s own fixed port', auth.origin === `http://127.0.0.1:${String(HOST_PORT)}`, auth.origin)
+    check('A2 the host origin is the one its `ready` URL named, on an OS-assigned port',
+      auth.origin === new URL(message.url).origin && hostPort > 0, `${auth.origin} (port ${String(hostPort)})`)
 
     const base = auth.origin
     const withCookie = { cookie: auth.cookie }
@@ -745,8 +768,8 @@ async function run() {
       facts !== null && facts.immediate !== null && facts.immediate.present === true
       && facts.injected !== null && facts.injected.present === true,
       JSON.stringify({ immediate: facts?.immediate, injected: facts?.injected }))
-    check('S2 the service is the webserver carrier, on the host package\'s own port, and it can register',
-      facts !== null && facts.injected.port === HOST_PORT && facts.injected.register === 'function'
+    check('S2 the service is the webserver carrier, on the port the host reported, and it can register',
+      facts !== null && facts.injected.port === hostPort && facts.injected.register === 'function'
       && facts.injected.members.includes('collectIndexInjections') && facts.injected.members.includes('registerFallback'),
       JSON.stringify(facts?.injected ?? null))
 

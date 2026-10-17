@@ -365,17 +365,44 @@ async function main() {
       return notice !== undefined
     })()`)
     await sleep(600)
-    // Two buttons carry aria-haspopup="dialog": the market's sidebar footer
-    // action and the settings trigger. The settings one is the only one whose
-    // aria-label is the settings copy (upstream sets it from `t('trigger')`).
-    const opened = await win.webContents.executeJavaScript(`(function () {
+    // The settings entry has TWO shapes on this line, and the probe must open
+    // whichever the composed tree renders:
+    //   - a direct trigger (`aria-haspopup="dialog"`, aria-label from
+    //     `ui-settings-general`'s `t('trigger')`) — only when the
+    //     `settings.launcher` slot is unoccupied;
+    //   - since 0.2.1 that slot is occupied by `ui-settings-account`'s account
+    //     menu (`aria-haspopup="menu"`), and Settings is one of its items. A
+    //     probe that only looked for the direct trigger failed on every run
+    //     against this line with "the settings dialog never rendered a navList".
+    const openedDirect = await win.webContents.executeJavaScript(`(function () {
       const trigger = [...document.querySelectorAll('button[aria-haspopup="dialog"]')]
-        .find((b) => /settings|设置/i.test(b.getAttribute('aria-label') ?? ''))
+        .find((b) => /^(settings|设置)$/i.test((b.getAttribute('aria-label') ?? '').trim()))
       if (trigger === undefined) return false
       trigger.click()
       return true
     })()`)
-    record('the settings trigger is findable by its label', opened === true)
+    let opened = openedDirect
+    if (!opened) {
+      // The launcher menu is a popover: click it, then pick the Settings item by
+      // its copy (the kernel's own dictionary, never a hashed class).
+      const menuOpened = await win.webContents.executeJavaScript(`(function () {
+        const menu = document.querySelector('button[aria-haspopup="menu"]')
+        if (menu === null) return false
+        menu.click()
+        return true
+      })()`)
+      if (menuOpened) {
+        await sleep(500)
+        opened = await win.webContents.executeJavaScript(`(function () {
+          const item = [...document.querySelectorAll('[role="menuitem"], [role="menu"] button, button')]
+            .find((el) => /^(settings|设置)/i.test((el.textContent ?? '').trim()))
+          if (item === undefined) return false
+          item.click()
+          return true
+        })()`)
+      }
+    }
+    record('the settings dialog opens from the footer launcher', opened === true)
     const navReady = await waitFor(win, `document.querySelector('[class*="navList"]') !== null`, 20_000, 'the settings nav').then(() => true).catch(() => false)
     if (!navReady) {
       const dump = await win.webContents.executeJavaScript(`(function () {
