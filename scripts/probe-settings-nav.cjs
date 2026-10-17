@@ -390,6 +390,29 @@ async function main() {
     }
   }
 
+  // The suite rides the PROFILE's own patch document, not a `--patch` overlay.
+  //
+  // That ordering is the one the desktop host creates (it passes no `--patch`),
+  // and it is also the one the kernel's config editor requires: the editor
+  // writes into this document, which applies after every bundle layer, so its
+  // value wins the composition check. A `--patch` overlay applies AFTER the
+  // document, and the editor then refuses every switch with 'Configuration for
+  // "web" is overridden by a home patch or command-line overlay' — measured on
+  // this very probe before it was changed.
+  const profilePatch = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  fs.mkdirSync(path.dirname(profilePatch), { recursive: true })
+  fs.writeFileSync(profilePatch, fs.readFileSync(OVERLAY, 'utf8'))
+
+  // A saved choice that differs from the profile row. The suite re-applies it
+  // at activation (the shell rewrites that row on every start, so this replay
+  // is what makes a choice survive a restart). Seeding it here turns the
+  // replay into something the pane must show: if the boot-time write fails,
+  // the marked card is the profile's source and the assertion below says so.
+  const SEEDED_PROVIDER = 'deepseek-search-api'
+  const storeDir = path.join(dshHome, 'storages', 'dsh-app-plugin-websearch')
+  fs.mkdirSync(storeDir, { recursive: true })
+  fs.writeFileSync(path.join(storeDir, 'config.json'), JSON.stringify({ version: 1, provider: SEEDED_PROVIDER }))
+
   const port = await freePort()
   console.log(`checkout : ${CHECKOUT}`)
   console.log(`DSH_HOME : ${dshHome}`)
@@ -398,7 +421,7 @@ async function main() {
 
   const logFd = openSync(logPath, 'a')
   const child = spawn(
-    `pnpm dsh web --patch "${OVERLAY}" --host 127.0.0.1 --port ${port} --no-open`,
+    `pnpm dsh web --host 127.0.0.1 --port ${port} --no-open`,
     [],
     {
       cwd: CHECKOUT,
@@ -692,12 +715,16 @@ async function main() {
           const expect = LANG === 'zh-CN'
             ? {
                 api: 'DeepSeek 官方（Search API）',
+                apiId: 'deepseek-search-api',
+                brandId: 'dsh-app',
                 model: 'DeepSeek 官方（模型检索）',
                 apiPrice: '起按 5 元 / 千次计费',
                 modelPrice: '没有按次单价',
               }
             : {
                 api: 'DeepSeek official (Search API)',
+                apiId: 'deepseek-search-api',
+                brandId: 'dsh-app',
                 model: 'DeepSeek official (model retrieval)',
                 apiPrice: 'billed at CNY 5 per 1000 calls',
                 modelPrice: 'no per-call price',
@@ -724,22 +751,85 @@ async function main() {
           // resolves to an id the pane does not render, NO card is marked —
           // which is what the reader saw while the kernel's registry held a
           // provider this page never listed.
-          const selected = await win.webContents.executeJavaScript(
-            `[...document.querySelectorAll('.dshWs-providerCard')].filter((el) => el.getAttribute('aria-current') === 'true').length`)
+          const marked = await win.webContents.executeJavaScript(
+            `[...document.querySelectorAll('.dshWs-providerCard')].filter((el) => el.getAttribute('aria-checked') === 'true').map((el) => el.textContent)`)
           record('exactly one provider card is marked as the one in use',
-            selected === 1, `${selected} marked`)
-          // The page must not offer a switch it cannot honour: the source is
-          // fixed by the `web` row the desktop suite writes into the profile on
-          // every start, and the kernel's config editor refuses to edit a row a
-          // `--patch` overlay owns. What the reader gets instead is that fact,
-          // said on the page.
-          const owned = LANG === 'zh-CN'
-            ? '搜索来源由桌面套件每次启动写入 profile 的 web 行决定'
-            : 'the `web` row the desktop suite writes into this profile'
-          const hint = await win.webContents.executeJavaScript(
-            `document.querySelector('.dshWs-providerRow')?.parentElement?.querySelector('.dshWs-hint')?.textContent ?? ''`)
-          record('the pane says where the search source is decided',
-            hint.includes(owned), hint.slice(0, 200))
+            marked.length === 1, `${marked.length} marked`)
+          // The saved choice, not the profile row, is what answers after a
+          // restart: the suite re-applies it at activation.
+          record('the saved source survives a restart (replayed at activation)',
+            marked.length === 1 && marked[0].startsWith(expect.api),
+            marked[0] ?? '(none)')
+
+          // The switch. 0.2.1 made `web.searchProvider` a read-only volatile
+          // field, so the plugin's old `seam.searchProviderId = …` was a silent
+          // no-op; the write now goes through the kernel's config editor. This
+          // drives the real path (card → confirm → /config/save → editor →
+          // loader) and reads the mark back. It runs against the probe's own
+          // temp home and switches back before finishing.
+          const brandLabel = LANG === 'zh-CN' ? '品牌引擎链' : 'Brand engine chain'
+          const readSelected = `(function () {
+            const card = [...document.querySelectorAll('.dshWs-providerCard')]
+              .find((el) => el.getAttribute('aria-checked') === 'true')
+            return card === undefined ? null : card.textContent
+          })()`
+          const clickCard = (label) => win.webContents.executeJavaScript(`(function () {
+            const card = [...document.querySelectorAll('.dshWs-providerCard')]
+              .find((el) => el.textContent.startsWith(${JSON.stringify(label)}))
+            if (card === undefined) return false
+            card.click()
+            return true
+          })()`)
+          const clickConfirm = () => win.webContents.executeJavaScript(`(function () {
+            const button = [...document.querySelectorAll('button')]
+              .find((el) => el.textContent.trim() === ${JSON.stringify(LANG === 'zh-CN' ? '切换' : 'Switch')})
+            if (button === undefined) return false
+            button.click()
+            return true
+          })()`)
+          /** Wait until the card whose label starts with `label` is the marked one. */
+          const settleOn = async (label) => {
+            for (let i = 0; i < 40; i += 1) {
+              const now = await win.webContents.executeJavaScript(readSelected)
+              if (now !== null && now.startsWith(label)) return now
+              await sleep(150)
+            }
+            return null
+          }
+          const startedOn = await win.webContents.executeJavaScript(readSelected)
+          const original = startedOn !== null && startedOn.startsWith(brandLabel) ? brandLabel : expect.api
+          const target = original === brandLabel ? expect.api : brandLabel
+          const clicked = await clickCard(target)
+          await sleep(120)
+          const confirmed = clicked === true && await clickConfirm() === true
+          const switched = await settleOn(target)
+          // On failure the page (correctly) shows its own sentence, which hides
+          // the editor's diagnostic. Fetch the route once more and keep it, so
+          // the record says WHY rather than only that it failed.
+          const diagnostic = switched === null && confirmed
+            ? await win.webContents.executeJavaScript(`(async () => {
+                const response = await fetch('/api/plugins/dsh-app/plugin-websearch/config/save', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  credentials: 'same-origin',
+                  body: JSON.stringify({ provider: ${JSON.stringify(target === brandLabel ? expect.brandId : expect.apiId)} }),
+                })
+                const body = await response.json()
+                return JSON.stringify({ status: response.status, text: body?.error?.host?.text ?? null })
+              })()`)
+            : ''
+          const banner = await win.webContents.executeJavaScript(
+            `document.querySelector('.dshWs-banner')?.textContent ?? ''`)
+          record('clicking a provider card switches ctx.web and the page says so',
+            confirmed && switched !== null,
+            `${JSON.stringify(startedOn)} → ${JSON.stringify(switched)} | banner ${JSON.stringify(banner)}${diagnostic === '' ? '' : ` | route said ${diagnostic}`}`)
+          if (switched !== null) {
+            // Leave the pane as found.
+            await clickCard(original)
+            await sleep(120)
+            await clickConfirm()
+            await settleOn(original)
+          }
         }
 
         // Our own composition-check card. This is the half the Han sweep CANNOT
