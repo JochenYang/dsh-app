@@ -27,7 +27,8 @@ import { appendRotatingLog } from './log-file'
 import { configureEventLog, errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation } from './event-log'
 import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
 import { devSuiteSources, homeRowsInProfilePatch, PLUGIN_SCOPE, prepareBrandSuite, prodSuiteSources, PROFILE_PATCH_FILENAME, resolveDshHome, writePatchAtomically, type PatchSpecifier } from './brand-suite'
-import { SUITE_LAYER_PACKAGE, installSuiteLayer, readShippedOverlay } from './suite-layer'
+import { SUITE_LAYER_PACKAGE, installSuiteLayer, keepSuiteLayer, readShippedOverlay } from './suite-layer'
+import type { SuiteLayerKeeper } from './suite-layer'
 import { applyHomeLayerMoves, collectEntryIds, planHomeLayerMoves, readHomeLayerConflicts, readPatchText } from './home-layer-rows'
 import { createMainWindow, isShowingLoadingPage, loadAppIntoWindow, showKernelProgress, showKernelUpdateCard, showToastWhenLoaded } from './window'
 import { activeThemeMode, attachSplashToWindow, handoffToMainWindow, setPauseToggleHandler, setStartupDigest, showStartupFailure, updateStartupWindow } from './startup-window'
@@ -133,6 +134,8 @@ let bundledReinstallTried = false
  * row — and for the repair that installs what they ask for.
  */
 let homeRepair: { readonly profileDir: string, readonly rows: readonly PatchSpecifier[] } = { profileDir: '', rows: [] }
+/** Keeps the suite layer on disk while the app runs — see `keepSuiteLayer`. */
+let suiteLayerKeeper: SuiteLayerKeeper | undefined
 /**
  * Set once the repair has answered "cannot": the CLI is not there, or nothing in
  * the rows survived the filter. The card then comes back WITHOUT the button,
@@ -1274,6 +1277,19 @@ async function startServerAndOpenWindow(): Promise<void> {
       logKernel(`[suite-layer] the suite's rows now travel in ${layer.layerDir ?? SUITE_LAYER_PACKAGE}`
         + (layer.removed.length === 0 ? '' : `; ${String(layer.removed.length)} overlay insert(s) were migrated out of the profile patch`))
     }
+    // A package-manager run in this profile prunes the layer as an extraneous
+    // directory, and the suite's rows travel ONLY through that bundle: measured
+    // on a real machine, one plugin install emptied the whole settings rail until
+    // the next app start. The keeper puts the files back within seconds, so the
+    // next composition (a kernel restart, or the plugin operation's own reload)
+    // finds them. Re-entering this function (a kernel restart) closes the previous
+    // loop first, or every restart would leave another timer behind.
+    suiteLayerKeeper?.close()
+    suiteLayerKeeper = keepSuiteLayer({
+      profileDir: profile.dir,
+      overlay: suiteRows.suite ? overlay : '',
+      report: logKernel,
+    })
   }
   // Upstream's legacy link projection is cleaned in `loadProfile`, which the
   // desktop host does not call — so a projection an EARLIER line left here would
@@ -2387,6 +2403,10 @@ if (!gotLock) {
   app.on('before-quit', () => {
     quitting = true
     stopProxyWatchdog()
+    // The keeper holds an interval; the process is going away, so stop it here
+    // rather than relying on `unref` (which only declines to hold the loop).
+    suiteLayerKeeper?.close()
+    suiteLayerKeeper = undefined
     // The run's last event, and the only one that closes a run whose
     // `app.boot.ready` never came: a start that failed, then quit.
     logEvent('app.quit', { ms: Date.now() - runStartedAt })

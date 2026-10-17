@@ -819,3 +819,85 @@ export async function installSuiteLayer(options: {
   }
   return { status: 'installed', removed, layerDir, ...(backup === undefined ? {} : { backup }) }
 }
+
+/** A running repair loop over the layer directory. */
+export interface SuiteLayerKeeper {
+  /** Stop the loop. Idempotent. */
+  close(): void
+}
+
+/**
+ * How often the keeper checks that the layer is still on disk.
+ *
+ * One `access` call per second: the layer is two small files, and a short period
+ * matters because the loader reconciles right after the package manager exits —
+ * a repair that lands inside that second can still make the SAME recomposition
+ * see the bundle, instead of waiting for the next one.
+ */
+const LAYER_KEEPER_INTERVAL_MS = 1_000
+
+/**
+ * Keep the suite's layer materialized while the app runs.
+ *
+ * Measured on a real machine: a package-manager run in the profile (`dsh plugin …
+ * install|remove`, and the plugin manager's own page) prunes
+ * `node_modules/@dsh-app/suite-layer` as an extraneous directory. The suite's rows
+ * travel ONLY through that bundle, so the live composition drops every suite row —
+ * the settings rail lost all of them and the plugin page reported the bundle as
+ * "not installed" — and nothing repaired it until the next start, because
+ * `installSuiteLayer` runs in the start path only.
+ *
+ * The keeper re-materializes the two files whenever they are missing. The
+ * manifest entry matters too: the kernel's own reconciliation preserves a bundle
+ * it cannot resolve, but that is the kernel's rule to keep or change, and a
+ * missing entry costs the same rows as a missing directory.
+ *
+ * @param options - profile dir, the overlay the layer carries, and the report sink.
+ * @returns a handle that stops the loop.
+ */
+export function keepSuiteLayer(options: {
+  profileDir: string
+  overlay: string
+  report?: (line: string) => void
+  intervalMs?: number
+}): SuiteLayerKeeper {
+  const { profileDir, overlay, report } = options
+  const layerDir = path.join(profileDir, 'node_modules', PLUGIN_SCOPE, SUITE_LAYER_DIRNAME)
+  const manifestFile = path.join(layerDir, 'package.json')
+  let closed = false
+  let repairing = false
+
+  const tick = async (): Promise<void> => {
+    if (closed || repairing) return
+    try {
+      await fs.access(manifestFile)
+      return
+    } catch {
+      // Missing — fall through and put it back.
+    }
+    repairing = true
+    try {
+      // `undefined` for the report: `writeLayerPackage` would log "wrote the suite
+      // layer", and the line below says what actually happened.
+      await writeLayerPackage(layerDir, overlay, undefined)
+      await ensureLayerBundle(profileDir, undefined)
+      report?.(`[suite-layer] restored the layer a package-manager run had pruned: ${layerDir}`)
+    } catch (error) {
+      report?.(`[suite-layer] the pruned layer could not be restored: ${(error as Error).message}`)
+    } finally {
+      repairing = false
+    }
+  }
+
+  const timer = setInterval(() => { void tick() }, options.intervalMs ?? LAYER_KEEPER_INTERVAL_MS)
+  // The keeper must never be the reason the process stays alive.
+  timer.unref?.()
+
+  return {
+    close(): void {
+      if (closed) return
+      closed = true
+      clearInterval(timer)
+    },
+  }
+}
