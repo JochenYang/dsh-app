@@ -211,12 +211,12 @@ Each rule's reasoning: [`docs/agents/security-invariants.md`](docs/agents/securi
 
 ## 8. The brand plugin suite (`plugins/`)
 
-Eighteen dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
+Seventeen dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
 desktop app updateable when upstream moves. Each is its own npm package with a host half, a client half,
 or both; `plugins/README.md` is the roster, `plugins/dsh-app.patch.yml` the loader overlay that mounts
-them, and desktop adaptation always stays shell-side — never a harness modification. `plugin-creative`
-has its host half, its bundled knowledge assets and its workspace API on the Connection carrier's exact
-routes in place, and no browser half yet (`plugins/README.md` says so beside it).
+them, and desktop adaptation always stays shell-side — never a harness modification. `plugin-workbench` is
+the container: its card grid and its `workbench.view` seat currently hold no domain, and a domain joins by
+registering a card into one of them, never by a change to the container.
 
 The suite's own rules — the roster's five copies and `check:suites:gate`, the four checks that gate a
 plugin's `lib/`, and the version-bump requirement — are in [`plugins/AGENTS.md`](plugins/AGENTS.md).

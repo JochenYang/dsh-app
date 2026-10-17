@@ -39,16 +39,6 @@
  *       the `webServer` routes is pure hardening, and it turns S5b RED — that is
  *       the signal to re-make the W14 decision. Do NOT loosen this check to make
  *       it green.
- *   S6  a REAL suite plugin's own routes (`plugin-creative`), because S1–S5 all
- *       probe fixtures. Its `/workspace` answers the plugin's own 400 with a
- *       cookie and no `sessionId`, and the carrier's 401/403 without a cookie or
- *       with a foreign `Origin` — so the ported handler is dispatching, and the
- *       route carries no fence of its own. Two further readings pin the shapes
- *       the route layer's module header registers as changed: the carrier's own
- *       404 and 403 bodies are PLAIN TEXT (`not found` / `forbidden`), not the
- *       source's `{"error": …}` JSON. `/video-preflight` answers 200 with a real
- *       capability probe, and it reports `ok: false` rather than failing when an
- *       interpreter is absent, so this holds on a machine with no Python.
  *
  * Why the desktop-host shape, and what it replaces. W13 measured S1–S3 on the
  * CLI/`dsh web` combination (`dsh/lib/bin.js --profile … --patch <overlay>
@@ -879,61 +869,6 @@ async function run() {
     check('S5a the same request with the session cookie and a same-origin Origin passes the fence',
       apiSameOrigin.status === 200,
       `status=${String(apiSameOrigin.status)}`)
-
-    // ---------------------------------------------------------------- S6
-    // A REAL plugin's own routes, on the composition the SHELL boots. The carrier
-    // is the only thing that decides whether a path reaches a handler, and its
-    // answers for "no route" (404) and "fence refused" (403) are plain text —
-    // not a route body. So a 400 carrying the plugin's own JSON envelope can only
-    // come from the ported handler. This is the end-to-end reading the creative
-    // route rewrite rests on; the plugin's own unit tests drive handlers
-    // directly and cannot see the carrier's resolution.
-    const CREATIVE = '/api/plugins/dsh-app/plugin-creative'
-    const creativeNoSession = await httpGet(url(`${CREATIVE}/workspace`), withCookie)
-    const creativeNoCookie = await httpGet(url(`${CREATIVE}/workspace`))
-    const creativeForeignOrigin = await httpGet(url(`${CREATIVE}/workspace`), { ...withCookie, origin: 'https://evil.example' })
-    const creativeFileNoPath = await httpGet(url(`${CREATIVE}/file`), withCookie)
-    const creativeMediaNoPath = await httpGet(url(`${CREATIVE}/media`), withCookie)
-    const creativePreflight = await httpGet(url(`${CREATIVE}/video-preflight`), withCookie)
-    const creativePreviewTree = await httpGet(url(`${CREATIVE}/game-preview/workspace/x/y/index.html`), withCookie)
-    section('S6 — the creative plugin\'s workspace API, as the Connection carrier dispatches it', {
-      workspaceWithCookieNoSession: { status: creativeNoSession.status, body: creativeNoSession.body.slice(0, 200) },
-      workspaceNoCookie: { status: creativeNoCookie.status, body: creativeNoCookie.body.slice(0, 80) },
-      workspaceForeignOrigin: { status: creativeForeignOrigin.status, body: creativeForeignOrigin.body.slice(0, 80) },
-      fileNoPath: { status: creativeFileNoPath.status, body: creativeFileNoPath.body.slice(0, 200) },
-      mediaNoPath: { status: creativeMediaNoPath.status, body: creativeMediaNoPath.body.slice(0, 200) },
-      videoPreflight: { status: creativePreflight.status, body: creativePreflight.body.slice(0, 200) },
-      gamePreviewSubPath: { status: creativePreviewTree.status, body: creativePreviewTree.body.slice(0, 80) },
-    })
-    check('S6 the plugin\'s /workspace route is REGISTERED and dispatching (its own 400, not the carrier\'s 404)',
-      creativeNoSession.status === 400 && creativeNoSession.body.includes('sessionId'),
-      `status=${String(creativeNoSession.status)} body=${JSON.stringify(creativeNoSession.body.slice(0, 160))}`)
-    check('S6 the carrier fences that same route (401 with no cookie) — the route carries no fence of its own',
-      creativeNoCookie.status === 401,
-      `status=${String(creativeNoCookie.status)}`)
-    check('S6 the carrier fences it against a foreign `Origin` too (403)',
-      creativeForeignOrigin.status === 403,
-      `status=${String(creativeForeignOrigin.status)} body=${JSON.stringify(creativeForeignOrigin.body.slice(0, 80))}`)
-    check('S6 /file answers the plugin\'s own JSON refusal rather than the carrier\'s 404',
-      creativeFileNoPath.status === 400 && creativeFileNoPath.body.includes('"error"'),
-      `status=${String(creativeFileNoPath.status)} body=${JSON.stringify(creativeFileNoPath.body.slice(0, 160))}`)
-    check('S6 /media answers the plugin\'s own JSON refusal rather than the carrier\'s 404',
-      creativeMediaNoPath.status === 400 && creativeMediaNoPath.body.includes('"error"'),
-      `status=${String(creativeMediaNoPath.status)} body=${JSON.stringify(creativeMediaNoPath.body.slice(0, 160))}`)
-    check('S6 /video-preflight answers 200 with a JSON capability probe',
-      creativePreflight.status === 200 && creativePreflight.body.includes('"ffmpeg"'),
-      `status=${String(creativePreflight.status)} body=${JSON.stringify(creativePreflight.body.slice(0, 160))}`)
-    check('S6 the game-preview tree has NO route, so the carrier answers 404 there',
-      creativePreviewTree.status === 404,
-      `status=${String(creativePreviewTree.status)}`)
-    // The two shapes the creative route layer's module header registers as
-    // changed: the carrier's own bodies are plain text, not the source's JSON.
-    check('S6 the carrier\'s own 404 body is PLAIN TEXT, not the source\'s JSON error envelope',
-      creativePreviewTree.body.trim() === 'not found' && !creativePreviewTree.body.includes('"error"'),
-      `body=${JSON.stringify(creativePreviewTree.body.slice(0, 80))}`)
-    check('S6 the carrier\'s own 403 body is PLAIN TEXT too',
-      creativeForeignOrigin.body.trim() === 'forbidden',
-      `body=${JSON.stringify(creativeForeignOrigin.body.slice(0, 80))}`)
 
     // ---------------------------------------------------------------- S5b
     // The same deep prefix path, with no cookie and with a foreign Origin. This

@@ -153,11 +153,6 @@ export function checkHanCharacters(repoRoot) {
     // half, whose copy belongs in the plugin's own dictionary.
     'plugins/plugin-pdf/src/',
     'plugins/plugin-ppt/src/',
-    // The creative domain plugin, on the same reading: its host half IS the
-    // model-facing layer — production prompts, skill text, role identities and
-    // single actionable failure values. Its `client/` is NOT covered and owes
-    // the plugin's own dictionary, which is where the ported UI copy has to go.
-    'plugins/plugin-creative/src/',
   ]
   const ALLOWLIST = new Set([
     // plugin-brand's route labels: documented at routes.ts and in the file
@@ -184,59 +179,6 @@ export function checkHanCharacters(repoRoot) {
     // client UI. Known deviation from the HostText rule — tracked as a
     // follow-up to route it through the wire contract.
     'plugins/plugin-swarm/src/index.ts',
-    // The creative domain's production reconciler: the Han it keeps is CONTRACT
-    // data, not copy — the upstream output directory `制作成果/成片/` (nothing
-    // under it is a new version of a shot), the delivery directory
-    // `交付/<episode>/`, and the label the production prompts write a job id
-    // behind (`任务 ID：<id>`). Translating any of them would break the match
-    // they exist for. Every sentence the module composes FOR THE CREATOR comes
-    // from the plugin's own dictionary instead, which is why this entry names
-    // one file and not the client tree.
-    'plugins/plugin-creative/src/client/production-runtime.ts',
-    // The short-drama protocol parser: the creator documents' own names
-    // (`剧本.md`, `分镜.md`, `视觉设定.md` …), the bullet FIELD names it reads
-    // inside them (`来源`, `时长`, `用途` …), and the heading vocabulary that
-    // decides what a section IS. Contract data again — translating it would stop
-    // the parser reading the documents the prompt layer tells the model to
-    // write. Its nine creator-facing diagnostics come from the dictionary.
-    'plugins/plugin-creative/src/client/drama-production.ts',
-    // The live file-mutation watcher: the workspace DIRECTORY names that decide
-    // which workbench a path belongs to (`正文`, `大纲`, `剧集`, `交付` …) and the
-    // DOCUMENT names its first-open ranking looks for (`剧本.md`, `screenplay.md`,
-    // `creative-brief.md` …). Contract data again — they are the creator's own
-    // folders and the names upstream tooling writes, so translating them would
-    // stop the workbench recognising the workspace it is looking at. Its one
-    // user-facing label (a workbench mode's name) comes from the dictionary.
-    'plugins/plugin-creative/src/client/file-activity.ts',
-    // The production prompts THEMSELVES: the model-facing layer, on the same
-    // reading as plugin-memory/src/prompt.ts. Every string is an instruction or
-    // a label the MODEL reads and writes, and a dictionary cannot hold it —
-    // translating a prompt does not translate the model's output, it only makes
-    // the prompt disagree with the documents the bundled Skills tell the model
-    // to write.
-    'plugins/plugin-creative/src/client/production-prompts.ts',
-    // The one CONTRACT literal the production view keeps: `ASSEMBLED_CUT_PATH`,
-    // upstream's own assembled-cut path (`制作成果/成片/成片.mp4`, relative to the
-    // episode directory). It is what the composition job correlates a finished
-    // cut on, because upstream renders to that fixed path rather than to a name
-    // carrying the job id — translating it would stop the job ever completing,
-    // and the module that owns the neighbouring output directory
-    // (`production-runtime.ts`, above) keeps the same literal for the same
-    // reason. Every sentence the view shows comes from the plugin's dictionary,
-    // and the two creator documents it names are taken from the parser module,
-    // so this entry covers exactly one path and no copy.
-    'plugins/plugin-creative/src/client/drama-production-view.tsx',
-    // The client half's workbench body. Its nine lines of Han are CONTRACT data,
-    // the same class as the modules above: the workspace directory names that
-    // group the file tree and fix their order (`正文`, `大纲`, `剧集`, `交付` …),
-    // the `剧集/` and `交付/` media roots, upstream's two assembled-cut patterns
-    // (`成片-<id>.mp4` and `制作成果/成片/`), the five creator document names, and
-    // the `Open`/`打开` prefix the source strips off a candidate path. Every one
-    // matches text that already exists on disk or that the model wrote, so
-    // translating it would stop the match; the one noun a creator can SEE (a
-    // group's fallback name) is derived from those same directory names. All of
-    // the workbench's own copy comes from the plugin's dictionary.
-    'plugins/plugin-creative/src/client/workbench.tsx',
   ])
   const HAN = /[\u4e00-\u9fff]/u
   const violations = []

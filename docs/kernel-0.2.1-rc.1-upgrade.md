@@ -39,6 +39,8 @@ npm dist-tags @deepseek-ai/dsh  → { alpha: 0.2.1-alpha.5, latest: 0.2.0-rc.2, 
 
 ### 1.1 creative 的角色限制为什么换到这个边界 `[静态]` + `[实测]`
 
+> 该插件（`plugin-creative`）在本轮之后已从套件移除，本节记的是当时的决策与实测，文中路径不再存在于树里。
+
 `persona` 与 `toolFilter` 现在只剩“冷恢复时重放历史描述符”的地位
 （`@deepseek-ai/dsh-subagent/lib/types/child-agent.d.ts` 的 `ChildComposition`），起子会话时无法再传。
 上游给出的替代是 Agent Preset，而我们的七个角色是随包分发的一次性文本，不是用户可选的 preset。
@@ -167,7 +169,7 @@ preset 组合一起进来，我们不再有这个选择——opt-out 意味着�
 | `npm run check:slots` | 全部 `OK`，无 `unjudged` |
 | `npm run check:suites:gate` | `no drift: every copy names the same set of plugins` |
 | `npm run check:touchpoints:gate` | exit 0（七类均有命中） |
-| 20 个插件的 `npm run build` + `npm test` | 20/20 绿；`plugin-creative` 417 用例、`plugin-swarm` 35 用例 |
+| 20 个插件的 `npm run build` + `npm test` | 20/20 绿；`plugin-creative` 417 用例（该插件其后已移除）、`plugin-swarm` 35 用例 |
 | 20 个插件的 `tsc --noEmit` | 20/20 干净（`plugin-rewind` 需 `--max-old-space-size=8192`，见 §5） |
 | `node --test test/host-arg-shape.test.mjs test/office-payload-heal.test.mjs` | 28 用例 / 0 fail（办公载荷新契约） |
 | `npm run runtime:build` | 见 §6 |

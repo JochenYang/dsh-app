@@ -314,11 +314,8 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
   `node scripts/fixtures/probe-workbench/build.mjs`）；
 - `scripts/probe-routes.cjs` 守**路由载体**（内核侧行为）：Connection 载体 exact-only（S3）、`Range` 透传
   （S4）与流式不缓冲（S4b）、宿主 `webServer` 的 `kind: 'prefix'` 服务深层子路径（S3），以及栅栏对照 ——
-  S5a：`/api` 无 cookie → 401、异源 `Origin` → 403；S5b：同一条 prefix 路由两者都 200；S6：**真实套件插件**
-  （`plugin-creative`）自己的路由在那道栅栏后面派发，且载体自己的 404/403 体是**纯文本**
-  （`not found` / `forbidden`），不是源那份 JSON —— 这条是「插件自己的路由真的接上了载体」的唯一端到端证据，
-  插件的单测直接驱动 handler，看不到载体的路径/方法回落。段标与断言标号
-  就是这里写的 S1…S6（输出里按同一个标号找）。**升线之后必须重跑**：它量的四条会随内核线变动，任一条
+  S5a：`/api` 无 cookie → 401、异源 `Origin` → 403；S5b：同一条 prefix 路由两者都 200。段标与断言标号
+  就是这里写的 S1…S5（输出里按同一个标号找）。**升线之后必须重跑**：它量的四条会随内核线变动，任一条
   变了都会推翻 W14 的路由决策（`docs/plans/workbench-hub.md` 的 W14 条目与收尾项）。S5b 是单向检查：
   上游哪天给 `webServer` 路由加上鉴权属于纯硬化，会让 S5b 变红，那是重做 W14 决策的信号，**不是**放宽
   这条检查的理由。它启的是**真机 desktop-host 形态**（`webShapeArgs` 那组位置参数、**无 `--patch`**、
@@ -435,7 +432,7 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
 - [ ] 第 3 节自动门禁裸跑全过
 - [ ] 第 4 节换线专属检查逐项过
 - [ ] 第 5 节 M1–M5
-- [ ] 第 6 节渲染面：探针跑一遍（`scripts/probe-workbench.cjs` 与 `scripts/probe-routes.cjs` 都自带 runtime 产物与内核子进程，不需要检出，见 §6.4），按三条纪律出**每插件**判定表；路由载体那几条（`probe-routes.cjs` 输出里的 S1–S6 段，S6 是插件自己的路由）按它的 `RESULT` 行记账
+- [ ] 第 6 节渲染面：探针跑一遍（`scripts/probe-workbench.cjs` 与 `scripts/probe-routes.cjs` 都自带 runtime 产物与内核子进程，不需要检出，见 §6.4），按三条纪律出**每插件**判定表；路由载体那几条（`probe-routes.cjs` 输出里的 S1–S5 段）按它的 `RESULT` 行记账
 - [ ] 第 7 节记录成文，含负面证据
 - [ ] 改动落在 `changesets/` 片段里
 

@@ -28,6 +28,7 @@ import {
   packageNameOf,
   pluginImportGaps,
 } from '../scripts/lib/plugin-imports.mjs'
+import { SUITE_PLUGINS } from '../scripts/kernel-line.mjs'
 import {
   assertPluginLibFresh,
   assertPluginOutputs,
@@ -426,7 +427,10 @@ test('the walker reads a real plugin directory and keeps out of lib/ and node_mo
   const names = readdirSync(pluginsRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('plugin-'))
     .map((entry) => entry.name)
-  assert.ok(names.length >= 18, `the suite has ${names.length} plugin directories, expected at least 18`)
+  // The floor is the ROSTER, not a number: the suite's size changes with a
+  // deliberate roster edit (this round removed one plugin), and a hardcoded
+  // count turns that edit into a red test that says nothing about the walker.
+  assert.ok(names.length >= SUITE_PLUGINS.length, `the suite has ${names.length} plugin directories, roster ${SUITE_PLUGINS.length}`)
   for (const name of names) {
     const { newestInput, libMtime } = pluginLibStaleness(path.join(pluginsRoot, name))
     // A plugin always has sources; the newest one is never an output or a
@@ -676,7 +680,10 @@ test('every import gap the real suite reports is a real one', () => {
   const names = readdirSync(pluginsRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('plugin-'))
     .map((entry) => entry.name)
-  assert.ok(names.length >= 18, `the suite has ${names.length} plugin directories, expected at least 18`)
+  // The floor is the ROSTER, not a number: the suite's size changes with a
+  // deliberate roster edit (this round removed one plugin), and a hardcoded
+  // count turns that edit into a red test that says nothing about the walker.
+  assert.ok(names.length >= SUITE_PLUGINS.length, `the suite has ${names.length} plugin directories, roster ${SUITE_PLUGINS.length}`)
   let checked = 0
   const reported = []
   for (const name of names) {

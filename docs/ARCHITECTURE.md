@@ -48,11 +48,6 @@
                                office generation: PPTD projects over bundled templates, and PDF
                                authoring/reading plus `office_to_pdf` conversion, over the
                                LibreOffice engine installed on demand (§4.1)
-    plugin-creative (dual-face) the seat a writing-oriented domain (fiction, short drama,
-                               interactive narrative, video recap) lands in; the host half, the
-                               four bundled knowledge domains under `knowledge/` and the creative
-                               workspace API on the Connection carrier's exact routes are in
-                               place, the browser half is not
 ```
 
 There is no setup renderer: the first run downloads/activates the kernel in the
