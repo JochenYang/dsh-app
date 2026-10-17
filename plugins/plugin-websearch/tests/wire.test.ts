@@ -12,7 +12,7 @@ import {
   engineBlockReason,
   maskEngines,
   unmaskEngines,
-  UPSTREAM_PROVIDER_ID,
+  UPSTREAM_PROVIDER_IDS,
   validateFile,
   WebSearchValidationError,
 } from '../src/wire.ts'
@@ -51,8 +51,8 @@ describe('validateFile', () => {
     assert.equal(file.cacheTtlMinutes, 0)
   })
 
-  it('accepts only the two known provider ids', () => {
-    assert.equal(validateFile({ provider: UPSTREAM_PROVIDER_ID }).provider, UPSTREAM_PROVIDER_ID)
+  it('accepts every DeepSeek provider the kernel line can mount', () => {
+    for (const id of UPSTREAM_PROVIDER_IDS) assert.equal(validateFile({ provider: id }).provider, id)
     assert.equal(validateFile({ provider: 'nonsense' }).provider, BRAND_PROVIDER_ID)
   })
 

@@ -34,8 +34,8 @@ import type { EngineEntry, EngineStatus, HostText, WebSearchFile } from '../wire
 // Coded host messages: the code → copy tables live in a React-free module so
 // the suite can test them (a .tsx cannot be bundled by the test harness).
 import { hostMessage, providerReasonCopy, routeErrorCopy, statusLabel } from './host-message.ts'
-import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS, type WebSearchKey } from './locales.ts'
+import { PROVIDER_HINT_KEYS, PROVIDER_PRICE_KEYS, providerLabel } from './providers.ts'
 
 /**
  * The host half's route prefix on the shared Connection `/api` channel. Mirrors
@@ -140,28 +140,6 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 /**
- * The provider ids the host can report, as dictionary keys. An unknown id
- * falls through to the id itself — an unnamed provider is still worth showing.
- *
- * `deepseek-search-api` is kernel 0.2.1-rc.2's direct Search API provider; it
- * sits beside `deepseek-official` (the older auxiliary-model-turn route), and a
- * user may have either one selected.
- */
-const PROVIDER_KEYS: Readonly<Record<string, WebSearchKey>> = {
-  'dsh-app': 'ws.provider.brand',
-  'deepseek-official': 'ws.provider.official',
-  'deepseek-search-api': 'ws.provider.officialApi',
-}
-
-/** Providers that bill per call through DeepSeek's own endpoints. */
-const BILLED_OFFICIAL_IDS: ReadonlySet<string> = new Set(['deepseek-official', 'deepseek-search-api'])
-
-function providerLabel(id: string, t: TranslateNS<typeof NS>): string {
-  const key = PROVIDER_KEYS[id]
-  return key === undefined ? id : t(key)
-}
-
-/**
  * The fetch-network line of the self-check: which transport the next
  * `web_fetch` uses. The three states are the whole story a user needs — a
  * proxied egress, a clean system resolver, or DoH after a poisoning
@@ -232,7 +210,6 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
   const [selfTestBusy, setSelfTestBusy] = useState(false)
   const [draft, setDraft] = useState<WebSearchFile | null>(null)
   const [instancesText, setInstancesText] = useState('')
-  const [confirmSwitch, setConfirmSwitch] = useState<string | null>(null)
 
   /** Show a transient success notice, replacing any previous one. */
   const showNotice = useCallback((key: WebSearchKey): void => {
@@ -408,21 +385,6 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
   const ordered = [...draft.engines].sort((a, b) => a.priority - b.priority)
   const activeLabel = providerLabel(draft.provider, t)
 
-  /** Switching provider is the one action worth confirming: it changes what
-   * every future web_search call does, and the other side may be unusable
-   * (the upstream provider needs a DeepSeek key and a mounted loader row). */
-  const requestSwitch = (provider: string): void => {
-    if (provider === draft.provider) return
-    setConfirmSwitch(provider)
-  }
-
-  /** The target provider's own verdict, used to make the confirm dialog
-   * honest about what the user is about to select. */
-  const providerReason = (id: string): string | undefined => {
-    const reason = view.providers.find(item => item.id === id)?.reason
-    return reason === undefined ? undefined : providerReasonCopy(t, reason)
-  }
-
   return (
     <div className="dshWs-section">
       <h3 className="dshWs-title">{t('ws.nav')}</h3>
@@ -443,7 +405,11 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
           <h4 className="dshWs-cardTitle">{t('ws.source.title')}</h4>
           <span className="dshWs-badge">{t('ws.source.current', { label: activeLabel })}</span>
         </div>
-        <div className="dshWs-providerRow" role="radiogroup" aria-label={t('ws.source.aria')}>
+        {/* Read-only status, not a control. The search source is decided by
+            the `web` row the desktop suite writes into the profile on every
+            start, so a switch here could not stick — and the line underneath
+            says where it is decided instead of offering a dead radio. */}
+        <div className="dshWs-providerRow" role="list" aria-label={t('ws.source.aria')}>
           {view.providers.map((provider) => {
             const label = providerLabel(provider.id, t)
             const dot = provider.state === 'ready'
@@ -453,14 +419,11 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
               ? t('ws.provider.ready')
               : provider.state === 'unavailable' ? t('ws.provider.unavailable') : t('ws.provider.unknown')
             return (
-              <button
+              <div
                 key={provider.id}
-                type="button"
-                role="radio"
-                aria-checked={provider.selected}
+                role="listitem"
+                aria-current={provider.selected ? 'true' : undefined}
                 className={`dshWs-providerCard${provider.selected ? ' dshWs-providerCardOn' : ''}`}
-                disabled={busy}
-                onClick={() => { requestSwitch(provider.id) }}
               >
                 <span className="dshWs-providerHead">
                   <span className={`dshWs-providerDot${dot}`} aria-hidden="true" />
@@ -472,18 +435,21 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
                 <span className="dshWs-providerMeta">
                   {provider.selected
                     ? (provider.state === 'ready' ? t('ws.provider.effective') : providerReasonCopy(t, provider.reason) || stateText)
-                    : providerReasonCopy(t, provider.reason) || (provider.id === 'dsh-app'
-                      ? t('ws.provider.brandHint')
-                      : t('ws.provider.officialHint'))}
+                    : providerReasonCopy(t, provider.reason) || (PROVIDER_HINT_KEYS[provider.id] === undefined
+                      // A provider this build has no name for gets the status
+                      // word alone rather than a borrowed claim about it.
+                      ? stateText
+                      : t(PROVIDER_HINT_KEYS[provider.id]))}
                 </span>
-                {/* The price is a fact about the OFFICIAL endpoint, not a state:
-                    it belongs on that card whether or not it is selected, so a
-                    switch made months from now still shows what it costs. Both
-                    DeepSeek routes bill; only their transport differs. */}
-                {BILLED_OFFICIAL_IDS.has(provider.id)
-                  ? <span className="dshWs-providerMeta">{t('ws.provider.officialBilling')}</span>
-                  : null}
-              </button>
+                {/* Price is a fact about the route, not a state: it belongs on
+                    the card whichever one answers. Each payable route carries
+                    its OWN sentence — they are not charged the same way, and
+                    one shared line said the model route was free until
+                    November. */}
+                {PROVIDER_PRICE_KEYS[provider.id] === undefined
+                  ? null
+                  : <span className="dshWs-providerMeta">{t(PROVIDER_PRICE_KEYS[provider.id])}</span>}
+              </div>
             )
           })}
         </div>
@@ -761,35 +727,6 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
       </div>
 
       <p className="dshWs-path">{t('ws.path', { path: view.filePath })}</p>
-
-      <ConfirmDialog
-        open={confirmSwitch !== null}
-        title={t('ws.confirm.title')}
-        message={confirmSwitch === null ? '' : (() => {
-          const target = confirmSwitch
-          const label = providerLabel(target, t)
-          const reason = providerReason(target)
-          const base = target === 'deepseek-official'
-            ? t('ws.confirm.toOfficial')
-            : t('ws.confirm.toBrand')
-          // When the host already knows the target cannot work, saying so in
-          // the confirmation is the difference between an informed choice and
-          // a silent breakage the user discovers at the next search.
-          const warn = reason === undefined ? '' : `\n\n${t('ws.confirm.warn', { label, reason })}`
-          return `${base}${warn}\n\n${t('ws.confirm.ask')}`
-        })()}
-        confirmLabel={t('ws.confirm.switch')}
-        cancelLabel={t('ws.cancel')}
-        busy={busy}
-        onConfirm={() => {
-          const provider = confirmSwitch
-          setConfirmSwitch(null)
-          if (provider !== null && draft !== null) {
-            void save({ ...draft, provider }, instancesText, 'ws.notice.providerSwitched')
-          }
-        }}
-        onClose={() => { setConfirmSwitch(null) }}
-      />
     </div>
   )
 }

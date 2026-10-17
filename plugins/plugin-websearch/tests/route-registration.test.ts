@@ -17,7 +17,10 @@ import { join } from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 import { registerWebSearchRoutes, ROUTE_PREFIX, type RouteDeps } from '../src/routes.ts'
 import { WebSearchStore } from '../src/store.ts'
-import { UPSTREAM_PROVIDER_ID } from '../src/wire.ts'
+import { UPSTREAM_PROVIDER_IDS } from '../src/wire.ts'
+
+/** The DeepSeek routes `dsh-base` mounts; the page offers one card each. */
+const [OFFICIAL_PROVIDER_ID, SEARCH_API_PROVIDER_ID] = UPSTREAM_PROVIDER_IDS
 
 /** One route as the registry received it. */
 interface CapturedRoute {
@@ -32,7 +35,6 @@ interface Harness {
   readonly routes: ReadonlyMap<string, CapturedRoute>
   readonly call: (path: string, init?: RequestInit) => Promise<{ status: number, body: Record<string, unknown> }>
   readonly store: WebSearchStore
-  readonly providerChoices: string[]
 }
 
 const dirs: string[] = []
@@ -49,9 +51,7 @@ function harness(overrides: Partial<RouteDeps> = {}): Harness {
     },
   }
   const store = new WebSearchStore(dir, () => undefined)
-  const providerChoices: string[] = []
   const deps: RouteDeps = {
-    applyProviderChoice: (file) => { providerChoices.push(file.provider) },
     clearCache: () => undefined,
     isChainExhausted: () => false,
     probe: async () => ({ latencyMs: 12, resultCount: 3 }),
@@ -60,14 +60,21 @@ function harness(overrides: Partial<RouteDeps> = {}): Harness {
     searchThroughSeam: async () => ({ provider: 'dsh-app', resultCount: 5, latencyMs: 7 }),
     networkStatus: async () => ({ route: 'direct', resolver: 'system', verdict: 'clean', checkedAt: null }),
     fetchProbe: async () => ({ statusCode: 200, bytes: 1256, latencyMs: 42 }),
-    upstreamStatus: () => ({ registered: true, usable: true }),
+    // The settings page reads these two off the seam: the registry (what is
+    // mounted) and the live configured id (which one answers). The harness
+    // replaces them per test; the defaults describe a healthy kernel.
+    providerAvailability: () => new Map([
+      ['dsh-app', true],
+      ['deepseek-official', true],
+      ['deepseek-search-api', true],
+    ]),
+    activeProviderId: () => 'dsh-app',
     ...overrides,
   }
   registerWebSearchRoutes(connectionFetch as never, store, deps)
   return {
     routes,
     store,
-    providerChoices,
     call: async (path, init) => {
       const route = routes.get(path)
       assert.ok(route !== undefined, `no route registered for ${path}`)
@@ -120,20 +127,44 @@ describe('web search route registration', () => {
     const value = body.value as Record<string, unknown>
     assert.equal(value.seamAvailable, true)
     assert.equal(value.activeProvider, 'dsh-app')
-    assert.equal((value.providers as unknown[]).length, 2)
+    // Brand + both DeepSeek routes the kernel line mounts: the page must offer
+    // every provider the model could resolve to, not a fixed pair.
+    assert.equal((value.providers as unknown[]).length, 3)
     assert.equal((value.engines as unknown[]).length, 5)
   })
 
-  it('persists a save, re-points the provider, and drops the result cache', async () => {
+  it('persists a save and drops the result cache', async () => {
     const cleared: number[] = []
-    const { call, store, providerChoices } = harness({ clearCache: () => { cleared.push(1) } })
-    const { status, body } = await call(`${ROUTE_PREFIX}/config/save`, post({ provider: UPSTREAM_PROVIDER_ID, maxResults: 3 }))
+    const { call, store } = harness({ clearCache: () => { cleared.push(1) } })
+    const { status, body } = await call(`${ROUTE_PREFIX}/config/save`, post({ provider: OFFICIAL_PROVIDER_ID, maxResults: 3 }))
     assert.equal(status, 200)
     assert.equal(body.ok, true)
-    assert.equal(store.load().provider, UPSTREAM_PROVIDER_ID)
+    assert.equal(store.load().provider, OFFICIAL_PROVIDER_ID)
     assert.equal(store.load().maxResults, 3)
-    assert.deepEqual(providerChoices, [UPSTREAM_PROVIDER_ID])
     assert.equal(cleared.length, 1)
+  })
+
+  it('accepts the Search API provider as a saved choice', async () => {
+    // Before 0.2.1 the validator knew only `deepseek-official`, so picking the
+    // line's new Search API card quietly persisted the brand id instead.
+    const { call, store } = harness()
+    const { status } = await call(`${ROUTE_PREFIX}/config/save`, post({ provider: SEARCH_API_PROVIDER_ID }))
+    assert.equal(status, 200)
+    assert.equal(store.load().provider, SEARCH_API_PROVIDER_ID)
+  })
+
+  it('never claims a provider switch: the source is the loader row, not this store', async () => {
+    // The `web` row comes from the desktop suite's `--patch` overlay, so the
+    // kernel's config editor refuses to edit it. A save that reported a switch
+    // would therefore be a lie; the route reports the seam's real id, which is
+    // whatever the loader says, even after the store is told otherwise.
+    const { call, store } = harness({ activeProviderId: () => 'dsh-app' })
+    const { status, body } = await call(`${ROUTE_PREFIX}/config/save`, post({ provider: OFFICIAL_PROVIDER_ID }))
+    assert.equal(status, 200)
+    assert.equal(store.load().provider, OFFICIAL_PROVIDER_ID)
+    const view = body.value as Record<string, unknown>
+    assert.equal(view.activeProvider, 'dsh-app')
+    assert.equal((view.file as Record<string, unknown>).provider, 'dsh-app')
   })
 
   it('rejects an unparseable save body with a coded 400', async () => {

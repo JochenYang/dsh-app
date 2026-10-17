@@ -31,7 +31,7 @@ import {
   engineSpec,
   maskEngines,
   unmaskEngines,
-  UPSTREAM_PROVIDER_ID,
+  UPSTREAM_PROVIDER_IDS,
   WebSearchValidationError,
   type EngineEntry,
   type EngineStatus,
@@ -59,8 +59,6 @@ export interface ProbeResult {
 
 /** The host services the routes need. */
 export interface RouteDeps {
-  /** Re-point `ctx.web.searchProvider` at the persisted choice. */
-  applyProviderChoice(file: WebSearchFile): void
   /** Run one engine against a real query. Throws on failure. */
   probe(id: string, query: string): Promise<ProbeResult>
   /** Whether an error is the chain's "everything failed" signal. */
@@ -77,12 +75,18 @@ export interface RouteDeps {
    */
   resolveKey(entry: EngineEntry): string | undefined
   /**
-   * The upstream provider's registration + usability, read off the seam's own
-   * registry. Returns undefined when the registry is not inspectable (a kernel
+   * Every search provider the seam's registry holds right now, mapped to its
+   * own `available()`. Undefined when the registry is not inspectable (a kernel
    * whose seam shape differs), which the view renders as "unknown" rather than
    * a false green.
    */
-  upstreamStatus(): { registered: boolean, usable: boolean } | undefined
+  providerAvailability(): ReadonlyMap<string, boolean> | undefined
+  /**
+   * The provider id `ctx.web` is configured with right now — the seam's own
+   * live value, not this plugin's stored preference. Undefined when the seam
+   * cannot be read, in which case the view falls back to the stored id.
+   */
+  activeProviderId(): string | undefined
   /**
    * Run one search through the REAL seam (`ctx.web.search`), so the self-check
    * exercises the exact path the model's `web_search` tool takes — including
@@ -159,13 +163,18 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
  * @param seamAvailable - whether `ctx.web` exists AND this plugin's provider
  *   is registered. Passed in rather than assumed: the banner it drives is the
  *   only signal that the chain cannot run at all.
+ * @param activeProvider - the id `ctx.web` is configured with right now, as the
+ *   seam reports it. It is what the page marks as active AND what the file
+ *   reflects back: the loader row is the authority on which provider answers,
+ *   so a stale stored preference must never be echoed as the current choice.
+ * @param availability - the seam's registry, or undefined when unreadable.
  */
 export function buildView(
   store: WebSearchStore,
   seamAvailable: boolean,
   activeProvider: string,
   resolveKey: (entry: EngineEntry) => string | undefined,
-  upstream: { registered: boolean, usable: boolean } | undefined,
+  availability: ReadonlyMap<string, boolean> | undefined,
 ): Record<string, unknown> {
   const file = store.load()
   const usable = new Set(activeEngines(file).map(entry => entry.id))
@@ -193,32 +202,48 @@ export function buildView(
     }
   })
   return {
-    file: { ...file, engines: maskEngines(file.engines) },
+    // `provider` follows the seam, not the stored preference: the two drift
+    // apart when the loader row was edited outside this page, and echoing the
+    // stored value would then hide the drift.
+    file: { ...file, provider: activeProvider, engines: maskEngines(file.engines) },
     engines,
     activeProvider,
-    providers: buildProviderStatuses(file, seamAvailable, activeProvider, upstream),
+    providers: buildProviderStatuses(file, seamAvailable, activeProvider, availability),
     filePath: store.filePath,
     seamAvailable,
   }
 }
 
 /**
- * Compute both provider choices' real state.
+ * Compute every provider choice's real state.
  *
  * The brand side is knowable locally: it is usable exactly when at least one
- * engine can run. The upstream side is NOT — whether `deepseek-official` is
+ * engine can run. The upstream side is NOT — whether a DeepSeek provider is
  * registered depends on the composed loader tree (its row can be disabled by
  * a patch layer), and whether it is usable depends on a DeepSeek credential
- * the seam resolves at call time. Neither fact is exposed as a queryable API,
- * so this reports `unknown` with an explicit explanation rather than guessing
- * green: the settings page can then tell the user to verify with 端到端自检,
- * which is the check that actually answers it.
+ * the seam resolves at call time.
+ *
+ * So the cards come from TWO sources: the ids this line is expected to mount
+ * ({@link UPSTREAM_PROVIDER_IDS}) and everything the live registry actually
+ * holds. The expected ids get an explicit state — `unknown` when the registry
+ * is unreadable, `unavailable` with a "not registered" reason when the row is
+ * missing, and the provider's own `available()` verdict otherwise — because a
+ * provider that is simply absent would otherwise vanish from a page whose
+ * whole job is offering the choice. Registry entries nobody expected are
+ * appended, not hidden: a third-party provider the model can resolve to is
+ * worth seeing.
+ *
+ * @param file - the persisted config (brand-chain usability).
+ * @param seamAvailable - false when the brand provider itself never registered.
+ * @param activeProvider - the id `ctx.web` resolves to right now.
+ * @param availability - the registry, or undefined when it cannot be read.
+ * @returns one status per card, brand first, expected upstream ids next.
  */
 export function buildProviderStatuses(
   file: WebSearchFile,
   seamAvailable: boolean,
   activeProvider: string,
-  upstream: { registered: boolean, usable: boolean } | undefined,
+  availability: ReadonlyMap<string, boolean> | undefined,
 ): ProviderStatus[] {
   const enginesReady = activeEngines(file).length > 0
   const brand: ProviderStatus = !seamAvailable
@@ -229,38 +254,54 @@ export function buildProviderStatuses(
         ? { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'unavailable', reason: { code: 'provider.noEngines', text: 'no engine is enabled' } }
         : { id: BRAND_PROVIDER_ID, selected: activeProvider === BRAND_PROVIDER_ID, state: 'ready' }
 
-  // The upstream side is answered from the seam's registry when it is
-  // inspectable. The two failure modes are distinct and worth telling apart:
-  // not registered means the loader row is absent or disabled (a patch-layer
-  // decision), registered-but-unusable means the provider is mounted but its
-  // own `available()` says no (typically a missing DeepSeek key).
-  let upstreamStatus: ProviderStatus
-  if (upstream === undefined) {
-    upstreamStatus = {
-      id: UPSTREAM_PROVIDER_ID,
-      selected: activeProvider === UPSTREAM_PROVIDER_ID,
+  if (availability === undefined) {
+    return [brand, ...UPSTREAM_PROVIDER_IDS.map((id): ProviderStatus => ({
+      id,
+      selected: activeProvider === id,
       state: 'unknown',
       reason: { code: 'provider.upstreamUnknown', text: 'the provider registry could not be read; run the end-to-end self-check' },
-    }
-  } else if (!upstream.registered) {
-    upstreamStatus = {
-      id: UPSTREAM_PROVIDER_ID,
-      selected: activeProvider === UPSTREAM_PROVIDER_ID,
-      state: 'unavailable',
-      reason: { code: 'provider.upstreamUnregistered', text: 'web-search-deepseek is not mounted (a patch layer may disable it)' },
-    }
-  } else if (!upstream.usable) {
-    upstreamStatus = {
-      id: UPSTREAM_PROVIDER_ID,
-      selected: activeProvider === UPSTREAM_PROVIDER_ID,
-      state: 'unavailable',
-      reason: { code: 'provider.upstreamUnusable', text: 'registered but unavailable: usually no DeepSeek API key, or an invalid one' },
-    }
-  } else {
-    upstreamStatus = { id: UPSTREAM_PROVIDER_ID, selected: activeProvider === UPSTREAM_PROVIDER_ID, state: 'ready' }
+    }))]
   }
 
-  return [brand, upstreamStatus]
+  // The two upstream failure modes are distinct and worth telling apart: not
+  // registered means the loader row is absent or disabled (a patch-layer
+  // decision), registered-but-unusable means the provider is mounted but its
+  // own `available()` says no (typically a missing DeepSeek key).
+  const expected = UPSTREAM_PROVIDER_IDS.map((id): ProviderStatus => {
+    const usable = availability.get(id)
+    if (usable === undefined) {
+      return {
+        id,
+        selected: activeProvider === id,
+        state: 'unavailable',
+        reason: { code: 'provider.upstreamUnregistered', text: `${id} is not registered on ctx.web (a patch layer may disable its loader row)` },
+      }
+    }
+    if (!usable) {
+      return {
+        id,
+        selected: activeProvider === id,
+        state: 'unavailable',
+        reason: { code: 'provider.upstreamUnusable', text: 'registered but unavailable: usually no DeepSeek API key, or an invalid one' },
+      }
+    }
+    return { id, selected: activeProvider === id, state: 'ready' }
+  })
+
+  const known = new Set<string>([BRAND_PROVIDER_ID, ...UPSTREAM_PROVIDER_IDS])
+  const additional = [...availability.keys()]
+    .filter(id => !known.has(id))
+    .sort()
+    .map((id): ProviderStatus => (availability.get(id) === true
+      ? { id, selected: activeProvider === id, state: 'ready' }
+      : {
+          id,
+          selected: activeProvider === id,
+          state: 'unavailable',
+          reason: { code: 'provider.upstreamUnusable', text: 'registered, but its own availability check says no' },
+        }))
+
+  return [brand, ...expected, ...additional]
 }
 
 /**
@@ -272,7 +313,7 @@ export function buildProviderStatuses(
  *
  * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
  * @param store - the config store.
- * @param deps - host callbacks (provider switch + engine probe).
+ * @param deps - host callbacks (engine probe, provider registry + selection).
  * @returns disposer removing the routes.
  */
 export function registerWebSearchRoutes(
@@ -282,7 +323,13 @@ export function registerWebSearchRoutes(
 ): () => Promise<void> {
   const respond = (): Response => {
     const file = store.load()
-    return ok(buildView(store, deps.seamAvailable(), file.provider, deps.resolveKey, deps.upstreamStatus()))
+    return ok(buildView(
+      store,
+      deps.seamAvailable(),
+      deps.activeProviderId() ?? file.provider,
+      deps.resolveKey,
+      deps.providerAvailability(),
+    ))
   }
 
   /** Map one body-read/validation failure onto its status + coded message. */
@@ -314,8 +361,14 @@ export function registerWebSearchRoutes(
             // down masked are re-attached from the stored copy here, so a
             // save that did not touch a key never destroys it.
             const merged = { ...body, engines: unmaskEngines(body.engines, existing.engines) }
-            const file = store.save(merged)
-            deps.applyProviderChoice(file)
+            store.save(merged)
+            // No provider write here: the search source is the loader's, fixed
+            // by the `web` row the desktop suite writes into this profile on
+            // every start. A `--patch` overlay owns that row, so the kernel's
+            // own config editor refuses to edit it ("overridden by a
+            // command-line overlay") — a switch attempted here could never take
+            // effect, which is why the page reports the source instead of
+            // offering one.
             deps.clearCache()
           } catch (error) {
             if (error instanceof WebSearchValidationError) {

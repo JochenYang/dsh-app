@@ -3,9 +3,11 @@
  * config shape, validation, and the host↔client view mapping. Zero node
  * builtins — the browser bundle imports this module directly.
  *
- * The provider id is deliberately NOT the upstream `deepseek-official` id:
- * the two providers coexist in the registry, and the settings page switches
- * which one `ctx.web.searchProvider` points at.
+ * The provider id is deliberately NOT the kernel's `deepseek-official` id:
+ * several search providers coexist in the registry (`deepseek-official`,
+ * `deepseek-search-api`, and this one), and which of them `ctx.web` resolves to
+ * is decided by the loader row — the settings page reports that, it does not
+ * change it.
  *
  * @module @dsh-app/plugin-websearch/wire
  */
@@ -28,8 +30,24 @@ export const BRAND_FETCH_PROVIDER_ID = 'dsh-app-fetch'
  */
 export const FETCH_PROBE_URL = 'https://example.com/'
 
-/** The upstream DeepSeek provider id (the "原生" switch). */
-export const UPSTREAM_PROVIDER_ID = 'deepseek-official'
+/**
+ * The DeepSeek search providers this kernel line mounts, in display order.
+ *
+ * Both arrive mounted from `dsh-base`'s own rows and share the
+ * `DEEPSEEK_API_KEY` credential; they differ in transport:
+ * `deepseek-official` spends an auxiliary model turn per search, while
+ * `deepseek-search-api` calls the Search API directly (0.2.1-rc.1+).
+ *
+ * This is an EXPECTATION, not a fact: a patch layer may disable either row, so
+ * the settings page renders one card per id here and lets the live registry
+ * decide each card's state.
+ */
+export const UPSTREAM_PROVIDER_IDS = ['deepseek-official', 'deepseek-search-api'] as const
+
+/** Whether an id names one of the DeepSeek providers this page can select. */
+export function isUpstreamProviderId(id: unknown): id is typeof UPSTREAM_PROVIDER_IDS[number] {
+  return typeof id === 'string' && (UPSTREAM_PROVIDER_IDS as readonly string[]).includes(id)
+}
 
 /** The upstream anonymous fetch provider id. */
 export const UPSTREAM_FETCH_ID = 'http'
@@ -302,7 +320,9 @@ export function validateFile(raw: unknown): WebSearchFile {
   return {
     version: 1,
     enabled: raw.enabled !== false,
-    provider: provider === UPSTREAM_PROVIDER_ID ? UPSTREAM_PROVIDER_ID : BRAND_PROVIDER_ID,
+    // Any other id is a config this build cannot honour: fall back to the brand
+    // chain rather than persisting a provider that would never resolve.
+    provider: isUpstreamProviderId(provider) ? provider : BRAND_PROVIDER_ID,
     mode: mode === 'rotate' ? 'rotate' : 'fallback',
     timeoutMs: clampNumber(raw.timeoutMs, 3_000, 120_000, base.timeoutMs),
     cacheTtlMinutes: clampNumber(raw.cacheTtlMinutes, 0, 60, base.cacheTtlMinutes),
@@ -331,11 +351,10 @@ export interface EngineStatus {
 /**
  * Availability of one provider choice, computed by the host.
  *
- * The 原生/品牌 switch needs more than a binary on/off. A provider can be
- * selected, selectable, or unusable — and the upstream one is genuinely
- * unusable on a kernel whose `web-search-deepseek` row is disabled, or which
- * has no DeepSeek key. Without this the user would see 官方 as a plain option,
- * pick it, and get a bare failure with no explanation.
+ * A provider can be live, selectable, or unusable — and a DeepSeek one is
+ * genuinely unusable on a kernel whose loader row is disabled, or which has no
+ * DeepSeek key. Without this the reader would see 官方 as a plain option with
+ * no explanation for why it is not answering.
  */
 export interface ProviderStatus {
   /** The provider id (`dsh-app` or `deepseek-official`). */

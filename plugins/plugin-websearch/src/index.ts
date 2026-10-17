@@ -18,11 +18,13 @@
  * shell injected one, the system resolver when it is clean, DNS-over-HTTPS
  * when it is poisoned. See `fetch/` for the mechanism.
  *
- * The upstream DeepSeek search provider (`deepseek-official`) stays
- * registered and untouched. Which of the two `ctx.web` search providers
- * resolves is a single field — the settings page's 原生/品牌 switch writes it
- * and the runtime re-points immediately, so the user can compare the two
- * without editing overlay files or restarting.
+ * The kernel's own DeepSeek searches (`deepseek-official`, `deepseek-search-api`)
+ * stay registered and untouched. Which search provider `ctx.web` resolves is
+ * one loader field (`web.searchProvider`) that this plugin only READS: the
+ * settings page reports every provider the seam holds and which one is live,
+ * so a reader can compare them without editing overlay files. It does not offer
+ * a switch — that row belongs to the suite's `--patch` overlay, which the
+ * kernel's config editor refuses to edit.
  *
  * Stability discipline: a kernel without the `ctx.web` seam degrades to
  * `seamAvailable: false` (routes still answer, nothing is registered) instead
@@ -46,7 +48,7 @@ import { createEngine } from './engines/index.ts'
 import { createWebFetchProvider } from './fetch/provider.ts'
 import { registerWebSearchRoutes } from './routes.ts'
 import { WebSearchStore } from './store.ts'
-import { activeEngines, BRAND_PROVIDER_ID, BRAND_FETCH_PROVIDER_ID, FETCH_PROBE_URL, UPSTREAM_PROVIDER_ID, type EngineEntry, type WebSearchFile } from './wire.ts'
+import { activeEngines, BRAND_PROVIDER_ID, BRAND_FETCH_PROVIDER_ID, FETCH_PROBE_URL, type EngineEntry } from './wire.ts'
 
 export const name = 'plugin-websearch'
 
@@ -100,7 +102,15 @@ interface WebSeamLike {
     available(): boolean
     fetch(request: { url: string }, signal?: AbortSignal): Promise<unknown>
   }): () => void
-  searchProviderId?: string
+  /**
+   * The seam's own config. `searchProvider` is read through its reference only:
+   * 0.2.1 turned the field `volatile`, so the mutable `searchProviderId`
+   * property older lines exposed is gone. The value is the loader's — the page
+   * reports it and does not offer to change it (see the settings section).
+   */
+  config?: {
+    searchProvider?: { get?(): unknown }
+  }
   search?(request: { query: string, maxResults?: number }, signal?: AbortSignal): Promise<unknown>
   /**
    * The seam's private provider registry. Read structurally (never typed by
@@ -220,33 +230,17 @@ export function apply(ctx: Context, config: Config): void {
     log.warn('websearch: this kernel cannot register a fetch provider; web_fetch keeps the host provider')
   }
 
-  /**
-   * Point `ctx.web` at the configured provider.
-   *
-   * The overlay pins `searchProvider: dsh-app`, so this only has to act when
-   * the user chose the upstream provider (or switched back) — the assignment
-   * is what makes the switch take effect without a restart. Written
-   * defensively: a kernel whose seam exposes `searchProviderId` as a
-   * read-only accessor simply keeps the overlay's value.
-   */
-  const applyProviderChoice = (file: WebSearchFile): void => {
-    if (seam === undefined) return
+  /** The provider id `ctx.web` is configured with, as the seam reports it. */
+  const activeProviderId = (): string | undefined => {
     try {
-      if (seam.searchProviderId !== file.provider) {
-        seam.searchProviderId = file.provider
-        log.info(`websearch: active search provider → ${file.provider}`)
-      }
-    } catch (error) {
-      log.warn(`websearch: cannot switch search provider on this kernel: ${error instanceof Error ? error.message : String(error)}`)
+      const configured = seam?.config?.searchProvider?.get?.()
+      return typeof configured === 'string' && configured !== '' ? configured : undefined
+    } catch {
+      return undefined
     }
   }
 
-  // Apply the persisted choice at activation so a restart honors the user's
-  // switch even when the overlay says `dsh-app`.
-  applyProviderChoice(store.load())
-
   ctx.effect(() => registerWebSearchRoutes(ctx.connection.fetch, store, {
-    applyProviderChoice,
     probe: async (id, query) => {
       const file = store.load()
       const entry = file.engines.find(item => item.id === id)
@@ -280,17 +274,27 @@ export function apply(ctx: Context, config: Config): void {
      * kernel that renames or hides it must degrade to "unknown" (the caller
      * renders that honestly) rather than throwing inside a GET route.
      */
-    upstreamStatus: () => {
+    providerAvailability: () => {
       try {
         const registry = seam?.searchProviders
         if (!(registry instanceof Map)) return undefined
-        const provider = registry.get(UPSTREAM_PROVIDER_ID)
-        if (provider === undefined) return { registered: false, usable: false }
-        return { registered: true, usable: provider.available() }
+        const availability = new Map<string, boolean>()
+        for (const [id, provider] of registry) {
+          // One provider whose own check throws must not blank the whole page:
+          // it is reported unusable, which is what its thrower meant to say.
+          try {
+            availability.set(id, provider.available())
+          } catch {
+            availability.set(id, false)
+          }
+        }
+        return availability
       } catch {
         return undefined
       }
     },
+    /** The seam's live selection, not this page's stored preference. */
+    activeProviderId,
     /**
      * Drive `ctx.web.search` itself. This is the self-check's whole point: it
      * resolves the provider through the seam's own selection rules, so a
@@ -310,7 +314,7 @@ export function apply(ctx: Context, config: Config): void {
       }
       const accounting = lastOutcome.get(query)
       return {
-        provider: seam.searchProviderId ?? 'unknown',
+        provider: activeProviderId() ?? 'unknown',
         resultCount: Array.isArray(result?.sources) ? result.sources.length : 0,
         latencyMs: Date.now() - startedAt,
         // Chain accounting from the provider that just ran (absent when the

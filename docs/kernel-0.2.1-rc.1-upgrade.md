@@ -380,6 +380,34 @@ rc.1 交付当天的 08:36Z，上游发布了 rc.2（`dsh-v0.2.1-rc.2`，rc.1 �
 
 ---
 
+## 9. 补记：rc.2 删掉了 `searchProviderId`，我们的切换静默失效 `[读取 + 实测]`
+
+rc.2 的 `WebRuntime` 把 `searchProvider` / `fetchProvider` 声明成 `z.string().volatile()`，取值经 `Volatile`
+引用、接口只有 `get()`；0.2.0-rc.2 里那个可写的 `searchProviderId` 属性不存在了（两版 `dsh-web/lib/index.js`
+对比）。后果：`plugin-websearch` 的切换写成 `seam.searchProviderId = file.provider`，在 rc.2 上是**静默空操作**
+——页面存下选择，`ctx.web` 仍旧解析到 loader 行里的那个 id；而 `WebSeamLike` 里自写的
+`searchProviderId?: string` 让 `tsc` 一直是绿的，正是 `agents/process-rules.md` 记的结构切片绕过类型闸门。
+同一轮里第二个受害者是自检返回值里的 `provider`，它一直报 `unknown`。
+
+`plugin-websearch@0.2.2` 的处理：
+
+- **不再提供运行时切换**：`web` 行由桌面套件的 `--patch` 覆盖层写进 profile，内核配置编辑器拒绝编辑被覆盖层接管的行
+  （`"Configuration for "web" is overridden by a home patch or command-line overlay"`），实测点击切换后
+  `activeProvider` 仍是 `dsh-app`。卡片因此改为只读状态，页面写明来源由补丁层的 `web` 行决定；把选择权还给页面需要
+  换设计（壳层按用户选择生成这一行、重启生效，或不写这一行并由插件自己写两个字段），不是这一轮的收尾动作。
+- **卡片改为「注册表 ∪ 本行期望的两个 id」**：`deepseek-search-api` 有了自己的卡；某个 id 的 loader 行被 patch
+  层禁用时显示原因而不是让卡片消失；「使用中」读 `seam.config.searchProvider.get()`，不再回显页面自己存的值。
+- **两条 DeepSeek 路线拆成各自的名称、说明与计费文案**：此前两张卡共用一句话，读起来像重复；更糟的是
+  「2026-11-01 起 5 元 / 千次」也被贴到了模型检索路线（`deepseek-official`）上——它按 token 计费，从来没有这条价格。
+- `validateFile` 认得 `deepseek-search-api`：此前会被夹回 `dsh-app`，用户在页面上选了也存不下来。
+- 自检返回值里的 `provider` 改用同一个只读来源，不再一直是 `unknown`。
+
+证据：插件 167 条单测全绿；`probe-settings-nav.cjs --lang zh-CN --section "网络搜索"` 与
+`--lang en-US --section "Web search"` 均 `RESULT: PASS`（3 张卡、Search API 标签、只有一张卡带日期价、
+模型路线带 token 文案、恰好一张卡 `aria-current`、页面写明来源由补丁层决定）。
+
+---
+
 ## 相关文档
 
 | 文档 | 用途 |
