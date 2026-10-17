@@ -9,6 +9,8 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 import {
+  availability,
+  compactionBoundary,
   isUserPrompt,
   listAnchors,
   messageText,
@@ -30,6 +32,13 @@ function event(seq: number, type: string, data: unknown, time = 1000 + seq): Eve
  * A real `session.surface.nodes` excludes boundaries like `turn/start`, so the
  * fixture must too — otherwise every range computed here would cite seqs the
  * kernel's own fold would never see.
+ *
+ * It models APPEND-only surfaces: a `surfaceOp: { op: 'replace' }` declared on an
+ * event is ignored here, so a checkpoint added to one of these arrays does not
+ * consume what it replaced. `tests/anchors.test.ts`'s fixture applies the
+ * declared op and is the honest one for a post-compaction surface — use that
+ * shape (or a real `Session`, as `tests/revert.test.ts` does) for a new
+ * compaction case instead of extending an array here.
  */
 function sessionOf(events: readonly EventLike[]): SessionLike {
   const bySeq = new Map(events.map((e) => [e.seq, e]))
@@ -203,6 +212,65 @@ test('planCut refuses when the anchor is no longer on the surface', () => {
   assert.deepEqual(planCut(session, 1), { reason: 'empty' })
 })
 
+// --- The compaction boundary ---
+//
+// A compaction replaces the history it summarised with one `user/message` whose
+// source kind is `compact-checkpoint`. It is not a recall point (its source is not
+// `user`), but it IS where recallable history stops — and until now the plugin
+// could not say that, so an ordinal past the end read as "no such number".
+
+/** A compaction checkpoint, the shape `@deepseek-ai/dsh-compaction` writes. */
+function checkpoint(seq: number): EventLike {
+  return event(seq, 'user/message', {
+    id: `ck${String(seq)}`,
+    role: 'user',
+    content: [{ type: 'text', text: 'summary' }],
+    source: { kind: 'compact-checkpoint' },
+  })
+}
+
+/** A surface a compaction replaced: checkpoint, then one prompt. */
+function compacted(): EventLike[] {
+  return [system(0), checkpoint(1), turnStart(2, 2), user(3, 'after'), assistant(4, 'a')]
+}
+
+test('compactionBoundary is the newest checkpoint on the surface, or null', () => {
+  assert.equal(compactionBoundary(sessionOf(compacted())), 1)
+  assert.equal(
+    compactionBoundary(sessionOf([system(0), checkpoint(1), turnStart(2, 2), user(3, 'after'), checkpoint(4)])),
+    4,
+    'the newest one bounds the list',
+  )
+  assert.equal(compactionBoundary(sessionOf([system(0), turnStart(1, 1), user(2, 'only')])), null)
+  // Logged but off the surface: a later replacement took it away, so it bounds
+  // nothing any more.
+  const bySeq = new Map<number, EventLike>([[0, system(0)], [1, checkpoint(1)], [2, user(2, 'only')]])
+  const session: SessionLike = { surface: { nodes: [0, 2] }, eventAt: (seq) => bySeq.get(seq) }
+  assert.equal(compactionBoundary(session), null)
+})
+
+test('availability reports the count and whether a compaction bounds it', () => {
+  assert.deepEqual(availability(sessionOf(compacted())), { maxTurns: 1, stoppedAtCompaction: true })
+  assert.deepEqual(
+    availability(sessionOf([system(0), turnStart(1, 1), user(2, 'one'), turnStart(3, 2), user(4, 'two')])),
+    { maxTurns: 2, stoppedAtCompaction: false },
+  )
+})
+
+test('planCut names the compaction boundary for an ordinal past the list', () => {
+  const session = sessionOf(compacted())
+  assert.deepEqual(planCut(session, 2), { reason: 'compactionBoundary', available: 1 })
+  // With no checkpoint the same request keeps the plain reason.
+  assert.deepEqual(
+    planCut(sessionOf([system(0), turnStart(1, 1), user(2, 'only'), assistant(3, 'a')]), 2),
+    { reason: 'outOfRange', available: 1 },
+  )
+  // A malformed ordinal never names a boundary: it is an argument error.
+  for (const bad of [0, -1, 1.5]) {
+    assert.deepEqual(planCut(session, bad), { reason: 'outOfRange', available: 1 })
+  }
+})
+
 test('placeholderData is an empty user message with a producer-owned source', () => {
   const data = placeholderData()
   assert.equal(data.role, 'user')
@@ -210,4 +278,15 @@ test('placeholderData is an empty user message with a producer-owned source', ()
   // The source kind is the plugin's own, so the anchor rule (which accepts only
   // `kind: 'user'`) never offers the placeholder as a recall point.
   assert.equal(data.source.kind, 'dsh-app-rewind')
+})
+
+test('a list truncated by the caller\'s cap is not reported as a compaction', () => {
+  // `config.maxAnchors` may be smaller than the picker's MAX_ANCHORS, so a list
+  // that stopped at `max` has NOT exhausted the surface: the ordinal is past the
+  // OFFERED range, not past the compacted one. Blaming compaction there would put
+  // a false sentence in front of the user.
+  const session = sessionOf(compacted())
+  assert.deepEqual(planCut(session, 2, 1), { reason: 'outOfRange', available: 1 })
+  // With the full cap the same ordinal really is past the boundary.
+  assert.deepEqual(planCut(session, 2, 50), { reason: 'compactionBoundary', available: 1 })
 })

@@ -321,7 +321,13 @@ export function apply(ctx: ClientContext): void {
       available: (session) => readProjection(ctx, session.sessionId) !== undefined,
       ui: {
         kind: 'popupSelect',
-        options: async (session) => anchorsToOptions(readProjection(ctx, session.sessionId)),
+        // The boundary sentence rides the option group, which the shell renders
+        // as one heading over the rows — the picker's only place to explain why
+        // older messages are missing.
+        options: async (session) => anchorsToOptions(
+          readProjection(ctx, session.sessionId),
+          t('rewind.picker.boundary'),
+        ),
         onSelect: async (option, session) => {
           const n = Number(option.id)
           if (!Number.isSafeInteger(n) || n < 1) return
@@ -493,6 +499,13 @@ async function planRecall(
     }
     const payload = parsedPlan(outcome.text)
     if (payload?.ok !== true) {
+      // The payload's own `reason` is the refusal the host chose (`empty`,
+      // `compactionBoundary`, `outOfRange`, …); its top-level `code` is only
+      // `rewind.host.plan`, so reading that alone would answer every refusal with
+      // "this is a recall preview". The reason wins when it is there.
+      if (typeof payload?.reason === 'string') {
+        return { note: t(payload.reason, payload.params) }
+      }
       const coded = hostCode(outcome.text)
       return { note: coded === undefined ? t('rewind.error.unavailable') : t(coded.code, coded.params) }
     }

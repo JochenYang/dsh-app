@@ -5,10 +5,12 @@
  * `ctx.sessionProjections` unit — computed once on the host and shipped to the
  * client already folded, because the client must not fold session events
  * itself. This unit therefore maintains a small model of the model-visible
- * surface and publishes two things:
+ * surface and publishes three things:
  *
  *   - `anchors` — the recallable user messages, newest first;
  *   - `hiddenTurns` — turns already cut away, so the client can hide them;
+ *   - `stoppedAtCompaction` — whether a compaction checkpoint bounds the list, so
+ *     the picker can say why older messages are missing.
  *
  * ## The surface model
  *
@@ -31,6 +33,9 @@
 import { z } from 'zod'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { previewText, REWIND_PROJECTION_KEY, REWIND_SOURCE_KIND, MAX_ANCHORS, type RewindAnchor } from './wire.ts'
+// The checkpoint rule is shared with the host's boundary walk: one question,
+// asked of the folded node list here and of the live surface there.
+import { isCompactCheckpointSource } from './cut.ts'
 
 /** One node currently on the model-visible surface. */
 interface SurfaceNode {
@@ -51,6 +56,15 @@ interface SurfaceNode {
    * on exactly that shape, which shifted every ordinal past it.
    */
   readonly prompt: boolean
+  /**
+   * Whether this node is the message a compaction wrote over the history it
+   * replaced (`user/message` with source kind `compact-checkpoint`).
+   *
+   * Not a recall point — its source is not `user` — but it is where the
+   * recallable list ends, so the client must be able to say so. Read through the
+   * same predicate the host's boundary uses.
+   */
+  readonly checkpoint: boolean
   /** Full text of a real user prompt; empty for every other node. */
   readonly text: string
 }
@@ -59,6 +73,12 @@ interface SurfaceNode {
 export interface RewindWire {
   readonly anchors: readonly RewindAnchor[]
   readonly hiddenTurns: readonly number[]
+  /**
+   * Whether a compaction checkpoint is on the surface, which is what bounds the
+   * anchor list. Folded from the surface, not latched: a checkpoint taken off the
+   * surface no longer bounds anything.
+   */
+  readonly stoppedAtCompaction: boolean
 }
 
 /**
@@ -85,6 +105,7 @@ const surfaceNodeSchema = z.object({
   time: nonNegInt,
   turn: nonNegInt.nullable(),
   prompt: z.boolean(),
+  checkpoint: z.boolean(),
   text: z.string(),
 })
 
@@ -103,6 +124,7 @@ export const rewindWireSchema = z.object({
     preview: z.string(),
   })),
   hiddenTurns: z.array(nonNegInt),
+  stoppedAtCompaction: z.boolean(),
 })
 
 /** Read a non-negative integer field, or null. */
@@ -223,8 +245,9 @@ export function applyRewindEvent(state: RewindState, event: unknown): RewindStat
   if (seq === null) return state
   const time = readNonNegInt(candidate.time) ?? 0
   const prompt = type === 'user/message' && isUserSource(candidate.data)
+  const checkpoint = type === 'user/message' && isCompactCheckpointSource(candidate.data)
   const text = prompt ? readText(candidate.data) : ''
-  const node: SurfaceNode = { seq, time, turn: state.openTurn, prompt, text }
+  const node: SurfaceNode = { seq, time, turn: state.openTurn, prompt, checkpoint, text }
 
   if (op === 'append') {
     return { ...state, nodes: [...state.nodes, node] }
@@ -312,7 +335,14 @@ export function rewindView(state: RewindState): RewindWire {
       preview: previewText(node.text),
     })
   }
-  return { anchors, hiddenTurns: state.hiddenTurns }
+  return {
+    anchors,
+    hiddenTurns: state.hiddenTurns,
+    // Derived from the CURRENT node list, exactly like the host's
+    // `compactionBoundary` walk: one asks "is a checkpoint on the surface", the
+    // other asks "which is the newest", and both must answer together.
+    stoppedAtCompaction: state.nodes.some((node) => node.checkpoint),
+  }
 }
 
 /**
@@ -330,5 +360,7 @@ export const rewindProjection = {
     viewSchema: rewindWireSchema,
     view: rewindView,
   },
-  stateVersion: 2,
+  // 3: a surface node now records whether a compaction wrote it, and the wire
+  // value carries `stoppedAtCompaction`.
+  stateVersion: 3,
 } satisfies ProjectionDefinition<'rewindAnchors'>

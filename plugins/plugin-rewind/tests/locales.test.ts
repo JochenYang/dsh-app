@@ -31,3 +31,18 @@ test('the per-message copy names the message it acts on', () => {
 test('the two dictionaries cover the same keys', () => {
   assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort())
 })
+
+test('the compaction-boundary answers say the older messages cannot be recalled', () => {
+  // The whole point of the separate code: an ordinal past a compaction is not a
+  // typo, it is history the user can never get back. Both languages must say that,
+  // not just "no such number".
+  for (const dict of [zh, en]) {
+    for (const key of ['rewind.host.compactionBoundary', 'rewind.host.listBoundary', 'rewind.picker.boundary', 'rewind.confirm.boundary']) {
+      assert.ok(typeof dict[key] === 'string' && dict[key] !== '', `${key} must be present`)
+    }
+  }
+  assert.match(zh['rewind.host.compactionBoundary'], /压缩边界之前的消息已经无法撤回/)
+  assert.match(en['rewind.host.compactionBoundary'], /compaction boundary can no longer be recalled/i)
+  assert.match(zh['rewind.host.listBoundary'], /压缩边界之前.*无法撤回/)
+  assert.match(en['rewind.host.listBoundary'], /compaction boundary can no longer be recalled/i)
+})

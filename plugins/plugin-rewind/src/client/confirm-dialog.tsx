@@ -39,6 +39,10 @@
  * would read as "nothing else changed", which is exactly the claim a recall must
  * not make when it cannot back it up.
  *
+ * It is also where the compaction boundary is stated, when there is one: a recall
+ * cannot reach past the newest checkpoint, and the user approving a cut should
+ * know that older messages are not in the list they are choosing from.
+ *
  * @module @dsh-app/plugin-rewind/client/confirm-dialog
  */
 
@@ -140,7 +144,11 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose }: Confi
     none: 'rewind.confirm.coverageNone',
     partial: 'rewind.confirm.coveragePartial',
   })
+  // The boundary is context, not a shortfall: it takes the plain tone, which is
+  // why `warn` below stays driven by the coverage verdict and the named files.
+  const boundary = plan?.stoppedAtCompaction === true ? t('rewind.confirm.boundary') : undefined
   const note = [
+    ...(boundary === undefined ? [] : [boundary]),
     ...(coverage === undefined ? [] : [coverage]),
     ...(unrestorable.length === 0 ? [] : [t('rewind.confirm.unrestorable', { n: unrestorable.length })]),
   ].join(' ')

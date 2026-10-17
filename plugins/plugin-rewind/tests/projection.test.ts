@@ -189,6 +189,41 @@ test('injected context is not an anchor', () => {
   assert.deepEqual(view.anchors.map((a) => a.seq), [1])
 })
 
+test('a compaction checkpoint sets stoppedAtCompaction, and nothing else changes', () => {
+  const state = fold([
+    turnStart(0, 1), user(1, 'summarised'), assistant(2, 'a'),
+    compaction(3, 1, 2, [1, 2]),
+    turnStart(4, 2), user(5, 'after'), assistant(6, 'b'),
+  ])
+  const view = rewindView(state)
+  // The checkpoint is NOT a recall point: its source kind is not `user`.
+  assert.deepEqual(view.anchors.map((a) => a.seq), [5])
+  // It does say where the list stops, which is what the picker renders.
+  assert.equal(view.stoppedAtCompaction, true)
+  // And it hides no turns: only this plugin's own replacements do that.
+  assert.deepEqual(view.hiddenTurns, [])
+})
+
+test('without a checkpoint the flag is false', () => {
+  const state = fold([turnStart(0, 1), user(1, 'a'), assistant(2, 'b')])
+  assert.equal(rewindView(state).stoppedAtCompaction, false)
+})
+
+test('a checkpoint taken off the surface stops bounding the list', () => {
+  // The flag is derived from the CURRENT node list, not latched when a checkpoint
+  // is first seen — the same rule the host's surface walk follows, so the two
+  // halves cannot disagree about a boundary that no longer exists.
+  const state = fold([
+    turnStart(0, 1), user(1, 'keep'), assistant(2, 'a'),
+    compaction(3, 1, 2, [1, 2]),
+    turnStart(4, 2), user(5, 'later'), assistant(6, 'b'),
+    placeholder(7, 3, 6, [3, 5, 6]),
+  ])
+  const view = rewindView(state)
+  assert.equal(view.stoppedAtCompaction, false)
+  assert.deepEqual(state.nodes.map((n) => n.seq), [7])
+})
+
 test('the initial state satisfies its own schema', () => {
   assert.equal(rewindStateSchema.safeParse(initRewindState()).success, true)
 })

@@ -2,14 +2,28 @@
  * The recall computation, kept free of cordis and of any session object so it
  * is unit-testable and so the executor layer stays thin.
  *
- * Three things live here:
+ * Four things live here:
  *
  * 1. **Anchor enumeration** — which user messages on the current model-visible
  *    surface are recallable, newest first.
- * 2. **Cut computation** — turning "recall ordinal n" into the exact
+ * 2. **The compaction boundary** — the newest surface node a compaction wrote,
+ *    which is where the recallable history stops, and the `availability` pair
+ *    the command and the picker share.
+ * 3. **Cut computation** — turning "recall ordinal n" into the exact
  *    replacement range the kernel's surface fold will accept.
- * 3. **Placeholder construction** — the empty-content event that carries the
+ * 4. **Placeholder construction** — the empty-content event that carries the
  *    replacement.
+ *
+ * ## Why a compaction checkpoint ends the recallable range
+ *
+ * A compaction replaces the history it summarised with ONE `user/message` whose
+ * source kind is `compact-checkpoint`. That node sits on the surface, and the
+ * prompt it replaced is no longer a surface node at all — so {@link listAnchors}
+ * has never offered anything older than the newest checkpoint. What was missing
+ * is saying WHY: an ordinal past the end read as a plain "no such number" when
+ * the real answer is "that part of the conversation was compacted away". The
+ * boundary is the seq of that node; the out-of-range answer, the bare listing,
+ * the picker and the confirmation dialog all say it now.
  *
  * ## Why the placeholder is a `user/message`, not a `system/message`
  *
@@ -102,6 +116,88 @@ export function isUserPrompt(event: EventLike): boolean {
   const source = (data as { source?: unknown }).source
   if (typeof source !== 'object' || source === null) return false
   return (source as { kind?: unknown }).kind === 'user'
+}
+
+/** Source kind of the message a compaction writes over the history it replaced. */
+const COMPACT_CHECKPOINT_KIND = 'compact-checkpoint'
+
+/**
+ * Whether one message payload was written by a compaction checkpoint.
+ *
+ * The rule lives here, and `./projection.ts` imports it, because the host's
+ * boundary and the client's flag must be the same question asked twice: a
+ * checkpoint is NOT a recall point (its source kind is not `user`), but it IS
+ * the place where recallable history stops.
+ *
+ * `@deepseek-ai/dsh-compaction` writes this source (`checkpoint.ts`,
+ * `isCompactCheckpointSource`); the literal is repeated rather than imported
+ * because that package is a kernel implementation detail, not a contract this
+ * plugin may depend on.
+ *
+ * @param data - one event's `data` payload.
+ * @returns whether a compaction wrote it.
+ */
+export function isCompactCheckpointSource(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false
+  const source = (data as { source?: unknown }).source
+  if (typeof source !== 'object' || source === null) return false
+  return (source as { kind?: unknown }).kind === COMPACT_CHECKPOINT_KIND
+}
+
+/**
+ * The seq of the NEWEST compaction checkpoint on the model-visible surface, or
+ * null when the session has never been compacted.
+ *
+ * Walks the surface, not the log: a checkpoint the log still holds but a later
+ * replacement has taken off the surface no longer bounds anything.
+ *
+ * ## The invariant this rests on
+ *
+ * Every surface replacement on this line replaces a PREFIX (compaction) or one
+ * node in place (the tool-result pruner, the loop's runtime context). Given
+ * that, the newest checkpoint is always where recallable history ends: a later
+ * compaction consumes the older checkpoint with the prefix it rewrites. The
+ * kernel also exports `compactSurfaceRegion` for a MIDDLE span, which this
+ * assumption does not cover — if a producer ever compacts a middle span, prompts
+ * older than the checkpoint stay recallable and the `stoppedAtCompaction` flag
+ * becomes a lie. Re-check this function if that producer appears.
+ *
+ * @param session - the session to inspect.
+ * @returns the boundary seq, or null.
+ */
+export function compactionBoundary(session: SessionLike): number | null {
+  const nodes = session.surface.nodes
+  for (let i = nodes.length - 1; i >= 0; i -= 1) {
+    const event = session.eventAt(nodes[i])
+    if (event === undefined) continue
+    if (event.type !== 'user/message') continue
+    if (isCompactCheckpointSource(event.data)) return nodes[i]
+  }
+  return null
+}
+
+/**
+ * What the `/rewind` command and the client's picker both report: how many
+ * recall points exist, and whether a compaction capped that number.
+ *
+ * ONE computation for both surfaces, so the picker can never offer a row the
+ * command resolves differently.
+ *
+ * @param session - the session to inspect.
+ * @param max - the cap the caller's list uses. NOT necessarily the picker's:
+ *   the client always lists `MAX_ANCHORS`, while the host resolves against
+ *   `config.maxAnchors`, so a smaller host cap truncates the list the picker
+ *   offered.
+ * @returns the recallable count and whether a compaction bounds it.
+ */
+export function availability(
+  session: SessionLike,
+  max: number = MAX_ANCHORS,
+): { readonly maxTurns: number, readonly stoppedAtCompaction: boolean } {
+  return {
+    maxTurns: listAnchors(session, max).length,
+    stoppedAtCompaction: compactionBoundary(session) !== null,
+  }
 }
 
 /**
@@ -210,6 +306,13 @@ export interface PlannedCut {
 export type PlanFailure =
   | { readonly reason: 'empty' }
   | { readonly reason: 'outOfRange', readonly available: number }
+  /**
+   * The ordinal is past the list AND a compaction bounds the list. Kept apart
+   * from `outOfRange` because the two answers are different sentences: "there is
+   * no number 4" versus "the conversation was compacted there, so those messages
+   * can no longer be recalled".
+   */
+  | { readonly reason: 'compactionBoundary', readonly available: number }
   | { readonly reason: 'notUserMessage' }
 
 /**
@@ -220,12 +323,36 @@ export type PlanFailure =
  * view. `sourceEventSeqs` must cite **every** shadowed node — the kernel's
  * fold rejects a partial citation (`surface replace: sourceEventSeqs must
  * include every shadowed surface node`).
+ *
+ * An ordinal past the end reports WHICH limit it hit: the newest compaction
+ * checkpoint when the session has one, a plain range error otherwise. A
+ * non-positive or non-integer ordinal is a malformed argument, not a boundary,
+ * so it always reports `outOfRange`.
  */
 export function planCut(session: SessionLike, n: number, max: number = MAX_ANCHORS): PlannedCut | PlanFailure {
   const anchors = listAnchors(session, max)
-  if (anchors.length === 0) return { reason: 'empty' }
+  // A compacted session can have ZERO recall points: `/compact` retains a priced
+  // tail, and with `retainTokens = 0` that tail is the last surface node alone —
+  // so the checkpoint replaces every prompt. Answering "empty" there would hide
+  // the one fact the user needs, so the boundary is checked FIRST.
+  if (anchors.length === 0) {
+    return compactionBoundary(session) === null
+      ? { reason: 'empty' }
+      : { reason: 'compactionBoundary', available: 0 }
+  }
   if (!Number.isSafeInteger(n) || n < 1 || n > anchors.length) {
-    return { reason: 'outOfRange', available: anchors.length }
+    // Only a WELL-FORMED ordinal past the end can name the boundary: 0, -1 and 1.5
+    // are argument errors, and answering "the conversation was compacted" for them
+    // would hide the caller's mistake behind a real fact.
+    //
+    // A list that STOPPED AT `max` has not exhausted the surface, so the ordinal
+    // is past the OFFERED range, not past the compacted one: `config.maxAnchors`
+    // below the picker's MAX_ANCHORS must never be reported as a compaction.
+    const beyond = Number.isSafeInteger(n) && n > anchors.length && anchors.length < max
+    const boundary = beyond ? compactionBoundary(session) : null
+    return boundary === null
+      ? { reason: 'outOfRange', available: anchors.length }
+      : { reason: 'compactionBoundary', available: anchors.length }
   }
   const anchor = anchors[n - 1]
   const nodes = session.surface.nodes

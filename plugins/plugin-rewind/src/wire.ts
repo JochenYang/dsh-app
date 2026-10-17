@@ -78,6 +78,19 @@ export type RewindCode =
   | 'rewind.host.badArg'
   /** The ordinal is outside the current list. */
   | 'rewind.host.outOfRange'
+  /**
+   * The ordinal is past the list AND a compaction bounds it, so the messages
+   * the user is looking for are before the boundary and can never come back.
+   */
+  | 'rewind.host.compactionBoundary'
+  /**
+   * A compaction consumed EVERY prompt: nothing is recallable at all.
+   *
+   * Kept apart from `compactionBoundary` because "no number 3" and "nothing at
+   * all, the conversation was compacted" are different sentences — and the
+   * second one is what a session looks like right after `/compact`.
+   */
+  | 'rewind.host.compactedAll'
   /** Nothing recallable yet. */
   | 'rewind.host.empty'
   /** The cut would not start on a user message. */
@@ -86,6 +99,8 @@ export type RewindCode =
   | 'rewind.host.rejected'
   /** The listing succeeded; `count` is how many points were offered. */
   | 'rewind.host.list'
+  /** The listing succeeded and stops at a compaction boundary; `count` as above. */
+  | 'rewind.host.listBoundary'
   /** A cut succeeded; `n` is the ordinal that was recalled. */
   | 'rewind.host.done'
   /** The preview succeeded; the plan rides the payload's `files`. */
@@ -157,6 +172,14 @@ export interface RevertPlan {
   readonly prompt?: string
   /** The ordinal the plan was computed for. */
   readonly n?: number
+  /**
+   * Whether a compaction bounds the recallable list.
+   *
+   * The dialog shows one sentence for it: the list the user is choosing from
+   * never held the messages before the boundary, and saying so is the difference
+   * between "the conversation used to be longer" and "your messages are gone".
+   */
+  readonly stoppedAtCompaction?: boolean
 }
 
 /**

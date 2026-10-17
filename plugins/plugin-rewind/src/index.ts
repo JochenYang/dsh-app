@@ -58,6 +58,23 @@
  * answered `{restored: 6, removed: 8, unrestorable: []}` while 27 shell calls in
  * the same range had just rewritten a sprite sheet and a `dist/` tree.
  *
+ * ## The recallable range stops at the newest compaction
+ *
+ * A compaction replaces the history it summarised with one `compact-checkpoint`
+ * message, so the prompts it replaced are not surface nodes and were never
+ * recallable. `compactionBoundary` in `./cut.ts` makes that limit sayable: an
+ * ordinal past the end reports it as the reason, the bare listing names it, and
+ * the picker and the confirmation dialog show it. The anchors themselves are
+ * unchanged — this makes an existing limit visible, it does not move it.
+ *
+ * ## Other plugins reconcile through a published service
+ *
+ * The file revert is only one thing a recall has to put back. Anything else that
+ * mirrored a turn registers a participant on `dsh-app-rewind-participants`
+ * (`./participants.ts`), and this plugin runs them after the surface write. The
+ * file revert is itself the first participant, so the seam is exercised by the
+ * one consumer whose behaviour users already depend on.
+ *
  * ## Guards
  *
  * A cut always starts on a user message, which is by construction the head of
@@ -95,7 +112,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 // Type-only: pulls the ctx merges (commands / sessionProjections) into scope.
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-projection'
-import { listAnchors, placeholderData, planCut, type EventLike, type SessionLike } from './cut.ts'
+import { availability, compactionBoundary, placeholderData, planCut, type EventLike, type SessionLike } from './cut.ts'
 import { createRecorder, turnAt, type CaptureFailure, type RecordedChange, type Recorder } from './recorder.ts'
 import {
   captureBefore,
@@ -125,6 +142,8 @@ import {
   type RewindCode,
 } from './wire.ts'
 import { rewindProjection } from './projection.ts'
+import { createParticipantRegistry } from './participants.ts'
+import type { RewindParticipantRegistry } from './participants.ts'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 // Type-only: pulls the connection Context merge (ctx.connection) into scope.
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -146,6 +165,68 @@ export interface FileRevert {
   /** Tools that ran in the range and can write files. */
   readonly tools?: readonly string[]
 }
+
+/**
+ * The report a recall sends when its file revert could not run at all.
+ *
+ * `coverage: 'none'` is the honest verdict: the plugin does not know what the
+ * range left behind, so it must not claim any of it was put back. The reason is
+ * developer-facing; the participant's own message is in the plugin log.
+ */
+function failedRevert(reason: string): FileRevert {
+  return {
+    restored: 0,
+    removed: 0,
+    unrestorable: [{ path: '(all)', reason }],
+    coverage: 'none',
+    coverageReason: 'revertFailed',
+  }
+}
+
+/** Narrow one participant report to the file revert's shape. */
+function isFileRevert(value: unknown): value is FileRevert {
+  if (typeof value !== 'object' || value === null) return false
+  const report = value as {
+    restored?: unknown
+    removed?: unknown
+    unrestorable?: unknown
+    coverage?: unknown
+  }
+  return typeof report.restored === 'number'
+    && typeof report.removed === 'number'
+    && Array.isArray(report.unrestorable)
+    && (report.coverage === 'full' || report.coverage === 'partial' || report.coverage === 'none')
+}
+
+/**
+ * Read the file revert's report out of the participants' results.
+ *
+ * `reconcileAll` contains a throwing participant and omits it from the map, so a
+ * missing entry IS the failure case: the recall already landed and the tree is
+ * reported as not put back rather than pretending otherwise.
+ */
+function fileRevertOf(reports: ReadonlyMap<string, unknown>): FileRevert {
+  const report = reports.get(FILE_REVERT_PARTICIPANT)
+  return isFileRevert(report)
+    ? report
+    : failedRevert('the file revert participant failed; see the plugin log')
+}
+
+/**
+ * The recall seam's public types.
+ *
+ * Re-exported for documentation value, not for `import type`: the suite's build
+ * is esbuild-only and emits no `.d.ts` (every plugin's `types` field points at a
+ * file that does not exist), so a consumer cannot actually resolve
+ * `@dsh-app/plugin-rewind` as a type source. A consumer therefore declares the
+ * service name and the interface it expects in its own module — the same shape
+ * `./participants.ts` declares for the Context merge — and `inject`s the name.
+ */
+export type {
+  RewindParticipant,
+  RewindParticipantRegistry,
+  RewindRecallContext,
+} from './participants.ts'
 
 // The two pre-write waterfalls, plus the tool-dispatch gate. Declared here, not
 // imported: they are dispatched by `dsh-tool-fs` and `dsh-tools`, which a plugin
@@ -223,6 +304,15 @@ type Ordinal =
   /** Preview a recall of `n` without performing it. */
   | { readonly kind: 'plan', readonly n: number }
   | { readonly kind: 'bad' }
+
+/**
+ * Id of the participant that puts the working tree back.
+ *
+ * It is a participant rather than an inline step so the seam is exercised by the
+ * one consumer whose behaviour users depend on; the id is also the key the
+ * command reads its `FileRevert` report under.
+ */
+const FILE_REVERT_PARTICIPANT = 'file-revert'
 
 /**
  * Tools whose writes the recorder sees exactly, so a range that ran only these
@@ -338,6 +428,25 @@ export function apply(ctx: Context, config: Config): void {
   }
   const snapshotWorkspace = config.snapshotWorkspace !== false
 
+  // --- The participant seam. Published as a service so another suite plugin can
+  // restore its own state after a recall without this plugin knowing what that
+  // state is; with no consumer the recall behaves exactly as before. The fiber
+  // owns it, so it is unregistered with the plugin.
+  //
+  // The file revert is registered FIRST, as the seam's own proof: it is the one
+  // consumer users already depend on, and it reads the recorder and the range's
+  // snapshot, which is why `reconcileAll` must run before the cleanup below. ---
+  const participants: RewindParticipantRegistry = createParticipantRegistry(log)
+  ctx.effect(
+    () => ctx.provide('dsh-app-rewind-participants', participants),
+    'plugin-rewind: participant registry',
+  )
+  participants.register({
+    id: FILE_REVERT_PARTICIPANT,
+    reconcileAfterRewind: (context) =>
+      revertFiles(context.session, context.sessionId, context.plan, recorder, limits, log),
+  })
+
   // --- The quarantine manager rides the Connection exact-Fetch registry, the
   // same carrier every suite route uses. `connection` is declared in `inject`
   // and read structurally: a profile without it loses the management page, never
@@ -442,11 +551,27 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     if (parsed.kind === 'list') {
-      const anchors = listAnchors(session, maxAnchors)
-      if (anchors.length === 0) {
-        return { kind: 'error', text: coded('rewind.host.empty') }
+      // ONE availability computation for the count and the boundary, so the
+      // listing can never disagree with what the picker offers.
+      const { maxTurns, stoppedAtCompaction } = availability(session, maxAnchors)
+      if (maxTurns === 0) {
+        // A compacted session can have no recall point at all: `/compact` keeps a
+        // priced tail, and with no retained budget that tail is the last node, so
+        // the checkpoint consumed every prompt. Saying "nothing recallable yet"
+        // there names the wrong cause.
+        return {
+          kind: 'error',
+          text: stoppedAtCompaction
+            ? coded('rewind.host.compactedAll')
+            : coded('rewind.host.empty'),
+        }
       }
-      return { kind: 'success', text: coded('rewind.host.list', { count: anchors.length }) }
+      return {
+        kind: 'success',
+        text: stoppedAtCompaction
+          ? coded('rewind.host.listBoundary', { count: maxTurns })
+          : coded('rewind.host.list', { count: maxTurns }),
+      }
     }
 
     // A running turn must not be cut: its later tool results would be left
@@ -461,10 +586,15 @@ export function apply(ctx: Context, config: Config): void {
       // rather than letting the user confirm something that cannot happen.
       const failureCode: RewindCode = plan.reason === 'empty'
         ? 'rewind.host.empty'
-        : plan.reason === 'outOfRange'
-          ? 'rewind.host.outOfRange'
-          : 'rewind.host.notUserMessage'
-      const failureParams = plan.reason === 'outOfRange'
+        : plan.reason === 'compactionBoundary'
+          ? plan.available === 0
+            ? 'rewind.host.compactedAll'
+            : 'rewind.host.compactionBoundary'
+          : plan.reason === 'outOfRange'
+            ? 'rewind.host.outOfRange'
+            : 'rewind.host.notUserMessage'
+      const failureParams = (plan.reason === 'outOfRange' || plan.reason === 'compactionBoundary')
+        && plan.available > 0
         ? { available: plan.available, requested: parsed.n }
         : undefined
       if (parsed.kind === 'plan') {
@@ -483,7 +613,8 @@ export function apply(ctx: Context, config: Config): void {
     const sessionId = String(session.header.id)
 
     // A preview stops here: it has answered what the recall would do, and it must
-    // not have changed anything on the way.
+    // not have changed anything on the way. It carries the boundary flag so the
+    // confirmation dialog can say that older messages are gone.
     if (parsed.kind === 'plan') {
       const preview = await previewRevert(session, sessionId, plan, recorder, limits)
       return {
@@ -492,30 +623,12 @@ export function apply(ctx: Context, config: Config): void {
           ok: true,
           n: parsed.n,
           prompt: plan.prompt,
+          // The flag alone: `availability` would walk the surface a third time
+          // (through `listAnchors`) to read a boolean, and this path already
+          // paid for two walks (`planCut`).
+          stoppedAtCompaction: compactionBoundary(session) !== null,
           ...preview,
         }),
-      }
-    }
-
-    // Revert the files this turn range changed. This is deliberately NOT fatal:
-    // a file whose before-image was never captured (an oversized file, a range
-    // from before this plugin could see it) cannot be reported by refusing the
-    // whole recall, and the transcript really can go back even when the tree
-    // cannot. The report rides the result.
-    let revert: FileRevert
-    try {
-      revert = await revertFiles(session, sessionId, plan, recorder, limits, log)
-    } catch (error) {
-      // A revert that throws must not lose the recall: the transcript change is
-      // the feature, and a failed restore is reported as such.
-      const detail = messageOf(error)
-      log.warn(`rewind: file revert failed: ${detail}`)
-      revert = {
-        restored: 0,
-        removed: 0,
-        unrestorable: [{ path: '(all)', reason: detail }],
-        coverage: 'none',
-        coverageReason: 'revertFailed',
       }
     }
 
@@ -536,6 +649,14 @@ export function apply(ctx: Context, config: Config): void {
       log.warn(`rewind: replacement rejected: ${detail}`)
       return { kind: 'error', text: coded('rewind.host.rejected', undefined, detail) }
     }
+
+    // The surface write is the recall's authoritative act, so the participants run
+    // AFTER it: each one reconciles against a cut that has already landed, and one
+    // participant's failure is a warning instead of a rollback. The file revert is
+    // the first of them (registered in `apply`), which is why this runs before the
+    // recorder and snapshot cleanup — it reads both.
+    const reconciled = await participants.reconcileAll({ session, sessionId, plan })
+    const revert = fileRevertOf(reconciled)
 
     // The recalled turns are off the surface, so their before-images are dead
     // weight — in memory and on disk.

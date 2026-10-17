@@ -21,8 +21,8 @@
  */
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { listAnchors, type EventLike, type SessionLike } from '../src/cut.ts'
-import { applyRewindEvent, initRewindState, rewindView } from '../src/projection.ts'
+import { availability, listAnchors, planCut, type EventLike, type SessionLike } from '../src/cut.ts'
+import { applyRewindEvent, initRewindState, rewindView, type RewindWire } from '../src/projection.ts'
 import { turnAt } from '../src/recorder.ts'
 
 /** Build one event. */
@@ -46,36 +46,100 @@ function assistant(seq: number, text: string): EventLike {
   return event(seq, 'assistant/message', { message: { role: 'assistant', content: [{ type: 'text', text }] } })
 }
 
+/**
+ * A compaction checkpoint: one `user/message` carrying the summary, written as a
+ * surface REPLACEMENT over the range it summarised.
+ *
+ * `surfaceOp` rides the fixture because the projection fold must see the same
+ * shape the kernel applies: an appended checkpoint would leave the history it
+ * replaced on the surface, which is not what happens.
+ */
+function checkpoint(seq: number, startSeq: number, endSeq: number): EventLike & { surfaceOp: unknown } {
+  return {
+    ...event(seq, 'user/message', {
+      id: `ck${String(seq)}`,
+      role: 'user',
+      content: [{ type: 'text', text: 'summary of what came before' }],
+      source: { kind: 'compact-checkpoint' },
+    }),
+    surfaceOp: { op: 'replace', startSeq, endSeq },
+  }
+}
+
 /** A `turn/start` is not a surface node; the others are. */
 const SURFACE = new Set(['system/message', 'developer/message', 'user/message', 'assistant/message', 'tool/result'])
 
-/** A session over a hand-written log. */
+/** A fixture's declared replacement range, when it has one. */
+function replaceRange(op: unknown): { startSeq: number, endSeq: number } | undefined {
+  if (typeof op !== 'object' || op === null) return undefined
+  const record = op as { op?: unknown, startSeq?: unknown, endSeq?: unknown }
+  if (record.op !== 'replace') return undefined
+  return typeof record.startSeq === 'number' && typeof record.endSeq === 'number'
+    ? { startSeq: record.startSeq, endSeq: record.endSeq }
+    : undefined
+}
+
+/**
+ * A session over a hand-written log.
+ *
+ * Applies a fixture's declared `surfaceOp` exactly as the kernel's fold does —
+ * an append pushes, a replace splices its range out and takes its place. A
+ * fixture that ignores the op it declares would model a surface no real session
+ * can have: a compaction checkpoint appended over history it actually replaced
+ * leaves the old prompt on the surface, and every ordinal past it is wrong.
+ */
 function sessionOf(events: readonly EventLike[]): SessionLike {
   const bySeq = new Map(events.map((e) => [e.seq, e]))
+  const nodes: number[] = []
+  for (const event of events) {
+    if (!SURFACE.has(event.type)) continue
+    const range = replaceRange((event as { surfaceOp?: unknown }).surfaceOp)
+    if (range === undefined) {
+      nodes.push(event.seq)
+      continue
+    }
+    const start = nodes.indexOf(range.startSeq)
+    const end = nodes.indexOf(range.endSeq)
+    if (start === -1 || end === -1 || start > end) continue
+    nodes.splice(start, end - start + 1, event.seq)
+  }
   return {
-    surface: { nodes: events.filter((e) => SURFACE.has(e.type)).map((e) => e.seq) },
+    surface: { nodes },
     eventAt: (seq: number) => bySeq.get(seq),
   }
 }
 
 /** Fold the same log through the projection, as the client's view does. */
-function projectedView(events: readonly EventLike[]): { anchors: readonly { n: number, seq: number }[] } {
+function projectedView(events: readonly EventLike[]): RewindWire {
   let state = initRewindState()
   for (const e of events) {
-    state = applyRewindEvent(state, { ...e, surfaceOp: 'append' })
+    // A fixture that declares its own surface op (a compaction checkpoint's
+    // replace) keeps it; everything else is an ordinary append.
+    const surfaceOp = (e as { surfaceOp?: unknown }).surfaceOp ?? 'append'
+    state = applyRewindEvent(state, { ...e, surfaceOp })
   }
   return rewindView(state)
 }
 
-/** Assert both halves produce the same `n` → `seq` mapping. */
+/** Assert both halves produce the same `n` → `seq` mapping AND the same flag. */
 function assertAgree(label: string, events: readonly EventLike[]): void {
-  const host = listAnchors(sessionOf(events)).map((a) => ({ n: a.n, seq: a.seq }))
-  const client = projectedView(events).anchors.map((a) => ({ n: a.n, seq: a.seq }))
+  const session = sessionOf(events)
+  const host = listAnchors(session).map((a) => ({ n: a.n, seq: a.seq }))
+  const view = projectedView(events)
+  const client = view.anchors.map((a) => ({ n: a.n, seq: a.seq }))
   assert.deepEqual(
     client,
     host,
     `${label}: the client's ordinals and the host's disagree\n` +
     `  client: ${JSON.stringify(client)}\n  host:   ${JSON.stringify(host)}`,
+  )
+  // The flag is the SAME surface fact asked twice (host: "which checkpoint is
+  // newest", client: "is one on the surface"), so disagreement here means the
+  // picker offers or withholds a boundary note the command does not agree with.
+  assert.equal(
+    view.stoppedAtCompaction,
+    availability(session).stoppedAtCompaction,
+    `${label}: the halves disagree on stoppedAtCompaction`,
   )
 }
 
@@ -197,4 +261,57 @@ test('the turn rule is the same on both halves', () => {
       `seq ${anchor.seq}: the projection says turn ${String(anchor.turn)}, the recorder says ${String(at)}`,
     )
   }
+})
+
+// --- The compaction boundary: the halves must agree on where the list STOPS,
+// not only on the ordinals they still offer ---
+//
+// A compaction replaces the history it summarised with one `user/message` whose
+// source kind is `compact-checkpoint`. The prompts it replaced leave the surface,
+// so `listAnchors` already stopped offering them — silently. The host now names
+// the boundary and the client shows the same flag, and both must agree about it
+// for the same reason the ordinals must: the picker's sentence and the command's
+// reason code describe one surface.
+
+/** Prompt A → compaction checkpoint → prompt B: what a real compaction leaves. */
+const COMPACTED: readonly EventLike[] = [
+  turnStart(0, 1), user(1, 'the message the compaction summarised'), assistant(2, 'a'),
+  checkpoint(3, 1, 2),
+  turnStart(4, 2), user(5, 'the message after it'), assistant(6, 'b'),
+]
+
+test('a prompt older than the newest checkpoint is not recallable, and both halves say so', () => {
+  assertAgree('past a compaction', COMPACTED)
+  // A is not on the surface any more, so it was never in the menu.
+  assert.deepEqual(listAnchors(sessionOf(COMPACTED)).map((a) => a.seq), [5])
+  const view = projectedView(COMPACTED)
+  assert.deepEqual(view.anchors.map((a) => a.seq), [5])
+  assert.equal(view.stoppedAtCompaction, true, 'the client must be able to say why the list is short')
+})
+
+test('availability counts what the boundary leaves and names it', () => {
+  assert.deepEqual(
+    availability(sessionOf(COMPACTED)),
+    { maxTurns: 1, stoppedAtCompaction: true },
+    'the picker and the command read one availability, so the count and the flag travel together',
+  )
+})
+
+test('/rewind past a compaction reports the boundary, not a bare range error', () => {
+  // The handler turns this reason into `rewind.host.compactionBoundary`, which is
+  // a different sentence from "there is no number 2": those messages are gone, not
+  // merely absent from a menu.
+  assert.deepEqual(planCut(sessionOf(COMPACTED), 2), { reason: 'compactionBoundary', available: 1 })
+  // A malformed ordinal names no boundary — it is an argument error either way.
+  assert.deepEqual(planCut(sessionOf(COMPACTED), 0), { reason: 'outOfRange', available: 1 })
+})
+
+test('with no checkpoint the flag is false and out-of-range keeps its own reason', () => {
+  const plain: readonly EventLike[] = [
+    turnStart(0, 1), user(1, 'first'), assistant(2, 'a'),
+    turnStart(3, 2), user(4, 'second'), assistant(5, 'b'),
+  ]
+  assertAgree('no compaction', plain)
+  assert.deepEqual(availability(sessionOf(plain)), { maxTurns: 2, stoppedAtCompaction: false })
+  assert.deepEqual(planCut(sessionOf(plain), 3), { reason: 'outOfRange', available: 2 })
 })
