@@ -8,6 +8,30 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.6] - 2026-10-17
+
+### 中文
+- 跟随内核 0.2.1-rc.1：并行子代理改走统一的激活接口（tool_filter 换成 agent_preset）；办公载荷按内核自己的七个技能目录校验，旧的 check_office.py 标记已不存在。
+- 跟随内核 0.2.1-rc.2：所有 @deepseek-ai/dsh* 规格升到该版本，代码无需改动（子代理、会话槽位、压缩检查点均未变）。
+- Office 收敛：Word / Excel 生成交给官方 Office 技能，套件只保留模板化 PPT 与 PDF 读写；模型高级设置收窄到官方页表达不了的字段（目录覆盖、compat 开关、带兼容自动填充的推理等级）。
+- 消息撤回现在会说明压缩边界：可撤回列表止于最近一次压缩，更早的消息撤回不了，`/rewind` 的列表、越界提示、选择器和确认框都会点明；撤回后的文件回退改成第一个「参与者」，其他套件插件可以通过新服务 `dsh-app-rewind-participants` 在撤回后对账自己的状态，某个参与者失败只记日志、不影响撤回和其他参与者。
+- 订正套件注入通道的说明：web 线上套件行由 bundle 层承载，shell 不再写 profile 自己的补丁层（只有 frames 线保留旧写法）。
+- 网络搜索设置页认识内核 0.2.1-rc.2 新增的 DeepSeek Search API 提供方：单独的名称，并与旧的官方提供方一样显示计费提示。
+- 网络搜索设置页在官方 DeepSeek 提供方那张卡片上写明计费：2026-11-01 00:00（北京时间）起按 5 元 / 千次计费，此前免费。
+- 网络搜索设置页改为按内核注册表列出搜索来源：0.2.1 新增的 DeepSeek Search API 有自己的卡片，某个来源被 patch 层禁用时会说明原因而不是从列表消失，「使用中」以 ctx.web 实际配置的来源为准。在这里切换会写进 profile 自己的补丁层并在每次启动时重新应用，所以选择能保留；每次读取都取当前 ctx.web 实例，切换后页面立即反映真实来源。两条 DeepSeek 路线现在各有名称、说明与计费文案：模型检索按 token 计费、没有按次单价，只有 Search API 才有 2026-11-01 起的 5 元 / 千次价格。
+- 工作台插件接入套件：侧边栏顶部新增「工作台」入口，排在「插件」之上；点进去是一个容器页，领域工作台注册一张卡片即可出现，卡片既能打开自己的页面，也能把某个目录作为工作区打开并回到会话。
+
+### English
+- Kernel 0.2.1-rc.1: swarm delegates through the unified activation seam (agent_preset replaces tool_filter); the office payload is validated by its seven skill directories, now that check_office.py is gone.
+- Follow dsh 0.2.1-rc.2: every @deepseek-ai/dsh* spec moves to that version; no code change was needed (subagent, session slots and the compaction checkpoint are unchanged).
+- Office narrowed: Word / Excel generation moves to the official Office skills, leaving template-driven PPT and PDF authoring in the suite; the advanced-models page keeps only what the official page cannot express (catalog overrides, compat switches, reasoning with compat auto-fill).
+- Message recall now states the compaction boundary: the recallable list stops at the most recent compaction and older messages cannot be recalled, which the `/rewind` listing, its out-of-range answer, the picker and the confirmation dialog all say; the file revert is now the first participant, another suite plugin reconciles its own state after a recall through the new `dsh-app-rewind-participants` service, and a participant that fails is only logged — the recall and the other participants are unaffected.
+- Correct the description of the suite's injection channel: on the web line the suite rows ride a bundle layer, and the shell no longer writes the profile's own patch file — only the frames line still does.
+- The web-search settings page knows kernel 0.2.1-rc.2's new DeepSeek Search API provider: its own label, and the same billing note the older official provider carries.
+- The web-search settings page now states the official DeepSeek provider's billing on its card: free until 2026-11-01 00:00 Beijing time, then CNY 5 per 1000 calls.
+- The web-search settings page now lists sources from the kernel's registry: 0.2.1's DeepSeek Search API gets its own card, a source whose loader row is disabled says why instead of vanishing, and "in use" follows the id ctx.web is actually configured with. A switch made here is written into the profile's own patch layer and re-applied at every start, so the choice survives a restart; every read takes the current ctx.web instance, so the page reflects the source that actually answers. The two DeepSeek routes now carry separate names, hints and price lines: model retrieval bills by token with no per-call price, and only the Search API has the 2026-11-01 CNY 5 / 1000-call price.
+- Workbench plugin joins the suite: a Workbench entry at the top of the sidebar, above Plugins, opening a container page that domain workbenches appear in by registering a card. A card can open its own page, or open a folder as a workspace and return to the conversation.
+
 ## [v0.16.5] - 2026-10-14
 
 ### 中文
