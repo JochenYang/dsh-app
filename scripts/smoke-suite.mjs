@@ -394,12 +394,19 @@ async function probeWebSearch(base) {
   check('websearch: five engines registered',
     Array.isArray(view?.engines) && view.engines.length === 5,
     `got ${view?.engines?.length ?? 0}`)
-  check('websearch: provider defaults to the brand chain', view?.file?.provider === 'dsh-app', `got ${view?.file?.provider}`)
-  // Both provider choices must carry an explicit state: a UI that cannot tell
-  // the user a source is unusable lets them select it and fail every search.
+  // The view reports the seam's live selection, which this profile's overlay
+  // pins to the brand chain — not the page's own stored preference.
+  check('websearch: the profile selects the brand chain', view?.file?.provider === 'dsh-app', `got ${view?.file?.provider}`)
+  // Every provider the line mounts must carry an explicit state: a UI that
+  // cannot tell the user a source is unusable lets them select it and fail
+  // every search. The list is the seam's registry plus the ids this line is
+  // expected to mount, so a disabled loader row still shows up as
+  // `unavailable` instead of disappearing.
   const providers = view?.providers ?? []
-  check('websearch: both providers report a state',
-    providers.length === 2 && providers.every(p => ['ready', 'unavailable', 'unknown'].includes(p.state)),
+  const EXPECTED_PROVIDERS = ['dsh-app', 'deepseek-official', 'deepseek-search-api']
+  check('websearch: every expected provider reports a state',
+    EXPECTED_PROVIDERS.every(id => providers.some(p => p.id === id))
+      && providers.every(p => ['ready', 'unavailable', 'unknown'].includes(p.state)),
     providers.map(p => `${p.id}=${p.state}`).join(', ') || 'none')
 
   const probe = await postJson(base, `${WS}/engine/test`, { id: 'bing', query: 'DeepSeek Harness' })
