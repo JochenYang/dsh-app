@@ -468,6 +468,12 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
                       ? t('ws.provider.brandHint')
                       : t('ws.provider.officialHint'))}
                 </span>
+                {/* The price is a fact about the OFFICIAL endpoint, not a state:
+                    it belongs on that card whether or not it is selected, so a
+                    switch made months from now still shows what it costs. */}
+                {provider.id === 'deepseek-official'
+                  ? <span className="dshWs-providerMeta">{t('ws.provider.officialBilling')}</span>
+                  : null}
               </button>
             )
           })}
