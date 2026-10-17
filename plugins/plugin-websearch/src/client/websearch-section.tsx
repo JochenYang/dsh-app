@@ -140,13 +140,21 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 /**
- * The two provider ids the host can report, as dictionary keys. An unknown id
+ * The provider ids the host can report, as dictionary keys. An unknown id
  * falls through to the id itself — an unnamed provider is still worth showing.
+ *
+ * `deepseek-search-api` is kernel 0.2.1-rc.2's direct Search API provider; it
+ * sits beside `deepseek-official` (the older auxiliary-model-turn route), and a
+ * user may have either one selected.
  */
 const PROVIDER_KEYS: Readonly<Record<string, WebSearchKey>> = {
   'dsh-app': 'ws.provider.brand',
   'deepseek-official': 'ws.provider.official',
+  'deepseek-search-api': 'ws.provider.officialApi',
 }
+
+/** Providers that bill per call through DeepSeek's own endpoints. */
+const BILLED_OFFICIAL_IDS: ReadonlySet<string> = new Set(['deepseek-official', 'deepseek-search-api'])
 
 function providerLabel(id: string, t: TranslateNS<typeof NS>): string {
   const key = PROVIDER_KEYS[id]
@@ -470,8 +478,9 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
                 </span>
                 {/* The price is a fact about the OFFICIAL endpoint, not a state:
                     it belongs on that card whether or not it is selected, so a
-                    switch made months from now still shows what it costs. */}
-                {provider.id === 'deepseek-official'
+                    switch made months from now still shows what it costs. Both
+                    DeepSeek routes bill; only their transport differs. */}
+                {BILLED_OFFICIAL_IDS.has(provider.id)
                   ? <span className="dshWs-providerMeta">{t('ws.provider.officialBilling')}</span>
                   : null}
               </button>
