@@ -35,6 +35,7 @@ interface Harness {
   readonly routes: ReadonlyMap<string, CapturedRoute>
   readonly call: (path: string, init?: RequestInit) => Promise<{ status: number, body: Record<string, unknown> }>
   readonly store: WebSearchStore
+  readonly providerChoices: string[]
 }
 
 const dirs: string[] = []
@@ -51,7 +52,9 @@ function harness(overrides: Partial<RouteDeps> = {}): Harness {
     },
   }
   const store = new WebSearchStore(dir, () => undefined)
+  const providerChoices: string[] = []
   const deps: RouteDeps = {
+    applyProviderChoice: async (file) => { providerChoices.push(file.provider) },
     clearCache: () => undefined,
     isChainExhausted: () => false,
     probe: async () => ({ latencyMs: 12, resultCount: 3 }),
@@ -75,6 +78,7 @@ function harness(overrides: Partial<RouteDeps> = {}): Harness {
   return {
     routes,
     store,
+    providerChoices,
     call: async (path, init) => {
       const route = routes.get(path)
       assert.ok(route !== undefined, `no route registered for ${path}`)
@@ -133,14 +137,15 @@ describe('web search route registration', () => {
     assert.equal((value.engines as unknown[]).length, 5)
   })
 
-  it('persists a save and drops the result cache', async () => {
+  it('persists a save, re-points the source, and drops the result cache', async () => {
     const cleared: number[] = []
-    const { call, store } = harness({ clearCache: () => { cleared.push(1) } })
+    const { call, store, providerChoices } = harness({ clearCache: () => { cleared.push(1) } })
     const { status, body } = await call(`${ROUTE_PREFIX}/config/save`, post({ provider: OFFICIAL_PROVIDER_ID, maxResults: 3 }))
     assert.equal(status, 200)
     assert.equal(body.ok, true)
     assert.equal(store.load().provider, OFFICIAL_PROVIDER_ID)
     assert.equal(store.load().maxResults, 3)
+    assert.deepEqual(providerChoices, [OFFICIAL_PROVIDER_ID])
     assert.equal(cleared.length, 1)
   })
 
@@ -153,18 +158,19 @@ describe('web search route registration', () => {
     assert.equal(store.load().provider, SEARCH_API_PROVIDER_ID)
   })
 
-  it('never claims a provider switch: the source is the loader row, not this store', async () => {
-    // The `web` row comes from the desktop suite's `--patch` overlay, so the
-    // kernel's config editor refuses to edit it. A save that reported a switch
-    // would therefore be a lie; the route reports the seam's real id, which is
-    // whatever the loader says, even after the store is told otherwise.
-    const { call, store } = harness({ activeProviderId: () => 'dsh-app' })
+  it('reports a switch the host could not apply instead of acknowledging it', async () => {
+    // The store write happens first; a switch that never took effect must not
+    // come back as a plain success, or the page shows a source that is not the
+    // one answering.
+    const { call, store } = harness({
+      applyProviderChoice: async () => { throw new Error('config editor refused the write') },
+    })
     const { status, body } = await call(`${ROUTE_PREFIX}/config/save`, post({ provider: OFFICIAL_PROVIDER_ID }))
-    assert.equal(status, 200)
+    assert.equal(status, 502)
+    assert.equal(body.ok, false)
+    const host = (body.error as Record<string, unknown>).host as Record<string, unknown>
+    assert.equal(host.code, 'provider.switchFailed')
     assert.equal(store.load().provider, OFFICIAL_PROVIDER_ID)
-    const view = body.value as Record<string, unknown>
-    assert.equal(view.activeProvider, 'dsh-app')
-    assert.equal((view.file as Record<string, unknown>).provider, 'dsh-app')
   })
 
   it('rejects an unparseable save body with a coded 400', async () => {

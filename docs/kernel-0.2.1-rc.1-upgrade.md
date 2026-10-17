@@ -391,20 +391,24 @@ rc.2 的 `WebRuntime` 把 `searchProvider` / `fetchProvider` 声明成 `z.string
 
 `plugin-websearch@0.2.2` 的处理：
 
-- **不再提供运行时切换**：`web` 行由桌面套件的 `--patch` 覆盖层写进 profile，内核配置编辑器拒绝编辑被覆盖层接管的行
-  （`"Configuration for "web" is overridden by a home patch or command-line overlay"`），实测点击切换后
-  `activeProvider` 仍是 `dsh-app`。卡片因此改为只读状态，页面写明来源由补丁层的 `web` 行决定；把选择权还给页面需要
-  换设计（壳层按用户选择生成这一行、重启生效，或不写这一行并由插件自己写两个字段），不是这一轮的收尾动作。
+- **切换改走内核的配置编辑器，并且换了承载它的层**。`--patch` 覆盖层接管的行编辑器一律拒绝
+  （`"Configuration for "web" is overridden by a home patch or command-line overlay"`，实测）；同一行写在
+  profile 自己的补丁层里则允许——那是桌面壳真实使用的形态（壳启动内核时不带 `--patch`），写入赢过 bundle 层。
+  探针此前用 `--patch` 启动，于是它测到的是「不可能切换」的假象；现在探针按产品形态启动。
+- **每次读取取当前的 `ctx.web` 实例**。写完配置后 loader 可能交回一个新实例，激活时捕获的那个会一直报旧来源——
+  页面显示旧的、搜索走新的。注册也随之补到新实例上，否则品牌 provider 会在换实例后消失。
+- **启动时按保存的选择重新应用一次**：壳每次启动会按 overlay 重写这一行，选择靠 store + 启动重放续上。
 - **卡片改为「注册表 ∪ 本行期望的两个 id」**：`deepseek-search-api` 有了自己的卡；某个 id 的 loader 行被 patch
-  层禁用时显示原因而不是让卡片消失；「使用中」读 `seam.config.searchProvider.get()`，不再回显页面自己存的值。
+  层禁用时显示原因而不是让卡片消失；「使用中」读 `ctx.web` 当前配置的 id，不再回显页面自己存的值。
 - **两条 DeepSeek 路线拆成各自的名称、说明与计费文案**：此前两张卡共用一句话，读起来像重复；更糟的是
   「2026-11-01 起 5 元 / 千次」也被贴到了模型检索路线（`deepseek-official`）上——它按 token 计费，从来没有这条价格。
 - `validateFile` 认得 `deepseek-search-api`：此前会被夹回 `dsh-app`，用户在页面上选了也存不下来。
-- 自检返回值里的 `provider` 改用同一个只读来源，不再一直是 `unknown`。
+- 自检返回值里的 `provider` 用同一个来源，不再一直是 `unknown`。
 
 证据：插件 167 条单测全绿；`probe-settings-nav.cjs --lang zh-CN --section "网络搜索"` 与
-`--lang en-US --section "Web search"` 均 `RESULT: PASS`（3 张卡、Search API 标签、只有一张卡带日期价、
-模型路线带 token 文案、恰好一张卡 `aria-current`、页面写明来源由补丁层决定）。
+`--lang en-US --section "Web search"` 均 `RESULT: PASS`——3 张卡、Search API 标签、只有一张卡带日期价、
+模型路线带 token 文案、恰好一张卡 `aria-checked`，并且**真实点击切换成功**：
+`品牌引擎链使用中` → `DeepSeek 官方（Search API）使用中`（探针跑完会切回原选择）。
 
 ---
 

@@ -115,6 +115,7 @@ export function routeErrorCopy(t: T, host: HostText | undefined, fallback: strin
     'route.bodyTooLarge': t('ws.host.bodyTooLarge'),
     'route.writeFailed': t('ws.host.writeFailed', { detail }),
     'route.invalidBody': t('ws.host.invalidBody', { detail }),
+    'provider.switchFailed': t('ws.host.providerSwitchFailed'),
     'selftest.chainExhausted': t('ws.chain.chainExhausted'),
     'selftest.failed': t('ws.chain.selftestFailed'),
     'selftest.fetchFailed': t('ws.fetch.failed', { detail }),

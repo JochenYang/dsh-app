@@ -334,9 +334,11 @@ const cssText = `
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-2);
   text-align: left;
+  cursor: pointer;
   font: inherit;
   color: inherit;
 }
+.dshWs-providerCard:disabled { cursor: not-allowed; opacity: 0.75; }
 .dshWs-providerCardOn {
   border-color: var(--dsw-alias-brand-primary);
   box-shadow: inset 0 0 0 1px var(--dsw-alias-brand-primary);

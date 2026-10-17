@@ -48,7 +48,7 @@ import { createEngine } from './engines/index.ts'
 import { createWebFetchProvider } from './fetch/provider.ts'
 import { registerWebSearchRoutes } from './routes.ts'
 import { WebSearchStore } from './store.ts'
-import { activeEngines, BRAND_PROVIDER_ID, BRAND_FETCH_PROVIDER_ID, FETCH_PROBE_URL, type EngineEntry } from './wire.ts'
+import { activeEngines, BRAND_PROVIDER_ID, BRAND_FETCH_PROVIDER_ID, FETCH_PROBE_URL, type EngineEntry, type WebSearchFile } from './wire.ts'
 
 export const name = 'plugin-websearch'
 
@@ -138,6 +138,26 @@ interface SearchAccounting {
   readonly attempts: number
   readonly failed: readonly string[]
 }
+
+/**
+ * Structural slice of the kernel's config editor (`ctx.configEditor`).
+ *
+ * It is the kernel's own write path into a profile's patch document — the same
+ * one its settings pages take — and the only sanctioned way to change a
+ * `volatile` config field from a plugin. Read structurally like the seam:
+ * importing the package would add a dependency this plugin does not need (it is
+ * a service, resolved by name from the shared context).
+ */
+interface ConfigEditorLike {
+  entries(): readonly { options?: { id?: unknown, name?: unknown } }[]
+  edit(
+    entry: unknown,
+    change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<void>
+}
+
+/** The loader row that owns `ctx.web` — what the config editor addresses. */
+const WEB_ENTRY_ID = 'web'
 
 export function apply(ctx: Context, config: Config): void {
   const log = ctx.logger(name)
@@ -230,17 +250,100 @@ export function apply(ctx: Context, config: Config): void {
     log.warn('websearch: this kernel cannot register a fetch provider; web_fetch keeps the host provider')
   }
 
-  /** The provider id `ctx.web` is configured with, as the seam reports it. */
+  /**
+   * The seam as it stands NOW.
+   *
+   * `ctx.web` is captured at activation for registration, but a config-editor
+   * write reconciles the `web` entry, and a reconciler may hand back a new
+   * service instance. Reading the captured one would then report the provider
+   * from before the switch — the page would keep naming the old source while
+   * `web_search` already used the new one.
+   */
+  const liveSeam = (): WebSeamLike | undefined => {
+    try {
+      return ctx.get('web') as WebSeamLike | undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The provider id `ctx.web` is configured with right now. */
   const activeProviderId = (): string | undefined => {
     try {
-      const configured = seam?.config?.searchProvider?.get?.()
+      const configured = liveSeam()?.config?.searchProvider?.get?.()
       return typeof configured === 'string' && configured !== '' ? configured : undefined
     } catch {
       return undefined
     }
   }
 
+  /**
+   * Make sure OUR providers are on the instance `ctx.web` is serving now.
+   *
+   * A reconcile that replaced the service would drop the registration that
+   * activation-time code performed (its disposal ran with the old fiber), and
+   * `web_search` would then find no brand provider at all. Re-registering is a
+   * no-op on the common path, where the instance never changed.
+   */
+  const keepRegistered = (): void => {
+    const live = liveSeam()
+    if (live === undefined || live === seam) return
+    try {
+      if (!(live.searchProviders instanceof Map) || !live.searchProviders.has(BRAND_PROVIDER_ID)) {
+        live.registerSearchProvider(provider)
+        log.info(`websearch: search provider ${BRAND_PROVIDER_ID} re-registered on the live seam`)
+      }
+      if (typeof live.registerFetchProvider === 'function'
+        && (!(live.fetchProviders instanceof Map) || !live.fetchProviders.has(BRAND_FETCH_PROVIDER_ID))) {
+        live.registerFetchProvider(fetchProvider)
+        log.info(`websearch: fetch provider ${BRAND_FETCH_PROVIDER_ID} re-registered on the live seam`)
+      }
+    } catch (error) {
+      log.warn(`websearch: could not re-register on the live seam: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Point `ctx.web` at the saved choice.
+   *
+   * 0.2.1 turned `web.searchProvider` into a `volatile` config field: the seam
+   * reads it through a reference that exposes `get()` only, so the mutable
+   * `searchProviderId` property older lines carried is gone — assigning it
+   * (what this plugin used to do) is a silent no-op. The sanctioned write is
+   * the kernel's own config editor, the same path its settings pages take.
+   *
+   * @param file - the config whose `provider` should become active.
+   * @throws when the write is refused; the save route reports it instead of
+   *   acknowledging a switch that did not take effect.
+   */
+  const applyProviderChoice = async (file: WebSearchFile): Promise<void> => {
+    if (activeProviderId() === file.provider) return
+    const editor = ctx.get('configEditor') as ConfigEditorLike | undefined
+    if (editor === undefined) throw new Error('this kernel mounts no config editor, so the source cannot be switched at runtime')
+    const entry = editor.entries().find(item => item.options?.id === WEB_ENTRY_ID)
+    if (entry === undefined) throw new Error(`the composed tree has no "${WEB_ENTRY_ID}" loader row to configure`)
+    try {
+      await editor.edit(entry, current => ({ ...current, searchProvider: file.provider }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      log.warn(`websearch: switching the source to ${file.provider} failed: ${message}`)
+      throw new Error(message)
+    }
+    keepRegistered()
+    log.info(`websearch: active source → ${file.provider}`)
+  }
+
+  // Re-apply the saved choice at activation: the shell regenerates this
+  // profile's `web` row from the shipped overlay on every start, so the choice
+  // survives only because it is stored and re-pointed here. Fire-and-forget —
+  // a kernel whose editor refuses must still boot, and the page reports the
+  // seam's real value either way.
+  void applyProviderChoice(store.load()).catch((error: unknown) => {
+    log.warn(`websearch: cannot re-apply the saved source at activation: ${error instanceof Error ? error.message : String(error)}`)
+  })
+
   ctx.effect(() => registerWebSearchRoutes(ctx.connection.fetch, store, {
+    applyProviderChoice,
     probe: async (id, query) => {
       const file = store.load()
       const entry = file.engines.find(item => item.id === id)
@@ -276,7 +379,7 @@ export function apply(ctx: Context, config: Config): void {
      */
     providerAvailability: () => {
       try {
-        const registry = seam?.searchProviders
+        const registry = liveSeam()?.searchProviders
         if (!(registry instanceof Map)) return undefined
         const availability = new Map<string, boolean>()
         for (const [id, provider] of registry) {
@@ -302,13 +405,14 @@ export function apply(ctx: Context, config: Config): void {
      * surfaces here instead of at the next real search.
      */
     searchThroughSeam: async (query: string) => {
-      if (seam === undefined || typeof seam.search !== 'function') {
+      const live = liveSeam()
+      if (live === undefined || typeof live.search !== 'function') {
         throw new Error('this kernel has no ctx.web service, so no search can run')
       }
       const file = store.load()
       lastOutcome.clear()
       const startedAt = Date.now()
-      const result = await seam.search({ query, maxResults: file.maxResults }) as {
+      const result = await live.search({ query, maxResults: file.maxResults }) as {
         sources?: readonly unknown[]
         content?: unknown
       }

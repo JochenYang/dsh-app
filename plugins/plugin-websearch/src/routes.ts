@@ -59,6 +59,15 @@ export interface ProbeResult {
 
 /** The host services the routes need. */
 export interface RouteDeps {
+  /**
+   * Re-point `ctx.web`'s configured search provider at the saved choice.
+   *
+   * The seam's config field is a read-only volatile reference, so the write
+   * goes through the kernel's own config editor — the path its settings pages
+   * take — and is therefore async. A rejection is a save the host could not
+   * apply, which the route reports instead of acknowledging silently.
+   */
+  applyProviderChoice(file: WebSearchFile): Promise<void>
   /** Run one engine against a real query. Throws on failure. */
   probe(id: string, query: string): Promise<ProbeResult>
   /** Whether an error is the chain's "everything failed" signal. */
@@ -361,14 +370,20 @@ export function registerWebSearchRoutes(
             // down masked are re-attached from the stored copy here, so a
             // save that did not touch a key never destroys it.
             const merged = { ...body, engines: unmaskEngines(body.engines, existing.engines) }
-            store.save(merged)
-            // No provider write here: the search source is the loader's, fixed
-            // by the `web` row the desktop suite writes into this profile on
-            // every start. A `--patch` overlay owns that row, so the kernel's
-            // own config editor refuses to edit it ("overridden by a
-            // command-line overlay") — a switch attempted here could never take
-            // effect, which is why the page reports the source instead of
-            // offering one.
+            const file = store.save(merged)
+            // The store write is this page's record; the seam's configured
+            // provider belongs to the loader. Re-pointing it is a write to the
+            // profile patch through the kernel's config editor, so it can fail
+            // on its own — and a page that acknowledged the save would then
+            // show a source that never took effect.
+            try {
+              await deps.applyProviderChoice(file)
+            } catch (error) {
+              return fail(502, 'provider', {
+                code: 'provider.switchFailed',
+                text: error instanceof Error ? error.message : String(error),
+              })
+            }
             deps.clearCache()
           } catch (error) {
             if (error instanceof WebSearchValidationError) {

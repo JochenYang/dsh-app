@@ -34,6 +34,7 @@ import type { EngineEntry, EngineStatus, HostText, WebSearchFile } from '../wire
 // Coded host messages: the code → copy tables live in a React-free module so
 // the suite can test them (a .tsx cannot be bundled by the test harness).
 import { hostMessage, providerReasonCopy, routeErrorCopy, statusLabel } from './host-message.ts'
+import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS, type WebSearchKey } from './locales.ts'
 import { PROVIDER_HINT_KEYS, PROVIDER_PRICE_KEYS, providerLabel } from './providers.ts'
 
@@ -210,6 +211,7 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
   const [selfTestBusy, setSelfTestBusy] = useState(false)
   const [draft, setDraft] = useState<WebSearchFile | null>(null)
   const [instancesText, setInstancesText] = useState('')
+  const [confirmSwitch, setConfirmSwitch] = useState<string | null>(null)
 
   /** Show a transient success notice, replacing any previous one. */
   const showNotice = useCallback((key: WebSearchKey): void => {
@@ -385,6 +387,21 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
   const ordered = [...draft.engines].sort((a, b) => a.priority - b.priority)
   const activeLabel = providerLabel(draft.provider, t)
 
+  /** Switching the source changes what every future web_search call does, so it
+   * is the one action that asks first — and the target's own verdict rides
+   * along, so a source the host already knows is unusable says so before the
+   * user picks it. */
+  const requestSwitch = (provider: string): void => {
+    if (provider === draft.provider) return
+    setConfirmSwitch(provider)
+  }
+
+  /** The target's own verdict, in the dialog's words. */
+  const providerReason = (id: string): string | undefined => {
+    const reason = view.providers.find(item => item.id === id)?.reason
+    return reason === undefined ? undefined : providerReasonCopy(t, reason)
+  }
+
   return (
     <div className="dshWs-section">
       <h3 className="dshWs-title">{t('ws.nav')}</h3>
@@ -405,11 +422,7 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
           <h4 className="dshWs-cardTitle">{t('ws.source.title')}</h4>
           <span className="dshWs-badge">{t('ws.source.current', { label: activeLabel })}</span>
         </div>
-        {/* Read-only status, not a control. The search source is decided by
-            the `web` row the desktop suite writes into the profile on every
-            start, so a switch here could not stick — and the line underneath
-            says where it is decided instead of offering a dead radio. */}
-        <div className="dshWs-providerRow" role="list" aria-label={t('ws.source.aria')}>
+        <div className="dshWs-providerRow" role="radiogroup" aria-label={t('ws.source.aria')}>
           {view.providers.map((provider) => {
             const label = providerLabel(provider.id, t)
             const dot = provider.state === 'ready'
@@ -419,11 +432,14 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
               ? t('ws.provider.ready')
               : provider.state === 'unavailable' ? t('ws.provider.unavailable') : t('ws.provider.unknown')
             return (
-              <div
+              <button
                 key={provider.id}
-                role="listitem"
-                aria-current={provider.selected ? 'true' : undefined}
+                type="button"
+                role="radio"
+                aria-checked={provider.selected}
                 className={`dshWs-providerCard${provider.selected ? ' dshWs-providerCardOn' : ''}`}
+                disabled={busy}
+                onClick={() => { requestSwitch(provider.id) }}
               >
                 <span className="dshWs-providerHead">
                   <span className={`dshWs-providerDot${dot}`} aria-hidden="true" />
@@ -449,7 +465,7 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
                 {PROVIDER_PRICE_KEYS[provider.id] === undefined
                   ? null
                   : <span className="dshWs-providerMeta">{t(PROVIDER_PRICE_KEYS[provider.id])}</span>}
-              </div>
+              </button>
             )
           })}
         </div>
@@ -727,6 +743,37 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
       </div>
 
       <p className="dshWs-path">{t('ws.path', { path: view.filePath })}</p>
+
+      <ConfirmDialog
+        open={confirmSwitch !== null}
+        title={t('ws.confirm.title')}
+        message={confirmSwitch === null ? '' : (() => {
+          const target = confirmSwitch
+          const label = providerLabel(target, t)
+          const reason = providerReason(target)
+          // Named by the target's own label: there are three sources now, and a
+          // two-way sentence told everyone switching to the Search API that the
+          // BRAND chain would answer.
+          const base = t('ws.confirm.toProvider', { label })
+          const warn = reason === undefined ? '' : `
+
+${t('ws.confirm.warn', { label, reason })}`
+          return `${base}${warn}
+
+${t('ws.confirm.ask')}`
+        })()}
+        confirmLabel={t('ws.confirm.switch')}
+        cancelLabel={t('ws.cancel')}
+        busy={busy}
+        onConfirm={() => {
+          const provider = confirmSwitch
+          setConfirmSwitch(null)
+          if (provider !== null && draft !== null) {
+            void save({ ...draft, provider }, instancesText, 'ws.notice.providerSwitched')
+          }
+        }}
+        onClose={() => { setConfirmSwitch(null) }}
+      />
     </div>
   )
 }
