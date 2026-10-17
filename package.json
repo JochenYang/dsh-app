@@ -28,6 +28,7 @@
     "icon:build": "python scripts/build-icons.py",
     "icon:gen": "node scripts/gen-icon.mjs",
     "primary-runtime:build": "node scripts/build-primary-runtime.mjs",
+    "probe:reap": "node scripts/reap-probe-kernels.mjs",
     "profiles:audit": "node scripts/profile-supply-chain.mjs audit",
     "profiles:peers": "node scripts/profile-supply-chain.mjs peers",
     "profiles:prune": "node scripts/profile-supply-chain.mjs prune",

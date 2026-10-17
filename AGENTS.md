@@ -141,6 +141,16 @@ already diffs them); the remaining `probe-chrome-surfaces.cjs` / `probe-in-frame
 `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` cover the surfaces
 their names say; `scripts/capture.mjs` screenshots the running UI for visual work.
 
+`npm run probe:reap` (`scripts/reap-probe-kernels.mjs`) has no re-run trigger — it is maintenance, not a
+check. A probe stopped by a timeout, a closed terminal or `taskkill /F` ends through
+`TerminateProcess`, so nothing takes its `dsh web` kernel down and it keeps a core and hundreds of MB
+until something else reaps it. This reaps on demand: first the registry the probes write while they run
+(`scratch/.probe-kernels.json` — entries whose probe is gone, and a no-op where nothing has recorded
+one), then a sweep for any kernel older than `--stale` (15 minutes by default). **Safe to run at any
+time** — it only touches a process whose command line carries `--no-open`, which `npm run dev`'s kernel
+never does, and only once it is past the threshold; `--dry-run` prints the same decisions and changes
+nothing.
+
 **A probe running inside Electron must pass `windowsHide: true` to every `spawn`** — otherwise each
 console child pops a terminal onto the user's desktop.
 
