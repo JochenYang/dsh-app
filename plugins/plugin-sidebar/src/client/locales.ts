@@ -38,6 +38,7 @@ export const zh = {
   'sidebar.resizeAria': '调整面板宽度',
 
   'sidebar.fail.gitMissing': '未找到 Git，请先安装 Git 或检查 PATH。',
+  'sidebar.fail.notARepo': '当前目录不是 Git 仓库，因此没有可显示的分支与改动。',
   'sidebar.fail.timeout': '网络操作超时，请检查网络或远程仓库后重试。',
   'sidebar.fail.forbidden': '当前会话的工作区校验失败，请刷新会话后重试。',
   'sidebar.fail.generic': 'Git 操作失败。',
@@ -162,6 +163,7 @@ export const en: Record<SidebarKey, string> = {
   'sidebar.resizeAria': 'Resize the panel',
 
   'sidebar.fail.gitMissing': 'Git was not found. Install Git or check your PATH.',
+  'sidebar.fail.notARepo': 'This folder is not a Git repository, so there is no branch or change to show.',
   'sidebar.fail.timeout': 'The network operation timed out. Check your network or the remote, then retry.',
   'sidebar.fail.forbidden': 'The workspace check for this session failed. Refresh the session and retry.',
   'sidebar.fail.generic': 'The Git operation failed.',

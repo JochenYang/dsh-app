@@ -77,6 +77,7 @@ import { anchorsToOptions, type RewindView } from './client/popup.ts'
 import type { RecallOutcome } from './client/outcome.ts'
 import { coverageSentence, hostCode, type FileReportLike } from './client/messages.ts'
 import type { Translate } from './client/messages.ts'
+import { transportFailure, transportNote } from './client/transport.ts'
 import type { RevertPlan } from './wire.ts'
 import { QuarantineSection } from './client/quarantine-section.tsx'
 import { showRecallNote, mountRecallNoteHost } from './client/recall-note-host.tsx'
@@ -158,6 +159,14 @@ interface RemoteCommands {
   ): Promise<{
     ok: boolean
     value?: { result?: { kind: string, text?: string, sourceEventSeq?: number } }
+    /**
+     * The kernel's envelope for a call it refused, when it sends one.
+     *
+     * Read for its message only: a refused call carries no command result, so
+     * that message is the one honest explanation of why — a session whose write
+     * handle is held, a released session reference, a malformed envelope.
+     */
+    error?: unknown
   }>
 }
 
@@ -493,8 +502,11 @@ async function planRecall(
   try {
     const result = await remote.execute(sessionId, `/rewind plan ${n}`, [])
     const outcome = result.value?.result
-    if (!result.ok || outcome === undefined || outcome.kind !== 'success') {
-      const coded = hostCode(outcome?.text)
+    // No command outcome means the transport refused: the kernel's own message
+    // is the only explanation, and "a capability is missing" would be a lie.
+    if (!result.ok || outcome === undefined) return { note: transportNote(t, result.error) }
+    if (outcome.kind !== 'success') {
+      const coded = hostCode(outcome.text)
       return { note: coded === undefined ? t('rewind.error.unavailable') : t(coded.code, coded.params) }
     }
     const payload = parsedPlan(outcome.text)
@@ -510,8 +522,8 @@ async function planRecall(
       return { note: coded === undefined ? t('rewind.error.unavailable') : t(coded.code, coded.params) }
     }
     return { plan: payload }
-  } catch {
-    return { note: t('rewind.error.unavailable') }
+  } catch (error) {
+    return { note: transportNote(t, error) }
   }
 }
 
@@ -565,9 +577,10 @@ async function recallByOrdinal(
     const outcome = result.value?.result
     if (!result.ok || outcome === undefined) {
       // The transport refused without a command outcome. `result.error` is the
-      // kernel's own envelope when it carries one; the coded fallback keeps the
-      // report actionable either way.
-      return { ok: false, code: 'rewind.error.unavailable' }
+      // kernel's own envelope when it carries one, and its message is the honest
+      // diagnostic; "a capability is missing" is the sentence for a service that
+      // really is absent, which is why it stays on the `remote` check above.
+      return transportFailure(result.error)
     }
     if (outcome.kind !== 'success') {
       // A refusal is a coded host answer: hand the code up so the component
@@ -592,8 +605,8 @@ async function recallByOrdinal(
     if (blocked !== undefined) return { ok: true, note: `composer prefill skipped: ${blocked}` }
     if (revert !== undefined) return { ok: true, note: revert }
     return { ok: true }
-  } catch {
-    return { ok: false, code: 'rewind.error.unavailable' }
+  } catch (error) {
+    return transportFailure(error)
   }
 }
 

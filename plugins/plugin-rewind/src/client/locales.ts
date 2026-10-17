@@ -37,6 +37,7 @@ export const zh = {
   'rewind.picker.boundary': '列表止于最近一次压缩：压缩边界之前的消息已经无法撤回。',
 
   'rewind.error.unavailable': '撤回功能当前不可用（缺少必要的内核能力）。',
+  'rewind.error.transport': '撤回请求没能送到内核：{detail}',
   'rewind.error.noSession': '先打开一个会话。',
   'rewind.files.unrestorable': '{count} 个文件无法恢复（不在撤回覆盖范围内）：{paths}',
   'rewind.files.coverageNone': '这段消息里运行过 {tools}，但那时没有工作区快照（例如内核重启过，或快照功能被关闭），它们对文件的改动无法还原。',
@@ -122,6 +123,7 @@ export const en: Record<RewindKey, string> = {
   'rewind.picker.boundary': 'The list stops at the most recent compaction: anything before that boundary can no longer be recalled.',
 
   'rewind.error.unavailable': 'Recall is unavailable right now (a required kernel capability is missing).',
+  'rewind.error.transport': 'The recall request never reached the kernel: {detail}',
   'rewind.error.noSession': 'Open a session first.',
   'rewind.files.unrestorable': '{count} file(s) could NOT be restored (outside what a recall can see): {paths}',
   'rewind.files.coverageNone': 'This range ran {tools}, and no workspace snapshot covers it (the kernel may have restarted, or snapshots are off), so their file changes could not be restored.',

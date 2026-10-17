@@ -60,6 +60,15 @@ const MAX_REPO_FILES = 20_000
 const NETWORK_TIMEOUT_MS = 120_000
 const MAX_BRANCH_NAME_CHARS = 200
 const MAX_ERROR_CHARS = 1_000
+/**
+ * Git's "this folder is not a repository" failure.
+ *
+ * Matched on git's own wording because the exit status alone cannot tell it
+ * apart from any other fatal error. The second alternative is the same sentence
+ * in a Chinese locale, written as escapes: only the dictionaries may hold Han
+ * characters, and git localizes its own messages.
+ */
+const NOT_A_REPO = /not a git repository|\u4e0d\u662f\s*git\s*\u4ed3\u5e93/iu
 /** Bounded stdout excerpt returned by pull/push so the client can word the
  * success notice from git's own verdict ("Already up to date." etc.). */
 const MAX_SYNC_OUT_CHARS = 1_000
@@ -615,6 +624,12 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       : raw.stdout !== undefined && raw.stdout !== ''
         ? raw.stdout.slice(0, MAX_ERROR_CHARS)
         : raw.message ?? 'git failed'
+    // "This folder is not a Git repository" is a STATE, not a failure of the
+    // operation the user asked for: the tab shows one sentence and stops, and
+    // the panel does not go on to ask the same question again (the log prefetch
+    // ran into the same 400). Every other non-zero exit keeps the generic
+    // `git-error`, where git's own wording is the useful diagnostic.
+    if (NOT_A_REPO.test(detail)) return fail(400, 'not-a-repo', detail, { code: 'git.notARepo', text: detail })
     const code = raw.code === 'ENOENT' ? 'git-missing' : 'git-error'
     return fail(code === 'git-missing' ? 500 : 400, code, detail)
   }

@@ -12,6 +12,10 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { mkdtempSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { ROUTE_PREFIX as CLIENT_PREFIX } from '../src/client/api.ts'
 import { handleGitRequest, registerGitRoutes, ROUTE_PREFIX } from '../src/git-routes.ts'
@@ -102,6 +106,28 @@ describe('git route envelopes', () => {
     assert.equal(answer.status, 400)
     assert.equal(answer.body.ok, false)
     assert.equal(answer.body.error?.code, 'bad-request')
+  })
+
+  it('names a folder that is not a repository instead of "git failed"', async () => {
+    // Measured on a real machine: the Git tab on a plain folder answered 400
+    // with git's stderr wrapped in the generic sentence, on BOTH the status and
+    // the log prefetch. It is a state, so the host answers its own code and the
+    // tab can stop asking.
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-sidebar-norepo-'))
+    try {
+      const answer = await call(
+        harness({ cwdForSession: sessionId => (sessionId === 'norepo' ? dir : undefined) }),
+        `${ROUTE_PREFIX}/git/status`,
+        `?cwd=${encodeURIComponent(dir)}&sessionId=norepo`,
+      )
+      assert.equal(answer.status, 400)
+      assert.equal(answer.body.error?.code, 'not-a-repo')
+      assert.equal(answer.body.error?.host?.code, 'git.notARepo')
+    } finally {
+      // The async form: the repo's recursive-delete guard measures it as safe
+      // around links, and its sync twin has followed a junction and cost a tree.
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('answers 403 for a session the host does not have', async () => {

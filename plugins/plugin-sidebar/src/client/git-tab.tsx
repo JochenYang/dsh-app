@@ -64,6 +64,9 @@ const STANDALONE_COPY: Readonly<Record<string, SidebarKey>> = {
   'git-missing': 'sidebar.fail.gitMissing',
   'git-timeout': 'sidebar.fail.timeout',
   'forbidden': 'sidebar.fail.forbidden',
+  // A folder that is not a repository is a STATE, not a failed operation: the
+  // tab says so in one sentence instead of framing git's stderr as "Git 操作失败".
+  'not-a-repo': 'sidebar.fail.notARepo',
 }
 
 /**
@@ -471,10 +474,14 @@ export function GitTab(props: GitTabProps): ReactNode {
       setError(t('sidebar.fail.noSession'))
       return
     }
-    void loadStatus(cwd, sessionId, generation)
-    // Prefetch the graph so switching to it is instant; failures surface in
-    // the graph view with a retry instead of a silent forever-loading state.
-    void loadLog(cwd, sessionId, generation)
+    // The log prefetch only runs when the status read succeeded: a folder that is
+    // not a repository would answer the same 400 twice, and git's stderr would be
+    // logged twice for one state the tab already explains.
+    void loadStatus(cwd, sessionId, generation).then((loaded) => {
+      // Prefetch the graph so switching to it is instant; failures surface in
+      // the graph view with a retry instead of a silent forever-loading state.
+      if (loaded) void loadLog(cwd, sessionId, generation)
+    })
   }, [cwd, sessionId])
 
   const refresh = (): void => {

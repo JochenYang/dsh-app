@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-sidebar",
   "description": "DSH APP sidebar dock: dual-face plugin (host git routes + client Git view tab) for repository status, diff, log, and sync actions.",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
