@@ -286,6 +286,19 @@ CSS），`locales.ts` 835 → 751 行（两张表各删 40 键，新增 2 键，
 
 ### 7.3 产物与真机复核 `[实测]`
 
+**上游在这轮工作期间发布了 `0.2.1-rc.2`**（`next` 标签于 2026-10-17T08:36Z 移过去）。后果有两条，都实测过：
+
+- `^0.2.1-rc.1` **接受** rc.2（`semver.satisfies('0.2.1-rc.2','^0.2.1-rc.1',{includePrerelease:true}) === true`），
+  所以 `runtime:build` 解析 `next` 时会拿到 rc.2 —— 而本地检出仍是 rc.1，构建守卫直接拒绝：
+  `host source at … is 0.2.1-rc.1, but this runtime ships dsh 0.2.1-rc.2`。这条守卫是对的，不是缺陷。
+- 因此本轮产物**显式钉在 rc.1**：`DSH_VERSION=0.2.1-rc.1 npm run runtime:build`。要跟 rc.2 是**下一轮**
+  （改 spec、重装、重跑门禁、复核是否有新的接口变更），不在本轮范围。
+- **钉版本也只能撑到 rewind 改动之前**：子包规格是范围（`^0.2.1-rc.1`），pnpm 仍会解析到 rc.2，
+  守卫报 `lockfile resolved @deepseek-ai/dsh-client-store@0.2.1-rc.2, but this runtime ships dsh 0.2.1-rc.1`。
+  所以下表这份产物是 **rewind 0.1.4 时期**的，不含 `plugin-rewind@0.1.5`；rewind 那轮的产物闸门因此
+  **未通过**（`docs/plans/rewind-undo-parity.md` 的 Phase 3 记了同一条）。补全要么升到 rc.2，要么给构建
+  加“精确钉住子包版本”的模式。
+
 | 项 | 结果 |
 |---|---|
 | `npm run runtime:build` | `dsh-runtime-win32-x64-0.2.1-rc.1.tgz`，111.8 MB / 20934 文件；`manifest.json` 的 `suiteVersion` = `7899ebd7`，与 `computeSuiteVersion()` 一致 |
