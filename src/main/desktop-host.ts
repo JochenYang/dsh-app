@@ -662,6 +662,40 @@ function webShapeArgs(options: DshHostOptions, primaryRuntime: string): string[]
 }
 
 /**
+ * The skill directories a valid office payload carries, one per kernel line.
+ *
+ * The kernel's `@deepseek-ai/dsh-skill-office` registers exactly this set and
+ * reads `<assetRoot>/<name>/SKILL.md` for each while composing, so a payload
+ * missing any of them makes the child throw a few seconds into its start. The
+ * list is the payload's whole contract with that package — 0.2.1 replaced the
+ * single `scripts/check_office.py` marker with these per-task skills, and a
+ * future line that adds or renames one must move this list with it. The build
+ * asserts the same set while staging (scripts/build-runtime.mjs).
+ */
+const OFFICE_SKILL_NAMES = [
+  'office',
+  'office-docx',
+  'office-pptx',
+  'office-xlsx',
+  'office-render',
+  'office-recalculate',
+  'office-export-pdf',
+] as const
+
+/** The one file every payload skill directory must hold. */
+const OFFICE_SKILL_ENTRY = 'SKILL.md'
+
+/**
+ * Which of {@link OFFICE_SKILL_NAMES} a payload directory is missing.
+ *
+ * @param root - a payload root (a source tree or the materialized copy).
+ * @returns the missing skill names; empty when the payload is complete.
+ */
+function missingOfficeSkills(root: string): string[] {
+  return OFFICE_SKILL_NAMES.filter((name) => !existsSync(path.join(root, name, OFFICE_SKILL_ENTRY)))
+}
+
+/**
  * Directory the office payload is materialized under, inside the shell's data
  * directory. The child's own default is `<runtimeDir>/../runtime`, a layout an
  * installed runtime artifact does not have today, so the shell owns a copy.
@@ -678,8 +712,8 @@ const OFFICE_PAYLOAD_DIR = 'office-skills'
  * this leaf makes the skills directory a SIBLING of the argument —
  * `<root>/primary-runtime` beside `<root>/office-skills`, the layout upstream's
  * own runtime uses. Naming it inside the payload directory instead puts the name
- * twice in the derived asset root and the skill fails its boot check on
- * `<root>/office-skills/office-skills/scripts/check_office.py`.
+ * twice in the derived asset root and the child fails on
+ * `<root>/office-skills/office-skills/office/SKILL.md`.
  *
  * The shell always answers THIS path, never the payload's own directory: what
  * the child does with it is derive the asset root from its parent, and only this
@@ -726,20 +760,20 @@ async function officePayloadStale(source: string, target: string): Promise<boole
  *
  * The payload is not optional for this transport: the child composes the office
  * skill plugin with `assetRoot = join(dirname(argv[4]), 'office-skills')`, and
- * that plugin THROWS at boot unless `<assetRoot>/scripts/check_office.py`
- * exists — so a host started without one dies on its own, several seconds in,
- * reported as a kernel crash. Failing here instead names the payload and where
- * it was looked for; on the shipping runtime that payload is a build-side gap
- * (the artifact carries no `runtime/office-skills` yet), which is exactly what
- * the message has to say.
+ * that plugin reads `<assetRoot>/<skill>/SKILL.md` for every skill it registers
+ * and THROWS at boot when one is missing — so a host started without a complete
+ * payload dies on its own, several seconds in, reported as a kernel crash.
+ * Failing here instead names the payload, the skills it lacks, and where it was
+ * looked for; on the shipping runtime that payload is a build-side gap, which is
+ * exactly what the message has to say.
  *
  * The returned path is ALWAYS the fixed leaf, and that is a hard contract: the
  * child derives its asset root from `dirname` of this argument, so answering
  * with the payload's own `primary-runtime` (the obvious way to let
  * `load_workspace_dependencies` find a Python set) moves the asset root into
  * `<payload>/office-skills` — a directory no artifact carries — and the boot
- * fails on the missing `check_office.py`. The Python set is therefore linked
- * BESIDE the materialized skills instead, where the fixed leaf already points.
+ * fails on the missing skills. The Python set is therefore linked BESIDE the
+ * materialized skills instead, where the fixed leaf already points.
  *
  * @param source - the payload to mirror (dev: the checkout's `skill-office`
  *   assets; production: `<runtimeDir>/../runtime/office-skills`), or undefined
@@ -754,30 +788,32 @@ async function officePayloadStale(source: string, target: string): Promise<boole
  *   (`DshHostOptions.executable`), placed inside the leaf while no Python set is
  *   linked. A bare command name is resolved through `PATH`.
  * @returns the primary-runtime path to pass as the child's fourth positional.
- * @throws when any input is missing, or when the source is not a payload.
+ * @throws when any input is missing, or when a payload is incomplete.
  */
 export async function prepareOfficePayload(source: string | undefined, dataDir: string | undefined, primaryRuntime?: string, interpreter?: string): Promise<string> {
   if (source === undefined || dataDir === undefined) {
-    throw new Error(`dsh host: the web transport needs an office payload (a directory holding scripts/check_office.py); ${source === undefined ? 'none was named' : 'no shell data directory was named'} for ${source}`)
+    throw new Error(`dsh host: the web transport needs an office payload (a directory of office skills, each holding ${OFFICE_SKILL_ENTRY}); ${source === undefined ? 'none was named' : 'no shell data directory was named'} for ${source}`)
   }
-  if (!existsSync(path.join(source, 'scripts', 'check_office.py'))) {
-    throw new Error(`dsh host: the office payload ${source} is missing or incomplete (it must hold scripts/check_office.py); the runtime has to ship it beside its own tree`)
+  const missing = missingOfficeSkills(source)
+  if (missing.length > 0) {
+    throw new Error(`dsh host: the office payload ${source} is missing ${missing.join(', ')} (each must hold ${OFFICE_SKILL_ENTRY}); the runtime has to ship a complete payload beside its own tree`)
   }
   const root = path.join(dataDir, OFFICE_PAYLOAD_ROOT)
   const target = path.join(root, OFFICE_PAYLOAD_DIR)
   // The staleness rule alone cannot see an INTERRUPTED materialization: a
   // half-copied tree is newer than its source, so it is never refreshed and the
-  // child dies on the missing `check_office.py` for good — the payload lives in
-  // the shell's data directory, which no reinstall and no kernel rollback
-  // clears. The marker file is what the child validates, so it decides here too.
-  const marker = path.join(target, 'scripts', 'check_office.py')
-  if (await officePayloadStale(source, target) || !existsSync(marker)) {
+  // child dies on the missing skills for good — the payload lives in the shell's
+  // data directory, which no reinstall and no kernel rollback clears. The
+  // completeness check is therefore an input to the decision, not an assertion
+  // after it: an incomplete copy is replaced on the next start.
+  if (await officePayloadStale(source, target) || missingOfficeSkills(target).length > 0) {
     await mkdir(root, { recursive: true })
     await rm(target, { recursive: true, force: true })
     await cp(source, target, { recursive: true })
   }
-  if (!existsSync(marker)) {
-    throw new Error(`dsh host: the office payload could not be materialized into ${target} (${path.join('scripts', 'check_office.py')} is not there after copying); the child refuses to boot without it`)
+  const stillMissing = missingOfficeSkills(target)
+  if (stillMissing.length > 0) {
+    throw new Error(`dsh host: the office payload could not be materialized into ${target} (${stillMissing.join(', ')} is not there after copying); the child refuses to boot without it`)
   }
   const leaf = path.join(root, OFFICE_PRIMARY_RUNTIME_LEAF)
   if (primaryRuntime === undefined) await materializeLeafInterpreter(leaf, interpreter)

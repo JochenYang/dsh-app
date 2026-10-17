@@ -9,7 +9,8 @@
 // `require('process')` calls hit esbuild's shim, which throws at run time
 // ("Dynamic require of \"process\" is not supported"). The shared recipe has no
 // host-banner hook, so this wrapper prepends the standard createRequire handoff
-// to the built file after buildDual — the same fix plugin-doc applies for docx.
+// to the built file after buildDual — the same fix plugin-market applies for its
+// CJS dependencies.
 //
 // Run from the dsh-app root (esbuild resolves out of dsh-app/node_modules):
 //   node plugins/plugin-presets/build.mjs

@@ -478,8 +478,8 @@ export function apply(ctx: Context, baseConfig: Config): void {
         + 'and completion criterion, and pass background every subtask shares via shared_context. Unsure about a '
         + 'split? Call with dry_run to preview the expanded per-child prompts before running them. Children run '
         + 'with the full tool set by default; '
-        + 'for read-only batches (analysis, review, lookups) pass tool_filter to scope every child to read/search '
-        + 'tools only.',
+        + 'for read-only batches (analysis, review, lookups) pass agent_preset to compose every child from a '
+        + 'read/search-scoped preset.',
       parameters: {
         description: {
           type: 'string',
@@ -523,22 +523,9 @@ export function apply(ctx: Context, baseConfig: Config): void {
           type: 'number',
           description: 'Optional worker-pool size (how many children run simultaneously). Pins the batch pool: adaptive scheduling may run below it after failures and recover back to it, but never above it. Values outside the configured bounds are clamped; omit to use the deployment default.',
         },
-        tool_filter: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            allow: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Global tool names that stay visible to every child; everything else is removed. Omit to keep all tools.',
-            },
-            deny: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Global tool names removed from every child. Omit to remove none.',
-            },
-          },
-          description: 'Optional tool scoping applied to EVERY child in the batch. Children otherwise run with the full tool set — for read-only batches (analysis, review, lookups) pass an allow-list of read/search tools so no child can write files the parent never audits. Applies to fresh children at creation; resumed children keep the tool set they were created with.',
+        agent_preset: {
+          type: 'string',
+          description: 'Optional Agent Preset id applied to EVERY fresh child in the batch. A preset is what the kernel composes a child\'s role and tool set from, so a read-only batch (analysis, review, lookups) should name a preset scoped to read/search tools — children otherwise run with the full tool set. Applies to fresh children at creation; resumed children keep the composition they were created with. Requires a provider that supports independent presets.',
         },
         dry_run: {
           type: 'boolean',
@@ -743,7 +730,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
             ? Math.max(0, Math.floor(args.token_budget))
             : live.tokenBudget,
           ...live.agentOptions !== undefined ? { agentOptions: live.agentOptions } : {},
-          ...args.tool_filter !== undefined ? { toolFilter: args.tool_filter } : {},
+          ...args.agent_preset !== undefined ? { agentPreset: args.agent_preset } : {},
           maxDepth: live.maxDepth,
         })
         if (exec.signal.aborted) {

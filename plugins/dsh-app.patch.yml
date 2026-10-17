@@ -209,12 +209,6 @@
     - id: presets
       name: '@dsh-app/plugin-presets'
 
-    - id: doc
-      name: '@dsh-app/plugin-doc'
-
-    - id: sheet
-      name: '@dsh-app/plugin-sheet'
-
     - id: pdf
       name: '@dsh-app/plugin-pdf'
 
@@ -344,48 +338,28 @@
   config:
     maxActiveSubagents: 16
 
-# Schedule: session-scoped reminders (schedule_create/list/delete tools +
-# read-only schedule directory in the session header). Only the schedule
-# service is mounted — dsh-time-context is deliberately LEFT OUT: it injects
-# the current time at every pre-step (token burn on every tool call), while
-# schedule only needs the time at delivery (computed server-side). Users who
-# need the time on demand use their own time plugin.
-# Both packages are verified in the CLI runtime closure (apps/cli deps,
-# 2026-09-07). Verified with the packaged bin.js before merging (never trust the
-# dev pnpm closure alone): a missing package fails the whole tree, not one row.
+# Schedule: session-scoped reminders. This line mounts the capability itself —
+# the web-app bundle ships the `schedule` row and the `ui-schedule` row, both
+# enabled and both carrying no config — and the reminder tools plus the clock
+# reading belong to the agent presets (`standard` / `cordis` / `ptc` declare
+# them in their own scope; the minimal and subagent presets do not).
 #
-# Both rows are INSERTS rather than overrides, because the row each one used to
-# override is not on every line:
+# The two INSERT rows that used to live here are GONE, deliberately:
 #
-#   - 0.1.7-rc.2 ships the `schedule` row itself (disabled) and the `ui-schedule`
-#     row (disabled), both in the web bundle — which is why the ui row used to be
-#     flipped on here instead of inserted;
-#   - 0.2.0-rc.1 ships NEITHER in the web bundle: they travel in
-#     `@deepseek-ai/dsh-experimental-schedule-bundle`, which this profile does not
-#     list (it also inserts `time-context`, which this overlay leaves out on
-#     purpose). An override row then has no target at all: every start logs
-#     `patch: entry "ui-schedule" not found` twice — once for this layer, once for
-#     the profile patch's copy — and the schedule page silently stays absent.
+#   - they existed because 0.2.0-rc.1 kept the capability in
+#     `@deepseek-ai/dsh-experimental-schedule-bundle`, which this profile does
+#     not list, so an override had no target and an insert was the only way to
+#     keep the page;
+#   - from 0.2.1 the bundle's own rows are back, so an insert can only SHADOW
+#     them with an identical row — a duplicate in the composed tree that buys
+#     nothing. An override would be equivalent, and is not needed either.
 #
-# Being an insert keeps the capability on both lines. The composed tree then
-# carries two rows per id on a line that ships its own (measured on the packaged
-# rc.2 runtime): that is NOT a duplicate-loader-entry failure — every layer's
-# patches are applied in ONE `applyEntryPatches` call
-# (`dsh-app-boot/lib/index.js`), an id-less insert is a plain `data.push`, and the
-# loader keys rows by id with the LAST one winning (`cordis-plugin-loader`), which
-# is ours. The insert therefore SHADOWS the line's own row for that id, which is
-# why ours carries nothing but `id` and `name`: a `config` here would replace a
-# config the line sets.
-#
-# An insert is also what survives a rollback: an override no-ops on a kernel
-# without the row, where a skipped row would silently drop the capability with only
-# a log line.
-- insert:
-    - id: schedule
-      name: '@deepseek-ai/dsh-schedule'
-
-    - id: ui-schedule
-      name: '@deepseek-ai/dsh-client-ui-schedule'
+# One consequence worth knowing: `dsh-time-context` used to be deliberately
+# left out here (it injects the current time at every pre-step, which the old
+# note measured as token burn). It now arrives inside the preset composition,
+# so this profile gets that injection without this overlay asking for it.
+# Opting out would mean patching a preset's composition, which this overlay
+# does not do — desktop adaptation stays in the overlay's own rows.
 
 # Agent Teams: the veto that used to live here is GONE, and this note is kept so
 # nobody re-adds it by reflex.

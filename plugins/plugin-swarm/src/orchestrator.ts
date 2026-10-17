@@ -4,19 +4,24 @@
  * pool with launch pacing, and aggregates per-item terminal outcomes into a
  * single result.
  *
- * Two execution backends behind one scheduling and aggregation core:
+ * Two execution backends behind one scheduling and aggregation core, both
+ * started through `ctx.subagents.startActivation()` (kernel 0.2.1, which
+ * replaced the separate `start()` and `startContinuable()` calls with one
+ * activation that always carries a child id, a result and a disposal):
  *
  *  - Continuable children (preferred, when the configured provider declares
- *    `prepareContinuable`): each task starts a durable continuable child via
- *    `ctx.subagents.startContinuable()` — or resumes a prior child through
- *    `followup()`, which cold-loads its persisted session so a failed item
- *    continues with its prior context instead of restarting from scratch.
- *    Continuable children expose no awaitable result, so settlement is
- *    observed through the runtime's `subagent/end` lifecycle event, which
- *    carries the terminal stop reason and the epoch's final assistant output.
+ *    `prepareContinuable`): each task starts a durable continuable child with
+ *    `delivery: 'parent'` — the shape this tool had before the seam was
+ *    unified — or resumes a prior child through `sendMessage()`, which
+ *    cold-loads its persisted session so a failed item continues with its
+ *    prior context instead of restarting from scratch. A follow-up has no
+ *    activation of its own, so settlement is observed for BOTH backends
+ *    through the runtime's `subagent/end` lifecycle event, which carries the
+ *    terminal stop reason and the epoch's final assistant output.
  *  - One-shot runs (fallback for providers without continuable support):
- *    `ctx.subagents.start()` + `run.result`, the classic delegation path.
- *    One-shot children are not resumable.
+ *    `startActivation({ delivery: 'caller' })` + `activation.result`, the
+ *    classic delegation path, disposed per item. One-shot children are not
+ *    resumable.
  *
  * Children run through the host's `ctx.subagents` seam either way, so
  * workspace, permissions, and session lineage all follow the platform's own
@@ -31,8 +36,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SubagentResult, SubagentRun, SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
-import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
+import type { SubagentActivation, SubagentResult, SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 
 /** Terminal state of one swarm item, mirroring the batch-level vocabulary. */
 export type SwarmItemStatus = 'completed' | 'failed' | 'aborted'
@@ -225,12 +229,14 @@ export interface SwarmBatchOptions {
   /** Optional child model routing. */
   readonly agentOptions?: AgentOptions
   /**
-   * Optional per-child tool scoping (the seam's ToolRestriction, applied at
-   * child creation on BOTH backends). Read-only batches (analysis, review,
-   * lookups) should pass an allow-list — a batch of full-tool children can
-   * otherwise write files the parent never audits.
+   * Optional independent Agent Preset for every child. Kernel 0.2.1 replaced
+   * the per-call tool filter with presets: a preset names the child's role and
+   * its tool composition together. Read-only batches (analysis, review,
+   * lookups) should pass a preset whose composition is scoped to read/search —
+   * a batch of full-tool children can otherwise write files the parent never
+   * audits. Requires a provider with the `agentPreset` capability.
    */
-  readonly toolFilter?: ToolRestriction
+  readonly agentPreset?: string
   /** Optional delegation-depth cap for each child. */
   readonly maxDepth?: number
   /**
@@ -821,17 +827,23 @@ async function runContinuableTask(
       childId = task.resumeChildId
       usageBaseline = childUsageTotals(ctx, liveChildSession(ctx, childId))
     } else {
-      const started = await ctx.subagents.startContinuable({
+      const started = await ctx.subagents.startActivation({
         provider: options.provider,
         label: childLabel(options.label, task.item),
         request: {
           prompt: [{ type: 'text', text: task.prompt }],
           parent: options.parent,
           ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
-          ...options.toolFilter !== undefined ? { toolFilter: options.toolFilter } : {},
+          ...options.agentPreset !== undefined ? { agentPreset: options.agentPreset } : {},
           ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
         },
         signal: options.signal,
+        // Parent delivery, unchanged from the pre-0.2.1 continuable shape: the
+        // kernel injects each child's settlement message into the delegating
+        // turn, and the batch's own aggregate is the tool's result. Caller
+        // delivery would silence those notices, which is a product decision
+        // this upgrade does not make on its own.
+        delivery: 'parent',
       })
       childId = String(started.childId)
     }
@@ -900,7 +912,7 @@ async function runOneShotTask(
   task: SwarmTask,
 ): Promise<SwarmItemOutcome> {
   const startedAt = Date.now()
-  let run: SubagentRun | undefined
+  let activation: SubagentActivation | undefined
   try {
     if (task.resumeChildId !== undefined) {
       // Only reachable when the provider lost continuable support between the
@@ -916,17 +928,25 @@ async function runOneShotTask(
     if (!(await clock.waitTurn(options.signal))) {
       return { index: task.index, item: task.item, status: 'aborted' }
     }
-    run = await ctx.subagents.start(options.provider, {
+    activation = await ctx.subagents.startActivation({
+      provider: options.provider,
       label: childLabel(options.label, task.item),
-      prompt: [{ type: 'text', text: task.prompt }],
-      parent: options.parent,
+      request: {
+        prompt: [{ type: 'text', text: task.prompt }],
+        parent: options.parent,
+        ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
+        ...options.agentPreset !== undefined ? { agentPreset: options.agentPreset } : {},
+        ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
+      },
       signal: options.signal,
-      ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
-      ...options.toolFilter !== undefined ? { toolFilter: options.toolFilter } : {},
-      ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
+      // One-shot children report to this tool only: their text is the item's
+      // output, and the batch aggregate is the one result the model receives.
+      delivery: 'caller',
     })
-    const result = await run.result
-    const session = run.localAgent?.session as unknown as ChildSessionSlice | undefined
+    const result = await activation.result
+    // The activation carries no Agent handle; the child session is resolved by
+    // id for the usage and failure detail, exactly as the continuable path does.
+    const session = liveChildSession(ctx, String(activation.childId))
     const usage = childUsage(ctx, session, undefined)
     const durationMs = Date.now() - startedAt
     const metrics = { durationMs, ...usage === undefined ? {} : { usage } }
@@ -963,9 +983,9 @@ async function runOneShotTask(
       },
     }
   } finally {
-    if (run !== undefined) {
+    if (activation !== undefined) {
       try {
-        await run.dispose()
+        await activation.dispose()
       } catch (error: unknown) {
         // Disposal failure must not flip an already-settled item outcome; the
         // child's terminal result stays authoritative for the batch report.

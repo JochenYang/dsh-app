@@ -207,7 +207,7 @@ npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 | 项 | 检查方式 |
 |---|---|
 | 私有宿主包被正确构建进 runtime | `tar -tzf <runtime>.tgz \| grep dsh-desktop-host`，应含 `lib/index.js`。该包从不发布，由 `scripts/build-runtime.mjs` 从检出构建 |
-| 办公载荷随 runtime 打包 | 同上，应含 `runtime/office-skills/scripts/check_office.py`（在**内核树内**，即双层 `runtime/runtime/`） |
+| 办公载荷随 runtime 打包 | 同上，应含 `runtime/office-skills/<skill>/SKILL.md` 这七个技能目录（内核树内，即双层 `runtime/runtime/`）。0.2.1 起不再有 `scripts/check_office.py`：载荷的契约是 `@deepseek-ai/dsh-skill-office` 的 `SKILL_NAMES`，构建脚本与外壳各存一份 |
 | 宿主传输分支未被切换 | 真机日志确认 `web transport`；出现 frames 分支说明走到了另一条协议路径 |
 | 客户端存储按线清理 | 换线后 `src/main/client-state.ts` 应报 `cleared`（客户端状态属于写它的那条线） |
 | overlay 行 id 是否还有目标 | 组合树里逐行确认；行 id 会在 bundle 层之间移动，override 因此可能失去目标 |

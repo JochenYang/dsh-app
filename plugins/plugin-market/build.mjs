@@ -12,7 +12,7 @@
 // to import and the whole market entry is dropped from the loader. The shared
 // recipe has no host-banner hook, so this wrapper prepends the standard
 // createRequire handoff after buildDual, the same fix plugin-presets and
-// plugin-doc apply for their own CJS dependencies.
+// plugin-ppt apply for their own CJS dependencies.
 //
 // Run from the dsh-app root (esbuild resolves out of dsh-app/node_modules):
 //   node plugins/plugin-market/build.mjs

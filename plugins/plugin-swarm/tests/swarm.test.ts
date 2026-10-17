@@ -188,25 +188,40 @@ function baseOptions(): Omit<SwarmBatchOptions, 'tasks'> {
   }
 }
 
-/** Mock ctx whose one-shot `start` resolves each child from the spec map. */
+/** Mock ctx whose one-shot `startActivation` resolves each child from the spec map. */
 function mockOneShotCtx(children: Record<string, MockChild>): Context {
   const projections = mockSessionProjections()
+  const sessions = new Map<string, object>()
+  const sessionOf = (key: string): object => {
+    let session = sessions.get(key)
+    if (session === undefined) {
+      session = projections.track({ snapshotEvents: () => children[key].events ?? [] }, children[key])
+      sessions.set(key, session)
+    }
+    return session
+  }
   const ctx = {
     get: (name: string) => name === 'sessionProjections' ? projections.service : undefined,
     sessionProjections: projections.service,
+    agents: {
+      get: (id: unknown) => {
+        const key = String(id).replace(/^child-/, '')
+        return children[key] === undefined ? undefined : { session: sessionOf(key) }
+      },
+    },
     subagents: {
       getProvider: () => ({}),
-      start: async (_provider: string, req: { prompt: readonly { text: string }[] }) => {
-        const text = req.prompt[0].text
+      startActivation: async (spec: { request: { prompt: readonly { text: string }[] } }) => {
+        const text = spec.request.prompt[0].text
         const key = Object.keys(children).find(k => text.includes(k))
         assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
-        const spec = children[key]
+        const child = children[key]
         return {
+          childId: `child-${key}`,
           result: Promise.resolve({
-            stopReason: spec.stopReason,
-            output: spec.text === undefined ? [] : [{ type: 'text', text: spec.text }],
+            stopReason: child.stopReason,
+            output: child.text === undefined ? [] : [{ type: 'text', text: child.text }],
           }),
-          localAgent: { session: projections.track({ snapshotEvents: () => spec.events ?? [] }, spec) },
           dispose: async () => {},
         }
       },
@@ -284,29 +299,44 @@ function mockCapacityCtx(children: Record<string, MockChild>, rejects: number): 
   readonly launches: () => number
 } {
   const projections = mockSessionProjections()
+  const sessions = new Map<string, object>()
+  const sessionOf = (key: string): object => {
+    let session = sessions.get(key)
+    if (session === undefined) {
+      session = projections.track({ snapshotEvents: () => children[key].events ?? [] }, children[key])
+      sessions.set(key, session)
+    }
+    return session
+  }
   let launches = 0
   const ctx = {
     get: (name: string) => name === 'sessionProjections' ? projections.service : undefined,
     sessionProjections: projections.service,
+    agents: {
+      get: (id: unknown) => {
+        const key = String(id).replace(/^child-/, '')
+        return children[key] === undefined ? undefined : { session: sessionOf(key) }
+      },
+    },
     subagents: {
       getProvider: () => ({}),
-      start: async (_provider: string, req: { prompt: readonly { text: string }[] }) => {
+      startActivation: async (spec: { request: { prompt: readonly { text: string }[] } }) => {
         launches += 1
         if (launches <= rejects) {
           const error = new Error('subagent limit reached (active child limit: 8); wait for an existing child to finish or complete this work with the current agents')
           Object.assign(error, { code: 'ACTIVATION_LIMIT_REACHED' })
           throw error
         }
-        const text = req.prompt[0].text
+        const text = spec.request.prompt[0].text
         const key = Object.keys(children).find(k => text.includes(k))
         assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
-        const spec = children[key]
+        const child = children[key]
         return {
+          childId: `child-${key}`,
           result: Promise.resolve({
-            stopReason: spec.stopReason,
-            output: spec.text === undefined ? [] : [{ type: 'text', text: spec.text }],
+            stopReason: child.stopReason,
+            output: child.text === undefined ? [] : [{ type: 'text', text: child.text }],
           }),
-          localAgent: { session: projections.track({ snapshotEvents: () => spec.events ?? [] }, spec) },
           dispose: async () => {},
         }
       },
@@ -399,7 +429,7 @@ function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHar
     },
     subagents: {
       getProvider: () => ({ prepareContinuable: async () => ({}) }),
-      startContinuable: async (spec: { request: { prompt: readonly { text: string }[] } }) => {
+      startActivation: async (spec: { request: { prompt: readonly { text: string }[] } }) => {
         const text = spec.request.prompt[0].text
         const key = Object.keys(children).find(k => text.includes(k))
         assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
@@ -413,7 +443,9 @@ function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHar
         } else {
           setTimeout(() => emit(childId, first), first.delay ?? 0)
         }
-        return { childId, messageId: 'm1' }
+        // The continuable backend settles through the `subagent/end` watch, so
+        // this activation's own result is never awaited; it stays pending.
+        return { childId, messageId: 'm1', result: new Promise(() => {}), dispose: async () => {} }
       },
       sendMessage: async (_parent: unknown, childId: unknown) => {
         sentFollowups.push(String(childId))

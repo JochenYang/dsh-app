@@ -37,6 +37,23 @@ const {
 } = require('../dist/main/desktop-host.js')
 
 /**
+ * The skill directories an office payload carries, mirroring
+ * `@deepseek-ai/dsh-skill-office`'s `SKILL_NAMES` and the shell's own
+ * OFFICE_SKILL_NAMES. 0.2.1 replaced the single `scripts/check_office.py`
+ * marker with these per-task skills, so a fixture that still writes the old
+ * marker would pass a payload the real kernel rejects.
+ */
+const OFFICE_SKILL_NAMES = [
+  'office',
+  'office-docx',
+  'office-pptx',
+  'office-xlsx',
+  'office-render',
+  'office-recalculate',
+  'office-export-pdf',
+]
+
+/**
  * Fake host child: enforces the argv contract it is told to have, reports ready
  * over the IPC channel, and answers `GET /index.html` over the byte pipes. A
  * shape it does not accept is refused exactly as the real hosts refuse it —
@@ -120,14 +137,17 @@ if (argv.length === 5) {
 }
 if (process.env.FAKE_WEB_CONTRACT === 'refuse') problems.push('unsupported internal option ' + JSON.stringify(argv[1] || ''))
 // The real host composes the office skill plugin with
-// assetRoot = join(dirname(argv[2]), 'office-skills') and the plugin throws at
-// boot unless that holds scripts/check_office.py. Enforced here so a shell that
-// answers with the payload's own primary-runtime (which moves the derived root
-// into <payload>/office-skills) fails this suite instead of the user's boot.
+// assetRoot = join(dirname(argv[2]), 'office-skills') and the plugin reads
+// <assetRoot>/<skill>/SKILL.md for every skill it registers, throwing at boot
+// when one is missing. Enforced here so a shell that answers with the payload's
+// own primary-runtime (which moves the derived root into
+// <payload>/office-skills) fails this suite instead of the user's boot.
 if (argv[2] !== undefined) {
   const assetRoot = path.join(path.dirname(argv[2]), 'office-skills')
-  if (!fs.existsSync(path.join(assetRoot, 'scripts', 'check_office.py'))) {
-    problems.push('office skills missing at ' + assetRoot)
+  const skills = ['office', 'office-docx', 'office-pptx', 'office-xlsx', 'office-render', 'office-recalculate', 'office-export-pdf']
+  const missing = skills.filter((name) => !fs.existsSync(path.join(assetRoot, name, 'SKILL.md')))
+  if (missing.length > 0) {
+    problems.push('office skills missing at ' + assetRoot + ': ' + missing.join(', '))
   }
   // 0.1.7-rc.1 reads an interpreter out of the SAME argument and stats it while
   // registering those skills — on every start, whether or not an office payload
@@ -218,8 +238,11 @@ function fakeRuntime(version, contract) {
 function fakeWebRuntime(version, contract = 'accept', env = {}) {
   const runtime = fakeRuntime(version, undefined)
   const officeSource = scratchDir('dsh-office-assets-')
-  mkdirSync(path.join(officeSource, 'scripts'), { recursive: true })
-  writeFileSync(path.join(officeSource, 'scripts', 'check_office.py'), '# fake office check\n')
+  for (const name of OFFICE_SKILL_NAMES) {
+    const dir = path.join(officeSource, name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'SKILL.md'), `# fake ${name}\n`)
+  }
   writeFileSync(path.join(desktopHostDir(runtime.root), 'lib', 'index.js'), FAKE_WEB_HOST)
   return {
     ...runtime,
@@ -524,8 +547,8 @@ test('a web-transport version starts on the child URL contract, office payload a
     const assetRoot = path.join(path.dirname(primaryRuntime), 'office-skills')
     assert.equal(path.basename(assetRoot), 'office-skills')
     assert.equal(
-      readFileSync(path.join(assetRoot, 'scripts', 'check_office.py'), 'utf8'),
-      '# fake office check\n',
+      readFileSync(path.join(assetRoot, 'office', 'SKILL.md'), 'utf8'),
+      '# fake office\n',
     )
     // No shape fallback is possible on this transport.
     assert.equal(run.shapes().length, 1)
@@ -598,7 +621,7 @@ test('a web-transport start without its office payload fails before the spawn', 
   const logs = []
   await assert.rejects(
     start(runtime, logs, { ...webStartOptions(runtime), officeSkillsSource: path.join(runtime.officeSource, 'gone') }),
-    /office payload .* is missing or incomplete/u,
+    /office payload .* is missing office/u,
   )
   await assert.rejects(
     start(runtime, [], { ...webStartOptions(runtime), userDataDir: undefined }),
@@ -641,7 +664,7 @@ function fakePayloadRuntime() {
  * a payload carrying a Python set used to be handed to the child AS the
  * primary-runtime argument, which moved the child's derived asset root into
  * `<payload>/office-skills` — a directory no artifact carries — and the office
- * skill plugin threw at boot ("ENOENT … check_office.py"). The argument must
+ * skill plugin threw at boot ("ENOENT … SKILL.md"). The argument must
  * stay the fixed leaf beside the materialized skills, with the Python set linked
  * there.
  */
@@ -657,7 +680,7 @@ test('a payload carrying a Python set is linked beside the skills, never handed 
     const leaf = path.join(dataDirOf(runtime), 'primary-runtime')
     const skills = path.join(dataDirOf(runtime), 'office-skills')
     // The child's own check ran: the asset root it derives exists.
-    assert.ok(existsSync(path.join(skills, 'scripts', 'check_office.py')), 'the materialized skills sit beside the leaf')
+    assert.ok(existsSync(path.join(skills, 'office', 'SKILL.md')), 'the materialized skills sit beside the leaf')
     // The leaf is a link to the payload's set, not the payload path itself.
     assert.equal(lstatSync(leaf).isSymbolicLink(), true, 'the leaf is a link')
     assert.equal(canonical(leaf), canonical(payloadRuntime), 'the link resolves to the payload set')
@@ -699,7 +722,7 @@ test('the leaf follows the payload when it moves, and holds the interpreter when
   assert.equal(lstatSync(leaf).isSymbolicLink(), false, 'the stale link is gone, not left pointing at a pruned payload')
   assert.equal(existsSync(path.join(leaf, 'runtime.json')), false, 'the pruned set is no longer reachable through the leaf')
   assert.ok(existsSync(path.join(leaf, LEAF_INTERPRETER)), 'the interpreter the child stats is there')
-  assert.ok(existsSync(path.join(dataDirOf(runtime), 'office-skills', 'scripts', 'check_office.py')), 'the skills stay materialized')
+  assert.ok(existsSync(path.join(dataDirOf(runtime), 'office-skills', 'office', 'SKILL.md')), 'the skills stay materialized')
 })
 
 // ---------------------------------------------- the task questions before a quit

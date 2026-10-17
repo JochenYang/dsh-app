@@ -1,23 +1,26 @@
 /**
- * The Advanced Models settings page: model-level fields the official Models
- * page deliberately leaves to `settings.yaml` — reasoning efforts, input
- * modalities, compat switches — plus whole-list editing for hand-declared
- * routes and a guarded create flow for out-of-catalog models.
+ * The Advanced Models settings page: the model-level and route-level fields the
+ * official Models page has no editor for.
  *
  * Division of labour (deliberate, mirroring the retired brand shadow's
- * lesson): the official page owns provider CRUD, credentials, and endpoint
- * discovery. This page only writes under `llm-pi-ai` → `providers.<route>`
- * through path-addressed `settings.mutate` ops against the stored user layer,
- * with `expectedRevision` fencing concurrent edits.
+ * lesson): the official Models page owns provider CRUD, credentials, endpoint
+ * discovery, model-list membership, per-model capacities and input modalities,
+ * and the reasoning efforts of a hand-declared route. This page owns what is
+ * left — a catalog route's `modelOverrides` (the full per-model field set), the
+ * `compat` switches on any route, reasoning levels with the compat auto-fill a
+ * private gateway needs, and the route-level advanced parameters card. It
+ * writes under `llm-pi-ai` → `providers.<route>` through path-addressed
+ * `settings.mutate` ops against the stored user layer, with `expectedRevision`
+ * fencing concurrent edits.
  *
  * Two addressing modes, because the adapter makes them mutually exclusive:
  *  - `models` — the route owns a full model list (hand-declared routes, or a
  *    catalog route whose list the user already took over). Edits are whole-
  *    list: the array is one `set` op, exactly how the official editor writes.
  *  - `overrides` — per-id tweaks over the installed catalog. Adding an id the
- *    catalog does not carry would be rejected at resolve time, so a NEW model
- *    on a catalog route is guarded into its own split route (the
- *    `opencode-go-vision` pattern) instead of being smuggled in.
+ *    catalog does not carry would be rejected at resolve time, so this page
+ *    never invents one: a model outside the catalog belongs to the provider
+ *    the official page creates.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -31,7 +34,7 @@ import { cloneDraft, defaultReasoningEfforts, getPath, modelRowFailure } from '.
 import { enrichDraftsFromModelsDev, fetchModelsDev } from './models-dev.ts'
 import type { ModelDraft } from './fields.ts'
 import { IconChevron, IconTrash, ModelEntryEditor } from './entry-editor.tsx'
-import { AdvancedModelsStore, messageOf, protocolChoices, writeOps } from './store.ts'
+import { AdvancedModelsStore, messageOf, writeOps } from './store.ts'
 import type { AdvancedModelsRemote, AdvancedModelsState, RouteRow, SchemaOps } from './store.ts'
 import { ModelsDevImportDialog } from './import-dialog.tsx'
 import { ProviderModelDiscoveryDialog } from './provider-discovery.tsx'
@@ -60,41 +63,6 @@ export interface AdvancedModelsInjected {
  * the mount guard below handles.
  */
 export type AdvancedModelsSectionProps = Partial<InjectFace<AdvancedModelsInjected>> & PropsLocale<typeof NS>
-
-/** Which edit target a models.dev import adopts into. */
-type ImportTarget = 'models' | 'new-route'
-
-/** Draft of the create-route card. */
-interface NewRouteDraft {
-  id: string
-  displayName: string
-  api: string
-  baseURL: string
-  apiKeyEnv: string
-  rows: ModelDraft[]
-}
-
-const EMPTY_NEW_ROUTE: NewRouteDraft = { id: '', displayName: '', api: '', baseURL: '', apiKeyEnv: '', rows: [] }
-
-/** Route ids a new route must not collide with (every layer's keys). */
-function existingRouteKeys(state: AdvancedModelsState, schema: SchemaOps): ReadonlySet<string> {
-  const namespace = state.namespaces.get('llm-pi-ai')
-  const providers = namespace === undefined ? undefined : schema.getPath(namespace.value, ['providers'])
-  const keys = typeof providers === 'object' && providers !== null && !Array.isArray(providers)
-    ? Object.keys(providers as Record<string, unknown>)
-    : []
-  return new Set(keys)
-}
-
-/** Strip blank optional fields; keep the create card's required shape. */
-function cleanRouteValue(draft: NewRouteDraft): Record<string, unknown> {
-  const value: Record<string, unknown> = { api: draft.api }
-  if (draft.displayName.trim() !== '') value.displayName = draft.displayName.trim()
-  if (draft.baseURL.trim() !== '') value.baseURL = draft.baseURL.trim()
-  if (draft.apiKeyEnv.trim() !== '') value.apiKeyEnv = draft.apiKeyEnv.trim()
-  if (draft.rows.length > 0) value.models = draft.rows
-  return value
-}
 
 /** The override value this page would write: the row minus its display id. */
 function overrideFields(row: ModelDraft): Record<string, unknown> {
@@ -153,7 +121,7 @@ export function AdvancedModelsSection(props: AdvancedModelsSectionProps): ReactN
 
 /** The mounted page: everything below assumes a fully resolved face. */
 function AdvancedModelsBody(face: ResolvedFace): ReactNode {
-  const { controller, useSnapshot, api, schema, t } = face
+  const { controller, useSnapshot, api, t } = face
   const state = useSnapshot((snapshot: AdvancedModelsState) => snapshot)
   useEffect(() => {
     if (state.status === 'idle') void controller.load()
@@ -181,7 +149,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     return () => { live = false }
   }, [api])
   // Expanded-row keys are string-scoped per list ('m3' model row 3, 'o:id'
-  // one override, 'n1' one create-card row) so lists never alias state.
+  // one override) so the two lists never alias state.
   const [openRows, setOpenRows] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState(false)
   const [enrichBusy, setEnrichBusy] = useState(false)
@@ -189,9 +157,8 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   // language switch re-words a line the page is still showing.
   const [failure, setFailure] = useState<PageMessage | undefined>(undefined)
   const [notice, setNotice] = useState<PageMessage | undefined>(undefined)
-  const [newRoute, setNewRoute] = useState<NewRouteDraft | undefined>(undefined)
-  const [modelsDevTarget, setModelsDevTarget] = useState<ImportTarget | undefined>(undefined)
-  const [discoveryTarget, setDiscoveryTarget] = useState<ImportTarget | undefined>(undefined)
+  const [modelsDevOpen, setModelsDevOpen] = useState(false)
+  const [discoveryOpen, setDiscoveryOpen] = useState(false)
   const row: RouteRow | undefined = useMemo(
     () => state.routes.find(candidate => candidate.entry.provider === selectedId),
     [state.routes, selectedId],
@@ -208,8 +175,8 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     setOpenRows(new Set())
     setFailure(undefined)
     setNotice(undefined)
-    setModelsDevTarget(undefined)
-    setDiscoveryTarget(undefined)
+    setModelsDevOpen(false)
+    setDiscoveryOpen(false)
   }, [selectedId])
 
   // The first active route is immediately useful on entry; a refresh keeps the
@@ -350,85 +317,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     await controller.load()
   }
 
-  /**
-   * Upsert from the create card: a NEW id creates the whole profile; an id a
-   * declared route already owns MERGES the card's rows into it (per-id, new
-   * winning) — the "import another batch later" flow needs no second route.
-   * A catalog route's id is refused: appending off-catalog rows there is the
-   * write the adapter rejects, and in-catalog ids need no appending.
-   */
-  const createRoute = async (): Promise<void> => {
-    if (newRoute === undefined || namespace === undefined) return
-    const id = newRoute.id.trim()
-    if (!/^[a-z0-9][a-z0-9-]*$/i.test(id)) {
-      setFailure(message('adv.failure.routeIdInvalid'))
-      return
-    }
-    const existingTarget = state.routes.find(candidate => candidate.entry.provider === id)
-    if (existingTarget !== undefined && existingTarget.entry.declared !== true) {
-      setFailure(message('adv.failure.catalogRouteCreate', { id }))
-      return
-    }
-    if (existingTarget === undefined && newRoute.api === '') {
-      setFailure(message('adv.failure.apiRequired'))
-      return
-    }
-    const seen = new Set<string>()
-    for (const model of newRoute.rows) {
-      const modelApi = typeof model.api === 'string' && model.api !== ''
-        ? model.api as string
-        : newRoute.api
-      const text = modelRowFailure(model, seen, modelApi)
-      if (text !== undefined) { setFailure(text); return }
-      seen.add(typeof model.id === 'string' ? model.id : '')
-    }
-    setBusy(true)
-    setFailure(undefined)
-    let ops: SettingsPathOpView[]
-    let doneNotice: PageMessage
-    if (existingTarget === undefined) {
-      ops = [{ op: 'set', path: ['providers', id], value: cleanRouteValue(newRoute) as JsonValue }]
-      doneNotice = message('adv.notice.routeCreated', { id })
-    } else {
-      // Merge into the existing declared route: keep its profile fields, upsert rows by id.
-      const current = profileAt(['providers', id]).models
-      const byId = new Map<string, ModelDraft>()
-      for (const model of Array.isArray(current) ? current as ModelDraft[] : []) {
-        if (typeof model.id === 'string' && model.id !== '') byId.set(model.id, model)
-      }
-      for (const model of newRoute.rows) byId.set(typeof model.id === 'string' ? model.id : '', model)
-      if (byId.size === 0) {
-        setBusy(false)
-        setFailure(message('adv.failure.nothingToAppend'))
-        return
-      }
-      ops = [{ op: 'set', path: ['providers', id, 'models'], value: [...byId.values()] as JsonValue }]
-      doneNotice = message('adv.notice.appended', { id, count: newRoute.rows.length })
-    }
-    const outcome = await writeOps(api, ops, namespace.revision)
-    setBusy(false)
-    if (outcome.kind === 'conflict') {
-      setFailure(message('adv.failure.conflictRetry'))
-      await controller.load()
-      return
-    }
-    if (outcome.kind === 'failure') {
-      setFailure(outcome.message)
-      return
-    }
-    setNewRoute(undefined)
-    setNotice(doneNotice)
-    setSelectedId(id)
-    await controller.load()
-  }
-
-  const protocols = protocolChoices(namespace, schema)
-
-  /** The existing route the create card's id addresses, when it does (upsert). */
-  const upsertTarget = newRoute === undefined || newRoute.id.trim() === ''
-    ? undefined
-    : state.routes.find(candidate => candidate.entry.provider === newRoute.id.trim())
-
   /** The resolved (all-layers) profile at one settings path, for reads. */
   const profileAt = (settingsPath: readonly string[]): Record<string, unknown> => {
     const value = namespace === undefined
@@ -481,12 +369,8 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
    * per-row manual enable. Pass `explicitRows` when the caller just set a
    * draft this render has not seen yet (discovery adopt).
    */
-  const enrichFromModelsDev = async (
-    target: 'models' | 'new-route',
-    explicitRows?: readonly ModelDraft[],
-  ): Promise<void> => {
-    const source = explicitRows
-      ?? (target === 'new-route' && newRoute !== undefined ? newRoute.rows : models)
+  const enrichFromModelsDev = async (explicitRows?: readonly ModelDraft[]): Promise<void> => {
+    const source = explicitRows ?? models
     const ids = source.filter(model => typeof model.id === 'string' && model.id.trim() !== '')
     if (ids.length === 0) {
       setNotice(message('adv.notice.noIdsToEnrich'))
@@ -499,11 +383,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
       const providers = await fetchModelsDev()
       const prefer = row?.entry.provider
       const result = enrichDraftsFromModelsDev(providers, source, prefer)
-      if (target === 'new-route' && newRoute !== undefined) {
-        setNewRoute({ ...newRoute, rows: result.drafts })
-      } else {
-        setModelsDraft(result.drafts)
-      }
+      setModelsDraft(result.drafts)
       const separator = t('adv.list.separator')
       if (result.filled.length === 0) {
         // Only the first eight misses are listed, and the trailing ellipsis
@@ -531,35 +411,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     setModelsDraft(models.map((model, at) => at === index ? next : model))
   }
 
-  /** Prefill the create card for an out-of-catalog model on a catalog route. */
-  const startSplitRoute = (): void => {
-    if (row === undefined) return
-    const info = resolvedProfile(row)
-    const text = (key: string): string => typeof info[key] === 'string' ? info[key] as string : ''
-    // One companion suffix everywhere: -extra (the manual companion-route convention).
-    const canonical = `${row.entry.provider}-extra`
-    const exists = existingRouteKeys(state, schema).has(canonical)
-    let id = canonical
-    for (let attempt = 2; existingRouteKeys(state, schema).has(id); attempt += 1) {
-      id = `${canonical}-${String(attempt)}`
-    }
-    setFailure(undefined)
-    setNotice(undefined)
-    setNewRoute({
-      id,
-      displayName: t('adv.newRoute.extendedName', { name: row.entry.displayName }),
-      // Prefill the source route's protocol when it names one; otherwise the
-      // hand-declared default for manual creation.
-      api: typeof info.api === 'string' && info.api !== '' ? info.api : 'openai-completions',
-      baseURL: text('baseURL'),
-      apiKeyEnv: text('apiKeyEnv'),
-      rows: [],
-    })
-    if (exists) {
-      setNotice(message('adv.notice.companionExists', { id: canonical }))
-    }
-  }
-
   const toggleOpen = (key: string): void => {
     setOpenRows(current => {
       const next = new Set(current)
@@ -578,10 +429,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
         {t('adv.intro.lead')}{' '}
         {t('adv.intro.split')}
         <b>{t('adv.info.catalog')}</b>{t('adv.intro.catalog')}
-        <b>{t('adv.info.declared')}</b>
-        {t('adv.intro.declaredBefore')}{' '}
-        <code>-extra</code>{' '}
-        {t('adv.intro.declaredAfter')}
+        <b>{t('adv.info.declared')}</b>{t('adv.intro.declared')}
       </p>
       {state.status === 'error'
         ? <p className="dshAma-error">{t('adv.load.failed', { message: state.error ?? '' })}</p>
@@ -607,7 +455,6 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           aria-label={t('adv.picker.label')}
           onChange={(event) => {
             setSelectedId(event.target.value === '' ? undefined : event.target.value)
-            setNewRoute(undefined)
           }}
         >
           <option value="">{t('adv.picker.placeholder')}</option>
@@ -651,26 +498,25 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                   ? t('adv.mode.full.declared')
                   : t('adv.mode.full.overridden')}
                 {' '}{t('adv.mode.full.catalogHint')}
+                {' '}{t('adv.mode.full.officialHint')}
               </div>
             )
             : row.mode === 'overrides'
               ? (
                 <div className="dshAma-modeBanner">
                   <b>{t('adv.mode.override.title')}</b>{t('adv.mode.override.body')}<code>modelOverrides</code>{t('adv.mode.override.afterCode')}
-                  <button type="button" className="dshAma-linkButton" onClick={startSplitRoute}>{t('adv.split.action')}</button>{t('adv.mode.override.afterAction')}
                 </div>
               )
               : row.entry.declared === true
                 ? (
                   <div className="dshAma-modeBanner">
                     <b>{t('adv.info.declared')}</b>{t('adv.mode.declaredEmpty.body')}
+                    {' '}{t('adv.mode.full.officialHint')}
                   </div>
                 )
                 : (
                   <div className="dshAma-modeBanner">
-                    <b>{t('adv.info.catalog')}</b>{t('adv.mode.catalog.body')}<b>{t('adv.mode.catalog.outOfCatalog')}</b>{t('adv.mode.catalog.beforeAction')}
-                    <button type="button" className="dshAma-linkButton" onClick={startSplitRoute}>{t('adv.split.action')}</button>
-                    {t('adv.mode.catalog.afterAction')}
+                    <b>{t('adv.info.catalog')}</b>{t('adv.mode.catalog.body')}
                   </div>
                 )}
           {inModelsMode
@@ -680,11 +526,11 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                   <span className="dshAma-listTitle">{t('adv.list.title', { count: models.length })}</span>
                   <button
                     type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setDiscoveryTarget('models') }}
+                    onClick={() => { setDiscoveryOpen(true) }}
                   >{t('adv.list.discover')}</button>
                   <button
                     type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setModelsDevTarget('models') }}
+                    onClick={() => { setModelsDevOpen(true) }}
                   >{t('adv.list.modelsDevRef')}</button>
                   <button
                     type="button" className="dshAma-linkButton" disabled={disabled}
@@ -698,7 +544,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
                   <button
                     type="button" className="dshAma-linkButton" disabled={disabled || enrichBusy}
                     title={t('adv.list.enrichTitle')}
-                    onClick={() => { void enrichFromModelsDev('models') }}
+                    onClick={() => { void enrichFromModelsDev() }}
                   >{enrichBusy ? t('adv.list.enriching') : t('adv.list.enrich')}</button>
                 </div>
                 {models.length === 0 ? <p className="dshAma-hint">{t('adv.list.empty')}</p> : null}
@@ -866,193 +712,25 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
         </>
       )}
 
-      <details
-        className="dshAma-newRoute"
-        open={newRoute !== undefined}
-        onToggle={(event) => {
-          if (!(event.currentTarget as HTMLDetailsElement).open) setNewRoute(undefined)
-        }}
-      >
-        <summary className="dshAma-newRouteSummary">{t('adv.newRoute.summary')}</summary>
-        <div className="dshAma-newRouteBody">
-          <p className="dshAma-hint">
-            {t('adv.newRoute.hint')}<code>opencode-go-vision</code>{t('adv.newRoute.hintTail')}
-          </p>
-          {newRoute === undefined
-            ? (
-              <Button
-                type="button" variant="outline" size="sm"
-                onClick={() => { setNewRoute({ ...EMPTY_NEW_ROUTE }); setFailure(undefined) }}
-              >{t('adv.newRoute.start')}</Button>
-            )
-            : (
-              <>
-                {/* Upsert targeting: an existing declared route's id switches
-                    the card from create to merge-append; a catalog route's id
-                    is refused (its models resolve from the official catalog). */}
-                {(() => {
-                  const trimmed = newRoute.id.trim()
-                  if (trimmed === '') return null
-                  const target = state.routes.find(candidate => candidate.entry.provider === trimmed)
-                  if (target === undefined) return null
-                  return target.entry.declared === true
-                    ? (
-                      <p className="dshAma-hint">
-                        {t('adv.newRoute.mergeHintA', { id: trimmed })}<b>{t('adv.newRoute.mergeTerm')}</b>{t('adv.newRoute.mergeHintB')}
-                      </p>
-                    )
-                    : (
-                      <p className="dshAma-error">
-                        {t('adv.newRoute.catalogRefusal', { id: trimmed })}
-                      </p>
-                    )
-                })()}
-                <div className="dshAma-grid">
-                  <label className="dshAma-field">
-                    <span className="dshAma-fieldLabel">{t('adv.newRoute.id')}</span>
-                    <Input className="dshAma-inputWrap" type="text" value={newRoute.id} placeholder={t('adv.newRoute.idPlaceholder')}
-                      aria-label={t('adv.newRoute.id')} onChange={(event) => { setNewRoute({ ...newRoute, id: event.target.value }) }} />
-                  </label>
-                  <label className="dshAma-field">
-                    <span className="dshAma-fieldLabel">{t('adv.entry.name')}</span>
-                    <Input className="dshAma-inputWrap" type="text" value={newRoute.displayName} placeholder={t('adv.newRoute.displayNamePlaceholder')}
-                      aria-label={t('adv.entry.name')} disabled={upsertTarget !== undefined}
-                      onChange={(event) => { setNewRoute({ ...newRoute, displayName: event.target.value }) }} />
-                  </label>
-                  <label className="dshAma-field">
-                    <span className="dshAma-fieldLabel">{t('adv.newRoute.api')}</span>
-                    <select className="dshAma-input dshAma-select" value={newRoute.api} aria-label={t('adv.newRoute.apiAria')}
-                      disabled={upsertTarget !== undefined}
-                      onChange={(event) => { setNewRoute({ ...newRoute, api: event.target.value }) }}>
-                      <option value="">
-                        {upsertTarget !== undefined ? t('adv.newRoute.apiExisting') : t('adv.newRoute.apiRequired')}
-                      </option>
-                      {protocols.map(choice => <option key={choice} value={choice}>{choice}</option>)}
-                    </select>
-                  </label>
-                  <label className="dshAma-field">
-                    <span className="dshAma-fieldLabel">baseURL</span>
-                    <Input className="dshAma-inputWrap" type="text" value={newRoute.baseURL} placeholder="https://…/v1"
-                      aria-label="baseURL" disabled={upsertTarget !== undefined}
-                      onChange={(event) => { setNewRoute({ ...newRoute, baseURL: event.target.value }) }} />
-                  </label>
-                  <label className="dshAma-field">
-                    <span className="dshAma-fieldLabel">{t('adv.newRoute.apiKeyEnv')}</span>
-                    <Input className="dshAma-inputWrap" type="text" value={newRoute.apiKeyEnv} placeholder="MY_GATEWAY_API_KEY"
-                      aria-label={t('adv.newRoute.apiKeyEnvAria')} disabled={upsertTarget !== undefined}
-                      onChange={(event) => { setNewRoute({ ...newRoute, apiKeyEnv: event.target.value }) }} />
-                  </label>
-                </div>
-                <div className="dshAma-listHead">
-                  <span className="dshAma-listTitle">
-                    {upsertTarget !== undefined
-                      ? t('adv.newRoute.rowsAppend', { count: newRoute.rows.length })
-                      : t('adv.newRoute.rowsInitial', { count: newRoute.rows.length })}
-                  </span>
-                  <button type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setDiscoveryTarget('new-route') }}>{t('adv.newRoute.discover')}</button>
-                  <button type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => { setModelsDevTarget('new-route') }}>{t('adv.list.modelsDevRef')}</button>
-                  <button type="button" className="dshAma-linkButton" disabled={disabled || enrichBusy}
-                    onClick={() => { void enrichFromModelsDev('new-route') }}>
-                    {enrichBusy ? t('adv.list.enriching') : t('adv.list.enrich')}
-                  </button>
-                  <button type="button" className="dshAma-linkButton" disabled={disabled}
-                    onClick={() => {
-                      const blank: ModelDraft = { id: '', ...defaultReasoningEfforts() as ModelDraft }
-                      setNewRoute({ ...newRoute, rows: [...newRoute.rows, blank] })
-                    }}>{t('adv.list.addManual')}</button>
-                </div>
-                {newRoute.rows.map((model, index) => (
-                  <div key={index} className="dshAma-entry">
-                    <div className="dshAma-entryHead">
-                      <Button type="button" variant="ghost" size="sm" icon={<IconChevron open={openRows.has('n' + String(index))} />}
-                        className="dshAma-iconAction" aria-label={t('adv.newRoute.expandRow', { index: index + 1 })}
-                        aria-expanded={openRows.has(`n${String(index)}`)}
-                        onClick={() => { toggleOpen(`n${String(index)}`) }} />
-                      <span className="dshAma-entryId">
-                        {typeof model.id === 'string' && model.id !== '' ? model.id : t('adv.list.unnamed')}
-                      </span>
-                      <Button type="button" variant="ghost" size="sm" icon={<IconTrash />}
-                        className="dshAma-iconAction dshAma-iconDanger"
-                        aria-label={t('adv.newRoute.removeRow', { index: index + 1 })} disabled={disabled}
-                        onClick={() => {
-                          collapseAll()
-                          setNewRoute({ ...newRoute, rows: newRoute.rows.filter((_m, at) => at !== index) })
-                        }} />
-                    </div>
-                    {openRows.has(`n${String(index)}`)
-                      ? (
-                        <ModelEntryEditor
-                          t={t} row={model} index={index} disabled={disabled}
-                          api={typeof model.api === 'string' && model.api !== ''
-                            ? model.api as string
-                            : newRoute.api}
-                          handDeclared
-                          onChange={(next) => {
-                            setNewRoute({ ...newRoute, rows: newRoute.rows.map((m, at) => at === index ? next : m) })
-                          }}
-                        />
-                      )
-                      : null}
-                  </div>
-                ))}
-                <div className="dshAma-footer">
-                  {failure !== undefined ? <p className="dshAma-error">{messageText(failure, t)}</p> : null}
-                  <Button type="button" variant="primary" size="sm"
-                    disabled={disabled || (upsertTarget !== undefined && upsertTarget.entry.declared !== true)}
-                    onClick={() => { void createRoute() }}>
-                    {busy
-                      ? t('adv.newRoute.busy')
-                      : upsertTarget === undefined
-                        ? t('adv.newRoute.create')
-                        : upsertTarget.entry.declared === true ? t('adv.newRoute.append') : t('adv.newRoute.cannotAppend')}
-                  </Button>
-                </div>
-              </>
-            )}
-        </div>
-      </details>
-
       <ModelsDevImportDialog
         t={t}
-        open={modelsDevTarget !== undefined}
-        onClose={() => { setModelsDevTarget(undefined) }}
-        onAdopt={(rows) => {
-          if (modelsDevTarget === 'new-route' && newRoute !== undefined) {
-            setNewRoute({ ...newRoute, rows: mergeModelRows(newRoute.rows, rows) })
-          } else {
-            setModelsDraft(mergeModelRows(models, rows))
-          }
-        }}
-        existingIds={modelsDevTarget === 'new-route' && newRoute !== undefined
-          ? new Set(newRoute.rows.map(model => typeof model.id === 'string' ? model.id : ''))
-          : modelIds}
+        open={modelsDevOpen}
+        onClose={() => { setModelsDevOpen(false) }}
+        onAdopt={(rows) => { setModelsDraft(mergeModelRows(models, rows)) }}
+        existingIds={modelIds}
       />
       <ProviderModelDiscoveryDialog
         t={t}
-        open={discoveryTarget !== undefined}
-        onClose={() => { setDiscoveryTarget(undefined) }}
+        open={discoveryOpen}
+        onClose={() => { setDiscoveryOpen(false) }}
         api={api}
-        target={discoveryTarget === 'models' && row !== undefined
-          ? providerDiscoveryTarget(row)
-          : discoveryTarget === 'new-route' && newRoute !== undefined
-            ? { settingsNs: 'llm-pi-ai', baseURL: newRoute.baseURL, api: newRoute.api }
-            : undefined}
-        existingIds={discoveryTarget === 'new-route' && newRoute !== undefined
-          ? new Set(newRoute.rows.map(model => typeof model.id === 'string' ? model.id : ''))
-          : modelIds}
+        target={discoveryOpen && row !== undefined ? providerDiscoveryTarget(row) : undefined}
+        existingIds={modelIds}
         onAdopt={(rows) => {
-          if (discoveryTarget === 'new-route' && newRoute !== undefined) {
-            const merged = mergeModelRows(newRoute.rows, rows)
-            setNewRoute({ ...newRoute, rows: merged })
-            // Discovery only returns id/name/capacities — enrich reasoning etc.
-            void enrichFromModelsDev('new-route', merged)
-          } else {
-            const merged = mergeModelRows(models, rows)
-            setModelsDraft(merged)
-            void enrichFromModelsDev('models', merged)
-          }
+          const merged = mergeModelRows(models, rows)
+          setModelsDraft(merged)
+          // Discovery only returns id/name/capacities — enrich reasoning etc.
+          void enrichFromModelsDev(merged)
         }}
       />
     </section>
@@ -1063,7 +741,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
 const ADVANCED_CSS = `
 .dshAma-root { display: flex; flex-direction: column; gap: 10px; padding-top: 16px; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAma-intro { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); line-height: 1.6; }
-.dshAma-intro code, .dshAma-modeBanner code, .dshAma-newRouteBody code { padding: 0 3px; border-radius: 4px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-size: 12px; }
+.dshAma-modeBanner code { padding: 0 3px; border-radius: 4px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-size: 12px; }
 .dshAma-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dshAma-fieldLabel { color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; }
 .dshAma-input { box-sizing: border-box; width: 100%; padding: 5px 8px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; font-size: 13px; }
@@ -1074,7 +752,6 @@ const ADVANCED_CSS = `
 .dshAma-routePicker .dshAma-field { flex: 1; }
 .dshAma-refreshButton { flex: none; margin-bottom: 1px; }
 .dshAma-capacityRow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.dshAma-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
 .dshAma-hint { margin: 2px 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.5; }
 .dshAma-error { margin: 2px 0; color: #dc2626; font-size: 12px; }
 .dshAma-notice { margin: 2px 0; color: #16a34a; font-size: 12px; }
@@ -1108,10 +785,12 @@ const ADVANCED_CSS = `
 .dshAma-levelGrid { display: flex; flex-wrap: wrap; gap: 10px 14px; padding: 6px 0; }
 .dshAma-invalid { color: #dc2626; }
 .dshAma-footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
-.dshAma-newRoute { border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 8px; margin-top: 8px; }
+/* The collapsible card shell the advanced-parameters card and its field groups
+   share (see route-advanced.tsx, ui.tsx). */
+.dshAma-card { border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 8px; margin-top: 8px; }
 .dshAma-retryCard { margin-top: 0; }
-.dshAma-newRouteSummary { padding: 8px 10px; cursor: pointer; color: var(--dsw-alias-label-secondary, #475569); font-size: 12.5px; }
-.dshAma-newRouteBody { display: flex; flex-direction: column; gap: 10px; padding: 10px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
+.dshAma-cardSummary { padding: 8px 10px; cursor: pointer; color: var(--dsw-alias-label-secondary, #475569); font-size: 12.5px; }
+.dshAma-cardBody { display: flex; flex-direction: column; gap: 10px; padding: 10px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
 /* The two dialogs are the kernel's Modal; these three rules are the seats it
    documents for sizing and for a long scrolling body. */
 .dshAma-importModal { width: min(560px, calc(100vw - 48px)); max-height: 100%; }

@@ -277,14 +277,14 @@ export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
   const credentialState = reference === undefined ? undefined : credentials[reference]
 
   return (
-    <details className="dshAma-newRoute dshAma-retryCard">
-      <summary className="dshAma-newRouteSummary">
+    <details className="dshAma-card dshAma-retryCard">
+      <summary className="dshAma-cardSummary">
         {t('adv.pg.title')}
         {configuredCount === 0
           ? t('adv.pg.summaryDefault')
           : t('adv.pg.summaryCount', { count: configuredCount })}
       </summary>
-      <div className="dshAma-newRouteBody">
+      <div className="dshAma-cardBody">
         <p className="dshAma-hint">{t('adv.pg.intro')}</p>
         {GROUPS.map(group => (
           <FieldGroup

@@ -19,9 +19,13 @@ peer/dev deps), then `npm run typecheck` and smoke `<runtime>/app` →
 pinned `@deepseek-ai/dsh-web-frontend` (`latest` lags), the private
 `@deepseek-ai/dsh-desktop-host` (from the line's tag; escape hatches in
 `environment.md`), and the **Office skills payload** at
-`<kernelDir>/runtime/office-skills` — a 0.1.6+ host will not boot without
-`<assetRoot>/scripts/check_office.py`, so it is as mandatory as the host (meta
-layer).
+`<kernelDir>/runtime/office-skills` — the host composes `skill-office` with that
+asset root and the package reads `<assetRoot>/<skill>/SKILL.md` for every skill
+it registers, so a partial payload is as fatal as a missing host (meta layer).
+The skill set is the payload's contract with the kernel line: seven directories
+on 0.2.1 (`office`, `office-docx`, `office-pptx`, `office-xlsx`, `office-render`,
+`office-recalculate`, `office-export-pdf`), asserted by `stageOfficeSkills` at
+build time and by the shell (`OFFICE_SKILL_NAMES`) before every start.
 
 The runtime also carries **pnpm** at `<kernelDir>/runtime/pnpm` (`stagePnpm`),
 pinned by `scripts/primary-runtime-lock.json` — the same pin the office payload
@@ -103,7 +107,7 @@ ran anyway failed a whole release on
    own `devDependencies` too** — `--legacy-peer-deps` installs dependencies AND
    devDependencies, so this is what makes the gate runnable in CI. Fourteen plugins
    import `@deepseek-ai/dsh-client-ui-primitives` and all fourteen now carry
-   `"@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2"` in both fields, the
+   `"@deepseek-ai/dsh-client-ui-primitives": "^0.2.1-rc.1"` in both fields, the
    spec the first three already used. Measured on fresh copies installed with the
    workflows' own command: every one of the nineteen plugins RUNS the type gate
    (none skips), where eleven used to skip.

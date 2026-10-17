@@ -44,9 +44,10 @@
     plugin-effort (client)     reasoning-effort track on the official model menu's 推理等级 row
     plugin-workbench (client)  workbench hub: one sidebar entry plus one container that domain
                                workbenches register their cards into
-    plugin-doc / plugin-sheet / plugin-ppt / plugin-pdf (dual-face)
-                               office_to_pdf conversion per source format: host tool + client skill
-                               prefill, over the LibreOffice engine installed on demand (§4.1)
+    plugin-ppt / plugin-pdf (dual-face)
+                               office generation: PPTD projects over bundled templates, and PDF
+                               authoring/reading plus `office_to_pdf` conversion, over the
+                               LibreOffice engine installed on demand (§4.1)
     plugin-creative (dual-face) the seat a writing-oriented domain (fiction, short drama,
                                interactive narrative, video recap) lands in; the host half, the
                                four bundled knowledge domains under `knowledge/` and the creative

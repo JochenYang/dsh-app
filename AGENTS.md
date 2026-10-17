@@ -35,7 +35,7 @@ suite, packed into one runtime artifact — are built, released and updated inde
 first** (every download has a mirror chain; ModelScope, not GitHub, is the primary shell-update source).
 
 The kernel line has one source of truth: the spec every `@deepseek-ai/dsh*` dependency in the root
-`package.json` shares (`^0.2.0-rc.2` today), resolved and asserted by `scripts/kernel-line.mjs`;
+`package.json` shares (`^0.2.1-rc.1` today), resolved and asserted by `scripts/kernel-line.mjs`;
 nothing else — no workflow variable, no hand-flipped channel — decides it.
 
 ## 2. Stack and layout
@@ -211,7 +211,7 @@ Each rule's reasoning: [`docs/agents/security-invariants.md`](docs/agents/securi
 
 ## 8. The brand plugin suite (`plugins/`)
 
-Twenty dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
+Eighteen dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
 desktop app updateable when upstream moves. Each is its own npm package with a host half, a client half,
 or both; `plugins/README.md` is the roster, `plugins/dsh-app.patch.yml` the loader overlay that mounts
 them, and desktop adaptation always stays shell-side — never a harness modification. `plugin-creative`

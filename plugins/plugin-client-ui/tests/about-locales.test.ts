@@ -3,7 +3,7 @@
  * table's language, and the placeholders a translation must carry across.
  *
  * The same three guards the other page dictionaries get (see
- * `plugin-sheet/tests/locales.test.ts` for the pattern): a key present on one
+ * `plugin-ppt/tests/locales.test.ts` for the pattern): a key present on one
  * side only is a compile error already, but a translation that quietly drops a
  * `{message}` placeholder type-checks and then renders the literal braces.
  *

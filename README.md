@@ -36,7 +36,7 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 交付审阅：文件改动卡片、单栏差异悬停预览 | `@dsh-app/plugin-sidebar`（host+client） | `plugins/plugin-sidebar/src/index.ts` |
 | MCP 服务器管理：设置页增删改查、动态挂载/卸载，服务器工具以原生 `mcp__<server>__<tool>` 注册；读取时掩码密钥值 | `@dsh-app/plugin-mcp`（双面） | `plugins/plugin-mcp/src/client/mcp-section.tsx` |
 | 外部 hooks 桥：对 Claude Code / Codex 的 `hooks.json` 做设置页增删改查，挂载为生效的 hook 实例（拦截提示词、工具与轮次） | `@dsh-app/plugin-hooks`（双面） | `plugins/plugin-hooks/src/client/hooks-section.tsx` |
-| Office 文档转换：`office_to_pdf` 工具把 docx / xlsx / pptx / pdf 源文件转成 PDF；转换引擎（LibreOffice）按需从诊断页安装，不在运行时里；字体缺失逐族上报 | `@dsh-app/plugin-doc` / `plugin-sheet` / `plugin-ppt` / `plugin-pdf`（host 工具 + 双面技能预填） | `plugins/plugin-{doc,sheet,ppt,pdf}/src/` |
+| Office 文档转换：`office_to_pdf` 工具把 docx / xlsx / pptx / pdf 源文件转成 PDF；转换引擎（LibreOffice）按需从诊断页安装，不在运行时里；字体缺失逐族上报。Word / Excel / PowerPoint 的生成走官方 Office 技能（python-docx / python-pptx / openpyxl，经 `load_workspace_dependencies` 运行），PPT 另有模板化路径、PDF 另有读写与中文字体子集 | `@dsh-app/plugin-ppt` / `plugin-pdf`（host 工具 + 双面技能预填） | `plugins/plugin-{ppt,pdf}/src/` |
 | 网络搜索：`web_search` / `web_fetch` 以 provider 形式接入（品牌引擎链 anysearch / Bing / Parallel / Exa / SearXNG，一键自检），host 侧只发稳定错误码 | `@dsh-app/plugin-websearch`（双面） | `plugins/plugin-websearch/src/` |
 | 插件市场：设置页浏览 / 安装 / 卸载第三方 dsh 插件（走内核 CLI 安装进当前 profile，pnpm 策略由市场处理） | `@dsh-app/plugin-market`（双面） | `plugins/plugin-market/src/` |
 | 预设包：设置页面板导入 / 导出品牌与上游配置组合 | `@dsh-app/plugin-presets`（双面） | `plugins/plugin-presets/src/` |

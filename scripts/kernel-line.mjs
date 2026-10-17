@@ -49,8 +49,6 @@ export const SUITE_PLUGINS = [
   '@dsh-app/plugin-ppt',
   '@dsh-app/plugin-market',
   '@dsh-app/plugin-presets',
-  '@dsh-app/plugin-doc',
-  '@dsh-app/plugin-sheet',
   '@dsh-app/plugin-pdf',
   '@dsh-app/plugin-websearch',
   '@dsh-app/plugin-rewind',

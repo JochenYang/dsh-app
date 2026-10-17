@@ -44,12 +44,24 @@ const INSERTED = overlayInsertOwnedIds(OVERLAY)
 test('the overlay\'s id roster is read off the overlay itself', () => {
   // The roster is derived, never listed in the module: a copy could only rot.
   // The two shapes both have to be found — a root-level row (`- id: web`) and an
-  // insert block's indented children (the seventeen plugins live in ONE block).
+  // insert block's indented children (the twenty plugins live in ONE block).
   assert.ok(OWNED.has('web'), 'a root-level row of the overlay')
   assert.ok(OWNED.has('brand'), 'an indented child of the overlay\'s insert block')
-  assert.ok(OWNED.has('schedule'), 'a child of the overlay\'s SECOND insert block')
   assert.ok(!OWNED.has('not-a-real-plugin'), 'nothing is attributed that the overlay does not declare')
-  for (const plugin of ['brand-client-ui', 'sidebar', 'swarm', 'usage', 'archives', 'memory', 'mcp', 'hooks', 'ppt', 'market', 'presets', 'doc', 'sheet', 'pdf', 'websearch']) {
+  // Several insert blocks are read, not just the first. The live overlay carried
+  // two until 0.2.1 shipped the schedule rows itself (see its Schedule note), so
+  // the multi-block shape is pinned on a synthetic overlay rather than on the
+  // roster of the day.
+  const twoBlocks = overlayOwnedIds([
+    '- insert:',
+    '    - id: a',
+    '- id: b',
+    '- insert:',
+    '    - id: c',
+    '',
+  ].join('\n'))
+  assert.deepEqual([...twoBlocks].sort(), ['a', 'b', 'c'], 'every insert block is read')
+  for (const plugin of ['brand-client-ui', 'sidebar', 'swarm', 'usage', 'archives', 'memory', 'mcp', 'hooks', 'ppt', 'market', 'presets', 'pdf', 'websearch']) {
     assert.ok(OWNED.has(plugin), `the overlay declares ${plugin}`)
   }
 })
@@ -94,27 +106,29 @@ test('a non-insert overlay row is KEPT: it is where the user\'s own choice lives
 })
 
 test('a spent flip row goes: its id is one the layer inserts, and it holds no value', () => {
-  // The exact residue the real profile carried: the pre-layer overlay flipped on a
-  // row the kernel then shipped disabled. 0.2.0 ships no such row, the overlay now
-  // inserts it (`ui-schedule` sits in an insert block), and this copy had nothing
-  // left to override — every start logged `patch: entry "ui-schedule" not found`,
-  // and in safe mode (empty layer) that line is the only thing naming the id.
+  // The exact residue an older profile carried: the pre-layer overlay flipped on
+  // a row the kernel shipped disabled, and a later overlay inserted the row
+  // instead, so the copy had nothing left to override — every start logged
+  // `patch: entry "…" not found`, and in safe mode (empty layer) that line was
+  // the only thing naming the id. `swarm` is an id the shipped overlay inserts
+  // today (the historical case was `ui-schedule`, which 0.2.1 ships itself and
+  // the overlay therefore no longer declares).
   const text = [
     '- id: web',
     '  config:',
     '    searchProvider: dsh-app',
-    '- id: ui-schedule',
+    '- id: swarm',
     '  disabled: false',
     '',
   ].join('\n')
   const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
-  assert.deepEqual(removed, ['ui-schedule'])
-  assert.ok(!next.includes('ui-schedule'), 'the spent row is gone')
+  assert.deepEqual(removed, ['swarm'])
+  assert.ok(!next.includes('swarm'), 'the spent row is gone')
   assert.ok(next.includes('searchProvider: dsh-app'), 'the row carrying a value stays')
 })
 
 test('a flip row that says something ELSE is kept: it is somebody\'s decision', () => {
-  const text = ['- id: ui-schedule', '  disabled: true', ''].join('\n')
+  const text = ['- id: swarm', '  disabled: true', ''].join('\n')
   const { text: next, removed } = stripSuiteRows(text, OWNED, INSERTED)
   assert.deepEqual(removed, [], 'nothing is removed')
   assert.equal(next, text, 'the document is returned unchanged')

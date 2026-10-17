@@ -8,7 +8,7 @@ a plugin; read the plugin's own JSDoc header before changing its internals.
 
 ## 1. What the suite is
 
-Twenty dsh plugins layered on top of the upstream kernel **without forking
+Eighteen dsh plugins layered on top of the upstream kernel **without forking
 it** — that is what keeps the desktop app updateable when upstream moves.
 `plugins/README.md` is the roster: which plugin owns which capability, and each
 one's host/client role. `plugins/dsh-app.patch.yml` is the loader overlay that
@@ -18,8 +18,8 @@ mounts them.
 `plugin-client-ui` (client; brand theme, advanced-models and maintenance
 sections, About row, nav icons), `plugin-sidebar` (Git view), `plugin-swarm`
 (subagent orchestration), `plugin-usage`, `plugin-archives`, `plugin-memory`,
-`plugin-mcp`, `plugin-hooks`, `plugin-ppt` / `plugin-doc` / `plugin-sheet` /
-`plugin-pdf` (office generation, one capsule bar), `plugin-market`,
+`plugin-mcp`, `plugin-hooks`, `plugin-ppt` / `plugin-pdf` (office generation,
+one capsule bar), `plugin-market`,
 `plugin-presets`, `plugin-websearch` (`web_search` / `web_fetch`),
 `plugin-rewind` (message recall + file revert), `plugin-effort` (reasoning
 effort), `plugin-workbench` (workbench hub: one sidebar entry plus the container
@@ -56,7 +56,7 @@ for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; do
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
-  result. All twenty plugins have suites.
+  result. All eighteen plugins have suites.
 - **CI runs every plugin with a `tests/` directory** (`.github/workflows/ci.yml`
   loops over `plugins/*/`), so a suite that passes locally also gates the PR.
   The root `test/plugin-version-bump.test.mjs` additionally fails any plugin

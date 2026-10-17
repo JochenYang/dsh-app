@@ -107,14 +107,14 @@ test('Han outside a dictionary is a violation; dictionaries and model-facing tre
   write('plugins/plugin-alpha/src/client/locales.ts', `export const zh = { a: '${han}' }\n`)
   write(section, "export const label = 'form'\n")
   assert.deepEqual(checkHanCharacters(root), [])
-  // The office plugins' model-facing trees are exempt, but their CLIENT half is
+  // The office pair's model-facing trees are exempt, but their CLIENT half is
   // not: that is the drift this exemptions rule kept visible.
-  const officeRoot = skeleton(t, ['plugin-doc'])
-  writeFileSync(path.join(officeRoot, 'plugins', 'plugin-doc', 'src', 'skill.ts'), `export const t = '${han}'\n`)
-  writeFileSync(path.join(officeRoot, 'plugins', 'plugin-doc', 'src', 'client', 'section.tsx'), `export const t = '${han}'\n`)
+  const officeRoot = skeleton(t, ['plugin-ppt'])
+  writeFileSync(path.join(officeRoot, 'plugins', 'plugin-ppt', 'src', 'skill.ts'), `export const t = '${han}'\n`)
+  writeFileSync(path.join(officeRoot, 'plugins', 'plugin-ppt', 'src', 'client', 'section.tsx'), `export const t = '${han}'\n`)
   const officeViolations = checkHanCharacters(officeRoot)
   assert.equal(officeViolations.length, 1)
-  assert.match(officeViolations[0], /plugin-doc\/src\/client\/section\.tsx/u)
+  assert.match(officeViolations[0], /plugin-ppt\/src\/client\/section\.tsx/u)
   // A comment is not code: a bilingual JSDoc example must not fire.
   write(section, `/** ${han} example */\nexport const label = 'x'\n`)
   assert.deepEqual(checkHanCharacters(root), [])

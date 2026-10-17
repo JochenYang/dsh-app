@@ -40,6 +40,11 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // this unit, so a misspelled slot name is a compile error rather than a runtime
 // registration failure.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: `SessionStandardProps.sessionId` is what ui-slots derives
+// `SessionIdOf` from, so this merge is what makes the slot's injected
+// `sessionId` the branded SessionId `ctx.modelDirectories.directoryFor` takes.
+// Without it the framework's own argument types as a bare `string`.
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 // Type-only: pulls the ctx.modelDirectories merge and the directory snapshot type.
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import { en as effortEn, NS as EFFORT_NS, zh as effortZh, type EffortKey } from './locales.ts'

@@ -259,9 +259,9 @@ export interface FieldGroupProps {
 export function FieldGroup(props: FieldGroupProps): ReactNode {
   const [open, setOpen] = useState(props.defaultOpen === true)
   return (
-    <details className="dshAma-newRoute dshAma-retryCard" open={open || props.forceOpen === true}>
+    <details className="dshAma-card dshAma-retryCard" open={open || props.forceOpen === true}>
       <summary
-        className="dshAma-newRouteSummary"
+        className="dshAma-cardSummary"
         onClick={(event) => {
           // Own the open state so a forced group can be closed without React
           // re-opening it on the next render.
@@ -271,7 +271,7 @@ export function FieldGroup(props: FieldGroupProps): ReactNode {
       >
         {props.title}{props.summary === undefined ? null : <span className="dshAma-groupSummary">{props.summary}</span>}
       </summary>
-      <div className="dshAma-newRouteBody">
+      <div className="dshAma-cardBody">
         {props.hint === undefined ? null : <p className="dshAma-hint">{props.hint}</p>}
         {props.children}
         {props.error === undefined ? null : <p className="dshAma-fieldError" role="status">{props.error}</p>}

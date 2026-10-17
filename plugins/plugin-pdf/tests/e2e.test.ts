@@ -162,7 +162,7 @@ function settle(): Promise<void> {
  * The mode store persists on a promise tail, so a read right after a POST
  * races the write. Poll until the file on disk reaches the expected state
  * instead of trusting a fixed sleep (a fast Linux runner loses that race —
- * measured: plugin-doc's e2e failed on CI and passed on Windows).
+ * measured: an office e2e failed on CI and passed on Windows).
  */
 async function readModeFile(
   file: string,

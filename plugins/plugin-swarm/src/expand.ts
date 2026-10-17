@@ -25,7 +25,7 @@ export interface SwarmToolArgs {
   readonly shared_context?: string
   readonly resume_entries?: readonly { readonly child_id: string; readonly followup: string }[]
   readonly max_concurrency?: number
-  readonly tool_filter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] }
+  readonly agent_preset?: string
   readonly dry_run?: boolean
   readonly token_budget?: number
   readonly output_mode?: 'full' | 'summary' | 'status_only'

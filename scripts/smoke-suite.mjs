@@ -51,7 +51,7 @@ import { removeTree } from './lib/remove-tree.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
-const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-doc', 'plugin-sheet', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort', 'plugin-workbench']
+const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort', 'plugin-workbench']
 
 // Mirrors SUITE_PROFILE / SUITE_PROFILE_BUNDLES in src/shared/constants.ts.
 // The suite boots its own profile; the throwaway home below has no legacy
@@ -653,8 +653,6 @@ async function main() {
       ['/api/plugins/dsh-app/plugin-market/sources', 'market: sources route'],
       ['/api/plugins/dsh-app/plugin-presets/presets', 'presets: list route'],
       ['/api/plugins/dsh-app/plugin-ppt/mode?sessionId=smoke', 'ppt: mode route'],
-      ['/api/plugins/dsh-app/plugin-doc/mode?sessionId=smoke', 'doc: mode route'],
-      ['/api/plugins/dsh-app/plugin-sheet/mode?sessionId=smoke', 'sheet: mode route'],
       ['/api/plugins/dsh-app/plugin-pdf/mode?sessionId=smoke', 'pdf: mode route'],
     ]) {
       await probeRoute(base, route, name)

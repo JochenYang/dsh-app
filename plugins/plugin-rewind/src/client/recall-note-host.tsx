@@ -65,7 +65,7 @@ export function showRecallNote(text: string, tone: RecallNote['tone'] = 'error')
  * Called once from the client entry, not per bubble: the wrapper runs for every
  * user message, so a component mounted there would render one toast per message
  * on screen. The host owns its own React root — the same shape the office capsules
- * use (`plugin-doc/src/client/office-entry.tsx`) — and the disposer unmounts it
+ * use (`plugin-ppt/src/client/office-entry.tsx`) — and the disposer unmounts it
  * with the plugin's fiber.
  *
  * @returns the disposer that unmounts the host.

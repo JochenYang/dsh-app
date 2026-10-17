@@ -1,7 +1,12 @@
 /**
- * One model entry's advanced editor: capacities, input modalities, the
- * reasoning-effort tri-state, and protocol-gated compat switches — the field
- * groups the official Models page deliberately leaves to `settings.yaml`.
+ * One model entry's advanced editor: the reasoning-effort tri-state with its
+ * compat auto-fill, and the protocol-gated compat switches — the field groups
+ * the official Models page has no editor for.
+ *
+ * An override row (one catalog model corrected by id) additionally edits its
+ * capacities and input modalities. A hand-declared route's rows hide those two
+ * groups: the official page owns model-list membership, capacities and
+ * modalities, so repeating them here would invite two editors to disagree.
  *
  * Rows are structurally open like upstream's editors: the draft carries every
  * stored key, this form edits the ones it knows, and anything else survives
@@ -32,7 +37,11 @@ export interface ModelEntryEditorProps {
    * protocols plus a warning.
    */
   api?: string
-  /** True when the owning route is hand-declared (no catalog base). */
+  /**
+   * True when the owning route is hand-declared (no catalog base). Such a row
+   * hides capacities and input modalities — the official Models page owns them
+   * — and the reasoning editor warns that nothing is inherited.
+   */
   handDeclared?: boolean
   /** Index for aria labels. */
   index: number
@@ -486,49 +495,55 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
           onChange={(event) => { setString('name', event.target.value) }}
         />
       </label>
-      <div className="dshAma-capacityRow">
-        <label className="dshAma-field">
-          <span className="dshAma-fieldLabel">{t('adv.field.contextWindow')}</span>
-          <Input
-            className="dshAma-inputWrap"
-            type="text"
-            inputMode="numeric"
-            value={contextText}
-            placeholder={t('adv.entry.contextPlaceholder')}
-            aria-label={t('adv.entry.contextAria', { index: index + 1 })}
-            disabled={disabled}
-            onChange={(event) => { editCapacity('contextWindow', event.target.value) }}
-          />
-        </label>
-        <label className="dshAma-field">
-          <span className="dshAma-fieldLabel">{t('adv.field.maxTokens')}</span>
-          <Input
-            className="dshAma-inputWrap"
-            type="text"
-            inputMode="numeric"
-            value={maxTokensText}
-            placeholder={t('adv.entry.maxTokensPlaceholder')}
-            aria-label={t('adv.entry.maxTokensAria', { index: index + 1 })}
-            disabled={disabled}
-            onChange={(event) => { editCapacity('maxTokens', event.target.value) }}
-          />
-        </label>
-      </div>
-      <div className="dshAma-field">
-        <span className="dshAma-fieldLabel">{t('adv.entry.input')}</span>
-        <div className="dshAma-inline">
-          {MODALITIES.map(modality => (
-            <Checkbox
-              key={modality}
-              checked={input.includes(modality)}
-              disabled={disabled}
-              label={modality === 'text' ? t('adv.entry.inputText') : t('adv.entry.inputImage')}
-              onChange={() => { toggleModality(modality) }}
-            />
-          ))}
-        </div>
-        <div className="dshAma-hint">{t('adv.entry.inputHint')}</div>
-      </div>
+      {handDeclared === true
+        ? null
+        : (
+          <>
+            <div className="dshAma-capacityRow">
+              <label className="dshAma-field">
+                <span className="dshAma-fieldLabel">{t('adv.field.contextWindow')}</span>
+                <Input
+                  className="dshAma-inputWrap"
+                  type="text"
+                  inputMode="numeric"
+                  value={contextText}
+                  placeholder={t('adv.entry.contextPlaceholder')}
+                  aria-label={t('adv.entry.contextAria', { index: index + 1 })}
+                  disabled={disabled}
+                  onChange={(event) => { editCapacity('contextWindow', event.target.value) }}
+                />
+              </label>
+              <label className="dshAma-field">
+                <span className="dshAma-fieldLabel">{t('adv.field.maxTokens')}</span>
+                <Input
+                  className="dshAma-inputWrap"
+                  type="text"
+                  inputMode="numeric"
+                  value={maxTokensText}
+                  placeholder={t('adv.entry.maxTokensPlaceholder')}
+                  aria-label={t('adv.entry.maxTokensAria', { index: index + 1 })}
+                  disabled={disabled}
+                  onChange={(event) => { editCapacity('maxTokens', event.target.value) }}
+                />
+              </label>
+            </div>
+            <div className="dshAma-field">
+              <span className="dshAma-fieldLabel">{t('adv.entry.input')}</span>
+              <div className="dshAma-inline">
+                {MODALITIES.map(modality => (
+                  <Checkbox
+                    key={modality}
+                    checked={input.includes(modality)}
+                    disabled={disabled}
+                    label={modality === 'text' ? t('adv.entry.inputText') : t('adv.entry.inputImage')}
+                    onChange={() => { toggleModality(modality) }}
+                  />
+                ))}
+              </div>
+              <div className="dshAma-hint">{t('adv.entry.inputHint')}</div>
+            </div>
+          </>
+        )}
       <ReasoningEditor
         t={t}
         index={index}

@@ -66,9 +66,10 @@
  *     checkout), staged beside the kernel tree as `runtime/office-skills` (see
  *     stageOfficeSkills). The host derives its skill asset root from its
  *     primary-runtime argument — `join(dirname(<kernelDir>/app), 'office-skills')`
- *     — and @deepseek-ai/dsh-skill-office THROWS at boot when
- *     `<assetRoot>/scripts/check_office.py` is absent, so a runtime shipped
- *     without it dies a few seconds into the first start.
+ *     — and @deepseek-ai/dsh-skill-office reads
+ *     `<assetRoot>/<skill>/SKILL.md` for every skill it registers, throwing at
+ *     boot when one is absent, so a runtime shipped with a partial payload dies
+ *     a few seconds into the first start.
  *
  * One payload the OFFICE PROVIDER needs is deliberately NOT in the tree:
  *   - the LibreOffice engine (@deepseek-ai/libreoffice-kit + its per-platform
@@ -623,10 +624,30 @@ const OFFICE_KIT_STUB_DIR = ['scripts', 'runtime-stubs', 'libreoffice-kit']
  * at `<kernelDir>/runtime/office-skills` — a path nothing else in the runtime
  * occupies, because the kernel tree itself is `<kernelDir>/app`.
  *
- * These are the four skill files (three SKILL.md and `scripts/check_office.py`),
- * not the conversion engine: the engine is the separate payload artifact.
+ * These are the seven skill directories (one SKILL.md each, plus their
+ * references), not the conversion engine: the engine is the separate payload
+ * artifact. The name list is the payload's contract with
+ * @deepseek-ai/dsh-skill-office's `SKILL_NAMES`, and the shell validates the
+ * same set before it starts the host (src/main/desktop-host.ts
+ * OFFICE_SKILL_NAMES) — a line that renames a skill must move both.
  */
 const OFFICE_SKILLS_DIR = 'runtime/office-skills'
+
+/** The skill directories a valid payload carries, per the kernel line. */
+const OFFICE_SKILL_NAMES = [
+  'office',
+  'office-docx',
+  'office-pptx',
+  'office-xlsx',
+  'office-render',
+  'office-recalculate',
+  'office-export-pdf',
+]
+
+/** Which of {@link OFFICE_SKILL_NAMES} a directory is missing. */
+function missingOfficeSkills(dir) {
+  return OFFICE_SKILL_NAMES.filter((name) => !existsSync(path.join(dir, name, 'SKILL.md')))
+}
 
 /**
  * Upstream repository, cloned only when no local checkout of it exists. The
@@ -677,10 +698,10 @@ function harnessCheckoutCandidates() {
  * a prebuilt tarball (DSH_APP_HOST_PACKAGE) — that path resolves no checkout of
  * the kernel line's tag, so the payload needs one of its own.
  *
- * No worktree and no clone here: the payload is four files, and a caller who
- * brought a prebuilt host is deliberately avoiding what cloning costs. An
- * explicit DSH_APP_HOST_CHECKOUT or DSH_APP_HOST_REPO wins; otherwise the first
- * sibling checkout that actually holds the payload.
+ * No worktree and no clone here: the payload is a set of skill directories, and
+ * a caller who brought a prebuilt host is deliberately avoiding what cloning
+ * costs. An explicit DSH_APP_HOST_CHECKOUT or DSH_APP_HOST_REPO wins; otherwise
+ * the first sibling checkout that actually holds a complete payload.
  */
 function officeSkillsCheckout() {
   const explicit = (process.env.DSH_APP_HOST_CHECKOUT ?? '').trim()
@@ -688,7 +709,7 @@ function officeSkillsCheckout() {
   const configured = (process.env.DSH_APP_HOST_REPO ?? '').trim()
   if (configured !== '') return path.resolve(configured)
   const siblings = harnessCheckoutCandidates()
-  return siblings.find((dir) => existsSync(path.join(dir, ...OFFICE_SKILLS_ASSETS))) ?? siblings[0]
+  return siblings.find((dir) => missingOfficeSkills(path.join(dir, ...OFFICE_SKILLS_ASSETS)).length === 0) ?? siblings[0]
 }
 
 /**
@@ -697,9 +718,10 @@ function officeSkillsCheckout() {
  * The payload is not optional for a runtime of this line: the host composes
  * @deepseek-ai/dsh-skill-office with
  * `assetRoot = join(dirname(primaryRuntime), 'office-skills')`, and that plugin
- * THROWS at boot unless `<assetRoot>/scripts/check_office.py` exists. Dev mode
- * reads it from the checkout it runs from; a shipped artifact has nothing but
- * its own tree to read, so the copy is a build-side duty.
+ * reads `<assetRoot>/<skill>/SKILL.md` for every skill it registers, throwing at
+ * boot when one is absent. Dev mode reads it from the checkout it runs from; a
+ * shipped artifact has nothing but its own tree to read, so the copy is a
+ * build-side duty.
  *
  * No separate inventory step is needed: writeFileInventory walks the whole
  * runtime tree, so every staged file lands in runtime/app/runtime-files.json —
@@ -710,15 +732,17 @@ function officeSkillsCheckout() {
  * @param runtimeDir - the runtime tree being assembled (the kernel dir).
  * @param checkoutDir - a harness checkout of the kernel line being built.
  * @returns the staged payload directory.
- * @throws when the checkout does not carry the payload: skipping it would only
- *   move the failure to a user's machine, several seconds into the first boot.
+ * @throws when the checkout does not carry a complete payload: skipping it would
+ *   only move the failure to a user's machine, several seconds into the first
+ *   boot.
  */
 async function stageOfficeSkills(runtimeDir, checkoutDir) {
   const source = path.join(checkoutDir, ...OFFICE_SKILLS_ASSETS)
-  if (!existsSync(path.join(source, 'scripts', 'check_office.py'))) {
+  const missing = missingOfficeSkills(source)
+  if (missing.length > 0) {
     throw new Error(
-      `no office payload at ${source}: the desktop host refuses to start unless <primaryRuntime>/../office-skills `
-      + `holds scripts/check_office.py, so a runtime for this line must ship one — point DSH_APP_HOST_CHECKOUT `
+      `no complete office payload at ${source}: the desktop host needs every skill directory to hold SKILL.md `
+      + `(${missing.join(', ')} missing), so a runtime for this line must ship one — point DSH_APP_HOST_CHECKOUT `
       + `(or DSH_APP_HOST_REPO) at a checkout of dsh ${DSH_VERSION}`,
     )
   }
@@ -727,8 +751,9 @@ async function stageOfficeSkills(runtimeDir, checkoutDir) {
   await cp(source, target, { recursive: true })
   // Asserted at the destination too: this is the path the child derives, and a
   // misplaced payload is indistinguishable from a missing one at boot.
-  if (!existsSync(path.join(target, 'scripts', 'check_office.py'))) {
-    throw new Error(`the staged office payload at ${target} holds no scripts/check_office.py`)
+  const stillMissing = missingOfficeSkills(target)
+  if (stillMissing.length > 0) {
+    throw new Error(`the staged office payload at ${target} is missing ${stillMissing.join(', ')}`)
   }
   console.log(`[build-runtime] office payload: ${source} -> ${OFFICE_SKILLS_DIR}`)
   return target

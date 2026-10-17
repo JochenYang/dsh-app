@@ -146,15 +146,13 @@ export function checkHanCharacters(repoRoot) {
   // individual file with its reason. Anything not listed here must be Han-free.
   const DICTIONARY = /(^|\/)(locales?|zh-CN)\.tsx?$/u
   const ALLOWED_DIRS = [
-    // The office four: every non-client module under these trees is the
+    // The office pair: every non-client module under these trees is the
     // model-facing layer by declared design — skill text, prompts, validation
     // reports and single actionable failure values are all zh-CN (each file's
     // JSDoc says so). `client/` is explicitly NOT covered: that is the UI
     // half, whose copy belongs in the plugin's own dictionary.
-    'plugins/plugin-doc/src/',
     'plugins/plugin-pdf/src/',
     'plugins/plugin-ppt/src/',
-    'plugins/plugin-sheet/src/',
     // The creative domain plugin, on the same reading: its host half IS the
     // model-facing layer — production prompts, skill text, role identities and
     // single actionable failure values. Its `client/` is NOT covered and owes

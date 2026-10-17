@@ -84,22 +84,12 @@ const AUDIT = [
   },
   // ── plugin tooling: build output only ────────────────────────────────────
   {
-    match: 'plugins/plugin-doc/scripts/test.mjs',
-    count: 1,
-    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
-  },
-  {
     match: 'plugins/plugin-pdf/scripts/test.mjs',
     count: 1,
     why: "wipes the plugin's own `.test-dist` before esbuild writes it",
   },
   {
     match: 'plugins/plugin-ppt/scripts/test.mjs',
-    count: 1,
-    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
-  },
-  {
-    match: 'plugins/plugin-sheet/scripts/test.mjs',
     count: 1,
     why: "wipes the plugin's own `.test-dist` before esbuild writes it",
   },
@@ -126,8 +116,8 @@ const AUDIT = [
   },
   {
     match: 'plugins/*/tests/**',
-    count: 103,
-    why: 'plugin suites: every call removes an os.tmpdir scratch root or fixture home that test just created — no link points out of any of them (was 97: the two release-age file-level cleanups went away with the exclusion-list tests; back to 97 with the office_to_pdf e2e scratch home + workspace; 98 with the preset-migration suite, whose one call clears the mkdtemp roots its own fixtures built — it creates plain directories only, no symlink or junction; 99 with the market write-tools suite, whose one call clears a mkdtemp skills home holding plain skill directories; 102 with the market install-intent suite, whose three calls clear the mkdtemp intent, route and tool homes its own cases built — a scratch root, a fixture home and a fixture home respectively, none of them holding a link; 103 with the market build-allow route suite, whose one call clears the mkdtemp home its route harness built — a scratch home holding a profile directory and a manifest, no link in it)',
+    count: 84,
+    why: 'plugin suites: every call removes an os.tmpdir scratch root or fixture home that test just created — no link points out of any of them (was 97: the two release-age file-level cleanups went away with the exclusion-list tests; back to 97 with the office_to_pdf e2e scratch home + workspace; 98 with the preset-migration suite, whose one call clears the mkdtemp roots its own fixtures built — it creates plain directories only, no symlink or junction; 99 with the market write-tools suite, whose one call clears a mkdtemp skills home holding plain skill directories; 102 with the market install-intent suite, whose three calls clear the mkdtemp intent, route and tool homes its own cases built — a scratch root, a fixture home and a fixture home respectively, none of them holding a link; 103 with the market build-allow route suite, whose one call clears the mkdtemp home its route harness built — a scratch home holding a profile directory and a manifest, no link in it. Down to 84 when the doc and sheet suites left with their plugins)',
   },
 ]
 
