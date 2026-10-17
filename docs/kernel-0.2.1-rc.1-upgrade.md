@@ -326,6 +326,58 @@ dev 内核已按新产物重解包到 `scratch/dev-kernel-0.2.1/runtime`（`dshV
 
 ---
 
+## 8 跟进到 0.2.1-rc.2 `[实测]`
+
+rc.1 交付当天的 08:36Z，上游发布了 rc.2（`dsh-v0.2.1-rc.2`，rc.1 之后 9 个提交、456 个文件、+4921/−845）。
+跟随同一 patch 的预发布是这条线的自然结果，于是整线挪到 rc.2。
+
+### 8.1 rc.2 真正变了什么
+
+456 个文件里绝大多数是发布提交带来的版本号刷新，功能性变化只有两处，都在 web：
+
+- **新增 `@deepseek-ai/dsh-web-deepseek-api`**（base bundle 的 `web-deepseek-api` 行）：注册
+  `deepseek-search-api` 与 `deepseek-fetch-api` 两个 provider，**直连 DeepSeek 的 Search / Fetch API**
+  （文章里的 5 元 / 千次那两个接口），不再经过一次辅助模型轮次；与旧的 `deepseek-official`
+  （`web-search-deepseek`，Messages API + 原生 `web_search_20250305`）并存。
+- `dsh-web` 的 `searchProvider` / `fetchProvider` 改为 **Volatile**（每次操作读当前值），
+  所以设置页切换不需要重挂 provider；`web-search-deepseek` 的请求补了 `thinking: { type: 'disabled' }`
+  （辅助轮次的推理 token 无人消费）。
+
+`web` 行的默认值没变（仍是 `deepseek-official` / `http`），所以我方 overlay 的
+`searchProvider: dsh-app` / `fetchProvider: dsh-app-fetch` 继续有效。
+
+### 8.2 适配量：零代码
+
+| 项 | 结果 |
+|---|---|
+| spec | 19 个 manifest、393 处 `^0.2.1-rc.1` → `^0.2.1-rc.2`；根与 18 插件的 `node_modules`/lockfile 全清重装 |
+| 子代理 | `startActivation` / `SubagentActivationSpec` 未变（`packages/subagent/subagent/src` 在 rc.2 的 diff 为空） |
+| 会话槽位 / 设置页 | `ui-settings-general` / `ui-settings-models` 无改动；`check:slots` 21 条仍全 OK |
+| 压缩检查点 | `compact-checkpoint` 的写入形态未变（`checkpoint.ts:19,50`），rewind 的边界逻辑不受影响 |
+| 唯一需要动的代码 | `plugin-websearch` 认识新 provider：`deepseek-search-api` 有自己的名称，并与旧的官方 provider 一样显示计费提示（`0.2.0` → `0.2.1`） |
+
+### 8.3 门禁与产物 `[实测]`
+
+- 根 `npm run typecheck` exit 0；`npm run build` exit 0；18 个插件 `tsc --noEmit` 全部干净、build 与单测全绿。
+- 根套件 **681 / 679 pass / 2 skipped / 0 fail**。**失败过一次**：与插件的 build/test 并发运行时出现
+  654/649/3 fail（`dist/`、`lib/` 正被写），串行重跑即绿；记为偶发，不是回归。
+- `check:graph`（`18 plugins, followed line ^0.2.1-rc.2`）、`check:slots`（21）、`check:suites:gate` 全过。
+- 产物：`runtime-dist/dsh-runtime-win32-x64-0.2.1-rc.2.tgz`，111.8 MB / 20949 文件，
+  `manifest.suiteVersion` = `b977c4b7`；配套 `office-payload-win32-x64-0.2.1-rc.2.tgz`。
+- `npm run verify -- --tgz …` → `smoke: all checks passed`；`check:plugins --kernel … --home scratch/e2e-home`
+  → 通过，就绪 5.0s。**§7 里 rewind 那轮挂起的产物闸门由此闭合**（新产物含 `plugin-rewind@0.1.5`）。
+- dev 内核已按 rc.2 产物重解包到 `scratch/dev-kernel-0.2.1/runtime`。
+
+### 8.4 仍未做
+
+- 真机压缩会话（`docs/plans/rewind-undo-parity.md` 第 10 条）仍未跑；现在 dev 的内核与套件都是 rc.2 / 最新版，
+  可以直接验：`/compact` 后 `/rewind` 应说“已压缩、没有可撤回的消息”，再发一条后应说“列表止于压缩边界”。
+- 用户机器上的 home 层把 `web-search-deepseek` 写着 `disabled: true`（2026-09 的取舍）；这一轮按用户要求改成
+  `disabled: false`，并把 profile 的 `searchProvider` 指向新的 `deepseek-search-api`。那是**机器本地配置**，
+  不在仓库里，记在这里以便下次排查“官方搜索为什么不可用”。
+
+---
+
 ## 相关文档
 
 | 文档 | 用途 |
