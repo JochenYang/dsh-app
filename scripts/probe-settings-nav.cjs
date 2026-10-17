@@ -17,7 +17,7 @@
 // launcher instead: DSH_APP_DEV_RUNTIME=<dir containing node_modules/@deepseek-ai/dsh>
 // (see scratch/dsh-kernel-stub/package.json for the shape of one).
 const { app, BrowserWindow, session } = require('electron')
-const { spawn } = require('node:child_process')
+const { spawn, spawnSync } = require('node:child_process')
 const { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, symlinkSync } = require('node:fs')
 const fs = require('node:fs')
 const net = require('node:net')
@@ -53,6 +53,58 @@ const record = (name, ok, detail) => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * The `dsh web` child this run booted, and whether its tree has been taken down.
+ *
+ * The probe's own `finally` is not enough, and that is measured, not assumed:
+ * this process is killed by a timeout, a closed terminal, a Ctrl-C or a
+ * `taskkill /F` without ever reaching a `finally`, and the kernel it spawned
+ * then runs on for ever. Four such kernels (171–397 MB each) were still alive
+ * after a round of interrupted runs. Even a GREEN run leaked one, because the
+ * `taskkill` in the `finally` is asynchronous and `app.exit()` is immediate —
+ * the kill lost the race and the probe process was gone before it ran. So: one
+ * synchronous, idempotent teardown, reachable from the `finally` AND from every
+ * process-level hook Node gives us.
+ */
+let kernelChild = null
+let kernelTreeKilled = false
+/**
+ * The registry's untrack handle, installed by `main` once the loader resolves
+ * it. A holder rather than a direct import because this is a CommonJS file and
+ * the registry is ESM.
+ */
+let trackOwnKernel = null
+/** The untrack handle for THIS probe's kernel, set right after it is spawned. */
+let ownKernelTracked = null
+
+/**
+ * Take down the kernel child's whole process tree, once.
+ *
+ * `taskkill /T` rather than `child.kill()`: the spawn goes through a shell
+ * (`shell: true`), so the child IS `cmd.exe` and killing it alone would leave
+ * `pnpm` and the kernel it started behind.
+ */
+function killKernelTree() {
+  if (kernelTreeKilled) return
+  kernelTreeKilled = true
+  // Drop this probe's registry entry first: a kernel already taken down here
+  // must not be reaped again by the next run.
+  try { ownKernelTracked?.() } catch { /* best effort */ }
+  if (kernelChild === null) return
+  try {
+    if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(kernelChild.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    else kernelChild.kill()
+  } catch { /* already gone */ }
+}
+
+process.on('exit', killKernelTree)
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    killKernelTree()
+    process.exit(1)
+  })
+}
+
+/**
  * Scratch directories this run created under the system temp, removed on the
  * way out. Without it every run left a scratch DSH_HOME and its links behind —
  * this machine had accumulated thousands of these directories (measured
@@ -67,6 +119,10 @@ const scratch = []
 
 /** Remove the scratch directories, best effort — a locked file must not fail the probe. */
 async function cleanup() {
+  // `PROBE_KEEP_LOGS=1` keeps everything: a failed provider switch or a boot
+  // error lives in the kernel log inside these directories, and the probe
+  // deletes them before anyone can read it.
+  if (process.env.PROBE_KEEP_LOGS === '1') return
   const { removeTree } = await import('./lib/remove-tree.mjs')
   for (const dir of scratch) {
     try { await removeTree(dir) } catch { /* best effort */ }
@@ -78,6 +134,9 @@ const WATCHDOG_MS = Number(process.env.PROBE_WATCHDOG_MS ?? 240_000)
 const watchdog = setTimeout(() => {
   console.error(`probe watchdog fired after ${WATCHDOG_MS} ms — treating as FAIL`)
   lines.push('FAIL watchdog timeout')
+  // The kernel first and synchronously: this path exits without passing through
+  // the caller's `finally`, so a kill left to that chain would never run.
+  killKernelTree()
   void cleanup().finally(() => app.exit(1))
 }, WATCHDOG_MS)
 watchdog.unref?.()
@@ -290,6 +349,14 @@ async function shot(page, name) {
 }
 
 async function main() {
+  // Whatever an earlier, killed run left behind goes first: a probe stopped by
+  // `taskkill /F` or a closed terminal runs no handler, so its kernel is only
+  // ever reaped here. See scripts/lib/probe-kernel-registry.mjs.
+  const { reapStaleKernels, trackKernel } = await import('./lib/probe-kernel-registry.mjs')
+  const reaped = reapStaleKernels()
+  if (reaped > 0) console.log(`reaped ${String(reaped)} kernel tree(s) an interrupted run left behind`)
+  trackOwnKernel = trackKernel
+
   const dshHome = mkdtempSync(path.join(os.tmpdir(), 'dsh-nav-probe-home-'))
   const logDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-nav-probe-log-'))
   // Registered before the links are made, in the order cleanup removes them.
@@ -343,6 +410,8 @@ async function main() {
       windowsHide: true,
     },
   )
+  kernelChild = child
+  if (trackOwnKernel !== null) ownKernelTracked = trackOwnKernel(child.pid)
 
   try {
     const settled = await waitForSettledUrl(logPath, 180_000)
@@ -449,12 +518,17 @@ async function main() {
     record('用量统计 is its own rail row, in the data band above the session block',
       usageRow !== -1 && memoryRow !== -1 && usageRow < memoryRow,
       `usage=${String(usageRow)} memory=${String(memoryRow)} rows=${JSON.stringify(nav.rows.map((row) => row.label))}`)
-    // Upkeep closes the suite's rows: it used to sit at 22, BETWEEN two data
-    // views, which made the rail read "data → system → data".
-    record('维护设置 is the last suite row, after the session pair',
-      maintenanceRow !== -1 && archivesRow !== -1 && maintenanceRow > archivesRow
-      && maintenanceRow === nav.rows.length - 1,
-      `maintenance=${String(maintenanceRow)} archives=${String(archivesRow)} total=${String(nav.rows.length)} rows=${JSON.stringify(nav.rows.map((row) => row.label))}`)
+    // Upkeep closes the suite's SETTINGS rows: it used to sit at 22, BETWEEN two
+    // data views, which made the rail read "data → system → data". It is not the
+    // final row — 关于 DSH-APP / About DSH-APP sits after it (the documented
+    // order table in docs/desktop-optimization-plan.md §3.1, 24 then 26), and
+    // that row closes the rail.
+    const aboutRow = nav.rows.findIndex((row) => /^(?:About DSH-APP|关于 DSH-APP)$/u.test(row.label))
+    record('维护设置 sits after the session pair and immediately before the About row that closes the rail',
+      maintenanceRow !== -1 && archivesRow !== -1 && aboutRow !== -1
+      && maintenanceRow > archivesRow && maintenanceRow === aboutRow - 1
+      && aboutRow === nav.rows.length - 1,
+      `maintenance=${String(maintenanceRow)} archives=${String(archivesRow)} about=${String(aboutRow)} total=${String(nav.rows.length)} rows=${JSON.stringify(nav.rows.map((row) => row.label))}`)
 
     // The interesting case is a SMALL window: the panel follows the viewport
     // (min(800, 100vh - 48)), so the rail is where the rows get cut.
@@ -603,15 +677,31 @@ async function main() {
         }
 
         // The Web search pane's provider cards. The Han sweep above cannot see
-        // this half: a provider id with no dictionary entry — or a billing
+        // this half: a provider id with no dictionary entry — or a price
         // sentence keyed to the wrong id — still renders clean English, so "no
         // Han" says nothing about it. After kernel 0.2.1-rc.2 added
-        // `deepseek-search-api`, the card existed and its label/billing mapping
+        // `deepseek-search-api`, the card existed and its label/price mapping
         // had no assertion anywhere.
+        //
+        // The two DeepSeek routes are NOT one product twice: `deepseek-official`
+        // spends a model call per search (token-billed, no date), while
+        // `deepseek-search-api` calls the search endpoint (free until
+        // 2026-11-01, then a per-call price). A shared sentence shipped once and
+        // told users the model route was free until November.
         if (/web ?search|网络搜索/i.test(SECTION)) {
           const expect = LANG === 'zh-CN'
-            ? { api: 'DeepSeek 官方（Search API）', billing: '起按 5 元 / 千次计费' }
-            : { api: 'DeepSeek official (Search API)', billing: 'then billed at CNY 5 per 1000 calls' }
+            ? {
+                api: 'DeepSeek 官方（Search API）',
+                model: 'DeepSeek 官方（模型检索）',
+                apiPrice: '起按 5 元 / 千次计费',
+                modelPrice: '没有按次单价',
+              }
+            : {
+                api: 'DeepSeek official (Search API)',
+                model: 'DeepSeek official (model retrieval)',
+                apiPrice: 'billed at CNY 5 per 1000 calls',
+                modelPrice: 'no per-call price',
+              }
           const cards = await win.webContents.executeJavaScript(
             `[...document.querySelectorAll('.dshWs-providerCard')].map((el) => el.textContent)`)
           record('the Web search pane lists the brand chain and both official providers',
@@ -619,9 +709,37 @@ async function main() {
           const apiCard = cards.find((text) => text.includes(expect.api))
           record('the Search API provider renders its own localized label, not a raw id',
             apiCard !== undefined, apiCard ?? '(no card carries the label)')
-          const billed = cards.filter((text) => text.includes(expect.billing))
-          record('every billed DeepSeek card states the 2026-11-01 price',
-            billed.length >= 2, `${billed.length} cards carry the sentence`)
+          const modelCard = cards.find((text) => text.includes(expect.model))
+          record('the model-retrieval route has its own label, so the pair is not two identical cards',
+            modelCard !== undefined, modelCard ?? '(no card carries the label)')
+          const dated = cards.filter((text) => text.includes(expect.apiPrice))
+          record('exactly one card states the 2026-11-01 Search API price',
+            dated.length === 1, `${dated.length} cards carry the sentence`)
+          record('the only dated card is the Search API one, not the model route',
+            (apiCard ?? '').includes(expect.apiPrice) && !(modelCard ?? '').includes(expect.apiPrice),
+            apiCard ?? '(no card)')
+          record('the model route states its own token billing instead',
+            (modelCard ?? '').includes(expect.modelPrice), modelCard ?? '(no card)')
+          // The card list and the "in use" mark must agree. When the seam
+          // resolves to an id the pane does not render, NO card is marked —
+          // which is what the reader saw while the kernel's registry held a
+          // provider this page never listed.
+          const selected = await win.webContents.executeJavaScript(
+            `[...document.querySelectorAll('.dshWs-providerCard')].filter((el) => el.getAttribute('aria-current') === 'true').length`)
+          record('exactly one provider card is marked as the one in use',
+            selected === 1, `${selected} marked`)
+          // The page must not offer a switch it cannot honour: the source is
+          // fixed by the `web` row the desktop suite writes into the profile on
+          // every start, and the kernel's config editor refuses to edit a row a
+          // `--patch` overlay owns. What the reader gets instead is that fact,
+          // said on the page.
+          const owned = LANG === 'zh-CN'
+            ? '搜索来源由桌面套件每次启动写入 profile 的 web 行决定'
+            : 'the `web` row the desktop suite writes into this profile'
+          const hint = await win.webContents.executeJavaScript(
+            `document.querySelector('.dshWs-providerRow')?.parentElement?.querySelector('.dshWs-hint')?.textContent ?? ''`)
+          record('the pane says where the search source is decided',
+            hint.includes(owned), hint.slice(0, 200))
         }
 
         // Our own composition-check card. This is the half the Han sweep CANNOT
@@ -650,38 +768,41 @@ async function main() {
             rows: card.querySelectorAll('.dshDiag-checkItem').length,
           }
         })()`
-        const checkBefore = await win.webContents.executeJavaScript(READ_CHECK)
-        record('the composition-check card renders, idle, before anything is run',
-          checkBefore.badge !== null && /未运行|Not run/.test(checkBefore.badge) && checkBefore.button !== null,
-          JSON.stringify(checkBefore))
-        const checkStarted = await win.webContents.executeJavaScript(`(function () {
-          const card = [...document.querySelectorAll('.dshDiag-card')]
-            .find((el) => /Static composition check|组合静态检查/.test(el.textContent))
-          if (card === undefined) return false
-          const button = [...card.querySelectorAll('button')].find((b) => /^(?:Run check|运行检查)$/.test(b.textContent.trim()))
-          if (button === undefined) return false
-          button.click()
-          return true
-        })()`)
-        const checkSeen = []
-        for (let i = 0; i < 120; i += 1) {
-          const now = await win.webContents.executeJavaScript(READ_CHECK)
-          if (now.badge !== null && checkSeen[checkSeen.length - 1] !== now.badge) checkSeen.push(now.badge)
-          if (checkSeen.some((text) => /检查中|Checking/.test(text)) && !/检查中|Checking/.test(checkSeen[checkSeen.length - 1] ?? '')) break
-          await sleep(500)
+        const isMaintenance = /diagnostic|诊断|maintenance|维护/i.test(SECTION)
+        if (isMaintenance) {
+          const checkBefore = await win.webContents.executeJavaScript(READ_CHECK)
+          record('the composition-check card renders, idle, before anything is run',
+            checkBefore.badge !== null && /未运行|Not run/.test(checkBefore.badge) && checkBefore.button !== null,
+            JSON.stringify(checkBefore))
+          const checkStarted = await win.webContents.executeJavaScript(`(function () {
+            const card = [...document.querySelectorAll('.dshDiag-card')]
+              .find((el) => /Static composition check|组合静态检查/.test(el.textContent))
+            if (card === undefined) return false
+            const button = [...card.querySelectorAll('button')].find((b) => /^(?:Run check|运行检查)$/.test(b.textContent.trim()))
+            if (button === undefined) return false
+            button.click()
+            return true
+          })()`)
+          const checkSeen = []
+          for (let i = 0; i < 120; i += 1) {
+            const now = await win.webContents.executeJavaScript(READ_CHECK)
+            if (now.badge !== null && checkSeen[checkSeen.length - 1] !== now.badge) checkSeen.push(now.badge)
+            if (checkSeen.some((text) => /检查中|Checking/.test(text)) && !/检查中|Checking/.test(checkSeen[checkSeen.length - 1] ?? '')) break
+            await sleep(500)
+          }
+          const checkAfter = await win.webContents.executeJavaScript(READ_CHECK)
+          console.log(`\n--- 组合静态检查 (${LANG}) ---`)
+          console.log(`  badge  : ${JSON.stringify(checkAfter.badge)}`)
+          console.log(`  seen   : ${JSON.stringify(checkSeen)}`)
+          console.log(`  summary: ${JSON.stringify(checkAfter.summary)}`)
+          console.log(`  rows   : ${checkAfter.rows}`)
+          console.log('  note   : the happy path needs the app origin (dsh-app://app/); this window is on the kernel URL')
+          record('running the composition check moves the verdict off idle — the click is never a no-op',
+            checkStarted === true
+              && checkSeen.length >= 2
+              && !/未运行|Not run/.test(checkSeen[checkSeen.length - 1] ?? ''),
+            JSON.stringify(checkSeen))
         }
-        const checkAfter = await win.webContents.executeJavaScript(READ_CHECK)
-        console.log(`\n--- 组合静态检查 (${LANG}) ---`)
-        console.log(`  badge  : ${JSON.stringify(checkAfter.badge)}`)
-        console.log(`  seen   : ${JSON.stringify(checkSeen)}`)
-        console.log(`  summary: ${JSON.stringify(checkAfter.summary)}`)
-        console.log(`  rows   : ${checkAfter.rows}`)
-        console.log('  note   : the happy path needs the app origin (dsh-app://app/); this window is on the kernel URL')
-        record('running the composition check moves the verdict off idle — the click is never a no-op',
-          checkStarted === true
-            && checkSeen.length >= 2
-            && !/未运行|Not run/.test(checkSeen[checkSeen.length - 1] ?? ''),
-          JSON.stringify(checkSeen))
       }
     }
   } finally {
