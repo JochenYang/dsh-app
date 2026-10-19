@@ -6,8 +6,13 @@
  * conventional discovery location — written at plugin mount. The write is
  * content-compared and skipped when unchanged, so repeated boots never touch
  * the file. The previous generation installed a differently-named skill
- * describing the retired ppt_write workflow; that directory is removed once
- * at mount so the two cannot both be discoverable. Failures log and degrade
+ * describing the retired `ppt_write`/`ppt_check`/`ppt_render` pipeline; that
+ * directory is retired at mount so the two cannot both be discoverable. Its text
+ * is what identifies it: the old body is not preserved anywhere in the tree, so
+ * the markers below are INFERRED from this module's own record of that workflow
+ * and from the naming the successor `pptd_*` tools replaced. An inference that
+ * is wrong under-deletes — the directory survives, with a `kept` line in the
+ * start log — which costs a delay instead of data. Failures log and degrade
  * instead of failing the mount.
  *
  * @module @dsh-app/plugin-ppt/skill
@@ -18,8 +23,51 @@ import { join } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 
 export const SKILL_NAME = 'dsh-ppt'
-/** The retired skill directory removed at mount (one-line cleanup). */
+/**
+ * This suite's first-generation skill directory.
+ *
+ * Kept as an export because tests and the module header name it; the retirement
+ * roster below carries it like any other entry, judged by its text.
+ */
 export const LEGACY_SKILL_NAME = 'dsh-app-ppt'
+
+/** What one retirement pass did: what it removed, and what it left alone. */
+export interface RetireReport {
+  /** Directories actually removed, by name. */
+  readonly removed: readonly string[]
+  /**
+   * Directories deliberately kept, with the reason. Reported rather than
+   * silently dropped: a dead skill that survives is the failure this whole
+   * mechanism exists to prevent, and it is invisible without this list.
+   */
+  readonly skipped: readonly { readonly name: string, readonly reason: string }[]
+}
+
+/**
+ * Skill directories this suite used to install and no longer does, with the
+ * tools whose absence proves a directory is ours and dead.
+ *
+ * `dsh-word` / `dsh-sheet` came from `plugin-doc` / `plugin-sheet`, removed with
+ * the move to the kernel's own Office skills. Nothing deletes a skill directory
+ * when its plugin disappears, so an install that carried them keeps a SKILL.md
+ * whose workflow opens with `doc_write` — a tool that exists nowhere — and a
+ * model following it fails at step one.
+ *
+ * The marker list is why this is a CONTENT check and not a blind `rm`.
+ * `dsh-word` is also a legal market slug (`plugin-market/src/skills.ts`
+ * `parseSkillSlug`), so a user can install somebody else's `dsh-word` from
+ * SkillHub into the same `$DSH_HOME/skills/dsh-word`. Deleting by name alone
+ * would erase that user's skill on every start, silently and for ever. Only a
+ * directory whose own text names a tool that no longer exists is ours to retire.
+ */
+export const RETIRED_SKILLS: readonly { name: string, markers: readonly string[] }[] = [
+  { name: 'dsh-word', markers: ['doc_write', 'doc_check', 'doc_render'] },
+  { name: 'dsh-sheet', markers: ['sheet_write', 'sheet_check', 'sheet_render'] },
+  // This suite's own first-generation name, judged by its text like the others:
+  // `dsh-app-ppt` is a legal market slug too, so the name alone proves nothing.
+  // The markers are inferred, not measured — see this module's header.
+  { name: LEGACY_SKILL_NAME, markers: ['ppt_write', 'ppt_check', 'ppt_render'] },
+]
 
 /** The skill body (Chinese, per the product's user-facing language). */
 export const SKILL_MARKDOWN = `---
@@ -31,7 +79,7 @@ description: 编写本地 PPTD 工程并输出可编辑 PPTX 演示文稿。当�
 
 > **与内核自带技能的分工**：内核随包提供 \`office-pptx\`（以及 \`office-docx\` / \`office-xlsx\`），
 > 用于**检查和修改已有的** OOXML 文件；本技能用于**从 PPTD 工程产出新的**可编辑 .pptx
-> （\`ppt_write\` → \`ppt_check\` → \`ppt_render\`）。手边是要改的演示文稿时用内核技能，
+> （\`pptd_write_file\` → \`pptd_check\` → \`pptd_render\`）。手边是要改的演示文稿时用内核技能，
 > 要从头做一份时用本技能。
 
 本 Skill 由用户选中的 PPT 模式启用，也适用于用户直接提出的 PPT / 演示文稿请求（未选模板时 theme 缺省用 paper 主题，同样保证版式质量，见下）。目标：为用户产出**可编辑**的 .pptx 与完整 PPTD 工程。所有文字都必须落在文本元素里，参考页不是输出背景，禁止用整页截图或图片代替文字、图表。
@@ -202,11 +250,63 @@ export function skillFilePath(dshHome: string): string {
 }
 
 /**
- * Install (or refresh) the skill file and remove the retired skill
- * directory. Content-compared: unchanged boots do not rewrite. Returns what
- * happened, for the boot log.
+ * Retire the skill directories this suite used to install.
+ *
+ * **Every directory is judged by its TEXT, never by its name.** Skill slugs are
+ * shared with the plugin market (`plugin-market/src/skills.ts` `parseSkillSlug`),
+ * so `dsh-word` — and `dsh-app-ppt` too — are legal names a user can install
+ * somebody else's skill under. A directory is ours to delete only when its own
+ * `SKILL.md` names a tool that exists nowhere any more (`doc_write`,
+ * `sheet_check`, `ppt_write`, …); a same-named skill that does not is left alone.
+ *
+ * The judgement is conservative in the direction that costs less: an unreadable
+ * or absent `SKILL.md` is left alone rather than guessed at, and a removal that
+ * throws is reported rather than retried. Removing a dead skill late is a delay;
+ * removing a live one is data loss.
+ *
+ * @param dshHome - the harness home whose `skills/` tree is inspected.
+ * @returns what happened: the directories removed, and those deliberately left.
  */
-export async function installSkill(dshHome: string): Promise<'installed' | 'unchanged'> {
+export async function retireSkills(dshHome: string): Promise<RetireReport> {
+  const removed: string[] = []
+  const skipped: { name: string, reason: string }[] = []
+  for (const { name, markers } of RETIRED_SKILLS) {
+    const dir = join(dshHome, 'skills', name)
+    let body: string
+    try {
+      body = await readFile(join(dir, 'SKILL.md'), 'utf8')
+    } catch (error) {
+      // Absent is the ordinary case and needs no report. Unreadable is not:
+      // a dead skill nobody can read would otherwise survive in silence.
+      const code = (error as { code?: unknown }).code
+      if (code !== 'ENOENT') skipped.push({ name, reason: `SKILL.md could not be read (${String(code ?? 'unknown')})` })
+      continue
+    }
+    if (!markers.some(marker => body.includes(marker))) {
+      skipped.push({ name, reason: 'its text names no retired tool, so it is not this suite\'s to delete' })
+      continue
+    }
+    try {
+      await rm(dir, { recursive: true, force: true })
+      removed.push(name)
+    } catch (error) {
+      skipped.push({ name, reason: `not removed (${error instanceof Error ? error.message : String(error)})` })
+    }
+  }
+  return { removed, skipped }
+}
+
+/**
+ * Install (or refresh) the skill file, then retire what this suite no longer
+ * ships. Content-compared: unchanged boots do not rewrite. Returns what
+ * happened, for the boot log.
+ *
+ * @param dshHome - the harness home the skill lands under.
+ * @returns whether the file changed, and which directories were retired.
+ */
+export async function installSkill(
+  dshHome: string,
+): Promise<{ readonly change: 'installed' | 'unchanged', readonly retired: RetireReport }> {
   const file = skillFilePath(dshHome)
   let current: string | undefined
   try {
@@ -219,7 +319,6 @@ export async function installSkill(dshHome: string): Promise<'installed' | 'unch
     // mkdir is implied by writeFileAtomic's parent creation.
     await writeFileAtomic(file, SKILL_MARKDOWN, { mode: 0o644 })
   }
-  // The retired skill must not linger beside the new one; best-effort.
-  await rm(join(dshHome, 'skills', LEGACY_SKILL_NAME), { recursive: true, force: true }).catch(() => undefined)
-  return changed ? 'installed' : 'unchanged'
+  const retired = await retireSkills(dshHome)
+  return { change: changed ? 'installed' : 'unchanged', retired }
 }

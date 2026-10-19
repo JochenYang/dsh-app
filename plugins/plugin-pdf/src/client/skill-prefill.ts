@@ -29,8 +29,16 @@ import type { ReferenceDispatch } from './skill-reference.ts'
 /** The skill this plugin installs; mirrors `SKILL_NAME` in src/skill.ts. */
 export const PREFILL_SKILL = SKILL_NAME
 
-/** The office chip tokens sharing the draft namespace, as clipboard text. */
-export const OFFICE_CHIP_TOKENS: readonly string[] = ['/dsh-ppt', '/dsh-word', '/dsh-sheet', '/dsh-pdf']
+/**
+ * The office chip tokens sharing the draft namespace, as clipboard text.
+ *
+ * Two entries, matching the two skills this suite still installs. `dsh-word`
+ * and `dsh-sheet` were here and are deliberately gone: those plugins were
+ * removed, so no `/dsh-word` reference can resolve to a skill body any more. A
+ * stale draft may still carry the literal text, so the pattern below keeps
+ * matching them — the cleanup has to be able to remove a token nobody names.
+ */
+export const OFFICE_CHIP_TOKENS: readonly string[] = ['/dsh-ppt', '/dsh-pdf']
 
 /** Chip token plus the single trailing separator the insertion appends. */
 const OFFICE_CHIP_PATTERN = /\/dsh-(?:ppt|word|sheet|pdf)(?![A-Za-z0-9_-])[ \t]*/g

@@ -553,8 +553,13 @@ export function apply(ctx: Context): void {
     // Fire-and-forget: the skill file outlives this fiber, so the effect owns
     // no unmount work — only the boot log entry.
     void installSkill(resolveDshHome()).then(
-      (result) => {
-        if (result === 'installed') log.info(`ppt skill installed: ${SKILL_NAME}`)
+      ({ change, retired }) => {
+        if (change === 'installed') log.info(`ppt skill installed: ${SKILL_NAME}`)
+        // A retired directory is a user-visible removal (a dead skill stops
+        // being offered), so it is reported. So is a directory that was KEPT:
+        // a dead skill that survives is invisible without that line.
+        if (retired.removed.length > 0) log.info(`retired skill director${retired.removed.length === 1 ? 'y' : 'ies'}: ${retired.removed.join(', ')}`)
+        for (const { name, reason } of retired.skipped) log.info(`kept skill directory "${name}": ${reason}`)
       },
       (cause: unknown) => {
         log.warn(`ppt skill install failed: ${messageOf(cause)}`)

@@ -288,7 +288,7 @@ test('skill reference: the built client artifact carries the source and no chip 
 })
 
 test('chip cleanup: the office token regex removes head, mid-text, trailing and coexisting tokens', () => {
-  assert.deepEqual(OFFICE_CHIP_TOKENS, ['/dsh-ppt', '/dsh-word', '/dsh-sheet', '/dsh-pdf'])
+  assert.deepEqual(OFFICE_CHIP_TOKENS, ['/dsh-ppt', '/dsh-pdf'])
   const strip = (text: string): string => stripOfficeTokens(text).text
 
   assert.equal(strip('/dsh-pdf '), '')
@@ -300,6 +300,17 @@ test('chip cleanup: the office token regex removes head, mid-text, trailing and 
   assert.equal(strip('材料原文'), '材料原文')
   assert.equal(strip('/dsh-pdfX '), '/dsh-pdfX ')
   assert.equal(strip('比值 1/2'), '比值 1/2')
+})
+
+test('chip cleanup: a token nobody names any more is still removable', () => {
+  // `dsh-word` / `dsh-sheet` left OFFICE_CHIP_TOKENS with their plugins, but a
+  // draft saved back then still holds the literal text. Switching capsules must
+  // clear it, or the stale reference rides into the next request.
+  const strip = (text: string): string => stripOfficeTokens(text).text
+  assert.equal(strip('/dsh-word 材料'), '材料')
+  assert.equal(strip('材料 /dsh-sheet 继续'), '材料 继续')
+  assert.ok(!OFFICE_CHIP_TOKENS.includes('/dsh-word'))
+  assert.ok(!OFFICE_CHIP_TOKENS.includes('/dsh-sheet'))
 })
 
 test('chip cleanup: stripSkillToken removes only the named token', () => {

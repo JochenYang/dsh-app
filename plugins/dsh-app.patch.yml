@@ -43,25 +43,26 @@
 #   the plugin dynamically mounts one @deepseek-ai/dsh-mcp-client instance
 #   per enabled server, so their tools register as mcp__<server>__<tool>.
 #   Mount failures degrade to per-server status and never fail the boot.
-# - ppt: editable PPTX generation — ppt_write/ppt_check/ppt_render tools over
-#   a validated JSON deck format, a guiding skill installed into
-#   $DSH_HOME/skills/dsh-app-ppt (content-compared, idempotent), and a
+# - ppt: editable PPTX generation — pptd_write_file / pptd_check / pptd_render
+#   tools over a validated PPTD project format, a guiding skill installed into
+#   $DSH_HOME/skills/dsh-ppt (content-compared, idempotent), and a
 #   composer "PPT" button that seeds the input draft. Render failures are
-#   per-element and never fail the boot.
+#   per-element and never fail the boot. The mount also retires the skill
+#   directories of the removed Word/Excel plugins (their text names tools that
+#   no longer exist), judged by the body so a same-named market skill survives.
 # - market: plugin marketplace — a sidebar footer entry opens a drawer panel
 #   over user-configurable catalog sources (https-only, size-capped); install
 #   and uninstall delegate to the kernel CLI's plugin command with
 #   registry-only version validation, serialized in-process to keep the
 #   profile manifest consistent. CLI failures surface as panel errors and
 #   never fail the boot.
-# - doc: Word document mode — doc_write/doc_check/doc_render tools over a
-#   validated JSON document project, rendered through the docx library to an
-#   editable .docx. Word capsule in the shared office bar; render is gated on
-#   a clean check and failures never fail the boot.
-# - sheet: Excel workbook mode — sheet_write/sheet_check/sheet_render tools
-#   over a validated JSON workbook project, rendered through the exceljs
-#   library to an editable .xlsx (styles, number formats, formulas). Excel
-#   capsule in the shared office bar; render is gated on a clean check.
+# - doc / sheet: REMOVED (2026-10). Word and Excel generation moved to the
+#   kernel's own Office skills (`office-docx` / `office-xlsx`), so `plugin-doc`
+#   and `plugin-sheet` — and their `doc_*` / `sheet_*` tools — are gone. Two
+#   leftovers outlive them and are handled elsewhere: `plugin-ppt`'s mount
+#   retires the `dsh-word` / `dsh-sheet` skill directories they installed
+#   (see `RETIRED_SKILLS`), and the capsules' mutual-exclusion list dropped the
+#   two tokens while the cleanup pattern still recognises them.
 # - pdf: PDF mode — pdf_read extracts text/metadata from workspace PDFs as
 #   agent material; pdf_write/pdf_check/pdf_render build a paginated PDF
 #   (check-gated export) with an embedded CJK font subset. PDF capsule in the

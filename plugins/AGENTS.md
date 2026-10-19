@@ -133,6 +133,26 @@ never a silent agreement it did not check: a reader that read four copies would
 otherwise report agreement it never verified, and a row the gate cannot read is
 red instead of counting as absent.
 
+**Removing a plugin also retires the skill it installed.** The five roster copies
+say nothing about `$DSH_HOME/skills/`: a skill directory outlives the plugin that
+wrote it, so a removed plugin leaves a `SKILL.md` whose workflow opens with a tool
+that no longer exists anywhere, and a model following it fails at step one. Add the
+removed skill's name — with the dead tool names as markers — to the
+`RETIRED_SKILLS` roster in `plugins/plugin-ppt/src/skill.ts`, in the same commit
+that removes the plugin.
+
+Retirement is judged by the skill BODY, never by the name alone: skill slugs are
+shared with the plugin market (`plugin-market/src/skills.ts` `parseSkillSlug`),
+which accepts names like `dsh-word` or `dsh-app-ppt`, so the same directory can
+hold a skill the user installed from a catalog. Only a body that names one of the
+vanished tools is this suite's to delete; everything else is kept and reported with
+its reason in the start log. The converse is deliberate: a body that mentions a
+retired tool in prose will be retired too, which is why the markers are full tool
+names rather than bare words. `plugin-ppt` is the host because it is in the roster
+and mounts on every start except safe mode (where the whole suite is absent and
+neither this nor its own skill refresh runs); `plugins/plugin-pdf/src/skill.ts`
+deliberately does not duplicate the roster, so there is one owner.
+
 **Any change under `plugins/` needs a version bump in that plugin**, and the
 patch field is a SINGLE digit: a tenth change carries into the minor
 (`0.8.9` → `0.9.0`), never `0.8.10`. `suiteVersion` hashes plugin `package.json`
