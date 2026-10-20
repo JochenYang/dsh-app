@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.9] - 2026-10-20
+
+### 中文
+- 修掉推理档位提示与实际不符：气泡写着「左右方向键可切换档位」，但键盘监听只挂在细条滑块上，用户点胶囊后焦点在官方推理等级行，按方向键没有任何反应。现在两个位置共用同一张按键表，整行都能用；细条本身在行内部，所以行上的监听会跳过来自细条的事件，避免一次按键走两档。
+- 输入框打 `/` 时出现「办公」分组：四行（文档 / PDF 文档 / 演示文稿 / 电子表格）带格式图标与一行能力说明，落在内核「指令」之后、「技能」之前。点一行会落一个 chip，其提交形态就是对应技能的 `/name` 手势——菜单里显示的别名与真正可用的写法是同一个字符串，所以照菜单手打也能用。分组只插入引用、不认领回车，打字仍归内核技能源管。
+- PDF 工具新增 `pdf_edit`：改已有 PDF 的页面与元数据——保留指定页、删页（两者互斥）、旋转 90/180/270、追加其它 PDF、改标题作者主题关键词。页码从 0 开始，源文件不会被修改，结果写到新路径。它改不了页面内的文字、不做 OCR、不填表单、不签名；这些需求要如实说明做不到，不要用重排或截图冒充。
+
+### English
+- Fix a hint that promised what it did not do: the bubble beside the reasoning track said arrow keys change the level, but the listener was on the thin track alone — a user who clicked the capsule had focus on the official effort row, and the keys went nowhere. Both positions now share one key table, so the whole row works; the track sits INSIDE that row, so the row's listener skips events coming from the track and one press still moves one step.
+- Typing `/` now offers an 办公 group: four rows (documents / PDF / presentations / spreadsheets) with a format glyph and a one-line capability note, placed after the kernel's commands and before its skills. Picking a row inserts a chip whose submitted form is that skill's `/name` gesture — the dimmed alias the menu shows is the same string that works, so typing it by hand behaves identically. The group only inserts a reference and claims no Enter, so a typed token stays the kernel skill source's business.
+- PDF tools gain `pdf_edit`, which changes the PAGES and metadata of an existing PDF: keep a selection of pages, delete pages (the two are mutually exclusive), rotate by 90/180/270, append other PDFs, and set title/author/subject/keywords. Page indexes are zero-based, the source file is never modified, and the result goes to a new path. It cannot rewrite the text inside a page, does not do OCR, and does not fill forms, sign or redact — those must be reported as out of reach rather than faked with a re-layout or a screenshot.
+
 ## [v0.16.8] - 2026-10-20
 
 ### 中文
