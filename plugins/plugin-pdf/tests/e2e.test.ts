@@ -223,7 +223,7 @@ test('e2e: apply registers the PDF tools, prompt sections and mode route', async
   try {
     process.env.DSH_HOME = home
     const host = await mountHost()
-    assert.deepEqual([...host.tools.keys()].sort(), ['office_to_pdf', 'pdf_check', 'pdf_read', 'pdf_render', 'pdf_write'])
+    assert.deepEqual([...host.tools.keys()].sort(), ['office_to_pdf', 'pdf_check', 'pdf_edit', 'pdf_read', 'pdf_render', 'pdf_write'])
     const names = host.sections.map(section => section.name)
     assert.ok(names.includes('tool:pdf-entry'), 'unconditional entry rule registered')
     assert.ok(names.includes('tool:pdf-mode'), 'conditional mode section registered')
@@ -443,6 +443,120 @@ test('e2e: write, check, render and read back a real PDF', async () => {
     const wrongReadExtension = await read.execute({ file_path: 'docs/report.pdf.json' }, exec)
     assert.equal(wrongReadExtension.status, 'failed')
     assert.match(String((wrongReadExtension.issues as { message: string }[])[0]?.message), /\.pdf/u)
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    rmSync(root, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('e2e: pdf_edit really edits a workspace PDF through the tool, not just registering', async () => {
+  assert.ok(existsSync(libEntry), 'lib/index.js must be built (npm run build) before the e2e test')
+  const root = mkdtempSync(join(tmpdir(), 'pdfd-e2e-edit-'))
+  const home = mkdtempSync(join(tmpdir(), 'pdfd-e2e-edit-home-'))
+  const savedHome = process.env.DSH_HOME
+  try {
+    process.env.DSH_HOME = home
+    const host = await mountHost()
+    const edit = host.tools.get('pdf_edit')
+    const read = host.tools.get('pdf_read')
+    assert.ok(edit !== undefined && read !== undefined, 'pdf_edit must be registered')
+    const exec: FakeExec = { agent: { session: { header: { id: 'session-edit', cwd: root } } }, signal: new AbortController().signal }
+
+    // A real 4-page PDF, written by pdf-lib through the plugin's own dependency,
+    // so the source is a genuine document rather than a fake header.
+    const { PDFDocument } = await import('pdf-lib')
+    const source = await PDFDocument.create()
+    for (let index = 0; index < 4; index += 1) {
+      const page = source.addPage([200, 200])
+      page.drawText(`page-${String(index)}`, { x: 20, y: 100, size: 12 })
+    }
+    source.setTitle('original title')
+    source.setAuthor('original author')
+    writeFileSync(join(root, 'source.pdf'), await source.save())
+
+    // 1. No operation at all is refused rather than silently copying the file.
+    const noop = await edit.execute({ file_path: 'source.pdf', output_file: 'out.pdf' }, exec)
+    assert.equal(noop.status, 'failed')
+    assert.match(String((noop.issues as { message: string }[])[0]?.message), /没有给出任何编辑操作/u)
+    assert.equal(existsSync(join(root, 'out.pdf')), false)
+
+    // 2. Keep two pages, rotate one, retitle: the result is a real document.
+    const edited = await edit.execute({
+      file_path: 'source.pdf',
+      output_file: 'edited.pdf',
+      keep_pages: [2, 3],
+      rotate_degrees: 90,
+      rotate_pages: [0],
+      title: 'edited title',
+    }, exec)
+    assert.equal(edited.status, 'ok')
+    assert.equal(edited.pageCount, 2)
+    assert.equal(edited.originalPageCount, 4)
+    assert.deepEqual(edited.removed, [0, 1])
+    assert.deepEqual(edited.rotated, [0])
+    assert.deepEqual(edited.metadataWritten, ['title'])
+    assert.match(String(edited.sha256), /^[0-9a-f]{64}$/u)
+    assert.equal(existsSync(join(root, 'edited.pdf')), true)
+
+    // The source is untouched: same page count and metadata it was written with.
+    const sourceAfter = await read.execute({ file_path: 'source.pdf' }, exec)
+    assert.equal(sourceAfter.pageCount, 4)
+    assert.equal(sourceAfter.title, 'original title')
+
+    // The result reads back with the edited page count and the new title, which
+    // is what proves the bytes on disk are the edited document.
+    const resultAfter = await read.execute({ file_path: 'edited.pdf' }, exec)
+    assert.equal(resultAfter.pageCount, 2)
+    assert.equal(resultAfter.title, 'edited title')
+
+    // 3. A merge source is appended, and its page count is reported.
+    writeFileSync(join(root, 'extra.pdf'), await (async () => {
+      const extra = await PDFDocument.create()
+      extra.addPage([200, 200])
+      return extra.save()
+    })())
+    const merged = await edit.execute({
+      file_path: 'edited.pdf',
+      output_file: 'merged.pdf',
+      merge_files: ['extra.pdf'],
+    }, exec)
+    assert.equal(merged.status, 'ok')
+    assert.equal(merged.pageCount, 3)
+    assert.deepEqual(merged.merged, [{ label: 'extra.pdf', pages: 1 }])
+
+    // 4. An out-of-range index is refused with the count, and nothing is written.
+    const outOfRange = await edit.execute({
+      file_path: 'source.pdf',
+      output_file: 'never.pdf',
+      remove_pages: [9],
+    }, exec)
+    assert.equal(outOfRange.status, 'failed')
+    assert.match(String((outOfRange.issues as { message: string }[])[0]?.message), /超出范围/u)
+    assert.equal(existsSync(join(root, 'never.pdf')), false)
+
+    // 5. A merge source that does not exist is refused BEFORE any edit: the
+    //    path is syntactically valid, so this reaches the existence check rather
+    //    than the lexical escape check — a mutation that skipped that check
+    //    would otherwise pass unnoticed.
+    const missingMerge = await edit.execute({
+      file_path: 'source.pdf',
+      output_file: 'missing-merge.pdf',
+      merge_files: ['docs/absent.pdf'],
+    }, exec)
+    assert.equal(missingMerge.status, 'failed')
+    assert.match(String((missingMerge.issues as { message: string }[])[0]?.message), /不存在/u)
+    assert.equal(existsSync(join(root, 'missing-merge.pdf')), false)
+
+    // 6. A merge path that escapes the workspace is refused at the syntax layer.
+    const escape = await edit.execute({
+      file_path: 'source.pdf',
+      output_file: 'escape.pdf',
+      merge_files: ['../outside.pdf'],
+    }, exec)
+    assert.equal(escape.status, 'failed')
+    assert.equal(existsSync(join(root, 'escape.pdf')), false)
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome

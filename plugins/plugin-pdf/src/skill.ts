@@ -25,14 +25,17 @@ description: 读取工作区 PDF 作为材料，或编写结构化 JSON 工程�
 # PDF 工作流（${SKILL_NAME}）
 
 > **与内核自带技能的分工**：内核随包提供 \`office-docx\` / \`office-pptx\` / \`office-xlsx\`，
-> 用于**检查和修改已有的** OOXML 文件；本技能管的是 PDF——读它（\`pdf_read\`）、从 JSON 工程
-> 产出它（\`pdf_render\`）、或把已有的 Office 文档转成它（\`office_to_pdf\`）。
+> 用于**检查和修改已有的** OOXML 文件；本技能管的是 PDF——读它（\`pdf_read\`）、改它的页面与
+> 元数据（\`pdf_edit\`）、从 JSON 工程产出它（\`pdf_render\`）、或把已有的 Office 文档转成它
+> （\`office_to_pdf\`）。
 > 只是想**看一眼**某个 .docx/.xlsx 的内容时不需要转换：侧栏已能原生预览 Office 与表格文件；
-> 转换的用途是产出 PDF 本身。
+> 转换的用途是产出 PDF 本身。要改的是 .docx/.xlsx/.pptx **里面**的内容时，用对应的内核技能，
+> 本技能改不了它们的正文（\`pdf_edit\` 只动 PDF 的页面与元数据）。
 
-三条腿，按任务选择：
+四条腿，按任务选择：
 
 - **读取**：把已有 PDF 当材料——\`pdf_read\` 读取工作区内 \`.pdf\`，返回页数、每页文本与标题/作者。
+- **编辑**：改已有 PDF 的**页面与元数据**——\`pdf_edit\`（入参 \`file_path\` 与新的 \`output_file\`）。可保留指定页（\`keep_pages\`）、删除页（\`remove_pages\`，两者互斥）、旋转（\`rotate_degrees\` 90/180/270 + 可选 \`rotate_pages\`）、追加其它 PDF（\`merge_files\`）、改标题/作者/主题/关键词。页码**从 0 开始**；\`rotate_pages\` 按编辑后的结果页序计数。源文件不会被修改，结果写到新的 \`output_file\`。它改不了页面内的文字、不做 OCR、不填表单、不签名、不脱敏、不解密——这些需求要如实说明做不到，不要用重排或截图冒充。
 - **转换**：把已有的 Office 文档（\`.doc\`/\`.docx\`/\`.xls\`/\`.xlsx\`/\`.ppt\`/\`.pptx\`）原样转成 PDF——\`office_to_pdf\`（入参 \`file_path\` 与新的 \`output_file\`）。转换由本应用自带的 LibreOffice 引擎完成，用户机器不需要装 Office 或 WPS；页数、页面尺寸、配色与图表保留，文字仍可选。返回的 \`missingFonts\` 是文档声明但本机没有的字体族——出现时排版可能与原稿不同，要如实告知用户。不要改用 PowerShell/COM 驱动本机 Office 或 WPS（取决于用户装了什么、可能弹窗、结果不可复现），也不要用截图或重排冒充原样转换。
 - **生成**：编写结构化 JSON 工程（\`*.pdf.json\`）——\`pdf_write\` 写入并即时校验 → \`pdf_check\` 只读全量校验 → \`pdf_render\` 渲染出规范排版的 \`.pdf\`。
 
@@ -95,6 +98,8 @@ description: 读取工作区 PDF 作为材料，或编写结构化 JSON 工程�
 - 未知字段（拼写错误、旧字段名）一律是 error，不会静默忽略。
 - 只有表头没有数据行是 warning（不阻塞渲染），交付前应权衡处理。
 - 语言遵循用户要求；禁止用图片或截图代替正文。
+- 用 \`pdf_edit\` 改页面后要核对返回的 \`pageCount\` 与 \`removed\`/\`rotated\`/\`merged\`：页码从 0 开始、\`rotate_pages\` 按结果页序，写错会得到一个页数对但内容错的文件。
+- \`pdf_edit\` 不修改源文件，也不改页面内文字。用户要「改这句话」而文件是扫描件或需要改正文时，如实说明做不到，并给出可行路径（重新生成、或改用 Office 文档）。
 `
 
 /** Where the skill file lands under the harness home. */

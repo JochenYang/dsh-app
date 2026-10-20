@@ -145,7 +145,15 @@ that file is a browser module whose template keeps its `${…}` placeholders, so
 not CSS at all (measured: every tick 0px wide);
 `probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
 `src/main/window.ts` — **keep the two in sync** (a root test
-already diffs them); the remaining `probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` /
+already diffs them); `probe-office-menu.cjs` (`node_modules/.bin/electron`) after touching
+`plugin-ppt`'s `office-menu.ts`, its icons, the `menu.*` dictionary keys or the client entry's
+registration block — it boots a real runtime artifact with `plugin-ppt` linked from the WORKING TREE,
+types `/` into a real composer and asserts what a static check cannot see: four rows rendering with
+a glyph, their name and their description; the four rows contiguous and between the kernel's 指令 and
+技能 groups; a click landing ONE chip node whose token is `/office-docx` (so one Backspace removes it);
+the same token typed by hand still readable in the conversation; the mode capsule still toggling; and
+no error, crashed slot entry or failure line anywhere in the run; the remaining
+`probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` /
 `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` cover the surfaces
 their names say; `scripts/capture.mjs` screenshots the running UI for visual work.
 

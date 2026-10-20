@@ -51,6 +51,8 @@ import type {} from '@deepseek-ai/dsh-office-to-pdf'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { checkPdfDocument, loadPdfDocument } from './pdfd/check.ts'
+import { PdfEditRefusal, editPdf } from './pdfd/edit.ts'
+import type { PdfEditRequest } from './pdfd/edit.ts'
 import { renderPdfProject } from './pdfd/render.ts'
 import { MAX_SOURCE_BYTES, readPdfFile } from './pdfd/read.ts'
 import { formatValidation, validationReport } from './pdfd/report.ts'
@@ -97,6 +99,38 @@ const OUTCOME_OUTPUT = {
 /** Error message of an unknown cause. */
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
+}
+
+/** A JSON-array argument as strings, refusing a non-array or a non-string entry. */
+function asStrings(value: unknown, what: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${what}：必须是字符串数组`)
+  return value.map((entry, index) => {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      throw new Error(`${what}[${String(index)}]：必须是非空字符串`)
+    }
+    return entry
+  })
+}
+
+/** A JSON-array argument as numbers, refusing a non-array or a non-number entry. */
+function asNumbers(value: unknown, what: string): number[] {
+  if (!Array.isArray(value)) throw new Error(`${what}：必须是数字数组`)
+  return value.map((entry, index) => {
+    if (typeof entry !== 'number') throw new Error(`${what}[${String(index)}]：必须是数字`)
+    return entry
+  })
+}
+
+/** A JSON-array argument as a list, refusing a non-array. */
+function asList(value: unknown, what: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${what}：必须是数组`)
+  return value
+}
+
+/** Whether the caller supplied any metadata field at all. */
+function hasMetadata(record: Record<string, unknown>): boolean {
+  return record.title !== undefined || record.author !== undefined
+    || record.subject !== undefined || record.keywords !== undefined
 }
 
 /**
@@ -488,6 +522,108 @@ function registerPdfTools(ctx: Context): () => void {
         } as unknown as JsonValue
       } catch (cause) {
         return needsRevision([`渲染失败：${messageOf(cause)}；请先运行 pdf_check 并逐条修复`])
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'pdf_edit',
+    description:
+      'Edit the PAGES and metadata of an existing workspace PDF (*.pdf) — the operations a user means by "edit this '
+      + 'PDF". Page indexes are zero-based. Use keep_pages to produce a document of exactly those pages (order as '
+      + 'given), or remove_pages to delete pages; the two cannot be combined. rotate turns pages clockwise by 90/180/270 '
+      + 'and accumulates onto any rotation the source already had. merge_ files appends other workspace PDFs after the '
+      + 'edited original, in the order given. metadata sets title/author/subject/keywords and leaves every field it does '
+      + 'not name untouched. The source file is never modified: the result is written to a NEW output_file. '
+      + 'NOT supported: text rewriting inside a page, OCR, form filling, signing, redaction, encryption.',
+    parameters: {
+      file_path: { type: 'string', required: true, description: '工作区内相对路径的源 .pdf 文件（不会被修改）。' },
+      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径；已存在的同名文件会被替换。' },
+      keep_pages: { type: 'array', items: { type: 'number' }, description: '要保留的页码（从 0 开始），按给定顺序排列。与 remove_pages 互斥。' },
+      remove_pages: { type: 'array', items: { type: 'number' }, description: '要删除的页码（从 0 开始）。与 keep_pages 互斥，且不能删光所有页。' },
+      rotate_degrees: { type: 'number', description: '顺时针旋转度数，只能是 90 / 180 / 270；给出后对 rotate_pages 或全部页面生效。' },
+      rotate_pages: { type: 'array', items: { type: 'number' }, description: '要旋转的页码，按编辑后的结果页序（从 0 开始）；省略则旋转全部页。' },
+      merge_files: { type: 'array', items: { type: 'string' }, description: '要追加到末尾的其它工作区 .pdf 路径，按给定顺序。' },
+      title: { type: 'string', description: '新的文档标题；省略则保留原值。' },
+      author: { type: 'string', description: '新的作者；省略则保留原值。' },
+      subject: { type: 'string', description: '新的主题；省略则保留原值。' },
+      keywords: { type: 'array', items: { type: 'string' }, description: '新的关键词列表；省略则保留原值。' },
+    },
+    output: OUTCOME_OUTPUT,
+    async execute(args, exec: ToolRunContext): Promise<JsonValue> {
+      const record = args as Record<string, unknown>
+      const workspace = workspaceRootOf(exec)
+      if ('reason' in workspace) return readFailed([workspace.reason])
+      try {
+        const relative = pdfFileRelative(record.file_path, 'file_path')
+        // An empty request is refused FIRST: parsing the other fields would
+        // otherwise answer a confusing argument error for a call that simply
+        // asked for nothing.
+        if (record.keep_pages === undefined && record.remove_pages === undefined && record.rotate_degrees === undefined
+          && (record.merge_files === undefined || (Array.isArray(record.merge_files) && record.merge_files.length === 0))
+          && !hasMetadata(record)) {
+          return readFailed(['没有给出任何编辑操作：请至少提供 keep_pages / remove_pages / rotate_degrees / merge_files / 一个元数据字段'])
+        }
+        const absolute = await existingWorkspaceFile(workspace.root, relative, 'file_path')
+        const metadata = await lstat(absolute)
+        if (metadata.size > MAX_SOURCE_BYTES) {
+          throw new Error(`file_path：PDF 超过 ${MAX_SOURCE_BYTES / (1024 * 1024)} MB 上限（当前 ${(metadata.size / (1024 * 1024)).toFixed(1)} MB）`)
+        }
+        // Merge sources are resolved and proven BEFORE anything is edited, so a
+        // bad path cannot leave a half-applied result behind. An absent list is
+        // no merge, not a malformed one.
+        const mergeLabels: string[] = []
+        for (const [index, entry] of (record.merge_files === undefined ? [] : asList(record.merge_files, 'merge_files')).entries()) {
+          const label = pdfFileRelative(entry, `merge_files[${index}]`)
+          await existingWorkspaceFile(workspace.root, label, `merge_files[${index}]`)
+          mergeLabels.push(label)
+        }
+        const request: PdfEditRequest = {
+          ...(mergeLabels.length === 0 ? {} : { merge: mergeLabels.map(label => ({ label, bytes: new Uint8Array() })) }),
+          ...(record.keep_pages === undefined ? {} : { keepPages: asNumbers(record.keep_pages, 'keep_pages') }),
+          ...(record.remove_pages === undefined ? {} : { removePages: asNumbers(record.remove_pages, 'remove_pages') }),
+          ...(record.rotate_degrees === undefined
+            ? {}
+            : {
+                rotate: {
+                  degrees: record.rotate_degrees as 90 | 180 | 270,
+                  ...(record.rotate_pages === undefined ? {} : { pages: asNumbers(record.rotate_pages, 'rotate_pages') }),
+                },
+              }),
+          ...(hasMetadata(record)
+            ? {
+                metadata: {
+                  ...(record.title === undefined ? {} : { title: String(record.title) }),
+                  ...(record.author === undefined ? {} : { author: String(record.author) }),
+                  ...(record.subject === undefined ? {} : { subject: String(record.subject) }),
+                  ...(record.keywords === undefined ? {} : { keywords: asStrings(record.keywords, 'keywords') }),
+                },
+              }
+            : {}),
+        }
+        const sourceBytes = await readFile(absolute)
+        const edited = await editPdf(sourceBytes, request, async (label) => {
+          const mergedAbsolute = await existingWorkspaceFile(workspace.root, label, 'merge_files')
+          return readFile(mergedAbsolute)
+        })
+        const target = await writableWorkspaceFile(workspace.root, pdfFileRelative(record.output_file, 'output_file'), 'output_file')
+        await mkdir(dirname(target), { recursive: true })
+        // tmp + rename so a failure never leaves half a PDF behind and a
+        // symlink at the destination is replaced, not followed.
+        const tmp = `${target}.${process.pid}.tmp`
+        await writeFile(tmp, Buffer.from(edited.bytes))
+        await rename(tmp, target)
+        return {
+          status: 'ok',
+          filePath: relative,
+          outputPath: record.output_file,
+          sizeBytes: edited.bytes.byteLength,
+          sha256: sha256Of(edited.bytes),
+          ...edited.summary,
+        } as unknown as JsonValue
+      } catch (cause) {
+        if (cause instanceof PdfEditRefusal) return readFailed([cause.message])
+        return readFailed([messageOf(cause)])
       }
     },
   })))

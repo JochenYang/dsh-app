@@ -487,6 +487,36 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     event.stopPropagation()
   }, [])
 
+  /**
+   * What one arrow/Home/End key asks for, or null when the key is not ours.
+   *
+   * Kept separate from the two listeners below so the same table drives the
+   * track's own key handling AND the official row's: the tooltip promises arrow
+   * keys beside the capsule, and a promise that only holds while the thin track
+   * happens to hold focus is a promise the user cannot act on. The table is
+   * DOM-free, so its branches are unit-testable without a browser.
+   */
+  const keyStep = useCallback((key: string): number | null => {
+    const from = shownIndex >= 0 ? shownIndex : 0
+    if (key === 'ArrowLeft' || key === 'ArrowDown') return Math.max(0, from - 1)
+    if (key === 'ArrowRight' || key === 'ArrowUp') return Math.min(count - 1, from + 1)
+    if (key === 'Home') return 0
+    if (key === 'End') return count - 1
+    return null
+  }, [count, shownIndex])
+
+  /** Commit one step, if the current shape accepts keyboard input at all. */
+  const stepTo = useCallback((key: string): boolean => {
+    if (mode !== 'interactive') return false
+    // Escape and Tab belong to the menu, not to the track.
+    if (key === 'Escape' || key === 'Tab') return false
+    const next = keyStep(key)
+    if (next === null) return false
+    const target = commitIndexFor(mode, next, count)
+    if (target !== null) commit(target)
+    return true
+  }, [commit, count, keyStep, mode])
+
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>): void => {
     // Escape belongs to the menu (it closes, or backs out of a drilled pane).
     if (event.key === 'Escape') return
@@ -499,19 +529,49 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
       host?.row.focus()
       return
     }
-    if (mode !== 'interactive') return
-    const from = shownIndex >= 0 ? shownIndex : 0
-    let next: number | null = null
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = Math.max(0, from - 1)
-    else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = Math.min(count - 1, from + 1)
-    else if (event.key === 'Home') next = 0
-    else if (event.key === 'End') next = count - 1
-    else return
-    event.preventDefault()
-    event.stopPropagation()
-    const target = commitIndexFor(mode, next, count)
-    if (target !== null) commit(target)
-  }, [commit, count, host, mode, shownIndex])
+    // The row already carries its own arrow-key handling (see the row listener
+    // below); when the event comes from there the row has dealt with it.
+    if (stepTo(event.key)) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+  }, [host, stepTo])
+
+  /**
+   * Arrow keys on the OFFICIAL ROW, not just on the track.
+   *
+   * Measured: the tooltip sits beside this control and says arrow keys change the
+   * level, but the only listener was the track's own — and the track is the thin
+   * bar, so a user reading the hint while focused on the row (which is what
+   * clicking the capsule gives you) pressed a key that went nowhere. The row is an
+   * element this plugin already owns the keyboard surface of (it routes Tab back
+   * to it), so the same step table is attached there natively.
+   *
+   * A level change is a discrete, user-initiated move, so this does not fire while
+   * a pointer drag is in flight: `stepTo` refuses a non-interactive shape, and the
+   * draft/pending state that a drag creates makes `mode` non-interactive.
+   */
+  useEffect(() => {
+    const row = host?.row
+    if (row === undefined) return undefined
+    const track = trackRef.current
+    const listener = (event: KeyboardEvent): void => {
+      // The track lives INSIDE this row (it is the capsule's second line), so its
+      // own React handler already ran for a key pressed there. Acting again here
+      // would step twice for one press — the failure mode a second listener on an
+      // ancestor creates whenever the two paths overlap.
+      if (track !== null && event.target instanceof Node && track.contains(event.target)) return
+      if (stepTo(event.key)) {
+        event.preventDefault()
+        // The official row's own handler must not also act on the same key — it
+        // opens the level list (drilling into the picker) on Enter/Space and would
+        // move its own selection on arrows.
+        event.stopPropagation()
+      }
+    }
+    row.addEventListener('keydown', listener)
+    return () => { row.removeEventListener('keydown', listener) }
+  }, [host, stepTo])
 
   const shape = controlShapeFor(state, failure, t, shownIndex)
   const ariaLabel = shownName === undefined ? t('effort.ariaUnset') : t('effort.aria', { name: shownName })

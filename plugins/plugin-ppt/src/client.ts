@@ -28,10 +28,14 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // to) into this compilation unit.
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import { rankByName } from '@deepseek-ai/dsh-client-ui-primitives'
 import { mountPptOfficeBar } from './client/office-entry.tsx'
 import type { CapsuleSeat } from './client/ppt-entry.tsx'
 import { en as pptEn, NS as PPT_NS, zh as pptZh } from './client/locales.ts'
 import type { PptKey } from './client/locales.ts'
+import { createOfficeMenuSource } from './client/office-menu.ts'
+import type { OfficeMenuRegistryLike } from './client/office-menu.ts'
+import { officeMenuIcon } from './client/office-menu-icons.tsx'
 import { createSkillReferenceSource } from './client/skill-reference.ts'
 import type { ReferenceSourceRegistry } from './client/skill-reference.ts'
 import { adoptStyles } from './client/styles.ts'
@@ -77,16 +81,36 @@ export function apply(ctx: ClientContext): void {
     'dsh-app plugin-ppt: office-bar capsule',
   )
 
-  // The skill reference rides a kernel chip: the registered source owns the
-  // codec the submit attempt routes through, and the insert-reference scoped
-  // event lands the chip in the draft. Both wait for the trigger pipeline;
-  // without it the capsule keeps the literal-token fallback.
+  // Two sources, one trigger: this one lists the formats as a menu group, the
+  // other owns the mode capsule's chip. Both wait for the trigger pipeline;
+  // without it there is no `/` menu at all, so no group can be half-registered.
+  //
+  // The service is read structurally (this plugin declares no dependency on the
+  // input-trigger package). `registerSource` is the only verb either source
+  // needs, and the two sources answer DIFFERENT candidate shapes, so the verb is
+  // typed once over the union of what the two structural types accept: one
+  // widening for the service, each source keeping its own type at its own call.
   ctx.inject(['inputTriggers'], (scope) => {
-    const registry = scope.get('inputTriggers') as ReferenceSourceRegistry | undefined
+    const registry = scope.get('inputTriggers') as
+      { registerSource(source: Parameters<ReferenceSourceRegistry['registerSource']>[0] | Parameters<OfficeMenuRegistryLike['registerSource']>[0]): () => void } | undefined
     if (registry === undefined) return
     scope.effect(
       () => registry.registerSource(createSkillReferenceSource()),
       'dsh-app plugin-ppt: skill reference source',
+    )
+    // The group is the one-shot entry: it inserts a skill chip and claims no
+    // Enter/Space, so a typed token stays the kernel skill source's business.
+    scope.effect(
+      () => registry.registerSource(createOfficeMenuSource({
+        t: ctx.locale.bind(PPT_NS),
+        iconFor: officeMenuIcon,
+        // The kernel's own ranker, so this group sorts by the same rule as every
+        // other group. Imported at runtime here (the browser half externalizes
+        // the primitives package); office-menu.ts takes it as a parameter so its
+        // own module stays free of that runtime.
+        rank: rankByName,
+      })),
+      'dsh-app plugin-ppt: office menu source',
     )
   })
 }

@@ -73,3 +73,32 @@ test('the keys hint still reaches assistive technology', () => {
   // the accessibility tree, so the track states the shortcut itself.
   assert.match(slider, /aria-keyshortcuts="ArrowLeft ArrowRight"/u, 'the track no longer states its arrow keys')
 })
+
+test('the arrow keys the hint promises work from the official ROW too, not only the track', () => {
+  // The defect this pins: the hint says "arrow keys change the level" and sits
+  // beside the capsule, but the only listener used to be the track's own — the
+  // thin bar. A user who clicked the capsule had focus on the ROW, pressed a key,
+  // and nothing happened. `aria-keyshortcuts` was present the whole time, which is
+  // why the assertion above could not see it: an attribute is not a behaviour.
+  assert.match(
+    slider,
+    /row\.addEventListener\('keydown', listener\)/u,
+    'the official row no longer listens for the arrow keys the hint promises',
+  )
+  // One key press must move one step: the track lives INSIDE the row, so the row
+  // listener has to skip events whose target is inside the track.
+  assert.match(
+    slider,
+    /track\.contains\(event\.target\)\) return/u,
+    'the row listener does not exempt the track, so one press would step twice',
+  )
+})
+
+test('the step table is shared by both listeners instead of written twice', () => {
+  // Two copies of "ArrowLeft means index-1" is how the two surfaces drift apart;
+  // the table is a callback both handlers call.
+  assert.match(slider, /const keyStep = useCallback\(/u, 'the step table is not a shared callback')
+  assert.match(slider, /const stepTo = useCallback\(/u, 'the commit path is not a shared callback')
+  const stepCalls = [...slider.matchAll(/if \(stepTo\(/gu)].length
+  assert.equal(stepCalls, 2, `stepTo is called from ${String(stepCalls)} listener(s); both the track and the row must call it`)
+})

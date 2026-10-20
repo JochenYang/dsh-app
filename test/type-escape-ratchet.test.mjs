@@ -28,7 +28,12 @@ const BASELINE = {
   'plugin-market': 1,
   'plugin-mcp': 1,
   'plugin-memory': 24,
-  'plugin-pdf': 9,
+  // 10: the pdf_edit tool answers a summary whose readonly arrays cannot be
+  // assigned to JsonValue directly, so the one boundary cast follows the same
+  // `as unknown as JsonValue` shape every other tool in this file already uses
+  // (pdf_read, pdf_render and pdf_write each carry one). Narrowing it would mean
+  // making the summary arrays mutable purely to satisfy the wire type.
+  'plugin-pdf': 10,
   'plugin-ppt': 12,
   'plugin-presets': 0,
   'plugin-rewind': 0,
