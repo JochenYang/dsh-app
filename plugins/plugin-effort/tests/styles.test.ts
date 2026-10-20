@@ -17,7 +17,7 @@
 
 import { strict as assert } from 'node:assert'
 import { afterEach, describe, it } from 'node:test'
-import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TRACK_HEIGHT } from '../src/client/geometry.ts'
+import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TICK_HOVER_SCALE, TICK_SIZE, TRACK_HEIGHT } from '../src/client/geometry.ts'
 import { DRIFT_AMPLITUDE } from '../src/client/mosaic.ts'
 import { EFFORT_TEXT_ATTRIBUTE, EFFORT_TEXT_WEIGHT, adoptStyles } from '../src/client/styles.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from '../src/client/value-color.ts'
@@ -174,6 +174,58 @@ describe('adoptStyles', () => {
     assert.deepEqual(declarations, ['font-weight: 600'], `the mark rule declares more than the weight: ${declarations.join('; ')}`)
     assert.equal(EFFORT_TEXT_ATTRIBUTE, 'data-dshAppEffort', 'the mark the bridge writes is not the one this sheet styles')
     assert.equal(EFFORT_TEXT_WEIGHT, '600', 'the weight is not the one this sheet declares')
+  })
+
+  it('grows the tick under the pointer by a transform, never by its size', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    // Three properties matter here and none is visible to a typecheck:
+    //   - the mark grows by `scale`, so no layout pass runs per pointer sample and
+    //     the growth stays centred on the tick (a width change would keep the
+    //     box's top-left corner and shift the circle by half the growth);
+    //   - the transition is on `transform` ALONE, so a level change (a background
+    //     swap on the ticks at or below the value) stays instant while the hover
+    //     size animates — a shared `transition: all` would fade every level
+    //     change and read as lag on a drag;
+    //   - the mark is its own state (`data-hover`), not a reuse of `data-on`,
+    //     which already means "at or below the current level".
+    // String checks rather than a regex: the selector's braces and dots need two
+    // levels of escaping inside a template, and getting that wrong produces a
+    // SyntaxError at run time instead of a failing assertion.
+    const tickRule = css.slice(css.indexOf('.dshAppEffort-tick {'), css.indexOf('.dshAppEffort-tick {') + 400)
+    assert.ok(
+      tickRule.includes(`width: ${TICK_SIZE}px`),
+      'the tick size is not the geometry constant',
+    )
+    assert.ok(
+      css.includes(`transform: scale(${TICK_HOVER_SCALE})`),
+      'the hover mark does not use the geometry scale',
+    )
+    // The whole declaration, not a prefix: `transition: transform 120ms,
+    // background 120ms` passes a bare `transition: transform \d+ms` match, and that
+    // rule would make every level change fade. The easing function itself contains
+    // commas, so they are stripped before asking whether a SECOND property is
+    // named — the only thing a split can be evidence of here.
+    const declared = /transition: ([^;]+);/u.exec(
+      /\.dshAppEffort-tick \{[^}]*\}/u.exec(css)?.[0] ?? '',
+    )?.[1] ?? ''
+    const withoutEasing = declared.replace(/[a-z-]*cubic-bezier\([^)]*\)/gu, '').replace(/\([^)]*\)/gu, '')
+    assert.ok(declared.startsWith('transform '), `the tick transition does not lead with transform: ${declared}`)
+    assert.equal(withoutEasing.split(',').length, 1, `the tick transitions more than one property: ${declared}`)
+    assert.ok(!/all/u.test(declared), `the tick uses transition: all: ${declared}`)
+    assert.ok(
+      /\.dshAppEffort-tick\[data-hover="1"\]/.test(css),
+      'no rule keys on the hover mark',
+    )
+  })
+
+  it('stops the tick transition under reduced motion', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    const tail = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'))
+    assert.ok(tail.includes('.dshAppEffort-tick'), 'the tick keeps animating for a reduced-motion reader')
   })
 
   it('reserves the note line, so the shape cannot move the card', () => {

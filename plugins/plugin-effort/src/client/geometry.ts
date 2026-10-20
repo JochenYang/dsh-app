@@ -54,6 +54,21 @@ export const KNOB_RADIUS = KNOB_SIZE / 2
  */
 export const BLOOM_WIDTH = 26
 
+/** Diameter of one level's tick mark, in px. */
+export const TICK_SIZE = 3
+
+/**
+ * How much a tick grows under the pointer.
+ *
+ * 2.2x on a 3px dot is ~6.6px — visible against a 28px track without touching the
+ * knob or reading as a second control. The mark says "this is the level you would
+ * get", so it has to be legible at a glance. It is a scale rather than a size for
+ * two reasons: no layout pass per pointer sample, and the growth stays centred on
+ * the tick (a width change would keep the box's top-left corner and shift the
+ * circle by half the growth — see the tick rule in `styles.ts`).
+ */
+export const TICK_HOVER_SCALE = 2.2
+
 /** Fractions are rounded to this many decimals before they enter a CSS expression. */
 const FRACTION_DIGITS = 4
 
@@ -167,6 +182,31 @@ export function pctAt(clientX: number, rect: TrackRect): number | null {
   const usable = rect.width - KNOB_RADIUS * 2
   if (!(usable > 0)) return null
   return clamp01((clientX - rect.left - KNOB_RADIUS) / usable)
+}
+
+/**
+ * The level a pointer is over, for the hover mark.
+ *
+ * One function, not two steps inline in the component, because the answer has to
+ * agree with where the tick is DRAWN: `pctFromIndex(i, n)` maps an index to a
+ * position and this maps a position back, so the round trip is the property worth
+ * testing (see `tests/track.test.ts`). A hover that lit a different tick than the
+ * one under the pointer would be worse than no hover at all — the mark would claim
+ * a level the click does not write.
+ *
+ * Measured against the LIVE box rather than a held one, unlike a drag
+ * ({@link createGestureMap}): a hover ends when the pointer leaves, so there is no
+ * gesture to keep consistent, and re-measuring is what keeps the mark under the
+ * pointer after the card re-lays itself out.
+ *
+ * @param clientX - pointer x in viewport coordinates.
+ * @param rect - the track's box right now.
+ * @param count - number of levels.
+ * @returns the level index, or null when the track has no usable width.
+ */
+export function hoverIndexAt(clientX: number, rect: TrackRect, count: number): number | null {
+  const pct = pctAt(clientX, rect)
+  return pct === null ? null : indexFromPct(pct, count)
 }
 
 /** A gesture's mapping from the pointer to a position; see {@link createGestureMap}. */

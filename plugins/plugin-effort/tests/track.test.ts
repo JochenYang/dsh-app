@@ -20,6 +20,7 @@ import {
   createGestureMap,
   fillClip,
   headEdgeExpr,
+  hoverIndexAt,
   indexFromPct,
   offsetExpr,
   pctAt,
@@ -48,6 +49,54 @@ describe('geometry constants', () => {
   it('keeps the knob the same size as the track', () => {
     assert.equal(KNOB_SIZE, TRACK_HEIGHT)
     assert.equal(KNOB_RADIUS * 2, TRACK_HEIGHT)
+  })
+})
+
+describe('hoverIndexAt', () => {
+  /** The x of level `index`'s tick centre, for a track at `rect`. */
+  const tickCentre = (index, count, rect) => rect.left + KNOB_RADIUS + pctFromIndex(index, count) * (rect.width - KNOB_SIZE)
+
+  it('answers the index whose tick is drawn under the pointer', () => {
+    // The round trip is the property that matters: a hover that lit a different
+    // tick than the one under the pointer would claim a level the click does not
+    // write, which is worse than no hover at all. Positions come from
+    // `pctFromIndex`, the same function `offsetExpr` places the ticks with.
+    const rect = { left: 100, width: 320 }
+    for (const count of [2, 3, 4, 5, 8]) {
+      for (let index = 0; index < count; index += 1) {
+        assert.equal(
+          hoverIndexAt(tickCentre(index, count, rect), rect, count),
+          index,
+          `count ${count}, index ${index}`,
+        )
+      }
+    }
+  })
+
+  it('clamps outside the travel to the end levels', () => {
+    const rect = { left: 100, width: 320 }
+    assert.equal(hoverIndexAt(-500, rect, 4), 0)
+    assert.equal(hoverIndexAt(9999, rect, 4), 3)
+  })
+
+  it('answers null for a track with no usable width', () => {
+    // A hidden or mid-layout track: any answer would be a guess, and a guessed
+    // level under the pointer is a mark in the wrong place.
+    for (const width of [0, KNOB_SIZE - 1, NaN]) {
+      assert.equal(hoverIndexAt(150, { left: 100, width }, 4), null, `width ${width}`)
+    }
+  })
+
+  it('agrees with indexFromPct on every sampled position', () => {
+    // It is a composition of two tested functions, so this pins the composition
+    // rather than the arithmetic: a future edit that swapped one half would change
+    // the hover mark without touching either piece's own suite.
+    const rect = { left: 40, width: 280 }
+    for (let step = 0; step <= 40; step += 1) {
+      const x = rect.left + (step / 40) * rect.width
+      const pct = pctAt(x, rect)
+      assert.equal(hoverIndexAt(x, rect, 5), pct === null ? null : indexFromPct(pct, 5), `x ${x}`)
+    }
   })
 })
 

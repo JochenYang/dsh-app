@@ -135,7 +135,15 @@ plugin's own routes dispatching behind that fence and the carrier's own plain-te
 `scripts/fixtures/probe-routes` and `scripts/fixtures/probe-wsinject` into the booted profile. Run
 `npm run build` first — it `require`s the shell's own `dist/main/` modules, which a clean checkout does not have
 — and build the roster packages it links from `plugins/`: it refuses a missing or stale `lib/` on either
-fixture or on any roster package, naming the command to run; `probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
+fixture or on any roster package, naming the command to run; `probe-effort-hover.cjs` (`node_modules/.bin/electron`) after touching `plugin-effort`'s stylesheet,
+its track geometry or its tick rules — it evaluates the REAL sheet (esbuild-bundles `styles.ts`, runs
+`adoptStyles` against a stub document) and measures the rendered result in Chromium: a hovered tick
+grows and returns, a neighbour does not move, the computed transition names `transform` alone, and
+reduced motion keeps the mark without the animation. It boots no kernel, so `npm run build` is not
+needed either; it reads the source. Reading the built `lib/client.js` as text is NOT a substitute —
+that file is a browser module whose template keeps its `${…}` placeholders, so a text slice of it is
+not CSS at all (measured: every tick 0px wide);
+`probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
 `src/main/window.ts` — **keep the two in sync** (a root test
 already diffs them); the remaining `probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` /
 `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` cover the surfaces

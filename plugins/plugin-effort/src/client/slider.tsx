@@ -46,11 +46,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { createEffortBridge, type EffortBridge, type EffortBridgeHost, type EffortRowLabels, type LevelColors } from './bridge.ts'
-import { createGestureMap, fillClip, headEdgeExpr, indexFromPct, offsetExpr, pctFromIndex } from './geometry.ts'
+import { createGestureMap, fillClip, headEdgeExpr, hoverIndexAt, indexFromPct, offsetExpr, pctFromIndex } from './geometry.ts'
 import { commitIndexFor, levelKey, resolveEffort, trackModeOf } from './levels.ts'
 import {
   ENERGY_END,
@@ -69,6 +70,16 @@ import { isDarkTheme, ringColorAt, textColorAt } from './value-color.ts'
 
 /** How long a committed level may stay unconfirmed before the display rolls back. */
 const COMMIT_TIMEOUT_MS = 10_000
+
+/**
+ * Delay before the keys hint appears, in ms.
+ *
+ * The track is a hover target the pointer crosses on its way to the knob, so the
+ * bubble must not appear the instant the pointer enters — it would flash on every
+ * pass. 400ms is long enough to require intent and short enough that a user who
+ * pauses still sees it.
+ */
+const HINT_DELAY_MS = 400
 
 /** What a commit reports back. Coded, never prose: the copy lives in the dictionary. */
 export type EffortOutcome =
@@ -106,6 +117,15 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   const [draft, setDraft] = useState<number | null>(null)
   const [pending, setPending] = useState<number | null>(null)
   const [failure, setFailure] = useState<EffortFailure | null>(null)
+  /**
+   * The level the pointer is over, or null.
+   *
+   * It exists only to enlarge that level's tick (see `data-hover` on the tick):
+   * the mark under the pointer is the one a click would select, and a static
+   * 3px dot gives no feedback that it is the target. Nothing is committed from
+   * this — a hover never writes a level.
+   */
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null)
 
   const anchorRef = useRef<HTMLSpanElement | null>(null)
   const trackRef = useRef<HTMLDivElement | null>(null)
@@ -199,7 +219,24 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     setDraft(null)
     setPending(null)
     setFailure(null)
+    // The hover mark belongs to the level LIST: an index that meant `max` a moment
+    // ago means something else on the new list, and the pointer may not even be over
+    // the track any more (a model switch can happen from the keyboard). Rule 3.
+    setHoverIndex(null)
   }, [identity])
+
+  /**
+   * The mark also dies with the container.
+   *
+   * The menu can close and reopen without the level list changing (Escape, then
+   * the same row again). The portal unmounts with `host`, but this state lives on
+   * the entry, so on reopen a tick would render `data-hover="1"` under a pointer
+   * that never went there — and `pointerleave` is not a contract that fires during
+   * an unmount.
+   */
+  useEffect(() => {
+    if (host === null) setHoverIndex(null)
+  }, [host])
 
   // Rule 2: the host's own frame ends the pending commit. What ends it is the
   // session reporting the level this request ASKED FOR — not merely a value that
@@ -354,6 +391,10 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
     // The track lives inside the official menu: a bubbled pointer event would
     // reach the row's own handlers, and the row's click drills into the level list.
     event.stopPropagation()
+    // A press starts a drag, so the hover mark has done its job: leaving it lit
+    // through the gesture would mark a level the pointer is about to move away
+    // from, and the knob is the mark during a drag.
+    setHoverIndex(null)
     draggingRef.current = true
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
@@ -389,6 +430,17 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
   }, [commit, gesture])
 
   const onPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
+    // The hover mark follows the pointer whether or not a drag is open. It is
+    // measured against the track's box as it is NOW — unlike the drag, which
+    // holds the box its gesture opened on. The difference is deliberate: a
+    // hover ends when the pointer leaves, so there is no gesture to keep
+    // consistent, and re-measuring is what keeps the mark under the pointer
+    // after the card re-lays itself out (a note line appearing).
+    if (mode === 'interactive' && !draggingRef.current) {
+      const node = trackRef.current
+      const index = node === null ? null : hoverIndexAt(event.clientX, node.getBoundingClientRect(), count)
+      setHoverIndex(previous => (previous === index ? previous : index))
+    }
     if (!draggingRef.current) return
     event.stopPropagation()
     // A release we never saw — the pointer left the window, the capture was
@@ -400,7 +452,18 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
       return
     }
     moveTo(event.clientX)
-  }, [endDrag, moveTo])
+  }, [count, endDrag, mode, moveTo])
+
+  /**
+   * Drop the hover mark when the pointer leaves, and at the start of a drag.
+   *
+   * `pointerleave` rather than `pointerout`: `out` also fires when the pointer
+   * crosses onto a child element, which would flicker the mark off and on as the
+   * pointer passes over the knob or the mosaic inside the track.
+   */
+  const onPointerLeave = useCallback((): void => {
+    setHoverIndex(null)
+  }, [])
 
   /**
    * Swallow the `click` the browser fires after a press-and-release on the track.
@@ -458,90 +521,118 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
       <span ref={anchorRef} className="dshAppEffortAnchor" aria-hidden="true" />
       {host === null ? null : createPortal(
         <>
-          <div
-            ref={trackRef}
-            className="dshAppEffort-track"
-            role="slider"
-            tabIndex={mode === 'interactive' ? 0 : -1}
-            aria-label={ariaLabel}
-            aria-valuemin={0}
-            aria-valuemax={Math.max(0, count - 1)}
-            aria-valuenow={shownIndex >= 0 ? shownIndex : 0}
-            aria-valuetext={shownName ?? ''}
-            aria-disabled={mode !== 'interactive'}
-            data-mode={mode}
-            data-energy={energy > 0 ? '1' : '0'}
-            data-drift={shownPct > ENERGY_END ? '1' : '0'}
-            data-dragging={draft !== null ? '1' : '0'}
-            title={t('effort.hint.keys')}
-            style={{ '--dshAppEffort-energy': String(energy) } as React.CSSProperties}
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={endDrag}
-            onPointerCancel={endDrag}
-            onClick={onTrackClick}
-            onKeyDown={onKeyDown}
+          {/* The keys hint. This was a native `title` on the track, which the OS
+              draws after its own delay, in the OS's type, outside the theme — beside
+              the rest of this card it read as a browser artefact rather than as part
+              of the control. `portal` is required, not decorative: `.dshAppEffort`
+              sets `contain: inline-size`, which makes it a containing block for
+              fixed descendants, so a bubble parented inside it would be positioned
+              against the card instead of the viewport. `disabled` while a drag is
+              open so the bubble never rides the pointer, and in a non-interactive
+              shape where there is nothing to press.
+
+              The hint used to reach assistive technology through `title`'s
+              announcement. This primitive injects `aria-describedby` only when
+              `openOnClick` is set (not wanted here — a pinned bubble is wrong for an
+              arrow-key hint), so the track carries `aria-keyshortcuts` instead. */}
+          <Tooltip
+            label={t('effort.hint.keys')}
+            side="top"
+            align="center"
+            portal
+            delayMs={HINT_DELAY_MS}
+            disabled={draft !== null || mode !== 'interactive'}
           >
-            <div className="dshAppEffort-fill" style={{ clipPath: fillClip(shownPct) }} />
-            {/* The leading edge's bloom. It fades in with the mosaic's own energy,
-                so the low end of the scale stays calm, and it is anchored on the
-                knob's rim rather than on the clip's edge — see `headEdgeExpr`. */}
             <div
-              className="dshAppEffort-bloom"
-              style={{
-                '--dshAppEffort-head': headEdgeExpr(shownPct),
-                clipPath: fillClip(shownPct),
-                opacity: energy,
-              } as React.CSSProperties}
-            />
-            <div
-              className="dshAppEffort-mosaic"
-              style={{ clipPath: fillClip(shownPct), opacity: tileLayerOpacityFor(shownPct) }}
+              ref={trackRef}
+              className="dshAppEffort-track"
+              role="slider"
+              tabIndex={mode === 'interactive' ? 0 : -1}
+              aria-label={ariaLabel}
+              aria-valuemin={0}
+              aria-valuemax={Math.max(0, count - 1)}
+              aria-valuenow={shownIndex >= 0 ? shownIndex : 0}
+              aria-valuetext={shownName ?? ''}
+              aria-keyshortcuts="ArrowLeft ArrowRight"
+              aria-disabled={mode !== 'interactive'}
+              data-mode={mode}
+              data-energy={energy > 0 ? '1' : '0'}
+              data-drift={shownPct > ENERGY_END ? '1' : '0'}
+              data-dragging={draft !== null ? '1' : '0'}
+              style={{ '--dshAppEffort-energy': String(energy) } as React.CSSProperties}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+              onPointerLeave={onPointerLeave}
+              onClick={onTrackClick}
+              onKeyDown={onKeyDown}
             >
-              {/* Every tile is always rendered: the ones outside the count are faded
-                  out and paused rather than unmounted, which is what stopped them
-                  appearing and vanishing in the middle of the track. */}
-              {tiles.map((tile, index) => {
-                const state = tileStateFor(tile, index, shownPct)
-                const duration = sweepDurationMsFor(sweepPct, tile.tone)
-                return (
-                  <span
-                    key={index}
-                    className="dshAppEffort-tile"
-                    data-on={state.on ? '1' : '0'}
-                    style={{
-                      top: `${(tile.top * 100).toFixed(2)}%`,
-                      animationDuration: `${duration.toFixed(0)}ms`,
-                      animationDelay: `${tileDelayMsFor(tile, duration).toFixed(0)}ms`,
-                    }}
-                  >
-                    <span
-                      className="dshAppEffort-square"
-                      style={{
-                        width: tile.size,
-                        height: tile.size,
-                        opacity: state.opacity,
-                        animationDelay: `${driftDelayMsFor(tile).toFixed(0)}ms`,
-                      }}
-                    />
-                  </span>
-                )
-              })}
-            </div>
-            {shape.ticks ? levels.map((level, index) => (
-              <span
-                key={level.id}
-                className="dshAppEffort-tick"
-                data-on={index <= shownIndex ? '1' : '0'}
-                style={{ left: offsetExpr(pctFromIndex(index, count)) }}
+              <div className="dshAppEffort-fill" style={{ clipPath: fillClip(shownPct) }} />
+              {/* The leading edge's bloom. It fades in with the mosaic's own energy,
+                  so the low end of the scale stays calm, and it is anchored on the
+                  knob's rim rather than on the clip's edge — see `headEdgeExpr`. */}
+              <div
+                className="dshAppEffort-bloom"
+                style={{
+                  '--dshAppEffort-head': headEdgeExpr(shownPct),
+                  clipPath: fillClip(shownPct),
+                  opacity: energy,
+                } as React.CSSProperties}
               />
-            )) : null}
-            {/* The knob marks a position, so it is absent while there is none —
-                an unset track with a knob parked at the left end would claim the
-                session is running at the lowest level. It is the ONLY layer that
-                tells an unset track from a ready one; see `controlShapeFor`. */}
-            {shape.knob ? <div className="dshAppEffort-knob" style={{ left: offsetExpr(shownPct) }} /> : null}
-          </div>
+              <div
+                className="dshAppEffort-mosaic"
+                style={{ clipPath: fillClip(shownPct), opacity: tileLayerOpacityFor(shownPct) }}
+              >
+                {/* Every tile is always rendered: the ones outside the count are faded
+                    out and paused rather than unmounted, which is what stopped them
+                    appearing and vanishing in the middle of the track. */}
+                {tiles.map((tile, index) => {
+                  const state = tileStateFor(tile, index, shownPct)
+                  const duration = sweepDurationMsFor(sweepPct, tile.tone)
+                  return (
+                    <span
+                      key={index}
+                      className="dshAppEffort-tile"
+                      data-on={state.on ? '1' : '0'}
+                      style={{
+                        top: `${(tile.top * 100).toFixed(2)}%`,
+                        animationDuration: `${duration.toFixed(0)}ms`,
+                        animationDelay: `${tileDelayMsFor(tile, duration).toFixed(0)}ms`,
+                      }}
+                    >
+                      <span
+                        className="dshAppEffort-square"
+                        style={{
+                          width: tile.size,
+                          height: tile.size,
+                          opacity: state.opacity,
+                          animationDelay: `${driftDelayMsFor(tile).toFixed(0)}ms`,
+                        }}
+                      />
+                    </span>
+                  )
+                })}
+              </div>
+              {shape.ticks ? levels.map((level, index) => (
+                <span
+                  key={level.id}
+                  className="dshAppEffort-tick"
+                  data-on={index <= shownIndex ? '1' : '0'}
+                  // The mark under the pointer, so the level a click would select
+                  // is visible before the click. Drawn on the tick itself rather
+                  // than as a separate element: one position, one owner.
+                  data-hover={index === hoverIndex ? '1' : '0'}
+                  style={{ left: offsetExpr(pctFromIndex(index, count)) }}
+                />
+              )) : null}
+              {/* The knob marks a position, so it is absent while there is none —
+                  an unset track with a knob parked at the left end would claim the
+                  session is running at the lowest level. It is the ONLY layer that
+                  tells an unset track from a ready one; see `controlShapeFor`. */}
+              {shape.knob ? <div className="dshAppEffort-knob" style={{ left: offsetExpr(shownPct) }} /> : null}
+            </div>
+          </Tooltip>
           {/* The line is drawn in EVERY shape — an empty one included. Its box is
               what keeps the container the same height, and the container's height is
               what decides where the official menu places itself; unmounting the line

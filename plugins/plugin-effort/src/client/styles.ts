@@ -70,7 +70,7 @@
  * @module @dsh-app/plugin-effort/client/styles
  */
 
-import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TRACK_HEIGHT } from './geometry.ts'
+import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TICK_HOVER_SCALE, TICK_SIZE, TRACK_HEIGHT } from './geometry.ts'
 import { DRIFT_AMPLITUDE, DRIFT_MS } from './mosaic.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from './value-color.ts'
 
@@ -292,15 +292,36 @@ body[data-ds-dark-theme] .dshAppEffort-square {
 .dshAppEffort-tick {
   position: absolute;
   top: 50%;
-  width: 3px;
-  height: 3px;
-  margin: -1.5px 0 0 -1.5px;
+  width: ${TICK_SIZE}px;
+  height: ${TICK_SIZE}px;
+  margin: ${-TICK_SIZE / 2}px 0 0 ${-TICK_SIZE / 2}px;
   border-radius: 50%;
   background: color-mix(in srgb, var(--dsw-alias-label-primary, #0f1115) 26%, transparent);
   pointer-events: none;
+  /* Scale rather than width/height, for two real reasons: a transform is
+     composited (no layout pass per pointer sample), and it grows about the tick's
+     own CENTRE — the absolutely-positioned box has a fixed offset and a negative
+     margin, so a size change would keep the top-left corner and shift the circle by
+     half the growth. The neighbours would not move either way (every tick is
+     absolutely positioned), but the mark would sit off its level.
+     The transition names the transform ALONE so a level change — a background swap
+     on the ticks at or below the value — stays instant: the colour reports state,
+     the size reports the pointer. */
+  transform: scale(1);
+  transition: transform 120ms cubic-bezier(0.2, 0, 0.2, 1);
 }
 .dshAppEffort-tick[data-on="1"] {
   background: rgb(255 255 255 / 55%);
+}
+/* The level a click would select. It grows rather than changing colour: colour on
+   this track already means "at or below the current level", and a hover that
+   recoloured a tick would read as a value change. */
+.dshAppEffort-tick[data-hover="1"] {
+  transform: scale(${TICK_HOVER_SCALE});
+  background: var(--dsw-alias-label-primary, #0f1115);
+}
+.dshAppEffort-tick[data-hover="1"][data-on="1"] {
+  background: rgb(255 255 255 / 92%);
 }
 
 .dshAppEffort-knob {
@@ -344,7 +365,8 @@ body[data-ds-dark-theme] .dshAppEffort-square {
   .dshAppEffort-mosaic { display: none; }
   .dshAppEffort-track,
   .dshAppEffort-knob,
-  .dshAppEffort-mosaic { transition: none; }
+  .dshAppEffort-mosaic,
+  .dshAppEffort-tick { transition: none; }
 }
 `
 

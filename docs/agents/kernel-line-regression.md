@@ -304,6 +304,12 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
 
 ### 6.4 探针与自动门禁的同步要求
 
+- `scripts/probe-effort-hover.cjs` 守 `plugin-effort` 的轨道视觉：改动该插件的样式表、轨道几何或刻度规则之后必须重跑。
+  它不启内核（这两个行为都是纯客户端代码），而是用 esbuild 把 `src/client/styles.ts` 打成 Node 模块、拿
+  `adoptStyles` 对着 stub document 跑一遍捕获**真实注入的那份 CSS**，再交给 Chromium 量计算样式与
+  `getBoundingClientRect`：指针悬停的刻度放大后回落、相邻刻度不动、计算出的 `transition-property` 是
+  `transform` 而非 `all`、`prefers-reduced-motion` 下标记仍出现但没有过渡。**不能拿 `lib/client.js` 的文本切一段当 CSS
+  用**：那是浏览器模块，模板里的 `${…}` 留给 loader 解析，切出来根本不是 CSS（实测：每个刻度宽度 0px）；
 - `scripts/probe-drag.cjs` 镜像 `src/main/window.ts` 的 `DESKTOP_CHROME_CSS`，
   `test/desktop-chrome-css.test.mjs` 会读它；
 - `scripts/probe-workbench.cjs` 守 `plugin-workbench` 容器：改动该插件的座位、页面或侧边栏行之后，
