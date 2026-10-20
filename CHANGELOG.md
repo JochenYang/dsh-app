@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.16.8] - 2026-10-20
+
+### 中文
+- 推理等级的轨道改用内核自己的 Tooltip 显示按键提示，不再用浏览器原生 `title`（后者由系统绘制、延迟和字体都不受主题控制，和这张卡片其他部分放在一起像是浏览器残留）。同时给每个刻度加了指针反馈：指针悬停到某一档时，该刻度会放大到 2.2 倍并高亮——放大用 `transform` 而不是改宽高：不必为每个指针采样做一次排版，而且放大以刻度自身圆心为原点（改宽高会保留左上角、让圆点偏移半个增量）；过渡只挂在 `transform` 上，所以档位变化（刻度的颜色）仍然即时，不会跟着淡入淡出。悬停只是一个独立的 `data-hover` 状态，不写任何值；系统开启「减少动态效果」时标记仍然出现，只是不再有过渡。
+- 修复 PPT 技能正文里三个不存在的工具名（`ppt_write` / `ppt_check` / `ppt_render` 改为实际注册的 `pptd_write_file` / `pptd_check` / `pptd_render`），并退役已删除插件留下的死技能目录：Word/Excel 生成交给内核官方技能后 `plugin-doc` / `plugin-sheet` 已移除，但它们写在 `$DSH_HOME/skills/` 的 `dsh-word` / `dsh-sheet` 没人清理，其正文第一步就调用已不存在的 `doc_write`。退役按正文判定——只有目录里的 SKILL.md 提到这些已消失的工具名时才删（这也意味着正文不含这些名字的旧 `dsh-app-ppt` 目录现在会被保留，而不是像以前那样按名字删除）；同名但正文不提这些名字的技能（例如从插件市场装来的）会原样保留，被保留的目录与原因写进启动日志。两个胶囊的互斥清理名单同步收缩到仍在的两个技能，但清理规则仍认旧 token，草稿里遗留的引用照样会被清掉。
+
+### English
+- The reasoning-effort track now shows its keys hint through the kernel's own Tooltip instead of the browser's native `title` — the latter is drawn by the OS, with its own delay and type that cannot follow the theme, and beside the rest of this card it read as a browser artefact. Every tick also gains pointer feedback: the level under the pointer grows to 2.2x and takes the theme's primary label colour, so the level a click would select is visible before the click. The growth is a `transform`, never a size change: no layout pass runs per pointer sample, and the growth stays centred on the tick (a width change would keep the box's top-left corner and shift the circle by half the growth). The transition is on `transform` alone, so a level change (a tick's colour) stays instant instead of fading with it. The hover is its own `data-hover` state and writes no value, and with reduced motion enabled the mark still appears — it just gets there without a transition.
+- Fix three tool names the PPT skill text named but which exist nowhere (`ppt_write` / `ppt_check` / `ppt_render` now read the registered `pptd_write_file` / `pptd_check` / `pptd_render`), and retire the dead skill directories left by removed plugins: after Word/Excel generation moved to the kernel's own Office skills, `plugin-doc` / `plugin-sheet` were deleted but the `dsh-word` / `dsh-sheet` they wrote under `$DSH_HOME/skills/` stayed behind, opening their workflow with a `doc_write` call that no longer exists. The retirement is judged by the skill BODY: a directory is removed only when its own SKILL.md names one of those vanished tools (which also means an old `dsh-app-ppt` directory whose text does not is now kept, where it used to be deleted by name), so a same-named skill that does not — including one installed from the market — is left exactly as it is, and every kept directory is reported with its reason in the start log. Both capsules' mutual-exclusion list shrinks to the two skills that remain, while the cleanup pattern still recognises the old tokens, so a stale reference in a draft is still cleared.
+
 ## [v0.16.7] - 2026-10-17
 
 ### 中文
