@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.0] - 2026-10-21
+
+### 中文
+- 撤回新增「只撤回对话」：消息撤回而文件保持不动。可以从确认框里的范围开关选，也可以输入 `/rewind conversation <n>`。这类撤回保留该轮的备份与快照——文件没被改过，那些数据是它们唯一还能还原的依据，删掉就再也撤不回来了。
+- 只撤回对话的预览按同一个范围作答（`/rewind plan conversation <n>`），清单不会列出不会被改动的文件。修掉一个只在这种范围下出现的缺陷：预览按序号取消息时把动词逐个列举，新动词漏在名单外，序号落成 0，明明能撤回的消息被答成「无法撤回」。
+- 工作区快照改为在每轮**开始时**采集，不再等到本轮第一个写文件的工具。原来那个时机在用户手工改过文件之后，撤回会把那些改动当成这一轮做的、一并还原掉；现在撤回还原的是**发这条消息那一刻**的目录状态。快照失败时会释放占位，让后面的工具门禁仍能补拍。
+
+### English
+- Recall gains a messages-only scope that leaves every file untouched: pick it with the scope control in the confirmation dialog, or type `/rewind conversation <n>`. That scope KEEPS the range's backups and snapshots — no file was touched, so those are the only record that could ever restore them, and dropping them would make those changes unrecoverable.
+- The messages-only preview answers for that same scope (`/rewind plan conversation <n>`), so the list never names a file it will not touch. Fixes a defect reachable only in that scope: the preview verbs were enumerated by hand when the ordinal was extracted, the new one was missing from that list, its ordinal fell to 0, and a perfectly recallable message was answered as "cannot recall".
+- The workspace snapshot is now taken when a turn OPENS, not at the turn's first writing tool. That earlier moment came after the user may have edited files by hand, so a recall treated those edits as the range's own work and undid them; a recall now returns the directory to the state it had when the message was SENT. A failed snapshot releases its claim, so the tool gate can still take one later in the turn.
+
 ## [v0.16.9] - 2026-10-20
 
 ### 中文
