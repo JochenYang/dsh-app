@@ -56,8 +56,14 @@ test('a pruned layer is put back while the app runs', async () => {
       // What pnpm does: the directory goes away, the manifest entry stays.
       await rm(layerDir, { recursive: true, force: true })
       assert.ok(!existsSync(layerManifest), 'the keeper is tested against a real removal')
-      assert.ok(await waitForFile(layerManifest), 'the keeper must restore the layer')
-      assert.equal(readFileSync(path.join(layerDir, 'cordis.patch.yml'), 'utf8'), `${OVERLAY.replace(/\n+$/u, '')}\n`)
+      // Wait on the PATCH file, not the manifest: `writeLayerPackage` writes the
+      // manifest FIRST and the patch SECOND, so waiting on the manifest returns
+      // while the patch is still in flight and the read below races it. Measured
+      // on CI (run 39554988656): ENOENT on this exact path, roughly one run in
+      // eight — a red gate that had nothing to do with the change under review.
+      const layerPatch = path.join(layerDir, 'cordis.patch.yml')
+      assert.ok(await waitForFile(layerPatch), 'the keeper must restore the layer patch')
+      assert.equal(readFileSync(layerPatch, 'utf8'), `${OVERLAY.replace(/\n+$/u, '')}\n`)
       // The manifest entry comes back too — a bundle the profile does not name is
       // just as invisible as a directory that is not there.
       const bundles = JSON.parse(readFileSync(manifest, 'utf8')).dsh.profile.bundles
