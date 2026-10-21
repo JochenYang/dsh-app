@@ -131,6 +131,8 @@ export const zh = {
 
   'sidebar.diff.empty': '无差异（未变更）',
   'sidebar.diff.truncated': '差异较大，仅显示前 500 KB。',
+  'sidebar.diff.rulerAria': '变更位置标尺',
+  'sidebar.diff.rulerMark': '第 {from}–{to} 行有变更，点击跳转',
   'sidebar.files.hint': '仓库跟踪文件——点击查看它与 HEAD 的差异；无变化的文件标注“未变更”。',
   'sidebar.files.loading': '正在读取仓库文件…',
   'sidebar.files.truncated': '仓库文件较多，仅显示前 20,000 个。',
@@ -253,6 +255,8 @@ export const en: Record<SidebarKey, string> = {
 
   'sidebar.diff.empty': 'No differences (not modified)',
   'sidebar.diff.truncated': 'The diff is large; only the first 500 KB is shown.',
+  'sidebar.diff.rulerAria': 'Change overview ruler',
+  'sidebar.diff.rulerMark': 'Lines {from}–{to} changed; click to jump',
   'sidebar.files.hint': 'Tracked files — click one to see its diff against HEAD; files with no changes are marked "not modified".',
   'sidebar.files.loading': 'Reading repository files…',
   'sidebar.files.truncated': 'The repository has many files; only the first 20,000 are shown.',

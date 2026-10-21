@@ -1,12 +1,17 @@
 /**
- * The git face's list presentation: how one flat change list becomes the two
- * shapes the user can pick between.
+ * The git face's list presentation: how one flat change list becomes the tree
+ * the panel draws.
  *
- * Kept out of `git-tab.tsx` and free of React so the suite can pin the two
- * rules that decide whether a tree reads correctly: the grouping depth (one
- * level — the top-level directory, VS Code's SCM tree) and the row label
- * (the path RELATIVE to the group whose header already names the directory,
- * so a row never repeats its own folder).
+ * Kept out of `git-tab.tsx` and free of React so the suite can pin the three
+ * rules that decide whether a tree reads correctly:
+ *
+ *   - the sort — directories before files at every level, each by name, which
+ *     is the SCM tree the panel imitates;
+ *   - the compaction — a directory whose only child is another directory
+ *     collapses into ONE header (`apps/api/src/modules/agent`), so a deep path
+ *     never renders as a column of single-child rows;
+ *   - the row label — a file shows its own name, because every directory above
+ *     it is already a header.
  *
  * @module @dsh-app/plugin-sidebar/client/git-list
  */
@@ -14,55 +19,116 @@
 /** The presentation shapes offered for the change list and the file list. */
 export type GitListShape = 'tree' | 'flat'
 
-/** One directory group of a list: the top-level key plus its rows. */
-export interface GitListGroup<T> {
-  /** The top-level directory, or `''` for entries at the repository root. */
-  readonly key: string
-  /** The group's rows, in their original order. */
-  readonly files: readonly T[]
+/** One file leaf. */
+export interface GitTreeFile<T> {
+  /** The file's own segment, which is what its row shows. */
+  readonly name: string
+  /** The full repository-relative path (the tooltip and the request key). */
+  readonly path: string
+  readonly entry: T
+}
+
+/** One directory node, its single-child chain already compacted. */
+export interface GitTreeDir<T> {
+  /** The header text, e.g. `apps/api/src/modules/agent`. */
+  readonly name: string
+  /** The deepest directory the header names — the collapse key. */
+  readonly path: string
+  readonly dirs: readonly GitTreeDir<T>[]
+  readonly files: readonly GitTreeFile<T>[]
+  /** Files at or below this node: the count badge on its header. */
+  readonly fileCount: number
+}
+
+/** The tree's two roots — directories, then the repository's own loose files. */
+export interface GitTree<T> {
+  readonly dirs: readonly GitTreeDir<T>[]
+  readonly files: readonly GitTreeFile<T>[]
+}
+
+/** Mutable build-time shape; `compact` turns it into the public node. */
+interface MutableDir<T> {
+  readonly name: string
+  readonly path: string
+  readonly dirs: Map<string, MutableDir<T>>
+  readonly files: GitTreeFile<T>[]
+}
+
+/** Name order, compared by code unit so the tree never depends on a locale. */
+function byName(left: { readonly name: string }, right: { readonly name: string }): number {
+  if (left.name < right.name) return -1
+  return left.name > right.name ? 1 : 0
 }
 
 /**
- * Group entries by their top-level directory.
+ * Collapse a single-child chain, then compact its subtree.
  *
- * Root entries (`''`) sort LAST so the directory groups read top-down before
- * the loose files, matching the SCM tree the panel imitates. Entries deeper
- * than one level stay inside their first segment's group: the tree is exactly
- * one level deep, which is what keeps a change list of a hundred paths
- * scannable without indentation drift.
+ * A directory that holds no files of its own and exactly one subdirectory is
+ * merged into it, repeatedly, so `apps` → `api` → `src` becomes one header
+ * reading `apps/api/src`. The merge stops at the first level that holds a file
+ * or a second directory, which is where the header would otherwise hide a
+ * sibling.
  *
- * @param list - the entries to group, in display order.
- * @returns the groups, directories sorted, root last.
+ * @param dir - the mutable node to compact.
+ * @returns the immutable node, its chain merged.
  */
-export function groupByTopDir<T extends { readonly path: string }>(list: readonly T[]): GitListGroup<T>[] {
-  const byDir = new Map<string, T[]>()
-  for (const entry of list) {
-    const slash = entry.path.indexOf('/')
-    const key = slash === -1 ? '' : entry.path.slice(0, slash)
-    const bucket = byDir.get(key) ?? []
-    bucket.push(entry)
-    byDir.set(key, bucket)
+function compact<T>(dir: MutableDir<T>): GitTreeDir<T> {
+  let name = dir.name
+  let path = dir.path
+  let current = dir
+  while (current.files.length === 0 && current.dirs.size === 1) {
+    const only = [...current.dirs.values()][0] as MutableDir<T>
+    name = `${name}/${only.name}`
+    path = only.path
+    current = only
   }
-  return [...byDir.entries()]
-    .sort(([a], [b]) => (a === '' ? '\uffff' : a).localeCompare(b === '' ? '\uffff' : b))
-    .map(([key, files]) => ({ key, files }))
+  const dirs = [...current.dirs.values()].sort(byName).map(compact)
+  const files = [...current.files].sort(byName)
+  return {
+    name,
+    path,
+    dirs,
+    files,
+    fileCount: files.length + dirs.reduce((total, child) => total + child.fileCount, 0),
+  }
 }
 
 /**
- * The label one row carries inside its group.
+ * Build the directory tree for one entry list.
  *
- * A grouped row shows the path WITHOUT its group's prefix — the header above
- * it already names that directory — so `src/client/panel.tsx` reads
- * `client/panel.tsx` under `src/`. A root row (no group) keeps the full path,
- * and a path that does not actually start with the group key is returned
- * untouched rather than sliced into a lie.
+ * Each entry is split on `/`; every segment but the last becomes a directory
+ * node and the last becomes the file's own label. An entry with no usable
+ * segment (an empty path) is skipped rather than rendered as a nameless row.
  *
- * @param path - the entry's full repository-relative path.
- * @param groupKey - the group's top-level directory, or `''` for root rows.
- * @returns the label for that row.
+ * @param list - the entries to lay out, in any order.
+ * @returns the tree, directories compacted and both roots sorted.
  */
-export function rowPathOf(path: string, groupKey: string): string {
-  if (groupKey === '') return path
-  const prefix = `${groupKey}/`
-  return path.startsWith(prefix) ? path.slice(prefix.length) : path
+export function buildPathTree<T extends { readonly path: string }>(list: readonly T[]): GitTree<T> {
+  const root: MutableDir<T> = { name: '', path: '', dirs: new Map(), files: [] }
+  for (const entry of list) {
+    const segments = entry.path.split('/').filter(segment => segment !== '')
+    const name = segments.pop()
+    if (name === undefined) continue
+    let cursor = root
+    for (const segment of segments) {
+      const known = cursor.dirs.get(segment)
+      if (known !== undefined) {
+        cursor = known
+        continue
+      }
+      const next: MutableDir<T> = {
+        name: segment,
+        path: cursor.path === '' ? segment : `${cursor.path}/${segment}`,
+        dirs: new Map(),
+        files: [],
+      }
+      cursor.dirs.set(segment, next)
+      cursor = next
+    }
+    cursor.files.push({ name, path: entry.path, entry })
+  }
+  return {
+    dirs: [...root.dirs.values()].sort(byName).map(compact),
+    files: [...root.files].sort(byName),
+  }
 }

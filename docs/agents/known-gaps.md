@@ -18,7 +18,14 @@ a short summary and points here.
   installer — a first run with no network converts no documents until the 诊断 row downloads it
   (`docs/agents/build-and-release.md` §2).
 - **`plugin-sidebar`** has no automated test suite for its client components — the plugin is verified
-  through tsc + esbuild + headless server API smokes.
+  through tsc + esbuild + headless server API smokes, plus `scripts/probe-git-panel.cjs` (real kernel,
+  real window) for the tree, the single-scroller rule and the diff ruler. One kernel-line fact that
+  probe had to work around: the conversation view-tab STRIP renders only when `conversation.view`
+  holds more than one registration (`showTabs = tabs.length > 1` in `ui-conversation`'s
+  ConversationSessionHeader), and on this line the suite's `git` is the only registrant — upstream's
+  对话/轨迹 rows are not registered, so there is no tab to click. The Git view is reached through the
+  per-session preference the kernel itself restores (`localStorage['dsh.conversation.<sessionId>']`,
+  `view: 'git'`), which is why the probe writes that instead of clicking.
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing secrets must be
   supplied as CI secrets; `resources/icon.png` is a placeholder.
 - **First-run UX**: kernel download progress is wired into the in-window update card, and the splash

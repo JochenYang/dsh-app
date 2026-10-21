@@ -20,13 +20,14 @@
  * commit messages) is a diagnostic and is shown verbatim.
  */
 
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { FsApiError, gitApi } from './api.ts'
 import type { GitActionValue, GitBranchList, GitStatusEntry, HostText } from './api.ts'
-import { groupByTopDir, rowPathOf, type GitListGroup, type GitListShape } from './git-list.ts'
+import { buildPathTree, type GitListShape, type GitTree, type GitTreeDir, type GitTreeFile } from './git-list.ts'
+import { diffRulerMarks, diffRulerScrollTop, type DiffLineKind, type DiffRulerMark } from './diff-ruler.ts'
 import { NS, type SidebarKey } from './locales.ts'
 
 /** The tab's namespace-bound translate, handed to the render helpers below. */
@@ -120,48 +121,92 @@ export type GitTabProps = PropsLocale<typeof NS> & {
   sessionId?: string
 }
 
-/** One diff text as a colored block. */
+/** One parsed diff row: its text, its colour class and what it is. */
+interface DiffRow {
+  readonly key: number
+  readonly text: string
+  readonly cls: string | undefined
+  readonly old: number | undefined
+  readonly new: number | undefined
+  readonly kind: DiffLineKind
+}
+
+/** One diff text as a colored block, with an overview ruler beside it. */
 function DiffView(props: { text: string, truncated?: boolean, t: SidebarTranslate }): ReactNode {
-  if (props.text === '') return <p className="dshAsb-hint">{props.t('sidebar.diff.empty')}</p>
-  const lines = props.text.split('\n')
-  // Unified-diff line numbering: each @@ hunk carries the new/old start
-  // lines; + counts against new, - against old, context against both.
-  let oldNo = 0
-  let newNo = 0
-  const rows = lines.map((line, index) => {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    if (hunk !== null) {
-      oldNo = Number(hunk[1])
-      newNo = Number(hunk[2])
-      return { key: index, text: line, cls: undefined, old: undefined, new: undefined }
-    }
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      const row = { key: index, text: line, cls: 'dshAsbGit-diffAdd', old: undefined, new: newNo }
+  const rows = useMemo<DiffRow[]>(() => {
+    if (props.text === '') return []
+    // Unified-diff line numbering: each @@ hunk carries the new/old start
+    // lines; + counts against new, - against old, context against both.
+    let oldNo = 0
+    let newNo = 0
+    return props.text.split('\n').map((line, index) => {
+      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+      if (hunk !== null) {
+        oldNo = Number(hunk[1])
+        newNo = Number(hunk[2])
+        return { key: index, text: line, cls: undefined, old: undefined, new: undefined, kind: 'meta' as const }
+      }
+      // The file headers are not changes: `+++ b/x` and `--- a/x` only look
+      // like one. They stay context-coloured and out of the ruler.
+      if (line.startsWith('+++') || line.startsWith('---')) {
+        return { key: index, text: line, cls: undefined, old: undefined, new: undefined, kind: 'meta' as const }
+      }
+      if (line.startsWith('+')) {
+        const row = { key: index, text: line, cls: 'dshAsbGit-diffAdd', old: undefined, new: newNo, kind: 'add' as const }
+        newNo += 1
+        return row
+      }
+      if (line.startsWith('-')) {
+        const row = { key: index, text: line, cls: 'dshAsbGit-diffDel', old: oldNo, new: undefined, kind: 'del' as const }
+        oldNo += 1
+        return row
+      }
+      const row = { key: index, text: line, cls: undefined, old: oldNo, new: newNo, kind: 'context' as const }
+      oldNo += 1
       newNo += 1
       return row
-    }
-    if (line.startsWith('-') && !line.startsWith('---')) {
-      const row = { key: index, text: line, cls: 'dshAsbGit-diffDel', old: oldNo, new: undefined }
-      oldNo += 1
-      return row
-    }
-    const row = { key: index, text: line, cls: undefined, old: oldNo, new: newNo }
-    oldNo += 1
-    newNo += 1
-    return row
-  })
+    })
+  }, [props.text])
+  const marks = useMemo(() => diffRulerMarks(rows), [rows])
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  if (props.text === '') return <p className="dshAsb-hint">{props.t('sidebar.diff.empty')}</p>
+  const jumpTo = (mark: DiffRulerMark): void => {
+    const node = bodyRef.current
+    if (node === null) return
+    node.scrollTop = diffRulerScrollTop(mark, node.scrollHeight, node.clientHeight)
+  }
   return (
     <>
       {props.truncated ? <p className="dshAsbGit-warning">{props.t('sidebar.diff.truncated')}</p> : null}
-      <pre className="dshAsbGit-diff">
-        {rows.map(row => (
-          <div key={row.key} className={row.cls}>
-            <span className="dshAsbGit-diffNo">{row.old === undefined ? '  ' : String(row.old).padEnd(4)}</span>
-            <span className="dshAsbGit-diffNo">{row.new === undefined ? '  ' : String(row.new).padEnd(4)}</span>
-            <span className="dshAsbGit-diffText">{row.text === '' ? ' ' : row.text}</span>
+      <div className="dshAsbGit-diffWrap">
+        {/* The ONE vertical scroller of this pane: the ruler rides it, and
+            nothing inside it scrolls vertically of its own accord. */}
+        <div className="dshAsbGit-diffBody" ref={bodyRef}>
+          <pre className="dshAsbGit-diff">
+            {rows.map(row => (
+              <div key={row.key} className={row.cls}>
+                <span className="dshAsbGit-diffNo">{row.old === undefined ? '  ' : String(row.old).padEnd(4)}</span>
+                <span className="dshAsbGit-diffNo">{row.new === undefined ? '  ' : String(row.new).padEnd(4)}</span>
+                <span className="dshAsbGit-diffText">{row.text === '' ? ' ' : row.text}</span>
+              </div>
+            ))}
+          </pre>
+        </div>
+        {/* Overview ruler. Marks are fractions of the parsed row count, so they
+            need no measurement; clicking one scrolls the body above. Rendered
+            only when there is something to locate. */}
+        {marks.length === 0 ? null : (
+          <div className="dshAsbGit-ruler" role="group" aria-label={props.t('sidebar.diff.rulerAria')}>
+            {marks.map(mark => (
+              <button key={`${String(mark.from)}-${String(mark.to)}`} type="button"
+                className={`dshAsbGit-rulerMark dshAsbGit-rulerMark${mark.kind === 'add' ? 'Add' : 'Del'}`}
+                style={{ top: `${String(mark.top * 100)}%`, height: `${String(Math.max(mark.span * 100, 0.6))}%` }}
+                aria-label={props.t('sidebar.diff.rulerMark', { from: mark.from + 1, to: mark.to + 1 })}
+                onClick={() => { jumpTo(mark) }} />
+            ))}
           </div>
-        ))}
-      </pre>
+        )}
+      </div>
     </>
   )
 }
@@ -570,6 +615,30 @@ export function GitTab(props: GitTabProps): ReactNode {
     }
   }, [branchPanelOpen])
 
+  // A single porcelain entry can have both an index and a worktree change
+  // (for example `MM`). Render it in both groups so neither half disappears.
+  // Derived lists are memoized on `entries`: the commit box re-renders on every
+  // keystroke, and the repository file list reaches 20,000 paths.
+  const staged = useMemo(
+    () => entries.filter(entry => entry.indexStatus !== ' ' && entry.indexStatus !== '?'),
+    [entries],
+  )
+  const unstaged = useMemo(
+    () => entries.filter(entry => entry.untracked || entry.worktreeStatus !== ' '),
+    [entries],
+  )
+  const unstagedTree = useMemo(() => buildPathTree(unstaged), [unstaged])
+  const stagedTree = useMemo(() => buildPathTree(staged), [staged])
+  // The 仓库文件 tab lists tracked paths with no status of their own; they are
+  // wrapped as readonly entries so both shapes render them through one path.
+  const repoFileEntries = useMemo<readonly GitStatusEntry[]>(
+    () => (repoFiles ?? []).map<GitStatusEntry>(path => ({
+      path, xy: '  ', indexStatus: ' ', worktreeStatus: ' ', staged: false, untracked: false,
+    })),
+    [repoFiles],
+  )
+  const repoFilesTree = useMemo(() => buildPathTree(repoFileEntries), [repoFileEntries])
+
   if (cwd === undefined) {
     return (
       <div className="dshAsbGit">
@@ -579,10 +648,6 @@ export function GitTab(props: GitTabProps): ReactNode {
     )
   }
 
-  // A single porcelain entry can have both an index and a worktree change
-  // (for example `MM`). Render it in both groups so neither half disappears.
-  const staged = entries.filter(entry => entry.indexStatus !== ' ' && entry.indexStatus !== '?')
-  const unstaged = entries.filter(entry => entry.untracked || entry.worktreeStatus !== ' ')
   const aheadCount = ahead ?? 0
   const behindCount = behind ?? 0
   const currentBranch = branchList?.current ?? null
@@ -638,55 +703,72 @@ export function GitTab(props: GitTabProps): ReactNode {
     )
   }
 
-  /** One directory group: expandable header + indented file rows (DEFAULT
-   * expanded — the tree opens fully so nothing is hidden behind a fold). The
-   * row label drops the group's own prefix: the header above it names that
-   * directory, so repeating it in every row is noise. */
-  const groupBlock = (group: GitListGroup<GitStatusEntry>, cached: boolean, readonly = false): ReactNode => {
-    if (group.key === '') {
-      return <>{group.files.map(entry => <Fragment key={entry.path}>{groupRow(entry, cached, readonly)}</Fragment>)}</>
-    }
-    const open = !collapsedDirs.has(group.key)
+  /** Toggle one directory's fold state, keyed by its full path. */
+  const toggleDir = (key: string): void => {
+    setCollapsedDirs(current => {
+      const next = new Set(current)
+      if (!next.delete(key)) next.add(key)
+      return next
+    })
+  }
+
+  /**
+   * One directory node and, when open, everything under it.
+   *
+   * The header names the whole compacted chain (`apps/api/src/modules/agent`),
+   * so a deep path is ONE row rather than a column of single-child rows, and
+   * each level below it indents by a fixed step. Recursion is what makes the
+   * depth real: a file sits under the directory that actually contains it, not
+   * under its first path segment.
+   */
+  const dirBlock = (dir: GitTreeDir<GitStatusEntry>, cached: boolean, readonly: boolean, depth: number): ReactNode => {
+    const open = !collapsedDirs.has(dir.path)
     return (
-      <>
+      <Fragment key={dir.path}>
         <button type="button" className="dshAsbGit-dirRow" aria-expanded={open}
-          onClick={() => {
-            setCollapsedDirs(current => {
-              const next = new Set(current)
-              if (!next.delete(group.key)) next.add(group.key)
-              return next
-            })
-          }}>
+          style={{ paddingLeft: `${String(depth * 12 + 6)}px` }}
+          onClick={() => { toggleDir(dir.path) }}>
           <ChevronGlyph open={open} />
-          <span className="dshAsbGit-dirName">{group.key}/</span>
-          <span className="dshAsbGit-dirCount">{String(group.files.length)}</span>
+          <span className="dshAsbGit-dirName">{dir.name}/</span>
+          <span className="dshAsbGit-dirCount">{String(dir.fileCount)}</span>
         </button>
         {open
-          ? group.files.map(entry => (
-              <div key={entry.path} className="dshAsbGit-fileRow">
-                {groupRow(entry, cached, readonly, rowPathOf(entry.path, group.key))}
-              </div>
-            ))
+          ? (
+            <>
+              {dir.dirs.map(child => dirBlock(child, cached, readonly, depth + 1))}
+              {dir.files.map(file => (
+                <div key={file.path} className="dshAsbGit-fileRow"
+                  style={{ marginLeft: `${String((depth + 1) * 12)}px` }}>
+                  {groupRow(file.entry, cached, readonly, file.name)}
+                </div>
+              ))}
+            </>
+          )
           : null}
-      </>
+      </Fragment>
     )
   }
 
   /**
    * Render one entry list in the chosen shape.
    *
-   * `tree` groups by top-level directory (collapsible headers, rows labelled
-   * relative to their group); `flat` is one row per file carrying its FULL
-   * path, which is what a reader wants when they are hunting for a path they
-   * already know. The shape governs presentation only — the same rows, the
-   * same actions, the same click-to-diff behaviour either way.
+   * `tree` walks the directory structure (compacted headers, rows labelled with
+   * their own file name); `flat` is one row per file carrying its FULL path,
+   * which is what a reader wants when they are hunting for a path they already
+   * know. The shape governs presentation only — the same rows, the same
+   * actions, the same click-to-diff behaviour either way.
    */
-  const renderList = (list: readonly GitStatusEntry[], cached: boolean, readonly = false, keyPrefix = ''): ReactNode =>
+  const renderTree = (tree: GitTree<GitStatusEntry>, cached: boolean, readonly = false): ReactNode => (
+    <>
+      {tree.dirs.map(dir => dirBlock(dir, cached, readonly, 0))}
+      {tree.files.map(file => <Fragment key={file.path}>{groupRow(file.entry, cached, readonly, file.name)}</Fragment>)}
+    </>
+  )
+
+  const renderList = (list: readonly GitStatusEntry[], tree: GitTree<GitStatusEntry>, cached: boolean, readonly = false, keyPrefix = ''): ReactNode =>
     shape === 'flat'
       ? list.map(entry => <Fragment key={`${keyPrefix}${entry.path}`}>{groupRow(entry, cached, readonly)}</Fragment>)
-      : groupByTopDir(list).map(group => (
-          <Fragment key={`${keyPrefix}${group.key}`}>{groupBlock(group, cached, readonly)}</Fragment>
-        ))
+      : <Fragment key={keyPrefix}>{renderTree(tree, cached, readonly)}</Fragment>
 
   // --- status view: left = change list, right = diff preview (SAME two-column
   // pattern as the file view: clicking a row previews in the right pane,
@@ -765,9 +847,7 @@ export function GitTab(props: GitTabProps): ReactNode {
               {filesError !== undefined ? <p className="dshAsb-error" role="alert">{filesError} <button type="button" className="dshAsbGit-link" onClick={() => { if (cwd !== undefined && sessionId !== undefined) void loadRepoFiles(cwd, sessionId, viewGeneration.current) }}>{t('sidebar.retry')}</button></p> : null}
               {repoFilesTruncated ? <p className="dshAsbGit-warning">{t('sidebar.files.truncated')}</p> : null}
               {repoFiles !== undefined && repoFiles.length === 0 && filesError === undefined ? <p className="dshAsb-hint">{t('sidebar.files.empty')}</p> : null}
-              {renderList((repoFiles ?? []).map<GitStatusEntry>(path => ({
-                path, xy: '  ', indexStatus: ' ', worktreeStatus: ' ', staged: false, untracked: false,
-              })), false, true, 'f:')}
+              {renderList(repoFileEntries, repoFilesTree, false, true, 'f:')}
             </>
           )
           : (
@@ -777,10 +857,10 @@ export function GitTab(props: GitTabProps): ReactNode {
               {notice !== undefined ? <p className="dshAsb-notice" role="status">{notice}</p> : null}
               {error === undefined && !(statusLoading && entries.length === 0) ? (
                 <>
-                  {renderList(unstaged, false, false, 'u:')}
+                  {renderList(unstaged, unstagedTree, false, false, 'u:')}
                   {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">{t('sidebar.status.clean')}</p> : null}
                   {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">{t('sidebar.status.staged', { count: staged.length })}</p> : null}
-                  {renderList(staged, true, false, 's:')}
+                  {renderList(staged, stagedTree, true, false, 's:')}
                   {!statusLoading && entries.length > 0 && staged.length === 0 ? <p className="dshAsb-hint">{t('sidebar.status.noStaged')}</p> : null}
                 </>
               ) : null}
@@ -983,8 +1063,21 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit-list { flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-right: 10px; }
 .dshAsbGit-list > * { flex-shrink: 0; }
 .dshAsbGit-resize { flex: none; width: 8px; cursor: col-resize; margin: 0 -2px 0 2px; z-index: 2; }
-.dshAsbGit-detail { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-left: 8px; }
+/* The right pane owns its scroll in exactly ONE element: the diff body. The
+   outer box is a plain flex column, so a tall diff no longer produces a second
+   scrollbar beside the pane's own. */
+.dshAsbGit-detail { flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 6px; padding-left: 8px; }
 .dshAsbGit-detail > * { flex-shrink: 0; }
+.dshAsbGit-diffWrap { flex: 1 1 0; min-height: 0; display: flex; gap: 4px; }
+.dshAsbGit-diffBody { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+/* Overview ruler: the marks are fractions of the diff's line count, so the
+   column needs no measurement of its own. Pointer-only (aria-hidden marks stay
+   focusable, so the buttons keep their labels); it rides the body's height. */
+.dshAsbGit-ruler { position: relative; flex: none; width: 10px; min-height: 0; align-self: stretch; border-radius: 5px; background: rgba(148, 163, 184, 0.12); overflow: hidden; }
+.dshAsbGit-rulerMark { position: absolute; left: 1px; right: 1px; min-height: 2px; padding: 0; border: none; border-radius: 1px; cursor: pointer; }
+.dshAsbGit-rulerMark:hover { filter: brightness(1.35); }
+.dshAsbGit-rulerMarkAdd { background: var(--dsw-alias-state-success-primary, #16a34a); }
+.dshAsbGit-rulerMarkDel { background: var(--dsw-alias-state-error-primary, #dc2626); }
 .dshAsbGit-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .dshAsbGit-branchWrap { position: relative; min-width: 0; max-width: 58%; }
 .dshAsbGit-branchBtn { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; padding: 3px 10px; border: none; border-radius: 999px; background: rgba(148, 163, 184, 0.2); color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 11.5px; }
@@ -1063,7 +1156,14 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit-diffBlock { display: flex; flex-direction: column; gap: 4px; }
 .dshAsbGit-diffPath { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; white-space: normal; overflow-wrap: anywhere; word-break: break-all; line-height: 1.5; }
 .dshAsbGit-commitMsg { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-family: inherit; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
-.dshAsbGit-diff, .dshAsbGit-graph { margin: 0; padding: 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.5; overflow: auto; max-height: calc(100vh - 280px); }
+.dshAsbGit-diff, .dshAsbGit-graph { margin: 0; padding: 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.5; }
+/* The diff scrolls HORIZONTALLY in place (long lines keep their own bar); the
+   vertical scroll belongs to .dshAsbGit-diffBody, which the ruler tracks.
+   overflow-y cannot be visible here: CSS computes it to auto when the other
+   axis scrolls, which is what produced a second scrollbar. clip is the value
+   that actually keeps this box out of the vertical scroll business. */
+.dshAsbGit-diff { overflow-x: auto; overflow-y: clip; }
+.dshAsbGit-graph { overflow: auto; max-height: calc(100vh - 280px); }
 .dshAsbGit-diffAdd { color: var(--dsw-alias-state-success-primary, #15803d); background: rgba(22, 163, 74, 0.08); }
 .dshAsbGit-diffDel { color: var(--dsw-alias-state-error-primary, #b91c1c); background: rgba(220, 38, 38, 0.08); }
 .dshAsbGit-graph { white-space: pre; color: var(--dsw-alias-label-primary, #0f172a); }

@@ -152,7 +152,18 @@ types `/` into a real composer and asserts what a static check cannot see: four 
 a glyph, their name and their description; the four rows contiguous and between the kernel's 指令 and
 技能 groups; a click landing ONE chip node whose token is `/office-docx` (so one Backspace removes it);
 the same token typed by hand still readable in the conversation; the mode capsule still toggling; and
-no error, crashed slot entry or failure line anywhere in the run; the remaining
+no error, crashed slot entry or failure line anywhere in the run; `probe-git-panel.cjs`
+(`node_modules/.bin/electron`) after touching `plugin-sidebar`'s tree, its right pane or its diff —
+it builds a fixture repository whose deep single-child path, sibling directory and many-hunk file
+make the three facts decidable, boots a real runtime artifact with `plugin-sidebar` linked from the
+WORKING TREE, and asserts what no static check can see: the tree nests by real directory level with
+the single-child chain compacted into one header, every file row labelled with its own name, folding
+one header hiding only its subtree; the right pane having exactly ONE vertical scroller for a tall
+diff (the `<pre>` inside it must not scroll vertically — `overflow-y: visible` computes to `auto`
+when the other axis scrolls, which is what produced the second bar); and the change ruler rendering
+merged marks that match the diff's own +/− lines and move the scroll when clicked. It reaches the Git
+view through the per-session preference the kernel itself restores, because the view-tab strip does
+not render with a single `conversation.view` registrant — see `docs/agents/known-gaps.md`; the remaining
 `probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` /
 `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` cover the surfaces
 their names say; `scripts/capture.mjs` screenshots the running UI for visual work.
