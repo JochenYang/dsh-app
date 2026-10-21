@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.1] - 2026-10-21
+
+### 中文
+- Git 面板的树形改为按真实目录层级嵌套：原来只按第一个路径段分组，`apps/api/src/modules/agent/tools/` 下的文件全挤在一个 `apps/` 下面、每行还重复着长路径；现在逐段建树，行只显示自己的文件名。只有子目录、没有自己文件的链会压缩成一行（`apps/api/src/modules/agent`），深层路径不会退化成一列单子行。
+- 右栏原来会出现两条纵向滚动条：右栏容器和 diff 的 `<pre>` 各能滚一次。现在纵向滚动只归 diff 体一个元素，`<pre>` 改用 `overflow-y: clip`——写成 `visible` 不行，CSS 规定另一个轴是 `auto` 时它会被算成 `auto`，那正是第二条滚动条的来源。
+- diff 右侧新增变更标尺：按行号比例画出红绿块，点击即跳到对应位置。相邻的同类变更行合并成一段；成对的删除/新增保持两块不同颜色，否则看不出哪行是删的。
+- 新增 `scripts/probe-git-panel.cjs`：造一个带深层路径、兄弟目录和多 hunk 大 diff 的仓库，起真实内核与窗口，断言这三件静态检查看不到的事。
+
+### English
+- The Git panel's tree now nests by real directory level. It used to group by the first path segment only, so every file under `apps/api/src/modules/agent/tools/` sat in one `apps/` bucket and each row repeated its long path; the tree is now built segment by segment and a row shows only its own file name. A chain of directories that hold no files of their own compacts into one row (`apps/api/src/modules/agent`), so a deep path never degrades into a column of single-child rows.
+- The right pane used to show two vertical scrollbars: the pane itself and the diff's `<pre>` could each scroll. The vertical scroll now belongs to one element, the diff body, and the `<pre>` uses `overflow-y: clip` — `visible` does not work there, because CSS computes it to `auto` when the other axis scrolls, which is exactly what produced the second bar.
+- The diff gains a change ruler beside it: red and green blocks placed by line fraction, and clicking one jumps there. Adjacent same-kind changes merge into one mark; a paired deletion/addition keeps two colours, or the reader cannot tell which line was removed.
+- Adds `scripts/probe-git-panel.cjs`: it builds a repository with a deep path, a sibling directory and a many-hunk diff, boots a real kernel and window, and asserts the three facts no static check can see.
+
 ## [v0.17.0] - 2026-10-21
 
 ### 中文
