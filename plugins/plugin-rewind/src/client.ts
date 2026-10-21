@@ -78,7 +78,7 @@ import type { RecallOutcome } from './client/outcome.ts'
 import { coverageSentence, hostCode, type FileReportLike } from './client/messages.ts'
 import type { Translate } from './client/messages.ts'
 import { transportFailure, transportNote } from './client/transport.ts'
-import type { RevertPlan } from './wire.ts'
+import type { RecallMode, RevertPlan } from './wire.ts'
 import { QuarantineSection } from './client/quarantine-section.tsx'
 import { showRecallNote, mountRecallNoteHost } from './client/recall-note-host.tsx'
 import { adoptStyles } from './client/styles.ts'
@@ -364,8 +364,8 @@ export function apply(ctx: ClientContext): void {
     t,
     recall: (ordinal: number, sessionId: string) =>
       recallByOrdinal(ctx, t, ordinal, sessionId as SessionId, handled),
-    plan: (ordinal: number, sessionId: string) =>
-      planRecall(ctx, t, ordinal, sessionId as SessionId),
+    plan: (ordinal: number, sessionId: string, mode?: RecallMode) =>
+      planRecall(ctx, t, ordinal, sessionId as SessionId, mode),
   }
   // `locale: 'chat'` matches how the built-in registers this slot: it supplies
   // the chat-bound `t` seat the keyed props require, and the wrapper forwards
@@ -495,12 +495,16 @@ async function planRecall(
   t: Translate,
   n: number,
   sessionId: SessionId,
+  mode: RecallMode = 'withFiles',
 ): Promise<{ readonly plan?: RevertPlan, readonly note?: string }> {
   const remote = (ctx.get('remote') as { commands?: RemoteCommands } | undefined)?.commands
   if (remote === undefined) return { note: t('rewind.error.unavailable') }
   if (typeof sessionId !== 'string' || sessionId === '') return { note: t('rewind.error.noSession') }
   try {
-    const result = await remote.execute(sessionId, `/rewind plan ${n}`, [])
+    // The scope travels with the preview, so the dialog never lists files the
+    // confirm button will not touch.
+    const command = mode === 'conversationOnly' ? `/rewind plan conversation ${String(n)}` : `/rewind plan ${String(n)}`
+    const result = await remote.execute(sessionId, command, [])
     const outcome = result.value?.result
     // No command outcome means the transport refused: the kernel's own message
     // is the only explanation, and "a capability is missing" would be a lie.
@@ -567,13 +571,18 @@ async function recallByOrdinal(
   n: number,
   sessionId: SessionId,
   handled: Set<number>,
+  mode: RecallMode = 'withFiles',
 ): Promise<RecallOutcome> {
   const remote = (ctx.get('remote') as { commands?: RemoteCommands } | undefined)?.commands
   if (remote === undefined) return { ok: false, code: 'rewind.error.unavailable' }
   const target = sessionId
   if (typeof target !== 'string' || target === '') return { ok: false, code: 'rewind.error.noSession' }
   try {
-    const result = await remote.execute(target, `/rewind ${n}`, [])
+    // The verb, not a flag: the host parses `conversation <n>` as its own
+    // command shape, so what the dialog chose and what the command does cannot
+    // drift apart through a stringly-typed option.
+    const command = mode === 'conversationOnly' ? `/rewind conversation ${String(n)}` : `/rewind ${String(n)}`
+    const result = await remote.execute(target, command, [])
     const outcome = result.value?.result
     if (!result.ok || outcome === undefined) {
       // The transport refused without a command outcome. `result.error` is the

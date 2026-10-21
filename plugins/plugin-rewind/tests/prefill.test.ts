@@ -97,6 +97,7 @@ test('the host sends the prompt with the success answer', () => {
   // the command registry keeps ONLY `kind`/`text`/`sourceEventSeq` on a result
   // (`dsh-commands/lib/types/index.js` `normalizeResult`), so a sibling field
   // would be dropped without a word.
-  assert.match(host, /text: coded\('rewind\.host\.done', \{ n: parsed\.n \}, undefined, \{/)
+  assert.match(host, /text: coded\('rewind\.host\.done', \{ n: ordinal \}, undefined, \{/)
   assert.match(host, /prompt: plan\.prompt/)
 })
+

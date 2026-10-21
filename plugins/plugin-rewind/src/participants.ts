@@ -46,6 +46,16 @@ export interface RewindRecallContext {
   /** The replacement range that was written. */
   readonly plan: PlannedCut
   /**
+   * Participants whose state this recall deliberately leaves alone.
+   *
+   * A conversation-only recall cuts the transcript and keeps the working tree,
+   * so the file revert must not run — but every OTHER participant still must,
+   * because a board or an archive that mirrored the turn is gone from the
+   * surface either way. Skipping by id rather than unregistering keeps the seam
+   * intact: the participant stays available for the next recall.
+   */
+  readonly skip?: ReadonlySet<string>
+  /**
    * The session, for a participant that needs the log rather than the plan.
    *
    * Typed as the read-only slice this plugin itself uses (`SessionLike`), but at
@@ -140,7 +150,9 @@ export function createParticipantRegistry(
       // shift the list under the loop and skip someone; one registered DURING a
       // reconcile then runs from the next recall, which is the only order that
       // keeps this pass's membership fixed.
+      const skip = context.skip
       for (const participant of [...ordered]) {
+        if (skip !== undefined && skip.has(participant.id)) continue
         try {
           reports.set(participant.id, await withDeadline(
             participant.reconcileAfterRewind(context),

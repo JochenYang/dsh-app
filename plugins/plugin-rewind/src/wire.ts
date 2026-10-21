@@ -138,6 +138,19 @@ export interface FileChangePreview {
 export type RevertCoverage = 'full' | 'partial' | 'none'
 
 /**
+ * What a recall is allowed to touch.
+ *
+ * `withFiles` is the ordinary recall: cut the messages and put the working tree
+ * back. `conversationOnly` cuts the messages and leaves every file alone — the
+ * case where the file work was right and only the message was wrong.
+ *
+ * Declared here, in the shared wire module, because the HOST parses it out of the
+ * command line and the CLIENT chooses it in the confirmation dialog; a second
+ * local copy is how the two would drift.
+ */
+export type RecallMode = 'withFiles' | 'conversationOnly'
+
+/**
  * The whole file effect of one would-be recall — ONE definition, shared.
  *
  * The host builds it (`previewRevert` in `src/index.ts`) and the client's

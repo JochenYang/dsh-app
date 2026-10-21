@@ -48,8 +48,8 @@
 
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, DiffBlock, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { FileChangePreview, RevertPlan } from '../wire.ts'
+import { Button, DiffBlock, Modal, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { FileChangePreview, RecallMode, RevertPlan } from '../wire.ts'
 import { coverageSentence } from './messages.ts'
 import type { RewindKey } from './locales.ts'
 
@@ -71,8 +71,20 @@ export interface ConfirmDialogProps {
   readonly busy: boolean
   /** The locale-bound `t` seat; this component owns no copy of its own. */
   readonly t: (key: RewindKey, params?: Readonly<Record<string, string | number>>) => string
-  readonly onConfirm: () => void
+  /**
+   * Run the recall. The mode is chosen IN this dialog, so it travels back with
+   * the confirmation rather than being fixed before the user sees the plan —
+   * a preview of files the user may then decide not to touch would be a lie
+   * about what the button does.
+   */
+  readonly onConfirm: (mode: RecallMode) => void
   readonly onClose: () => void
+  /**
+   * The scope changed, so the caller must re-ask the host what the recall would
+   * do. The dialog does not fetch by itself: the plan is the caller's state, and
+   * a second fetch path would be a second place for it to go stale.
+   */
+  readonly onScopeChange?: (mode: RecallMode) => void
 }
 
 /** The last path segment, which is what a row is recognisable by. */
@@ -123,13 +135,21 @@ function diffLabels(t: ConfirmDialogProps['t']): {
  *
  * @returns the dialog element, or null.
  */
-export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose }: ConfirmDialogProps): ReactNode {
+export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose, onScopeChange }: ConfirmDialogProps): ReactNode {
   const [expanded, setExpanded] = useState<string | undefined>(undefined)
+  // The safe default: a recall that also puts files back is what the button has
+  // always done, and a user who only wants the messages can say so here.
+  const [mode, setMode] = useState<RecallMode>('withFiles')
 
   // A closed dialog forgets which row was expanded, so reopening it never shows a
-  // stale diff for a plan that has since changed.
+  // stale diff for a plan that has since changed. The mode resets with it: the
+  // next recall starts from the ordinary shape instead of inheriting a choice
+  // made about a different message.
   useEffect(() => {
-    if (!open) setExpanded(undefined)
+    if (!open) {
+      setExpanded(undefined)
+      setMode('withFiles')
+    }
   }, [open])
 
   if (!open) return null
@@ -153,6 +173,9 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose }: Confi
     ...(unrestorable.length === 0 ? [] : [t('rewind.confirm.unrestorable', { n: unrestorable.length })]),
   ].join(' ')
   const warn = coverage !== undefined || unrestorable.length > 0
+  // Choosing "messages only" makes the file rows moot, and the dialog says so
+  // rather than showing a list of files it will not touch.
+  const modeNote = mode === 'conversationOnly' ? t('rewind.confirm.modeConversationOnly') : undefined
 
   return (
     <Modal
@@ -173,13 +196,35 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose }: Confi
           <Button variant="outline" disabled={busy} onClick={onClose}>
             {t('rewind.confirm.cancel')}
           </Button>
-          <Button variant="primary" disabled={busy} onClick={onConfirm}>
+          <Button variant="primary" disabled={busy} onClick={() => { onConfirm(mode) }}>
             {busy ? t('rewind.confirm.working') : t('rewind.confirm.confirm')}
           </Button>
         </>
       )}
     >
-      {rows.length > 0 && (
+      {/* The scope choice sits ABOVE the file list, because it decides whether
+          that list is even going to be acted on. Choosing "messages only" hides
+          the rows rather than dimming them: a list of files that will not be
+          touched is noise in a dialog whose job is to say what WILL happen. */}
+      <SegmentedControl
+        id="dshRewind-scope"
+        value={mode}
+        options={[
+          { value: 'withFiles' as const, label: t('rewind.mode.withFiles') },
+          { value: 'conversationOnly' as const, label: t('rewind.mode.conversationOnly') },
+        ]}
+        onChange={(next) => {
+          setMode(next)
+          onScopeChange?.(next)
+        }}
+        label={t('rewind.mode.label')}
+        disabled={busy}
+        className="dshRewind-scope"
+      />
+      {modeNote === undefined ? null : (
+        <p className="dshRewind-modeNote">{modeNote}</p>
+      )}
+      {mode === 'withFiles' && rows.length > 0 && (
         <ul className="dshRewind-fileList">
           {rows.map((row) => (
             <li key={row.path} className="dshRewind-fileRow">

@@ -16,7 +16,7 @@
  */
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -510,4 +510,192 @@ test('a prompt after the checkpoint lists with the boundary and refuses past it 
 
   await rm(work, { recursive: true, force: true })
   await rm(home, { recursive: true, force: true })
+})
+
+test('a conversation-only recall cuts the messages and leaves the files alone', async () => {
+  // The case this verb exists for: the file work was right, the message was
+  // wrong. An ordinary recall would undo both, so the user's only option used to
+  // be "recall, then put the files back by hand".
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'app.ts'), 'export const v = 1\n')
+  process.env.DSH_HOME = home
+  const { host, handler } = mount()
+  const target = session('probe-chat-only', work)
+  openTurn(target, 1, 'rewrite the module')
+  await toolGate(host, target, 'write')
+  toolCall(target, 1, 'write')
+  await toolWrite(host, target, join(work, 'app.ts'), 'export const v = 2\n')
+  closeTurn(target, 1)
+
+  const result = await handler({ rawInput: 'conversation 1', agent: { session: target, status: 'idle' } })
+  const files = report(result).files as { restored: number, removed: number, coverage: string, skipped?: boolean }
+
+  assert.equal(result.kind, 'success', 'the recall itself succeeds')
+  assert.equal(readFileSync(join(work, 'app.ts'), 'utf8'), 'export const v = 2\n',
+    'the write is still there — this verb must not touch files')
+  assert.equal(files.skipped, true, 'and the report says it was skipped rather than failed')
+  assert.equal(files.coverage, 'full', 'a skipped revert is not a coverage shortfall')
+  assert.equal(files.restored, 0)
+  assert.equal(files.removed, 0)
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a conversation-only recall keeps the before-image so a later recall can still use it', async () => {
+  // Dropping the recorder's entry and the range's snapshot here would make the
+  // files permanently unrestorable: the turn is off the surface, so nothing else
+  // remembers what it changed. The data therefore survives the skip.
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'app.ts'), 'export const v = 1\n')
+  process.env.DSH_HOME = home
+  const { host, handler } = mount()
+  const target = session('probe-chat-keep', work)
+  openTurn(target, 1, 'rewrite the module')
+  await toolGate(host, target, 'write')
+  toolCall(target, 1, 'write')
+  await toolWrite(host, target, join(work, 'app.ts'), 'export const v = 2\n')
+  closeTurn(target, 1)
+
+  await handler({ rawInput: 'conversation 1', agent: { session: target, status: 'idle' } })
+  assert.equal(readFileSync(join(work, 'app.ts'), 'utf8'), 'export const v = 2\n', 'files untouched')
+
+  // The real proof that the data survived: the turn is off the surface now, so a
+  // second recall cannot find it through the anchor list — but the before-image
+  // is still there, and a file revert asked for the same path still has it. The
+  // assertion is therefore on the STORE, not on a directory that other data would
+  // keep alive anyway (an earlier version asserted `existsSync(storages)` and
+  // passed even when the entry had been dropped — measured by mutation).
+  const trees = join(home, 'storages', 'dsh-app-plugin-rewind', 'trees', 'probe-chat-keep')
+  const manifests = existsSync(trees) ? readdirSync(trees) : []
+  assert.ok(manifests.includes('1.json'),
+    `turn 1's workspace snapshot was dropped by the conversation-only recall (found: ${JSON.stringify(manifests)})`)
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a conversation-only recall still reaches the other participants', async () => {
+  // Skipping the file revert must not skip the seam: a consumer that mirrored the
+  // turn has to learn the turn is gone, because the transcript changed either way.
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'note.md'), 'ORIGINAL')
+  process.env.DSH_HOME = home
+  const { host, handler, provided } = mount()
+  const seen: string[] = []
+  registryOf(provided).register({
+    id: 'board',
+    reconcileAfterRewind: (recall) => { seen.push(`board:${String(recall.plan.turn)}`) },
+  })
+  const target = session('probe-chat-seam', work)
+  openTurn(target, 1, 'hello')
+  closeTurn(target, 1)
+
+  const result = await handler({ rawInput: 'conversation 1', agent: { session: target, status: 'idle' } })
+
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(seen, ['board:1'], 'the other participant reconciled against the cut')
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+
+test('the snapshot is taken when the TURN opens, so a recall returns the tree as it was then', async () => {
+  // What "recall this message" means: put the tree back to the state it had when
+  // the message was SENT. The lazy tool gate alone cannot do that — it fires at
+  // the turn's first writing tool, by which time the user may have edited files
+  // by hand, and that edit would be captured as the turn's starting state.
+  //
+  // The shell write is what makes the difference observable: it never passes the
+  // pre-write waterfalls, so the snapshot diff is the only way a recall can see
+  // that the file changed at all.
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'note.md'), 'ORIGINAL')
+  process.env.DSH_HOME = home
+  const { host, handler } = mount()
+  const target = session('probe-boundary', work)
+
+  openTurn(target, 1, 'look at this for me')
+  // The boundary snapshot rides the event feed. A Session built in a test does
+  // not publish to the mounted context, so the event is emitted explicitly;
+  // without it the assertion below would pass on the lazy gate alone.
+  host.emit('session/event', target, { type: 'turn/start', data: { turn: 1 } })
+  // Fire-and-forget by design, so give the walk longer than the default settle.
+  await settle(400)
+  const manifest = join(home, 'storages', 'dsh-app-plugin-rewind', 'trees', 'probe-boundary', '1.json')
+  assert.equal(existsSync(manifest), true,
+    'no boundary snapshot was taken: turn 1 has no manifest before any tool fired')
+
+  // The user edits AFTER the turn opened, then the model's shell command edits
+  // the same file.
+  writeFileSync(join(work, 'note.md'), 'USER EDITED THIS')
+  await toolGate(host, target, 'pwsh')
+  toolCall(target, 1, 'pwsh')
+  writeFileSync(join(work, 'note.md'), 'MODEL EDITED THIS')
+  closeTurn(target, 1)
+  await settle()
+
+  const result = await handler({ rawInput: '1', agent: { session: target, status: 'idle' } })
+  assert.equal(result.kind, 'success')
+  // The state when the message was sent — before either edit.
+  assert.equal(readFileSync(join(work, 'note.md'), 'utf8'), 'ORIGINAL',
+    'the recall did not return the tree to the state it had when the turn opened')
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('the messages-only PREVIEW answers the same ordinal as the ordinary one', async () => {
+  // The regression this pins: the preview verbs were enumerated by hand when the
+  // ordinal was extracted, and the messages-only variant was not in that list —
+  // so `/rewind plan conversation 1` silently planned ordinal 0, which the cut
+  // rejects as out of range. The dialog then reported "cannot recall" for a
+  // message that was perfectly recallable.
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'note.md'), 'ORIGINAL')
+  process.env.DSH_HOME = home
+  const { handler } = mount()
+  const target = session('probe-plan-scope', work)
+  openTurn(target, 1, 'a message worth recalling')
+  closeTurn(target, 1)
+  await settle()
+
+  const ordinary = report(await handler({ rawInput: 'plan 1', agent: { session: target, status: 'idle' } })) as {
+    ok?: boolean, prompt?: string, skipped?: boolean
+  }
+  const messagesOnly = report(await handler({ rawInput: 'plan conversation 1', agent: { session: target, status: 'idle' } })) as {
+    ok?: boolean, prompt?: string, skipped?: boolean
+  }
+
+  assert.equal(ordinary.ok, true, 'the ordinary preview must still resolve')
+  assert.equal(messagesOnly.ok, true, 'the messages-only preview resolved a different ordinal')
+  assert.equal(messagesOnly.prompt, ordinary.prompt, 'the two previews describe different messages')
+  assert.equal(messagesOnly.skipped, true, 'the messages-only preview does not say the files are left alone')
+})
+
+test('a messages-only preview reports NO file effect, so the dialog cannot overstate it', async () => {
+  // The dialog renders whatever the preview says and then acts on confirmation.
+  // A preview listing files while the recall touches none would be a dialog
+  // describing an operation other than the one it runs.
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'note.md'), 'ORIGINAL')
+  process.env.DSH_HOME = home
+  const { host, handler } = mount()
+  const target = session('probe-plan-empty', work)
+  openTurn(target, 1, 'change the file')
+  await settle(150)
+  await toolGate(host, target, 'write')
+  toolCall(target, 1, 'write')
+  await toolWrite(host, target, join(work, 'note.md'), 'CHANGED')
+  closeTurn(target, 1)
+  await settle()
+
+  const ordinary = report(await handler({ rawInput: 'plan 1', agent: { session: target, status: 'idle' } })) as {
+    restore?: unknown[], remove?: unknown[]
+  }
+  const messagesOnly = report(await handler({ rawInput: 'plan conversation 1', agent: { session: target, status: 'idle' } })) as {
+    restore?: unknown[], remove?: unknown[], skipped?: boolean
+  }
+
+  assert.equal((ordinary.restore ?? []).length, 1, 'the ordinary preview should list the file')
+  assert.deepEqual(messagesOnly.restore, [], 'the messages-only preview listed a file it will not touch')
+  assert.deepEqual(messagesOnly.remove, [])
+  assert.equal(messagesOnly.skipped, true)
 })

@@ -38,7 +38,7 @@ import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { RecallOutcome } from './outcome.ts'
 import type { Translate } from './messages.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
-import type { RevertPlan } from '../wire.ts'
+import type { RecallMode, RevertPlan } from '../wire.ts'
 import { useHiddenTurns } from './hide-turns.ts'
 import { showRecallNote } from './recall-note-host.tsx'
 
@@ -113,14 +113,14 @@ export interface MessageActionDeps {
    * nothing is indistinguishable from a broken button, which is how the first
    * round of this feature read on a real machine.
    */
-  readonly recall: (ordinal: number, sessionId: string) => Promise<RecallOutcome>
+  readonly recall: (ordinal: number, sessionId: string, mode?: RecallMode) => Promise<RecallOutcome>
   /**
    * Ask what a recall would do, without doing it.
    *
    * The confirmation dialog renders this. It must be a separate call: a preview
    * that could change things is not a preview.
    */
-  readonly plan: (ordinal: number, sessionId: string) => Promise<RecallPlanOutcome>
+  readonly plan: (ordinal: number, sessionId: string, mode?: RecallMode) => Promise<{ readonly plan?: RevertPlan, readonly note?: string }>
 }
 
 /** The outcome of asking what a recall would do. */
@@ -232,7 +232,11 @@ export function makeMessageActionView<Kind extends ChatNodeKind>(
                   // confirmation instead of performing it: by the time a sentence
                   // reported the outcome, the tree would already have changed.
                   setBusy(true)
-                  void deps.plan(anchor.n, sessionId).then((planned) => {
+                  // Preview the ORDINARY recall first: that is the dialog's
+                  // default scope, and a preview for a scope the user has not
+                  // chosen yet would be a guess. Switching the scope inside the
+                  // dialog re-asks, so the list always matches the selection.
+                  void deps.plan(anchor.n, sessionId, 'withFiles').then((planned) => {
                     setBusy(false)
                     if (planned.plan === undefined) {
                       showRecallNote(planned.note ?? deps.t('rewind.error.unavailable'))
@@ -253,11 +257,23 @@ export function makeMessageActionView<Kind extends ChatNodeKind>(
           busy={busy}
           t={deps.t}
           onClose={() => setPending(undefined)}
-          onConfirm={() => {
+          onScopeChange={(next) => {
+            const target = pending
+            if (target === undefined) return
+            // Re-ask with the new scope. The previous plan is kept on screen
+            // until the answer arrives, so switching back and forth does not
+            // blank the dialog.
+            void deps.plan(target.n, target.sessionId, next).then((planned) => {
+              const nextPlan = planned.plan
+              if (nextPlan === undefined) return
+              setPending((current) => current === undefined ? current : { ...current, plan: nextPlan })
+            })
+          }}
+          onConfirm={(mode) => {
             const target = pending
             if (target === undefined) return
             setBusy(true)
-            void deps.recall(target.n, target.sessionId).then((outcome) => {
+            void deps.recall(target.n, target.sessionId, mode).then((outcome) => {
               setBusy(false)
               setPending(undefined)
               // Reported through the overlay, never inside this row: the row sits

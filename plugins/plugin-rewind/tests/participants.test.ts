@@ -167,3 +167,48 @@ test('a participant that never settles is cut off at the deadline, not awaited f
   assert.match(lines.join('\n'), /"hung"/u, 'the hung participant is named in the log')
   assert.match(lines.join('\n'), /did not settle/u, 'with the reason it was dropped for')
 })
+
+test('a skipped participant does not run, and every other one still does', async () => {
+  // A conversation-only recall cuts the transcript and leaves the working tree
+  // alone. The file revert must not run — restoring files the user asked to keep
+  // would be worse than not recalling at all — while a participant that mirrored
+  // the turn still has to reconcile, because the turn is gone from the surface
+  // either way.
+  const { registry } = warned()
+  const ran: string[] = []
+  registry.register({ id: 'file-revert', reconcileAfterRewind: () => { ran.push('file-revert') } })
+  registry.register({ id: 'board', reconcileAfterRewind: () => { ran.push('board') } })
+
+  const reports = await registry.reconcileAll({ ...context(), skip: new Set(['file-revert']) })
+
+  assert.deepEqual(ran, ['board'], 'only the non-skipped participant ran')
+  assert.equal(reports.has('file-revert'), false, 'a skipped participant contributes no report')
+  assert.equal(reports.has('board'), true, 'and the others still report')
+})
+
+test('skipping is per recall: the same participant runs again next time', async () => {
+  // Skipping by id rather than unregistering is what keeps the seam usable: the
+  // file revert must still be there for the next ordinary recall.
+  const { registry } = warned()
+  let runs = 0
+  registry.register({ id: 'file-revert', reconcileAfterRewind: () => { runs += 1 } })
+
+  await registry.reconcileAll({ ...context(), skip: new Set(['file-revert']) })
+  assert.equal(runs, 0, 'skipped on the first recall')
+  await registry.reconcileAll(context())
+  assert.equal(runs, 1, 'and it runs on a recall that did not skip it')
+})
+
+test('an empty skip set is the same as no skip at all', async () => {
+  // The ordinary path must not pay for the new field: an empty set has to behave
+  // exactly like the absent one, or a conversation-only recall would leave a
+  // difference behind in every other case.
+  const { registry } = warned()
+  const ran: string[] = []
+  registry.register({ id: 'a', reconcileAfterRewind: () => { ran.push('a') } })
+  registry.register({ id: 'b', reconcileAfterRewind: () => { ran.push('b') } })
+
+  await registry.reconcileAll({ ...context(), skip: new Set<string>() })
+
+  assert.deepEqual(ran, ['a', 'b'])
+})

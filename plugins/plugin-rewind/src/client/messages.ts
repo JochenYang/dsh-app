@@ -94,6 +94,8 @@ export interface FileReportLike {
   readonly coverage?: unknown
   readonly coverageReason?: unknown
   readonly tools?: unknown
+  /** The recall was asked to leave the working tree alone. */
+  readonly skipped?: unknown
 }
 
 /** The dictionary key naming why a workspace snapshot fell short. */
@@ -132,6 +134,10 @@ export function coverageSentence(
   t: Translate,
   keys: { readonly none: RewindKey, readonly partial: RewindKey },
 ): string | undefined {
+  // A skipped revert is checked FIRST and is not a coverage verdict at all: the
+  // files were deliberately left alone, so the `none` sentence ("could not be
+  // restored") would describe a chosen outcome as a failure.
+  if (files?.skipped === true) return t('rewind.files.skipped')
   const coverage = files?.coverage
   if (coverage !== 'none' && coverage !== 'partial') return undefined
   if (coverage === 'none') {

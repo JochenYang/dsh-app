@@ -164,6 +164,15 @@ export interface FileRevert {
   readonly coverageReason?: string
   /** Tools that ran in the range and can write files. */
   readonly tools?: readonly string[]
+  /**
+   * The recall deliberately left the working tree alone.
+   *
+   * Distinct from `coverage: 'none'`: that says the plugin COULD NOT see the
+   * range's file changes, while this says it was asked not to touch them. A
+   * client that rendered both as "the files could not be restored" would turn a
+   * chosen outcome into an alarming one.
+   */
+  readonly skipped?: boolean
 }
 
 /**
@@ -181,6 +190,17 @@ function failedRevert(reason: string): FileRevert {
     coverage: 'none',
     coverageReason: 'revertFailed',
   }
+}
+
+/**
+ * The report a conversation-only recall sends.
+ *
+ * Every count is zero because nothing was touched, and `skipped` is what tells
+ * the client to say "the files were left as they are" instead of rendering the
+ * `coverage: 'none'` sentence meant for a revert that failed.
+ */
+function skippedRevert(): FileRevert {
+  return { restored: 0, removed: 0, unrestorable: [], coverage: 'full', skipped: true }
 }
 
 /** Narrow one participant report to the file revert's shape. */
@@ -303,6 +323,18 @@ type Ordinal =
   | { readonly kind: 'n', readonly n: number }
   /** Preview a recall of `n` without performing it. */
   | { readonly kind: 'plan', readonly n: number }
+  /**
+   * Preview a CONVERSATION-ONLY recall of `n`.
+   *
+   * A separate verb, for the same reason the recall has one: a plan that says
+   * "1 file will be restored" while the recall it describes leaves every file
+   * alone is a dialog lying about the operation it is about to run. The client
+   * asks with the scope the user has selected, so the preview always matches the
+   * action the confirm button performs.
+   */
+  | { readonly kind: 'planConversationOnly', readonly n: number }
+  /** Recall `n` but leave the working tree alone. */
+  | { readonly kind: 'conversationOnly', readonly n: number }
   | { readonly kind: 'bad' }
 
 /**
@@ -337,18 +369,39 @@ const READ_ONLY_TOOLS = new Set([
 /**
  * Parse the argument.
  *
- * Bare lists; `<n>` recalls; `plan <n>` previews. The preview is a separate verb
- * rather than a flag because the client needs to ASK what would happen before the
- * user decides — and asking must never be capable of changing anything, which is
- * easiest to keep true when it is a different command.
+ * Bare lists; `<n>` recalls; `plan <n>` previews; `conversation <n>` recalls the
+ * messages only. The preview is a separate verb rather than a flag because the
+ * client needs to ASK what would happen before the user decides — and asking must
+ * never be capable of changing anything, which is easiest to keep true when it is
+ * a different command.
+ *
+ * `conversation` is a separate verb for the same reason: it changes what the
+ * recall DOES, and a flag on the recall line (`/rewind 2 --no-files`) would have
+ * to be parsed out of free text the model may also be writing in. A user who
+ * wants their words back but their files kept is a real case — a message sent by
+ * mistake often follows correct file work — and without this verb the only way
+ * was to recall with files and then put them back by hand.
  */
 function parseOrdinal(raw: string): Ordinal {
   const text = raw.trim()
   if (text === '') return { kind: 'list' }
+  // `plan conversation <n>` previews the messages-only shape; plain `plan <n>`
+  // previews the ordinary one. The scope is part of the verb so a preview can
+  // never describe an operation other than the one it is previewing for.
+  const planOnly = /^plan\s+(?:conversation|chat)\s+(\d+)$/.exec(text)
+  if (planOnly !== null) {
+    const n = Number(planOnly[1])
+    return Number.isSafeInteger(n) && n >= 1 ? { kind: 'planConversationOnly', n } : { kind: 'bad' }
+  }
   const plan = /^plan\s+(\d+)$/.exec(text)
   if (plan !== null) {
     const n = Number(plan[1])
     return Number.isSafeInteger(n) && n >= 1 ? { kind: 'plan', n } : { kind: 'bad' }
+  }
+  const conversation = /^(?:conversation|chat)\s+(\d+)$/.exec(text)
+  if (conversation !== null) {
+    const n = Number(conversation[1])
+    return Number.isSafeInteger(n) && n >= 1 ? { kind: 'conversationOnly', n } : { kind: 'bad' }
   }
   if (!/^\d+$/.test(text)) return { kind: 'bad' }
   const n = Number(text)
@@ -527,20 +580,69 @@ export function apply(ctx: Context, config: Config): void {
   /**
    * Take this turn's workspace snapshot if it does not exist yet.
    *
-   * The in-memory guard is claimed BEFORE the await so two concurrent tool calls
-   * of one step cannot both walk the tree, and it is never released: a snapshot
-   * that failed is not retried mid-turn, because the state it would capture is no
-   * longer the turn's starting state.
+   * The in-memory guard is claimed BEFORE the await so two concurrent callers —
+   * two tool calls of one step, or the turn boundary racing the first tool —
+   * cannot both walk the tree. A SUCCESS holds the claim for the turn: the state
+   * a second walk would capture is no longer the turn's starting state, so
+   * re-taking it would record a mid-turn tree under the turn's own number. A
+   * FAILURE releases it, because the other caller may well succeed (the turn
+   * boundary runs earlier, when the workspace is not yet known to be walkable)
+   * and a released claim costs one walk instead of a turn with no snapshot.
    */
   async function ensureSnapshot(info: SnapshotTarget, signal?: AbortSignal): Promise<void> {
     const key = `${info.id}\u0000${String(info.turn)}`
     if (captured.has(key)) return
     captured.add(key)
     const dshHome = resolveDshHome()
-    const previous = await latestSnapshotBefore(dshHome, info.id, info.turn)
-    await captureWorkspace(dshHome, info.id, info.turn, info.cwd, limits, previous, signal)
-    await pruneSnapshots(dshHome, info.id, limits)
+    try {
+      const previous = await latestSnapshotBefore(dshHome, info.id, info.turn)
+      await captureWorkspace(dshHome, info.id, info.turn, info.cwd, limits, previous, signal)
+      await pruneSnapshots(dshHome, info.id, limits)
+    } catch (error) {
+      // The claim is RELEASED on failure, and this is why the two callers can
+      // coexist: the turn-start path runs before the workspace is known to be
+      // walkable (the session may have just opened), so it can fail where the
+      // tool gate would have succeeded a moment later. Holding the claim would
+      // leave the whole turn without a snapshot — the very state the claim
+      // exists to record — and the recall would then report `coverage: none`
+      // for a range that could have been covered.
+      captured.delete(key)
+      throw error
+    }
   }
+
+  // --- The turn boundary. ---
+  //
+  // The tool gate above only fires when a turn reaches a tool that could write,
+  // which leaves a real window uncovered: between the turn's first prompt and
+  // that first tool, the model is reading and thinking while the USER may be
+  // editing files by hand. A recall of that turn then restores a tree that was
+  // already changed before the range began — the diff attributes the user's own
+  // edits to the range and undoes them.
+  //
+  // The snapshot is therefore also taken at `turn/start`. This costs the same
+  // single tree walk the gate would have done (the guard is shared, so whichever
+  // fires first wins and the other is a no-op), and it is strictly earlier: the
+  // state at the turn's first prompt is the state a recall of that turn must
+  // return to.
+  //
+  // It is NOT a timer, deliberately. A periodic snapshot would pay the walk
+  // (bounded at 1.5 s by `maxWalkMs`) over and over inside one turn while the
+  // only thing a recall can return to is a turn boundary — the extra snapshots
+  // would cost IO and disk for states no command can address.
+  ctx.effect(() => ctx.on('session/event', (session, event) => {
+    // An ordinary event, not a waterfall: it carries no `next`, and returning a
+    // value means nothing here. Only the turn's own start is interesting.
+    if (!snapshotWorkspace || event?.type !== 'turn/start') return
+    const info = sessionInfoOfSession(session, event)
+    if (info === undefined) return
+    // Not awaited: this listener sits on the event feed, and a turn must not wait
+    // on a tree walk to begin. The guard makes a later tool gate a no-op if this
+    // one is still running, so the two cannot both walk.
+    void ensureSnapshot(info).catch((error: unknown) => {
+      log.warn(`rewind: turn-start snapshot failed: ${messageOf(error)}`)
+    })
+  }), 'plugin-rewind: turn-start snapshot')
 
   const handle = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const session = invocation.agent.session
@@ -580,7 +682,13 @@ export function apply(ctx: Context, config: Config): void {
       return { kind: 'error', text: coded('rewind.host.busy') }
     }
 
-    const plan = planCut(session, parsed.n, maxAnchors)
+    // Every verb reaching this point carries an ordinal (`list` returned above,
+    // and TypeScript proves the union no longer includes it). Naming it once keeps
+    // the plan, the messages and the report reading the same number — and an
+    // explicit per-variant list here is how a new verb silently got ordinal 0 and
+    // was rejected as out of range.
+    const ordinal = parsed.n
+    const plan = planCut(session, ordinal, maxAnchors)
     if ('reason' in plan) {
       // A preview reports the same reasons as a recall; the dialog shows them
       // rather than letting the user confirm something that cannot happen.
@@ -595,9 +703,9 @@ export function apply(ctx: Context, config: Config): void {
             : 'rewind.host.notUserMessage'
       const failureParams = (plan.reason === 'outOfRange' || plan.reason === 'compactionBoundary')
         && plan.available > 0
-        ? { available: plan.available, requested: parsed.n }
+        ? { available: plan.available, requested: ordinal }
         : undefined
-      if (parsed.kind === 'plan') {
+      if (parsed.kind === 'plan' || parsed.kind === 'planConversationOnly') {
         return {
           kind: 'success',
           text: coded('rewind.host.plan', undefined, undefined, {
@@ -615,13 +723,18 @@ export function apply(ctx: Context, config: Config): void {
     // A preview stops here: it has answered what the recall would do, and it must
     // not have changed anything on the way. It carries the boundary flag so the
     // confirmation dialog can say that older messages are gone.
-    if (parsed.kind === 'plan') {
-      const preview = await previewRevert(session, sessionId, plan, recorder, limits)
+    if (parsed.kind === 'plan' || parsed.kind === 'planConversationOnly') {
+      // A messages-only preview reports NO file effect at all, which is exactly
+      // what that recall will do. Reporting the ordinary plan here would tell the
+      // dialog to list files the confirm button will not touch.
+      const preview = parsed.kind === 'planConversationOnly'
+        ? { restore: [], remove: [], unrestorable: [], coverage: 'full' as const, skipped: true }
+        : await previewRevert(session, sessionId, plan, recorder, limits)
       return {
         kind: 'success',
         text: coded('rewind.host.plan', undefined, undefined, {
           ok: true,
-          n: parsed.n,
+          n: ordinal,
           prompt: plan.prompt,
           // The flag alone: `availability` would walk the surface a third time
           // (through `listAnchors`) to read a boolean, and this path already
@@ -655,16 +768,32 @@ export function apply(ctx: Context, config: Config): void {
     // participant's failure is a warning instead of a rollback. The file revert is
     // the first of them (registered in `apply`), which is why this runs before the
     // recorder and snapshot cleanup — it reads both.
-    const reconciled = await participants.reconcileAll({ session, sessionId, plan })
-    const revert = fileRevertOf(reconciled)
+    // A conversation-only recall cuts the transcript and leaves the working tree
+    // exactly as it is, so the file revert is skipped BY ID — every other
+    // participant still reconciles, because whatever mirrored the turn is gone
+    // from the surface either way.
+    const conversationOnly = parsed.kind === 'conversationOnly'
+    const reconciled = await participants.reconcileAll({
+      session,
+      sessionId,
+      plan,
+      ...(conversationOnly ? { skip: new Set([FILE_REVERT_PARTICIPANT]) } : {}),
+    })
+    const revert = conversationOnly ? skippedRevert() : fileRevertOf(reconciled)
 
     // The recalled turns are off the surface, so their before-images are dead
-    // weight — in memory and on disk.
-    recorder.forget(sessionId, plan.turns)
-    try {
-      await dropSnapshots(resolveDshHome(), sessionId, plan.turns)
-    } catch (error) {
-      log.warn(`rewind: snapshot cleanup failed: ${messageOf(error)}`)
+    // weight — in memory and on disk. EXCEPT after a conversation-only recall:
+    // the files were deliberately left alone, so those before-images are still
+    // the only record of what the range changed, and dropping them would make a
+    // later "recall with files" impossible. The turn is off the surface but its
+    // file state is still restorable, so the data stays.
+    if (!conversationOnly) {
+      recorder.forget(sessionId, plan.turns)
+      try {
+        await dropSnapshots(resolveDshHome(), sessionId, plan.turns)
+      } catch (error) {
+        log.warn(`rewind: snapshot cleanup failed: ${messageOf(error)}`)
+      }
     }
 
     return {
@@ -672,7 +801,7 @@ export function apply(ctx: Context, config: Config): void {
       // The recalled text travels WITH the result, so the composer gets it
       // exactly once — a durable projection would replay it on every reload.
       // The file revert's tally rides the same payload; see `coded`.
-      text: coded('rewind.host.done', { n: parsed.n }, undefined, {
+      text: coded('rewind.host.done', { n: ordinal }, undefined, {
         prompt: plan.prompt,
         files: revert,
       }),
@@ -740,6 +869,29 @@ function sessionInfoOfExec(exec: unknown): SessionInfo | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * The session facts a turn-start snapshot needs, read off the session handle the
+ * event feed hands over.
+ *
+ * `turn/start` carries the turn in its own payload, so this does not fold the
+ * log: the event already says which turn began, and re-deriving it would read a
+ * log that is being written to at that moment.
+ */
+function sessionInfoOfSession(session: unknown, event: unknown): SnapshotTarget | undefined {
+  if (typeof session !== 'object' || session === null) return undefined
+  const handle = session as { header?: { id?: unknown, cwd?: unknown } }
+  const id = handle.header?.id
+  if (typeof id !== 'string' || id === '') return undefined
+  const rawCwd = handle.header?.cwd
+  // The snapshot needs a root; a session without one has nothing to walk.
+  if (typeof rawCwd !== 'string' || rawCwd === '') return undefined
+  // The turn comes from the EVENT. A default would snapshot turn 0 and then
+  // collide with nothing the recall can address, which is worse than skipping.
+  const turn = (event as { data?: { turn?: unknown } } | null)?.data?.turn
+  if (typeof turn !== 'number' || !Number.isSafeInteger(turn) || turn < 1) return undefined
+  return { id, cwd: rawCwd, turn }
 }
 
 /** The sequence a write happens at, so two writes to one path stay ordered. */
