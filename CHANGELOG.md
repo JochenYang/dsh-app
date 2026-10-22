@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.3] - 2026-10-22
+
+### 中文
+- 会话归档新增「恢复」：每个会话和每个项目分组都有自己的恢复按钮，把会话移出归档集，重新出现在列表里。恢复只移除归档记录、不碰日志文件，所以没有确认框——随时可以再归档回去。
+- Git 面板的变更标尺改为严格按变更行数占全文的比例绘制。原来 2px / 0.6% 的下限会让一行的改动看起来和一大段一样长，长文件里所有色块长得都一样，反而看不出哪里改得多。点击热区改用伪元素外扩，细小的色块仍然可点。
+- 并行子代理与智能体团队现在共用一套委派规范：批量子代理的提示词移出人格区、紧跟在团队策略之后渲染，并明确把有序、需要中途审核的交接交给团队工具。启用团队能力时额外追加一段触发条件说明——有先后依赖的工作归团队，互相独立的铺开归批量。
+- 新增两个验证工具：`probe-diff-ruler.cjs` 测量色块的真实绘制比例，`probe-swarm-team-prompt.mjs` / `probe-team-section-mount.mjs` 在真实内核上验证两段提示词能同时组装并按预期顺序渲染。
+
+### English
+- Session archives gain Restore: every session and every project group has its own button, which drops the session from the archive set so it lists again. Restoring removes the archive record and never touches the log, so it carries no confirm dialog — archiving again undoes it.
+- The Git panel's change ruler now draws each mark at the true fraction of changed lines. The old 2px / 0.6% floor made a one-line change look as long as a whole block, so on a long file every mark looked alike and the ruler stopped showing where the bulk of a change sat. The click target moved to a pseudo-element overhang, so small marks stay clickable.
+- Batch subagents and Agent Teams now share one delegation policy: the batch prompt section moves out of the persona band to render right after the Team policy, and hands ordered, reviewed work to the Team tools. A trigger section is added when Agent Teams is present — work with dependencies belongs to the Team, independent fan-out to the batch.
+- Adds two verification tools: `probe-diff-ruler.cjs` measures a mark's true painted proportion, and `probe-swarm-team-prompt.mjs` / `probe-team-section-mount.mjs` verify on a real kernel that both prompt sections assemble together in the intended order.
+
 ## [v0.17.2] - 2026-10-22
 
 ### 中文
