@@ -95,7 +95,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /** Suite plugin directory names under dsh-app/plugins (and kernel node_modules). */
-export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort', 'plugin-workbench'] as const
+export const SUITE_PLUGIN_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort', 'plugin-workbench', 'plugin-codegraph'] as const
 
 /** npm scope shared by the suite plugins; also the scope the mirror drop must not take back. */
 export const PLUGIN_SCOPE = '@dsh-app'

@@ -42,6 +42,11 @@ const BASELINE = {
   'plugin-usage': 0,
   'plugin-websearch': 0,
   'plugin-workbench': 0,
+  // One: `node:sqlite` types a row as `Record<string, SQLOutputValue>`, which
+  // shares no structural overlap with the column record, so the cast must go
+  // through `unknown`. The SELECT list in that one statement IS the contract,
+  // and SCHEMA_VERSION guards a change to it.
+  'plugin-codegraph': 1,
 }
 
 /** Every source file under a plugin's src/, recursively. */

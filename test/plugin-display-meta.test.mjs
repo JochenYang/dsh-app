@@ -113,6 +113,34 @@ test('every suite plugin locale file carries a title and a description', () => {
   assert.deepEqual(problems, [], 'the reader rejects a non-string or empty field, and a malformed dictionary is skipped rather than reported')
 })
 
+test('every suite plugin ships BOTH en.json and zh.json, with the same keys', () => {
+  // The reader falls back silently: a plugin with only `en.json` shows English in
+  // a Chinese UI with no error anywhere, and the `en.json`-only checks above stay
+  // green. This project's own convention is that every plugin owns a paired
+  // dictionary (`plugins/AGENTS.md` §6), so the pair is the contract.
+  const problems = []
+  for (const plugin of PLUGIN_DIRS) {
+    const directory = join(ROOT, 'plugins', plugin, 'locale')
+    const entries = languageFiles(directory)
+    for (const required of ['en.json', 'zh.json']) {
+      if (!entries.includes(required)) problems.push(`${plugin}: locale/${required} is missing`)
+    }
+    if (!entries.includes('en.json') || !entries.includes('zh.json')) continue
+    // Same keys on both sides: a key added to one language only is copy that
+    // silently disappears in that locale.
+    const keysOf = (name) => {
+      const parsed = JSON.parse(readFileSync(join(directory, name), 'utf8'))
+      return Object.keys(parsed.meta ?? {}).sort()
+    }
+    const en = keysOf('en.json')
+    const zh = keysOf('zh.json')
+    if (en.join(',') !== zh.join(',')) {
+      problems.push(`${plugin}: en.json and zh.json disagree on meta keys (en: ${en.join(',')}; zh: ${zh.join(',')})`)
+    }
+  }
+  assert.deepEqual(problems, [], 'every suite plugin needs the paired dictionary; en-only passes every other locale check while showing English in a Chinese UI')
+})
+
 test('every suite plugin ships an icon the kernel accepts', () => {
   const problems = []
   for (const plugin of PLUGIN_DIRS) {

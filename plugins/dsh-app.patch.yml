@@ -218,6 +218,9 @@
     - id: workbench
       name: '@dsh-app/plugin-workbench'
 
+    - id: codegraph
+      name: '@dsh-app/plugin-codegraph'
+
 # Web search seam: point BOTH capabilities at the suite's providers.
 #
 # This row is written as a PAIR on purpose. Patch semantics REPLACE the whole

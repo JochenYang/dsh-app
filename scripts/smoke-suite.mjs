@@ -51,7 +51,7 @@ import { removeTree } from './lib/remove-tree.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const OVERLAY = path.join(root, 'plugins', 'dsh-app.patch.yml')
-const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort', 'plugin-workbench']
+const SUITE_DIRS = ['plugin-brand', 'plugin-client-ui', 'plugin-sidebar', 'plugin-swarm', 'plugin-usage', 'plugin-archives', 'plugin-memory', 'plugin-mcp', 'plugin-hooks', 'plugin-ppt', 'plugin-market', 'plugin-presets', 'plugin-pdf', 'plugin-websearch', 'plugin-rewind', 'plugin-effort', 'plugin-workbench', 'plugin-codegraph']
 
 // Mirrors SUITE_PROFILE / SUITE_PROFILE_BUNDLES in src/shared/constants.ts.
 // The suite boots its own profile; the throwaway home below has no legacy

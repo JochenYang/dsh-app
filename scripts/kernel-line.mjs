@@ -54,6 +54,7 @@ export const SUITE_PLUGINS = [
   '@dsh-app/plugin-rewind',
   '@dsh-app/plugin-effort',
   '@dsh-app/plugin-workbench',
+  '@dsh-app/plugin-codegraph',
 ]
 
 function readJson(file) {

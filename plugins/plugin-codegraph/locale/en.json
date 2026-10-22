@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Code graph",
+    "description": "Per-project code knowledge graph: find symbols across languages, see what a change affects, and read a symbol's context with the documents that describe it."
+  }
+}
