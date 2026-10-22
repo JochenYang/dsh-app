@@ -133,15 +133,47 @@ export function parseFragment(text, name) {
 /**
  * Decide whether a diff satisfies the gate.
  *
+ * Three ways to declare a change:
+ *
+ * - a fragment that comes WITH the change (`changesets/<name>.md`), the normal
+ *   and always-available form;
+ * - a RELEASE commit, which consumes the fragments it folds into CHANGELOG and
+ *   bumps `package.json`, so its own declaration is the changelog section it
+ *   writes — requiring a fragment here would forbid folding and releasing in one
+ *   commit, which is a legitimate shape;
+ * - nothing at all when no releasable path changed.
+ *
+ * The release form is narrow on purpose: the SAME commit that deletes a fragment
+ * must also write a NEW `[vX.Y.Z]` section in CHANGELOG.md. A commit that only
+ * deletes fragments declares nothing, and a `src/` change smuggled next to a
+ * release bump therefore lives or dies by the section the release wrote — which
+ * the `--tag` form of this gate checks again before a tag ships.
+ *
+ * A caller that knows which paths were DELETED must pass them: a deleted fragment
+ * is indistinguishable from an added one by path alone, and treating the fold's
+ * own cleanup as "this commit brought a fragment" is how the exemption leaks.
+ *
  * @param {readonly string[]} changedPaths - repository-relative paths.
- * @returns {{ releasable: string[], hasFragment: boolean, ok: boolean }} the
- *   releasable paths in the diff, whether a fragment came with it, and the
- *   verdict.
+ * @param {{ releasedVersion?: string, deletedPaths?: readonly string[] }} [context] -
+ *   the section the commit ADDS, and the paths it removed.
+ * @returns {{ releasable: string[], hasFragment: boolean, released: string | null, ok: boolean }}
+ *   the releasable paths in the diff, whether a fragment came with it, the
+ *   version it released if any, and the verdict.
  */
-export function decide(changedPaths) {
+export function decide(changedPaths, context = {}) {
   const releasable = changedPaths.filter(isReleasablePath)
-  const hasFragment = changedPaths.some(isChangesetFile)
-  return { releasable, hasFragment, ok: releasable.length === 0 || hasFragment }
+  const deleted = new Set(context.deletedPaths ?? [])
+  const addedFragments = changedPaths.filter((filePath) => isChangesetFile(filePath) && !deleted.has(filePath))
+  const hasFragment = addedFragments.length > 0
+  const consumedFragments = changedPaths.some((filePath) => isChangesetFile(filePath) && deleted.has(filePath))
+  return {
+    releasable,
+    hasFragment,
+    released: context.releasedVersion !== undefined && consumedFragments ? context.releasedVersion : null,
+    ok: releasable.length === 0
+      || hasFragment
+      || (context.releasedVersion !== undefined && consumedFragments),
+  }
 }
 
 /**
@@ -153,16 +185,21 @@ export function decide(changedPaths) {
  * fails a release that followed the rule (measured on v0.14.1's push). Each
  * commit answers for itself.
  *
- * @param {readonly { sha: string, paths: readonly string[] }[]} commits - the
- *   commits a push or PR adds, oldest first.
+ * A commit may also carry its context: whether it ADDED a `[vX.Y.Z]` changelog
+ * section and whether it deleted fragments. Together those identify a release
+ * commit, whose declaration is the section it wrote (see {@link decide}), so a
+ * fold that also touches `src/` is not reported as undeclared.
+ *
+ * @param {readonly { sha: string, paths: readonly string[], context?: object }[]} commits -
+ *   the commits a push or PR adds, oldest first.
  * @returns {{ sha: string, releasable: string[], hasFragment: boolean }[]} one
  *   entry per offending commit; empty when every commit carries its
  *   declaration.
  */
 export function decideCommits(commits) {
   const problems = []
-  for (const { sha, paths } of commits) {
-    const { releasable, hasFragment, ok } = decide(paths)
+  for (const { sha, paths, context } of commits) {
+    const { releasable, hasFragment, ok } = decide(paths, context)
     if (!ok) problems.push({ sha, releasable, hasFragment })
   }
   return problems
@@ -232,13 +269,76 @@ export function insertSection(changelog, section, version) {
 }
 
 /**
- * The bullets of one version's CHANGELOG section, per language.
+ * Split NUL-separated git output into records.
  *
- * @param {string} changelog - the CHANGELOG.md text.
- * @param {string} version - bare version, e.g. `0.14.0`.
- * @returns {{ zh: string[], en: string[] }} the section's bullets; both empty
- *   when the section is absent.
+ * `-z` is what makes this safe: without it git quotes any path with a non-ASCII
+ * byte (or a quote) and escapes it, so a fragment named in Chinese would never be
+ * recognised — a legitimate release commit then fails as if it declared nothing.
+ * Splitting on NUL also keeps spaces and newlines in names intact.
+ *
+ * @param {string} output - raw stdout from a `-z` invocation.
+ * @returns {string[]} the records, empty trailing record dropped.
  */
+export function nulRecords(output) {
+  return output.split('\0').filter((record) => record !== '')
+}
+
+/**
+ * The paths one commit changed, from `git diff --name-status -z`.
+ *
+ * Rename records are `R100\0old\0new` (three fields); every other status is a
+ * single path. Only the POST-image path is reported, which is what a changed-path
+ * list means everywhere else in this gate.
+ *
+ * @param {string[]} records - output of {@link nulRecords}.
+ * @returns {{ paths: string[], deleted: string[] }} the changed paths, and the
+ *   ones the commit removed.
+ */
+export function parseNameStatus(records) {
+  const paths = []
+  const deleted = []
+  for (let index = 0; index < records.length; index += 1) {
+    const status = records[index]
+    if (/^[RC]\d*$/u.test(status)) {
+      // A rename/copy record carries two paths: source, then destination.
+      const destination = records[index + 2]
+      if (destination !== undefined) paths.push(destination)
+      index += 2
+      continue
+    }
+    const filePath = records[index + 1]
+    if (filePath === undefined) break
+    paths.push(filePath)
+    if (status === 'D') deleted.push(filePath)
+    index += 1
+  }
+  return { paths, deleted }
+}
+
+/**
+ * The `[vX.Y.Z]` sections a CHANGELOG diff ADDS.
+ *
+ * Read from added diff lines rather than the file, so correcting a past version's
+ * wording is not mistaken for releasing it. A version already present in the
+ * parent is never "added", however the diff happens to align, which is what keeps
+ * a reformat or a reorder from granting a release exemption it never earned.
+ *
+ * @param {string} diff - `git diff --unified=0 … -- CHANGELOG.md` output.
+ * @param {readonly string[]} presentInParent - versions already in the parent file.
+ * @returns {string[]} the versions this diff introduces.
+ */
+export function addedVersions(diff, presentInParent = []) {
+  const existing = new Set(presentInParent)
+  const versions = []
+  for (const line of diff.split('\n')) {
+    if (!line.startsWith('+') || line.startsWith('+++')) continue
+    const match = /^\+## \[v(\d+\.\d+\.\d+)\]/u.exec(line)
+    if (match === null || existing.has(match[1])) continue
+    versions.push(match[1])
+  }
+  return versions
+}
+
 export function sectionBullets(changelog, version) {
   const lines = changelog.split('\n')
   const heading = `## [v${version}]`

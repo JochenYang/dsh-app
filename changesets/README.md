@@ -46,6 +46,27 @@ Anything that reaches an existing installation — the paths `ci.yml` gates:
 
 Docs, CI, tests and tooling reach nobody and need none.
 
+## The release commit
+
+A commit that folds the fragments into `CHANGELOG.md` and bumps `package.json`
+declares through the **section it writes**, not through a fragment — its own
+fragment was just consumed. The gate accepts that form only when the same commit
+both deletes a fragment (one that already existed) and adds a `## [vX.Y.Z]`
+heading the parent commit did not carry.
+
+Three shapes are therefore still refused, and each is a real mistake:
+
+- adding a section while consuming nothing — the fold never ran, so the fragment
+  on disk is still the declaration for the next release;
+- consuming a fragment without adding a section — cleanup is not a release, and
+  nothing tells a user what shipped;
+- introducing a fragment and folding it away in the SAME commit — the net diff
+  shows no `changesets/` entry at all, so there is nothing to consume and no
+  release to record. Write the fragment in the change's commit, then fold.
+
+The last one is why the release stays two commits. Folding alongside a last `src/`
+fix is allowed, provided the fragment being consumed came from an earlier commit.
+
 ## At release time
 
 1. Bump `package.json` (the shell convention: 9 rolls to 0).

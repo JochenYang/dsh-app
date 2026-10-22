@@ -66,6 +66,11 @@ gate:
 - [ ] Commit both. `release.yml` refuses a tag whose version has no bilingual
       section, so a tag cut without this step fails instead of publishing an
       empty release page.
+      The change and its fragment are one commit; the fold and the version bump
+      are a second. A single commit that does both is accepted only when the
+      fragment it consumes already existed in an earlier commit — writing a
+      fragment and folding it away in the same commit shows no `changesets/`
+      change at all, so the gate cannot see a declaration.
 
 ## Tag
 
