@@ -79,8 +79,20 @@ export const name = 'plugin-swarm'
  */
 export const inject = ['tools', 'subagents', 'commands', 'systemPrompt', 'connection', 'agents']
 
-/** Prompt order directly after the single-delegation policy section. */
-const SWARM_SECTION_ORDER = 116.6
+/**
+ * Prompt order directly after the kernel's own Team policy section
+ * (`TEAM_POLICY` = 600, `@deepseek-ai/dsh-system-prompt` SECTION_ORDERS).
+ *
+ * The two are halves of one delegation policy — Team owns ordered work, this
+ * plugin owns the independent batch — so they must read next to each other.
+ * This value used to be `116.6`, which sorts into the persona/plan band and put
+ * the swarm guidance AHEAD of the Team policy by ~480: measured as the reason a
+ * composition carrying both kept choosing the batch tool for work that needed
+ * stages. Section orders are one namespace for global and agent-scoped layers
+ * (`assemble()` merges them, then sorts), so a scoped Team policy and this
+ * global section are neighbours at 600/620.
+ */
+export const SWARM_SECTION_ORDER = 620
 
 /**
  * Hard bound for adaptive pool exploration when the model did not pin
@@ -224,7 +236,7 @@ function editableValues(config: ResolvedConfig): SwarmConfigValues {
  * contain the tool's literal placeholder token — the exact syntax stays
  * documented in the tool's parameter descriptions, which are not interpolated.
  */
-const SWARM_SECTION_TEXT =
+export const SWARM_SECTION_TEXT =
   'When a request decomposes into multiple independent, non-overlapping subtasks that could run in parallel '
   + '(separate analyses, per-module edits in disjoint areas, batch lookups), prefer the swarm tool over repeated '
   + 'subagent calls: state the shared instructions once in prompt_template using the item placeholder token '
@@ -235,14 +247,87 @@ const SWARM_SECTION_TEXT =
   + 'items a stranger could execute without asking questions. Good split for "add test coverage": one item per '
   + 'top-level module, each naming the module path, the test framework in use, and "new tests pass" as the '
   + 'criterion. Bad split: "write tests", "fix bugs", "clean up" — vague items produce vague, overlapping work. '
-  + 'Never fan out subtasks that depend on each other or share mutable state; run those sequentially yourself or '
-  + 'in a later batch. When every subtask needs the same background (project conventions, a file inventory), pass '
+  + 'Never fan out subtasks that depend on each other or share mutable state: run those sequentially yourself, '
+  + 'or — when the chain needs several agents, a hand-off between them, or your own review between stages — '
+  + 'reach for the Team tools instead (task dependencies + durable teammates). A batch is one shot and keeps '
+  + 'no state between items; ordered or reviewed work is not a batch. '
+  + 'When every subtask needs the same background (project conventions, a file inventory), pass '
   + 'it once via shared_context instead of repeating it per item. For a large or unfamiliar split, call with '
   + 'dry_run first to inspect the expanded per-child prompts before spending the batch. '
   + 'Items that die from transient provider errors '
   + '(network, rate limit) are retried automatically and only report failure when the retries are exhausted. '
   + 'When a result item carries a childId, a later '
   + 'swarm call can resume that child with follow-up instructions via resume_entries — it keeps its prior context.'
+
+/**
+ * Standing guidance for the Team path, mounted only when the composition
+ * actually carries an `agentTeams` service.
+ *
+ * Why this section exists at all. The kernel's own Team policy
+ * (`@deepseek-ai/dsh-experimental-tool-agent-team`) states what the Team tools
+ * ARE and how to cooperate inside them, but never WHEN to open a Team — it
+ * opens with "Agent Teams is available in this session" and spends its length
+ * on write scopes, `FS_STALE_VERSION`, and `wait_agent` semantics. A model
+ * holding both that policy and this plugin's batch guidance therefore reaches
+ * for the batch every time: the batch asks for the work, the policy only
+ * waits. This section supplies the missing half — the trigger condition and
+ * the shape of an ordered hand-off — and deliberately claims NO overlap with
+ * the batch: the division is stated once, in one place, so the two sections
+ * cannot both answer "use me".
+ *
+ * Placement note: `TEAM_POLICY` is 600, so this sits before it (that policy's
+ * detail reads better after the decision), and both read before the tool
+ * descriptions. `tool:` prefixes are the section-name convention the kernel
+ * uses for its own tool guidance; a name that collides with the kernel's
+ * `team:policy` would be SHADOWED by it rather than merged, so the name is
+ * distinct on purpose.
+ */
+export const TEAM_SECTION_ORDER = 590
+
+export const TEAM_SECTION_TEXT =
+  'Agent Teams is the right tool when the work has to happen in a particular ORDER across several agents, '
+  + 'or when a stage must be reviewed before the next one starts. Open one with the Team tools when any of '
+  + 'these hold: a later subtask needs an earlier subtask\'s output as its input (design, then backend, then '
+  + 'frontend); you want to inspect or correct a stage before handing the next one out; a teammate must stay '
+  + 'available across several rounds instead of finishing in one shot; two agents must talk to each other '
+  + 'directly. The shape is: create the shared tasks first with team_task_create, declaring dependencies '
+  + 'through blocked_by (a task blocked by an incomplete task cannot be claimed — the kernel enforces this, '
+  + 'so ordering is a property of the board rather than something you have to remember); record each task\'s '
+  + 'intended file scope in write_scopes; then spawn one durable teammate per responsibility and let it claim '
+  + 'its own ready work. The Lead reviews between stages: collect the stage\'s result, decide, then either '
+  + 'update the next task or message the teammate that owns it. The Lead must wait for the required teammates '
+  + 'before answering. '
+  + 'Do NOT use a Team for a set of subtasks that are independent and can all run at once — that is the '
+  + 'batch tool\'s job (the parallel-subagent section above), and a Team there only adds rounds of '
+  + 'coordination. The division is: independent fan-out = batch, ordered or reviewed hand-off = Team.'
+
+/**
+ * Mount the Team guidance when — and only when — this composition provides the
+ * `agentTeams` service, i.e. the profile lists the upstream Agent Teams bundle.
+ *
+ * `ctx.inject(['agentTeams'], …)` is cordis's optional-injection door: the
+ * callback runs once the service exists (immediately when it already does, and
+ * again on a composition that adds the bundle later), and nothing is registered
+ * while it is absent. That is deliberately NOT an entry in this plugin's own
+ * `inject` list — the swarm tool and `/swarm` command must keep working on a
+ * composition without Agent Teams, and a required service would gate the plugin.
+ *
+ * The section is what the kernel's own Team policy lacks: that policy says how
+ * to cooperate inside a Team, never when to open one, so a model holding both
+ * it and this plugin's batch guidance reaches for the batch every time.
+ */
+function mountTeamSection(ctx: Context, provider: string): void {
+  if (ctx.get('agentTeams') === undefined) {
+    ctx.logger.info(`agent team service not present; the Team guidance section stays unmounted (swarm's provider is "${provider}")`)
+  }
+  ctx.inject(['agentTeams'], (teamCtx) => {
+    teamCtx.effect(() => teamCtx.systemPrompt.section({
+      name: 'tool:agent-team',
+      order: TEAM_SECTION_ORDER,
+      text: TEAM_SECTION_TEXT,
+    }), 'plugin-swarm: team guidance section')
+  })
+}
 
 /**
  * Decomposition directive used by the explicit /swarm command path. Submitted
@@ -832,4 +917,6 @@ export function apply(ctx: Context, baseConfig: Config): void {
     // A backend fiber may activate later; a misspelled provider remains visible in this log.
     ctx.logger.info(`subagent provider "${config.provider}" not registered yet; the swarm tool and /swarm command will register when it appears`)
   }
+
+  mountTeamSection(ctx, config.provider)
 }

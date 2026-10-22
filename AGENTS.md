@@ -10,6 +10,7 @@ documents below. Read the one your change touches, and when a document and the c
 | [`docs/agents/security-invariants.md`](docs/agents/security-invariants.md) | a security invariant — §7 indexes them, this file carries the reasoning |
 | [`docs/agents/process-rules.md`](docs/agents/process-rules.md) | the reason behind a process rule — §9 indexes them |
 | [`docs/agents/testing.md`](docs/agents/testing.md) | a suite's shape, a gate's wiring, or the CI job order |
+| [`docs/agents/delegation-division.md`](docs/agents/delegation-division.md) | a delegation prompt section, `plugin-swarm`'s order, or the batch-versus-Agent-Teams split |
 | [`docs/agents/known-gaps.md`](docs/agents/known-gaps.md) | whether something here is actually finished |
 | [`docs/agents/build-and-release.md`](docs/agents/build-and-release.md) | the runtime artifact, the office payload, the bundled kernel, cutting or recovering a release, the ModelScope mirror |
 | [`docs/agents/release-checklist.md`](docs/agents/release-checklist.md) | cutting a release — the order of operations, with the mistakes that each cost one called out |
@@ -143,6 +144,23 @@ reduced motion keeps the mark without the animation. It boots no kernel, so `npm
 needed either; it reads the source. Reading the built `lib/client.js` as text is NOT a substitute —
 that file is a browser module whose template keeps its `${…}` placeholders, so a text slice of it is
 not CSS at all (measured: every tick 0px wide);
+`probe-swarm-team-prompt.mjs` and `probe-team-section-mount.mjs` (plain `node`, no Electron) after
+touching `plugin-swarm`'s prompt sections or the batch-versus-Team wording — they boot the REAL
+`@deepseek-ai/dsh-system-prompt` service out of the installed kernel and drive the real `assemble()`
+/ `renderPrompt()`, because the facts they check are invisible to a unit test over constants: whether
+a `tool:agent-team` section survives assembly next to the kernel's own `team:policy` (a same-name
+scoped section SHADOWS a global one), whether the three delegation sections stay CONTIGUOUS and in
+order 590/600/620, whether a stray double-brace group makes rendering throw, and whether the Team
+section mounts through `ctx.inject(['agentTeams'])` in BOTH composition orders (present at activation,
+and registered later by a bundle layer) and unmounts when the service goes. Both read the working
+tree by default; `--plugin <lib/index.js>` points them at a copy that shipped in a runtime artifact,
+which is what makes a packaged-bytes claim rather than a working-tree one. `attribute-prompt.mjs`
+answers "why is the system prompt N KB": it decodes a recorded session (a zstd CONCATENATION of
+frames — a single `zstdDecompressSync` returns only the first frame and every session then looks
+empty), recovers the assembled prompt, and ranks it by OWNER. Its large contributors have not been
+the sections anyone would suspect: a PTC preset's generated `run_code` TypeScript SDK
+(`interface ToolArgsMap` / `ToolOutputMap`, measured at 89 KB of a 112 KB prompt) dwarfs everything
+this suite contributes (the batch section is 1.7 KB);
 `probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
 `src/main/window.ts` — **keep the two in sync** (a root test
 already diffs them); `probe-office-menu.cjs` (`node_modules/.bin/electron`) after touching

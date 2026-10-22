@@ -972,3 +972,91 @@ test('plugin shape: settle-time session reads declare the agents service in inje
     + 'cordis "without inject" and marks every settled item failed',
   )
 })
+
+// --- delegation division (batch vs Team) ---------------------------------------
+
+const KERNEL = {
+  /** `SECTION_ORDERS.HARNESS_IDENTITY` — the first section the kernel renders. */
+  harnessIdentity: -1000,
+  /** `SECTION_ORDERS.PLAN_POLICY`. */
+  planPolicy: 500,
+  /** `SECTION_ORDERS.TEAM_POLICY` — the upstream Team bundle's own policy. */
+  teamPolicy: 600,
+  /** `SECTION_ORDERS.TOOL_SUBAGENT` — where the single-delegation guidance sits. */
+  toolSubagent: 2800,
+}
+
+test('prompt order: the batch section sits in the policy band, next to the kernel Team policy', async () => {
+  const { SWARM_SECTION_ORDER, TEAM_SECTION_ORDER } = await import('../src/index.ts')
+  // The regression this pins: 116.6 sorted the batch guidance into the
+  // persona/plan band, AHEAD of the kernel's Team policy by ~480, and a
+  // composition carrying both then reached for the batch for ordered work.
+  assert.ok(
+    SWARM_SECTION_ORDER > KERNEL.planPolicy,
+    `the batch section (${SWARM_SECTION_ORDER}) must sort after PLAN_POLICY (${KERNEL.planPolicy}); `
+    + 'a value in the persona band puts delegation guidance ahead of the deployment persona',
+  )
+  assert.ok(
+    SWARM_SECTION_ORDER < KERNEL.toolSubagent,
+    `the batch section (${SWARM_SECTION_ORDER}) must sort before the tool descriptions (${KERNEL.toolSubagent})`,
+  )
+  // Both sections describe ONE delegation policy, so they must read together.
+  assert.ok(
+    Math.abs(SWARM_SECTION_ORDER - KERNEL.teamPolicy) <= 30,
+    `the batch section (${SWARM_SECTION_ORDER}) must stay within 30 of TEAM_POLICY (${KERNEL.teamPolicy}) `
+    + 'so the two halves of the delegation policy read as one decision',
+  )
+  assert.ok(
+    TEAM_SECTION_ORDER < KERNEL.teamPolicy,
+    `the Team trigger (${TEAM_SECTION_ORDER}) explains WHEN before the kernel policy (${KERNEL.teamPolicy}) `
+    + 'explains HOW, so it must sort first',
+  )
+})
+
+test('prompt text: the batch section refuses ordered work and names the Team path as its owner', async () => {
+  const { SWARM_SECTION_TEXT } = await import('../src/index.ts')
+  // The batch cannot do dependencies at all (no blockedBy in the tool schema),
+  // so this text is the only thing steering ordered work away from it.
+  assert.match(SWARM_SECTION_TEXT, /Never fan out subtasks that depend on each other/)
+  assert.match(SWARM_SECTION_TEXT, /Team tools/, 'the refusal must name where ordered work belongs')
+  assert.match(SWARM_SECTION_TEXT, /keeps no state between items/)
+})
+
+test('prompt text: the Team section claims ordered work and hands independent fan-out back to the batch', async () => {
+  const { TEAM_SECTION_TEXT } = await import('../src/index.ts')
+  // A trigger condition, which the kernel's own Team policy does not supply.
+  assert.match(TEAM_SECTION_TEXT, /ORDER/, 'must state the ordering trigger')
+  assert.match(TEAM_SECTION_TEXT, /blocked_by/, 'must name the mechanism that enforces the order')
+  assert.match(TEAM_SECTION_TEXT, /write_scopes/)
+  assert.match(TEAM_SECTION_TEXT, /spawn_teammate|durable teammate/)
+  // The other half of the division, so the two sections never both say "use me".
+  assert.match(TEAM_SECTION_TEXT, /Do NOT use a Team for a set of subtasks that are independent/)
+  assert.match(TEAM_SECTION_TEXT, /batch/)
+  // No double-brace group: section text is interpolated, and an unregistered
+  // variable makes rendering throw rather than render literally.
+  assert.ok(!TEAM_SECTION_TEXT.includes('{{'), 'section text is interpolated; a stray double-brace group would fail the render')
+})
+
+test('prompt text: the two sections state one division and do not both demand preference', async () => {
+  const { SWARM_SECTION_TEXT, TEAM_SECTION_TEXT } = await import('../src/index.ts')
+  // Two equally imperative sections are what produced the unstable choice this
+  // change exists to remove: each side must name its own half and yield the other.
+  assert.doesNotMatch(TEAM_SECTION_TEXT, /prefer the Team|always use a Team/i)
+  assert.ok(
+    /batch/i.test(TEAM_SECTION_TEXT),
+    'the Team section must yield the independent case to the batch explicitly',
+  )
+  assert.ok(
+    /Team/i.test(SWARM_SECTION_TEXT),
+    'the batch section must yield the ordered case to the Team explicitly',
+  )
+})
+
+test('mount: the Team section is optional in inject so a composition without Agent Teams still loads', async () => {
+  const plugin = await import('../src/index.ts')
+  assert.ok(
+    !(plugin.inject as readonly string[]).includes('agentTeams'),
+    'a required agentTeams service would gate the whole plugin on a composition without the Agent Teams bundle; '
+    + 'the section mounts through ctx.inject inside apply instead',
+  )
+})
