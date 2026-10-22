@@ -130,7 +130,7 @@ export function checkOnDiskRoster(repoRoot, roster = SUITE_PLUGINS) {
 /**
  * Han characters outside a plugin's own dictionary.
  *
- * Repository rule (AGENTS.md §4 / plugins/AGENTS.md §4): each plugin owns its
+ * Repository rule (AGENTS.md §6 / plugins/AGENTS.md §6): each plugin owns its
  * dictionary file and writes no Han characters anywhere else — the model-facing
  * zh-CN tool failures and the one declared exception in plugin-brand's routes
  * are the sanctioned cases. New prose drifting into a second place splits the

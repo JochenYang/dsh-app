@@ -544,7 +544,7 @@ async function main() {
     // Upkeep closes the suite's SETTINGS rows: it used to sit at 22, BETWEEN two
     // data views, which made the rail read "data → system → data". It is not the
     // final row — 关于 DSH-APP / About DSH-APP sits after it (the documented
-    // order table in docs/desktop-optimization-plan.md §3.1, 24 then 26), and
+    // order table in docs/agents/settings-rail-order.md, 24 then 26), and
     // that row closes the rail.
     const aboutRow = nav.rows.findIndex((row) => /^(?:About DSH-APP|关于 DSH-APP)$/u.test(row.label))
     record('维护设置 sits after the session pair and immediately before the About row that closes the rail',

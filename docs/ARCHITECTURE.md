@@ -53,6 +53,24 @@
 There is no setup renderer: the first run downloads/activates the kernel in the
 background and reports through the in-window update card and the tray.
 
+### 2.1 Which file decides what
+
+Read the row for the file you are about to change; nothing here is needed to
+work elsewhere.
+
+| File | What it decides |
+|---|---|
+| `package.json` | shell version, every npm script, and the `@deepseek-ai/dsh*` spec that picks the kernel line |
+| `tsconfig.json` / `plugins/*/tsconfig.json` | the shell's compile (`strict`, CommonJS, Node resolution, ES2022, `src/` → `dist/`) and a plugin's (ESM, `moduleResolution: "Bundler"`, explicit local-import extensions, `noEmit`) |
+| `plugins/*/package.json` | a plugin's own version (hashed into `suiteVersion`), `files` (the only source of runtime resources), `dsh.bundle` / `dsh.client` wiring, and its dependency fields |
+| `electron-builder.yml` | packaging targets, the NSIS hook include, `extraResources` (the bundled kernel), the `publish` provider |
+| `plugins/dsh-app.patch.yml` | the loader overlay that mounts the suite into the kernel (roster copy 1 of 5 — `plugins/AGENTS.md` §5) |
+| `scripts/kernel-line.mjs` | line derivation, `SUITE_PLUGINS` (roster copy 2), `suiteVersion`, the LibreOffice kit pin |
+| `scripts/primary-runtime-lock.json` | the Python set the office payload carries, plus the bundled pnpm pin |
+| `changesets/*.md` | the release-input fragments (`AGENTS.md` §11) |
+| `.github/workflows/{ci,release,publish-mirror}.yml` | the gates, the release pipeline, the ModelScope mirror |
+| `.github/scripts/mirror_release.py` (+ its test) | the mirror's own logic, including its delete allowlists |
+
 ## 3. Brand suite wiring
 
 Three pieces are stitched at every server start (`src/main/brand-suite.ts`,

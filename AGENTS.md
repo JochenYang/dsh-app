@@ -5,11 +5,13 @@ documents below. Read the one your change touches, and when a document and the c
 
 | Read this | When your change touches |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | a module's design: layers, update flow, security posture, packaging |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | a module's design: layers, update flow, security posture, packaging; §2.1 is the which-file-decides-what table |
+| [`docs/agents/commands.md`](docs/agents/commands.md) | a gate, a packaging target, or which probe your change obliges you to re-run |
 | [`docs/agents/runtime-shape.md`](docs/agents/runtime-shape.md) | the boot path: the kernel child, the activation file, the brand-suite stitching, the office payload |
 | [`docs/agents/security-invariants.md`](docs/agents/security-invariants.md) | a security invariant — §7 indexes them, this file carries the reasoning |
 | [`docs/agents/process-rules.md`](docs/agents/process-rules.md) | the reason behind a process rule — §9 indexes them |
 | [`docs/agents/testing.md`](docs/agents/testing.md) | a suite's shape, a gate's wiring, or the CI job order |
+| [`docs/agents/settings-rail-order.md`](docs/agents/settings-rail-order.md) | adding or moving a settings section: the order table and the no-reuse rule |
 | [`docs/agents/delegation-division.md`](docs/agents/delegation-division.md) | a delegation prompt section, `plugin-swarm`'s order, or the batch-versus-Agent-Teams split |
 | [`docs/agents/known-gaps.md`](docs/agents/known-gaps.md) | whether something here is actually finished |
 | [`docs/agents/build-and-release.md`](docs/agents/build-and-release.md) | the runtime artifact, the office payload, the bundled kernel, cutting or recovering a release, the ModelScope mirror |
@@ -45,19 +47,6 @@ Electron 44 + TypeScript 5.7 → CommonJS/ES2022 via `tsc`; electron-builder 26 
 dmg+zip (mac) / AppImage+deb (linux); esbuild 0.28 bundles the plugin halves; `npm` here, `pnpm`
 inside the harness checkout and the runtime assembly; Node 22+ (what CI runs).
 
-| File | What it decides |
-|---|---|
-| `package.json` | shell version, every npm script, and the `@deepseek-ai/dsh*` spec that picks the kernel line |
-| `tsconfig.json` / `plugins/*/tsconfig.json` | the shell's compile (`strict`, CommonJS, Node resolution, ES2022, `src/` → `dist/`) and a plugin's (ESM, `moduleResolution: "Bundler"`, explicit local-import extensions, `noEmit`) |
-| `plugins/*/package.json` | a plugin's own version (hashed into `suiteVersion`), `files` (the only source of runtime resources), `dsh.bundle` / `dsh.client` wiring, and its dependency fields |
-| `electron-builder.yml` | packaging targets, the NSIS hook include, `extraResources` (the bundled kernel), the `publish` provider |
-| `plugins/dsh-app.patch.yml` | the loader overlay that mounts the suite into the kernel (roster copy 1 of 5 — `plugins/AGENTS.md` §5) |
-| `scripts/kernel-line.mjs` | line derivation, `SUITE_PLUGINS` (roster copy 2), `suiteVersion`, the LibreOffice kit pin |
-| `scripts/primary-runtime-lock.json` | the Python set the office payload carries, plus the bundled pnpm pin |
-| `changesets/*.md` | the release-input fragments (§11) |
-| `.github/workflows/{ci,release,publish-mirror}.yml` | the gates, the release pipeline, the ModelScope mirror |
-| `.github/scripts/mirror_release.py` (+ its test) | the mirror's own logic, including its delete allowlists |
-
 `src/main/` is the shell (Electron main): boot and lifecycle, the kernel child (`server.ts`,
 `desktop-host.ts`), the window and its injected desktop chrome (`window.ts`), tray, updater, safe mode,
 proxy detection, crash/log/event files, profile healing, the in-frame dialog. `src/kernel/` is the kernel
@@ -68,6 +57,10 @@ holds cross-cutting constants, types and the shell locale table. `plugins/` is t
 share); `test/` the root suites; `docs/` the architecture, runbooks, plans and roadmap; `static/` the
 startup page; `resources/` the icons; `bundled-kernel/` the tarball, sidecar and manifest a packaged
 shell ships.
+
+Which file decides what (the `package.json` script table, the `tsconfig` shapes, the roster
+copies, the workflow roles) is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §2.1 — read the row
+for the file you are about to change.
 
 **Never commit build output** (all gitignored, per `.gitignore`): `dist/`, `release/`, `runtime-dist/`,
 `bundled-kernel/`, `runtime-layers/`, `plugins/*/lib/`, `plugins/*/.test-dist/`, `plugins/*/package-lock.json`,
@@ -85,124 +78,28 @@ Full boot path: [`docs/agents/runtime-shape.md`](docs/agents/runtime-shape.md).
 
 ## 4. Build, dev and verification commands
 
-Prerequisites: none for `npm run dev` and `npm test` — a dev run boots the **installed** runtime, the same
-artifact a packaged start uses; a local `deepseek-harness` checkout is needed only for live sources or to
-rebuild the artifact. `DSH_APP_DEV_KERNEL` boots a built runtime tree in place and `DSH_APP_DEV_RUNTIME`
-boots a harness source checkout; with neither set a dev run boots the installed runtime, and with nothing
-installed it installs the bundled `kernel.tgz` offline (`docs/agents/environment.md` lists every variable).
+The four a change almost always needs:
 
 ```sh
 npm run typecheck             # tsc --noEmit; the compile gate
 npm run build                 # tsc -> dist/ + static/overlay/tray icon copy
 npm test                      # root suites (builds first; needs dist/)
-npm start                     # build + launch Electron (production-like)
 npm run dev                   # DSH_APP_DEV=1 + the installed runtime
-#   PowerShell: $env:DSH_APP_DEV="1"; npm start   (no `VAR=1 cmd` in PowerShell)
-#   A built runtime tree:  DSH_APP_DEV_KERNEL=D:/.../scratch/<name>/runtime
-#   A source checkout:     DSH_APP_DEV_RUNTIME=D:/.../deepseek-harness  (must be built)
-npm run dist:win | dist:mac | dist:linux          # build + bundle kernel + electron-builder
-npm run runtime:build                             # rebuild the runtime artifact
-npm run primary-runtime:build                     # stage the Python set the office payload carries
-npm run smoke:package                             # assert a packaged output carries what boot loads
-npm run icon:build | icon:gen                     # regenerate resources/ icons
-
-# Gates (all static, no kernel, no network)
-npm run check:graph           # plugin-graph + suite-roster rules
-npm run check:suites          # the five roster copies agree (--check form: check:suites:gate)
-npm run check:slots           # every ctx.slots id a client half names still exists in the line
-npm run check:surface         # kernel-surface report
-npm run check:touchpoints     # the seven pre-flight contact-surface scans (--check form gates)
-npm run check:plugins -- --kernel <runtime.tgz> --home <the dir holding profiles/>
-
-# Real-kernel verification
-npm run verify                                        # smoke-suite.mjs against a dev checkout
-npm run verify -- --tgz runtime-dist/dsh-runtime-linux-x64-*.tgz
 ```
 
-**Hand-run probes** (`scripts/probe-*.mjs` / `.cjs`) — each mirrors a piece of shipped behaviour and must be re-run
-when that piece moves: `probe-launch-folder.mjs` after a kernel-line bump; `probe-settings-nav.cjs --lang en-US
-[--sweep]` after touching a settings section (it measures order, icons, scrolling and residual Han characters);
-`probe-workbench.cjs` (`node_modules/.bin/electron`) after touching `plugins/plugin-workbench`, its seats or the
-sidebar rail — it boots a real runtime artifact and asserts the container in a real window (the row, both child
-seats, the rendered page, the card frame, the panel-leave reset), links the container from the working tree, takes
-`scripts/fixtures/probe-workbench` as its walk-in domain plugin (build it first — the probe refuses a missing or
-stale `lib/` on either half and names the command); `probe-routes.cjs` (`node_modules/.bin/electron`) after a
-kernel-line bump or any move of the route carriers — it boots a real runtime artifact in the **desktop-host
-shape the shell actually spawns** and asserts what the W14 routing decision rests on: the Connection fetch
-carrier is exact-only (S3), passes `Range` through (S4) and streams rather than buffers (S4b), a `webServer`
-`kind: 'prefix'` route serves deep sub-paths (S3), and the fence comparison (S5a: the `/api` carrier answers 401
-with no cookie and 403 for a foreign `Origin`; S5b: the same prefix route answers both), plus one real suite
-plugin's own routes dispatching behind that fence and the carrier's own plain-text 404/403 bodies (S6), linking
-`scripts/fixtures/probe-routes` and `scripts/fixtures/probe-wsinject` into the booted profile. Run
-`npm run build` first — it `require`s the shell's own `dist/main/` modules, which a clean checkout does not have
-— and build the roster packages it links from `plugins/`: it refuses a missing or stale `lib/` on either
-fixture or on any roster package, naming the command to run; `probe-effort-hover.cjs` (`node_modules/.bin/electron`) after touching `plugin-effort`'s stylesheet,
-its track geometry or its tick rules — it evaluates the REAL sheet (esbuild-bundles `styles.ts`, runs
-`adoptStyles` against a stub document) and measures the rendered result in Chromium: a hovered tick
-grows and returns, a neighbour does not move, the computed transition names `transform` alone, and
-reduced motion keeps the mark without the animation. It boots no kernel, so `npm run build` is not
-needed either; it reads the source. Reading the built `lib/client.js` as text is NOT a substitute —
-that file is a browser module whose template keeps its `${…}` placeholders, so a text slice of it is
-not CSS at all (measured: every tick 0px wide);
-`probe-swarm-team-prompt.mjs` and `probe-team-section-mount.mjs` (plain `node`, no Electron) after
-touching `plugin-swarm`'s prompt sections or the batch-versus-Team wording — they boot the REAL
-`@deepseek-ai/dsh-system-prompt` service out of the installed kernel and drive the real `assemble()`
-/ `renderPrompt()`, because the facts they check are invisible to a unit test over constants: whether
-a `tool:agent-team` section survives assembly next to the kernel's own `team:policy` (a same-name
-scoped section SHADOWS a global one), whether the three delegation sections stay CONTIGUOUS and in
-order 590/600/620, whether a stray double-brace group makes rendering throw, and whether the Team
-section mounts through `ctx.inject(['agentTeams'])` in BOTH composition orders (present at activation,
-and registered later by a bundle layer) and unmounts when the service goes. Both read the working
-tree by default; `--plugin <lib/index.js>` points them at a copy that shipped in a runtime artifact,
-which is what makes a packaged-bytes claim rather than a working-tree one. `attribute-prompt.mjs`
-answers "why is the system prompt N KB": it decodes a recorded session (a zstd CONCATENATION of
-frames — a single `zstdDecompressSync` returns only the first frame and every session then looks
-empty), recovers the assembled prompt, and ranks it by OWNER. Its large contributors have not been
-the sections anyone would suspect: a PTC preset's generated `run_code` TypeScript SDK
-(`interface ToolArgsMap` / `ToolOutputMap`, measured at 89 KB of a 112 KB prompt) dwarfs everything
-this suite contributes (the batch section is 1.7 KB);
-`probe-drag.cjs` mirrors `DESKTOP_CHROME_CSS` in
-`src/main/window.ts` — **keep the two in sync** (a root test
-already diffs them); `probe-office-menu.cjs` (`node_modules/.bin/electron`) after touching
-`plugin-ppt`'s `office-menu.ts`, its icons, the `menu.*` dictionary keys or the client entry's
-registration block — it boots a real runtime artifact with `plugin-ppt` linked from the WORKING TREE,
-types `/` into a real composer and asserts what a static check cannot see: four rows rendering with
-a glyph, their name and their description; the four rows contiguous and between the kernel's 指令 and
-技能 groups; a click landing ONE chip node whose token is `/office-docx` (so one Backspace removes it);
-the same token typed by hand still readable in the conversation; the mode capsule still toggling; and
-no error, crashed slot entry or failure line anywhere in the run;
-`probe-diff-ruler.cjs` (`node_modules/.bin/electron`, no kernel, no build) is the ONE runtime check
-left for `plugin-sidebar`'s client: it applies the plugin's REAL stylesheet in Chromium and measures
-marks at 0.25/1/5/20%, asserting the painted height equals the true fraction (0.5px, 2px, 10px, 40px
-on a 200px column), that no minimum height applies, and that the `::after` overhang still makes a
-hairline clickable — measured once as 0.25% painting at 2px, which made a one-line change look like a
-whole block. **The Git panel's own UI walk was retired** (it depended on session switching and
-Git-panel timing, and its `A1` step failed on the switch rather than on the panel, so a red run
-proved nothing); its remaining facts now rest on the pure-function suite plus that probe — the tree
-nesting and compaction on `buildPathTree` (9 cases), the ruler logic on `diffRulerMarks` (6 cases),
-and the single-scroller rule on NOTHING, which is the gap `docs/agents/known-gaps.md` records. Do not
-re-add a UI walk for this plugin without fixing the session-switch precondition first; the remaining
-`probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` /
-`probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` cover the surfaces
-their names say; `scripts/capture.mjs` screenshots the running UI for visual work.
+Everything else — packaging targets, the six static gates, `npm run verify`, the
+hand-run probes with the trigger that obliges each one, `probe:reap`, and the
+dependency-install rules — is in [`docs/agents/commands.md`](docs/agents/commands.md).
+Read it when you need a gate, an artifact, or to know which probe your change
+obliges you to re-run.
 
-`npm run probe:reap` (`scripts/reap-probe-kernels.mjs`) has no re-run trigger — it is maintenance, not a
-check. A probe stopped by a timeout, a closed terminal or `taskkill /F` ends through
-`TerminateProcess`, so nothing takes its `dsh web` kernel down and it keeps a core and hundreds of MB
-until something else reaps it. This reaps on demand: first the registry the probes write while they run
-(`scratch/.probe-kernels.json` — entries whose probe is gone, and a no-op where nothing has recorded
-one), then a sweep for any kernel older than `--stale` (15 minutes by default). **Safe to run at any
-time** — it only touches a process whose command line carries `--no-open`, which `npm run dev`'s kernel
-never does, and only once it is past the threshold; `--dry-run` prints the same decisions and changes
-nothing.
+**Two facts that change how you verify**, both from that file:
 
-**A probe running inside Electron must pass `windowsHide: true` to every `spawn`** — otherwise each
-console child pops a terminal onto the user's desktop.
-
-**Dependency installs**: root changes use plain `npm install`; plugin-local installs use
-`--legacy-peer-deps` **inside the plugin directory only** (at the ROOT it prunes the peer-only tree
-and breaks `npm ci`); when switching kernel lines delete root `node_modules/` first — a stale tree
-causes ERESOLVE.
+- A **prompt** change is testable with `npm run dev` alone: dev resolves the suite
+  from the working tree (`devSuiteSources()`, `src/main/index.ts:1244`), not from the
+  installed kernel's copy. A packaged build reads the kernel's copy and needs a release.
+- A probe running inside Electron must pass `windowsHide: true` to every `spawn`,
+  or each console child pops a terminal onto the user's desktop.
 
 ## 5. Testing
 
@@ -241,14 +138,11 @@ smoke's assertions: [`docs/agents/testing.md`](docs/agents/testing.md).
   diagnostic.
 - **Desktop adaptation stays shell-side** — inject via `executeJavaScript`, stylesheets and profile
   patch rows only; never modify harness source. Injected surfaces answer status tokens, never copy.
-- **Settings sections are one ordered rail.** The `order` values live in a table in
-  `docs/desktop-optimization-plan.md` §3.1: **update that table in the same commit as an `order` change,
-  and never reuse a value that is taken.** Current suite rows: 模型高级设置 / Advanced models 11, MCP 服务器 /
-  MCP 12, Hooks 13, 网络搜索 / Web search 14, 并行子代理 / Swarm 19, 用量统计 / Usage 21, 会话记忆 / Memory 22,
-  会话归档 / Archives 23, 维护设置 / Maintenance 24, 关于 DSH-APP / About 26;
-  upstream owns 0, 10, 15, 20 and the pinned 25. 维护设置 is ONE section with three tabs — 预设包 / Presets 2,
-  诊断 / Diagnostics 3, 撤回隔离区 / Quarantine 4 (order 1 is a vacant slot, kept vacant) — declared by the
-  section owner through the `settings.dsh-app-maintenance.tab` child slot.
+- **Settings sections are one ordered rail.** Two rules, and they are the ones that get broken:
+  **update the order table in the same commit as an `order` change, and never reuse a value that is
+  taken.** The current assignments, the upstream-owned and pinned slots, and the 维护设置 tab shape are
+  in [`docs/agents/settings-rail-order.md`](docs/agents/settings-rail-order.md) — read it before adding
+  or moving a section. No gate catches a collision; the rail just renders in an order nobody chose.
 
 ## 7. Security invariants
 
