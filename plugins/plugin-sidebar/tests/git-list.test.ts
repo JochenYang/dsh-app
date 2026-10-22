@@ -10,7 +10,7 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import { buildPathTree } from '../src/client/git-list.ts'
-import { diffRulerMarks, diffRulerScrollTop } from '../src/client/diff-ruler.ts'
+import { diffRulerMarks, diffRulerScrollTop, parseDiffRows } from '../src/client/diff-ruler.ts'
 
 /** The only slice these helpers read. */
 const at = (path: string): { readonly path: string } => ({ path })
@@ -115,11 +115,44 @@ describe('diffRulerMarks', () => {
     assert.deepEqual(marks.map(mark => [mark.kind, mark.from, mark.to]), [['del', 0, 1], ['add', 2, 3]])
   })
 
-  it('merges runs separated by a short gap, keeping the FIRST run kind', () => {
-    // add at 0, one context line, add at 2: closer than MIN_GAP, so one mark.
+  it('does NOT merge across unchanged lines', () => {
+    // add at 0, one context line, add at 2: two marks. The old rule merged
+    // these into one covering 0..2, which painted the unchanged line as
+    // changed and made a small scattered edit read as a long band.
     const marks = diffRulerMarks(lines('add', 'context', 'add'))
-    assert.equal(marks.length, 1)
-    assert.deepEqual([marks[0]?.kind, marks[0]?.from, marks[0]?.to], ['add', 0, 2])
+    assert.equal(marks.length, 2)
+    assert.deepEqual(marks.map(mark => [mark.from, mark.to]), [[0, 0], [2, 2]])
+  })
+
+  it('paints no more than the lines that actually changed', () => {
+    // The fact the user sees: two three-line runs with three unchanged lines
+    // between them. The painted fraction must total 6/12 changed lines, not
+    // the 9/12 the merge rule reported.
+    const rows = [
+      'add', 'add', 'add',
+      'context', 'context', 'context',
+      'add', 'add', 'add',
+      'context', 'context', 'context',
+    ] as const
+    const marks = diffRulerMarks(lines(...rows))
+    const changed = rows.filter(kind => kind === 'add' || kind === 'del').length
+    const painted = marks.reduce((sum, mark) => sum + mark.span, 0)
+    assert.equal(marks.length, 2)
+    assert.equal(painted, changed / rows.length,
+      'the marks together must cover exactly the changed lines and no gap')
+  })
+
+  it('keeps every mark inside its own run', () => {
+    // No mark may span a context line: the gap between two marks IS the gap
+    // between two edits, which is what the ruler exists to show.
+    const rows = ['add', 'add', 'context', 'context', 'del', 'del'] as const
+    const marks = diffRulerMarks(lines(...rows))
+    assert.deepEqual(marks.map(mark => [mark.kind, mark.from, mark.to]), [['add', 0, 1], ['del', 4, 5]])
+    for (const mark of marks) {
+      for (let index = mark.from; index <= mark.to; index += 1) {
+        assert.equal(rows[index], mark.kind, `row ${index} is '${rows[index]}', not part of a '${mark.kind}' mark`)
+      }
+    }
   })
 
   it('keeps distant runs apart', () => {
@@ -158,3 +191,98 @@ describe('diffRulerScrollTop', () => {
     assert.equal(diffRulerScrollTop(last, 2000, 500), 1500)
   })
 })
+
+/**
+ * The ruler against a REAL `git diff`, end to end through the parser.
+ *
+ * The suites above feed `diffRulerMarks` a hand-written array of kinds, which is
+ * how a rule that merged across unchanged lines survived review: nothing in a
+ * kind array distinguishes "three lines apart" from "adjacent", so the gap the
+ * rule destroyed was never in the input. These cases start from the text the
+ * host actually hands the renderer (`git diff --no-ext-diff --no-color`), so the
+ * gap is real and the painted total is checkable against the changed lines.
+ */
+describe('parseDiffRows + diffRulerMarks over a real git diff', () => {
+  /**
+   * A diff with the shape that exposed the bug: one hunk, three separate edit
+   * runs, and unchanged lines between them. Captured from `git diff` on a real
+   * file rather than composed by hand.
+   */
+  const REAL = [
+    'diff --git a/src/WirelessBatteryTray/AutoStart.cs b/src/WirelessBatteryTray/AutoStart.cs',
+    'index 2171cae..4a2a9c1 100644',
+    '--- a/src/WirelessBatteryTray/AutoStart.cs',
+    '+++ b/src/WirelessBatteryTray/AutoStart.cs',
+    '@@ -2,13 +2,21 @@ using Microsoft.Win32;',
+    ' ',
+    ' namespace WirelessBatteryTray',
+    ' {',
+    '+    // Moved to a scheduled task; the Run key stays readable for old installs.',
+    '     internal static class AutoStart',
+    '     {',
+    '+        const string RunKeyPath = @"Software\\Microsoft\\Windows\\CurrentVersion\\Run";',
+    '+',
+    '+        public static bool IsEnabled()',
+    '+        {',
+    '+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);',
+    '+            return key?.GetValue(ValueName) != null;',
+    '+        }',
+    '+',
+    '         public static void SetEnabled(bool enabled)',
+    '         {',
+    '-            using var key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true);',
+    '-            if (enabled) key.SetValue(ValueName, BuildCommand());',
+    '-            else key.DeleteValue(ValueName, throwOnMissingValue: false);',
+    '+            if (enabled) CreateTask();',
+    '+            else DeleteTask();',
+    '         }',
+    '     }',
+    ' }',
+    '',
+  ].join('\n')
+
+  it('reads the file headers as meta, not as a one-line deletion and addition', () => {
+    // `--- a/x` and `+++ b/x` both start with a sign character. Without the
+    // header rule they become a del and an add, which is a change that does not
+    // exist — and it lands at the very top of the ruler, where it is most
+    // visible.
+    const rows = parseDiffRows(REAL)
+    assert.equal(rows[2]?.kind, 'meta')
+    assert.equal(rows[3]?.kind, 'meta')
+  })
+
+  it('paints exactly the changed lines, with the gaps left as gaps', () => {
+    const rows = parseDiffRows(REAL)
+    const marks = diffRulerMarks(rows)
+    const changed = rows.filter(row => row.kind === 'add' || row.kind === 'del').length
+    const painted = marks.reduce((sum, mark) => sum + mark.span, 0)
+
+    // 30 rows (git's diff ends with a trailing newline, which is a row here),
+    // 14 of them changed. The merge rule this replaced painted 60% and drew one
+    // 53.3% bar covering rows 8..23 — the two unchanged rows at 19-20 were
+    // swallowed into it, which is what the screenshot showed.
+    assert.equal(rows.length, 30)
+    assert.equal(changed, 14)
+    assert.equal(marks.length, 4, 'four separate edit runs, not two merged bars')
+    assert.deepEqual(marks.map(mark => [mark.from, mark.to]), [[8, 8], [11, 18], [21, 23], [24, 25]])
+    assert.ok(Math.abs(painted - changed / rows.length) < 1e-9,
+      `marks cover ${String(painted)} of the document; the changed lines are ${String(changed / rows.length)}`)
+  })
+
+  it('leaves every mark on lines that really changed', () => {
+    const rows = parseDiffRows(REAL)
+    const marks = diffRulerMarks(rows)
+    for (const mark of marks) {
+      for (let index = mark.from; index <= mark.to; index += 1) {
+        assert.equal(rows[index]?.kind, mark.kind,
+          `row ${String(index)} is '${String(rows[index]?.kind)}' but sits inside a '${mark.kind}' mark`)
+      }
+    }
+    // The two unchanged rows the old rule swallowed must stay uncovered.
+    for (const index of [19, 20]) {
+      assert.ok(marks.every(mark => index < mark.from || index > mark.to),
+        `row ${String(index)} did not change and must not be painted`)
+    }
+  })
+})
+

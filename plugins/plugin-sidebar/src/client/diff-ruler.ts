@@ -7,11 +7,13 @@
  * same numbers on every re-render. That is what lets the ruler be a pure
  * function of the parsed rows instead of a second pass over the layout.
  *
- * Kept out of `git-tab.tsx` and free of React so the two rules that decide
- * whether the ruler is readable can be pinned: adjacent changed lines form ONE
- * mark (a run of twenty additions is one bar, not twenty), and the fractions
- * are computed against the WHOLE document, hunk headers included, so a mark
- * never drifts away from the line it points at.
+ * Kept out of `git-tab.tsx` and free of React so the rules that decide whether
+ * the ruler tells the truth can be pinned: one mark per contiguous run of
+ * same-kind changed lines (a run of twenty additions is one bar because those
+ * twenty lines really are twenty changes), the fraction computed against the
+ * WHOLE document so a mark never drifts from the line it points at, and NO
+ * merging across unchanged lines — a gap in the marks is a gap in the changes,
+ * which is the one thing an overview ruler exists to show.
  *
  * @module @dsh-app/plugin-sidebar/client/diff-ruler
  */
@@ -34,30 +36,96 @@ export interface DiffRulerMark {
 }
 
 /**
- * Changed runs closer than this many unchanged lines merge into one mark.
+ * One parsed line of a unified diff, as the ruler needs it.
  *
- * The value is a legibility floor, not a semantic one: the ruler is 10px wide
- * and the eye cannot resolve two marks separated by a fraction of a pixel, so
- * three context lines — git's own hunk padding — is the smallest gap worth
- * drawing apart. Measured on a file whose every 12th line changed: 68 runs
- * collapsed to a handful of readable bars.
+ * Named apart from `git-tab.tsx`'s `DiffRow` on purpose: the render row carries
+ * the text, the colour class and the React key, while this carries only what
+ * the line IS and where it sits in each side. Two names keep that split visible
+ * instead of inviting the reader to assume they are the same record.
  */
-const MIN_GAP = 4
+export interface ParsedDiffLine {
+  readonly kind: DiffLineKind
+  /** The old-file line number, or undefined for an addition. */
+  readonly old: number | undefined
+  /** The new-file line number, or undefined for a deletion. */
+  readonly new: number | undefined
+}
+
+/**
+ * Parse a unified diff into rows, carrying the per-side line numbers.
+ *
+ * This lives beside the ruler rather than inside the component so a test can
+ * feed it a REAL `git diff` string. The ruler's own tests used to take a
+ * hand-written array of kinds, which is exactly how a rule that merges across
+ * unchanged lines survived: nothing ever produced those lines from a diff, so
+ * the gap the rule destroyed was never present in the input.
+ *
+ * `@@` hunk headers and the `---`/`+++` file headers are `meta`: they are not
+ * changes, but they occupy a row and therefore count toward the ruler's
+ * denominator, which is what keeps a mark over the line it points at. A `+++`
+ * or `---` line starts with a sign character and would otherwise read as a
+ * change — the git header is the one shape the prefix test cannot decide alone.
+ *
+ * @param text - a unified diff, as `git diff` writes it.
+ * @returns one row per line, in order.
+ */
+export function parseDiffRows(text: string): ParsedDiffLine[] {
+  if (text === '') return []
+  let oldNo = 0
+  let newNo = 0
+  return text.split('\n').map((line) => {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (hunk !== null) {
+      oldNo = Number(hunk[1])
+      newNo = Number(hunk[2])
+      return { kind: 'meta' as const, old: undefined, new: undefined }
+    }
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      return { kind: 'meta' as const, old: undefined, new: undefined }
+    }
+    if (line.startsWith('+')) {
+      const row = { kind: 'add' as const, old: undefined, new: newNo }
+      newNo += 1
+      return row
+    }
+    if (line.startsWith('-')) {
+      const row = { kind: 'del' as const, old: oldNo, new: undefined }
+      oldNo += 1
+      return row
+    }
+    const row = { kind: 'context' as const, old: oldNo, new: newNo }
+    oldNo += 1
+    newNo += 1
+    return row
+  })
+}
 
 /**
  * Turn parsed diff lines into ruler marks.
  *
- * Runs are built from CONSECUTIVE lines of the same kind: an addition directly
- * after a deletion starts a new run (the two carry different colours), and a
- * run interrupted by a context line ends there. `meta` lines — the `@@` hunks
- * and the `---`/`+++` headers — are never marks, but they DO count toward the
- * denominator, because the ruler has to line up with the rendered rows.
+ * One mark per CONTIGUOUS run of same-kind changed lines, and nothing else. A
+ * run of twenty additions is one mark because those twenty lines really are
+ * twenty changed lines; two runs separated by three unchanged lines are TWO
+ * marks because the gap is information the ruler exists to show.
  *
- * A ruler is 10px wide and a document can hold hundreds of changed lines, so
- * runs separated by fewer than {@link MIN_GAP} lines are merged into ONE mark.
- * Without that, a file whose every line changed produces one mark per line and
- * the column becomes a solid block that locates nothing; the merged mark keeps
- * the kind of its FIRST run, which is the one a reader scrolls to.
+ * There was a third rule here once — runs closer than a few context lines
+ * merged into one mark, "for legibility". It was wrong in two directions. It
+ * painted the unchanged gap as changed, so a three-line edit read as a long
+ * band and the ruler overstated every scattered edit; and because the merged
+ * mark covered more, it also made a file of many small edits look like a few
+ * large ones, which is the opposite of what an overview ruler is for. The
+ * legibility worry it was answering is handled at the paint level instead: a
+ * mark carries no minimum height, and its clickable area is a `::after`
+ * overhang, so a hairline stays reachable without lying about its length.
+ *
+ * A directly adjacent run of the other kind (a deleted line followed by an
+ * added one) is already its own run here: run building splits by kind, so a
+ * replaced line keeps two colours and the reader can still tell which side went
+ * away.
+ *
+ * `meta` lines — the `@@` hunks and the `---`/`+++` headers — are never marks,
+ * but they DO count toward the denominator, because the ruler has to line up
+ * with the rendered rows.
  *
  * @param lines - the parsed diff rows, in render order.
  * @returns the marks, top to bottom; empty when nothing changed.
@@ -65,7 +133,7 @@ const MIN_GAP = 4
 export function diffRulerMarks(lines: readonly { readonly kind: DiffLineKind }[]): DiffRulerMark[] {
   const total = lines.length
   if (total === 0) return []
-  const runs: { kind: 'add' | 'del', from: number, to: number }[] = []
+  const marks: DiffRulerMark[] = []
   let index = 0
   while (index < total) {
     const kind = lines[index]?.kind
@@ -76,30 +144,16 @@ export function diffRulerMarks(lines: readonly { readonly kind: DiffLineKind }[]
     const from = index
     let to = index
     while (to + 1 < total && lines[to + 1]?.kind === kind) to += 1
-    runs.push({ kind, from, to })
+    marks.push({
+      kind,
+      from,
+      to,
+      top: from / total,
+      span: (to - from + 1) / total,
+    })
     index = to + 1
   }
-  const merged: { kind: 'add' | 'del', from: number, to: number }[] = []
-  for (const run of runs) {
-    const previous = merged[merged.length - 1]
-    // A DIRECTLY adjacent run of the other kind is a real paired change (a
-    // replaced line), so it keeps its own mark: merging it would paint the pair
-    // in one colour and lose which side was removed. Only runs separated by at
-    // least one unchanged line are far enough apart to be illegible apart.
-    const gap = previous === undefined ? Number.POSITIVE_INFINITY : run.from - previous.to - 1
-    if (previous !== undefined && gap > 0 && gap < MIN_GAP) {
-      previous.to = run.to
-      continue
-    }
-    merged.push({ ...run })
-  }
-  return merged.map(run => ({
-    kind: run.kind,
-    from: run.from,
-    to: run.to,
-    top: run.from / total,
-    span: (run.to - run.from + 1) / total,
-  }))
+  return marks
 }
 
 /**

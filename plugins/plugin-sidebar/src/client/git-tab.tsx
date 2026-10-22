@@ -27,7 +27,7 @@ import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { FsApiError, gitApi } from './api.ts'
 import type { GitActionValue, GitBranchList, GitStatusEntry, HostText } from './api.ts'
 import { buildPathTree, type GitListShape, type GitTree, type GitTreeDir, type GitTreeFile } from './git-list.ts'
-import { diffRulerMarks, diffRulerScrollTop, type DiffLineKind, type DiffRulerMark } from './diff-ruler.ts'
+import { diffRulerMarks, diffRulerScrollTop, parseDiffRows, type DiffLineKind, type DiffRulerMark } from './diff-ruler.ts'
 import { NS, type SidebarKey } from './locales.ts'
 
 /** The tab's namespace-bound translate, handed to the render helpers below. */
@@ -133,39 +133,22 @@ interface DiffRow {
 
 /** One diff text as a colored block, with an overview ruler beside it. */
 function DiffView(props: { text: string, truncated?: boolean, t: SidebarTranslate }): ReactNode {
+  // The parsing itself is `parseDiffRows` (beside the ruler, so a test can feed
+  // it a real `git diff`); this only adds the render fields — the row's own text,
+  // its position as the React key, and the colour class the kind decides. The
+  // parsed list and the source list share one index: each diff line produces
+  // exactly one row, so `source[index]` is that row's own text.
   const rows = useMemo<DiffRow[]>(() => {
-    if (props.text === '') return []
-    // Unified-diff line numbering: each @@ hunk carries the new/old start
-    // lines; + counts against new, - against old, context against both.
-    let oldNo = 0
-    let newNo = 0
-    return props.text.split('\n').map((line, index) => {
-      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-      if (hunk !== null) {
-        oldNo = Number(hunk[1])
-        newNo = Number(hunk[2])
-        return { key: index, text: line, cls: undefined, old: undefined, new: undefined, kind: 'meta' as const }
-      }
-      // The file headers are not changes: `+++ b/x` and `--- a/x` only look
-      // like one. They stay context-coloured and out of the ruler.
-      if (line.startsWith('+++') || line.startsWith('---')) {
-        return { key: index, text: line, cls: undefined, old: undefined, new: undefined, kind: 'meta' as const }
-      }
-      if (line.startsWith('+')) {
-        const row = { key: index, text: line, cls: 'dshAsbGit-diffAdd', old: undefined, new: newNo, kind: 'add' as const }
-        newNo += 1
-        return row
-      }
-      if (line.startsWith('-')) {
-        const row = { key: index, text: line, cls: 'dshAsbGit-diffDel', old: oldNo, new: undefined, kind: 'del' as const }
-        oldNo += 1
-        return row
-      }
-      const row = { key: index, text: line, cls: undefined, old: oldNo, new: newNo, kind: 'context' as const }
-      oldNo += 1
-      newNo += 1
-      return row
-    })
+    const parsed = parseDiffRows(props.text)
+    const source = props.text === '' ? [] : props.text.split('\n')
+    return parsed.map((row, index) => ({
+      key: index,
+      text: source[index] ?? '',
+      cls: row.kind === 'add' ? 'dshAsbGit-diffAdd' : row.kind === 'del' ? 'dshAsbGit-diffDel' : undefined,
+      old: row.old,
+      new: row.new,
+      kind: row.kind,
+    }))
   }, [props.text])
   const marks = useMemo(() => diffRulerMarks(rows), [rows])
   const bodyRef = useRef<HTMLDivElement | null>(null)
