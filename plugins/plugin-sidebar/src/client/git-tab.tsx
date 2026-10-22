@@ -194,13 +194,22 @@ function DiffView(props: { text: string, truncated?: boolean, t: SidebarTranslat
         </div>
         {/* Overview ruler. Marks are fractions of the parsed row count, so they
             need no measurement; clicking one scrolls the body above. Rendered
-            only when there is something to locate. */}
+            only when there is something to locate.
+
+            A mark's HEIGHT is the true fraction of changed lines, with no
+            floor: a 1-line change in a 400-line diff is 0.25% of the column and
+            must read as a hairline, because that is what the reader is being
+            told. The clickable area is what gets the floor (a 2px pseudo-element
+            that overhangs the mark), so a hairline is still reachable by pointer
+            without being PAINTED at 2px — the earlier `Math.max(span, 0.6%)`
+            made every small change look like a large one, and on a long file
+            every mark then read as the same bar. */}
         {marks.length === 0 ? null : (
           <div className="dshAsbGit-ruler" role="group" aria-label={props.t('sidebar.diff.rulerAria')}>
             {marks.map(mark => (
               <button key={`${String(mark.from)}-${String(mark.to)}`} type="button"
                 className={`dshAsbGit-rulerMark dshAsbGit-rulerMark${mark.kind === 'add' ? 'Add' : 'Del'}`}
-                style={{ top: `${String(mark.top * 100)}%`, height: `${String(Math.max(mark.span * 100, 0.6))}%` }}
+                style={{ top: `${String(mark.top * 100)}%`, height: `${String(mark.span * 100)}%` }}
                 aria-label={props.t('sidebar.diff.rulerMark', { from: mark.from + 1, to: mark.to + 1 })}
                 onClick={() => { jumpTo(mark) }} />
             ))}
@@ -1072,9 +1081,15 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit-diffBody { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
 /* Overview ruler: the marks are fractions of the diff's line count, so the
    column needs no measurement of its own. Pointer-only (aria-hidden marks stay
-   focusable, so the buttons keep their labels); it rides the body's height. */
+   focusable, so the buttons keep their labels); it rides the body's height.
+   A mark has NO minimum height: its painted length is the true fraction, so a
+   one-line change reads as a hairline and a twenty-line run reads long. The
+   ::after overhang is what makes a hairline clickable without changing what is
+   drawn — the earlier 2px min-height painted every small change at the same
+   size as a real block. */
 .dshAsbGit-ruler { position: relative; flex: none; width: 10px; min-height: 0; align-self: stretch; border-radius: 5px; background: rgba(148, 163, 184, 0.12); overflow: hidden; }
-.dshAsbGit-rulerMark { position: absolute; left: 1px; right: 1px; min-height: 2px; padding: 0; border: none; border-radius: 1px; cursor: pointer; }
+.dshAsbGit-rulerMark { position: absolute; left: 1px; right: 1px; padding: 0; border: none; border-radius: 1px; cursor: pointer; }
+.dshAsbGit-rulerMark::after { content: ''; position: absolute; left: 0; right: 0; top: -2px; bottom: -2px; }
 .dshAsbGit-rulerMark:hover { filter: brightness(1.35); }
 .dshAsbGit-rulerMarkAdd { background: var(--dsw-alias-state-success-primary, #16a34a); }
 .dshAsbGit-rulerMarkDel { background: var(--dsw-alias-state-error-primary, #dc2626); }

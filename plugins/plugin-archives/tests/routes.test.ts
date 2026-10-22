@@ -353,6 +353,65 @@ test('delete: refuses an id whose directory name would be escaped upstream', asy
   assert.equal(existsSync(join(s.root, 'p', 'session~weird')), true)
 })
 
+// --- /restore: the inverse of archiving ------------------------------------
+
+test('restore: drops the archive record so the session is visible again', async () => {
+  const s = await scenario({ ids: ['session-a', 'session-b'], archived: ['session-a', 'session-b'] })
+
+  const reply = await call(s.routes.get(`${ROUTE_PREFIX}/restore`)!, request('POST', { ids: ['session-a'] }))
+  const value = (reply.body as { value: { restored: string[], skipped: Array<{ id: string, reason: string }> } }).value
+
+  assert.equal(reply.status, 200)
+  assert.deepEqual(value.restored, ['session-a'])
+  assert.deepEqual(value.skipped, [])
+  assert.deepEqual([...s.made.registry.archivedSessionIds], ['session-b'])
+  // Restoring is NOT deletion: the log is untouched, so the session can be
+  // opened (and archived again) afterwards.
+  assert.equal(existsSync(s.logs.get('session-a')!), true)
+})
+
+test('restore: a session that is not archived is skipped, not failed', async () => {
+  // The normal cause is a second click, or another window having restored it
+  // already. Failing the whole call over that would report a user error where
+  // there is none.
+  const s = await scenario({ ids: ['session-a'], archived: ['session-a'] })
+
+  const first = await call(s.routes.get(`${ROUTE_PREFIX}/restore`)!, request('POST', { ids: ['session-a'] }))
+  const second = await call(s.routes.get(`${ROUTE_PREFIX}/restore`)!, request('POST', { ids: ['session-a'] }))
+  const value = (second.body as { value: { restored: string[], skipped: Array<{ id: string, reason: string }> } }).value
+
+  assert.equal(first.status, 200)
+  assert.equal(second.status, 200)
+  assert.deepEqual(value.restored, [])
+  assert.deepEqual(value.skipped, [{ id: 'session-a', reason: 'not-archived' }])
+})
+
+test('restore: rejects a body that names no ids', async () => {
+  const s = await scenario({ ids: ['session-a'], archived: ['session-a'] })
+  const reply = await call(s.routes.get(`${ROUTE_PREFIX}/restore`)!, request('POST', { ids: [] }))
+  assert.equal(reply.status, 400)
+})
+
+test('restore: answers 501 when the kernel publishes no unarchive path', async () => {
+  // Same capability discipline as /prune: this plugin must never reach for a
+  // private write chain, so a kernel without the public removal path gets a
+  // coded refusal instead of a silent no-op.
+  const root = await mkdtemp(join(tmpdir(), 'dshar-test-'))
+  created.push(root)
+  const routes = harness({
+    persistence: { list: async () => [] } as unknown as ArchiveRoutesOptions['persistence'],
+    // No `unarchiveSession`: the shape of a kernel that does not publish it.
+    registry: { archivedSessionIds: ['session-a'] } as unknown as ArchiveRoutesOptions['registry'],
+    sessions: undefined,
+    projectionCache: undefined,
+    activity: async () => [],
+    sessionQuery: undefined,
+    tools: undefined,
+  } as ArchiveRoutesOptions)
+  const reply = await call(routes.get(`${ROUTE_PREFIX}/restore`)!, request('POST', { ids: ['session-a'] }))
+  assert.equal(reply.status, 501)
+})
+
 // --- /prune: the reclaim path for the records /delete keeps -----------------
 
 test('prune: drops exactly the records whose logs are gone', async () => {
@@ -465,6 +524,7 @@ test('routes: each path owns exactly the methods and body mode it declares', asy
       // and lets a method it does not own fall through to the channel's 404.
       [`${ROUTE_PREFIX}/list`, ['GET']],
       [`${ROUTE_PREFIX}/delete`, ['POST']],
+      [`${ROUTE_PREFIX}/restore`, ['POST']],
       [`${ROUTE_PREFIX}/prune`, ['POST']],
       [`${ROUTE_PREFIX}/search`, ['GET']],
     ],

@@ -1,7 +1,7 @@
 /**
  * DSH APP session archive manager — host half.
  *
- * Serves the archive manager's four routes (list/delete/prune/search) on the
+ * Serves the archive manager's five routes (list/delete/restore/prune/search) on the
  * shared Connection `/api` channel, under
  * `/api/plugins/dsh-app/plugin-archives`. The archive set comes from the
  * workspace registry (`archivedSessionIds` — upstream archiving hides a

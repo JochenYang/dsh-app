@@ -181,7 +181,13 @@ diff (the `<pre>` inside it must not scroll vertically — `overflow-y: visible`
 when the other axis scrolls, which is what produced the second bar); and the change ruler rendering
 merged marks that match the diff's own +/− lines and move the scroll when clicked. It reaches the Git
 view through the per-session preference the kernel itself restores, because the view-tab strip does
-not render with a single `conversation.view` registrant — see `docs/agents/known-gaps.md`; the remaining
+not render with a single `conversation.view` registrant — see `docs/agents/known-gaps.md`; that walk
+depends on session switching and Git-panel timing, so a failure there can mean anything, and
+`probe-diff-ruler.cjs` (plain `node` + Electron, no kernel) isolates the one fact a CSS floor
+destroys: it applies the plugin's REAL stylesheet in Chromium and measures marks at 0.25/1/5/20%,
+asserting the painted height equals the true fraction (0.5px, 2px, 10px, 40px on a 200px column),
+that no minimum height applies, and that the `::after` overhang still makes a hairline clickable —
+measured once as 0.25% painting at 2px, which made a one-line change look like a whole block; the remaining
 `probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` /
 `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` cover the surfaces
 their names say; `scripts/capture.mjs` screenshots the running UI for visual work.

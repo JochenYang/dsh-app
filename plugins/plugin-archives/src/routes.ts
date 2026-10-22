@@ -525,7 +525,7 @@ async function pruneStaleArchives(writer: RegistryPruner, options: ArchiveRoutes
 }
 
 /**
- * Register the four API routes on the Connection exact-Fetch registry.
+ * Register the five API routes on the Connection exact-Fetch registry.
  *
  * Every route owns its exact path and its methods; another method of the same
  * path falls through to the shared channel's own 404 rather than a route body.
@@ -591,6 +591,50 @@ export function registerArchiveRoutes(connectionFetch: HostConnectionFetch, opti
       })
     }
   }
+  const restoreFetch = async (request: Request): Promise<Response> => {
+    // Same capability discipline as /prune: the PUBLIC removal path is the only
+    // one this plugin may use, and a kernel that does not publish it must fail
+    // loudly (501) rather than have the plugin reach for a private write chain.
+    const writer = options.registry as RegistryPruner
+    if (typeof writer.unarchiveSession !== 'function') {
+      return fail(501, 'restore-unsupported', {
+        code: 'route.restoreUnsupported',
+        text: 'this kernel version cannot restore an archived session',
+      })
+    }
+    try {
+      const body = await readJsonBody(request)
+      const ids = (body as { ids?: unknown }).ids
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_IDS_PER_CALL || ids.some((id) => typeof id !== 'string')) {
+        return fail(400, 'bad-request', { code: 'route.idsRequired', text: 'the body needs a non-empty array of string ids' })
+      }
+      // Restoring is the exact inverse of archiving: dropping the id from the
+      // archive set un-hides the session on every grouping surface, and the log
+      // was never touched, so nothing else has to happen. The registry's own
+      // serialized chain is what makes a concurrent archive/restore safe.
+      const restored: string[] = []
+      const skipped: { id: string, reason: string }[] = []
+      const archived = new Set(options.registry.archivedSessionIds.map(String))
+      for (const id of ids as string[]) {
+        if (!archived.has(id)) {
+          // Not archived is not an error worth failing the whole call over: a
+          // second click, or a session restored from another window, is normal.
+          skipped.push({ id, reason: 'not-archived' })
+          continue
+        }
+        await writer.unarchiveSession(SessionId(id))
+        restored.push(id)
+      }
+      return ok({ restored, skipped })
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return fail(500, 'restore-failed', {
+        code: 'route.restoreFailed',
+        params: { detail },
+        text: `could not restore archived sessions: ${detail}`,
+      })
+    }
+  }
   const searchFetch = async (request: Request): Promise<Response> => {
     if (options.sessionQuery === undefined) {
       return fail(503, 'session-query-unavailable', {
@@ -631,6 +675,7 @@ export function registerArchiveRoutes(connectionFetch: HostConnectionFetch, opti
   const disposers = [
     connectionFetch.register({ path: `${ROUTE_PREFIX}/list`, methods: ['GET'], requestBody: 'buffered', fetch: listFetch }),
     connectionFetch.register({ path: `${ROUTE_PREFIX}/delete`, methods: ['POST'], requestBody: 'buffered', fetch: deleteFetch }),
+    connectionFetch.register({ path: `${ROUTE_PREFIX}/restore`, methods: ['POST'], requestBody: 'buffered', fetch: restoreFetch }),
     connectionFetch.register({ path: `${ROUTE_PREFIX}/prune`, methods: ['POST'], requestBody: 'buffered', fetch: pruneFetch }),
     connectionFetch.register({ path: `${ROUTE_PREFIX}/search`, methods: ['GET'], requestBody: 'buffered', fetch: searchFetch }),
   ]

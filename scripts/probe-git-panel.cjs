@@ -714,13 +714,19 @@ const RULER_SNAP = `(function () {
     if (cls.indexOf('dshAsbGit-diffDel') >= 0) dels += 1
   }
   var marks = []
+  var rulerHeight = ruler === null ? 0 : ruler.getBoundingClientRect().height
   if (ruler !== null) {
     marks = Array.prototype.map.call(ruler.querySelectorAll('.dshAsbGit-rulerMark'), function (node) {
       var cls = String(node.className || '')
+      var rect = node.getBoundingClientRect()
       return {
         kind: cls.indexOf('dshAsbGit-rulerMarkAdd') >= 0 ? 'add' : cls.indexOf('dshAsbGit-rulerMarkDel') >= 0 ? 'del' : 'unknown',
         top: node.style.top,
         height: node.style.height,
+        // The PAINTED height, which is what the reader sees: a floor applied in
+        // CSS shows up here and nowhere in the inline style.
+        px: Math.round(rect.height * 100) / 100,
+        pxTop: Math.round(rect.top * 100) / 100,
         label: node.getAttribute('aria-label')
       }
     })
@@ -728,6 +734,7 @@ const RULER_SNAP = `(function () {
   return {
     rulerPresent: ruler !== null,
     rulerAria: ruler === null ? null : ruler.getAttribute('aria-label'),
+    rulerHeight: Math.round(rulerHeight * 100) / 100,
     marks: marks,
     diffLines: rows.length,
     adds: adds,
@@ -1077,6 +1084,29 @@ async function run() {
     check('A5 a mark sits inside the ruler, not below it',
       ruler.marks.every((mark) => parseFloat(mark.top) >= 0 && parseFloat(mark.top) <= 100),
       JSON.stringify(ruler.marks.map((mark) => mark.top)))
+    // The mark's PAINTED length is the true fraction of changed lines. This is
+    // the fact a CSS floor destroys: a `min-height` or a `Math.max(span, 0.6%)`
+    // makes a one-line change as long as a real block, so the ruler stops
+    // telling the reader how much changed. The fixture's marks are 1-2 lines
+    // each, so on any ordinary ruler height a floor shows up as a mismatch here.
+    {
+      const rulerHeight = ruler.rulerHeight
+      const expected = ruler.marks.map((mark) => {
+        // `height` is the inline percentage the component wrote; the mark's line
+        // span is in its aria label (from-to, 1-based).
+        return { spanPct: parseFloat(mark.height), px: mark.px }
+      })
+      const faithful = expected.every((entry) => {
+        if (!Number.isFinite(entry.spanPct) || rulerHeight <= 0) return false
+        const predicted = (entry.spanPct / 100) * rulerHeight
+        // 1px of slack: sub-pixel rounding in the compositor, nothing more. A
+        // floor of 2px or 0.6% exceeds this on a ruler shorter than 333px.
+        return Math.abs(entry.px - predicted) <= 1
+      })
+      check('A5 a mark is PAINTED at its true line fraction, with no minimum height',
+        faithful,
+        JSON.stringify({ rulerHeight, marks: expected.map((e) => ({ span: e.spanPct, px: e.px, predicted: Math.round((e.spanPct / 100) * rulerHeight * 100) / 100 })) }))
+    }
 
     const jumped = await evalIn(CLICK_RULER_MARK)
     section('A5 — clicking the first mark', jumped)

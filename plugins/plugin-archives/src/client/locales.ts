@@ -42,6 +42,8 @@ export const zh = {
   'archives.prune': '清理',
   'archives.delete': '删除',
   'archives.deleteAll': '删除全部',
+  'archives.restore': '恢复',
+  'archives.restoreAll': '恢复全部',
   'archives.group.sessions': '{count} 个会话',
   'archives.group.noCwd': '未记录项目目录',
 
@@ -64,6 +66,7 @@ export const zh = {
   'archives.target.group': '“{title}”的 {count} 个会话',
 
   'archives.notice.pruned': '已清理 {count} 条无效归档记录',
+  'archives.notice.restored': '已恢复 {count} 个会话',
   'archives.notice.deleted': '已删除 {count} 个会话，释放 {bytes}',
   'archives.notice.recordsKept': '归档记录已保留，可用上方「清理」移除',
   'archives.notice.skipped': '跳过 {count} 个（{reasons}）',
@@ -100,6 +103,8 @@ export const en: Record<ArchivesKey, string> = {
   'archives.prune': 'Prune',
   'archives.delete': 'Delete',
   'archives.deleteAll': 'Delete all',
+  'archives.restore': 'Restore',
+  'archives.restoreAll': 'Restore all',
   'archives.group.sessions': '{count} sessions',
   'archives.group.noCwd': 'No project directory recorded',
 
@@ -122,6 +127,7 @@ export const en: Record<ArchivesKey, string> = {
   'archives.target.group': 'the {count} sessions in "{title}"',
 
   'archives.notice.pruned': 'Pruned {count} invalid archive records',
+  'archives.notice.restored': 'Restored {count} sessions',
   'archives.notice.deleted': 'Deleted {count} sessions, freeing {bytes}',
   'archives.notice.recordsKept': 'Archive records were kept; remove them with "Prune" above',
   'archives.notice.skipped': 'Skipped {count} ({reasons})',

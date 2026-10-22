@@ -86,3 +86,12 @@ export interface ArchivePruneResult {
   /** Archive-set size after the prune. */
   remaining: number
 }
+
+/** POST /restore response value. */
+export interface ArchiveRestoreResult {
+  /** Ids dropped from the archive set (the session is visible again). */
+  restored: string[]
+  /** Ids left untouched, each with a reason. `not-archived` is the normal one:
+   *  a second click, or a session another window already restored. */
+  skipped: Array<{ id: string; reason: ArchiveSkipReason }>
+}

@@ -28,7 +28,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, HostText } from '../types.ts'
+import type { ArchiveDeleteResult, ArchiveGroup, ArchiveList, ArchivePruneResult, ArchiveRestoreResult, HostText } from '../types.ts'
 import { NS, type ArchivesKey } from './locales.ts'
 
 /**
@@ -194,11 +194,12 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return body.value as T
 }
 
-/** One project group panel: collapsible header with meta + delete-all, then session rows. */
-function GroupPanel({ group, busy, onDeleteSessions, t }: {
+/** One project group panel: collapsible header with meta + restore/delete-all, then session rows. */
+function GroupPanel({ group, busy, onDeleteSessions, onRestoreSessions, t }: {
   group: ArchiveGroup
   busy: boolean
   onDeleteSessions: (group: ArchiveGroup) => void
+  onRestoreSessions: (group: ArchiveGroup) => void
   t: ArchivesTranslate
 }): ReactNode {
   const [expanded, setExpanded] = useState(true)
@@ -234,6 +235,14 @@ function GroupPanel({ group, busy, onDeleteSessions, t }: {
           <span>{fmtBytes(group.totalBytes)}</span>
           <button
             type="button"
+            className="dshar_button"
+            disabled={busy}
+            onClick={(event) => { event.stopPropagation(); onRestoreSessions(group) }}
+          >
+            {t('archives.restoreAll')}
+          </button>
+          <button
+            type="button"
             className="dshar_button dshar_buttonDanger"
             disabled={busy}
             onClick={(event) => { event.stopPropagation(); onDeleteSessions(group) }}
@@ -248,6 +257,14 @@ function GroupPanel({ group, busy, onDeleteSessions, t }: {
           <span className="dshar_rowMeta">
             <span>{fmtDate(session.createdAt)}</span>
             <span>{fmtBytes(session.sizeBytes)}</span>
+            <button
+              type="button"
+              className="dshar_button"
+              disabled={busy}
+              onClick={() => { onRestoreSessions({ ...group, sessions: [session] }) }}
+            >
+              {t('archives.restore')}
+            </button>
             <button
               type="button"
               className="dshar_button dshar_buttonDanger"
@@ -315,6 +332,48 @@ export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
       : t('archives.target.group', { title: groupHeading(group, t), count: ids.length })
     setConfirm({ kind: 'delete', ids, label, bytes })
   }, [t])
+
+  /**
+   * Restore one session (or a whole group) out of the archive.
+   *
+   * No confirm banner, deliberately: deleting a log is irreversible and earns
+   * the pause, while restoring only drops an id from the archive set and never
+   * touches the stored log — so it is undoable by archiving again. Making the
+   * user confirm a reversible action is how a dialog teaches people to click
+   * through dialogs.
+   */
+  const onRestoreSessions = useCallback(async (group: ArchiveGroup) => {
+    setNotice(null)
+    setBusy(true)
+    try {
+      const result = await fetchJson<ArchiveRestoreResult>(`${ROUTE_PREFIX}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: group.sessions.map((session) => session.id) }),
+      })
+      const parts = [t('archives.notice.restored', { count: result.restored.length })]
+      if (result.skipped.length > 0) {
+        const counts = new Map<string, number>()
+        for (const skip of result.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1)
+        const skippedText = [...counts]
+          // An unknown reason code has no key of its own: show the code raw.
+          .map(([reason, count]) => `${SKIP_REASONS[reason] === undefined ? reason : t(SKIP_REASONS[reason])} × ${count}`)
+          .join(t('archives.notice.join.reasons'))
+        parts.push(t('archives.notice.skipped', { count: result.skipped.length, reasons: skippedText }))
+      }
+      setNotice(result.skipped.length > 0
+        ? { kind: 'warn', text: parts.join(t('archives.notice.join.notices')) }
+        : { kind: 'ok', text: parts[0] })
+      await load()
+    } catch (actionError) {
+      const failure = asFailure(actionError)
+      // A failed restore must not blank the listing: surface it as a notice, the
+      // same way a failed prune is reported.
+      setNotice({ kind: 'warn', text: routeErrorCopy(t, failure.host, failure.fallback) })
+    } finally {
+      setBusy(false)
+    }
+  }, [load, t])
 
   /** Confirm the pending action: POST, surface the outcome, reload. */
   const onConfirm = useCallback(async () => {
@@ -491,7 +550,7 @@ export function ArchivesSection({ t }: ArchivesSectionProps): ReactNode {
       {empty
         ? <div className="dshar_empty">{t('archives.empty')}</div>
         : list.groups.map((group) => (
-          <GroupPanel key={group.cwd} group={group} busy={busy} onDeleteSessions={onDeleteSessions} t={t} />
+          <GroupPanel key={group.cwd} group={group} busy={busy} onDeleteSessions={onDeleteSessions} onRestoreSessions={(target) => { void onRestoreSessions(target) }} t={t} />
         ))}
     </div>
   )
