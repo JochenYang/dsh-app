@@ -8,6 +8,22 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.2] - 2026-10-22
+
+### 中文
+- 内置用量 / 充值页现在会带客户端身份请求头（版本、语言、时区偏移、桌面平台标识）。之前只注入部署头，平台始终把桌面端当成普通网页；时区与语言按每次请求采样，页面开着的过程中切语言或遇到夏令时都能跟上。
+- 该页的存储改为按账号复用：同一账号重开后是同一份存储，不同账号绝不共用。因此「知道了」横幅、时区选择、时间维度这些页面偏好不再每次打开都被重置。
+- 补上退出侧的凭证清理。存储变成持久化之后，会话 cookie 会落在磁盘上，而原来只有更新安装前才清理，正常退出、托盘退出和四处重启都绕过去了。现在退出、重启与两条安装路径都会先等待清理完成，再移交进程。
+- 修掉两个会随持久化放大的老问题：下载拦截监听器原来每次打开都注册一遍，同一份持久存储上会一直累积；嵌入视图的导航判定改用了非废弃的事件对象，否则 Electron 移除旧参数后会静默地永不关闭视图。
+- 嵌入页的凭据校验补上主框架身份比较：同源子框架的 URL 与主框架完全一样，只比 URL 挡不住它。
+
+### English
+- The embedded usage / top-up page now carries the client-identity headers (version, language, UTC offset, desktop platform). Only deployment headers used to be injected, so Platform always saw the desktop app as an ordinary web page; the offset and language are sampled per request, so a language switch or a DST change while the page is open still reports the truth.
+- That page's storage is now keyed to the account: the same account reopens the same storage, and two accounts never share one. Page preferences — the "知道了" banner, the timezone choice, the date range — therefore survive reopening instead of resetting every time.
+- Adds the credential cleanup on the exit side. Once the storage is persistent the session cookie lands on disk, and cleanup used to run only before an update install, so an ordinary quit, a tray quit and all four restart paths went past it. Quitting, restarting and both install paths now await the cleanup before the process is handed over.
+- Fixes two older problems that persistence would have amplified: the download refusal was registered once per open and accumulated forever on a reused persistent session, and the embedded view's navigation check now reads the non-deprecated event object — with the old positional arguments removed, the view would have silently never closed.
+- The credential check for that page gains a main-frame identity comparison: a same-origin subframe has exactly the main frame's URL, so comparing URLs alone could not refuse it.
+
 ## [v0.17.1] - 2026-10-21
 
 ### 中文

@@ -371,8 +371,12 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
   preload is the switch for the account section, sign-in dialog and balance card.
   It exposes **no channel and no IPC**: a page cannot ask the main process for
   anything through it. The embedded Platform view has its own preload and its own
-  non-persistent partition (`src/main/platform-preload.ts`, `platform-view.ts`),
-  which the app document cannot reach.
+  partition, keyed to the signed-in account (`src/main/platform-preload.ts`,
+  `platform-view.ts`), which the app document cannot reach. That partition is
+  persistent once the kernel reports an account ID — so page preferences survive
+  reopening — and it is sanitized on every open and awaitably on every exit: the
+  cookie and cache clear runs before any document loads and before an update
+  install replaces the process.
 - Navigation confined to `dsh-app://app` plus the shell's own splash `file:`
   document (the predicate is `src/main/nav-policy.ts`, compared by
   protocol + hostname — a custom scheme's URL `origin` is the literal string

@@ -10,8 +10,11 @@ them; this file carries each one's reasoning.
   **exactly one frozen marker** (`window.dshDesktop`, `src/main/account-preload.ts`) — the kernel's
   account UI registers only when that key is present, and nothing else needs a bridge. A second
   preload serves the embedded Platform view (`src/main/platform-preload.ts`), its own `WebContentsView`
-  in its own partition, not exposed to the app document. **Neither may grow a channel without a
-  security review.**
+  in its own partition, not exposed to the app document. That partition is **account-scoped and
+  persistent** once the kernel reports an account ID (`platformPartition`: a throwaway one when it
+  reports none), so it outlives the document — which is why it is sanitized on every open and
+  `closeAndWait`ed before either update install path replaces the process. **Neither preload may grow a
+  channel without a security review.**
 - **Navigation** is confined to `dsh-app://app` plus the shell's own splash `file:` document (`src/main/nav-policy.ts`
   compares protocol + hostname — a custom scheme's URL `origin` is the literal string `"null"` in every realm).
   Everything else goes to `shell.openExternal` (http/https only).

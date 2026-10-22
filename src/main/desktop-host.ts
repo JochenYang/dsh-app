@@ -361,13 +361,20 @@ export interface DshHostOptions {
  *
  * Declared locally rather than imported: the package that defines it
  * (`@deepseek-ai/dsh-deepseek-account`) lives in the KERNEL's dependency tree, and
- * this shell typechecks against its own. Only these three fields are read, and the
+ * this shell typechecks against its own. Only these fields are read, and the
  * shape is asserted on arrival — an unreadable payload is treated as absent rather
  * than trusted.
  */
 export interface PlatformSession {
   readonly origin: string
   readonly token: string
+  /**
+   * Stable account ID from the kernel's last successful profile read, or null
+   * while it has not succeeded. It keys the view's PERSISTENT storage (see
+   * `PlatformView`): the same account must find the page preferences it left
+   * behind, and a different one must not inherit them.
+   */
+  readonly userId: string | null
   readonly embeddedPageDist?: string
   /**
    * Deployment-owned request headers for the Platform origin (never the user's
@@ -2041,13 +2048,15 @@ export class DshHost implements DshAppTarget {
  * signed out, not fail the host handshake.
  *
  * `token` is required: a session without one cannot open an authenticated view.
+ * `userId` is optional by design — the kernel publishes null until a profile read
+ * has succeeded — and any other value becomes null rather than a storage key.
  *
  * @param value - the raw `session` field of the host's message.
  * @returns the session this shell can use, or null.
  */
 export function readPlatformSession(value: unknown): PlatformSession | null {
   if (!isRecord(value)) return null
-  const { origin, token, embeddedPageDist, requestHeaders } = value
+  const { origin, token, userId, embeddedPageDist, requestHeaders } = value
   if (typeof origin !== 'string' || origin === '') return null
   if (typeof token !== 'string' || token === '') return null
   const headers: Record<string, string> = {}
@@ -2061,6 +2070,7 @@ export function readPlatformSession(value: unknown): PlatformSession | null {
   return {
     origin,
     token,
+    userId: typeof userId === 'string' && userId !== '' ? userId : null,
     ...(typeof embeddedPageDist === 'string' && embeddedPageDist !== '' ? { embeddedPageDist } : {}),
     ...(Object.keys(headers).length > 0 ? { requestHeaders: headers } : {}),
   }

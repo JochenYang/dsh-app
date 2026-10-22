@@ -16,7 +16,9 @@ import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
 const { readPlatformSession } = require('../dist/main/desktop-host.js')
-const { isAppFrame, mergePlatformCookies, platformBounds, platformPage } = require('../dist/main/platform-view.js')
+const {
+  isAppFrame, mergePlatformCookies, platformBounds, platformClientHeaders, platformClientMetadata, platformPage, platformPartition,
+} = require('../dist/main/platform-view.js')
 
 // ------------------------------------------------------------ app-frame check
 //
@@ -64,20 +66,34 @@ test('a session is read only from a well-formed payload', () => {
   const full = readPlatformSession({
     origin: 'https://platform.deepseek.com',
     token: 'tok-123',
+    userId: 'uid-9',
     embeddedPageDist: 'beta',
     requestHeaders: { 'x-deployment': 'prod' },
   })
   assert.deepEqual(full, {
     origin: 'https://platform.deepseek.com',
     token: 'tok-123',
+    userId: 'uid-9',
     embeddedPageDist: 'beta',
     requestHeaders: { 'x-deployment': 'prod' },
   })
   // Optional fields are omitted rather than set to empty strings, so a consumer
   // can tell "absent" from "present but blank".
-  assert.deepEqual(readPlatformSession({ origin: 'https://x.test', token: 't' }), { origin: 'https://x.test', token: 't' })
+  assert.deepEqual(
+    readPlatformSession({ origin: 'https://x.test', token: 't' }),
+    { origin: 'https://x.test', token: 't', userId: null },
+  )
   // Header names are normalised: a request header set is case-insensitive.
   assert.deepEqual(readPlatformSession({ origin: 'https://x.test', token: 't', requestHeaders: { 'X-A': '1' } }).requestHeaders, { 'x-a': '1' })
+})
+
+test('the account ID is read, and anything unusable becomes null', () => {
+  // It keys the view's PERSISTENT partition, so a value this shell misreads is a
+  // storage key it must never write under: only a non-empty string survives.
+  assert.equal(readPlatformSession({ origin: 'https://x.test', token: 't', userId: 'uid-1' }).userId, 'uid-1')
+  for (const userId of [null, undefined, '', 42, {}, [], true]) {
+    assert.equal(readPlatformSession({ origin: 'https://x.test', token: 't', userId }).userId, null, JSON.stringify(userId))
+  }
 })
 
 test('a malformed session becomes null rather than throwing', () => {
@@ -153,6 +169,82 @@ test('deployment cookies merge with the session cookie, one per name', () => {
   assert.equal(mergePlatformCookies('a=', 'b=2'), 'a=; b=2')
 })
 
+// -------------------------------------------------------- client identity
+//
+// Platform picks its own behaviour from these headers, so they are pinned field
+// for field against the kernel's `platformClientHeaders`: a drift here changes
+// what the page thinks it is talking to, silently.
+
+test('the client identity headers carry all five fields Platform reads', () => {
+  assert.deepEqual(
+    platformClientHeaders('win32', { version: '0.17.1', locale: 'zh_CN', timezoneOffsetSeconds: 28_800 }),
+    {
+      'x-client-bundle-id': '',
+      'x-client-platform': 'desktop-win',
+      'x-client-version': '0.17.1',
+      'x-client-locale': 'zh_CN',
+      'x-client-timezone-offset': '28800',
+    },
+  )
+})
+
+test('an unidentified platform still reports the web identity it is', () => {
+  // The bundle id stays empty and `x-client-platform` stays `web`; the desktop
+  // claim is a SEPARATE header the provider has to name an OS for.
+  const linux = platformClientHeaders(null, { version: 'v', locale: 'en_US', timezoneOffsetSeconds: 0 })
+  assert.deepEqual(linux, {
+    'x-client-bundle-id': '',
+    'x-client-platform': 'web',
+    'x-client-version': 'v',
+    'x-client-locale': 'en_US',
+    'x-client-timezone-offset': '0',
+  })
+})
+
+test('the UTC offset is seconds east, which is the negated platform offset', () => {
+  // Measured from a real Date rather than a stub: the sign convention is the one
+  // thing a hand-written expectation would get wrong. UTC+8 is 28800 east.
+  const original = Date.prototype.getTimezoneOffset
+  try {
+    Date.prototype.getTimezoneOffset = () => -480
+    const metadata = platformClientMetadata('v', 'zh_CN')
+    assert.equal(metadata.timezoneOffsetSeconds, 28_800)
+    // The rest of the sample is passed through untouched.
+    assert.equal(metadata.version, 'v')
+    assert.equal(metadata.locale, 'zh_CN')
+  } finally {
+    Date.prototype.getTimezoneOffset = original
+  }
+})
+
+// ------------------------------------------------------------ partition choice
+//
+// The view's storage is keyed by ACCOUNT: page preferences must survive reopening
+// and must never be shared between accounts. Both halves are pure and pinned here
+// because the failures are invisible — a wrong key silently resets preferences,
+// or silently shows one account another's settings.
+
+test('a known account gets a persistent, account-scoped partition', () => {
+  const name = platformPartition('https://platform.deepseek.com', 'uid-1')
+  assert.match(name, /^persist:dsh-platform-[a-f0-9]{64}$/u)
+  // Stable: reopening the page is what makes the preferences survive.
+  assert.equal(name, platformPartition('https://platform.deepseek.com', 'uid-1'))
+  // A different account, or the same account on another issuer, is a different
+  // partition — neither inherits the other's storage.
+  assert.notEqual(name, platformPartition('https://platform.deepseek.com', 'uid-2'))
+  assert.notEqual(name, platformPartition('https://platform.example.test', 'uid-1'))
+})
+
+test('an unknown account gets a throwaway partition, never a shared one', () => {
+  // Null means the kernel has no profile ID yet; there is nothing stable to key
+  // on, so two opens must not collide on one shared storage.
+  const first = platformPartition('https://platform.deepseek.com', null)
+  const second = platformPartition('https://platform.deepseek.com', null)
+  assert.match(first, /^dsh-platform-[0-9a-f-]{36}$/u)
+  assert.notEqual(first, second)
+  assert.ok(!first.startsWith('persist:'), 'a null account ID must not persist anything')
+})
+
 // ------------------------------------------------------------ exposed surface
 
 test('the app preload exposes the marker and the platform bridge, nothing else', () => {
@@ -191,6 +283,20 @@ test('the platform preload scopes the credential to the view that owns it', () =
   // hand itself one, and it is never written to a global.
   assert.match(built, /value\.origin === location\.origin/u)
   assert.match(built, /exposeInMainWorld\('dsh'/u)
+})
+
+test('the main process re-checks the FRAME, not just the webContents', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
+  const bootstrap = /  bootstrap\(([\s\S]*?)\n  \}\n/u.exec(source)
+  assert.ok(bootstrap !== null, 'bootstrap is the credential handoff')
+  // A same-origin SUBFRAME has the same URL as the main frame, so a URL check
+  // cannot tell them apart: identity has to be compared against the main frame.
+  assert.match(bootstrap[1], /frame !== view\.webContents\.mainFrame/u)
+  assert.match(bootstrap[1], /frame === null/u)
+  // The IPC handler must pass the frame OBJECT for that comparison to be possible.
+  const handler = /ipcMain\.on\(PLATFORM_IPC\.bootstrap,\s*\(event\)\s*=>\s*\{([\s\S]*?)\n  \}\)/u.exec(source)
+  assert.ok(handler !== null, 'the bootstrap channel is where the call arrives')
+  assert.match(handler[1], /view\.bootstrap\(event\.sender, event\.senderFrame\)/u)
 })
 
 // ------------------------------------------------- the session survives ordering
@@ -234,3 +340,125 @@ test('a publication is not lost when it arrives before the view exists', () => {
     'applying the session only through `platformView?.` drops an early publication — keep it in shell state instead',
   )
 })
+
+// ------------------------------------------------- credential lifetime on exit
+//
+// A persisted partition outlives the document, so the credential has to be
+// removed rather than left for the next process. The cleanup is asynchronous,
+// which is why both install paths must AWAIT it before handing the process over:
+// a fire-and-forget clear can be lost with the process that scheduled it.
+
+test('the view clears its own partition, not just its document', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
+  const close = /  close\(\): void \{([\s\S]*?)\n  \}\n/u.exec(source)
+  assert.ok(close !== null, 'close() is where the document is destroyed')
+  // The four steps a persisted partition needs; any one missing leaves the
+  // credential reachable by a later view.
+  for (const step of [
+    /webRequest\.onBeforeSendHeaders\(null\)/u,
+    /flushStorageData\(\)/u,
+    /cleanStorage\(browserSession/u,
+    /waitForBeforeUnload: false/u,
+  ]) {
+    assert.match(close[1], step, `close() must ${String(step)}`)
+  }
+  // The clear itself: every authenticating store, and the cache/auth cache.
+  const clean = /private cleanStorage\(([\s\S]*?)\n  \}\n\}/u.exec(source)
+  assert.ok(clean !== null, 'cleanStorage is where a partition is sanitized')
+  assert.match(clean[0], /closeAllConnections\(\)/u)
+  assert.match(clean[0], /clearStorageData\(/u)
+  assert.match(clean[0], /clearCache\(\)/u)
+  assert.match(clean[0], /clearAuthCache\(\)/u)
+  // A PERSISTED partition keeps local storage (that is what makes preferences
+  // survive); a throwaway one is cleared whole. Getting this backwards silently
+  // resets every preference, or silently keeps credentials.
+  assert.match(clean[0], /isPersistent\(\)/u)
+  assert.match(clean[0], /\? \{ storages: \[[^\]]*'cookies'[^\]]*\] \}\s*: undefined/u)
+  assert.ok(!/'localstorage'/u.test(clean[0]), 'local storage must survive on a persisted partition')
+  // A failure is REPORTED, never swallowed: the caller decides whether it blocks.
+  assert.match(clean[0], /AggregateError/u)
+})
+
+test('the download refusal is registered once per session, not once per open', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
+  // A persisted partition is the SAME Session on every open, so a listener added
+  // per open accumulates forever (and warns once it passes ten).
+  assert.match(source, /downloadGuards = new WeakSet<Session>\(\)/u)
+  const registration = /if \(!this\.downloadGuards\.has\(browserSession\)\) \{([\s\S]{0,200}?)\n    \}/u.exec(source)
+  assert.ok(registration !== null, 'the guard must be conditional on the session')
+  assert.match(registration[1], /will-download/u)
+  // And close() must NOT remove it: the guard belongs to the session, not the view.
+  const close = /  close\(\): void \{([\s\S]*?)\n  \}\n/u.exec(source)
+  assert.ok(!/will-download/u.test(close[1]))
+})
+
+test('a disposed view refuses to be resurrected', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
+  // After dispose() the credential is gone for good; a stale reference must not
+  // be able to open a signed-in page or adopt a new snapshot.
+  const open = /  async open\(owner: BrowserWindow, page: PlatformPage, bounds: PlatformBounds\): Promise<void> \{\n([\s\S]{0,300}?)\n    this\.close\(\)/u.exec(source)
+  assert.ok(open !== null)
+  assert.match(open[1], /if \(this\.disposed\) throw/u)
+  const setSession = /  setSession\(next: PlatformSession \| null\): void \{\n([\s\S]{0,300}?)const current = this\.account/u.exec(source)
+  assert.ok(setSession !== null)
+  assert.match(setSession[1], /if \(this\.disposed\) return/u)
+})
+
+test('both install paths await the discard before replacing the process', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'updater.ts'), 'utf8')
+  // Two install paths replace the process: electron-updater's quitAndInstall and
+  // the Windows installer spawn. Each call site must AWAIT the discard, and the
+  // discard must come first — a fire-and-forget clear can be lost with the
+  // process that scheduled it.
+  const calls = [...source.matchAll(/await discardPlatformCredentialsForRestart\(\)/gu)]
+  assert.equal(calls.length, 2, `expected both install paths to await the discard, saw ${calls.length}`)
+  for (const [which, handover] of [[0, /autoUpdater\.quitAndInstall\(\)/u], [1, /spawn\(dest,/u]]) {
+    const callAt = calls[which].index
+    const handoverAt = source.search(handover)
+    assert.ok(handoverAt !== -1, 'each discard must precede a process handover')
+    assert.ok(callAt < handoverAt, 'the discard must happen BEFORE the process is replaced')
+  }
+  // The injected hook is what the shell fills in; unset means nothing to discard.
+  assert.match(source, /let discardPlatformCredentials[\s\S]{0,200}?= null/u)
+})
+
+test('the shell wires its discard hook where the updater can find it', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+  const wired = /setPlatformCredentialDiscard\(([\s\S]*?)\n/u.exec(source)
+  assert.ok(wired !== null, 'the shell must hand the updater its discard operation')
+  // The operation waits for `dispose()`, never the fire-and-forget `close()`.
+  assert.match(source, /async function discardPlatformView\(\)[\s\S]{0,700}?await view\.dispose\(\)/u)
+})
+
+// ------------------------------------------------- the exit side, not just installs
+//
+// The partition is PERSISTENT once the kernel reports an account ID, so the
+// credential now outlives the document. Clearing it only before an UPDATE would
+// leave it on disk for every ordinary quit, a relaunch, or a crash — which is the
+// regression this block pins. Every way this process stops must discard first.
+
+test('every way this process stops discards the credential first', () => {
+  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+  // will-quit: awaited inside the handler, because app.exit() below it does not
+  // wait for pending work.
+  const willQuit = /app\.on\('will-quit', \(event\) => \{([\s\S]*?)\n  \}\)/u.exec(source)
+  assert.ok(willQuit !== null, 'will-quit is the last stop for an ordinary quit')
+  assert.match(willQuit[1], /event\.preventDefault\(\)/u)
+  assert.match(willQuit[1], /await discardPlatformView\(\)/u)
+  const discardAt = willQuit[1].indexOf('await discardPlatformView()')
+  const stopAt = willQuit[1].indexOf('server.stop()')
+  assert.ok(discardAt !== -1 && discardAt < stopAt, 'the credential is dropped before the host that issued it stops')
+  // Relaunch paths go through one helper, so a new one cannot forget the discard.
+  const helper = /async function relaunchAfterDiscard\(\): Promise<void> \{([\s\S]*?)\n\}/u.exec(source)
+  assert.ok(helper !== null, 'the relaunch helper is where every restart path converges')
+  assert.match(helper[1], /await discardPlatformView\(\)/u)
+  assert.match(helper[1], /app\.relaunch\(\)/u)
+  // No path may call app.relaunch() directly any more: that is the shape that
+  // shipped a persistent credential past the process boundary.
+  const direct = [...source.matchAll(/^\s*app\.relaunch\(\)/gmu)].filter((match) => {
+    const before = source.slice(Math.max(0, match.index - 200), match.index)
+    return !/async function relaunchAfterDiscard/u.test(before)
+  })
+  assert.equal(direct.length, 0, 'a restart must go through relaunchAfterDiscard, which discards first')
+})
+

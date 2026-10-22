@@ -45,7 +45,7 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { kernelCliUsable, openManagedTerminal, terminalLogLine } from './terminal'
-import { initShellUpdater, setHostTaskInspector, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
+import { initShellUpdater, setHostTaskInspector, setPlatformCredentialDiscard, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
 import { HOST_TASK_INSPECT_TIMEOUT_MS, KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { healLogLine, healProfileDependencies, installIntoProfile, isInstallablePackageName, type ProfileHealOutcome } from './profile-heal'
@@ -180,6 +180,12 @@ let platformSession: PlatformSession | null = null
  * reused for every open. Holds no credential itself — see {@link platformSession}.
  */
 let platformView: PlatformView | undefined
+/**
+ * Removes the view's IPC handlers. Kept because `ipcMain.handle` throws on a
+ * channel that already has one: a view recreated after `discardPlatformView`
+ * must install its own set, so this runs first.
+ */
+let platformIpcDispose: (() => void) | undefined
 
 // --------------------------------------------------------------- helpers
 
@@ -303,8 +309,7 @@ async function offerStartupRecovery(message: string, detail?: string): Promise<v
   }
   const choice = await showStartupFailure(message, lines.join('\n'), extraActions)
   if (choice === 'retry') {
-    app.relaunch()
-    app.quit()
+    await relaunchAfterDiscard()
   } else if (choice === 'install-missing') {
     await installMissingPackages(installable)
   } else if (choice === 'restore-config') {
@@ -387,8 +392,7 @@ async function installMissingPackages(packages: readonly string[]): Promise<void
   )
   if (outcome.status === 'healed') {
     logKernel(installLogLine(outcome, packages))
-    app.relaunch()
-    app.quit()
+    await relaunchAfterDiscard()
     return
   }
   if (outcome.status === 'ok') {
@@ -467,8 +471,7 @@ async function restoreLastWorkingConfig(origin: 'failure-card' | 'tray'): Promis
     // starts, and the shell has no way to recompose the running profile. Same
     // path the safe-mode toggle takes.
     logKernel(`[config-checkpoint] restored ${outcome.generation} (${String(outcome.backups.length)} backup(s) written); relaunching`)
-    app.relaunch()
-    app.quit()
+    await relaunchAfterDiscard()
     return
   }
   const advice = outcome.status === 'none'
@@ -662,8 +665,7 @@ function serverFailureAdvice(kind: ServerFailureKind): string {
 async function restartWithSafeMode(enabled: boolean): Promise<void> {
   await setSafeMode(enabled)
   safeModeActive = enabled
-  app.relaunch()
-  app.quit()
+  await relaunchAfterDiscard()
 }
 
 /**
@@ -867,17 +869,68 @@ function ensurePlatformView(): void {
   // The embedded page follows `prefers-color-scheme`, so it is given the same
   // appearance the shell resolved for its own chrome (see PlatformView.applyTheme).
   const platformTheme = (): 'light' | 'dark' => activeThemeMode()
-  platformView = new PlatformView(platformPreloadPath(), platformLocale, platformTheme)
+  platformView = new PlatformView(
+    platformPreloadPath(),
+    platformLocale,
+    platformTheme,
+    // Platform reports this as the client version, so it is the SHELL's version:
+    // the runtime's kernels change without a shell release.
+    app.getVersion(),
+    // Only the two platforms the account provider names may be reported as a
+    // desktop client; anywhere else the request keeps the `web` identity (see
+    // platformClientHeaders).
+    process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : null,
+  )
   // Hand it whatever the kernel has already published: this call and the host's
   // publication are independent events, and the view must not miss a session that
   // arrived while the shell was still starting (see `platformSession`).
   platformView.setSession(platformSession)
-  installPlatformIpc({
+  platformIpcDispose = installPlatformIpc({
     owner: () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents),
     view: () => platformView,
     locale: platformLocale,
     log: logKernel,
   })
+}
+
+/**
+ * Restart this process after clearing the embedded Platform credential.
+ *
+ * `app.relaunch()` does not wait for anything, and the Platform partition is
+ * persistent, so the discard has to finish BEFORE the relaunch is requested —
+ * otherwise the next process finds the previous account's cookies on disk.
+ * Used by every path that restarts: safe mode, config restore, profile repair and
+ * the startup-failure retry.
+ */
+async function relaunchAfterDiscard(): Promise<void> {
+  await discardPlatformView()
+  app.relaunch()
+  app.quit()
+}
+
+/**
+ * Discard the embedded Platform document and WAIT for its storage cleanup.
+ *
+ * Called on every way this process stops — a quit, a relaunch, and both install
+ * paths — because the view's partition is PERSISTENT once the kernel reports an
+ * account ID: without this its cookies outlive the process. A cleanup failure is
+ * REPORTED and never blocks the exit: refusing to quit over a cache eviction
+ * would be the worse failure, and the partition is sanitized again on the way in
+ * (see `PlatformView.open`).
+ */
+async function discardPlatformView(): Promise<void> {
+  const view = platformView
+  if (view === undefined) return
+  platformView = undefined
+  // The IPC handlers go with the instance: a later `ensurePlatformView` installs
+  // its own, and `ipcMain.handle` throws on a channel that already has one.
+  platformIpcDispose?.()
+  platformIpcDispose = undefined
+  try {
+    await view.dispose()
+  } catch (error) {
+    logKernel(`[platform] storage cleanup failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 function attachMainWindowHandlers(win: BrowserWindow): void {
@@ -2289,6 +2342,9 @@ async function boot(): Promise<void> {
   // turn in half. The question is answered by the live child, so the inspector
   // reads `server` at call time rather than capturing it.
   setHostTaskInspector(() => server.inspectQuit(HOST_TASK_INSPECT_TIMEOUT_MS))
+  // The install paths replace this process; the embedded Platform page holds a
+  // credential issued by the host that is about to stop.
+  setPlatformCredentialDiscard(discardPlatformView)
   // Surface the previous silent-install result (if any) before the first
   // update-check runs, so an install failure is never silent.
   void consumeUpdaterInstallResult(mainWindow)
@@ -2413,12 +2469,19 @@ if (!gotLock) {
   })
 
   app.on('will-quit', (event) => {
-    if (server?.isRunning) {
-      // The host must be gone before the process exits — a live child would
-      // keep the piped request/response descriptors (and any process it spawned)
-      // alive after the window is gone.
+    // The embedded Platform partition is persistent, so its credential outlives
+    // this process unless it is cleared here — and `app.exit` below does not wait
+    // for pending work, so the cleanup has to be awaited inside this handler.
+    if (platformView !== undefined || server?.isRunning) {
       event.preventDefault()
-      void server!.stop().catch(() => undefined).finally(() => {
+      void (async () => {
+        // Before the host stops: the credential was issued BY that host.
+        await discardPlatformView()
+        // The host must be gone before the process exits — a live child would
+        // keep the piped request/response descriptors (and any process it spawned)
+        // alive after the window is gone.
+        if (server?.isRunning) await server.stop().catch(() => undefined)
+      })().finally(() => {
         destroyTray()
         app.exit(0)
       })

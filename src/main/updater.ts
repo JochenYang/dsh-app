@@ -47,6 +47,36 @@ export function setHostTaskInspector(inspector: (() => Promise<{ active: boolean
 }
 
 /**
+ * Discards credentials held by embedded documents, injected by the shell at boot
+ * (see `setPlatformCredentialDiscard`).
+ *
+ * Both install paths replace this process, and the embedded Platform page holds a
+ * credential issued by the host that is about to stop. Injected for the same
+ * reason as the inspector above: the updater decides WHEN to discard, the shell
+ * decides HOW. Unset means there is nothing to discard, so the install proceeds.
+ */
+let discardPlatformCredentials: (() => Promise<void>) | null = null
+
+/**
+ * Hand the updater a way to drop embedded-document credentials before a restart.
+ * @param discard - the shell's discard operation, or null when there is none.
+ */
+export function setPlatformCredentialDiscard(discard: (() => Promise<void>) | null): void {
+  discardPlatformCredentials = discard
+}
+
+/**
+ * Discard embedded-document credentials ahead of a restart.
+ *
+ * Wired by the shell to an operation that ALREADY reports its own failures, so a
+ * cleanup problem surfaces in the log without turning the install into an error:
+ * refusing to update over a cache eviction would be the worse failure.
+ */
+async function discardPlatformCredentialsForRestart(): Promise<void> {
+  await discardPlatformCredentials?.()
+}
+
+/**
  * Whether installing right now would interrupt work, and the diagnostic when the
  * host could not say. A missing inspector or a failed one both read as active —
  * this gates a quit that kills a running turn.
@@ -292,6 +322,9 @@ export function initShellUpdater(): void {
       // install, so there is no `.end` to record — the next run's
       // `app.boot.begin` (with its shell version) is what closes the story.
       logEvent('shell.update.install.begin', { detail: { source: 'electron-updater', version: downloadedVersion } })
+      // The embedded Platform document holds credentials issued by the host that
+      // is about to stop; they are discarded before the install, not after.
+      await discardPlatformCredentialsForRestart()
       autoUpdater.quitAndInstall()
     }
   })
@@ -1106,6 +1139,9 @@ async function downloadAndInstallPackage(
   // plus `install.spawned` (or `install.failed`) is the whole truth this run can
   // report, and the next boot's own events say whether the version moved.
   logEvent('shell.update.install.begin', { detail: { version, source: 'windows-installer', installer: path.basename(dest) } })
+  // The embedded Platform document holds credentials issued by the host that is
+  // about to stop; discard them before the installer closes this process.
+  await discardPlatformCredentialsForRestart()
   const child = spawn(dest, [], { detached: true, stdio: 'ignore' })
   // Spawn failure is otherwise invisible (the app is about to quit).
   child.on('error', (err) => {
