@@ -2,9 +2,10 @@
 /**
  * Focused probe: is a diff ruler mark PAINTED at its true line fraction?
  *
- * `probe-git-panel.cjs` asserts this as part of a full UI walk, but that walk
- * depends on session switching and Git-panel timing, so a failure there can mean
- * anything. This probe isolates the one fact: it renders the plugin's REAL
+ * This used to be asserted as part of a full Git-panel UI walk
+ * (`probe-git-panel.cjs`, retired 2026-10-22). That walk depended on session
+ * switching and Git-panel timing, so a red run proved nothing about the ruler;
+ * this probe isolates the one fact instead. It renders the plugin's REAL
  * stylesheet in Chromium and measures marks whose spans the component itself
  * computes, so a CSS floor (a `min-height`, or a `Math.max(span, …)` in the
  * inline style) is the only thing that can make the measurement disagree.

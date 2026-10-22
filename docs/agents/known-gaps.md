@@ -18,14 +18,17 @@ a short summary and points here.
   installer — a first run with no network converts no documents until the 诊断 row downloads it
   (`docs/agents/build-and-release.md` §2).
 - **`plugin-sidebar`** has no automated test suite for its client components — the plugin is verified
-  through tsc + esbuild + headless server API smokes, plus `scripts/probe-git-panel.cjs` (real kernel,
-  real window) for the tree, the single-scroller rule and the diff ruler. One kernel-line fact that
-  probe had to work around: the conversation view-tab STRIP renders only when `conversation.view`
-  holds more than one registration (`showTabs = tabs.length > 1` in `ui-conversation`'s
-  ConversationSessionHeader), and on this line the suite's `git` is the only registrant — upstream's
-  对话/轨迹 rows are not registered, so there is no tab to click. The Git view is reached through the
-  per-session preference the kernel itself restores (`localStorage['dsh.conversation.<sessionId>']`,
-  `view: 'git'`), which is why the probe writes that instead of clicking.
+  through tsc + esbuild + headless server API smokes. Its Git-panel UI walk
+  (`scripts/probe-git-panel.cjs`) was RETIRED on 2026-10-22: it reached the Git view through the
+  per-session preference the kernel restores (`localStorage['dsh.conversation.<sessionId>']`,
+  `view: 'git'`) because the conversation view-tab STRIP renders only when `conversation.view` holds
+  more than one registration (`showTabs = tabs.length > 1` in `ui-conversation`'s
+  ConversationSessionHeader) and the suite's `git` is the only registrant on this line — and its
+  session-switch step then failed on the switch rather than on the panel, so a red run proved
+  nothing. What remains: `buildPathTree` (9 cases) pins the tree nesting and compaction, `diffRulerMarks`
+  (6 cases) pins the ruler logic, `scripts/probe-diff-ruler.cjs` pins the ruler's PAINTED proportions,
+  and **the single-vertical-scroller rule has no automated check at all** — it is verified by hand.
+  A future UI walk has to fix the session-switch precondition first.
 - **Pre-release gaps**: macOS signing/notarization and optional Windows signing secrets must be
   supplied as CI secrets; `resources/icon.png` is a placeholder.
 - **First-run UX**: kernel download progress is wired into the in-window update card, and the splash
