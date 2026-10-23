@@ -1,0 +1,301 @@
+/**
+ * Incremental pass contract: what gets re-parsed, what gets skipped, what gets
+ * forgotten, and when the graph is considered stale.
+ *
+ * The failure these guard against is the one that makes a graph worse than no
+ * graph: it keeps answering, with yesterday's answer, and nothing says so. A
+ * skip that is too eager (wrong mtime comparison) and a removal that never runs
+ * (renamed file) both look identical from the outside — a plausible symbol list
+ * that no longer matches the code.
+ *
+ * @module plugin-codegraph/tests/indexer
+ */
+
+import { strict as assert } from 'node:assert'
+import { after, describe, it } from 'node:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { indexProject, isStale, scanProject } from '../src/indexer.ts'
+import { openGraph, readProjectMeta, graphStats, type ProjectMeta } from '../src/store.ts'
+import type { ParsedFile } from '../src/parse.ts'
+
+const scratch: string[] = []
+const graphs: ReturnType<typeof openGraph>[] = []
+
+after(() => {
+  // Close every graph BEFORE removing the directories: SQLite keeps a handle on
+  // Windows and `rmSync` fails with EPERM on an open file.
+  for (const graph of graphs.splice(0)) {
+    try { graph.close() } catch { /* already closed by the test */ }
+  }
+  for (const dir of scratch.splice(0)) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
+})
+
+/** A temp project directory plus an open graph for it. */
+function project(): { root: string, graph: ReturnType<typeof openGraph>, dbFile: string } {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-cg-idx-'))
+  scratch.push(root)
+  const dbFile = join(root, '.graph', 'graph.db')
+  const graph = openGraph(dbFile)
+  graphs.push(graph)
+  return { root, graph, dbFile }
+}
+
+/**
+ * A parse stub that reads a tiny made-up syntax: one symbol per `SYM <name>`
+ * line and one call per `CALL <name>` line. The real tree-sitter path is covered
+ * by `parse.test.ts`; this suite is about WHICH files get parsed, so a stub keeps
+ * it from depending on a grammar.
+ */
+function stubParse(source: string, path: string): ParsedFile {
+  const symbols: ParsedFile['symbols'] = []
+  const calls: ParsedFile['calls'] = []
+  source.split('\n').forEach((line, index) => {
+    const sym = /^SYM (\w+)$/u.exec(line)
+    if (sym !== null) {
+      symbols.push({ id: `${path}#function:${sym[1]!}`, path, name: sym[1]!, kind: 'function', line: index + 1, parent: undefined })
+    }
+    const call = /^CALL (\w+)$/u.exec(line)
+    if (call !== null) calls.push({ name: call[1]!, line: index + 1 })
+  })
+  return { symbols, calls, imports: [], hasError: false, unsupported: false }
+}
+
+/** Write a file inside the project, creating parents. */
+function write(root: string, path: string, body: string): void {
+  const absolute = join(root, path)
+  mkdirSync(join(absolute, '..'), { recursive: true })
+  writeFileSync(absolute, body)
+}
+
+describe('scanProject', () => {
+  it('finds parseable files and skips dependency trees and dot directories', () => {
+    const { root } = project()
+    write(root, 'a.ts', 'SYM a')
+    write(root, 'src/b.py', 'SYM b')
+    write(root, 'node_modules/x/c.ts', 'SYM c')
+    write(root, '.git/d.ts', 'SYM d')
+    write(root, 'README.md', '# not a language')
+
+    const { files } = scanProject(root)
+    assert.deepEqual(files.map(file => file.path).sort(), ['a.ts', 'src/b.py'])
+  })
+
+  it('reports truncation instead of silently covering part of a tree', () => {
+    const { root } = project()
+    for (let index = 0; index < 5; index += 1) write(root, `f${String(index)}.ts`, 'SYM x')
+    const { files, truncated } = scanProject(root, 2)
+    assert.equal(files.length, 2)
+    assert.equal(truncated, true, 'a bounded walk must say it was bounded')
+  })
+})
+
+describe('indexProject', () => {
+  it('parses every file on the first pass and records the metadata', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha\nCALL beta')
+    write(root, 'b.ts', 'SYM beta')
+
+    const outcome = await indexProject(graph, root, stubParse)
+    assert.equal(outcome.parsed, 2)
+    assert.equal(outcome.skipped, 0)
+    assert.equal(graphStats(graph.db).files, 2)
+    assert.equal(graphStats(graph.db).symbols, 2)
+    const meta = readProjectMeta(graph.db)
+    assert.equal(meta?.cwd, root)
+    assert.equal(meta?.fileCount, 2)
+    graph.close()
+  })
+
+  it('resolves a call into a reference edge when the name is unique', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha\nCALL beta')
+    write(root, 'b.ts', 'SYM beta')
+    await indexProject(graph, root, stubParse)
+
+    const row = graph.db.prepare("SELECT src, dst FROM edges WHERE kind = 'references'").get() as { src: string, dst: string } | undefined
+    assert.equal(row?.dst, 'b.ts#function:beta')
+    assert.equal(row?.src, 'file:a.ts')
+    graph.close()
+  })
+
+  it('resolves a call into a file whose parse was SKIPPED this pass', async () => {
+    // The core claim of the two-phase design: `resolveName` reads the GRAPH, not
+    // a map built by this pass, so a reference to an unchanged file still
+    // resolves. Without this, every edit to a caller would drop its edges to
+    // every callee it did not re-parse.
+    const { root, graph } = project()
+    write(root, 'b.ts', 'SYM beta')
+    await indexProject(graph, root, stubParse)
+
+    await new Promise(resolve => setTimeout(resolve, 10))
+    write(root, 'a.ts', 'SYM alpha\nCALL beta')
+    const second = await indexProject(graph, root, stubParse)
+    assert.equal(second.parsed, 1, 'only a.ts changed')
+    assert.equal(second.skipped, 1, 'b.ts was skipped')
+
+    const row = graph.db.prepare("SELECT dst FROM edges WHERE kind = 'references'").get() as { dst: string } | undefined
+    assert.equal(row?.dst, 'b.ts#function:beta', 'the skipped file is still a resolvable target')
+    graph.close()
+  })
+
+  it('resolves mutual calls between two files changed in the same pass', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha\nCALL beta')
+    write(root, 'b.ts', 'SYM beta\nCALL alpha')
+    await indexProject(graph, root, stubParse)
+    const targets = (graph.db.prepare("SELECT dst FROM edges WHERE kind = 'references' ORDER BY dst").all() as unknown as { dst: string }[]).map(r => r.dst)
+    assert.deepEqual(targets, ['a.ts#function:alpha', 'b.ts#function:beta'])
+    graph.close()
+  })
+
+  it('updates the recorded stamp when the bytes are unchanged', async () => {
+    // A checkout or a `touch` changes mtime without changing content. Without
+    // recording the new stamp, this file is re-read and re-hashed on every pass
+    // forever — the exact cost the stat comparison exists to avoid.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    await indexProject(graph, root, stubParse)
+    const first = graph.db.prepare('SELECT mtime FROM files WHERE path = ?').get('a.ts') as { mtime: number }
+
+    await new Promise(resolve => setTimeout(resolve, 10))
+    // Same bytes, new mtime.
+    write(root, 'a.ts', 'SYM alpha')
+    const second = await indexProject(graph, root, stubParse)
+    assert.equal(second.skipped, 1)
+    assert.equal(second.parsed, 0)
+    const after = graph.db.prepare('SELECT mtime FROM files WHERE path = ?').get('a.ts') as { mtime: number }
+    assert.ok(after.mtime > first.mtime, 'the new stamp is recorded, so the next pass skips on the cheap comparison')
+    graph.close()
+  })
+
+  it('skips the removal pass when the scan was truncated', async () => {
+    // A truncated walk sees fewer files than the disk has. Treating that as
+    // "these are gone" would delete most of a project and still report current.
+    const { root, graph } = project()
+    for (let index = 0; index < 5; index += 1) write(root, `f${String(index)}.ts`, 'SYM x')
+    await indexProject(graph, root, stubParse)
+    assert.equal(graphStats(graph.db).files, 5)
+
+    const second = await indexProject(graph, root, stubParse, Date.now, 2)
+    assert.equal(second.truncated, true)
+    assert.equal(second.removalSkipped, true, 'a bounded walk must not drive deletion')
+    assert.equal(second.removed, 0)
+    assert.equal(graphStats(graph.db).files, 5, 'nothing was deleted')
+    graph.close()
+  })
+
+  it('does not delete anything when the root cannot be read', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    await indexProject(graph, root, stubParse)
+
+    // A root that does not exist stands in for a disconnected drive or a denied
+    // permission: the scan learned nothing, so it must not claim the file is gone.
+    const missing = join(root, 'no-such-dir')
+    const outcome = await indexProject(graph, missing, stubParse)
+    assert.equal(outcome.removalSkipped, true)
+    assert.equal(graphStats(graph.db).files, 1, 'a graph that keeps stale rows is recoverable; one that deleted them is not')
+    graph.close()
+  })
+
+  it('skips an unchanged file on the second pass', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    await indexProject(graph, root, stubParse)
+
+    const second = await indexProject(graph, root, stubParse)
+    assert.equal(second.parsed, 0)
+    assert.equal(second.skipped, 1, 'an unchanged file must not be re-parsed')
+    graph.close()
+  })
+
+  it('re-parses only the file that changed', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'b.ts', 'SYM beta')
+    await indexProject(graph, root, stubParse)
+
+    // A later mtime is what a real edit produces.
+    await new Promise(resolve => setTimeout(resolve, 10))
+    write(root, 'a.ts', 'SYM alpha2')
+    const second = await indexProject(graph, root, stubParse)
+    assert.equal(second.parsed, 1)
+    assert.equal(second.skipped, 1)
+    const names = (graph.db.prepare('SELECT name FROM symbols ORDER BY name').all() as unknown as { name: string }[]).map(r => r.name)
+    assert.deepEqual(names, ['alpha2', 'beta'])
+    graph.close()
+  })
+
+  it('forgets a file that is no longer on disk', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'b.ts', 'SYM beta')
+    await indexProject(graph, root, stubParse)
+    assert.equal(graphStats(graph.db).files, 2)
+
+    unlinkSync(join(root, 'b.ts'))
+    const second = await indexProject(graph, root, stubParse)
+    assert.equal(second.removed, 1)
+    assert.equal(graphStats(graph.db).files, 1)
+    // The reference from b.ts is gone with it.
+    assert.equal(graphStats(graph.db).symbols, 1)
+    graph.close()
+  })
+
+  it('counts a file whose language has no extraction shape as unsupported, but still records its stat', async () => {
+    const { root, graph } = project()
+    write(root, 'a.rb', 'SYM rubything')
+    const outcome = await indexProject(graph, root, (_source, path) => ({
+      symbols: [], calls: [], imports: [], hasError: false, unsupported: true,
+    }))
+    assert.equal(outcome.unsupported, 1)
+    assert.equal(outcome.parsed, 0)
+    // The row IS written: it is the stat cache, and without it this file would be
+    // read and re-parsed on every pass forever. It declares no symbols, which is
+    // what "unsupported" means.
+    assert.equal(graphStats(graph.db).files, 1)
+    assert.equal(graphStats(graph.db).symbols, 0)
+    graph.close()
+  })
+
+  it('counts a parse that produced an ERROR node, without dropping the file', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM partial')
+    const outcome = await indexProject(graph, root, (source, path) => ({
+      ...stubParse(source, path),
+      hasError: true,
+    }))
+    assert.equal(outcome.parseErrors, 1)
+    assert.equal(outcome.parsed, 1, 'a partly-readable file still contributes what it could read')
+    graph.close()
+  })
+})
+
+describe('isStale', () => {
+  const meta = (head: string): ProjectMeta => ({
+    cwd: 'D:/x', name: 'x', head, indexedAt: 1, fileCount: 1, symbolCount: 1, edgeCount: 1,
+  })
+
+  it('treats a graph with no metadata as stale', () => {
+    assert.equal(isStale(undefined, 'abc'), true)
+  })
+
+  it('compares HEAD, and treats an unprovable comparison as NOT stale', () => {
+    assert.equal(isStale(meta('abc'), 'abc'), false)
+    assert.equal(isStale(meta('abc'), 'def'), true)
+    // No repository, or no git on PATH: both sides answer ''. Reporting stale
+    // here would re-index on every query and never converge, because a pass
+    // writes '' again.
+    assert.equal(isStale(meta(''), ''), false)
+    // A project that BECAME a repository after indexing: the stored '' cannot
+    // describe the new HEAD.
+    assert.equal(isStale(meta(''), 'abc'), true)
+    // A stored HEAD with no readable one now: freshness cannot be proven, and
+    // the graph is older than what we know — treat it as stale.
+    assert.equal(isStale(meta('abc'), ''), true)
+  })
+})

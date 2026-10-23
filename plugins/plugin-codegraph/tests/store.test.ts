@@ -103,6 +103,10 @@ describe('openGraph', () => {
       fileCount: 2,
       symbolCount: 3,
       edgeCount: 4,
+      truncated: false,
+      removalSkipped: false,
+      unsupported: 0,
+      parseErrors: 0,
     })
     assert.deepEqual(readProjectMeta(graph.db), {
       cwd: 'D:/codes/x',
@@ -112,6 +116,10 @@ describe('openGraph', () => {
       fileCount: 2,
       symbolCount: 3,
       edgeCount: 4,
+      truncated: false,
+      removalSkipped: false,
+      unsupported: 0,
+      parseErrors: 0,
     })
     graph.close()
   })

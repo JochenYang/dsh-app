@@ -109,11 +109,26 @@ export interface ProjectMeta {
   readonly head: string
   /** Epoch ms of the last successful index. */
   readonly indexedAt: number
-  /** Files parsed in the last full pass. */
+  /** Files in the graph after the last pass. */
   readonly fileCount: number
   /** Symbols and edges in the graph after the last pass. */
   readonly symbolCount: number
   readonly edgeCount: number
+  /**
+   * True when the last pass hit the file budget.
+   *
+   * Persisted rather than kept in memory: "this graph covers only the first N
+   * files" is exactly the fact a tool must be able to report after a restart, and
+   * a graph that silently covers part of a project is the failure this plugin
+   * exists to avoid.
+   */
+  readonly truncated: boolean
+  /** True when the last pass skipped its removal step because the scan was partial. */
+  readonly removalSkipped: boolean
+  /** Files that exist but were not indexed because their language is not installed. */
+  readonly unsupported: number
+  /** Files whose last parse produced an ERROR node. */
+  readonly parseErrors: number
 }
 
 const SCHEMA = `
@@ -284,19 +299,39 @@ export function readProjectMeta(db: DatabaseSync): ProjectMeta | undefined {
   if (parsed === null || typeof parsed !== 'object') return undefined
   const meta = parsed as Record<string, unknown>
   const strings = ['cwd', 'name', 'head'] as const
-  const numbers = ['indexedAt', 'fileCount', 'symbolCount', 'edgeCount'] as const
+  const numbers = ['indexedAt', 'fileCount', 'symbolCount', 'edgeCount', 'unsupported', 'parseErrors'] as const
+  const booleans = ['truncated', 'removalSkipped'] as const
   for (const key of strings) if (typeof meta[key] !== 'string') return undefined
   for (const key of numbers) if (typeof meta[key] !== 'number' || !Number.isFinite(meta[key])) return undefined
+  for (const key of booleans) if (typeof meta[key] !== 'boolean') return undefined
   return parsed as ProjectMeta
+}
+
+/** A value a query may bind. All queries here bind parameters; none interpolate. */
+export type SqlValue = string | number | bigint | null | Uint8Array
+
+/**
+ * Run a SELECT returning many rows, typed by its column list.
+ *
+ * `node:sqlite` answers `Record<string, SQLOutputValue>[]`, which shares no
+ * structural overlap with any row interface, so every caller would otherwise
+ * repeat the double cast. This module is where that cast is allowed to live
+ * exactly twice: a statement's SELECT list is the contract, a schema change is
+ * already guarded by SCHEMA_VERSION, and one reviewed pair of casts beats a
+ * dozen per-call-site ones that can each drift.
+ */
+export function allRows<Row>(db: DatabaseSync, sql: string, ...params: readonly SqlValue[]): Row[] {
+  return db.prepare(sql).all(...params) as unknown as Row[]
+}
+
+/** Run a SELECT returning at most one row. See {@link allRows} for the cast. */
+export function oneRow<Row>(db: DatabaseSync, sql: string, ...params: readonly SqlValue[]): Row | undefined {
+  return db.prepare(sql).get(...params) as unknown as Row | undefined
 }
 
 /** Every indexed file, keyed by path, for the incremental comparison. */
 export function readFiles(db: DatabaseSync): Map<string, FileRecord> {
-  // `node:sqlite` types a row as `Record<string, SQLOutputValue>`; the cast goes
-  // through `unknown` because the two records share no structural overlap. The
-  // column list here IS the contract, so a row that stops matching is a schema
-  // change this module already guards with SCHEMA_VERSION.
-  const rows = db.prepare('SELECT path, mtime, size, hash, lang FROM files').all() as unknown as FileRecord[]
+  const rows = allRows<FileRecord>(db, 'SELECT path, mtime, size, hash, lang FROM files')
   return new Map(rows.map(row => [row.path, row]))
 }
 
