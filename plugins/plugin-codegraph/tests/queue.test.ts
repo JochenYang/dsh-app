@@ -16,7 +16,7 @@ import type { IndexOutcome } from '../src/indexer.ts'
 
 /** An outcome with every counter zeroed. */
 const EMPTY: IndexOutcome = {
-  parsed: 0, skipped: 0, removed: 0, truncated: false, unsupported: 0, parseErrors: 0, durationMs: 1,
+  parsed: 0, skipped: 0, removed: 0, truncated: false, missingLanguage: 0, noRules: 0, parseErrors: 0, durationMs: 1,
 }
 
 /** A runner that records its calls and resolves after a microtask. */

@@ -77,8 +77,10 @@ export interface IndexOutcome {
   readonly removed: number
   /** True when {@link MAX_FILES} stopped the walk before the tree was exhausted. */
   readonly truncated: boolean
-  /** Files skipped because their language has no grammar or no extraction shape. */
-  readonly unsupported: number
+  /** Files skipped because their grammar is NOT INSTALLED (a download fixes it). */
+  readonly missingLanguage: number
+  /** Files skipped because this plugin has no extraction rules for an installed grammar. */
+  readonly noRules: number
   /** Files whose parse produced an ERROR node; their symbols are partial. */
   readonly parseErrors: number
   /** Files present but not indexed because they exceed the size limit. */
@@ -262,17 +264,29 @@ export function resolveImport(
 }
 
 /**
- * The ids declaring one name, project-wide.
+ * The name→ids table for the whole project, read once.
  *
- * Read from the graph rather than from a map built in this pass, because the
- * callee may be declared in a file this pass SKIPPED (unchanged since the last
- * run) — a pass-local map would resolve only within the files it happened to
- * re-parse, and every reference to an unchanged file would vanish.
+ * Project-wide rather than pass-local, and that part is load-bearing: the callee
+ * may be declared in a file this pass SKIPPED (unchanged since the last run), so a
+ * map built only from the files just parsed would make every reference into an
+ * unchanged file vanish.
  *
- * The index on `symbols.name` is what makes this one lookup per call site.
+ * Read in ONE query for the same reason: the first version ran a `SELECT` per call
+ * edge inside the phase-2 transaction, and on a 1613-file project that resolved
+ * tens of thousands of times and held the kernel's event loop for 251 seconds.
+ *
+ * @param graph - the open graph.
+ * @returns name → every id carrying it (an ambiguous name stays ambiguous, which
+ *   is what `callEdges` checks before drawing an edge).
  */
-function resolveName(graph: Graph, name: string): readonly string[] {
-  return allRows<{ id: string }>(graph.db, 'SELECT id FROM symbols WHERE name = ?', name).map(row => row.id)
+function namesIndex(graph: Graph): (name: string) => readonly string[] {
+  const byName = new Map<string, string[]>()
+  for (const row of allRows<{ id: string, name: string }>(graph.db, 'SELECT id, name FROM symbols')) {
+    const list = byName.get(row.name)
+    if (list === undefined) byName.set(row.name, [row.id])
+    else list.push(row.id)
+  }
+  return (name) => byName.get(name) ?? []
 }
 
 /**
@@ -302,8 +316,22 @@ export async function indexProject(
 
   let parsed = 0
   let skipped = 0
-  let unsupported = 0
+  let missingLanguage = 0
+  let noRules = 0
   let parseErrors = 0
+  /**
+   * Whether phase 3 has to re-derive document edges this pass.
+   *
+   * Set by anything that can change the answer: a document whose bytes changed, or
+   * a source file that contributed or retired symbols (a mention resolves against
+   * the symbol table, so a new declaration makes an old paragraph point somewhere
+   * new). When neither happened the previous pass's edges are still correct, and
+   * re-deriving them costs a full re-read of every document — measured at 64
+   * seconds on a real project before the fan-out was capped, and still the single
+   * most expensive step afterwards.
+   */
+  let documentsDirty = false
+  let symbolsChanged = false
 
   // Two phases, because a call edge needs the CALLEE to be in the graph already
   // and the walk order is arbitrary: `a.ts` calling `beta` must resolve whether
@@ -312,8 +340,25 @@ export async function indexProject(
   // symbol table.
   const pending: { path: string, fileId: string, parsed: ParsedFile }[] = []
 
-  /** Yield to the event loop, so a long pass does not freeze the kernel. */
-  const breathe = async (): Promise<void> => { await new Promise(resolve => { setImmediate(resolve) }) }
+  /**
+   * Yield to the event loop, so a long pass does not freeze the kernel.
+   *
+   * BY TIME, not by a file count. The first version yielded every 64 files, which
+   * reads as "bounded" and is not: 64 files that each need a full tree-sitter parse
+   * and a transaction is seconds of a blocked event loop, and the kernel serves the
+   * whole UI from it — measured on a 1930-file project, the window went dead with an
+   * empty settings pane and a graph view stuck on "loading".
+   *
+   * A time budget is what actually bounds the stall: 8ms of work then one turn of
+   * the loop, whatever the files weigh.
+   */
+  const BREATHE_MS = 8
+  let lastBreathe = Date.now()
+  const breatheIfDue = async (): Promise<void> => {
+    if (Date.now() - lastBreathe < BREATHE_MS) return
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    lastBreathe = Date.now()
+  }
 
   for (const candidate of scan.files) {
     seen.add(candidate.path)
@@ -344,6 +389,7 @@ export async function indexProject(
         continue
       }
       replaceFile(graph.db, { path: candidate.path, mtime: candidate.mtime, size: candidate.size, hash: docHash, lang: 'document' }, [], [])
+      documentsDirty = true
       continue
     }
     const language = languageForPath(candidate.path)
@@ -370,11 +416,12 @@ export async function indexProject(
       continue
     }
     const result = await parse(source, candidate.path, language.id)
-    if (result.unsupported) {
+    if (result.unsupported !== false) {
       // The file row is still written: it is the stat cache, and without it this
       // file is re-read and re-parsed on every pass forever. `lang` records what
       // it would need, which is what the settings page counts.
-      unsupported += 1
+      if (result.unsupported === 'missing') missingLanguage += 1
+      else noRules += 1
       graph.db.prepare('INSERT INTO files (path, mtime, size, hash, lang) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, size = excluded.size, hash = excluded.hash, lang = excluded.lang')
         .run(candidate.path, candidate.mtime, candidate.size, hash, language.id)
       continue
@@ -396,10 +443,12 @@ export async function indexProject(
       line: symbol.line,
     })))
     pending.push({ path: candidate.path, fileId, parsed: result })
+    symbolsChanged = true
     parsed += 1
-    // Every 64 files: a 20000-file pass must not hold the kernel's event loop
-    // for its whole duration, or no tool call can observe the `indexing` state.
-    if (parsed % 64 === 0) await breathe()
+    // After EVERY file, decided by elapsed time rather than a file count: the call
+    // is cheap when it is not due, and it is the only thing standing between a
+    // 2000-file pass and a kernel that cannot answer the UI.
+    await breatheIfDue()
   }
 
   // Phase 2: the calls and imports, now that every changed file's symbols are
@@ -413,16 +462,42 @@ export async function indexProject(
     // `imports` targets are project-relative paths; the graph's file nodes are
     // keyed the same way, so membership in the known set is the resolution test.
     const knownPaths = new Set<string>([...known.keys(), ...seen])
+    // ONE query for the whole name table, not one per call edge.
+    //
+    // `resolveName` used to run a SELECT per edge, inside this transaction, and
+    // that is what made a real pass unusable: a 1613-file project resolves tens of
+    // thousands of edges, and measured end to end the pass held the kernel's event
+    // loop for 251 SECONDS — the window went dead, the settings pane emptied, and
+    // "new session" did nothing until it finished. The table is a few thousand rows,
+    // so reading it once costs milliseconds and turns N queries into 1.
+    const resolveOnce = namesIndex(graph)
+    /**
+     * Files per transaction, and the yield between them.
+     *
+     * The phase used to be one transaction with no yield, so a 1600-file project
+     * held the kernel's event loop for its whole duration (measured: seconds of a
+     * dead window). A file's edges are independent of the next file's, so batching
+     * them costs nothing and gives the loop a turn between batches.
+     */
+    const FILES_PER_COMMIT = 50
+    let inBatch = 0
     graph.db.exec('BEGIN')
     try {
       for (const entry of pending) {
-        for (const edge of callEdges(entry.parsed, entry.fileId, name => resolveName(graph, name))) {
+        for (const edge of callEdges(entry.parsed, entry.fileId, resolveOnce)) {
           insert.run(edge.from, edge.to, edge.kind, edge.line)
         }
         for (const specifier of entry.parsed.imports) {
           const target = resolveImport(entry.path, specifier.specifier, path => knownPaths.has(path))
           if (target === undefined) continue
           insert.run(entry.fileId, fileNodeId(target), 'imports', specifier.line)
+        }
+        inBatch += 1
+        if (inBatch >= FILES_PER_COMMIT) {
+          graph.db.exec('COMMIT')
+          inBatch = 0
+          await new Promise<void>(resolve => { setImmediate(resolve) })
+          graph.db.exec('BEGIN')
         }
       }
       graph.db.exec('COMMIT')
@@ -452,7 +527,11 @@ export async function indexProject(
   //     hundred file reads; tracking which name appears in which document costs a
   //     second index and a new way to be wrong.
   const documentPaths = allRows<{ path: string }>(graph.db, 'SELECT path FROM files WHERE lang = ?', 'document')
-  if (documentPaths.length > 0) {
+  // Re-derived only when the answer can have changed: a document whose bytes moved,
+  // or a source file that added or retired symbols (a mention resolves against the
+  // symbol table). When neither happened the previous edges are still correct, and
+  // re-reading every document is the most expensive step of the pass.
+  if (documentPaths.length > 0 && (documentsDirty || symbolsChanged)) {
     // The mention scan matches by NAME, but an edge needs a NODE id, and one name
     // can be declared in several places (a `render` in each component, an `open`
     // per class). Every declaration of a mentioned name gets the edge: guessing
@@ -467,11 +546,42 @@ export async function indexProject(
       else existing.push(symbol)
     }
     const known2 = knownNames(declared)
+    /**
+     * How many declarations ONE mention may point at.
+     *
+     * This number is the whole cost of phase 3, and it was measured rather than
+     * guessed. A real project's documents produced 103,334 mentions, and at 20
+     * targets each that is two million inserts — 64 seconds inside one phase,
+     * which froze the kernel. The scan itself is cheap (117ms for the same 127
+     * documents); the fan-out is what costs.
+     *
+     * ONE. A paragraph that names `index` does not describe 300 unrelated
+     * declarations, and a reader following the edge wants the one the author meant.
+     * With a single target the phase is linear in mentions instead of
+     * mentions × duplicates, and the answer stays useful: `context` still shows
+     * the documents that name a symbol, which is the feature.
+     */
+    const MAX_TARGETS_PER_MENTION = 1
     // DELETE then INSERT inside one transaction. The delete is per DOCUMENT, not
     // per symbol, so a mention the author removed stops being an edge — the first
     // version only inserted, so a deleted paragraph kept its edge for ever.
     const clear = graph.db.prepare("DELETE FROM edges WHERE kind = 'documents' AND dst = ?")
     const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)')
+    /**
+     * Documents per transaction, and the yield between them.
+     *
+     * This loop used to run inside ONE transaction with no yield, which is what
+     * made a real project freeze the whole kernel: measured on a 1771-file project,
+     * phase 3 alone ran past 200 seconds with the event loop held the entire time —
+     * the window stopped answering, the settings pane came up empty, and "new
+     * session" did nothing. The cost of the scan is not the problem; running it
+     * without ever returning to the loop is.
+     *
+     * 25 is small enough that one batch is milliseconds and large enough that the
+     * commit overhead stays negligible against the file reads.
+     */
+    const DOCS_PER_COMMIT = 25
+    let inBatch = 0
     graph.db.exec('BEGIN')
     try {
       for (const row of documentPaths) {
@@ -488,9 +598,22 @@ export async function indexProject(
         for (const mention of documentMentions({ path: row.path, text }, known2)) {
           // The edge points FROM the symbol TO the document: "this code is
           // described here", which is what `context` reads.
-          for (const symbol of byName.get(mention.name) ?? []) {
+          const targets = byName.get(mention.name) ?? []
+          const keep = targets.length > MAX_TARGETS_PER_MENTION ? targets.slice(0, MAX_TARGETS_PER_MENTION) : targets
+          for (const symbol of keep) {
             insert.run(symbol.id, target, 'documents', mention.line)
           }
+        }
+        inBatch += 1
+        if (inBatch >= DOCS_PER_COMMIT) {
+          // Commit, then give the loop a turn. A batch that fails leaves the
+          // documents before it committed and the rest for the next pass, which is
+          // the same recovery the phase already has: the documents' file rows are
+          // written, so a re-run re-derives their edges.
+          graph.db.exec('COMMIT')
+          inBatch = 0
+          await new Promise<void>(resolve => { setImmediate(resolve) })
+          graph.db.exec('BEGIN')
         }
       }
       graph.db.exec('COMMIT')
@@ -507,6 +630,7 @@ export async function indexProject(
       if (seen.has(path)) continue
       forgetFile(graph.db, path)
       removed += 1
+      symbolsChanged = true
     }
   }
 
@@ -521,7 +645,8 @@ export async function indexProject(
     edgeCount: stats.edges,
     truncated: scan.truncated,
     removalSkipped,
-    unsupported,
+    missingLanguage,
+    noRules,
     parseErrors,
   }
   writeProjectMeta(graph.db, meta)
@@ -531,7 +656,8 @@ export async function indexProject(
     skipped,
     removed,
     truncated: scan.truncated,
-    unsupported,
+    missingLanguage,
+    noRules,
     parseErrors,
     tooLarge: scan.tooLarge.length,
     durationMs: now() - started,

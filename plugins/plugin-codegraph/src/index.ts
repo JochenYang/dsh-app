@@ -42,7 +42,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 // the settings routes register on ctx.connection.fetch rather than webServer.
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { createHash } from 'node:crypto'
-import { unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { gitHead, indexProject, isStale } from './indexer.ts'
 import { parseFile } from './tree-sitter.ts'
@@ -56,6 +56,7 @@ import {
   formatSymbol,
   freshnessNote,
   importsOf,
+  projectOverview,
   referencesTo,
   resolveSymbol,
   symbolsInFile,
@@ -66,7 +67,7 @@ import {
 } from './query.ts'
 import { createIndexQueue, type IndexQueue } from './queue.ts'
 import { registerCodegraphRoutes } from './routes.ts'
-import { fileNodeId, openGraph, readProjectMeta, type Graph } from './store.ts'
+import { fileNodeId, openGraph, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
 
 export const name = 'plugin-codegraph'
 
@@ -116,6 +117,45 @@ function runtimeWasm(): string {
   return join(bundledGrammarDir(), 'web-tree-sitter.wasm')
 }
 
+/**
+ * The projects this machine already has a graph for.
+ *
+ * The queue keeps its project list in memory, so without this a restart shows
+ * only the project a session happens to open — the five graphs on disk were
+ * invisible until each was visited again. The directory NAME is a hash of the
+ * project root and cannot be reversed, so the root is read out of each graph's
+ * own `meta` row: the file is opened read-only, its metadata read, and the handle
+ * closed before anything else touches the file.
+ *
+ * A directory with no readable metadata is skipped rather than reported: it is
+ * either a half-written graph from a killed pass (the next visit rebuilds it) or
+ * a leftovers directory, and neither is a fact a user can act on.
+ *
+ * @param storageRoot - the plugin's storage root, which holds `projects/`.
+ * @returns one `{ cwd, meta }` per graph that carries metadata.
+ */
+export function knownProjects(storageRoot: string): { cwd: string, meta: ProjectMeta }[] {
+  const projectsDir = join(storageRoot, 'projects')
+  if (!existsSync(projectsDir)) return []
+  const found: { cwd: string, meta: ProjectMeta }[] = []
+  for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const file = join(projectsDir, entry.name, 'graph.db')
+    if (!existsSync(file)) continue
+    let graph: Graph | undefined
+    try {
+      graph = openGraph(file)
+      const meta = readProjectMeta(graph.db)
+      if (meta !== undefined && meta.cwd !== '') found.push({ cwd: meta.cwd, meta })
+    } catch {
+      // Unreadable graph: skipped, and the next pass for that project rebuilds it.
+    } finally {
+      try { graph?.close() } catch { /* already closed */ }
+    }
+  }
+  return found
+}
+
 export function apply(ctx: Context): void {
   /** Open graphs by project root; a graph stays open for the plugin's lifetime. */
   const graphs = new Map<string, Graph>()
@@ -126,10 +166,10 @@ export function apply(ctx: Context): void {
       // not-yet-installed language answers `unsupported` and the file is still
       // recorded, so the next pass skips it on the cheap comparison.
       const language = LANGUAGES.find(entry => entry.id === languageId)
-      if (language === undefined) return { symbols: [], calls: [], imports: [], hasError: false, unsupported: true }
+      if (language === undefined) return { symbols: [], calls: [], imports: [], hasError: false, unsupported: 'missing' as const }
       const paths = grammarPaths()
       const grammar = grammarPath(language, paths)
-      if (grammar === undefined) return { symbols: [], calls: [], imports: [], hasError: false, unsupported: true }
+      if (grammar === undefined) return { symbols: [], calls: [], imports: [], hasError: false, unsupported: 'missing' as const }
       return await parseFile(grammar, runtimeWasm(), source, path, languageId)
     })
   })
@@ -143,6 +183,36 @@ export function apply(ctx: Context): void {
     queue.adopt(cwd, readProjectMeta(opened.db))
     return opened
   }
+
+  // Restore the project list from disk, once, at activation.
+  //
+  // The queue's project list is in memory, so without this a restart shows only
+  // the project a session happens to open: measured on this machine, five graphs
+  // were on disk and one was visible. `knownProjects` reads each graph's own
+  // `meta.cwd` (the directory name is a hash and cannot be reversed) and adopts
+  // it, which is exactly what `graphFor` does on first use — this just does it for
+  // every project that already has a graph.
+  //
+  // WHY THIS IS DEFERRED. The first version ran `knownProjects` inline, and that
+  // takes an exclusive SQLite lock per database (`journal_mode = WAL` does), so on
+  // a machine whose graph was mid-pass it blocked the KERNEL's event loop inside
+  // activation: the whole UI went dead — an empty settings pane and a code-graph
+  // view stuck on "loading" — until the lock cleared. Restoring a LIST is not worth
+  // one millisecond of that, so it happens after activation, and a failure to read
+  // one graph cannot stop the plugin from loading.
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      try {
+        for (const project of knownProjects(join(resolveDshHome(), 'storages', 'dsh-app-plugin-codegraph'))) {
+          queue.adopt(project.cwd, project.meta)
+        }
+      } catch {
+        // A storage root this process cannot read is not a reason to fail to load:
+        // the list stays empty and each project is adopted on first use instead.
+      }
+    }, 0)
+    return () => { clearTimeout(timer) }
+  }, 'plugin-codegraph: restore the project list')
 
   /** The freshness of one project's graph, as every tool answer reports it. */
   const freshnessOf = async (cwd: string): Promise<{ freshness: Freshness, note: string | undefined }> => {
@@ -194,11 +264,14 @@ export function apply(ctx: Context): void {
   disposers.push(ctx.tools.register(defineTool({
     name: 'codegraph_find',
     description:
-      'Find where a symbol is declared in this project. Returns each match with its kind, file and line. '
-      + 'Use this before reading files to answer "where is X implemented" or "what does this project call it". '
-      + 'An exact name match wins over a substring match; if no name matches exactly, it falls back to a '
-      + 'case-insensitive substring search. The answer says whether the graph is current, so a "not found" '
-      + 'while the graph is rebuilding or stale means "ask again", not "it does not exist".',
+      'Locate a symbol in this project WITHOUT reading files: answers "where is X declared / defined" with '
+      + 'its kind, file and line, in one call. Use it as the first step of almost any question about the '
+      + 'codebase — before opening files, grepping, or guessing a path — because the graph already holds '
+      + 'every declaration in the project. '
+      + 'Matching: an exact name wins over a substring; with no exact match it falls back to a '
+      + 'case-insensitive substring search, so a partial name still finds candidates. '
+      + 'The answer carries the graph\'s freshness: a "not found" while it reports stale or indexing means '
+      + '"ask again in a moment", not "it does not exist".',
     parameters: {
       query: {
         type: 'string',
@@ -254,11 +327,14 @@ export function apply(ctx: Context): void {
   disposers.push(ctx.tools.register(defineTool({
     name: 'codegraph_impact',
     description:
-      'Answer "who is affected if I change this". Resolves a symbol by id or by an unambiguous name, then '
-      + 'lists the files that reference it and the files its own file imports. References are resolved by '
-      + 'NAME, so a call through an interface or a dynamic dispatch may be missing — treat an empty list as '
-      + '"no direct calls found", not as "safe to change". An ambiguous name answers no target rather than '
-      + 'picking one, because describing the wrong symbol would look correct.',
+      'Answer "what else does this touch before I change it" in ONE call: resolves a symbol, then lists '
+      + 'every place that references it plus the files its own file imports. Use it before editing anything '
+      + 'shared — a utility, a type, a public function — so the change does not surprise a caller you did '
+      + 'not see. This is the reverse direction of codegraph_find: that one goes from a name to its '
+      + 'declaration, this one from a declaration to its users. '
+      + 'References are resolved by NAME, so a call through an interface or a dynamic dispatch may be '
+      + 'missing — an empty list means "no direct calls found", never "safe to change". An ambiguous name '
+      + 'answers no target rather than picking one, because describing the wrong symbol would look correct.',
     parameters: {
       symbol: {
         type: 'string',
@@ -344,18 +420,22 @@ export function apply(ctx: Context): void {
   disposers.push(ctx.tools.register(defineTool({
     name: 'codegraph_context',
     description:
-      'Read one symbol\u2019s neighbourhood in a single call: its declaration, the other symbols declared in '
+      'Read one symbol\u2019s whole neighbourhood in a single call — its declaration, the other symbols in '
       + 'the same file, the calls it makes, what references it, what its file imports, and the project '
-      + 'documents that name it. Use this instead of several codegraph_find calls when you need to '
-      + 'understand how a piece fits before changing it. A call is attributed to the enclosing declaration '
-      + 'when it sits inside one, and to the file otherwise, so `calls` is this symbol\u2019s own calls plus '
-      + 'any file-level call; targets are resolved by name, so a name declared in more than one place '
-      + 'produces no edge rather than a guess.',
+      + 'documents that mention it. Use it when you need to UNDERSTAND a piece before changing it: one '
+      + 'call replaces several codegraph_find calls plus the file reads they would lead to. '
+      + 'OMIT `symbol` to get the project OVERVIEW instead — file/symbol/edge counts, the language split, '
+      + 'the files nothing imports (entry points, or a library\u2019s public surface) and the most-referenced '
+      + 'symbols. Call it with no argument whenever you are asked what a project IS, where it starts, how '
+      + 'it is organised, or how to begin in an unfamiliar repo, BEFORE listing directories or reading '
+      + 'files: the graph already holds that shape. '
+      + 'A call is attributed to the enclosing declaration when it sits inside one, and to the file '
+      + 'otherwise, so `calls` is this symbol\u2019s own calls plus any file-level call. Targets are resolved '
+      + 'by name, so a name declared in more than one place produces no edge rather than a guess.',
     parameters: {
       symbol: {
         type: 'string',
-        required: true,
-        description: 'A symbol id from codegraph_find, or a name that is unique in this project.',
+        description: 'A symbol id from codegraph_find, or a name that is unique in this project. Omit it to get the project overview.',
       },
     },
     output: {
@@ -434,10 +514,93 @@ export function apply(ctx: Context): void {
               },
             },
           },
+          overview: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              files: { type: 'number', required: true },
+              symbols: { type: 'number', required: true },
+              edges: { type: 'number', required: true },
+              truncated: { type: 'boolean', required: true },
+              byLanguage: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    lang: { type: 'string', required: true },
+                    files: { type: 'number', required: true },
+                  },
+                },
+              },
+              entryCandidates: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    path: { type: 'string', required: true },
+                    symbols: { type: 'number', required: true },
+                    symbol: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        id: { type: 'string', required: true },
+                        name: { type: 'string', required: true },
+                        kind: { type: 'string', required: true },
+                        path: { type: 'string', required: true },
+                        line: { type: 'number', required: true },
+                        parent: { type: 'string' },
+                      },
+                    },
+                  },
+                },
+              },
+              hubs: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    references: { type: 'number', required: true },
+                    symbol: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        id: { type: 'string', required: true },
+                        name: { type: 'string', required: true },
+                        kind: { type: 'string', required: true },
+                        path: { type: 'string', required: true },
+                        line: { type: 'number', required: true },
+                        parent: { type: 'string' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
       },
       render: (_args, value) => {
         const result = value as ContextResult
+        if (result.overview !== undefined) {
+          const o = result.overview
+          const lines = [
+            `codegraph_context: project overview — ${String(o.files)} files, ${String(o.symbols)} symbols, ${String(o.edges)} edges${o.truncated ? ' (lists truncated)' : ''}`,
+            ...(result.note === undefined ? [] : [`note: ${result.note}`]),
+            `languages: ${o.byLanguage.map(entry => `${entry.lang} ${String(entry.files)}`).join(', ')}`,
+            `entry candidates (${String(o.entryCandidates.length)}) — nothing imports these:`,
+            ...o.entryCandidates.map(entry => `- ${entry.path} (${String(entry.symbols)} symbol(s))${entry.symbol === undefined ? '' : ` starts at ${entry.symbol.kind} ${entry.symbol.name}:${String(entry.symbol.line)}`}`),
+            `most referenced (${String(o.hubs.length)}):`,
+            ...o.hubs.map(hub => `- ${formatSymbol(hub.symbol)} — ${String(hub.references)} referrer(s)`),
+            'Pass `symbol` (an id or a unique name) to expand any one of these.',
+          ]
+          return [{ type: 'text', text: lines.join('\n') }]
+        }
         if (result.symbol === undefined) {
           return [{ type: 'text', text: `codegraph_context: no unambiguous symbol matched${result.note === undefined ? '' : `\nnote: ${result.note}`}` }]
         }
@@ -458,6 +621,24 @@ export function apply(ctx: Context): void {
       const cwd = requireCwd(exec.agent)
       const { freshness, note } = await freshnessOf(cwd)
       const graph = graphFor(cwd)
+      // No selector: answer the question no symbol name can, from the graph's
+      // own shape. This is the branch that makes the plugin reachable at all for
+      // "where does this project start", which names nothing.
+      if (args.symbol === undefined || args.symbol.trim() === '') {
+        return dropUndefined({
+          freshness,
+          note,
+          siblings: [],
+          calls: [],
+          calledBy: [],
+          imports: [],
+          documents: [],
+          // The query layer types its lists `readonly`; the tool's output schema
+          // describes mutable arrays because that is what the JSON snapshot
+          // carries. One cast at the boundary, where the shape is known equal.
+          overview: projectOverview(graph, MAX_ROWS) as unknown as NonNullable<ContextResult['overview']>,
+        }) satisfies ContextResult
+      }
       const symbol = resolveSymbol(graph, args.symbol)
       if (symbol === undefined) {
         return dropUndefined({ freshness, note, symbol: undefined, siblings: [], calls: [], calledBy: [], imports: [], documents: [] }) satisfies ContextResult

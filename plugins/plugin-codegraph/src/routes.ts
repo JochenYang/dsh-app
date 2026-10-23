@@ -93,7 +93,8 @@ export interface ProjectRow {
     readonly skipped: number
     readonly removed: number
     readonly truncated: boolean
-    readonly unsupported: number
+    readonly missingLanguage: number
+    readonly noRules: number
     readonly parseErrors: number
     readonly tooLarge: number
     readonly durationMs: number

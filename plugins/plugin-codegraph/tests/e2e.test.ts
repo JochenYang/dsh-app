@@ -74,7 +74,7 @@ describe('real parse → index → query', () => {
 
     const outcome = await indexProject(graph, root, realParse)
     assert.equal(outcome.parsed, 2)
-    assert.equal(outcome.unsupported, 0, 'TypeScript is supported')
+    assert.equal(outcome.missingLanguage, 0, 'TypeScript is supported')
     assert.ok(outcome.skipped === 0)
 
     // The parser's symbol id must be exactly what the query layer reads.

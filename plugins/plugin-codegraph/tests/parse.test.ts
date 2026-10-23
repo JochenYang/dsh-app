@@ -347,6 +347,13 @@ describe('GRAMMAR_SHAPES — every declaration entry really produces a symbol', 
     bash: {
       function_definition: 'f() { echo 1; }',
     },
+    // The two declarations whose names are CHILD NODES rather than fields — the
+    // reason the shape grew `nameChild`. A `nameField` here yields no symbol and
+    // the case below would report it.
+    powershell: {
+      function_statement: 'function Get-Thing { Write-Host 1 }',
+      class_statement: 'class Widget { [string] $Name }',
+    },
     // Parseable, downloadable, and deliberately NOT symbol-producing: a selector,
     // a config key and a regex fragment name nothing a caller can reference. The
     // gate below requires an entry for every shape, so these three are stated as
@@ -504,7 +511,7 @@ describe('extractSymbols — unsupported', () => {
     // selector is not a symbol. It must report `unsupported`, not an empty file:
     // the two are different facts and only one means this language works.
     const parsed = extractSymbols(root, 'a.css', 'css')
-    assert.equal(parsed.unsupported, true)
+    assert.equal(parsed.unsupported, 'noShape')
     assert.deepEqual(parsed.symbols, [])
   })
 })

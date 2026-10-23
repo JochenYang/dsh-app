@@ -125,8 +125,10 @@ export interface ProjectMeta {
   readonly truncated: boolean
   /** True when the last pass skipped its removal step because the scan was partial. */
   readonly removalSkipped: boolean
-  /** Files that exist but were not indexed because their language is not installed. */
-  readonly unsupported: number
+  /** Files skipped because their grammar is not installed (a download fixes it). */
+  readonly missingLanguage: number
+  /** Files skipped because this plugin has no extraction rules for an installed grammar. */
+  readonly noRules: number
   /** Files whose last parse produced an ERROR node. */
   readonly parseErrors: number
 }
@@ -173,6 +175,13 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path);
 CREATE INDEX IF NOT EXISTS edges_dst  ON edges(dst);
+-- The source side of every edge needs its own index; its absence cost minutes of
+-- blocked event loop. Every write deletes a file's outgoing edges with
+-- "WHERE src = ?" — once per symbol — and without this index each of those is a
+-- full scan of the edge table. Measured on a 1613-file project: the first pass
+-- held the kernel for 241 SECONDS, which is why the window went dead and the new
+-- session button did nothing.
+CREATE INDEX IF NOT EXISTS edges_src  ON edges(src);
 `
 
 /** One open graph: the handle plus the statements this module owns. */
@@ -299,7 +308,7 @@ export function readProjectMeta(db: DatabaseSync): ProjectMeta | undefined {
   if (parsed === null || typeof parsed !== 'object') return undefined
   const meta = parsed as Record<string, unknown>
   const strings = ['cwd', 'name', 'head'] as const
-  const numbers = ['indexedAt', 'fileCount', 'symbolCount', 'edgeCount', 'unsupported', 'parseErrors'] as const
+  const numbers = ['indexedAt', 'fileCount', 'symbolCount', 'edgeCount', 'missingLanguage', 'noRules', 'parseErrors'] as const
   const booleans = ['truncated', 'removalSkipped'] as const
   for (const key of strings) if (typeof meta[key] !== 'string') return undefined
   for (const key of numbers) if (typeof meta[key] !== 'number' || !Number.isFinite(meta[key])) return undefined
@@ -384,11 +393,22 @@ export function replaceFile(
 
   const deleteOutgoing = db.prepare('DELETE FROM edges WHERE src = ?')
   const deleteIncoming = db.prepare('DELETE FROM edges WHERE dst = ?')
+  // One statement for the whole file's outgoing edges instead of one per symbol.
+  //
+  // A symbol id always begins with its file path plus `#`, so a HALF-OPEN RANGE on
+  // `src` selects exactly this file's symbols — and unlike `LIKE`, it needs no
+  // escaping: a path containing `%` or `_` is just a path. The bounds are built by
+  // stepping the last character of the prefix, which orders correctly for every
+  // character a path can hold.
+  const deleteOutgoingOfFile = db.prepare('DELETE FROM edges WHERE src >= ? AND src < ?')
+  const upper = `${file.path}$`  // `$` (0x24) sorts just above `#` (0x23)
 
   db.exec('BEGIN')
   try {
-    // Every outgoing edge is re-emitted by this write, so all of them go.
-    for (const id of ids) deleteOutgoing.run(id)
+    // Every outgoing edge is re-emitted by this write, so all of them go — the
+    // file-level edges and its symbols' edges, in one range delete.
+    deleteOutgoingOfFile.run(`${file.path}#`, upper)
+    deleteOutgoing.run(fileId)
     // Inbound edges go only for ids this file no longer declares.
     for (const id of retired) deleteIncoming.run(id)
     db.prepare('DELETE FROM symbols WHERE path = ?').run(file.path)

@@ -292,9 +292,9 @@ describe('indexProject', () => {
     const { root, graph } = project()
     write(root, 'a.rb', 'SYM rubything')
     const outcome = await indexProject(graph, root, (_source, path) => ({
-      symbols: [], calls: [], imports: [], hasError: false, unsupported: true,
+      symbols: [], calls: [], imports: [], hasError: false, unsupported: 'noShape' as const,
     }))
-    assert.equal(outcome.unsupported, 1)
+    assert.equal(outcome.noRules, 1)
     assert.equal(outcome.parsed, 0)
     // The row IS written: it is the stat cache, and without it this file would be
     // read and re-parsed on every pass forever. It declares no symbols, which is
@@ -447,7 +447,7 @@ describe('documents edges', () => {
 describe('isStale', () => {
   const meta = (head: string): ProjectMeta => ({
     cwd: 'D:/x', name: 'x', head, indexedAt: 1, fileCount: 1, symbolCount: 1, edgeCount: 1,
-    truncated: false, removalSkipped: false, unsupported: 0, parseErrors: 0,
+    truncated: false, removalSkipped: false, missingLanguage: 0, noRules: 0, parseErrors: 0,
   })
 
   it('treats a graph with no metadata as stale', () => {
@@ -467,5 +467,49 @@ describe('isStale', () => {
     // A stored HEAD with no readable one now: freshness cannot be proven, and
     // the graph is older than what we know — treat it as stale.
     assert.equal(isStale(meta('abc'), ''), true)
+  })
+})
+
+describe('documents edges — the cost of a mention', () => {
+  it('points a mention at ONE declaration, not at every name-alike', async () => {
+    // This number is the whole cost of the phase, measured on a real project: its
+    // documents produced 103,334 mentions, and at 20 targets each that is two
+    // million inserts — 64 seconds inside one phase, which froze the kernel (the
+    // window stopped answering and the settings pane came up empty). At one target
+    // the phase is linear in mentions.
+    //
+    // The case below is the shape that produced it: many declarations share a name,
+    // and one paragraph names it once.
+    const { root, graph } = project()
+    for (let i = 0; i < 12; i += 1) write(root, `m${String(i)}.ts`, 'SYM index')
+    write(root, 'README.md', 'Call `index` to start.')
+
+    await indexProject(graph, root, stubParse)
+    const rows = graph.db.prepare("SELECT src FROM edges WHERE kind = 'documents'").all() as { src: string }[]
+    assert.equal(rows.length, 1, 'twelve same-named declarations must not become twelve edges')
+    graph.close()
+  })
+
+  it('re-derives document edges only when the answer can have changed', async () => {
+    // A pass that changed nothing must not re-read every document: on a real
+    // project that was the most expensive step, and a second pass over an unchanged
+    // tree now costs milliseconds instead of tens of seconds.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'README.md', '`alpha` is described here.')
+    await indexProject(graph, root, stubParse)
+    const count = (): number => (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'documents'").get() as { n: number }).n
+    assert.equal(count(), 1, 'first pass')
+
+    // Same bytes everywhere: nothing to re-derive, and the edge survives.
+    await indexProject(graph, root, stubParse)
+    assert.equal(count(), 1, 'an unchanged pass keeps the edge')
+
+    // A DOCUMENT change must be re-derived even though no source moved: the
+    // paragraph is what changed, and its edge has to follow.
+    write(root, 'README.md', 'nothing here names a symbol')
+    await indexProject(graph, root, stubParse)
+    assert.equal(count(), 0, 'a changed document loses the mention it no longer makes')
+    graph.close()
   })
 })

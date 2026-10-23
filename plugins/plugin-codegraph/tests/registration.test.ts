@@ -24,22 +24,38 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { describe, it } from 'node:test'
-import { apply, graphFileFor, inject, name } from '../src/index.ts'
+import { after, describe, it } from 'node:test'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { openGraph, writeProjectMeta } from '../src/store.ts'
+
+/** Scratch directories this suite created, removed on the way out. */
+const created: string[] = []
+after(() => {
+  for (const dir of created.splice(0)) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
+})
+import { apply, graphFileFor, inject, knownProjects, name } from '../src/index.ts'
 import { ROUTE_PREFIX } from '../src/routes.ts'
 import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 
 /** The minimal Context the plugin's apply() reads, recording every registration. */
 function fakeContext() {
   const tools: string[] = []
+  /** The full definition of each registered tool, for the parameter-shape assertions. */
+  const definitions = new Map<string, { name: string, parameters?: Record<string, { required?: boolean }> }>()
   const routes: ConnectionFetchRoute[] = []
   /** Every `ctx.on` listener, by event name, so the auto-index rule is testable. */
   const listeners = new Map<string, ((...args: never[]) => void)[]>()
   let dispose: (() => void) | (() => Promise<void>) | undefined
   const ctx = {
     tools: {
-      register(tool: { name: string }): () => void {
+      register(tool: { name: string, parameters?: Record<string, { required?: boolean }> }): () => void {
         tools.push(tool.name)
+        definitions.set(tool.name, tool)
         return () => { tools.splice(tools.indexOf(tool.name), 1) }
       },
     },
@@ -72,7 +88,7 @@ function fakeContext() {
       dispose = body()
     },
   }
-  return { ctx, tools, routes, listeners, disposeAll: async () => { await dispose?.() } }
+  return { ctx, tools, definitions, routes, listeners, disposeAll: async () => { await dispose?.() } }
 }
 
 describe('apply', () => {
@@ -80,6 +96,22 @@ describe('apply', () => {
     const { ctx, tools } = fakeContext()
     apply(ctx as never)
     assert.deepEqual(tools.sort(), ['codegraph_context', 'codegraph_find', 'codegraph_impact'])
+  })
+
+  it('leaves codegraph_context callable with no argument', () => {
+    // The orientation question — "what is this project, where does it start" —
+    // names no symbol, so a required `symbol` made the tool unreachable for
+    // exactly the question the plugin exists to answer. Measured: a session with
+    // a built graph answered it with `working_directory` + `查找文件` + four
+    // `读取` calls, because every codegraph tool demanded a name it did not have.
+    const { ctx, definitions } = fakeContext()
+    apply(ctx as never)
+    const required = (tool: string): string[] => definitions.get(tool)?.parameters?.required ?? []
+    assert.equal(required('codegraph_context').includes('symbol'), false, 'omitting symbol must be legal')
+    // The other two stay required: they are name lookups and have no meaning
+    // without one.
+    assert.equal(required('codegraph_find').includes('query'), true)
+    assert.equal(required('codegraph_impact').includes('symbol'), true)
   })
 
   it('registers the routes under the plugin prefix the client fetches', () => {
@@ -183,5 +215,44 @@ describe('routes registration contract', () => {
       assert.ok(!route.path.includes('@'), 'the registry rejects an @ in a segment')
     }
     await Promise.resolve()
+  })
+})
+
+describe('knownProjects', () => {
+  it('reads the root back out of each graph, because the directory name is a hash', async () => {
+    // The queue's list is in memory, so a restart showed only the project a
+    // session happened to open: measured on this machine, five graphs were on disk
+    // and one was visible. The directory name is `sha256(cwd)` and cannot be
+    // reversed, so the root has to come out of the graph's own meta row.
+    const dir = mkdtempSync(join(tmpdir(), 'cg-known-'))
+    created.push(dir)
+    const storage = join(dir, 'storage')
+    const roots = ['D:/codes/one', 'D:/codes/two']
+    for (const root of roots) {
+      const file = join(storage, 'projects', createHash('sha256').update(root).digest('hex').slice(0, 32), 'graph.db')
+      mkdirSync(dirname(file), { recursive: true })
+      const graph = openGraph(file)
+      writeProjectMeta(graph.db, {
+        cwd: root, name: root.split('/').pop() ?? root, head: '', indexedAt: 7,
+        fileCount: 3, symbolCount: 9, edgeCount: 4,
+        truncated: false, removalSkipped: false, missingLanguage: 0, noRules: 0, parseErrors: 0,
+      })
+      graph.close()
+    }
+
+    const found = knownProjects(storage)
+    assert.deepEqual(found.map(project => project.cwd).sort(), roots)
+    assert.equal(found[0]?.meta.fileCount, 3, 'the metadata travels with the root')
+  })
+
+  it('skips a directory with no readable graph', () => {
+    // A half-written graph from a killed pass is not a fact a user can act on:
+    // the next visit rebuilds it.
+    const dir = mkdtempSync(join(tmpdir(), 'cg-known-empty-'))
+    created.push(dir)
+    const storage = join(dir, 'storage')
+    mkdirSync(join(storage, 'projects', 'deadbeef'), { recursive: true })
+    assert.deepEqual(knownProjects(storage), [])
+    assert.deepEqual(knownProjects(join(dir, 'absent')), [], 'a storage root that does not exist yet is empty, not a throw')
   })
 })

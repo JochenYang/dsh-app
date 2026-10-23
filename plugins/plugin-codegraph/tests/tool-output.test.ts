@@ -116,6 +116,27 @@ describe('the three tool answers survive the snapshot', () => {
       // `name` here is a string, not an optional undefined, so `dropUndefined`
       // keeps it — and the tool's schema must therefore declare it.
       { freshness: 'current', target: undefined, referencing: [{ path: 'a.ts', line: 4, kind: 'references', name: 'caller' }], imports: [] },
+      // The overview branch: the answer to a question that names no symbol. Its
+      // entry candidate may have no starting symbol (a file of re-exports), so
+      // that key is the optional one here.
+      {
+        freshness: 'current',
+        note: undefined,
+        siblings: [],
+        calls: [],
+        calledBy: [],
+        imports: [],
+        documents: [],
+        overview: {
+          files: 2,
+          symbols: 3,
+          edges: 1,
+          truncated: false,
+          byLanguage: [{ lang: 'typescript', files: 2 }],
+          entryCandidates: [{ path: 'main.ts', symbols: 1, symbol: undefined }],
+          hubs: [],
+        },
+      },
     ]
     for (const answer of answers) {
       const stripped = dropUndefined(answer)

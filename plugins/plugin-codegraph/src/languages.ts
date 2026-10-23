@@ -72,6 +72,7 @@ export const LANGUAGES: readonly LanguageSpec[] = [
   { id: 'bash', grammar: 'bash', label: 'Shell', extensions: ['.sh', '.bash', '.zsh'], bundled: false },
   { id: 'css', grammar: 'css', label: 'CSS', extensions: ['.css', '.scss', '.less'], bundled: false },
   { id: 'ini', grammar: 'ini', label: 'INI / TOML', extensions: ['.ini', '.toml', '.cfg'], bundled: false },
+  { id: 'powershell', grammar: 'powershell', label: 'PowerShell', extensions: ['.ps1', '.psm1', '.psd1'], bundled: false },
   { id: 'regex', grammar: 'regex', label: 'Regular expression', extensions: [], bundled: false },
 ]
 
@@ -189,6 +190,7 @@ export const GRAMMAR_SHA512: Readonly<Record<string, string>> = {
   bash: 'wa3L7EfD6bhq2k3zSkesmgAz0cxfLUyPW+VpLQkN8yHHDWAIGE51HdcOVZADwmgHXkm70gM04aE3Nplst2nQUQ==',
   css: 'b8nIiSr/hb+tr0ZB9LfrtOyqHjOLLnk2dlI9bW7iW4Ww6jzzo+xvHhCzoIGaEE1YOGF74fmmGDuAwPaQw9I/pQ==',
   ini: 'jky36dOyF+89iyv7eEy5MDTvnq5A2iobv+c8febN5zTJHr6KZRJ4q4E3IEQlEDF8L3s3Sbv3fWMFE3xyPFxLEA==',
+  powershell: 'G47wlygEk/shL0R6E1Wz819Ltv+Qt6yAFA6PU1IjVGzcHZ2E6/cC0R4UlWz6x3fAmrukUUbjOKp7sZC3ysocrA==',
   regex: 'Pxh69HAvK/prkTy3SpvQW5Z46HN4pEKyhRyIeg/20HdiOeNy0YngRvoFlYoV+mJc5zPtx7Uhph/3XRl8eKZIbg==',
 }
 

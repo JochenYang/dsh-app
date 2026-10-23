@@ -47,6 +47,25 @@ const cssText = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The chevron reads as an affordance only if it keeps its size and its gap: a
+   squeezed one is decoration that looks like a rendering glitch.
+   Rotating on open ties the glyph to the state it stands for; the transition
+   names transform alone, which the motion rules allow, and it is dropped
+   entirely under reduced motion. */
+.dshcg_pickerChevron {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  opacity: 0.7;
+  transition: transform var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out);
+}
+.dshcg_picker [aria-expanded='true'] .dshcg_pickerChevron {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .dshcg_pickerChevron {
+    transition: none;
+  }
+}
 .dshcg_card {
   display: flex;
   flex-direction: column;

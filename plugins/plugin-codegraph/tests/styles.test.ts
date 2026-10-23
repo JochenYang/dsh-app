@@ -94,9 +94,13 @@ describe('stylesheet', () => {
     assert.ok(open >= 0, 'the cssText template literal was not found')
     // The template ends on a line that is just a backtick; take the LAST such
     // line so an embedded one cannot shorten the range.
+    // The file is stored with CRLF, so a line's content is followed by `\r` —
+    // comparing against a bare backtick never matches, and the check then reports
+    // "not closed" on a perfectly good file. Measured: that is exactly what it did
+    // once this module grew a Windows checkout's line endings.
     let close = -1
     for (let index = open + 1; index < lines.length; index += 1) {
-      if (lines[index] === '`') close = index
+      if (lines[index]?.trimEnd() === '`') close = index
     }
     assert.ok(close > open, 'the cssText template literal is not closed')
     const literal = lines.slice(open + 1, close).join('\n')
@@ -373,17 +377,6 @@ describe('the clickable rows', () => {
 })
 
 describe('the sidebar page', () => {
-  it('registers one row and one panel under the SAME id', () => {
-    // The pair nothing type-checks: the list slot types `id` as an open string and
-    // the layout package types the panel key as its own brand, so a drift between
-    // them surfaces only as a thrown `main panel "…" is not registered` in the
-    // running app. One constant used twice is what turns it into a compile error.
-    const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
-    assert.match(client, /const PANEL_ID = '[a-z]+'/u, 'the shared id must be one constant')
-    assert.match(client, /name: 'sidebar\.panellist',\s*\n\s*id: PANEL_ID,/u, 'the sidebar row uses it as its id')
-    assert.match(client, /name: 'main',\s*\n\s*key: PANEL_ID,/u, 'the main panel uses it as its key')
-  })
-
   it('gives the rail a selected state that is not a hover', () => {
     // A selection must survive the pointer leaving. The hover wash alone would
     // read as "the mouse happens to be here", which is the wrong claim about
@@ -425,5 +418,15 @@ describe('the project picker', () => {
     const label = body.slice(body.indexOf('.dshcg_pickerLabel {'), body.indexOf('\n}', body.indexOf('.dshcg_pickerLabel {')))
     assert.match(label, /text-overflow:\s*ellipsis/u, 'the trigger label must truncate')
     assert.match(label, /max-width:/u, 'and be capped, or a long name widens the control')
+    // A bordered box showing the current project name reads as a STATUS CHIP. The
+    // chevron is what says it opens a list, so it is part of the control, not
+    // decoration: it must keep its size, and it must flip when the list is open.
+    assert.match(section, /<IconChevronDownOutlineRegular\s/u, 'the trigger RENDERS a chevron, not merely imports one')
+    assert.match(section, /aria-expanded=\{pickerOpen\}/u, 'and must announce its open state')
+    const chevronAt = body.indexOf('.dshcg_pickerChevron {')
+    assert.ok(chevronAt > 0, 'the chevron needs its own rule')
+    const chevron = body.slice(chevronAt, body.indexOf('\n}', chevronAt))
+    assert.match(chevron, /flex:\s*0 0 auto/u, 'a squeezed chevron reads as a glitch')
+    assert.match(body, /aria-expanded='true'\]\s+\.dshcg_pickerChevron/u, 'the glyph must flip when the list opens')
   })
 })

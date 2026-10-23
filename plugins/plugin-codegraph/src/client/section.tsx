@@ -23,7 +23,7 @@
  * @module @dsh-app/plugin-codegraph/client/section
  */
 
-import { Button, Menu, PathLabel, Tag, Tooltip, fileSizeText, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Menu, PathLabel, Tag, Tooltip, fileSizeText, IconChevronDownOutlineRegular, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { en, NS, type CodegraphKey } from './locales.ts'
@@ -45,7 +45,8 @@ interface ProjectRow {
     readonly skipped: number
     readonly removed: number
     readonly truncated: boolean
-    readonly unsupported: number
+    readonly missingLanguage: number
+    readonly noRules: number
     readonly parseErrors: number
     readonly tooLarge: number
     readonly durationMs: number
@@ -208,8 +209,16 @@ function ProjectPanel({ project, busy, onReindex, t }: {
       )}
       {outcome?.truncated === true ? <p className="dshcg_notice dshcg_noticeWarn">{t('codegraph.outcome.truncated')}</p> : null}
       {outcome?.removalSkipped === true ? <p className="dshcg_notice dshcg_noticeWarn">{t('codegraph.outcome.removalSkipped')}</p> : null}
-      {outcome !== undefined && outcome.unsupported > 0
-        ? <p className="dshcg_notice">{t('codegraph.outcome.unsupported', { count: outcome.unsupported })}</p>
+      {/* Two DIFFERENT facts, reported apart. The first asks the user to install
+          a grammar; the second says nothing is installable. Reporting them as one
+          number told users a download would help when their only gap was a .css
+          file — measured on this machine, where every skipped file belonged to a
+          language that was already installed. */}
+      {outcome !== undefined && outcome.missingLanguage > 0
+        ? <p className="dshcg_notice dshcg_noticeWarn">{t('codegraph.outcome.missingLanguage', { count: outcome.missingLanguage })}</p>
+        : null}
+      {outcome !== undefined && outcome.noRules > 0
+        ? <p className="dshcg_notice">{t('codegraph.outcome.noRules', { count: outcome.noRules })}</p>
         : null}
       {outcome !== undefined && outcome.parseErrors > 0
         ? <p className="dshcg_notice">{t('codegraph.outcome.parseErrors', { count: outcome.parseErrors })}</p>
@@ -426,6 +435,11 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
                     aria-haspopup="menu"
                   >
                     <span className="dshcg_pickerLabel">{current?.name ?? translate('codegraph.project.label')}</span>
+                    {/* A chevron, because the label alone reads as a static tag: a
+                        bordered box showing the current project's name looks like a
+                        status chip, not like something that opens a list. This is
+                        the shell's own glyph, so it follows the theme. */}
+                    <IconChevronDownOutlineRegular size={12} className="dshcg_pickerChevron" />
                   </Button>
                 )}
                 items={projects.map(project => ({ id: project.cwd, label: project.name }))}

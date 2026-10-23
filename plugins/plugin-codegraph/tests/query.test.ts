@@ -22,6 +22,7 @@ import {
   findSymbols,
   freshnessNote,
   importsOf,
+  projectOverview,
   referencesTo,
   resolveSymbol,
   symbolsInFile,
@@ -187,6 +188,123 @@ describe('symbolsInFile', () => {
     const g = graph()
     replaceFile(g.db, file('a.ts'), [sym('a.ts', 'second', 10), sym('a.ts', 'first', 2)], [])
     assert.deepEqual(symbolsInFile(g, 'a.ts', 10).map(symbol => symbol.name), ['first', 'second'])
+  })
+})
+
+describe('projectOverview', () => {
+  it('answers "what is this project" with no symbol name at all', () => {
+    // The question that motivated this: "where does this project start" names no
+    // symbol, so before this the model had nothing to call and fell back to
+    // listing directories. Measured in a real session: one orientation question
+    // produced `working_directory` + `查找文件` + four `读取` calls.
+    const g = graph()
+    replaceFile(g.db, file('src/entry.ts'), [sym('src/entry.ts', 'start')], [])
+    replaceFile(g.db, file('src/lib.ts'), [sym('src/lib.ts', 'helper')], [
+      { from: fileNodeId('src/entry.ts'), to: fileNodeId('src/lib.ts'), kind: 'imports', line: 1 },
+    ])
+    const overview = projectOverview(g, 10)
+    assert.equal(overview.files, 2)
+    assert.equal(overview.symbols, 2)
+    assert.deepEqual(
+      overview.entryCandidates.map(entry => entry.path),
+      ['src/entry.ts'],
+      'the file nothing imports is the entry point; the imported one is not',
+    )
+    assert.equal(overview.entryCandidates[0]?.symbol?.name, 'start')
+  })
+
+  it('ranks the most-referenced symbols first, and counts distinct referrers', () => {
+    const g = graph()
+    const hub = sym('hub.ts', 'shared')
+    const a = sym('a.ts', 'one')
+    const b = sym('b.ts', 'two')
+    replaceFile(g.db, file('hub.ts'), [hub], [])
+    replaceFile(g.db, file('a.ts'), [a], [{ from: a.id, to: hub.id, kind: 'references', line: 1 }])
+    replaceFile(g.db, file('b.ts'), [b], [
+      { from: b.id, to: hub.id, kind: 'references', line: 1 },
+      // A second reference from the SAME symbol must not inflate the count: the
+      // question is "how many places depend on this", not "how many call sites".
+      { from: b.id, to: hub.id, kind: 'references', line: 9 },
+    ])
+    const overview = projectOverview(g, 10)
+    assert.equal(overview.hubs[0]?.symbol.name, 'shared')
+    assert.equal(overview.hubs[0]?.references, 2, 'two distinct referrers, not three references')
+  })
+
+  it('excludes documents from the entry candidates and reports the language split', () => {
+    // A README imports nothing, so an unguarded in-degree query would rank every
+    // document as an entry point and bury the real one.
+    const g = graph()
+    replaceFile(g.db, { ...file('README.md'), lang: 'document' }, [], [])
+    replaceFile(g.db, file('main.ts'), [sym('main.ts', 'main')], [])
+    const overview = projectOverview(g, 10)
+    assert.deepEqual(overview.entryCandidates.map(entry => entry.path), ['main.ts'])
+    assert.deepEqual(
+      overview.byLanguage.map(entry => `${entry.lang}:${String(entry.files)}`),
+      ['typescript:1'],
+      'the document must not appear as a language',
+    )
+  })
+
+  it('reports truncation instead of silently cutting a long list', () => {
+    const g = graph()
+    for (const name of ['a', 'b', 'c']) {
+      replaceFile(g.db, file(`${name}.ts`), [sym(`${name}.ts`, `fn${name}`)], [])
+    }
+    const overview = projectOverview(g, 2)
+    assert.equal(overview.entryCandidates.length, 2)
+    assert.equal(overview.truncated, true)
+  })
+
+  it('ranks a conventional entry filename above a bigger file', () => {
+    // Measured on a real 1771-file monorepo: in-degree alone answered a 371-symbol
+    // HTML template as the entry and never showed the CLI, which is imported by
+    // its own wrapper. The filename is the project's own statement of where it
+    // starts, so it outranks symbol count.
+    const g = graph()
+    replaceFile(g.db, file('src/cli.ts'), [sym('src/cli.ts', 'run')], [])
+    replaceFile(g.db, file('src/template.js'), [
+      sym('src/template.js', 'a'), sym('src/template.js', 'b'), sym('src/template.js', 'c'),
+    ], [])
+    const overview = projectOverview(g, 10)
+    assert.equal(overview.entryCandidates[0]?.path, 'src/cli.ts')
+  })
+
+  it('orders tests last rather than dropping them', () => {
+    // A test imports nothing, so it is a legitimate zero-in-degree file — but it
+    // is not where a project starts. Dropping it would answer an empty list for a
+    // test-heavy project, so it is demoted, not removed.
+    const g = graph()
+    replaceFile(g.db, file('src/main.ts'), [sym('src/main.ts', 'main')], [])
+    replaceFile(g.db, file('test/thing.test.ts'), [
+      sym('test/thing.test.ts', 't1'), sym('test/thing.test.ts', 't2'), sym('test/thing.test.ts', 't3'),
+    ], [])
+    const overview = projectOverview(g, 10)
+    assert.deepEqual(
+      overview.entryCandidates.map(entry => entry.path),
+      ['src/main.ts', 'test/thing.test.ts'],
+      'the test stays visible, but after the entry',
+    )
+  })
+
+  it('ranks top-level declarations as hubs, not built-in method names', () => {
+    // Measured: the unguarded query answered `.filter`, `.trim` and `.includes`
+    // as the project's most-referenced symbols — same-named variables the parser
+    // recorded, which say nothing about this codebase. A top-level function is a
+    // real public surface; a nested declaration or a bare variable is where the
+    // collisions live.
+    const g = graph()
+    const real = sym('api.ts', 'createServer')
+    const noise = sym('noise.ts', 'filter', 3, 'Thing')
+    const caller = sym('caller.ts', 'use')
+    replaceFile(g.db, file('api.ts'), [real], [])
+    replaceFile(g.db, file('noise.ts'), [noise], [])
+    replaceFile(g.db, file('caller.ts'), [caller], [
+      { from: caller.id, to: real.id, kind: 'references', line: 1 },
+      { from: caller.id, to: noise.id, kind: 'references', line: 2 },
+    ])
+    const overview = projectOverview(g, 10)
+    assert.deepEqual(overview.hubs.map(hub => hub.symbol.name), ['createServer'])
   })
 })
 

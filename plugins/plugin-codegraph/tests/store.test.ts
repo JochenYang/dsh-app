@@ -105,7 +105,8 @@ describe('openGraph', () => {
       edgeCount: 4,
       truncated: false,
       removalSkipped: false,
-      unsupported: 0,
+      missingLanguage: 0,
+      noRules: 0,
       parseErrors: 0,
     })
     assert.deepEqual(readProjectMeta(graph.db), {
@@ -118,7 +119,8 @@ describe('openGraph', () => {
       edgeCount: 4,
       truncated: false,
       removalSkipped: false,
-      unsupported: 0,
+      missingLanguage: 0,
+      noRules: 0,
       parseErrors: 0,
     })
     graph.close()

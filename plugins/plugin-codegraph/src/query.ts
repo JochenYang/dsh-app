@@ -87,7 +87,7 @@ export interface ImpactResult extends ToolEnvelope {
 
 /** The result of `codegraph_context`. */
 export interface ContextResult extends ToolEnvelope {
-  readonly symbol: SymbolView | undefined
+  readonly symbol?: SymbolView | undefined
   /** Symbols declared in the same file. */
   readonly siblings: readonly SymbolView[]
   /** What this symbol calls (outgoing references). */
@@ -105,6 +105,13 @@ export interface ContextResult extends ToolEnvelope {
    * the code rather than a whole document.
    */
   readonly documents: readonly DocumentRef[]
+  /**
+   * The project's shape, present only when no symbol was named.
+   *
+   * The one question the other fields cannot answer: they all describe a symbol,
+   * and "what is this project" starts from no symbol at all.
+   */
+  readonly overview?: ProjectOverview | undefined
 }
 
 /** One place a document mentions a symbol. */
@@ -309,6 +316,187 @@ export function symbolsInFile(graph: Graph, path: string, limit: number): Symbol
     path, limit,
   )
   return rows.map(toSymbolView)
+}
+
+/** One entry point candidate: a file nothing else in the project imports. */
+export interface EntryCandidate {
+  /** The project-relative path. */
+  readonly path: string
+  /** The symbol a reader starts at, when the file declares one. */
+  readonly symbol: SymbolView | undefined
+  /** How many symbols the file declares. */
+  readonly symbols: number
+}
+
+/** One symbol that many others depend on. */
+export interface HubSymbol {
+  readonly symbol: SymbolView
+  /** How many distinct places reference it. */
+  readonly references: number
+}
+
+/**
+ * What a project consists of, for the question no symbol name can answer.
+ *
+ * The three tools answered "where is X" and "what does X touch"; every one of
+ * them needed a name, so a model asked "where does this project start" had
+ * nothing to call and fell back to listing directories and reading files — the
+ * exact cost this plugin exists to remove. Measured: a session with the graph
+ * built still answered an orientation question with `working_directory`,
+ * `查找文件` and four `读取` calls, because the question names no symbol.
+ *
+ * So this answers from the graph's own shape:
+ *   - **entry candidates**: files whose imports-in degree is zero. In a project
+ *     with one entry that is the entry; in a library it is the public surface.
+ *   - **hubs**: the most-referenced symbols, i.e. what to read before changing
+ *     anything, and the fastest way to learn the vocabulary of an unfamiliar repo.
+ *   - **by language**: how the project splits, so a model can tell a TypeScript
+ *     service from the Go tool beside it without opening a file.
+ *
+ * Every list is bounded and reports its own truncation, because "there are 400
+ * files" is a fact and "here are 40 of them" is what fits.
+ */
+export interface ProjectOverview {
+  /** Files, symbols and edges in the graph. */
+  readonly files: number
+  readonly symbols: number
+  readonly edges: number
+  /** Files per language id, largest first. */
+  readonly byLanguage: { readonly lang: string, readonly files: number }[]
+  /** Files nothing else imports, most-substantial first. */
+  readonly entryCandidates: EntryCandidate[]
+  /** The most-referenced symbols. */
+  readonly hubs: HubSymbol[]
+  /** True when any list was cut to its limit. */
+  readonly truncated: boolean
+}
+
+/**
+ * Answer "what is this project" from the graph alone.
+ *
+ * @param graph - the open graph.
+ * @param limit - how many rows each of the three lists may carry.
+ * @returns the bounded overview.
+ */
+export function projectOverview(graph: Graph, limit: number): ProjectOverview {
+  const counts = oneRow<{ files: number, symbols: number, edges: number }>(
+    graph.db,
+    `SELECT (SELECT COUNT(*) FROM files) AS files,
+            (SELECT COUNT(*) FROM symbols) AS symbols,
+            (SELECT COUNT(*) FROM edges) AS edges`,
+  ) ?? { files: 0, symbols: 0, edges: 0 }
+
+  // Documents hold no symbols and import nothing, so counting them as entry
+  // candidates would fill the list with READMEs. The `lang` column is what tells
+  // them apart without a second table.
+  const languages = allRows<{ lang: string, files: number }>(
+    graph.db,
+    `SELECT lang, COUNT(*) AS files FROM files WHERE lang <> 'document'
+     GROUP BY lang ORDER BY files DESC, lang ASC`,
+  )
+
+  // In-degree zero over `imports` edges, computed in one statement: a file is an
+  // entry candidate when nothing imports it. `LIMIT ? + 1` so truncation is
+  // observed rather than guessed, the same rule `findSymbols` follows.
+  //
+  // Test, example and script files are ordered LAST rather than filtered out.
+  // Measured on a real 1771-file monorepo: the unguarded query filled all six
+  // rows with `*.test.ts` files, because a test is imported by nothing — true,
+  // and useless as "where does this project start". Filtering them out entirely
+  // would answer an empty list for a project made mostly of tests, so they stay
+  // in the list at the end, where a reader can still see them.
+  //
+  // A conventional entry FILENAME is promoted above a plain zero-in-degree file.
+  // In-degree alone misses the real entry: measured on the same monorepo, the
+  // CLI is imported by its own `bun/cli.ts` wrapper, so it has in-degree one and
+  // never appeared — while a 371-symbol HTML template did. `cli`/`main`/`index`
+  // is what a project's own convention calls a start, and that signal is worth
+  // more than the edge count here.
+  const entryRows = allRows<{ path: string, n: number }>(
+    graph.db,
+    `SELECT f.path AS path, COUNT(s.id) AS n
+     FROM files f
+     LEFT JOIN symbols s ON s.path = f.path
+     WHERE f.lang <> 'document'
+       AND NOT EXISTS (
+         SELECT 1 FROM edges e
+         WHERE e.kind = 'imports' AND e.dst = ('file:' || f.path)
+       )
+     GROUP BY f.path
+     ORDER BY
+       CASE
+         WHEN f.path LIKE '%test%' OR f.path LIKE '%spec%'
+           OR f.path LIKE '%example%' OR f.path LIKE '%fixture%'
+           OR f.path LIKE '%/scripts/%' THEN 2
+         WHEN f.path LIKE '%/cli.ts' OR f.path LIKE '%/main.ts'
+           OR f.path LIKE '%/index.ts' OR f.path LIKE '%/entry.ts'
+           OR f.path LIKE '%/app.ts' OR f.path LIKE '%/cli.js'
+           OR f.path LIKE '%/main.js' OR f.path LIKE '%/index.js' THEN 0
+         ELSE 1
+       END ASC,
+       n DESC, f.path ASC
+     LIMIT ?`,
+    limit + 1,
+  )
+
+  const hubRows = allRows<{ id: string, n: number }>(
+    graph.db,
+    // Top-level declarations only, and never a `variable`.
+    //
+    // Measured on a real 1771-file project: the unguarded query ranked
+    // `.filter` (975 referrers), `.trim` (512) and `.includes` (476) as the
+    // project's hubs — built-in method names that happen to match a variable the
+    // parser recorded, which tell a reader nothing about this codebase. Nested
+    // declarations and bare variables are where those collisions live; a
+    // top-level function or type is a real public surface.
+    //
+    // A test helper is demoted for the same reason a test file is: measured on
+    // the same project, `chatSetup` in `test/chat-support.ts` outranked every
+    // production symbol because tests call it everywhere. It is a real hub — but
+    // not the one to read first when learning the codebase.
+    `SELECT e.dst AS id, COUNT(DISTINCT e.src) AS n
+     FROM edges e JOIN symbols s ON s.id = e.dst
+     WHERE e.kind = 'references'
+       AND s.parent IS NULL
+       AND s.kind IN ('function', 'class', 'interface', 'type', 'enum')
+     GROUP BY e.dst
+     ORDER BY
+       CASE WHEN s.path LIKE '%test%' OR s.path LIKE '%spec%'
+                  OR s.path LIKE '%fixture%' THEN 1 ELSE 0 END ASC,
+       n DESC, e.dst ASC
+     LIMIT ?`,
+    limit + 1,
+  )
+
+  const entryCandidates = entryRows.slice(0, limit).map(row => {
+    // The first symbol in the file is the reader's starting point; a file of
+    // pure re-exports has none, which the type admits.
+    const first = oneRow<SymbolRow>(
+      graph.db,
+      `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE path = ? ORDER BY line LIMIT 1`,
+      row.path,
+    )
+    return {
+      path: row.path,
+      symbol: first === undefined ? undefined : toSymbolView(first),
+      symbols: row.n,
+    }
+  })
+
+  const hubs = hubRows.slice(0, limit).flatMap(row => {
+    const symbol = readSymbol(graph, row.id)
+    return symbol === undefined ? [] : [{ symbol, references: row.n }]
+  })
+
+  return {
+    files: counts.files,
+    symbols: counts.symbols,
+    edges: counts.edges,
+    byLanguage: languages,
+    entryCandidates,
+    hubs,
+    truncated: entryRows.length > limit || hubRows.length > limit,
+  }
 }
 
 /**

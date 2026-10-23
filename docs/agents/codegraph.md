@@ -84,9 +84,12 @@ unreadable root reads as zero files. Either way the removal pass must NOT run:
 skip is persisted (`removalSkipped`) and reported, never silent.
 
 **A missing language read as "no symbols here".** A grammar that is not installed,
-or one with no extraction shape, answers `LANGUAGE_UNSUPPORTED` and is counted in
-`meta.unsupported`. An empty symbol list would be indistinguishable from a file
-that genuinely declares nothing.
+or one with no extraction shape, answers `LANGUAGE_UNSUPPORTED` and is counted —
+but the two counts are SEPARATE (`meta.missingLanguage` versus `meta.noRules`).
+Collapsing them told users "N files skipped because the language is not installed"
+for projects whose only gap was a `.css` file, so the settings page asked them to
+download something that would not help. Measured on this machine: every skipped
+file belonged to a language that was already installed.
 
 **An ambiguous name resolved to one match.** A call target that resolves to two or
 more declarations produces NO edge. The graph under-reports; it never guesses.
@@ -96,7 +99,15 @@ three times is ONE edge (three would inflate counts without adding a place to
 read), and a document mentions only names the graph already declares (otherwise
 every English word is an edge).
 
-## 5. When a pass runs
+## 5. Restoring the project list
+
+The queue keeps its project list in memory, so a restart used to show only the
+project a session happened to open — five graphs could be on disk with one
+visible. At activation the plugin now walks `storages/.../projects/` and adopts
+every graph that carries `meta.cwd` (the directory name is a hash of the root and
+cannot be reversed). It reads metadata only; no pass is queued.
+
+## 6. When a pass runs
 
 Three triggers, and they share one queue:
 
@@ -113,7 +124,62 @@ reported by the settings page; the `session/created` listener swallows it there
 and only there, because a rejected promise inside session creation would surface
 as a broken session.
 
-## 6. Freshness
+## 7. Staying out of the kernel's way
+
+The index runs on the KERNEL's event loop, so a phase that never yields does not
+just make the graph slow — it freezes the whole UI. Measured on a 1771-file
+project before these fixes: a first pass held the loop for **241 seconds**, during
+which the window stopped answering, the settings pane came up empty and "new
+session" did nothing. The user-visible symptom is indistinguishable from losing
+every setting.
+
+Four rules follow, each paid for:
+
+- **Yield by TIME, not by file count.** A fixed "every 64 files" bound is not a
+  bound: 64 files that each need a parse and a transaction is seconds. The pass
+  yields after 8ms of work, whatever the files weigh.
+- **Commit in batches.** Phase 2 commits every 50 files and phase 3 every 25
+  documents, with a `setImmediate` between batches, so one long phase cannot hold
+  the loop for its duration.
+- **A mention points at ONE declaration.** This was the single largest cost: a
+  real project's documents produced 103,334 mentions, and at 20 targets each that
+  is two million inserts. The scan itself is cheap (117ms for the same documents);
+  the fan-out is what cost 64 seconds.
+- **Re-derive document edges only when the answer can change** — a document whose
+  bytes moved, or a source file that added or retired symbols. A second pass over
+  an unchanged tree costs **93ms** instead of tens of seconds.
+
+After the fixes, the same project: first pass **17.9s** (longest stall 3.0s),
+second pass **93ms** (longest stall 64ms).
+## 8. The three tools, and the question that names no symbol
+
+`codegraph_find` (where is X declared), `codegraph_impact` (who uses X) and
+`codegraph_context` (what is X's neighbourhood) split by the QUESTION asked, not
+by the data touched — three tools is prompt budget the model spends on every turn.
+
+The first two need a name and always will. `codegraph_context` used to require one
+too, which made the plugin unreachable for the question it was built to answer:
+"what is this project, where does it start" names no symbol, so the model had
+nothing to pass and fell back to listing directories and reading files. Measured
+in a real session with the graph already built: one orientation question produced
+`working_directory`, a file search and four reads. `symbol` is now optional, and
+omitting it answers a **project overview** from the graph's own shape — counts,
+the language split, the files nothing imports, and the most-referenced symbols.
+
+Two ordering rules in that overview were paid for by looking at real output on a
+1771-file monorepo, not by reasoning about it:
+
+- **Test, example and script files rank last** (not out). A test is imported by
+  nothing, so in-degree alone filled every row with `*.test.ts`. Dropping them
+  would answer an empty list for a test-heavy project, so they stay, demoted.
+- **A conventional entry filename outranks symbol count.** The real CLI there is
+  imported by its own `bun/cli.ts` wrapper, so it has in-degree one and never
+  appeared — while a 371-symbol HTML template did.
+- **Hubs are top-level declarations only, and never a `variable`.** The unguarded
+  query answered `.filter` (975 referrers), `.trim` (512) and `.includes` (476):
+  built-in method names matching variables the parser recorded.
+
+## 9. Freshness
 
 Every tool answer carries it, and the three values mean different things to a
 model: `current` — trust it; `stale` — the working tree moved, trust then refresh;
@@ -124,7 +190,7 @@ no tool answer emits it, because the first call queues a pass.
 three-state: no repository on either side means "cannot prove", which must NOT
 read as stale — a pass writes `''` again and the graph would rebuild forever.
 
-## 7. What it does not do
+## 10. What it does not do
 
 Stated here because the tool descriptions promise exactly this and no more:
 
@@ -137,7 +203,7 @@ Stated here because the tool descriptions promise exactly this and no more:
 - **The graph is derived.** Delete it and the next pass rebuilds it; nothing else
   in the app depends on it existing.
 
-## 8. Where the tests are blind
+## 11. Where the tests are blind
 
 Three layers, each blind to something:
 

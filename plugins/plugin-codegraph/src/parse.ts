@@ -33,8 +33,16 @@ import type { EdgeRecord, SymbolKind, SymbolRecord } from './store.ts'
  * differently is a new row, not a new code path.
  */
 export interface GrammarShape {
-  /** Node type → the symbol it declares. */
-  readonly declarations: Readonly<Record<string, { kind: SymbolKind, nameField: string }>>
+  /**
+   * Node type → the symbol it declares.
+   *
+   * `nameField` is the node FIELD carrying the name. Some grammars do not name it
+   * as a field at all — PowerShell's `function_statement` carries the name as a
+   * `function_name` CHILD with no field — so `nameChild` names a child TYPE to
+   * fall back to. Exactly one of the two is required; a row with neither would
+   * silently never produce a symbol, which the per-declaration suite catches.
+   */
+  readonly declarations: Readonly<Record<string, { kind: SymbolKind, nameField?: string, nameChild?: string }>>
   /** Node types that wrap a body whose declarations belong to the enclosing symbol. */
   readonly scopes: readonly string[]
   /** Node type used for a call, and the field naming the callee. */
@@ -178,6 +186,23 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     call: { type: 'command', field: 'name' },
     import: undefined,
   },
+  // PowerShell: the grammar is in the same package, and it is one of the few
+  // "not a mainstream compiled language" ids a Windows project actually uses.
+  //
+  // Neither declaration names its name as a FIELD — measured against the real
+  // grammar: `function_statement` carries a `function_name` CHILD and
+  // `class_statement` a `simple_name` child — which is why the shape grew
+  // `nameChild`. A `nameField: 'name'` here would have produced an empty symbol
+  // list and looked like a language this plugin does not support.
+  powershell: {
+    declarations: {
+      function_statement: { kind: 'function', nameChild: 'function_name' },
+      class_statement: { kind: 'class', nameChild: 'simple_name' },
+    },
+    scopes: ['script_block', 'script_block_body', 'statement_list'],
+    call: { type: 'command', field: 'command_name' },
+    import: undefined,
+  },
   // CSS, INI and regex are DOWNLOADABLE and PARSEABLE but carry no extraction
   // shape on purpose. Their "declarations" are a selector, a config key and a
   // regular-expression fragment: none names a thing a caller can reference, so an
@@ -305,11 +330,18 @@ export interface ParsedFile {
   /** True when the parser produced an ERROR node — the file is partly unread. */
   readonly hasError: boolean
   /**
-   * True when this language has a grammar but no extraction shape, so nothing
-   * was read. Distinct from "this file declares nothing": a tool must be able to
-   * say `LANGUAGE_UNSUPPORTED` rather than report an empty file as fact.
+   * True when nothing was read from this file, because the language cannot be
+   * read at all right now.
+   *
+   * Two causes, and they are reported apart because they ask the user for
+   * different things: `missing` means the grammar is not installed (download it),
+   * `noShape` means it is installed and this plugin has no rules for it (nothing
+   * to download). Collapsing them into one count told users "N files skipped
+   * because their language is not installed" for a project whose only gap was a
+   * `.css` file — measured on this machine, where every skipped file was a
+   * language that IS installed.
    */
-  readonly unsupported: boolean
+  readonly unsupported: false | 'missing' | 'noShape'
 }
 
 /** The symbol id for a declaration. Never includes a line number. */
@@ -399,7 +431,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
   // an empty symbol table — the exact "installed but useless" claim this plugin
   // refuses to make.
   if (shape === undefined || Object.keys(shape.declarations).length === 0) {
-    return { symbols: [], calls: [], imports: [], hasError: hasErrorNode(root), unsupported: true }
+    return { symbols: [], calls: [], imports: [], hasError: hasErrorNode(root), unsupported: 'noShape' }
   }
 
   const symbols: SymbolRecord[] = []
@@ -433,7 +465,17 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
   const walk = (node: SyntaxNode, parent: string | undefined, ownerId: string | undefined): void => {
     const declaration = Object.hasOwn(shape.declarations, node.type) ? shape.declarations[node.type] : undefined
     if (declaration !== undefined) {
-      const nameNode = node.childForFieldName(declaration.nameField)
+      // A named field first; otherwise the first child of the declared TYPE, which
+      // is how PowerShell's `function_statement` (child `function_name`, no
+      // field) is read.
+      const fieldNode = declaration.nameField === undefined
+        ? null
+        : node.childForFieldName(declaration.nameField)
+      const nameNode = fieldNode ?? (
+        declaration.nameChild === undefined
+          ? null
+          : node.namedChildren.find(child => child.type === declaration.nameChild) ?? null
+      )
       const rawName = nameNode === null
         ? ''
         : (declaration.nameField === 'declarator' ? leafName(nameNode) : nameNode.text)
