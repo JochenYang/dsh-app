@@ -21,8 +21,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale runtime's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: the sidebar contract's SlotMap merge ('sidebar.panellist' and its
+// owner props). Without it the name is not a known slot and the registration does
+// not compile — the same reason plugin-workbench imports both of these.
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the main seat is declared by the layout package, so its keyed
+// panel key is a known slot name only where that package's types are in scope.
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { CodegraphSection } from './client/section.tsx'
 import { GraphTab } from './client/graph-tab.tsx'
+import { CodegraphPage, CodegraphPanelIcon } from './client/page.tsx'
 import { en as codegraphEn, NS as CODEGRAPH_NS, zh as codegraphZh } from './client/locales.ts'
 import type { CodegraphKey } from './client/locales.ts'
 import { adoptStyles } from './client/styles.ts'
@@ -48,6 +56,18 @@ const SECTION_TITLE = 'codegraph.title' satisfies CodegraphKey
 /** The conversation view tab's id and its label key (`Files`). */
 const VIEW_ID = 'codegraph'
 const VIEW_TITLE = 'codegraph.view.title' satisfies CodegraphKey
+
+/**
+ * The sidebar row's id, and the `main` panel key it opens.
+ *
+ * ONE constant, exported nowhere and used in both registrations, because nothing
+ * checks the pair: the list slot types `id` as an open string, the layout package
+ * types the panel key as its own brand, and the slot gate compares slot names
+ * rather than keys. A drift therefore surfaces only as a thrown
+ * `main panel "…" is not registered` in the running app.
+ */
+const PANEL_ID = 'codegraph'
+const PAGE_TITLE = 'codegraph.page.title' satisfies CodegraphKey
 
 /**
  * Client apply: register the dictionaries and the settings section.
@@ -98,4 +118,30 @@ export function apply(ctx: ClientContext): void {
     locale: CODEGRAPH_NS,
     label: () => t(VIEW_TITLE),
   }, GraphTab))
+
+  // --- The sidebar page: every project, then one project's graph. ------------
+  //
+  // The conversation tab can only ever show the CURRENT session's project, so it
+  // cannot answer "which projects have a graph". This page is that surface, and
+  // it is the same `GraphPanel` the tab draws — one implementation, two doors.
+  //
+  // `id` and `key` are the SAME constant: the row selects a main panel by key, and
+  // nothing type-checks the pair. A drift throws `main panel "…" is not registered`
+  // in the running app, which is why `plugin-workbench` exports its id for exactly
+  // this reason and why this one does too.
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: PANEL_ID,
+    // After the kernel's own rows (插件 0, 自动化任务 10) and before the suite's
+    // workbench hub (-1 is above everything; this one sits with the tools).
+    order: 5,
+    locale: CODEGRAPH_NS,
+    label: () => t(PAGE_TITLE),
+  }, CodegraphPanelIcon))
+
+  ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main',
+    key: PANEL_ID,
+    locale: CODEGRAPH_NS,
+  }, CodegraphPage))
 }

@@ -32,7 +32,7 @@ import { NS, type CodegraphKey } from './locales.ts'
 const ROUTE_PREFIX = '/api/plugins/dsh-app/codegraph'
 
 /** The view's translate seat. */
-type CodegraphTranslate = TranslateNS<typeof NS>
+export type CodegraphTranslate = TranslateNS<typeof NS>
 
 /** One file node as the host reports it. */
 interface FileNode {
@@ -328,8 +328,24 @@ export interface GraphTabProps extends PropsLocale<typeof NS> {
 }
 
 /** The tab body. */
-export function GraphTab({ sessionId, useSessions, t }: GraphTabProps): ReactNode {
-  const cwd = useProjectDir(useSessions ?? NO_SESSIONS, sessionId)
+/**
+ * One project's graph, loaded and rendered.
+ *
+ * Extracted from `GraphTab` so the conversation view and the sidebar page draw
+ * the SAME surface from the same rules: one place decides when a project is
+ * `indexing` rather than empty, when to poll, and which of the two screens to
+ * show. A second copy would drift on the first fix.
+ *
+ * @param props.cwd - the project to read; undefined renders the empty note.
+ * @param props.t - this plugin's dictionary.
+ * @param props.emptyNote - what to say when there is no project (the two callers
+ *   have different reasons for that: no session, versus nothing selected).
+ */
+export function GraphPanel({ cwd, t, emptyNote }: {
+  cwd: string | undefined
+  t: CodegraphTranslate
+  emptyNote: string
+}): ReactNode {
   const [answer, setAnswer] = useState<GraphAnswer | undefined>(undefined)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [openPath, setOpenPath] = useState<string | undefined>(undefined)
@@ -359,6 +375,14 @@ export function GraphTab({ sessionId, useSessions, t }: GraphTabProps): ReactNod
     }
   }, [cwd, openPath])
 
+  // A different project is a different graph: drop the open file and the previous
+  // answer, or the new project would briefly render the old one's symbols.
+  useEffect(() => {
+    setOpenPath(undefined)
+    setAnswer(undefined)
+    setFailure(undefined)
+  }, [cwd])
+
   useEffect(() => { void load() }, [load])
 
   // While the host reports `indexing`, ask again. The first visit to a project
@@ -375,7 +399,7 @@ export function GraphTab({ sessionId, useSessions, t }: GraphTabProps): ReactNod
   }, [answer, load])
 
   if (cwd === undefined) {
-    return <p className="dshcg_viewNote dshcg_viewPad">{t('codegraph.view.noSession')}</p>
+    return <p className="dshcg_viewNote dshcg_viewPad">{emptyNote}</p>
   }
   if (failure !== undefined) {
     // The host's own diagnostic, which names the cause; the copy above it says
@@ -397,4 +421,10 @@ export function GraphTab({ sessionId, useSessions, t }: GraphTabProps): ReactNod
     return <p className="dshcg_viewNote dshcg_viewPad">{t('codegraph.view.empty')}</p>
   }
   return <FileOverview files={answer.files} onOpen={setOpenPath} t={t} />
+}
+
+/** The tab body: one project's graph, chosen by the current session. */
+export function GraphTab({ sessionId, useSessions, t }: GraphTabProps): ReactNode {
+  const cwd = useProjectDir(useSessions ?? NO_SESSIONS, sessionId)
+  return <GraphPanel cwd={cwd} t={t} emptyNote={t('codegraph.view.noSession')} />
 }

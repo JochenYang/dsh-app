@@ -66,6 +66,13 @@ export const en = {
 
   // The conversation-page view (W10c). Its copy lives here, with the settings
   // page's, because one plugin owns one dictionary.
+  'codegraph.page.title': 'Code graph',
+  'codegraph.page.count': '{count} projects',
+  'codegraph.page.projects': 'Projects',
+  'codegraph.page.empty': 'No project has a graph yet. Open a session in one, or pick one from the list once it has been indexed.',
+  'codegraph.page.pick': 'Pick a project to see its graph.',
+  'codegraph.page.when': 'Indexed {when}',
+  'codegraph.page.never': 'Never indexed',
   'codegraph.view.title': 'Code graph',
   'codegraph.view.loading': 'Loading the graph…',
   'codegraph.view.indexing': 'Building this project’s graph. It will appear here when the first pass finishes.',
@@ -136,6 +143,13 @@ export const zh: Readonly<Record<CodegraphKey, string>> = {
   'codegraph.host.unknown': '与图谱通信时出错：{detail}',
 
   // 会话页的图谱视图（W10c）。
+  'codegraph.page.title': '代码图谱',
+  'codegraph.page.count': '{count} 个项目',
+  'codegraph.page.projects': '项目',
+  'codegraph.page.empty': '还没有项目建立图谱。在某个项目里开一次会话，索引完成后它会出现在这里。',
+  'codegraph.page.pick': '选择一个项目查看它的图谱。',
+  'codegraph.page.when': '索引于 {when}',
+  'codegraph.page.never': '尚未索引',
   'codegraph.view.title': '代码图谱',
   'codegraph.view.loading': '正在读取图谱…',
   'codegraph.view.indexing': '正在建立这个项目的图谱，第一遍完成后会显示在这里。',

@@ -371,3 +371,37 @@ describe('the clickable rows', () => {
     assert.equal(/--dsw-alias-bg-layer/u.test(hover), false, 'and not a layer token')
   })
 })
+
+describe('the sidebar page', () => {
+  it('registers one row and one panel under the SAME id', () => {
+    // The pair nothing type-checks: the list slot types `id` as an open string and
+    // the layout package types the panel key as its own brand, so a drift between
+    // them surfaces only as a thrown `main panel "…" is not registered` in the
+    // running app. One constant used twice is what turns it into a compile error.
+    const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
+    assert.match(client, /const PANEL_ID = '[a-z]+'/u, 'the shared id must be one constant')
+    assert.match(client, /name: 'sidebar\.panellist',\s*\n\s*id: PANEL_ID,/u, 'the sidebar row uses it as its id')
+    assert.match(client, /name: 'main',\s*\n\s*key: PANEL_ID,/u, 'the main panel uses it as its key')
+  })
+
+  it('gives the rail a selected state that is not a hover', () => {
+    // A selection must survive the pointer leaving. The hover wash alone would
+    // read as "the mouse happens to be here", which is the wrong claim about
+    // which project the panel below is showing.
+    const body = readFileSync(SOURCE, 'utf8')
+    const at = body.indexOf(".dshcg_proj[data-selected='1'] {")
+    assert.ok(at > 0, 'the selected row needs its own rule')
+    const block = body.slice(at, body.indexOf('\n}', at))
+    assert.match(block, /background:/u, 'the selected row must be visibly filled')
+  })
+
+  it('lets the rail scroll on its own', () => {
+    // A project list grows without bound; the graph beside it must keep its own
+    // height. Without `min-height: 0` on both the flex body and the rail, the
+    // rail's content sets the page height and the graph is pushed off screen.
+    const body = readFileSync(SOURCE, 'utf8')
+    const rail = body.slice(body.indexOf('.dshcg_pageRail {'), body.indexOf('\n}', body.indexOf('.dshcg_pageRail {')))
+    assert.match(rail, /overflow-y:\s*auto/u, 'the rail owns its scroll')
+    assert.match(rail, /min-height:\s*0/u, 'and a zero minimum, or it cannot scroll inside a flex column')
+  })
+})

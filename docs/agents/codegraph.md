@@ -43,7 +43,8 @@ Two properties of symbol ids matter and both were paid for:
 | `src/docs.ts` | which symbols a document NAMES | parse markdown |
 | `src/indexer.ts` | the walk, the incremental comparison, the three phases | write SQL |
 | `src/query.ts` | every read the three tools perform | own state |
-| `src/routes.ts` | the settings page's HTTP surface | compute index state |
+| `src/routes.ts` | the settings page's and the pages' HTTP surface | compute index state |
+| `src/client/page.tsx` | the sidebar page: every project, then one project's graph | own a second copy of the graph surface (it reuses `GraphPanel`) |
 | `src/index.ts` | tool registration and the composition | — |
 
 `store.ts` is the only module that writes SQL and `indexer.ts` is the only module

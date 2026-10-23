@@ -307,6 +307,142 @@ const cssText = `
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
 }
+/* --- The sidebar page: a project rail beside one project's graph. --- */
+.dshcg_page {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  /* Opaque: this page is a whole pane, and the shell paints this colour behind
+     every other one. */
+  background: var(--dsw-alias-bg-base);
+}
+.dshcg_pageHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: none;
+  padding: 16px 20px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  min-width: 0;
+}
+.dshcg_pageTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+.dshcg_pageMeta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.dshcg_pageBody {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+.dshcg_pageRail {
+  flex: 0 0 232px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 8px;
+  border-right: 1px solid var(--dsw-alias-border-l1);
+  min-width: 0;
+}
+.dshcg_projs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dshcg_proj {
+  box-sizing: border-box;
+  display: grid;
+  /* Name on the first line, when and state under it: a project path is long and
+     a single-line row would truncate the only part that identifies it. */
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'name state' 'meta state';
+  align-items: center;
+  gap: 1px 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dshcg_proj:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dshcg_proj:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-primary);
+  outline-offset: -2px;
+}
+/* The selected row is a STATE, not a hover: it must survive the pointer leaving,
+   so it uses the pressed wash plus a rail marker. */
+.dshcg_proj[data-selected='1'] {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+.dshcg_projName {
+  grid-area: name;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.dshcg_projMeta {
+  grid-area: meta;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.dshcg_projState {
+  grid-area: state;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+.dshcg_projState[data-state='current'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+.dshcg_projState[data-state='stale'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+.dshcg_projState[data-state='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+.dshcg_pageMain {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.dshcg_pagePath {
+  flex: none;
+  padding: 10px 20px 0;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--ds-font-family-code, ui-monospace, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .dshcg_viewFile {
   box-sizing: border-box;
   display: flex;
