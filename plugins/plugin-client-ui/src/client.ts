@@ -334,7 +334,10 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: MAINTENANCE_SECTION_ID,
-    order: 24,
+    // 26: after the code graph (24) and upstream's pinned 已归档会话 row (25).
+    // The graph is about this project's source, which reads before a page about
+    // the suite's own health.
+    order: 26,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: NS,
     label: () => t('maint.nav'),
@@ -365,7 +368,8 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: ABOUT_SECTION_ID,
-    order: 26,
+    // 27: last, after 维护设置 (26). "What am I running" closes the rail.
+    order: 27,
     // `locale:` puts the namespace-bound `t` seat on the component's props.
     locale: NS,
     label: () => t('about.nav'),

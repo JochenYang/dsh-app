@@ -61,7 +61,27 @@ export const en = {
   'codegraph.host.unknownProject': 'No graph has been opened for "{cwd}".',
   'codegraph.host.unknownAction': 'Unknown action "{action}".',
   'codegraph.host.actionFailed': 'The {action} action failed: {detail}',
+  'codegraph.host.graphFailed': 'Could not read the graph: {detail}',
   'codegraph.host.unknown': 'Something went wrong talking to the graph: {detail}',
+
+  // The conversation-page view (W10c). Its copy lives here, with the settings
+  // page's, because one plugin owns one dictionary.
+  'codegraph.view.title': 'Code graph',
+  'codegraph.view.loading': 'Loading the graph…',
+  'codegraph.view.indexing': 'Building this project’s graph. It will appear here when the first pass finishes.',
+  'codegraph.view.empty': 'No graph for this project yet. It is built the first time a session here uses a codegraph tool.',
+  'codegraph.view.emptyFile': 'This file declares no symbols.',
+  'codegraph.view.truncated': 'Showing {kept} of {total}.',
+  'codegraph.view.noSession': 'Open a session to see its project graph.',
+  'codegraph.view.totals': '{files} of {total} files',
+  'codegraph.view.root': 'Project root',
+  'codegraph.view.refs': '{count} refs',
+  'codegraph.view.colKind': 'Kind',
+  'codegraph.view.colName': 'Name',
+  'codegraph.view.colLine': 'Line',
+  'codegraph.view.colCalls': 'Calls',
+  'codegraph.view.back': 'All files',
+  'codegraph.view.fileMeta': '{count} symbols',
 } as const
 
 /** The key union every dictionary must cover exactly. */
@@ -112,5 +132,24 @@ export const zh: Readonly<Record<CodegraphKey, string>> = {
   'codegraph.host.unknownProject': '尚未为 "{cwd}" 打开过图谱。',
   'codegraph.host.unknownAction': '未知操作 "{action}"。',
   'codegraph.host.actionFailed': '{action} 操作失败：{detail}',
+  'codegraph.host.graphFailed': '无法读取图谱：{detail}',
   'codegraph.host.unknown': '与图谱通信时出错：{detail}',
+
+  // 会话页的图谱视图（W10c）。
+  'codegraph.view.title': '代码图谱',
+  'codegraph.view.loading': '正在读取图谱…',
+  'codegraph.view.indexing': '正在建立这个项目的图谱，第一遍完成后会显示在这里。',
+  'codegraph.view.empty': '这个项目还没有图谱。在此项目里第一次用到图谱工具时会自动建立。',
+  'codegraph.view.emptyFile': '这个文件没有声明任何符号。',
+  'codegraph.view.truncated': '显示前 {kept} 个，共 {total} 个。',
+  'codegraph.view.noSession': '打开一个会话即可查看该项目的图谱。',
+  'codegraph.view.totals': '{total} 个文件中的 {files} 个',
+  'codegraph.view.root': '项目根目录',
+  'codegraph.view.refs': '{count} 处引用',
+  'codegraph.view.colKind': '类型',
+  'codegraph.view.colName': '名称',
+  'codegraph.view.colLine': '行号',
+  'codegraph.view.colCalls': '调用',
+  'codegraph.view.back': '全部文件',
+  'codegraph.view.fileMeta': '{count} 个符号',
 }

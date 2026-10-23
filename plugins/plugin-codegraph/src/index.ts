@@ -499,6 +499,7 @@ export function apply(ctx: Context): void {
       try { unlinkSync(file) } catch { /* absent is the already-removed case */ }
     },
     reindex: async (cwd) => { await queue.request(cwd) },
+    graphFor,
   }))
 
   ctx.effect(() => async () => {
@@ -513,6 +514,31 @@ export function apply(ctx: Context): void {
     }
     graphs.clear()
   }, 'plugin-codegraph: tools, routes and graphs')
+
+  /**
+   * Build a project's graph when a session enters it, without being asked.
+   *
+   * The graph used to appear only after a session called one of the tools, which
+   * made the settings page and the view empty for every project the user had not
+   * queried — the index existed but only ever ran on demand. `session/created`
+   * fires when a session is entered and announced, so it covers BOTH a new
+   * session and a resumed one: an old session reopened after this plugin was
+   * installed still gets its project indexed, which is the promise.
+   *
+   * `queue.request` is idempotent while a project is queued or running, so the
+   * several events one project produces cost one pass, and a failure is recorded
+   * on the project rather than thrown into the session's creation path.
+   */
+  ctx.on('session/created', (session) => {
+    const cwd = session.header.cwd
+    if (typeof cwd !== 'string' || cwd === '') return
+    void queue.request(cwd).catch(() => {
+      // Deliberately swallowed HERE and nowhere else: this listener runs inside
+      // session creation, and a rejected promise there would surface as a broken
+      // session. The failure is not lost — `request` records it on the project,
+      // which the settings page reports.
+    })
+  })
 }
 
 /** The session's cwd, or a throw the model can act on. */

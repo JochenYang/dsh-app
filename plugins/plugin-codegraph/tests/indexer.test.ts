@@ -112,6 +112,20 @@ describe('scanProject', () => {
     assert.deepEqual(files.map(file => file.path).sort(), ['a.ts'])
   })
 
+  it('skips .NET build output', () => {
+    // Measured on a real WPF project: `obj/Release/net9.0-windows` and its
+    // `win-x64` variant added ten generated files that declare nothing, and the
+    // view listed them as two blocks of "0 symbols" under a path nobody wrote.
+    const { root } = project()
+    write(root, 'Program.cs', 'SYM a')
+    write(root, 'obj/Release/net9.0-windows/App.AssemblyInfo.cs', 'SYM generated')
+    write(root, 'obj/Release/net9.0-windows/win-x64/App.AssemblyInfo.cs', 'SYM generated')
+    write(root, 'bin/Debug/net9.0/App.cs', 'SYM generated')
+
+    const { files } = scanProject(root)
+    assert.deepEqual(files.map(file => file.path), ['Program.cs'])
+  })
+
   it('reports truncation instead of silently covering part of a tree', () => {
     const { root } = project()
     for (let index = 0; index < 5; index += 1) write(root, `f${String(index)}.ts`, 'SYM x')

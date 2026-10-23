@@ -25,13 +25,25 @@ import {
   type CodegraphRoutesOptions,
 } from '../src/routes.ts'
 import type { ProjectStatus } from '../src/queue.ts'
+import { openGraph, replaceFile, type FileRecord, type Graph, type SymbolRecord } from '../src/store.ts'
 
 const created: string[] = []
+/** Graphs this file opened; closed before their directories go. */
+const opened: Graph[] = []
 
 after(() => {
+  for (const graph of opened.splice(0)) { try { graph.close() } catch { /* already closed */ } }
   for (const dir of created.splice(0)) {
     try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
   }
+})
+
+/** A file row for a view case. */
+const file = (path: string): FileRecord => ({ path, mtime: 1, size: 1, hash: `h-${path}`, lang: 'typescript' })
+
+/** A symbol row for a view case. */
+const sym = (path: string, name: string, line = 1): SymbolRecord => ({
+  id: `${path}#function:${name}`, path, name, kind: 'function', line, parent: undefined,
 })
 
 type FetchHandler = (request: Request) => Promise<Response>
@@ -111,19 +123,22 @@ function options(over: Partial<CodegraphRoutesOptions> = {}): CodegraphRoutesOpt
     installLanguage: async (id) => { actions.push(`install:${id}`) },
     removeLanguage: async (id) => { actions.push(`remove:${id}`) },
     reindex: async (cwd) => { actions.push(`reindex:${cwd}`) },
+    graphFor: () => { throw new Error('this case does not read the graph') },
     ...over,
   }
 }
 
 describe('route registration', () => {
-  it('registers the three routes under the plugin prefix with the admitted methods', async () => {
+  it('registers the four routes under the plugin prefix with the admitted methods', async () => {
     const { routes, dispose } = harness(options())
     assert.deepEqual([...routes.keys()].sort(), [
       `${ROUTE_PREFIX}/action`,
+      `${ROUTE_PREFIX}/graph`,
       `${ROUTE_PREFIX}/languages`,
       `${ROUTE_PREFIX}/status`,
     ])
     assert.deepEqual([...routes.get(`${ROUTE_PREFIX}/status`)!.methods], ['GET'])
+    assert.deepEqual([...routes.get(`${ROUTE_PREFIX}/graph`)!.methods], ['GET'])
     assert.deepEqual([...routes.get(`${ROUTE_PREFIX}/action`)!.methods], ['POST'])
     // No `@` in any segment (the registry rejects it), and the shared prefix is
     // the suite's own `/api/plugins/dsh-app/<plugin>` shape.
@@ -147,6 +162,65 @@ describe('GET /status', () => {
     // field used to ride along and reached the browser while nothing read it —
     // a local path in the page for no benefit.
     assert.deepEqual(Object.keys(value).sort(), ['projects'])
+    await dispose()
+  })
+})
+
+describe('GET /graph', () => {
+  it('queues an unknown project and answers indexing, rather than an error', async () => {
+    // Opening the view IS the request for that project's graph, and
+    // `session/created` fires once — so a session that predates this plugin never
+    // queues its project on its own. Answering 404 left the page permanently empty
+    // for exactly those sessions, which is the state this view was shipped in.
+    //
+    // The fence still holds: the route queues the path the SESSION names, and the
+    // queue is what decides whether a pass runs. Nothing here reads the disk.
+    const { routes, dispose } = harness(options())
+    const route = routes.get(`${ROUTE_PREFIX}/graph`)!
+
+    const missing = await call(route, new Request('dsh-app://app/x'))
+    assert.equal(missing.status, 400)
+    assert.equal((missing.body.error as { host?: { code?: string } }).host?.code, 'route.cwdRequired')
+
+    const unknown = await call(route, new Request('dsh-app://app/x?cwd=D:/elsewhere'))
+    assert.equal(unknown.status, 200)
+    assert.equal((unknown.body.value as { kind: string }).kind, 'indexing')
+    await dispose()
+  })
+
+  it('answers the file overview by default, and one file’s symbols when asked', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cg-graph-route-'))
+    created.push(dir)
+    const g = openGraph(join(dir, 'view.db'))
+    opened.push(g)
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'alpha'), sym('a.ts', 'beta', 2)], [])
+    const opts = options({ graphFor: () => g })
+    const { routes, dispose } = harness(opts)
+
+    // The route is keyed WITHOUT its query string (that is the registered path);
+    // the project and the file travel in the request URL, which is what the
+    // handler reads.
+    const route = routes.get(`${ROUTE_PREFIX}/graph`)!
+    const overview = await call(route, new Request('dsh-app://app/x?cwd=D:/codes/a'))
+    assert.equal(overview.status, 200)
+    const files = overview.body.value as { kind: string, files: { nodes: { path: string }[] } }
+    assert.equal(files.kind, 'files')
+    assert.deepEqual(files.files.nodes.map(node => node.path), ['a.ts'])
+
+    const detail = await call(route, new Request('dsh-app://app/x?cwd=D:/codes/a&path=a.ts'))
+    assert.equal(detail.status, 200)
+    const symbols = detail.body.value as { kind: string, symbols: { nodes: { name: string }[] } }
+    assert.equal(symbols.kind, 'symbols')
+    assert.deepEqual(symbols.symbols.nodes.map(node => node.name), ['alpha', 'beta'])
+    await dispose()
+  })
+
+  it('reports a read failure as a coded 500 rather than throwing', async () => {
+    const opts = options({ graphFor: () => { throw new Error('database is locked') } })
+    const { routes, dispose } = harness(opts)
+    const reply = await call(routes.get(`${ROUTE_PREFIX}/graph`)!, new Request('dsh-app://app/x?cwd=D:/codes/a'))
+    assert.equal(reply.status, 500)
+    assert.equal((reply.body.error as { host?: { code?: string } }).host?.code, 'route.graphFailed')
     await dispose()
   })
 })

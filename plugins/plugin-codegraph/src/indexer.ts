@@ -57,6 +57,11 @@ const SKIP_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor',
   '.next', '.nuxt', '.cache', '.turbo', '.venv', 'venv', '__pycache__',
   'coverage', '.test-dist', 'lib', 'release', 'runtime-dist', 'bundled-kernel',
+  // .NET build output. Measured on a real WPF project: `obj/Release/net9.0-windows`
+  // and its `win-x64` variant contributed ten files that declare nothing, and the
+  // view listed them as two blocks of "0 symbols" under a path nobody wrote. A
+  // generated file has no place in a graph of the source.
+  'obj', 'bin',
 ])
 
 /** A file that is large enough to be generated rather than written. */

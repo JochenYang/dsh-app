@@ -30,10 +30,10 @@ Two rules, and they are the reason this file exists:
 | 21 | 用量统计 / Usage | this suite |
 | 22 | 会话记忆 / Memory | this suite |
 | 23 | 会话归档 / Archives | this suite |
-| 24 | 维护设置 / Maintenance | this suite |
+| 24 | 代码图谱 / Code graph | this suite |
 | 25 | upstream, PINNED | upstream |
-| 26 | 关于 DSH-APP / About | this suite |
-| 27 | 代码图谱 / Code graph | this suite |
+| 26 | 维护设置 / Maintenance | this suite |
+| 27 | 关于 DSH-APP / About | this suite |
 
 **维护设置 is ONE section with three tabs**, not three sections: 预设包 2,
 诊断 3, 撤回隔离区 4. It is declared by the section owner through the

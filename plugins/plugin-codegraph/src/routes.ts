@@ -19,6 +19,8 @@ import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import type { ProjectStatus } from './queue.ts'
 import { LANGUAGES, languageStatuses, type GrammarPaths, type LanguageStatus } from './languages.ts'
 import { SUPPORTED_LANGUAGE_IDS } from './parse.ts'
+import { fileGraph, symbolGraph, type FileGraph, type SymbolGraph } from './graph-view.ts'
+import type { Graph } from './store.ts'
 
 /** Everything the routes read, supplied by the plugin. */
 export interface CodegraphRoutesOptions {
@@ -32,10 +34,37 @@ export interface CodegraphRoutesOptions {
   readonly removeLanguage: (id: string) => Promise<void>
   /** Ask for a pass on one project. */
   readonly reindex: (cwd: string) => Promise<void>
+  /**
+   * Open one project's graph, for the view.
+   *
+   * Injected rather than opened here: the plugin owns the handle cache (one open
+   * database per project, closed on unload), and a route that opened its own would
+   * be a second connection to a file SQLite already has open in this process.
+   */
+  readonly graphFor: (cwd: string) => Graph
 }
 
 /** The path prefix every route in this plugin owns. */
 export const ROUTE_PREFIX = '/api/plugins/dsh-app/codegraph'
+
+/**
+ * What `GET /graph` answers.
+ *
+ * A tagged union rather than two optional fields: the view switches on `kind`, and
+ * a shape with both `files` and `symbols` possibly-present would make "the
+ * overview came back empty" indistinguishable from "the detail did".
+ */
+export type GraphAnswer =
+  | { readonly kind: 'files', readonly files: FileGraph }
+  | { readonly kind: 'symbols', readonly symbols: SymbolGraph }
+  /**
+   * The project has no graph yet and a pass was just queued.
+   *
+   * A distinct answer rather than a 404: opening the view IS the request to build
+   * one, so the client shows "building" and asks again instead of rendering an
+   * error the user cannot act on.
+   */
+  | { readonly kind: 'indexing' }
 
 /**
  * The languages this plugin has extraction rules for, as a set.
@@ -225,6 +254,51 @@ export function registerCodegraphRoutes(connectionFetch: HostConnectionFetch, op
     }
   }
 
+  /**
+   * The graph view's data: the file overview, or one file's symbols.
+   *
+   * Two levels through ONE route because they are one picture at two zooms, and
+   * because the overview is what the view asks for first: a separate route for the
+   * detail would either duplicate the "is this project known" check or skip it.
+   *
+   * The cwd is checked against the queue's known projects, exactly as `reindex`
+   * does: a route that opened a graph for any path a caller named would let a
+   * request choose what this process reads off disk.
+   */
+  const graphFetch = async (request: Request): Promise<Response> => {
+    const url = new URL(request.url)
+    const cwd = url.searchParams.get('cwd')
+    if (cwd === null || cwd === '') {
+      return fail(400, 'cwd-required', { code: 'route.cwdRequired', text: 'this request needs a project directory' })
+    }
+    // A project the queue has never seen is NOT an error: opening the view is the
+    // user asking for that project's graph, and answering "no graph has been
+    // opened" would leave the page permanently empty for every session that
+    // predates this plugin — `session/created` fires once, so an existing session
+    // never queues its project on its own.
+    //
+    // So: queue it and answer `indexing`. The view polls, the first pass lands,
+    // and the same request then answers the graph. `reindex` is idempotent while a
+    // pass is queued or running, so a poll loop costs one pass, not one per tick.
+    if (!options.statuses().some(status => status.cwd === cwd)) {
+      void options.reindex(cwd).catch(() => {
+        // Recorded on the project by the queue; the next poll reports it.
+      })
+      return ok({ kind: 'indexing' } satisfies GraphAnswer)
+    }
+    try {
+      const graph = options.graphFor(cwd)
+      const path = url.searchParams.get('path')
+      if (path !== null && path !== '') {
+        return ok({ kind: 'symbols', symbols: symbolGraph(graph, path) } satisfies GraphAnswer)
+      }
+      return ok({ kind: 'files', files: fileGraph(graph) } satisfies GraphAnswer)
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return fail(500, 'graph-failed', { code: 'route.graphFailed', params: { detail }, text: `could not read the graph: ${detail}` })
+    }
+  }
+
   disposers.push(connectionFetch.register({
     path: `${ROUTE_PREFIX}/status`,
     methods: ['GET'],
@@ -236,6 +310,12 @@ export function registerCodegraphRoutes(connectionFetch: HostConnectionFetch, op
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: languagesFetch,
+  }))
+  disposers.push(connectionFetch.register({
+    path: `${ROUTE_PREFIX}/graph`,
+    methods: ['GET'],
+    requestBody: 'buffered',
+    fetch: graphFetch,
   }))
   disposers.push(connectionFetch.register({
     path: `${ROUTE_PREFIX}/action`,

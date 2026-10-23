@@ -33,6 +33,8 @@ import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 function fakeContext() {
   const tools: string[] = []
   const routes: ConnectionFetchRoute[] = []
+  /** Every `ctx.on` listener, by event name, so the auto-index rule is testable. */
+  const listeners = new Map<string, ((...args: never[]) => void)[]>()
   let dispose: (() => void) | (() => Promise<void>) | undefined
   const ctx = {
     tools: {
@@ -49,13 +51,28 @@ function fakeContext() {
         },
       },
     },
+    /** Cordis `ctx.on`: the disposer is registered with the fiber, not tracked here. */
+    on(event: string, listener: (...args: never[]) => void): () => void {
+      const list = listeners.get(event)
+      if (list === undefined) listeners.set(event, [listener])
+      else list.push(listener)
+      return () => {
+        const current = listeners.get(event) ?? []
+        const at = current.indexOf(listener)
+        if (at >= 0) current.splice(at, 1)
+      }
+    },
+    /** Fire one event at the listeners the plugin registered. */
+    emit(event: string, ...args: never[]): void {
+      for (const listener of [...(listeners.get(event) ?? [])]) listener(...args)
+    },
     // Cordis runs an effect body on activation and its returned disposer on
     // unload; the fake captures both so the test can exercise the teardown.
     effect(body: () => (() => void) | (() => Promise<void>)): void {
       dispose = body()
     },
   }
-  return { ctx, tools, routes, disposeAll: async () => { await dispose?.() } }
+  return { ctx, tools, routes, listeners, disposeAll: async () => { await dispose?.() } }
 }
 
 describe('apply', () => {
@@ -70,7 +87,7 @@ describe('apply', () => {
     apply(ctx as never)
     assert.deepEqual(
       routes.map(route => route.path).sort(),
-      [`${ROUTE_PREFIX}/action`, `${ROUTE_PREFIX}/languages`, `${ROUTE_PREFIX}/status`].sort(),
+      [`${ROUTE_PREFIX}/action`, `${ROUTE_PREFIX}/graph`, `${ROUTE_PREFIX}/languages`, `${ROUTE_PREFIX}/status`].sort(),
     )
   })
 
@@ -80,10 +97,35 @@ describe('apply', () => {
     // not on a warning.
     const { ctx, tools, routes, disposeAll } = fakeContext()
     apply(ctx as never)
-    assert.ok(tools.length === 3 && routes.length === 3)
+    assert.ok(tools.length === 3 && routes.length === 4)
     await disposeAll()
     assert.deepEqual(tools, [], 'every tool registration was disposed')
     assert.deepEqual(routes, [], 'every route registration was disposed')
+  })
+
+  it('starts a pass for a project when a session enters it', () => {
+    // The graph used to be built only when a tool was called, so the settings page
+    // and the view stayed empty for every project the user had not queried.
+    // session/created fires on entering AND resuming, so an old session reopened
+    // after install still gets indexed.
+    const { ctx, listeners } = fakeContext()
+    apply(ctx as never)
+    const registered = listeners.get('session/created') ?? []
+    assert.equal(registered.length, 1, 'the plugin listens for session creation exactly once')
+  })
+
+  it('ignores a session with no working directory', () => {
+    // A blank or absent cwd is not a project: queueing it would create a graph
+    // file keyed by an empty string.
+    const { ctx, listeners } = fakeContext()
+    apply(ctx as never)
+    const fire = listeners.get('session/created')?.[0]
+    assert.ok(fire !== undefined)
+    // Both shapes a header can carry; neither may throw out of the listener,
+    // which runs inside session creation.
+    for (const header of [{}, { cwd: '' }]) {
+      assert.doesNotThrow(() => fire({ header } as never))
+    }
   })
 
   it('declares the module contract the loader reads', () => {

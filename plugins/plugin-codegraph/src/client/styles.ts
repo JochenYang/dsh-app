@@ -157,6 +157,263 @@ const cssText = `
   font-weight: 600;
   color: var(--dsw-alias-label-primary);
 }
+.dshcg_viewPad {
+  /* The view's ROOT, and it owns the scroll.
+     The slot is rendered inside the conversation's viewArea element, which is a flex
+     COLUMN: its height comes from flex, and a percentage height on a flex child
+     resolves against that, not against the region. A first attempt of height 100%
+     alone therefore left the root at content height and the surface collapsed.
+     Flex-grow with a zero minimum is what makes a child fill that column, and the
+     auto vertical overflow keeps a tall graph scrollable inside it. */
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 32px;
+  /* Opaque, so the conversation pane's watermark does not read through the
+     list. The shell paints this same base colour behind the transcript. */
+  background: var(--dsw-alias-bg-base);
+}
+/* Take the pane over while THIS view is mounted.
+   The composer belongs to the conversation shell, not to the view, so a view that
+   wants the whole pane has to say so — and the way dsh-context says it, read off
+   its own stylesheet, is a has-rule keyed on the view's root class. Nothing reads
+   state: the rule applies exactly while the root exists, and the shell's draft
+   survives because the composer is hidden rather than unmounted.
+   The not-has clause is the part that matters most: an approval, a
+   question or a plan review must stay visible even here, or this view would hide
+   the control that the session is waiting on. */
+[data-conversation-scroll]:has(.dshcg_viewPad, .dshcg_viewFile) > [data-composer-seat]:not(:has([data-approval-key], [data-question-key], [data-plan-review-key])) {
+  display: none;
+}
+/* The transcript-width handles are FOLLOWING SIBLINGS of the scroller, so the
+   combinator is a sibling tilde, not a descendant selector. Without this the
+   drag handles stay visible over a pane that no longer has a transcript. */
+[data-conversation-scroll]:has(.dshcg_viewPad, .dshcg_viewFile) ~ [data-width-handle] {
+  display: none;
+}
+/* The list's own header: the title and the count, above the groups. */
+.dshcg_viewHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+  min-width: 0;
+}
+.dshcg_viewHeadTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+.dshcg_viewHeadMeta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.dshcg_group {
+  margin-bottom: 18px;
+}
+.dshcg_groupTitle {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  /* The directory is a heading for the rows under it, not a row itself: mono and
+     subdued so it reads as a path rather than as another file name. */
+  font-family: var(--ds-font-family-code, ui-monospace, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshcg_files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.dshcg_file {
+  box-sizing: border-box;
+  display: grid;
+  /* Name takes the slack, then a proportional bar, then two right-aligned
+     numbers. A GRID so the bar and both numbers line up down the column — the
+     whole reason a list beats the circle this replaced. */
+  grid-template-columns: minmax(0, 1fr) 88px 76px 68px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dshcg_file:hover {
+  /* The shell hover wash, not a layer token. Both layer tokens resolve to the
+     SAME colour as the base in the light theme, so the first hover was
+     invisible: measured, the row did not change at all, and a clickable row with
+     no feedback reads as plain text. This is the token every other clickable row
+     uses, and it is a 6 percent ink wash rather than a surface colour. */
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dshcg_file:active {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+.dshcg_file:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-primary);
+  outline-offset: -2px;
+}
+.dshcg_fileName {
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.dshcg_fileBar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--dsw-alias-bg-layer-3);
+  overflow: hidden;
+}
+.dshcg_fileBarFill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--dsw-alias-state-success-primary);
+}
+.dshcg_fileCount {
+  text-align: right;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dshcg_fileRefs {
+  text-align: right;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dshcg_viewNote {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+.dshcg_viewFile {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* Same contract as the overview root: this IS the view's root when a file is
+     open, inside the same flex-column viewArea. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 32px;
+  min-width: 0;
+  /* The conversation pane draws its own watermark behind the transcript, and a
+     view that leaves its background transparent shows it through the table —
+     text over a whale. The base colour is what the shell itself paints. */
+  background: var(--dsw-alias-bg-base);
+}
+.dshcg_viewFileHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.dshcg_viewBack {
+  /* A real button, not a borderless label: it is the only way back, so it has to
+     look pressable and carry a hover state. Text only — the arrow that used to
+     sit here was decoration beside a label that already says what it does. */
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dshcg_viewBack:hover {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-border-l3);
+  background: var(--dsw-alias-bg-layer-3);
+}
+.dshcg_viewBack:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-primary);
+  outline-offset: 1px;
+}
+.dshcg_viewFileTitle {
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  font-family: var(--ds-font-family-code, ui-monospace, monospace);
+}
+.dshcg_symbols {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: fixed;
+}
+.dshcg_symbols th {
+  padding: 4px 8px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+.dshcg_symbols td {
+  padding: 3px 8px;
+  vertical-align: baseline;
+  border-bottom: 1px solid var(--dsw-alias-bg-layer-2);
+}
+.dshcg_symbols tbody tr:hover {
+  /* Same reason as the file rows: the layer token equals the base colour in the
+     light theme, so a hover that used it changed nothing on screen. */
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+/* Fixed column widths: kind and line are bounded, name and calls absorb the
+   slack. The whole point of the table is that these edges agree on every row. */
+.dshcg_symbolKind {
+  width: 76px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+.dshcg_symbolName {
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshcg_symbolLine {
+  width: 56px;
+  text-align: right;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.dshcg_symbolCalls {
+  width: 34%;
+  color: var(--dsw-alias-label-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 `
 
 /** Inject the stylesheet once. */

@@ -95,7 +95,24 @@ three times is ONE edge (three would inflate counts without adding a place to
 read), and a document mentions only names the graph already declares (otherwise
 every English word is an edge).
 
-## 5. Freshness
+## 5. When a pass runs
+
+Three triggers, and they share one queue:
+
+1. **A session enters a project** (`session/created`) — covers a new session AND a
+   resumed one, so an old session reopened after install still gets indexed. The
+   graph used to be built only when a tool was called, which left the settings
+   page and the view empty for every project the user had not queried.
+2. **A tool is called** in a project with no current graph.
+3. **The settings page or the view asks** — the re-index action, and a stale read.
+
+`queue.request` is idempotent while a project is queued or running, so several
+sessions on one project cost one pass. A failure is recorded on the project and
+reported by the settings page; the `session/created` listener swallows it there
+and only there, because a rejected promise inside session creation would surface
+as a broken session.
+
+## 6. Freshness
 
 Every tool answer carries it, and the three values mean different things to a
 model: `current` — trust it; `stale` — the working tree moved, trust then refresh;
@@ -106,7 +123,7 @@ no tool answer emits it, because the first call queues a pass.
 three-state: no repository on either side means "cannot prove", which must NOT
 read as stale — a pass writes `''` again and the graph would rebuild forever.
 
-## 6. What it does not do
+## 7. What it does not do
 
 Stated here because the tool descriptions promise exactly this and no more:
 
@@ -119,7 +136,7 @@ Stated here because the tool descriptions promise exactly this and no more:
 - **The graph is derived.** Delete it and the next pass rebuilds it; nothing else
   in the app depends on it existing.
 
-## 7. Where the tests are blind
+## 8. Where the tests are blind
 
 Three layers, each blind to something:
 

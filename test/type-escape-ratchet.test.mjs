@@ -42,11 +42,16 @@ const BASELINE = {
   'plugin-usage': 0,
   'plugin-websearch': 0,
   'plugin-workbench': 0,
-  // Two: `node:sqlite` types a row as `Record<string, SQLOutputValue>`, which
-  // shares no structural overlap with the column record, so each cast must go
-  // through `unknown`. Both statements name their columns explicitly, and
-  // SCHEMA_VERSION guards a change to either.
-  'plugin-codegraph': 2,
+  // Three, each a boundary this package genuinely cannot type:
+  //   - two `node:sqlite` casts: a row is `Record<string, SQLOutputValue>`, which
+  //     shares no structural overlap with the column record. Both statements name
+  //     their columns explicitly, and SCHEMA_VERSION guards a change to either.
+  //   - `ctx.get('sessions')` in the client half: the concrete service face is
+  //     declared by a package this plugin does not depend on, so the file narrows
+  //     it to the one accessor it reads (`list.getSnapshot().byId[id].cwd`, the
+  //     same accessor upstream uses). `plugin-sidebar` holds the identical cast
+  //     for the identical reason.
+  'plugin-codegraph': 3,
 }
 
 /** Every source file under a plugin's src/, recursively. */
