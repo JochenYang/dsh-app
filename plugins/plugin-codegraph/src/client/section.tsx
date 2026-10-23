@@ -241,7 +241,26 @@ function LanguageItem({ language, busy, onAction, t }: {
   // primitive, so removing this branch brings the defect back with `row.ts`
   // unchanged. `styles.test.ts` pins the branch.
   const bubble = nameBubble(language.extensions)
-  const name = <span className="dshcg_langName">{language.label}</span>
+  // The anchor is an INLINE span inside the flex item, not the flex item itself.
+  // The Tooltip measures its child's rect, so a child that is also a flex box is
+  // positioned by the layout algorithm — and every `flex` value tried here moved
+  // the bubble: `1 1 auto` filled the row (164px of box for a 31px word, the
+  // bubble landing over empty card), and even a shrink-to-fit value left the box
+  // under the layout's control. A plain inline span is measured by its TEXT, so
+  // the bubble sits over the word whatever the row does. This is the shape
+  // `plugin-archives` uses (`rowTitle` wraps an inline span, no `flex` on it).
+  const label = <span className="dshcg_langLabel">{language.label}</span>
+  const name = bubble.label === undefined
+    ? <span className="dshcg_langName">{label}</span>
+    // `portal`: the bubble is `position: fixed`, and the settings dialog's panel
+    // carries a transform — a transformed ancestor is the containing block for a
+    // fixed descendant, so a bubble placed at viewport x=0 rendered at x=120
+    // instead. Portaling to `document.body` takes that ancestor out of the chain.
+    : (
+      <span className="dshcg_langName">
+        <Tooltip label={bubble.label} side="top" portal>{label}</Tooltip>
+      </span>
+    )
   // Two rows, because the card is a 240px column at the grid's floor: the name
   // and its action share the first row (the name absorbs the slack and truncates
   // only when it truly has to), and the tags sit on the second. On one flat
@@ -250,9 +269,7 @@ function LanguageItem({ language, busy, onAction, t }: {
   return (
     <div className="dshcg_lang">
       <div className="dshcg_langMain">
-        {bubble.label === undefined
-          ? name
-          : <Tooltip label={bubble.label} side="top">{name}</Tooltip>}
+        {name}
         {language.bundled ? null : (
           <span className="dshcg_langAction">
             <Button

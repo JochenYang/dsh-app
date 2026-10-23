@@ -21,7 +21,7 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
-import { dropUndefined, type ContextResult, type FindResult, type ImpactResult } from '../src/query.ts'
+import { dropUndefined, type ContextResult, type FindResult, type ImpactResult, type Referrer } from '../src/query.ts'
 
 /** The exact shape a `current`, unremarkable `find` answer has. */
 const findAnswer = (): FindResult => ({
@@ -112,10 +112,26 @@ describe('the three tool answers survive the snapshot', () => {
       { freshness: 'stale', note: 'behind', truncated: true, symbols: [{ id: 'x', name: 'n', kind: 'k', path: 'p', line: 1, parent: undefined }] },
       { freshness: 'current', target: undefined, referencing: [{ path: 'a', line: 1, kind: 'references' }], imports: [] },
       { freshness: 'current', symbol: { id: 'x', name: 'n', kind: 'k', path: 'p', line: 1, parent: 'C' }, siblings: [], calls: [], calledBy: [], imports: ['a'] },
+      // The shape W11b introduced: a referrer that NAMES the calling symbol. The
+      // `name` here is a string, not an optional undefined, so `dropUndefined`
+      // keeps it — and the tool's schema must therefore declare it.
+      { freshness: 'current', target: undefined, referencing: [{ path: 'a.ts', line: 4, kind: 'references', name: 'caller' }], imports: [] },
     ]
     for (const answer of answers) {
       const stripped = dropUndefined(answer)
       assert.notEqual(snapshotJsonValue(stripped), undefined, `rejected after strip: ${JSON.stringify(stripped)}`)
     }
+  })
+
+  it('carries every field the impact schema does not declare out of the answer', () => {
+    // The gap this pins: `referencesTo` returns `{path, line, kind, name}` and
+    // `ImpactResult.referencing` accepted it structurally while the output schema
+    // declared only three keys. `additionalProperties: false` makes an undeclared
+    // key an INVALID_TOOL_OUTPUT for the WHOLE answer, so the tool failed on
+    // exactly the case W11b created. The type now names `name`, and this asserts
+    // the value really carries it — so deleting either the type field or the
+    // schema row breaks here.
+    const referrer: Referrer = { path: 'a.ts', line: 4, kind: 'references', name: 'caller' }
+    assert.deepEqual(Object.keys(referrer).sort(), ['kind', 'line', 'name', 'path'])
   })
 })

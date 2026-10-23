@@ -122,20 +122,29 @@ const cssText = `
 }
 .dshcg_langName {
   font-size: 13px;
-  /* Grows into whatever the action leaves, and truncates only when the text is
-     genuinely wider than that space. It must NOT shrink-to-fit its own text:
-     that is what truncated the longest language name to "Regular..." while
-     empty space sat beside it. The min-width below is what lets the ellipsis
-     apply to a flex item at all. */
-  flex: 1 1 auto;
+  /* Layout only. Shrinks when the row runs out, never grows past its text. */
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+}
+.dshcg_langLabel {
+  /* The TOOLTIP ANCHOR, and deliberately an inline box: the primitive measures
+     its child's rect, so the bubble lands over the word only if this box IS the
+     word. A flex item here would be positioned by the layout algorithm — every
+     flex value tried on the anchor put the bubble somewhere else in the card. */
+  display: inline;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .dshcg_langAction {
-  /* The action keeps its own width whatever happens to the name. */
+  /* The action keeps its own width whatever happens to the name, and rides the
+     right edge so the buttons line up down the grid. An auto left margin used to
+     strand it on its own wrapped line; the card is two rows now and this row
+     holds only name + action, with the name the one that shrinks — so there is
+     no second line for it to fall onto. */
   flex: 0 0 auto;
+  margin-left: auto;
 }
 .dshcg_empty {
   margin: 0;

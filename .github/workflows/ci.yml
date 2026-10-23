@@ -95,7 +95,33 @@ jobs:
           done
       - name: Shell + kernel unit tests
         run: npm test
+      # Fetch the ON-DEMAND grammars before the plugin suites run, so the code
+      # graph's real-grammar extraction cases execute instead of skipping. Its
+      # suite has one case per extraction-table row, and each parses real source:
+      # a node name the grammar does not produce yields no symbol and the case
+      # fails. The nine BUNDLED grammars are in the repository and always run; the
+      # four on-demand tables (`rust`, `ruby`, `php`, `bash`) were printed as 16
+      # skips on every CI run — precisely the tables a change is most likely to
+      # touch, guarded only by a written-down instruction.
+      #
+      # It downloads through the PRODUCT's own `downloadGrammar`, so the recorded
+      # sha512 and the wasm magic check apply to these bytes exactly as they do to
+      # a user's; no new source of trust is introduced. A failure is fatal on
+      # purpose: silently falling back to skips is the outcome this step exists to
+      # prevent.
+      - name: Fetch on-demand grammars (code graph)
+        env:
+          # One spelling of the path for both steps: `$RUNNER_TEMP` and
+          # `${{ runner.temp }}` resolve to the same directory, and mixing the two
+          # is how a later edit points them at different ones.
+          DSH_APP_CODEGRAPH_GRAMMARS: ${{ runner.temp }}/codegraph-grammars
+        run: node plugins/plugin-codegraph/scripts/fetch-ci-grammars.mjs "$DSH_APP_CODEGRAPH_GRAMMARS"
       - name: Plugin unit tests
+        env:
+          # What the code graph suite looks for before it runs a grammar it cannot
+          # find in the plugin. Named here rather than in the plugin, because a
+          # path is a CI concern and the plugin must not know one.
+          DSH_APP_CODEGRAPH_GRAMMARS: ${{ runner.temp }}/codegraph-grammars
         run: |
           # Every suite that has one, not a fixed pair: eleven suites previously
           # ran only on a developer's machine, which is how "upstream API drift"

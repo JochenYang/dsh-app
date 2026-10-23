@@ -42,12 +42,12 @@
 | W10 | P0 | 设置页：语言下载、项目状态列表，全部用 primitives 组件 | [x] |
 | W10b | P0 | 设置页按项目切换：`SegmentedTabs` 列出每个已索引项目，切换显示该项目自己的状态与操作 | [x] |
 | W10c | P0 | 会话页顶部「图谱」视图：注册 `conversation.view`，渲染当前项目的图谱（文件→符号分层，`<svg>` 手绘，不引图形库） | [ ] |
-| W11 | P1 | documents 边：把 docs/ 与 AGENTS.md 的段落关联到符号 | [ ] |
-| W11b | P1 | **回炉 W5：调用边归属到符号而非文件。** 现状 `edges.src` 恒为 `file:<path>`（parse 层不记录每条调用属于哪个声明），所以 `codegraph_context.calls` 只能答"这个文件调了什么"，答不了"这个函数调了什么"。修法：`extractSymbols` 在提取调用时记下当前所在的声明 id，`callEdges` 用它作 `src`；同时保留文件级边（`impact` 的"哪个文件受影响"依赖它），并给两者不同的 `kind` 或前端过滤。改 parse.ts + indexer.ts + query.ts + 相应测试 | [ ] |
+| W11 | P1 | documents 边：把 docs/ 与 AGENTS.md 的段落关联到符号 | [x] |
+| W11b | P1 | **回炉 W5：调用边归属到符号而非文件。** 现状 `edges.src` 恒为 `file:<path>`（parse 层不记录每条调用属于哪个声明），所以 `codegraph_context.calls` 只能答"这个文件调了什么"，答不了"这个函数调了什么"。修法：`extractSymbols` 在提取调用时记下当前所在的声明 id，`callEdges` 用它作 `src`；同时保留文件级边（`impact` 的"哪个文件受影响"依赖它），并给两者不同的 `kind` 或前端过滤。改 parse.ts + indexer.ts + query.ts + 相应测试 | [x] |
 | W12 | P1 | 读时 HEAD 校验：落后时返回 stale:true 并触发后台重建 | [~] |
-| W13 | P2 | 其余 28 种语言接入 | [ ] |
+| W13 | P2 | 其余语言接入：rust/ruby/php/bash 已加提取规则（真实语法树验证）；css/ini/regex 显式登记为空规则（无可引用语义） | [x] |
 | W14 | P2 | 设置页序号登记进 docs/agents/settings-rail-order.md | [x] |
-| W15 | P2 | 文档：docs/agents/codegraph.md + AGENTS.md 阅读表一行 | [ ] |
+| W15 | P2 | 文档：docs/agents/codegraph.md + AGENTS.md 阅读表一行 | [x] |
 
 类目：P0 不做就走不通 · P1 静默失败或数据风险 · P2 清理与一致性 · OPT 可选。
 
@@ -62,7 +62,7 @@
 | 3 增量与队列 | W6, W7, W12 | 二次索引走增量，状态机四态可观测 | [ ] |
 | 4 工具与路由 | W8, W9 | 三个工具在真实会话中可用，路由过 Connection 围栏 | [x] |
 | 5 设置页 | W10, W10b, W14 | 语言下载可用，项目可切换，序号表已更新 | [x] |
-| 6 文档与扩展 | W11, W11b, W13, W15 | documents 边可用，调用边可按符号归属，文档落盘 | [ ] |
+| 6 文档与扩展 | W11, W11b, W13, W15 | documents 边可用，调用边可按符号归属，文档落盘 | [x] |
 | 7 会话页视图 | W10c | 图谱视图在会话标签栏可切换，真实项目能渲染 | [ ] |
 
 阶段闸门：任何条目处于 `[~]` 或 `[?]` 时不得开始下一阶段。Gate 通过 = 该阶段验证项全 PASS 且 review 无阻塞发现。
@@ -130,3 +130,4 @@ npm test
 | 4 | 2026-10-23 | 插件 `npm test` 166/166；typecheck 干净；四道门禁全过；根测试 715 通过 / 0 失败；`as unknown as` 恰 2 处与 ratchet 基线吻合 | 通过。审查发现 **1 个 P0**：三个工具的返回值含 `undefined` 属性，内核 `snapshotJsonValue` 在 schema 校验**之前**跑并返回 `undefined` ⇒ 每次调用都抛 `INVALID_TOOL_OUTPUT`。**已用运行时证据确认**（`snapshotJsonValue({a:1,b:undefined}) === undefined`），不是推断。修复：`dropUndefined` 在三处出口剥除，并新增 `tests/tool-output.test.ts` 双向断言（拒绝存在 + 剥后通过）。另修 3 个 P1：`calls` 因边归属文件而恒为空（改为按文件查并如实改文案）、`failed` 态对工具不可见导致永久 `indexing` 且每次重跑全量、缺 changeset/版本。以及 P2：dispose 漏 await 异步路由卸载器、queue 先于图关闭。四问：主张成立（166 条，含 P0 的运行时证据与 e2e 跨层契约）；最小；新风险已消除（P0 是本次引入且已修）；反例已覆盖 |
 | 5 | 2026-10-23 | 插件 `npm test` 179/179；typecheck 干净；四道门禁全过；`check:graph` 无违规；根测试 717（715 通过 / 2 跳过）/ 0 失败；`probe-codegraph-langs.cjs` **21/21 PASS**，**五处回退验证**全部证伪（空 tooltip 分支 → FAIL；删 `dshcg_langAction` 包裹 → FAIL；删两行结构 → FAIL；CSS 退回扁平单行 → FAIL「两标签卡 71px vs 一标签卡 44px」；按钮与名字不同行 → 断言在） | 通过（含两次返工）。用户报了三个缺陷，修完经独立审查发现 6 个 major；**用户随后截图指出第一版修复的布局仍然不对**——「下载」按钮虽不再竖排，却在窄列下换行到第二行并被 `margin-left: auto` 推到右缘，相邻卡片高度不一致。这是审查已指出、我当时未处理的一条，且探针测不到：它只断言「按钮内部文字几行」与「名字未被截断」，按钮整体换行时两条都成立。**返工**：卡片改为两行结构（`dshcg_langMain` 名字+按钮 / `dshcg_langMeta` 标签），名字 `flex: 1 1 auto` + `min-width: 0` 吸收余量，去掉 auto margin；探针补「按钮与名字中心 Y 一致」与「同网格卡片等高」两条断言。三个缺陷根因：① 按钮被压到 32px 导致竖排（flex 默认 shrink）；② `regex` 语言 `extensions` 为空数组 ⇒ `join('  ')` 为 `''`，primitives 文档写明空 label 只显示快捷键 ⇒ 空 tooltip（改为调用处不渲染 Tooltip）；③ 顶部文案把「开会话」误写成触发器（真实触发器是首次调用 `codegraph_*` 工具）。审查另抓出 **`cannot be {action}ed` 拼出 `removeded`**（替换成过去分词后又拼 `ed`，路由测试只看状态码）；`Eight` 与实际 9 个 bundled id 矛盾；`.dshcg_row` 同型压缩缺陷；两张会漂移的语言真值表；`storageRoot` 泄露本机路径。另修 `scripts/test.mjs` 原用 `readdirSync` 执行源文件已删的遗留 bundle（实测三个 `zz-*` 调试套件一直在跑）。四问：主张成立（179 条 + 21 条探针，五次回退证伪，其中一次正是用户看到的现象）；最小（删掉冗余抽象 `languageAction`）；新风险已消除（布局退化是本轮引入并已修）；反例已覆盖 |
 | 5b | 2026-10-23 | 同上；`styles.test.ts` 的反引号守卫改为「取最后一个闭合行」，原实现取第一个 `\n`` `` 导致嵌入反引号时切出无内容片段而误放行 | 通过。CSS 模板字面量里写反引号连续踩三次（构建报 `Expected ";" found "flex"` 指向注释），故修守卫本身。同时更正其定位：esbuild 会先失败，这条测试不是新错误的网，而是给手工排查一个可读的失败信息 |
+| 6 | 2026-10-23 | 插件 `npm test` **233**（217 通过 / 16 跳过；`DSH_APP_CODEGRAPH_GRAMMARS` 指向下载目录时 233 全过 / 0 跳过）；typecheck 干净；四道 plugin-gates 全过；`check:graph` 无违规；`check:suites:gate` 18 份一致；根测试 717（715 通过 / 2 跳过）/ 0 失败；`probe-codegraph-langs.cjs` **25/25** | 通过（经一次退回重做）。**独立审查判「不放行」，3 个 blocker 全部成立并被复现**：① W11b 让 `referencesTo` 返回调用者名，而 `codegraph_impact` 的输出 schema 是 `additionalProperties: false` 且未声明 `name` ⇒ 该工具在最常见输入下整体抛 `INVALID_TOOL_OUTPUT`（类型没拦住，因为 `ImpactResult.referencing` 内联写死 `{path,line,kind}`，结构化赋值把多出的字段吞了；已改为引用 `Referrer` 类型 + schema 补 `name`）；② `replaceFile` 会删掉某文件符号的**全部出边**，而 phase 3 只重扫「本轮变动的文档」⇒ 改一行源文件就让该文件的 `documents` 边永久消失（**已用测试复现**）；③ `doc:<path>#<line>` 是伪节点，任何表都没有这一行，`forgetFile` 回收不到 ⇒ 删文档留下永久孤儿，且 phase 3 只 INSERT 不 DELETE ⇒ 删掉一段话它的边永远留着。**修法**：`documents` 边改指向 `file:<docpath>`、行号走 edges 自有 `line` 列，phase 3 每次全量重扫全部已知文档并「先按 dst 清、再插」。三条都补了回归测试，并各自做过反向验证（把修复退回，对应测试变红）。另修：W13 的四种语言在 CI 上会跳过，`docs/agents/codegraph.md` 已写明 16 个 skip 与验证方式。tooltip 定位：用户两次指出仍错，根因是**锚点盒子**（`flex: 1 1 auto` 量到 164px 而文字只有 31px）与 **transform 祖先**（fixed 气泡相对面板定位）两处；改为「内联 span 作锚点 + portal」，探针实测锚点盒 = 文字宽（30.9px = 30.9px），并测出「panelled fixed box 在 x=120、portaled 在 x=0」这一位移机制。四问：主张成立（233 条 + 25 条探针 + 多次反向验证）；最小（`doc:` 伪节点与 `scopes` 死字段都是删掉更小）；新风险已消除（3 个 blocker 均为本阶段引入且已修）；反例已覆盖 |

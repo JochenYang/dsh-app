@@ -78,10 +78,38 @@ describe('scanProject', () => {
     write(root, 'src/b.py', 'SYM b')
     write(root, 'node_modules/x/c.ts', 'SYM c')
     write(root, '.git/d.ts', 'SYM d')
-    write(root, 'README.md', '# not a language')
 
     const { files } = scanProject(root)
     assert.deepEqual(files.map(file => file.path).sort(), ['a.ts', 'src/b.py'])
+  })
+
+  it('walks documents too, marked apart from source', () => {
+    // A document is a candidate — it contributes `documents` edges — but it must
+    // never be handed to a parser. The flag is what carries that distinction out
+    // of the walk; re-deriving it at the use site is how a `.md` one day reaches
+    // tree-sitter and is reported as an unparseable source file.
+    const { root } = project()
+    write(root, 'a.ts', 'SYM a')
+    write(root, 'README.md', '# not a language')
+    write(root, 'docs/guide.md', 'prose')
+
+    const { files } = scanProject(root)
+    const byPath = new Map(files.map(file => [file.path, file.document]))
+    assert.equal(byPath.get('a.ts'), false, 'source is not a document')
+    assert.equal(byPath.get('README.md'), true, 'a markdown file is walked as a document')
+    assert.equal(byPath.get('docs/guide.md'), true, 'a nested document is walked too')
+  })
+
+  it('does not walk a lockfile or an unknown extension as a document', () => {
+    // The extension list is fixed on purpose: "anything the language table does
+    // not claim" would pull in lockfiles and binaries and parse them as prose.
+    const { root } = project()
+    write(root, 'a.ts', 'SYM a')
+    write(root, 'package-lock.json', '{}')
+    write(root, 'image.png', 'binary')
+
+    const { files } = scanProject(root)
+    assert.deepEqual(files.map(file => file.path).sort(), ['a.ts'])
   })
 
   it('reports truncation instead of silently covering part of a tree', () => {
@@ -275,9 +303,137 @@ describe('indexProject', () => {
   })
 })
 
+describe('documents edges', () => {
+  it('records an edge from a symbol to the line of prose that names it', async () => {
+    // The whole W11 contract: a paragraph is reachable from the symbol it
+    // explains. `documentsFor` reads this back for `codegraph_context`.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'docs/guide.md', '# Guide\n\nCall `alpha` to start.')
+
+    await indexProject(graph, root, stubParse)
+
+    const edges = graph.db.prepare("SELECT src, dst, kind, line FROM edges WHERE kind = 'documents'").all() as { src: string, dst: string, kind: string, line: number }[]
+    assert.equal(edges.length, 1, 'one paragraph names one symbol once')
+    assert.equal(edges[0]!.src, 'a.ts#function:alpha', 'the edge starts at the SYMBOL, not the file')
+    // The target is the document FILE and the detection line rides the edge's own
+    // column. A `doc:<path>#<line>` pseudo-node was the first design and it leaked:
+    // no table held that row, so nothing that reclaims a path reclaimed it.
+    assert.equal(edges[0]!.dst, 'file:docs/guide.md', 'the target is the document file node')
+    assert.equal(edges[0]!.line, 3, 'line points at the sentence, not the file start')
+    graph.close()
+  })
+
+  it('keeps the document edges when an unrelated SOURCE file changes', async () => {
+    // Measured defect: `replaceFile` deletes every outgoing edge of a file's
+    // symbols, so editing `a.ts` removed the edges INTO a.ts's symbols from
+    // documents nobody had touched — and the first version only rescanned changed
+    // documents, so they never returned. The scan now covers every known document.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'README.md', '`alpha` is explained here.')
+    await indexProject(graph, root, stubParse)
+    const count = (): number => (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'documents'").get() as { n: number }).n
+    assert.equal(count(), 1, 'first pass')
+
+    write(root, 'a.ts', 'SYM alpha\n// an edit that does not touch the document')
+    await indexProject(graph, root, stubParse)
+    assert.equal(count(), 1, 'a source edit must not delete the document edges')
+    graph.close()
+  })
+
+  it('drops an edge when the sentence that made it is deleted', async () => {
+    // The first version only INSERTed, so a removed paragraph kept its edge for
+    // ever. Phase 3 now clears a document's edges before re-deriving them.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'README.md', '`alpha` is explained here.')
+    await indexProject(graph, root, stubParse)
+    const count = (): number => (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'documents'").get() as { n: number }).n
+    assert.equal(count(), 1, 'first pass')
+
+    write(root, 'README.md', 'This paragraph mentions nothing declared.')
+    await indexProject(graph, root, stubParse)
+    assert.equal(count(), 0, 'a removed mention must lose its edge')
+    graph.close()
+  })
+
+  it('drops every edge pointing at a document that was deleted', async () => {
+    // A `doc:` pseudo-node id was in no table, so `forgetFile` could not reclaim
+    // it and a deleted document left permanent orphans. A file node is what the
+    // removal pass already sweeps.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'README.md', '`alpha` is explained here.')
+    await indexProject(graph, root, stubParse)
+    const count = (): number => (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'documents'").get() as { n: number }).n
+    assert.equal(count(), 1, 'first pass')
+
+    unlinkSync(join(root, 'README.md'))
+    await indexProject(graph, root, stubParse)
+    assert.equal(count(), 0, 'a deleted document must not leave a dangling edge')
+    graph.close()
+  })
+
+  it('matches an unquoted identifier too', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'README.md', 'alpha does the work.')
+
+    await indexProject(graph, root, stubParse)
+    const count = (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'documents'").get() as { n: number }).n
+    assert.equal(count, 1)
+    graph.close()
+  })
+
+  it('records nothing for prose that names no declared symbol', async () => {
+    // The failure this prevents: every English word becoming an edge.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'README.md', 'This document talks about things in general.')
+
+    await indexProject(graph, root, stubParse)
+    const count = (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'documents'").get() as { n: number }).n
+    assert.equal(count, 0)
+    graph.close()
+  })
+
+  it('does not parse a document as source', async () => {
+    // A document is walked and stored, never handed to the parser. If it were,
+    // its "symbols" would be prose and the graph would fill with nonsense.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    write(root, 'README.md', 'SYM notReal\nCALL alsoNotReal')
+
+    const outcome = await indexProject(graph, root, stubParse)
+    assert.equal(outcome.parsed, 1, 'only the source file was parsed')
+    const names = (graph.db.prepare('SELECT name FROM symbols').all() as { name: string }[]).map(row => row.name)
+    assert.deepEqual(names, ['alpha'])
+    // The document is still a ROW in `files`, which is what stops every pass
+    // re-reading it forever.
+    const paths = (graph.db.prepare('SELECT path FROM files').all() as { path: string }[]).map(row => row.path).sort()
+    assert.deepEqual(paths, ['README.md', 'a.ts'])
+    graph.close()
+  })
+
+  it('re-indexes a document when only the document changed', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha')
+    await indexProject(graph, root, stubParse)
+
+    write(root, 'README.md', 'alpha is described here.')
+    const outcome = await indexProject(graph, root, stubParse)
+    assert.equal(outcome.parsed, 0, 'no source file changed')
+    const count = (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'documents'").get() as { n: number }).n
+    assert.equal(count, 1, 'the new document produced its edge on the second pass')
+    graph.close()
+  })
+})
+
 describe('isStale', () => {
   const meta = (head: string): ProjectMeta => ({
     cwd: 'D:/x', name: 'x', head, indexedAt: 1, fileCount: 1, symbolCount: 1, edgeCount: 1,
+    truncated: false, removalSkipped: false, unsupported: 0, parseErrors: 0,
   })
 
   it('treats a graph with no metadata as stale', () => {

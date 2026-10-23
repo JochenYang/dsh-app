@@ -30,6 +30,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { languageForPath } from './languages.ts'
+import { DOCUMENT_EXTENSIONS, documentMentions, knownNames } from './docs.ts'
 import { callEdges, type ParsedFile } from './parse.ts'
 import {
   allRows,
@@ -38,10 +39,12 @@ import {
   graphStats,
   readFiles,
   replaceFile,
+  symbolsOf,
   writeProjectMeta,
   type FileRecord,
   type Graph,
   type ProjectMeta,
+  type SymbolRecord,
 } from './store.ts'
 
 const execFileAsync = promisify(execFile)
@@ -111,6 +114,22 @@ interface Candidate {
   readonly path: string
   readonly mtime: number
   readonly size: number
+  /**
+   * True when this is a DOCUMENT (prose that names symbols) rather than source.
+   *
+   * The distinction has to be carried out of the walk rather than re-derived
+   * later: both kinds end up as rows in `files`, and a second `languageForPath`
+   * call at the use site is how a document would one day be handed to a parser.
+   */
+  readonly document: boolean
+}
+
+/** A path's extension, lower case, with its dot; empty when it has none. */
+function extensionOf(path: string): string {
+  const dot = path.lastIndexOf('.')
+  const slash = path.lastIndexOf('/')
+  if (dot <= slash || dot < 0) return ''
+  return path.slice(dot).toLowerCase()
 }
 
 /** What a walk produced, including the facts that decide whether deletion is safe. */
@@ -161,7 +180,11 @@ export function scanProject(root: string, limit = MAX_FILES): ScanResult {
       if (!entry.isFile()) continue
       const absolute = join(dir, entry.name)
       const relativePath = relative(root, absolute).split(sep).join('/')
-      if (languageForPath(relativePath) === undefined) continue
+      // A document is walked for its own sake, not parsed. It carries no symbols
+      // and no imports; what it contributes is the list of symbols it NAMES
+      // (`docs.ts`), which the second phase turns into `documents` edges.
+      const isDocument = DOCUMENT_EXTENSIONS.includes(extensionOf(relativePath))
+      if (!isDocument && languageForPath(relativePath) === undefined) continue
       let stat
       try {
         stat = statSync(absolute)
@@ -178,7 +201,7 @@ export function scanProject(root: string, limit = MAX_FILES): ScanResult {
         truncated = true
         return
       }
-      files.push({ path: relativePath, mtime: Math.floor(stat.mtimeMs), size: stat.size })
+      files.push({ path: relativePath, mtime: Math.floor(stat.mtimeMs), size: stat.size, document: isDocument })
     }
   }
 
@@ -294,6 +317,30 @@ export async function indexProject(
       skipped += 1
       continue
     }
+    // Documents take their own path: their row is stored (so the stat cache stops
+    // a re-read every pass), and they are never handed to a parser and never
+    // declare a symbol. Their TEXT is re-read in phase 3, which scans every known
+    // document — see the comment there for why that is not just this pass's
+    // changed ones.
+    if (candidate.document) {
+      let docHash: string
+      try {
+        const bytes = readFileSync(join(root, candidate.path))
+        docHash = createHash('sha256').update(bytes).digest('hex')
+      } catch {
+        // Vanished between the scan and the read; `seen` already holds it, so the
+        // removal pass leaves its old rows for the next run.
+        continue
+      }
+      if (previous !== undefined && previous.hash === docHash) {
+        graph.db.prepare('UPDATE files SET mtime = ?, size = ? WHERE path = ?')
+          .run(candidate.mtime, candidate.size, candidate.path)
+        skipped += 1
+        continue
+      }
+      replaceFile(graph.db, { path: candidate.path, mtime: candidate.mtime, size: candidate.size, hash: docHash, lang: 'document' }, [], [])
+      continue
+    }
     const language = languageForPath(candidate.path)
     if (language === undefined) continue
     let source: string
@@ -380,10 +427,74 @@ export async function indexProject(
     }
   }
 
-  // Anything the graph knows about that the walk did not see is gone — but ONLY
-  // when the walk is trustworthy. A truncated scan or an unreadable root both
-  // produce a shorter list than the disk really has; deleting on that evidence
-  // would drop most of a project and call it "current".
+  // Phase 3: the documents. Deliberately AFTER phase 2, because a `documents`
+  // edge targets a symbol and a document may name one declared in a file the walk
+  // reached later.
+  //
+  // TWO decisions here, each fixing a defect the first version shipped:
+  //
+  //   - The edge targets `file:<docpath>`, with the LINE in the `line` column,
+  //     instead of a `doc:<path>#<line>` pseudo-node. A doc node is in no table,
+  //     so nothing that reclaims a path knew to reclaim it: deleting a document
+  //     left its edges as permanent orphans. A file node is what `forgetFile`
+  //     already sweeps, and the primary key `(src, dst, kind, line)` keeps the
+  //     same document's several mentions apart.
+  //   - The scan covers EVERY known document on every pass, not only the ones
+  //     whose bytes changed. `replaceFile` deletes every outgoing edge of a file's
+  //     symbols, so editing `a.ts` removed the edges INTO a.ts's symbols from
+  //     documents that had not changed — and only a changed document was ever
+  //     rescanned, so they never came back. Rescanning all of them costs a few
+  //     hundred file reads; tracking which name appears in which document costs a
+  //     second index and a new way to be wrong.
+  const documentPaths = allRows<{ path: string }>(graph.db, 'SELECT path FROM files WHERE lang = ?', 'document')
+  if (documentPaths.length > 0) {
+    // The mention scan matches by NAME, but an edge needs a NODE id, and one name
+    // can be declared in several places (a `render` in each component, an `open`
+    // per class). Every declaration of a mentioned name gets the edge: guessing
+    // which one a paragraph meant is exactly the confident-but-wrong edge this
+    // plugin exists to avoid.
+    const byName = new Map<string, SymbolRecord[]>()
+    const declared: SymbolRecord[] = []
+    for (const symbol of symbolsOf(graph.db)) {
+      declared.push(symbol)
+      const existing = byName.get(symbol.name)
+      if (existing === undefined) byName.set(symbol.name, [symbol])
+      else existing.push(symbol)
+    }
+    const known2 = knownNames(declared)
+    // DELETE then INSERT inside one transaction. The delete is per DOCUMENT, not
+    // per symbol, so a mention the author removed stops being an edge — the first
+    // version only inserted, so a deleted paragraph kept its edge for ever.
+    const clear = graph.db.prepare("DELETE FROM edges WHERE kind = 'documents' AND dst = ?")
+    const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)')
+    graph.db.exec('BEGIN')
+    try {
+      for (const row of documentPaths) {
+        const target = fileNodeId(row.path)
+        clear.run(target)
+        let text: string
+        try {
+          text = readFileSync(join(root, row.path)).toString('utf8')
+        } catch {
+          // Gone between the walk and this read; `seen` already covered it, so the
+          // removal pass settles the file row on the next run.
+          continue
+        }
+        for (const mention of documentMentions({ path: row.path, text }, known2)) {
+          // The edge points FROM the symbol TO the document: "this code is
+          // described here", which is what `context` reads.
+          for (const symbol of byName.get(mention.name) ?? []) {
+            insert.run(symbol.id, target, 'documents', mention.line)
+          }
+        }
+      }
+      graph.db.exec('COMMIT')
+    } catch (error) {
+      try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+      throw error
+    }
+  }
+
   const removalSkipped = scan.truncated || scan.rootUnreadable
   let removed = 0
   if (!removalSkipped) {

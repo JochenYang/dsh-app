@@ -122,6 +122,71 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     call: { type: 'invocation_expression', field: 'function' },
     import: { type: 'using_directive', field: 'name' },
   },
+  // Node names below were read off a REAL parse of a sample file with this
+  // plugin's own grammar (`scratch/codegraph-grammars/probe.cjs`), not from
+  // memory: a name the grammar does not produce fails silently, producing a
+  // symbol table that looks empty for a language that works. Rust's `impl_item`
+  // is deliberately absent — it declares no name of its own, and the methods
+  // inside it are matched by `function_item` under the `declaration_list` scope.
+  rust: {
+    declarations: {
+      function_item: { kind: 'function', nameField: 'name' },
+      struct_item: { kind: 'struct', nameField: 'name' },
+      enum_item: { kind: 'enum', nameField: 'name' },
+      trait_item: { kind: 'interface', nameField: 'name' },
+      // A trait's method SIGNATURE (no body) is its own node; an impl's method is
+      // a `function_item`. Both must be declared or a trait's surface is missing.
+      function_signature_item: { kind: 'method', nameField: 'name' },
+      field_declaration: { kind: 'variable', nameField: 'name' },
+    },
+    scopes: ['declaration_list', 'block', 'impl_item'],
+    call: { type: 'call_expression', field: 'function' },
+    // `use_declaration` names its target through a scoped identifier, not a field.
+    import: { type: 'use_declaration', field: '' },
+  },
+  ruby: {
+    declarations: {
+      method: { kind: 'method', nameField: 'name' },
+      singleton_method: { kind: 'method', nameField: 'name' },
+      class: { kind: 'class', nameField: 'name' },
+      module: { kind: 'module', nameField: 'name' },
+    },
+    scopes: ['body_statement', 'block'],
+    call: { type: 'call', field: 'method' },
+    import: undefined,
+  },
+  php: {
+    declarations: {
+      function_definition: { kind: 'function', nameField: 'name' },
+      method_declaration: { kind: 'method', nameField: 'name' },
+      class_declaration: { kind: 'class', nameField: 'name' },
+      interface_declaration: { kind: 'interface', nameField: 'name' },
+      trait_declaration: { kind: 'class', nameField: 'name' },
+    },
+    scopes: ['declaration_list', 'compound_statement'],
+    call: { type: 'function_call_expression', field: 'function' },
+    // `namespace_use_declaration` has no field; the name is a child.
+    import: { type: 'namespace_use_declaration', field: '' },
+  },
+  bash: {
+    declarations: {
+      // A shell function is the only declaration the language has: no classes, no
+      // types, and a variable is a runtime name rather than a code structure.
+      function_definition: { kind: 'function', nameField: 'name' },
+    },
+    scopes: ['compound_statement', 'function_definition'],
+    call: { type: 'command', field: 'name' },
+    import: undefined,
+  },
+  // CSS, INI and regex are DOWNLOADABLE and PARSEABLE but carry no extraction
+  // shape on purpose. Their "declarations" are a selector, a config key and a
+  // regular-expression fragment: none names a thing a caller can reference, so an
+  // edge to one would be a graph entry no one can act on. The settings page
+  // reports them as "No extraction rules" instead of promising a symbol table,
+  // which is the same honesty `LANGUAGE_UNSUPPORTED` gives an uninstalled grammar.
+  css: { declarations: {}, scopes: [], call: undefined, import: undefined },
+  ini: { declarations: {}, scopes: [], call: undefined, import: undefined },
+  regex: { declarations: {}, scopes: [], call: undefined, import: undefined },
 }
 
 /** The TypeScript shape, shared by the three JS-family ids. */
@@ -197,8 +262,15 @@ function cppShape(): GrammarShape {
  * "no extraction rules" for a language that works, or promise one that parses to
  * nothing — and neither failure is red. Importing this module costs a table and
  * a few pure functions; it does not load tree-sitter.
+ *
+ * Having an ENTRY is not the test — `declarations` being non-empty is. CSS, INI
+ * and regex appear in `GRAMMAR_SHAPES` with an empty declaration map on purpose
+ * (rated below), and a plain `Object.keys` would have advertised them as
+ * indexable while every file of theirs produced an empty symbol table.
  */
-export const SUPPORTED_LANGUAGE_IDS: readonly string[] = Object.keys(GRAMMAR_SHAPES)
+export const SUPPORTED_LANGUAGE_IDS: readonly string[] = Object.entries(GRAMMAR_SHAPES)
+  .filter(([, shape]) => Object.keys(shape.declarations).length > 0)
+  .map(([id]) => id)
 
 /**
  * The minimal tree-sitter node surface this module reads.
@@ -219,8 +291,15 @@ export interface SyntaxNode {
 /** What one file parsed to. */
 export interface ParsedFile {
   readonly symbols: readonly SymbolRecord[]
-  /** Call targets by name, with the line they were called from. */
-  readonly calls: readonly { readonly name: string, readonly line: number }[]
+  /**
+   * Call targets by name, with the line they were called from and the symbol that
+   * contains the call.
+   *
+   * `owner` is the enclosing declaration's node id, or undefined for a call made
+   * at file scope. It is what lets an edge say "this FUNCTION calls X" rather
+   * than "this file does".
+   */
+  readonly calls: readonly { readonly name: string, readonly line: number, readonly owner: string | undefined }[]
   /** Import specifiers, verbatim (resolution happens against the project). */
   readonly imports: readonly { readonly specifier: string, readonly line: number }[]
   /** True when the parser produced an ERROR node — the file is partly unread. */
@@ -313,12 +392,27 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
   // `hasOwn` rather than a bare index: `node.type` is grammar-controlled text,
   // and a name like `constructor` would otherwise hit `Object.prototype`.
   const shape = Object.hasOwn(GRAMMAR_SHAPES, language) ? GRAMMAR_SHAPES[language] : undefined
-  if (shape === undefined) {
+  // An entry with an EMPTY declaration map is the same answer as no entry: CSS,
+  // INI and regex appear in the table so the settings page can rate them, and
+  // `declarations: {}` means "parses, declares nothing addressable". Reading only
+  // `shape === undefined` here reported those three as SUPPORTED while producing
+  // an empty symbol table — the exact "installed but useless" claim this plugin
+  // refuses to make.
+  if (shape === undefined || Object.keys(shape.declarations).length === 0) {
     return { symbols: [], calls: [], imports: [], hasError: hasErrorNode(root), unsupported: true }
   }
 
   const symbols: SymbolRecord[] = []
-  const calls: { name: string, line: number }[] = []
+  /**
+   * A call site, with the declaration that CONTAINS it.
+   *
+   * `owner` is the enclosing symbol's node id, or undefined at file scope (a
+   * top-level statement, a module initialiser). Without it every call edge
+   * started at `file:<path>`, so `codegraph_context` could answer "what does this
+   * file call" but never "what does this function call" — the question the tool
+   * is actually asked.
+   */
+  const calls: { name: string, line: number, owner: string | undefined }[] = []
   const imports: { specifier: string, line: number }[] = []
   // Same-file collisions of (kind, parent, name) — overloads, and a method and a
   // field of one name. The id is the symbols table's PRIMARY KEY, so a duplicate
@@ -329,8 +423,14 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
    * Walk one node, tracking the enclosing declaration's name so a method's id
    * carries its class. A declaration's own body is walked with the declaration
    * as parent; everything else keeps the parent it had.
+   *
+   * `ownerId` is the ID of the enclosing symbol, which is what a call edge needs:
+   * a call inside `alpha` belongs to `alpha`, not to the file. It is carried
+   * separately from `parent` because `parent` is only the NAME (needed for the
+   * next symbol's id) whereas the edge needs the full id, overload ordinal
+   * included — two overloads of one name are two different callers.
    */
-  const walk = (node: SyntaxNode, parent: string | undefined): void => {
+  const walk = (node: SyntaxNode, parent: string | undefined, ownerId: string | undefined): void => {
     const declaration = Object.hasOwn(shape.declarations, node.type) ? shape.declarations[node.type] : undefined
     if (declaration !== undefined) {
       const nameNode = node.childForFieldName(declaration.nameField)
@@ -344,8 +444,9 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
         const base = symbolId(path, declaration.kind, name, parent)
         const seen = used.get(base) ?? 0
         used.set(base, seen + 1)
+        const id = seen === 0 ? base : `${base}#${String(seen)}`
         symbols.push({
-          id: seen === 0 ? base : `${base}#${String(seen)}`,
+          id,
           path,
           name,
           kind: declaration.kind,
@@ -353,7 +454,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
           parent,
         })
         // A declaration's own body belongs to it.
-        for (const child of node.namedChildren) walk(child, name)
+        for (const child of node.namedChildren) walk(child, name, id)
         return
       }
     }
@@ -361,7 +462,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
       const callee = node.childForFieldName(shape.call.field)
       if (callee !== null) {
         const name = calleeName(callee)
-        if (name !== '') calls.push({ name, line: node.startPosition.row + 1 })
+        if (name !== '') calls.push({ name, line: node.startPosition.row + 1, owner: ownerId })
       }
     }
     if (shape.import !== undefined && node.type === shape.import.type) {
@@ -373,10 +474,10 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
         : node.childForFieldName(shape.import.field)
       if (target !== null) imports.push({ specifier: target.text.replace(/^['"]|['"]$/gu, ''), line: node.startPosition.row + 1 })
     }
-    for (const child of node.namedChildren) walk(child, parent)
+    for (const child of node.namedChildren) walk(child, parent, ownerId)
   }
 
-  walk(root, undefined)
+  walk(root, undefined, undefined)
   return { symbols, calls, imports, hasError: hasErrorNode(root), unsupported: false }
 }
 
@@ -419,7 +520,18 @@ export function callEdges(
     // language. Several matches: the name is ambiguous without types. Both are
     // "no edge", which under-reports rather than lying.
     if (targets.length !== 1) continue
-    edges.push({ from: callerId, to: targets[0]!, kind: 'references', line: call.line })
+    // The edge starts at the enclosing DECLARATION when the call is inside one,
+    // and at the file otherwise. This is what makes "what does this function
+    // call" a question the graph can answer: attributing every call to the file
+    // made `codegraph_context.calls` report the whole file's calls for every
+    // symbol in it.
+    //
+    // Both kinds of edge carry kind `references`, and they are told apart by
+    // their source: `file:<path>` is a file-level call (a top-level statement or
+    // a module initialiser), a symbol id is a call made inside that symbol. A
+    // separate kind would have meant every existing `references` query needing
+    // to know about it, and `impact` genuinely wants both.
+    edges.push({ from: call.owner ?? callerId, to: targets[0]!, kind: 'references', line: call.line })
   }
   return edges
 }

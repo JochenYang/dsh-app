@@ -7,11 +7,23 @@
  * thing hand-built nodes are still used for is the edge-resolution rule, which
  * has no syntax of its own.
  *
+ * **Where the on-demand cases run.** A bundled grammar is in the repository, so
+ * its cases run everywhere. The on-demand ones (`rust`, `ruby`, `php`, `bash`,
+ * and the three symbol-less formats) are downloaded into a user's storage at run
+ * time, and the repository deliberately does not ship a second copy — that is the
+ * whole point of "on demand". Their cases therefore SKIP by name on a machine
+ * without them (16 skips, visible in the count, never silent). CI does not accept
+ * that: it runs `scripts/fetch-ci-grammars.mjs` first and points
+ * `DSH_APP_CODEGRAPH_GRAMMARS` at the result, so the same 233 cases execute
+ * there. A local run reproduces CI with that variable set to any directory
+ * holding the downloaded wasm.
+ *
  * @module plugin-codegraph/tests/parse
  */
 
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Parser, Language } from 'web-tree-sitter'
@@ -34,11 +46,33 @@ async function parserFor(languageId: string): Promise<Parser> {
   if (cached !== undefined) return cached
   const spec = LANGUAGES.find(language => language.id === languageId)
   assert.ok(spec !== undefined, `no language table entry for ${languageId}`)
-  const grammar = await Language.load(join(grammarDir, `tree-sitter-${spec.grammar}.wasm`))
+  // A bundled grammar lives in the plugin; an ON-DEMAND one (rust, ruby, php,
+  // bash, css, ini, regex) is downloaded at run time into the user's storage, so a
+  // test machine may not have it. `DSH_APP_CODEGRAPH_GRAMMARS` points the suite at
+  // a download directory; without it those ids are skipped by name rather than
+  // failing, because "the grammar was never downloaded" and "the table is wrong"
+  // are different facts and only the second is a defect.
+  const bundled = join(grammarDir, `tree-sitter-${spec.grammar}.wasm`)
+  const downloaded = process.env.DSH_APP_CODEGRAPH_GRAMMARS === undefined
+    ? undefined
+    : join(process.env.DSH_APP_CODEGRAPH_GRAMMARS, `tree-sitter-${spec.grammar}.wasm`)
+  const file = existsSync(bundled) ? bundled : downloaded
+  assert.ok(file !== undefined && existsSync(file),
+    `no grammar for ${languageId} — bundled path ${bundled} is absent and DSH_APP_CODEGRAPH_GRAMMARS is ${process.env.DSH_APP_CODEGRAPH_GRAMMARS ?? 'unset'}`)
+  const grammar = await Language.load(file)
   const parser = new Parser()
   parser.setLanguage(grammar)
   parsers.set(languageId, parser)
   return parser
+}
+
+/** Whether this machine can run a language's real-grammar cases. */
+function grammarAvailable(languageId: string): boolean {
+  const spec = LANGUAGES.find(language => language.id === languageId)
+  if (spec === undefined) return false
+  if (existsSync(join(grammarDir, `tree-sitter-${spec.grammar}.wasm`))) return true
+  return process.env.DSH_APP_CODEGRAPH_GRAMMARS !== undefined
+    && existsSync(join(process.env.DSH_APP_CODEGRAPH_GRAMMARS, `tree-sitter-${spec.grammar}.wasm`))
 }
 
 /** Parse a source string and extract through the real tree. */
@@ -285,15 +319,58 @@ describe('GRAMMAR_SHAPES — every declaration entry really produces a symbol', 
       enum_declaration: 'enum E { A }',
       property_declaration: 'class C { int P { get; set; } }',
     },
+    // The four added in W13, each sample run against the REAL grammar by this
+    // suite: a node name this grammar does not produce yields no symbol and the
+    // case above fails, which is the only durable check on a table written from a
+    // probe.
+    rust: {
+      function_item: 'fn f() {}',
+      struct_item: 'struct S;',
+      enum_item: 'enum E { A }',
+      trait_item: 'trait T {}',
+      function_signature_item: 'trait T { fn m(&self); }',
+      field_declaration: 'struct S { x: i32 }',
+    },
+    ruby: {
+      method: 'def f; end',
+      singleton_method: 'def self.f; end',
+      class: 'class C; end',
+      module: 'module M; end',
+    },
+    php: {
+      function_definition: '<?php function f() {}',
+      method_declaration: '<?php class C { public function m() {} }',
+      class_declaration: '<?php class C {}',
+      interface_declaration: '<?php interface I {}',
+      trait_declaration: '<?php trait T {}',
+    },
+    bash: {
+      function_definition: 'f() { echo 1; }',
+    },
+    // Parseable, downloadable, and deliberately NOT symbol-producing: a selector,
+    // a config key and a regex fragment name nothing a caller can reference. The
+    // gate below requires an entry for every shape, so these three are stated as
+    // EMPTY rather than omitted — an omission would read as an oversight.
+    css: {},
+    ini: {},
+    regex: {},
   }
 
   for (const [languageId, entries] of Object.entries(SAMPLES)) {
     for (const [nodeType, source] of Object.entries(entries)) {
-      it(`${languageId}: ${nodeType} produces a symbol`, async () => {
+      it(`${languageId}: ${nodeType} produces a symbol`, async (t) => {
         const shape = GRAMMAR_SHAPES[languageId]
         assert.ok(shape !== undefined, `no shape for ${languageId}`)
         const expected = shape.declarations[nodeType]
         assert.ok(expected !== undefined, `${nodeType} is not in ${languageId}'s declarations table`)
+        // An ON-DEMAND grammar is downloaded at run time, so a test machine may
+        // not have it. Skipping by NAME is honest: the alternative is a case that
+        // passes because it never ran, or a failure that reports a wrong table
+        // when the truth is "not downloaded".
+        if (!grammarAvailable(languageId)) {
+          t.skip(`${languageId}'s grammar is not installed; set DSH_APP_CODEGRAPH_GRAMMARS to a download directory to run it`)
+          return
+        }
         const parsed = await parse(source, languageId, `a.${languageId}`)
         assert.ok(parsed.symbols.length > 0,
           `${nodeType} produced NO symbol from ${JSON.stringify(source)} — its nameField names a field the grammar does not have`)
@@ -316,6 +393,58 @@ describe('GRAMMAR_SHAPES — every declaration entry really produces a symbol', 
 })
 
 describe('GRAMMAR_SHAPES — every call and import entry is reachable', () => {
+  it('attributes each call to the declaration that contains it', async () => {
+    // W11b's core contract. Before it, every call edge started at the FILE, so
+    // `codegraph_context` answered "what does this file call" for every symbol in
+    // it — which for a 40-function file is 40 identical lists.
+    const parsed = await parse([
+      'function outer() {',
+      '  inner()',
+      '  return deep()',
+      '}',
+      'function inner() {',
+      '  deep()',
+      '}',
+      'function deep() { return 1 }',
+      'top()',
+    ].join('\n'), 'typescript', 'a.ts')
+
+    const owner = (name: string): string | undefined => parsed.calls.find(call => call.name === name)?.owner
+    assert.equal(owner('inner'), 'a.ts#function:outer', 'a call inside outer belongs to outer')
+    assert.equal(owner('top'), undefined, 'a call at file scope belongs to no symbol')
+    // `deep` is called from two declarations, so there are two calls with two
+    // different owners — not one edge shared by the file.
+    const deepOwners = parsed.calls.filter(call => call.name === 'deep').map(call => call.owner)
+    assert.deepEqual(deepOwners, ['a.ts#function:outer', 'a.ts#function:inner'])
+  })
+
+  it('gives each overload its own ownership, so two overloads are two callers', async () => {
+    // The id carries the ordinal, and the ordinal is what tells two same-named
+    // declarations apart. Using the NAME here would merge their call edges.
+    const parsed = await parse([
+      'class C {',
+      '  m(a: number) { helper() }',
+      '  m(a: string) { helper() }',
+      '  helper() {}',
+      '}',
+    ].join('\n'), 'typescript', 'a.ts')
+    const owners = parsed.calls.filter(call => call.name === 'helper').map(call => call.owner)
+    assert.equal(new Set(owners).size, 2, `two overloads must be two owners, got ${JSON.stringify(owners)}`)
+  })
+
+  it('attributes a nested function call to the innermost declaration', async () => {
+    // The walk replaces the owner on entering a declaration and restores it on
+    // leaving, so a closure's call belongs to the closure.
+    const parsed = await parse([
+      'function outer() {',
+      '  function inner() {',
+      '    target()',
+      '  }',
+      '}',
+    ].join('\n'), 'typescript', 'a.ts')
+    assert.equal(parsed.calls.find(call => call.name === 'target')?.owner, 'a.ts#function:outer.inner')
+  })
+
   it('captures a bare call, a member call, a Go selector call and a Java invocation', async () => {
     const bare = await parse('function a() { return b() }', 'typescript', 'a.ts')
     assert.ok(bare.calls.some(call => call.name === 'b'), 'bare call')
@@ -371,7 +500,10 @@ describe('extractSymbols — unsupported', () => {
       namedChildren: [],
       childForFieldName: () => null,
     }
-    const parsed = extractSymbols(root, 'a.rb', 'ruby')
+    // `css` parses and downloads but declares nothing a caller can reference — a
+    // selector is not a symbol. It must report `unsupported`, not an empty file:
+    // the two are different facts and only one means this language works.
+    const parsed = extractSymbols(root, 'a.css', 'css')
     assert.equal(parsed.unsupported, true)
     assert.deepEqual(parsed.symbols, [])
   })

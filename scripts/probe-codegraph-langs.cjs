@@ -184,7 +184,13 @@ async function main() {
       main.className = 'dshcg_langMain'
       const nameEl = document.createElement('span')
       nameEl.className = 'dshcg_langName'
-      nameEl.textContent = name
+      // The TOOLTIP ANCHOR is this inner inline span, not the flex item around
+      // it — that separation is the fix. The primitive measures this element, so
+      // these assertions are only meaningful against it.
+      const labelEl = document.createElement('span')
+      labelEl.className = 'dshcg_langLabel'
+      labelEl.textContent = name
+      nameEl.append(labelEl)
       main.append(nameEl)
       let button
       if (action !== undefined) {
@@ -210,7 +216,7 @@ async function main() {
       row.append(meta)
       grid.append(row)
       document.body.append(grid)
-      return { grid, row, nameEl, button }
+      return { grid, row, nameEl, labelEl, button }
     }
     /** How many line boxes a button's own text occupies. */
     const textLines = (button) => {
@@ -219,6 +225,12 @@ async function main() {
       return range.getClientRects().length
     }
     const rows = []
+    /** The width of a box's OWN TEXT, not the box. */
+    const textWidth = (el) => {
+      const range = document.createRange()
+      range.selectNodeContents(el)
+      return range.getBoundingClientRect().width
+    }
     // The grid's declared floor is minmax(240px, 1fr); 240 is the narrowest a
     // column can be, so that is where a squeezed control shows up first.
     for (const width of [240, 300, 520]) {
@@ -237,6 +249,12 @@ async function main() {
         nameClient: nameBox.clientWidth,
         nameScroll: nameBox.scrollWidth,
         nameTruncated: nameBox.scrollWidth > nameBox.clientWidth + 1,
+        // THE ANCHOR FIT IS THE TOOLTIP'S POSITION. The name box is the element
+        // the Tooltip measures, so a box wider than its text puts the bubble over
+        // empty card instead of over the word — measured at 164px of box for 31px
+        // of "Ruby", which is exactly where the reported bubble landed.
+        nameBoxWidth: nameBoxRect.width,
+        nameTextWidth: textWidth(nameBox),
         rowRight: rowBox.right,
         rowHeight: rowBox.height,
         buttonRight: buttonBox.right,
@@ -269,7 +287,20 @@ async function main() {
     const withAction = build(240, { name: 'TypeScript', tags: ['随包提供', '1.3MB'], action: '下载' })
     const holderCount = withAction.row.querySelectorAll('.dshcg_langAction').length
     withAction.grid.remove()
-    return { rows, holderCount, heights }
+    // The tooltip anchor: a SHORT name in a WIDE column. This is the shape that
+    // shipped a bubble over empty card, because the name cell grew to fill the
+    // row and the bubble is placed from that cell's rect.
+    const fits = []
+    for (const width of [240, 420]) {
+      const wide = build(width, { name: 'Ruby', tags: ['未安装'], action: '下载' })
+      wide.grid.style.gridTemplateColumns = '1fr'
+      const anchorRect = wide.labelEl.getBoundingClientRect()
+      const range = document.createRange()
+      range.selectNodeContents(wide.labelEl)
+      fits.push({ width, boxWidth: anchorRect.width, textWidth: range.getBoundingClientRect().width })
+      wide.grid.remove()
+    }
+    return { rows, holderCount, heights, fits }
   })()`)
 
   for (const row of measure.rows) {
@@ -304,6 +335,16 @@ async function main() {
     measure.holderCount === 1,
     `${String(measure.holderCount)} .dshcg_langAction node(s)`)
 
+  // The tooltip's position IS this box. A short name at a wide column is the case
+  // that shipped wrong: the name cell grew to fill the row (164px for the 31px
+  // word "Ruby"), and the bubble, centred on that box, floated out over the empty
+  // card — what the report circled.
+  for (const fit of measure.fits) {
+    record(`the name box hugs its text at a ${fit.width}px column (the tooltip anchor)`,
+      Math.abs(fit.boxWidth - fit.textWidth) <= 2,
+      `box ${fit.boxWidth.toFixed(1)}px vs text ${fit.textWidth.toFixed(1)}px — the bubble lands on the box, not the word`)
+  }
+
   // The JSX half. The measurements above run against a row this probe builds, so
   // they can only prove the CSS. These read the COMPONENT, which is what decides
   // whether the wrapper, the two-row structure and the tooltip branch exist at
@@ -317,12 +358,49 @@ async function main() {
   record('the component renders the two-row card the stylesheet shapes',
     /className="dshcg_langMain"/u.test(section) && /className="dshcg_langMeta"/u.test(section),
     'section.tsx `dshcg_langMain` + `dshcg_langMeta`')
-  record('the component skips the tooltip when there is no label',
-    /\{bubble\.label === undefined\s*\?\s*name\s*:\s*<Tooltip/u.test(section),
-    'section.tsx renders no Tooltip for a language with no extension')
+  record('the component skips the tooltip when it has no label',
+    /bubble\.label === undefined/u.test(section),
+    'section.tsx branches on `bubble.label`')
+  record('the component portals its tooltip out of the dialog panel',
+    // The defect this pins: the bubble is `position: fixed`, and the settings
+    // panel carries a `transform`, so a non-portaled bubble positioned itself
+    // against that ancestor and appeared ~70px away from the language it named.
+    // Measured in the browser below; this asserts the PROP that does it.
+    /<Tooltip label=\{bubble\.label\}[^>]*\sportal/u.test(section),
+    'section.tsx passes `portal` to the language Tooltip')
   record('a bundled language renders no action button at all',
     /\{language\.bundled \? null : \(/u.test(section),
     'a disabled button would suggest a state the user could reach')
+
+  // T1: the offset itself, measured. A transformed ancestor is exactly the
+  // condition that broke it, so the probe builds one and asks where a
+  // `position: fixed` box actually lands. Without a portal the answer is
+  // "relative to the ancestor"; with one it is "relative to the viewport".
+  const anchorRect = await win.webContents.executeJavaScript(`(() => {
+    const panel = document.createElement('div')
+    // The settings panel's own shape: a transform makes this element the
+    // containing block for any fixed descendant.
+    panel.style.cssText = 'position:absolute;left:120px;top:80px;transform:translateZ(0);padding:20px'
+    const anchor = document.createElement('span')
+    anchor.textContent = 'PHP'
+    panel.append(anchor)
+    document.body.append(panel)
+    const box = anchor.getBoundingClientRect()
+    const probe = document.createElement('div')
+    probe.style.cssText = 'position:fixed;left:0;top:0;width:4px;height:4px'
+    // Inside the transformed panel: the fixed box is placed against the PANEL,
+    // not the viewport, which is the whole bug.
+    panel.append(probe)
+    const inside = probe.getBoundingClientRect()
+    document.body.append(probe)
+    const portaled = probe.getBoundingClientRect()
+    panel.remove()
+    probe.remove()
+    return { anchorLeft: box.left, anchorTop: box.top, insideLeft: inside.left, portaledLeft: portaled.left }
+  })()`)
+  record('a fixed box inside the transformed panel is displaced (the mechanism behind the offset)',
+    Math.abs(anchorRect.insideLeft - anchorRect.portaledLeft) > 1,
+    `inside the panel a fixed box sits at x=${anchorRect.insideLeft.toFixed(1)}; portaled it sits at x=${anchorRect.portaledLeft.toFixed(1)} — that gap is what put the bubble ~70px from its language`)
 
   console.log('\n--- code graph language rows ---')
   for (const line of lines) console.log(line)

@@ -123,10 +123,31 @@ describe('stylesheet', () => {
     // The card stacks its two rows instead of wrapping one line.
     assert.match(rule('.dshcg_lang'), /flex-direction:\s*column/u, 'the card must stack its rows, not wrap one line')
     assert.equal(/flex-wrap/u.test(rule('.dshcg_lang')), false, 'a wrapping card is what stranded the action on its own line')
-    assert.match(rule('.dshcg_langName'), /flex:\s*1 1 auto/u, 'the name absorbs the slack the action leaves')
+    // The name flex item is LAYOUT only, and the tooltip anchors the inline span
+    // inside it. A grow-able flex box filled the row — 164px of box for the 31px
+    // word "Ruby" — and because the primitive measures its CHILD rect, the bubble
+    // landed out over empty card. Two rules follow: the flex item never grows
+    // past its text, and the anchor itself is an inline box, which is the shape
+    // `plugin-archives` uses for the same reason.
+    assert.match(rule('.dshcg_langName'), /flex:\s*0 1 auto/u, 'the name flex item hugs its text')
+    assert.equal(/flex:\s*[1-9]/u.test(rule('.dshcg_langName')), false, 'a growing name box detaches the tooltip from the word it labels')
     assert.match(rule('.dshcg_langName'), /min-width:\s*0/u, 'a flex item cannot ellipsis without min-width: 0')
+    assert.match(rule('.dshcg_langLabel'), /display:\s*inline/u, 'the tooltip anchor must be measured by its text, not by the layout')
+    // Extracted from the block's OWN declarations, with its COMMENTS stripped.
+    // Two false signals had to be removed to make this honest: `rule()` slices to
+    // the next `}` so a neighbouring rule's `flex` leaked in, and the block's own
+    // prose says "a flex item here would…", which matches a naive `/flex/` on the
+    // full body. Neither is a declaration, and an assertion that trips on either
+    // is testing the wrong text.
+    const labelRuleBody = /\.dshcg_langLabel\s*\{([\s\S]*?)\}/u.exec(body)?.[1] ?? ''
+    assert.ok(labelRuleBody !== '', '.dshcg_langLabel rule is missing')
+    const labelDeclarations = labelRuleBody.replace(/\/\*[\s\S]*?\*\//gu, '')
+    assert.equal(/flex/u.test(labelDeclarations), false, 'a flex spec on the anchor is what moved the bubble')
     assert.match(rule('.dshcg_langAction'), /flex:\s*0 0 auto/u, 'the action must keep its own width')
-    assert.equal(/margin-left:\s*auto/u.test(rule('.dshcg_langAction')), false, 'an auto margin is what pushed a stranded button to the edge')
+    // The action rides the right edge. The auto margin is safe now because the
+    // card is two rows and this row holds only name + action, with the NAME the
+    // one that shrinks — there is no second line for the button to fall onto.
+    assert.match(rule('.dshcg_langAction'), /margin-left:\s*auto/u, 'the action lines up on the right down the grid')
     // The project row holds the same control shape (`重新索引`), so it needs the
     // same rule. Fixing only the row a screenshot happened to show is how this
     // class of defect survives.
@@ -153,10 +174,27 @@ describe('stylesheet', () => {
     // must render no Tooltip at all rather than a blank one. `row.ts` answers
     // `undefined` for that case; this asserts the CALL SITE honours it, which is
     // what actually stops the bubble.
+    //
+    // The branch is now a ternary over `name`, not over the JSX element: the
+    // anchor is the label span INSIDE the name cell, so the `undefined` arm still
+    // renders the name cell (and the ellipsis with it) while the other wraps only
+    // the label in the primitive.
     assert.match(
       section,
-      /\{bubble\.label === undefined\s*\?\s*name\s*:\s*<Tooltip/u,
-      'a language with no extensions must render no Tooltip',
+      /bubble\.label === undefined\s*\n?\s*\?\s*<span className="dshcg_langName">/u,
+      'the undefined arm must render the name cell with no Tooltip',
+    )
+    assert.match(section, /className="dshcg_langLabel"/u, 'the tooltip anchor must be the inline label span')
+    // `portal` is the positioning fix, not a preference. The bubble is
+    // `position: fixed`, and the settings dialog's panel carries a transform — a
+    // transformed ancestor becomes the containing block for a fixed descendant, so
+    // a bubble reading "php" appeared ~70px up and to the right of PHP. Portaling
+    // to the body takes that ancestor out of the chain. Removing this prop brings
+    // the offset back while every other assertion here still passes.
+    assert.match(
+      section,
+      /<Tooltip label=\{bubble\.label\}[^>]*\sportal/u,
+      'the language tooltip must portal out of the dialog panel',
     )
   })
 })

@@ -50,6 +50,7 @@ import { LANGUAGES, bundledGrammarDir, downloadGrammar, grammarPath, type Gramma
 import {
   calledBy,
   callsOf,
+  documentsFor,
   dropUndefined,
   findSymbols,
   formatSymbol,
@@ -294,6 +295,13 @@ export function apply(ctx: Context): void {
                 path: { type: 'string', required: true },
                 line: { type: 'number', required: true },
                 kind: { type: 'string', required: true },
+                // The calling SYMBOL's name. W11b made `referencesTo` answer it,
+                // and `additionalProperties: false` means an undeclared field is
+                // an INVALID_TOOL_OUTPUT for the whole answer — so this row is
+                // what keeps "who calls this" from failing the tool that asks.
+                // Absent (not null) for a reference at file scope, which is why
+                // it is optional rather than required.
+                name: { type: 'string' },
               },
             },
           },
@@ -337,10 +345,12 @@ export function apply(ctx: Context): void {
     name: 'codegraph_context',
     description:
       'Read one symbol\u2019s neighbourhood in a single call: its declaration, the other symbols declared in '
-      + 'the same file, the calls made FROM THAT FILE, what references it, and what its file imports. Use this '
-      + 'instead of several codegraph_find calls when you need to understand how a piece fits before changing '
-      + 'it. Calls are attributed to the file, not to the enclosing function: this graph resolves references by '
-      + 'name only, so it cannot say which function inside a file made a call.',
+      + 'the same file, the calls it makes, what references it, what its file imports, and the project '
+      + 'documents that name it. Use this instead of several codegraph_find calls when you need to '
+      + 'understand how a piece fits before changing it. A call is attributed to the enclosing declaration '
+      + 'when it sits inside one, and to the file otherwise, so `calls` is this symbol\u2019s own calls plus '
+      + 'any file-level call; targets are resolved by name, so a name declared in more than one place '
+      + 'produces no edge rather than a guess.',
     parameters: {
       symbol: {
         type: 'string',
@@ -412,6 +422,18 @@ export function apply(ctx: Context): void {
             },
           },
           imports: { type: 'array', required: true, items: { type: 'string' } },
+          documents: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string', required: true },
+                line: { type: 'number', required: true },
+              },
+            },
+          },
         },
       },
       render: (_args, value) => {
@@ -424,9 +446,10 @@ export function apply(ctx: Context): void {
           ...(result.note === undefined ? [] : [`note: ${result.note}`]),
           `same file (${String(result.siblings.length)}):`,
           ...result.siblings.map(symbol => `- ${formatSymbol(symbol)}`),
-          ...(result.calls.length === 0 ? [] : ['calls made from this file:', ...result.calls.map(edge => `- ${edge.name ?? '?'} at line ${String(edge.line)}`)]),
+          ...(result.calls.length === 0 ? [] : ['calls made from here:', ...result.calls.map(edge => `- ${edge.name ?? '?'} at line ${String(edge.line)}`)]),
           ...(result.calledBy.length === 0 ? [] : ['called by:', ...result.calledBy.map(edge => `- ${edge.path ?? '?'}:${String(edge.line)}`)]),
           ...(result.imports.length === 0 ? [] : ['imports:', ...result.imports.map(path => `- ${path}`)]),
+          ...(result.documents.length === 0 ? [] : ['described in:', ...result.documents.map(doc => `- ${doc.path}:${String(doc.line)}`)]),
         ]
         return [{ type: 'text', text: lines.join('\n') }]
       },
@@ -437,16 +460,20 @@ export function apply(ctx: Context): void {
       const graph = graphFor(cwd)
       const symbol = resolveSymbol(graph, args.symbol)
       if (symbol === undefined) {
-        return dropUndefined({ freshness, note, symbol: undefined, siblings: [], calls: [], calledBy: [], imports: [] }) satisfies ContextResult
+        return dropUndefined({ freshness, note, symbol: undefined, siblings: [], calls: [], calledBy: [], imports: [], documents: [] }) satisfies ContextResult
       }
       return dropUndefined({
         freshness,
         note,
         symbol,
         siblings: symbolsInFile(graph, symbol.path, MAX_ROWS),
-        calls: callsOf(graph, fileNodeId(symbol.path), MAX_ROWS),
+        // The symbol's OWN calls, plus whatever its file calls at file scope.
+        // Before W11b this was the file's calls for every symbol in it, so a
+        // 40-function file answered with the same 40-entry list 40 times.
+        calls: [...callsOf(graph, symbol.id, MAX_ROWS), ...callsOf(graph, fileNodeId(symbol.path), MAX_ROWS)],
         calledBy: calledBy(graph, symbol.id, MAX_ROWS),
         imports: importsOf(graph, symbol.path, MAX_ROWS),
+        documents: documentsFor(graph, symbol.id, MAX_ROWS),
       }) satisfies ContextResult
     },
   })))

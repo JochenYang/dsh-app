@@ -4,8 +4,8 @@
  *
  * The rules pinned here are the ones that decide whether an answer can be
  * trusted: exact name beats substring, an ambiguous name answers nothing rather
- * than the first match, a reverse walk reports the FILE a call came from, and
- * every answer says how fresh the graph is.
+ * than the first match, a reverse walk names the SYMBOL a call came from (or its
+ * file, for a call at file scope), and every answer says how fresh the graph is.
  *
  * @module plugin-codegraph/tests/query
  */
@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import {
   calledBy,
   callsOf,
+  documentsFor,
   findSymbols,
   freshnessNote,
   importsOf,
@@ -104,15 +105,26 @@ describe('resolveSymbol', () => {
 })
 
 describe('referencesTo', () => {
-  it('reports the FILE a call came from, because call edges are file-owned', () => {
+  it('names the calling SYMBOL, and falls back to the file for a file-scope call', () => {
+    // Both shapes exist in one graph and a caller must not have to know which:
+    // a call inside a declaration is owned by that symbol, a top-level call by the
+    // file. W11b changed the first from "the file" to "the function".
     const g = graph()
     const target = sym('target.ts', 'shared')
+    const caller = sym('caller.ts', 'run')
     replaceFile(g.db, file('target.ts'), [target], [])
-    replaceFile(g.db, file('caller.ts'), [], [
-      { from: fileNodeId('caller.ts'), to: target.id, kind: 'references', line: 7 },
+    replaceFile(g.db, file('caller.ts'), [caller], [
+      { from: caller.id, to: target.id, kind: 'references', line: 7 },
+      { from: fileNodeId('caller.ts'), to: target.id, kind: 'references', line: 12 },
     ])
     const refs = referencesTo(g, target.id, 10)
-    assert.deepEqual(refs, [{ path: 'caller.ts', line: 7, kind: 'references' }])
+    // The rows come back ordered by `src`, so the SYMBOL-sourced edge sorts before
+    // the `file:` one ("caller.ts#function:run" < "file:caller.ts"). Sorted here
+    // by line so the case states what it means rather than pinning that order.
+    assert.deepEqual([...refs].sort((a, b) => a.line - b.line), [
+      { path: 'caller.ts', line: 7, kind: 'references', name: 'run' },
+      { path: 'caller.ts', line: 12, kind: 'references', name: undefined },
+    ])
   })
 
   it('does not report a `contains` edge as a reference', () => {
@@ -200,5 +212,42 @@ describe('freshnessNote', () => {
     assert.match(indexing, /being built/u)
     assert.match(indexing, /first time/u)
     assert.match(freshnessNote('stale', false, false) ?? '', /older than the working tree/u)
+  })
+})
+
+describe('documentsFor', () => {
+  /** A graph holding one symbol and whichever document edges the case needs. */
+  const withDocs = (targets: readonly { readonly path: string, readonly line: number }[]): ReturnType<typeof openGraph> => {
+    const dir = mkdtempSync(join(tmpdir(), 'cg-docsfor-'))
+    scratch.push(dir)
+    const graph = openGraph(join(dir, 'graph.db'))
+    graphs.push(graph)
+    const file: FileRecord = { path: 'a.ts', mtime: 1, size: 1, hash: 'h', lang: 'typescript' }
+    const symbol: SymbolRecord = { id: 'a.ts#function:alpha', path: 'a.ts', name: 'alpha', kind: 'function', line: 1, parent: undefined }
+    replaceFile(graph.db, file, [symbol], targets.map(t => ({ from: symbol.id, to: `file:${t.path}`, kind: 'documents' as const, line: t.line })))
+    return graph
+  }
+
+  it('reads the document path from the file node and the line from the edge', () => {
+    const graph = withDocs([{ path: 'docs/guide.md', line: 3 }])
+    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10), [{ path: 'docs/guide.md', line: 3 }])
+  })
+
+  it('keeps a path that contains a hash intact', () => {
+    // The `doc:<path>#<line>` id this used to unpack forced a split on the last
+    // `#`, so a file genuinely named `notes#1.md` had to be special-cased. The
+    // line now lives in its own column and the path is just a path.
+    const graph = withDocs([{ path: 'docs/notes#1.md', line: 7 }])
+    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10), [{ path: 'docs/notes#1.md', line: 7 }])
+  })
+
+  it('answers nothing when no document mentions the symbol', () => {
+    const graph = withDocs([])
+    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10), [])
+  })
+
+  it('honours the row limit', () => {
+    const graph = withDocs([{ path: 'a.md', line: 1 }, { path: 'a.md', line: 2 }, { path: 'a.md', line: 3 }])
+    assert.equal(documentsFor(graph, 'a.ts#function:alpha', 2).length, 2)
   })
 })

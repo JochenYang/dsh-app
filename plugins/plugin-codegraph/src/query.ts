@@ -69,8 +69,18 @@ export interface FindResult extends ToolEnvelope {
 export interface ImpactResult extends ToolEnvelope {
   /** The symbol the question was about, when the id or name resolved. */
   readonly target: SymbolView | undefined
-  /** Files that reference the target, with the line of the reference. */
-  readonly referencing: readonly { readonly path: string, readonly line: number, readonly kind: string }[]
+  /**
+   * What references the target, with the line and the calling symbol.
+   *
+   * Typed as {@link Referrer} rather than as an inline shape: an inline
+   * `{path, line, kind}` was structurally satisfied by the richer value W11b
+   * produces, so `tsc` accepted a result whose `name` the output schema had not
+   * declared — and `additionalProperties: false` turns an undeclared field into
+   * INVALID_TOOL_OUTPUT for the whole answer. The type now names every field the
+   * value carries, so a schema that falls behind is a type error rather than a
+   * tool that fails on its most common input.
+   */
+  readonly referencing: readonly Referrer[]
   /** Files the target's file imports (the forward direction, for orientation). */
   readonly imports: readonly string[]
 }
@@ -86,6 +96,23 @@ export interface ContextResult extends ToolEnvelope {
   readonly calledBy: readonly EdgeView[]
   /** Files this symbol's file imports. */
   readonly imports: readonly string[]
+  /**
+   * Where this project's own prose names this symbol.
+   *
+   * The point of the whole `documents` edge: "what is this for" is answered by a
+   * paragraph, and a model given only the declaration will guess. Each entry
+   * names the file and the line, so a reader can open the sentence that explains
+   * the code rather than a whole document.
+   */
+  readonly documents: readonly DocumentRef[]
+}
+
+/** One place a document mentions a symbol. */
+export interface DocumentRef {
+  /** The document's project-relative path. */
+  readonly path: string
+  /** 1-based line in that document. */
+  readonly line: number
 }
 
 /** The note a freshness value carries. */
@@ -157,19 +184,60 @@ interface EdgeRow {
   readonly kind: string
 }
 
+/** One place that references a symbol. */
+export interface Referrer {
+  /** The referring file. */
+  readonly path: string
+  /** The line of the reference. */
+  readonly line: number
+  /** The edge kind (always `references` here). */
+  readonly kind: string
+  /**
+   * The referring SYMBOL's name, or undefined when the reference is at file
+   * scope.
+   *
+   * "`resolveName` calls this" is actionable; "somewhere in this file" is not.
+   */
+  readonly name: string | undefined
+}
+
 /**
- * Files whose edges point at this symbol id, with the line of each edge.
+ * What points at this symbol: the calling symbol, its file, and the line.
  *
- * The edge's `src` is `file:<path>` for call edges (the parse layer does not
- * know which symbol contains a call), so the file is read out of the id.
+ * The edge's `src` is a SYMBOL id when the call sits inside a declaration, and
+ * `file:<path>` when it sits at file scope. Both are unpacked here, so a caller
+ * never has to know which kind it is looking at — and the answer names the
+ * FUNCTION that calls this one, which is what makes `impact` actionable.
+ *
+ * @param graph - the open graph.
+ * @param symbolId - the destination symbol.
+ * @param limit - how many edges to return.
+ * @returns the referrers in a stable order.
  */
-export function referencesTo(graph: Graph, symbolId: string, limit: number): { path: string, line: number, kind: string }[] {
-  const rows = allRows<EdgeRow>(
+export function referencesTo(graph: Graph, symbolId: string, limit: number): Referrer[] {
+  // Joined on the SOURCE symbol so a symbol-level edge can name its caller. A
+  // file-level edge has no symbol row to join, which is what the LEFT JOIN and
+  // the `name` fallback handle.
+  const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null }>(
     graph.db,
-    "SELECT src, line, kind FROM edges WHERE dst = ? AND kind = 'references' ORDER BY src, line LIMIT ?",
+    `SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path
+     FROM edges e LEFT JOIN symbols s ON s.id = e.src
+     WHERE e.dst = ? AND e.kind = 'references' ORDER BY e.src, e.line LIMIT ?`,
     symbolId, limit,
   )
-  return rows.map(row => ({ path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind }))
+  return rows.map((row) => {
+    if (row.src.startsWith('file:')) {
+      return { path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind, name: undefined }
+    }
+    // A symbol id is `<path>#<kind>:<name>`; the join gives both parts, but fall
+    // back to unpacking the id when the row is gone (a symbol removed between two
+    // passes, which the next pass settles).
+    if (row.path !== null && row.name !== null) {
+      return { path: row.path, line: row.line, kind: row.kind, name: row.name }
+    }
+    const hash = row.src.lastIndexOf('#')
+    return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined }
+  })
 }
 
 /** Files this file imports. */
@@ -210,6 +278,27 @@ export function calledBy(graph: Graph, symbolId: string, limit: number): EdgeVie
     symbolId, limit,
   )
   return rows.map(row => ({ kind: row.kind, line: row.line, path: row.src.replace(/^file:/u, ''), name: undefined }))
+}
+
+/**
+ * The documents that name one symbol.
+ *
+ * The edge targets the document FILE (`file:<path>`) and carries the mention's
+ * line in its own `line` column, so this is a plain read — no id to unpack, and
+ * a path containing `#` is just a path.
+ *
+ * @param graph - the open graph.
+ * @param symbolId - the symbol's node id.
+ * @param limit - how many mentions to return.
+ * @returns the document locations, in document order.
+ */
+export function documentsFor(graph: Graph, symbolId: string, limit: number): DocumentRef[] {
+  const rows = allRows<{ dst: string, line: number }>(
+    graph.db,
+    "SELECT dst, line FROM edges WHERE src = ? AND kind = 'documents' ORDER BY dst, line LIMIT ?",
+    symbolId, limit,
+  )
+  return rows.map(row => ({ path: row.dst.replace(/^file:/u, ''), line: row.line }))
 }
 
 /** Every symbol declared in one file. */

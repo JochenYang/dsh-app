@@ -23,7 +23,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { indexProject } from '../src/indexer.ts'
 import { parseFile } from '../src/tree-sitter.ts'
-import { resolveSymbol, findSymbols, referencesTo, importsOf } from '../src/query.ts'
+import { resolveSymbol, findSymbols, referencesTo, importsOf, callsOf, documentsFor } from '../src/query.ts'
 import { openGraph, graphStats, type Graph } from '../src/store.ts'
 import { LANGUAGES, grammarPath } from '../src/languages.ts'
 
@@ -82,9 +82,12 @@ describe('real parse → index → query', () => {
     assert.ok(shared !== undefined, 'the shared symbol resolves by name')
     assert.equal(shared.path, 'src/lib.ts')
 
-    // The call in use.ts resolves to an edge pointing AT shared, owned by its file.
+    // The call in use.ts resolves to an edge pointing AT shared, and the edge now
+    // names the SYMBOL that makes the call (`caller`), not just its file. That is
+    // the W11b contract: "which function calls this" is the question.
     const refs = referencesTo(graph, shared.id, 10)
-    assert.deepEqual(refs.map(ref => ref.path), ['src/use.ts'], 'the caller file references shared')
+    assert.deepEqual(refs.map(ref => ref.path), ['src/use.ts'], 'the caller lives in use.ts')
+    assert.deepEqual(refs.map(ref => ref.name), ['caller'], 'and the caller is the function, not the file')
 
     // And the import the parser recorded became a file→file edge.
     assert.deepEqual(importsOf(graph, 'src/use.ts', 10), ['src/lib.ts'])
@@ -106,6 +109,35 @@ describe('real parse → index → query', () => {
     assert.ok(useIt !== undefined)
     assert.equal(useIt.path, 'a.py')
     assert.deepEqual(referencesTo(graph, resolveSymbol(graph, 'helper')!.id, 10).map(r => r.path), ['a.py'])
+  })
+
+  it('answers one symbol with only ITS calls, plus the documents that name it', async () => {
+    // The end-to-end shape of W11 + W11b together: a file with two functions that
+    // call different things, and a README that names one of them.
+    const { root, graph } = fixture()
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src', 'lib.ts'), [
+      'export function first(): number { return 1 }',
+      'export function second(): number { return 2 }',
+    ].join('\n'))
+    writeFileSync(join(root, 'src', 'use.ts'), [
+      "import { first, second } from './lib'",
+      'export function alpha(): number { return first() }',
+      'export function beta(): number { return second() }',
+    ].join('\n'))
+    writeFileSync(join(root, 'README.md'), '# Project\n\n`alpha` starts the pipeline.\n')
+
+    await indexProject(graph, root, realParse)
+
+    const alpha = resolveSymbol(graph, 'alpha')
+    assert.ok(alpha !== undefined)
+    // Only alpha's call. Before W11b this answered with BOTH `first` and `second`
+    // because the edge started at the file.
+    const own = callsOf(graph, alpha.id, 10)
+    assert.deepEqual(own.map(edge => edge.name), ['first'], 'alpha calls only first')
+
+    // And the prose that names alpha is reachable from alpha.
+    assert.deepEqual(documentsFor(graph, alpha.id, 10), [{ path: 'README.md', line: 3 }])
   })
 
   it('re-running the pass on unchanged files resolves the same edges without duplicating', async () => {

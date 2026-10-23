@@ -167,14 +167,19 @@ describe('GET /languages', () => {
 
   it('marks an installed grammar with no extraction shape as unsupported', async () => {
     // "Installed" and "indexable" are different claims; conflating them tells the
-    // user a language works when it parses to nothing.
-    const opts = options({ grammarPaths: grammarFixture(['download:tree-sitter-ruby.wasm']) })
+    // user a language works when it parses to nothing. `css` is the case: it
+    // parses, it downloads, and a selector is not a symbol — so it reports false
+    // here while `rust` (which has a table) reports true.
+    const opts = options({ grammarPaths: grammarFixture(['download:tree-sitter-css.wasm', 'download:tree-sitter-rust.wasm']) })
     const { routes, dispose } = harness(opts)
     const reply = await call(routes.get(`${ROUTE_PREFIX}/languages`)!, new Request('dsh-app://app/x'))
     const { languages } = reply.body.value as { languages: { id: string, installed: boolean, supported: boolean }[] }
-    const ruby = languages.find(language => language.id === 'ruby')
-    assert.equal(ruby?.installed, true)
-    assert.equal(ruby?.supported, false, 'ruby has a grammar but no shape in this plugin')
+    const css = languages.find(language => language.id === 'css')
+    assert.equal(css?.installed, true)
+    assert.equal(css?.supported, false, 'css has a grammar but no symbols to extract')
+    const rust = languages.find(language => language.id === 'rust')
+    assert.equal(rust?.installed, true)
+    assert.equal(rust?.supported, true, 'rust has an extraction table')
     await dispose()
   })
 })

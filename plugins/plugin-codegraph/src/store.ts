@@ -336,6 +336,21 @@ export function readFiles(db: DatabaseSync): Map<string, FileRecord> {
 }
 
 /**
+ * Every symbol the graph declares.
+ *
+ * Read whole rather than page by page: the mention scan needs the complete name
+ * set before it can decide anything, and a project's symbol count is bounded by
+ * the file budget (`MAX_FILES`), so this is one query over a bounded table rather
+ * than the "load the world" it would be in a bigger index.
+ *
+ * @param db - the open database.
+ * @returns the symbol rows, in no particular order.
+ */
+export function symbolsOf(db: DatabaseSync): SymbolRecord[] {
+  return allRows<SymbolRecord>(db, 'SELECT id, path, name, kind, line, parent FROM symbols')
+}
+
+/**
  * Apply one file's parse result, replacing whatever that file contributed before.
  *
  * Delete-then-insert rather than a diff: a file's symbols and edges are only
@@ -443,9 +458,19 @@ export function fileNodeId(path: string): string {
   return `file:${path}`
 }
 
-/** The node id a document paragraph carries (the source of `documents`). */
-export function documentNodeId(path: string, line: number): string {
-  return `doc:${path}#${String(line)}`
+/**
+ * The node id a document file carries, as the target of `documents` edges.
+ *
+ * A DOCUMENT'S LINE LIVES IN THE EDGE'S `line` COLUMN, not in its id. An earlier
+ * version minted a `doc:<path>#<line>` pseudo-node; because no table held such a
+ * row, nothing that reclaims a path reclaimed it, and deleting a document left
+ * its edges as permanent orphans. A plain file node is what `forgetFile` already
+ * sweeps, and `(src, dst, kind, line)` keeps one document's several mentions
+ * apart. Kept as a named function so the intent is greppable — the value is the
+ * same as {@link fileNodeId}.
+ */
+export function documentNodeId(path: string): string {
+  return fileNodeId(path)
 }
 
 /** Counts for the settings page and the tool output. */

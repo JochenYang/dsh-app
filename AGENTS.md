@@ -12,6 +12,7 @@ documents below. Read the one your change touches, and when a document and the c
 | [`docs/agents/process-rules.md`](docs/agents/process-rules.md) | the reason behind a process rule — §9 indexes them |
 | [`docs/agents/testing.md`](docs/agents/testing.md) | a suite's shape, a gate's wiring, or the CI job order |
 | [`docs/agents/settings-rail-order.md`](docs/agents/settings-rail-order.md) | adding or moving a settings section: the order table and the no-reuse rule |
+| [`docs/agents/codegraph.md`](docs/agents/codegraph.md) | `plugin-codegraph`: what the graph holds, the three pass phases, the three ways it can be quietly wrong |
 | [`docs/agents/delegation-division.md`](docs/agents/delegation-division.md) | a delegation prompt section, `plugin-swarm`'s order, or the batch-versus-Agent-Teams split |
 | [`docs/agents/known-gaps.md`](docs/agents/known-gaps.md) | whether something here is actually finished |
 | [`docs/agents/build-and-release.md`](docs/agents/build-and-release.md) | the runtime artifact, the office payload, the bundled kernel, cutting or recovering a release, the ModelScope mirror |
