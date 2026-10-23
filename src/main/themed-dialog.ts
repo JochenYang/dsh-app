@@ -11,11 +11,43 @@ import { t } from '../shared/locale'
 
 /** Pick the window a dialog should attach to. */
 export function resolveDialogWindow(preferred: BrowserWindow | null): BrowserWindow | null {
-  if (preferred !== null && !preferred.isDestroyed()) return preferred
+  if (preferred !== null && answersScripts(preferred)) return preferred
   const focused = BrowserWindow.getFocusedWindow()
-  if (focused !== null && !focused.isDestroyed()) return focused
+  if (focused !== null && answersScripts(focused)) return focused
   const first = BrowserWindow.getAllWindows()[0]
-  return first !== undefined && !first.isDestroyed() ? first : null
+  return first !== undefined && answersScripts(first) ? first : null
+}
+
+/**
+ * Whether a window can answer an injected script right now.
+ *
+ * `isDestroyed()` is not enough, and that is measured: closing a window destroys
+ * its render frame FIRST and the window object later, so a window that is on its
+ * way out passes `isDestroyed()` and then throws `Render frame was disposed
+ * before WebFrameMain could be accessed` on `executeJavaScript`. The result was a
+ * stack trace per dialog during shutdown — the native fallback still answered, so
+ * nothing broke visibly, but the log filled with errors from a case this function
+ * exists to avoid.
+ *
+ * `webContents.isDestroyed()` plus a live frame is the pair that actually decides
+ * it: `mainFrame` throws once the contents are gone, and `isLoadingMainFrame()`
+ * stays true while a navigation has no document to answer from.
+ *
+ * @param win - the candidate window.
+ * @returns true when an injected script has somewhere to run.
+ */
+function answersScripts(win: BrowserWindow): boolean {
+  if (win.isDestroyed()) return false
+  const contents = win.webContents
+  if (contents.isDestroyed() || contents.isCrashed()) return false
+  try {
+    // Accessing `mainFrame` throws once the render frame is gone, which is the
+    // exact failure the caller was logging.
+    const frame = contents.mainFrame
+    return frame !== undefined && !frame.detached
+  } catch {
+    return false
+  }
 }
 
 /**

@@ -325,7 +325,11 @@ function applyOverlayColor(win: BrowserWindow, color: string): void {
  * forever: the observer still owns every change after it.
  */
 async function syncOverlayOnce(win: BrowserWindow): Promise<void> {
-  if (win.isDestroyed()) return
+  // `isDestroyed()` alone is not enough: closing a window destroys its render
+  // frame first, so the sample threw `Render frame was disposed before
+  // WebFrameMain could be accessed` on every shutdown. The catch below already
+  // swallowed it, but an error per close is a log nobody can read.
+  if (win.isDestroyed() || win.webContents.isDestroyed() || win.webContents.isCrashed()) return
   try {
     const color = await win.webContents.executeJavaScript(SAMPLE_SCRIPT)
     if (typeof color === 'string') applyOverlayColor(win, color)
