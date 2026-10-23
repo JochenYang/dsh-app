@@ -3,12 +3,13 @@
  *
  * Two surfaces in one page, because they answer one question each:
  *
- *   - **Projects** — one tab per project that has a graph, and under the selected
- *     tab that project's own state: how fresh it is, what the last pass did, and
- *     the reasons its answer may be incomplete. The tab strip is
- *     `SegmentedTabs`, the shell's own primitive, rather than a hand-rolled row
- *     of buttons: the sliding indicator, the arrow/Home/End keys and the single
- *     tab stop all come with it.
+ *   - **Projects** — a dropdown of every project that has a graph, and under it
+ *     that project's own state: how fresh it is, what the last pass did, and the
+ *     reasons its answer may be incomplete. A dropdown rather than a tab strip
+ *     because the number of projects is unbounded: `SegmentedTabs` sizes each
+ *     segment to its label, so the strip wraps and the names collide as soon as a
+ *     user has four or five (measured). `Menu` is the shell's own anchored
+ *     dropdown — it scrolls, keeps the keyboard walk, and marks the selection.
  *   - **Languages** — which grammars are present, which ship with the plugin,
  *     and which would need a download. "Installed" and "indexable" are reported
  *     separately: a grammar with no extraction rules parses to nothing, and a
@@ -22,7 +23,7 @@
  * @module @dsh-app/plugin-codegraph/client/section
  */
 
-import { Button, PathLabel, SegmentedTabs, Tag, Tooltip, fileSizeText, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Menu, PathLabel, Tag, Tooltip, fileSizeText, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { en, NS, type CodegraphKey } from './locales.ts'
@@ -300,6 +301,9 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
   const [projects, setProjects] = useState<readonly ProjectRow[]>([])
   const [languages, setLanguages] = useState<readonly LanguageRow[]>([])
   const [selected, setSelected] = useState<string | undefined>(undefined)
+  // The project picker: one dropdown rather than a strip, because the number of
+  // projects is unbounded and a strip changes shape as it grows.
+  const [pickerOpen, setPickerOpen] = useState(false)
   // Two separate channels on purpose. A load failure is about the page not being
   // able to read the graph; an action failure is about one button. Sharing one
   // slot meant a later successful load silently erased an action error the user
@@ -383,17 +387,6 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
   // carries the whole message instead of an empty control. The array is built as
   // a non-empty tuple when it has an entry, which is the type `SegmentedTabs`
   // declares — no assertion needed.
-  const tabs = useMemo(() => projects.map((project, index) => ({
-    value: project.cwd,
-    label: project.name,
-    // Indexed, not derived from the path: sanitising `D:/a/b-c` and `D:/a/b_c`
-    // both collapse to `-D--a-b-c`, and two projects sharing a DOM id makes the
-    // tab's `aria-controls` and the keyboard Home/End sweep target the wrong
-    // panel — a switch that silently shows another project's state.
-    id: `dshcg-tab-${String(index)}`,
-    panelId: `dshcg-panel-${String(index)}`,
-  })), [projects])
-
   const current = projects.find(project => project.cwd === selected)
 
   return (
@@ -409,36 +402,49 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
         <p className="dshcg_empty">{translate('codegraph.empty')}</p>
       ) : (
         <>
-          {/* A one-item tablist is not a choice, so a single project renders no
-              strip: the sliding indicator has nothing to slide between and the
-              tablist announces an interaction that does not exist. */}
-          {tabs.length > 1 ? (
-            <div className="dshcg_tabs">
-              <SegmentedTabs
-                items={[tabs[0]!, ...tabs.slice(1)]}
-                value={selected ?? tabs[0]!.value}
-                onChange={setSelected}
-                label={translate('codegraph.project.label')}
+          {/* A MENU, not a tab strip.
+              `SegmentedTabs` sizes every segment to its own label, so a project
+              list grows until the strip wraps and the names collide — measured on
+              four real projects, where `dsh-rewind-plugin` and `Warm-kitchen-time`
+              broke onto two lines each. The number of projects is unbounded, so
+              the control has to be one that does not change shape with it.
+              `Menu` is the shell's own anchored dropdown: it scrolls, keeps the
+              keyboard walk, and carries the selection marker.
+              A single project still gets no control — there is nothing to choose. */}
+          {projects.length > 1 ? (
+            <div className="dshcg_picker">
+              <Menu
+                open={pickerOpen}
+                // The trigger is a real button, so it is in the tab order and
+                // announces what it does; the menu's own anchor is that button.
+                anchor={(
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => { setPickerOpen(open => !open) }}
+                    aria-expanded={pickerOpen}
+                    aria-haspopup="menu"
+                  >
+                    <span className="dshcg_pickerLabel">{current?.name ?? translate('codegraph.project.label')}</span>
+                  </Button>
+                )}
+                items={projects.map(project => ({ id: project.cwd, label: project.name }))}
+                selectedId={selected}
+                onSelect={(id) => { setSelected(id); setPickerOpen(false) }}
+                onClose={() => { setPickerOpen(false) }}
+                align="start"
+                portal
+                dense
               />
             </div>
           ) : null}
           {current === undefined ? null : (
-            // The panel is named by its tab (`aria-labelledby`) and focusable, so
-            // Tab reaches the content — the two halves of the tabs pattern the
-            // primitive leaves to the caller (`panels remain caller-owned`).
-            <div
-              id={tabs.find(tab => tab.value === current.cwd)?.panelId}
-              role="tabpanel"
-              aria-labelledby={tabs.find(tab => tab.value === current.cwd)?.id}
-              tabIndex={0}
-            >
-              <ProjectPanel
-                project={current}
-                busy={busyProjects.has(current.cwd)}
-                onReindex={onReindex}
-                t={translate}
-              />
-            </div>
+            <ProjectPanel
+              project={current}
+              busy={busyProjects.has(current.cwd)}
+              onReindex={onReindex}
+              t={translate}
+            />
           )}
         </>
       )}

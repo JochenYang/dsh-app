@@ -33,9 +33,19 @@ const cssText = `
   font-size: 13px;
   line-height: 1.6;
 }
-.dshcg_tabs {
+.dshcg_picker {
   display: flex;
   min-width: 0;
+}
+/* The trigger shows the CURRENT project's name and must not push the menu wider
+   than the page: a long directory name truncates instead of stretching the
+   control. */
+.dshcg_pickerLabel {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .dshcg_card {
   display: flex;

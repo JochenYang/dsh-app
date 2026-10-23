@@ -405,3 +405,25 @@ describe('the sidebar page', () => {
     assert.match(rail, /min-height:\s*0/u, 'and a zero minimum, or it cannot scroll inside a flex column')
   })
 })
+
+describe('the project picker', () => {
+  it('is a dropdown, not a strip that grows with the project count', () => {
+    // Measured defect: `SegmentedTabs` sizes every segment to its own label, so
+    // four real projects wrapped the strip and broke `dsh-rewind-plugin` and
+    // `Warm-kitchen-time` onto two lines each. The number of projects is
+    // unbounded, so the control must not change shape with it.
+    const section = readFileSync(join(pluginRoot, 'src', 'client', 'section.tsx'), 'utf8')
+    // The import is the test, not the word: the module header NAMES the strip it
+    // replaced, so a bare match on the name would fail on the explanation.
+    const imports = section.split('\n').filter(line => line.startsWith('import ')).join('\n')
+    assert.equal(imports.includes('SegmentedTabs'), false, 'the project switcher must not import a segmented strip')
+    assert.match(section, /<Menu\b/u, 'it must be the shell dropdown')
+    // A single project is not a choice: the control would open a list of one.
+    assert.match(section, /projects\.length > 1 \?/u, 'one project renders no picker')
+    // The trigger truncates rather than stretching the control to a long path.
+    const body = readFileSync(SOURCE, 'utf8')
+    const label = body.slice(body.indexOf('.dshcg_pickerLabel {'), body.indexOf('\n}', body.indexOf('.dshcg_pickerLabel {')))
+    assert.match(label, /text-overflow:\s*ellipsis/u, 'the trigger label must truncate')
+    assert.match(label, /max-width:/u, 'and be capped, or a long name widens the control')
+  })
+})
