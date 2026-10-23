@@ -33,6 +33,7 @@ Two rules, and they are the reason this file exists:
 | 24 | 维护设置 / Maintenance | this suite |
 | 25 | upstream, PINNED | upstream |
 | 26 | 关于 DSH-APP / About | this suite |
+| 27 | 代码图谱 / Code graph | this suite |
 
 **维护设置 is ONE section with three tabs**, not three sections: 预设包 2,
 诊断 3, 撤回隔离区 4. It is declared by the section owner through the
@@ -41,7 +42,7 @@ vacant.
 
 ## Adding a section
 
-Pick the next free number above 26 unless the section belongs beside an existing
+Pick the next free number above 27 unless the section belongs beside an existing
 one, add the row here, and add the same number to the section's registration. A
 collision is not caught by any gate — the rail just renders in an order nobody
 chose.

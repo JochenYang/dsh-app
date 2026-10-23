@@ -188,6 +188,19 @@ function cppShape(): GrammarShape {
 }
 
 /**
+ * The languages this plugin can actually READ.
+ *
+ * Derived from the extraction table rather than kept beside it. `routes.ts` used
+ * to carry its own copy so a route would not pull the parser into the request
+ * path, and that copy is exactly the kind of second truth that drifts: a
+ * language added to one table and not the other would make the settings page say
+ * "no extraction rules" for a language that works, or promise one that parses to
+ * nothing — and neither failure is red. Importing this module costs a table and
+ * a few pure functions; it does not load tree-sitter.
+ */
+export const SUPPORTED_LANGUAGE_IDS: readonly string[] = Object.keys(GRAMMAR_SHAPES)
+
+/**
  * The minimal tree-sitter node surface this module reads.
  *
  * Declared structurally rather than imported from `web-tree-sitter` so a test

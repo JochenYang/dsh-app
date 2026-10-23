@@ -78,6 +78,7 @@ not moved does not need a run.
 | `probe-routes.cjs` | after a kernel-line bump or any move of the route carriers | what the W14 routing decision rests on (S3–S6) |
 | `probe-effort-hover.cjs` | after touching `plugin-effort`'s stylesheet, track geometry or tick rules | the REAL sheet's rendered behaviour in Chromium |
 | `probe-diff-ruler.cjs` | after touching the Git panel's ruler or its styles | a mark's PAINTED height against its true line fraction |
+| `probe-codegraph-langs.cjs` | after touching `plugin-codegraph`'s `styles.ts`, its language-row markup, or the row's action button | a language row LAID OUT at the grid's 240px floor: the action label stays on one line, the name is not truncated, and the click target keeps its width — plus the component-side structure that a stylesheet measurement cannot see |
 | `probe-office-menu.cjs` | after touching `plugin-ppt`'s `office-menu.ts`, its icons, the `menu.*` keys, or the client entry's registration | the four rows rendering, ordered, clicking to ONE chip |
 | `probe-swarm-team-prompt.mjs` | after touching `plugin-swarm`'s prompt sections | whether both delegation sections survive assembly, contiguous and ordered |
 | `probe-team-section-mount.mjs` | after touching the Team section's mount | the optional `agentTeams` mount in BOTH composition orders |

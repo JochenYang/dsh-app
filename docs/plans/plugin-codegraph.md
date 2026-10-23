@@ -35,17 +35,18 @@
 | W3 | P0 | 语言加载器：随包 8 种 + 按需下载，未安装返回 LANGUAGE_NOT_INSTALLED | [x] |
 | W4 | P0 | 解析器：tree-sitter 提取 file/symbol 节点与 contains/imports 边（先 ts/js/python 三语言验证通路） | [x] |
 | W5 | P0 | 调用边提取：call_expression 等节点 → references 边（不做数据流） | [x] |
-| W6 | P0 | 增量索引：mtime+size+hash 比对，只重解析变化文件，删除级联 | [ ] |
-| W7 | P0 | 后台索引队列 + 状态机（unindexed/indexing/current/stale），并发上限 1 | [ ] |
-| W8 | P0 | 三个工具：find / impact / context，含 stale 与 INDEXING 语义 | [ ] |
-| W9 | P0 | host 路由：走 `ctx.connection.fetch.register`，路径 `/api/plugins/dsh-app/codegraph/*` | [ ] |
-| W10 | P0 | 设置页：语言下载、项目状态列表，全部用 primitives 组件 | [ ] |
-| W10b | P0 | 设置页按项目切换：`SegmentedTabs` 列出每个已索引项目，切换显示该项目自己的状态与操作 | [ ] |
+| W6 | P0 | 增量索引：mtime+size+hash 比对，只重解析变化文件，删除级联 | [x] |
+| W7 | P0 | 后台索引队列 + 状态机（unindexed/indexing/current/stale），并发上限 1 | [x] |
+| W8 | P0 | 三个工具：find / impact / context，含 stale 与 INDEXING 语义 | [x] |
+| W9 | P0 | host 路由：走 `ctx.connection.fetch.register`，路径 `/api/plugins/dsh-app/codegraph/*` | [x] |
+| W10 | P0 | 设置页：语言下载、项目状态列表，全部用 primitives 组件 | [x] |
+| W10b | P0 | 设置页按项目切换：`SegmentedTabs` 列出每个已索引项目，切换显示该项目自己的状态与操作 | [x] |
 | W10c | P0 | 会话页顶部「图谱」视图：注册 `conversation.view`，渲染当前项目的图谱（文件→符号分层，`<svg>` 手绘，不引图形库） | [ ] |
 | W11 | P1 | documents 边：把 docs/ 与 AGENTS.md 的段落关联到符号 | [ ] |
-| W12 | P1 | 读时 HEAD 校验：落后时返回 stale:true 并触发后台重建 | [ ] |
+| W11b | P1 | **回炉 W5：调用边归属到符号而非文件。** 现状 `edges.src` 恒为 `file:<path>`（parse 层不记录每条调用属于哪个声明），所以 `codegraph_context.calls` 只能答"这个文件调了什么"，答不了"这个函数调了什么"。修法：`extractSymbols` 在提取调用时记下当前所在的声明 id，`callEdges` 用它作 `src`；同时保留文件级边（`impact` 的"哪个文件受影响"依赖它），并给两者不同的 `kind` 或前端过滤。改 parse.ts + indexer.ts + query.ts + 相应测试 | [ ] |
+| W12 | P1 | 读时 HEAD 校验：落后时返回 stale:true 并触发后台重建 | [~] |
 | W13 | P2 | 其余 28 种语言接入 | [ ] |
-| W14 | P2 | 设置页序号登记进 docs/agents/settings-rail-order.md | [ ] |
+| W14 | P2 | 设置页序号登记进 docs/agents/settings-rail-order.md | [x] |
 | W15 | P2 | 文档：docs/agents/codegraph.md + AGENTS.md 阅读表一行 | [ ] |
 
 类目：P0 不做就走不通 · P1 静默失败或数据风险 · P2 清理与一致性 · OPT 可选。
@@ -59,9 +60,9 @@
 | 1 骨架与存储 | W1, W2 | 插件能被内核加载，schema 建表成功 | [x] |
 | 2 解析通路 | W3, W4, W5 | ts/js/python 三语言能提取符号与调用边 | [x] |
 | 3 增量与队列 | W6, W7, W12 | 二次索引走增量，状态机四态可观测 | [ ] |
-| 4 工具与路由 | W8, W9 | 三个工具在真实会话中可用，路由过 Connection 围栏 | [ ] |
-| 5 设置页 | W10, W10b, W14 | 语言下载可用，项目可切换，序号表已更新 | [ ] |
-| 6 文档与扩展 | W11, W13, W15 | documents 边可用，文档落盘 | [ ] |
+| 4 工具与路由 | W8, W9 | 三个工具在真实会话中可用，路由过 Connection 围栏 | [x] |
+| 5 设置页 | W10, W10b, W14 | 语言下载可用，项目可切换，序号表已更新 | [x] |
+| 6 文档与扩展 | W11, W11b, W13, W15 | documents 边可用，调用边可按符号归属，文档落盘 | [ ] |
 | 7 会话页视图 | W10c | 图谱视图在会话标签栏可切换，真实项目能渲染 | [ ] |
 
 阶段闸门：任何条目处于 `[~]` 或 `[?]` 时不得开始下一阶段。Gate 通过 = 该阶段验证项全 PASS 且 review 无阻塞发现。
@@ -124,3 +125,8 @@ npm test
 | 阶段 | 日期 | 证据 | 结论 |
 |------|------|------|------|
 | 1 | 2026-10-22 | `npm run typecheck` 干净；`npm test` 13/13；`plugin-gates` 四道全过；`check:suites:gate` 18 份一致；根 `npm test` 714 通过 / 2 跳过 / 0 失败 | 通过。独立审查发现 3 个 P1（入边误删、资源文件缺失、缺 changeset）与 6 个 P2，全部修复后复验。**「schema 建表成功」在插件加载路径上尚未验证**——`apply()` 仍为空，`store.ts` 不在产物里，见 Deferred。四问：主张成立（13 条测试含 3 条针对审查发现的缺口）；最小（无多余抽象）；新风险已消除（入边误删是本次引入且已修）；反例已覆盖（存活符号的重索引、文件级 imports） |
+| 2 | 2026-10-22 | 插件 `npm test` 122/122（阶段 2 结束时 94）；typecheck 干净；四道门禁全过；根测试 715 通过 | 通过。审查发现 3 个致命缺陷：`lexical_declaration` 无 `name` 字段（const 声明全丢）、重载撞主键让整文件写不进、成员调用 `this.foo()` 无边（`property_identifier` 不在 identifier 列表）。修复后补「每个 declarations 条目一条真实源码」的测试，它立刻又抓出 4 个问题。另修：下载加 sha512 校验、原子写入用唯一临时名、超时与大小上限。**关键实测**：`tree-sitter-wasms@0.1.13` 与 `web-tree-sitter@0.27` ABI 不兼容（`getDylinkMetadata` 抛空错），改用 `@vscode/tree-sitter-wasm@0.3.1`；该包无纯 C 语法，C 通过 cpp 语法解析无 ERROR 节点 |
+| 3 | 2026-10-22 | 插件 `npm test` 122/122；typecheck 干净；四道门禁全过；根测试 715 通过 / 0 失败 | 通过（W12 留 `[~]`）。审查发现 5 个 P1：① 截断/根不可读的扫描驱动删除会静默删掉大片图；② 两阶段非原子，phase 2 失败会永久丢引用边；③ 同步 I/O 阻塞事件循环，W8 的 INDEXING 语义物理不可达；④ `isStale` 对空 HEAD 判 stale 会无限重建；⑤ `stale` 状态不可达。全部修复：删除由「扫描可信」闸门控制、phase 2 单事务、每 64 文件 `setImmediate` 让出、`isStale` 改三态、加 `markStale`。另补 imports 边、`truncated`/`removalSkipped` 落库。四问：主张成立（新增 8 条测试覆盖跨跳过解析、互相调用、stamp 回写、截断与根不可读）；最小；新风险已消除；反例已覆盖 |
+| 4 | 2026-10-23 | 插件 `npm test` 166/166；typecheck 干净；四道门禁全过；根测试 715 通过 / 0 失败；`as unknown as` 恰 2 处与 ratchet 基线吻合 | 通过。审查发现 **1 个 P0**：三个工具的返回值含 `undefined` 属性，内核 `snapshotJsonValue` 在 schema 校验**之前**跑并返回 `undefined` ⇒ 每次调用都抛 `INVALID_TOOL_OUTPUT`。**已用运行时证据确认**（`snapshotJsonValue({a:1,b:undefined}) === undefined`），不是推断。修复：`dropUndefined` 在三处出口剥除，并新增 `tests/tool-output.test.ts` 双向断言（拒绝存在 + 剥后通过）。另修 3 个 P1：`calls` 因边归属文件而恒为空（改为按文件查并如实改文案）、`failed` 态对工具不可见导致永久 `indexing` 且每次重跑全量、缺 changeset/版本。以及 P2：dispose 漏 await 异步路由卸载器、queue 先于图关闭。四问：主张成立（166 条，含 P0 的运行时证据与 e2e 跨层契约）；最小；新风险已消除（P0 是本次引入且已修）；反例已覆盖 |
+| 5 | 2026-10-23 | 插件 `npm test` 179/179；typecheck 干净；四道门禁全过；`check:graph` 无违规；根测试 717（715 通过 / 2 跳过）/ 0 失败；`probe-codegraph-langs.cjs` **21/21 PASS**，**五处回退验证**全部证伪（空 tooltip 分支 → FAIL；删 `dshcg_langAction` 包裹 → FAIL；删两行结构 → FAIL；CSS 退回扁平单行 → FAIL「两标签卡 71px vs 一标签卡 44px」；按钮与名字不同行 → 断言在） | 通过（含两次返工）。用户报了三个缺陷，修完经独立审查发现 6 个 major；**用户随后截图指出第一版修复的布局仍然不对**——「下载」按钮虽不再竖排，却在窄列下换行到第二行并被 `margin-left: auto` 推到右缘，相邻卡片高度不一致。这是审查已指出、我当时未处理的一条，且探针测不到：它只断言「按钮内部文字几行」与「名字未被截断」，按钮整体换行时两条都成立。**返工**：卡片改为两行结构（`dshcg_langMain` 名字+按钮 / `dshcg_langMeta` 标签），名字 `flex: 1 1 auto` + `min-width: 0` 吸收余量，去掉 auto margin；探针补「按钮与名字中心 Y 一致」与「同网格卡片等高」两条断言。三个缺陷根因：① 按钮被压到 32px 导致竖排（flex 默认 shrink）；② `regex` 语言 `extensions` 为空数组 ⇒ `join('  ')` 为 `''`，primitives 文档写明空 label 只显示快捷键 ⇒ 空 tooltip（改为调用处不渲染 Tooltip）；③ 顶部文案把「开会话」误写成触发器（真实触发器是首次调用 `codegraph_*` 工具）。审查另抓出 **`cannot be {action}ed` 拼出 `removeded`**（替换成过去分词后又拼 `ed`，路由测试只看状态码）；`Eight` 与实际 9 个 bundled id 矛盾；`.dshcg_row` 同型压缩缺陷；两张会漂移的语言真值表；`storageRoot` 泄露本机路径。另修 `scripts/test.mjs` 原用 `readdirSync` 执行源文件已删的遗留 bundle（实测三个 `zz-*` 调试套件一直在跑）。四问：主张成立（179 条 + 21 条探针，五次回退证伪，其中一次正是用户看到的现象）；最小（删掉冗余抽象 `languageAction`）；新风险已消除（布局退化是本轮引入并已修）；反例已覆盖 |
+| 5b | 2026-10-23 | 同上；`styles.test.ts` 的反引号守卫改为「取最后一个闭合行」，原实现取第一个 `\n`` `` 导致嵌入反引号时切出无内容片段而误放行 | 通过。CSS 模板字面量里写反引号连续踩三次（构建报 `Expected ";" found "flex"` 指向注释），故修守卫本身。同时更正其定位：esbuild 会先失败，这条测试不是新错误的网，而是给手工排查一个可读的失败信息 |
