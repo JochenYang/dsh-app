@@ -139,6 +139,11 @@ export function renderOverviewContext(
     '- "who calls this / what breaks if I change it" → `codegraph_impact(symbol)` (a keyword search cannot tell a call from a definition or a comment)',
     '- "what does this file define / what are the methods of this class" → `codegraph_context("<file path>")` (no keyword search can answer this: definitions do not name their class)',
     '- "what is this symbol\u2019s neighbourhood" → `codegraph_context(symbol)`; pass any id above to expand it.',
+    // The graph knows structure, and structure is exactly what a reader re-derives
+    // from scratch on the next session. Naming the write path here is the one place
+    // it costs nothing: this block is already in context, and a session that spent
+    // three queries working out what a file is for should not pay for it twice.
+    'What you work out here, save with `memory_save` before the task ends — the graph re-derives structure, not conclusions.',
   )
   return lines.join('\n')
 }

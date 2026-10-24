@@ -49,6 +49,33 @@ export interface GrammarShape {
   readonly call: { readonly type: string, readonly field: string } | undefined
   /** Node type used for an import statement, and the field naming the target. */
   readonly import: { readonly type: string, readonly field: string } | undefined
+  /**
+   * The heritage clause node types, one per relationship.
+   *
+   * `extends` and `implements` are different questions — "what is this derived
+   * from" versus "what contract does this promise" — and collapsing them loses the
+   * one a reader asks about an interface. Measured before this existed: the graph
+   * answered "who references this interface" with only the places that NAME it,
+   * never the classes that implement it.
+   */
+  readonly heritage?: { readonly extends?: string, readonly implements?: string }
+  /**
+   * Node types that carry a TYPE reference, and the child type holding the name.
+   *
+   * A signature is not a call: `function f(x: Foo)` never calls `Foo`, so no call
+   * edge exists, yet changing `Foo` breaks `f`. Without this edge, `impact` on a
+   * type reports only the code that constructs it.
+   */
+  readonly typeRef?: readonly string[]
+  /**
+   * How an export names what it exports, when the grammar distinguishes it.
+   *
+   * A module's public surface is what other packages may depend on, and it is not
+   * derivable from references: an exported symbol with no internal callers is still
+   * the API. `all` marks `export * from './x'`, which re-exports another module's
+   * whole surface.
+   */
+  readonly exportSurface?: { readonly statement: string, readonly specifier?: string }
 }
 
 /**
@@ -236,6 +263,9 @@ function typescriptShape(): GrammarShape {
     scopes: ['class_body', 'object', 'statement_block'],
     call: { type: 'call_expression', field: 'function' },
     import: { type: 'import_statement', field: 'source' },
+    heritage: { extends: 'extends_clause', implements: 'implements_clause' },
+    typeRef: ['type_annotation'],
+    exportSurface: { statement: 'export_statement', specifier: 'export_specifier' },
   }
 }
 
@@ -327,6 +357,49 @@ export interface ParsedFile {
   readonly calls: readonly { readonly name: string, readonly line: number, readonly owner: string | undefined }[]
   /** Import specifiers, verbatim (resolution happens against the project). */
   readonly imports: readonly { readonly specifier: string, readonly line: number }[]
+  /**
+   * Heritage relationships: a class or interface and what it derives from.
+   *
+   * `extends` and `implements` are kept apart because they answer different
+   * questions — "what is this built on" versus "what contract does this satisfy" —
+   * and a reader asking about an interface means the second. Neither is a call, so
+   * without this the graph has nothing to say about a type hierarchy at all.
+   */
+  readonly heritage: readonly {
+    readonly from: string
+    readonly name: string
+    readonly line: number
+    readonly kind: 'extends' | 'implements'
+  }[]
+  /**
+   * Type references a declaration carries in its signature or annotations.
+   *
+   * `function f(x: Foo)` never calls `Foo`, so no call edge exists, yet changing
+   * `Foo` breaks `f`. Without these, `impact` on a type reports only the code that
+   * constructs it — a fraction of what actually depends on it.
+   */
+  readonly typeRefs: readonly { readonly name: string, readonly line: number, readonly owner: string | undefined }[]
+  /**
+   * What this module makes public.
+   *
+   * Not derivable from references: an exported symbol with no internal caller is
+   * still the API. `all` marks `export * from './x'`, which republishes another
+   * module's whole surface.
+   */
+  readonly exports: readonly {
+    readonly name: string
+    readonly line: number
+    readonly all: boolean
+    /**
+     * The `from` specifier, when the export names another module.
+     *
+     * The author's own statement of WHERE the name comes from, which is the most
+     * precise resolution signal available — stronger than a project-wide name match.
+     * Measured before this existed: one `export { contentText } from './utils/text.ts'`
+     * linked four unrelated `contentText` declarations from files it never mentioned.
+     */
+    readonly from: string | undefined
+  }[]
   /** True when the parser produced an ERROR node — the file is partly unread. */
   readonly hasError: boolean
   /**
@@ -412,6 +485,65 @@ function calleeName(node: SyntaxNode): string {
   return ''
 }
 
+/** Type names that never resolve to a project declaration. */
+const SKIP_TYPE_NAMES = new Set([
+  'any', 'unknown', 'never', 'void', 'string', 'number', 'boolean', 'object',
+  'symbol', 'bigint', 'null', 'undefined', 'this', 'true', 'false',
+  'Array', 'Promise', 'Map', 'Set', 'Record', 'Partial', 'Readonly',
+])
+
+/**
+ * Every descendant of one node type.
+ *
+ * `SyntaxNode.descendantsOfType` is not on the type this plugin compiles against, so
+ * the walk is explicit. Depth-first and in source order, which is what an export
+ * clause's names should keep.
+ *
+ * @param node - the subtree root.
+ * @param type - the node type to collect.
+ * @returns the matching descendants, in source order.
+ */
+function collectByType(node: SyntaxNode, type: string): SyntaxNode[] {
+  const found: SyntaxNode[] = []
+  const visit = (current: SyntaxNode): void => {
+    for (const child of current.namedChildren) {
+      if (child.type === type) found.push(child)
+      visit(child)
+    }
+  }
+  visit(node)
+  return found
+}
+
+/**
+ * The declaration name a type node refers to, or '' when it names none.
+ *
+ * `SomeType`, `Foo.Bar`, `Array<Item>` and `readonly Foo[]` all mention a name; only
+ * the LAST part of a qualified path and the inner name of a generic are declarations
+ * a reader can act on. Builtin keywords (`string`, `number`, `void`) are excluded:
+ * they resolve to nothing in the symbol table, so an edge for them is pure noise.
+ *
+ * @param node - a node inside a heritage clause or a type annotation.
+ * @returns the type's name, or '' when this node carries none.
+ */
+function typeNameOf(node: SyntaxNode): string {
+  if (SKIP_TYPE_NAMES.has(node.type)) return ''
+  if (node.type === 'type_identifier' || node.type === 'identifier' || node.type === 'nested_type_identifier') {
+    const text = node.text.trim()
+    if (text === '') return ''
+    // `Foo.Bar` names Bar.
+    const last = text.includes('.') ? text.slice(text.lastIndexOf('.') + 1) : text
+    return SKIP_TYPE_NAMES.has(last) ? '' : last
+  }
+  // `generic_type` / `array_type` / `union_type` / `type_arguments`: the names are
+  // deeper. Recursing keeps `Array<Item>` pointing at Item and not at Array.
+  for (const child of node.namedChildren) {
+    const name = typeNameOf(child)
+    if (name !== '') return name
+  }
+  return ''
+}
+
 /**
  * Extract one file's symbols and call sites.
  *
@@ -431,7 +563,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
   // an empty symbol table — the exact "installed but useless" claim this plugin
   // refuses to make.
   if (shape === undefined || Object.keys(shape.declarations).length === 0) {
-    return { symbols: [], calls: [], imports: [], hasError: hasErrorNode(root), unsupported: 'noShape' }
+    return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: hasErrorNode(root), unsupported: 'noShape' }
   }
 
   const symbols: SymbolRecord[] = []
@@ -446,6 +578,9 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
    */
   const calls: { name: string, line: number, owner: string | undefined }[] = []
   const imports: { specifier: string, line: number }[] = []
+  const heritage: { from: string, name: string, line: number, kind: 'extends' | 'implements' }[] = []
+  const typeRefs: { name: string, line: number, owner: string | undefined }[] = []
+  const exports: { name: string, line: number, all: boolean, from: string | undefined }[] = []
   // Same-file collisions of (kind, parent, name) — overloads, and a method and a
   // field of one name. The id is the symbols table's PRIMARY KEY, so a duplicate
   // would fail the whole file's write; an ordinal keeps both rows addressable.
@@ -516,11 +651,72 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
         : node.childForFieldName(shape.import.field)
       if (target !== null) imports.push({ specifier: target.text.replace(/^['"]|['"]$/gu, ''), line: node.startPosition.row + 1 })
     }
+    // Heritage: `class A extends B implements C`. Both sides are TYPE names, and
+    // neither is a call, so the call branch can never see them.
+    if (shape.heritage !== undefined) {
+      const isExtends = shape.heritage.extends !== undefined && node.type === shape.heritage.extends
+      const isImplements = shape.heritage.implements !== undefined && node.type === shape.heritage.implements
+      if ((isExtends || isImplements) && ownerId !== undefined) {
+        for (const child of node.namedChildren) {
+          // `extends Foo<T>` wraps the name in `generic_type`; the identifier is the
+          // part that names a declaration, so every named child is read as a name.
+          const name = typeNameOf(child)
+          if (name !== '') heritage.push({ from: ownerId, name, line: node.startPosition.row + 1, kind: isExtends ? 'extends' : 'implements' })
+        }
+      }
+    }
+    // A type reference in a signature or a field: `function f(x: Foo)`.
+    if (shape.typeRef !== undefined && shape.typeRef.includes(node.type)) {
+      for (const child of node.namedChildren) {
+        const name = typeNameOf(child)
+        if (name !== '') typeRefs.push({ name, line: node.startPosition.row + 1, owner: ownerId })
+      }
+    }
+    // What this module publishes. `export * from './x'` has no name of its own, so
+    // it is recorded as an `all` row carrying the source specifier instead.
+    if (shape.exportSurface !== undefined && node.type === shape.exportSurface.statement) {
+      const line = node.startPosition.row + 1
+      const wanted = shape.exportSurface.specifier
+      const specifiers = wanted === undefined ? [] : collectByType(node, wanted)
+      // The `from` specifier, when there is one: `export { x } from './y'`. This is
+      // the author's own statement of where the name comes from, and the strongest
+      // resolution signal the parse has.
+      const fromSpecifier = node.childForFieldName('source')?.text.replace(/^['"]|['"]$/gu, '') ?? undefined
+      if (specifiers.length > 0) {
+        for (const specifier of specifiers) {
+          const name = specifier.childForFieldName('name')?.text ?? specifier.namedChildren[0]?.text ?? ''
+          if (name !== '') exports.push({ name: name.trim(), line, all: false, from: fromSpecifier })
+        }
+      } else if (/\bexport\s*\*/u.test(node.text)) {
+        const source = fromSpecifier ?? ''
+        if (source !== '') exports.push({ name: source, line, all: true, from: source })
+      } else {
+        // `export const x`, `export function f` — the declaration inside carries the
+        // name; this row records that the module publishes it. `export const` wraps
+        // a `lexical_declaration`, whose own name sits one level deeper on the
+        // `variable_declarator`, so the search is recursive rather than one level.
+        const declarators = collectByType(node, 'variable_declarator')
+        const own = node.namedChildren.find(child => child.childForFieldName('name') !== null)
+        const name = own?.childForFieldName('name')?.text
+          ?? declarators[0]?.childForFieldName('name')?.text
+          ?? ''
+        if (name !== '') exports.push({ name: name.trim(), line, all: false, from: fromSpecifier })
+      }
+    }
     for (const child of node.namedChildren) walk(child, parent, ownerId)
   }
 
   walk(root, undefined, undefined)
-  return { symbols, calls, imports, hasError: hasErrorNode(root), unsupported: false }
+  return {
+    symbols,
+    calls,
+    imports,
+    heritage,
+    typeRefs,
+    exports,
+    hasError: hasErrorNode(root),
+    unsupported: false,
+  }
 }
 
 /** The first named child, for a grammar that names a target as a child, not a field. */
@@ -550,30 +746,205 @@ function hasErrorNode(node: SyntaxNode): boolean {
  * @param resolve - name → the ids that declare it, project-wide.
  * @returns the reference edges.
  */
+/**
+ * How many declarations a shared name may have before it stops linking.
+ *
+ * A name shared by two declarations is a real ambiguity worth linking to both: the
+ * reader picks. A name shared by 1325 of them is not a name, it is a local variable
+ * convention — measured on a real project, `variable:result` alone produced 200,000+
+ * edges because every `const result` in the codebase became a target of every
+ * `result.something()` call. That is noise wearing the costume of coverage.
+ *
+ * Ten is where a reader can still discard the wrong rows by eye. Past that, the link
+ * says nothing and only costs time: an index pass went from 17.9s to 124.6s when
+ * every shared name expanded without a bound.
+ */
+const MAX_SHARED_TARGETS = 10
+
+/**
+ * The declarations one call or type reference should link to.
+ *
+ * Three layers, most precise first. Measured on a real project, the layers matter
+ * unevenly — but the middle one is nearly free and prevents the shape that cost the
+ * most in this plugin's history:
+ *
+ *   1. **Declared in the same file.** A module-private name can only mean the local
+ *      declaration; a file-local match is exact, not a guess. `streamWithDeltas` was
+ *      declared in production code and in a test harness, and the project-wide
+ *      uniqueness rule dropped all thirteen call sites — the local declaration was
+ *      right there.
+ *   2. **Declared in a file this one imports.** `see base.ts` is the author stating
+ *      which declaration they mean, so a match inside an imported file beats a global
+ *      count. Not implemented yet: it needs the names an import clause carries, which
+ *      the parse does not record, and measured on a real project the heritage targets
+ *      that fan out are already type-distinct (`type Container` versus
+ *      `class Container`). Recorded here as the next layer rather than pretended.
+ *   3. **Unique project-wide**, or few enough to list.
+ *
+ * @param targets - every declaration carrying the name.
+ * @param sameFile - the declarations of those that live in the referring file.
+ * @returns the ones worth an edge.
+ */
+function linkTargets(targets: readonly string[], sameFile: readonly string[] = []): readonly string[] {
+  if (targets.length === 0) return []
+  if (targets.length === 1) return targets
+  // Layer 1: a local declaration is exact. This is what the project-wide rule threw
+  // away, and it is the common shape — a private helper beside a same-named export.
+  if (sameFile.length > 0) return sameFile.slice(0, MAX_SHARED_TARGETS)
+  // Too common: `resolve` found a name the codebase reuses for locals. Linking to
+  // all of them buries the real callers, and linking to one would be a guess.
+  if (targets.length > MAX_SHARED_TARGETS) return []
+  return targets
+}
+
+/**
+ * The heritage and type-reference edges for one file.
+ *
+ * Three relationships the call walk cannot produce, each answering a question the
+ * graph could not answer before:
+ *
+ *   - `extends`    — "what is this built on". The class hierarchy.
+ *   - `implements` — "what contract does this satisfy". Separate from `extends`
+ *     because a reader asking about an interface means this one, and merging them
+ *     would answer with the wrong set.
+ *   - `type_refs`  — a signature's dependency. `function f(x: Foo)` never calls
+ *     `Foo`; without this edge, `impact` on a type reports only the code that
+ *     constructs it, which is a fraction of what actually breaks.
+ *
+ * Targets resolve by NAME through the same rule the call walk uses, so a type
+ * declared in several places links to each of them — and inherits the same ceiling,
+ * because a name shared by a thousand declarations identifies nothing.
+ *
+ * @param parsed - one file's parse.
+ * @param fileId - the file's node id, for a reference at file scope.
+ * @param resolve - name → the declaration ids carrying it.
+ * @returns the edges, ready to insert.
+ */
+export function relationEdges(
+  parsed: ParsedFile,
+  fileId: string,
+  resolve: (name: string) => readonly string[],
+  /**
+   * Turns a relative specifier into the project-relative path the graph keys files by.
+   *
+   * Without it a star re-export's target was stored VERBATIM, so a package's
+   * `index.ts` pointed at a `./`-relative node while the graph's file nodes are
+   * project-relative — measured, all 46 star edges failed to join and were
+   * decoration. The same resolver `imports` already uses is the answer; a re-export
+   * and an import name a path in exactly the same way.
+   */
+  resolveModule?: (specifier: string) => string | undefined,
+): EdgeRecord[] {
+  const edges: EdgeRecord[] = []
+  // A module-private type can only mean itself, so a local declaration is exact and
+  // outranks any project-wide count — the same first layer `callEdges` applies.
+  const local = new Map<string, string[]>()
+  for (const symbol of parsed.symbols) {
+    const list = local.get(symbol.name)
+    if (list === undefined) local.set(symbol.name, [symbol.id])
+    else list.push(symbol.id)
+  }
+  const add = (from: string, name: string, kind: 'extends' | 'implements' | 'type_refs', line: number): void => {
+    for (const target of linkTargets(resolve(name), local.get(name) ?? [])) edges.push({ from, to: target, kind, line })
+  }
+  for (const relation of parsed.heritage) add(relation.from, relation.name, relation.kind, relation.line)
+  // ONE edge per (declaration, type), at its first line.
+  //
+  // A type annotation is not a call site: `function f(a: Foo, b: Foo)` mentions Foo
+  // twice and says nothing a reader acts on twice. Measured on a real project the
+  // duplication is 8.3% (25,561 edges collapse to 23,428) — smaller than expected,
+  // so this is a tidiness rule rather than the volume problem it was proposed as.
+  // The distinction that matters: `references` keeps every call site because each one
+  // is a place to read, while `type_refs` answers "does this signature depend on
+  // this type" — a set question, not a line question.
+  const seenTypeRefs = new Set<string>()
+  for (const reference of parsed.typeRefs) {
+    const from = reference.owner ?? fileId
+    const key = `${from}\u0000${reference.name}`
+    if (seenTypeRefs.has(key)) continue
+    seenTypeRefs.add(key)
+    add(from, reference.name, 'type_refs', reference.line)
+  }
+  // The public surface: file → symbol. `all` rows name a MODULE rather than a
+  // declaration (`export * from './x'`), so they resolve against file nodes instead;
+  // they still say "this file republishes that one's surface", which is what makes
+  // "what does this package expose" answerable across a re-export chain.
+  for (const entry of parsed.exports) {
+    const fromFile = entry.from === undefined ? undefined : resolveModule?.(entry.from)
+    if (entry.all) {
+      // A re-export names a PATH. Storing it verbatim was the defect: the node is
+      // project-relative, the specifier is not, and the edge joined to nothing.
+      if (fromFile !== undefined) edges.push({ from: fileId, to: `file:${fromFile}`, kind: 'exports', line: entry.line })
+      continue
+    }
+    // A named re-export (`export { x } from '../y'`) means a declaration IN THAT
+    // FILE. Resolving it against the whole project was a real false-positive source:
+    // measured, one `export { contentText }` linked four unrelated `contentText`
+    // declarations from files it never mentioned.
+    if (fromFile !== undefined) {
+      // Narrow to the named module when the parse knows it; the join is exact.
+      for (const target of linkTargets(resolve(entry.name).filter(id => id.startsWith(`${fromFile}#`)))) {
+        edges.push({ from: fileId, to: target, kind: 'exports', line: entry.line })
+      }
+      continue
+    }
+    // A plain `export const x` / `export function f`: the declaration is this file's.
+    for (const target of local.get(entry.name) ?? []) {
+      edges.push({ from: fileId, to: target, kind: 'exports', line: entry.line })
+    }
+  }
+  return edges
+}
+
 export function callEdges(
   parsed: ParsedFile,
   callerId: string,
   resolve: (name: string) => readonly string[],
 ): EdgeRecord[] {
   const edges: EdgeRecord[] = []
+  // The ids this file declares, by name. A module-private declaration can only mean
+  // itself, so a local match is exact and outranks any project-wide count.
+  const local = new Map<string, string[]>()
+  for (const symbol of parsed.symbols) {
+    const list = local.get(symbol.name)
+    if (list === undefined) local.set(symbol.name, [symbol.id])
+    else list.push(symbol.id)
+  }
   for (const call of parsed.calls) {
-    const targets = resolve(call.name)
-    // Zero matches: the callee is outside this project or in an unparsed
-    // language. Several matches: the name is ambiguous without types. Both are
-    // "no edge", which under-reports rather than lying.
-    if (targets.length !== 1) continue
-    // The edge starts at the enclosing DECLARATION when the call is inside one,
-    // and at the file otherwise. This is what makes "what does this function
-    // call" a question the graph can answer: attributing every call to the file
-    // made `codegraph_context.calls` report the whole file's calls for every
-    // symbol in it.
+    const targets = linkTargets(resolve(call.name), local.get(call.name) ?? [])
+    // Zero targets means one of two things, and neither can produce an edge: the
+    // callee is outside this project, or its name is shared so widely that every
+    // declaration of it would be noise.
+    if (targets.length === 0) continue
+    // SEVERAL targets: the name is declared more than once, by a handful.
     //
-    // Both kinds of edge carry kind `references`, and they are told apart by
-    // their source: `file:<path>` is a file-level call (a top-level statement or
-    // a module initialiser), a symbol id is a call made inside that symbol. A
-    // separate kind would have meant every existing `references` query needing
-    // to know about it, and `impact` genuinely wants both.
-    edges.push({ from: call.owner ?? callerId, to: targets[0]!, kind: 'references', line: call.line })
+    // This used to be dropped as "ambiguous", and that was the single worst defect
+    // in this plugin. Measured on a real project: 53.2% of all reference edges hung
+    // off file nodes rather than symbols, and `streamWithDeltas` — declared once in
+    // production code and once in a test harness — had thirteen real call sites and
+    // ZERO edges. `codegraph_impact` answered `referencing: []`, which reads exactly
+    // like "nobody calls this". A module that under-reports callers is worse than one
+    // that over-reports them: the reader can discard a wrong row, but cannot know
+    // about a missing one.
+    //
+    // So a shared name links to every declaration of it (up to `MAX_SHARED_TARGETS`).
+    // Picking one would be a guess dressed as an answer; linking to all of them is a
+    // fact — "this name is used here, and these are the declarations it could mean" —
+    // which is what `codegraph_impact`'s candidates list exists to disambiguate.
+    for (const target of targets) {
+      // The edge starts at the enclosing DECLARATION when the call is inside one,
+      // and at the file otherwise. This is what makes "what does this function
+      // call" a question the graph can answer: attributing every call to the file
+      // made `codegraph_context.calls` report the whole file's calls for every
+      // symbol in it.
+      //
+      // Both kinds of edge carry kind `references`, and they are told apart by
+      // their source: `file:<path>` is a file-level call (a top-level statement or
+      // a module initialiser), a symbol id is a call made inside that symbol. A
+      // separate kind would have meant every existing `references` query needing
+      // to know about it, and `impact` genuinely wants both.
+      edges.push({ from: call.owner ?? callerId, to: target, kind: 'references', line: call.line })
+    }
   }
   return edges
 }

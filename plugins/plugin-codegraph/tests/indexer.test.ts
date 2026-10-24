@@ -61,7 +61,7 @@ function stubParse(source: string, path: string): ParsedFile {
     const call = /^CALL (\w+)$/u.exec(line)
     if (call !== null) calls.push({ name: call[1]!, line: index + 1 })
   })
-  return { symbols, calls, imports: [], hasError: false, unsupported: false }
+  return { symbols, calls, imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: false }
 }
 
 /** Write a file inside the project, creating parents. */

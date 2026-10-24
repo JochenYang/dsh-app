@@ -31,7 +31,7 @@ import { join, relative, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { languageForPath } from './languages.ts'
 import { DOCUMENT_EXTENSIONS, documentMentions, knownNames } from './docs.ts'
-import { callEdges, type ParsedFile } from './parse.ts'
+import { callEdges, relationEdges, type ParsedFile } from './parse.ts'
 import {
   allRows,
   fileNodeId,
@@ -525,6 +525,21 @@ export async function indexProject(
     try {
       for (const entry of pending) {
         for (const edge of callEdges(entry.parsed, entry.fileId, resolveOnce)) {
+          insert.run(edge.from, edge.to, edge.kind, edge.line)
+        }
+        // Heritage and type references, resolved the same way calls are. These are
+        // the edges that let `impact` answer "who implements this interface" and
+        // "which signatures name this type" — neither is a call, so `callEdges`
+        // could never produce them.
+        for (const edge of relationEdges(
+          entry.parsed,
+          entry.fileId,
+          resolveOnce,
+          // The same resolver `imports` uses: a re-export and an import name a path
+          // in exactly the same way, so a star edge points at the node the rest of the
+          // graph uses instead of at a `./`-relative string that joins to nothing.
+          specifier => resolveImport(entry.path, specifier, path => knownPaths.has(path)),
+        )) {
           insert.run(edge.from, edge.to, edge.kind, edge.line)
         }
         for (const specifier of entry.parsed.imports) {

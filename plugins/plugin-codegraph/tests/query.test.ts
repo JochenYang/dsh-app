@@ -19,11 +19,13 @@ import {
   calledBy,
   callsOf,
   documentsFor,
+  fileOutline,
   findSymbols,
   freshnessNote,
   importsOf,
   projectOverview,
   referencesTo,
+  ambiguousCandidates,
   resolveSymbol,
   symbolsInFile,
 } from '../src/query.ts'
@@ -82,6 +84,31 @@ describe('findSymbols', () => {
     const result = findSymbols(g, 'x', 2)
     assert.equal(result.symbols.length, 2)
     assert.equal(result.truncated, true, 'the caller must know matches were dropped')
+  })
+
+  it('counts each match\u2019s call sites, which is what picks the next tool', () => {
+    // The count is the decision input, not decoration. Measured: `streamWithDeltas`
+    // has 7 grep matches and 6 edges, so grep is cheaper and choosing it is right;
+    // `setResponses` has 482 grep matches (~15k tokens plus a judgement per line) and
+    // the model still reached for grep, because no answer said how large the question
+    // was. Two symbols in one graph, one cheap and one not, is the smallest case that
+    // proves the numbers differ per symbol rather than per query.
+    const g = graph()
+    const cheap = sym('a.ts', 'cheap')
+    const expensive = sym('b.ts', 'expensive')
+    replaceFile(g.db, file('a.ts'), [cheap, expensive], [])
+    const callers = Array.from({ length: 5 }, (_, i) => sym(`c${String(i)}.ts`, `caller${String(i)}`))
+    for (const caller of callers) {
+      replaceFile(g.db, file(caller.path), [caller], [
+        { from: caller.id, to: expensive.id, kind: 'references', line: 1 },
+      ])
+    }
+    const result = findSymbols(g, 'exp', 10)
+    assert.equal(result.symbols[0]?.name, 'expensive')
+    assert.equal(result.symbols[0]?.references, 5, 'five call sites, so the answer says 5')
+
+    const cheapResult = findSymbols(g, 'cheap', 10)
+    assert.equal(cheapResult.symbols[0]?.references, 0, 'and a symbol nobody calls says 0')
   })
 })
 
@@ -154,7 +181,37 @@ describe('referencesTo', () => {
     const result = referencesTo(g, target.id, 2)
     assert.equal(result.rows.length, 2, 'the limit still bounds the answer')
     assert.equal(result.truncated, true, 'and the answer says it was cut')
+    // "There are more" without a size is a warning the reader cannot act on: 45 or
+    // 6000 changes the decision. Measured on a real project, a symbol with 664 call
+    // sites answered 40 rows and `truncated: true` with no total.
+    assert.equal(result.total, 5, 'the total says HOW many more')
     assert.equal(referencesTo(g, target.id, 99).truncated, false)
+    assert.equal(referencesTo(g, target.id, 99).total, 5, 'a complete answer reports the same total')
+  })
+})
+
+describe('ambiguousCandidates', () => {
+  it('names the declarations that share a name, instead of answering nothing', () => {
+    // The failure this pins, measured: `streamWithDeltas` is declared in both the
+    // production file and a test harness, so every call edge to it was dropped as
+    // ambiguous and `codegraph_impact` said "no unambiguous symbol matched" — which
+    // reads exactly like "nothing calls this". The candidates turn a dead end into a
+    // next step.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'shared')], [])
+    replaceFile(g.db, file('b.ts'), [sym('b.ts', 'shared')], [])
+    assert.equal(resolveSymbol(g, 'shared'), undefined, 'still refuses to pick one')
+    const shared = ambiguousCandidates(g, 'shared', 10)
+    assert.equal(shared.total, 2)
+    assert.deepEqual(shared.candidates.map(candidate => candidate.path), ['a.ts', 'b.ts'])
+  })
+
+  it('answers no candidates for a name that genuinely is not declared', () => {
+    // The other half: "not declared" and "declared twice" must stay distinguishable,
+    // because one is a typo and the other is a reason the edges were never built.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'only')], [])
+    assert.deepEqual(ambiguousCandidates(g, 'nowhere', 10), { candidates: [], total: 0 })
   })
 })
 
@@ -398,5 +455,38 @@ describe('documentsFor', () => {
     assert.equal(cut.rows.length, 2)
     assert.equal(cut.truncated, true)
     assert.equal(documentsFor(graph, 'a.ts#function:alpha', 3).truncated, false)
+  })
+})
+
+describe('fileOutline', () => {
+  it('puts the public surface first, even when nothing inside calls it', () => {
+    // The failure this pins: measured on a real 103-symbol file, line order put only
+    // 14 referenced symbols in the first 40 rows, and an exported type with ZERO
+    // internal callers — the module's actual API — sat below forty `const` helpers
+    // nobody uses. A reader asking "what does this file expose" got the opposite
+    // answer.
+    const g = graph()
+    const helper = sym('a.ts', 'helper')
+    const api = sym('a.ts', 'publicApi')
+    replaceFile(g.db, file('a.ts'), [helper, api], [
+      // `helper` is called; `api` is not, but it IS exported.
+      { from: fileNodeId('a.ts'), to: helper.id, kind: 'references', line: 9 },
+      { from: fileNodeId('a.ts'), to: api.id, kind: 'exports', line: 2 },
+    ])
+    const outline = fileOutline(g, 'a.ts', 10)
+    assert.equal(outline.symbols[0]?.symbol.name, 'publicApi', 'the exported one leads despite zero callers')
+    assert.equal(outline.symbols[0]?.exported, true)
+    assert.equal(outline.symbols[1]?.symbol.name, 'helper')
+    assert.equal(outline.symbols[1]?.exported, false)
+  })
+
+  it('reports a star re-export as a module, not a declaration', () => {
+    // `export * from './x'` names a module; it has no symbol row, and dropping it
+    // would make a re-exporting file look like it publishes nothing.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'own')], [
+      { from: fileNodeId('a.ts'), to: 'file:src/other.ts', kind: 'exports', line: 1 },
+    ])
+    assert.deepEqual(fileOutline(g, 'a.ts', 10).starReExports, ['src/other.ts'])
   })
 })

@@ -27,12 +27,19 @@ import { mkdirSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 /**
- * Bumped whenever a table or index changes shape.
+ * Bumped whenever a table, an index, or the MEANING of a stored row changes.
  *
- * A stored value that differs makes {@link openGraph} rebuild from scratch. Do
- * not add migrations for a derived graph: the rebuild is the migration.
+ * A stored value that differs makes {@link openGraph} rebuild from scratch. Do not
+ * add migrations for a derived graph: the rebuild is the migration.
+ *
+ * Version 3 is not a table change — it is an EDGE-KIND change. A version-2 graph has
+ * no `extends`, `implements`, `type_refs` or `exports` rows, and nothing would ever
+ * add them: the incremental pass skips a file whose mtime and hash are unchanged, so
+ * an existing installation would answer "no implementers" forever. The table shape is
+ * identical, which is exactly why this needs a bump rather than an assumption — a
+ * derived graph is only as good as the pass that filled it.
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 /** One indexed file, as the incremental pass sees it. */
 export interface FileRecord {
@@ -85,7 +92,27 @@ export interface SymbolRecord {
 }
 
 /** What an edge means. */
-export type EdgeKind = 'contains' | 'references' | 'imports' | 'documents'
+/**
+ * What kind of relationship an edge records.
+ *
+ * Eight kinds, each answering a question the others cannot:
+ *   - `contains`   — this file declares this symbol.
+ *   - `references` — this declaration names that one (a call, a use).
+ *   - `imports`    — this file pulls in that file.
+ *   - `documents`  — this symbol is described in this document.
+ *   - `extends`    — this type derives from that one.
+ *   - `implements` — this type promises that interface's contract.
+ *   - `type_refs`  — this declaration's signature names that type.
+ *   - `exports`    — this file publishes that symbol as its public surface.
+ *
+ * `extends` and `implements` are separate because a reader asking about an interface
+ * means "who implements it", and answering with derivation would be a different set.
+ * `type_refs` records a signature's dependency, which is never a call: `f(x: Foo)`
+ * does not call `Foo`, yet changing `Foo` breaks `f`. `exports` is separate again
+ * because a module's public surface is not derivable from references — an exported
+ * symbol with no internal caller is still the API.
+ */
+export type EdgeKind = 'contains' | 'references' | 'imports' | 'documents' | 'extends' | 'implements' | 'type_refs' | 'exports'
 
 /** One edge. `from` and `to` are node ids. */
 export interface EdgeRecord {

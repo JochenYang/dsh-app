@@ -53,6 +53,7 @@ import { gitHead, indexProject, isStale } from './indexer.ts'
 import { parseFile } from './tree-sitter.ts'
 import { LANGUAGES, bundledGrammarDir, downloadGrammar, grammarPath, type GrammarPaths } from './languages.ts'
 import {
+  ambiguousCandidates,
   calledBy,
   callsOf,
   documentsFor,
@@ -64,6 +65,7 @@ import {
   importsOf,
   projectOverview,
   referencesTo,
+  relatedTo,
   resolveSymbol,
   symbolsInFile,
   type ContextResult,
@@ -176,10 +178,10 @@ export function apply(ctx: Context): void {
       // not-yet-installed language answers `unsupported` and the file is still
       // recorded, so the next pass skips it on the cheap comparison.
       const language = LANGUAGES.find(entry => entry.id === languageId)
-      if (language === undefined) return { symbols: [], calls: [], imports: [], hasError: false, unsupported: 'missing' as const }
+      if (language === undefined) return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: 'missing' as const }
       const paths = grammarPaths()
       const grammar = grammarPath(language, paths)
-      if (grammar === undefined) return { symbols: [], calls: [], imports: [], hasError: false, unsupported: 'missing' as const }
+      if (grammar === undefined) return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: 'missing' as const }
       return await parseFile(grammar, runtimeWasm(), source, path, languageId)
     })
   })
@@ -341,6 +343,7 @@ export function apply(ctx: Context): void {
                 path: { type: 'string', required: true },
                 line: { type: 'number', required: true },
                 parent: { type: 'string' },
+                references: { type: 'number', required: true },
               },
             },
           },
@@ -348,7 +351,17 @@ export function apply(ctx: Context): void {
       },
       render: (_args, value) => {
         const result = value as FindResult
-        const lines = result.symbols.map(symbol => `- ${formatSymbol(symbol)}`)
+        // The count goes ON the row, and the advice goes LAST. A caller count is what
+        // tells the model whether the next question is cheap or expensive: at 7
+        // matches a text search is the right tool, at 482 it costs ~15k tokens and a
+        // judgement per line. Measured: without the count the model reached for grep
+        // on both, because nothing in the answer said how large the question was.
+        const lines = result.symbols.map((symbol) => {
+          const row = `- ${formatSymbol(symbol)} — ${String(symbol.references)} call site(s)`
+          return symbol.references > 20
+            ? `${row} (large: \`codegraph_impact("${symbol.id}")\` is cheaper than searching)`
+            : row
+        })
         const head = `codegraph_find: ${String(result.symbols.length)} match(es)${result.truncated ? ' (truncated)' : ''}`
         return [{ type: 'text', text: [head, ...(result.note === undefined ? [] : [`note: ${result.note}`]), ...lines].join('\n') }]
       },
@@ -420,12 +433,67 @@ export function apply(ctx: Context): void {
           },
           imports: { type: 'array', required: true, items: { type: 'string' } },
           truncated: { type: 'boolean', required: true },
+          total: { type: 'number', required: true },
+          ambiguity: { type: 'number' },
+          candidates: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                name: { type: 'string', required: true },
+                kind: { type: 'string', required: true },
+                path: { type: 'string', required: true },
+                line: { type: 'number', required: true },
+                parent: { type: 'string' },
+              },
+            },
+          },
+          related: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                kind: { type: 'string', required: true },
+                rows: {
+                  type: 'array',
+                  required: true,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      path: { type: 'string', required: true },
+                      line: { type: 'number', required: true },
+                      kind: { type: 'string', required: true },
+                      name: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
       },
       render: (_args, value) => {
         const result = value as ImpactResult
         if (result.target === undefined) {
-          return [{ type: 'text', text: `codegraph_impact: no unambiguous symbol matched${result.note === undefined ? '' : `\nnote: ${result.note}`}` }]
+          // THREE different situations, and they must not read alike:
+          //   - the name is not declared anywhere;
+          //   - the name is declared several times, so no edge was ever built for it;
+          //   - something else went wrong (a failure note is carried).
+          if (result.candidates.length > 0) {
+            const lines = [
+              `codegraph_impact: "${String((_args as { symbol?: string }).symbol ?? '')}" is declared ${String(result.ambiguity)} time(s), so no reference edges were built for it. Pass one of these ids:`,
+              ...result.candidates.map(candidate => `- ${formatSymbol(candidate)} (id: ${candidate.id})`),
+              'An ambiguous name is not an absent one: this answer says nothing about how many callers exist. Verify with a text search before changing it.',
+            ]
+            return [{ type: 'text', text: lines.join('\n') }]
+          }
+          return [{ type: 'text', text: `codegraph_impact: no symbol named that in this project${result.note === undefined ? '' : `\nnote: ${result.note}`}` }]
         }
         // TWO numbers, each labelled with what it actually counts.
         //
@@ -439,12 +507,34 @@ export function apply(ctx: Context): void {
         const lines = [
           `codegraph_impact: ${formatSymbol(result.target)}`,
           ...(result.note === undefined ? [] : [`note: ${result.note}`]),
-          `referenced from ${String(result.referencing.length)} reference(s) across ${String(referrerFiles)} file(s):`,
-          ...result.referencing.map(ref => `- ${ref.path}:${String(ref.line)}`),
+          // The TOTAL leads when the list was cut, because the sample is not the
+          // answer: "664 reference(s), 40 shown" tells the reader the size of what
+          // they are looking at, which "40 reference(s) (truncated)" does not.
+          ...(result.truncated
+            ? [
+                `referenced from ${String(result.total)} reference(s) — ${String(result.referencing.length)} shown, across ${String(referrerFiles)} file(s):`,
+                ...result.referencing.map(ref => `- ${ref.path}:${String(ref.line)}`),
+                `TRUNCATED: ${String(result.total - result.referencing.length)} more reference(s) exist. This is a SAMPLE, not the complete list — verify with a text search before concluding anything about callers.`,
+              ]
+            : [
+                `referenced from ${String(result.total)} reference(s) across ${String(referrerFiles)} file(s):`,
+                ...result.referencing.map(ref => `- ${ref.path}:${String(ref.line)}`),
+              ]),
           ...(result.imports.length === 0 ? [] : ['its file imports:', ...result.imports.map(path => `- ${path}`)]),
-          // Stated in the MODEL's answer, not only as a schema field: a model that
-          // reads 40 rows and sees no warning concludes it has seen every caller.
-          ...(result.truncated ? [`TRUNCATED: more rows exist than this answer carries (limit ${String(MAX_ROWS)}). Narrow the question — pass a symbol id, or read the file — before concluding this is the complete list.`] : []),
+          // The other relationships, each under its own heading. A class that
+          // implements an interface does not call it, so these are not callers — and
+          // "who implements this" is the question a reader has about an interface.
+          ...result.related.flatMap(group => [
+            `${group.kind === 'type_refs' ? 'mentioned in a signature' : group.kind === 'extends' ? 'derived from this' : 'implements this'} (${String(group.rows.length)}):`,
+            ...group.rows.map(row => `- ${row.path}:${String(row.line)}${row.name === undefined ? '' : ` (${row.name})`}`),
+          ]),
+          // An empty list is the one answer that reads as "safe to change", and it is
+          // also the answer name-only resolution produces for a call through an
+          // interface, a dynamic dispatch, or a variable forwarding path. Said every
+          // time, not only when something was truncated.
+          ...(result.referencing.length === 0 && result.total === 0
+            ? ['No direct callers found. That is NOT "safe to change": a call through an interface, a dynamic dispatch or a variable holds no name to resolve, so it leaves no edge. Verify with a text search.']
+            : []),
         ]
         return [{ type: 'text', text: lines.join('\n') }]
       },
@@ -455,20 +545,45 @@ export function apply(ctx: Context): void {
       const graph = graphFor(cwd)
       const target = resolveSymbol(graph, args.symbol)
       if (target === undefined) {
-        return dropUndefined({ freshness, note, target: undefined, referencing: [], imports: [], truncated: false }) satisfies ImpactResult
+        // An ambiguous name must not render like an absent one. `resolveSymbol`
+        // answers undefined for both, and the previous version said "no unambiguous
+        // symbol matched" with nothing to act on — measured: `streamWithDeltas` is
+        // declared twice, every edge to it is dropped as ambiguous, and the answer
+        // read as "no callers".
+        const shared = ambiguousCandidates(graph, args.symbol, 5)
+        return dropUndefined({
+          freshness,
+          note,
+          target: undefined,
+          referencing: [],
+          imports: [],
+          related: [],
+          truncated: false,
+          total: 0,
+          candidates: shared.candidates,
+          ambiguity: shared.total,
+        }) satisfies ImpactResult
       }
       const referencing = referencesTo(graph, target.id, MAX_ROWS)
       const imports = importsOf(graph, target.path, MAX_ROWS)
+      // Heritage and type references, kept in their own groups. Merging them into
+      // `referencing` would make "who calls this" wrong — a class that implements an
+      // interface does not call it, and an interface's reader is usually asking
+      // exactly that question.
+      const related = relatedTo(graph, target.id, MAX_ROWS)
       return dropUndefined({
         freshness,
         note,
         target,
         referencing: referencing.rows,
         imports: imports.rows,
+        related: related.groups.map(group => ({ kind: group.kind, rows: group.rows })),
         // Every list in this answer reports whether it was cut: an incomplete list
         // of callers read as complete is the one failure that silently produces
         // wrong code rather than a wrong answer.
-        truncated: referencing.truncated || imports.truncated,
+        truncated: referencing.truncated || imports.truncated || related.truncated,
+        total: referencing.total,
+        candidates: [],
       }) satisfies ImpactResult
     },
   })))
@@ -595,9 +710,11 @@ export function apply(ctx: Context): void {
                     line: { type: 'number', required: true },
                     parent: { type: 'string' },
                     references: { type: 'number', required: true },
+                    exported: { type: 'boolean', required: true },
                   },
                 },
               },
+              reExports: { type: 'array', required: true, items: { type: 'string' } },
             },
           },
           overview: {
@@ -680,10 +797,16 @@ export function apply(ctx: Context): void {
           const lines = [
             `codegraph_context: ${result.file.path} declares ${String(result.file.symbols.length)} symbol(s)${result.truncated ? ' (TRUNCATED — more exist)' : ''}`,
             ...(result.note === undefined ? [] : [`note: ${result.note}`]),
+            // Exported first (the query orders them so) and marked, because "what
+            // does this module expose" is the question this branch exists for.
             ...result.file.symbols.map(entry => {
               const parent = entry.parent === undefined ? '' : `${entry.parent}.`
-              return `- ${entry.kind} ${parent}${entry.name}:${String(entry.line)} — ${String(entry.references)} call site(s)`
+              const mark = entry.exported ? ' [exported]' : ''
+              return `- ${entry.kind} ${parent}${entry.name}:${String(entry.line)} — ${String(entry.references)} call site(s)${mark}`
             }),
+            ...(result.file.reExports.length === 0
+              ? []
+              : ['re-exports these modules whole:', ...result.file.reExports.map(path => `- ${path}`)]),
             ...(result.imports.length === 0 ? [] : ['imports:', ...result.imports.map(path => `- ${path}`)]),
             'Pass any id above as `symbol` to expand it, or use `codegraph_impact` for what a change would touch.',
           ]
@@ -773,7 +896,12 @@ export function apply(ctx: Context): void {
               line: entry.symbol.line,
               parent: entry.symbol.parent,
               references: entry.references,
+              // The public surface first, and marked: an exported symbol with no
+              // internal caller is still the API, and that is the row a reader
+              // asking "what does this module expose" wants.
+              exported: entry.exported,
             })),
+            reExports: asFile.starReExports,
           },
         } satisfies ContextResult)
       }

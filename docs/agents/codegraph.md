@@ -20,11 +20,11 @@ rebuilds rather than migrates, because a graph is derived data).
 | `edges` | a relation between two nodes | `(src, dst, kind)` |
 | `meta` | the project's own state | one row |
 
-`edges.src` / `edges.dst` are NODE ids, and a node is one of three things:
+`edges.src` / `edges.dst` are NODE ids, and a node is one of two things:
 
 - `file:<path>` — the file itself (`imports`, `contains`, a call at file scope);
-- a symbol id — a declaration;
-- `doc:<path>#<line>` — a line of prose (`documents` edges only).
+- a symbol id — a declaration (including `documents`, whose target is a file node
+  carrying the mention's line in its own `line` column).
 
 Two properties of symbol ids matter and both were paid for:
 
@@ -32,6 +32,27 @@ Two properties of symbol ids matter and both were paid for:
   its symbols.
 - **An ordinal for overloads** (`…#m#1`). The id is a primary key, so two
   same-named methods on one class collided and failed the whole file's write.
+
+Seven edge kinds, each answering a question the others cannot:
+
+| kind | from → to | answers |
+|---|---|---|
+| `contains` | file → symbol | what does this file declare |
+| `references` | declaration → declaration | who uses this (a call or a use) |
+| `imports` | file → file | what does this file pull in |
+| `documents` | symbol → file | where is this described in prose |
+| `extends` | type → type | what is this built on |
+| `implements` | class → interface | what contract does this satisfy |
+| `type_refs` | declaration → type | whose signature depends on this type |
+
+The last three were added later and each closes a question the graph could not
+answer. **Implementing is not calling**, so `impact` on an interface used to find
+only the places that NAMED it, never the classes that implement it — the question a
+reader actually has about an interface. **A signature is not a call** either:
+`function f(x: Foo)` never calls `Foo`, yet changing `Foo` breaks `f`, so without
+`type_refs` the answer was a fraction of the damage. Measured on a 1613-file
+project: 142 `extends`, 182 `implements` and 25,561 `type_refs`, for about one
+second of extra index time.
 
 ## 2. Which module decides what
 
@@ -91,8 +112,20 @@ for projects whose only gap was a `.css` file, so the settings page asked them t
 download something that would not help. Measured on this machine: every skipped
 file belonged to a language that was already installed.
 
-**An ambiguous name resolved to one match.** A call target that resolves to two or
-more declarations produces NO edge. The graph under-reports; it never guesses.
+**A shared name linked to one match.** A call target that resolves to several
+declarations must not pick one — that would be a guess dressed as an answer. It must
+not pick none either, and that was the defect: dropping it made a symbol declared
+twice look like a symbol nobody calls. Measured, `streamWithDeltas` — declared in
+production code and in a test harness — had thirteen real call sites and **zero**
+edges, so `codegraph_impact` answered `referencing: []`, indistinguishable from
+"nothing calls this". 53.2% of the project's reference edges hung off file nodes for
+the same reason.
+
+The rule now: link to **every** declaration of the name, up to `MAX_SHARED_TARGETS`
+(10), and let the tool's candidates list do the disambiguation. Past ten the name is
+not a name — `result` had 1325 declarations, and linking it produced 200,000+ edges
+while burying the real callers, so those link to nothing. Measured after the change:
+file-node share 53.2% → **36.5%**, first pass 17.9s → 25.6s, edges 54k → 203k.
 
 **Two surfaces reporting one concept with different numbers.** The most recent
 member, and the hardest to notice because neither answer is wrong on its own:
@@ -373,6 +406,77 @@ Stated here because the tool descriptions promise exactly this and no more:
   A mention is a line number, which is what lets a reader open the sentence.
 - **The graph is derived.** Delete it and the next pass rebuilds it; nothing else
   in the app depends on it existing.
+- **No behaviour.** It knows `A` references `B`. It does not know what `A` expects
+  `B` to return, which of `B`'s errors `A` handles, or which assertion encodes the
+  contract. "What breaks if I change this" is answered by reading the assertions,
+  and the graph only narrows which files hold them.
+
+### 10b. Known boundaries and residual risk
+
+Each of these is measured, not hypothetical, and each is a deliberate line rather
+than an unfinished one. Listed so a reader knows where an answer stops.
+
+| boundary | consequence | why it stays |
+|---|---|---|
+| A name declared in several files links to all of them (up to ten) | a signature's type dependencies can read about twice the real count — `Model` has 364 annotations but 728 edges because two files declare it | under-reporting callers changes code silently; over-reporting is a row the reader can dismiss. Import-guided resolution is the next layer |
+| `extends` / `implements` have shapes for the TypeScript/JavaScript family only | a Python, Go, Java, C# or Rust project answers these queries with nothing | each language needs its own node table; the grammars differ more here than for calls |
+| A module's public surface stops at file → symbol | `export * from './x'` is a file→file edge, so "is this symbol part of the package API" is one hop away, not answered directly | deriving symbol-level publication across a re-export chain means re-scanning every exporting file whenever one changes — the W11b shape that lost edges before |
+| A shared name's re-export resolves inside the named module only | an `export { x } from './y'` where `y` re-exports `x` from `z` links to nothing at the second hop | one hop is what the `from` clause states; following the chain needs import resolution for every step |
+| The graph is rebuilt from scratch on a schema bump | the first launch after an upgrade shows `indexing` for ~30s | a derived graph is only as good as the pass that filled it; an interrupted rebuild leaves an empty graph that the next open repairs |
+
+The last one has a sharp edge worth stating: an interrupted rebuild leaves a graph
+with no rows, and nothing marks it as incomplete. The next open rebuilds it, so the
+state is transient — but a query issued during it answers from an empty graph, and
+`indexing` is the only signal.
+
+### 10a. The five ways an answer is incomplete, and what each now says
+
+Every one of these was measured, and each used to read as a complete answer.
+
+| the situation | used to answer | now says |
+|---|---|---|
+| more references than the row limit | `40 rows`, `truncated: true` | `664 reference(s) — 40 shown`, plus the 624 that are missing |
+| the sample came from three files out of a hundred | 40 rows, all from one file | 40 rows drawn one-per-file, so a sample looks like a sample |
+| the name is declared several times, so no edge was ever built | "no unambiguous symbol matched" | the declarations that share it, their ids, and "ambiguity is not absence" |
+| the call goes through an interface, a dispatch or a variable, so no edge exists | an empty list | "no direct callers found — that is NOT safe to change" |
+| the symbol has hundreds of callers, so searching for them is expensive | the declaration only | `482 call site(s) — codegraph_impact is cheaper than searching` |
+
+The second row is a different failure from the first: `truncated: true` was honest
+about the cut and silent about the SHAPE. Measured, `impact` on a symbol with 664
+call sites across 105 files returned 40 rows from **one** file — a sample that says
+"the callers live here", which is false. The rows are now drawn one per source file
+(`ROW_NUMBER() PARTITION BY src`), so 40 rows name 40 different places whenever 40
+files exist.
+
+The fourth one produced a wrong conclusion in a real session: `streamWithDeltas` is
+declared in both `faux.ts` and a test harness, so all thirteen of its call sites were
+dropped as ambiguous and `codegraph_impact` answered as if nothing called it. **An
+empty list and an ambiguous name were the same sentence**, and only one of them means
+"safe to look elsewhere". The edges are now built (see §4), and an ambiguous name
+still says so with its candidates.
+
+The fourth is a different kind of fix: not "the answer was incomplete" but "the reader
+could not size the question". Measured, `streamWithDeltas` has 7 text matches (a search
+is cheaper, and choosing it is correct) while `setResponses` has 482 — around 15k
+tokens, and a definition-versus-call judgement on every line. The model searched both
+times, because no answer said which was which.
+
+The rule the tools now follow: a result that cannot be trusted says which way it is
+untrustworthy, and names the next step.
+
+### 10b. What this plugin is, in one sentence
+
+A **code graph**: a static index of declarations and the name-resolved references
+between them. It is not a knowledge graph and not a semantic one — it encodes "A
+references B", never "A depends on what B returns". The three questions it owns are
+*what does this file define*, *who references this symbol*, and *what is this
+project's shape*; the one it does not own is *what breaks if I change this*, because
+that answer lives in test assertions and in signatures the graph cannot see.
+
+That boundary is why the model correctly picks `grep` for a function with seven
+matches and no callers of consequence, and why the plugin now reports the caller count
+in `codegraph_find`: choosing well needs the size of the question, not more
+instructions.
 
 ## 11. Where the tests are blind
 

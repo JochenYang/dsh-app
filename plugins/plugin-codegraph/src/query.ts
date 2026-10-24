@@ -18,7 +18,7 @@
  * @module @dsh-app/plugin-codegraph/host/tools
  */
 
-import { allRows, oneRow, type Graph } from './store.ts'
+import { allRows, fileNodeId, oneRow, type Graph } from './store.ts'
 
 /**
  * How fresh the graph is, as every answer reports it.
@@ -48,6 +48,21 @@ export interface SymbolView {
   readonly parent: string | undefined
 }
 
+/**
+ * One `codegraph_find` match, with the count that decides the next tool.
+ *
+ * The count is here so the model can choose between `codegraph_impact` and a text
+ * search before paying for either. Measured: `streamWithDeltas` has 7 grep matches
+ * and 6 edges, so grep is cheaper and choosing it is correct; `setResponses` has 482
+ * grep matches — about 15k tokens plus a line-by-line judgement — and the model
+ * still reached for grep, because nothing in the answer said how large the question
+ * was. A caller count is that statement.
+ */
+export interface FoundSymbol extends SymbolView {
+  /** How many reference edges point at it. */
+  readonly references: number
+}
+
 /** One edge as a tool reports it. */
 export interface EdgeView {
   readonly kind: string
@@ -60,7 +75,7 @@ export interface EdgeView {
 
 /** The result of `codegraph_find`. */
 export interface FindResult extends ToolEnvelope {
-  readonly symbols: readonly SymbolView[]
+  readonly symbols: readonly FoundSymbol[]
   /** True when the name matched more symbols than were returned. */
   readonly truncated: boolean
 }
@@ -93,6 +108,40 @@ export interface ImpactResult extends ToolEnvelope {
    * direction that changes code.
    */
   readonly truncated: boolean
+  /**
+   * How many reference edges exist in total, when the list was cut.
+   *
+   * "There are more" without a size is a warning the reader cannot act on: 45 or
+   * 6000 is the difference between "read a bit more" and "this symbol is load
+   * bearing, do not judge it from a sample".
+   */
+  readonly total: number
+  /**
+   * The declarations that share this name, when the selector resolved to none.
+   *
+   * An ambiguous name and an absent one used to render identically — "no
+   * unambiguous symbol matched" — so a symbol declared twice looked like a symbol
+   * nobody calls. Measured: `streamWithDeltas` is declared in both `faux.ts` and a
+   * test harness, every edge to it was dropped as ambiguous, and the answer read as
+   * "no callers". Naming the candidates turns that into a next step.
+   */
+  readonly candidates: readonly SymbolView[]
+  /**
+   * The other relationships pointing at this symbol, one group per kind.
+   *
+   * `extends`, `implements` and `type_refs` are separate from `referencing` because
+   * they answer different questions: a class that implements an interface does not
+   * call it, and "who implements this" is the question a reader has about an
+   * interface. Merging them would make the call count wrong in both directions.
+   */
+  readonly related: readonly { readonly kind: string, readonly rows: readonly Referrer[] }[]
+  /**
+   * How many declarations share the name, when the selector was ambiguous.
+   *
+   * Present only in that case: a number here means "the edges for this name were
+   * never built", which is the fact the old answer hid.
+   */
+  readonly ambiguity?: number | undefined
 }
 
 /** The result of `codegraph_context`. */
@@ -140,7 +189,11 @@ export interface ContextResult extends ToolEnvelope {
       readonly line: number
       readonly parent: string | undefined
       readonly references: number
+      /** True when this module publishes the symbol. */
+      readonly exported: boolean
     }[]
+    /** Modules this file republishes whole (`export * from './x'`). */
+    readonly reExports: readonly string[]
   } | undefined
   /**
    * True when any of the symbol's lists was cut to the row limit.
@@ -199,7 +252,7 @@ export function readSymbol(graph: Graph, id: string): SymbolView | undefined {
 const SYMBOL_COLUMNS = 'id, name, kind, path, line, parent'
 
 /** Find symbols by exact name, or by a case-insensitive substring. */
-export function findSymbols(graph: Graph, query: string, limit: number): { symbols: SymbolView[], truncated: boolean } {
+export function findSymbols(graph: Graph, query: string, limit: number): { symbols: FoundSymbol[], truncated: boolean } {
   const exact = allRows<SymbolRow>(
     graph.db,
     `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE name = ? ORDER BY path, line LIMIT ?`,
@@ -215,8 +268,26 @@ export function findSymbols(graph: Graph, query: string, limit: number): { symbo
       `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE name LIKE ? ORDER BY path, line LIMIT ?`,
       `%${query}%`, limit + 1,
     )
+  const kept = rows.slice(0, limit)
+  // ONE query for every kept symbol's caller count, not one per row.
+  //
+  // This number is what lets the model choose between `codegraph_impact` and a text
+  // search BEFORE spending either. Measured: `streamWithDeltas` has 7 grep matches
+  // and 6 graph edges, so `grep` is the cheaper tool and the model correctly picked
+  // it; `setResponses` has 482 grep matches, where grep costs ~15k tokens and a row
+  // of judgement per line, and the model still reached for grep because nothing told
+  // it the size beforehand. A caller count in this answer is that signal.
+  const counts = new Map<string, number>()
+  if (kept.length > 0) {
+    const placeholders = kept.map(() => '?').join(', ')
+    for (const row of allRows<{ dst: string, n: number }>(
+      graph.db,
+      `SELECT dst, COUNT(*) AS n FROM edges WHERE kind = 'references' AND dst IN (${placeholders}) GROUP BY dst`,
+      ...kept.map(row => row.id),
+    )) counts.set(row.dst, row.n)
+  }
   return {
-    symbols: rows.slice(0, limit).map(toSymbolView),
+    symbols: kept.map(row => ({ ...toSymbolView(row), references: counts.get(row.id) ?? 0 })),
     truncated: rows.length > limit,
   }
 }
@@ -258,24 +329,108 @@ export interface Referrer {
  * @param limit - how many edges to return.
  * @returns the referrers in a stable order.
  */
-export function referencesTo(graph: Graph, symbolId: string, limit: number): { rows: Referrer[], truncated: boolean } {
-  // Joined on the SOURCE symbol so a symbol-level edge can name its caller. A
-  // file-level edge has no symbol row to join, which is what the LEFT JOIN and
-  // the `name` fallback handle.
-  //
-  // `limit + 1` is what makes `truncated` a fact rather than a guess: a symbol with
-  // 200 callers answered 40 rows and NO signal, so the model read a complete-looking
-  // list that was missing 80% of the callers — and it would then edit the symbol and
-  // miss them. `findSymbols` and `projectOverview` already follow this rule; this is
-  // the one place where breaking it fails silently in the direction that changes
-  // code.
-  const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null }>(
+/**
+ * The other relationships that point at one symbol, grouped by kind.
+ *
+ * Kept apart from `referencesTo` on purpose: "who calls this" and "what implements
+ * this" are different questions, and merging them would make a call count wrong.
+ * Before this existed, `impact` on an interface answered only the places that NAME
+ * it — never the classes that implement it — which is the question a reader actually
+ * has about an interface.
+ *
+ * @param graph - the open graph.
+ * @param symbolId - the destination symbol.
+ * @param limit - how many rows a single kind may carry.
+ * @returns one group per kind that has any rows, plus whether anything was cut.
+ */
+export function relatedTo(graph: Graph, symbolId: string, limit: number): { groups: { kind: string, rows: Referrer[] }[], truncated: boolean } {
+  const kinds = ['extends', 'implements', 'type_refs', 'exports'] as const
+  const groups: { kind: string, rows: Referrer[] }[] = []
+  let truncated = false
+  for (const kind of kinds) {
+    const rows = allRows<{ src: string, line: number, name: string | null, path: string | null }>(
+      graph.db,
+      `SELECT e.src AS src, e.line AS line, s.name AS name, s.path AS path
+       FROM edges e LEFT JOIN symbols s ON s.id = e.src
+       WHERE e.dst = ? AND e.kind = ? ORDER BY e.src, e.line LIMIT ?`,
+      symbolId, kind, limit + 1,
+    )
+    if (rows.length > limit) truncated = true
+    if (rows.length === 0) continue
+    groups.push({
+      kind,
+      rows: rows.slice(0, limit).map(row => ({
+        path: row.path ?? row.src.replace(/^file:/u, ''),
+        line: row.line,
+        kind,
+        name: row.name ?? undefined,
+      })),
+    })
+  }
+  return { groups, truncated }
+}
+
+/**
+ * The type references one declaration carries in its signature.
+ *
+ * The forward direction of `type_refs`: "what does this function's signature depend
+ * on". Named after the field it answers, not after the edge kind, so the tool's
+ * output reads as a sentence.
+ *
+ * @param graph - the open graph.
+ * @param symbolId - the declaration whose signature is in question.
+ * @param limit - how many references to return.
+ * @returns the type names it mentions.
+ */
+export function typeRefsOf(graph: Graph, symbolId: string, limit: number): { rows: { path: string | undefined, name: string | undefined, line: number }[], truncated: boolean } {
+  const rows = allRows<{ dst: string, line: number }>(
     graph.db,
-    `SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path
-     FROM edges e LEFT JOIN symbols s ON s.id = e.src
-     WHERE e.dst = ? AND e.kind = 'references' ORDER BY e.src, e.line LIMIT ?`,
+    `SELECT dst, line FROM edges WHERE src = ? AND kind = 'type_refs' ORDER BY line LIMIT ?`,
     symbolId, limit + 1,
   )
+  return {
+    rows: rows.slice(0, limit).map(row => {
+      const hash = row.dst.lastIndexOf('#')
+      return { path: hash > 0 ? row.dst.slice(0, hash) : undefined, name: hash > 0 ? row.dst.slice(hash + 1) : row.dst, line: row.line }
+    }),
+    truncated: rows.length > limit,
+  }
+}
+
+/**
+ * The relationships that point at one symbol, for `codegraph_impact`.
+ *
+ * @param graph - the open graph.
+ * @param symbolId - the destination symbol.
+ * @param limit - how many rows a single kind may carry.
+ * @returns one group per kind that has any rows.
+ */
+
+export function referencesTo(graph: Graph, symbolId: string, limit: number): { rows: Referrer[], truncated: boolean, total: number } {
+  // ROUND-ROBIN ACROSS FILES, not lexicographic order.
+  //
+  // `ORDER BY e.src LIMIT 40` clusters: measured on a real project, the 40 rows
+  // returned for a symbol with 664 call sites across 110 files came from THREE files,
+  // and for another symbol from ONE. A sample that concentrated in one file is not a
+  // sample — it says "the callers live here", which is false. `ROW_NUMBER()` partitioned
+  // by source file makes the first pass take one row per file, so 40 rows name 40
+  // different call sites whenever 40 files exist.
+  //
+  // `limit + 1` keeps `truncated` a fact rather than a guess: a symbol with 200 callers
+  // used to answer 40 rows with NO signal, so the model read a complete-looking list
+  // that was missing 80% of the callers and would then edit the symbol and miss them.
+  const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null }>(
+    graph.db,
+    `SELECT src, line, kind, name, path FROM (
+       SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path,
+              ROW_NUMBER() OVER (PARTITION BY e.src ORDER BY e.line) AS rank_in_source
+       FROM edges e LEFT JOIN symbols s ON s.id = e.src
+       WHERE e.dst = ? AND e.kind = 'references'
+     )
+     ORDER BY rank_in_source, src, line LIMIT ?`,
+    symbolId, limit + 1,
+  )
+  const truncated = rows.length > limit
   return {
     rows: rows.slice(0, limit).map((row) => {
       if (row.src.startsWith('file:')) {
@@ -290,7 +445,15 @@ export function referencesTo(graph: Graph, symbolId: string, limit: number): { r
       const hash = row.src.lastIndexOf('#')
       return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined }
     }),
-    truncated: rows.length > limit,
+    truncated,
+    // "There are more" without "how many" is a warning the reader cannot size:
+    // measured on a real project, a symbol with 664 call sites answered 40 rows and
+    // `truncated: true`, and the model had no way to know whether "more" meant 45 or
+    // 6000. The count is only computed when the answer was actually cut, so the
+    // common case pays nothing.
+    total: truncated
+      ? (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE dst = ? AND kind = 'references'").get(symbolId) as { n: number }).n
+      : rows.length,
   }
 }
 
@@ -382,12 +545,31 @@ export interface FileSymbol {
   readonly symbol: SymbolView
   /** How many reference edges point at it, from anywhere including this file. */
   readonly references: number
+  /**
+   * True when this module publishes the symbol.
+   *
+   * Not derivable from the count: an exported symbol with no internal caller is
+   * still the API, and that is the row a reader wants first.
+   */
+  readonly exported: boolean
 }
 
-/** One file's outline: what it declares, in line order. */
+/** One file's outline: what it declares, the public surface first. */
 export interface FileOutline {
   readonly path: string
   readonly symbols: readonly FileSymbol[]
+  /**
+   * The modules this file republishes whole (`export * from './x'`).
+   *
+   * Names a MODULE rather than a declaration, so it has no row in `symbols`; a
+   * reader asking what a file publishes still needs to know it re-exports another
+   * module's surface.
+   *
+   * A mutable array, not `readonly`: the tool's output schema describes mutable
+   * arrays because that is what the JSON snapshot carries, and typing this `readonly`
+   * forced an `as unknown as` at the boundary — a type escape the ratchet counts.
+   */
+  readonly starReExports: string[]
   /** True when the file declares more symbols than the answer carries. */
   readonly truncated: boolean
 }
@@ -429,6 +611,24 @@ export function fileOutline(graph: Graph, path: string, limit: number): FileOutl
     path,
   )) counted.set(row.dst, row.n)
 
+  // Which of them this module publishes. Not derivable from the counts above: an
+  // exported symbol with no internal caller is still the API, and that is exactly
+  // the row a reader wants when asking "what is this module's public surface".
+  const exported = new Set<string>()
+  for (const row of allRows<{ dst: string }>(
+    graph.db,
+    "SELECT dst FROM edges WHERE src = ? AND kind = 'exports'",
+    fileNodeId(path),
+  )) exported.add(row.dst)
+  // `export * from './x'` names a MODULE rather than a declaration, so it has no row
+  // in the symbol list. Reported separately below, because a reader asking what a
+  // file publishes needs to know it republishes another module's surface.
+  const starReExports = allRows<{ dst: string }>(
+    graph.db,
+    "SELECT dst FROM edges WHERE src = ? AND kind = 'exports' AND dst LIKE 'file:%'",
+    fileNodeId(path),
+  ).map(row => row.dst.replace(/^file:/u, ''))
+
   const total = (graph.db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE path = ?').get(path) as { n: number }).n
   const rows = allRows<SymbolRow>(
     graph.db,
@@ -437,13 +637,22 @@ export function fileOutline(graph: Graph, path: string, limit: number): FileOutl
   )
   const ordered = rows
     .map(row => ({ row, references: counted.get(row.id) ?? 0 }))
-    .sort((a, b) => (b.references - a.references) || (a.row.line - b.row.line))
+    // Exported first, then by how much depends on it. On a 103-symbol file this is
+    // the difference between listing the public surface and listing forty `const`
+    // helpers nobody calls.
+    .sort((a, b) => {
+      const aExported = exported.has(a.row.id) ? 0 : 1
+      const bExported = exported.has(b.row.id) ? 0 : 1
+      return (aExported - bExported) || (b.references - a.references) || (a.row.line - b.row.line)
+    })
   return {
     path,
     symbols: ordered.slice(0, limit).map(entry => ({
       symbol: toSymbolView(entry.row),
       references: entry.references,
+      exported: exported.has(entry.row.id),
     })),
+    starReExports,
     truncated: total > limit,
   }
 }
@@ -671,6 +880,34 @@ export function resolveSymbol(graph: Graph, selector: string): SymbolView | unde
   const rows = allRows<{ id: string }>(graph.db, 'SELECT id FROM symbols WHERE name = ? LIMIT 2', selector)
   if (rows.length !== 1) return undefined
   return readSymbol(graph, rows[0]!.id)
+}
+
+/**
+ * Why a selector failed to resolve, when it failed because the NAME is shared.
+ *
+ * `resolveSymbol` answers `undefined` for both "no such symbol" and "several
+ * symbols share this name", and the tools rendered those the same way — which made
+ * the second case look like the first. Measured on a real project: `streamWithDeltas`
+ * was declared twice (a production function and a test helper), so every call edge
+ * to it was dropped as ambiguous, and `codegraph_impact` answered "no unambiguous
+ * symbol matched" with nothing to act on. The model had no way to learn that the
+ * name was shared rather than absent, and concluded the symbol had no callers.
+ *
+ * Returning the candidates turns a dead end into a next step: pick one of these ids.
+ *
+ * @param graph - the open graph.
+ * @param selector - the name that failed to resolve.
+ * @param limit - how many candidates to name.
+ * @returns the candidates and how many exist in total.
+ */
+export function ambiguousCandidates(graph: Graph, selector: string, limit: number): { candidates: SymbolView[], total: number } {
+  const total = (graph.db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE name = ?').get(selector) as { n: number }).n
+  const rows = allRows<SymbolRow>(
+    graph.db,
+    `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE name = ? ORDER BY path, line LIMIT ?`,
+    selector, limit,
+  )
+  return { candidates: rows.map(toSymbolView), total }
 }
 
 /**

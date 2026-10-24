@@ -216,7 +216,21 @@ describe('symbolId', () => {
 })
 
 describe('callEdges', () => {
-  it('resolves an unambiguous name and drops an ambiguous one', () => {
+  it('links a shared name to every declaration of it, and only skips a missing one', () => {
+    // This case used to assert that an ambiguous name produced NO edge, with the
+    // reasoning "under-reporting is visible, guessing is not". The reasoning was
+    // wrong about which failure is visible: a missing edge is invisible.
+    //
+    // Measured on a real project: `streamWithDeltas` is declared in production code
+    // and in a test harness, so all thirteen of its call sites produced no edge, and
+    // `codegraph_impact` answered `referencing: []` — indistinguishable from "nobody
+    // calls this". 53.2% of the project's reference edges hung off file nodes for the
+    // same reason.
+    //
+    // Linking to every declaration is not a guess: it is the fact "this name is used
+    // here, and these are the declarations it could mean", which is precisely what
+    // the tool's candidates list exists to disambiguate. Only a name with NO
+    // declaration produces no edge.
     const parsed = {
       symbols: [],
       calls: [
@@ -233,9 +247,61 @@ describe('callEdges', () => {
       return []
     }
     const edges = callEdges(parsed, 'a.ts#function:caller', resolve)
-    // Ambiguous and missing both answer no edge: under-reporting is visible,
-    // guessing is not.
-    assert.deepEqual(edges.map(edge => [edge.to, edge.line]), [['b.ts#function:unique', 1]])
+    assert.deepEqual(
+      edges.map(edge => [edge.to, edge.line]),
+      [
+        ['b.ts#function:unique', 1],
+        ['x.ts#function:shared', 2],
+        ['y.ts#function:shared', 2],
+      ],
+      'a shared name reaches both declarations; a name with none reaches nothing',
+    )
+  })
+
+  it('prefers a declaration in the same file over a project-wide count', () => {
+    // The first layer, and the one that would have saved `streamWithDeltas`: it was
+    // declared in the file that calls it AND in a test harness. The project-wide
+    // uniqueness rule dropped all thirteen call sites, even though the local
+    // declaration was right there and is the only thing a module-private name can
+    // mean.
+    const parsed = {
+      symbols: [
+        { id: 'a.ts#function:shared', path: 'a.ts', name: 'shared', kind: 'function', line: 1, parent: undefined },
+      ],
+      calls: [{ name: 'shared', line: 9 }],
+      imports: [],
+      heritage: [],
+      typeRefs: [],
+      exports: [],
+      hasError: false,
+    }
+    // The name is declared in four files; one of them is this one.
+    const all = [
+      'a.ts#function:shared',
+      'b.ts#function:shared',
+      'c.ts#function:shared',
+      'd.ts#function:shared',
+    ]
+    const edges = callEdges(parsed, 'a.ts#function:caller', () => all)
+    assert.deepEqual(edges.map(edge => edge.to), ['a.ts#function:shared'], 'the local declaration wins outright')
+  })
+
+  it('stops linking a name the codebase reuses for locals', () => {
+    // Why this bound exists. Names shared by a handful are worth linking to both;
+    // names shared by the thousand are not names. Measured on a real project,
+    // `result` had **1325** declarations, and expanding it produced 200,000+ edges —
+    // the index pass went from 17.9s to 124.6s, and every real caller was buried
+    // under unrelated `const result` rows from other files.
+    const parsed = { symbols: [], calls: [{ name: 'result', line: 1 }], imports: [], hasError: false }
+    const many = Array.from({ length: 1325 }, (_, i) => `f${String(i)}.ts#variable:result`)
+    const edges = callEdges(parsed, 'a.ts#function:caller', () => many)
+    assert.deepEqual(edges, [], 'a name shared by 1325 declarations links to none of them')
+
+    // The boundary is inclusive: ten targets still link, eleven do not.
+    const ten = Array.from({ length: 10 }, (_, i) => `f${String(i)}.ts#variable:shared`)
+    assert.equal(callEdges(parsed, 'a.ts#function:caller', () => ten).length, 10)
+    const eleven = Array.from({ length: 11 }, (_, i) => `f${String(i)}.ts#variable:shared`)
+    assert.deepEqual(callEdges(parsed, 'a.ts#function:caller', () => eleven), [])
   })
 
   it('keeps a self-recursive call as a real reference', () => {
@@ -513,5 +579,63 @@ describe('extractSymbols — unsupported', () => {
     const parsed = extractSymbols(root, 'a.css', 'css')
     assert.equal(parsed.unsupported, 'noShape')
     assert.deepEqual(parsed.symbols, [])
+  })
+})
+
+describe('extractSymbols — relationships the call walk cannot see', () => {
+  it('records extends and implements as different kinds', async () => {
+    // A class that implements an interface does not CALL it, so no call edge exists.
+    // Before these two kinds, `impact` on an interface answered only the places that
+    // NAME it — never the classes that implement it, which is the question a reader
+    // has about an interface.
+    const source = [
+      'class Base {}',
+      'interface Shape { area(): number }',
+      'class Square extends Base implements Shape {',
+      '  area() { return 1 }',
+      '}',
+    ].join('\n')
+    const parsed = await parse(source, 'typescript', 'src/a.ts')
+    const square = 'src/a.ts#class:Square'
+    assert.deepEqual(
+      parsed.heritage.map(row => [row.kind, row.name, row.from]),
+      [['extends', 'Base', square], ['implements', 'Shape', square]],
+      'both are recorded, and kept apart',
+    )
+  })
+
+  it('records a type named in a signature, which is never a call', async () => {
+    // `function f(x: Foo)` does not call Foo. Without this edge, changing Foo breaks
+    // f and `impact` says nothing.
+    const source = 'function takes(x: SomeParam): SomeReturn { return x }'
+    const parsed = await parse(source, 'typescript', 'src/a.ts')
+    assert.deepEqual(
+      parsed.typeRefs.map(row => [row.name, row.owner]),
+      [['SomeParam', 'src/a.ts#function:takes'], ['SomeReturn', 'src/a.ts#function:takes']],
+    )
+  })
+
+  it('ignores builtin type names, which resolve to nothing', async () => {
+    // An edge for `string` would be noise in every answer, forever.
+    const source = 'function f(a: string, b: number): void {}'
+    const parsed = await parse(source, 'typescript', 'src/a.ts')
+    assert.deepEqual(parsed.typeRefs, [])
+  })
+
+  it('records what a module publishes, including a star re-export', async () => {
+    // A module's public surface is not derivable from references: an exported symbol
+    // with no internal caller is still the API. `export * from './x'` has no name of
+    // its own, so it is recorded as an `all` row carrying the source.
+    const source = [
+      'export const value = 1',
+      'export function fn() {}',
+      'export { inner } from \'./inner\'',
+      'export * from \'./star\'',
+    ].join('\n')
+    const parsed = await parse(source, 'typescript', 'src/a.ts')
+    assert.deepEqual(
+      parsed.exports.map(row => [row.all, row.name]),
+      [[false, 'value'], [false, 'fn'], [false, 'inner'], [true, './star']],
+    )
   })
 })

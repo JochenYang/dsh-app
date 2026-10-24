@@ -105,7 +105,7 @@ export async function parseFile(
   const { parser } = await parserFor(grammarFile, languageId, runtimeWasm)
   const tree = parser.parse(source)
   if (tree === null) {
-    return { symbols: [], calls: [], imports: [], hasError: true, unsupported: false }
+    return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: true, unsupported: false }
   }
   // The tree-sitter Node type is structurally the SyntaxNode `parse.ts` reads;
   // the cast is the boundary where a real parse becomes this plugin's contract.
