@@ -24,12 +24,37 @@
 import type { ProjectOverview } from './query.ts'
 import { freshnessNote, type Freshness } from './query.ts'
 
-/** How many entry candidates the context names. */
-const MAX_ENTRIES = 5
-/** How many hubs the context names. */
-const MAX_HUBS = 5
-/** How many languages the context names. */
+/** How many entry candidates a SMALL project's context names. */
+const MIN_ENTRIES = 5
+/** How many hubs a small project's context names. */
+const MIN_HUBS = 5
+/** How many languages the context names, whatever the size. */
 const MAX_LANGUAGES = 3
+/** The ceiling, so a huge project cannot spend the whole context budget on this. */
+const MAX_ENTRIES_CAP = 12
+const MAX_HUBS_CAP = 12
+
+/**
+ * How many rows this project's shape is worth.
+ *
+ * A fixed five was wrong in both directions. Measured on a 1771-file monorepo: five
+ * entry candidates named only the `evals` CLI and two script files, while the real
+ * front door (`coding-agent/src/cli.ts`) sat below them — a reader learned the shape
+ * of a tenth of the project. On a 20-file library five is already more than it has.
+ *
+ * The scale is logarithmic because the useful number of "places to start" grows far
+ * slower than the file count: 20 files need 3, 200 need 5, 2000 need 8, and past
+ * about a dozen a list stops being an orientation and becomes a directory dump.
+ *
+ * @param files - how many files the graph holds.
+ * @returns the row budget for each list.
+ */
+function rowBudget(files: number): number {
+  if (files <= 0) return MIN_ENTRIES
+  // log10(files) * 3, rounded: 10 → 3, 100 → 6, 1000 → 9, 10000 → 12.
+  const scaled = Math.round(Math.log10(files) * 3)
+  return Math.max(MIN_ENTRIES, Math.min(MAX_ENTRIES_CAP, scaled))
+}
 
 /** The queue states this block answers to. `unindexed` never reaches it. */
 export type OverviewState = 'indexing' | 'failed' | 'stale' | 'current'
@@ -110,7 +135,10 @@ export function renderOverviewContext(
   lines.push(`Code graph for this project (${String(overview.files)} files, ${String(overview.symbols)} symbols, ${String(overview.edges)} edges${languages === '' ? '' : `; ${languages}`}).`)
   if (note !== undefined) lines.push(note)
 
-  const entries = overview.entryCandidates.slice(0, MAX_ENTRIES)
+  // Sized to the project, not fixed: five named a tenth of a monorepo and more
+  // than a small library has. See `rowBudget`.
+  const budget = rowBudget(overview.files)
+  const entries = overview.entryCandidates.slice(0, budget)
   if (entries.length > 0) {
     lines.push('Files nothing else imports — where a project starts, or a library\u2019s public surface:')
     for (const entry of entries) {
@@ -119,7 +147,7 @@ export function renderOverviewContext(
     }
   }
 
-  const hubs = overview.hubs.slice(0, MAX_HUBS)
+  const hubs = overview.hubs.slice(0, Math.min(budget, MAX_HUBS_CAP))
   if (hubs.length > 0) {
     lines.push('Most-referenced symbols — read these first to learn the vocabulary:')
     for (const hub of hubs) {

@@ -116,7 +116,17 @@ const cssText = `
   margin: 0;
   padding: 0;
   list-style: none;
+  /* Bounded, and scrolling inside that bound. Measured: a recall that touched
+     dozens of files rendered every row, so the dialog grew past the viewport and
+     the confirm button was pushed off screen — the one control the dialog exists
+     for. The cap is in vh so it follows the window rather than a pixel guess, and
+     the negative margin with matching padding keeps a focus ring from being clipped
+     by the scroll container. */
+  max-height: min(52vh, 460px);
   overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 4px;
+  margin: -2px -4px;
 }
 .dshRewind-fileRow {
   display: flex;

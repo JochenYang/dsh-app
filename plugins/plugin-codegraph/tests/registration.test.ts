@@ -199,6 +199,39 @@ describe('apply', () => {
     assert.equal(text({ agent: { session: { header: { cwd: 'Z:/no/such/project' } } } }), '')
   })
 
+  it('keeps the phrases the tool descriptions are measured by', () => {
+    // A description is an instruction the model reads before it plans, and this one
+    // is HAND-MAINTAINED: when the behaviour behind it changed, the prose did not
+    // follow. Measured twice in one release — the ambiguity sentence described "no
+    // target" after the tool had started returning candidates, and an earlier
+    // compression nearly took the two trigger phrases with it.
+    //
+    // So these five are pinned as LITERALS, not derived from the code: the point is
+    // to fail when a reword drops one by accident. Each earned its place by being
+    // measured — the two capitalised phrases are what got a session to call this
+    // instead of globbing, and "never safe to change" is the sentence that stops an
+    // empty reference list from reading as approval.
+    const { ctx, definitions } = fakeContext()
+    apply(ctx as never)
+    const description = (tool: string): string => definitions.get(tool)?.description ?? ''
+
+    const context = description('codegraph_context')
+    assert.ok(context.includes('OMIT `symbol` to get the project OVERVIEW'),
+      'the overview trigger phrase is what makes "what is this project" reach the graph')
+    assert.ok(context.includes('PASS A FILE PATH'),
+      'the outline trigger phrase is what makes "what does this file define" reach the graph')
+
+    const impact = description('codegraph_impact')
+    assert.ok(impact.includes('never "safe to change"'),
+      'an empty reference list must never read as approval')
+    assert.ok(impact.includes('answers the candidates instead of picking one'),
+      'a shared name returns candidates; the description must say so, not "no target"')
+
+    const find = description('codegraph_find')
+    assert.ok(find.includes('before opening files, grepping, or guessing a path'),
+      'the ordering instruction is what makes the graph the first step rather than the last')
+  })
+
   it('decides freshness per assembly rather than capturing it once', () => {
     // The block cannot decide staleness itself: `text` returns a string
     // synchronously, while that needs `await gitHead(cwd)`. It CAN report what a

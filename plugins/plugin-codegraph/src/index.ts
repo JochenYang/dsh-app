@@ -304,13 +304,11 @@ export function apply(ctx: Context): void {
     name: 'codegraph_find',
     description:
       'Locate a symbol in this project WITHOUT reading files: answers "where is X declared / defined" with '
-      + 'its kind, file and line, in one call. Use it as the first step of almost any question about the '
-      + 'codebase — before opening files, grepping, or guessing a path — because the graph already holds '
-      + 'every declaration in the project. '
+      + 'its kind, file and line, and its call-site count, in one call. Use it as the first step of almost '
+      + 'any question about the codebase — before opening files, grepping, or guessing a path. '
       + 'Matching: an exact name wins over a substring; with no exact match it falls back to a '
       + 'case-insensitive substring search, so a partial name still finds candidates. '
-      + 'The answer carries the graph\'s freshness: a "not found" while it reports stale or indexing means '
-      + '"ask again in a moment", not "it does not exist".',
+      + 'A "not found" while the answer reports stale or indexing means "ask again in a moment".',
     parameters: {
       query: {
         type: 'string',
@@ -383,8 +381,9 @@ export function apply(ctx: Context): void {
       + 'not see. This is the reverse direction of codegraph_find: that one goes from a name to its '
       + 'declaration, this one from a declaration to its users. '
       + 'References are resolved by NAME, so a call through an interface or a dynamic dispatch may be '
-      + 'missing — an empty list means "no direct calls found", never "safe to change". An ambiguous name '
-      + 'answers no target rather than picking one, because describing the wrong symbol would look correct.',
+      + 'missing — an empty list means "no direct calls found", never "safe to change". When a name is '
+      + 'declared in more than one place it answers the candidates instead of picking one, because '
+      + 'describing the wrong symbol would look correct.',
     parameters: {
       symbol: {
         type: 'string',
@@ -593,21 +592,19 @@ export function apply(ctx: Context): void {
     description:
       'Read one symbol\u2019s whole neighbourhood in a single call — its declaration, the other symbols in '
       + 'the same file, the calls it makes, what references it, what its file imports, and the project '
-      + 'documents that mention it. Use it when you need to UNDERSTAND a piece before changing it: one '
-      + 'call replaces several codegraph_find calls plus the file reads they would lead to. '
+      + 'documents that mention it. Use it when you need to UNDERSTAND a piece before changing it. '
       + 'OMIT `symbol` to get the project OVERVIEW instead — file/symbol/edge counts, the language split, '
       + 'the files nothing imports (entry points, or a library\u2019s public surface) and the most-referenced '
       + 'symbols. Call it with no argument whenever you are asked what a project IS, where it starts, how '
       + 'it is organised, or how to begin in an unfamiliar repo, BEFORE listing directories or reading '
       + 'files: the graph already holds that shape. '
       + 'PASS A FILE PATH (any path the project holds, with or without ./) to get that file\u2019S OUTLINE: '
-      + 'every symbol it declares, in line order, each with its own call-site count. That answers "what '
+      + 'every symbol it declares, each with its own call-site count. That answers "what '
       + 'does this file define", "which methods does this class have" and "what is this module\u2019s public '
       + 'surface" — questions keyword search answers badly, because a method definition does not name its '
       + 'class and a symbol is not a keyword. '
-      + 'A call is attributed to the enclosing declaration when it sits inside one, and to the file '
-      + 'otherwise, so `calls` is this symbol\u2019s own calls plus any file-level call. Targets are resolved '
-      + 'by name, so a name declared in more than one place produces no edge rather than a guess.',
+      + 'A call belongs to its enclosing declaration (or the file at top level), so `calls` is this '
+      + 'symbol\u2019s own calls plus any file-level one.',
     parameters: {
       symbol: {
         type: 'string',

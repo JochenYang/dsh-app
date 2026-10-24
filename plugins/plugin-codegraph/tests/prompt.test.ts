@@ -80,13 +80,16 @@ describe('renderOverviewContext', () => {
       byLanguage: Array.from({ length: 12 }, (_, i) => ({ lang: `lang${String(i)}`, files: 10 - i })),
     })
     const lines = renderOverviewContext(many, 'current', undefined).split('\n')
-    // 1 headline + 1 entries heading + 5 entries + 1 hubs heading + 5 hubs
-    // + 1 trigger heading + 3 triggers = 17. The trigger block is at the END on
-    // purpose: the CodeCompass study moved its checklist there and raised graph-tool
-    // adoption from 0/30 to 31/31 on structural tasks.
-    assert.ok(lines.length <= 18, `expected at most 18 lines, got ${String(lines.length)}:\n${lines.join('\n')}`)
-    assert.equal(lines.filter(line => /^- src\/e/u.test(line)).length, 5, 'five entry candidates')
-    assert.equal(lines.filter(line => /^- function h/u.test(line)).length, 5, 'five hubs')
+    // The list budget SCALES with the project (see `rowBudget`): a fixed five named
+    // a tenth of a 1771-file monorepo, and more than a 20-file library has. The
+    // ceiling is what keeps this text — spent on every turn — bounded.
+    const entries = lines.filter(line => /^- src\/e/u.test(line)).length
+    const hubs = lines.filter(line => /^- function h/u.test(line)).length
+    assert.ok(entries >= 5 && entries <= 12, `entry candidates within the 5..12 budget, got ${String(entries)}`)
+    assert.equal(hubs, entries, 'both lists use the same budget')
+    // 1 headline + 1 entries heading + N entries + 1 hubs heading + N hubs
+    // + 1 trigger heading + 3 triggers + 1 memory line.
+    assert.ok(lines.length <= 33, `expected at most 33 lines, got ${String(lines.length)}`)
   })
 
   it('ends with the concrete triggers, not a generic suggestion', () => {

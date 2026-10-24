@@ -808,11 +808,20 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
     // say. Two numbers for one concept is worse than either number alone: the model
     // cannot tell which to trust. This count also matches what the row limit is
     // applied to, so "664 call site(s)" and "TRUNCATED at 40" describe one list.
+    //
+    // AND the name is not shared by several declarations.
+    //
+    // Measured after widening the list to ten rows: `startsWith` appeared three times
+    // (554 / 554 / 553) and `ok` eight. The reference count of a SHARED NAME is the
+    // sum over every unrelated declaration of it, so the number says how common the
+    // word is, not how important any one symbol is. A hub list exists to teach the
+    // vocabulary of THIS project, and `startsWith` is not part of it.
     `SELECT e.dst AS id, COUNT(*) AS n
      FROM edges e JOIN symbols s ON s.id = e.dst
      WHERE e.kind = 'references'
        AND s.parent IS NULL
        AND s.kind IN ('function', 'class', 'interface', 'type', 'enum')
+       AND (SELECT COUNT(*) FROM symbols s2 WHERE s2.name = s.name) <= 2
      GROUP BY e.dst
      ORDER BY
        CASE WHEN s.path LIKE '%test%' OR s.path LIKE '%spec%'

@@ -27,7 +27,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Parser, Language } from 'web-tree-sitter'
-import { GRAMMAR_SHAPES, callEdges, extractSymbols, symbolId, type SyntaxNode } from '../src/parse.ts'
+import { GRAMMAR_SHAPES, callEdges, extractSymbols, relationEdges, symbolId, type SyntaxNode } from '../src/parse.ts'
 import { LANGUAGES } from '../src/languages.ts'
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -637,5 +637,96 @@ describe('extractSymbols — relationships the call walk cannot see', () => {
       parsed.exports.map(row => [row.all, row.name]),
       [[false, 'value'], [false, 'fn'], [false, 'inner'], [true, './star']],
     )
+  })
+})
+
+describe('extractSymbols — heritage beyond TypeScript', () => {
+  it('reads Python base classes from the class header only, never from a call', () => {
+    // Python spells both a class header and a call with `argument_list`, so the
+    // node type alone would read `foo(bar)` as "foo derives from bar". The `parent`
+    // guard is the whole reason this row is safe.
+    const source = [
+      'class A(Base, Mixin):',
+      '  def m(self):',
+      '    helper(thing)',
+    ].join('\n')
+    return parse(source, 'python', 'src/a.py').then((parsed) => {
+      assert.deepEqual(
+        parsed.heritage.map(row => [row.kind, row.name]),
+        [['extends', 'Base'], ['extends', 'Mixin']],
+        'the class header yields both bases, and the call yields none',
+      )
+    })
+  })
+
+  it('keeps Java superclass and implemented interfaces apart', () => {
+    // Java names them with two different node types, and a reader asking about an
+    // interface means `implements` — merging the two answers with the wrong set.
+    const source = 'class A extends B implements I, J { }'
+    return parse(source, 'java', 'src/A.java').then((parsed) => {
+      assert.deepEqual(
+        parsed.heritage.map(row => [row.kind, row.name]),
+        [['extends', 'B'], ['implements', 'I'], ['implements', 'J']],
+      )
+    })
+  })
+
+  it('records C# base types, which the grammar does not split by relationship', () => {
+    // C# puts bases and interfaces in one `base_list`, so the distinction is not
+    // available. Recorded as `extends` rather than guessed into `implements`,
+    // because a wrong `implements` answers "who implements this" with derivations.
+    const source = 'class A : B, I { }'
+    return parse(source, 'c_sharp', 'src/A.cs').then((parsed) => {
+      assert.deepEqual(
+        parsed.heritage.map(row => [row.kind, row.name]),
+        [['extends', 'B'], ['extends', 'I']],
+      )
+    })
+  })
+})
+
+describe('relationEdges — import-guided resolution', () => {
+  // `Model` is declared in two OTHER files, so this file has no local declaration to
+  // shadow it and the import clause is the only thing that can narrow the answer.
+  const symbols = [
+    { id: 'lib/a.ts#interface:Model', path: 'lib/a.ts', name: 'Model', kind: 'interface', line: 1, parent: undefined },
+    { id: 'lib/b.ts#interface:Model', path: 'lib/b.ts', name: 'Model', kind: 'interface', line: 1, parent: undefined },
+    { id: 'app.ts#class:Uses', path: 'app.ts', name: 'Uses', kind: 'class', line: 5, parent: undefined },
+  ]
+  const resolve = (name: string): readonly string[] => symbols.filter(s => s.name === name).map(s => s.id)
+
+  it('resolves a type to the module its import names, not to every same-named one', () => {
+    // The failure this pins, measured: `Model` is declared in two files, so every
+    // signature naming it produced TWO edges and the count read about double the
+    // truth. `import { Model } from './lib/a'` states which one this file means.
+    const parsed = {
+      symbols,
+      calls: [],
+      imports: [{ specifier: './lib/a', line: 1, names: ['Model'] }],
+      heritage: [],
+      typeRefs: [{ name: 'Model', line: 7, owner: 'app.ts#class:Uses' }],
+      exports: [],
+      hasError: false,
+    }
+    const resolveModule = (spec: string): string | undefined => (spec === './lib/a' ? 'lib/a.ts' : undefined)
+    const edges = relationEdges(parsed, 'file:app.ts', resolve, resolveModule)
+    assert.deepEqual(edges.map(edge => edge.to), ['lib/a.ts#interface:Model'], 'one edge, to the imported one')
+  })
+
+  it('falls back to every declaration when no import names the type', () => {
+    // Without an import clause there is nothing to narrow by, so the shared-name rule
+    // applies — both are linked, and the reader picks. Under-reporting here would be
+    // the failure that changes code silently.
+    const parsed = {
+      symbols,
+      calls: [],
+      imports: [],
+      heritage: [],
+      typeRefs: [{ name: 'Model', line: 7, owner: 'app.ts#class:Uses' }],
+      exports: [],
+      hasError: false,
+    }
+    const edges = relationEdges(parsed, 'file:app.ts', resolve)
+    assert.equal(edges.length, 2, 'both declarations are linked when nothing narrows it')
   })
 })

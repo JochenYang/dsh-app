@@ -58,7 +58,19 @@ export interface GrammarShape {
    * answered "who references this interface" with only the places that NAME it,
    * never the classes that implement it.
    */
-  readonly heritage?: { readonly extends?: string, readonly implements?: string }
+  readonly heritage?: {
+    readonly extends?: readonly string[]
+    readonly implements?: readonly string[]
+    /**
+     * The node type a heritage clause must sit inside, when the grammar reuses one.
+     *
+     * Python writes base classes in the class header's argument list, and every
+     * CALL spells its arguments the same way — so without this the extractor would
+     * read `foo(bar)` as "foo derives from bar". Requiring the parent to be a class
+     * definition is what makes that row safe.
+     */
+    readonly parent?: string
+  }
   /**
    * Node types that carry a TYPE reference, and the child type holding the name.
    *
@@ -113,6 +125,10 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     scopes: ['block'],
     call: { type: 'call', field: 'function' },
     import: { type: 'import_statement', field: 'name' },
+    // Python writes base classes in the class header's ARGUMENT LIST, which is also
+    // how every call spells its arguments — so the type alone cannot tell them
+    // apart. `parent` is what makes this row safe to declare.
+    heritage: { extends: ['argument_list'], parent: 'class_definition' },
   },
   go: {
     declarations: {
@@ -138,6 +154,9 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     // `import_declaration` has no fields; the target is a child node. The
     // `field` is empty and the extractor falls back to the first scoped name.
     import: { type: 'import_declaration', field: '' },
+    // Two node types for one relationship: Java spells the superclass and the
+    // implemented interfaces differently, and both are type names.
+    heritage: { extends: ['superclass'], implements: ['super_interfaces'] },
   },
   // C and C++ share ONE shape: they are parsed by the same `cpp` grammar, so a
   // narrower C table would only lose declarations that grammar does produce
@@ -156,6 +175,12 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     scopes: ['declaration_list', 'block'],
     call: { type: 'invocation_expression', field: 'function' },
     import: { type: 'using_directive', field: 'name' },
+    // C# puts base types AND implemented interfaces in one `base_list`, so the
+    // distinction the other languages make is not available here. Recorded as
+    // `extends` — "this type is built on those" — rather than guessing which entry
+    // is an interface, because a guess that lands in `implements` would answer
+    // "who implements this interface" with classes that merely derive from it.
+    heritage: { extends: ['base_list'] },
   },
   // Node names below were read off a REAL parse of a sample file with this
   // plugin's own grammar (`scratch/codegraph-grammars/probe.cjs`), not from
@@ -263,7 +288,7 @@ function typescriptShape(): GrammarShape {
     scopes: ['class_body', 'object', 'statement_block'],
     call: { type: 'call_expression', field: 'function' },
     import: { type: 'import_statement', field: 'source' },
-    heritage: { extends: 'extends_clause', implements: 'implements_clause' },
+    heritage: { extends: ['extends_clause'], implements: ['implements_clause'] },
     typeRef: ['type_annotation'],
     exportSurface: { statement: 'export_statement', specifier: 'export_specifier' },
   }
@@ -356,7 +381,21 @@ export interface ParsedFile {
    */
   readonly calls: readonly { readonly name: string, readonly line: number, readonly owner: string | undefined }[]
   /** Import specifiers, verbatim (resolution happens against the project). */
-  readonly imports: readonly { readonly specifier: string, readonly line: number }[]
+  /**
+   * Import specifiers, verbatim (resolution happens against the project).
+   *
+   * `names` carries the identifiers the clause brings into scope, which is what makes
+   * import-guided resolution possible: `import { Base } from './base'` states that
+   * THIS file's `Base` is the one in `./base`, so a type reference or a heritage
+   * clause can be resolved to the right declaration instead of to every declaration
+   * of that name in the project. Empty for a namespace or side-effect import
+   * (`import * as ns`, `import './x'`), where no single name is named.
+   */
+  readonly imports: readonly {
+    readonly specifier: string
+    readonly line: number
+    readonly names: readonly string[]
+  }[]
   /**
    * Heritage relationships: a class or interface and what it derives from.
    *
@@ -526,6 +565,37 @@ function collectByType(node: SyntaxNode, type: string): SyntaxNode[] {
  * @param node - a node inside a heritage clause or a type annotation.
  * @returns the type's name, or '' when this node carries none.
  */
+/**
+ * Every declaration name a heritage clause mentions.
+ *
+ * `typeNameOf` answers the first; a clause can hold several. Java's
+ * `implements I, J` wraps them in a `type_list`, so reading only the first
+ * answered with half the interfaces a class promises.
+ *
+ * @param node - the heritage clause.
+ * @returns every name it mentions, in source order, without duplicates.
+ */
+function typeNamesOf(node: SyntaxNode): string[] {
+  const found: string[] = []
+  const add = (name: string): void => {
+    if (name !== '' && !found.includes(name)) found.push(name)
+  }
+  // A NAMED type node ends the descent; anything else is a wrapper (`type_list`,
+  // `argument_list`, `generic_type`) whose children are the names.
+  const visit = (current: SyntaxNode): void => {
+    if (NAMED_TYPE_NODES.has(current.type)) {
+      add(typeNameOf(current))
+      return
+    }
+    for (const child of current.namedChildren) visit(child)
+  }
+  for (const child of node.namedChildren) visit(child)
+  return found
+}
+
+/** Node types that directly carry a type's name. */
+const NAMED_TYPE_NODES = new Set(['type_identifier', 'identifier', 'nested_type_identifier', 'scoped_type_identifier'])
+
 function typeNameOf(node: SyntaxNode): string {
   if (SKIP_TYPE_NAMES.has(node.type)) return ''
   if (node.type === 'type_identifier' || node.type === 'identifier' || node.type === 'nested_type_identifier') {
@@ -577,7 +647,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
    * is actually asked.
    */
   const calls: { name: string, line: number, owner: string | undefined }[] = []
-  const imports: { specifier: string, line: number }[] = []
+  const imports: { specifier: string, line: number, names: string[] }[] = []
   const heritage: { from: string, name: string, line: number, kind: 'extends' | 'implements' }[] = []
   const typeRefs: { name: string, line: number, owner: string | undefined }[] = []
   const exports: { name: string, line: number, all: boolean, from: string | undefined }[] = []
@@ -597,7 +667,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
    * next symbol's id) whereas the edge needs the full id, overload ordinal
    * included — two overloads of one name are two different callers.
    */
-  const walk = (node: SyntaxNode, parent: string | undefined, ownerId: string | undefined): void => {
+  const walk = (node: SyntaxNode, parent: string | undefined, ownerId: string | undefined, parentType: string | undefined): void => {
     const declaration = Object.hasOwn(shape.declarations, node.type) ? shape.declarations[node.type] : undefined
     if (declaration !== undefined) {
       // A named field first; otherwise the first child of the declared TYPE, which
@@ -631,7 +701,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
           parent,
         })
         // A declaration's own body belongs to it.
-        for (const child of node.namedChildren) walk(child, name, id)
+        for (const child of node.namedChildren) walk(child, name, id, node.type)
         return
       }
     }
@@ -649,19 +719,46 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
       const target = shape.import.field === ''
         ? firstNamedChild(node)
         : node.childForFieldName(shape.import.field)
-      if (target !== null) imports.push({ specifier: target.text.replace(/^['"]|['"]$/gu, ''), line: node.startPosition.row + 1 })
+      if (target !== null) {
+        // The names the clause brings into scope, which is what lets a type
+        // reference resolve to the file it came from instead of to every declaration
+        // of that name. `import { A, B as C }` names A and C — the LOCAL names,
+        // because those are what the file's own code refers to.
+        const names: string[] = []
+        for (const clause of collectByType(node, 'import_specifier')) {
+          const local = clause.childForFieldName('alias') ?? clause.childForFieldName('name') ?? clause.namedChildren[0]
+          const text = local?.text.trim() ?? ''
+          if (text !== '' && !names.includes(text)) names.push(text)
+        }
+        // A default import (`import Foo from './x'`) is an `identifier` child that is
+        // not inside a specifier list.
+        for (const child of node.namedChildren) {
+          if (child.type === 'identifier' && child.text.trim() !== '' && !names.includes(child.text.trim())) {
+            names.push(child.text.trim())
+          }
+        }
+        imports.push({
+          specifier: target.text.replace(/^['"]|['"]$/gu, ''),
+          line: node.startPosition.row + 1,
+          names,
+        })
+      }
     }
     // Heritage: `class A extends B implements C`. Both sides are TYPE names, and
     // neither is a call, so the call branch can never see them.
     if (shape.heritage !== undefined) {
-      const isExtends = shape.heritage.extends !== undefined && node.type === shape.heritage.extends
-      const isImplements = shape.heritage.implements !== undefined && node.type === shape.heritage.implements
-      if ((isExtends || isImplements) && ownerId !== undefined) {
-        for (const child of node.namedChildren) {
-          // `extends Foo<T>` wraps the name in `generic_type`; the identifier is the
-          // part that names a declaration, so every named child is read as a name.
-          const name = typeNameOf(child)
-          if (name !== '') heritage.push({ from: ownerId, name, line: node.startPosition.row + 1, kind: isExtends ? 'extends' : 'implements' })
+      const isExtends = shape.heritage.extends?.includes(node.type) === true
+      const isImplements = shape.heritage.implements?.includes(node.type) === true
+      // A grammar may reuse one node type for a heritage clause and something else
+      // (Python's `argument_list` is both a class header and every call). `parent`
+      // is the AST parent type, which is what tells them apart.
+      const parentMatches = shape.heritage.parent === undefined || parentType === shape.heritage.parent
+      if ((isExtends || isImplements) && parentMatches && ownerId !== undefined) {
+        // EVERY name, not the first: Java's `super_interfaces` wraps its list in a
+        // `type_list`, so `implements I, J` has two names under one clause and
+        // reading only the first answered with half the interfaces.
+        for (const name of typeNamesOf(node)) {
+          heritage.push({ from: ownerId, name, line: node.startPosition.row + 1, kind: isExtends ? 'extends' : 'implements' })
         }
       }
     }
@@ -703,10 +800,10 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
         if (name !== '') exports.push({ name: name.trim(), line, all: false, from: fromSpecifier })
       }
     }
-    for (const child of node.namedChildren) walk(child, parent, ownerId)
+    for (const child of node.namedChildren) walk(child, parent, ownerId, node.type)
   }
 
-  walk(root, undefined, undefined)
+  walk(root, undefined, undefined, undefined)
   return {
     symbols,
     calls,
@@ -838,14 +935,53 @@ export function relationEdges(
   const edges: EdgeRecord[] = []
   // A module-private type can only mean itself, so a local declaration is exact and
   // outranks any project-wide count — the same first layer `callEdges` applies.
+  // Guarded by PATH, not assumed: `parsed.symbols` is this file's in the real parse,
+  // but a caller that hands in a mixed list must not have another file's declarations
+  // treated as local — that would shadow the import layer silently.
   const local = new Map<string, string[]>()
   for (const symbol of parsed.symbols) {
+    if (`file:${symbol.path}` !== fileId) continue
     const list = local.get(symbol.name)
     if (list === undefined) local.set(symbol.name, [symbol.id])
     else list.push(symbol.id)
   }
+  // IMPORT-GUIDED: the names this file imports, and the module each came from.
+  //
+  // `import { Base } from './base'` states that THIS file's `Base` is the one in
+  // `./base`, which is the most precise signal available and outranks any
+  // project-wide name count. Measured on a real project: `Model` is declared in two
+  // files, so every signature naming it produced TWO edges and the count read about
+  // double the truth. The import clause is what tells them apart.
+  const importedFrom = new Map<string, string[]>()
+  if (resolveModule !== undefined) {
+    for (const clause of parsed.imports) {
+      const target = resolveModule(clause.specifier)
+      if (target === undefined) continue
+      for (const name of clause.names) {
+        const list = importedFrom.get(name)
+        if (list === undefined) importedFrom.set(name, [target])
+        else if (!list.includes(target)) list.push(target)
+      }
+    }
+  }
   const add = (from: string, name: string, kind: 'extends' | 'implements' | 'type_refs', line: number): void => {
-    for (const target of linkTargets(resolve(name), local.get(name) ?? [])) edges.push({ from, to: target, kind, line })
+    const localTargets = local.get(name) ?? []
+    // Layer 1: a declaration in this file is exact.
+    if (localTargets.length > 0) {
+      for (const target of linkTargets(resolve(name), localTargets)) edges.push({ from, to: target, kind, line })
+      return
+    }
+    // Layer 2: the module this file imports the name from. Only the declarations
+    // inside that module are candidates, so a same-named symbol elsewhere is not
+    // even considered.
+    const sources = importedFrom.get(name)
+    if (sources !== undefined && sources.length > 0) {
+      const inSources = resolve(name).filter(id => sources.some(source => id.startsWith(`${source}#`)))
+      for (const target of linkTargets(inSources)) edges.push({ from, to: target, kind, line })
+      return
+    }
+    // Layer 3: unique project-wide, or few enough to list.
+    for (const target of linkTargets(resolve(name))) edges.push({ from, to: target, kind, line })
   }
   for (const relation of parsed.heritage) add(relation.from, relation.name, relation.kind, relation.line)
   // ONE edge per (declaration, type), at its first line.

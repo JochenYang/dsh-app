@@ -717,13 +717,32 @@ export function GitTab(props: GitTabProps): ReactNode {
     const open = !collapsedDirs.has(dir.path)
     return (
       <Fragment key={dir.path}>
-        <button type="button" className="dshAsbGit-dirRow" aria-expanded={open}
-          style={{ paddingLeft: `${String(depth * 12 + 6)}px` }}
-          onClick={() => { toggleDir(dir.path) }}>
-          <ChevronGlyph open={open} />
-          <span className="dshAsbGit-dirName">{dir.name}/</span>
-          <span className="dshAsbGit-dirCount">{String(dir.fileCount)}</span>
-        </button>
+        <div className="dshAsbGit-dirLine" style={{ paddingLeft: `${String(depth * 12 + 6)}px` }}>
+          <button type="button" className="dshAsbGit-dirRow" aria-expanded={open}
+            onClick={() => { toggleDir(dir.path) }}>
+            <ChevronGlyph open={open} />
+            <span className="dshAsbGit-dirName">{dir.name}/</span>
+            <span className="dshAsbGit-dirCount">{String(dir.fileCount)}</span>
+          </button>
+          {/* A directory is a RESTORE SCOPE, not just a fold handle.
+              `git restore -- <path>` accepts a directory natively, so the whole
+              subtree is one call and one confirmation — the same operation the
+              per-file link performs, applied to what the header names. Without it a
+              change spanning a directory took one click per file, each with its own
+              confirmation. */}
+          {readonly || !open
+            ? null
+            : (
+              <Tooltip label={t('sidebar.action.restoreDir', { path: dir.path })} side="bottom">
+                <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger dshAsbGit-dirAction"
+                  disabled={busy || sessionId === undefined}
+                  aria-label={t('sidebar.action.restoreDir', { path: dir.path })}
+                  onClick={(event) => { event.stopPropagation(); setRestoreFor(dir.path) }}>
+                  {t('sidebar.action.restoreShort')}
+                </button>
+              </Tooltip>
+            )}
+        </div>
         {open
           ? (
             <>
@@ -849,6 +868,26 @@ export function GitTab(props: GitTabProps): ReactNode {
               {notice !== undefined ? <p className="dshAsb-notice" role="status">{notice}</p> : null}
               {error === undefined && !(statusLoading && entries.length === 0) ? (
                 <>
+                  {/* One control for the whole unstaged set, because restoring a
+                      working tree is the operation a reader wants most often and
+                      doing it file by file is the slow path. `git restore -- .`
+                      already means exactly this; the confirmation names the count
+                      so nobody clears a tree by accident. */}
+                  {unstaged.length > 0
+                    ? (
+                      <div className="dshAsbGit-bulkRow">
+                        <span className="dshAsbGit-bulkCount">{t('sidebar.status.unstagedCount', { count: unstaged.length })}</span>
+                        <Tooltip label={t('sidebar.action.restoreAll')} side="bottom">
+                          <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger"
+                            disabled={busy || sessionId === undefined}
+                            aria-label={t('sidebar.action.restoreAll')}
+                            onClick={() => { setRestoreFor('.') }}>
+                            {t('sidebar.action.restoreAll')}
+                          </button>
+                        </Tooltip>
+                      </div>
+                    )
+                    : null}
                   {renderList(unstaged, unstagedTree, false, false, 'u:')}
                   {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">{t('sidebar.status.clean')}</p> : null}
                   {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">{t('sidebar.status.staged', { count: staged.length })}</p> : null}
@@ -1050,8 +1089,34 @@ const GIT_CSS = `
    layer-1 black there (light theme keeps the token default). */
 :root { --dshapp-overlay: var(--dsw-alias-bg-overlay, #fff); }
 body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
-.dshAsbGit { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px max(160px, var(--dsh-composer-height, 152px) + 16px); min-height: 0; flex: 1 1 auto; width: 100%; box-sizing: border-box; overflow: hidden; }
+.dshAsbGit { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; min-height: 0; flex: 1 1 auto; width: 100%; box-sizing: border-box; overflow: hidden; }
+/* Take the pane over while the Git view is mounted, the same way the code-graph
+   view does it: the composer belongs to the conversation shell, so a view that
+   wants the whole pane says so with a has-rule keyed on its own root class.
+   Nothing reads state — the rule applies exactly while the root exists, and the
+   shell's draft survives because the composer is hidden rather than unmounted.
+   The not-has clause keeps an approval, a question or a plan review visible even
+   here, or this view would hide the control the session is waiting on. */
+[data-conversation-scroll]:has(.dshAsbGit) > [data-composer-seat]:not(:has([data-approval-key], [data-question-key], [data-plan-review-key])) {
+  display: none;
+}
+/* The transcript-width handles are FOLLOWING SIBLINGS of the scroller, so the
+   combinator is a sibling tilde, not a descendant selector. */
+[data-conversation-scroll]:has(.dshAsbGit) ~ [data-width-handle] {
+  display: none;
+}
 .dshAsbGit-cols { display: flex; flex: 1 1 0; min-height: 0; overflow: hidden; gap: 0; }
+/* A directory header plus its restore control: the header keeps its own click
+   target for folding, and the control sits beside it rather than inside, so a
+   reader cannot fold the tree by trying to restore it. */
+.dshAsbGit-dirLine { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dshAsbGit-dirLine .dshAsbGit-dirRow { flex: 1 1 auto; min-width: 0; }
+.dshAsbGit-dirAction { flex: none; opacity: 0; transition: opacity 120ms ease; }
+.dshAsbGit-dirLine:hover .dshAsbGit-dirAction,
+.dshAsbGit-dirAction:focus-visible { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .dshAsbGit-dirAction { transition: none; } }
+.dshAsbGit-bulkRow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 2px 4px; }
+.dshAsbGit-bulkCount { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .dshAsbGit-list { flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-right: 10px; }
 .dshAsbGit-list > * { flex-shrink: 0; }
 .dshAsbGit-resize { flex: none; width: 8px; cursor: col-resize; margin: 0 -2px 0 2px; z-index: 2; }
