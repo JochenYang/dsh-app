@@ -107,6 +107,35 @@ visible. At activation the plugin now walks `storages/.../projects/` and adopts
 every graph that carries `meta.cwd` (the directory name is a hash of the root and
 cannot be reversed). It reads metadata only; no pass is queued.
 
+That walk is **deferred past activation** (`ctx.effect` + `setTimeout(0)`): reading
+each graph takes an exclusive SQLite lock, and on a machine whose graph was
+mid-pass it blocked the kernel's event loop — the window went dead with an empty
+settings pane and a view stuck on "loading". Restoring a list is not worth a
+millisecond of that, and a graph this process cannot read must not stop the plugin
+from loading.
+
+## 5a. Deleting a graph
+
+The settings page's delete action (`action: 'forget'`) removes one project's whole
+directory under `projects/` — `graph.db` plus the WAL and SHM sidecars beside it.
+Three steps, each for a measured reason:
+
+1. **close the open handle first** — Windows refuses to delete a file another
+   handle holds, so deleting before closing fails with EBUSY;
+2. **drop the queue entry** — otherwise the settings list keeps showing the
+   project, and the next `graphFor` re-creates an empty database at the same path;
+3. **remove the directory through `removeTree`**, never `rmSync({recursive:true})`
+   — the sync call descends through a junction
+   (`test/recursive-delete-guard.test.mjs` holds the contrast).
+
+The directory comes from `graphFileFor`, which hashes the cwd, and the route
+refuses any cwd the queue never opened — the same fence `reindex` has. Without it
+a request body would choose which directory gets deleted.
+
+This exists because nothing else ever removes a graph: a project dropped from the
+workspace leaves its directory behind forever, and the space is real (124 MB for
+two projects on this machine).
+
 ## 6. When a pass runs
 
 Three triggers, and they share one queue:

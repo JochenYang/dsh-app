@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-codegraph",
   "description": "DSH APP code graph: a per-project, incrementally updated code knowledge graph (files, symbols, documents) parsed with tree-sitter and stored in the kernel's own node:sqlite, exposed as three model tools (find / impact / context) plus a settings section for language packs and per-project index status.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",

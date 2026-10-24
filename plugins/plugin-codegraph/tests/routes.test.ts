@@ -123,6 +123,7 @@ function options(over: Partial<CodegraphRoutesOptions> = {}): CodegraphRoutesOpt
     installLanguage: async (id) => { actions.push(`install:${id}`) },
     removeLanguage: async (id) => { actions.push(`remove:${id}`) },
     reindex: async (cwd) => { actions.push(`reindex:${cwd}`) },
+    forgetProject: async (cwd) => { actions.push(`forget:${cwd}`) },
     graphFor: () => { throw new Error('this case does not read the graph') },
     ...over,
   }
@@ -306,6 +307,29 @@ describe('POST /action', () => {
     const reply = await call(routes.get(`${ROUTE_PREFIX}/action`)!, post({ action: 'reindex', cwd: 'D:/codes/a' }))
     assert.equal(reply.status, 200)
     assert.deepEqual(opts.actions, ['reindex:D:/codes/a'])
+    await dispose()
+  })
+
+  it('deletes a known project\u2019s graph', async () => {
+    // The way out for a project removed from the workspace: its graph is real
+    // disk space and nothing else ever removes it.
+    const opts = options()
+    const { routes, dispose } = harness(opts)
+    const reply = await call(routes.get(`${ROUTE_PREFIX}/action`)!, post({ action: 'forget', cwd: 'D:/codes/a' }))
+    assert.equal(reply.status, 200)
+    assert.deepEqual(opts.actions, ['forget:D:/codes/a'])
+    await dispose()
+  })
+
+  it('refuses a forget for a path the queue never opened', async () => {
+    // The same fence `reindex` has, and it matters more here: without it the
+    // route would delete a directory chosen by the request body.
+    const opts = options()
+    const { routes, dispose } = harness(opts)
+    const reply = await call(routes.get(`${ROUTE_PREFIX}/action`)!, post({ action: 'forget', cwd: 'D:/somewhere/else' }))
+    assert.equal(reply.status, 404)
+    assert.equal((reply.body.error as { host: { code: string } }).host.code, 'route.unknownProject')
+    assert.deepEqual(opts.actions, [], 'nothing was deleted')
     await dispose()
   })
 

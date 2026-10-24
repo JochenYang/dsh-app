@@ -35,6 +35,16 @@ export interface CodegraphRoutesOptions {
   /** Ask for a pass on one project. */
   readonly reindex: (cwd: string) => Promise<void>
   /**
+   * Delete one project's graph and its stored files.
+   *
+   * The settings page needs this: a project removed from the workspace leaves a
+   * graph directory behind, and on a machine with many projects that is real disk
+   * space (measured: 124 MB for two projects on this machine, one of them 157 MB
+   * before a re-index). Without it the only way out is finding the hashed
+   * directory by hand.
+   */
+  readonly forgetProject: (cwd: string) => Promise<void>
+  /**
    * Open one project's graph, for the view.
    *
    * Injected rather than opened here: the plugin owns the handle cache (one open
@@ -248,7 +258,22 @@ export function registerCodegraphRoutes(connectionFetch: HostConnectionFetch, op
         await options.reindex(cwd)
         return ok({ action, cwd })
       }
-      return fail(400, 'unknown-action', { code: 'route.unknownAction', params: { action: String(action) }, text: 'action must be install, remove or reindex' })
+      if (action === 'forget') {
+        const cwd = body.cwd
+        if (typeof cwd !== 'string' || cwd === '') {
+          return fail(400, 'cwd-required', { code: 'route.cwdRequired', text: 'this action needs a project directory' })
+        }
+        // Same fence as `reindex`: only a project this plugin already has a graph
+        // for may be deleted. Without it the route would delete whatever directory
+        // a request named — the hash is derived here, but the check is what keeps
+        // the input from being the decision.
+        if (!options.statuses().some(status => status.cwd === cwd)) {
+          return fail(404, 'unknown-project', { code: 'route.unknownProject', params: { cwd }, text: `no graph has been opened for "${cwd}"` })
+        }
+        await options.forgetProject(cwd)
+        return ok({ action, cwd })
+      }
+      return fail(400, 'unknown-action', { code: 'route.unknownAction', params: { action: String(action) }, text: 'action must be install, remove, reindex or forget' })
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error)
       return fail(500, 'action-failed', { code: 'route.actionFailed', params: { action: String(action), detail }, text: `the ${String(action)} action failed: ${detail}` })

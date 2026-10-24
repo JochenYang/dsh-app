@@ -23,7 +23,7 @@
  * @module @dsh-app/plugin-codegraph/client/section
  */
 
-import { Button, Menu, PathLabel, Tag, Tooltip, fileSizeText, IconChevronDownOutlineRegular, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Menu, PathLabel, RiskConfirmation, Tag, Tooltip, fileSizeText, IconChevronDownOutlineRegular, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { en, NS, type CodegraphKey } from './locales.ts'
@@ -163,10 +163,11 @@ function StatePill({ state, queued, t }: { state: string, queued: boolean, t: Co
 }
 
 /** One project's panel: state, last outcome, the reasons an answer may be partial. */
-function ProjectPanel({ project, busy, onReindex, t }: {
+function ProjectPanel({ project, busy, onReindex, onForget, t }: {
   project: ProjectRow
   busy: boolean
   onReindex: (cwd: string) => void
+  onForget: (cwd: string) => void
   t: CodegraphTranslate
 }): ReactNode {
   const outcome = project.lastOutcome
@@ -188,6 +189,19 @@ function ProjectPanel({ project, busy, onReindex, t }: {
           onClick={() => { onReindex(project.cwd) }}
         >
           {busy ? t('codegraph.reindexing') : t('codegraph.reindex')}
+        </Button>
+        {/* Deleting is the way out for a project the user removed from the
+            workspace: its graph is real disk space (124 MB for two projects on
+            this machine) and nothing else ever removes it. Confirmed through the
+            primitive that requires an acknowledgement, because a rebuild costs a
+            full index pass. */}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={() => { onForget(project.cwd) }}
+        >
+          {t('codegraph.forget')}
         </Button>
       </div>
       <div className="dshcg_meta">
@@ -388,6 +402,24 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
     void runAction('project', cwd, { action: 'reindex', cwd })
   }, [runAction])
 
+  /**
+   * Deleting a graph is confirmed before it happens, and the confirmation is a
+   * separate step rather than a second click: a rebuild costs a full index pass,
+   * which is minutes on a large project.
+   */
+  const [pendingForget, setPendingForget] = useState<string | undefined>(undefined)
+  const [forgetAcknowledged, setForgetAcknowledged] = useState(false)
+  const onForget = useCallback((cwd: string) => {
+    setPendingForget(cwd)
+    setForgetAcknowledged(false)
+  }, [])
+  const confirmForget = useCallback(() => {
+    const cwd = pendingForget
+    setPendingForget(undefined)
+    setForgetAcknowledged(false)
+    if (cwd !== undefined) void runAction('project', cwd, { action: 'forget', cwd })
+  }, [pendingForget, runAction])
+
   const onLanguageAction = useCallback((action: 'install' | 'remove', id: string) => {
     void runAction('language', id, { action, id })
   }, [runAction])
@@ -457,6 +489,7 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
               project={current}
               busy={busyProjects.has(current.cwd)}
               onReindex={onReindex}
+              onForget={onForget}
               t={translate}
             />
           )}
@@ -480,6 +513,20 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
           ))}
         </div>
       </div>
+
+      <RiskConfirmation
+        open={pendingForget !== undefined}
+        title={translate('codegraph.forgetTitle')}
+        description={translate('codegraph.forgetBody', { path: pendingForget ?? '' })}
+        acknowledgeLabel={translate('codegraph.forgetAck')}
+        cancelLabel={translate('codegraph.forgetCancel')}
+        closeLabel={translate('codegraph.forgetCancel')}
+        confirmLabel={translate('codegraph.forgetConfirm')}
+        acknowledged={forgetAcknowledged}
+        onAcknowledgedChange={setForgetAcknowledged}
+        onCancel={() => { setPendingForget(undefined); setForgetAcknowledged(false) }}
+        onConfirm={confirmForget}
+      />
     </div>
   )
 }

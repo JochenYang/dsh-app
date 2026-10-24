@@ -43,7 +43,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { gitHead, indexProject, isStale } from './indexer.ts'
 import { parseFile } from './tree-sitter.ts'
 import { LANGUAGES, bundledGrammarDir, downloadGrammar, grammarPath, type GrammarPaths } from './languages.ts'
@@ -66,6 +66,7 @@ import {
   type ImpactResult,
 } from './query.ts'
 import { createIndexQueue, type IndexQueue } from './queue.ts'
+import { removeTree } from './remove-tree.ts'
 import { registerCodegraphRoutes } from './routes.ts'
 import { fileNodeId, openGraph, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
 
@@ -182,6 +183,33 @@ export function apply(ctx: Context): void {
     graphs.set(cwd, opened)
     queue.adopt(cwd, readProjectMeta(opened.db))
     return opened
+  }
+
+  /**
+   * Delete one project's graph from disk and from this process's bookkeeping.
+   *
+   * Order matters and each step is here for a measured reason:
+   *   1. close the open handle FIRST — Windows refuses to delete a file another
+   *      handle holds, so deleting before closing fails with EBUSY;
+   *   2. drop the queue entry, or the settings list keeps showing the project and
+   *      the next `graphFor` re-creates an empty database from the same path;
+   *   3. remove the project's DIRECTORY, not just `graph.db` — the WAL and SHM
+   *      sidecars live beside it, and a leftover `-wal` holding pages of a deleted
+   *      database is exactly the kind of thing that looks clean and is not.
+   *
+   * The directory comes from `graphFileFor`, which hashes the cwd, so a caller
+   * cannot name the path to delete.
+   *
+   * @param cwd - the project whose graph goes away.
+   */
+  const forgetProject = async (cwd: string): Promise<void> => {
+    const open = graphs.get(cwd)
+    if (open !== undefined) {
+      graphs.delete(cwd)
+      try { open.close() } catch { /* already closed is the desired state */ }
+    }
+    queue.forget(cwd)
+    await removeTree(dirname(graphFileFor(cwd)))
   }
 
   // Restore the project list from disk, once, at activation.
@@ -680,6 +708,7 @@ export function apply(ctx: Context): void {
       try { unlinkSync(file) } catch { /* absent is the already-removed case */ }
     },
     reindex: async (cwd) => { await queue.request(cwd) },
+    forgetProject,
     graphFor,
   }))
 

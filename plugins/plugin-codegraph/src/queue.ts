@@ -66,6 +66,14 @@ export interface IndexQueue {
    * "this graph is behind".
    */
   markStale(cwd: string): void
+  /**
+   * Drop one project from the queue's bookkeeping.
+   *
+   * Called when the user deletes a project's graph: the entry would otherwise
+   * keep reporting a graph that no longer exists, and the settings list would
+   * show the deleted project until the next restart.
+   */
+  forget(cwd: string): void
   /** Stop accepting work and fail every waiter. */
   dispose(): void
 }
@@ -219,6 +227,15 @@ export function createIndexQueue(run: IndexRunner): IndexQueue {
       // Only a settled graph becomes stale: one that is indexing or already
       // failed has a more specific state, and overwriting it would hide why.
       if (entry.state === 'current') entry.state = 'stale'
+    },
+
+    forget(cwd: string): void {
+      const entry = records.get(cwd)
+      if (entry === undefined) return
+      // A pass still in flight would write into a database the caller just
+      // deleted, so the delete waits for it: the caller cancels by awaiting the
+      // running pass's own promise, and this only drops the bookkeeping.
+      records.delete(cwd)
     },
 
     dispose(): void {
