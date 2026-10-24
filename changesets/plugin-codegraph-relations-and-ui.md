@@ -1,7 +1,0 @@
----
-shell: none
-plugins: plugin-codegraph, plugin-sidebar, plugin-rewind
----
-
-代码图谱补上三类结构关系与两处精度修正：继承、实现、类型引用现在在 Python、Java、C# 上也能提取（此前只有 TypeScript/JavaScript）；类型引用按该文件自己的 import 语句解析，不再把全项目同名声明全连上——实测一个 `Model` 接口的依赖数从虚高的 728 降到真实的 647。会话开头的概览按项目规模调整长度（大项目 10 个入口与枢纽，小项目仍是 5 个），并过滤掉被大量同名声明合并计数的通用词（`startsWith` 此前出现三次、各 554 条引用）。Git 页现在占满整个面板并隐藏对话输入框，目录行和「还原全部」都带还原操作，不用再逐个文件点。撤回确认框的文件列表有了高度上限与滚动，此前改动文件多时会把确认按钮挤出屏幕。
-The code graph gains three structural relationships and two precision fixes: inheritance, implementation and type references now extract for Python, Java and C# (previously only TypeScript/JavaScript); a type reference resolves through the file's own import clause instead of linking every same-named declaration in the project — measured, one `Model` interface's dependency count fell from an inflated 728 to the real 647. The session's opening overview now scales its length to the project (ten entry points and hubs on a large one, still five on a small one) and filters out generic words whose counts are summed across many unrelated declarations (`startsWith` appeared three times at 554 references each). The Git page now takes the whole pane and hides the chat composer, and both directory rows and a "restore all" control carry a restore action, so a tree no longer takes one click per file. The recall dialog's file list is bounded and scrolls; before, a change touching many files pushed the confirm button off screen.
