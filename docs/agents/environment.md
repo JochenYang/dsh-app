@@ -6,7 +6,7 @@ exact precedence when a value can come from more than one place.
 
 | Variable → meaning (used in) |
 |---|
-| `DSH_APP_DEV=1` — dev mode: the suite plugins come from this repository instead of the runtime, and the updater/rollback paths stay off (`index.ts`) |
+| `DSH_APP_DEV=1` — dev mode: the suite plugins come from this repository instead of the runtime, and the updater/rollback paths stay off (`index.ts`). `npm run dev` also **rebuilds every suite plugin whose `lib/` is older than its sources** before it launches (`dev.mjs`): `npm start` only compiles `src/`, and a plugin loads through its own `lib/`, so an un-rebuilt plugin silently runs the previous bundle |
 | `DSH_APP_DEV_RUNTIME` — a deepseek-harness SOURCE checkout to run as the kernel; it must be built (the shell starts its `apps/desktop-host` and `apps/cli`). **Named explicitly only** — there is no sibling-directory probing, so a pulled-but-unbuilt checkout can never be booted by accident (`index.ts`, `dev.mjs`) |
 | `DSH_APP_DEV_KERNEL` — an already-built runtime tree (`node/` + `app/`) to boot in place, leaving the installed kernel and its `current.json` untouched (`index.ts`, `kernel/manager.ts`) |
 | *(neither set, with `DSH_APP_DEV=1`)* — the dev run boots the **installed** runtime, the same artifact a packaged start boots; with nothing installed it installs the bundled `kernel.tgz` offline and never reaches the network (`index.ts`) |

@@ -26,10 +26,54 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { assertFollowedVersion, followedSpec } from './kernel-line.mjs'
+import { assertFollowedVersion, followedSpec, SUITE_PLUGINS } from './kernel-line.mjs'
+import { pluginLibStaleness } from './lib/plugin-gates.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const appRoot = path.resolve(here, '..')
+
+/**
+ * Rebuild every suite plugin whose `lib/` is older than its own sources.
+ *
+ * A dev run loads a plugin through its manifest's `main` — `lib/index.js` — so a
+ * source edit that was never rebuilt is invisible to the app. Measured: a
+ * `codegraph_context` change was committed and the next session still ran the
+ * 47-minute-old bundle, which answered `symbol: string` (required) and silently
+ * proved nothing about the change. Nothing in `npm start` rebuilds a plugin: it
+ * runs `tsc` over `src/` only, so `lib/` is a build product nobody refreshed.
+ *
+ * Only stale plugins are rebuilt — a full suite build is under ten seconds, but
+ * skipping the clean ones keeps a dev start instant on the common path. A build
+ * failure is reported and stops the launch rather than booting the old bundle,
+ * because that is the failure this exists to prevent.
+ */
+function rebuildStalePlugins() {
+  const rebuilt = []
+  for (const name of SUITE_PLUGINS) {
+    const dir = path.join(appRoot, 'plugins', name.replace(/^@dsh-app\//u, ''))
+    if (!existsSync(path.join(dir, 'package.json'))) continue
+    const { stale, libMtime } = pluginLibStaleness(dir)
+    // `libMtime === null` means "never built", which is not stale — a plugin with
+    // no build script (`plugin-brand` is `tsc`-only) would otherwise be reported
+    // forever. Those are built by their own npm script and shipped that way.
+    if (!stale || libMtime === null) continue
+    const built = spawnSync('npm', ['run', 'build'], {
+      cwd: dir,
+      stdio: 'inherit',
+      shell: true,
+      windowsHide: true,
+    })
+    if (built.status !== 0) {
+      console.error(`[dev] ${name}: npm run build failed (exit ${String(built.status)}).`)
+      console.error('[dev] Refusing to boot the previous lib/ — that is the stale-bundle trap this step exists to close.')
+      process.exit(1)
+    }
+    rebuilt.push(name)
+  }
+  if (rebuilt.length > 0) {
+    console.log(`[dev] rebuilt stale plugin lib/: ${rebuilt.map(name => name.replace(/^@dsh-app\//u, '')).join(', ')}`)
+  }
+}
 
 process.env.DSH_APP_DEV = '1'
 
@@ -170,6 +214,12 @@ if (named.length > 0) {
 // stdio so boot/server logs stay visible; shell:true resolves the npm shim
 // on Windows (npm.cmd) and the bare binary on POSIX alike. windowsHide keeps
 // the shim's console from flashing a terminal onto the desktop.
+//
+// The suite plugins are rebuilt FIRST: `npm start` only compiles `src/`, and a
+// plugin is loaded through its own `lib/`, so an un-rebuilt plugin makes a dev run
+// silently execute the previous bundle.
+rebuildStalePlugins()
+
 const result = spawnSync('npm', ['start'], {
   cwd: appRoot,
   stdio: 'inherit',
