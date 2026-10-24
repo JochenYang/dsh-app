@@ -89,6 +89,81 @@ const AUDIT = [
     why: "wipes the plugin's own `.test-dist` before esbuild writes it",
   },
   {
+    match: 'plugins/plugin-archives/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-brand/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-client-ui/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-effort/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-hooks/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-market/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-mcp/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-memory/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-presets/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-rewind/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-sidebar/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-swarm/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-usage/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-websearch/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
+    match: 'plugins/plugin-workbench/scripts/test.mjs',
+    count: 1,
+    why: "wipes the plugin's own `.test-dist` before esbuild writes it",
+  },
+  {
     match: 'plugins/plugin-ppt/scripts/test.mjs',
     count: 1,
     why: "wipes the plugin's own `.test-dist` before esbuild writes it",

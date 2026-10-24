@@ -10,8 +10,8 @@
  */
 import { buildSync } from 'esbuild'
 import { execFileSync } from 'node:child_process'
-import { readdirSync, rmSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readdirSync, rmSync, existsSync } from 'node:fs'
+import { dirname, basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -41,4 +41,7 @@ buildSync({
   logLevel: 'error',
 })
 
-execFileSync(process.execPath, ['--test', ...readdirSync(outDir).filter(name => name.endsWith('.test.mjs')).map(name => join(outDir, name))], { stdio: 'inherit' })
+// Run the bundles THIS build produced, by name, rather than whatever the directory
+// happens to hold.
+const bundles = entryPoints.map(entry => join(outDir, `${basename(entry, '.test.ts')}.test.test.mjs`))
+execFileSync(process.execPath, ['--test', ...bundles], { stdio: 'inherit' })
