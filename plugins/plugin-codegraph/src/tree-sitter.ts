@@ -19,17 +19,8 @@
  */
 
 import { statSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { Language, Parser } from 'web-tree-sitter'
 import { extractSymbols, type ParsedFile, type SyntaxNode } from './parse.ts'
-
-/** The shape of the `web-tree-sitter` module this bridge uses. */
-interface TreeSitterModule {
-  Parser: {
-    init(options: { locateFile: (file: string) => string }): Promise<void>
-    new (): { setLanguage(language: unknown): void, parse(source: string): { rootNode: unknown } | null }
-  }
-  Language: { load(path: string): Promise<unknown> }
-}
 
 /** One cached parser, keyed by language id, with the grammar file it came from. */
 interface Cached {
@@ -38,29 +29,29 @@ interface Cached {
   readonly grammarSize: number
 }
 
-let runtime: Promise<TreeSitterModule> | undefined
+let runtime: Promise<void> | undefined
 const parsers = new Map<string, Cached>()
 
 /**
- * Load the tree-sitter runtime once.
+ * Initialise the tree-sitter runtime once.
  *
- * `web-tree-sitter` is CommonJS and resolves its own wasm beside its entry; the
- * `locateFile` callback points it at the copy this plugin ships in `grammars/`,
- * so an installed runtime does not depend on the module's own layout.
+ * Imported STATICALLY, not through `createRequire`. The runtime never installs a
+ * plugin's production dependencies — `stripShippedDependencies` in
+ * `scripts/build-runtime.mjs` deletes the field from the shipped manifest — so
+ * every non-framework package has to be inlined into `lib/index.js` by esbuild,
+ * which only follows a static specifier. A `require('web-tree-sitter')` call
+ * compiled to a runtime lookup of that name and failed in the installed artifact
+ * with `Cannot find module 'web-tree-sitter'`. Measured on
+ * `dsh-0.2.1-rc.3+suite-1c3251ad`: every index attempt failed that way.
+ *
+ * The `locateFile` callback points it at the copy this plugin ships in
+ * `grammars/`, so an installed runtime does not depend on the module's own
+ * layout.
  *
  * @param runtimeWasm - absolute path to `web-tree-sitter.wasm`.
- * @returns the module.
  */
-function loadRuntime(runtimeWasm: string): Promise<TreeSitterModule> {
-  runtime ??= (async () => {
-    // `createRequire` rather than a dynamic `import()`: the package is CommonJS,
-    // and the plugin bundle externalises `@deepseek-ai/*` only — everything else
-    // is inlined, so the runtime resolves from this bundle's own scope.
-    const require = createRequire(import.meta.url)
-    const module = require('web-tree-sitter') as TreeSitterModule
-    await module.Parser.init({ locateFile: () => runtimeWasm })
-    return module
-  })()
+function loadRuntime(runtimeWasm: string): Promise<void> {
+  runtime ??= Parser.init({ locateFile: () => runtimeWasm })
   return runtime
 }
 
@@ -76,9 +67,9 @@ async function parserFor(grammarFile: string, languageId: string, runtimeWasm: s
   const size = statSync(grammarFile).size
   const cached = parsers.get(languageId)
   if (cached !== undefined && cached.grammarFile === grammarFile && cached.grammarSize === size) return cached
-  const module = await loadRuntime(runtimeWasm)
-  const language = await module.Language.load(grammarFile)
-  const parser = new module.Parser()
+  await loadRuntime(runtimeWasm)
+  const language = await Language.load(grammarFile)
+  const parser = new Parser()
   parser.setLanguage(language)
   const entry: Cached = { parser, grammarFile, grammarSize: size }
   parsers.set(languageId, entry)
