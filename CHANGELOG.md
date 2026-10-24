@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.5] - 2026-10-25
+
+### 中文
+- 修复代码图谱无法生成：树解析库此前以运行时查找的方式加载，而运行时不会安装插件的依赖，于是每次索引都报「找不到 web-tree-sitter」。现在改为在打包时并入插件自身，安装后不再依赖任何外部模块。
+
+### English
+- Fix the code graph failing to build: the parser library was loaded by a runtime lookup, but the runtime never installs a plugin's dependencies, so every index attempt reported "cannot find web-tree-sitter". It is now bundled into the plugin itself, so an installed copy needs no external module.
+
 ## [v0.17.4] - 2026-10-24
 
 ### 中文
