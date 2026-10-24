@@ -8,6 +8,28 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.4] - 2026-10-24
+
+### 中文
+- `npm run dev` 启动前会重建所有源码已改动的套件插件，不再让开发运行悄悄加载上一次的构建产物。此前 `npm start` 只编译 `src/`，而插件是通过自己的 `lib/` 加载的，改了插件源码却没重建时，运行的是旧包。
+- Git 面板的变更标尺不再把两段改动之间的未改动行算进色块长度。原来相距不足 4 行的两段改动会合并成一个色块，把中间的空白也涂成「已改动」——一段三行的修改看起来和一大段一样长。现在每段连续改动各画一个色块，中间的空白如实留空。
+- Git 页现在占满整个面板并隐藏对话输入框，目录行和「还原全部」都带还原操作，不用再逐个文件点。撤回确认框的文件列表有了高度上限与滚动，此前改动文件多时会把确认按钮挤出屏幕。
+- 跟随内核线 0.2.1-rc.3：七十个内核包比对下来六十五个只改了版本号，五个有真实改动（新增 entry-customization 装配行、agent-preset 的返回类型、遥测字段与一处草稿初始化选项），逐一核对后没有一处打到本仓代码，因此这一步只是依赖换线，没有源码适配。
+- 新增代码图谱插件（首次随包发布）：每个项目建一份独立的图库，用 tree-sitter 解析源码里的文件、符号与它们之间的调用、继承、实现、类型引用和文档引用关系，存在内核自己的 SQLite 里，随代码改动增量更新。它给模型三个工具——查一个符号在哪儿、改一处会波及哪些地方、读一个符号的上下文与解释它的文档，另加一个可选的项目概览在会话开始时注入，让模型先知道项目的骨架再决定读哪些文件，而不是逐个打开试探。八种常用语言的语法随插件发布，其余在设置页按需下载；索引分阶段让出事件循环，大仓库不会卡住界面；查询结果被截断时会明说，不会把 40 条当成全部。侧边栏和会话页各有一页可视化：一页列出所有建过图的项目与各自的新鲜度，另一页把当前项目的文件与引用画成图；回到一个项目就自动开始建图，设置页可以单独删除某个项目的图谱来释放磁盘。
+- 设置页把「代码图谱」排到「维护设置」与「关于 DSH-APP」之前，于是最后三行读作：代码图谱 → 维护设置 → 关于。
+- 关闭窗口时的渲染进程报错不再刷满日志：注入脚本前会确认窗口的渲染帧仍可响应，而不再只看窗口对象是否已销毁。此前每次关窗都会打印一条 `Render frame was disposed before WebFrameMain could be accessed`，对话框与遮罩同步都受影响。
+- 套件提示词去重：并行子代理把「什么时候用」留在会话段、「怎么用」全部交给工具描述，记忆卡的生命周期规则由工具描述与会话段共用同一份文本，市场安装的两条规则同理，代码图谱三个工具的说明与启动概览也各自收紧——实测每轮少约 1900 个字符的系统提示词。
+
+### English
+- `npm run dev` now rebuilds every suite plugin whose sources changed before it launches, instead of letting a dev run quietly load the previous bundle. `npm start` only compiled `src/`, while a plugin loads through its own `lib/`, so an un-rebuilt plugin ran the old package.
+- The Git panel's change ruler no longer counts the unchanged lines between two edits into a mark's length. Two runs closer than four lines used to merge into one mark, painting the gap as changed, so a three-line edit looked as long as a whole block; each contiguous run now gets its own mark and the gaps stay empty.
+- The Git page now takes the whole pane and hides the chat composer, and both directory rows and a "restore all" control carry a restore action, so a tree no longer takes one click per file. The recall dialog's file list is bounded and scrolls; before, a change touching many files pushed the confirm button off screen.
+- Follow the 0.2.1-rc.3 kernel line: comparing all seventy kernel packages, sixty-five changed only their version while five carried real edits (a new entry-customization composition row, an agent-preset return type, telemetry fields and one draft-initialization option) — none of them reach this repository's code, so this step is a dependency move with no source adaptation.
+- New code graph plugin (first shipped release): one library per project, parsed with tree-sitter into files, symbols and the calls, inheritance, implementations, type references and documentation references between them, stored in the kernel's own SQLite and updated incrementally as code changes. It gives the model three tools — find where a symbol lives, see what a change would reach, and read a symbol's context along with the documents that explain it — plus an optional project overview injected at session start, so the model knows the project's shape before deciding which files to open instead of probing one at a time. Eight common grammars ship with the plugin and the rest download on demand from settings; indexing yields the event loop in stages so a large repository does not freeze the window; a cut-down answer says so rather than passing 40 rows off as the whole list. Two visual surfaces accompany it: one page in the sidebar lists every project that has a graph with its freshness, another draws the current project's files and their references; entering a project starts indexing on its own, and settings can delete one project's graph to reclaim disk.
+- The settings rail now orders 代码图谱 before 维护设置 and 关于 DSH-APP, so the last three rows read: code graph, maintenance, about.
+- Closing a window no longer fills the log with renderer errors: an injected script now checks that the window's render frame can still answer instead of only that the window object exists. Every close used to print `Render frame was disposed before WebFrameMain could be accessed`, from both the themed dialog and the overlay sync.
+- Suite prompts deduplicated: the swarm section keeps only "when to use" and leaves "how" to the tool description, the memory card lifecycle rules are one shared string referenced by both the guidelines and the save tool, the marketplace's two install rules likewise, and the code graph's three tool descriptions and startup overview were each tightened — measured, about 1,900 fewer system-prompt characters per turn.
+
 ## [v0.17.3] - 2026-10-22
 
 ### 中文
