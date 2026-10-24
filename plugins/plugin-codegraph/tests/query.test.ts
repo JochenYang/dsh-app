@@ -118,7 +118,7 @@ describe('referencesTo', () => {
       { from: caller.id, to: target.id, kind: 'references', line: 7 },
       { from: fileNodeId('caller.ts'), to: target.id, kind: 'references', line: 12 },
     ])
-    const refs = referencesTo(g, target.id, 10)
+    const refs = referencesTo(g, target.id, 10).rows
     // The rows come back ordered by `src`, so the SYMBOL-sourced edge sorts before
     // the `file:` one ("caller.ts#function:run" < "file:caller.ts"). Sorted here
     // by line so the case states what it means rather than pinning that order.
@@ -136,7 +136,25 @@ describe('referencesTo', () => {
     replaceFile(g.db, file('a.ts'), [own], [
       { from: fileNodeId('a.ts'), to: own.id, kind: 'contains', line: 1 },
     ])
-    assert.deepEqual(referencesTo(g, own.id, 10), [])
+    assert.deepEqual(referencesTo(g, own.id, 10).rows, [])
+  })
+
+  it('reports truncation, because an incomplete caller list reads as complete', () => {
+    // The failure this pins: a symbol with 200 callers answered 40 rows with no
+    // signal, so the model edited it believing it had seen every caller.
+    const g = graph()
+    const target = sym('target.ts', 'shared')
+    replaceFile(g.db, file('target.ts'), [target], [])
+    const callers = Array.from({ length: 5 }, (_, i) => sym(`c${String(i)}.ts`, `caller${String(i)}`))
+    for (const caller of callers) {
+      replaceFile(g.db, file(caller.path), [caller], [
+        { from: caller.id, to: target.id, kind: 'references', line: 1 },
+      ])
+    }
+    const result = referencesTo(g, target.id, 2)
+    assert.equal(result.rows.length, 2, 'the limit still bounds the answer')
+    assert.equal(result.truncated, true, 'and the answer says it was cut')
+    assert.equal(referencesTo(g, target.id, 99).truncated, false)
   })
 })
 
@@ -147,7 +165,8 @@ describe('importsOf', () => {
     replaceFile(g.db, file('app.ts'), [], [
       { from: fileNodeId('app.ts'), to: fileNodeId('lib.ts'), kind: 'imports', line: 1 },
     ])
-    assert.deepEqual(importsOf(g, 'app.ts', 10), ['lib.ts'])
+    assert.deepEqual(importsOf(g, 'app.ts', 10).rows, ['lib.ts'])
+    assert.equal(importsOf(g, 'app.ts', 10).truncated, false)
   })
 })
 
@@ -161,13 +180,13 @@ describe('callsOf and calledBy', () => {
       { from: fileNodeId('a.ts'), to: target.id, kind: 'references', line: 3 },
     ])
 
-    const incoming = calledBy(g, target.id, 10)
+    const incoming = calledBy(g, target.id, 10).rows
     assert.deepEqual(incoming.map(edge => [edge.path, edge.line]), [['a.ts', 3]])
 
     // `callsOf` is symbol-scoped; the call edge is owned by the FILE, so it
     // answers nothing for the symbol. That asymmetry is why `calledBy` reads the
     // file id — see the note in query.ts.
-    assert.deepEqual(callsOf(g, caller.id, 10), [])
+    assert.deepEqual(callsOf(g, caller.id, 10).rows, [])
   })
 
   it('resolves a symbol-owned reference to its target name', () => {
@@ -178,7 +197,7 @@ describe('callsOf and calledBy', () => {
     replaceFile(g.db, file('a.ts'), [caller], [
       { from: caller.id, to: callee.id, kind: 'references', line: 2 },
     ])
-    const outgoing = callsOf(g, caller.id, 10)
+    const outgoing = callsOf(g, caller.id, 10).rows
     assert.deepEqual(outgoing.map(edge => [edge.name, edge.line]), [['beta', 2]])
   })
 })
@@ -213,7 +232,15 @@ describe('projectOverview', () => {
     assert.equal(overview.entryCandidates[0]?.symbol?.name, 'start')
   })
 
-  it('ranks the most-referenced symbols first, and counts distinct referrers', () => {
+  it('ranks the most-referenced symbols first, counting the same edges impact counts', () => {
+    // ONE count per symbol, everywhere.
+    //
+    // This used to assert "two distinct referrers, not three references", and that
+    // rule was itself the defect: measured on a real project the overview said 203
+    // for a symbol whose `codegraph_impact` answer carries 664 rows. The model reads
+    // 203 in its context, asks the tool, gets 664, and has no way to tell which is
+    // real. The edge count is what the tool reports and what its row limit applies
+    // to, so that is the number the overview names too.
     const g = graph()
     const hub = sym('hub.ts', 'shared')
     const a = sym('a.ts', 'one')
@@ -222,13 +249,14 @@ describe('projectOverview', () => {
     replaceFile(g.db, file('a.ts'), [a], [{ from: a.id, to: hub.id, kind: 'references', line: 1 }])
     replaceFile(g.db, file('b.ts'), [b], [
       { from: b.id, to: hub.id, kind: 'references', line: 1 },
-      // A second reference from the SAME symbol must not inflate the count: the
-      // question is "how many places depend on this", not "how many call sites".
       { from: b.id, to: hub.id, kind: 'references', line: 9 },
     ])
     const overview = projectOverview(g, 10)
     assert.equal(overview.hubs[0]?.symbol.name, 'shared')
-    assert.equal(overview.hubs[0]?.references, 2, 'two distinct referrers, not three references')
+    assert.equal(overview.hubs[0]?.references, 3, 'the edge count, the same number impact reports')
+    // The cross-check that makes the rule enforceable: both numbers come from the
+    // same table under the same predicate.
+    assert.equal(referencesTo(g, hub.id, 10).rows.length, 3, 'impact sees the same three call sites')
   })
 
   it('excludes documents from the entry candidates and reports the language split', () => {
@@ -348,7 +376,7 @@ describe('documentsFor', () => {
 
   it('reads the document path from the file node and the line from the edge', () => {
     const graph = withDocs([{ path: 'docs/guide.md', line: 3 }])
-    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10), [{ path: 'docs/guide.md', line: 3 }])
+    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10).rows, [{ path: 'docs/guide.md', line: 3 }])
   })
 
   it('keeps a path that contains a hash intact', () => {
@@ -356,16 +384,19 @@ describe('documentsFor', () => {
     // `#`, so a file genuinely named `notes#1.md` had to be special-cased. The
     // line now lives in its own column and the path is just a path.
     const graph = withDocs([{ path: 'docs/notes#1.md', line: 7 }])
-    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10), [{ path: 'docs/notes#1.md', line: 7 }])
+    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10).rows, [{ path: 'docs/notes#1.md', line: 7 }])
   })
 
   it('answers nothing when no document mentions the symbol', () => {
     const graph = withDocs([])
-    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10), [])
+    assert.deepEqual(documentsFor(graph, 'a.ts#function:alpha', 10).rows, [])
   })
 
-  it('honours the row limit', () => {
+  it('honours the row limit and reports when it cut the list', () => {
     const graph = withDocs([{ path: 'a.md', line: 1 }, { path: 'a.md', line: 2 }, { path: 'a.md', line: 3 }])
-    assert.equal(documentsFor(graph, 'a.ts#function:alpha', 2).length, 2)
+    const cut = documentsFor(graph, 'a.ts#function:alpha', 2)
+    assert.equal(cut.rows.length, 2)
+    assert.equal(cut.truncated, true)
+    assert.equal(documentsFor(graph, 'a.ts#function:alpha', 3).truncated, false)
   })
 })

@@ -85,12 +85,12 @@ describe('real parse → index → query', () => {
     // The call in use.ts resolves to an edge pointing AT shared, and the edge now
     // names the SYMBOL that makes the call (`caller`), not just its file. That is
     // the W11b contract: "which function calls this" is the question.
-    const refs = referencesTo(graph, shared.id, 10)
+    const refs = referencesTo(graph, shared.id, 10).rows
     assert.deepEqual(refs.map(ref => ref.path), ['src/use.ts'], 'the caller lives in use.ts')
     assert.deepEqual(refs.map(ref => ref.name), ['caller'], 'and the caller is the function, not the file')
 
     // And the import the parser recorded became a file→file edge.
-    assert.deepEqual(importsOf(graph, 'src/use.ts', 10), ['src/lib.ts'])
+    assert.deepEqual(importsOf(graph, 'src/use.ts', 10).rows, ['src/lib.ts'])
 
     // Everything is reachable through the public find entry too.
     const found = findSymbols(graph, 'caller', 10)
@@ -108,7 +108,7 @@ describe('real parse → index → query', () => {
     const useIt = resolveSymbol(graph, 'use_it')
     assert.ok(useIt !== undefined)
     assert.equal(useIt.path, 'a.py')
-    assert.deepEqual(referencesTo(graph, resolveSymbol(graph, 'helper')!.id, 10).map(r => r.path), ['a.py'])
+    assert.deepEqual(referencesTo(graph, resolveSymbol(graph, 'helper')!.id, 10).rows.map(r => r.path), ['a.py'])
   })
 
   it('answers one symbol with only ITS calls, plus the documents that name it', async () => {
@@ -133,11 +133,11 @@ describe('real parse → index → query', () => {
     assert.ok(alpha !== undefined)
     // Only alpha's call. Before W11b this answered with BOTH `first` and `second`
     // because the edge started at the file.
-    const own = callsOf(graph, alpha.id, 10)
+    const own = callsOf(graph, alpha.id, 10).rows
     assert.deepEqual(own.map(edge => edge.name), ['first'], 'alpha calls only first')
 
     // And the prose that names alpha is reachable from alpha.
-    assert.deepEqual(documentsFor(graph, alpha.id, 10), [{ path: 'README.md', line: 3 }])
+    assert.deepEqual(documentsFor(graph, alpha.id, 10).rows, [{ path: 'README.md', line: 3 }])
   })
 
   it('re-running the pass on unchanged files resolves the same edges without duplicating', async () => {

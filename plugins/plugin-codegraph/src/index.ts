@@ -41,6 +41,11 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 // Type-only: pulls the Connection Context merge (ctx.connection) into scope, so
 // the settings routes register on ctx.connection.fetch rather than webServer.
 import type {} from '@deepseek-ai/dsh-client-connection'
+// Type-only: pulls the systemPrompt Context merge (ctx.systemPrompt) and the
+// AssembleContext.agent augmentation into scope, so the overview can be pushed as
+// runtime context and read the session's cwd.
+import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-agent'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -53,6 +58,7 @@ import {
   documentsFor,
   dropUndefined,
   findSymbols,
+  fileOutline,
   formatSymbol,
   freshnessNote,
   importsOf,
@@ -66,6 +72,7 @@ import {
   type ImpactResult,
 } from './query.ts'
 import { createIndexQueue, type IndexQueue } from './queue.ts'
+import { overviewContextText } from './prompt.ts'
 import { removeTree } from './remove-tree.ts'
 import { registerCodegraphRoutes } from './routes.ts'
 import { fileNodeId, openGraph, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
@@ -76,9 +83,11 @@ export const name = 'plugin-codegraph'
  * Services this plugin cannot work without.
  *
  * `connection` is required because the settings routes ride its exact-Fetch
- * registry; `tools` because the three tools are the plugin's whole point.
+ * registry; `tools` because the three tools are the plugin's whole point;
+ * `systemPrompt` because the project overview is pushed as runtime context — the
+ * one mechanism that does not depend on the model choosing to look.
  */
-export const inject = ['tools', 'connection']
+export const inject = ['tools', 'connection', 'systemPrompt']
 
 /** How many rows one tool answer may carry before it reports truncation. */
 const MAX_ROWS = 40
@@ -410,6 +419,7 @@ export function apply(ctx: Context): void {
             },
           },
           imports: { type: 'array', required: true, items: { type: 'string' } },
+          truncated: { type: 'boolean', required: true },
         },
       },
       render: (_args, value) => {
@@ -417,12 +427,24 @@ export function apply(ctx: Context): void {
         if (result.target === undefined) {
           return [{ type: 'text', text: `codegraph_impact: no unambiguous symbol matched${result.note === undefined ? '' : `\nnote: ${result.note}`}` }]
         }
+        // TWO numbers, each labelled with what it actually counts.
+        //
+        // This line used to read `referenced from ${referencing.length} file(s)`,
+        // and `referencing` is one row per EDGE — so a symbol with 664 call sites
+        // across 110 files was announced as "664 file(s)". That is the same defect
+        // the overview had (203 distinct callers vs 664 call sites): a label that
+        // names a different quantity than the number beside it. The count is call
+        // sites, the file count is deduplicated from the rows.
+        const referrerFiles = new Set(result.referencing.map(ref => ref.path)).size
         const lines = [
           `codegraph_impact: ${formatSymbol(result.target)}`,
           ...(result.note === undefined ? [] : [`note: ${result.note}`]),
-          `referenced from ${String(result.referencing.length)} file(s):`,
+          `referenced from ${String(result.referencing.length)} reference(s) across ${String(referrerFiles)} file(s):`,
           ...result.referencing.map(ref => `- ${ref.path}:${String(ref.line)}`),
           ...(result.imports.length === 0 ? [] : ['its file imports:', ...result.imports.map(path => `- ${path}`)]),
+          // Stated in the MODEL's answer, not only as a schema field: a model that
+          // reads 40 rows and sees no warning concludes it has seen every caller.
+          ...(result.truncated ? [`TRUNCATED: more rows exist than this answer carries (limit ${String(MAX_ROWS)}). Narrow the question — pass a symbol id, or read the file — before concluding this is the complete list.`] : []),
         ]
         return [{ type: 'text', text: lines.join('\n') }]
       },
@@ -433,14 +455,20 @@ export function apply(ctx: Context): void {
       const graph = graphFor(cwd)
       const target = resolveSymbol(graph, args.symbol)
       if (target === undefined) {
-        return dropUndefined({ freshness, note, target: undefined, referencing: [], imports: [] }) satisfies ImpactResult
+        return dropUndefined({ freshness, note, target: undefined, referencing: [], imports: [], truncated: false }) satisfies ImpactResult
       }
+      const referencing = referencesTo(graph, target.id, MAX_ROWS)
+      const imports = importsOf(graph, target.path, MAX_ROWS)
       return dropUndefined({
         freshness,
         note,
         target,
-        referencing: referencesTo(graph, target.id, MAX_ROWS),
-        imports: importsOf(graph, target.path, MAX_ROWS),
+        referencing: referencing.rows,
+        imports: imports.rows,
+        // Every list in this answer reports whether it was cut: an incomplete list
+        // of callers read as complete is the one failure that silently produces
+        // wrong code rather than a wrong answer.
+        truncated: referencing.truncated || imports.truncated,
       }) satisfies ImpactResult
     },
   })))
@@ -457,13 +485,18 @@ export function apply(ctx: Context): void {
       + 'symbols. Call it with no argument whenever you are asked what a project IS, where it starts, how '
       + 'it is organised, or how to begin in an unfamiliar repo, BEFORE listing directories or reading '
       + 'files: the graph already holds that shape. '
+      + 'PASS A FILE PATH (any path the project holds, with or without ./) to get that file\u2019S OUTLINE: '
+      + 'every symbol it declares, in line order, each with its own call-site count. That answers "what '
+      + 'does this file define", "which methods does this class have" and "what is this module\u2019s public '
+      + 'surface" — questions keyword search answers badly, because a method definition does not name its '
+      + 'class and a symbol is not a keyword. '
       + 'A call is attributed to the enclosing declaration when it sits inside one, and to the file '
       + 'otherwise, so `calls` is this symbol\u2019s own calls plus any file-level call. Targets are resolved '
       + 'by name, so a name declared in more than one place produces no edge rather than a guess.',
     parameters: {
       symbol: {
         type: 'string',
-        description: 'A symbol id from codegraph_find, or a name that is unique in this project. Omit it to get the project overview.',
+        description: 'A symbol id from codegraph_find, a name unique in this project, or a project file path for its outline. Omit it to get the project overview.',
       },
     },
     output: {
@@ -530,6 +563,7 @@ export function apply(ctx: Context): void {
             },
           },
           imports: { type: 'array', required: true, items: { type: 'string' } },
+          truncated: { type: 'boolean', required: true },
           documents: {
             type: 'array',
             required: true,
@@ -539,6 +573,30 @@ export function apply(ctx: Context): void {
               properties: {
                 path: { type: 'string', required: true },
                 line: { type: 'number', required: true },
+              },
+            },
+          },
+          file: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              path: { type: 'string', required: true },
+              symbols: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string', required: true },
+                    name: { type: 'string', required: true },
+                    kind: { type: 'string', required: true },
+                    path: { type: 'string', required: true },
+                    line: { type: 'number', required: true },
+                    parent: { type: 'string' },
+                    references: { type: 'number', required: true },
+                  },
+                },
               },
             },
           },
@@ -615,6 +673,22 @@ export function apply(ctx: Context): void {
       },
       render: (_args, value) => {
         const result = value as ContextResult
+        if (result.file !== undefined) {
+          // The outline, rendered as an outline: one line per declaration with its
+          // caller count, so "which of these is the public surface" is readable
+          // without asking again.
+          const lines = [
+            `codegraph_context: ${result.file.path} declares ${String(result.file.symbols.length)} symbol(s)${result.truncated ? ' (TRUNCATED — more exist)' : ''}`,
+            ...(result.note === undefined ? [] : [`note: ${result.note}`]),
+            ...result.file.symbols.map(entry => {
+              const parent = entry.parent === undefined ? '' : `${entry.parent}.`
+              return `- ${entry.kind} ${parent}${entry.name}:${String(entry.line)} — ${String(entry.references)} call site(s)`
+            }),
+            ...(result.imports.length === 0 ? [] : ['imports:', ...result.imports.map(path => `- ${path}`)]),
+            'Pass any id above as `symbol` to expand it, or use `codegraph_impact` for what a change would touch.',
+          ]
+          return [{ type: 'text', text: lines.join('\n') }]
+        }
         if (result.overview !== undefined) {
           const o = result.overview
           const lines = [
@@ -641,6 +715,7 @@ export function apply(ctx: Context): void {
           ...(result.calledBy.length === 0 ? [] : ['called by:', ...result.calledBy.map(edge => `- ${edge.path ?? '?'}:${String(edge.line)}`)]),
           ...(result.imports.length === 0 ? [] : ['imports:', ...result.imports.map(path => `- ${path}`)]),
           ...(result.documents.length === 0 ? [] : ['described in:', ...result.documents.map(doc => `- ${doc.path}:${String(doc.line)}`)]),
+          ...(result.truncated === true ? [`TRUNCATED: at least one list was cut at ${String(MAX_ROWS)} rows. Treat these as a sample, not the whole neighbourhood.`] : []),
         ]
         return [{ type: 'text', text: lines.join('\n') }]
       },
@@ -653,6 +728,7 @@ export function apply(ctx: Context): void {
       // own shape. This is the branch that makes the plugin reachable at all for
       // "where does this project start", which names nothing.
       if (args.symbol === undefined || args.symbol.trim() === '') {
+        const shape = projectOverview(graph, MAX_ROWS)
         return dropUndefined({
           freshness,
           note,
@@ -661,16 +737,55 @@ export function apply(ctx: Context): void {
           calledBy: [],
           imports: [],
           documents: [],
+          // The overview's own lists are bounded and it reports its own
+          // `truncated`; the symbol-shaped fields here are all empty.
+          truncated: false,
           // The query layer types its lists `readonly`; the tool's output schema
           // describes mutable arrays because that is what the JSON snapshot
           // carries. One cast at the boundary, where the shape is known equal.
-          overview: projectOverview(graph, MAX_ROWS) as unknown as NonNullable<ContextResult['overview']>,
+          overview: shape as unknown as NonNullable<ContextResult['overview']>,
         }) satisfies ContextResult
+      }
+      // A FILE PATH: the outline, which is a structural question no keyword search
+      // answers well. Measured (structural/semantic taxonomy): 6.5% accuracy for
+      // "list the methods of class X" and 0-10% for "list the symbols in this file",
+      // because a method definition does not mention its class and a symbol is not a
+      // keyword. `symbolsInFile` already existed but was only reachable THROUGH a
+      // symbol the model had to name first, which inverted the question.
+      const asFile = fileOutline(graph, args.symbol.replace(/^\.\//u, '').replace(/\\/gu, '/'), MAX_ROWS)
+      if (asFile.symbols.length > 0) {
+        return dropUndefined({
+          freshness,
+          note,
+          siblings: [],
+          calls: [],
+          calledBy: [],
+          imports: importsOf(graph, asFile.path, MAX_ROWS).rows,
+          documents: [],
+          truncated: asFile.truncated,
+          file: {
+            path: asFile.path,
+            symbols: asFile.symbols.map(entry => ({
+              id: entry.symbol.id,
+              name: entry.symbol.name,
+              kind: entry.symbol.kind,
+              path: entry.symbol.path,
+              line: entry.symbol.line,
+              parent: entry.symbol.parent,
+              references: entry.references,
+            })),
+          },
+        } satisfies ContextResult)
       }
       const symbol = resolveSymbol(graph, args.symbol)
       if (symbol === undefined) {
-        return dropUndefined({ freshness, note, symbol: undefined, siblings: [], calls: [], calledBy: [], imports: [], documents: [] }) satisfies ContextResult
+        return dropUndefined({ freshness, note, symbol: undefined, siblings: [], calls: [], calledBy: [], imports: [], documents: [], truncated: false }) satisfies ContextResult
       }
+      const symbolCalls = callsOf(graph, symbol.id, MAX_ROWS)
+      const fileCalls = callsOf(graph, fileNodeId(symbol.path), MAX_ROWS)
+      const called = calledBy(graph, symbol.id, MAX_ROWS)
+      const imported = importsOf(graph, symbol.path, MAX_ROWS)
+      const docs = documentsFor(graph, symbol.id, MAX_ROWS)
       return dropUndefined({
         freshness,
         note,
@@ -679,10 +794,12 @@ export function apply(ctx: Context): void {
         // The symbol's OWN calls, plus whatever its file calls at file scope.
         // Before W11b this was the file's calls for every symbol in it, so a
         // 40-function file answered with the same 40-entry list 40 times.
-        calls: [...callsOf(graph, symbol.id, MAX_ROWS), ...callsOf(graph, fileNodeId(symbol.path), MAX_ROWS)],
-        calledBy: calledBy(graph, symbol.id, MAX_ROWS),
-        imports: importsOf(graph, symbol.path, MAX_ROWS),
-        documents: documentsFor(graph, symbol.id, MAX_ROWS),
+        calls: [...symbolCalls.rows, ...fileCalls.rows],
+        calledBy: called.rows,
+        imports: imported.rows,
+        documents: docs.rows,
+        truncated: symbolCalls.truncated || fileCalls.truncated || called.truncated
+          || imported.truncated || docs.truncated,
       }) satisfies ContextResult
     },
   })))
@@ -711,6 +828,63 @@ export function apply(ctx: Context): void {
     forgetProject,
     graphFor,
   }))
+
+  // THE ONE MECHANISM THAT DOES NOT DEPEND ON THE MODEL LOOKING.
+  //
+  // Measured, twice, on real sessions with a current graph and a correct tool
+  // description: the model wrote "I should use codegraph_find / codegraph_context"
+  // in its reasoning and then planned `glob` + `read` anyway, eight times. A
+  // description is an instruction, and an instruction loses to the "explore =
+  // list directories, read files" prior at the moment the plan is made.
+  //
+  // The overview is the ANSWER rather than an instruction, and it arrives before
+  // that plan exists: "what is this project, where does it start" is already
+  // answered, so the explore chain has nothing left to fetch. This is a push where
+  // the tools were a pull — the plugin's output moves to where the decision is
+  // made instead of waiting to be asked.
+  //
+  // Evaluated per assembly (`text` as a function), so a fresh graph, a re-index or
+  // a new session all land without a restart. The `agent` in the assembly context
+  // is the session whose cwd names the project, exactly as plugin-memory does for
+  // its own per-session text.
+  ctx.effect(() => ctx.systemPrompt.context({
+    name: 'dsh-app:codegraph:overview',
+    // After the kernel's own operational context (cwd, sandbox) and beside the
+    // suite's other per-session blocks: the model reads the project's shape after
+    // it knows where it is, not before.
+    order: 60,
+    text: (assembly) => {
+      const cwd = assembly.agent?.session.header.cwd
+      if (cwd === undefined || cwd === '') return ''
+      const status = queue.status(cwd)
+      // A project with no entry in the queue has no graph yet. Queueing a pass
+      // here would start an index on every assembly; `session/created` already
+      // does it once, which is the right moment.
+      if (status === undefined) return ''
+      // Everything below is I/O; the DECISION lives in `overviewContextText`, so the
+      // five states are testable without a Context, a queue or a database.
+      let overview
+      let meta
+      if (status.state !== 'indexing' && status.state !== 'failed') {
+        try {
+          const graph = graphFor(cwd)
+          overview = projectOverview(graph, MAX_ROWS)
+          meta = readProjectMeta(graph.db)
+        } catch {
+          // A graph this process cannot read is not a reason to break the prompt:
+          // the tools report the failure when they are called.
+          return ''
+        }
+      }
+      return overviewContextText({
+        state: status.state === 'unindexed' ? 'indexing' : status.state,
+        failure: status.failure,
+        overview,
+        truncated: meta?.truncated ?? false,
+        removalSkipped: meta?.removalSkipped ?? false,
+      })
+    },
+  }), 'plugin-codegraph: project overview as runtime context')
 
   ctx.effect(() => async () => {
     // Awaited, in order: the routes' disposer is async, and a route left

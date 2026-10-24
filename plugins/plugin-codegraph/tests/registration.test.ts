@@ -50,7 +50,13 @@ function fakeContext() {
   const routes: ConnectionFetchRoute[] = []
   /** Every `ctx.on` listener, by event name, so the auto-index rule is testable. */
   const listeners = new Map<string, ((...args: never[]) => void)[]>()
-  let dispose: (() => void) | (() => Promise<void>) | undefined
+  /** The registered prompt contexts, so the overview block is observable. */
+  const contexts = new Map<string, { order: number, text: unknown }>()
+  // EVERY effect's disposer, not just the last one: the plugin registers several
+  // (tools clean-up, the deferred project-list restore, the prompt context), and a
+  // fake that kept only the last would report a clean teardown while leaving the
+  // others mounted.
+  const disposers: (() => void | Promise<void>)[] = []
   const ctx = {
     tools: {
       register(tool: { name: string, parameters?: Record<string, { required?: boolean }> }): () => void {
@@ -65,6 +71,12 @@ function fakeContext() {
           routes.push(route)
           return async () => { routes.splice(routes.indexOf(route), 1) }
         },
+      },
+    },
+    systemPrompt: {
+      context(spec: { name: string, order: number, text: unknown }): () => void {
+        contexts.set(spec.name, spec)
+        return () => { contexts.delete(spec.name) }
       },
     },
     /** Cordis `ctx.on`: the disposer is registered with the fiber, not tracked here. */
@@ -83,12 +95,22 @@ function fakeContext() {
       for (const listener of [...(listeners.get(event) ?? [])]) listener(...args)
     },
     // Cordis runs an effect body on activation and its returned disposer on
-    // unload; the fake captures both so the test can exercise the teardown.
+    // unload; the fake captures every one so the test can exercise the teardown.
     effect(body: () => (() => void) | (() => Promise<void>)): void {
-      dispose = body()
+      disposers.push(body())
     },
   }
-  return { ctx, tools, definitions, routes, listeners, disposeAll: async () => { await dispose?.() } }
+  return {
+    ctx,
+    tools,
+    definitions,
+    routes,
+    listeners,
+    contexts,
+    disposeAll: async () => {
+      for (const dispose of disposers.splice(0)) await dispose()
+    },
+  }
 }
 
 describe('apply', () => {
@@ -146,6 +168,54 @@ describe('apply', () => {
     assert.equal(registered.length, 1, 'the plugin listens for session creation exactly once')
   })
 
+  it('pushes the project overview as runtime context', () => {
+    // The mechanism that does not depend on the model choosing to look. Measured:
+    // a session with a current graph and a correct tool description wrote "I should
+    // use codegraph_find / codegraph_context" and then planned `glob` + `read`
+    // eight times. A description is an instruction; this arrives before the plan.
+    const { ctx, contexts } = fakeContext()
+    apply(ctx as never)
+    const spec = contexts.get('dsh-app:codegraph:overview')
+    assert.notEqual(spec, undefined, 'the overview context is registered')
+    assert.equal(typeof spec?.text, 'function', 'evaluated per assembly, so a fresh graph lands without a restart')
+  })
+
+  it('contributes no context for a session with no project', () => {
+    // An empty block would be a lie about the project; the assembly asks per turn,
+    // and a session without a cwd has no project to describe.
+    const { ctx, contexts } = fakeContext()
+    apply(ctx as never)
+    const text = contexts.get('dsh-app:codegraph:overview')?.text as (assembly: unknown) => string
+    assert.equal(text({}), '')
+    assert.equal(text({ agent: { session: { header: { cwd: '' } } } }), '')
+  })
+
+  it('contributes no context for a project the queue has never seen', () => {
+    // A project with no queue entry has no graph yet. Queueing one here would start
+    // an index on EVERY assembly; `session/created` does it once, at the right moment.
+    const { ctx, contexts } = fakeContext()
+    apply(ctx as never)
+    const text = contexts.get('dsh-app:codegraph:overview')?.text as (assembly: unknown) => string
+    assert.equal(text({ agent: { session: { header: { cwd: 'Z:/no/such/project' } } } }), '')
+  })
+
+  it('decides freshness per assembly rather than capturing it once', () => {
+    // The block cannot decide staleness itself: `text` returns a string
+    // synchronously, while that needs `await gitHead(cwd)`. It CAN report what a
+    // tool already found — a call that saw HEAD move runs `queue.markStale`, so the
+    // state stays `stale` until the rebuild settles. One beat behind, and honest;
+    // the literal `'current'` it used to assert was a claim it could not back up.
+    //
+    // What this case pins is the SHAPE that makes that possible: `text` is a
+    // function, so the state is read at assembly time. `prompt.test.ts` pins what a
+    // stale block renders as; together they cover "the queue's state reaches the
+    // text" without this suite having to stand up a real graph on disk.
+    const { ctx, contexts } = fakeContext()
+    apply(ctx as never)
+    const spec = contexts.get('dsh-app:codegraph:overview')
+    assert.equal(typeof spec?.text, 'function', 'evaluated per assembly, not captured once')
+  })
+
   it('ignores a session with no working directory', () => {
     // A blank or absent cwd is not a project: queueing it would create a graph
     // file keyed by an empty string.
@@ -162,10 +232,12 @@ describe('apply', () => {
 
   it('declares the module contract the loader reads', () => {
     assert.equal(name, 'plugin-codegraph')
-    // `tools` and `connection` are the two services registration needs; nothing
-    // else may creep in — every extra required service is one more reason the
-    // plugin silently fails to activate on a kernel line that lacks it.
-    assert.deepEqual(inject, ['tools', 'connection'])
+    // Three services, each with a reason: `tools` and `connection` for the
+    // registration itself, `systemPrompt` for the overview pushed as runtime
+    // context. Nothing else may creep in — every extra required service is one
+    // more reason the plugin silently fails to activate on a kernel line that
+    // lacks it.
+    assert.deepEqual(inject, ['tools', 'connection', 'systemPrompt'])
   })
 })
 

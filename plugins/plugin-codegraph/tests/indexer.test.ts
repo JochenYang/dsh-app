@@ -444,6 +444,69 @@ describe('documents edges', () => {
   })
 })
 
+describe('a failed pass does not lose edges permanently', () => {
+  /**
+   * The defect this pins, in the order it happens:
+   *
+   *   1. phase 1 commits each changed file's `mtime`/`size`/`hash`;
+   *   2. phase 2 builds the reference edges in batches and throws part-way;
+   *   3. the next pass compares mtime, sees "unchanged", and skips the file — so
+   *      the edges phase 1's range delete removed are never rebuilt, while the
+   *      graph reports `current`.
+   *
+   * The old single-transaction phase 2 got this for free. Batching it (for the
+   * event loop) is what re-opened the hole, so the recovery has to be explicit:
+   * a failed pass deletes the stat-cache row of every file still pending.
+   */
+  const failingOn = (failingPath: string): ((source: string, path: string) => ParsedFile) => {
+    return (source, path) => {
+      const parsed = stubParse(source, path)
+      if (path !== failingPath) return parsed
+      // A value SQLite cannot bind makes the INSERT throw — a real phase 2
+      // failure, not a simulated flag. NaN was tried first and does NOT fail:
+      // node:sqlite binds it as NULL, and the column accepts that.
+      return { ...parsed, calls: parsed.calls.map(call => ({ ...call, line: { not: 'an integer' } as unknown as number })) }
+    }
+  }
+
+  it('re-parses the file on the next pass and rebuilds its reference edge', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha\nCALL beta')
+    write(root, 'b.ts', 'SYM beta')
+
+    // First pass: phase 2 throws on a.ts's call edge.
+    await assert.rejects(indexProject(graph, root, failingOn('a.ts')))
+
+    const edgeCount = (): number => (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'references'").get() as { n: number }).n
+    assert.equal(edgeCount(), 0, 'the failing phase produced no reference edge')
+
+    // Second pass with a working parser: it must NOT skip a.ts as unchanged.
+    const outcome = await indexProject(graph, root, stubParse)
+    // `parsed` counts every file the pass re-read, and the recovery is deliberately
+    // conservative: it drops the stat cache for EVERY file still pending, not only
+    // the one that threw, because a batched phase cannot tell which of them got
+    // their edges. b.ts is therefore re-read too — cheap, and correct.
+    assert.ok(outcome.parsed >= 1, 'the failed file was re-parsed rather than skipped by mtime')
+    const fileRow = graph.db.prepare("SELECT path FROM files WHERE path = 'a.ts'").get()
+    assert.notEqual(fileRow, undefined, 'the stat-cache row is back after a successful pass')
+    assert.equal(edgeCount(), 1, 'the reference edge came back')
+    graph.close()
+  })
+
+  it('keeps the symbols of a failed file, so a lookup still answers', async () => {
+    // Only the stat-cache row goes. Deleting the symbols too would turn a
+    // repairable graph into one that reports "no such symbol" until the next pass.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM alpha\nCALL beta')
+    write(root, 'b.ts', 'SYM beta')
+
+    await assert.rejects(indexProject(graph, root, failingOn('a.ts')))
+    const symbols = graph.db.prepare("SELECT COUNT(*) AS n FROM symbols WHERE path = 'a.ts'").get() as { n: number }
+    assert.equal(symbols.n, 1, 'the symbol survives the failed pass')
+    graph.close()
+  })
+})
+
 describe('isStale', () => {
   const meta = (head: string): ProjectMeta => ({
     cwd: 'D:/x', name: 'x', head, indexedAt: 1, fileCount: 1, symbolCount: 1, edgeCount: 1,

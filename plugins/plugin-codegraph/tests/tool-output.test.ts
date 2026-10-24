@@ -20,6 +20,7 @@
 
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
+import { readFileSync } from 'node:fs'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { dropUndefined, type ContextResult, type FindResult, type ImpactResult, type Referrer } from '../src/query.ts'
 
@@ -70,6 +71,37 @@ describe('dropUndefined', () => {
   })
 })
 
+describe('one quantity, one label', () => {
+  it('never labels a call-site count as a file count', () => {
+    // The defect this pins, read out of the code rather than asserted around it:
+    // `codegraph_impact` rendered `referenced from ${rows.length} file(s)` where
+    // rows were EDGES, so a symbol with 664 call sites across 110 files was
+    // announced as "664 file(s)". The overview had the same shape one layer up
+    // (203 distinct callers vs 664 call sites).
+    //
+    // A source guard is the honest test here: the renderer is a closure inside
+    // `defineTool`, and standing up the whole registry to read one line of output
+    // would test the harness rather than the rule. What must not exist is the
+    // template that names the wrong quantity — reintroducing it fails here.
+    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+    assert.doesNotMatch(
+      source,
+      /referencing\.length\)\} file\(s\)/u,
+      'a call-site count must not be labelled as a file count',
+    )
+    // And the two counts it SHOULD publish are both present, each with its own noun.
+    assert.match(source, /reference\(s\) across/u)
+    assert.match(source, /file\(s\):/u)
+  })
+
+  it('counts the same edges in the overview and in impact', () => {
+    // The cross-face half: the overview's hub row and `codegraph_impact` must be
+    // counting the same rows, because the model reads one and then asks the other.
+    const overviewSource = readFileSync(new URL('../src/prompt.ts', import.meta.url), 'utf8')
+    assert.match(overviewSource, /call site\(s\)/u, 'the hub row names the same noun impact uses')
+  })
+})
+
 describe('the three tool answers survive the snapshot', () => {
   it('a current find answer with no note and no parent is lossless after the strip', () => {
     const answer = findAnswer()
@@ -115,7 +147,10 @@ describe('the three tool answers survive the snapshot', () => {
       // The shape W11b introduced: a referrer that NAMES the calling symbol. The
       // `name` here is a string, not an optional undefined, so `dropUndefined`
       // keeps it — and the tool's schema must therefore declare it.
-      { freshness: 'current', target: undefined, referencing: [{ path: 'a.ts', line: 4, kind: 'references', name: 'caller' }], imports: [] },
+      { freshness: 'current', target: undefined, referencing: [{ path: 'a.ts', line: 4, kind: 'references', name: 'caller' }], imports: [], truncated: false },
+      // A truncated answer: the flag is what stops a 40-row sample from reading as
+      // the complete list of callers.
+      { freshness: 'current', target: undefined, referencing: [{ path: 'a', line: 1, kind: 'references' }], imports: [], truncated: true },
       // The overview branch: the answer to a question that names no symbol. Its
       // entry candidate may have no starting symbol (a file of re-exports), so
       // that key is the optional one here.

@@ -290,6 +290,36 @@ function namesIndex(graph: Graph): (name: string) => readonly string[] {
 }
 
 /**
+ * Drop the stat-cache row of every file a failed phase left without its edges.
+ *
+ * Phase 1 commits each file's `mtime`/`size`/`hash` before phase 2 builds its
+ * edges, so a phase 2 failure would otherwise leave the graph claiming those files
+ * are unchanged — the next pass skips them and the edges never come back. With no
+ * `files` row the next pass re-parses the file, which is the only way to rebuild
+ * the edges phase 1's range delete already removed.
+ *
+ * Only the `files` row goes: the symbols stay, so the graph still answers
+ * `codegraph_find` for these files while the next pass repairs their edges.
+ *
+ * @param graph - the open graph.
+ * @param entries - the files whose edges are missing, at minimum their `path`.
+ */
+function forgetStatCache(graph: Graph, entries: readonly { readonly path: string }[]): void {
+  if (entries.length === 0) return
+  const drop = graph.db.prepare('DELETE FROM files WHERE path = ?')
+  graph.db.exec('BEGIN')
+  try {
+    for (const entry of entries) drop.run(entry.path)
+    graph.db.exec('COMMIT')
+  } catch (error) {
+    try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+    // A failure here must not mask the phase error the caller is already carrying;
+    // the next pass still re-reads these files because their mtime never moved on.
+    void error
+  }
+}
+
+/**
  * Run one incremental pass over a project.
  *
  * `parse` is injected rather than imported so this module stays free of
@@ -452,11 +482,21 @@ export async function indexProject(
   }
 
   // Phase 2: the calls and imports, now that every changed file's symbols are
-  // present. One transaction for the whole phase: a failure here leaves phase 1's
-  // files without reference edges, and the incremental pass would then SKIP them
-  // (their mtime/size are already recorded), losing those edges permanently.
-  // Committing them together means a failure rolls back to "these files are
-  // unchanged", which the next pass retries.
+  // present.
+  //
+  // WHY THE FILES ROWS ARE DELETED ON FAILURE. Phase 1 already committed each
+  // file's `mtime`/`size`/`hash` (inside `replaceFile`), and phase 2 runs in
+  // BATCHES of `FILES_PER_COMMIT` so a large pass can yield to the event loop. A
+  // failure therefore rolls back only the batch in flight: every earlier batch
+  // stays committed, and — worse — the `files` rows from phase 1 stay too. The
+  // next pass then skips those files by mtime, `pending` is empty, and the
+  // `references` edges phase 1's range delete removed are never rebuilt. The graph
+  // reports `current` while under-reporting every caller of those files.
+  //
+  // So a failure deletes the `files` rows for everything still pending: without a
+  // stat-cache row the next pass re-parses the file and rebuilds its edges. This
+  // is the invariant the old single-transaction version got for free and the
+  // batched version has to restore explicitly.
   if (pending.length > 0) {
     const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)')
     // `imports` targets are project-relative paths; the graph's file nodes are
@@ -503,6 +543,7 @@ export async function indexProject(
       graph.db.exec('COMMIT')
     } catch (error) {
       try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+      forgetStatCache(graph, pending)
       throw error
     }
   }
@@ -619,6 +660,11 @@ export async function indexProject(
       graph.db.exec('COMMIT')
     } catch (error) {
       try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+      // Same recovery as phase 2, and for the same reason: a document whose edges
+      // were cleared but not rewritten must be re-scanned. Its `files` row does not
+      // decide that here (this phase re-reads every document when the pass is dirty),
+      // but dropping it keeps one rule for both phases instead of two.
+      forgetStatCache(graph, documentPaths.map(row => ({ path: row.path })))
       throw error
     }
   }

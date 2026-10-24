@@ -83,6 +83,16 @@ export interface ImpactResult extends ToolEnvelope {
   readonly referencing: readonly Referrer[]
   /** Files the target's file imports (the forward direction, for orientation). */
   readonly imports: readonly string[]
+  /**
+   * True when a list was cut to the row limit.
+   *
+   * Without it a symbol with 200 callers answered 40 rows and looked complete: the
+   * model would edit the symbol believing it had seen every caller. This plugin's
+   * own rule — a truncated answer must say so — is what `findSymbols` and
+   * `projectOverview` already follow; this was the one place that broke it in the
+   * direction that changes code.
+   */
+  readonly truncated: boolean
 }
 
 /** The result of `codegraph_context`. */
@@ -112,6 +122,33 @@ export interface ContextResult extends ToolEnvelope {
    * and "what is this project" starts from no symbol at all.
    */
   readonly overview?: ProjectOverview | undefined
+  /**
+   * One file's outline, present when the selector named a FILE instead of a symbol.
+   *
+   * "What does this file declare" is a structural question: no keyword search can
+   * answer "list the methods of this class", because the definitions do not mention
+   * it. Each row carries its own reference count, which is what separates a file's
+   * public surface from its internal helpers.
+   */
+  readonly file?: {
+    readonly path: string
+    readonly symbols: readonly {
+      readonly id: string
+      readonly name: string
+      readonly kind: string
+      readonly path: string
+      readonly line: number
+      readonly parent: string | undefined
+      readonly references: number
+    }[]
+  } | undefined
+  /**
+   * True when any of the symbol's lists was cut to the row limit.
+   *
+   * Same reason as `ImpactResult.truncated`: a 40-entry `calledBy` that is really
+   * 300 is a wrong answer stated confidently.
+   */
+  readonly truncated?: boolean | undefined
 }
 
 /** One place a document mentions a symbol. */
@@ -221,40 +258,53 @@ export interface Referrer {
  * @param limit - how many edges to return.
  * @returns the referrers in a stable order.
  */
-export function referencesTo(graph: Graph, symbolId: string, limit: number): Referrer[] {
+export function referencesTo(graph: Graph, symbolId: string, limit: number): { rows: Referrer[], truncated: boolean } {
   // Joined on the SOURCE symbol so a symbol-level edge can name its caller. A
   // file-level edge has no symbol row to join, which is what the LEFT JOIN and
   // the `name` fallback handle.
+  //
+  // `limit + 1` is what makes `truncated` a fact rather than a guess: a symbol with
+  // 200 callers answered 40 rows and NO signal, so the model read a complete-looking
+  // list that was missing 80% of the callers — and it would then edit the symbol and
+  // miss them. `findSymbols` and `projectOverview` already follow this rule; this is
+  // the one place where breaking it fails silently in the direction that changes
+  // code.
   const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null }>(
     graph.db,
     `SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path
      FROM edges e LEFT JOIN symbols s ON s.id = e.src
      WHERE e.dst = ? AND e.kind = 'references' ORDER BY e.src, e.line LIMIT ?`,
-    symbolId, limit,
+    symbolId, limit + 1,
   )
-  return rows.map((row) => {
-    if (row.src.startsWith('file:')) {
-      return { path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind, name: undefined }
-    }
-    // A symbol id is `<path>#<kind>:<name>`; the join gives both parts, but fall
-    // back to unpacking the id when the row is gone (a symbol removed between two
-    // passes, which the next pass settles).
-    if (row.path !== null && row.name !== null) {
-      return { path: row.path, line: row.line, kind: row.kind, name: row.name }
-    }
-    const hash = row.src.lastIndexOf('#')
-    return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined }
-  })
+  return {
+    rows: rows.slice(0, limit).map((row) => {
+      if (row.src.startsWith('file:')) {
+        return { path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind, name: undefined }
+      }
+      // A symbol id is `<path>#<kind>:<name>`; the join gives both parts, but fall
+      // back to unpacking the id when the row is gone (a symbol removed between two
+      // passes, which the next pass settles).
+      if (row.path !== null && row.name !== null) {
+        return { path: row.path, line: row.line, kind: row.kind, name: row.name }
+      }
+      const hash = row.src.lastIndexOf('#')
+      return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined }
+    }),
+    truncated: rows.length > limit,
+  }
 }
 
 /** Files this file imports. */
-export function importsOf(graph: Graph, path: string, limit: number): string[] {
+export function importsOf(graph: Graph, path: string, limit: number): { rows: string[], truncated: boolean } {
   const rows = allRows<{ dst: string }>(
     graph.db,
     "SELECT dst FROM edges WHERE src = ? AND kind = 'imports' ORDER BY dst LIMIT ?",
-    `file:${path}`, limit,
+    `file:${path}`, limit + 1,
   )
-  return rows.map(row => row.dst.replace(/^file:/u, ''))
+  return {
+    rows: rows.slice(0, limit).map(row => row.dst.replace(/^file:/u, '')),
+    truncated: rows.length > limit,
+  }
 }
 
 /** An outgoing edge joined to the symbol it points at. */
@@ -266,25 +316,31 @@ interface OutgoingRow {
 }
 
 /** Outgoing reference edges of one symbol, resolved to names. */
-export function callsOf(graph: Graph, symbolId: string, limit: number): EdgeView[] {
+export function callsOf(graph: Graph, symbolId: string, limit: number): { rows: EdgeView[], truncated: boolean } {
   const rows = allRows<OutgoingRow>(
     graph.db,
     `SELECT e.kind AS kind, e.line AS line, s.name AS name, s.path AS path
      FROM edges e LEFT JOIN symbols s ON s.id = e.dst
      WHERE e.src = ? AND e.kind = 'references' ORDER BY e.line LIMIT ?`,
-    symbolId, limit,
+    symbolId, limit + 1,
   )
-  return rows.map(row => ({ kind: row.kind, line: row.line, name: row.name ?? undefined, path: row.path ?? undefined }))
+  return {
+    rows: rows.slice(0, limit).map(row => ({ kind: row.kind, line: row.line, name: row.name ?? undefined, path: row.path ?? undefined })),
+    truncated: rows.length > limit,
+  }
 }
 
 /** Incoming reference edges of one symbol, resolved to the calling file. */
-export function calledBy(graph: Graph, symbolId: string, limit: number): EdgeView[] {
+export function calledBy(graph: Graph, symbolId: string, limit: number): { rows: EdgeView[], truncated: boolean } {
   const rows = allRows<EdgeRow>(
     graph.db,
     "SELECT src, line, kind FROM edges WHERE dst = ? AND kind = 'references' ORDER BY src, line LIMIT ?",
-    symbolId, limit,
+    symbolId, limit + 1,
   )
-  return rows.map(row => ({ kind: row.kind, line: row.line, path: row.src.replace(/^file:/u, ''), name: undefined }))
+  return {
+    rows: rows.slice(0, limit).map(row => ({ kind: row.kind, line: row.line, path: row.src.replace(/^file:/u, ''), name: undefined })),
+    truncated: rows.length > limit,
+  }
 }
 
 /**
@@ -297,15 +353,18 @@ export function calledBy(graph: Graph, symbolId: string, limit: number): EdgeVie
  * @param graph - the open graph.
  * @param symbolId - the symbol's node id.
  * @param limit - how many mentions to return.
- * @returns the document locations, in document order.
+ * @returns the document locations, in document order, and whether more exist.
  */
-export function documentsFor(graph: Graph, symbolId: string, limit: number): DocumentRef[] {
+export function documentsFor(graph: Graph, symbolId: string, limit: number): { rows: DocumentRef[], truncated: boolean } {
   const rows = allRows<{ dst: string, line: number }>(
     graph.db,
     "SELECT dst, line FROM edges WHERE src = ? AND kind = 'documents' ORDER BY dst, line LIMIT ?",
-    symbolId, limit,
+    symbolId, limit + 1,
   )
-  return rows.map(row => ({ path: row.dst.replace(/^file:/u, ''), line: row.line }))
+  return {
+    rows: rows.slice(0, limit).map(row => ({ path: row.dst.replace(/^file:/u, ''), line: row.line })),
+    truncated: rows.length > limit,
+  }
 }
 
 /** Every symbol declared in one file. */
@@ -316,6 +375,77 @@ export function symbolsInFile(graph: Graph, path: string, limit: number): Symbol
     path, limit,
   )
   return rows.map(toSymbolView)
+}
+
+/** One symbol of a file, with the count that says whether anything depends on it. */
+export interface FileSymbol {
+  readonly symbol: SymbolView
+  /** How many reference edges point at it, from anywhere including this file. */
+  readonly references: number
+}
+
+/** One file's outline: what it declares, in line order. */
+export interface FileOutline {
+  readonly path: string
+  readonly symbols: readonly FileSymbol[]
+  /** True when the file declares more symbols than the answer carries. */
+  readonly truncated: boolean
+}
+
+/**
+ * Every symbol one file declares, with each one's reference count.
+ *
+ * Why this exists. "What does this file define" and "which methods does this class
+ * have" are STRUCTURAL questions, and text search answers them badly — measured by
+ * the structural/semantic taxonomy work at **6.5% accuracy for refactor-style
+ * queries** and **0–10% for "list the symbols in this file"**, because a method
+ * definition does not mention its class name and a symbol is not a keyword. The
+ * graph holds exactly this list, so it should be askable directly instead of through
+ * a symbol the model has to name first.
+ *
+ * ORDERED BY REFERENCE COUNT, then line. Measured on a real 103-symbol file: line
+ * order put only 14 referenced symbols in the first 40 rows, and the file's most
+ * depended-on function (664 call sites) happened to land at position 15 by luck.
+ * The list exists to answer "what is this module's public surface", and a row that
+ * nothing references is not part of that answer — so the surface comes first and the
+ * internal helpers follow. Line order is kept as the tiebreak, so a file of equal
+ * symbols still reads top to bottom.
+ *
+ * @param graph - the open graph.
+ * @param path - the project-relative file path.
+ * @param limit - how many symbols to return.
+ * @returns the outline, most-depended-on first.
+ */
+export function fileOutline(graph: Graph, path: string, limit: number): FileOutline {
+  // Counted for the WHOLE file before slicing, so the order is decided by every
+  // symbol's references rather than by whichever ones the limit happened to keep.
+  const counted = new Map<string, number>()
+  for (const row of allRows<{ dst: string, n: number }>(
+    graph.db,
+    `SELECT e.dst AS dst, COUNT(*) AS n
+     FROM edges e JOIN symbols s ON s.id = e.dst
+     WHERE e.kind = 'references' AND s.path = ?
+     GROUP BY e.dst`,
+    path,
+  )) counted.set(row.dst, row.n)
+
+  const total = (graph.db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE path = ?').get(path) as { n: number }).n
+  const rows = allRows<SymbolRow>(
+    graph.db,
+    `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE path = ? ORDER BY line`,
+    path,
+  )
+  const ordered = rows
+    .map(row => ({ row, references: counted.get(row.id) ?? 0 }))
+    .sort((a, b) => (b.references - a.references) || (a.row.line - b.row.line))
+  return {
+    path,
+    symbols: ordered.slice(0, limit).map(entry => ({
+      symbol: toSymbolView(entry.row),
+      references: entry.references,
+    })),
+    truncated: total > limit,
+  }
 }
 
 /** One entry point candidate: a file nothing else in the project imports. */
@@ -331,7 +461,13 @@ export interface EntryCandidate {
 /** One symbol that many others depend on. */
 export interface HubSymbol {
   readonly symbol: SymbolView
-  /** How many distinct places reference it. */
+  /**
+   * How many reference edges point at it.
+   *
+   * Edge count, not distinct sources: this is the number `codegraph_impact`
+   * reports and the number its row limit applies to, so one symbol has one count
+   * whether the model reads it from the overview or from the tool.
+   */
   readonly references: number
 }
 
@@ -454,7 +590,16 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
     // the same project, `chatSetup` in `test/chat-support.ts` outranked every
     // production symbol because tests call it everywhere. It is a real hub — but
     // not the one to read first when learning the codebase.
-    `SELECT e.dst AS id, COUNT(DISTINCT e.src) AS n
+    //
+    // COUNT(*) over the edges, NOT COUNT(DISTINCT e.src).
+    //
+    // The distinct-source count was measured at 203 for a symbol whose edge count
+    // is 664, and `codegraph_impact` reports the edge count — so the overview named
+    // a number a third of what the tool the model is being invited to call would
+    // say. Two numbers for one concept is worse than either number alone: the model
+    // cannot tell which to trust. This count also matches what the row limit is
+    // applied to, so "664 call site(s)" and "TRUNCATED at 40" describe one list.
+    `SELECT e.dst AS id, COUNT(*) AS n
      FROM edges e JOIN symbols s ON s.id = e.dst
      WHERE e.kind = 'references'
        AND s.parent IS NULL
@@ -469,11 +614,19 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
   )
 
   const entryCandidates = entryRows.slice(0, limit).map(row => {
-    // The first symbol in the file is the reader's starting point; a file of
-    // pure re-exports has none, which the type admits.
+    // The reader's starting point in the file: the first DECLARATION that does
+    // something, not the first symbol of any kind.
+    //
+    // Measured on a real project, "first by line" answered `type EvalCliOptions`,
+    // `variable scriptDir` and `variable AUTH_FILE` as the entry points — true
+    // statements about line order and useless as "begin here", because a type
+    // alias is a shape and a top-level constant is a config read. A function or a
+    // class is what an entry file actually does first.
     const first = oneRow<SymbolRow>(
       graph.db,
-      `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE path = ? ORDER BY line LIMIT 1`,
+      `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE path = ?
+       ORDER BY CASE WHEN kind IN ('function', 'class', 'method') THEN 0 ELSE 1 END, line
+       LIMIT 1`,
       row.path,
     )
     return {

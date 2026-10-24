@@ -73,7 +73,7 @@ Every 64 files the pass yields to the event loop. Without it a 20 000-file pass
 holds the kernel's loop for its whole duration and no tool call can ever observe
 the `indexing` state — the state machine would be unreachable in practice.
 
-## 4. The three ways this can be quietly wrong
+## 4. The four ways this can be quietly wrong
 
 These are the failure modes the code is shaped around. Each one produces a
 plausible answer that is wrong, which is worse than an error.
@@ -93,6 +93,26 @@ file belonged to a language that was already installed.
 
 **An ambiguous name resolved to one match.** A call target that resolves to two or
 more declarations produces NO edge. The graph under-reports; it never guesses.
+
+**Two surfaces reporting one concept with different numbers.** The most recent
+member, and the hardest to notice because neither answer is wrong on its own:
+
+| surface | used to say | counts |
+|---|---|---|
+| the overview's hub row | `203 referrer(s)` | `COUNT(DISTINCT src)` — distinct calling symbols |
+| `codegraph_impact` | 664 rows | reference EDGES |
+| `codegraph_impact`'s render | `referenced from 664 file(s)` | reference EDGES, labelled "files" |
+
+Measured on one real function: **203 / 664 / 110 files**. Three labels, two
+quantities, one symbol. The model reads 203 in its context, asks the tool, gets 664,
+and has no way to tell which is real — while the render calls the same 664 "files",
+which is a third number again (110).
+
+Truncation at least carries a signal. This carries none: every number looks like an
+answer. The rule that follows is narrow and absolute — **a count is published with
+the noun of the thing it counts, and the same concept uses the same noun
+everywhere**. Both are now `call site(s)` / `reference(s)`, and
+`referencesTo`-style edge counts are labelled as edges, never as files.
 
 Two smaller versions of the same principle: one document line naming a symbol
 three times is ONE edge (three would inflate counts without adding a place to
@@ -180,6 +200,23 @@ Four rules follow, each paid for:
 
 After the fixes, the same project: first pass **17.9s** (longest stall 3.0s),
 second pass **93ms** (longest stall 64ms).
+
+### 7a. A failed pass must not lose edges permanently
+
+Phase 1 commits each changed file's `mtime`/`size`/`hash`; phase 2 builds its
+reference edges in batches (the yielding above is why). A failure part-way through
+phase 2 therefore rolls back only the batch in flight — every earlier batch stays,
+**and so do the `files` rows from phase 1**. The next pass then compares mtime,
+sees "unchanged", skips the file, and the `references` edges that phase 1's range
+delete already removed are never rebuilt. The graph reports `current` while
+under-reporting every caller of those files.
+
+The old single-transaction phase 2 got this for free; batching it is what re-opened
+the hole. The recovery is now explicit: a failed pass deletes the stat-cache row of
+every file still pending (`forgetStatCache` in `indexer.ts`), so the next pass
+re-parses them. Only the `files` row goes — the symbols stay, so a lookup still
+answers while the edges are being repaired.
+
 ## 8. The three tools, and the question that names no symbol
 
 `codegraph_find` (where is X declared), `codegraph_impact` (who uses X) and
@@ -207,6 +244,111 @@ Two ordering rules in that overview were paid for by looking at real output on a
 - **Hubs are top-level declarations only, and never a `variable`.** The unguarded
   query answered `.filter` (975 referrers), `.trim` (512) and `.includes` (476):
   built-in method names matching variables the parser recorded.
+- **One count per symbol.** The hub row names the **edge** count, not
+  `COUNT(DISTINCT src)`. Measured: the distinct-source count was 203 for a symbol
+  whose `codegraph_impact` answer carries 664 rows, so the overview named a number
+  a third of what the tool it invites the model to call would say — and the model
+  cannot tell which to trust. The edge count is what the tool reports and what its
+  row limit applies to, so "664 call site(s)" and "TRUNCATED at 40" describe one
+  list. Two numbers for one concept is worse than either number alone.
+
+### 8a. Why the overview is pushed, not offered
+
+The tools are reachable and were correctly described, and a real session still
+answered "where does this project start" with `glob` + `read` eight times. Its own
+reasoning recorded the failure precisely:
+
+    I should use codegraph_find / codegraph_context to find entry points.
+    Plan:
+    1. glob package.json, read root package.json
+    2. Look at packages/coding-agent package.json bin field
+    3. Find main entry file (src/main.ts? cli.ts?) and trace initialization.
+
+The model thought of the tool and then dropped it while listing the plan. A tool
+description is an **instruction**, and an instruction loses to the "explore = list
+directories, read files" prior at exactly that step. Adding more description cannot
+fix it — the model had already quoted the description.
+
+So the overview is registered as runtime context (`ctx.systemPrompt.context`), not
+as another tool. It is the **answer** rather than an instruction, and it arrives
+before the plan exists: counts, language split, entry candidates and hubs are
+already in context, so "what is this project" has nothing left to explore.
+
+Three properties make it safe to run on every turn:
+
+- **Bounded** — five entry candidates, five hubs, three languages, ~14 lines. This
+  is context spent on every turn; an unbounded list would cost more than the reading
+  it saves.
+- **Silent when it cannot back itself up** — no graph, an empty graph or an
+  `indexing` graph contributes `''`. "0 files" would read as a fact about the
+  project rather than about the pass. A `failed` pass says so with its recorded
+  reason instead of asserting a shape: it is terminal until a human retries, so any
+  shape it left has no bounded age.
+- **Evaluated per assembly** — a fresh graph, a re-index or a new session all land
+  without a restart.
+
+The overview reports `stale` one observation late: the queue's state flips only
+after a tool call or a pass noticed HEAD moved, because deciding staleness is async
+(`await gitHead`) and the context provider must return synchronously.
+
+The five states are decided in `prompt.ts`'s `overviewContextText`, a pure function,
+so the matrix is testable without a Context, a queue or a database — `apply` only
+reads cwd/status/meta/overview and calls it.
+
+An entry candidate's "starts at" symbol prefers a function or a class over whatever
+declares first: measured, line order answered `type EvalCliOptions`,
+`variable scriptDir` and `variable AUTH_FILE` — true, and useless as "begin here".
+
+The `note` argument to `renderOverviewContext` is where the freshness warning rides,
+and it is the only channel that carries one: the block itself asserts a project's
+shape, so it must also say when that shape was cut by the file budget. That argument
+was passed a literal `undefined` when the block was first wired, which made the one
+warning channel dead — the block claimed a complete graph and could not be warned
+about. Deciding `stale` is NOT done here: `text` must be synchronous while that
+needs `await gitHead(cwd)`, so staleness is reported by the tools, which do the
+check on every call.
+
+### 8b. A cut list must say it was cut
+
+`referencesTo`, `callsOf`, `calledBy`, `importsOf` and `documentsFor` used a bare
+`LIMIT` with no `+1` and no `truncated` flag, while `findSymbols` and
+`projectOverview` reported their own truncation. Measured on a real project, the
+most-referenced function has **664** inbound references; `codegraph_impact` answered
+40 of them with no signal. The failure is the one that silently produces wrong code
+rather than a wrong answer: the model reads 40 rows, concludes it has every caller,
+and edits the symbol.
+
+Both tool results now carry `truncated`, and the rendered text says so in words —
+a schema field alone is not enough, because a model that never reads it still acts
+on the sample. The rule the whole plugin follows: an incomplete answer must be
+unmistakably incomplete.
+
+### 8c. What the graph is FOR, in evidence
+
+The plugin is not a step every task must pass through. It is the cheapest path when
+the question is **structural**, and the wrong tool when keyword search already
+answers it. Three independent sources agree, and one of them explains a measurement
+that looked like a defect:
+
+- **Aider's repo map** — same approach (tree-sitter symbols, graph ranking, a token
+  budget). Its stated benefit is that a map "alone may give it enough context to
+  solve many tasks", and that the model uses it to decide *which files* to read.
+  That is exactly what our overview injection does: measured on a real session, the
+  model read the overview and then read specific files instead of scanning.
+- **Structural vs semantic retrieval** — text search scores **6.5%** on refactor
+  queries ("list the methods of class X") and **0–10%** on "list this file's
+  symbols", because a definition does not name its container and a symbol is not a
+  keyword. This is `fileOutline`'s reason to exist.
+- **CodeCompass (arXiv 2602.20048)** — a graph tool's design purpose is structural
+  dependencies, and **0 of 30 structural-task trials invoked it**, while **31 of 31**
+  hidden-dependency trials did. Adoption rose from 0/30 to 31/31 after the checklist
+  moved to the END of the prompt. Two lessons are implemented here: the overview's
+  triggers sit last, and they name the QUESTION rather than saying "consider using".
+
+So "did the model call a codegraph tool" is a diagnostic, not a success metric. A
+rename task where `grep` wins is the tool being correctly not chosen — the plugin
+earns its place on "who calls this", "what does this file define", and "what is this
+symbol's neighbourhood", which keyword search cannot answer at all.
 
 ## 9. Freshness
 
