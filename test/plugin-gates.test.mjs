@@ -530,6 +530,19 @@ test('packageNameOf reduces a subpath to its package and refuses what names none
   assert.equal(packageNameOf('@scope/'), null)
 })
 
+test('a builtin the runtime provides is not a package to declare, even when the gate runs on an older Node', () => {
+  // `node:sqlite` became a builtin in Node 22.5 and needs no flag from 23.4, but
+  // it is absent from `builtinModules` on the Node 22 a CI runner installs —
+  // while the plugin actually loads inside Electron's own Node 24. Judging by
+  // the gate's runtime refused `plugin-codegraph` for an import that never
+  // leaves the host (measured on CI run 40104494149: src/store.ts:25). The
+  // exemption is a fixed list, so this pins its one entry; a project that starts
+  // importing another newer builtin adds it there and fails this test first,
+  // which is the reminder to check the runtime really provides it.
+  assert.equal(packageNameOf('node:sqlite'), null,
+    'node:sqlite is a runtime builtin and must never be read as an undeclared package')
+})
+
 test('a package is explained by any of the three fields, by an ancestor manifest, or by being installed', () => {
   // Each of the three fields, one per specifier: the rule is "declared", never
   // "declared as a peer".

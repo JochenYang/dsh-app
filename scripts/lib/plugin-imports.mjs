@@ -65,8 +65,30 @@ const DEPENDENCY_FIELDS = ['dependencies', 'peerDependencies', 'devDependencies'
 /** Packages the running kernel's module table answers, whatever the manifest says. */
 const KERNEL_PACKAGE = '@deepseek-ai/'
 
-/** Every builtin, bare and `node:`-prefixed, as this Node reports them. */
-const BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)])
+/**
+ * Builtins a plugin may import that THIS Node's `builtinModules` may not list.
+ *
+ * The gate runs under whatever Node the CI job installed (22 today), while the
+ * plugin itself loads inside the Electron binary's own Node (24 for Electron 44),
+ * and a builtin that is stable in one is not necessarily listed by the other.
+ * `node:sqlite` is the case that matters: stable without a flag from 23.4, and
+ * absent from `builtinModules` on 22, so judging by the gate's own runtime
+ * refused `plugin-codegraph` for an import that never leaves the host. Measured
+ * under `ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe`: Node
+ * 24.22.0, `node:sqlite` listed, a CREATE/INSERT/SELECT roundtrip works.
+ *
+ * Only a builtin belongs here. A third-party package must be declared — that is
+ * the whole point of the gate, and widening this set for one would turn a
+ * load-time failure into a green log.
+ */
+const RUNTIME_BUILTINS = ['node:sqlite']
+
+/** Every builtin a plugin's runtime provides, bare and `node:`-prefixed. */
+const BUILTINS = new Set([
+  ...builtinModules,
+  ...builtinModules.map((name) => `node:${name}`),
+  ...RUNTIME_BUILTINS,
+])
 
 /**
  * The source files under a plugin's `src/`, posix-relative, sorted by name.
