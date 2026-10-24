@@ -31,6 +31,7 @@
 import { join } from 'node:path'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { INSTALL_CONSENT_RULE, INSTALL_RESTART_RULE } from './install-consent.ts'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the systemPrompt Context merge (ctx.systemPrompt) into
 // scope (ctx.tools rides the dsh-tools import above).
@@ -233,8 +234,12 @@ export function marketBridgeSectionText(): string {
   return [
     '## Skill / plugin requests',
     'When the user asks whether a skill or a plugin exists for something, or asks for one to be found, call `market_search` with their own words as the query and answer from its results — do not answer from recollection. It reports what the market has, whether it is already installed, and for plugins whether it is installable.',
-    'Installing is the user\'s decision, not yours: search first, then say what you found and let them choose. Once the user has named a skill or a plugin from those results — or told you to install one — call `market_install_skill` with its slug or `market_install_plugin` with its npm package name, and name the exact thing you are installing. Never install on your own initiative, and never install something the user has not seen.',
-    'A successful plugin install takes effect after a restart; a skill is picked up on the next scan. Say so in one short sentence, and never print install commands.',
+    // The consent and restart rules come from the SHARED constant that both install
+    // tools also carry, so the two surfaces cannot drift apart. What stays here is
+    // the part only a section can say: search first, then let the user choose.
+    'Search first, then say what you found and let the user choose. ',
+    INSTALL_CONSENT_RULE + ' ',
+    INSTALL_RESTART_RULE,
   ].join('\n')
 }
 

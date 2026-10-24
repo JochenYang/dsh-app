@@ -229,35 +229,35 @@ function editableValues(config: ResolvedConfig): SwarmConfigValues {
 }
 
 /**
- * Standing guidance for the autonomous (tool-choice) path.
+ * Standing guidance for the autonomous (tool-choice) path: WHEN a batch is the right
+ * shape, and which half of the work it owns.
  *
- * Section text is interpolated by the platform's prompt renderer (every
- * double-brace group must be a registered variable), so this text must not
- * contain the tool's literal placeholder token — the exact syntax stays
- * documented in the tool's parameter descriptions, which are not interpolated.
+ * Deliberately says nothing about HOW. Every mechanic — the placeholder token,
+ * `items` being distinct, `shared_context`, `dry_run`, `resume_entries`, the retry
+ * policy — lives in the tool's own parameter descriptions, which are in the same
+ * assembly and cannot drift from the schema they describe. This section used to
+ * restate six of them; measured, that was ~700 characters of duplicate prose on
+ * EVERY turn, and a second copy that could disagree with the first.
+ *
+ * The division with the Team path is stated here because the batch cannot enforce it
+ * (the schema has no `blocked_by`), so a sentence is the only thing steering ordered
+ * work away from a tool that would silently run it in the wrong order.
+ *
+ * Section text is interpolated by the platform's prompt renderer (every double-brace
+ * group must be a registered variable), so this text must not contain the tool's
+ * literal placeholder token — the exact syntax stays documented in the parameter
+ * descriptions, which are not interpolated.
  */
 export const SWARM_SECTION_TEXT =
   'When a request decomposes into multiple independent, non-overlapping subtasks that could run in parallel '
-  + '(separate analyses, per-module edits in disjoint areas, batch lookups), prefer the swarm tool over repeated '
-  + 'subagent calls: state the shared instructions once in prompt_template using the item placeholder token '
-  + 'documented in the tool\'s parameter descriptions, list the varying part of each subtask in items, and '
-  + 'synthesize the returned per-item results into one answer. '
-  + 'Split quality decides batch quality. Each item must be self-contained: a child sees only its own expanded '
-  + 'prompt, so spell out the input, the expected output, and the completion criterion of every subtask — write '
-  + 'items a stranger could execute without asking questions. Good split for "add test coverage": one item per '
-  + 'top-level module, each naming the module path, the test framework in use, and "new tests pass" as the '
-  + 'criterion. Bad split: "write tests", "fix bugs", "clean up" — vague items produce vague, overlapping work. '
-  + 'Never fan out subtasks that depend on each other or share mutable state: run those sequentially yourself, '
-  + 'or — when the chain needs several agents, a hand-off between them, or your own review between stages — '
-  + 'reach for the Team tools instead (task dependencies + durable teammates). A batch is one shot and keeps '
-  + 'no state between items; ordered or reviewed work is not a batch. '
-  + 'When every subtask needs the same background (project conventions, a file inventory), pass '
-  + 'it once via shared_context instead of repeating it per item. For a large or unfamiliar split, call with '
-  + 'dry_run first to inspect the expanded per-child prompts before spending the batch. '
-  + 'Items that die from transient provider errors '
-  + '(network, rate limit) are retried automatically and only report failure when the retries are exhausted. '
-  + 'When a result item carries a childId, a later '
-  + 'swarm call can resume that child with follow-up instructions via resume_entries — it keeps its prior context.'
+  + '(separate analyses, per-module edits in disjoint areas, batch lookups), a swarm batch is the right shape: '
+  + 'one call, one aggregated result, instead of repeated subagent calls. '
+  + 'Never fan out subtasks that depend on each other or share mutable state: a batch is one shot and keeps '
+  + 'no state between items, so ordered work would run in an order nobody chose. Run those sequentially '
+  + 'yourself, or — when the chain needs several agents, a hand-off between them, or your own review between '
+  + 'stages — reach for the Team tools instead (task dependencies + durable teammates). '
+  + 'The tool\'s parameter descriptions carry the mechanics: the placeholder token, what makes an item '
+  + 'self-contained, shared background, previewing a split, and resuming a child.'
 
 /**
  * Standing guidance for the Team path, mounted only when the composition

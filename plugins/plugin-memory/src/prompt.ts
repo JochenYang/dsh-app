@@ -29,7 +29,7 @@
 
 import type { MemoryRoot, MemoryStore, TopicCard } from './memory-store.ts'
 import type { MemoryCategory } from './types.ts'
-import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
+import { CARD_LIFECYCLE_RULES, CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
 import { MAX_SUMMARY_CHARS } from './memory-store.ts'
 
 /** Hard ceiling on the injected PROJECT card bodies (characters). */
@@ -54,19 +54,19 @@ const GUIDELINES_TEXT = [
   'later sessions of this workspace and of no other. The index below lists every topic',
   'of this project, one line each; memory_recall reads any card in full.',
   '',
-  'SAVE what is durable yourself, with memory_save, BEFORE the task ends — no background',
-  'pass writes memory for you. Save, without waiting to be asked, when you learned:',
+  // The three lifecycle rules come from the shared constant so this surface and
+  // `memory_save` cannot drift apart. Measured before this existed: the same three
+  // were spelled twice, ~300 characters per turn, with nothing catching a reword.
+  ...CARD_LIFECYCLE_RULES.split('\n'),
+  '',
+  'Save, without waiting to be asked, when you learned:',
   '- an explicit request to remember something;',
   '- a preference or working habit of this project that will recur;',
   '- a settled decision, a hard-won root cause, a non-obvious constraint or pitfall.',
-  'The moment you notice it is the moment writing it is cheapest; a fact you meant to',
-  'save at the end of the task is a fact you will forget to save.',
+  'The moment you notice it is the moment writing it is cheapest.',
   '',
   'ONE TOPIC, ONE CARD: pick a stable ASCII kebab-case topic key for the subject',
-  '(e.g. "pnpm11-allowscripts"). To correct or extend a saved fact, SAVE THE SAME TOPIC',
-  'again with the revised content — the card is rewritten, never duplicated. Check the',
-  'index BEFORE saving: if a card already covers the subject, update it instead of',
-  'creating a near-duplicate (memory_recall reads it first when unsure).',
+  '(e.g. "pnpm11-allowscripts"). memory_recall reads a card in full when unsure.',
   '',
   'NEVER save: credentials (even when asked); work logs — what this conversation implemented,',
   'fixed, or committed (commit ids, "已完成" reports, file-by-file change lists); how far the',

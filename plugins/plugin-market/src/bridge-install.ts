@@ -29,6 +29,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { MarketExecutionError, MarketValidationError } from './errors.ts'
+import { INSTALL_CONSENT_RULE, INSTALL_RESTART_RULE } from './install-consent.ts'
 import type { PluginInstaller } from './installer.ts'
 import type { InstallIntentStore } from './install-intent.ts'
 import { validatePackageName } from './npm.ts'
@@ -255,7 +256,7 @@ export function registerMarketInstallTools(ctx: { tools: { register(definition: 
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'market_install_skill',
-    description: 'Install a skill from the skill catalog into this machine, so the agent can use it in later turns. Call this ONLY after the user has chosen a skill — name the exact slug you are about to install in your reply and act on their instruction, never on your own judgement. Pass the slug `market_search` returned. It does not print commands; report the outcome in one short sentence.',
+    description: 'Install a skill from the skill catalog into this machine, so the agent can use it in later turns. ' + INSTALL_CONSENT_RULE + ' Pass the slug `market_search` returned. It does not print commands; report the outcome in one short sentence.',
     parameters: {
       slug: {
         type: 'string',
@@ -287,7 +288,7 @@ export function registerMarketInstallTools(ctx: { tools: { register(definition: 
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'market_install_plugin',
-    description: 'Install a dsh plugin from the plugin catalog into the profile this app boots. Call this ONLY after the user has chosen a plugin — name the exact package you are about to install in your reply and act on their instruction. Pass the npm package name `market_search` returned; the name must be one that catalog carried, because the install is resolved against the catalog row rather than the name alone. It refuses when a plugin of that name is already installed, whatever its origin, instead of replacing it — installing over an existing copy is the market panel\u2019s job, where a confirmation is shown — and it refuses a row that installs from GitHub, which only the panel can install. A successful install needs a restart to take effect; say so in one short sentence.',
+    description: 'Install a dsh plugin from the plugin catalog into the profile this app boots. ' + INSTALL_CONSENT_RULE + ' Pass the npm package name `market_search` returned; the name must be one that catalog carried, because the install is resolved against the catalog row rather than the name alone. It refuses when a plugin of that name is already installed, whatever its origin, instead of replacing it — installing over an existing copy is the market panel\u2019s job, where a confirmation is shown — and it refuses a row that installs from GitHub, which only the panel can install. ' + INSTALL_RESTART_RULE,
     parameters: {
       package: {
         type: 'string',

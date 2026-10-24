@@ -451,13 +451,35 @@ test('renderMemoryText: the project index and cards inject; the retired root sco
   assert.ok(noCwd.includes('memory_save'))
 })
 
+test('both surfaces carry ONE copy of the card lifecycle rules', async () => {
+  // The rules used to be spelled twice, hand-maintained, ~300 characters per turn,
+  // with nothing catching one side being reworded into a different rule. They come
+  // from `CARD_LIFECYCLE_RULES` now, so this asserts the SOURCE is one constant and
+  // that both surfaces still carry it.
+  const { CARD_LIFECYCLE_RULES } = await import('../src/card-discipline.ts')
+  const { SAVE_TOOL_DESCRIPTION } = await import('../src/tools.ts')
+  const root = tmpRoot()
+  const guidelines = renderMemoryText(root, 'D:/codes/Demo')
+  for (const rule of CARD_LIFECYCLE_RULES.split('\n')) {
+    assert.ok(SAVE_TOOL_DESCRIPTION.includes(rule), `memory_save must carry: ${rule}`)
+    assert.ok(guidelines.includes(rule), `the guidelines must carry: ${rule}`)
+  }
+})
+
 test('renderMemoryText: the guidelines ask for the save themselves, at the end of the task', async () => {
   const root = tmpRoot()
   const text = renderMemoryText(root, 'D:/codes/Demo')
   // The extractor is retired, so this block is the ONLY thing that asks for a
-  // save: it must name the tool, the moment, and what not to save.
-  assert.match(text, /SAVE what is durable yourself, with memory_save, BEFORE the task ends/)
-  assert.match(text, /no background\s+pass writes memory for you/)
+  // save: it must name the moment, say nothing writes memory in the background,
+  // and say what not to save.
+  //
+  // The moment and the two card-lifecycle rules come from the SHARED constant that
+  // `memory_save` also carries (see `card-discipline`), so this asserts the RULE is
+  // present rather than the wording of one hand-maintained copy.
+  assert.match(text, /BEFORE the task ends/)
+  assert.match(text, /no background pass writes memory for you/)
+  assert.match(text, /same topic again rewrites it/)
+  assert.match(text, /Read the injected index BEFORE saving/)
   assert.match(text, /NEVER save/)
   assert.match(text, /work logs/)
   assert.match(text, /how far the\s+current task has got/)

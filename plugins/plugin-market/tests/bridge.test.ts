@@ -19,7 +19,7 @@
 
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
-import { limitOf, pluginHitOf, registerMarketBridge, runMarketSearch, skillHitOf } from '../src/bridge.ts'
+import { limitOf, marketBridgeSectionText, pluginHitOf, registerMarketBridge, runMarketSearch, skillHitOf } from '../src/bridge.ts'
 import type { CatalogEntry } from '../src/catalog.ts'
 import type { SkillCard } from '../src/skills.ts'
 
@@ -276,5 +276,19 @@ describe('registerMarketBridge', () => {
       searchPlugins: async (_q, limit) => { seen.push(limit); return [] },
     })
     assert.deepEqual(seen, [25, 25])
+  })
+})
+
+
+describe('the install rules are stated once', () => {
+  it('carries the same consent and restart rules the install tools carry', async () => {
+    // They used to be spelled twice, nearly word for word: the section said "takes
+    // effect after a restart ... Say so in one short sentence" and the tool said
+    // "needs a restart to take effect; say so in one short sentence". A consent rule
+    // is exactly where a reword becomes a different rule.
+    const { INSTALL_CONSENT_RULE, INSTALL_RESTART_RULE } = await import('../src/install-consent.ts')
+    const section = marketBridgeSectionText()
+    assert.ok(section.includes(INSTALL_CONSENT_RULE), 'the section must carry the consent rule')
+    assert.ok(section.includes(INSTALL_RESTART_RULE), 'the section must carry the restart rule')
   })
 })

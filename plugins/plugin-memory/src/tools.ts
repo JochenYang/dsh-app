@@ -55,7 +55,7 @@ import {
   type TopicCard,
 } from './memory-store.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from './types.ts'
-import { CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
+import { CARD_LIFECYCLE_RULES, CARD_TEXT_DISCIPLINE } from './card-discipline.ts'
 
 /** Hard ceiling for recall output; a runaway scope must not flood the
  * context either. */
@@ -70,16 +70,13 @@ const MAX_RECALL_CHARS = 50_000
  * model any more) and the scope rule.
  */
 export const SAVE_TOOL_DESCRIPTION =
-  'Save one topic card to the persistent cross-session memory of the CURRENT workspace. The topic '
-  + 'key is the card\'s identity: saving the SAME topic again rewrites the card (use that to correct '
-  + 'or extend a fact — never create a second card for one subject). Check the injected index BEFORE '
-  + 'saving: if a card already covers the subject, update that topic instead. Call this before the '
-  + 'task ends, when you learned something that will still hold in a later session of this project '
-  + '(a settled decision, a convention, a root cause, a pitfall) — no background pass writes memory '
-  + 'for you. The session\'s workspace decides where the card lands; there is only that one scope, '
-  + 'and a session without a workspace cannot save. NEVER save API keys, tokens, passwords, or '
-  + 'credentials, work logs or task progress. These cards are re-injected into future sessions of '
-  + 'this workspace; keep them lean.\n'
+  'Save one topic card to the persistent cross-session memory of the CURRENT workspace. '
+  + CARD_LIFECYCLE_RULES
+  + '\nCall this when you learned something that will still hold in a later session of this project '
+  + '(a settled decision, a convention, a root cause, a pitfall). The session\'s workspace decides '
+  + 'where the card lands; there is only that one scope, and a session without a workspace cannot '
+  + 'save. NEVER save API keys, tokens, passwords, or credentials, work logs or task progress. '
+  + 'These cards are re-injected into future sessions of this workspace; keep them lean.\n'
   + CARD_TEXT_DISCIPLINE
 
 /**
