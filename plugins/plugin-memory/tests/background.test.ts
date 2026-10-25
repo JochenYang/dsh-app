@@ -1056,8 +1056,8 @@ test('curator applyEdits: a rename still needs the new key to be well formed', a
 /** A host context stub that records what `apply()` mounted. Only the parts
  *  the plugin actually touches exist; `inject` runs its callback immediately
  *  with the same stub, the way cordis reports an available service. */
-function hostStub(): { ctx: never, mounted: { events: string[], effects: string[], tools: string[] } } {
-  const mounted = { events: [] as string[], effects: [] as string[], tools: [] as string[] }
+function hostStub(): { ctx: never, mounted: { events: string[], effects: string[], tools: string[], sections: Record<string, unknown>[] } } {
+  const mounted = { events: [] as string[], effects: [] as string[], tools: [] as string[], sections: [] as Record<string, unknown>[] }
   const log = { info: (): void => undefined, warn: (): void => undefined }
   const ctx: Record<string, unknown> = {
     logger: () => log,
@@ -1067,7 +1067,7 @@ function hostStub(): { ctx: never, mounted: { events: string[], effects: string[
       const dispose = fn()
       return typeof dispose === 'function' ? dispose : () => undefined
     },
-    systemPrompt: { section: () => () => undefined },
+    systemPrompt: { section: (definition: Record<string, unknown>) => { mounted.sections.push(definition); return () => undefined } },
     tools: { register: (definition: { name: string }) => { mounted.tools.push(definition.name); return () => undefined } },
     connection: { fetch: { register: () => () => Promise.resolve() } },
     get: () => undefined,
@@ -1089,6 +1089,21 @@ test('host apply: nothing subscribes to the session event feed', async () => {
   assert.deepEqual(mounted.tools, ['memory_save', 'memory_recall', 'memory_forget'])
   assert.ok(mounted.effects.some(name => name.includes('background maintenance')), 'the curator mounts')
   assert.ok(mounted.effects.some(name => name.includes('settings routes')), 'the settings routes mount')
+})
+
+test('host apply: the memory section opts out of prompt-variable interpolation', async () => {
+  const dir = scratchDir('dshm-apply-interp-')
+  const { ctx, mounted } = hostStub()
+  await applyHost(ctx, { storePath: dir })
+  const section = mounted.sections.find((s) => s.name === 'tool:memory')
+  assert.ok(section !== undefined, 'the memory section is registered')
+  // This section carries the USER'S card text. The kernel renders every section
+  // through a `{{variable}}` pass that throws on a name it cannot parse, so a
+  // card quoting any template syntax — a WeChat mini-program `bindXXX="{{KEY}}"`,
+  // a Mustache sample, an env template — took down every session with
+  // `malformed prompt variable reference "{{KEY}}"`. Measured on a real card.
+  assert.equal(section.interpolate, false,
+    'user card text must never be read as a prompt-variable reference')
 })
 
 test('host apply: the boot migration runs before anything mounts', async () => {

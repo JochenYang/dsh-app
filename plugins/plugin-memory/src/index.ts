@@ -124,9 +124,20 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   // Provider evaluated on every assembly: guidelines + the live current-project
   // index/cards, honoring the toggle without a restart.
+  //
+  // `interpolate: false` is load-bearing, not a detail: this section carries the
+  // USER'S OWN card text, and the kernel renders every section through a
+  // `{{variable}}` pass that THROWS on a name it cannot parse. A card quoting any
+  // template syntax — a WeChat mini-program `bindXXX="{{KEY}}"`, a Mustache
+  // sample, an env template — took the whole prompt down, and with it every
+  // session: `malformed prompt variable reference "{{KEY}}" in section
+  // "tool:memory"`, model unusable, new session or resumed alike. Measured on a
+  // real card (`mp-bare-ref-tap-dead`). This section references no kernel
+  // variable of its own, so opting out of the pass costs nothing.
   ctx.effect(() => ctx.systemPrompt.section({
     name: 'tool:memory',
     order: PROMPT_SECTION_ORDER,
+    interpolate: false,
     text: context => renderMemoryText(root, context.agent?.session.header.cwd),
   }), 'plugin-memory: system prompt section')
 
