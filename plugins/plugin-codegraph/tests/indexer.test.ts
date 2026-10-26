@@ -16,7 +16,7 @@ import { after, describe, it } from 'node:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { indexProject, isStale, scanProject } from '../src/indexer.ts'
+import { indexProject, isStale, projectChanged, scanProject } from '../src/indexer.ts'
 import { openGraph, readProjectMeta, graphStats, type ProjectMeta } from '../src/store.ts'
 import type { ParsedFile } from '../src/parse.ts'
 
@@ -574,5 +574,162 @@ describe('documents edges — the cost of a mention', () => {
     await indexProject(graph, root, stubParse)
     assert.equal(count(), 0, 'a changed document loses the mention it no longer makes')
     graph.close()
+  })
+})
+
+describe('projectChanged — "unchanged" must be provable', () => {
+  it('answers unchanged only after a pass over an intact tree', async () => {
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM a')
+    await indexProject(graph, root, stubParse)
+    assert.equal(projectChanged(graph, root), false, 'a settled, readable tree really is unchanged')
+  })
+
+  it('answers changed for a root it cannot read, and removes nothing', async () => {
+    // THE DEFECT. `scanProject` reports `rootUnreadable` when the root's own `readdir`
+    // fails, and the check used to answer `false` for it — "unchanged", a claim about a
+    // comparison it never made. The caller then kept the project `current` with no
+    // `removalSkipped`, so the model was told the graph had been checked and was
+    // complete.
+    //
+    // The root is made unreadable the way Windows and POSIX both honour: the graph lives
+    // in a SUBDIRECTORY of the project, and the project root is removed while the graph
+    // handle (which lives outside it) stays open. `scanProject` then cannot `readdir` a
+    // path that is not a directory at all.
+    const base = mkdtempSync(join(tmpdir(), 'dsh-cg-unreadable-'))
+    scratch.push(base)
+    const root = join(base, 'project')
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src', 'a.ts'), 'SYM a')
+    const graph = openGraph(join(base, 'graph', 'graph.db'))
+    graphs.push(graph)
+    await indexProject(graph, root, stubParse)
+    const before = graphStats(graph.db)
+    assert.equal(before.files, 1)
+
+    // The root goes away entirely. Its `readdir` now fails with ENOENT, which is what
+    // `scanProject` reports as `rootUnreadable` — the same branch a permissions failure
+    // takes.
+    rmSync(root, { recursive: true, force: true })
+    assert.equal(projectChanged(graph, root), true, 'an unreadable root cannot prove "unchanged"')
+
+    // The pass records the unreadable root instead of deleting the graph's rows.
+    const outcome = await indexProject(graph, root, stubParse)
+    assert.equal(outcome.removalSkipped, true, 'the pass says deletions were not verified')
+    assert.equal(outcome.removed, 0, 'and removed nothing')
+    assert.equal(graphStats(graph.db).files, before.files, 'the existing graph is intact')
+    const meta = readProjectMeta(graph.db)
+    assert.equal(meta?.removalSkipped, true, 'and the metadata carries it for every surface')
+  })
+
+  it('answers changed for a TRUNCATED walk without changing the removal rule', async () => {
+    // The budget case keeps its existing behaviour: a truncated walk is not evidence of
+    // deletion (`removalSkipped`), and the check must not claim it is unchanged either.
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM a')
+    write(root, 'b.ts', 'SYM b')
+    await indexProject(graph, root, stubParse)
+    assert.equal(projectChanged(graph, root, 1), true, 'a walk cut at one file proves nothing about the rest')
+    // And the pass with the same budget skips removal rather than dropping `b.ts`.
+    const outcome = await indexProject(graph, root, stubParse, Date.now, 1)
+    assert.equal(outcome.removalSkipped, true)
+    assert.ok(graphStats(graph.db).files >= 1, 'no rows were deleted on a truncated walk')
+  })
+})
+
+describe('cancellation during phase 2 or phase 3', () => {
+  /** Enough files that phase 2 crosses its 50-file commit boundary. */
+  function bigProject(count: number): { root: string, graph: ReturnType<typeof openGraph> } {
+    const { root, graph } = project()
+    for (let index = 0; index < count; index += 1) {
+      // Each file declares a symbol and calls it, so phase 2 has edges to insert.
+      write(root, `f${String(index)}.ts`, `SYM fn${String(index)}\nCALL fn${String(index)}`)
+    }
+    return { root, graph }
+  }
+
+  it('stops phase 2 at its next batch boundary and writes nothing afterwards', async () => {
+    // THE DEFECT. `checkAborted` ran at the phase's entry and at the removal/meta steps,
+    // but NOT after the `setImmediate` each batch commits through — so a cancellation
+    // that arrived during a yield was only noticed after the next transaction had already
+    // opened. On unload that is a write against a handle the caller is closing.
+    //
+    // The signal has to come from INSIDE phase 2, which is what a `references` edge is:
+    // phase 1 writes only files/symbols, so the first reference edge proves the call
+    // phase is running. Both counters are then sampled at the abort and again once the
+    // pass settled — a pass that keeps writing after the cancel moves them.
+    const { root, graph } = bigProject(1200)
+    const controller = new AbortController()
+    const refs = (): number => (graph.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind = 'references'").get() as { n: number }).n
+    const files = (): number => graphStats(graph.db).files
+    let refsAtAbort = -1
+    let filesAtAbort = -1
+    const pass = indexProject(graph, root, stubParse, Date.now, undefined, controller.signal)
+    const watcher = (async (): Promise<void> => {
+      for (;;) {
+        if (refs() > 0) {
+          controller.abort()
+          refsAtAbort = refs()
+          filesAtAbort = files()
+          return
+        }
+        await new Promise(resolve => { setTimeout(resolve, 0) })
+      }
+    })()
+    await assert.rejects(async () => { await Promise.all([pass, watcher]) }, /aborted/u)
+    assert.ok(refsAtAbort > 0, 'the abort landed inside phase 2, after its first batch committed')
+    assert.equal(refs(), refsAtAbort, 'no reference edge was written after the cancel')
+    assert.equal(files(), filesAtAbort, 'and no file row either')
+    assert.equal(readProjectMeta(graph.db), undefined, 'a cancelled pass never declares itself complete')
+  })
+
+  it('dispose waits for the pass to settle before resolving', async () => {
+    // THE OTHER HALF OF P1-D. `queue.dispose` used to abort and return synchronously, so
+    // the caller closed the graph handles while a phase was still running. Two properties
+    // are asserted here, and the second is the one a "dispose is async" edit alone would
+    // not give: dispose must not resolve while the runner is still executing, and it must
+    // resolve once it has.
+    const { createIndexQueue } = await import('../src/queue.ts')
+    const EMPTY = {
+      parsed: 0, skipped: 0, removed: 0, truncated: false, missingLanguage: 0, noRules: 0,
+      parseErrors: 0, durationMs: 1, removalSkipped: false,
+    }
+    let running = false
+    let settled = false
+    const queue = createIndexQueue(async (_cwd, signal) => {
+      running = true
+      // A pass that only ends when it is cancelled, like a long phase 2.
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => {
+          // Simulate a phase's last batch: the runner is still on the stack when the
+          // abort arrives, so `settled` must stay false until this returns.
+          // Long enough that the assertions below can run while it is still pending.
+          setTimeout(() => { running = false; settled = true; resolve() }, 300)
+        }, { once: true })
+      })
+      throw new Error('the index pass was aborted')
+    })
+    const pending = queue.request('D:/x')
+    await new Promise(resolve => { setTimeout(resolve, 15) })
+    assert.equal(running, true, 'the pass is in flight')
+
+    // The order here is what makes the assertion reliable: dispose is started, then the
+    // caller's own promise is awaited (it rejects when the queue cancels the job), and only
+    // then is dispose awaited. `settled` must still be false at the moment the job's
+    // rejection is observable, because the runner is still on the stack — that is exactly
+    // "dispose has not resolved yet".
+    let resolvedEarly = false
+    const stopping = queue.dispose()
+    void stopping.then(() => { resolvedEarly = true })
+    // Sampled WHILE the runner is still inside its abort handler: dispose must still be
+    // pending here, and must not resolve until that handler has returned.
+    await new Promise(resolve => { setTimeout(resolve, 50) })
+    assert.equal(settled, false, 'the runner has not finished yet')
+    assert.equal(resolvedEarly, false, 'dispose has not resolved while the runner is still finishing')
+    await assert.rejects(() => pending, /cancelled|aborted|disposed/u)
+    await stopping
+    assert.equal(settled, true, 'dispose resolved only after the runner finished')
+    assert.notEqual(queue.status('D:/x')?.state, 'failed', 'a cancellation is not a structural failure')
+    void EMPTY
   })
 })

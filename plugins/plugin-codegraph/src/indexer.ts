@@ -100,6 +100,37 @@ export interface IndexOutcome {
   readonly removalSkipped: boolean
 }
 
+/**
+ * The pass was cancelled by its owner.
+ *
+ * A queue that can be told "stop this project" needs the pass to have a way out:
+ * otherwise `forget` would either return while the pass keeps writing, or wait for a
+ * full walk of a project the user just deleted. The class exists rather than a bare
+ * `AbortError` so `queue.ts` can recognise a cancellation and refuse to record it as a
+ * structural failure — a cancelled pass is not a broken one.
+ */
+export class IndexAbortedError extends Error {
+  constructor() {
+    super('the index pass was aborted')
+    this.name = 'IndexAbortedError'
+  }
+}
+
+/**
+ * Was this pass cancelled?
+ *
+ * The two phases need to know before they run their RECOVERY path, because that path
+ * opens a transaction of its own (`forgetStatCache`). A cancelled pass must stop
+ * without writing anything: the caller is closing the graph handle, so a write there
+ * is a closed-database error at best and a write after teardown at worst.
+ *
+ * @param error - whatever the phase caught.
+ * @returns true when the pass was cancelled rather than broken.
+ */
+export function isAborted(error: unknown): boolean {
+  return error instanceof IndexAbortedError || (error instanceof Error && error.name === 'IndexAbortedError')
+}
+
 /** `git rev-parse HEAD` in a directory, or '' when it is not a repository. */
 export async function gitHead(cwd: string): Promise<string> {
   try {
@@ -320,16 +351,87 @@ function forgetStatCache(graph: Graph, entries: readonly { readonly path: string
 }
 
 /**
+ * Did the working tree actually change since the last pass?
+ *
+ * THE QUESTION A READ-ONLY TOOL RESULT MAY NOT ANSWER WITH "STALE". A tool result
+ * says a tool ran, not that it wrote anything: `Read`, `Grep`, a test run, a build that
+ * produced identical bytes. Marking the graph `stale` on that evidence reports work
+ * nobody did — and because a query then re-arms the same check, a stream of read-only
+ * calls would keep a project permanently `stale` and permanently walking.
+ *
+ * So the decision is made from the SAME comparison `indexProject` uses, without
+ * writing anything: a file whose `mtime`+`size` differ from its recorded row, a
+ * recorded file that is gone, or a file the graph has never seen. That is exactly the
+ * set the next pass would parse, so "changed" here and "the pass has work to do" are
+ * the same fact rather than two estimates of it.
+ *
+ * It reads the disk and the graph — nothing is written — so it is safe to run on every
+ * debounced check, and it costs one directory walk plus one query. A pass that follows
+ * it re-scans; that is the cost of the honest answer, and it is bounded by the same
+ * debounce as the pass itself.
+ *
+ * `removalSkipped` (a truncated walk or an unreadable root) must NOT answer `false`.
+ * "Unchanged" is a claim about a comparison this call did not make: an unreadable root
+ * means the walk learned nothing, and a truncated walk means it stopped early, so
+ * neither can prove that nothing moved. Answering `false` there reported a broken
+ * project as up to date — the caller then kept `current`, and the model was told the
+ * graph had been checked and was complete. Both cases answer `true` instead: the pass
+ * runs, records `removalSkipped` (so the answer carries "deletions were not verified"),
+ * and performs no removal of its own — which is the pass's existing budget rule, not a
+ * new one.
+ *
+ * @param graph - the open graph for this project.
+ * @param root - the absolute project root.
+ * @param limit - the file budget the pass would use.
+ * @returns true when the next pass would parse or remove anything, OR when this check
+ *   could not see enough of the tree to say it would not.
+ */
+export function projectChanged(graph: Graph, root: string, limit = MAX_FILES): boolean {
+  const known = readFiles(graph.db)
+  const scan = scanProject(root, limit)
+  // Cannot prove "nothing changed": the walk was cut short or could not read the root.
+  // `true` is the honest answer and the only safe one — `false` would let a caller
+  // report a current, complete graph over a tree this call never saw.
+  if (scan.truncated || scan.rootUnreadable) return true
+  const seen = new Set<string>()
+  for (const candidate of scan.files) {
+    seen.add(candidate.path)
+    const previous = known.get(candidate.path)
+    // Never indexed, or the recorded stat moved. A `tooLarge` file is in neither list
+    // by design: the pass leaves its row alone, so it is not a change either.
+    if (previous === undefined || previous.mtime !== candidate.mtime || previous.size !== candidate.size) return true
+  }
+  for (const path of known.keys()) {
+    if (!seen.has(path)) return true
+  }
+  return false
+}
+
+/**
  * Run one incremental pass over a project.
  *
  * `parse` is injected rather than imported so this module stays free of
  * tree-sitter: the parse itself needs the grammar loader and the wasm runtime,
  * and a test that only cares about the diffing should not have to load either.
  *
+ * **INCREMENTAL EVIDENCE IS PART OF THE RESULT.** `parsed` and `removed` are what
+ * decide whether the working tree actually moved: a pass over an unchanged project
+ * parses nothing and removes nothing, which is the fact the caller needs before it
+ * says "stale" to anyone. That is why the outcome carries them rather than only a
+ * total.
+ *
+ * **CANCELLABLE.** `signal` aborts the pass at its next checkpoint, including the
+ * one before the first file and the one before the metadata write. The queue passes
+ * the controller's signal, so deleting a project (or unloading the plugin) stops the
+ * pass instead of letting it write into a database whose handle was just closed. A
+ * cancelled pass throws {@link IndexAbortedError} and commits nothing further.
+ *
  * @param graph - the open graph for this project.
  * @param root - the absolute project root.
  * @param parse - turns a source string into symbols and edges for one file.
  * @param now - clock, injectable for tests.
+ * @param limit - the file budget.
+ * @param signal - cancellation for the pass.
  * @returns what the pass did.
  */
 export async function indexProject(
@@ -338,8 +440,11 @@ export async function indexProject(
   parse: (source: string, path: string, languageId: string) => ParsedFile | Promise<ParsedFile>,
   now: () => number = Date.now,
   limit = MAX_FILES,
+  signal?: AbortSignal,
 ): Promise<IndexOutcome> {
   const started = now()
+  const checkAborted = (): void => { if (signal?.aborted === true) throw new IndexAbortedError() }
+  checkAborted()
   const known = readFiles(graph.db)
   const scan = scanProject(root, limit)
   const seen = new Set<string>(scan.tooLarge)
@@ -387,10 +492,17 @@ export async function indexProject(
   const breatheIfDue = async (): Promise<void> => {
     if (Date.now() - lastBreathe < BREATHE_MS) return
     await new Promise<void>(resolve => { setImmediate(resolve) })
+    // Cancellation is checked HERE as well as before each file, because a long
+    // sequence of cheap files (stat-cache hits) never reaches the file checks if the
+    // only check is inside the parse branch.
+    checkAborted()
     lastBreathe = Date.now()
   }
 
   for (const candidate of scan.files) {
+    // Cancellation before each file: a pass over a 20 000-file tree must stop at the
+    // next file, not at the next phase.
+    checkAborted()
     seen.add(candidate.path)
     const previous = known.get(candidate.path)
     if (previous !== undefined && previous.mtime === candidate.mtime && previous.size === candidate.size) {
@@ -552,13 +664,24 @@ export async function indexProject(
           graph.db.exec('COMMIT')
           inBatch = 0
           await new Promise<void>(resolve => { setImmediate(resolve) })
+          // CHECKED AFTER EVERY YIELD, not only at the phase's entry. A long phase 2
+          // yields ~once per 50 files, and a cancellation that arrives during one of
+          // those turns must stop the pass BEFORE the next transaction opens — otherwise
+          // the pass keeps writing after the caller closed the graph.
+          checkAborted()
           graph.db.exec('BEGIN')
         }
       }
       graph.db.exec('COMMIT')
     } catch (error) {
-      try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
-      forgetStatCache(graph, pending)
+      // A CANCELLED PASS MUST NOT WRITE. `forgetStatCache` opens its own transaction, so
+      // running it here would be a write after the abort — exactly the "closed database"
+      // failure a teardown produces. The recovery it performs is for a FAILED pass; a
+      // cancelled one is finished, and the next explicit pass re-reads whatever it left.
+      if (!isAborted(error)) {
+        try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+        forgetStatCache(graph, pending)
+      }
       throw error
     }
   }
@@ -669,17 +792,25 @@ export async function indexProject(
           graph.db.exec('COMMIT')
           inBatch = 0
           await new Promise<void>(resolve => { setImmediate(resolve) })
+          // Same rule as phase 2: a cancellation that arrives during a yield stops the
+          // pass before the next transaction, so nothing is written after the caller
+          // closed the graph.
+          checkAborted()
           graph.db.exec('BEGIN')
         }
       }
       graph.db.exec('COMMIT')
     } catch (error) {
-      try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
-      // Same recovery as phase 2, and for the same reason: a document whose edges
-      // were cleared but not rewritten must be re-scanned. Its `files` row does not
-      // decide that here (this phase re-reads every document when the pass is dirty),
-      // but dropping it keeps one rule for both phases instead of two.
-      forgetStatCache(graph, documentPaths.map(row => ({ path: row.path })))
+      // Same rule as phase 2: `forgetStatCache` opens a transaction, so a cancelled pass
+      // must not reach it — that would be a write after the abort.
+      if (!isAborted(error)) {
+        try { graph.db.exec('ROLLBACK') } catch { /* already rolled back */ }
+        // Same recovery as phase 2, and for the same reason: a document whose edges
+        // were cleared but not rewritten must be re-scanned. Its `files` row does not
+        // decide that here (this phase re-reads every document when the pass is dirty),
+        // but dropping it keeps one rule for both phases instead of two.
+        forgetStatCache(graph, documentPaths.map(row => ({ path: row.path })))
+      }
       throw error
     }
   }
@@ -689,12 +820,18 @@ export async function indexProject(
   if (!removalSkipped) {
     for (const path of known.keys()) {
       if (seen.has(path)) continue
+      checkAborted()
       forgetFile(graph.db, path)
       removed += 1
       symbolsChanged = true
     }
   }
 
+  // The last checkpoint before the metadata write: after this the pass has declared
+  // itself complete, so a cancellation that arrives earlier must win. Writing `meta`
+  // for a project whose graph handle is about to close is exactly the "recreated after
+  // delete" failure this checkpoint exists to prevent.
+  checkAborted()
   const stats = graphStats(graph.db)
   const meta: ProjectMeta = {
     cwd: root,

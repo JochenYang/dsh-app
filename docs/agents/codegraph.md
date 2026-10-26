@@ -62,11 +62,14 @@ second of extra index time.
 | `src/languages.ts` | which extensions map to which grammar, and the download + sha512 check | parse |
 | `src/parse.ts` | the per-language extraction tables (`GRAMMAR_SHAPES`) | touch the disk |
 | `src/docs.ts` | which symbols a document NAMES | parse markdown |
-| `src/indexer.ts` | the walk, the incremental comparison, the three phases | write SQL |
+| `src/indexer.ts` | the walk, the incremental comparison, the three phases, `projectChanged` (the read-only "did anything move" answer), and the pass's cancellation checkpoints | write SQL |
 | `src/query.ts` | every read the three tools perform | own state |
 | `src/routes.ts` | the settings page's and the pages' HTTP surface | compute index state |
 | `src/client/page.tsx` | the sidebar page: every project, then one project's graph | own a second copy of the graph surface (it reuses `GraphPanel`) |
 | `src/index.ts` | tool registration and the composition | — |
+| `src/refresh.ts` | the debounce that turns a `tools/result` into one change CHECK per project | own a queue, a database, or a verdict |
+| `src/tool-text.ts` | what the three tools SAY (`renderFind` / `renderImpact` / `renderContext`) | read a graph, a queue or a clock |
+| `src/queue.ts` | serialisation, the state machine, the read-only change decision, the compensating pass a mid-pass change owes, and cancelling a deleted project's work | write to a graph, or decide staleness from Git |
 
 `store.ts` is the only module that writes SQL and `indexer.ts` is the only module
 that reads the disk, which is what makes each one testable without the other.
@@ -103,6 +106,22 @@ plausible answer that is wrong, which is worse than an error.
 unreadable root reads as zero files. Either way the removal pass must NOT run:
 "everything else is gone" is a catastrophic conclusion from a partial scan. The
 skip is persisted (`removalSkipped`) and reported, never silent.
+
+**A partial scan read as "nothing changed".** The same two cases reach the freshness
+check, and the first version answered `unchanged` for them — a claim about a
+comparison it had not made. That was worse than the removal bug above because it is
+silent: the project stayed `current` with no `removalSkipped` warning, so the model
+was told the graph had been checked AND was complete. `projectChanged` now answers
+`changed` whenever the walk was truncated or the root unreadable, which makes the
+pass run, record `removalSkipped` (so every answer carries "deletions were not
+verified") and remove nothing. `false` means one thing only: this call compared a
+complete walk against the graph and found no difference.
+
+**An unreadable root read as an empty project.** Related, and the reason the check
+above cannot be "read the directory and see": `readdir` failing at the root and a
+genuinely empty project both produce no files. The pass distinguishes them
+(`rootUnreadable`), and the freshness check treats the unprovable case as work to do
+rather than as a verdict.
 
 **A missing language read as "no symbols here".** A grammar that is not installed,
 or one with no extraction shape, answers `LANGUAGE_UNSUPPORTED` and is counted —
@@ -171,12 +190,24 @@ from loading.
 
 The settings page's delete action (`action: 'forget'`) removes one project's whole
 directory under `projects/` — `graph.db` plus the WAL and SHM sidecars beside it.
-Three steps, each for a measured reason:
+Four steps, each for a measured reason:
 
-1. **close the open handle first** — Windows refuses to delete a file another
-   handle holds, so deleting before closing fails with EBUSY;
-2. **drop the queue entry** — otherwise the settings list keeps showing the
-   project, and the next `graphFor` re-creates an empty database at the same path;
+0. **cancel the project's work and WAIT for it** — `queue.forget` aborts the pass in
+   flight, fails every waiting job for that cwd, and resolves only after the aborted
+   pass has settled. This step was missing, and its absence was a real defect: the
+   function was synchronous while its comment claimed the delete waited, so closing the
+   handle and removing the directory happened underneath a pass that was still writing —
+   and an owed compensating pass then re-created the directory the user had just
+   deleted, a removed project reappearing on disk. A tombstone (`removed`) keeps the
+   delete authoritative for jobs already queued; `queue.request` lifts it, because an
+   explicit re-index of a path the user chose is a new decision;
+1. **close the open handle** — Windows refuses to delete a file another handle holds,
+   so deleting before closing fails with EBUSY. `indexProject` is cancellable at its
+   checkpoints, so step 0 is a real stop rather than a hope;
+2. **drop the queue entry** (step 0 does it) — otherwise the settings list keeps
+   showing the project, and the next `graphFor` re-creates an empty database at the
+   same path. A `deleting` fence in `apply` also makes `graphFor` refuse the project
+   during the window, so a concurrent tool call cannot open a fresh database either;
 3. **remove the directory through `removeTree`**, never `rmSync({recursive:true})`
    — the sync call descends through a junction
    (`test/recursive-delete-guard.test.mjs` holds the contrast).
@@ -191,7 +222,7 @@ two projects on this machine).
 
 ## 6. When a pass runs
 
-Three triggers, and they share one queue:
+Four triggers, and they share one queue:
 
 1. **A session enters a project** (`session/created`) — covers a new session AND a
    resumed one, so an old session reopened after install still gets indexed. The
@@ -199,12 +230,20 @@ Three triggers, and they share one queue:
    page and the view empty for every project the user had not queried.
 2. **A tool is called** in a project with no current graph.
 3. **The settings page or the view asks** — the re-index action, and a stale read.
+4. **A tool result reports a change** — any settled non-codegraph call in an
+   indexed project, debounced per project. This is the one that covers an
+   UNCOMMITTED edit; §9a has the reasoning and the compensating pass.
 
 `queue.request` is idempotent while a project is queued or running, so several
-sessions on one project cost one pass. A failure is recorded on the project and
-reported by the settings page; the `session/created` listener swallows it there
-and only there, because a rejected promise inside session creation would surface
-as a broken session.
+sessions on one project cost one pass. Trigger 4 does not call it: it calls
+`queue.observe` (mark a check owed, synchronously, so the next answer cannot say
+`current`), then `queue.check` after the debounce — a READ-ONLY comparison that
+schedules a pass only when it proves something moved. A check that arrives while a
+pass is RUNNING records the debt instead, because that pass may already have read the
+changed file, so the pump settles one compensating pass. §9a has the full state
+machine. A failure is recorded on the project and reported by the settings page; the
+`session/created` listener swallows it there and only there, because a rejected
+promise inside session creation would surface as a broken session.
 
 ## 7. Staying out of the kernel's way
 
@@ -312,17 +351,20 @@ Three properties make it safe to run on every turn:
 - **Bounded** — five entry candidates, five hubs, three languages, ~14 lines. This
   is context spent on every turn; an unbounded list would cost more than the reading
   it saves.
-- **Silent when it cannot back itself up** — no graph, an empty graph or an
-  `indexing` graph contributes `''`. "0 files" would read as a fact about the
-  project rather than about the pass. A `failed` pass says so with its recorded
-  reason instead of asserting a shape: it is terminal until a human retries, so any
-  shape it left has no bounded age.
+- **Silent when it cannot back itself up** — no graph, or a graph with no files,
+  contributes `''`. "0 files" would read as a fact about the project rather than about
+  the pass. An `indexing` pass contributes a BOUNDED STATUS instead (§8b-1): silence
+  there read as "this project has no graph", in exactly the window a session asks its
+  first orientation question. A `failed` pass says so with its recorded reason instead
+  of asserting a shape: it is terminal until a human retries, so any shape it left has
+  no bounded age.
 - **Evaluated per assembly** — a fresh graph, a re-index or a new session all land
   without a restart.
 
-The overview reports `stale` one observation late: the queue's state flips only
-after a tool call or a pass noticed HEAD moved, because deciding staleness is async
-(`await gitHead`) and the context provider must return synchronously.
+The overview can report `stale` one observation late, and only for the HEAD half:
+`text` must return synchronously while deciding staleness from Git needs
+`await gitHead`. A change reported by a tool result is different — the queue records
+it synchronously (`observe`), so the provider sees it on the next assembly.
 
 The five states are decided in `prompt.ts`'s `overviewContextText`, a pure function,
 so the matrix is testable without a Context, a queue or a database — `apply` only
@@ -356,6 +398,67 @@ a schema field alone is not enough, because a model that never reads it still ac
 on the sample. The rule the whole plugin follows: an incomplete answer must be
 unmistakably incomplete.
 
+**One boolean was still not enough, and the gap was in the render.** `impact` merges
+three lists — `references`, `imports`, and the relationship groups — and the render
+warned only when `referencing` was cut. A file that imports 300 modules printed 40
+paths under a heading that reads as the complete dependency set, with
+`truncated: true` sitting unread in the JSON. Same for a relationship group cut at 40
+of 300: a sample presented as the set, in the list a reader consults before changing
+an interface.
+
+Each list now carries its own `{ shown, total, truncated }` (`ImpactResult.lists` for
+the two top-level lists, and `RelatedGroup.total`/`truncated` per group, because the
+groups are cut independently of each other), and each gets its own sentence. The
+aggregate `truncated`/`total` stay — a consumer that only asks "is anything missing"
+keeps working — but the render reads the per-list counts, because the aggregate cannot
+say WHICH list. A total is only queried when a list was actually cut, so the common
+answer still costs one statement.
+
+`codegraph_context`'s symbol branch keeps one boolean and says "at least one list was
+cut": it is an unmistakable statement of partiality, which is the property that
+matters there. `impact` is where the counts decide a model's next step.
+
+**A relationship's label is the relationship.** Every group used to render as
+"implements this" unless it was `extends` or `type_refs` — and `exports` edges start
+at a FILE node (the module that publishes the symbol), so the answer told a reader
+that a module "implements" a function. Each of the four kinds now has its own
+sentence, and an unknown kind names itself (`related by <kind>`) rather than borrowing
+"implements": a kind added later must not silently inherit a meaning it does not have.
+
+The renderers moved out of the `defineTool` closures into `src/tool-text.ts` as pure
+functions for a reason: while they were closures the only assertion available was a
+regular expression over the SOURCE, which proves a template is gone and never that the
+sentence is right. Both defects above were invisible to that check.
+
+### 8b-1. The overview's rows are queryable as printed
+
+The block said "pass any id above", and the hub rows printed a kind, a name, a path
+and a line — no id anywhere. `resolveSymbol` accepts an id or a UNIQUE name, and the
+hub query admits names declared twice, so the instruction was unfollowable exactly on
+the rows it pointed at. Hub rows now lead with the full symbol id (it already contains
+kind, path and name, so it replaces that text rather than adding to it — copyable and
+no longer), and entry rows keep the path, which is itself a valid selector
+(`codegraph_context("<path>")` answers the file outline). No new tool, and no invented
+selector syntax.
+
+Two more sentences were wrong in the same block for a different reason:
+
+- **"0 files" vs silence vs a status.** An `indexing` graph contributes a bounded
+  status instead of `''`. Silence read as "this project has no graph" — in exactly the
+  window a session asks its first orientation question, since a first pass on a real
+  repository takes tens of seconds. It names no count: a partly-filled graph's number
+  would be a fact about the pass stated as a fact about the project.
+- **What the counts cover.** The headline now carries one line: the project's
+  INDEXED files, the relations held (imports, calls, extends/implements, signature
+  type references, docs), and that names are resolved statically — no type inference,
+  no dynamic dispatch — so the source and the tests still decide. One line, because
+  this text is spent on every turn.
+
+The `memory_save` sentence is gone. This plugin owns no memory behaviour, the suite
+ships with and without that plugin, and naming another plugin's tool is how one
+plugin starts failing when the other is absent: the model calls a tool nothing
+registered.
+
 ### 8c. What the graph is FOR, in evidence
 
 The plugin is not a step every task must pass through. It is the cheapest path when
@@ -386,13 +489,97 @@ symbol's neighbourhood", which keyword search cannot answer at all.
 ## 9. Freshness
 
 Every tool answer carries it, and the three values mean different things to a
-model: `current` — trust it; `stale` — the working tree moved, trust then refresh;
-`indexing` — wait, this is a first touch. `unindexed` exists in the store type but
-no tool answer emits it, because the first call queues a pass.
+model: `current` — trust it; `stale` — the working tree moved (or the compensation
+ceiling stopped), trust then refresh; `indexing` — the graph is not settled, so wait:
+this is either a first touch or a pass/check in flight. `unindexed` exists in the store
+type but no tool answer emits it, because the first call queues a pass. §9a's table is
+the authoritative mapping from situation to value.
 
 `isStale` compares the stored git HEAD to a fresh one and is deliberately
 three-state: no repository on either side means "cannot prove", which must NOT
 read as stale — a pass writes `''` again and the graph would rebuild forever.
+
+### 9a. HEAD is not the working tree
+
+That check is necessary and was not sufficient, and the gap produced the one
+failure mode that looks authoritative rather than broken. A session's own edit
+does **not** move HEAD, so an agent could write `src/util.ts`, ask
+`codegraph_impact`, and receive an answer about the file from BEFORE the edit —
+with `freshness: current` on it. There is no error to notice and no empty list to
+be suspicious of; the answer is simply about the wrong bytes, which is worse than
+no answer.
+
+The graph is now refreshed from the event every way a session changes the tree
+funnels through: **`tools/result`**, the kernel's emit for a settled call. That
+covers a `write`/`edit`, a `shell` command that ran a formatter, a nested
+`run_code` dispatch, and a plugin's own file-moving tool — the trigger is "some
+tool settled in this project", never a list of tool NAMES. A name list covers the
+three shapes somebody thought of and misses the fourth.
+
+Three rules make that safe, and each is a module:
+
+- **`refresh.ts`** owns the timing, and it schedules a QUESTION, not a verdict. The
+  first result in a debounce window calls `queue.observe` synchronously (so the window
+  is visible to the next tool answer) and arms one trailing check; later results join it
+  rather than extending it, because extending would postpone the check for as long as
+  tool calls keep arriving — which is a long turn, exactly when the graph is furthest
+  behind. The scheduler holds no queue and no database, so the timing rules are tested
+  against a hand-driven clock.
+- **`queue.check`** owns the decision, and it is READ-ONLY. A tool result means a tool
+  ran, not that a byte changed: `Read`, `Grep`, a passing test run and a build that
+  rewrote identical bytes all produce results. So `check` asks the injected `changed`
+  predicate — the same `mtime`/`size` comparison the pass itself uses, plus "a recorded
+  file is gone" and "a file was never indexed" — and schedules a pass only when it
+  answers yes. **A current graph stays `current` through a read-only stream**, and no
+  pass runs; the first version marked `stale` on every result, which reported work
+  nobody did AND (through the query re-arming path) kept the tree walking forever.
+  A check that cannot read the tree falls through to a pass, so the real failure is
+  recorded rather than reported as "unchanged" — and `projectChanged` itself answers
+  `changed` for an unreadable root or a truncated walk (§4), because "unchanged" is a
+  claim it could not make.
+- **`queue` also owns the mid-pass case.** A pass already RUNNING may have read the
+  files that just changed, so it finishes looking correct and would be reported
+  `current`. A check that arrives mid-pass records that as owed and the pump settles
+  exactly one compensating pass — coalesced, because the flag is a flag and not a count.
+  A QUEUED pass owes nothing (it has not read anything yet), and a FAILED project is
+  left alone: retrying a structural failure from a tool result is the spin the queue's
+  header forbids. The compensation stops at a ceiling of four, past which the project
+  reports `stale` with `awaitingRetry` set — and stays there until an EXPLICIT re-index,
+  because a ceiling a check could re-arm would only mean "the chain resumes after any
+  tool call".
+- **`index.ts`** owns the join, and refuses two cases: a `codegraph_*` result (a query
+  must never schedule the work that changes its own answer) and a project this process
+  holds no graph for (`session/created` and the first tool call decide a project
+  exists; a stray result must not create a graph directory for every cwd a session
+  mentions). The listener never throws — a `tools/result` observer's failure is
+  contained and logged, which is never useful.
+
+**The three states a tool answer may report, and why `indexing` is one of them.**
+`freshness` keeps its three-value enum; what changed is which one the window produces:
+
+| the situation | the answer | why |
+|---|---|---|
+| a check ran and found nothing | `current` | proved, not assumed |
+| a check ran and found work, or the queue is `stale` | `stale` | proved, and the pass is running |
+| a result landed and the check has not answered | `indexing`, with a note that a check is running | neither `current` (unproved, and the defect this round is about) nor `stale` (claims work nobody proved) |
+
+`freshnessOf` resolves that last row rather than guessing: it runs the SAME read-only
+comparison (`projectChanged`) on the spot, so a query that lands inside the debounce
+window answers `current` when nothing moved and `stale` when something did. That is why
+a read-only session stays `current` instead of flapping.
+
+`freshnessOf` keeps the HEAD check: it covers the other direction, a commit, pull or
+checkout that moves the tree with no tool result in between. It no longer STARTS
+anything for a `stale` entry — that branch used to call `refresh.notify`, so a model
+asking twice kept the project walking, and a project at the compensation ceiling was
+resurrected by a read. The queue already owns the work; the answer only reports it, and
+`awaitingRetry` reaches the model as "re-index from the code graph settings page".
+
+There is deliberately no filesystem watcher. A watcher is a resident handle per
+project that multiplies across platforms, and the thing that needs to know is a
+session, whose writes always arrive through this pipeline. An edit from an external
+editor with no tool call in between is covered one observation late, on the next
+tool call or the next HEAD move.
 
 ## 10. What it does not do
 
@@ -477,6 +664,38 @@ That boundary is why the model correctly picks `grep` for a function with seven
 matches and no callers of consequence, and why the plugin now reports the caller count
 in `codegraph_find`: choosing well needs the size of the question, not more
 instructions.
+
+### 10c. Unloading: the pass must stop before the handles close
+
+The teardown has three steps and their ORDER is the whole contract:
+
+1. `queue.dispose()` aborts every project's pass **and resolves only once they have
+   settled**. It used to abort and return synchronously, so the next step closed graph
+   handles underneath a phase 2 or phase 3 that was still committing batches — or running
+   its recovery path, `forgetStatCache`, which opens a transaction of its own. The result
+   was a write against a closed database, or a write spanning a reload;
+2. the tools and routes come down (a route left registered after unload collides on the
+   next mount, which lands on the boot audit rather than on a warning);
+3. only then are the graphs closed.
+
+A third detail is inside step 1 itself: `dispose` **collects each project's running
+promise before it aborts**, because aborting first runs the runner's own abort listener,
+which can settle the pass before the loop has captured it — and a `dispose` that
+resolved then would be the same defect in a new place. The regression test asserts that
+`dispose` is still pending while the runner is inside its abort handler.
+
+Two more details make step 1 real rather than nominal. `indexProject` checks its `signal`
+after **every yield** — phase 2 commits every 50 files and phase 3 every 25 documents,
+each followed by a `setImmediate` — not only at a phase's entry, so a cancellation that
+arrives during a batch stops the pass before the next transaction opens. And a cancelled
+pass does not run the recovery path at all (`isAborted`): `forgetStatCache` exists to
+repair a FAILED pass, and running it for a cancelled one would be the write the abort was
+supposed to prevent.
+
+A cancelled pass rejects, and that rejection is expected by every caller: `dispose` awaits
+it with `allSettled`, the plugin's `request`/`check` call sites catch it, and the queue
+records no `failed` state for it — a pass nobody broke must not be reported as one that
+needs a manual re-index.
 
 ## 11. Where the tests are blind
 

@@ -80,6 +80,44 @@ export interface FindResult extends ToolEnvelope {
   readonly truncated: boolean
 }
 
+/**
+ * How much of ONE list an answer carries.
+ *
+ * Truncation used to be one boolean for the whole `impact` answer, and the render
+ * warned only about `references` — so a symbol whose IMPORTS list was cut at 40 said
+ * nothing, and its type-relationship groups said nothing either. Worse, the single
+ * boolean made three different quantities share one meaning: a reader could not tell
+ * "40 of 664 references" from "40 of 41 imports".
+ *
+ * Each list now reports its own cut, with the total it was cut from. The aggregate
+ * boolean stays for compatibility (a consumer that only wants "is anything missing"
+ * keeps working), and it is computed from these — never the other way round.
+ */
+export interface ListMeta {
+  /** Rows in the array the answer carries. */
+  readonly shown: number
+  /**
+   * Rows that exist, when they are known.
+   *
+   * Absent for the relationship groups: their totals are only counted when the list
+   * was actually cut, because counting every kind on every answer would cost a query
+   * per kind for a number nobody reads in the common case.
+   */
+  readonly total?: number | undefined
+  /** True when rows exist beyond `shown`. */
+  readonly truncated: boolean
+}
+
+/** One relationship group: its kind, its rows, and how many of them are shown. */
+export interface RelatedGroup {
+  readonly kind: string
+  readonly rows: readonly Referrer[]
+  /** How many rows this kind has in total, when the answer was cut. */
+  readonly total?: number | undefined
+  /** True when this KIND's list was cut — not the answer's other lists. */
+  readonly truncated: boolean
+}
+
 /** The result of `codegraph_impact`. */
 export interface ImpactResult extends ToolEnvelope {
   /** The symbol the question was about, when the id or name resolved. */
@@ -134,7 +172,7 @@ export interface ImpactResult extends ToolEnvelope {
    * call it, and "who implements this" is the question a reader has about an
    * interface. Merging them would make the call count wrong in both directions.
    */
-  readonly related: readonly { readonly kind: string, readonly rows: readonly Referrer[] }[]
+  readonly related: readonly RelatedGroup[]
   /**
    * How many declarations share the name, when the selector was ambiguous.
    *
@@ -142,6 +180,31 @@ export interface ImpactResult extends ToolEnvelope {
    * never built", which is the fact the old answer hid.
    */
   readonly ambiguity?: number | undefined
+  /**
+   * The count for each list this answer carries, one entry per list.
+   *
+   * The rendering needs it: `truncated` alone says "something was cut" and the
+   * text then has to guess which list, which is how the imports and relationship
+   * lists ended up silent about their own cuts. Optional so an older consumer that
+   * builds an `ImpactResult` by hand still type-checks.
+   */
+  readonly lists?: ImpactLists | undefined
+}
+
+/**
+ * Per-list counts for one `impact` answer.
+ *
+ * One field per list rather than a map: the lists are a fixed, schema-declared set,
+ * and a map would let a new list reach the renderer without a schema row — an
+ * `additionalProperties: false` failure for the whole answer. The relationship
+ * groups are not here: each `RelatedGroup` carries its own `total`/`truncated`,
+ * because they are cut independently of each other.
+ */
+export interface ImpactLists {
+  /** The references list — what `total`/`truncated` at the top level describe. */
+  readonly references: ListMeta
+  /** The target file's imports, which are cut on their own row budget. */
+  readonly imports: ListMeta
 }
 
 /** The result of `codegraph_context`. */
@@ -341,11 +404,12 @@ export interface Referrer {
  * @param graph - the open graph.
  * @param symbolId - the destination symbol.
  * @param limit - how many rows a single kind may carry.
- * @returns one group per kind that has any rows, plus whether anything was cut.
+ * @returns one group per kind that has any rows, each with its own cut and total,
+ *   plus whether ANY group was cut.
  */
-export function relatedTo(graph: Graph, symbolId: string, limit: number): { groups: { kind: string, rows: Referrer[] }[], truncated: boolean } {
+export function relatedTo(graph: Graph, symbolId: string, limit: number): { groups: RelatedGroup[], truncated: boolean } {
   const kinds = ['extends', 'implements', 'type_refs', 'exports'] as const
-  const groups: { kind: string, rows: Referrer[] }[] = []
+  const groups: RelatedGroup[] = []
   let truncated = false
   for (const kind of kinds) {
     const rows = allRows<{ src: string, line: number, name: string | null, path: string | null }>(
@@ -355,7 +419,8 @@ export function relatedTo(graph: Graph, symbolId: string, limit: number): { grou
        WHERE e.dst = ? AND e.kind = ? ORDER BY e.src, e.line LIMIT ?`,
       symbolId, kind, limit + 1,
     )
-    if (rows.length > limit) truncated = true
+    const cut = rows.length > limit
+    if (cut) truncated = true
     if (rows.length === 0) continue
     groups.push({
       kind,
@@ -365,9 +430,19 @@ export function relatedTo(graph: Graph, symbolId: string, limit: number): { grou
         kind,
         name: row.name ?? undefined,
       })),
+      // Counted ONLY when this kind was cut. A group that fits already knows its
+      // total (`rows.length`), and counting every kind on every answer would add one
+      // query per kind for a number nobody reads in the common case.
+      ...(cut ? { total: countEdgesTo(graph, symbolId, kind) } : {}),
+      truncated: cut,
     })
   }
   return { groups, truncated }
+}
+
+/** How many edges of one kind point at a symbol. Only called when a list was cut. */
+function countEdgesTo(graph: Graph, symbolId: string, kind: string): number {
+  return (graph.db.prepare('SELECT COUNT(*) AS n FROM edges WHERE dst = ? AND kind = ?').get(symbolId, kind) as { n: number }).n
 }
 
 /**
@@ -458,16 +533,25 @@ export function referencesTo(graph: Graph, symbolId: string, limit: number): { r
 }
 
 /** Files this file imports. */
-export function importsOf(graph: Graph, path: string, limit: number): { rows: string[], truncated: boolean } {
+export function importsOf(graph: Graph, path: string, limit: number): { rows: string[], truncated: boolean, total: number } {
   const rows = allRows<{ dst: string }>(
     graph.db,
     "SELECT dst FROM edges WHERE src = ? AND kind = 'imports' ORDER BY dst LIMIT ?",
     `file:${path}`, limit + 1,
   )
+  const truncated = rows.length > limit
   return {
     rows: rows.slice(0, limit).map(row => row.dst.replace(/^file:/u, '')),
-    truncated: rows.length > limit,
+    truncated,
+    // Same rule as `referencesTo`: the total is only queried when the list was cut,
+    // so the common answer costs one statement, not two.
+    total: truncated ? countEdgesFrom(graph, `file:${path}`, 'imports') : rows.length,
   }
+}
+
+/** How many edges of one kind leave a node. Only called when a list was cut. */
+function countEdgesFrom(graph: Graph, src: string, kind: string): number {
+  return (graph.db.prepare('SELECT COUNT(*) AS n FROM edges WHERE src = ? AND kind = ?').get(src, kind) as { n: number }).n
 }
 
 /** An outgoing edge joined to the symbol it points at. */

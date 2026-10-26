@@ -79,17 +79,17 @@ describe('one quantity, one label', () => {
     // announced as "664 file(s)". The overview had the same shape one layer up
     // (203 distinct callers vs 664 call sites).
     //
-    // A source guard is the honest test here: the renderer is a closure inside
-    // `defineTool`, and standing up the whole registry to read one line of output
-    // would test the harness rather than the rule. What must not exist is the
-    // template that names the wrong quantity — reintroducing it fails here.
-    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+    // The renderer now lives in `tool-text.ts` as a pure function, so the rule is
+    // asserted on REAL output in `tool-text.test.ts`. What this case still guards is
+    // the shape of the source: the template that named the wrong quantity must not
+    // come back, and both counts must still be published with their own noun.
+    const source = readFileSync(new URL('../src/tool-text.ts', import.meta.url), 'utf8')
     assert.doesNotMatch(
       source,
       /referencing\.length\)\} file\(s\)/u,
       'a call-site count must not be labelled as a file count',
     )
-    // And the two counts it SHOULD publish are both present, each with its own noun.
+    // And the two counts it DOES publish are both present, each with its own noun.
     assert.match(source, /reference\(s\) across/u)
     assert.match(source, /file\(s\):/u)
   })

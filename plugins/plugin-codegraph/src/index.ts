@@ -49,7 +49,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { gitHead, indexProject, isStale } from './indexer.ts'
+import { gitHead, indexProject, isStale, projectChanged } from './indexer.ts'
 import { parseFile } from './tree-sitter.ts'
 import { LANGUAGES, bundledGrammarDir, downloadGrammar, grammarPath, type GrammarPaths } from './languages.ts'
 import {
@@ -60,7 +60,6 @@ import {
   dropUndefined,
   findSymbols,
   fileOutline,
-  formatSymbol,
   freshnessNote,
   importsOf,
   projectOverview,
@@ -75,6 +74,8 @@ import {
 } from './query.ts'
 import { createIndexQueue, type IndexQueue } from './queue.ts'
 import { overviewContextText } from './prompt.ts'
+import { createRefreshScheduler } from './refresh.ts'
+import { renderContext, renderFind, renderImpact } from './tool-text.ts'
 import { removeTree } from './remove-tree.ts'
 import { registerCodegraphRoutes } from './routes.ts'
 import { fileNodeId, openGraph, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
@@ -93,6 +94,30 @@ export const inject = ['tools', 'connection', 'systemPrompt']
 
 /** How many rows one tool answer may carry before it reports truncation. */
 const MAX_ROWS = 40
+
+/**
+ * The schema for one list's counts, shared by every list that reports its own cut.
+ *
+ * A function rather than a constant because the tool definitions pass plain objects,
+ * and reusing one object reference across two schema branches is the kind of shared
+ * mutable state a validator may legitimately walk once and annotate. The return type
+ * is inferred (all `as const`) so the tool's output type keeps the exact keys: a
+ * `Record<string, …>` annotation here widened the inferred value to an index
+ * signature, and every real answer then failed the `satisfies ImpactResult` check.
+ */
+function listMetaSchema() {
+  return {
+    type: 'object' as const,
+    additionalProperties: false as const,
+    properties: {
+      shown: { type: 'number' as const, required: true as const },
+      // Absent when the total is unknown — the relationship groups only count when
+      // they were cut, so their totals are optional rather than zero.
+      total: { type: 'number' as const },
+      truncated: { type: 'boolean' as const, required: true as const },
+    },
+  }
+}
 
 /**
  * Where one project's graph lives.
@@ -171,7 +196,19 @@ export function knownProjects(storageRoot: string): { cwd: string, meta: Project
 export function apply(ctx: Context): void {
   /** Open graphs by project root; a graph stays open for the plugin's lifetime. */
   const graphs = new Map<string, Graph>()
-  const queue: IndexQueue = createIndexQueue(async (cwd) => {
+  /**
+   * A project whose graph is being deleted.
+   *
+   * `forgetProject` closes the handle and removes the directory, and the queue's own
+   * cancellation keeps a pass from writing during that window. This set covers the
+   * remaining window: a tool call (or the runner's own `graphFor`) that asks for the
+   * graph of a project mid-delete must not open a fresh database at the path that is
+   * about to disappear. `graphFor` throws for it, which the caller reports as an
+   * ordinary tool error — an answer about a deleted graph would be worse.
+   */
+  const deleting = new Set<string>()
+  const queue: IndexQueue = createIndexQueue(async (cwd, signal) => {
+    if (deleting.has(cwd)) throw new Error('this project’s code graph is being deleted')
     const graph = graphFor(cwd)
     return await indexProject(graph, cwd, async (source, path, languageId) => {
       // A grammar is resolved per file rather than per pass: an unsupported or
@@ -183,11 +220,28 @@ export function apply(ctx: Context): void {
       const grammar = grammarPath(language, paths)
       if (grammar === undefined) return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: 'missing' as const }
       return await parseFile(grammar, runtimeWasm(), source, path, languageId)
-    })
+    }, Date.now, undefined, signal)
+  }, {
+    // THE READ-ONLY HALF OF THE FRESHNESS QUESTION. A tool result proves a tool ran,
+    // not that a byte changed; this predicate asks the same stat comparison the pass
+    // uses, so `stale` is only reported once something really moved.
+    changed: (cwd) => {
+      const graph = graphs.get(cwd)
+      // No open graph means nothing to compare against: let the pass open it and
+      // record the truth rather than answering "unchanged" about a graph that does
+      // not exist.
+      if (graph === undefined) return true
+      try {
+        return projectChanged(graph, cwd)
+      } catch {
+        return true
+      }
+    },
   })
 
   /** The open graph for a project, opening and adopting it on first use. */
   const graphFor = (cwd: string): Graph => {
+    if (deleting.has(cwd)) throw new Error('this project’s code graph is being deleted')
     const existing = graphs.get(cwd)
     if (existing !== undefined) return existing
     const opened = openGraph(graphFileFor(cwd))
@@ -199,14 +253,22 @@ export function apply(ctx: Context): void {
   /**
    * Delete one project's graph from disk and from this process's bookkeeping.
    *
-   * Order matters and each step is here for a measured reason:
-   *   1. close the open handle FIRST — Windows refuses to delete a file another
-   *      handle holds, so deleting before closing fails with EBUSY;
-   *   2. drop the queue entry, or the settings list keeps showing the project and
-   *      the next `graphFor` re-creates an empty database from the same path;
-   *   3. remove the project's DIRECTORY, not just `graph.db` — the WAL and SHM
-   *      sidecars live beside it, and a leftover `-wal` holding pages of a deleted
-   *      database is exactly the kind of thing that looks clean and is not.
+   * ORDER IS THE CONTRACT, and the first step is the one that used to be missing:
+   *   0. **cancel the project's work and WAIT for it** — `queue.forget` aborts the pass
+   *      in flight, fails every waiting job for this cwd, and resolves only after the
+   *      aborted pass has settled. Skipping the wait (the previous behaviour: a
+   *      synchronous `forget` whose comment claimed it waited) let a running pass write
+   *      through a handle that was about to close, and an owed compensating pass
+   *      re-create the directory this function had just deleted. `deleting` also makes
+   *      `graphFor` refuse the project during the window, so a tool call cannot open a
+   *      fresh database at the path being removed;
+   *   1. close the open handle — Windows refuses to delete a file another handle holds,
+   *      so deleting before closing fails with EBUSY;
+   *   2. drop the queue entry (step 0 does it), or the settings list keeps showing the
+   *      project and the next `graphFor` re-creates an empty database from the same path;
+   *   3. remove the project's DIRECTORY, not just `graph.db` — the WAL and SHM sidecars
+   *      live beside it, and a leftover `-wal` holding pages of a deleted database is
+   *      exactly the kind of thing that looks clean and is not.
    *
    * The directory comes from `graphFileFor`, which hashes the cwd, so a caller
    * cannot name the path to delete.
@@ -214,13 +276,23 @@ export function apply(ctx: Context): void {
    * @param cwd - the project whose graph goes away.
    */
   const forgetProject = async (cwd: string): Promise<void> => {
-    const open = graphs.get(cwd)
-    if (open !== undefined) {
-      graphs.delete(cwd)
-      try { open.close() } catch { /* already closed is the desired state */ }
+    deleting.add(cwd)
+    try {
+      // 0. Stop the work first, and wait for it. Every promise this settles is one the
+      // plugin already catches (`request`/`check` call sites), so nothing here leaks an
+      // unhandled rejection.
+      await queue.forget(cwd)
+      // 1. Close, now that no pass can be writing through the handle.
+      const open = graphs.get(cwd)
+      if (open !== undefined) {
+        graphs.delete(cwd)
+        try { open.close() } catch { /* already closed is the desired state */ }
+      }
+      // 2–3. The directory (graph.db plus its WAL/SHM sidecars).
+      await removeTree(dirname(graphFileFor(cwd)))
+    } finally {
+      deleting.delete(cwd)
     }
-    queue.forget(cwd)
-    await removeTree(dirname(graphFileFor(cwd)))
   }
 
   // Restore the project list from disk, once, at activation.
@@ -253,6 +325,64 @@ export function apply(ctx: Context): void {
     return () => { clearTimeout(timer) }
   }, 'plugin-codegraph: restore the project list')
 
+  // Sync tool disposers and the routes' async disposer share one list. The type
+  // has to admit both: a `() => Promise<void>` assigned to a `() => void` slot
+  // type-checks, so an unawaited route teardown would only show up as a route
+  // still registered after unload.
+  const disposers: (() => void | Promise<void>)[] = []
+
+  // THE TRIGGER FOR A WORKING TREE THAT MOVED WITHOUT COMMITTING.
+  //
+  // Every other freshness signal this plugin had reads Git: `isStale` compares the
+  // stored HEAD with a fresh one. A session's own writes do not move HEAD, so an
+  // uncommitted edit left the graph answering from before the edit while reporting
+  // `current` — the one failure mode that looks authoritative. The kernel emits
+  // `tools/result` for every settled call, which is where each way a session changes
+  // the tree converges: a `write`, an `edit`, a `shell` command that ran a formatter,
+  // a nested `run_code` dispatch. Watching the event, not a list of tool names, is
+  // what makes that coverage a property of the pipeline rather than of a table
+  // somebody has to maintain.
+  //
+  // WHAT IT SCHEDULES IS A CHECK. `refresh.ts` owns the timing (one debounced wake per
+  // project) and `queue.check` owns the decision, which is a read-only stat comparison:
+  // a `Read`, a `Grep` or a passing test run must NOT turn a current graph `stale`, and
+  // must not make it walk its tree on every tool call. Only a proved change schedules a
+  // pass, and a pass already running owes a compensation.
+  const refresh = createRefreshScheduler({
+    // The window is open from the first result, not from the timer: a query that lands
+    // before the check answers must not claim `current` (see `freshnessOf`).
+    observe: (cwd) => { queue.observe(cwd) },
+    request: (cwd) => { queue.check(cwd) },
+  })
+
+  ctx.effect(() => {
+    const dispose = ctx.on('tools/result', (exec) => {
+      // THE LOOP THIS AVOIDS: a codegraph tool's own answer is a tool result too,
+      // and a check requested from inside one would make every query walk the tree.
+      // The tools decide staleness themselves (`gitHead` plus the queue's state); they
+      // must never be the thing that starts the work.
+      if (exec.name.startsWith('codegraph_')) return
+      // Same boundary the tools use: no session cwd, no project. `requireCwd`
+      // throws for a tool call in that state, and an observer must not throw — a
+      // `tools/result` listener's failure is contained and logged, never useful.
+      const cwd = exec.agent?.session?.header?.cwd
+      if (typeof cwd !== 'string' || cwd === '') return
+      // A project this process holds no graph for is not scheduled from here.
+      // `session/created` and the first tool call already cover "index this
+      // project"; scheduling from an unrelated result would create a graph for
+      // every directory a session ever mentions.
+      if (!graphs.has(cwd) && queue.status(cwd) === undefined) return
+      // Two steps, and the first is the one that keeps the answer honest: the window is
+      // open NOW (a query in it must not say `current`), the check runs after the debounce.
+      refresh.observe(cwd)
+      refresh.notify(cwd)
+    })
+    return () => {
+      refresh.dispose()
+      dispose()
+    }
+  }, 'plugin-codegraph: incremental refresh after tool results')
+
   /** The freshness of one project's graph, as every tool answer reports it. */
   const freshnessOf = async (cwd: string): Promise<{ freshness: Freshness, note: string | undefined }> => {
     const status = queue.status(cwd)
@@ -280,6 +410,47 @@ export function apply(ctx: Context): void {
       queue.request(cwd).catch(() => { /* recorded on the queue's status */ })
       return { freshness: 'indexing', note: freshnessNote('indexing', false, false) }
     }
+    if (status?.pendingCheck === true && status.state === 'current') {
+      // A TOOL RESULT LANDED AND THE DEBOUNCED CHECK HAS NOT RUN YET.
+      //
+      // Two wrong answers are available and both were shipped once:
+      //   - `current` — the defect this round is about: an edit followed immediately by a
+      //     query answered from the previous bytes and called them current;
+      //   - `stale` — claiming work nobody proved, which turned a read-only session into a
+      //     permanently stale graph and a permanently walking tree.
+      //
+      // So ask the SAME read-only question the check will ask, right now. It is a stat
+      // walk (the pass's own comparison, no writes), it resolves this answer instead of
+      // guessing, and it keeps a read-only stream `current` — which is the truth. If it
+      // finds a change the answer is `stale` (proved) and the pass that is already
+      // scheduled indexes it; if it cannot read the tree it falls through to the
+      // honest `indexing`.
+      const graph = graphs.get(cwd)
+      if (graph !== undefined) {
+        let changed = true
+        try {
+          changed = projectChanged(graph, cwd)
+        } catch {
+          changed = true
+        }
+        if (!changed) {
+          // The walk already answered the check's question, so the check does not owe
+          // another one: clearing the flag is what keeps a stream of queries in one
+          // window from walking the tree per query.
+          queue.settleCheck(cwd)
+          return { freshness: 'current', note: freshnessNote('current', meta.truncated, meta.removalSkipped) }
+        }
+        const extra = freshnessNote('current', meta.truncated, meta.removalSkipped)
+        return {
+          freshness: 'stale',
+          note: `A change in the working tree was detected and a re-index is running; this answer describes the previous state. Ask again in a moment.${extra === undefined ? '' : ` ${extra}`}`,
+        }
+      }
+      return {
+        freshness: 'indexing',
+        note: 'A tool call just finished in this project and a change check is running, so this answer may describe the state before it. Ask again in a moment.',
+      }
+    }
     // Reading the working tree's HEAD is the only way to know the graph is
     // behind; doing it per call keeps the answer honest without a background
     // timer that would re-index projects nobody is looking at.
@@ -291,14 +462,29 @@ export function apply(ctx: Context): void {
       void queue.request(cwd).catch(() => { /* recorded on the queue's status */ })
       return { freshness: 'stale', note: freshnessNote('stale', meta.truncated, meta.removalSkipped) }
     }
+    if (status?.state === 'stale') {
+      // A PROVED STALE GRAPH — a check compared the tree and found work, and the pass
+      // that follows has not settled yet. Two rules, both learned the hard way:
+      //
+      //   - The answer must NOT say `current`: the change is real.
+      //   - The answer must NOT start anything. This branch used to call
+      //     `refresh.notify(cwd)`, which re-armed the debounce on every query — so a
+      //     model asking twice kept the project walking, and a project at the
+      //     compensation ceiling was resurrected by a READ, which is exactly what that
+      //     ceiling exists to prevent. The queue already owns the work: the check that
+      //     proved the change scheduled the pass, and `awaitingRetry` says whether a
+      //     human has to.
+      const awaitingRetry = status.awaitingRetry
+      const reason = awaitingRetry
+        ? 'This project kept changing during every index pass, so automatic re-indexing stopped. Re-index it from the code graph settings page to try again.'
+        : 'A change in the working tree was detected and a re-index is running; this answer describes the previous state. Ask again in a moment.'
+      return {
+        freshness: 'stale',
+        note: [reason, freshnessNote('current', meta.truncated, meta.removalSkipped)].filter(part => part !== undefined).join(' '),
+      }
+    }
     return { freshness: 'current', note: freshnessNote('current', meta.truncated, meta.removalSkipped) }
   }
-
-  // Sync tool disposers and the routes' async disposer share one list. The type
-  // has to admit both: a `() => Promise<void>` assigned to a `() => void` slot
-  // type-checks, so an unawaited route teardown would only show up as a route
-  // still registered after unload.
-  const disposers: (() => void | Promise<void>)[] = []
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'codegraph_find',
@@ -347,22 +533,7 @@ export function apply(ctx: Context): void {
           },
         },
       },
-      render: (_args, value) => {
-        const result = value as FindResult
-        // The count goes ON the row, and the advice goes LAST. A caller count is what
-        // tells the model whether the next question is cheap or expensive: at 7
-        // matches a text search is the right tool, at 482 it costs ~15k tokens and a
-        // judgement per line. Measured: without the count the model reached for grep
-        // on both, because nothing in the answer said how large the question was.
-        const lines = result.symbols.map((symbol) => {
-          const row = `- ${formatSymbol(symbol)} — ${String(symbol.references)} call site(s)`
-          return symbol.references > 20
-            ? `${row} (large: \`codegraph_impact("${symbol.id}")\` is cheaper than searching)`
-            : row
-        })
-        const head = `codegraph_find: ${String(result.symbols.length)} match(es)${result.truncated ? ' (truncated)' : ''}`
-        return [{ type: 'text', text: [head, ...(result.note === undefined ? [] : [`note: ${result.note}`]), ...lines].join('\n') }]
-      },
+      render: (_args, value) => renderFind(value as FindResult),
     },
     async execute(args, exec) {
       const cwd = requireCwd(exec.agent)
@@ -472,71 +643,29 @@ export function apply(ctx: Context): void {
                     },
                   },
                 },
+                // Each group reports its OWN cut, because they are cut independently:
+                // a class can have two subclasses and three hundred implementers, and
+                // one boolean for the answer cannot say which of those lists is a
+                // sample. Optional so an answer that carries no cut stays as small as
+                // it was (and `dropUndefined` removes the absent ones).
+                total: { type: 'number' },
+                truncated: { type: 'boolean' },
               },
+            },
+          },
+          // Per-list counts. Optional, and additive: `truncated` and `total` above keep
+          // their existing meaning for any consumer that already reads them.
+          lists: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              references: listMetaSchema(),
+              imports: listMetaSchema(),
             },
           },
         },
       },
-      render: (_args, value) => {
-        const result = value as ImpactResult
-        if (result.target === undefined) {
-          // THREE different situations, and they must not read alike:
-          //   - the name is not declared anywhere;
-          //   - the name is declared several times, so no edge was ever built for it;
-          //   - something else went wrong (a failure note is carried).
-          if (result.candidates.length > 0) {
-            const lines = [
-              `codegraph_impact: "${String((_args as { symbol?: string }).symbol ?? '')}" is declared ${String(result.ambiguity)} time(s), so no reference edges were built for it. Pass one of these ids:`,
-              ...result.candidates.map(candidate => `- ${formatSymbol(candidate)} (id: ${candidate.id})`),
-              'An ambiguous name is not an absent one: this answer says nothing about how many callers exist. Verify with a text search before changing it.',
-            ]
-            return [{ type: 'text', text: lines.join('\n') }]
-          }
-          return [{ type: 'text', text: `codegraph_impact: no symbol named that in this project${result.note === undefined ? '' : `\nnote: ${result.note}`}` }]
-        }
-        // TWO numbers, each labelled with what it actually counts.
-        //
-        // This line used to read `referenced from ${referencing.length} file(s)`,
-        // and `referencing` is one row per EDGE — so a symbol with 664 call sites
-        // across 110 files was announced as "664 file(s)". That is the same defect
-        // the overview had (203 distinct callers vs 664 call sites): a label that
-        // names a different quantity than the number beside it. The count is call
-        // sites, the file count is deduplicated from the rows.
-        const referrerFiles = new Set(result.referencing.map(ref => ref.path)).size
-        const lines = [
-          `codegraph_impact: ${formatSymbol(result.target)}`,
-          ...(result.note === undefined ? [] : [`note: ${result.note}`]),
-          // The TOTAL leads when the list was cut, because the sample is not the
-          // answer: "664 reference(s), 40 shown" tells the reader the size of what
-          // they are looking at, which "40 reference(s) (truncated)" does not.
-          ...(result.truncated
-            ? [
-                `referenced from ${String(result.total)} reference(s) — ${String(result.referencing.length)} shown, across ${String(referrerFiles)} file(s):`,
-                ...result.referencing.map(ref => `- ${ref.path}:${String(ref.line)}`),
-                `TRUNCATED: ${String(result.total - result.referencing.length)} more reference(s) exist. This is a SAMPLE, not the complete list — verify with a text search before concluding anything about callers.`,
-              ]
-            : [
-                `referenced from ${String(result.total)} reference(s) across ${String(referrerFiles)} file(s):`,
-                ...result.referencing.map(ref => `- ${ref.path}:${String(ref.line)}`),
-              ]),
-          ...(result.imports.length === 0 ? [] : ['its file imports:', ...result.imports.map(path => `- ${path}`)]),
-          // The other relationships, each under its own heading. A class that
-          // implements an interface does not call it, so these are not callers — and
-          // "who implements this" is the question a reader has about an interface.
-          ...result.related.flatMap(group => [
-            `${group.kind === 'type_refs' ? 'mentioned in a signature' : group.kind === 'extends' ? 'derived from this' : 'implements this'} (${String(group.rows.length)}):`,
-            ...group.rows.map(row => `- ${row.path}:${String(row.line)}${row.name === undefined ? '' : ` (${row.name})`}`),
-          ]),
-          // An empty list is the one answer that reads as "safe to change", and it is
-          // also the answer name-only resolution produces for a call through an
-          // interface, a dynamic dispatch, or a variable forwarding path. Said every
-          // time, not only when something was truncated.
-          ...(result.referencing.length === 0 && result.total === 0
-            ? ['No direct callers found. That is NOT "safe to change": a call through an interface, a dynamic dispatch or a variable holds no name to resolve, so it leaves no edge. Verify with a text search.']
-            : []),
-        ]
-        return [{ type: 'text', text: lines.join('\n') }]
-      },
+      render: (args, value) => renderImpact(args, value as ImpactResult),
     },
     async execute(args, exec) {
       const cwd = requireCwd(exec.agent)
@@ -547,8 +676,10 @@ export function apply(ctx: Context): void {
         // An ambiguous name must not render like an absent one. `resolveSymbol`
         // answers undefined for both, and the previous version said "no unambiguous
         // symbol matched" with nothing to act on — measured: `streamWithDeltas` is
-        // declared twice, every edge to it is dropped as ambiguous, and the answer
-        // read as "no callers".
+        // declared twice and the answer read as "no callers". The edges are built now
+        // (see `parse.ts`'s `linkTargets`), so the sentence names the declarations
+        // that share the name and asks for one of them rather than claiming the
+        // graph holds nothing.
         const shared = ambiguousCandidates(graph, args.symbol, 5)
         return dropUndefined({
           freshness,
@@ -557,10 +688,14 @@ export function apply(ctx: Context): void {
           referencing: [],
           imports: [],
           related: [],
+          // No list is missing from THIS answer: it carries no rows at all, so
+          // nothing was cut. The ambiguity flag is what says it is not an answer
+          // about callers.
           truncated: false,
           total: 0,
           candidates: shared.candidates,
           ambiguity: shared.total,
+          lists: { references: { shown: 0, total: 0, truncated: false }, imports: { shown: 0, total: 0, truncated: false } },
         }) satisfies ImpactResult
       }
       const referencing = referencesTo(graph, target.id, MAX_ROWS)
@@ -576,13 +711,27 @@ export function apply(ctx: Context): void {
         target,
         referencing: referencing.rows,
         imports: imports.rows,
-        related: related.groups.map(group => ({ kind: group.kind, rows: group.rows })),
+        // Each group carries its own cut. The rows are rebuilt as mutable arrays
+        // because the output schema describes what a JSON snapshot carries; the
+        // query layer types them `readonly` on purpose.
+        related: related.groups.map(group => ({
+          kind: group.kind,
+          rows: group.rows.map(row => ({ path: row.path, line: row.line, kind: row.kind, name: row.name })),
+          total: group.total,
+          truncated: group.truncated,
+        })),
         // Every list in this answer reports whether it was cut: an incomplete list
         // of callers read as complete is the one failure that silently produces
-        // wrong code rather than a wrong answer.
+        // wrong code rather than a wrong answer. The aggregate stays for consumers
+        // that only ask "is anything missing"; the per-list counts are what the
+        // render uses, because the aggregate cannot say WHICH list.
         truncated: referencing.truncated || imports.truncated || related.truncated,
         total: referencing.total,
         candidates: [],
+        lists: {
+          references: { shown: referencing.rows.length, total: referencing.total, truncated: referencing.truncated },
+          imports: { shown: imports.rows.length, total: imports.total, truncated: imports.truncated },
+        },
       }) satisfies ImpactResult
     },
   })))
@@ -785,60 +934,7 @@ export function apply(ctx: Context): void {
           },
         },
       },
-      render: (_args, value) => {
-        const result = value as ContextResult
-        if (result.file !== undefined) {
-          // The outline, rendered as an outline: one line per declaration with its
-          // caller count, so "which of these is the public surface" is readable
-          // without asking again.
-          const lines = [
-            `codegraph_context: ${result.file.path} declares ${String(result.file.symbols.length)} symbol(s)${result.truncated ? ' (TRUNCATED — more exist)' : ''}`,
-            ...(result.note === undefined ? [] : [`note: ${result.note}`]),
-            // Exported first (the query orders them so) and marked, because "what
-            // does this module expose" is the question this branch exists for.
-            ...result.file.symbols.map(entry => {
-              const parent = entry.parent === undefined ? '' : `${entry.parent}.`
-              const mark = entry.exported ? ' [exported]' : ''
-              return `- ${entry.kind} ${parent}${entry.name}:${String(entry.line)} — ${String(entry.references)} call site(s)${mark}`
-            }),
-            ...(result.file.reExports.length === 0
-              ? []
-              : ['re-exports these modules whole:', ...result.file.reExports.map(path => `- ${path}`)]),
-            ...(result.imports.length === 0 ? [] : ['imports:', ...result.imports.map(path => `- ${path}`)]),
-            'Pass any id above as `symbol` to expand it, or use `codegraph_impact` for what a change would touch.',
-          ]
-          return [{ type: 'text', text: lines.join('\n') }]
-        }
-        if (result.overview !== undefined) {
-          const o = result.overview
-          const lines = [
-            `codegraph_context: project overview — ${String(o.files)} files, ${String(o.symbols)} symbols, ${String(o.edges)} edges${o.truncated ? ' (lists truncated)' : ''}`,
-            ...(result.note === undefined ? [] : [`note: ${result.note}`]),
-            `languages: ${o.byLanguage.map(entry => `${entry.lang} ${String(entry.files)}`).join(', ')}`,
-            `entry candidates (${String(o.entryCandidates.length)}) — nothing imports these:`,
-            ...o.entryCandidates.map(entry => `- ${entry.path} (${String(entry.symbols)} symbol(s))${entry.symbol === undefined ? '' : ` starts at ${entry.symbol.kind} ${entry.symbol.name}:${String(entry.symbol.line)}`}`),
-            `most referenced (${String(o.hubs.length)}):`,
-            ...o.hubs.map(hub => `- ${formatSymbol(hub.symbol)} — ${String(hub.references)} referrer(s)`),
-            'Pass `symbol` (an id or a unique name) to expand any one of these.',
-          ]
-          return [{ type: 'text', text: lines.join('\n') }]
-        }
-        if (result.symbol === undefined) {
-          return [{ type: 'text', text: `codegraph_context: no unambiguous symbol matched${result.note === undefined ? '' : `\nnote: ${result.note}`}` }]
-        }
-        const lines = [
-          `codegraph_context: ${formatSymbol(result.symbol)}`,
-          ...(result.note === undefined ? [] : [`note: ${result.note}`]),
-          `same file (${String(result.siblings.length)}):`,
-          ...result.siblings.map(symbol => `- ${formatSymbol(symbol)}`),
-          ...(result.calls.length === 0 ? [] : ['calls made from here:', ...result.calls.map(edge => `- ${edge.name ?? '?'} at line ${String(edge.line)}`)]),
-          ...(result.calledBy.length === 0 ? [] : ['called by:', ...result.calledBy.map(edge => `- ${edge.path ?? '?'}:${String(edge.line)}`)]),
-          ...(result.imports.length === 0 ? [] : ['imports:', ...result.imports.map(path => `- ${path}`)]),
-          ...(result.documents.length === 0 ? [] : ['described in:', ...result.documents.map(doc => `- ${doc.path}:${String(doc.line)}`)]),
-          ...(result.truncated === true ? [`TRUNCATED: at least one list was cut at ${String(MAX_ROWS)} rows. Treat these as a sample, not the whole neighbourhood.`] : []),
-        ]
-        return [{ type: 'text', text: lines.join('\n') }]
-      },
+      render: (_args, value) => renderContext(value as ContextResult, MAX_ROWS),
     },
     async execute(args, exec) {
       const cwd = requireCwd(exec.agent)
@@ -1012,11 +1108,18 @@ export function apply(ctx: Context): void {
   }), 'plugin-codegraph: project overview as runtime context')
 
   ctx.effect(() => async () => {
-    // Awaited, in order: the routes' disposer is async, and a route left
-    // registered after unload collides on the next mount — a failure that lands
-    // on the boot audit rather than on a warning. Queue first, so no pass is
-    // still writing when the graphs close underneath it (P2-2).
-    queue.dispose()
+    // THE ORDER IS THE CONTRACT, and the first await is the one that was missing.
+    //
+    // 1. `queue.dispose()` aborts every pass in flight AND waits for them to settle.
+    //    Without the wait the next step closed graph handles underneath a phase 2 or
+    //    phase 3 that was still committing batches — or running its recovery path's
+    //    `forgetStatCache` — so the teardown itself produced a write against a closed
+    //    database, or left a write spanning a reload.
+    // 2. Only then the tools and routes come down (a route left registered after unload
+    //    collides on the next mount, which lands on the boot audit rather than a warning).
+    // 3. Only then are the graphs closed. Nothing can reach them now: the queue refuses
+    //    new work, the tools are gone and `graphs` is the only handle owner.
+    await queue.dispose()
     for (const dispose of disposers.splice(0)) await dispose()
     for (const graph of graphs.values()) {
       try { graph.close() } catch { /* already closed */ }

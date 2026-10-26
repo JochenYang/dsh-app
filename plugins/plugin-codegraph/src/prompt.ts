@@ -15,8 +15,10 @@
  *
  * Deliberately bounded to ~15 lines. Context is budget spent on every turn, and
  * a full symbol list would cost more than the reading it saves. Five entry
- * candidates and five hubs are enough to name the shape; each line carries an id
- * or a unique name, so `codegraph_context(symbol)` expands any one of them.
+ * candidates and five hubs are enough to name the shape; every line is queryable
+ * as printed — an entry row's path goes to `codegraph_context("<path>")` and a hub
+ * row's symbol id goes to `codegraph_context(symbol)`. A name would not do for the
+ * hub rows: two declarations can share one, and the selector then refuses it.
  *
  * @module @dsh-app/plugin-codegraph/prompt
  */
@@ -82,14 +84,16 @@ export interface OverviewInputs {
  *
  * The five states, each for a reason:
  *   - `indexing` — no shape to report yet, and "0 files" would read as a fact
- *     about the project rather than about the pass.
+ *     about the project rather than about the pass. It says THAT instead of
+ *     returning nothing: a silent block reads as "this project has no graph", and
+ *     the first index of a real repository is exactly when a session asks.
  *   - `failed` — the last pass is terminal until a human retries, so any shape it
  *     left has no bounded age. It says the failure and its reason instead of
  *     asserting a shape; silence would drop the only surface that can explain it.
  *   - `stale` — a shape worth reporting, plus the sentence that says it is behind.
  *     This lags the tools by one observation: the queue flips only after a tool
- *     call or a pass noticed HEAD moved, because deciding staleness is async and
- *     this provider must return synchronously.
+ *     call or a pass noticed HEAD moved or a tool result reported a change, because
+ *     deciding staleness is async and this provider must return synchronously.
  *   - `current` — the shape, plus whatever the last pass recorded about its own
  *     completeness.
  *
@@ -97,7 +101,20 @@ export interface OverviewInputs {
  * @returns the block's text, or '' to contribute nothing.
  */
 export function overviewContextText(inputs: OverviewInputs): string {
-  if (inputs.state === 'indexing') return ''
+  if (inputs.state === 'indexing') {
+    // The pass is building the graph right now, so there is no shape to report and
+    // no symbol to look up — and saying NOTHING was the wrong silence: a model that
+    // sees no block at all concludes this project has no graph (or no structure) and
+    // falls back to listing directories. Measured need: the first index of a real
+    // repository takes tens of seconds, which is exactly the window in which a
+    // session asks its first orientation question.
+    //
+    // The text is bounded and carries no numbers, deliberately. "0 files" would be
+    // a fact about the pass; any other count would be a fact about a half-filled
+    // graph. What a reader can act on is that the answer is coming and that an empty
+    // tool answer right now means "not yet", not "nothing here".
+    return 'Code graph: the index for this project is being built right now, so no project shape is reported here and `codegraph_*` answers are incomplete until it finishes. An empty or partial answer in the meantime means the pass has not reached that part of the tree yet — not that the project lacks it. Ask again after a file read or two, or proceed by reading files.'
+  }
   if (inputs.state === 'failed') {
     // The recorded reason goes INTO the sentence: "failed: EPERM ..." lets a reader
     // tell an unreadable root from a corrupt database without opening anything,
@@ -134,13 +151,24 @@ export function renderOverviewContext(
     .join(', ')
   lines.push(`Code graph for this project (${String(overview.files)} files, ${String(overview.symbols)} symbols, ${String(overview.edges)} edges${languages === '' ? '' : `; ${languages}`}).`)
   if (note !== undefined) lines.push(note)
+  // WHAT THE COUNTS COVER, and where an answer stops. Two sentences, because both
+  // halves are things a reader would otherwise assume wrongly in opposite
+  // directions: a symbol count with no stated scope reads as "the whole project"
+  // (it is the project's indexable files only), and a graph of names reads as a
+  // type checker (it is name resolution — no types, no dynamic dispatch). Turns
+  // that spend a whole block on neither still get this line, which is why it is
+  // one line and not a section.
+  lines.push('Covers the project\u2019s indexed files: imports, calls, extends/implements, signature type references, and the docs that name a symbol. Names are resolved statically (no type inference, no dynamic dispatch), so a dependency it cannot name may be missing — read the source and the tests before changing shared code.')
 
   // Sized to the project, not fixed: five named a tenth of a monorepo and more
   // than a small library has. See `rowBudget`.
   const budget = rowBudget(overview.files)
   const entries = overview.entryCandidates.slice(0, budget)
   if (entries.length > 0) {
-    lines.push('Files nothing else imports — where a project starts, or a library\u2019s public surface:')
+    // A PATH, not an id: `codegraph_context("<path>")` answers a file outline, and
+    // the path is already the row's own first column — so this list is queryable
+    // without spending a single extra token on a selector.
+    lines.push('Files nothing else imports \u2014 where a project starts, or a library\u2019s public surface (query one with `codegraph_context("<path>")`):')
     for (const entry of entries) {
       const head = entry.symbol === undefined ? '' : ` (starts at ${entry.symbol.kind} ${entry.symbol.name})`
       lines.push(`- ${entry.path}${head}`)
@@ -149,9 +177,15 @@ export function renderOverviewContext(
 
   const hubs = overview.hubs.slice(0, Math.min(budget, MAX_HUBS_CAP))
   if (hubs.length > 0) {
-    lines.push('Most-referenced symbols — read these first to learn the vocabulary:')
+    // The full symbol ID leads each row, so "expand one of these" is an instruction
+    // a reader can follow by copying. It used to say "pass any id above" while the
+    // row carried no id at all — only a name, which `resolveSymbol` refuses when
+    // two declarations share it (and `projectOverview` admits names declared twice).
+    // The id already contains kind, path and name, so it REPLACES that text rather
+    // than being appended to it: copyable and no longer than what it replaces.
+    lines.push('Most-referenced symbols \u2014 read these first to learn the vocabulary (each id is directly queryable):')
     for (const hub of hubs) {
-      lines.push(`- ${hub.symbol.kind} ${hub.symbol.name} \u2014 ${hub.symbol.path}:${String(hub.symbol.line)}, ${String(hub.references)} call site(s)`)
+      lines.push(`- ${hub.symbol.id} \u2014 ${String(hub.references)} call site(s)`)
     }
   }
 
@@ -166,12 +200,7 @@ export function renderOverviewContext(
     'Reach for these before reading files when the question is about dependencies or structure:',
     '- "who calls this / what breaks if I change it" → `codegraph_impact(symbol)` (a keyword search cannot tell a call from a definition or a comment)',
     '- "what does this file define / what are the methods of this class" → `codegraph_context("<file path>")` (no keyword search can answer this: definitions do not name their class)',
-    '- "what is this symbol\u2019s neighbourhood" → `codegraph_context(symbol)`; pass any id above to expand it.',
-    // The graph knows structure, and structure is exactly what a reader re-derives
-    // from scratch on the next session. Naming the write path here is the one place
-    // it costs nothing: this block is already in context, and a session that spent
-    // three queries working out what a file is for should not pay for it twice.
-    'What you work out here, save with `memory_save` before the task ends — the graph re-derives structure, not conclusions.',
+    '- "what is this symbol\u2019s neighbourhood" → `codegraph_context(symbol)`, passing one of the ids above.',
   )
   return lines.join('\n')
 }

@@ -97,6 +97,14 @@ export interface ProjectRow {
   readonly indexedAt: number
   readonly queued: boolean
   readonly failure: string | undefined
+  /**
+   * True when the project is `stale` because automatic re-indexing gave up.
+   *
+   * The queue stops after a bounded number of compensating passes; without this field the
+   * settings page could only say "stale", which is the same word a change that is about
+   * to be scanned produces. The reason a user has to act is exactly this flag.
+   */
+  readonly awaitingRetry: boolean
   /** Present when a pass has completed at least once. */
   readonly lastOutcome: {
     readonly parsed: number
@@ -171,6 +179,7 @@ function projectRows(options: CodegraphRoutesOptions): ProjectRow[] {
       indexedAt: status.indexedAt,
       queued: status.queued,
       failure: status.failure,
+      awaitingRetry: status.awaitingRetry,
       lastOutcome: status.lastOutcome,
     }))
     .sort((left, right) => right.indexedAt - left.indexedAt)

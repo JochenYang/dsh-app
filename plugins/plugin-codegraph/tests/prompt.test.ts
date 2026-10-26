@@ -57,9 +57,23 @@ describe('renderOverviewContext', () => {
     assert.equal(renderOverviewContext(overview({ files: 0 }), 'current', undefined), '')
   })
 
-  it('says nothing while the graph is still being built', () => {
-    // The pass has no shape to report mid-flight; the tools answer `indexing`.
-    assert.equal(renderOverviewContext(overview(), 'indexing', undefined), '')
+  it('says the index is being built rather than nothing at all', () => {
+    // The pass has no shape to report mid-flight, and it used to contribute '' — a
+    // silence a model reads as "this project has no graph", in exactly the window a
+    // session asks its first orientation question (a first pass on a real repository
+    // takes tens of seconds).
+    //
+    // What it must NOT do is name a number: "0 files" would be a fact about the pass
+    // reported as a fact about the project, and any partly-filled count is worse.
+    const text = renderOverviewContext(overview(), 'indexing', undefined)
+    assert.equal(text, '', 'the shape branch still refuses to invent a shape')
+    const indexing = overviewContextText({
+      state: 'indexing', failure: undefined, overview: undefined, truncated: false, removalSkipped: false,
+    })
+    assert.match(indexing, /being built/u)
+    assert.match(indexing, /incomplete/u, 'the reader is told an empty answer means "not yet"')
+    assert.doesNotMatch(indexing, /\b\d+\s+files\b/u, 'no count is invented for a pass that has not finished')
+    assert.ok(indexing.length < 600, `the status must stay bounded, got ${String(indexing.length)} chars`)
   })
 
   it('carries the freshness sentence when the graph is behind', () => {
@@ -84,12 +98,13 @@ describe('renderOverviewContext', () => {
     // a tenth of a 1771-file monorepo, and more than a 20-file library has. The
     // ceiling is what keeps this text — spent on every turn — bounded.
     const entries = lines.filter(line => /^- src\/e/u.test(line)).length
-    const hubs = lines.filter(line => /^- function h/u.test(line)).length
+    const hubs = lines.filter(line => /^- src\/h\d+\.ts#/u.test(line)).length
     assert.ok(entries >= 5 && entries <= 12, `entry candidates within the 5..12 budget, got ${String(entries)}`)
     assert.equal(hubs, entries, 'both lists use the same budget')
-    // 1 headline + 1 entries heading + N entries + 1 hubs heading + N hubs
-    // + 1 trigger heading + 3 triggers + 1 memory line.
-    assert.ok(lines.length <= 33, `expected at most 33 lines, got ${String(lines.length)}`)
+    // 1 headline + 1 coverage line + 1 entries heading + N entries + 1 hubs heading
+    // + N hubs + 1 trigger heading + 3 triggers, one line each.
+    const ceiling = 8 + 2 * 12
+    assert.ok(lines.length <= ceiling, `expected at most ${String(ceiling)} lines, got ${String(lines.length)}`)
   })
 
   it('ends with the concrete triggers, not a generic suggestion', () => {
@@ -101,6 +116,44 @@ describe('renderOverviewContext', () => {
     assert.match(tail, /who calls this/u)
     assert.match(tail, /what does this file define/u)
     assert.match(tail, /codegraph_impact/u)
+  })
+
+  it('prints a copyable id for every hub, so "expand one of these" is followable', () => {
+    // The defect: the block said "pass any id above", and the hub rows printed a
+    // KIND, a NAME, a path and a line — no id. `resolveSymbol` accepts an id or a
+    // UNIQUE name, and `projectOverview`'s hub query admits names declared twice (it
+    // only excludes more than two), so the instruction was unfollowable exactly on
+    // the rows it pointed at.
+    const text = renderOverviewContext(overview(), 'current', undefined)
+    assert.match(text, /^- src\/util\.ts#function:shared — 40 call site\(s\)$/mu,
+      'the hub row leads with the full symbol id, which is what the tool accepts')
+    assert.doesNotMatch(text, /pass any id above/iu, 'the instruction now matches what the rows carry')
+    // And the entry rows stay queryable by path — no id needed, because a path is
+    // itself a valid `codegraph_context` selector (it answers the file's outline).
+    assert.match(text, /^- src\/cli\.ts/mu)
+    assert.match(text, /codegraph_context\("<path>"\)/u, 'the entry heading names how to query its own column')
+  })
+
+  it('states what the counts cover and where static name resolution stops', () => {
+    // Without this, a symbol count reads as "the whole project" and a graph of names
+    // reads as a type checker. Both wrong assumptions change how a model acts on the
+    // numbers, and one line is enough to prevent both.
+    const text = renderOverviewContext(overview(), 'current', undefined)
+    assert.match(text, /indexed files/u, 'the scope of the counts is stated')
+    assert.match(text, /imports, calls, extends\/implements, signature type references/u, 'the relations it holds')
+    assert.match(text, /no type inference, no dynamic dispatch/u, 'and the boundary of name resolution')
+    assert.match(text, /read the source and the tests/u, 'plus what to do about it')
+    // It is ONE line: this text is spent on every turn.
+    assert.equal(text.split('\n').filter(line => /no type inference/u.test(line)).length, 1)
+  })
+
+  it('does not couple the plugin to a memory tool', () => {
+    // The block used to end with "save with `memory_save`". This plugin owns no
+    // memory behaviour, and the suite ships with and without that plugin; naming a
+    // tool another plugin provides is how one plugin starts failing when the other
+    // is absent — the model calls a tool nothing registered.
+    const text = renderOverviewContext(overview(), 'current', undefined)
+    assert.doesNotMatch(text, /memory_save|memory/u)
   })
 })
 
@@ -122,10 +175,15 @@ describe('overviewContextText — the state matrix', () => {
     assert.doesNotMatch(text, /file budget/u)
   })
 
-  it('says nothing while indexing, because there is no shape yet', () => {
-    // "0 files" would be a statement about the project rather than about the pass.
-    assert.equal(overviewContextText(inputs({ state: 'indexing', overview: undefined })), '')
-    assert.equal(overviewContextText(inputs({ state: 'indexing' })), '')
+  it('says the index is being built, and asserts no shape', () => {
+    // "0 files" would be a statement about the project rather than about the pass;
+    // a silent block was the other wrong answer, because it reads as "no graph here".
+    for (const inputsUnderTest of [inputs({ state: 'indexing', overview: undefined }), inputs({ state: 'indexing' })]) {
+      const text = overviewContextText(inputsUnderTest)
+      assert.match(text, /being built/u)
+      assert.doesNotMatch(text, /120 files/u, 'and no shape is asserted while it builds')
+      assert.doesNotMatch(text, /\b0 files\b/u, 'nor a shape-shaped zero')
+    }
   })
 
   it('announces a failed pass with its reason, and reports no shape', () => {
