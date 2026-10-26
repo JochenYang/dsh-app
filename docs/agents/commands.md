@@ -78,6 +78,7 @@ not moved does not need a run.
 | `probe-routes.cjs` | after a kernel-line bump or any move of the route carriers | what the W14 routing decision rests on (S3–S6) |
 | `probe-effort-hover.cjs` | after touching `plugin-effort`'s stylesheet, track geometry or tick rules | the REAL sheet's rendered behaviour in Chromium |
 | `probe-diff-ruler.cjs` | after touching the Git panel's ruler or its styles | a mark's PAINTED height against its true line fraction |
+| `probe-startup.cjs` | after touching `static/startup.html` layout, theme, whale rendering or progress states | the REAL splash in Chromium: light/dark and reduced-motion, all five stages, DPR, minimum-window and English label layout, pause and failure recovery |
 | `probe-codegraph-langs.cjs` | after touching `plugin-codegraph`'s `styles.ts`, its language-row markup, or the row's action button | a language row LAID OUT at the grid's 240px floor: the action label stays on one line, the name is not truncated, the tooltip ANCHOR box equals the width of the word it labels (a flex box measured 164px for a 31px word, which is where the bubble landed), and the click target keeps its width — plus the component-side structure a stylesheet measurement cannot see |
 
 **`plugin-codegraph/scripts/fetch-ci-grammars.mjs`** is not a probe: it is the CI

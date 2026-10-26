@@ -80,7 +80,7 @@ window.__dshStartupShowFailure = function (config) {
     --step-ring: rgba(100, 116, 139, 0.55);
     --step-current-bg: rgba(37, 99, 235, 0.08);
     --step-current-ring: rgba(37, 99, 235, 0.14);
-    --whale-halo: rgba(59, 130, 246, 0.16);
+    --whale-halo: rgba(59, 130, 246, 0.10);
     --brand-app-gradient: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
     --rail-sheen: rgba(255, 255, 255, 0.38);
     --step-done-text: #334155;
@@ -727,6 +727,149 @@ window.__dshStartupShowFailure = function (config) {
     to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
   }
 
+  /* ========================================================== Visual Refinement */
+  /* The whale is the brand image; the boot message and progress are the task.
+     This refinement layer intentionally overrides the base stage above; responsive
+     rules below add constraints and never replace the state machine. */
+  .stage-monolith {
+    max-width: 640px;
+    padding: 40px 32px 32px;
+    transform: translateY(-1vh);
+  }
+
+  .whale-stage-wrap {
+    width: min(38vmin, 300px);
+    height: min(29vmin, 228px);
+    margin-bottom: 12px;
+  }
+
+  .whale-stage-wrap::before { inset: -8% -12%; }
+
+  .brand-row { gap: 11px; margin-bottom: 22px; }
+
+  .brand-logo-badge,
+  .brand-logo-badge .brand-logo-img {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+  }
+
+  .brand-logo-badge {
+    box-shadow: 0 5px 16px rgba(37, 99, 235, 0.24), 0 0 0 1px rgba(37, 99, 235, 0.10);
+  }
+
+  .brand-title { gap: 6px; }
+  .brand-dsh, .brand-app { font-size: 26px; letter-spacing: -0.025em; }
+
+  .version-pill {
+    margin-left: 2px;
+    padding: 2px 7px;
+    border-color: transparent;
+    background: transparent;
+    font-size: 10.5px;
+  }
+
+  #startup-status {
+    margin-bottom: 8px;
+    min-height: 32px;
+    font-size: 21px;
+    font-weight: 650;
+    line-height: 1.5;
+    letter-spacing: -0.01em;
+  }
+
+  #startup-hint {
+    margin-bottom: 32px;
+    font-size: 13px;
+    line-height: 1.65;
+  }
+
+  .progress-section {
+    width: min(520px, 100%);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .progress-bar-wrap { height: 7px; }
+
+  .progress-bar-wrap[data-mode="determinate"] #startup-bar-fill::after { display: none; }
+  #startup-bar-head { width: 28px; }
+
+  #startup-percent {
+    min-width: 40px;
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .step-rail {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px 4px;
+    width: min(720px, calc(100vw - 64px));
+    margin-bottom: 34px;
+  }
+
+  .step-rail li.step-item {
+    justify-content: center;
+    gap: 7px;
+    min-width: 0;
+    margin: 0;
+    padding: 4px 2px;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+
+  .step-rail li.sep { display: none; }
+  .step-rail li.step-item[data-state="current"] { background: transparent; }
+  .step-rail li.step-item[data-state="current"] .step-badge::after { display: none; }
+  .step-badge { width: 14px; height: 14px; }
+  .step-text { min-width: 0; }
+
+  .footer-wrap { gap: 16px; margin-top: 0; }
+  .footer-rule { flex-basis: 36px; }
+  #startup-saying { font-size: 12px; letter-spacing: 0.02em; }
+
+  #startup-pause,
+  #startup-error button { min-height: 36px; }
+
+  #startup-pause:focus-visible,
+  #startup-error button:focus-visible {
+    outline: 2px solid var(--brand-accent);
+    outline-offset: 3px;
+  }
+
+  #startup-error { border-radius: 16px; }
+
+  @media (max-width: 1040px) {
+    .stage-monolith { padding-right: 24px; padding-left: 24px; }
+    .step-rail {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      max-width: 480px;
+      gap: 10px 12px;
+    }
+    .step-rail li.step-item { justify-content: flex-start; padding-left: 12px; }
+    .step-rail li.step-item:nth-child(7) { grid-column: 1 / 3; }
+    .step-rail li.step-item:nth-child(9) { grid-column: 3 / 4; }
+  }
+
+  @media (max-height: 720px) {
+    .stage-monolith { padding-top: calc(38px + 4vh); padding-bottom: 20px; transform: none; }
+    .whale-stage-wrap {
+      width: min(32vmin, 220px);
+      height: min(23vmin, 158px);
+      margin-bottom: 8px;
+    }
+    .brand-row { margin-bottom: 16px; }
+    .brand-logo-badge, .brand-logo-badge .brand-logo-img { width: 30px; height: 30px; }
+    .brand-dsh, .brand-app { font-size: 24px; }
+    #startup-status { min-height: 29px; font-size: 19px; }
+    #startup-hint { margin-bottom: 22px; }
+    .progress-section { margin-bottom: 18px; }
+    .step-rail { margin-bottom: 24px; }
+  }
+
   /* ========================================================== Reduced Motion */
   @media (prefers-reduced-motion: reduce) {
     .stage-monolith { animation: none; }
@@ -866,7 +1009,7 @@ window.__dshStartupShowFailure = function (config) {
     var WHALE_GRID = 60;
     var ART_CELLS_X = 60;
     var CELL = 0.18;
-    var TILE_SIZE = 0.06;
+    var TILE_SIZE = 0.076;
 
     var WHALE_B64 = [
       'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAOIABAAAAAPgH',
@@ -963,6 +1106,9 @@ window.__dshStartupShowFailure = function (config) {
     var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     function resizeCanvas() {
+      // Re-read the ratio on every resize: a window dragged between monitors of
+      // different scale would otherwise keep painting at the old ratio and go soft.
+      DPR = Math.min(2, window.devicePixelRatio || 1);
       var cssW = canvas.clientWidth || 360;
       var cssH = canvas.clientHeight || 300;
       canvasW = cssW;
@@ -1050,15 +1196,15 @@ window.__dshStartupShowFailure = function (config) {
      * from the desktop theme, because this page runs before the theme loads; the
      * gradient ends are this page's own choice and are not theme tokens.
      */
-    var INK_DARK = [230, 235, 245], ALPHA_DARK = 0.64;
-    var INK_LIGHT = [15, 23, 42], ALPHA_LIGHT = 0.76;
+    var INK_DARK = [230, 235, 245], ALPHA_DARK = 0.82;
+    var INK_LIGHT = [15, 23, 42], ALPHA_LIGHT = 0.92;
     // The brand colour is not one value: it runs from a lighter blue at the
     // whale's back to a deeper one at its belly, which gives the flat mosaic a
     // lit-from-above read. The two themes need opposite handling: on the pale
     // field the belly goes DEEPER (more contrast); on the dark field both ends
     // stay bright and only the saturation changes, because a darker belly there
     // would lose contrast instead of gaining depth.
-    var BRAND_LIGHT_TOP = [110, 175, 255], BRAND_LIGHT_BOTTOM = [37, 80, 200];
+    var BRAND_LIGHT_TOP = [82, 151, 235], BRAND_LIGHT_BOTTOM = [28, 67, 178];
     var BRAND_DARK_TOP = [191, 219, 254], BRAND_DARK_BOTTOM = [96, 165, 250];
     // Tile rows span roughly gy = -0.35 .. +0.35; this maps that to 0 (top) .. 1.
     var GRADIENT_SPAN = 0.7;
