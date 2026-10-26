@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.8] - 2026-10-26
+
+### 中文
+- 代码图：未提交的开发修改在任意工具结果后被增量索引，索引期间的新修改会补跑一次；概览与三个工具的文本不再夸大完整性与关系语义。
+- 启动页优化品牌与进度信息层级、点阵鲸鱼清晰度及小窗口步骤布局，同时保留启动、暂停和失败恢复行为。
+
+### English
+- Code graph: uncommitted edits are indexed incrementally after any tool result, a change made during a pass buys a compensating one, and the overview and tool text no longer overstate completeness or relation semantics.
+- Startup: refine brand and progress hierarchy, whale clarity, and small-window steps while preserving boot, pause, and failure recovery.
+
 ## [v0.17.7] - 2026-10-26
 
 ### 中文
