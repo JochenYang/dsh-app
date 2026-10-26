@@ -31,6 +31,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { CodegraphSection } from './client/section.tsx'
 import { GraphTab } from './client/graph-tab.tsx'
 import { CodegraphPage, CodegraphPanelIcon } from './client/page.tsx'
+import { mountNavIconPatch } from './client/nav-icon.ts'
 import { en as codegraphEn, NS as CODEGRAPH_NS, zh as codegraphZh } from './client/locales.ts'
 import type { CodegraphKey } from './client/locales.ts'
 import { adoptStyles } from './client/styles.ts'
@@ -82,6 +83,13 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(CODEGRAPH_NS)
 
   adoptStyles()
+  // The rail's own glyph. The shell falls back to a generic gear for any
+  // section id it does not know, so without this the code graph wears the same
+  // icon as every other unlisted row.
+  ctx.effect(
+    () => mountNavIconPatch(() => [t(SECTION_TITLE)]),
+    'dsh-app plugin-codegraph: nav icon patch',
+  )
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,
