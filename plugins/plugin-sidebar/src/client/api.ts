@@ -109,7 +109,7 @@ export interface GitActionValue {
 
 /** The host git routes. */
 export const gitApi = {
-  status(cwd: string, sessionId?: string): Promise<{ cwd: string, branch: string, detached: boolean, ahead: number | null, behind: number | null, entries: GitStatusEntry[] }> {
+  status(cwd: string, sessionId?: string): Promise<{ cwd: string, root: string, branch: string, detached: boolean, ahead: number | null, behind: number | null, entries: GitStatusEntry[] }> {
     return get(`${ROUTE_PREFIX}/git/status?cwd=${encodeURIComponent(cwd)}${sessionQuery(sessionId)}`)
   },
   show(cwd: string, sha: string, sessionId?: string): Promise<{ message: string, stat: string }> {

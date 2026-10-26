@@ -22,12 +22,13 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { ImageLightbox, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { FsApiError, gitApi } from './api.ts'
 import type { GitActionValue, GitBranchList, GitStatusEntry, HostText } from './api.ts'
 import { buildPathTree, type GitListShape, type GitTree, type GitTreeDir, type GitTreeFile } from './git-list.ts'
 import { diffRulerMarks, diffRulerScrollTop, parseDiffRows, type DiffLineKind, type DiffRulerMark } from './diff-ruler.ts'
+import { isBinaryDiffOnly, isPreviewableImage, mediaRouteUrl, workspaceAbsolutePath } from './media.ts'
 import { NS, type SidebarKey } from './locales.ts'
 
 /** The tab's namespace-bound translate, handed to the render helpers below. */
@@ -203,6 +204,80 @@ function DiffView(props: { text: string, truncated?: boolean, t: SidebarTranslat
   )
 }
 
+/**
+ * Resolve one repository path to its preview URL and render the image.
+ *
+ * Splitting this from {@link MediaPreview} keeps `document.baseURI` out of the
+ * component tree's own logic: the URL is computed once per (path, root) pair,
+ * and a base this app cannot address (no app origin) becomes the
+ * "unsupported" line rather than a request to a nonsense URL.
+ *
+ * @param props - repository-relative path, the repository root and the copy.
+ * @returns the preview, or the unsupported line.
+ */
+function PreviewOfImage(props: { path: string, root: string, t: SidebarTranslate }): ReactNode {
+  const src = useMemo(
+    () => mediaRouteUrl(document.baseURI, workspaceAbsolutePath(props.root, props.path)),
+    [props.path, props.root],
+  )
+  if (src === undefined) return <p className="dshAsb-hint">{props.t('sidebar.media.unsupported')}</p>
+  // `key` restarts the load state per source: without it, opening a second
+  // image would inherit the first one's "ready" and never show its own
+  // loading or failure line.
+  return <MediaPreview key={src} src={src} alt={props.path} t={props.t} />
+}
+
+/**
+ * The image preview of the right pane.
+ *
+ * It addresses the file through the host's authenticated `/api/file` route and
+ * paints it with a plain `<img>`, which is the only shape that renders SVG
+ * safely: the bytes reach an image element, never the document, so a committed
+ * SVG cannot script the app origin. Clicking opens the shared `ImageLightbox`
+ * primitive rather than a hand-rolled overlay — it owns the backdrop, Escape,
+ * focus restore and the portal that escapes a transformed ancestor.
+ *
+ * @param props - absolute source URL, description, click target and copy.
+ * @returns the preview, or a status line while loading or after a failure.
+ */
+function MediaPreview(props: {
+  src: string
+  alt: string
+  t: SidebarTranslate
+}): ReactNode {
+  const [state, setState] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const [zoomed, setZoomed] = useState(false)
+  const labels = {
+    dialog: props.t('sidebar.media.dialog'),
+    close: props.t('sidebar.media.close'),
+  }
+  return (
+    <div className="dshAsbGit-media">
+      <button type="button" className="dshAsbGit-mediaOpen"
+        disabled={state !== 'ready'}
+        aria-label={props.t('sidebar.media.open')}
+        onClick={() => { setZoomed(true) }}>
+        <img className="dshAsbGit-mediaImage" src={props.src} alt={props.alt}
+          decoding="async" referrerPolicy="no-referrer"
+          data-ready={state === 'ready' || undefined}
+          data-failed={state === 'failed' || undefined}
+          onLoad={() => { setState('ready') }}
+          onError={() => { setState('failed') }} />
+      </button>
+      {state === 'ready'
+        ? null
+        : (
+          <p className={state === 'failed' ? 'dshAsb-error' : 'dshAsb-hint'} role={state === 'failed' ? 'alert' : 'status'}>
+            {props.t(state === 'failed' ? 'sidebar.media.failed' : 'sidebar.media.loading')}
+          </p>
+        )}
+      {zoomed && state === 'ready'
+        ? <ImageLightbox src={props.src} alt={props.alt} labels={labels} onClose={() => { setZoomed(false) }} />
+        : null}
+    </div>
+  )
+}
+
 /** Small chevron for directory group rows. */
 function ChevronGlyph({ open }: { open: boolean }): ReactNode {
   return (
@@ -239,6 +314,15 @@ export function GitTab(props: GitTabProps): ReactNode {
   /** Tree (grouped by top-level directory) or a flat list of full paths. */
   const [shape, setShape] = useState<GitListShape>('tree')
   const [repoFiles, setRepoFiles] = useState<readonly string[] | undefined>(undefined)
+  /**
+   * The repository root Git reported with the last status read.
+   *
+   * Not the session cwd: `status --porcelain` and `ls-files --full-name` both
+   * spell paths relative to the ROOT, so a session opened in a subdirectory
+   * would otherwise resolve every row against the wrong base. Null until the
+   * first status answer, and the preview falls back to the cwd until then.
+   */
+  const [repoRoot, setRepoRoot] = useState<string | undefined>(undefined)
   const [repoFilesTruncated, setRepoFilesTruncated] = useState(false)
   const [filesLoading, setFilesLoading] = useState(false)
   const [filesError, setFilesError] = useState<string | undefined>(undefined)
@@ -313,6 +397,7 @@ export function GitTab(props: GitTabProps): ReactNode {
       result => {
         if (!isCurrent(generation, targetCwd, targetSessionId) || statusRequestId.current !== requestId) return false
         setEntries(result.entries)
+        setRepoRoot(typeof result.root === 'string' && result.root !== '' ? result.root : undefined)
         setBranch(result.branch)
         setDetached(result.detached)
         setAhead(result.ahead)
@@ -909,7 +994,20 @@ export function GitTab(props: GitTabProps): ReactNode {
               </Tooltip>
               {diffFor.error !== undefined ? <p className="dshAsb-error">{diffFor.error}</p> : null}
               {diffFor.text === undefined && diffFor.error === undefined ? <p className="dshAsb-hint">{t('sidebar.loading')}</p> : null}
-              {diffFor.text !== undefined ? <DiffView text={diffFor.text} truncated={diffFor.truncated} t={t} /> : null}
+              {diffFor.text !== undefined
+                ? (
+                  <>
+                    {/* An image has no text diff to read: the pane paints the
+                        file itself. The URL is built from the REPOSITORY ROOT
+                        (not the session cwd) because that is the base Git
+                        spells every path against. */}
+                    {isPreviewableImage(diffFor.path) ? <PreviewOfImage path={diffFor.path} root={repoRoot ?? cwd} t={t} /> : null}
+                    {isBinaryDiffOnly(diffFor.text)
+                      ? <p className="dshAsbGit-hint">{t('sidebar.media.binary')}</p>
+                      : <DiffView text={diffFor.text} truncated={diffFor.truncated} t={t} />}
+                  </>
+                )
+                : null}
             </>
           )}
       </div>
@@ -940,7 +1038,7 @@ export function GitTab(props: GitTabProps): ReactNode {
               {showFor !== undefined
                 ? (
                   <div className="dshAsbGit-diffBlock">
-                    <button type="button" className="dshAsbGit-link" onClick={() => { setShowFor(undefined) }}>{t('sidebar.graph.back')}</button>
+                    <button type="button" className="dshAsbGit-reviewBtn dshAsbGit-backBtn" onClick={() => { setShowFor(undefined) }}>{t('sidebar.graph.back')}</button>
                     <Tooltip label={String(showFor.sha)} side="top">
                       <p className="dshAsbGit-diffPath">{t('sidebar.graph.commit', { sha: String(showFor.sha).slice(0, 8) })}</p>
                     </Tooltip>
@@ -1195,6 +1293,8 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit-primary:disabled { opacity: .5; cursor: default; }
 .dshAsbGit-reviewBtn { flex: none; padding: 6px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 8px; background: none; color: var(--dsw-alias-label-secondary, #475569); cursor: pointer; font-size: 12px; }
 .dshAsbGit-reviewBtn:hover { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
+.dshAsbGit-backBtn { align-self: flex-start; }
+.dshAsbGit-reviewBtn:hover { background: rgba(148, 163, 184, 0.18); color: var(--dsw-alias-label-primary, #0f172a); }
 .dshAsbGit-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin-top: 2px; }
 .dshAsbGit-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-left: auto; justify-content: flex-end; }
 .dshAsbGit-title { font-weight: 600; font-size: 13px; }
@@ -1218,6 +1318,11 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit-primary:disabled { opacity: .5; cursor: default; }
 .dshAsbGit-diffBlock { display: flex; flex-direction: column; gap: 4px; }
 .dshAsbGit-diffPath { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; white-space: normal; overflow-wrap: anywhere; word-break: break-all; line-height: 1.5; }
+.dshAsbGit-media { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow: auto; }
+.dshAsbGit-mediaOpen { padding: 0; border: none; background: none; cursor: zoom-in; display: block; max-width: 100%; border-radius: 8px; }
+.dshAsbGit-mediaOpen:disabled { cursor: default; }
+.dshAsbGit-mediaImage { display: block; max-width: 100%; height: auto; margin: 0 auto; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); }
+.dshAsbGit-mediaImage[data-failed] { display: none; }
 .dshAsbGit-commitMsg { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-family: inherit; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .dshAsbGit-diff, .dshAsbGit-graph { margin: 0; padding: 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, #f1f5f9); font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.5; }
 /* The diff scrolls HORIZONTALLY in place (long lines keep their own bar); the
@@ -1259,6 +1364,6 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsb-error { margin: 2px 0; color: var(--dsw-alias-state-error-primary, #dc2626); font-size: 12px; }
 .dshAsb-notice { margin: 2px 0; color: var(--dsw-alias-state-success-primary, #16a34a); font-size: 12px; }
 .dshAsbGit-warning { margin: 2px 0; padding: 6px 8px; border-radius: 6px; background: rgba(234, 179, 8, .14); color: var(--dsw-alias-state-warn-primary, #a16207); font-size: 11px; }
-.dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-shapeBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible, .dshAsbGit-branchBtn:focus-visible, .dshAsbGit-syncBtn:focus-visible, .dshAsbGit-branchItem:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
+.dshAsbGit-rowPath:focus-visible, .dshAsbGit-dirRow:focus-visible, .dshAsbGit-link:focus-visible, .dshAsbGit-primary:focus-visible, .dshAsbGit-ghostBtn:focus-visible, .dshAsbGit-segBtn:focus-visible, .dshAsbGit-shapeBtn:focus-visible, .dshAsbGit-reviewBtn:focus-visible, .dshAsbGit-dangerBtn:focus-visible, .dshAsbGit-modalClose:focus-visible, .dshAsbGraph-line:focus-visible, .dshAsbGit-input:focus-visible, .dshAsbGit-branchBtn:focus-visible, .dshAsbGit-syncBtn:focus-visible, .dshAsbGit-branchItem:focus-visible, .dshAsbGit-mediaOpen:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2563eb); outline-offset: 2px; }
 @media (hover: none), (pointer: coarse) { .dshAsbGit-rowActions { visibility: visible; opacity: 1; pointer-events: auto; } }
 `

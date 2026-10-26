@@ -416,6 +416,12 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
     if (route === 'status') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
       const out = await git(cwd, ['status', '--porcelain=v1', '-z', '-uall'])
+      // `status --porcelain` spells every path relative to the REPOSITORY ROOT,
+      // which is not the session cwd whenever the session sits in a
+      // subdirectory. The client needs that same root to turn a row's path into
+      // an absolute one (an image's preview URL), so it travels with the status
+      // it belongs to. `/` is already normalised by git on every platform.
+      const root = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim()
       let branch = ''
       let detached = false
       try {
@@ -437,11 +443,17 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       } catch {
         // keep null/null
       }
-      return ok({ cwd, branch, detached, ahead, behind, entries: parsePorcelain(out) })
+      return ok({ cwd, root, branch, detached, ahead, behind, entries: parsePorcelain(out) })
     }
     if (route === 'ls') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
-      const out = await git(cwd, ['ls-files', '-z'])
+      // `--full-name` is load-bearing: without it `ls-files` answers paths
+      // relative to the CWD, while `status --porcelain` answers paths relative
+      // to the REPOSITORY ROOT. A session whose cwd sits in a subdirectory then
+      // sees two lists of the same repository spelled two different ways, and
+      // every path-keyed lookup (a row's diff, an image's preview URL) resolves
+      // against the wrong base for one of them.
+      const out = await git(cwd, ['ls-files', '--full-name', '-z'])
       const allFiles = out.split('\u0000').filter(line => line !== '')
       const truncated = allFiles.length > MAX_REPO_FILES
       return ok({ files: truncated ? allFiles.slice(0, MAX_REPO_FILES) : allFiles, truncated })
@@ -475,10 +487,22 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       if (untracked) args.push('--no-index')
       if (cached) args.push('--cached')
       args.push('--no-ext-diff', '--no-color')
+      // Every path this route receives comes from `status --porcelain` or
+      // `ls-files --full-name`, both spelled against the REPOSITORY ROOT. A
+      // bare pathspec is resolved against the CWD, so a session opened in a
+      // subdirectory silently produced an EMPTY diff — the pane read that as
+      // "no changes" for a file the list had just shown as modified. `:(top)`
+      // anchors the pathspec at the root the path was actually measured from.
+      //
+      // `--no-index` (`untracked`) is the exception: it compares two PATHS on
+      // disk and accepts no pathspec syntax at all, so both operands are
+      // resolved to absolute paths against the SAME root — resolving them
+      // against the cwd would address `<cwd>/<path-from-root>` and diff nothing.
+      const root = untracked ? (await git(cwd, ['rev-parse', '--show-toplevel'])).trim() : cwd
       if (untracked && path !== null && path !== '') {
-        args.push('--', process.platform === 'win32' ? 'NUL' : '/dev/null', path)
+        args.push('--', process.platform === 'win32' ? 'NUL' : '/dev/null', pathModule.resolve(root, path))
       } else if (path !== null && path !== '') {
-        args.push('--', path)
+        args.push('--', `:(top)${path}`)
       }
       let out: string
       try {

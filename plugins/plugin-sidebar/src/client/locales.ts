@@ -137,6 +137,17 @@ export const zh = {
   'sidebar.diff.truncated': '差异较大，仅显示前 500 KB。',
   'sidebar.diff.rulerAria': '变更位置标尺',
   'sidebar.diff.rulerMark': '第 {from}–{to} 行有变更，点击跳转',
+
+  // Media preview. `git diff` cannot describe an image, so the pane switches
+  // to the file itself rather than printing "Binary files … differ".
+  'sidebar.media.loading': '正在加载图片…',
+  'sidebar.media.failed': '图片无法显示。',
+  'sidebar.media.unsupported': '该文件类型无法预览。',
+  'sidebar.media.open': '放大查看',
+  'sidebar.media.dialog': '图片预览',
+  'sidebar.media.close': '关闭图片预览',
+  'sidebar.media.binary': '二进制文件，无文本差异。',
+
   'sidebar.files.hint': '仓库跟踪文件——点击查看它与 HEAD 的差异；无变化的文件标注“未变更”。',
   'sidebar.files.loading': '正在读取仓库文件…',
   'sidebar.files.truncated': '仓库文件较多，仅显示前 20,000 个。',
@@ -145,7 +156,7 @@ export const zh = {
   'sidebar.graph.open': '◈ 图谱',
   'sidebar.graph.title': 'Git 图谱',
   'sidebar.graph.close': '关闭图谱',
-  'sidebar.graph.back': '← 返回图谱',
+  'sidebar.graph.back': '返回图谱',
   'sidebar.graph.commit': 'commit {sha}',
   'sidebar.graph.noBody': '（该提交没有正文）',
   'sidebar.graph.empty': '暂无提交。',
@@ -265,6 +276,15 @@ export const en: Record<SidebarKey, string> = {
   'sidebar.diff.truncated': 'The diff is large; only the first 500 KB is shown.',
   'sidebar.diff.rulerAria': 'Change overview ruler',
   'sidebar.diff.rulerMark': 'Lines {from}–{to} changed; click to jump',
+
+  'sidebar.media.loading': 'Loading image…',
+  'sidebar.media.failed': 'This image cannot be displayed.',
+  'sidebar.media.unsupported': 'This file type cannot be previewed.',
+  'sidebar.media.open': 'Open larger',
+  'sidebar.media.dialog': 'Image preview',
+  'sidebar.media.close': 'Close the image preview',
+  'sidebar.media.binary': 'Binary file — no text diff.',
+
   'sidebar.files.hint': 'Tracked files — click one to see its diff against HEAD; files with no changes are marked "not modified".',
   'sidebar.files.loading': 'Reading repository files…',
   'sidebar.files.truncated': 'The repository has many files; only the first 20,000 are shown.',
@@ -273,7 +293,7 @@ export const en: Record<SidebarKey, string> = {
   'sidebar.graph.open': '◈ Graph',
   'sidebar.graph.title': 'Git graph',
   'sidebar.graph.close': 'Close the graph',
-  'sidebar.graph.back': '← Back to the graph',
+  'sidebar.graph.back': 'Back to the graph',
   'sidebar.graph.commit': 'commit {sha}',
   'sidebar.graph.noBody': '(this commit has no body)',
   'sidebar.graph.empty': 'No commits.',
