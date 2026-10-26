@@ -215,6 +215,39 @@ describe('provider — clean network path', () => {
 })
 
 describe('provider — poisoned network path', () => {
+  /**
+   * The verdict lives for DECISION_TTL_MS (10 minutes), and starting or
+   * stopping a local proxy changes what the system resolver answers inside that
+   * window. Measured: the proxy came up, the resolver began answering from
+   * `198.18.0.0/15`, the cached verdict still said "clean", no DoH arm
+   * happened, and the fetch died on the SSRF bar with
+   * `WEB_BLOCKED_URL: URL hostname "example.com" resolves to a non-public IP`.
+   * A non-public answer is the canary's own evidence, so it must invalidate the
+   * verdict on the spot rather than wait out the TTL.
+   */
+  it('re-checks when a cached clean verdict meets a non-public answer', async () => {
+    let poisoned = false
+    const dohCalls: string[] = []
+    const provider = make({
+      send: localSend([]),
+      // Clean until the proxy software starts, then fake-IP — the order a user
+      // actually produces by launching the app first and the proxy after.
+      systemLookup: async () => (poisoned ? [POISONED_IP] : [CLEAN_IP]),
+      dohSend: dohOk(dohCalls),
+    })
+    // Pin a clean verdict well inside its TTL window.
+    assert.equal((await provider.status({ refresh: true })).verdict, 'clean')
+    poisoned = true
+    // The cached verdict still says clean; only the fetch itself can notice.
+    assert.equal((await provider.status()).verdict, 'clean')
+
+    const result = await provider.fetch({ url: `http://${TEST_HOST}/text` })
+    assert.equal(result.statusCode, 200, 'the fetch must recover through DoH')
+    assert.equal(dohCalls.length, 1, 'the non-public answer must re-resolve through DoH')
+    assert.ok(dohCalls[0]?.includes(TEST_HOST) === true, `DoH must be asked for ${TEST_HOST}: ${String(dohCalls[0])}`)
+    assert.equal((await provider.status()).verdict, 'poisoned', 'the verdict must be replaced')
+  })
+
   it('bypasses the poisoned resolver with DoH', async () => {
     const lookups: string[] = []
     const dohCalls: string[] = []

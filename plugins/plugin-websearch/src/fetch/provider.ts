@@ -37,6 +37,7 @@ import {
   decoderForCharset,
   isRedirectStatus,
   isSameOrigin,
+  isPublicAddress,
   literalHostAddresses,
   parseCharset,
   validateFetchUrl,
@@ -222,8 +223,21 @@ export class WebFetchNetworkProvider implements WebFetchProvider {
     // The verdict is read ONCE per hop and handed down: a decision that
     // expires between the canary and the lookup must not split one request
     // across two resolvers.
-    const verdict = literalAddresses !== null ? null : await this.resolveVerdict()
-    const addresses = literalAddresses ?? await this.resolveAddresses(url, deadline, verdict as CanaryOutcome)
+    let verdict = literalAddresses !== null ? null : await this.resolveVerdict()
+    let addresses = literalAddresses ?? await this.resolveAddresses(url, deadline, verdict as CanaryOutcome)
+    // A cached `system` verdict can be WRONG by the time a request uses it:
+    // starting or stopping a local proxy changes what the system resolver
+    // answers, and the verdict lives for DECISION_TTL_MS. The measured failure:
+    // the proxy software came up, the resolver began answering from the
+    // benchmarking block, the cached verdict still said "clean", so no DoH arm
+    // happened and the fetch died on the SSRF bar with
+    // `WEB_BLOCKED_URL: URL hostname "example.com" resolves to a non-public IP`.
+    // A non-public answer is the canary's own evidence, so it invalidates the
+    // verdict on the spot instead of waiting out the TTL.
+    if (verdict !== null && verdict.action === 'system' && addresses.some(address => !isPublicAddress(address))) {
+      verdict = await this.recheck()
+      addresses = await this.resolveAddresses(url, deadline, verdict)
+    }
     validateAddresses(url.hostname, addresses)
     return await this.send(url, addresses, headers, deadline.signal)
   }
