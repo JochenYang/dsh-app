@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.7] - 2026-10-26
+
+### 中文
+- 代码图谱：设置页侧栏改用图谱专用字形（三节点连边），不再与其它未映射行共用默认齿轮。
+- Git 面板：图片文件（svg/png/jpg/gif/webp/bmp/ico/avif）在预览区直接显示画面并可点击放大，不再显示一行 "Binary files … differ"；仓库位于子目录时，文件列表与差异读取不再错位或显示为空；图谱里的“返回图谱”改为标准按钮并去掉箭头。
+- 网络搜索：启动程序后再打开或关闭代理软件时，抓取不再报“resolves to a non-public IP address”，解析结果一变就立即重新判定并改走加密 DNS。
+
+### English
+- Code graph: the settings rail now paints the graph's own three-node glyph instead of sharing the default gear with every section the shell does not map.
+- Git panel: image files (svg/png/jpg/gif/webp/bmp/ico/avif) now render in the preview pane with click-to-zoom instead of a lone "Binary files … differ" line, a repository opened from a subdirectory no longer lists files against one base and reads diffs against another, and the graph's back link is a real button without the arrow glyph.
+- Web search: starting or stopping proxy software after launch no longer breaks fetching with "resolves to a non-public IP address" — a changed answer now re-runs the resolver verdict on the spot instead of waiting out its 10-minute window.
+
 ## [v0.17.6] - 2026-10-26
 
 ### 中文
