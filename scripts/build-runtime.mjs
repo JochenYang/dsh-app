@@ -682,6 +682,66 @@ function hostTag() {
 }
 
 /**
+ * Whether the upstream repository has a ref the clone can use, and which kind.
+ *
+ * `--branch` accepts a branch OR a tag, so the question is only whether the ref
+ * EXISTS — not what kind it is. Asking first costs one `ls-remote` and turns a
+ * failed 90-second clone into a named reason.
+ *
+ * @param url - the repository URL.
+ * @param ref - the branch or tag name.
+ * @returns 'branch', 'tag', or null when neither exists.
+ */
+function upstreamRefKind(url, ref, cwd) {
+  const ask = (pattern) => {
+    try {
+      const out = capture('git', ['ls-remote', '--refs', url, pattern], cwd)
+      return out.trim() !== ''
+    } catch {
+      return false
+    }
+  }
+  if (ask(`refs/heads/${ref}`)) return 'branch'
+  if (ask(`refs/tags/${ref}`)) return 'tag'
+  return null
+}
+
+/**
+ * The upstream ref to clone for this kernel version.
+ *
+ * WHY THIS IS NOT JUST {@link hostTag}. A kernel version is published to npm and
+ * tagged in the harness repository independently, and upstream has been observed
+ * shipping a version to npm while deleting the matching branch — `next` pointed
+ * at 0.2.1-rc.4, the branch `dsh-v0.2.1-rc.4` never existed, and all six runtime
+ * cells died in `git clone` with a message about a missing branch. A build that
+ * only needs the SOURCE for a version should not care whether upstream kept it
+ * as a branch or a tag.
+ *
+ * So: the branch wins when it exists (it is what a line in flight uses), the tag
+ * is the fallback, and neither existing fails with a message that names both
+ * candidates instead of the clone's own error.
+ *
+ * @param url - the repository URL.
+ * @param cwd - the build work dir the `ls-remote` runs in.
+ * @returns the ref to pass to `--branch`.
+ */
+function upstreamRef(url, cwd) {
+  const wanted = hostTag()
+  const kind = upstreamRefKind(url, wanted, cwd)
+  if (kind !== null) {
+    if (kind === 'tag') {
+      console.warn(`[build-runtime] ${wanted} is a tag, not a branch — cloning the tag (upstream kept no branch for this version)`)
+    }
+    return wanted
+  }
+  throw new Error(
+    `the harness repository has neither a branch nor a tag named "${wanted}" — `
+    + `the kernel version ${DSH_VERSION} is on npm but its source ref is missing upstream. `
+    + 'Set DSH_APP_HOST_TAG to a ref that exists (dsh-v<version>), or wait for upstream to publish it.',
+  )
+}
+
+/**
  * Where a checkout of the harness repository may already sit on this machine.
  *
  * The same two candidates the shell's own dev mode and scripts/smoke-suite.mjs
@@ -935,10 +995,15 @@ async function prepareDesktopHostSource(workRoot) {
   // checkout), and a server that does not support it answers "filtering not
   // recognized by server, ignoring" and a plain shallow clone — so a mirror
   // behind DSH_APP_HOST_REPO_URL cannot be broken by it.
-  run('git', ['clone', '--filter=blob:none', '--depth', '1', '--no-tags', '--branch', hostTag(), url, dir], workRoot)
+  //
+  // The ref comes from upstreamRef, not hostTag: a version upstream published to
+  // npm but kept only as a tag still has a source tree to clone, and failing the
+  // build over the ref's KIND is not a fact about the code.
+  const ref = upstreamRef(url, workRoot)
+  run('git', ['clone', '--filter=blob:none', '--depth', '1', '--no-tags', '--branch', ref, url, dir], workRoot)
   return {
     dir,
-    origin: `${redactCredentials(url)} at ${hostTag()}`,
+    origin: `${redactCredentials(url)} at ${ref}`,
     dispose: async () => { await rm(dir, { recursive: true, force: true }) },
   }
 }

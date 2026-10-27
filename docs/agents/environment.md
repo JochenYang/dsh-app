@@ -15,7 +15,7 @@ exact precedence when a value can come from more than one place.
 | `DSH_APP_HOST_PACKAGE` — prebuilt host tarball instead of building one (`pnpm pack`) (`build-runtime.mjs`) |
 | `DSH_APP_HOST_REPO` — checkout the host source comes from at `dsh-v<DSH_VERSION>`, else sibling `../deepseek-harness` (`build-runtime.mjs`) |
 | `DSH_APP_HOST_REPO_URL` — clone URL, used only with no local checkout; empty disables cloning (`build-runtime.mjs`, CI `vars.*`) |
-| `DSH_APP_HOST_TAG` — tag the host source is taken from, default `dsh-v<DSH_VERSION>` (`build-runtime.mjs`, CI `vars.*`) |
+| `DSH_APP_HOST_TAG` — ref the host source is taken from, default `dsh-v<DSH_VERSION>`; a branch is preferred, a same-named tag is accepted, and neither existing fails with the ref named (`build-runtime.mjs`, CI `vars.*`) |
 | `DSH_APP_CHANNEL` — kernel line: `alpha` → alpha tag, `beta` → `next`, else stable; **unset** follows the bundled kernel's own manifest channel (`resources/kernel/manifest.json`, else the repo's `bundled-kernel/manifest.json`) and only falls back to stable with no readable manifest; at build time the cross-line override (`index.ts`, `kernel-line.mjs`, `build-runtime.mjs`) |
 | `DSH_APP_ARTIFACT_OWNER` / `DSH_APP_ARTIFACT_REPO` — GitHub owner/repo hosting runtime artifacts (`shared/constants.ts`) |
 | `DSH_APP_SUITE_VERSION` — overrides the runtime manifest's content-hash suite version (`kernel-line.mjs`, `sources/dev.ts`) |

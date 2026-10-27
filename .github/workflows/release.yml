@@ -251,6 +251,10 @@ jobs:
       # is not a free variable — build-runtime.mjs derives `dsh-v<dshVersion>`
       # from the version this cell resolved and asserts the packed host's own
       # version against it, so a source from another line fails the build.
+      # That ref is VERIFIED before the clone: a branch of that name wins, a tag
+      # is accepted, and neither existing fails with the ref named. Measured on
+      # v0.17.8: the beta line's `next` resolved 0.2.1-rc.4, upstream had no
+      # `dsh-v0.2.1-rc.4` branch, and all six cells died in `git clone`.
       # The repository variable only moves the CLONE SOURCE (a domestic mirror
       # or a private fork); the default upstream stays in place when it is
       # unset. The `||` is load-bearing: an EMPTY DSH_APP_HOST_REPO_URL means
