@@ -216,6 +216,52 @@ export function computeSuiteVersion(repoRoot = root, env = process.env) {
   return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 8)
 }
 
+/**
+ * The kernel version the tree's committed lockfile resolved, or null.
+ *
+ * THE LOCKFILE OUTRANKS THE DIST-TAG, and the reason is measured. v0.17.8's
+ * release (run 40351118119) studied the dist-tag alone, so a SUITE-ONLY release
+ * moved the KERNEL: the plugins changed, the runtime therefore had to be
+ * rebuilt, and the rebuild resolved `next` — 0.2.1-rc.4 — while package.json
+ * still said `^rc.3`. All six runtime cells failed the assembly audit with
+ * "two kernel versions in one tree".
+ *
+ * `package-lock.json` is committed, reviewed, and holds exactly ONE version per
+ * kernel package (asserted here, because two would be the same bug). Reading it
+ * makes "which kernel ships" a fact of the tree that a human changes on
+ * purpose, which is what a release should be.
+ *
+ * build-runtime.mjs applies this same rule for its own resolution; the two must
+ * agree, or the version the workflow advertises and the version the artifact
+ * contains diverge.
+ *
+ * @param repoRoot - the repository root.
+ * @returns the single version the lockfile resolved, or null when it says nothing.
+ */
+export function lockfileKernelVersion(repoRoot = root) {
+  let lock
+  try {
+    lock = readJson(path.join(repoRoot, 'package-lock.json'))
+  } catch {
+    return null
+  }
+  const versions = new Set()
+  for (const [key, value] of Object.entries(lock.packages ?? {})) {
+    if (!/^node_modules\/@deepseek-ai\/dsh(?:-|$)/u.test(key)) continue
+    if (typeof value?.version === 'string' && value.version !== '') versions.add(value.version)
+  }
+  if (versions.size === 0) return null
+  if (versions.size > 1) {
+    // One line, one version. Two in one lockfile is the double-instance bug the
+    // assembly audit refuses; failing here names the cause, not the symptom.
+    throw new Error(
+      `package-lock.json resolved ${String(versions.size)} different @deepseek-ai/dsh* versions `
+      + `(${[...versions].sort().join(', ')}) — one line must resolve as one version; re-run npm install before building`,
+    )
+  }
+  return [...versions][0]
+}
+
 /** Resolve one npm dist-tag to a concrete version, with a hard timeout. */
 export async function resolveDistTagVersion(tag, { timeoutMs = 15_000 } = {}) {
   const res = await fetch(`https://registry.npmjs.org/-/package/${DSH_PACKAGE}/dist-tags`, {
@@ -248,11 +294,21 @@ if (invokedDirectly) {
   const assertIndex = args.indexOf('--assert')
   try {
     if (args.includes('--resolve')) {
-      // Resolve the followed line's dist-tag to a concrete version. A version
-      // obtained this way belongs to the followed line by construction, so it
-      // is always asserted; only an explicit DSH_APP_CHANNEL override — the
-      // documented escape hatch for a deliberate cross-line build — is exempt.
-      const version = await resolveDistTagVersion(distTagFor(resolveFollowChannel()))
+      // A version obtained this way belongs to the followed line by
+      // construction, so it is always asserted; only an explicit
+      // DSH_APP_CHANNEL override — the documented escape hatch for a deliberate
+      // cross-line build — is exempt.
+      //
+      // THE COMMITTED LOCKFILE DECIDES FIRST, and the dist-tag is the fallback.
+      // Measured on v0.17.8: the dist-tag alone made a SUITE-ONLY release move
+      // the kernel, because the plugins changed, so the runtime had to be
+      // rebuilt, and the rebuild resolved `next` (0.2.1-rc.4) while the tree was
+      // pinned to rc.3 — every runtime cell then failed the assembly audit.
+      // Reading package-lock.json makes "which kernel ships" a fact of the tree
+      // a human changes on purpose. build-runtime.mjs applies the same rule; the
+      // two must agree or the resolved version and the built one diverge.
+      const locked = override === undefined ? lockfileKernelVersion(root) : null
+      const version = locked ?? await resolveDistTagVersion(distTagFor(resolveFollowChannel()))
       process.stdout.write(`${override === undefined ? assertFollowedVersion(version) : assertValidVersion(version)}\n`)
     } else if (assertIndex >= 0) {
       const version = args[assertIndex + 1]

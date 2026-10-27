@@ -126,6 +126,7 @@ import {
   computeSuiteVersion,
   DESKTOP_OFFICE_KIT_VERSION,
   followedSpec,
+  lockfileKernelVersion,
   resolveFollowChannel,
   resolveDistTagVersion,
   SUITE_PLUGINS,
@@ -148,6 +149,13 @@ const [platform = process.platform, arch = process.arch, versionArg] = process.a
  * releases; the default path is always asserted.
  */
 async function resolveDefaultDshVersion(channelOverride) {
+  // The committed lockfile decides the version first: one line, one version,
+  // changed by a human on purpose. See lockfileKernelVersion() for the v0.17.8
+  // measurement that made the dist-tag stop being the default.
+  if (channelOverride === undefined) {
+    const locked = lockfileKernelVersion()
+    if (locked !== null) return locked
+  }
   const channel = channelOverride ?? resolveFollowChannel()
   let tag
   if (channel === 'alpha') tag = 'alpha'
@@ -1241,6 +1249,49 @@ async function packDesktopHost(destDir, workRoot, runtimeDir) {
 }
 
 /**
+ * The `@deepseek-ai/*` peers the suite declares, each pinned to {@link DSH_VERSION}.
+ *
+ * WHY THIS EXISTS — measured on v0.17.8's runtime rebuild (run 40432607697): all
+ * six cells failed with
+ *
+ *     lockfile resolved @deepseek-ai/dsh-client-store@0.2.1-rc.4, but this
+ *     runtime ships dsh 0.2.1-rc.3
+ *
+ * The tree was pinned to rc.3 everywhere, yet rc.4 reached the lockfile. The
+ * cause is a RANGE peer: every suite plugin declares `@deepseek-ai/dsh*: ^<line>`
+ * in `peerDependencies`, `autoInstallPeers` installs those, and pnpm resolves a
+ * range peer from the REGISTRY rather than through the overrides — so the day
+ * upstream tagged 0.2.1-rc.4 the range started satisfying it.
+ *
+ * A glob override does not close it (measured: `'@deepseek-ai/dsh-*'` alone left
+ * 181 rc.4 entries), and disabling peer installs is not an option either
+ * (measured: the plugins lose `dsh-client-ui-primitives` and
+ * `dsh-client-ui-slots`, which their client halves import at run time). An
+ * EXACT override per peer name is what works, and deriving the names from the
+ * plugins' own manifests is what keeps the list from drifting.
+ *
+ * The version is DSH_VERSION for every peer: the kernel moves as one line, which
+ * is the same assumption `followedSpec` enforces on the root manifest.
+ *
+ * @returns `name → DSH_VERSION` for every `@deepseek-ai/*` peer the suite names.
+ */
+function suitePeerKernelSpecs() {
+  const specs = new Map()
+  for (const name of SUITE_PLUGINS) {
+    const shortName = name.replace('@dsh-app/', '')
+    const manifest = JSON.parse(readFileSync(path.join(root, 'plugins', shortName, 'package.json'), 'utf8'))
+    for (const peer of Object.keys(manifest.peerDependencies ?? {})) {
+      // cordis and schemastery are peers of a DIFFERENT line (the framework, not
+      // the kernel) and are pinned by the host's own closure; only the kernel
+      // packages move as one with DSH_VERSION.
+      if (!KERNEL_PACKAGE.test(peer)) continue
+      specs.set(peer, DSH_VERSION)
+    }
+  }
+  return specs
+}
+
+/**
  * Pack one suite plugin with `npm pack`. The tarball holds exactly what
  * `npm publish` would ship, because the plugin's own `files` field is npm's
  * publish contract — the same source the previous hand-written copy loop read.
@@ -2055,6 +2106,14 @@ async function main() {
   for (const name of SUITE_PLUGINS) {
     suiteSpecs[name] = await packPlugin(name.replace('@dsh-app/', ''), pkgsDir)
   }
+  // Every `@deepseek-ai/*` peer a suite plugin declares, with the exact version
+  // this runtime ships for it. See the peer-policy note at the overrides below:
+  // a peer whose declaration is a RANGE is resolved by pnpm from the registry,
+  // and a glob override does not reach it.
+  const suitePeerSpecs = suitePeerKernelSpecs()
+  console.log(
+    `[build-runtime] peer pins: ${suitePeerSpecs.size} @deepseek-ai peer(s) declared by suite plugins, pinned to ${DSH_VERSION}`,
+  )
   // The host the shell starts the kernel with, plus the UI it serves. Both have
   // to be in the tree or the packaged app cannot boot at all — the node/ binary
   // beside them is no longer the kernel's entry point. The host is built from
@@ -2106,7 +2165,21 @@ async function main() {
     '# bare specifier from app/node_modules.',
     'nodeLinker: hoisted',
     '',
-    '# See the peer-policy note in scripts/build-runtime.mjs.',
+    '# Missing peers are an error here, not a suggestion: a plugin tarball',
+    '# declares `@deepseek-ai/dsh*: ^<line>`, and a RANGE peer under pnpm 11 is',
+    '# resolved to the newest version SATISFYING it — measured on v0.17.8, where',
+    "# `^0.2.1-rc.3` peers pulled 0.2.1-rc.4 into a tree pinned to rc.3 and",
+    '# six runtime cells failed the assertLockfileCore() audit below.',
+    '#',
+    '# A GLOB override does not reach an auto-installed peer: measured on this',
+    "# tree, `'@deepseek-ai/dsh-*': '<version>'` alone left 181 rc.4 entries,",
+    '# because the peer install asks the registry for the range rather than',
+    '# following the override that pins a reference. Turning the feature off is',
+    '# not the answer either — measured: the plugins lose their two real peers',
+    '# (`dsh-client-ui-primitives`, `dsh-client-ui-slots`) and the client halves',
+    '# stop resolving. So every @deepseek-ai peer a suite plugin declares gets an',
+    '# EXACT override, derived below from those manifests rather than listed by',
+    '# hand.',
     'autoInstallPeers: true',
     'strictPeerDependencies: false',
     '',
@@ -2134,6 +2207,11 @@ async function main() {
     'overrides:',
     `  '@deepseek-ai/dsh': '${DSH_VERSION}'`,
     `  '@deepseek-ai/dsh-*': '${DSH_VERSION}'`,
+    // Exact pins for every kernel peer a suite plugin declares. The glob above
+    // covers REFERENCES in the dependency graph; an auto-installed PEER asks the
+    // registry for its declared range instead and ignores it — see
+    // suitePeerKernelSpecs() for the v0.17.8 measurement.
+    ...[...suitePeerSpecs].map(([peer, version]) => `  '${peer}': '${version}'`),
     // The office kit decides the PAYLOAD version the runtime will require, and
     // that payload is published once per release — see
     // DESKTOP_OFFICE_KIT_VERSION for what a floating range cost.
