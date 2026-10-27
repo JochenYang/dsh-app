@@ -30,6 +30,22 @@ gate:
     `src/kernel/bundled.ts` `decideBundledAdoption`.)
   - both → one shell release with a refreshed `bundled-kernel/`; the shell update
     installs the newer bundled kernel and the channel follows it.
+- [ ] **A suite-only release must keep the SAME kernel.** A plugin change forces
+      the runtime to be rebuilt, and the rebuild used to re-resolve the kernel from
+      npm — so a plugin fix silently shipped a different kernel (v0.17.8: `next` →
+      0.2.1-rc.4 while the tree pinned rc.3; all six runtime cells failed the
+      assembly audit with "two kernel versions in one tree"). The version now comes
+      from the committed `package-lock.json`, not the dist-tag, and the workflow's
+      `--resolve` shares that one resolver. Check it before tagging:
+      `node scripts/kernel-line.mjs --resolve` must print the version the tree
+      already pins.
+- [ ] **Never hand-dispatch `dsh_version` to hold the kernel back.** Measured on
+      v0.17.8's dispatch (run 40432607697): passing `dsh_version=0.2.1-rc.3`
+      while `package.json` still allowed `^rc.3` did not pin the tree — a suite
+      plugin's range PEER pulled rc.4 into the assembly and all six cells failed.
+      The peer leak is now closed (every suite kernel peer gets an exact override;
+      see `build-runtime.mjs` `suitePeerKernelSpecs`), but the rule stands: to keep
+      the kernel where it is, make the RESOLUTION say so, do not pass a version.
 - [ ] `runtime-dist/` is gitignored and build output — never commit it.
 
 ### Two lessons this project paid for (read before deciding what to bump)
@@ -63,6 +79,15 @@ gate:
       ci.yml enforced that they exist), then deletes them. The output is a
       draft: review and enrich it the way past entries are enriched, keeping
       **zh and en aligned** (same entries, same order).
+- [ ] **If the fold refuses with "already has a section for vX.Y.Z"**, the
+      version was cut before and never published (v0.17.8: the tag was deleted
+      after a failed release, `package.json` stayed at that version). Do NOT bump
+      again — that produces a version nobody saw. Write the new bullets into the
+      EXISTING section by hand, zh and en in the same order, and delete the
+      consumed fragments; then confirm with
+      `node scripts/check-changeset.mjs --tag vX.Y.Z`, which reports the bullet
+      counts for both languages. A bumped version counts as "published" for every
+      future reader, so the section must describe what actually ships.
 - [ ] Commit both. `release.yml` refuses a tag whose version has no bilingual
       section, so a tag cut without this step fails instead of publishing an
       empty release page.

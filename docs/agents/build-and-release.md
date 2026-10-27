@@ -11,10 +11,12 @@ node scripts/build-runtime.mjs <platform> <arch> [version]
 node scripts/prepare-bundled-kernel.mjs <platform> <arch>
 ```
 
-Both outputs are gitignored; CI rebuilds them. Omit `<version>` to resolve the
-followed line's dist-tag. On a **new kernel line**, bump every
+Both outputs are gitignored; CI rebuilds them. Omit `<version>` to build the
+version **the committed `package-lock.json` resolved** (see §3); the npm dist-tag
+is only the fallback for a tree with no lockfile. On a **new kernel line**, bump every
 `@deepseek-ai/dsh*` dep in the root `package.json` to one spec (plugins follow via
-peer/dev deps), then `npm run typecheck` and smoke `<runtime>/app` →
+peer/dev deps), re-run `npm install` so the lockfile moves with it, then
+`npm run typecheck` and smoke `<runtime>/app` →
 `node_modules/@deepseek-ai/dsh/lib/bin.js --version`. The runtime also carries the
 pinned `@deepseek-ai/dsh-web-frontend` (`latest` lags), the private
 `@deepseek-ai/dsh-desktop-host` (from the line's tag; escape hatches in
@@ -311,11 +313,35 @@ and pnpm versions, and the `load_workspace_dependencies` answer itself.
 
 ## 3. Line derivation and `suiteVersion`
 
-**Line derivation**: the root `package.json` alone decides the dsh line —
-`scripts/kernel-line.mjs` reads the one spec all `@deepseek-ai/dsh*` deps must
-share, maps it to a dist-tag, and owns the suite roster + `suiteVersion`;
-`build-runtime.mjs` and the workflow's `resolve` assert against it. Moving the
-line = one edit (bump, tag).
+**Line derivation**: the root `package.json` decides the dsh LINE (which spec all
+`@deepseek-ai/dsh*` deps must share) and `scripts/kernel-line.mjs` reads it, maps
+it to a dist-tag, and owns the suite roster + `suiteVersion`. The concrete VERSION
+comes from the committed `package-lock.json` first — exactly one
+`@deepseek-ai/dsh*` version must appear there, and a second one is refused, because
+that is the same double-instance bug `assertLockfileCore` catches during assembly.
+The dist-tag is the fallback only when the tree carries no lockfile.
+
+Why the split matters, measured on v0.17.8 (run 40351118119): resolving the
+version from the dist-tag alone meant a SUITE-ONLY release moved the KERNEL. The
+plugins changed, so the runtime had to be rebuilt, and the rebuild followed `next`
+to 0.2.1-rc.4 while the tree was still pinned to rc.3 — all six runtime cells then
+failed the assembly audit with "two kernel versions in one tree". A release that
+only touches the suite must reuse the kernel the tree already pins.
+
+Two halves of the same failure, both now enforced:
+
+- `build-runtime.mjs` and the workflow's `--resolve` share ONE resolver
+  (`lockfileKernelVersion`), so the version the release advertises and the version
+  it builds cannot diverge.
+- Every `@deepseek-ai/*` peer a suite plugin declares gets an **exact override** in
+  the assembly. A plugin tarball declares `^<line>` as a peer, `autoInstallPeers`
+  resolves a range peer from the REGISTRY, and a glob override does not reach it
+  (measured: 181 rc.4 entries with the glob alone). Turning peer installs off is
+  not an option either (measured: `dsh-client-ui-primitives` and
+  `dsh-client-ui-slots` vanish and the client halves stop resolving).
+
+Moving the line is therefore two edits: bump `package.json`, and re-run
+`npm install` so `package-lock.json` agrees.
 
 **`suiteVersion` hashes plugin `package.json` versions**, not code — **any change
 under `plugins/` needs a version bump in that plugin**, or CI reuses the published
@@ -329,7 +355,7 @@ release tag and skips in a shallow clone.
 Mechanics live in `.github/workflows/release.yml` (jobs: `prepare-release`,
 `resolve`, `runtime` × 6 cells, `app` × 4 cells); the decisions:
 
-**Before anything else — three things that cost a release each (each is expanded
+**Before anything else — the rules that cost a release each (each is expanded
 where it belongs, and each has bitten this project):**
 
 | Rule | Why | Where |
@@ -337,6 +363,8 @@ where it belongs, and each has bitten this project):**
 | The `runtime-<dshVersion>` release **stays a prerelease** | `/releases/latest` resolves to the newest NON-prerelease release, and a runtime tag carries no `latest.yml` — publishing it as a normal release points the shell's own update check at a release that cannot answer it | §4.3 |
 | A shell **`vX.Y.Z` tag is never re-run** | electron-builder's publish is not idempotent (422 `already_exists`); recovery is delete release + delete tag, then re-tag with the same content | §6 |
 | **Publish WITH the generated notes** | `node scripts/gen-release-notes.mjs vX.Y.Z` → `release-notes.md`, then `gh release edit vX.Y.Z --draft=false --notes-file release-notes.md`. Flipping the draft without `--notes-file` leaves an EMPTY release page — measured on v0.13.2, where the notes had to be attached afterwards | §4.4–§4.5 |
+| **A suite-only release must NOT move the kernel** | The plugins changed, so the runtime has to be rebuilt — and a rebuild used to re-resolve the kernel from npm, so "just a plugin fix" shipped a different kernel (v0.17.8: `next` → 0.2.1-rc.4 against a tree pinned to rc.3, six cells red). The version now comes from `package-lock.json`, and every suite kernel peer is pinned. Before tagging a suite-only release, confirm `node scripts/kernel-line.mjs --resolve` prints the version the tree already pins | §3 |
+| **Never hand-dispatch `dsh_version` to force an older kernel** | Measured on v0.17.8's dispatch (run 40432607697): pinning rc.3 while `package.json` allowed `^rc.3` is not the same as pinning the tree — the assembly then inherited rc.4 through a range peer and all six cells failed. If the kernel must not move, fix the resolution (§3), do not pass a version | §3 |
 | The **ModelScope mirror runs itself** when the draft is flipped to published | `.github/workflows/publish-mirror.yml` hooks `release: published`, which IS that moment (a job inside `release.yml` cannot observe it), and `MODELSCOPE_TOKEN` supplies the credentials. A manual `gh workflow run publish-mirror.yml -f tag=vX.Y.Z` is the **backfill** path (after a `503`, add `-f mode=diagnose`) — not a required step | §4.5–§4.7 |
 
 **And know which line the release moves**: the shell's kernel channel comes from

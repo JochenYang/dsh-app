@@ -38,9 +38,11 @@ suite, packed into one runtime artifact — are built, released and updated inde
 `src/main/updater.ts` owns the shell channel, `src/kernel/manager.ts` the kernel one), and **Mainland China
 first** (every download has a mirror chain; ModelScope, not GitHub, is the primary shell-update source).
 
-The kernel line has one source of truth: the spec every `@deepseek-ai/dsh*` dependency in the root
-`package.json` shares (`^0.2.1-rc.1` today), resolved and asserted by `scripts/kernel-line.mjs`;
-nothing else — no workflow variable, no hand-flipped channel — decides it.
+The kernel LINE has one source of truth: the spec every `@deepseek-ai/dsh*` dependency in the root
+`package.json` shares, resolved and asserted by `scripts/kernel-line.mjs`; nothing else — no workflow
+variable, no hand-flipped channel — decides it. The concrete VERSION is the one the committed
+`package-lock.json` resolved (the dist-tag is only a fallback for a tree without a lockfile), so a
+suite-only release keeps the kernel it already pins instead of following npm `next`.
 
 ## 2. Stack and layout
 

@@ -10,12 +10,19 @@
  * compared the two.
  *
  * Two distinct questions this module answers, deliberately not conflated:
- *   - which dist-tag to resolve FROM  → the followed spec (package.json)
+ *   - which VERSION to resolve FROM   → the committed package-lock.json, with the
+ *     followed spec's dist-tag as the fallback for a tree that has no lockfile
  *   - which channel to LABEL an artifact with → the version actually built
+ *
+ * The lockfile leads because the dist-tag drifts: measured on v0.17.8, a
+ * suite-only release rebuilt the runtime and the dist-tag carried the KERNEL to
+ * 0.2.1-rc.4 while the tree pinned rc.3, which failed all six runtime cells.
  *
  * CLI (used by the release workflow):
  *   node scripts/kernel-line.mjs            → resolved dist-tag name
  *   node scripts/kernel-line.mjs --json     → { spec, channel, tag, suiteVersion }
+ *   node scripts/kernel-line.mjs --resolve  → the concrete version a build ships
+ *   node scripts/kernel-line.mjs --assert V → V, asserted against the followed line
  */
 
 import { readFileSync } from 'node:fs'

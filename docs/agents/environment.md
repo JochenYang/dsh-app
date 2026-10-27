@@ -29,7 +29,7 @@ exact precedence when a value can come from more than one place.
 | `DSH_APP_PROXY_INJECT` — `off` keeps the detected proxy out of the kernel child's environment; any other value (or unset) injects it (`index.ts`) |
 | `DSH_APP_PROXY_WATCHDOG_MS` — watchdog interval, default 30000 (`index.ts`) |
 | `DSH_HOME` — dsh profiles home, default `~/.dsh` (`brand-suite.ts`) |
-| `DSH_VERSION` — kernel version to bundle, else from the followed dist-tag, then asserted (`build-runtime.mjs`) |
+| `DSH_VERSION` — kernel version to bundle; when unset the build takes the version the committed `package-lock.json` resolved, falling back to the followed dist-tag for a tree with no lockfile, then asserts it (`build-runtime.mjs`, `kernel-line.mjs`) |
 | `NODE_DIST_MIRROR` — mirror for the Node archive; `SHASUMS256.txt` still nodejs.org-first (`build-runtime.mjs`) |
 | `MODELSCOPE_TOKEN` / `MODELSCOPE_REPO` — mirror credentials/target; an unset token reports `SKIPPED`; SDK pinned in `MODELSCOPE_SDK_VERSION` (`publish-mirror.yml`, `mirror_release.py`) |
 | `MODELSCOPE_ENDPOINT` — ModelScope API base the mirror publish/probe/diagnose scripts talk to (`publish-modelscope.mjs`, `diagnose-modelscope-upload.mjs`, `mirror_release.py`) |
