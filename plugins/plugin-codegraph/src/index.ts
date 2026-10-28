@@ -491,10 +491,7 @@ export function apply(ctx: Context): void {
     description:
       'Locate a symbol in this project WITHOUT reading files: answers "where is X declared / defined" with '
       + 'its kind, file and line, and its call-site count, in one call. Use it as the first step of almost '
-      + 'any question about the codebase — before opening files, grepping, or guessing a path. '
-      + 'Matching: an exact name wins over a substring; with no exact match it falls back to a '
-      + 'case-insensitive substring search, so a partial name still finds candidates. '
-      + 'A "not found" while the answer reports stale or indexing means "ask again in a moment".',
+      + 'any question about the codebase — before opening files, grepping, or guessing a path.',
     parameters: {
       query: {
         type: 'string',

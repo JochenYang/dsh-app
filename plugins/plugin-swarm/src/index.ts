@@ -239,6 +239,16 @@ function editableValues(config: ResolvedConfig): SwarmConfigValues {
  * restate six of them; measured, that was ~700 characters of duplicate prose on
  * EVERY turn, and a second copy that could disagree with the first.
  *
+ * The tool DESCRIPTION was the third copy of that material and is trimmed for the
+ * same reason: it now states what the tool does and when to call it, and leaves the
+ * per-argument mechanics to the parameters. What survives there is what nothing
+ * else can say — the read-only `agent_preset` guidance, which has no error path
+ * (children silently run with the full tool set), and the childId → `resume_entries`
+ * link, which is what makes resuming discoverable at all. Rules the code enforces
+ * on its own (`expand.ts` throws on composition errors and warns on a thin split,
+ * `execute` throws on a provider without continuable children) are deliberately
+ * NOT restated: those messages arrive with the model's own input quoted back.
+ *
  * The division with the Team path is stated here because the batch cannot enforce it
  * (the schema has no `blocked_by`), so a sentence is the only thing steering ordered
  * work away from a tool that would silently run it in the wrong order.
@@ -550,21 +560,15 @@ export function apply(ctx: Context, baseConfig: Config): void {
       name: 'swarm',
       description:
         'Fan a batch of parallel subagents over a list of items: one shared prompt template (containing an '
-        + '{{item}} placeholder) is expanded once per item, every expanded task runs as an independent subagent '
-        + '(its own context, no parent conversation), and the tool returns each item\'s terminal outcome and '
-        + 'final output. When the configured provider supports continuable children, each child is durable: its '
-        + 'result item carries a childId, and a later swarm call can resume that child with follow-up '
-        + 'instructions through resume_entries — it keeps its full prior context instead of restarting from '
-        + 'scratch (e.g. retry a failed item, ask for refinements). Use this when a request decomposes into '
-        + 'multiple independent, non-overlapping subtasks that are worth running at once — batch analyses, '
-        + 'per-module edits in disjoint areas, parallel lookups. Prefer it over calling the subagent tool '
-        + 'repeatedly: one call, one aggregated result. Items must be self-contained (each child sees only its '
-        + 'expanded prompt) and must not depend on each other: write each item with its input, expected output, '
-        + 'and completion criterion, and pass background every subtask shares via shared_context. Unsure about a '
-        + 'split? Call with dry_run to preview the expanded per-child prompts before running them. Children run '
-        + 'with the full tool set by default; '
-        + 'for read-only batches (analysis, review, lookups) pass agent_preset to compose every child from a '
-        + 'read/search-scoped preset.',
+        + '{{item}} placeholder) is expanded once per item, each expanded task runs as an independent subagent '
+        + 'with its own context and no parent conversation, and the tool returns every item\'s terminal outcome '
+        + 'and final output. Each result item carries a childId on a provider that supports durable children, '
+        + 'which is what resume_entries addresses. '
+        + 'Use this when a request decomposes into multiple independent, non-overlapping subtasks that are worth '
+        + 'running at once — batch analyses, per-module edits in disjoint areas, parallel lookups — and prefer '
+        + 'it over calling the subagent tool repeatedly: one call, one aggregated result. '
+        + 'Children run with the full tool set by default; for read-only batches (analysis, review, lookups) '
+        + 'pass agent_preset to compose every child from a read/search-scoped preset.',
       parameters: {
         description: {
           type: 'string',
@@ -574,15 +578,15 @@ export function apply(ctx: Context, baseConfig: Config): void {
         items: {
           type: 'array',
           items: { type: 'string' },
-          description: 'The varying part of each fresh subtask, one entry per new child. Required (with prompt_template) unless resume_entries alone forms the batch. Entries must be distinct.',
+          description: 'The varying part of each fresh subtask, one entry per new child, paired with prompt_template.',
         },
         prompt_template: {
           type: 'string',
-          description: 'The complete, self-contained instructions shared by every fresh child, with an {{item}} placeholder where each entry of `items` is substituted. Required when `items` is present. Include everything a child needs — it sees no other context. State the expected output and the completion criterion explicitly.',
+          description: 'The instructions every fresh child receives, with an {{item}} placeholder where each entry of `items` is substituted. A child sees only this expanded prompt, so state the expected output and the completion criterion in it.',
         },
         shared_context: {
           type: 'string',
-          description: 'Optional background text prepended to every FRESH child\'s prompt (project conventions, file inventory, constraints every subtask shares). Pass shared background once here instead of repeating it inside the template or every item. Ignored for resume_entries — a resumed child keeps its existing context.',
+          description: 'Optional background prepended to every fresh child\'s prompt — project conventions, file inventory, constraints every subtask shares. Ignored for resume_entries.',
         },
         resume_entries: {
           type: 'array',
@@ -602,28 +606,28 @@ export function apply(ctx: Context, baseConfig: Config): void {
               },
             },
           },
-          description: 'Optional entries resuming prior swarm children by their childId. Each followup becomes the child\'s next turn with its full prior context — the natural way to retry failed items or request refinements. Requires a provider with continuable support (the previous result indicated it by including childId); may be combined with fresh items.',
+          description: 'Optional entries resuming prior swarm children by the childId a previous result item carried. Each followup becomes that child\'s next turn and keeps its full prior context — the way to retry a failed item or ask for refinements. May be combined with fresh items.',
         },
         max_concurrency: {
           type: 'number',
-          description: 'Optional worker-pool size (how many children run simultaneously). Pins the batch pool: adaptive scheduling may run below it after failures and recover back to it, but never above it. Values outside the configured bounds are clamped; omit to use the deployment default.',
+          description: 'Optional worker-pool size (how many children run at once). Pins the batch pool: adaptive scheduling may run below it after failures and recover back to it, never above. Omit for the deployment default.',
         },
         agent_preset: {
           type: 'string',
-          description: 'Optional Agent Preset id applied to EVERY fresh child in the batch. A preset is what the kernel composes a child\'s role and tool set from, so a read-only batch (analysis, review, lookups) should name a preset scoped to read/search tools — children otherwise run with the full tool set. Applies to fresh children at creation; resumed children keep the composition they were created with. Requires a provider that supports independent presets.',
+          description: 'Optional Agent Preset id applied to EVERY fresh child, on a provider that supports independent presets. Name one scoped to read/search tools for a read-only batch (analysis, review, lookups) — children otherwise run with the full tool set. Resumed children keep the composition they were created with.',
         },
         dry_run: {
           type: 'boolean',
-          description: 'When true, validate the batch and return each child\'s fully expanded prompt WITHOUT running anything. Use it to inspect a large or unfamiliar split before spending the batch; fix the split from the preview, then call again without dry_run.',
+          description: 'When true, validate the batch and return each child\'s fully expanded prompt WITHOUT running anything. Use it to inspect a large or unfamiliar split before spending the batch.',
         },
         token_budget: {
           type: 'number',
-          description: 'Optional batch token budget: once the summed usage of settled children reaches this, the batch stops launching new work (in-flight children settle normally; unstarted items report aborted with budgetExhausted set). Omit to use the deployment default (0 = no budget).',
+          description: 'Optional batch token budget: once the settled children\'s summed usage reaches it, no new work is launched, while children already running settle normally. Omit for the deployment default (0 = no budget).',
         },
         output_mode: {
           type: 'string',
           enum: ['full', 'summary', 'status_only'],
-          description: 'How much of each item\'s output the result carries. full (default): complete outputs; summary: each output truncated to ~500 characters; status_only: no output text at all — statuses and childIds only, then drill into any child via resume_entries. Use status_only for large batches to keep the parent context lean.',
+          description: 'How much of each item\'s output the result carries. full (default): complete outputs; summary: each output truncated to ~500 characters; status_only: statuses and childIds only, no output text. Use status_only for large batches to keep the parent context lean.',
         },
       },
       output: {
