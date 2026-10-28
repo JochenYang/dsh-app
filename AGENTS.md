@@ -163,7 +163,7 @@ Each rule's reasoning: [`docs/agents/security-invariants.md`](docs/agents/securi
 
 ## 8. The brand plugin suite (`plugins/`)
 
-Seventeen dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
+Eighteen dsh plugins layered on the upstream kernel **without forking it** — that is what keeps the
 desktop app updateable when upstream moves. Each is its own npm package with a host half, a client half,
 or both; `plugins/README.md` is the roster, `plugins/dsh-app.patch.yml` the loader overlay that mounts
 them, and desktop adaptation always stays shell-side — never a harness modification. `plugin-workbench` is

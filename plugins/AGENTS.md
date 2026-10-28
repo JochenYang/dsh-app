@@ -8,7 +8,7 @@ a plugin; read the plugin's own JSDoc header before changing its internals.
 
 ## 1. What the suite is
 
-Seventeen dsh plugins layered on top of the upstream kernel **without forking
+Eighteen dsh plugins layered on top of the upstream kernel **without forking
 it** — that is what keeps the desktop app updateable when upstream moves.
 `plugins/README.md` is the roster: which plugin owns which capability, and each
 one's host/client role. `plugins/dsh-app.patch.yml` is the loader overlay that
@@ -48,12 +48,12 @@ for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run bu
 for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; done
 ```
 
-- **Build**: sixteen plugins run `node build.mjs` (esbuild bundles both halves).
+- **Build**: seventeen plugins run `node build.mjs` (esbuild bundles both halves).
   `plugin-brand` is the one exception — `tsc -p tsconfig.json` into `lib/`.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
-  result. All seventeen plugins have suites.
+  result. All eighteen plugins have suites.
 - **CI runs every plugin with a `tests/` directory** (`.github/workflows/ci.yml`
   loops over `plugins/*/`), so a suite that passes locally also gates the PR.
   The root `test/plugin-version-bump.test.mjs` additionally fails any plugin
@@ -161,6 +161,17 @@ keeps the old one and every local gate stays green. The bump travels with a
 `changesets/<name>.md` fragment at the repository root naming the plugin (see
 the root AGENTS.md §11); ci.yml refuses the commit without one, and
 `scripts/fold-changesets.mjs` consumes it at release time.
+
+**A plugin that has never shipped is the exception, and it is a real one.**
+`test/plugin-version-bump.test.mjs` compares each plugin against the newest
+release tag and treats "absent at the tag" as NEW, not stale: a plugin that did
+not exist then has no earlier version to bump from, and its arrival already moves
+`suiteVersion` because that hash joins `${name}@${version}` per plugin. So a
+brand-new plugin keeps **one** version (its initial `0.1.0`) for the whole
+pre-release build-up, carries **one** changeset describing the plugin rather than
+one per internal round, and takes its first real bump at the release that ships
+it. Bumping per internal change is what produces `0.1.10` — a value the
+single-digit rule forbids, and a version nobody ever received.
 
 ## 6. Conventions specific to plugins
 
