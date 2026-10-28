@@ -209,7 +209,11 @@ test('a manifest entry recorded as unreadable is not treated as created either',
   assert.deepEqual(diff.uncapturedChanged, [join(root, 'locked.txt')], 'a change to it is reported')
   await cleanup(root, home)
 
-  const source = readFileSync(new URL('../src/trees.ts', import.meta.url), 'utf8')
+  // Normalised at the read: a CRLF checkout (Windows, `core.autocrlf=true`)
+  // leaves a `\r` at every line end, so a pattern that spans two lines with
+  // `\n` never matches there while CI's LF checkout stays green. This asserts
+  // on the code's shape, not on its line endings.
+  const source = readFileSync(new URL('../src/trees.ts', import.meta.url), 'utf8').replace(/\r\n/gu, '\n')
   const code = source
     .replace(/\/\*[\s\S]*?\*\//gu, '')
     .split('\n')

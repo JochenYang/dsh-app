@@ -15,10 +15,15 @@ import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+// Line endings are normalised at the read: this checkout is CRLF on Windows
+// (`core.autocrlf=true`, the repo has no .gitattributes), and a CRLF line is
+// never equal to a bare backtick, so the template-literal scan below would
+// report "not closed" on every Windows tree while CI's LF checkout stayed
+// green. The assertions are about the literal's CONTENT, not its endings.
 const source = readFileSync(
   fileURLToPath(new URL('../src/client/styles.ts', import.meta.url)),
   'utf8',
-)
+).replace(/\r\n/gu, '\n')
 
 test('the icon reveal keys off the chat flow item, not the icon row', () => {
   // The user hovers the message; the flow item wraps both the bubble and the
