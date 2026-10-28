@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.17.9] - 2026-10-28
+
+### 中文
+- 跟随内核线 0.2.1-rc.4：三十八个内核包逐个解包比对，三十五个与 rc.3 逐字节相同，只有 client-modules、client-ui-conversation、client-ui-sidebar 三个的 `lib/` 有改动，都不触及本仓使用的工具、提示词与会话接口，因此这一步只是依赖换线，没有源码适配。
+- 构建：`kernel-line.mjs --resolve` 与其他构建入口现在共用同一个内核版本解析规则（先读 `package-lock.json`），发版文档同步说明「只改套件时内核不随 npm `next` 漂移」。
+- 插件市场默认目录源换成 jsDelivr 上的 format-1 索引（`dsh-plugin-catalog/index.json`，约 610 KB 压缩传输），一次请求即可打开面板；原来走腾讯镜像的 metadata + tarball 两跳退为可手动添加的源，仍是完整目录。新增该索引格式的解析与契约测试。
+- 套件工具描述瘦身：`swarm` 的参数说明不再重述代码自己会报的错（组合规则、重复条目、provider 能力），`codegraph_find` 的匹配与「稍后再问」说明交给参数说明和结果里的 note；行为与 schema 未变，只减字。
+
+### English
+- Follow the 0.2.1-rc.4 kernel line: unpacking all thirty-eight kernel packages, thirty-five are byte-identical to rc.3 and only client-modules, client-ui-conversation and client-ui-sidebar carry `lib/` edits — none touching the tool, prompt or session interfaces this repository uses, so this step is a dependency move with no source adaptation.
+- Build: `kernel-line.mjs --resolve` and the other build entry points now share one kernel-version rule (the committed `package-lock.json` first), and the release docs state that a suite-only release keeps the pinned kernel instead of following npm `next`.
+- Market catalog now opens from the format-1 index on jsDelivr (`dsh-plugin-catalog/index.json`, ~610 KB compressed) in a single request; the Tencent-mirror metadata + tarball transport is no longer a preset source but stays addable and remains the complete directory. Adds the parser and contract coverage for the index format.
+- Suite tool descriptions trimmed: `swarm`'s parameter prose no longer restates what the code already throws (composition rules, duplicate entries, provider capabilities), and `codegraph_find` leaves matching and "ask again in a moment" to its parameter description and the result's own note; behaviour and schemas unchanged, words removed only.
+
 ## [v0.17.8] - 2026-10-26
 
 ### 中文
