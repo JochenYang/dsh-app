@@ -53,26 +53,33 @@ both a fetched body and the bundled offline snapshot flow through).
 
 ## 2. Document shapes and how they are sniffed
 
-The shape is decided by the **first object row** of `plugins`, in this order
-(`src/catalog.ts:359`, `:378`, `:406`):
+A document that **declares `format: 1`** is read as the format-1 index (§5.1)
+before any sniffing happens: it says what it is, and it is checked against that
+declaration rather than guessed at from a row. A `format` of anything else falls
+through to the sniff below, so a future format number degrades to "no rows"
+instead of being read as today's shape.
+
+Every other shape is decided by the **first object row** of `plugins`, in this
+order (`src/catalog.ts` — `isStoreDocument`, `isAggregatedDocument`):
 
 | Shape | Recognized by | Decided at |
 | --- | --- | --- |
+| format-1 index | the document declares `format: 1` AND its first object row carries a `name` string and a `versions` array | `isIndexDocument` |
 | store document | top-level `categories` is an **array** AND the first object row carries an `install` string starting with `dsh plugin ` | `isStoreDocument` |
 | aggregated document | otherwise, the first object row has an `npm` **or** `category` key | `isAggregatedDocument` |
 | custom document | otherwise (a first row with neither key) | fallback |
 
-Store is sniffed first because store rows also carry `category`, which would
-otherwise route them into the aggregated path and strip their npm identity. The
-`categories` shape is decisive, not the install command: the primary
-aggregated directory ships install commands on its rows too.
+Store is sniffed first among the row-shaped ones because store rows also carry
+`category`, which would otherwise route them into the aggregated path and strip
+their npm identity. The `categories` shape is decisive, not the install command:
+the primary aggregated directory ships install commands on its rows too.
 
 Consequences for an author: keep the document **homogeneous** (one shape for all
 rows), and do not add `npm` or `category` to a custom-schema row — a single such
 key on the first row moves the whole document to the aggregated path, where the
 custom rows' `package` field is not read and every row degrades to a
 non-installable entry. Mis-sniffing never produces a *wrong* install target, only
-a lost one (`src/catalog.ts:356`).
+a lost one.
 
 Shape-specific fields follow. `Required` is what a conforming row must carry
 (`yes` = always, `conditional` = one of the row's routing keys, `no` = optional)
@@ -182,6 +189,60 @@ Top-level `categories` **array** item.
 | `id` | string (≤100) | yes | Category key rows refer to. Its being an array is what identifies the store shape. |
 | `en` | string (≤400) | no | English label. |
 | `zh` | string (≤400) | no | Chinese label; preferred when both are present. |
+
+## 5.1 The format-1 index
+
+The shape the newest community directories publish, and the one the preset
+source list leads with: a single JSON file on a CDN, one row per published
+plugin, npm-only by construction (`versions[].source.type` is `npm` throughout).
+
+```json
+{
+  "format": 1,
+  "title": { "en": "…", "zh": "…" },
+  "description": { "en": "…", "zh": "…" },
+  "metadata": { "categories": { "tools": { "title": { "en": "…", "zh": "…" } } } },
+  "plugins": [
+    {
+      "name": "dsh-example",
+      "title": "owner/dsh-example",
+      "description": { "en": "…", "zh": "…" },
+      "homepage": "https://directory.example/p/owner/dsh-example/",
+      "repository": { "url": "https://github.com/owner/dsh-example" },
+      "metadata": { "category": "tools" },
+      "versions": [{ "version": "0.1.7", "publishTimestamp": 1793034373, "source": { "type": "npm" } }]
+    }
+  ]
+}
+```
+
+Two rules differ from the aggregated shape, and both come from what the document
+does **not** carry:
+
+- **A row whose `name` is not a valid npm package name is dropped**, not kept as
+  a source-only row. There is no `install` command and no git target anywhere in
+  this shape, so a kept row would be one the panel can neither install nor
+  explain.
+- **`homepage` becomes the entry's `id`, and `repository.url` becomes the
+  entry's homepage.** A directory page identifies the listing; a repository
+  identifies the code, and it is the code that the same-name origin check
+  compares.
+
+The category map is **one level deeper** than the aggregated shape's:
+`metadata.categories[id].title.{en, zh}`, not `categories[id].{en, zh}`. The
+version shown is the newest by `publishTimestamp`, not the array's last element.
+
+### Row fields: format-1 index
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | npm name (≤214) | yes | The npm identity: install target, merge/dedupe key, and the reason a bad name drops the row. |
+| `title` | string (≤200) | no | The source's human label (`owner/repo`). Becomes the display name; falls back to `name`. |
+| `description` | string or {en, zh} | yes | Display copy; `zh` wins, `en` is the fallback. A row with neither is dropped. |
+| `homepage` | http(s) URL | no | The directory's own page. Becomes the entry's stable id — **not** its homepage. |
+| `repository` | object | no | `url` (an http(s) URL) becomes the entry's homepage, which is the field the repository identity is derived from. |
+| `metadata` | object | no | `category` (a string id) resolves through the document's own map; `zh` first, the raw id as fallback. |
+| `versions` | array | yes | Release rows. The newest `publishTimestamp` gives the displayed `version`, which is never installed verbatim (§6). |
 
 ## 6. Installability, updates and identity
 

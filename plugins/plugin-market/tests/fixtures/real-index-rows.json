@@ -1,0 +1,117 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Awesome DSH Plugin",
+    "zh": "Awesome DSH Plugin 插件精选"
+  },
+  "description": {
+    "en": "Community-curated DeepSeek Harness (dsh) plugins, from the awesome-dsh-plugin.com list.",
+    "zh": "来自 awesome-dsh-plugin.com 的社区 DeepSeek Harness（dsh）插件精选。"
+  },
+  "metadata": {
+    "categories": {
+      "memory": {
+        "title": {
+          "en": "Memory",
+          "zh": "记忆"
+        }
+      },
+      "workflow": {
+        "title": {
+          "en": "Workflow & Automation",
+          "zh": "工作流与自动化"
+        }
+      }
+    },
+    "labels": {},
+    "sortKeys": {}
+  },
+  "plugins": [
+    {
+      "name": "@yolk_vat-y/dsh-project-memory",
+      "title": "00080000/dsh-project-memory",
+      "description": {
+        "zh": "为 DeepSeek Harness提供持久化的项目级记忆。专门针对项目开发，原生融合 dsh 任务系统，会话内任务清单与读过的文件自动沉淀为跨会话任务记录，任务↔文件自动关联——开发工作流可切换、可续接，无需重复梳理整个项目。文档与代码符号在读取时索引，无需全量预扫；针对不同语言的项目，支持可选功能增强。经验笔记自动…",
+        "en": "Project memory for dsh with native task-system integration: session todos and file reads auto-condense into cross-session task records (task↔file links), so…"
+      },
+      "homepage": "https://awesome-dsh-plugin.com/p/00080000/dsh-project-memory/",
+      "repository": {
+        "url": "https://github.com/00080000/dsh-project-memory"
+      },
+      "metadata": {
+        "category": "memory",
+        "keywords": [],
+        "labels": [],
+        "sortKeys": {}
+      },
+      "versions": [
+        {
+          "version": "0.6.6",
+          "publishTimestamp": 1793034373,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {}
+        }
+      ]
+    },
+    {
+      "name": "dsh-expert-group",
+      "title": "NTOIOTN/dsh-expert-group",
+      "description": {
+        "en": "Role-based expert subagents for DeepSeek Harness with a task sidebar: explorer, librarian, oracle, designer and fixer delegate in parallel, each with its own…",
+        "zh": "基于角色的专家子代理并行协作，各角色可配置模型与思考深度，并提供 Expert Group 任务侧栏。"
+      },
+      "homepage": "https://awesome-dsh-plugin.com/p/NTOIOTN/dsh-expert-group/",
+      "repository": {
+        "url": "https://github.com/NTOIOTN/dsh-expert-group"
+      },
+      "metadata": {
+        "category": "workflow",
+        "keywords": [],
+        "labels": [],
+        "sortKeys": {}
+      },
+      "versions": [
+        {
+          "version": "0.1.7",
+          "publishTimestamp": 1792408719,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dsh-novel-craft",
+      "title": "shiyan688/dsh-novel-craft",
+      "description": {
+        "en": "A novel-writing workbench for DeepSeek Harness: you tap thumbs-up or thumbs-down on candidate passages, and the model distils them into a short preference…",
+        "zh": "DeepSeek Harness 的小说写作工作台：你在候选段落上点赞或点踩，模型把这批点选蒸馏成一份简短的「作者偏好档案」带进后续写稿，正文本身不进写稿上下文。另有章节看板、每章写作包、只改被批注段落并逐字核对其余段落的批注式微调、项目台账，以及不把正文送进模型的本地情节体检。"
+      },
+      "homepage": "https://awesome-dsh-plugin.com/p/shiyan688/dsh-novel-craft/",
+      "repository": {
+        "url": "https://github.com/shiyan688/dsh-novel-craft"
+      },
+      "metadata": {
+        "category": "workflow",
+        "keywords": [],
+        "labels": [],
+        "sortKeys": {}
+      },
+      "versions": [
+        {
+          "version": "0.3.0",
+          "publishTimestamp": 1790788821,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {}
+        }
+      ]
+    }
+  ]
+}

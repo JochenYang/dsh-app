@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
-import { DEFAULT_SOURCE_URLS, MAX_SOURCES } from '../src/catalog.ts'
+import { DEFAULT_INDEX_SOURCE_URL, DEFAULT_SOURCE_URLS, LEGACY_SOURCE_URLS, MAX_SOURCES, NPM_PACKAGE_SOURCE_URL } from '../src/catalog.ts'
 import { loadSources, saveSources } from '../src/store.ts'
 
 describe('sources store', () => {
@@ -25,12 +25,23 @@ describe('sources store', () => {
   })
   afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-  it('presets the npm-mirror catalog first, then the community store', () => {
+  it('presets the jsDelivr index first, then the community store', () => {
     assert.deepEqual(loadSources(path, () => {}), [...DEFAULT_SOURCE_URLS])
-    // The npm-package catalog is the FIRST request the panel makes — it is
-    // the China-fast path — so it must lead the preset list.
+    // The format-1 index on jsDelivr is the FIRST request the panel makes, and
+    // one open waits on every source (`Promise.all` in resolveCatalog), so the
+    // leading entry is what decides the panel's open time. It must be the CDN
+    // file, not a two-hop tarball transport.
     assert.equal(DEFAULT_SOURCE_URLS.length, 2)
-    assert.match(DEFAULT_SOURCE_URLS[0], /^npm:/)
+    assert.equal(DEFAULT_SOURCE_URLS[0], DEFAULT_INDEX_SOURCE_URL)
+    assert.match(DEFAULT_SOURCE_URLS[0], /^https:\/\/cdn\.jsdelivr\.net\/npm\/dsh-plugin-catalog\/index\.json$/)
+  })
+
+  it('keeps the npm-mirror package source addable but out of the preset list', () => {
+    // Dropped from the presets on 2026-10-28: the manifest + tarball round trip
+    // is what stalled a panel open (966 KB of 1.2 MB in 58 s, then a reset).
+    // The address stays valid input on the Sources tab, so the preset list
+    // naming it is the failure this asserts against.
+    assert.ok(!DEFAULT_SOURCE_URLS.includes(NPM_PACKAGE_SOURCE_URL))
   })
 
   it('presets NO GitHub-Pages source (the expired-open stall)', () => {
@@ -46,6 +57,28 @@ describe('sources store', () => {
   it('respects an existing empty list (no preset re-injection)', () => {
     saveSources(path, [])
     assert.deepEqual(loadSources(path, () => {}), [])
+  })
+
+  it('upgrades the untouched legacy preset pair, and only that pair', () => {
+    // Every install that predates the CDN index carries exactly this pair and
+    // would stay on the slow tarball transport for ever. It is upgraded — but
+    // only while it is INDISTINGUISHABLE from an untouched install.
+    const logged: string[] = []
+    saveSources(path, [...LEGACY_SOURCE_URLS])
+    assert.deepEqual(loadSources(path, message => logged.push(message)), [...DEFAULT_SOURCE_URLS])
+    assert.equal(logged.some(message => message.includes('upgrading the untouched preset pair')), true)
+
+    // Removed one entry: a decision, so it stands.
+    saveSources(path, [LEGACY_SOURCE_URLS[0]!])
+    assert.deepEqual(loadSources(path, () => {}), [LEGACY_SOURCE_URLS[0]!])
+
+    // Reordered: also a decision.
+    saveSources(path, [...LEGACY_SOURCE_URLS].reverse())
+    assert.deepEqual(loadSources(path, () => {}), [...LEGACY_SOURCE_URLS].reverse())
+
+    // Added their own source on top: untouched legacy entries plus one more.
+    saveSources(path, [...LEGACY_SOURCE_URLS, 'https://mine.example.com/list.json'])
+    assert.deepEqual(loadSources(path, () => {}), [...LEGACY_SOURCE_URLS, 'https://mine.example.com/list.json'])
   })
 
   it('round-trips a saved list verbatim (order preserved)', () => {

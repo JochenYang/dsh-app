@@ -14,6 +14,7 @@ import { gzipSync } from 'node:zlib'
 import { MarketExecutionError } from '../src/errors.ts'
 import {
   CATALOG_TIMEOUT_MS,
+  DEFAULT_INDEX_SOURCE_URL,
   DEFAULT_SECONDARY_SOURCE_URL,
   DEFAULT_SOURCE_URL,
   MAX_BYTES_PER_SOURCE,
@@ -44,6 +45,15 @@ describe('validateSourceUrl', () => {
     // The registry must be https, and the shape must carry a package name.
     assert.equal(validateSourceUrl('npm:dsh-plugin-catalog@http://mirrors.example.com/npm').ok, false)
     assert.equal(validateSourceUrl('npm:').ok, false)
+  })
+
+  it('accepts the jsDelivr index that now leads the preset list', () => {
+    // The preset list's first entry has to pass BOTH halves of the policy: the
+    // literal-address rule here, and the DNS judgement at request time. This
+    // asserts the shape; `fetchCatalog` covers the rest with a fake resolver.
+    const check = validateSourceUrl(DEFAULT_INDEX_SOURCE_URL)
+    assert.equal(check.ok, true)
+    assert.equal(check.ok && check.url, 'https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json')
   })
 
   it('rejects non-https schemes, garbage, and credential URLs', () => {
@@ -369,6 +379,103 @@ describe('parseCatalog (aggregated directory format)', () => {
     assert.equal(entries[0]?.category, '分类 0')
     assert.equal(entries[0]?.installable, true)
     assert.equal(entries[1]?.installable, false)
+  })
+})
+
+describe('parseCatalog (format-1 index)', () => {
+  /**
+   * One row shaped like the real jsDelivr index (`dsh-plugin-catalog`): npm
+   * `name`, `owner/repo` `title`, two-language description, a repository block,
+   * a `metadata.category` and a `versions` array.
+   */
+  const indexEntry = (pkg: string, overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    name: pkg,
+    title: `someone/${pkg}`,
+    description: { en: `${pkg} en`, zh: `${pkg} 的中文描述` },
+    homepage: `https://dir.example.com/p/someone/${pkg}/`,
+    repository: { url: `https://github.com/someone/${pkg}` },
+    metadata: { category: 'tools', keywords: [], labels: [], sortKeys: {} },
+    versions: [{ version: '1.0.0', publishTimestamp: 1_700_000_000, source: { type: 'npm' }, engines: {} }],
+    ...overrides,
+  })
+
+  const indexDocument = (plugins: readonly unknown[]): string => JSON.stringify({
+    format: 1,
+    title: { en: 'Directory', zh: '目录' },
+    description: { en: 'en', zh: 'zh' },
+    metadata: { categories: { tools: { title: { en: 'Tools & Capabilities', zh: '工具与能力' } } }, labels: {}, sortKeys: {} },
+    plugins,
+  })
+
+  it('maps the format-1 schema onto the internal entries', () => {
+    const entries = parseCatalog(indexDocument([indexEntry('dsh-alpha')]))
+    assert.equal(entries.length, 1)
+    assert.deepEqual(entries[0], {
+      // id is the directory page; homepage is the REPOSITORY, which is what
+      // originOf derives a same-name identity from.
+      id: 'https://dir.example.com/p/someone/dsh-alpha/',
+      name: 'someone/dsh-alpha',
+      description: 'dsh-alpha 的中文描述',
+      package: 'dsh-alpha',
+      version: '1.0.0',
+      homepage: 'https://github.com/someone/dsh-alpha',
+      category: '工具与能力',
+      categoryId: 'tools',
+    })
+  })
+
+  it('takes the newest version by publish timestamp, not array order', () => {
+    const entries = parseCatalog(indexDocument([indexEntry('dsh-alpha', {
+      versions: [
+        { version: '2.0.0', publishTimestamp: 200 },
+        { version: '0.9.0', publishTimestamp: 900 },
+      ],
+    })]))
+    assert.equal(entries[0]?.version, '0.9.0')
+  })
+
+  it('drops a row that names no valid npm package (nothing else to install from)', () => {
+    // Unlike the aggregated path, this shape carries no git target and no
+    // install command: a kept row the panel cannot install and cannot explain
+    // is worse than a missing row.
+    const entries = parseCatalog(indexDocument([
+      indexEntry('dsh-alpha'),
+      indexEntry('not a package'),
+      indexEntry('../sneaky'),
+      indexEntry('dsh-beta', { name: 42 }),
+    ]))
+    assert.deepEqual(entries.map(entry => entry.package), ['dsh-alpha'])
+  })
+
+  it('falls back to the npm name for display and to en for description', () => {
+    const entries = parseCatalog(indexDocument([indexEntry('dsh-alpha', {
+      title: undefined,
+      description: { en: 'english only' },
+    })]))
+    assert.equal(entries[0]?.name, 'dsh-alpha')
+    assert.equal(entries[0]?.description, 'english only')
+  })
+
+  it('degrades a claimed format 1 whose entries do not match it, instead of misreading them', () => {
+    // A future format under the same number: the declaration alone must not be
+    // enough to route it here.
+    const entries = parseCatalog(JSON.stringify({
+      format: 1,
+      plugins: [{ name: 'dsh-alpha', description: 'no versions array' }],
+    }))
+    assert.deepEqual(entries, [])
+  })
+
+  it(`absorbs the real document's scale (3730 rows, 2.83 MB) within the ${MAX_BYTES_PER_SOURCE} byte cap`, () => {
+    // Measured 2026-10-28 from the published file: 2.83 MB of JSON / 610 KB on
+    // the wire with gzip. The cap is a byte cap on the BODY, so this asserts
+    // the source that now leads the preset list actually fits it.
+    const REAL_BYTES = 2_965_041
+    assert.ok(REAL_BYTES < MAX_BYTES_PER_SOURCE)
+    const row = JSON.stringify(indexEntry('dsh-alpha'))
+    assert.ok(REAL_BYTES / 3730 > row.length * 0.5, 'the synthetic row is within 2x of real rows')
+    const entries = parseCatalog(indexDocument(Array.from({ length: 3730 }, (_, i) => indexEntry(`dsh-pkg-${i}`))))
+    assert.equal(entries.length, 3730)
   })
 })
 

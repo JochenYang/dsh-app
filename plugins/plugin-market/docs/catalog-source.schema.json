@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/JochenYang/dsh-app/main/plugins/plugin-market/docs/catalog-source.schema.json",
   "title": "DSH APP plugin-market catalog source",
-  "description": "The published document contract of a plugin-market catalog source: an https URL answering a JSON object with a `plugins` array. Three document shapes are accepted; the parser sniffs the shape from the FIRST object row of `plugins` (store first, then aggregated, custom otherwise), so a document must be homogeneous. This schema is the machine-readable half of docs/catalog-source.md and is bound to the implementation by tests/catalog-contract.test.ts: every field name the parser reads appears here, the install-command grammar is the parser's own npm and git grammars spliced together, and the null forms the primary source actually publishes are accepted. Where this schema is stricter than the parser, docs/catalog-source.md says so in the 'Strictness' section — a document that fails this schema is not necessarily refused by the parser, but it is not a conforming source.",
+  "description": "The published document contract of a plugin-market catalog source: an https URL answering a JSON object with a `plugins` array. Four document shapes are accepted; a document that declares `format: 1` is read as the format-1 index, and every other document is sniffed from the FIRST object row of `plugins` (store first, then aggregated, custom otherwise), so a document must be homogeneous. This schema is the machine-readable half of docs/catalog-source.md and is bound to the implementation by tests/catalog-contract.test.ts: every field name the parser reads appears here, the install-command grammar is the parser's own npm and git grammars spliced together, and the null forms the primary source actually publishes are accepted. Where this schema is stricter than the parser, docs/catalog-source.md says so in the 'Strictness' section — a document that fails this schema is not necessarily refused by the parser, but it is not a conforming source.",
   "anyOf": [
     { "$ref": "#/$defs/customDocument" },
     { "$ref": "#/$defs/aggregatedDocument" },
-    { "$ref": "#/$defs/storeDocument" }
+    { "$ref": "#/$defs/storeDocument" },
+    { "$ref": "#/$defs/indexDocument" }
   ],
   "$defs": {
     "npmPackageName": {
@@ -306,6 +307,91 @@
         "categories": {
           "type": "array",
           "items": { "$ref": "#/$defs/storeCategory" }
+        }
+      }
+    },
+    "indexDocument": {
+      "title": "format-1 index document",
+      "description": "A document that declares `format: 1` and whose first `plugins` row carries an npm `name` plus a `versions` ARRAY. Detected by that DECLARATION rather than sniffed from the row shape, so a future format under a different number falls through to the other shapes instead of being read as this one. Required keys: `plugins`, `format`.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["plugins", "format"],
+      "properties": {
+        "format": {
+          "description": "The document's own format number. The parser only routes a document here when this is exactly 1.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "metadata": {
+          "description": "Document metadata. Only `categories` is read: `{ id: { title: { en, zh } } }`, one level deeper than the aggregated shape's `{ id: { en, zh } }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "categories": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "title": { "$ref": "#/$defs/localizedText" }
+                }
+              }
+            }
+          }
+        },
+        "plugins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/indexRow" }
+        }
+      }
+    },
+    "indexRow": {
+      "title": "format-1 index row",
+      "description": "One published plugin, as the format-1 index lists it. Every row names an npm package (`versions[].source.type` is `npm` for the whole document), so a row whose `name` is not a valid npm package name is DROPPED rather than kept as a source-only row — this shape carries no other install target. Required keys: `name`, `description`, `versions`.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "description", "versions"],
+      "properties": {
+        "name": { "$ref": "#/$defs/npmPackageName" },
+        "title": {
+          "description": "The source's human label (`owner/repo`). Becomes the entry's display name; the npm `name` is shown beside it.",
+          "type": "string",
+          "maxLength": 200
+        },
+        "description": { "$ref": "#/$defs/localizedText" },
+        "homepage": {
+          "description": "The directory's own page for this plugin. Becomes the entry's stable `id`; it is NOT the entry's homepage — see `repository`.",
+          "$ref": "#/$defs/httpUrl"
+        },
+        "repository": {
+          "description": "The code's repository. `url` becomes the entry's `homepage`, because that is the field `originOf` derives a same-name repo identity from.",
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["url"],
+          "properties": {
+            "url": { "$ref": "#/$defs/httpUrl" }
+          }
+        },
+        "metadata": {
+          "description": "Row metadata. Only the `category` id is read; it resolves through the document's own `metadata.categories` map.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "category": { "type": "string", "maxLength": 100 }
+          }
+        },
+        "versions": {
+          "description": "Published releases. The parser takes the newest by `publishTimestamp` — NOT the array's order, which the document does not promise — and shows it as the entry's `version` (display only; the install chain re-resolves from the registry).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "version": { "type": "string", "maxLength": 100 },
+              "publishTimestamp": { "type": "integer", "minimum": 0 }
+            }
+          }
         }
       }
     }

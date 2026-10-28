@@ -16,6 +16,7 @@ import { dirname } from 'node:path'
 import { hostDiagnostic, type HostText } from './errors.ts'
 import {
   DEFAULT_SOURCE_URLS,
+  LEGACY_SOURCE_URLS,
   MAX_ENTRIES_TOTAL,
   MAX_SOURCES,
   validateSourceUrl,
@@ -31,6 +32,14 @@ import {
  * existing file is respected as-is — a user who deleted every source keeps an
  * empty list, and an unreadable file degrades to empty instead of silently
  * substituting the preset.
+ *
+ * ONE exception, and it is not a preset re-injection: a list that is EXACTLY
+ * {@link LEGACY_SOURCE_URLS} — the pair an untouched install has carried since
+ * the presets were last changed — is upgraded to the current presets. The
+ * distinction is "nobody has edited this" versus "this is what the user chose":
+ * a user who removed one entry, reordered them, or added their own holds a list
+ * that matches neither, and keeps it. The file is not rewritten; the upgrade is
+ * recomputed on each read and becomes permanent at the user's next save.
  *
  * @param path - absolute path of sources.json.
  * @param log - diagnostic logger for degradations.
@@ -71,6 +80,11 @@ export function loadSources(path: string, log: (message: string) => void): strin
     seen.add(check.url)
     out.push(check.url)
     if (out.length >= MAX_SOURCES) break
+  }
+  // The untouched-install upgrade: same length, same order, same URLs.
+  if (out.length === LEGACY_SOURCE_URLS.length && out.every((url, index) => url === LEGACY_SOURCE_URLS[index])) {
+    log('plugin-market sources: upgrading the untouched preset pair to the current presets (CDN index instead of the npm tarball)')
+    return [...DEFAULT_SOURCE_URLS]
   }
   return out
 }

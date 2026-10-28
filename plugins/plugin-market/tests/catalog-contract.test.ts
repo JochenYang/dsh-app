@@ -54,6 +54,7 @@ const MANIFEST = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 const REAL_AGGREGATED = JSON.parse(readFileSync(new URL('../tests/fixtures/real-aggregated-rows.json', import.meta.url), 'utf8')) as FixtureDocument
 const REAL_STORE = JSON.parse(readFileSync(new URL('../tests/fixtures/real-store-rows.json', import.meta.url), 'utf8')) as FixtureDocument
 const REAL_REFUSED = JSON.parse(readFileSync(new URL('../tests/fixtures/real-refused-rows.json', import.meta.url), 'utf8')) as FixtureDocument
+const REAL_INDEX = JSON.parse(readFileSync(new URL('../tests/fixtures/real-index-rows.json', import.meta.url), 'utf8')) as FixtureDocument
 
 /** A 40-hex commit pin (the only mutable-selector proof the git grammar takes). */
 const SHA = 'c3319d9d3e78a18191e1381461b69e84bc547575'
@@ -86,6 +87,8 @@ const KNOWN_DEFS = [
   'customDocument',
   'customRow',
   'httpUrl',
+  'indexDocument',
+  'indexRow',
   'installCommand',
   'localizedText',
   'npmPackageName',
@@ -99,6 +102,7 @@ const ROW_DEFS: ReadonlyArray<{ readonly def: string, readonly parseFunction: st
   { def: 'customRow', parseFunction: 'customEntriesOf', kind: 'row' },
   { def: 'aggregatedRow', parseFunction: 'aggregatedEntriesOf', kind: 'row' },
   { def: 'storeRow', parseFunction: 'storeEntriesOf', kind: 'row' },
+  { def: 'indexRow', parseFunction: 'indexEntriesOf', kind: 'row' },
   { def: 'categoryLabel', parseFunction: 'categoryMapOf', kind: 'label' },
   { def: 'storeCategory', parseFunction: 'storeCategoryMapOf', kind: 'label' },
 ]
@@ -108,6 +112,7 @@ const DOC_SECTIONS: ReadonlyArray<{ readonly def: string, readonly heading: stri
   { def: 'customRow', heading: 'Row fields: custom schema' },
   { def: 'aggregatedRow', heading: 'Row fields: aggregated directory' },
   { def: 'storeRow', heading: 'Row fields: store directory' },
+  { def: 'indexRow', heading: 'Row fields: format-1 index' },
   { def: 'categoryLabel', heading: 'Category label fields: aggregated document' },
   { def: 'storeCategory', heading: 'Category label fields: store document' },
 ]
@@ -158,7 +163,7 @@ function documentReadKeys(): string[] {
 function allDeclaredFields(): string[] {
   const names = new Set<string>()
   for (const { def: name } of ROW_DEFS) for (const field of declaredFields(name)) names.add(field)
-  for (const name of ['customDocument', 'aggregatedDocument', 'storeDocument']) {
+  for (const name of ['customDocument', 'aggregatedDocument', 'storeDocument', 'indexDocument']) {
     for (const field of declaredFields(name)) names.add(field)
   }
   return [...names].sort()
@@ -213,6 +218,8 @@ function typeCellOf(node: JsonSchema): string {
     assert.equal(typeof node.minimum, 'number', 'an integer column needs a minimum in the schema to state')
     return `integer ≥ ${String(node.minimum)}`
   }
+  if (node.type === 'object') return 'object'
+  if (node.type === 'array') return 'array'
   throw new Error(`the doc-table renderer has no Type for ${JSON.stringify(node.type ?? node)}`)
 }
 
@@ -254,8 +261,8 @@ describe('contract drift guard: the parser, the schema and the doc', () => {
     assert.deepEqual(Object.keys(SCHEMA.$defs as Record<string, unknown>).sort(), KNOWN_DEFS,
       'a $defs entry was added or removed: it is part of the published contract, so add it here and to the guard below')
     const root = (SCHEMA.anyOf as JsonSchema[]).map(branch => String(branch.$ref))
-    assert.deepEqual(root, ['#/$defs/customDocument', '#/$defs/aggregatedDocument', '#/$defs/storeDocument'],
-      'the root must offer exactly the three document shapes')
+    assert.deepEqual(root, ['#/$defs/customDocument', '#/$defs/aggregatedDocument', '#/$defs/storeDocument', '#/$defs/indexDocument'],
+      'the root must offer exactly the four document shapes')
   })
 
   it('every field the parser reads is declared by the schema', () => {
@@ -268,10 +275,14 @@ describe('contract drift guard: the parser, the schema and the doc', () => {
     const branches = def('localizedText').anyOf as JsonSchema[]
     assert.deepEqual(readsIn('localizedText', 'localized'),
       Object.keys(branches[1]!.properties as Record<string, unknown>).sort())
-    assert.deepEqual(documentReadKeys().filter(name => !DOCUMENT_EXTRAS.includes(name)), ['categories', 'plugins'])
-    const documentDefs = ['customDocument', 'aggregatedDocument', 'storeDocument']
+    // `format` and `metadata` are the format-1 document's own fields: the shape
+    // declares itself and carries its category map one level down, so both are
+    // read off the document rather than off a row.
+    assert.deepEqual(documentReadKeys().filter(name => !DOCUMENT_EXTRAS.includes(name)),
+      ['categories', 'format', 'metadata', 'plugins'])
+    const documentDefs = ['customDocument', 'aggregatedDocument', 'storeDocument', 'indexDocument']
     const union = new Set(documentDefs.flatMap(name => declaredFields(name)))
-    assert.deepEqual([...union].sort(), ['categories', 'plugins'],
+    assert.deepEqual([...union].sort(), ['categories', 'format', 'metadata', 'plugins'],
       'the document-level fields the parser reads must be declared by the document shapes')
   })
 
@@ -636,6 +647,25 @@ describe('contract conformance: the documents the live sources serve', () => {
     // documented drop: the `#` rule in the aggregated path.
     assert.deepEqual(entriesOf(REAL_REFUSED), [])
   })
+
+  it('validates and reads an unedited excerpt of the live format-1 index', () => {
+    const errors = validateSchema(SCHEMA, REAL_INDEX)
+    assert.deepEqual(errors, [], `tests/fixtures/real-index-rows.json no longer validates:\n${errors.slice(0, 5).join('\n')}`)
+    // The excerpt is the file the preset list now leads with, so the rows are
+    // the published ones: a scoped name, an unscoped one, and a `owner/repo`
+    // title. The directory page becomes the id and the repository becomes the
+    // homepage — the two fields that are easy to transpose.
+    const entries = entriesOf(REAL_INDEX)
+    assert.equal(entries.length, REAL_INDEX.plugins.length, 'every published row must survive: this shape has no source-only form')
+    for (const row of REAL_INDEX.plugins) {
+      const entry = entries.find(candidate => candidate.package === row.name)
+      assert.ok(entry !== undefined, `the row for ${String(row.name)} was dropped`)
+      assert.equal(entry.id, String(row.homepage))
+      assert.equal(entry.homepage, String((row.repository as { url?: unknown }).url))
+      assert.equal(entry.version, (row.versions as { version?: unknown }[])[0]?.version)
+      assert.equal(entry.categoryId, String((row.metadata as { category?: unknown }).category))
+    }
+  })
 })
 
 describe('contract semantics: what each declared field does', () => {
@@ -695,7 +725,37 @@ describe('contract semantics: what each declared field does', () => {
     },
   }
 
-  const SHAPES: readonly ShapeFixture[] = [CUSTOM, AGGREGATED, STORE]
+  const INDEX: ShapeFixture = {
+    def: 'indexRow',
+    document: row => ({
+      format: 1,
+      metadata: {
+        categories: {
+          'cat-a': { title: { en: 'Label A', zh: '标签 A' } },
+          'cat-b': { title: { en: 'Label B', zh: '标签 B' } },
+        },
+      },
+      plugins: [row],
+    }),
+    values: {
+      // Every pair has to move something through `indexEntriesOf`: the npm
+      // package name, the display title, the copy, the stable id (from
+      // `homepage`), the repo identity (from `repository.url`), the category
+      // label, and the version the newest `publishTimestamp` selects.
+      name: ['pkg-a', 'pkg-b'],
+      title: ['owner/a', 'owner/b'],
+      description: ['Desc A', 'Desc B'],
+      homepage: ['https://dir.example.com/p/a/', 'https://dir.example.com/p/b/'],
+      repository: [{ url: 'https://github.com/owner/a' }, { url: 'https://github.com/owner/b' }],
+      metadata: [{ category: 'cat-a' }, { category: 'cat-b' }],
+      versions: [
+        [{ version: '1.0.0', publishTimestamp: 100 }],
+        [{ version: '2.0.0', publishTimestamp: 200 }],
+      ],
+    },
+  }
+
+  const SHAPES: readonly ShapeFixture[] = [CUSTOM, AGGREGATED, STORE, INDEX]
 
   /** One row built entirely from the 'A' column of a fixture's values. */
   const rowOf = (shape: ShapeFixture): Record<string, unknown> =>
@@ -908,7 +968,7 @@ describe('contract publication: the artefacts an outside author can reach', () =
     for (const name of ['catalog-source.md', 'catalog-source.schema.json']) {
       assert.equal(existsSync(fileURLToPath(new URL(`../docs/${name}`, import.meta.url))), true, `docs/${name} is missing`)
     }
-    assert.equal(MANIFEST.version, '0.6.9',
+    assert.equal(MANIFEST.version, '0.7.0',
       'shipping a new file to existing installations changes the plugin, so its version travels with the contract')
   })
 })

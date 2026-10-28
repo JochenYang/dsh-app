@@ -1,9 +1,9 @@
 /**
  * Catalog sources: fetching, validation, and merging.
  *
- * A catalog source is an https URL answering a JSON document. Two document
+ * A catalog source is an https URL answering a JSON document. Four document
  * formats are accepted, decided by sniffing the first object entry of the
- * `plugins` array:
+ * `plugins` array (and, for format 1, by its own `format` declaration):
  *
  * 1. Custom schema (the suite's own directory format):
  *      { "plugins": [{ "id": string, "name": string, "description": string,
@@ -23,6 +23,16 @@
  *      by the store entry id. The categories map arrives as an ARRAY of
  *      `{ id, en, zh, count }`. The preset URL pins the first page
  *      (`page=1&limit=100`), so this source shows its top-100 slice.
+ * 4. Format-1 index (`{ "format": 1, "title", "description", "metadata",
+ *      "plugins": [...] }`), the published-index shape the newest community
+ *      directories serve: it declares itself, so it is detected by `format`
+ *      rather than sniffed. Entries carry the npm `name`, a human `title`
+ *      (`owner/repo`), an `{ en, zh }` description, `repository.url`,
+ *      `metadata.category` and a `versions` array — npm-only by construction,
+ *      so a row whose `name` is not a valid npm package name is DROPPED rather
+ *      than kept as a source-only row (there is no other install target in
+ *      this shape, and a wrong one is worse than a missing row). The category
+ *      map is `{ id: { title: { en, zh } } }`.
  *
  * Security stance: a source is DATA ONLY. Entries are validated field by
  * field and anything unusable is dropped (never executed, never followed);
@@ -81,16 +91,49 @@ import {
 export const DEFAULT_SOURCE_URL = 'https://awesome-dsh-plugin.com/plugins.json'
 
 /**
+ * The catalog as a format-1 index on a global CDN — the live source list's
+ * FIRST entry, and the only one that ships enabled besides the community store.
+ *
+ * Why this and not the npm-package source below. Both read the SAME published
+ * package (`dsh-plugin-catalog`), but the transports are not comparable: the
+ * package source costs a registry manifest plus a tarball, while jsDelivr
+ * serves the index as one immutable file from an edge cache. Measured
+ * 2026-10-28 on the reporter's link, `/catalog` being the open that stalls:
+ *
+ *   jsDelivr index.json   610 KB transferred / 2.83 MB JSON  ~4.9 s
+ *   jsDelivr plugins.json 1.66 MB transferred / 9.07 MB JSON ~9.1 s
+ *   Tencent metadata+tgz  0.28 MB + 966 KB of a 1.2 MB tarball in 58 s, then reset
+ *
+ * The index carries 3730 rows and every one of them is npm-installable (its
+ * `versions[].source.type` is `npm`), which is exactly the set this market can
+ * install. The tarball's `plugins.json` carries 7406 rows — the extra ~3.6k are
+ * source-only rows it browses but cannot install, plus 106 npm rows the index
+ * does not list yet. That 106 is the price of the transport, and it is
+ * recoverable per user: the npm-package source ({@link NPM_PACKAGE_SOURCE_URL})
+ * stays valid input on the Sources tab.
+ *
+ * `Promise.all` in `resolveCatalog` means ONE slow source delays the whole
+ * open, so this cannot be an addition beside the tarball source — it replaces
+ * it in the seed list. jsDelivr is a public CDN with edges on every continent,
+ * which is the "fast from anywhere" property the mirror chain could not give.
+ */
+export const DEFAULT_INDEX_SOURCE_URL = 'https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json'
+
+/**
  * The catalog as a PUBLISHED NPM PACKAGE, read through a China npm mirror.
  *
- * This is the LIVE source list's comprehensive directory. It carries the same
- * document the GitHub-Pages origin ({@link DEFAULT_SOURCE_URL}) serves —
- * published there daily, byte-identical (verified 2026-10-11: sha256 equal) —
- * but rides the same mirror every plugin install already uses: measured
- * against the Tencent mirror 2026-10-03, the metadata + tarball round trip is
- * 1.2 MB in ~0.7 s, and the package carries a meaningful version that doubles
- * as the cache validator (skip the tarball entirely when the held version
- * matches).
+ * The COMPREHENSIVE directory, and the reason the index source above exists: it
+ * carries the same document the GitHub-Pages origin ({@link DEFAULT_SOURCE_URL})
+ * serves — published there daily, byte-identical (verified 2026-10-11: sha256
+ * equal) — but rides the same mirror every plugin install already uses, and the
+ * package carries a meaningful version that doubles as the cache validator (skip
+ * the tarball entirely when the held version matches).
+ *
+ * NOT in {@link DEFAULT_SOURCE_URLS} any more (2026-10-28): it is a two-hop
+ * transport ending in a tarball, and the tarball is what stalled the panel open
+ * (measured: 966 KB of 1.2 MB in 58 s, then a reset). Kept exported because the
+ * address stays valid input on the Sources tab, and because
+ * {@link DEFAULT_CATALOG_PACKAGE} is still what the index is published from.
  */
 export const DEFAULT_CATALOG_PACKAGE = 'dsh-plugin-catalog'
 
@@ -101,8 +144,7 @@ export const DEFAULT_NPM_MIRROR = 'https://mirrors.cloud.tencent.com/npm'
  * The secondary preset: a China-reachable community store. The URL pins the
  * first page only — full pagination is deliberately out of scope (a 13k-entry
  * catalog would blow every entry cap for no browsing benefit; the panel is a
- * discovery surface, the npm-package catalog above stays the comprehensive
- * one).
+ * discovery surface, the index source above stays the comprehensive one).
  */
 export const DEFAULT_SECONDARY_SOURCE_URL = 'https://deepseek1024.com/api/v2/plugins?page=1&limit=100'
 
@@ -116,16 +158,17 @@ export const NPM_PACKAGE_SOURCE_URL = `npm:${DEFAULT_CATALOG_PACKAGE}@${DEFAULT_
 /**
  * Fresh-store seed list (first run only; user-removable).
  *
- * Two sources, both China-reachable without a proxy. The npm-package catalog
- * (byte-identical to the GitHub-Pages document, verified 2026-10-11) leads; the
- * community store follows. The GitHub-Pages origin
- * ({@link DEFAULT_SOURCE_URL}) is deliberately ABSENT — see its doc comment:
- * it is the snapshot builder's fetch source, and an expired open must not wait
- * on a 5 MB body the mirror already serves (measured on a mainland link with a
- * proxy off: the mirror round-trips in under a second, the origin in 6-8 s or
- * not at all — an expired open then stalls on it alone, the original report).
+ * Two sources, both reachable without a proxy. The format-1 index on jsDelivr
+ * leads — one file off a global CDN, ~610 KB on the wire — and the community
+ * store follows. The npm-package source is deliberately ABSENT: it is the
+ * fastest COMPLETE mirror on a domestic link and simultaneously the slowest
+ * thing this list has ever carried (a 1.2 MB tarball that stalls), and because
+ * one open waits on every source, its presence decides the panel's open time.
+ * The GitHub-Pages origin ({@link DEFAULT_SOURCE_URL}) stays absent for the
+ * reason its own doc comment gives: it is the snapshot builder's fetch source,
+ * and a 5 MB body is not what an expired open should wait on.
  */
-export const DEFAULT_SOURCE_URLS: readonly string[] = [NPM_PACKAGE_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
+export const DEFAULT_SOURCE_URLS: readonly string[] = [DEFAULT_INDEX_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
 
 /** One browsable catalog entry (already validated). */
 export interface CatalogEntry {
@@ -186,6 +229,18 @@ export interface CatalogEntry {
   /** Store-declared 30-day install count (only the store schema carries it; display only). */
   readonly installs30d?: number
 }
+
+/**
+ * The seed list a build BEFORE 2026-10-28 wrote, kept so it can be recognised.
+ *
+ * Existing installations keep their stored `sources.json` — the preset list is
+ * first-run only — and every one of them carries this pair, which is why the
+ * panel open would stay slow after the default changed. `loadSources` therefore
+ * upgrades a list that is EXACTLY this pair (an untouched install, not a
+ * decision) and leaves every other list alone; see its doc comment. Bump this
+ * constant, never the semantics, if the presets change again.
+ */
+export const LEGACY_SOURCE_URLS: readonly string[] = [NPM_PACKAGE_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
 
 /** Per-source fetch cap: large aggregated directories clock in around 3 MB. */
 export const MAX_BYTES_PER_SOURCE = 8_000_000
@@ -390,6 +445,26 @@ function isAggregatedDocument(plugins: readonly unknown[]): boolean {
 }
 
 /**
+ * Format-1 index detection. Gated on the document's OWN `format: 1`
+ * declaration, then confirmed on the first object entry (`name` + a `versions`
+ * array), so a future `format: 2` document — which this parser has never seen —
+ * falls through to the other sniffs and degrades to "no rows" instead of being
+ * read as though it were today's shape. Both halves are needed: the declaration
+ * alone would accept a document whose entries changed under the same number,
+ * and the entry shape alone would accept anything that happens to carry
+ * `versions`.
+ */
+function isIndexDocument(json: object, plugins: readonly unknown[]): boolean {
+  if ((json as { format?: unknown }).format !== 1) return false
+  for (const candidate of plugins) {
+    if (typeof candidate !== 'object' || candidate === null) continue
+    const record = candidate as Record<string, unknown>
+    return typeof record.name === 'string' && Array.isArray(record.versions)
+  }
+  return false
+}
+
+/**
  * Validate one already-parsed catalog document. The shared entry point for
  * fetched bodies (parseCatalog) and the bundled offline snapshot (snapshot.ts)
  * — both flow through the same per-field validation, so a snapshot entry can
@@ -402,6 +477,10 @@ export function parseCatalogDocument(json: unknown): CatalogEntry[] {
   if (typeof json !== 'object' || json === null || Array.isArray(json)) return []
   const plugins = (json as { plugins?: unknown }).plugins
   if (!Array.isArray(plugins)) return []
+  // The declared-format branch goes first: a format-1 document also carries
+  // `name`-only entries, which the custom path would drop and the aggregated
+  // path would misread.
+  if (isIndexDocument(json, plugins)) return indexEntriesOf(json, plugins)
   if (isStoreDocument(json, plugins)) return storeEntriesOf(json, plugins)
   if (isAggregatedDocument(plugins)) return aggregatedEntriesOf(json, plugins)
   return customEntriesOf(plugins)
@@ -497,6 +576,100 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
       ...(owner !== undefined ? { owner } : {}),
       ...(stars !== undefined ? { stars } : {}),
       ...(downloads !== undefined ? { downloads } : {}),
+      ...(homepage !== undefined ? { homepage } : {}),
+      ...(category !== undefined ? { category: category.label, categoryId: category.id } : {}),
+    })
+  }
+  return entries
+}
+
+/**
+ * The newest release row of a format-1 entry's `versions` array.
+ *
+ * The timestamp decides, not array order: the document does not promise an
+ * order, and a row that reports an older release as "the version" would show a
+ * stale number on a card whose update check then disagrees with it. A row with
+ * no timestamp loses to one that has it; the first row wins a tie.
+ */
+function latestVersionOf(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined
+  let best: { version: string, at: number } | undefined
+  for (const candidate of value) {
+    if (typeof candidate !== 'object' || candidate === null) continue
+    const record = candidate as Record<string, unknown>
+    const version = plainString(record.version, 100)
+    if (version === undefined) continue
+    const at = typeof record.publishTimestamp === 'number' && Number.isFinite(record.publishTimestamp)
+      ? record.publishTimestamp
+      : Number.NEGATIVE_INFINITY
+    if (best === undefined || at > best.at) best = { version, at }
+  }
+  return best?.version
+}
+
+/** Format-1 category map: `{ id: { title: { en, zh } } }` — one level deeper than the aggregated shape. */
+function indexCategoryMapOf(value: unknown): ReadonlyMap<string, { zh?: string, en?: string }> {
+  const map = new Map<string, { zh?: string, en?: string }>()
+  if (typeof value !== 'object' || value === null) return map
+  for (const [id, entry] of Object.entries(value)) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const title = (entry as { title?: unknown }).title
+    if (typeof title !== 'object' || title === null) continue
+    const record = title as Record<string, unknown>
+    map.set(id, { zh: plainString(record.zh), en: plainString(record.en) })
+  }
+  return map
+}
+
+/**
+ * Format-1 index path.
+ *
+ * Every row names an npm package — `versions[].source.type` is `npm` for the
+ * whole document — so a row whose `name` is not a valid npm package name is
+ * DROPPED rather than kept as a source-only row. That is the opposite of the
+ * aggregated path, and deliberate: there a drop would lose a browsable row that
+ * other schema fields can still describe, while here there is no other install
+ * target anywhere in the shape, so a kept row would be one the panel cannot
+ * install and cannot explain.
+ *
+ * Field mapping, and the two choices that are not obvious:
+ * - `id` ← `homepage`: the directory page is stable per row and is what a
+ *   duplicate report names.
+ * - `homepage` ← `repository.url`, NOT the directory page. `originOf` derives
+ *   the repo identity from this field, and the same-name origin check is only
+ *   meaningful against the repository (a directory page identifies the catalog
+ *   entry, not the code).
+ */
+function indexEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry[] {
+  const metadata = (json as { metadata?: { categories?: unknown } }).metadata
+  const categories = indexCategoryMapOf(metadata?.categories)
+  const entries: CatalogEntry[] = []
+  for (const candidate of plugins) {
+    if (entries.length >= MAX_ENTRIES_PER_SOURCE) break
+    if (typeof candidate !== 'object' || candidate === null) continue
+    const record = candidate as Record<string, unknown>
+    const pkg = plainString(record.name, MAX_NAME_LENGTH)
+    if (pkg === undefined || !PACKAGE_NAME_PATTERN.test(pkg)) continue
+    const description = localizedText(record.description)
+    if (description === undefined) continue
+    const repository = record.repository
+    const repoUrl = typeof repository === 'object' && repository !== null
+      ? plainString((repository as { url?: unknown }).url)
+      : undefined
+    const homepage = repoUrl !== undefined && /^https?:\/\//.test(repoUrl) ? repoUrl : undefined
+    const page = plainString(record.homepage)
+    const title = plainString(record.title, 200)
+    const rowMetadata = typeof record.metadata === 'object' && record.metadata !== null
+      ? record.metadata as Record<string, unknown>
+      : {}
+    const category = categoryOf(rowMetadata.category, categories)
+    const version = latestVersionOf(record.versions)
+    entries.push({
+      id: page ?? homepage ?? pkg,
+      name: title ?? pkg,
+      description,
+      package: pkg,
+      ...(version !== undefined ? { version } : {}),
       ...(homepage !== undefined ? { homepage } : {}),
       ...(category !== undefined ? { category: category.label, categoryId: category.id } : {}),
     })
@@ -1050,10 +1223,12 @@ interface Packument {
  *
  * BOTH requests this makes are source-controlled and both go through
  * {@link judgedFetch}: the metadata URL is built from the user's registry base,
- * and the tarball URL is whatever that registry's answer names. This is the
- * source that ships enabled (`DEFAULT_SOURCE_URLS[0]`), so a second hop nobody
- * judges is a request to any address a registry chooses — including a
- * redirected one. A hop the policy cannot judge is refused, not sent.
+ * and the tarball URL is whatever that registry's answer names. This source no
+ * longer ships enabled (see {@link DEFAULT_SOURCE_URLS}), but it is one the
+ * Sources tab offers and a user can add back in two clicks, so a second hop
+ * nobody judges would still be a request to any address a registry chooses —
+ * including a redirected one. A hop the policy cannot judge is refused, not
+ * sent.
  *
  * BOTH reads are byte-capped while they stream, and the cap is what makes the
  * judging above worth anything: a registry that passes the address policy can
