@@ -163,42 +163,50 @@ function DiffView(props: { text: string, truncated?: boolean, t: SidebarTranslat
     <>
       {props.truncated ? <p className="dshAsbGit-warning">{props.t('sidebar.diff.truncated')}</p> : null}
       <div className="dshAsbGit-diffWrap">
-        {/* The ONE vertical scroller of this pane: the ruler rides it, and
-            nothing inside it scrolls vertically of its own accord. */}
+        {/* The ONE vertical scroller of this pane, and the ruler lives INSIDE
+            it. A mark's `top`/`span` are fractions of the parsed ROWS, so the
+            column that paints them has to be measured in the same coordinates:
+            inside this box it stretches to the content height and scrolls with
+            the lines. As a sibling of this box it stretched to the VIEWPORT
+            instead — every mark was squeezed into the visible height and stood
+            still while the diff scrolled under it, which is the drift this
+            arrangement removes. */}
         <div className="dshAsbGit-diffBody" ref={bodyRef}>
-          <pre className="dshAsbGit-diff">
-            {rows.map(row => (
-              <div key={row.key} className={row.cls}>
-                <span className="dshAsbGit-diffNo">{row.old === undefined ? '  ' : String(row.old).padEnd(4)}</span>
-                <span className="dshAsbGit-diffNo">{row.new === undefined ? '  ' : String(row.new).padEnd(4)}</span>
-                <span className="dshAsbGit-diffText">{row.text === '' ? ' ' : row.text}</span>
-              </div>
-            ))}
-          </pre>
-        </div>
-        {/* Overview ruler. Marks are fractions of the parsed row count, so they
-            need no measurement; clicking one scrolls the body above. Rendered
-            only when there is something to locate.
+          <div className="dshAsbGit-diffPane">
+            <pre className="dshAsbGit-diff">
+              {rows.map(row => (
+                <div key={row.key} className={row.cls}>
+                  <span className="dshAsbGit-diffNo">{row.old === undefined ? '  ' : String(row.old).padEnd(4)}</span>
+                  <span className="dshAsbGit-diffNo">{row.new === undefined ? '  ' : String(row.new).padEnd(4)}</span>
+                  <span className="dshAsbGit-diffText">{row.text === '' ? ' ' : row.text}</span>
+                </div>
+              ))}
+            </pre>
+            {/* Overview ruler, in the rows' own coordinates; clicking one
+                scrolls the body. Rendered only when there is something to
+                locate.
 
-            A mark's HEIGHT is the true fraction of changed lines, with no
-            floor: a 1-line change in a 400-line diff is 0.25% of the column and
-            must read as a hairline, because that is what the reader is being
-            told. The clickable area is what gets the floor (a 2px pseudo-element
-            that overhangs the mark), so a hairline is still reachable by pointer
-            without being PAINTED at 2px — the earlier `Math.max(span, 0.6%)`
-            made every small change look like a large one, and on a long file
-            every mark then read as the same bar. */}
-        {marks.length === 0 ? null : (
-          <div className="dshAsbGit-ruler" role="group" aria-label={props.t('sidebar.diff.rulerAria')}>
-            {marks.map(mark => (
-              <button key={`${String(mark.from)}-${String(mark.to)}`} type="button"
-                className={`dshAsbGit-rulerMark dshAsbGit-rulerMark${mark.kind === 'add' ? 'Add' : 'Del'}`}
-                style={{ top: `${String(mark.top * 100)}%`, height: `${String(mark.span * 100)}%` }}
-                aria-label={props.t('sidebar.diff.rulerMark', { from: mark.from + 1, to: mark.to + 1 })}
-                onClick={() => { jumpTo(mark) }} />
-            ))}
+                A mark's HEIGHT is the true fraction of changed lines, with no
+                floor: a 1-line change in a 400-line diff is 0.25% of the column
+                and must read as a hairline, because that is what the reader is
+                being told. The clickable area is what gets the floor (a 2px
+                pseudo-element that overhangs the mark), so a hairline is still
+                reachable by pointer without being PAINTED at 2px — the earlier
+                `Math.max(span, 0.6%)` made every small change look like a large
+                one, and on a long file every mark then read as the same bar. */}
+            {marks.length === 0 ? null : (
+              <div className="dshAsbGit-ruler" role="group" aria-label={props.t('sidebar.diff.rulerAria')}>
+                {marks.map(mark => (
+                  <button key={`${String(mark.from)}-${String(mark.to)}`} type="button"
+                    className={`dshAsbGit-rulerMark dshAsbGit-rulerMark${mark.kind === 'add' ? 'Add' : 'Del'}`}
+                    style={{ top: `${String(mark.top * 100)}%`, height: `${String(mark.span * 100)}%` }}
+                    aria-label={props.t('sidebar.diff.rulerMark', { from: mark.from + 1, to: mark.to + 1 })}
+                    onClick={() => { jumpTo(mark) }} />
+                ))}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
     </>
   )
@@ -1223,17 +1231,28 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
    scrollbar beside the pane's own. */
 .dshAsbGit-detail { flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 6px; padding-left: 8px; }
 .dshAsbGit-detail > * { flex-shrink: 0; }
-.dshAsbGit-diffWrap { flex: 1 1 0; min-height: 0; display: flex; gap: 4px; }
+.dshAsbGit-diffWrap { flex: 1 1 0; min-height: 0; display: flex; }
 .dshAsbGit-diffBody { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+/* The rows and the ruler as one scrolling row. The pane is exactly as wide as
+   the viewport (the diff keeps its own horizontal scrollbar), and its height is
+   the content's, which is what puts the ruler in the ROWS' coordinates. */
+.dshAsbGit-diffPane { display: flex; align-items: stretch; gap: 6px; width: 100%; }
+/* The pre is the horizontal scroller, so it takes the width the ruler leaves
+   instead of its own content width: without this the PANE would overflow and
+   the body would grow a second horizontal bar beside the pre's own. */
+.dshAsbGit-diffPane > .dshAsbGit-diff { flex: 1 1 0; min-width: 0; }
 /* Overview ruler: the marks are fractions of the diff's line count, so the
-   column needs no measurement of its own. Pointer-only (aria-hidden marks stay
-   focusable, so the buttons keep their labels); it rides the body's height.
+   column needs no measurement of its own — but it must be measured against the
+   same box the rows are, or the fractions land somewhere else. The vertical
+   margin below is the pre's 10px padding: with it the stretched column spans
+   exactly the rows, so a mark sits beside the line it names. Pointer-only
+   (aria-hidden marks stay focusable, so the buttons keep their labels).
    A mark has NO minimum height: its painted length is the true fraction, so a
    one-line change reads as a hairline and a twenty-line run reads long. The
    ::after overhang is what makes a hairline clickable without changing what is
    drawn — the earlier 2px min-height painted every small change at the same
    size as a real block. */
-.dshAsbGit-ruler { position: relative; flex: none; width: 10px; min-height: 0; align-self: stretch; border-radius: 5px; background: rgba(148, 163, 184, 0.12); overflow: hidden; }
+.dshAsbGit-ruler { position: relative; flex: none; width: 10px; min-height: 0; margin-block: 10px; border-radius: 5px; background: rgba(148, 163, 184, 0.12); overflow: hidden; }
 .dshAsbGit-rulerMark { position: absolute; left: 1px; right: 1px; padding: 0; border: none; border-radius: 1px; cursor: pointer; }
 .dshAsbGit-rulerMark::after { content: ''; position: absolute; left: 0; right: 0; top: -2px; bottom: -2px; }
 .dshAsbGit-rulerMark:hover { filter: brightness(1.35); }

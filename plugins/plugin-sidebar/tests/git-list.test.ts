@@ -8,6 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import { buildPathTree } from '../src/client/git-list.ts'
 import { diffRulerMarks, diffRulerScrollTop, parseDiffRows } from '../src/client/diff-ruler.ts'
@@ -286,3 +287,59 @@ describe('parseDiffRows + diffRulerMarks over a real git diff', () => {
   })
 })
 
+/**
+ * The ruler's GEOMETRY, pinned where a unit test can still see it.
+ *
+ * Every mark is a fraction of the parsed rows, so the column that paints them
+ * has to be measured against the same box the rows are. It used to be a sibling
+ * of the scroll container: stretched to the VIEWPORT, so a long diff squeezed
+ * every mark into the visible height and left them standing still while the
+ * code scrolled underneath — the marks pointed at nothing. None of that is
+ * reachable from `diffRulerMarks`, which is why the arrangement is asserted
+ * here against the source that builds it.
+ *
+ * @module plugin-sidebar/tests/diff-ruler-geometry
+ */
+describe('the diff ruler shares the rows coordinates', () => {
+  const source = readFileSync(new URL('../src/client/git-tab.tsx', import.meta.url), 'utf8')
+  const css = (selector: string): string => {
+    const start = source.indexOf(`${selector} {`)
+    assert.notEqual(start, -1, `git-tab.tsx declares no rule for ${selector}`)
+    const end = source.indexOf('}', start)
+    return source.slice(start, end === -1 ? undefined : end)
+  }
+
+  it('renders the ruler INSIDE the vertical scroller, in a pane beside the rows', () => {
+    const body = source.indexOf('className="dshAsbGit-diffBody"')
+    const pane = source.indexOf('className="dshAsbGit-diffPane"')
+    const rows = source.indexOf('<pre className="dshAsbGit-diff">')
+    const ruler = source.indexOf('className="dshAsbGit-ruler"')
+    assert.notEqual(body, -1, 'the scroll container is gone')
+    assert.notEqual(pane, -1, 'the pane that groups rows and ruler is gone')
+    assert.ok(body < pane && pane < rows && rows < ruler,
+      'the ruler must come after the pane and the rows it measures, i.e. inside the scroller')
+    // The closing tags: everything up to the ruler's own block is still inside
+    // the body, which the ordering above proves only if the body is the last
+    // container opened before the rows.
+    assert.ok(source.slice(body, ruler).includes('<pre className="dshAsbGit-diff">'),
+      'the rows must sit between the scroller and the ruler')
+  })
+
+  it('keeps the ruler box equal to the rows box, so a mark sits beside its line', () => {
+    // The pre's vertical padding is the offset the ruler has to mirror; reading
+    // both numbers here is what stops them drifting apart.
+    const diffRule = css('.dshAsbGit-diff, .dshAsbGit-graph')
+    const prePadding = /padding:\s*(\d+)px/u.exec(diffRule)?.[1]
+    assert.ok(prePadding !== undefined, 'the diff pre no longer declares its padding')
+    const rulerRule = css('.dshAsbGit-ruler')
+    assert.match(rulerRule, new RegExp(`margin-block:\\s*${prePadding}px`, 'u'),
+      `the ruler's vertical margin must mirror the pre's ${prePadding}px padding`)
+    assert.doesNotMatch(rulerRule, /align-self:\s*stretch/u,
+      'a stretched sibling measures the viewport; the ruler is stretched by the pane instead')
+  })
+
+  it('lets the pre scroll horizontally instead of the pane', () => {
+    assert.match(css('.dshAsbGit-diffPane > .dshAsbGit-diff'), /min-width:\s*0/u,
+      'the pre needs min-width:0 as a flex item, or the pane overflows and the body grows a second bar')
+  })
+})
