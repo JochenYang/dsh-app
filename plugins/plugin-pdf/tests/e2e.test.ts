@@ -436,12 +436,28 @@ test('e2e: write, check, render and read back a real PDF', async () => {
     // 5d. The same file under a different spelling. NTFS and APFS fold case, so
     //     `DOCS/Report.PDF` names the source; a lexical comparison would pass it
     //     through and `rename` would destroy the bytes the edit had just read.
+    //
+    //     A case-SENSITIVE filesystem makes that spelling a DIFFERENT file, and the
+    //     tool is then right to write it: the guard folds case exactly where the
+    //     filesystem does (`src/index.ts` `foldCase`), which is the only definition
+    //     of "the same file" it can apply without stat-ing a path that may not exist
+    //     yet. This assertion therefore follows the platform, or a Linux CI run
+    //     reports a failure for behaviour that is correct there.
+    const foldsCase = process.platform === 'win32' || process.platform === 'darwin'
     const cased = await edit.execute(
       { file_path: 'docs/report.pdf', output_file: 'DOCS/Report.PDF', rotate_degrees: 90, overwrite: true },
       exec,
     )
-    assert.equal(cased.status, 'failed', 'a case-variant spelling of the source is refused')
-    assert.match(String(cased.issuesText), /不能与源文件相同/u)
+    if (foldsCase) {
+      assert.equal(cased.status, 'failed', 'a case-variant spelling of the source is refused')
+      assert.match(String(cased.issuesText), /不能与源文件相同/u)
+    } else {
+      assert.equal(
+        cased.status,
+        'ok',
+        `a case-variant path is a different file on this filesystem: ${String(cased.issuesText)}`,
+      )
+    }
     assert.deepEqual(readFileSync(pdfPath), afterOverwrite, 'and the source survived the attempt')
 
     // 6. The read leg round-trips the rendered file: pagination, text, footer
