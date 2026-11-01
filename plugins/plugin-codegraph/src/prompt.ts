@@ -58,6 +58,46 @@ function rowBudget(files: number): number {
   return Math.max(MIN_ENTRIES, Math.min(MAX_ENTRIES_CAP, scaled))
 }
 
+/**
+ * A count as a coarse magnitude (`~360`, `~5.8k`), or the exact value below ten.
+ *
+ * NOT COSMETIC — this is what keeps the block from being re-pushed on every edit.
+ *
+ * The kernel's runtime-context snapshot is append-only: `dsh-agent-loop` commits a
+ * changed snapshot as a NEW user message (`surfaceOp: "append"`) and retires
+ * nothing, and the only mitigation upstream applies is a framing line declaring
+ * that a later snapshot supersedes earlier ones (`dsh-system-prompt`,
+ * `joinContextSections`) — so every earlier copy still occupies context. Its
+ * `RuntimeContextProjection` de-duplicates on the WHOLE joined text, which means
+ * one changed digit re-pushes every section: this block, the cwd, the policy, the
+ * task state.
+ *
+ * Measured on this repository's own sessions before this function existed: one
+ * session carried 438 snapshots (1.37 MB of text, 66% of everything in it) and 435
+ * of those carried this block with 351 DIFFERENT versions, differing only in
+ * `304 files, 4881 symbols, 17046 edges` becoming `305 files, 4893 symbols, 17081
+ * edges` after a single edit. The exact numbers are one `codegraph_context` call
+ * away — the call this block exists to encourage — so a bucket costs a reader
+ * nothing and saves a full snapshot per edit.
+ *
+ * Two significant digits: `356` → `~360`, `5750` → `~5.8k`, `19888` → `~20k`. A
+ * bucket moves only when the project really changed size, which is the moment the
+ * number is worth reading.
+ *
+ * @param value - a non-negative count.
+ * @returns the rendered magnitude.
+ */
+function magnitude(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return String(value)
+  // Below ten the exact value IS the bucket: a project with 3 files is not
+  // approximated by "~3", and these counts never churn at that size.
+  if (value < 10) return String(value)
+  const [unit, suffix] = value >= 1_000_000 ? [1_000_000, 'M'] : value >= 1_000 ? [1_000, 'k'] : [1, '']
+  // `toPrecision(2)` on the scaled value, then back through Number so `9.0`
+  // prints as `9` rather than a trailing zero no reader needs.
+  return `~${String(Number((value / unit).toPrecision(2)))}${suffix}`
+}
+
 /** The queue states this block answers to. `unindexed` never reaches it. */
 export type OverviewState = 'indexing' | 'failed' | 'stale' | 'current'
 
@@ -147,9 +187,9 @@ export function renderOverviewContext(
 
   const lines: string[] = []
   const languages = overview.byLanguage.slice(0, MAX_LANGUAGES)
-    .map(entry => `${entry.lang} ${String(entry.files)}`)
+    .map(entry => `${entry.lang} ${magnitude(entry.files)}`)
     .join(', ')
-  lines.push(`Code graph for this project (${String(overview.files)} files, ${String(overview.symbols)} symbols, ${String(overview.edges)} edges${languages === '' ? '' : `; ${languages}`}).`)
+  lines.push(`Code graph for this project (${magnitude(overview.files)} files, ${magnitude(overview.symbols)} symbols, ${magnitude(overview.edges)} edges${languages === '' ? '' : `; ${languages}`}).`)
   if (note !== undefined) lines.push(note)
   // WHAT THE COUNTS COVER, and where an answer stops. Two sentences, because both
   // halves are things a reader would otherwise assume wrongly in opposite
@@ -185,7 +225,7 @@ export function renderOverviewContext(
     // than being appended to it: copyable and no longer than what it replaces.
     lines.push('Most-referenced symbols \u2014 read these first to learn the vocabulary (each id is directly queryable):')
     for (const hub of hubs) {
-      lines.push(`- ${hub.symbol.id} \u2014 ${String(hub.references)} call site(s)`)
+      lines.push(`- ${hub.symbol.id} \u2014 ${magnitude(hub.references)} call site(s)`)
     }
   }
 

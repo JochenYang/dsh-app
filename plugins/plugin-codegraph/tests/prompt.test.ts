@@ -44,7 +44,7 @@ describe('renderOverviewContext', () => {
     const text = renderOverviewContext(overview(), 'current', undefined)
     assert.match(text, /120 files/u)
     assert.match(text, /900 symbols/u)
-    assert.match(text, /typescript 100/u)
+    assert.match(text, /typescript ~100/u)
     assert.match(text, /src\/cli\.ts/u)
     assert.match(text, /starts at function run/u)
     assert.match(text, /shared/u)
@@ -125,7 +125,7 @@ describe('renderOverviewContext', () => {
     // only excludes more than two), so the instruction was unfollowable exactly on
     // the rows it pointed at.
     const text = renderOverviewContext(overview(), 'current', undefined)
-    assert.match(text, /^- src\/util\.ts#function:shared — 40 call site\(s\)$/mu,
+    assert.match(text, /^- src\/util\.ts#function:shared — ~40 call site\(s\)$/mu,
       'the hub row leads with the full symbol id, which is what the tool accepts')
     assert.doesNotMatch(text, /pass any id above/iu, 'the instruction now matches what the rows carry')
     // And the entry rows stay queryable by path — no id needed, because a path is
@@ -228,5 +228,33 @@ describe('overviewContextText — the state matrix', () => {
   it('says nothing for a stale graph that has no shape to report', () => {
     // A stale marker with no graph behind it would be a claim with nothing in it.
     assert.equal(overviewContextText(inputs({ state: 'stale', overview: undefined })), '')
+  })
+})
+
+describe('the counts are magnitudes, so an edit does not re-push the block', () => {
+  // The kernel appends a whole runtime-context snapshot whenever ANY byte of the
+  // joined text changes and retires nothing (the older copies stay in context),
+  // so a count that moves by one after every edit costs a full snapshot — this
+  // block plus the cwd, the policy and the task state — per edit. Measured on a
+  // real session here: 351 of 435 snapshots differed only in these numbers.
+  it('renders two significant digits with a tilde, and exact values below ten', () => {
+    const text = renderOverviewContext(overview({ files: 356, symbols: 5750, edges: 19888 }), 'current', undefined)
+    assert.match(text, /\(~360 files, ~5\.8k symbols, ~20k edges/u)
+    const tiny = renderOverviewContext(overview({ files: 3, symbols: 4, edges: 5 }), 'current', undefined)
+    assert.match(tiny, /\(3 files, 4 symbols, 5 edges/u)
+  })
+
+  it('is byte-identical while the counts stay inside their bucket', () => {
+    const before = renderOverviewContext(overview({ files: 356, symbols: 5750, edges: 19888 }), 'current', undefined)
+    const afterEdit = renderOverviewContext(overview({ files: 359, symbols: 5751, edges: 19890 }), 'current', undefined)
+    assert.equal(afterEdit, before,
+      'one edited file must not change the text: the snapshot would be re-appended for nothing')
+  })
+
+  it('does move when the project changes magnitude, which is worth telling', () => {
+    const before = renderOverviewContext(overview({ files: 356 }), 'current', undefined)
+    const grown = renderOverviewContext(overview({ files: 4800 }), 'current', undefined)
+    assert.notEqual(grown, before)
+    assert.match(grown, /~4\.8k files/u)
   })
 })
