@@ -93,6 +93,25 @@ export async function runBackfill(
     log(`usage backfill: listing failed: ${(error as Error).message}`)
     return report
   }
+  // The format witness is GLOBAL to the store, not per session: a migration
+  // rewrites every log at once, and `observeLogFormat` answers "the stored
+  // vocabulary differs from this one" only on its FIRST call. Asking inside the
+  // loop made the first session re-fold correctly and every later one re-fold
+  // WITHOUT dropping its old rows — the same message counted twice on disk. One
+  // read before the loop puts every session on the same verdict.
+  // The HIGHEST witness, not the first one found: during a migration the list holds
+  // both vocabularies, and taking whichever session came first made the witness flip
+  // with list order — every flip cleared the watermarks and re-folded every session.
+  const formatVersion = headers
+    .map(entry => listedHeaderVersion(entry))
+    .reduce<number | undefined>((highest, value) => {
+      if (value === undefined) return highest
+      return highest === undefined || value > highest ? value : highest
+    }, undefined)
+  const formatChanged = formatVersion !== undefined && store.observeLogFormat(formatVersion)
+  if (formatChanged) {
+    log(`usage backfill: log format ${String(formatVersion)} differs from the folded one; re-folding every session's rows`)
+  }
   for (const entry of headers) {
     const id = listedSessionId(entry)
     if (id === '') continue
@@ -102,24 +121,20 @@ export async function runBackfill(
       close(): Promise<void>
     } | undefined
     try {
+      // Dropped BEFORE the read. A session whose read fails this pass still holds
+      // rows keyed by the OLD seq, and the next pass finds `formatChanged` false —
+      // re-folding on top of them would count that usage twice, for ever. The
+      // watermarks were cleared globally already, so there is nothing to protect by
+      // waiting for a successful read.
+      if (formatChanged) {
+        const dropped = store.dropRowsFor(id)
+        if (dropped > 0) log(`usage backfill: ${String(dropped)} row(s) dropped for session ${id}`)
+      }
       handle = await persistence.open(id, 'read')
       const { events } = await handle.read()
       report.inspected += 1
       const inherited = typeof handle.inheritedEventCount === 'number' ? handle.inheritedEventCount : 0
       const lastSeq = events.length > 0 ? events[events.length - 1]!.seq : 0
-      // The log format is the witness for every watermark below: a migration
-      // renumbers the tail, so a watermark advanced under the previous format can
-      // skip events that moved below it — read here, before the watermark is
-      // consulted, so the re-fold happens in THIS pass rather than the next.
-      // Rows are deduplicated by key, so re-reading a log cannot double-count.
-      const version = listedHeaderVersion(entry)
-      if (version !== undefined && store.observeLogFormat(version)) {
-        // The witness moved, so this session's stored rows may hold the same
-        // message under its OLD seq — re-folding without dropping them would
-        // count that usage twice. See `UsageStore.dropRowsFor`.
-        const dropped = store.dropRowsFor(id)
-        log(`usage backfill: log format ${String(version)} differs from the folded one; re-folding sessions${dropped > 0 ? ` (${String(dropped)} row(s) dropped for this one)` : ''}`)
-      }
       // Both bounds must be cleared: the stored watermark (what this plugin
       // already folded) and the inherited prefix (what the PARENT's fold
       // already counted).

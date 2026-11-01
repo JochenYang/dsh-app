@@ -584,7 +584,11 @@ function listsOf(
       // rows outrank a later source's live same-package rows (npm names are
       // the merge key) — last write wins stays with the leading source.
       const cached = cache?.sources[result.url]
-      if (cached !== undefined && cached.failed === undefined && cached.entries.length > 0) {
+      // ANY cached rows are lent, failed mark or not: the rows are what the user
+      // sees, and the failure reason beside them is what says they did not refresh.
+      // Requiring `failed === undefined` made the second consecutive outage shrink
+      // the very list the first one was allowed to keep.
+      if (cached !== undefined && cached.entries.length > 0) {
         lists.push([...cached.entries])
       }
     }
@@ -614,7 +618,10 @@ function cachePayload(cache: CatalogCache, sources: readonly string[], fresh: bo
     const state = cache.sources[url]
     if (state === undefined) continue
     if (state.failed !== undefined) failed.push({ url, reason: state.failed })
-    else if (state.entries.length > 0) lists.push([...state.entries])
+    // The two are independent: a row can carry its last good entries AND the reason
+    // it could not refresh. Treating them as an either-or dropped the rows, which is
+    // what made a flaky source disappear from the model's catalog entirely.
+    if (state.entries.length > 0) lists.push([...state.entries])
   }
   return {
     plugins: withRepoKeys(mergeCatalogs(lists)),
@@ -629,10 +636,14 @@ function cachePayload(cache: CatalogCache, sources: readonly string[], fresh: bo
 function isCacheFresh(cache: CatalogCache, sources: readonly string[], now: number): boolean {
   if (!Number.isSafeInteger(cache.fetchedAt) || now - cache.fetchedAt < 0) return false
   if (now - cache.fetchedAt >= CATALOG_CACHE_TTL_MS) return false
-  // A source added after the snapshot has no row — treat the whole cache as
-  // expired so the new source participates in the next fetch instead of
-  // silently rendering an incomplete directory for hours.
-  return sources.every(url => cache.sources[url] !== undefined)
+  // A failed row is NOT fresh. The TTL bounds how long a GOOD answer is reused;
+  // using it to lock in a failure meant one flaky fetch hid a source for hours.
+  // The rows such a row still carries stay readable — the retry is what makes the
+  // next request prove them.
+  return sources.every(url => {
+    const row = cache.sources[url]
+    return row !== undefined && row.failed === undefined
+  })
 }
 
 /**
@@ -759,6 +770,57 @@ export interface CatalogResolution {
  * 5. nothing at all → an empty payload whose failed list drives the panel's
  *    prominent reload box.
  */
+/** One stale-while-revalidate pass at a time, per process. */
+let catalogRefreshing = false
+
+/**
+ * Refresh the catalog BEHIND an already-answered request.
+ *
+ * The expired-open path used to block the panel on every source. Measured on this
+ * machine 2026-11-01: the jsDelivr index is 3.3 MB in 1.8 s, the community API
+ * 2.25 s, and parsing the merged snapshot costs about another second — so the first
+ * open after the six-hour window sat on a spinner for ~3.5 s. The snapshot is now
+ * served immediately and this runs behind it, which is what makes the next open
+ * instant (and what the community plugin's CDN-fed panel effectively does).
+ *
+ * @param deps - the route's dependencies.
+ * @param sources - the configured sources, in order.
+ * @param heldCache - the snapshot the request just served.
+ */
+async function refreshCatalogBehind(
+  deps: MarketDeps,
+  sources: readonly string[],
+  heldCache: CatalogCache,
+  persist: (cache: CatalogCache) => void,
+  log: (message: string) => void,
+): Promise<void> {
+  if (catalogRefreshing) return
+  catalogRefreshing = true
+  try {
+    const resolution = await resolveCatalog({
+      sources,
+      refresh: true,
+      fetchSource: fetchCatalog,
+      readCache: () => heldCache,
+      loadSnapshot,
+      now: Date.now,
+    })
+    if (resolution.cacheToWrite !== null) persist(resolution.cacheToWrite)
+    deps.installIntents.hold.remember(catalogBuildOf(
+      resolution.payload.plugins,
+      resolution.payload.cachedAt,
+      sources,
+      resolution.cacheToWrite ?? heldCache,
+    ))
+  } catch (error) {
+    // A silent catch leaves the banner's "refreshing" claim unverifiable: this log
+    // line is the only place the failure shows up for whoever reads it next.
+    log(`plugin-market: the background catalog refresh failed: ${String(error)}`)
+  } finally {
+    catalogRefreshing = false
+  }
+}
+
 export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogResolution> {
   const { sources } = deps
   if (sources.length === 0) {
@@ -794,16 +856,24 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
     const fetchedAt = deps.now()
     return {
       payload: { plugins: withRepoKeys(mergeCatalogs(lists)), failed, sources, cachedAt: fetchedAt },
-      cacheToWrite: buildCatalogCache(fetchedAt, results, revalidated),
+      cacheToWrite: buildCatalogCache(fetchedAt, results, revalidated, cache?.sources ?? {}),
     }
   }
   // Every source failed with nothing live: the last good snapshot (even an
   // expired one) beats an empty panel, and the current failure reasons still
-  // reach the user. Nothing is written — the old rows stay the cache, so a
-  // later open retries from the same base.
+  // reach the user.
   if (cache !== null) {
     const payload = cachePayload(cache, sources, false)
-    return { payload: { ...payload, failed }, cacheToWrite: null }
+    // A total failure WRITES too, and keeps the ORIGINAL timestamp: the next open
+    // has to see both the last good rows AND why they did not refresh. Writing
+    // nothing was the silent-failure path — the panel's banner promised an update
+    // that never happened, and `failed` stayed empty in the file for ever. Keeping
+    // the original `fetchedAt` also stops an older row set from masquerading as
+    // fresh.
+    return {
+      payload: { ...payload, failed },
+      cacheToWrite: buildCatalogCache(cache.fetchedAt, results, revalidated, cache.sources),
+    }
   }
   const snapshot = deps.loadSnapshot()
   if (snapshot !== null) {
@@ -980,7 +1050,7 @@ export function registerMarketRoutes(
    * on success (pnpm warns and exits 0) and on failure (the blocked-builds
    * error) alike, which are the two ways the panel learns to offer the retry.
    */
-  const allowBuildLedger = new BlockedBuildLedger()
+  const allowBuildLedger = deps.installer.ledger
 
   /**
    * Run one install of this host's own and record a blocked-builds outcome
@@ -1089,6 +1159,16 @@ export function registerMarketRoutes(
           // below: which directory contributed each row must come from the same
           // snapshot the rows do.
           const heldCache = loadCatalogCache(deps.catalogCachePath, log)
+          // STALE-WHILE-REVALIDATE. An expired snapshot is answered NOW and refreshed
+          // behind the request; blocking on the sources is what made the first open
+          // every six hours take seconds (see `refreshCatalogBehind`). A forced
+          // `?refresh=1` still pays the live fetch, because that click asks for it.
+          if (heldCache !== null && !wantsRefresh(request.url) && !isCacheFresh(heldCache, sources, Date.now())) {
+            void refreshCatalogBehind(deps, sources, heldCache, persistCache, log)
+            const payload = cachePayload(heldCache, sources, false)
+            deps.installIntents.hold.remember(catalogBuildOf(payload.plugins, payload.cachedAt, sources, heldCache))
+            return ok(payload)
+          }
           const resolution = await resolveCatalog({
             sources,
             // ?refresh=1 is the panel's force reload: skip the cache and pay
@@ -1306,7 +1386,17 @@ export function registerMarketRoutes(
       fetch: async (request) => {
         try {
           const body = await readJsonBody(request)
-          const result = await deps.installer.uninstall(body.package)
+          // Suite packages are refused for the same reason `/toggle` refuses them:
+          // the shell's overlay re-mounts them on every boot, so a removal is undone
+          // by the next launch — after the user waited through a full install cycle.
+          const name = validatePackageName(body.package)
+          if (name.startsWith('@dsh-app/')) {
+            throw new MarketValidationError({
+              code: 'uninstall.suiteManaged',
+              text: 'suite plugins are managed by the desktop shell and cannot be removed in the market',
+            })
+          }
+          const result = await deps.installer.uninstall(name)
           return ok({ installed: false, output: result.output })
         } catch (error: unknown) {
           const mapped = errorStatus(error)

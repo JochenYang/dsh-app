@@ -61,6 +61,11 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
   /** Picks from the model-name search list (keyed providerId + space + modelId). */
   const [pickedModels, setPickedModels] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState(false)
+  /** Bumped by the retry button. The effect depends on it because a FAILED fetch
+   *  leaves `providers` undefined — the value the retry sets it back to — so the
+   *  dependency never changed and the effect never ran again: the panel sat on
+   *  "loading" for ever. */
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     if (!open || providers !== undefined) return
@@ -78,7 +83,7 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
       },
     )
     return () => { stale = true }
-  }, [open, providers])
+  }, [open, providers, attempt])
 
   const results = useMemo(
     () => providers === undefined ? [] : searchProviders(providers, query).slice(0, 20),
@@ -139,7 +144,7 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
                 <p>{t('adv.import.unreachable', { message: messageText(failure, t) })}</p>
                 <Button
                   type="button" variant="outline" size="sm"
-                  onClick={() => { setProviders(undefined); setFailure(undefined) }}
+                  onClick={() => { setProviders(undefined); setFailure(undefined); setAttempt(count => count + 1) }}
                 >{t('adv.common.retry')}</Button>
               </div>
             )

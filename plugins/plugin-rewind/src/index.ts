@@ -497,7 +497,7 @@ export function apply(ctx: Context, config: Config): void {
   participants.register({
     id: FILE_REVERT_PARTICIPANT,
     reconcileAfterRewind: (context) =>
-      revertFiles(context.session, context.sessionId, context.plan, recorder, limits, log),
+      revertFiles(context.session, context.sessionId, context.plan, recorder, limits, log, context.signal),
   })
 
   // --- The quarantine manager rides the Connection exact-Fetch registry, the
@@ -553,7 +553,7 @@ export function apply(ctx: Context, config: Config): void {
   // cover their target exactly, but a turn that writes and then runs a shell
   // command would otherwise be snapshotted AFTER the write, and the diff would
   // then treat that write as part of the range's starting state. ---
-  const captured = new Set<string>()
+  const captured = new Map<string, Promise<void>>()
   ctx.effect(() => ctx.on('tools/pre-execute', async (exec, next) => {
     const info = sessionInfoOfExec(exec)
     const tool = String((exec as { name?: unknown } | null)?.name ?? '')
@@ -591,24 +591,42 @@ export function apply(ctx: Context, config: Config): void {
    */
   async function ensureSnapshot(info: SnapshotTarget, signal?: AbortSignal): Promise<void> {
     const key = `${info.id}\u0000${String(info.turn)}`
-    if (captured.has(key)) return
-    captured.add(key)
+    // A caller that arrives while a walk is running JOINS it. Returning early was
+    // the whole defect: the tool gate's contract is that the snapshot describes the
+    // workspace BEFORE the tool runs, so it must wait for the walk, not skip it —
+    // skipping let the tool write while the walk was still reading, recording a
+    // mid-turn tree under the turn's own number and reporting `coverage: full`.
+    const inFlight = captured.get(key)
+    if (inFlight !== undefined) return await inFlight
     const dshHome = resolveDshHome()
-    try {
-      const previous = await latestSnapshotBefore(dshHome, info.id, info.turn)
-      await captureWorkspace(dshHome, info.id, info.turn, info.cwd, limits, previous, signal)
-      await pruneSnapshots(dshHome, info.id, limits)
-    } catch (error) {
-      // The claim is RELEASED on failure, and this is why the two callers can
-      // coexist: the turn-start path runs before the workspace is known to be
-      // walkable (the session may have just opened), so it can fail where the
-      // tool gate would have succeeded a moment later. Holding the claim would
-      // leave the whole turn without a snapshot — the very state the claim
-      // exists to record — and the recall would then report `coverage: none`
-      // for a range that could have been covered.
-      captured.delete(key)
-      throw error
-    }
+    const run = (async (): Promise<void> => {
+      try {
+        const previous = await latestSnapshotBefore(dshHome, info.id, info.turn)
+        const capture = await captureWorkspace(dshHome, info.id, info.turn, info.cwd, limits, previous, signal)
+        await pruneSnapshots(dshHome, info.id, limits)
+        // A CANCELLED walk is not a snapshot: `captureWorkspace` answers
+        // `complete:false, reason:'cancelled'` instead of throwing. Keeping the claim
+        // would make every later tool gate in this turn await a promise that recorded
+        // nothing, and the recall would then report partial coverage with no way to
+        // repair it.
+        if (!capture.complete) captured.delete(key)
+      } catch (error) {
+        // The claim is RELEASED on failure, and this is why the two callers can
+        // coexist: the turn-start path runs before the workspace is known to be
+        // walkable (the session may have just opened), so it can fail where the
+        // tool gate would have succeeded a moment later. Holding the claim would
+        // leave the whole turn without a snapshot — the very state the claim
+        // exists to record — and the recall would then report `coverage: none`
+        // for a range that could have been covered.
+        captured.delete(key)
+        throw error
+      }
+    })()
+    // A SUCCESS keeps the settled promise: the state a second walk would capture is
+    // no longer the turn's starting state, so re-taking it would record a mid-turn
+    // tree, while every later caller still awaits this one.
+    captured.set(key, run)
+    return await run
   }
 
   // --- The turn boundary. ---
@@ -1045,8 +1063,16 @@ function coverageOf(
   session: SessionLike,
   plan: CutPlan,
   snapshot: TreeSnapshot | undefined,
+  trimmedThrough = -1,
 ): { readonly coverage: RevertCoverage, readonly reason?: string, readonly tools?: readonly string[] } {
   const tools = writingToolsInRange(session, plan.startSeq, plan.endSeq)
+  // A trimmed recorder lost before-images for the oldest writes it had seen. The
+  // range cannot be fully restored even when every tool in it is one the recorder
+  // understands, and answering `full` would be exactly the "quietly leaves things
+  // out" failure the preview documents exist to prevent.
+  if (trimmedThrough >= plan.startSeq) {
+    return { coverage: 'partial', reason: 'recorderTrimmed', ...(tools.length === 0 ? {} : { tools }) }
+  }
   const blind = tools.filter((tool) => !RECORDER_TOOLS.has(tool))
   if (blind.length === 0) return { coverage: 'full', ...(tools.length === 0 ? {} : { tools }) }
   if (snapshot === undefined) return { coverage: 'none', reason: 'noSnapshot', tools: blind }
@@ -1136,7 +1162,7 @@ async function previewRevert(
       ...(nextText === undefined ? {} : { next: nextText }),
     })
   }
-  const cover = coverageOf(session, plan, snapshot)
+  const cover = coverageOf(session, plan, snapshot, recorder.trimmedThroughSeq())
   return {
     restore,
     remove,
@@ -1174,6 +1200,7 @@ async function revertFiles(
   recorder: Recorder,
   limits: TreeLimits,
   log: { warn(message: string): void },
+  signal?: AbortSignal,
 ): Promise<FileRevert> {
   const dshHome = resolveDshHome()
   const { snapshot, diff } = await snapshotDiff(sessionId, plan, limits)
@@ -1184,6 +1211,15 @@ async function revertFiles(
   let restored = 0
   let removed = 0
   for (const target of targets) {
+    // The participant deadline aborts this loop. Continuing after the recall has
+    // already reported "not restored" is worse than stopping: the recall forgets the
+    // recorder's before-images and drops the snapshots right after that report, so a
+    // write still in flight would race the user's own retry on the same paths. The
+    // remaining targets are named as cancelled instead of vanishing from the report.
+    if (signal?.aborted === true) {
+      unrestorable.push({ path: target.path, reason: 'cancelled' })
+      continue
+    }
     const outcome = await restoreOne({ path: target.path, before: target.before }, dir, now, limits.maxFileBytes)
     if (outcome.kind === 'restored') restored += 1
     else if (outcome.kind === 'removed') removed += 1
@@ -1192,7 +1228,7 @@ async function revertFiles(
       log.warn(`rewind: could not restore ${target.path}: ${outcome.reason ?? 'unknown'}`)
     }
   }
-  const cover = coverageOf(session, plan, snapshot)
+  const cover = coverageOf(session, plan, snapshot, recorder.trimmedThroughSeq())
   return {
     restored,
     removed,

@@ -120,18 +120,21 @@ export function fileGraph(graph: Graph, limit = MAX_VIEW_FILES): FileGraph {
   )
   const total = rows.length
   const kept = rows.slice(0, limit)
-  const known = new Set(kept.map(row => row.path))
-  // An edge is drawn only when BOTH ends are drawn: a line to a node that is not
-  // in the picture reads as a rendering bug, not as a truncation.
-  const edges = allRows<{ src: string, dst: string, kind: string }>(
+  // Filtered IN SQL, not after the LIMIT. The old query took the graph's first
+  // MAX_VIEW_EDGES edges and only then dropped the ones whose ends are not drawn, so
+  // a picture whose kept files sat outside that window came back with NO edges at
+  // all — which reads as "nothing is connected" rather than as truncation.
+  const ids = kept.map(row => fileNodeId(row.path))
+  const placeholders = ids.map(() => '?').join(', ')
+  const edges = ids.length === 0 ? [] : allRows<{ src: string, dst: string, kind: string }>(
     graph.db,
     `SELECT DISTINCT src, dst, kind FROM edges
-     WHERE kind IN ('imports', 'references') AND src LIKE 'file:%' AND dst LIKE 'file:%'
+     WHERE kind IN ('imports', 'references')
+       AND src IN (${placeholders}) AND dst IN (${placeholders})
      LIMIT ?`,
-    MAX_VIEW_EDGES,
+    ...([...ids, ...ids, MAX_VIEW_EDGES] as (string | number)[]),
   )
     .map(row => ({ from: row.src, to: row.dst, kind: row.kind }))
-    .filter(edge => known.has(edge.from.replace(/^file:/u, '')) && known.has(edge.to.replace(/^file:/u, '')))
   return {
     nodes: kept.map(row => ({
       id: fileNodeId(row.path),

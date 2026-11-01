@@ -51,6 +51,11 @@ export class HooksMountManager {
   private enqueue(id: string, op: () => Promise<void>): Promise<void> {
     const next = (this.chains.get(id) ?? Promise.resolve()).catch(() => undefined).then(op)
     this.chains.set(id, next)
+    // Dropped once this is the LAST link: the map otherwise grows with every bridge
+    // ever synced, and the value is only read to chain the next transition.
+    void next.finally(() => {
+      if (this.chains.get(id) === next) this.chains.delete(id)
+    }).catch(() => undefined)
     return next
   }
 

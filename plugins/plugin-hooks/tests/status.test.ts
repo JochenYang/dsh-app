@@ -76,4 +76,24 @@ describe('NativeHookRuntime status', () => {
     assert.equal(runtime.statusFor('hook-1')?.state, 'mounted')
     assert.equal(runtime.statusFor('hook-1')?.message, undefined)
   })
+
+  it('does not activate the earlier rules of an entry whose later rule is invalid', () => {
+    // THE DEFECT: `compiled.push` sat inside the parse loop, so a rule that threw
+    // halfway left the earlier ones in the live set while `statusFor` reported
+    // `error` — the panel said "not mounted" about a hook that was already
+    // intercepting tool calls.
+    const runtime = new NativeHookRuntime(() => {})
+    runtime.sync([{
+      id: 'hook-1',
+      configContent: JSON.stringify({
+        rules: [
+          { on: 'pre-tool-use', action: 'block', message: 'a' },
+          { on: 'pre-tool-use', action: 'block', message: 'b' },
+          { on: 'pre-tool-use', action: 'block', message: 'c', matcher: '[bad' },
+        ],
+      }),
+    }])
+    assert.equal(runtime.statusFor('hook-1')?.state, 'error')
+    assert.equal(runtime.active, false, 'an entry reported as error intercepts nothing')
+  })
 })

@@ -50,6 +50,34 @@ import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { gitHead, indexProject, isStale, projectChanged } from './indexer.ts'
+
+/** How many project graphs one process keeps open at a time. */
+const MAX_OPEN_GRAPHS = 8
+
+/**
+ * Cached HEAD per project.
+ *
+ * A tool call asks once, and a turn that makes several graph calls would otherwise
+ * spawn `git rev-parse` each time — tens of milliseconds on a warm repo, which is
+ * most of a small context answer's latency. Two seconds is short enough that a
+ * commit is seen by the next turn and long enough that one turn shares the answer.
+ */
+const HEAD_TTL_MS = 2_000
+const headCache = new Map<string, { head: string, at: number }>()
+
+/**
+ * `gitHead` with a short per-project cache.
+ * @param cwd - the project root.
+ * @returns the commit HEAD.
+ */
+async function gitHeadCached(cwd: string): Promise<string> {
+  const now = Date.now()
+  const hit = headCache.get(cwd)
+  if (hit !== undefined && now - hit.at < HEAD_TTL_MS) return hit.head
+  const head = await gitHead(cwd)
+  headCache.set(cwd, { head, at: now })
+  return head
+}
 import { parseFile } from './tree-sitter.ts'
 import { LANGUAGES, bundledGrammarDir, downloadGrammar, grammarPath, type GrammarPaths } from './languages.ts'
 import {
@@ -78,7 +106,7 @@ import { createRefreshScheduler } from './refresh.ts'
 import { renderContext, renderFind, renderImpact } from './tool-text.ts'
 import { removeTree } from './remove-tree.ts'
 import { registerCodegraphRoutes } from './routes.ts'
-import { fileNodeId, openGraph, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
+import { fileNodeId, forgetFile, openGraph, readFiles, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
 
 export const name = 'plugin-codegraph'
 
@@ -226,11 +254,18 @@ export function apply(ctx: Context): void {
     // not that a byte changed; this predicate asks the same stat comparison the pass
     // uses, so `stale` is only reported once something really moved.
     changed: (cwd) => {
-      const graph = graphs.get(cwd)
-      // No open graph means nothing to compare against: let the pass open it and
-      // record the truth rather than answering "unchanged" about a graph that does
-      // not exist.
-      if (graph === undefined) return true
+      // `graphFor`, not `graphs.get`: the open-graph map is BOUNDED and evicts, so
+      // "not open" has two meanings now — never opened, and evicted. Reading the map
+      // directly made an evicted project answer `changed: true` on every tool call:
+      // a full pass for a tree that had not moved, and an `indexing` answer about a
+      // project that was merely not resident. `graphFor` is one SQLite open plus the
+      // same stat comparison.
+      let graph: Graph
+      try {
+        graph = graphFor(cwd)
+      } catch {
+        return true
+      }
       try {
         return projectChanged(graph, cwd)
       } catch {
@@ -243,10 +278,30 @@ export function apply(ctx: Context): void {
   const graphFor = (cwd: string): Graph => {
     if (deleting.has(cwd)) throw new Error('this project’s code graph is being deleted')
     const existing = graphs.get(cwd)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      // Touch. `graphs` is insertion-ordered and the eviction below closes the FIRST
+      // entry, so without this the bound behaves as FIFO — and the first project the
+      // user opened, often the one they are working in, is the first one closed.
+      graphs.delete(cwd)
+      graphs.set(cwd, existing)
+      return existing
+    }
     const opened = openGraph(graphFileFor(cwd))
     graphs.set(cwd, opened)
     queue.adopt(cwd, readProjectMeta(opened.db))
+    // Bounded: each entry pins a SQLite handle, and a session that visits many
+    // projects would otherwise keep one per project for ever. The oldest entry whose
+    // project is NOT mid-pass is closed; `indexing`/`checking` are the two states that
+    // hold a reference to the handle, and closing one under them would write into a
+    // closed database. Everything else is cheap to reopen.
+    for (const [key, handle] of graphs) {
+      if (graphs.size <= MAX_OPEN_GRAPHS) break
+      if (key === cwd) continue
+      const status = queue.status(key)
+      if (status?.state === 'indexing' || status?.checking === true) continue
+      graphs.delete(key)
+      try { handle.close() } catch { /* already closed */ }
+    }
     return opened
   }
 
@@ -425,7 +480,15 @@ export function apply(ctx: Context): void {
       // finds a change the answer is `stale` (proved) and the pass that is already
       // scheduled indexes it; if it cannot read the tree it falls through to the
       // honest `indexing`.
-      const graph = graphs.get(cwd)
+      // Same reasoning as `changed` above: `graphs.get` cannot tell "never opened"
+      // from "evicted", and answering `indexing` for a resident-again project would
+      // be a wrong freshness claim. `graphFor` reopens it and touches the LRU.
+      let graph: Graph | undefined
+      try {
+        graph = graphFor(cwd)
+      } catch {
+        graph = undefined
+      }
       if (graph !== undefined) {
         let changed = true
         try {
@@ -454,7 +517,7 @@ export function apply(ctx: Context): void {
     // Reading the working tree's HEAD is the only way to know the graph is
     // behind; doing it per call keeps the answer honest without a background
     // timer that would re-index projects nobody is looking at.
-    const head = await gitHead(cwd)
+    const head = await gitHeadCached(cwd)
     if (isStale(meta, head)) {
       queue.markStale(cwd)
       // A stale graph is still useful, so the answer is served AND the rebuild
@@ -1029,6 +1092,39 @@ export function apply(ctx: Context): void {
       const spec = LANGUAGES.find(language => language.id === id)
       if (spec === undefined) throw new Error(`no language "${id}"`)
       await downloadGrammar(spec, grammarPaths())
+      // Installing a grammar makes files of that language PARSEABLE, but their rows
+      // already say "indexed, zero symbols": the pass skips a file whose mtime and
+      // size did not move, and installing a grammar moves neither. Forgetting the
+      // rows is what puts those files back in front of the parser.
+      //
+      // EVERY project with a graph on disk, not only the ones this process has
+      // opened: a project the user has not touched this session holds exactly the
+      // same stale rows, and leaving it out would fix the language only where the
+      // settings page happened to be used. Each graph is opened, cleaned and closed
+      // here so a grammar install does not pin one handle per project.
+      const extensions = spec.extensions
+      const targets = new Set<string>(graphs.keys())
+      for (const project of knownProjects(graphStorageRoot())) targets.add(project.cwd)
+      for (const cwd of targets) {
+        const live = graphs.get(cwd)
+        const graph = live ?? openGraph(graphFileFor(cwd))
+        try {
+          let forgotten = 0
+          for (const path of readFiles(graph.db).keys()) {
+            const lower = path.toLowerCase()
+            if (!extensions.some(extension => lower.endsWith(extension))) continue
+            forgetFile(graph.db, path)
+            forgotten += 1
+          }
+          // Awaited, not fire-and-forget: the route promises the settings page that
+          // the language is usable now. A project with no such files costs nothing.
+          if (forgotten > 0) await queue.request(cwd)
+        } finally {
+          // Only a graph this call opened is closed here; a live one belongs to the
+          // tool surface.
+          if (live === undefined) graph.close()
+        }
+      }
     },
     removeLanguage: async (id) => {
       const spec = LANGUAGES.find(language => language.id === id)

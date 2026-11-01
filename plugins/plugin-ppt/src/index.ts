@@ -34,7 +34,7 @@
  * @module @dsh-app/plugin-ppt
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, lstat, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import path, { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -424,11 +424,12 @@ function registerPptTools(ctx: Context, modeStore: PptModeStore): () => void {
       + 'report the returned PPTX path and keep the PPTD project for later edits.',
     parameters: {
       project_path: { type: 'string', required: true, description: '工作区内 PPTD 工程目录或 .pptd 清单路径。' },
-      output_file: { type: 'string', required: true, description: '新的工作区内 .pptx 输出路径。' },
+      output_file: { type: 'string', required: true, description: '新的工作区内 .pptx 输出路径；该文件已存在时必须同时传 overwrite: true。' },
+      overwrite: { type: 'boolean', description: '目标 .pptx 已存在时，确认为覆盖才传 true；省略则拒绝，避免不可逆地替换上一次的导出。' },
     },
     output: OUTCOME_OUTPUT,
     async execute(args, exec: ToolRunContext): Promise<JsonValue> {
-      const { project_path: projectPath, output_file: outputFile } = args as Record<string, unknown>
+      const { project_path: projectPath, output_file: outputFile, overwrite } = args as Record<string, unknown>
       const workspace = workspaceRootOf(exec)
       if ('reason' in workspace) return failed([workspace.reason])
       if (typeof projectPath !== 'string' || projectPath.trim() === '') return failed(['project_path：必须是非空的工作区相对路径'])
@@ -461,7 +462,18 @@ function registerPptTools(ctx: Context, modeStore: PptModeStore): () => void {
         // plus tmp+rename so a symlink at the destination gets replaced (not
         // followed) and a failed write never leaves half a deck behind.
         const outAbs = await writableProjectFile(workspace.root, outputFile, 'output_file')
-        const outTmp = `${outAbs}.${process.pid}.tmp`
+        // An export is the one write with no undo inside the app: the bytes it
+        // replaces at that path exist nowhere else. Replacing them therefore
+        // needs the call to say so.
+        const existingOutput = await lstat(outAbs).catch(() => undefined)
+        if (existingOutput !== undefined && overwrite !== true) {
+          return failed([`output_file：目标文件已存在（${outputFile}）；确认要覆盖时传 overwrite: true，或改用一个新路径`])
+        }
+        const outTmp = `${outAbs}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+        // The parent may not exist yet (`exports/deck.pptx` on a first export); the
+        // PDF tools all create it, and a bare ENOENT here would be reported as a
+        // render failure pointing the model back at a perfectly valid project.
+        await mkdir(path.dirname(outAbs), { recursive: true })
         await writeFile(outTmp, Buffer.from(rendered.bytes))
         await rename(outTmp, outAbs)
         const sizeBytes = rendered.bytes.byteLength
@@ -555,6 +567,11 @@ export function apply(ctx: Context): void {
     void installSkill(resolveDshHome()).then(
       ({ change, retired }) => {
         if (change === 'installed') log.info(`ppt skill installed: ${SKILL_NAME}`)
+        // A file at our name whose body is not ours is kept, not overwritten:
+        // `dsh-app-ppt` is a legal market slug, so the directory can hold
+        // somebody else's skill. Keep the log line — ours never appearing is
+        // otherwise unexplainable.
+        if (change === 'kept-foreign') log.info(`kept skill directory "${SKILL_NAME}": its body is not this plugin's`)
         // A retired directory is a user-visible removal (a dead skill stops
         // being offered), so it is reported. So is a directory that was KEPT:
         // a dead skill that survives is invisible without that line.

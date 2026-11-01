@@ -64,6 +64,8 @@ type GraphAnswer =
   | { readonly kind: 'symbols', readonly symbols: SymbolGraphPayload }
   /** No graph yet; a pass was queued, so ask again shortly. */
   | { readonly kind: 'indexing' }
+  /** No graph, and no session ever used this project: nothing was queued. */
+  | { readonly kind: 'notAdopted' }
 
 /** A host failure carrying the coded message the client renders. */
 interface HostText {
@@ -408,6 +410,11 @@ export function GraphPanel({ cwd, t, emptyNote }: {
   }
   if (answer === undefined) {
     return <p className="dshcg_viewNote dshcg_viewPad">{t('codegraph.view.loading')}</p>
+  }
+  if (answer.kind === 'notAdopted') {
+    // Nothing is running, so polling would spin for ever. The note tells the user
+    // what actually happens: work in the project once and its graph appears.
+    return <p className="dshcg_viewNote dshcg_viewPad">{t('codegraph.view.notAdopted')}</p>
   }
   if (answer.kind === 'indexing') {
     // Distinct from `loading`: the host has started a pass and this page is

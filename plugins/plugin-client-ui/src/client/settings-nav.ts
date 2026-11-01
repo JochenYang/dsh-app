@@ -78,12 +78,25 @@ export function mountSettingsNav(glyphs: readonly NavGlyph[]): () => void {
   }
   patch()
 
-  const observer = new MutationObserver(patch)
+  // Coalesced to one pass per frame. The observer sees `characterData` too (React
+  // rewrites a label in place on a language switch), so a streaming answer fired it
+  // once per character — and each `patch()` runs a `querySelector` plus two
+  // `querySelectorAll` sweeps over the whole document.
+  let frame = 0
+  const schedule = (): void => {
+    if (frame !== 0) return
+    frame = requestAnimationFrame(() => {
+      frame = 0
+      patch()
+    })
+  }
+  const observer = new MutationObserver(schedule)
   // characterData is part of the observation because React rewrites a lone
   // text child in place, which emits no childList record.
   observer.observe(document.body, { childList: true, subtree: true, characterData: true })
 
   return () => {
+    if (frame !== 0) cancelAnimationFrame(frame)
     observer.disconnect()
     style.remove()
     for (const glyph of glyphs) {

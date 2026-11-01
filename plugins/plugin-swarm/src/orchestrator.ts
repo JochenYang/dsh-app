@@ -71,16 +71,38 @@ const TRANSPORT_FAILURE_CODES: ReadonlySet<string> = new Set([
   'SERVER',
   'EMPTY_RESPONSE',
   'QUOTA',
+  // Node/undici errno. Without these, a launch that failed with `ECONNRESET` was
+  // classified `structural` — the TERMINAL state — so one flaky connection stopped
+  // the batch from retrying and from shrinking its pool, for a condition a later
+  // attempt routinely survives.
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'EPIPE',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  // The kernel flattens a non-`HarnessError` (a raw undici `TypeError: fetch
+  // failed`, whose `cause` is the errno above) into `code:'UNKNOWN'` on the settle
+  // path, so the errno itself never reaches it. Same shape as QUOTA: unavailable for
+  // a reason outside this item, so the pool gives way — but not worth an automatic
+  // replay, which is why it stays out of RETRYABLE_FAILURE_CODES.
+  'UNKNOWN',
 ])
 
-/** Transport codes whose failure is worth an automatic retry; QUOTA is terminal. */
-const RETRYABLE_FAILURE_CODES: ReadonlySet<string> = new Set([
-  'RATE_LIMIT',
-  'TRANSPORT',
-  'TIMEOUT',
-  'SERVER',
-  'EMPTY_RESPONSE',
-])
+/**
+ * Transport codes whose failure is worth an automatic retry.
+ *
+ * DERIVED from the set above, not copied. The two lists drifted apart once, and a
+ * code present in the first but not the second is classified transport, shrinks the
+ * pool, and then never retries — a silent behaviour change no test would explain.
+ * `QUOTA` and `UNKNOWN` both name a condition outside the item's control (the
+ * account, a connection the kernel could not name), so they give way without a
+ * replay.
+ */
+const RETRYABLE_FAILURE_CODES: ReadonlySet<string> = new Set(
+  [...TRANSPORT_FAILURE_CODES].filter(code => code !== 'QUOTA' && code !== 'UNKNOWN'),
+)
 
 /**
  * The kernel's live-child limit rejection (`dsh-subagent`'s `ActivationPool`).

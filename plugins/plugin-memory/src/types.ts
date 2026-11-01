@@ -159,6 +159,16 @@ export interface MemoryArchiveRow {
 export interface MemoryArchiveResponse {
   cards: MemoryArchiveRow[]
   total: number
+  /**
+   * The last archive-write failure, when one happened.
+   *
+   * An empty list otherwise reads as "nothing was deleted", while the card really is
+   * gone — `MemoryStore.lastArchiveError` existed for this and had no caller, so a
+   * failed archive looked exactly like an empty one.
+   */
+  archiveError?: string
+  /** Which project's archive failed, for the sentence that names it. */
+  archiveErrorSlug?: string
 }
 
 /**

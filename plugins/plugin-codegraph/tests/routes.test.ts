@@ -168,15 +168,16 @@ describe('GET /status', () => {
 })
 
 describe('GET /graph', () => {
-  it('queues an unknown project and answers indexing, rather than an error', async () => {
-    // Opening the view IS the request for that project's graph, and
-    // `session/created` fires once — so a session that predates this plugin never
-    // queues its project on its own. Answering 404 left the page permanently empty
-    // for exactly those sessions, which is the state this view was shipped in.
-    //
-    // The fence still holds: the route queues the path the SESSION names, and the
-    // queue is what decides whether a pass runs. Nothing here reads the disk.
-    const { routes, dispose } = harness(options())
+  it('answers notAdopted for a project no session has used, rather than 404 or a scan', async () => {
+    // The view opening is a READ. This route used to queue a pass for whatever
+    // directory the caller named, so an authenticated client could make the kernel
+    // walk and store an arbitrary tree — and a `GET` that starts a scan is a side
+    // effect nothing can bound. Every project the user works in is already adopted
+    // (the plugin adopts the graphs found on disk at startup, and a session adopts
+    // its cwd when it is created), so an unknown cwd means "no graph and no session"
+    // and is answered without touching the disk.
+    const opts = options()
+    const { routes, dispose } = harness(opts)
     const route = routes.get(`${ROUTE_PREFIX}/graph`)!
 
     const missing = await call(route, new Request('dsh-app://app/x'))
@@ -184,8 +185,9 @@ describe('GET /graph', () => {
     assert.equal((missing.body.error as { host?: { code?: string } }).host?.code, 'route.cwdRequired')
 
     const unknown = await call(route, new Request('dsh-app://app/x?cwd=D:/elsewhere'))
-    assert.equal(unknown.status, 200)
-    assert.equal((unknown.body.value as { kind: string }).kind, 'indexing')
+    assert.equal(unknown.status, 200, 'a distinct answer, not an error the user cannot act on')
+    assert.equal((unknown.body.value as { kind: string }).kind, 'notAdopted')
+    assert.deepEqual(opts.actions, [], 'and nothing was queued or walked')
     await dispose()
   })
 

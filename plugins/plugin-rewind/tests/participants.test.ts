@@ -64,7 +64,12 @@ test('every participant reconciles once, in registration order', async () => {
   const reports = await registry.reconcileAll(recall)
   assert.deepEqual(calls, ['first', 'second'])
   assert.equal(seen.length, 2)
-  assert.equal(seen[0], recall, 'each participant is handed the same recall context')
+  // Each participant gets its OWN context object: the registry adds a per-call
+  // cancellation signal, so one deadline can abort one participant without touching
+  // its neighbours. Every field the caller supplied travels verbatim.
+  assert.deepEqual({ ...seen[0], signal: undefined }, { ...recall, signal: undefined })
+  assert.ok(seen[0]?.signal instanceof AbortSignal, 'each participant is handed a signal')
+  assert.notEqual(seen[0]?.signal, seen[1]?.signal, 'and it is its own, not a shared one')
   assert.deepEqual([...reports.entries()], [['first', { ok: 1 }], ['second', { ok: 2 }]])
   // `list()` reports registration order — the order `reconcileAll` runs in.
   assert.deepEqual(registry.list().map((entry) => entry.id), ['first', 'second'])
@@ -156,7 +161,14 @@ test('a participant that never settles is cut off at the deadline, not awaited f
   const lines: string[] = []
   const registry = createParticipantRegistry({ warn: (message) => { lines.push(message) } }, 20)
   const ran: string[] = []
-  registry.register({ id: 'hung', reconcileAfterRewind: () => new Promise(() => {}) })
+  let hungSignal: AbortSignal | undefined
+  registry.register({
+    id: 'hung',
+    reconcileAfterRewind: (recall) => {
+      hungSignal = recall.signal
+      return new Promise(() => {})
+    },
+  })
   registry.register({ id: 'after', reconcileAfterRewind: () => { ran.push('after') } })
 
   const reports = await registry.reconcileAll(context())
@@ -166,6 +178,9 @@ test('a participant that never settles is cut off at the deadline, not awaited f
   assert.equal(reports.get('after'), undefined, 'and the one that settled is still recorded')
   assert.match(lines.join('\n'), /"hung"/u, 'the hung participant is named in the log')
   assert.match(lines.join('\n'), /did not settle/u, 'with the reason it was dropped for')
+  // Aborted, not merely abandoned: a participant still writing after the recall
+  // answered "not restored" is what the user's retry would race on the same paths.
+  assert.equal(hungSignal?.aborted, true, 'the deadline aborts the participant before reporting it')
 })
 
 test('a skipped participant does not run, and every other one still does', async () => {

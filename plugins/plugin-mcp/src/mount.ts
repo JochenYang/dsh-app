@@ -156,6 +156,12 @@ export class McpMountManager {
   private enqueue(id: string, op: () => Promise<void>): Promise<void> {
     const next = (this.chains.get(id) ?? Promise.resolve()).catch(() => undefined).then(op)
     this.chains.set(id, next)
+    // Dropped once this is the LAST link. Keeping every settled promise made the map
+    // grow with each server ever mounted, and the value is only ever read to chain
+    // the next transition.
+    void next.finally(() => {
+      if (this.chains.get(id) === next) this.chains.delete(id)
+    }).catch(() => undefined)
     return next
   }
 

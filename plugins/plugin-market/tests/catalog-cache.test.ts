@@ -173,9 +173,10 @@ describe('resolveCatalog (TTL cache flow)', () => {
   })
 
   it('answers a fresh cache immediately with cached: true and never fetches', async () => {
-    // Freshness requires a row for EVERY configured source (URL_B's failure
-    // row counts) — a partial snapshot must never pose as complete.
-    const cache = buildCatalogCache(9_000, [okSource(URL_A, ['pkg-a']), failedSource(URL_B, FAILED_REASON)])
+    // Freshness requires a row for EVERY configured source and NO failure on any of
+    // them: a failed row is retried on the next open instead of being trusted for
+    // the rest of the TTL (see the retry test below).
+    const cache = buildCatalogCache(9_000, [okSource(URL_A, ['pkg-a']), okSource(URL_B, ['pkg-b'])])
     const { fetches, run } = harness({ cache, results: [] })
     const { payload, cacheToWrite } = await run()
     assert.deepEqual(fetches, [])
@@ -183,9 +184,21 @@ describe('resolveCatalog (TTL cache flow)', () => {
     assert.equal(payload.cached, true)
     assert.equal(payload.stale, undefined)
     assert.equal(payload.cachedAt, 9_000)
-    assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a'])
-    // The cached failure row keeps the source's last error visible.
-    assert.deepEqual(payload.failed, [{ url: URL_B, reason: FAILED_REASON }])
+    assert.deepEqual(payload.plugins.map(item => item.package).sort(), ['pkg-a', 'pkg-b'])
+    assert.deepEqual(payload.failed, [])
+  })
+
+  it('retries a source whose cached row is a failure', async () => {
+    // One flaky fetch used to be locked in for the whole TTL: the row was written
+    // with empty entries, the cache still counted as fresh, and the source stayed
+    // hidden for hours. The row is now unproven, so the next open fetches it.
+    const cache = buildCatalogCache(9_000, [okSource(URL_A, ['pkg-a']), failedSource(URL_B, FAILED_REASON)])
+    const { fetches, run } = harness({ cache, results: [okSource(URL_A, ['pkg-a']), okSource(URL_B, ['pkg-b'])] })
+    const { payload, cacheToWrite } = await run()
+    assert.deepEqual(fetches, sources, 'the failed row is retried')
+    assert.equal(payload.cached, undefined)
+    assert.deepEqual(payload.plugins.map(item => item.package).sort(), ['pkg-a', 'pkg-b'])
+    assert.equal(cacheToWrite?.fetchedAt, 10_000)
   })
 
   it('treats a cache that misses a configured source as expired', async () => {
@@ -236,9 +249,10 @@ describe('resolveCatalog (TTL cache flow)', () => {
     assert.equal(payload.stale, undefined)
     assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a1', 'pkg-a2', 'pkg-b'])
     assert.deepEqual(payload.failed, [{ url: URL_A, reason: TIMEOUT_REASON }])
-    // The rebuilt cache keeps the failure row for the dead source — the lent
-    // rows are a payload convenience, never a substitute for a retry.
-    assert.deepEqual(cacheToWrite?.sources[URL_A], { entries: [], failed: TIMEOUT_REASON })
+    // The rebuilt cache keeps the failure row for the dead source AND the rows it
+    // lent: erasing them made one flaky fetch shrink the directory, and the retry
+    // path had nothing left to read.
+    assert.deepEqual(cacheToWrite?.sources[URL_A], { entries: [entry('pkg-a1'), entry('pkg-a2')], failed: TIMEOUT_REASON })
     assert.deepEqual(cacheToWrite?.sources[URL_B], { entries: [entry('pkg-b')] })
   })
 
@@ -271,7 +285,12 @@ describe('resolveCatalog (TTL cache flow)', () => {
     })
     const { payload, cacheToWrite } = await run()
     assert.deepEqual(fetches, sources)
-    assert.equal(cacheToWrite, null)
+    // WRITTEN even though nothing was live: the next open has to see the old rows
+    // AND why they did not refresh. The timestamp does not move, so an older row set
+    // cannot masquerade as fresh.
+    assert.equal(cacheToWrite?.fetchedAt, 10_000, 'the timestamp does not move')
+    assert.equal(cacheToWrite?.sources[URL_A]?.failed !== undefined, true, 'and the failure is recorded')
+    assert.deepEqual(cacheToWrite?.sources[URL_A]?.entries.map(item => item.package), ['pkg-a', 'pkg-b'], 'with the old rows kept')
     assert.equal(payload.stale, true)
     assert.equal(payload.cachedAt, 10_000)
     assert.deepEqual(payload.plugins.map(item => item.package), ['pkg-a', 'pkg-b', 'pkg-c'])
@@ -302,7 +321,7 @@ describe('resolveCatalog (TTL cache flow)', () => {
     })
     const { payload, cacheToWrite } = await run()
     assert.deepEqual(fetches, sources)
-    assert.equal(cacheToWrite, null)
+    assert.equal(cacheToWrite?.fetchedAt, 10_000, 'a total failure still records itself, with the old timestamp')
     assert.equal(payload.stale, true)
     assert.equal(payload.cached, undefined)
     assert.equal(payload.cachedAt, 10_000)

@@ -256,6 +256,36 @@ interface Job {
   readonly fail: (error: Error) => void
 }
 
+/** The display name of one project: its last path segment. */
+function nameOf(cwd: string): string {
+  return cwd.split(/[\\/]/u).filter(part => part !== '').pop() ?? cwd
+}
+
+/**
+ * The wire projection of one queue row.
+ *
+ * Shared by `statuses()` and `status()`: the single-cwd lookup used to build the
+ * whole array and then `find` in it, which made every "how is THIS project doing"
+ * call cost O(projects) — and the code graph asks that on each tool call.
+ *
+ * @param cwd - the project's root.
+ * @param entry - its queue record.
+ */
+function projectStatus(cwd: string, entry: Entry): ProjectStatus {
+  return {
+    cwd,
+    name: nameOf(cwd),
+    state: entry.state,
+    indexedAt: entry.indexedAt,
+    lastOutcome: entry.lastOutcome,
+    failure: entry.failure,
+    queued: entry.queued,
+    checking: entry.checking,
+    pendingCheck: entry.pendingCheck,
+    awaitingRetry: entry.exhausted,
+  }
+}
+
 /** A queue with a concurrency of one. */
 export function createIndexQueue(run: IndexRunner, options: IndexQueueOptions = {}): IndexQueue {
   const records = new Map<string, Entry>()
@@ -287,7 +317,7 @@ export function createIndexQueue(run: IndexRunner, options: IndexQueueOptions = 
     return entry
   }
 
-  const nameOf = (cwd: string): string => cwd.split(/[\\/]/u).filter(part => part !== '').pop() ?? cwd
+  // `nameOf` lives at module scope: `projectStatus` (also module scope) uses it.
 
   /** The error a cancelled job fails with. Exported nowhere: callers only catch. */
   const cancelled = (): Error => new Error('the code graph pass was cancelled')
@@ -545,22 +575,12 @@ export function createIndexQueue(run: IndexRunner, options: IndexQueueOptions = 
     },
 
     statuses(): ProjectStatus[] {
-      return [...records.entries()].map(([cwd, entry]) => ({
-        cwd,
-        name: nameOf(cwd),
-        state: entry.state,
-        indexedAt: entry.indexedAt,
-        lastOutcome: entry.lastOutcome,
-        failure: entry.failure,
-        queued: entry.queued,
-        checking: entry.checking,
-        pendingCheck: entry.pendingCheck,
-        awaitingRetry: entry.exhausted,
-      }))
+      return [...records.entries()].map(([cwd, entry]) => projectStatus(cwd, entry))
     },
 
     status(cwd: string): ProjectStatus | undefined {
-      return this.statuses().find(status => status.cwd === cwd)
+      const entry = records.get(cwd)
+      return entry === undefined ? undefined : projectStatus(cwd, entry)
     },
 
     adopt(cwd: string, meta: ProjectMeta | undefined): void {
@@ -607,10 +627,22 @@ export function createIndexQueue(run: IndexRunner, options: IndexQueueOptions = 
       if (entry.running !== undefined) {
         try { await entry.running } catch { /* the aborted pass rejects; that is expected */ }
       }
-      // 4. Drop the bookkeeping only now, so nothing above can resolve to a record that
-      //    no longer exists. The tombstone stays: a job already scheduled for this cwd
-      //    would otherwise create a fresh record and run against a deleted directory.
-      if (records.get(cwd) === entry) records.delete(cwd)
+      // 4. Reset, rather than delete, the record. Deleting it told `/graph` "no such
+      //    project" — after a user removed a graph, the view answered `notAdopted`
+      //    with no way back, because the view used to self-heal by queueing the
+      //    project. A reset record keeps the project listed (`state: 'unindexed'`),
+      //    so the next open queues a fresh pass; `removed` still tombstones the jobs
+      //    already scheduled against the deleted directory.
+      if (records.get(cwd) === entry) {
+        entry.removing = false
+        entry.state = 'unindexed'
+        entry.indexedAt = 0
+        entry.lastOutcome = undefined
+        entry.failure = undefined
+        entry.controller = undefined
+        entry.running = undefined
+        entry.dirty = true
+      }
       removed.add(cwd)
     },
 

@@ -469,8 +469,14 @@ async function deleteArchives(options: ArchiveRoutesOptions, ids: readonly strin
       // every generation and sidecar with it. `force` tolerates a racing
       // removal; other faults surface as `io` skips, never a failed batch.
       const logPath = await resolver.resolveCurrentLog(id)
-      const dir = logPath !== undefined
-        ? dirname(logPath)
+      // The resolver is trusted for the FILE, not for what its parent happens to be:
+      // a kernel that ever returned a log in a shared directory would make `rm -r`
+      // delete every session at once. The fallback path below already checks that the
+      // directory's own name is the id, which is what this line holds the primary
+      // path to as well.
+      const resolvedDir = logPath === undefined ? undefined : dirname(logPath)
+      const dir = resolvedDir !== undefined && basename(resolvedDir) === id
+        ? resolvedDir
         : root === undefined ? undefined : await locatedSessionDir(root, id)
       if (dir === undefined) {
         result.skipped.push({ id, reason: 'missing' })

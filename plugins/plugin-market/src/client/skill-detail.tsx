@@ -6,15 +6,15 @@
  * last update — enough to decide whether to install without leaving the panel.
  *
  * Copy arrives as props from the caller's dictionary (this module owns no
- * strings). Same modal idiom as confirm-dialog: mask + centered card, Esc and
- * the mask close it, Enter activates the focused action.
+ * strings). The shell is the host's `Modal` primitive, the same one the settings
+ * sections use: it owns the portal, the mask, Escape, the focus trap and the focus
+ * return, so this file only supplies the body and the action row.
  *
  * @module @dsh-app/plugin-market/client/skill-detail
  */
 
-import { useEffect } from 'react'
 import type { ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Translate } from './messages.ts'
 import type { SkillDetailEntry } from './api.ts'
 import { Spinner } from './spinner.tsx'
@@ -52,100 +52,88 @@ export interface SkillDetailDialogProps {
 export function SkillDetailDialog({
   open, detail, error, installed, busy, t, onClose, onInstall, onUninstall,
 }: SkillDetailDialogProps): ReactNode {
-  useEffect(() => {
-    if (!open) return undefined
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('keydown', onKey) }
-  }, [open, onClose])
-
-  if (!open) return null
   const stats: Array<{ label: string, value: string }> = detail === null ? [] : [
     { label: t('mkt.skill.detailDownloads'), value: String(detail.downloads) },
     { label: t('mkt.skill.detailStars'), value: String(detail.stars) },
     { label: t('mkt.skill.detailVersionsLabel'), value: String(detail.versions) },
   ]
-  return createPortal(
-    <div className="dshMkt-dialogWrap" role="presentation" onClick={onClose}>
-      <div
-        className="dshMkt-detailCard"
-        role="dialog"
-        aria-modal="true"
-        aria-label={detail?.name ?? t('mkt.skill.detailTitle')}
-        onClick={(event) => { event.stopPropagation() }}
-      >
-        {error !== '' ? (
-          <>
-            <div className="dshMkt-dialogTitle">{t('mkt.skill.detailTitle')}</div>
-            <div className="dshMkt-dialogMessage dshMkt-stripError">{error}</div>
-            <div className="dshMkt-dialogActions">
-              <button type="button" className="dshMkt-button" onClick={onClose}>{t('mkt.skill.detailClose')}</button>
+  // The action row is absent while loading or on failure: there is nothing to act
+  // on yet, and the Modal's own close button (labelled by `closeLabel`) covers the
+  // dismissal those states need.
+  const footer = error !== '' || detail === null ? undefined : (
+    <div className="dshMkt-dialogActions">
+      {detail.sourceUrl !== undefined ? (
+        <a className="dshMkt-button" href={detail.sourceUrl} target="_blank" rel="noreferrer noopener">{t('mkt.skill.detailSource')}</a>
+      ) : null}
+      <Button type="button" variant="outline" size="sm" onClick={onClose}>{t('mkt.skill.detailClose')}</Button>
+      {installed ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => { onUninstall(detail.slug) }}
+        >
+          {t('mkt.skill.uninstall')}
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          variant="primary"
+          size="sm"
+          disabled={busy}
+          onClick={() => { onInstall(detail.slug) }}
+        >
+          {t('mkt.skill.install')}
+        </Button>
+      )}
+    </div>
+  )
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t('mkt.skill.detailTitle')}
+      closeLabel={t('mkt.skill.detailClose')}
+      className="dshMkt-detailCard"
+      {...footer === undefined ? {} : { footer }}
+    >
+      {error !== '' ? (
+        <p className="dshMkt-dialogMessage dshMkt-stripError">{error}</p>
+      ) : detail === null ? (
+        <div className="dshMkt-detailLoading"><Spinner /> {t('mkt.skill.detailLoading')}</div>
+      ) : (
+        <>
+          <div className="dshMkt-detailHead">
+            {detail.iconUrl !== undefined ? (
+              <img className="dshMkt-avatar dshMkt-avatarImg" src={detail.iconUrl} alt="" loading="lazy" />
+            ) : (
+              <span className="dshMkt-avatar dshMkt-avatar2" aria-hidden="true">{detail.slug.slice(0, 1).toUpperCase()}</span>
+            )}
+            <div className="dshMkt-detailId">
+              {detail.owner !== undefined ? <span className="dshMkt-cardOwner">{detail.owner}</span> : null}
+              <h3 className="dshMkt-detailName">{detail.name}</h3>
+              <span className="dshMkt-detailSlug">{detail.slug}{detail.version !== '' ? ` · v${detail.version}` : ''}</span>
             </div>
-          </>
-        ) : detail === null ? (
-          <div className="dshMkt-detailLoading"><Spinner /> {t('mkt.skill.detailLoading')}</div>
-        ) : (
-          <>
-            <div className="dshMkt-detailHead">
-              {detail.iconUrl !== undefined ? (
-                <img className="dshMkt-avatar dshMkt-avatarImg" src={detail.iconUrl} alt="" loading="lazy" />
-              ) : (
-                <span className="dshMkt-avatar dshMkt-avatar2" aria-hidden="true">{detail.slug.slice(0, 1).toUpperCase()}</span>
-              )}
-              <div className="dshMkt-detailId">
-                {detail.owner !== undefined ? <span className="dshMkt-cardOwner">{detail.owner}</span> : null}
-                <h3 className="dshMkt-detailName">{detail.name}</h3>
-                <span className="dshMkt-detailSlug">{detail.slug}{detail.version !== '' ? ` · v${detail.version}` : ''}</span>
-              </div>
-            </div>
-            <p className="dshMkt-detailDesc">{detail.description === '' ? t('mkt.card.noDescription') : detail.description}</p>
-            <div className="dshMkt-detailStats">
-              {stats.map(stat => (
-                <span key={stat.label} className="dshMkt-detailStat">
-                  <span className="dshMkt-detailStatValue">{stat.value}</span>
-                  <span className="dshMkt-detailStatLabel">{stat.label}</span>
-                </span>
-              ))}
-            </div>
-            <div className="dshMkt-detailMeta">
-              {detail.category !== '' ? <span className="dshMkt-badge">{detail.category}</span> : null}
-              {detail.subCategories.map(label => <span key={label} className="dshMkt-badge">{label}</span>)}
-              {detail.updatedAt !== undefined ? (
-                <span className="dshMkt-hint">{t('mkt.skill.detailUpdated', { date: fmtDate(detail.updatedAt) })}</span>
-              ) : null}
-            </div>
-            <div className="dshMkt-dialogActions">
-              {detail.sourceUrl !== undefined ? (
-                <a className="dshMkt-button" href={detail.sourceUrl} target="_blank" rel="noreferrer noopener">{t('mkt.skill.detailSource')}</a>
-              ) : null}
-              <button type="button" className="dshMkt-button" onClick={onClose}>{t('mkt.skill.detailClose')}</button>
-              {installed ? (
-                <button
-                  type="button"
-                  className="dshMkt-button dshMkt-buttonDanger"
-                  disabled={busy}
-                  onClick={() => { onUninstall(detail.slug) }}
-                >
-                  {t('mkt.skill.uninstall')}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="dshMkt-button dshMkt-buttonPrimary"
-                  disabled={busy}
-                  autoFocus
-                  onClick={() => { onInstall(detail.slug) }}
-                >
-                  {t('mkt.skill.install')}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>,
-    document.body,
+          </div>
+          <p className="dshMkt-detailDesc">{detail.description === '' ? t('mkt.card.noDescription') : detail.description}</p>
+          <div className="dshMkt-detailStats">
+            {stats.map(stat => (
+              <span key={stat.label} className="dshMkt-detailStat">
+                <span className="dshMkt-detailStatValue">{stat.value}</span>
+                <span className="dshMkt-detailStatLabel">{stat.label}</span>
+              </span>
+            ))}
+          </div>
+          <div className="dshMkt-detailMeta">
+            {detail.category !== '' ? <span className="dshMkt-badge">{detail.category}</span> : null}
+            {detail.subCategories.map(label => <span key={label} className="dshMkt-badge">{label}</span>)}
+            {detail.updatedAt !== undefined ? (
+              <span className="dshMkt-hint">{t('mkt.skill.detailUpdated', { date: fmtDate(detail.updatedAt) })}</span>
+            ) : null}
+          </div>
+        </>
+      )}
+    </Modal>
   )
 }

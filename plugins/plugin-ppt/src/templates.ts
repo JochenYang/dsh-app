@@ -179,7 +179,15 @@ async function scanTemplates(): Promise<readonly TemplateEntry[]> {
 
 /** Every bundled template, scanned once per process. */
 export async function allTemplates(): Promise<readonly TemplateEntry[]> {
-  if (cache === undefined) cache = await scanTemplates()
+  if (cache === undefined) {
+    const scanned = await scanTemplates()
+    // Cached only when the scan FOUND something. A first scan that failed — the
+    // office payload still downloading, a transient EACCES on the templates root —
+    // used to be cached as "no templates", and that answer then outlived its cause
+    // and hid every template until the app restarted.
+    if (scanned.length > 0) cache = scanned
+    return scanned
+  }
   return cache
 }
 

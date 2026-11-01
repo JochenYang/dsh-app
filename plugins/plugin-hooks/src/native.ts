@@ -88,6 +88,12 @@ export class NativeHookRuntime {
         // Compile every matcher ONCE here and cache the RegExp: per-event
         // recompilation would redo this work on every tool call. Overlong
         // matchers are rejected (the entry reports error, like any bad rule).
+        //
+        // Compiled into a LOCAL array and pushed once the whole entry parsed: a
+        // rule that throws halfway used to leave the earlier rules already in
+        // `compiled` while the status said `error` — the panel reported "not
+        // mounted" for a hook that was already intercepting tool calls.
+        const pending: Array<{ rule: (typeof parsed)[number], test: RegExp | null }> = []
         for (const rule of parsed) {
           if (rule.matcher !== undefined && rule.matcher.length > MAX_MATCHER_CHARS) {
             throw new HooksValidationError('native.matcherTooLong', {
@@ -104,8 +110,9 @@ export class NativeHookRuntime {
               throw new HooksValidationError('native.matcherBadRegex', { matcher: rule.matcher })
             }
           }
-          compiled.push({ rule, test })
+          pending.push({ rule, test })
         }
+        compiled.push(...pending)
         statuses.set(entry.id, { state: 'mounted' })
       } catch (error) {
         // A rejected rule is a coded message (see HostText); anything else is

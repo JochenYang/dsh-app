@@ -138,6 +138,25 @@ test('a legacy directory whose text names no dead tool is kept, and says why', a
   }
 })
 
+test('a same-named skill installed from a catalog is kept, not overwritten', async () => {
+  // `dsh-app-ppt` is a legal market slug, so a user can install somebody else's
+  // skill into the exact directory this plugin writes to. A blind "the body
+  // differs, so write ours" would erase it on every boot — silently, and for good.
+  const home = mkdtempSync(join(os.tmpdir(), 'ppt-skill-foreign-'))
+  try {
+    const foreign = '# 别人的演示文稿技能\n\n1. 用 `deck_magic` 生成…\n'
+    const file = skillFilePath(home)
+    mkdirSync(join(home, 'skills', SKILL_NAME), { recursive: true })
+    writeFileSync(file, foreign)
+
+    const result = await installSkill(home)
+    assert.equal(result.change, 'kept-foreign')
+    assert.equal(readFileSync(file, 'utf8'), foreign, 'the foreign body is untouched')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('a clean home installs once and retires nothing on the second mount', async () => {
   const home = mkdtempSync(join(os.tmpdir(), 'ppt-skill-idempotent-'))
   try {

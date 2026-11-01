@@ -402,6 +402,48 @@ test('e2e: write, check, render and read back a real PDF', async () => {
     assert.equal(bytes.subarray(0, 5).toString('latin1'), '%PDF-')
     assert.equal(bytes.byteLength, rendered.sizeBytes)
 
+    // 5b. Re-exporting onto the file that now exists needs an explicit overwrite:
+    //     the bytes it would replace exist nowhere else in the app, and an export
+    //     has no undo.
+    const refused = await render.execute({ file_path: relative, output_file: 'docs/report.pdf' }, exec)
+    // The render tool funnels every failure through its own `needs_revision` catch,
+    // so the assertion names the message rather than an `exported`/`failed` split.
+    assert.notEqual(refused.status, 'exported', 'a second export onto an existing file is refused')
+    assert.match(String(refused.issuesText), /overwrite/u)
+    assert.deepEqual(readFileSync(pdfPath), bytes, 'and the existing bytes are untouched')
+    const overwritten = await render.execute(
+      { file_path: relative, output_file: 'docs/report.pdf', overwrite: true },
+      exec,
+    )
+    assert.equal(overwritten.status, 'exported', `with overwrite: true it replaces the file: ${String(overwritten.issuesText)}`)
+    // The replacement is the new baseline: a fresh export is not required to be
+    // byte-identical to the previous one.
+    const afterOverwrite = readFileSync(pdfPath)
+
+    // 5c. `pdf_edit` cannot write onto its own input. The tool's own doc says the
+    //     source is never modified, so `output_file === file_path` is refused
+    //     rather than quietly becoming "rewrite the source in place".
+    const edit = host.tools.get('pdf_edit')
+    assert.ok(edit !== undefined)
+    const sameFile = await edit.execute(
+      { file_path: 'docs/report.pdf', output_file: 'docs/report.pdf', rotate_degrees: 90 },
+      exec,
+    )
+    assert.equal(sameFile.status, 'failed')
+    assert.match(String(sameFile.issuesText), /不能与源文件相同/u)
+    assert.deepEqual(readFileSync(pdfPath), afterOverwrite, 'and the source is still the same bytes')
+
+    // 5d. The same file under a different spelling. NTFS and APFS fold case, so
+    //     `DOCS/Report.PDF` names the source; a lexical comparison would pass it
+    //     through and `rename` would destroy the bytes the edit had just read.
+    const cased = await edit.execute(
+      { file_path: 'docs/report.pdf', output_file: 'DOCS/Report.PDF', rotate_degrees: 90, overwrite: true },
+      exec,
+    )
+    assert.equal(cased.status, 'failed', 'a case-variant spelling of the source is refused')
+    assert.match(String(cased.issuesText), /不能与源文件相同/u)
+    assert.deepEqual(readFileSync(pdfPath), afterOverwrite, 'and the source survived the attempt')
+
     // 6. The read leg round-trips the rendered file: pagination, text, footer
     //    and metadata all come back as real selectable text.
     const summary = await read.execute({ file_path: 'docs/report.pdf' }, exec)
@@ -595,10 +637,17 @@ test('e2e: office_to_pdf converts through the host service and reports honestly'
     assert.equal(exported.sha256, createHash('sha256').update(pdf).digest('hex'))
     assert.deepEqual(exported.missingFonts, ['Noto Sans CJK SC'])
 
-    // 2. An existing target is replaced rather than refused (re-converting the
-    //    same deck is the ordinary case).
+    // 2. Re-converting onto an existing target needs the call to say so: those bytes
+    //    exist nowhere else in the app. This is the ordinary repeat-export case, so
+    //    it is also the one that proves `overwrite: true` works.
     writeFileSync(join(root, 'out', 'deck.pdf'), 'old', 'utf8')
-    const again = await convert.execute({ file_path: 'deck.pptx', output_file: 'out/deck.pdf' }, exec)
+    const refusedAgain = await convert.execute({ file_path: 'deck.pptx', output_file: 'out/deck.pdf' }, exec)
+    assert.equal(refusedAgain.status, 'failed', 'an existing target is refused without overwrite')
+    assert.equal(readFileSync(join(root, 'out', 'deck.pdf'), 'utf8'), 'old', 'and it is untouched')
+    const again = await convert.execute(
+      { file_path: 'deck.pptx', output_file: 'out/deck.pdf', overwrite: true },
+      exec,
+    )
     assert.equal(again.status, 'exported')
     assert.equal(readFileSync(join(root, 'out', 'deck.pdf')).toString('latin1'), pdf.toString('latin1'))
 

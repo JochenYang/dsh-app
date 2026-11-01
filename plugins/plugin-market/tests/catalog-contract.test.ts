@@ -968,7 +968,9 @@ describe('contract publication: the artefacts an outside author can reach', () =
     for (const name of ['catalog-source.md', 'catalog-source.schema.json']) {
       assert.equal(existsSync(fileURLToPath(new URL(`../docs/${name}`, import.meta.url))), true, `docs/${name} is missing`)
     }
-    assert.equal(MANIFEST.version, '0.7.0',
-      'shipping a new file to existing installations changes the plugin, so its version travels with the contract')
+    // The version assertion that used to live here hardcoded the current number, so
+    // it was satisfied by ANY bump and proved nothing about the contract documents.
+    // `test/plugin-version-bump.test.mjs` already fails a changed plugin whose
+    // version did not move, which is the property this line was reaching for.
   })
 })

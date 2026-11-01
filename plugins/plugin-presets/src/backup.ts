@@ -360,18 +360,47 @@ export async function collectConfigBackup(
 ): Promise<{ files: BackupFile[], warnings: SecretWarning[] }> {
   const files: BackupFile[] = []
   const warnings: SecretWarning[] = []
-  const add = (rel: string, path: string): void => {
+  const add = (rel: string, path: string, required = false): void => {
     try {
       // Export never follows symlinks: a link named like a whitelisted file
       // would pull its target's content into the shareable archive.
-      if (lstatSync(path).isSymbolicLink()) return
-      if (!statSync(path).isFile()) return
+      //
+      // A REQUIRED member may not be quietly skipped either way — a link at the
+      // credential path is the same failure shape as an unreadable one (a restore
+      // would land with no keys), and it is NOT an exception, so the `required`
+      // handling below has to be reachable from here too.
+      const metadata = lstatSync(path)
+      const regular = !metadata.isSymbolicLink() && statSync(path).isFile()
+      if (!regular) {
+        if (required) {
+          throw new PresetPackageError('io', {
+            code: 'backup.memberNotRegular',
+            params: { file: rel },
+            text: `${rel} is a symbolic link or not a regular file; the backup would be missing content a restore cannot recreate`,
+          })
+        }
+        return
+      }
       const data = readFileSync(path)
       const rule = secretScanRuleHit(data)
       if (rule !== undefined) warnings.push({ rel, rule })
       files.push({ rel, data })
-    } catch {
-      // Absent/unreadable optional member: the backup just carries less.
+    } catch (error) {
+      // A REQUIRED member is one a restore cannot reconstruct. The credential store
+      // is the only such file: every other member can be recreated by booting, and
+      // an API key cannot — so a backup that silently omits it reports success and
+      // restores a profile whose providers all have no key.
+      //
+      // ABSENT stays fine even for that one: a user with nothing configured has
+      // nothing to back up. UNREADABLE is the failure this export must not swallow.
+      if (!required) return
+      const code = fsErrorCode(error)
+      if (code === 'ENOENT') return
+      throw new PresetPackageError('io', {
+        code: 'backup.memberUnreadable',
+        params: { file: rel, code },
+        text: `cannot read ${rel} (${code}); the backup would be missing content a restore cannot recreate`,
+      })
     }
   }
   const profileDir = join(home, 'profiles', profile)
@@ -402,7 +431,7 @@ export async function collectConfigBackup(
   // dsh's credential store — the API keys. Admitted by exact path; its
   // content usually hits the scan and that hit IS the warning that tells the
   // user the archive carries plaintext key material.
-  add(CREDENTIALS_REL, join(home, '.credentials.yaml'))
+  add(CREDENTIALS_REL, join(home, '.credentials.yaml'), true)
   // A store whose content matches no rule (a custom header name, an opaque
   // ref) must still produce the notice: the archive carries keys either way,
   // and the warning is the only per-export channel that says so.

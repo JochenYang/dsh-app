@@ -23,7 +23,7 @@
  *    the official page creates.
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -129,6 +129,19 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
 
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
   const [modelsDraft, setModelsDraft] = useState<readonly ModelDraft[] | undefined>(undefined)
+  /**
+   * Which selected route the in-flight enrich request belongs to.
+   *
+   * `modelsDraft` is SECTION state, so it outlives a route switch: without this,
+   * a models.dev answer that arrives after the user picked another provider wrote
+   * the OLD provider's catalog into the new one — visible as wrong models, and then
+   * saved into its config. Bumped whenever the selection changes.
+   */
+  const enrichGeneration = useRef(0)
+  useEffect(() => {
+    // Any selection change invalidates what is in flight; see `enrichGeneration`.
+    enrichGeneration.current += 1
+  }, [selectedId])
   const [overridesDraft, setOverridesDraft] = useState<Record<string, ModelDraft> | undefined>(undefined)
   // The LIVE model catalog, fetched once for the override picker. Which models a
   // route serves right now is what the chat's own picker lists, so it is the only
@@ -191,14 +204,20 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
   }, [state.status, state.routes])
 
   /** The user-layer `models` array as loaded (undefined when unowned). */
-  const baseModels = row !== undefined && Array.isArray(row.userProfile?.models)
-    ? cloneDraft(row.userProfile.models as ModelDraft[])
-    : undefined
+  const baseModels = useMemo(
+    () => row !== undefined && Array.isArray(row.userProfile?.models)
+      ? cloneDraft(row.userProfile.models as ModelDraft[])
+      : undefined,
+    [row],
+  )
   /** The user-layer `modelOverrides` object as loaded. */
-  const baseOverrides = row !== undefined && typeof row.userProfile?.modelOverrides === 'object'
-    && row.userProfile.modelOverrides !== null && !Array.isArray(row.userProfile.modelOverrides)
-    ? cloneDraft(row.userProfile.modelOverrides as Record<string, ModelDraft>)
-    : {}
+  const baseOverrides = useMemo(
+    () => row !== undefined && typeof row.userProfile?.modelOverrides === 'object'
+      && row.userProfile.modelOverrides !== null && !Array.isArray(row.userProfile.modelOverrides)
+      ? cloneDraft(row.userProfile.modelOverrides as Record<string, ModelDraft>)
+      : {},
+    [row],
+  )
   const models = modelsDraft ?? baseModels ?? []
   const overrides = overridesDraft ?? baseOverrides
   const inModelsMode = row !== undefined
@@ -379,8 +398,12 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
     setEnrichBusy(true)
     setFailure(undefined)
     setNotice(undefined)
+    const generation = enrichGeneration.current
     try {
       const providers = await fetchModelsDev()
+      // The selection moved while models.dev was answering: these drafts belong to
+      // the row that asked, not to whichever row is current now.
+      if (generation !== enrichGeneration.current) return
       const prefer = row?.entry.provider
       const result = enrichDraftsFromModelsDev(providers, source, prefer)
       setModelsDraft(result.drafts)
@@ -401,6 +424,7 @@ function AdvancedModelsBody(face: ResolvedFace): ReactNode {
           : message('adv.notice.enriched', { count: result.filled.length }))
       }
     } catch (error) {
+      if (generation !== enrichGeneration.current) return
       setFailure(wireText(messageOf(error)))
     } finally {
       setEnrichBusy(false)

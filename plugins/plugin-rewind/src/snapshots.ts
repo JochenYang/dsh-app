@@ -38,6 +38,7 @@
  */
 
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
 /** One file's state before a change, keyed to the turn that changed it. */
@@ -194,7 +195,14 @@ export async function restoreOne(
   now: number,
   maxBytes: number = MAX_SNAPSHOT_BYTES,
 ): Promise<{ readonly kind: 'restored' | 'removed' | 'failed', readonly reason?: string, readonly slot?: string }> {
-  const slot = join(quarantineDir, `${stamp(now)}-${Math.abs(hash(snapshot.path))}`)
+  // The random tail is not decoration: the stamp is only millisecond-accurate and the
+  // hash is a 32-bit fold (`Math.abs` even maps `h` and `-h` onto the same slot), so
+  // two paths restored in one millisecond could share a slot and the second
+  // `writeFile` would overwrite the first quarantine copy without a trace.
+  const slot = join(
+    quarantineDir,
+    `${stamp(now)}-${Math.abs(hash(snapshot.path))}-${randomBytes(4).toString('hex')}`,
+  )
   try {
     const current = await captureBefore(snapshot.path, maxBytes)
     if (current.kind === 'unreadable') return { kind: 'failed', reason: current.reason }

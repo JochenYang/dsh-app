@@ -73,31 +73,56 @@ export function parseDiffRows(text: string): ParsedDiffLine[] {
   if (text === '') return []
   let oldNo = 0
   let newNo = 0
-  return text.split('\n').map((line) => {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+  /**
+   * Lines the current hunk still owes, per side.
+   *
+   * This is what tells a file header from content. `--- x` is what a REMOVED
+   * `-- x` line renders as, and `+++ i` is an added `++i`; reading either as a
+   * header skipped its number and shifted every later row of the hunk. The hunk
+   * header states how many old and new lines follow, so the pair is content
+   * whenever the current hunk still owes any.
+   */
+  let owedOld = 0
+  let owedNew = 0
+  const rows: ParsedDiffLine[] = []
+  for (const line of text.split('\n')) {
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line)
     if (hunk !== null) {
       oldNo = Number(hunk[1])
-      newNo = Number(hunk[2])
-      return { kind: 'meta' as const, old: undefined, new: undefined }
+      newNo = Number(hunk[3])
+      owedOld = hunk[2] === undefined ? 1 : Number(hunk[2])
+      owedNew = hunk[4] === undefined ? 1 : Number(hunk[4])
+      rows.push({ kind: 'meta', old: undefined, new: undefined })
+      continue
     }
-    if (line.startsWith('+++') || line.startsWith('---')) {
-      return { kind: 'meta' as const, old: undefined, new: undefined }
+    if (owedOld <= 0 && owedNew <= 0 && (line.startsWith('+++') || line.startsWith('---'))) {
+      rows.push({ kind: 'meta', old: undefined, new: undefined })
+      continue
+    }
+    if (line.startsWith('\\')) {
+      // "\ No newline at end of file" belongs to neither side.
+      rows.push({ kind: 'meta', old: undefined, new: undefined })
+      continue
     }
     if (line.startsWith('+')) {
-      const row = { kind: 'add' as const, old: undefined, new: newNo }
+      owedNew -= 1
+      rows.push({ kind: 'add', old: undefined, new: newNo })
       newNo += 1
-      return row
+      continue
     }
     if (line.startsWith('-')) {
-      const row = { kind: 'del' as const, old: oldNo, new: undefined }
+      owedOld -= 1
+      rows.push({ kind: 'del', old: oldNo, new: undefined })
       oldNo += 1
-      return row
+      continue
     }
-    const row = { kind: 'context' as const, old: oldNo, new: newNo }
+    owedOld -= 1
+    owedNew -= 1
+    rows.push({ kind: 'context', old: oldNo, new: newNo })
     oldNo += 1
     newNo += 1
-    return row
-  })
+  }
+  return rows
 }
 
 /**

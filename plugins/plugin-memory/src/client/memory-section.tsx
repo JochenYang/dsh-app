@@ -310,6 +310,9 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   const [projectRows, setProjectRows] = useState<{ slug: string, cards: MemoryCardRow[] } | null>(null)
   const [expandedCards, setExpandedCards] = useState<ReadonlySet<string>>(new Set())
   const [archive, setArchive] = useState<MemoryArchiveRow[] | null>(null)
+  /** Why the last archive write failed, when it did. An empty list otherwise reads
+   *  as "nothing was deleted" while the card really is gone (see `lastArchiveError`). */
+  const [archiveError, setArchiveError] = useState<string | undefined>(undefined)
   const [archiveExpanded, setArchiveExpanded] = useState(false)
   // The project whose maintenance pass is in flight, if any: the pass can run
   // for a minute on one model call, and its row has to say so.
@@ -334,6 +337,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
     try {
       const data = await fetchJson<MemoryArchiveResponse>(`${ROUTE_PREFIX}/archive`)
       setArchive(data.cards)
+      setArchiveError(data.archiveError)
     } catch (failure) {
       setError(wireNotice(failure))
     }
@@ -574,7 +578,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         await fetchJson(`${ROUTE_PREFIX}/archive-clear`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ scope: 'all' }),
         })
         setNotice({ source: 'key', key: 'memory.notice.archiveCleared', params: { count: target.count } })
         await loadArchive()
@@ -661,6 +665,9 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">{t('memory.archive.title', { count: archive.length })}</div>
             <div className="dshm_hint">{t('memory.archive.hint', { days: ARCHIVE_RETENTION_DAYS, max: ARCHIVE_MAX_FILES })}</div>
+            {archiveError === undefined
+              ? null
+              : <div className="dshm_hint">{t('memory.archive.failed', { detail: archiveError })}</div>}
             {archive.length === 0
               ? <div className="dshm_hint">{t('memory.archive.empty')}</div>
               : null}

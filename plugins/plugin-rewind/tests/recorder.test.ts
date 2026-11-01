@@ -255,3 +255,28 @@ test('captureBefore reports a directory rather than reading it', async () => {
   assert.equal(result.kind, 'unreadable')
   await rm(dir, { recursive: true, force: true })
 })
+
+test('a trimmed recorder names the seq it dropped instead of claiming full coverage', async () => {
+  // THE DEFECT this pins: `trim` splices the oldest before-images away and nothing
+  // told the recall, so a range whose files had been trimmed still answered
+  // `coverage: 'full'` — a restore that reports success with files left untouched.
+  const dir = mkdtempSync(join(tmpdir(), 'rewind-rec-'))
+  try {
+    const { recorder, record } = createRecorder(undefined, 2)
+    for (const [index, seq] of [10, 20, 30, 40].entries()) {
+      const file = join(dir, `f${String(index)}.ts`)
+      writeFileSync(file, `v${String(index)}`)
+      record(S, file, 1, seq)
+      await settle()
+    }
+    assert.equal(recorder.size(), 2, 'held at the bound')
+    assert.equal(recorder.trimmedThroughSeq(), 20, 'and the newest dropped seq is named')
+    assert.deepEqual(
+      recorder.changesForTurns(S, [1]).map(change => change.seq),
+      [30, 40],
+      'the surviving records are the newest ones',
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

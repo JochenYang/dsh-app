@@ -214,6 +214,7 @@ export function buildCatalogCache(
   fetchedAt: number,
   results: ReadonlyArray<SourceFetchResult>,
   revalidated: Readonly<Record<string, CachedSourceState>> = {},
+  previous: Readonly<Record<string, CachedSourceState>> = {},
 ): CatalogCache {
   const sources: Record<string, CachedSourceState> = {}
   let budget = MAX_ENTRIES_TOTAL
@@ -227,12 +228,32 @@ export function buildCatalogCache(
         ...(result.modified !== undefined ? { modified: result.modified } : {}),
       }
     } else if ('notModified' in result) {
-      // The cached copy is confirmed current: write it back verbatim, so the
-      // next refresh revalidates against the same validators again.
+      // The cached copy is confirmed current: write it back so the next refresh
+      // revalidates against the same validators again — but WITHOUT its `failed`
+      // mark. A 304 proves the source answers; carrying an old failure forward made
+      // `isCacheFresh` distrust it for ever, and made the catalog payload drop the
+      // very rows this response just confirmed.
       const row = revalidated[result.url]
-      if (row !== undefined) sources[result.url] = row
+      if (row !== undefined) {
+        sources[result.url] = {
+          entries: row.entries,
+          ...(row.etag !== undefined ? { etag: row.etag } : {}),
+          ...(row.modified !== undefined ? { modified: row.modified } : {}),
+        }
+      }
     } else {
-      sources[result.url] = { entries: [], failed: result.reason }
+      // A transient failure KEEPS the rows the user already had. Overwriting them
+      // with an empty list made one flaky fetch erase the source from the panel,
+      // and the cache then looked fresh for the whole TTL — the opposite of what
+      // the retry path assumes. `failed` marks the row as unproven: the freshness
+      // check retries it on the next request.
+      const prior = previous[result.url] ?? revalidated[result.url]
+      sources[result.url] = {
+        entries: prior?.entries ?? [],
+        failed: result.reason,
+        ...(prior?.etag !== undefined ? { etag: prior.etag } : {}),
+        ...(prior?.modified !== undefined ? { modified: prior.modified } : {}),
+      }
     }
   }
   return { version: CACHE_FORMAT_VERSION, fetchedAt, sources }

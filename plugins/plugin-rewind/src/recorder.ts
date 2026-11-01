@@ -91,6 +91,14 @@ export interface Recorder {
   forget(sessionId: string, turns: readonly number[]): void
   /** Everything still held, for tests and diagnostics. */
   size(): number
+  /**
+   * The highest `seq` any trim has discarded, or -1 when nothing was trimmed.
+   *
+   * A recall reads this to know whether the range it covers still has its
+   * before-images: trimming drops the OLDEST records, so a range starting at or
+   * before this number cannot be fully restored and must not report `full`.
+   */
+  trimmedThroughSeq(): number
 }
 
 /**
@@ -99,7 +107,14 @@ export interface Recorder {
  * @param capture - how to read a before-image; injected so tests can drive it.
  * @returns the recorder, plus the per-write entry point the hooks await.
  */
-export function createRecorder(capture: (path: string) => Promise<CaptureResult> = captureBefore): {
+/** How many recorded changes one process keeps before the oldest are trimmed. */
+const MAX_RECORDED_CHANGES = 20_000
+
+export function createRecorder(
+  capture: (path: string) => Promise<CaptureResult> = captureBefore,
+  /** Trim threshold. A parameter so a test can drive the bound without 20 000 records. */
+  maxChanges: number = MAX_RECORDED_CHANGES,
+): {
   readonly recorder: Recorder
   record(sessionId: string, path: string, turn: number | null, seq: number): Promise<void>
 } {
@@ -109,6 +124,8 @@ export function createRecorder(capture: (path: string) => Promise<CaptureResult>
   // one write — a second capture would file a before-image taken AFTER the first
   // write.
   const seen = new Set<string>()
+  /** Highest seq a trim has dropped; -1 until the first trim. */
+  let trimmedThrough = -1
 
   return {
     recorder: {
@@ -138,6 +155,9 @@ export function createRecorder(capture: (path: string) => Promise<CaptureResult>
       size() {
         return changes.length
       },
+      trimmedThroughSeq() {
+        return trimmedThrough
+      },
     },
     async record(sessionId, path, turn, seq) {
       const key = `${sessionId}\u0000${path}\u0000${String(seq)}`
@@ -146,6 +166,7 @@ export function createRecorder(capture: (path: string) => Promise<CaptureResult>
       const result = await capture(path)
       if (result.kind === 'captured') {
         changes.push({ sessionId, path, before: result.before, turn, seq })
+        trim()
         return
       }
       failures.push({
@@ -154,7 +175,36 @@ export function createRecorder(capture: (path: string) => Promise<CaptureResult>
         turn,
         reason: result.kind === 'too-large' ? 'the file is too large to snapshot' : result.reason,
       })
+      trim()
     },
+  }
+
+  /**
+   * Keep the recorded history bounded.
+   *
+   * Nothing else prunes it: `forget` runs only when a recall drops a range, so a
+   * long session that never recalls would grow `changes` for every write it made.
+   * The recall range is bounded by the anchor count, so trimming from the OLDEST end
+   * only ever drops turns a recall can no longer address.
+   *
+   * `seen` is cleared wholesale when it outgrows the same bound. That can let one
+   * already-recorded `seq` capture a second time — a re-entrant hook on the same
+   * write — which costs one redundant before-image and is the price of not keeping a
+   * second unbounded structure to prune in step.
+   */
+  function trim(): void {
+    if (changes.length > maxChanges) {
+      const drop = changes.length - maxChanges
+      // Remember the highest discarded seq before dropping. The recall reads it: a
+      // range starting at or before this lost before-images, so its coverage is not
+      // "full" even when every tool in it is one the recorder understands.
+      for (let i = 0; i < drop; i += 1) trimmedThrough = Math.max(trimmedThrough, changes[i].seq)
+      changes.splice(0, drop)
+    }
+    if (failures.length > maxChanges) {
+      failures.splice(0, failures.length - maxChanges)
+    }
+    if (seen.size > maxChanges) seen.clear()
   }
 }
 

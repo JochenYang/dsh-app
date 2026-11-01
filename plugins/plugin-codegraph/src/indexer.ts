@@ -393,12 +393,14 @@ export function projectChanged(graph: Graph, root: string, limit = MAX_FILES): b
   // `true` is the honest answer and the only safe one — `false` would let a caller
   // report a current, complete graph over a tree this call never saw.
   if (scan.truncated || scan.rootUnreadable) return true
-  const seen = new Set<string>()
+  // `tooLarge` is seeded for the same reason `indexProject` seeds it: a file that
+  // grew past the size cap leaves `scan.files`, and comparing against that set alone
+  // reads the absence as a deletion — a change reported on every pass forever.
+  const seen = new Set<string>(scan.tooLarge)
   for (const candidate of scan.files) {
     seen.add(candidate.path)
     const previous = known.get(candidate.path)
-    // Never indexed, or the recorded stat moved. A `tooLarge` file is in neither list
-    // by design: the pass leaves its row alone, so it is not a change either.
+    // Never indexed, or the recorded stat moved.
     if (previous === undefined || previous.mtime !== candidate.mtime || previous.size !== candidate.size) return true
   }
   for (const path of known.keys()) {

@@ -304,16 +304,40 @@ export async function retireSkills(dshHome: string): Promise<RetireReport> {
 }
 
 /**
+ * Text that only this plugin's own body carries.
+ *
+ * `dsh-app-ppt` is a legal market slug, so a user can install somebody else's
+ * skill into the same directory. `retireSkills` already judges ownership by
+ * content for that reason; the install path uses the same rule instead of "a file
+ * sits at our name, so overwrite it".
+ *
+ * The set, not one token: an installation from a release older than v0.16.8
+ * carries `ppt_write`/`ppt_check`/`ppt_render` and only became `pptd_write_file`
+ * in that release, so a single modern marker would classify our OWN previous body
+ * as somebody else's and the fix would never reach that machine. The `ppt_*`
+ * names are the ones `RETIRED_SKILLS` already treats as proof of this suite.
+ */
+const OWN_SKILL_MARKERS = ['pptd_write_file', 'ppt_write', 'ppt_check', 'ppt_render'] as const
+
+/**
+ * Whether a `SKILL.md` body was written by this plugin.
+ * @param body - the file's text.
+ */
+function isOwnSkillBody(body: string): boolean {
+  return OWN_SKILL_MARKERS.some(marker => body.includes(marker))
+}
+
+/**
  * Install (or refresh) the skill file, then retire what this suite no longer
- * ships. Content-compared: unchanged boots do not rewrite. Returns what
- * happened, for the boot log.
+ * ships. Content-compared: unchanged boots do not rewrite. A file at our name
+ * whose body is NOT ours is left alone and reported.
  *
  * @param dshHome - the harness home the skill lands under.
- * @returns whether the file changed, and which directories were retired.
+ * @returns what happened, and which directories were retired.
  */
 export async function installSkill(
   dshHome: string,
-): Promise<{ readonly change: 'installed' | 'unchanged', readonly retired: RetireReport }> {
+): Promise<{ readonly change: 'installed' | 'unchanged' | 'kept-foreign', readonly retired: RetireReport }> {
   const file = skillFilePath(dshHome)
   let current: string | undefined
   try {
@@ -321,11 +345,16 @@ export async function installSkill(
   } catch {
     // Absent or unreadable → treat as a fresh install.
   }
-  const changed = current !== SKILL_MARKDOWN
-  if (changed) {
-    // mkdir is implied by writeFileAtomic's parent creation.
-    await writeFileAtomic(file, SKILL_MARKDOWN, { mode: 0o644 })
+  let change: 'installed' | 'unchanged' | 'kept-foreign' = 'unchanged'
+  if (current !== SKILL_MARKDOWN) {
+    if (current !== undefined && !isOwnSkillBody(current)) {
+      change = 'kept-foreign'
+    } else {
+      // mkdir is implied by writeFileAtomic's parent creation.
+      await writeFileAtomic(file, SKILL_MARKDOWN, { mode: 0o644 })
+      change = 'installed'
+    }
   }
   const retired = await retireSkills(dshHome)
-  return { change: changed ? 'installed' : 'unchanged', retired }
+  return { change, retired }
 }

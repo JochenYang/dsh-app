@@ -424,7 +424,18 @@ export function registerMemoryRoutes(
         // Newest day first, then project, then topic — one stable order across
         // what used to be several separate lists.
         cards.sort((a, b) => b.day.localeCompare(a.day) || a.slug.localeCompare(b.slug) || a.topic.localeCompare(b.topic))
-        const payload: MemoryArchiveResponse = { cards, total: cards.length }
+        const payload: MemoryArchiveResponse = {
+          cards,
+          total: cards.length,
+          // The undo surface must say when a delete could NOT be archived. Without
+          // this an empty list reads as "nothing was deleted", while the card is
+          // gone — and `lastArchiveError` had no caller at all.
+          ...(() => {
+            const failed = targets.find(target => target.store.lastArchiveError() !== undefined)
+            if (failed === undefined) return {}
+            return { archiveError: failed.store.lastArchiveError(), archiveErrorSlug: failed.slug }
+          })(),
+        }
         return ok(payload)
       },
     }),
@@ -504,12 +515,20 @@ export function registerMemoryRoutes(
         } catch (error) {
           return bodyFailure(error)
         }
-        // Same scope rule as GET /archive: no scope = every project, because
-        // the panel that offers this button shows every project. The retired
-        // global scope is not enumerated (see that route).
+        // Destructive routes never reach more than one project by omission.
+        // `/clear` in this same file states that rule; a caller that means
+        // "every project" says so with `'all'`. The panel's global button sends
+        // that value, so a request without one is a caller bug, not an
+        // instruction to empty every project's undo copies.
         const scope = body.scope
+        if (scope === undefined) {
+          return fail(400, 'scope-required', {
+            code: 'route.scopeRequired',
+            text: 'scope is required: pass "all" or a project slug',
+          })
+        }
         let cleared = 0
-        if (scope === undefined || scope === 'all') {
+        if (scope === 'all') {
           for (const project of listProjects(root.dir)) {
             const store = root.projectBySlug(project.slug)
             if (store !== undefined) cleared += await store.clearArchive()

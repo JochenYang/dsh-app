@@ -108,10 +108,23 @@ export function skillFilePath(dshHome: string): string {
 }
 
 /**
- * Install (or refresh) the skill file. Content-compared: unchanged boots do not
- * rewrite. Returns what happened, for the boot log.
+ * Text that only this plugin's own body carries.
+ *
+ * The install path must not treat "a `SKILL.md` sits at our name" as "the file is
+ * ours": `dsh-pdf` is a legal market slug too, so a user can install somebody
+ * else's skill into the same directory, and a blind overwrite would erase it on
+ * every boot. `retireSkills` already judges ownership by CONTENT, for exactly this
+ * reason; the install path now uses the same rule. `DSH_PDF_FONT` is a token only
+ * this body writes — a marker wide enough to survive our own edits, narrow enough
+ * not to match another skill that merely mentions `pdf_edit`.
  */
-export async function installSkill(dshHome: string): Promise<'installed' | 'unchanged'> {
+const OWN_SKILL_MARKER = 'DSH_PDF_FONT'
+
+/**
+ * Install (or refresh) the skill file. Content-compared: unchanged boots do not
+ * rewrite. A file at our name whose body is NOT ours is left alone and reported.
+ */
+export async function installSkill(dshHome: string): Promise<'installed' | 'unchanged' | 'kept-foreign'> {
   const file = skillFilePath(dshHome)
   let current: string | undefined
   try {
@@ -119,10 +132,10 @@ export async function installSkill(dshHome: string): Promise<'installed' | 'unch
   } catch {
     // Absent or unreadable → treat as a fresh install.
   }
-  const changed = current !== SKILL_MARKDOWN
-  if (changed) {
-    // mkdir is implied by writeFileAtomic's parent creation.
-    await writeFileAtomic(file, SKILL_MARKDOWN, { mode: 0o644 })
-  }
-  return changed ? 'installed' : 'unchanged'
+  if (current === SKILL_MARKDOWN) return 'unchanged'
+  // Present, different, and carrying none of our text: somebody else's skill.
+  if (current !== undefined && !current.includes(OWN_SKILL_MARKER)) return 'kept-foreign'
+  // mkdir is implied by writeFileAtomic's parent creation.
+  await writeFileAtomic(file, SKILL_MARKDOWN, { mode: 0o644 })
+  return 'installed'
 }

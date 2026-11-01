@@ -380,8 +380,16 @@ test('POST /archive-delete and /archive-clear drop copies without touching live 
   assert.equal(bad.status, 409)
   assert.notEqual(project.get('survivor'), undefined, 'and the live card still there')
 
-  // EMPTY the rest, every scope at once.
-  const cleared = await call('archive-clear', { method: 'POST', body: JSON.stringify({}) })
+  // A request that names NO scope is refused. `/clear` in the same file states the
+  // rule: a destructive route never reaches more than one project by omission, and
+  // this one used to empty every project's undo copies when `scope` was left out.
+  const unnamed = await call('archive-clear', { method: 'POST', body: JSON.stringify({}) })
+  assert.equal(unnamed.status, 400)
+  assert.equal(project.archiveCount(), 1, 'and the refusal cleared nothing')
+
+  // EMPTY the rest, every scope at once — named, the way the panel's global
+  // button does.
+  const cleared = await call('archive-clear', { method: 'POST', body: JSON.stringify({ scope: 'all' }) })
   const clearedBody = await cleared.json() as { value: { cleared: number } }
   assert.equal(clearedBody.value.cleared, 1)
   assert.equal(project.archiveCount(), 0, 'the archive is empty')

@@ -71,22 +71,44 @@ async function assertInsideProject(directory: string, lexical: string, what: str
   if (lexical === directory || !lexical.startsWith(`${directory}${path.sep}`)) {
     throw new Error(`${what}：必须位于 project_path 内部`)
   }
-  // Every existing ancestor must resolve back inside the project directory.
+  // Every existing ancestor must resolve back inside the project directory, and a
+  // MISSING ancestor is not a reason to stop looking: `a/b/c/x.pptx` with a
+  // nonexistent `c` still has a real `b`, and if that one is a symlink pointing out
+  // of the project, creating `c` would write outside it. Walk up until an ancestor
+  // exists, then judge it — the shape `plugin-pdf/src/pdf-paths.ts` uses.
   let ancestor = path.dirname(lexical)
-  while (ancestor !== directory) {
+  for (;;) {
     const resolved = await realpath(ancestor).catch(() => undefined)
-    if (resolved !== undefined && !resolved.startsWith(`${directory}${path.sep}`)) {
-      throw new Error(`${what}：父目录越出 project_path`)
+    if (resolved !== undefined) {
+      if (resolved !== directory && !resolved.startsWith(`${directory}${path.sep}`)) {
+        throw new Error(`${what}：父目录越出 project_path`)
+      }
+      break
     }
-    if (resolved === undefined) break
-    ancestor = path.dirname(ancestor)
+    const parent = path.dirname(ancestor)
+    if (parent === ancestor) throw new Error(`${what}：无法在 project_path 内创建目标目录`)
+    ancestor = parent
   }
   return lexical
 }
 
+/**
+ * The project directory as the filesystem names it.
+ *
+ * A workspace can be opened through a symlink — macOS resolves `/tmp` and
+ * `/var/folders`, Windows hands out junctions and 8.3 short names — and then the
+ * caller's root and an ancestor's `realpath` carry different prefixes, so every
+ * containment comparison fails from the wrong side and every write is refused as
+ * "outside the project" although it is inside.
+ */
+async function canonicalDirectory(directory: string): Promise<string> {
+  return realpath(directory).catch(() => directory)
+}
+
 /** Existing project file, containment-checked. */
 export async function existingProjectFile(directory: string, fileRelative: string, what: string): Promise<string> {
-  const lexical = await assertInsideProject(directory, path.resolve(directory, ...fileRelative.split('/')), what)
+  const canonical = await canonicalDirectory(directory)
+  const lexical = await assertInsideProject(canonical, path.resolve(canonical, ...fileRelative.split('/')), what)
   const metadata = await lstat(lexical).catch(() => undefined)
   if (metadata === undefined || metadata.isSymbolicLink() || !metadata.isFile()) {
     throw new Error(`${what}：文件不存在或不是普通文件（${fileRelative}）`)
@@ -98,5 +120,6 @@ export async function existingProjectFile(directory: string, fileRelative: strin
 
 /** Writable project file target (parent directories may not exist yet). */
 export async function writableProjectFile(directory: string, fileRelative: string, what: string): Promise<string> {
-  return assertInsideProject(directory, path.resolve(directory, ...fileRelative.split('/')), what)
+  const canonical = await canonicalDirectory(directory)
+  return assertInsideProject(canonical, path.resolve(canonical, ...fileRelative.split('/')), what)
 }

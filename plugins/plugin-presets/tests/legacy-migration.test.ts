@@ -174,6 +174,29 @@ describe('rendering one preset as a patch row', () => {
     const doc = parse(renderPresetRow(preset, 0).text, { customTags: TAGS })
     assert.equal(doc[0].insert[0].config.name, undefined)
   })
+
+  it('quotes an id whose directory name would start a YAML comment', () => {
+    // `preset.id` is the DIRECTORY NAME (`findLegacyPresets` skips only dotfiles), so
+    // `a #b` rendered `id: preset-a #b` and YAML read ` #b` as a comment: the row came
+    // back with a different id than the preset it was migrated from, silently. The
+    // same rule `name` and `description` already followed — a quoted scalar.
+    const { dir } = makePreset('a #b', COMPOSITION)
+    const preset = findLegacyPresets(join(dir, '..'))[0]!
+    const doc = parse(renderPresetRow(preset, 0).text, { customTags: TAGS })
+    assert.equal(doc[0].insert[0].id, 'preset-a #b')
+    assert.equal(doc[0].insert[0].config.id, 'a #b')
+  })
+
+  it('writes a patch document YAML can parse for a name carrying `: `', { skip: process.platform === 'win32' }, () => {
+    // POSIX allows `: ` in a directory name and Windows does not, so this case only
+    // exists where the input can. Unquoted, `id: preset-a: b` makes the document
+    // unparseable — and this document is the layer every profile loads.
+    const { dir } = makePreset('a: b', COMPOSITION)
+    const preset = findLegacyPresets(join(dir, '..'))[0]!
+    const doc = parse(renderPresetRow(preset, 0).text, { customTags: TAGS })
+    assert.equal(doc[0].insert[0].id, 'preset-a: b')
+    assert.equal(doc[0].insert[0].config.id, 'a: b')
+  })
 })
 
 describe('rebasing the path expression', () => {

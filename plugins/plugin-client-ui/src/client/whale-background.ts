@@ -141,12 +141,6 @@ const luminance = (c: Rgb): number => (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) 
 const cssRgb = (c: Rgb): string =>
   `rgb(${Math.round(clamp(c.r, 0, 255))},${Math.round(clamp(c.g, 0, 255))},${Math.round(clamp(c.b, 0, 255))})`
 
-/** Read a `--dsw-alias-*` token from the body's computed style. */
-function readToken(name: string): string {
-  const v = getComputedStyle(document.body).getPropertyValue(name)
-  return v === '' ? '' : v
-}
-
 interface ThemePalette {
   dark: boolean
   /** Base tile color: ink mixed toward brand. */
@@ -161,15 +155,41 @@ interface ThemePalette {
   fills: string[][]
 }
 
-/** Resolve the current theme into paint parameters from the live tokens. */
-function readTheme(): ThemePalette {
-  const bg = parseColor(readToken('--dsw-alias-bg-base')) ?? { r: 255, g: 255, b: 255 }
-  const ink = parseColor(readToken('--dsw-alias-label-primary')) ?? (luminance(bg) < 0.5 ? { r: 230, g: 235, b: 245 } : { r: 15, g: 23, b: 42 })
-  const brand = parseColor(readToken('--dsw-alias-brand-primary')) ?? { r: 59, g: 130, b: 246 }
+/** The four values the 250 ms poll compares; one `getComputedStyle`, no allocation. */
+interface ThemeTokens {
+  readonly dark: boolean
+  readonly base: Rgb
+  readonly brand: Rgb
+  readonly ink: Rgb
+}
+
+/**
+ * Read the live tokens.
+ *
+ * Split out of {@link readTheme} because that function ALSO builds the 165 fill
+ * strings (33 × 5 buckets) and the poll runs four times a second. Comparing on these
+ * values is what keeps an unchanged theme from allocating them on every tick.
+ *
+ * @returns the four values a theme change can move.
+ */
+function readTokens(): ThemeTokens {
+  // ONE `getComputedStyle` for the three tokens: each call forces a style resolution,
+  // and three per tick was the poll's whole cost before this was hoisted.
+  const style = getComputedStyle(document.body)
+  const token = (name: string): string => style.getPropertyValue(name)
+  const bg = parseColor(token('--dsw-alias-bg-base')) ?? { r: 255, g: 255, b: 255 }
+  const ink = parseColor(token('--dsw-alias-label-primary')) ?? (luminance(bg) < 0.5 ? { r: 230, g: 235, b: 245 } : { r: 15, g: 23, b: 42 })
+  const brand = parseColor(token('--dsw-alias-brand-primary')) ?? { r: 59, g: 130, b: 246 }
   const dark = luminance(bg) < 0.5
   // Light themes mix harder toward the brand and paint at a much higher
   // alpha than v1: the old ink-lean 0.375 mix was near-invisible on white.
   const base = mixRgb(ink, brand, dark ? 0.3 : 0.5)
+  return { dark, base, brand, ink }
+}
+
+/** Resolve the current theme into paint parameters from the live tokens. */
+function readTheme(tokens: ThemeTokens = readTokens()): ThemePalette {
+  const { dark, base, brand } = tokens
   // Dark themes keep the whale a LOW-contrast texture: the upstream dark
   // palette is near-black (bg rgb(21,21,23)) with a slightly lighter
   // sidebar (rgb(27,27,28)) — a bright tile wall there clashes hard with
@@ -493,9 +513,12 @@ export function mountWhaleBackground(): () => void {
   }
 
   function pollState(): void {
-    const next = readTheme()
-    if (next.dark !== theme.dark || cssRgb(next.base) !== cssRgb(theme.base) || cssRgb(next.brand) !== cssRgb(theme.brand)) {
-      theme = next
+    // Compare on TOKENS first: `readTheme` also builds the 165 fill strings, and this
+    // runs four times a second — that allocation, not the style read, is what an
+    // unchanged theme costs when it is rebuilt every tick.
+    const tokens = readTokens()
+    if (tokens.dark !== theme.dark || cssRgb(tokens.base) !== cssRgb(theme.base) || cssRgb(tokens.brand) !== cssRgb(theme.brand)) {
+      theme = readTheme(tokens)
       if (!hidden) renderFrame()
     }
     // The conversation root carries data-phase (hero | active | settling).

@@ -343,3 +343,59 @@ describe('the diff ruler shares the rows coordinates', () => {
       'the pre needs min-width:0 as a flex item, or the pane overflows and the body grows a second bar')
   })
 })
+
+describe('parseDiffRows — header vs content', () => {
+  it('starts the new numbering at the hunk header\'s +start', () => {
+    // The header's capture groups are (old start, old count, new start, new count).
+    // Reading group 2 as the new start made every `new` number in a SIZED hunk wrong
+    // — `@@ -10,2 +40,2 @@` numbered its first added line 11 instead of 40.
+    const rows = parseDiffRows(['--- a/x', '+++ b/x', '@@ -10,2 +40,2 @@', '-a', '+b'].join('\n'))
+    assert.equal(rows.find(row => row.kind === 'add')?.new, 40)
+  })
+
+  it('treats a removed `-- x` and an added `++i` as content once a hunk is open', () => {
+    // THE DEFECT: the header rule was a prefix test, so these two lines — which a
+    // hunk legitimately contains — were read as file headers. Each skipped its
+    // number and shifted the rest of the hunk by one.
+    const rows = parseDiffRows([
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1,3 +1,3 @@',
+      ' keep',
+      '--- removed',
+      '+++ added',
+      ' tail',
+    ].join('\n'))
+    assert.equal(rows[1]?.kind, 'meta', 'the real header is still meta')
+    assert.equal(rows[2]?.kind, 'meta')
+    assert.equal(rows[5]?.kind, 'del')
+    assert.equal(rows[5]?.old, 2)
+    assert.equal(rows[6]?.kind, 'add')
+    assert.equal(rows[6]?.new, 2)
+    assert.equal(rows[7]?.kind, 'context')
+    assert.equal(rows[7]?.old, 3)
+    assert.equal(rows[7]?.new, 3)
+  })
+
+  it('accepts the header pair of a SECOND file after the first file\'s hunks', () => {
+    // Multi-file diffs put another `---`/`+++` pair after a completed hunk, so
+    // "only before the first hunk" would turn it into content.
+    const rows = parseDiffRows([
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1,1 +1,1 @@',
+      '-a',
+      '+b',
+      '--- a/y',
+      '+++ b/y',
+      '@@ -1,1 +1,1 @@',
+      '-c',
+      '+d',
+    ].join('\n'))
+    assert.equal(rows[5]?.kind, 'meta')
+    assert.equal(rows[6]?.kind, 'meta')
+    assert.equal(rows[8]?.kind, 'del')
+    assert.equal(rows[8]?.old, 1)
+  })
+})

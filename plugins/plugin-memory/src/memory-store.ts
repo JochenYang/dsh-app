@@ -183,24 +183,72 @@ export function stripCommitIds(content: string): string {
 }
 
 /**
- * Credential-looking fragments that must never be persisted. Every pattern
- * needs either a key NAME with a `:`/`=` separator or a known token PREFIX:
- * bare words alone never match, so legitimate entries about token budgets or
- * model limits ("token 上限导致失败") pass through. No `g` flag — these run
- * through RegExp.test, where `g` would make lastIndex stateful.
+ * Credential-looking fragments that must never be persisted.
+ *
+ * A name-with-separator list alone is not enough: it only catches the shapes whose
+ * KEY NAME the user happened to type, and a pasted `postgres://user:pw@host` or a
+ * raw `AKIA…` line carries no such name at all. The list therefore also recognises
+ * the SHAPES a credential has — a known token prefix, a private-key banner, a JWT,
+ * a URL with a password, a high-entropy base64 run, a bare hash-length hex string —
+ * because a secret is a secret regardless of the sentence around it.
+ *
+ * The name rules are anchored with `(?<![A-Za-z0-9])`, not `\b`: `_` is a word
+ * character, so `\b` fails between `_` and `P` and would let `DB_PASSWORD=…`,
+ * `client_secret=…` and `access_token=…` — the `.env` shapes users paste most —
+ * straight through. Requiring the word's own end (`token\s*[:=]`) already keeps
+ * `tokenizer=bert` out, which is the only thing `\b` was ever argued for.
+ *
+ * Two deliberate non-catches, recorded in `.devflow/suite-review-backlog/verify-W7.md`:
+ * a credential word buried inside a longer name (`mypass=hunter2`) is not matched,
+ * because `(?<![A-Za-z0-9])passw` cannot start after a letter; and `\b`-free
+ * sentences with no separator ("token 上限导致失败") stay out.
+ *
+ * Excluding 40 hex is deliberate too: a git sha is the one hex string that lands in
+ * memories constantly and is not a secret. The base64 run excludes `/` for the same
+ * reason — a long POSIX path is the other thing that looks like a random string.
+ *
+ * No `g` flag — these run through RegExp.test, where `g` would make lastIndex
+ * stateful.
  */
 const CREDENTIAL_PATTERNS: readonly RegExp[] = [
-  /api[_-]?key\s*[:=：]/iu,
-  /\bsecret\s*[:=：]/iu,
-  /passw(or)?d\s*[:=：]/iu,
-  /\btoken\s*[:=：]/iu,
-  /\bauthorization\s*[:=：]/iu,
+  // Name + separator. `(?<![A-Za-z0-9])` admits `_`/`-` prefixes so the
+  // SCREAMING_SNAKE and snake_case spellings stay in scope.
+  /(?<![A-Za-z0-9])api[_-]?key\s*[:=：]/iu,
+  /(?<![A-Za-z0-9])secret\s*[:=：]/iu,
+  /(?<![A-Za-z0-9])passw(or)?d\s*[:=：]/iu,
+  /(?<![A-Za-z0-9])pwd\s*[:=：]/iu,
+  /(?<![A-Za-z0-9])token\s*[:=：]/iu,
+  /(?<![A-Za-z0-9])authorization\s*[:=：]/iu,
+  /(?<![A-Za-z0-9])credential\s*[:=：]/iu,
   /\bbearer\s+[A-Za-z0-9]/iu,
+  /密[码钥]\s*[是为:：=]/u,
+  /口令\s*[是为:：=]/u,
+  // Known token prefixes.
   /\bsk-[A-Za-z0-9_-]{16,}\b/u,
   /(gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}/u,
   /xox[bpas]-[A-Za-z0-9-]+/u,
-  /密[码钥]\s*[是为:：=]/u,
-  /口令\s*[是为:：=]/u,
+  /\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/u,
+  /\bAIza[0-9A-Za-z_-]{35}\b/u,
+  /\bnpm_[A-Za-z0-9]{36}\b/u,
+  /\bpypi-[A-Za-z0-9_-]{50,}\b/u,
+  // A private-key banner, whatever the key type.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
+  // A JWT is three base64url segments and its first two both start with `eyJ`
+  // (the base64 of `{"`), which is what makes this shape identifiable.
+  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\./u,
+  // A URL that carries a password.
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@/iu,
+  // A database connection string, with or without a password: the host is
+  // usually an internal address the user would not knowingly paste.
+  /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|mssql):\/\/[^\s]+@/iu,
+  // A base64 run long enough to be a key, with mixed case AND a digit — the
+  // combination that separates a random secret from a word or a hash. `/` is out
+  // of the character class on purpose: a long path is the other thing that looks
+  // like one.
+  /\b(?=[A-Za-z0-9+]*[a-z])(?=[A-Za-z0-9+]*[A-Z])(?=[A-Za-z0-9+]*\d)[A-Za-z0-9+]{32,}={0,2}\b/u,
+  // Bare hex at the two lengths a generated key is written at.
+  /\b[0-9a-f]{32}\b/u,
+  /\b[0-9a-f]{64}\b/u,
 ]
 
 /**
@@ -565,6 +613,9 @@ export class MemoryStore {
         target = join(dir, `${card.name}~${stamp}.md`)
       }
       atomicWrite(target, renderCard(card))
+      // Cleared on a LANDING write: the flag is what `/archive` reports, and a stale
+      // one would keep warning about an undo the user has again by now.
+      this.lastArchiveFailure = undefined
     } catch (error) {
       // Diagnostics only — the caller's removal proceeds regardless, but the
       // failure is remembered so the settings page can say the undo is not
@@ -1553,11 +1604,22 @@ export class MemoryRoot {
     atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
   }
 
-  /** Record one similarity suspect the light sweep noticed (bounded FIFO). */
-  recordSuspect(scope: string, a: string, b: string, score: number): void {
+  /**
+   * Record many similarity suspects with ONE read/write.
+   *
+   * The per-pair form rewrites the whole state file — which also carries every
+   * curated hash and rotation anchor — for each pair. Thirty cards produce up to 435
+   * pairs, so one sweep rewrote that file 435 times on the caller's way back from
+   * `memory_save`.
+   */
+  recordSuspects(scope: string, pairs: readonly { a: string, b: string, score: number }[]): void {
+    if (pairs.length === 0) return
     const state = this.readDistillState()
     const suspects = state.suspects ?? []
-    suspects.push({ at: Date.now(), scope, a, b, score: Math.round(score * 1000) / 1000 })
+    const at = Date.now()
+    for (const pair of pairs) {
+      suspects.push({ at, scope, a: pair.a, b: pair.b, score: Math.round(pair.score * 1000) / 1000 })
+    }
     state.suspects = suspects.slice(-MAX_SUSPECTS)
     mkdirSync(this.dir, { recursive: true })
     atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)

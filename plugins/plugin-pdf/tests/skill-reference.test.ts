@@ -376,3 +376,11 @@ test('chip cleanup: the stand-down path removes only this plugin chip', () => {
   assert.equal(removeSkillReference(binding), false)
   assert.equal(written.length, 1)
 })
+
+test('the installed body keeps the token the install path judges ownership by', () => {
+  // `installSkill` decides whether a file at our name is ours by looking for this
+  // token. A future body rewrite that drops it would classify our own previous file
+  // as somebody else's and silently stop updating the skill — invisible until a
+  // user's copy points at a tool that no longer exists.
+  assert.equal(SKILL_MARKDOWN.includes('DSH_PDF_FONT'), true)
+})

@@ -635,6 +635,25 @@ describe('projectChanged — "unchanged" must be provable', () => {
     assert.equal(outcome.removalSkipped, true)
     assert.ok(graphStats(graph.db).files >= 1, 'no rows were deleted on a truncated walk')
   })
+
+  it('answers unchanged for a file that outgrew the size cap', async () => {
+    // THE DEFECT. `scanProject` moves a file that grew past `MAX_FILE_BYTES` into
+    // `tooLarge` (still on disk, so the removal pass must not treat it as gone), but
+    // the check compared only `scan.files` against the rows — so the row written by
+    // the smaller previous version looked deleted and the check answered "changed" on
+    // every pass for ever: a full re-scan behind a freshness that could never say
+    // "current".
+    const { root, graph } = project()
+    write(root, 'a.ts', 'SYM a')
+    await indexProject(graph, root, stubParse)
+    // The same path, now over the cap.
+    write(root, 'a.ts', 'A'.repeat(1_600_000))
+    assert.equal(projectChanged(graph, root), false, 'a too-large file is not a deletion')
+    // And the pass agrees: it counts the file as too large and leaves its row alone.
+    const outcome = await indexProject(graph, root, stubParse)
+    assert.equal(outcome.tooLarge, 1, 'the pass counted it as too large')
+    assert.equal(graphStats(graph.db).files, 1, 'and left its row in place')
+  })
 })
 
 describe('cancellation during phase 2 or phase 3', () => {

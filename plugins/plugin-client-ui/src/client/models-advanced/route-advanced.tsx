@@ -179,6 +179,14 @@ export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
   const { row, disabled, api, t, namespace, controller } = props
   const [draft, setDraft] = useState<ModelDraft | null>(null)
   const [touched, setTouched] = useState<ReadonlySet<string>>(new Set())
+  /** Bumped when the draft is dropped (saved or discarded).
+   *
+   *  `HeadersField` keeps its rows in local state — a half-typed header has to stay
+   *  on screen to be fixed — so the table only re-seeds when it is remounted. The
+   *  key used to be derived from `touched.has('headers')`, which also flipped on the
+   *  FIRST edit: adding a row to an empty table remounted the component immediately
+   *  and the row vanished. This counter is the signal the key actually needs. */
+  const [draftEpoch, setDraftEpoch] = useState(0)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<PageMessage | undefined>(undefined)
   const [notice, setNotice] = useState<PageMessage | undefined>(undefined)
@@ -258,7 +266,12 @@ export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
       setDraft(null)
       setTouched(new Set())
       setNotice(message('adv.pg.saved'))
+      // AFTER the reload, never before: the remount reads `working` on mount, so
+      // bumping first re-seeded the table from the PRE-save server state and left it
+      // showing the old headers — and editing from there wrote them back over the
+      // save that had just succeeded.
       await controller.load()
+      setDraftEpoch((value) => value + 1)
       return
     }
     if (outcome.kind === 'conflict') {
@@ -328,7 +341,7 @@ export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
             ))}
             {group.id === 'headers' ? (
               <HeadersField
-                key={`headers:${row.entry.provider}:${String(touched.has('headers'))}`}
+                key={`headers:${row.entry.provider}:${String(draftEpoch)}`}
                 t={t}
                 value={working.headers}
                 disabled={fieldDisabled}
@@ -373,7 +386,7 @@ export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
           <Button
             type="button" variant="outline" size="sm"
             disabled={fieldDisabled || dirty === 0}
-            onClick={() => { setDraft(null); setTouched(new Set()); setNotice(undefined); setFailure(undefined) }}
+            onClick={() => { setDraft(null); setTouched(new Set()); setDraftEpoch((value) => value + 1); setNotice(undefined); setFailure(undefined) }}
           >{t('adv.pg.reset')}</Button>
           {dirty === 0 ? null : <span className="dshAma-hint">{t('adv.pg.dirty', { count: dirty })}</span>}
         </div>

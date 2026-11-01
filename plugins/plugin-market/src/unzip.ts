@@ -88,13 +88,32 @@ function readEntry(buf: Buffer, localOff: number, method: number, compSize: numb
   return inflateEntry(buf.subarray(dataStart, dataEnd), method, name)
 }
 
+/**
+ * Per-member decompressed cap.
+ *
+ * A skill is markdown and a few assets; nothing legitimate expands past this. The
+ * cap is enforced by the inflater itself (`maxOutputLength`), so a bomb is stopped
+ * after one bounded buffer instead of after allocating its full output — the
+ * kernel child this runs in has no other guard on this path.
+ */
+const MAX_ENTRY_BYTES = 32 * 1024 * 1024
+
 /** Stored passes through; deflate inflates. Anything else is refused. */
 function inflateEntry(compressed: Buffer, method: number, name: string): Buffer {
-  if (method === 0) return Buffer.from(compressed)
+  if (method === 0) {
+    if (compressed.length > MAX_ENTRY_BYTES) {
+      throw new MarketZipError(`zip entry ${name} is past the per-file cap`)
+    }
+    return Buffer.from(compressed)
+  }
   if (method !== 8) throw new MarketZipError(`unsupported zip compression method ${method}`)
   try {
-    return inflateRawSync(compressed)
-  } catch {
+    return inflateRawSync(compressed, { maxOutputLength: MAX_ENTRY_BYTES })
+  } catch (error) {
+    // The inflater's own cap reports a buffer-size fault; anything else is bad data.
+    if ((error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') {
+      throw new MarketZipError(`zip entry ${name} expands past the ${String(MAX_ENTRY_BYTES / (1024 * 1024))} MB per-file cap`)
+    }
     throw new MarketZipError(`zip inflate failed: ${name}`)
   }
 }

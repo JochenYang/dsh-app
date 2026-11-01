@@ -20,6 +20,7 @@ import {
   MemoryRoot,
   MemoryStore,
   contentSimilarity,
+  containsCredential,
   isValidTopic,
   listProjects,
   normalizeForMatch,
@@ -1093,4 +1094,44 @@ test('card-text discipline: guidance cards carry the reason and the boundary', (
   assert.match(CARD_TEXT_DISCIPLINE, /GUIDANCE cards \(convention, lesson, decision\)/)
   assert.match(CARD_TEXT_DISCIPLINE, /the reason it holds and the case it does NOT cover/)
   assert.match(CARD_TEXT_DISCIPLINE, /not as the story of how it was agreed/)
+})
+
+test('containsCredential recognises credential shapes, not only key names', () => {
+  // THE DEFECT this case exists for: the eleven name-with-separator patterns caught
+  // 4 of 12 real credential shapes. A pasted AWS key, a PEM banner, a JWT, a raw
+  // 32-hex secret, a `postgres://user:pw@host` URL and a 44-character base64 key all
+  // passed straight through to a card that is re-injected into every future session.
+  const caught = [
+    'AKIAIOSFODNN7EXAMPLE',
+    '-----BEGIN RSA PRIVATE KEY-----',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl',
+    'd41d8cd98f00b204e9800998ecf8427e',
+    'postgres://app:S3cretPw@db.internal/prod',
+    'mysql://root@10.0.0.5/db',
+    'k3Jx9vQ2pLmN8sT4wY6zA1bC3dE5fG7hI9jK0lM2nO4p',
+    // The `.env` spellings. `_` is a word character, so a `\b` anchor would put
+    // every one of them out of reach — these are the shapes users paste most.
+    'DB_PASSWORD=hunter2',
+    'client_secret=abc123def',
+    'access_token=abc123def',
+  ]
+  for (const sample of caught) {
+    assert.equal(containsCredential(sample), true, `must be caught: ${sample}`)
+  }
+
+  // What must keep passing. A sentence about token budgets, a git sha (40 hex — the
+  // one hex string memories carry constantly) and a UUID all have to stay saveable,
+  // or the filter becomes something users work around instead of relying on.
+  const allowed = [
+    'token 上限导致失败',
+    'commit 3f786850e387550fdab836ed7e6dc881de23001b 修复了这个问题',
+    '7f3e2a1c-9b4d-4e6f-8a2b-1c3d5e7f9a0b',
+    // A long path is the other thing that looks like a random string. Rejecting
+    // "the project lives at …" would make the filter something users work around.
+    '/Users/dev/Projects/MyApp2024/src/components',
+    'C:/Users/Dev/Projects/ApiV2/src/Services',
+  ]
+  for (const sample of allowed) {
+    assert.equal(containsCredential(sample), false, `must not be caught: ${sample}`)
+  }
 })

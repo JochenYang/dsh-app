@@ -1047,7 +1047,7 @@ function CatalogTab({
           </div>
         </div>
       ) : cacheInfo?.stale === true ? (
-        <div className="dshMkt-banner" role="alert">
+        <div className="dshMkt-banner" role="status">
           {t('mkt.catalog.stale', { age: cacheAgeText(cacheInfo.cachedAt ?? Date.now(), t) })}
         </div>
       ) : cacheInfo?.cached === true ? (

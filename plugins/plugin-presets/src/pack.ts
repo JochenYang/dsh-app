@@ -20,7 +20,7 @@
  */
 
 import { statSync } from 'node:fs'
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, readFile, lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { strToU8, unzipSync, zipSync, type Zippable } from 'fflate'
 import {
@@ -78,7 +78,10 @@ export async function walkPresetFiles(dir: string): Promise<WalkedFile[]> {
       if (!child.isFile()) continue
       let size: number
       try {
-        size = (await stat(join(current, child.name))).size
+        // `lstat`, not `stat`: a link swapped in after the dirent check must not
+        // contribute its TARGET's size to the archive budget, and everything the
+        // export packs is read through the same lstat gate below.
+        size = (await lstat(join(current, child.name))).size
       } catch (error) {
         throw new PresetPackageError('io', {
           code: 'preset.readFileFailed',
@@ -125,8 +128,33 @@ export async function packPresetDir(dir: string, entry: string): Promise<Uint8Ar
   }
   const files: Zippable = { [MANIFEST_NAME]: strToU8(JSON.stringify(manifest)) }
   for (const file of walked) {
+    const absolute = join(dir, file.rel)
+    // Re-checked with `lstat` rather than trusted from the walk: the tree is the
+    // user's, and `readFile` FOLLOWS a link. A regular file swapped for one between
+    // the walk and this read would put content from OUTSIDE the preset into the
+    // exported archive — the walk's containment promise holds only for the walk.
+    let linked = false
+    try {
+      linked = (await lstat(absolute)).isSymbolicLink()
+    } catch (error) {
+      // Same treatment `walkPresetFiles` gives an unreadable member: a file that
+      // vanished between the walk and this read is reported as what it is, not as a
+      // bare ENOENT the route turns into "backup export failed".
+      throw new PresetPackageError('io', {
+        code: 'preset.readFileFailed',
+        params: { code: fsErrorCode(error) },
+        text: `cannot read a preset file (${(error as NodeJS.ErrnoException).code ?? 'unknown'})`,
+      })
+    }
+    if (linked) {
+      throw new PresetPackageError('illegal-path', {
+        code: 'preset.memberIsLink',
+        params: { path: file.rel },
+        text: `the preset member ${file.rel} is a symbolic link; it cannot be exported`,
+      })
+    }
     // readFile returns a Buffer, which satisfies fflate's Uint8Array slots.
-    files[`${PAYLOAD_PREFIX}${file.rel}`] = await readFile(join(dir, file.rel))
+    files[`${PAYLOAD_PREFIX}${file.rel}`] = await readFile(absolute)
   }
   const bytes = zipSync(files)
   if (bytes.byteLength > MAX_ZIP_BYTES) {

@@ -28,6 +28,7 @@
 
 import { spawn } from 'node:child_process'
 import { MarketBlockedBuildError, MarketExecutionError, MarketValidationError, type HostText } from './errors.ts'
+import { BlockedBuildLedger } from './build-allow.ts'
 import { RELEASE_AGE_OVERRIDE, isReleaseAgeFailure } from './release-age.ts'
 import { GIT_TARGET_PATTERN } from './catalog.ts'
 import {
@@ -187,6 +188,16 @@ export class PluginInstaller {
     private readonly argv1: string | undefined = process.argv[1],
     private readonly spawnImpl: SpawnLike = spawn,
     private readonly log: (message: string) => void = () => {},
+    /**
+     * The host's record of installs whose build scripts pnpm skipped.
+     *
+     * It lives with the INSTALLER rather than with one caller: `POST /allow-build`
+     * authorizes against it, and an install the model bridge runs has to feed the
+     * same record — a ledger owned by one route left the panel answering "nothing
+     * was blocked" for every install a conversation triggered, which is the exact
+     * dead end the retry button exists to avoid.
+     */
+    readonly ledger: BlockedBuildLedger = new BlockedBuildLedger(),
   ) {}
 
   /**
@@ -200,9 +211,18 @@ export class PluginInstaller {
     const version = validateExactVersion(requestedVersion)
     return this.enqueue(async () => {
       const exact = await resolveRegistryVersion(name, version)
-      const { output, blockedBuilds } = await this.runCli(['add', `${name}@${exact}`])
-      this.log(`plugin-market: installed ${name}@${exact} into profile ${this.profile}`)
-      return { version: exact, output, ...(blockedBuilds !== null ? { blockedBuilds } : {}) }
+      try {
+        const { output, blockedBuilds } = await this.runCli(['add', `${name}@${exact}`])
+        this.log(`plugin-market: installed ${name}@${exact} into profile ${this.profile}`)
+        if (blockedBuilds !== null) this.ledger.record(this.profile, name, blockedBuilds)
+        return { version: exact, output, ...(blockedBuilds !== null ? { blockedBuilds } : {}) }
+      } catch (error) {
+        // The refusal is the OTHER way the panel learns to offer the retry: pnpm
+        // exits non-zero carrying the same signal, and `runCli` turns it into this
+        // error. Recording only the success path left a failed install unreachable.
+        if (error instanceof MarketBlockedBuildError) this.ledger.record(this.profile, name, error.blockedBuilds)
+        throw error
+      }
     })
   }
 
@@ -318,9 +338,21 @@ export class PluginInstaller {
         windowsHide: true,
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],
+        // POSIX only: the timeout path kills the whole process group with
+        // `kill(-pid)`, and that only works when THIS child leads a group of its
+        // own. Without it the group kill answered ESRCH, the fallback killed just
+        // the CLI, and the pnpm grandchild survived holding the profile lock.
+        // Windows uses `taskkill /T` instead, so the flag would only change its
+        // console semantics.
+        ...(process.platform === 'win32' ? {} : { detached: true }),
       })
       let combined = ''
       let truncated = false
+      // Tracked for the exit hook: a POSIX child spawned `detached` no longer shares
+      // this process's group, so a Ctrl-C on a dev run (or a crashed app) would leave
+      // pnpm writing the profile with the lock held. The timeout below is the only
+      // other terminator.
+      if (child.pid !== undefined) trackInstall(child.pid)
       const onChunk = (chunk: Buffer | string): void => {
         if (combined.length >= STREAM_CAPTURE_BYTES) {
           truncated = true
@@ -347,6 +379,7 @@ export class PluginInstaller {
 
       const finish = (error: Error | undefined, code: number | undefined): void => {
         clearTimeout(timer)
+        if (child.pid !== undefined) liveInstalls.delete(child.pid)
         if (error !== undefined) {
           rejectPromise(error)
           return
@@ -362,6 +395,29 @@ export class PluginInstaller {
       child.on('close', (code: number | null) => finish(undefined, code ?? -1))
     })
   }
+}
+
+/**
+ * Children currently running a package-manager mutation.
+ *
+ * A POSIX child is spawned `detached` so the timeout path can kill its whole process
+ * group (see `runOnce`), and that also means it no longer receives any signal sent
+ * to this process's group — a Ctrl-C on a dev run, or a crashed app, would leave pnpm
+ * writing the profile with the lock held. The timeout is the only other terminator,
+ * so the exit hook is what stops them; `killTree` is synchronous precisely so it can
+ * run there.
+ */
+const liveInstalls = new Set<number>()
+let exitHookInstalled = false
+
+/** Track one child for the exit hook, installing the hook on first use. */
+function trackInstall(pid: number): void {
+  liveInstalls.add(pid)
+  if (exitHookInstalled) return
+  exitHookInstalled = true
+  process.on('exit', () => {
+    for (const live of liveInstalls) killTree(live)
+  })
 }
 
 /**

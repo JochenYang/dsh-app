@@ -78,18 +78,22 @@ export async function lightSweep(
     //    is auto-actionable, but the rewording band below it is exactly where
     //    threshold calibration needs real data (see the constants' comment).
     let suspects = 0
+    /** Collected and written ONCE: one pair per write rewrote the whole distill
+     *  state (curated hashes and rotation anchors included) up to 435 times a sweep. */
+    const pairs: { a: string, b: string, score: number }[] = []
     for (let i = 0; i < cards.length; i += 1) {
       for (let j = i + 1; j < cards.length; j += 1) {
         const a = cards[i]!
         const b = cards[j]!
         const score = contentSimilarity(`${a.summary} ${a.body}`, `${b.summary} ${b.body}`)
         if (score >= SIM_RELATED) {
-          root.recordSuspect(label, a.name, b.name, score)
+          pairs.push({ a: a.name, b: b.name, score })
           suspects += 1
         }
       }
     }
-    if (suspects > 0) {
+    if (pairs.length > 0) {
+      root.recordSuspects(label, pairs)
       log.info(`memory light sweep: ${label} logged ${String(suspects)} similarity suspect pair(s)`)
     }
 

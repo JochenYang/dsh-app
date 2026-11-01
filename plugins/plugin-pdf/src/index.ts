@@ -32,9 +32,9 @@
  * @module @dsh-app/plugin-pdf
  */
 
-import { createHash } from 'node:crypto'
-import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { createHash, randomBytes } from 'node:crypto'
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -240,6 +240,74 @@ function checkValue(report: ValidationReport): Record<string, unknown> {
 }
 
 /**
+ * Whether two absolute paths name the same file.
+ *
+ * String equality is not enough: a case-insensitive volume (Windows, and macOS by
+ * default) and a directory symlink inside the workspace both make two different
+ * spellings name one file. An export that renames onto its own source destroys the
+ * only copy the operation just read — and the model reaching that state was
+ * following this plugin's own "pass overwrite: true" advice, believing the target
+ * to be a different file.
+ *
+ * @param a - absolute path that exists.
+ * @param b - absolute path that may not exist yet.
+ */
+async function sameFile(a: string, b: string): Promise<boolean> {
+  const [realA, realB] = await Promise.all([
+    realpath(a).catch(() => undefined),
+    realpath(b).catch(() => undefined),
+  ])
+  if (realA !== undefined && realB !== undefined) return comparable(realA) === comparable(realB)
+  // The target usually does not exist yet: compare the parent's realpath plus the
+  // name, which is what makes `alias/report.pdf` and `docs/report.pdf` one path.
+  const [dirA, dirB] = await Promise.all([
+    realpath(dirname(a)).catch(() => undefined),
+    realpath(dirname(b)).catch(() => undefined),
+  ])
+  if (dirA === undefined || dirB === undefined) return false
+  return comparable(join(dirA, basename(a))) === comparable(join(dirB, basename(b)))
+}
+
+/** Case folding, only where the filesystem folds it. */
+function comparable(value: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? value.toLowerCase() : value
+}
+
+/**
+ * Resolve an export target, refusing the two ways an export destroys data.
+ *
+ * An export is the one write a user cannot undo from inside the app: replacing an
+ * existing file leaves no copy anywhere, so it needs the caller's explicit
+ * `overwrite: true`. And an `output_file` naming the source would make the
+ * operation destroy its own input — the tool's own doc says the source is never
+ * modified, so that case is refused rather than silently reinterpreted.
+ *
+ * @param root - workspace root.
+ * @param relative - sanitized relative output path.
+ * @param sourceRelative - the operation's input path, or undefined when it has none.
+ * @param overwrite - the call's `overwrite` argument, verbatim.
+ * @param what - the parameter name to name in the error.
+ * @returns the absolute target path.
+ */
+async function exportTarget(
+  root: string,
+  relative: string,
+  sourceRelative: string | undefined,
+  overwrite: unknown,
+  what: string,
+): Promise<string> {
+  const target = await writableWorkspaceFile(root, relative, what)
+  if (sourceRelative !== undefined && await sameFile(target, join(root, ...sourceRelative.split('/')))) {
+    throw new Error(`${what}：不能与源文件相同——源文件不会被修改，请给出一个新路径`)
+  }
+  const metadata = await lstat(target).catch(() => undefined)
+  if (metadata !== undefined && overwrite !== true) {
+    throw new Error(`${what}：目标文件已存在（${relative}）；确认要覆盖时传 overwrite: true，或改用一个新路径`)
+  }
+  return target
+}
+
+/**
  * Read and parse one workspace project, then validate it. Both pdf_check and
  * pdf_render go through here, so the render gate validates exactly the bytes it
  * is about to render.
@@ -321,20 +389,28 @@ function registerPdfTools(ctx: Context): () => void {
       + 'Read-only on the source; writes only output_file.',
     parameters: {
       file_path: { type: 'string', required: true, description: '工作区内相对路径的 Office 文档（.doc/.docx/.xls/.xlsx/.ppt/.pptx）。' },
-      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径；已存在的同名文件会被替换。' },
+      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径；与 file_path 相同时被拒绝，已存在时必须同时传 overwrite: true。' },
+      overwrite: { type: 'boolean', description: 'output_file 已存在时，确认为覆盖才传 true；省略则拒绝。' },
     },
     output: OUTCOME_OUTPUT,
     async execute(args, exec: ToolRunContext): Promise<JsonValue> {
-      const { file_path: filePath, output_file: outputFile } = args as Record<string, unknown>
+      const { file_path: filePath, output_file: outputFile, overwrite } = args as Record<string, unknown>
       const workspace = workspaceRootOf(exec)
       if ('reason' in workspace) return readFailed([workspace.reason])
       try {
         const relative = officeFileRelative(filePath, 'file_path')
         // Both paths are proven before the engine is asked to read anything:
         // the source must exist as an in-workspace regular file, and the target
-        // must be an in-workspace write the caller may create.
+        // must be an in-workspace write the caller may create — and may replace
+        // only when it said so.
         await existingWorkspaceFile(workspace.root, relative, 'file_path')
-        const target = await writableWorkspaceFile(workspace.root, pdfFileRelative(outputFile, 'output_file'), 'output_file')
+        const target = await exportTarget(
+          workspace.root,
+          pdfFileRelative(outputFile, 'output_file'),
+          relative,
+          overwrite,
+          'output_file',
+        )
         const service = ctx.get('officeToPdf')
         if (service === undefined) {
           throw new Error(officeComponentDeclared()
@@ -356,7 +432,7 @@ function registerPdfTools(ctx: Context): () => void {
         // decode — the workspace file interfaces were unified on `readBytes`.
         const bytes = rendered.data
         await mkdir(dirname(target), { recursive: true })
-        const tmp = `${target}.${process.pid}.tmp`
+        const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
         await writeFile(tmp, bytes)
         await rename(tmp, target)
         return {
@@ -485,11 +561,12 @@ function registerPdfTools(ctx: Context): () => void {
       + 'is a delivery; report the returned .pdf path and keep the JSON project for later edits.',
     parameters: {
       file_path: { type: 'string', required: true, description: '工作区内相对路径的 .pdf.json 文件。' },
-      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径。' },
+      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径；与 file_path 相同时被拒绝，已存在时必须同时传 overwrite: true。' },
+      overwrite: { type: 'boolean', description: 'output_file 已存在时，确认为覆盖才传 true；省略则拒绝。' },
     },
     output: OUTCOME_OUTPUT,
     async execute(args, exec: ToolRunContext): Promise<JsonValue> {
-      const { file_path: filePath, output_file: outputFile } = args as Record<string, unknown>
+      const { file_path: filePath, output_file: outputFile, overwrite } = args as Record<string, unknown>
       const workspace = workspaceRootOf(exec)
       if ('reason' in workspace) return needsRevision([workspace.reason])
       try {
@@ -498,16 +575,33 @@ function registerPdfTools(ctx: Context): () => void {
         if (report.status === 'needs_revision') {
           return { status: 'needs_revision', ...checkValue(report), issuesText: formatValidation(report) } as unknown as JsonValue
         }
+        // The target is proven BEFORE the render, and its refusals answer `failed`
+        // rather than falling into the outer catch: "this path already exists" is
+        // the caller's argument, not a defect in a project the checker just
+        // approved, and `needs_revision` would send the model back to fix a clean
+        // document. Deciding it first also keeps a refused path from costing a
+        // full layout.
+        let target: string
+        try {
+          target = await exportTarget(
+            workspace.root,
+            pdfFileRelative(outputFile, 'output_file'),
+            relative,
+            overwrite,
+            'output_file',
+          )
+        } catch (cause) {
+          return readFailed([messageOf(cause)])
+        }
         // The gate holds: only an error-free parse reaches the renderer, and
         // the normalized project it renders is the one the checker approved.
         const { project } = loadPdfDocument(parsed)
         const rendered = await renderPdfProject(project)
         const bytes = rendered.bytes
-        const target = await writableWorkspaceFile(workspace.root, pdfFileRelative(outputFile, 'output_file'), 'output_file')
         await mkdir(dirname(target), { recursive: true })
         // tmp + rename so a failure never leaves half a PDF behind and a
         // symlink at the destination is replaced, not followed.
-        const tmp = `${target}.${process.pid}.tmp`
+        const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
         await writeFile(tmp, Buffer.from(bytes))
         await rename(tmp, target)
         return {
@@ -538,7 +632,8 @@ function registerPdfTools(ctx: Context): () => void {
       + 'NOT supported: text rewriting inside a page, OCR, form filling, signing, redaction, encryption.',
     parameters: {
       file_path: { type: 'string', required: true, description: '工作区内相对路径的源 .pdf 文件（不会被修改）。' },
-      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径；已存在的同名文件会被替换。' },
+      output_file: { type: 'string', required: true, description: '新的工作区内 .pdf 输出路径；与 file_path 相同时被拒绝，已存在时必须同时传 overwrite: true。' },
+      overwrite: { type: 'boolean', description: 'output_file 已存在时，确认为覆盖才传 true；省略则拒绝。' },
       keep_pages: { type: 'array', items: { type: 'number' }, description: '要保留的页码（从 0 开始），按给定顺序排列。与 remove_pages 互斥。' },
       remove_pages: { type: 'array', items: { type: 'number' }, description: '要删除的页码（从 0 开始）。与 keep_pages 互斥，且不能删光所有页。' },
       rotate_degrees: { type: 'number', description: '顺时针旋转度数，只能是 90 / 180 / 270；给出后对 rotate_pages 或全部页面生效。' },
@@ -606,11 +701,17 @@ function registerPdfTools(ctx: Context): () => void {
           const mergedAbsolute = await existingWorkspaceFile(workspace.root, label, 'merge_files')
           return readFile(mergedAbsolute)
         })
-        const target = await writableWorkspaceFile(workspace.root, pdfFileRelative(record.output_file, 'output_file'), 'output_file')
+        const target = await exportTarget(
+          workspace.root,
+          pdfFileRelative(record.output_file, 'output_file'),
+          relative,
+          record.overwrite,
+          'output_file',
+        )
         await mkdir(dirname(target), { recursive: true })
         // tmp + rename so a failure never leaves half a PDF behind and a
         // symlink at the destination is replaced, not followed.
-        const tmp = `${target}.${process.pid}.tmp`
+        const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
         await writeFile(tmp, Buffer.from(edited.bytes))
         await rename(tmp, target)
         return {
@@ -679,6 +780,10 @@ export function apply(ctx: Context): void {
     void installSkill(resolveDshHome()).then(
       (result) => {
         if (result === 'installed') log.info(`pdf skill installed: ${SKILL_NAME}`)
+        // A file at our name whose body is not ours is kept, not overwritten.
+        // Silent would mean the user's own skill shadows ours with no way to see
+        // why ours never appears (`dsh-pdf` is a legal market slug too).
+        if (result === 'kept-foreign') log.info(`kept skill directory "${SKILL_NAME}": its body is not this plugin's`)
       },
       (cause: unknown) => {
         log.warn(`pdf skill install failed: ${messageOf(cause)}`)

@@ -56,6 +56,14 @@ export interface RewindRecallContext {
    */
   readonly skip?: ReadonlySet<string>
   /**
+   * Cancels this participant's work when it outlives the deadline.
+   *
+   * The registry aborts it BEFORE reporting the failure: a deadline that only
+   * stopped WAITING left the participant writing files while the recall answered
+   * "not restored", and the user's retry then raced it on the same paths.
+   */
+  readonly signal?: AbortSignal
+  /**
    * The session, for a participant that needs the log rather than the plan.
    *
    * Typed as the read-only slice this plugin itself uses (`SessionLike`), but at
@@ -153,11 +161,13 @@ export function createParticipantRegistry(
       const skip = context.skip
       for (const participant of [...ordered]) {
         if (skip !== undefined && skip.has(participant.id)) continue
+        const controller = new AbortController()
         try {
           reports.set(participant.id, await withDeadline(
-            participant.reconcileAfterRewind(context),
+            participant.reconcileAfterRewind({ ...context, signal: controller.signal }),
             deadlineMs,
             participant.id,
+            controller,
           ))
         } catch (error) {
           // Contained: the recall already landed, and one consumer's failure is
@@ -184,19 +194,26 @@ const PARTICIPANT_DEADLINE_MS = 30_000
 /**
  * Resolve with the participant's own result, or reject once the deadline passes.
  *
- * `Promise.race` rather than an abort signal: a participant's contract takes no
- * signal, and cancelling one mid-restore would be worse than reporting it late.
+ * The deadline ABORTS the participant before it rejects. Only dropping the wait
+ * would leave a restore writing files after the recall answered "not restored", and
+ * the obvious next action — recall again — would then race it on the same paths.
  *
  * @param value - the participant's return value or promise.
  * @param ms - the deadline.
  * @param id - the participant's id, for the refusal message.
+ * @param cancel - the controller the participant's context carries.
  * @returns the participant's result.
  * @throws when the deadline passes first.
  */
-function withDeadline(value: unknown, ms: number, id: string): Promise<unknown> {
+function withDeadline(value: unknown, ms: number, id: string, cancel?: AbortController): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => { reject(new Error(`did not settle within ${String(ms)}ms`)) }, ms)
+    timer = setTimeout(() => {
+      // Abort FIRST: the caller is about to report this participant as failed, and
+      // its writes have to stop before that report is believed.
+      cancel?.abort()
+      reject(new Error(`did not settle within ${String(ms)}ms`))
+    }, ms)
   })
   return Promise.race([Promise.resolve(value), deadline]).finally(() => {
     if (timer !== undefined) clearTimeout(timer)

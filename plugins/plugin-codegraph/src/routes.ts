@@ -75,6 +75,17 @@ export type GraphAnswer =
    * error the user cannot act on.
    */
   | { readonly kind: 'indexing' }
+  /**
+   * The project has no graph and no session has ever used it.
+   *
+   * Distinct from `indexing`: NOTHING was queued. Indexing is a side effect a `GET`
+   * must not trigger for a directory the caller merely named — this route used to
+   * start a full walk of any path an authenticated client asked about. Every project
+   * the user actually works in is already known here (the plugin adopts the graphs
+   * found on disk at startup, and a session adopts its cwd when it is created), so an
+   * unknown cwd means "no graph and no session" and is answered without being walked.
+   */
+  | { readonly kind: 'notAdopted' }
 
 /**
  * The languages this plugin has extraction rules for, as a set.
@@ -306,19 +317,27 @@ export function registerCodegraphRoutes(connectionFetch: HostConnectionFetch, op
     if (cwd === null || cwd === '') {
       return fail(400, 'cwd-required', { code: 'route.cwdRequired', text: 'this request needs a project directory' })
     }
-    // A project the queue has never seen is NOT an error: opening the view is the
-    // user asking for that project's graph, and answering "no graph has been
-    // opened" would leave the page permanently empty for every session that
-    // predates this plugin — `session/created` fires once, so an existing session
-    // never queues its project on its own.
-    //
-    // So: queue it and answer `indexing`. The view polls, the first pass lands,
-    // and the same request then answers the graph. `reindex` is idempotent while a
-    // pass is queued or running, so a poll loop costs one pass, not one per tick.
+    // A project the queue has never seen is answered `notAdopted`, NOT queued: an
+    // authenticated client could otherwise make the kernel walk and store any
+    // directory it named, and a `GET` that starts a scan is a side effect nothing can
+    // bound. A project the user actually works in is already adopted (the plugin
+    // adopts the graphs found on disk at startup, and a session adopts its cwd when
+    // it is created). A project that was FORGOTTEN is reset to `unindexed`, so this
+    // branch is about a directory that has never been used, not about a deleted one.
     if (!options.statuses().some(status => status.cwd === cwd)) {
-      void options.reindex(cwd).catch(() => {
-        // Recorded on the project by the queue; the next poll reports it.
-      })
+      // Answered, NOT indexed. This route used to queue a pass for any directory a
+      // caller named, so an authenticated client could make the kernel walk and store
+      // an arbitrary tree — and a `GET` that starts a scan is a side effect nothing
+      // can bound. A project the user works in is already known here: the plugin
+      // adopts every graph found on disk at startup, and a session adopts its cwd when
+      // it is created. An unknown cwd therefore means "no graph and no session".
+      return ok({ kind: 'notAdopted' } satisfies GraphAnswer)
+    }
+    // An adopted-but-unfinished pass is `indexing`, not an empty graph: without this
+    // the view shows `files.nodes.length === 0` and never polls, so the first pass
+    // landing changes nothing on screen.
+    const status = options.statuses().find(entry => entry.cwd === cwd)
+    if (status?.state === 'unindexed' || status?.state === 'indexing') {
       return ok({ kind: 'indexing' } satisfies GraphAnswer)
     }
     try {

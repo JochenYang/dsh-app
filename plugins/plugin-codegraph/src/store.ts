@@ -274,13 +274,18 @@ function hasTable(db: DatabaseSync, name: string): boolean {
  * @returns the open database.
  */
 function openOrRecreate(file: string): DatabaseSync {
+  let db: DatabaseSync | undefined
   try {
-    const db = new DatabaseSync(file, { timeout: 5000 })
+    db = new DatabaseSync(file, { timeout: 5000 })
     // A file that is not a database opens lazily; the first query is what
     // throws, so prove the schema table is readable before handing it out.
     hasTable(db, 'meta')
     return db
   } catch (error) {
+    // Closed BEFORE the repair: an open handle makes `unlinkSync` fail with EPERM on
+    // Windows, and the repair would then leave the unusable file in place for every
+    // later open to trip over — the corruption would look permanent.
+    try { db?.close() } catch { /* already closed by the failed open */ }
     const code = (error as { code?: string }).code ?? ''
     const message = error instanceof Error ? error.message : String(error)
     const unusable = /SQLITE_NOTADB|SQLITE_CORRUPT|file is not a database|malformed/i.test(`${code} ${message}`)

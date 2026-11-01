@@ -451,7 +451,7 @@ describe('deleting a project while it is being indexed', () => {
         const listed = await route.fetch(new Request('dsh-app://app/api/plugins/dsh-app/codegraph/status'))
         return await listed.json() as { value?: { projects?: { cwd: string }[] } }
       })()
-      assert.deepEqual(statuses.value?.projects?.map(project => project.cwd) ?? [], [], 'the deleted project is not listed')
+      assert.deepEqual(statuses.value?.projects?.map(project => project.state) ?? [], ['unindexed'], 'a forgotten project is listed as unindexed, so the view can queue it again')
     } finally {
       await dispose()
     }

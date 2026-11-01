@@ -170,7 +170,15 @@ class GitTimeoutError extends Error {
 
 /** Environment baseline: PATH + HOME only (no parent-proc leakage). */
 function gitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH }
+  const base = process.env.PATH ?? ''
+  // A macOS app launched from Finder inherits a minimal PATH (`/usr/bin:/bin:…`),
+  // so a Homebrew git is invisible and the tab reports `git-missing` on a machine
+  // that has git. Prepending the two standard prefixes fixes that without inheriting
+  // the rest of the parent environment — which is the reason this baseline exists.
+  const path = process.platform === 'darwin'
+    ? ['/opt/homebrew/bin', '/usr/local/bin', base].filter(part => part !== '').join(':')
+    : base
+  const env: NodeJS.ProcessEnv = { PATH: path }
   const home = process.env.HOME ?? process.env.USERPROFILE
   if (home !== undefined) env.HOME = home
   return env

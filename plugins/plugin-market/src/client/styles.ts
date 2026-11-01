@@ -61,7 +61,11 @@ const cssText = `
    * window's right edge — the shell samples the same element, so the two
    * read as one surface. */
   position: fixed;
-  z-index: 2147483646;
+  /* BELOW the primitives' Modal mask (1000). This used to be 2147483646, which
+   * put the whole panel above every modal in the app — the confirm dialog opened
+   * behind it. The panel only has to cover the host UI, and the host paints far
+   * below 1000. */
+  z-index: 900;
   display: flex;
   -webkit-app-region: no-drag;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -364,9 +368,13 @@ const cssText = `
 .dshMkt-cardFoot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   margin-top: auto;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-all;
 }
 .dshMkt-cardStars {
   flex: none;
@@ -414,12 +422,6 @@ const cssText = `
   flex: none;
 }
 /* Row-2 byline: author · stars / 30-day installs · category, muted so the title leads. */
-.dshMkt-cardFoot {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-primary);
-  word-break: break-all;
-}
 .dshMkt-badge {
   padding: 1px 8px;
   border-radius: 999px;
@@ -470,12 +472,6 @@ const cssText = `
   color: var(--dsw-alias-label-tertiary);
   font-size: 11.5px;
   word-break: break-all;
-}
-.dshMkt-cardFoot {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
 }
 /* Catalog title as a repository link: underlines subtly, never steals focus
  * from the install action. */
@@ -702,32 +698,10 @@ const cssText = `
   .dshMkt-drawer { transition: none; }
   .dshMkt-switchTrack, .dshMkt-switchThumb { transition: none; }
 }
-/* Confirmation modal — the React port of the shell's in-frame dialog idiom
- * (same mask/card idiom the other suite sections use). */
-.dshMkt-dialogWrap {
-  position: fixed;
-  inset: 0;
-  z-index: 2147483647;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, .35);
-}
-.dshMkt-dialogCard {
-  width: 340px;
-  max-width: calc(100vw - 48px);
-  background: var(--dsw-alias-bg-layer-1, #ffffff);
-  border: 1px solid var(--dsw-alias-border-l1, rgba(15, 23, 42, 0.06));
-  border-radius: 12px;
-  padding: 20px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, .28);
-}
-.dshMkt-dialogTitle {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-primary, #0f172a);
-  margin-bottom: 6px;
-}
+/* The card itself is the primitives' Modal; only the message and the action row
+ * are still styled here. The old .dshMkt-dialogWrap (z-index 2147483647),
+ * .dshMkt-dialogCard and .dshMkt-dialogTitle rules went with the hand-drawn
+ * dialog — leaving that z-index behind in a dead rule is how it comes back. */
 .dshMkt-dialogMessage {
   font-size: 13px;
   color: var(--dsw-alias-label-secondary, #475569);

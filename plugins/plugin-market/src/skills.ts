@@ -277,6 +277,59 @@ export async function skillDetail(slug: string): Promise<SkillDetail> {
   }
 }
 
+/** Download cap for one skill archive. A skill is markdown and small assets. */
+const MAX_SKILL_ZIP_BYTES = 32 * 1024 * 1024
+
+/**
+ * Read a response body into a buffer, refusing anything past `cap`.
+ *
+ * `arrayBuffer()` has no bound at all: the body is accumulated whole, in the kernel
+ * child, before anything looks at it. A declared `Content-Length` is checked first
+ * (cheap) and the stream is counted as well, because a chunked response declares
+ * nothing.
+ *
+ * @param response - the fetch result.
+ * @param cap - byte ceiling.
+ * @param name - what to name in the refusal.
+ */
+async function readBodyCapped(response: Response, cap: number, name: string): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length') ?? Number.NaN)
+  if (Number.isFinite(declared) && declared > cap) {
+    throw new MarketExecutionError(
+      { code: 'skill.tooLarge', params: { name, mb: String(Math.floor(cap / (1024 * 1024))) }, text: `${name} is past the ${String(cap)}-byte cap` },
+      'skill',
+    )
+  }
+  if (response.body === null) return Buffer.alloc(0)
+  const chunks: Buffer[] = []
+  let total = 0
+  // Read through the stream's own reader rather than `for await`: the async
+  // iterator is not on the web-stream type, and asserting it away would add one
+  // more type escape to this plugin's ratchet for no gain.
+  const reader = response.body.getReader()
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > cap) {
+        // Cancelled, not merely abandoned: throwing with the reader still locked
+        // leaves the connection fetching until the request's own 120 s timeout. The
+        // catalog reader next door already does this — one behaviour, not two.
+        await reader.cancel().catch(() => undefined)
+        throw new MarketExecutionError(
+          { code: 'skill.tooLarge', params: { name, mb: String(Math.floor(cap / (1024 * 1024))) }, text: `${name} streamed past the ${String(cap)}-byte cap` },
+          'skill',
+        )
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return Buffer.concat(chunks)
+}
+
 /**
  * Download a skill's zip and return the extracted FILES map (relative path →
  * bytes), every path re-checked by {@link safeRelPath} after extraction.
@@ -291,7 +344,7 @@ export async function downloadSkillFiles(slug: string): Promise<Map<string, Buff
       'skill',
     )
   }
-  const bytes = Buffer.from(await response.arrayBuffer())
+  const bytes = await readBodyCapped(response, MAX_SKILL_ZIP_BYTES, slug)
   if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
     throw new MarketExecutionError({ code: 'skill.notZip', text: 'the download is not a zip archive' }, 'skill')
   }

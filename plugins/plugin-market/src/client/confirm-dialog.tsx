@@ -1,16 +1,18 @@
 /**
- * In-app confirmation modal — the React port of the shell's in-frame dialog
- * idiom (mask + centered alias-token card, Esc/mask = cancel, Enter on the
- * focused confirm button), the same idiom the other suite sections use.
- * All copy arrives as props: the caller owns the wording and its locale
- * namespace (no string is built here).
+ * In-app confirmation modal, built on the host's `Modal` primitive.
+ *
+ * The shell's in-frame idiom (mask + centered alias-token card, Esc/mask = cancel,
+ * Enter on the focused confirm button) is the framework's own: drawing a second
+ * mask and card here meant two focus traps, two Escape handlers and two looks that
+ * drift apart. `Modal` owns the portal, the mask, Escape, the focus trap and the
+ * focus return; this file only supplies the body and the action row. All copy
+ * arrives as props: the caller owns the wording and its locale namespace.
  *
  * @module @dsh-app/plugin-market/client/confirm-dialog
  */
 
-import { useEffect } from 'react'
 import type { ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 
 export interface ConfirmDialogProps {
   open: boolean
@@ -38,41 +40,28 @@ export interface ConfirmDialogProps {
 export function ConfirmDialog({
   open, title, message, confirmLabel, cancelLabel, busy = false, tone = 'neutral', onConfirm, onClose,
 }: ConfirmDialogProps): ReactNode {
-  useEffect(() => {
-    if (!open) return
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('keydown', onKey) }
-  }, [open, onClose])
-
-  if (!open) return null
-  return createPortal(
-    <div className="dshMkt-dialogWrap" role="presentation" onClick={onClose}>
-      <div
-        className="dshMkt-dialogCard"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        onClick={(event) => { event.stopPropagation() }}
-      >
-        <div className="dshMkt-dialogTitle">{title}</div>
-        <div className="dshMkt-dialogMessage">{message}</div>
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={title}
+      closeLabel={cancelLabel}
+      footer={(
         <div className="dshMkt-dialogActions">
-          <button type="button" className="dshMkt-button" disabled={busy} onClick={onClose}>{cancelLabel}</button>
-          <button
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onClose}>{cancelLabel}</Button>
+          <Button
             type="button"
-            className={tone === 'dark' ? 'dshMkt-button dshMkt-buttonDark' : 'dshMkt-button dshMkt-buttonNeutral'}
+            variant="primary"
+            size="sm"
             disabled={busy}
-            autoFocus
             onClick={onConfirm}
           >
             {confirmLabel}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>,
-    document.body,
+      )}
+    >
+      <p className="dshMkt-dialogMessage">{message}</p>
+    </Modal>
   )
 }

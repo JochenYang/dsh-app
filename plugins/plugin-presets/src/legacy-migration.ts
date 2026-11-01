@@ -253,12 +253,19 @@ export function renderPresetRow(preset: LegacyPreset, indent: number): RenderedP
   const rowId = `${PRESET_ROW_PREFIX}${preset.id}`
   const { text: composition, rewritten } = rebasePresetPaths(preset.composition, preset.dir)
   const pad = ' '.repeat(indent)
+  // Every value that came from a DIRECTORY NAME is a quoted scalar. `preset.id` is
+  // the preset's directory name (`findLegacyPresets` skips only dotfiles), so a
+  // name carrying `: ` or ` #` would otherwise produce a patch document YAML cannot
+  // parse (POSIX) or silently truncate the id at the comment (Windows) — and this
+  // file is the layer every profile loads. JSON is a YAML subset, so
+  // `JSON.stringify` is the escaper the neighbouring name/description lines
+  // already use.
   const header = [
     `${pad}- insert:`,
-    `${pad}    - id: ${rowId}`,
+    `${pad}    - id: ${JSON.stringify(rowId)}`,
     `${pad}      name: '@deepseek-ai/dsh-agent-preset'`,
     `${pad}      config:`,
-    `${pad}        id: ${preset.id}`,
+    `${pad}        id: ${JSON.stringify(preset.id)}`,
     // The registration row's `config.name` is the preset's DISPLAY name (the
     // package's field table: id / plugins / name / description / order). Without
     // it the chooser falls back to the row id, which is how a migrated preset

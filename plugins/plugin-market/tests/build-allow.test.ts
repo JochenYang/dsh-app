@@ -25,7 +25,7 @@ import { CatalogHold, InstallIntentStore } from '../src/install-intent.ts'
 import type { PluginInstaller } from '../src/installer.ts'
 import { blockedBuildsOf } from '../src/installer.ts'
 import { registerMarketRoutes, ROUTE_PREFIX, type MarketDeps } from '../src/routes.ts'
-import { allowBuilds, withAllowedBuilds } from '../src/build-allow.ts'
+import { BlockedBuildLedger, allowBuilds, withAllowedBuilds } from '../src/build-allow.ts'
 
 /** A realistic user-maintained workspace file the merge must not disturb. */
 const EXISTING = `packages:
@@ -187,6 +187,10 @@ describe('POST /allow-build (the host’s own blocked-attempt record)', () => {
     // builds it: the blocked names come from `blockedBuildsOf` over real pnpm
     // wording, so what the ledger records is what a blocked run produces.
     const installer = {
+      // The route authorizes against `installer.ledger` since the ledger moved onto
+      // the installer (a per-route instance was invisible to installs the model
+      // bridge ran). The fake needs the same seat.
+      ledger: new BlockedBuildLedger(),
       install: async (pkg: unknown) => {
         installs.push(String(pkg))
         const output = script.shift()

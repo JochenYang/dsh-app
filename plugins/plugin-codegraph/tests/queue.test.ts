@@ -472,7 +472,7 @@ describe('forget — deleting a project cancels its work', () => {
     assert.equal(sawAbort, true, 'the running pass was told to stop')
     assert.equal(finished, true, 'and forget waited for it to settle before returning')
     await pending.catch(() => { /* the caller must catch: the pass was cancelled */ })
-    assert.equal(queue.status('D:/x'), undefined, 'the record is gone, not left as failed')
+    assert.equal(queue.status('D:/x')?.state, 'unindexed', 'the record is reset, so the view can queue the project again')
   })
 
   it('fails a waiting job for that project instead of running it', async () => {
@@ -497,7 +497,7 @@ describe('forget — deleting a project cancels its work', () => {
     await first
     await settle(20)
     assert.deepEqual(ran, ['D:/a'], 'b never ran')
-    assert.equal(queue.status('D:/b'), undefined)
+    assert.equal(queue.status('D:/b')?.state, 'unindexed')
   })
 
   it('cancels an owed compensating pass rather than running it after the delete', async () => {
@@ -520,7 +520,7 @@ describe('forget — deleting a project cancels its work', () => {
     await deleting
     await settle(40)
     assert.equal(passes, 1, 'the owed pass never ran')
-    assert.equal(queue.status('D:/x'), undefined)
+    assert.equal(queue.status('D:/x')?.state, 'unindexed', 'and the record is reset, so a later open queues a fresh pass')
   })
 
   it('leaves other projects untouched', async () => {
@@ -545,7 +545,7 @@ describe('forget — deleting a project cancels its work', () => {
     await settle(20)
     assert.deepEqual(ran, ['D:/a'])
     assert.equal(queue.status('D:/a')?.state, 'current', 'a completed normally')
-    assert.equal(queue.status('D:/b'), undefined)
+    assert.equal(queue.status('D:/b')?.state, 'unindexed')
   })
 
   it('resolves for a project the queue never saw', async () => {

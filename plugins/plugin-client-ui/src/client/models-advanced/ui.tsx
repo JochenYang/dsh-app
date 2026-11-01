@@ -102,6 +102,16 @@ function parseDraft(text: string, kind: ScalarKind, choices: readonly string[]):
  * @param props - see {@link ScalarFieldProps}.
  * @returns the field block.
  */
+/**
+ * A reset is not the echo of a committed value.
+ *
+ * `undefined` IS what a reset commits, so storing it in `echoed` made the re-seed
+ * guard (`Object.is(echoed.current, value)`) skip exactly the update the reset
+ * asked for, and the input kept showing the old text (`500K`) after the value had
+ * already been unset.
+ */
+const RESET = Symbol('reset')
+
 export function ScalarField(props: ScalarFieldProps): ReactNode {
   const { id, label, hint, value, kind, choices = [], disabled, invalidCopy, onCommit } = props
   const [text, setText] = useState(() => draftTextOf(value, kind))
@@ -145,7 +155,7 @@ export function ScalarField(props: ScalarFieldProps): ReactNode {
             className="dshAma-linkButton"
             aria-label={`${props.resetLabel}: ${label}`}
             disabled={disabled === true}
-            onClick={() => { setLocalError(false); echoed.current = undefined; onCommit(undefined) }}
+            onClick={() => { setLocalError(false); echoed.current = RESET; onCommit(undefined) }}
           >{props.resetLabel}</button>
         </>
       ) : null}

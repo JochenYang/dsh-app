@@ -423,6 +423,10 @@ export async function captureWorkspace(
   const entries: Record<string, Entry> = Object.create(null) as Record<string, Entry>
   const uncaptured: Record<string, Uncaptured> = Object.create(null) as Record<string, Uncaptured>
   for (const [rel, found] of walk.uncaptured) uncaptured[rel] = found
+  /** Blobs THIS capture holds against collection. `inFlight` is process-wide, so a
+   *  blanket clear released a concurrent capture's holds and the next collection pass
+   *  then deleted bytes a live turn's snapshot still pointed at. */
+  const held = new Set<string>()
   const deadline = Date.now() + limits.maxWalkMs
   let reason = walk.reason
   try {
@@ -452,12 +456,15 @@ export async function captureWorkspace(
         uncaptured[rel] = { size: found.size, mtimeMs: found.mtimeMs, reason: 'unreadable' }
         continue
       }
-      entries[rel] = [await putBlob(dshHome, bytes), found.size, found.mtimeMs]
+      const hash = await putBlob(dshHome, bytes)
+      held.add(hash)
+      entries[rel] = [hash, found.size, found.mtimeMs]
     }
   } finally {
-    // Release the collection hold whatever happened; the manifest is written
-    // below, and a capture that failed leaves real orphans for the next pass.
-    inFlight.clear()
+    // Release only THIS capture's holds. A blanket `inFlight.clear()` dropped a
+    // concurrent capture's blobs into the next collection pass, which then deleted
+    // bytes a live turn's snapshot still pointed at.
+    for (const hash of held) inFlight.delete(hash)
   }
   const snapshot: TreeSnapshot = {
     v: 1,
