@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 230" fill="none">
+  <g stroke="#29282B" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <!-- calendar body, tilted slightly clockwise -->
+    <path d="M72 40 Q75 19 98 22 L275 43 Q301 46 298 72 L280 203 Q277 224 254 220 L62 198 Q39 195 43 171 Z" fill="#FFFDF9"/>
+    <path d="M72 40 Q75 19 98 22 L275 43 Q301 46 298 72 L294 105 L48 76 Z" fill="#FF8E79"/>
+    <!-- binder loops -->
+    <path d="M112 31 L108 8 Q107 -2 119 0 Q132 2 130 13 L127 35 Q125 48 114 46 Q105 44 112 31Z" fill="#F4B84D"/>
+    <path d="M216 42 L219 18 Q221 7 232 10 Q244 13 241 24 L237 48 Q234 60 223 56 Q214 53 216 42Z" fill="#F4B84D"/>
+  </g>
+  <!-- date tiles -->
+  <g fill="#D8D9DC">
+    <rect x="93" y="91" width="35" height="29" rx="8" transform="rotate(8 93 91)"/>
+    <rect x="145" y="98" width="35" height="29" rx="8" transform="rotate(8 145 98)"/>
+    <rect x="197" y="105" width="35" height="29" rx="8" transform="rotate(8 197 105)"/>
+    <rect x="86" y="143" width="35" height="29" rx="8" transform="rotate(8 86 143)"/>
+    <rect x="138" y="150" width="35" height="29" rx="8" transform="rotate(8 138 150)"/>
+    <rect x="190" y="157" width="35" height="29" rx="8" transform="rotate(8 190 157)"/>
+  </g>
+  <!-- cheerful accent rays, kept clear of the calendar's own corner -->
+  <g stroke="#FFD05A" stroke-width="12" stroke-linecap="round" transform="translate(-18 -12)">
+    <path d="M18 82 L43 87"/><path d="M35 48 L52 66"/><path d="M82 18 L88 42"/>
+  </g>
+</svg>

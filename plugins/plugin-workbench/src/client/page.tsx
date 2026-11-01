@@ -143,14 +143,14 @@ export function WorkbenchPage(props: WorkbenchPageProps): ReactElement {
     return (
       <div className="dshWorkbench-page" ref={viewRef} tabIndex={-1}>
         <div className="dshWorkbench-inner">
-          <header className="dshWorkbench-head">
-            <div className="dshWorkbench-headRow">
-              <button type="button" className="dshWorkbench-back" onClick={closeView}>
-                {t('workbench.back')}
-              </button>
-              <h1 className="dshWorkbench-title">{t('workbench.title')}</h1>
-            </div>
-          </header>
+          {/* The bar is the way BACK, and nothing else: the domain page prints its
+              own title as the first thing in its body, so the container adds no
+              heading over it. */}
+          <div className="dshWorkbench-viewBar">
+            <button type="button" className="dshWorkbench-back" onClick={closeView}>
+              {t('workbench.back')}
+            </button>
+          </div>
           <div className="dshWorkbench-body">
             {renderSlot('workbench.view', {}, { entryKey: viewId })}
           </div>

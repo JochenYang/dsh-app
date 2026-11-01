@@ -40,8 +40,10 @@
  *         does not match the rule, the card does and carries padding, border,
  *         radius and a background
  *   A4    the card's entry opens the view registered under `workbench.view`
- *         (content marker in, grid out), 返回工作台 is rendered VERBATIM, and
- *         returning through it shows the grid again on the SAME page element
+ *         (content marker in, grid out), 返回工作台 is rendered VERBATIM, the
+ *         container prints NO title over the domain's page (the page names
+ *         itself), and returning through the button shows the grid again on the
+ *         SAME page element
  *   A5    `ctx.layout.selectPanel(null)` — and the rail's other row — unmount the
  *         page (measured by an expando stamped on the element: gone means
  *         unmounted, not hidden), and coming back shows a FRESH element with the
@@ -402,6 +404,10 @@ const CENTRE_SNAP = `(function () {
   var card = document.querySelector('[data-probe-card]')
   var view = document.querySelector('[data-probe-view]')
   var back = document.querySelector('.dshWorkbench-back')
+  // The shell lays a 36px window-drag strip over the top of this column
+  // (src/main/window.ts, OVERLAY_HEIGHT). A control inside it receives no mouse
+  // event at all, so its distance from the column's top is a contract, not a taste.
+  var column = document.querySelector('[class*="_centerCol"]')
   var title = document.querySelector('.dshWorkbench-title')
   var intro = document.querySelector('.dshWorkbench-intro')
   var out = []
@@ -455,6 +461,13 @@ const CENTRE_SNAP = `(function () {
     backInDom: back !== null,
     backText: back === null ? null : back.innerText,
     backTextMatches: back !== null && back.innerText === ${JSON.stringify(ZH_BACK)},
+    backRect: back === null ? null : (function () {
+      var r = back.getBoundingClientRect()
+      return { left: r.left, top: r.top, width: r.width, height: r.height }
+    })(),
+    backTopInColumn: back === null || column === null
+      ? null
+      : Math.round(back.getBoundingClientRect().top - column.getBoundingClientRect().top),
     bodyHead: bodyText.replace(/\\s+/g, ' ').slice(0, 160)
   }
 })()`
@@ -1050,11 +1063,41 @@ async function run() {
     check('A4 返回工作台 is rendered VERBATIM while the view is open',
       view.backInDom === true && view.backTextMatches === true,
       JSON.stringify(view.backText))
+    check('A4 the domain page owns its own title: the container prints none over it',
+      view.titleInDom === false,
+      JSON.stringify({ titleInDom: view.titleInDom, titleText: view.titleText }))
+    check('A4 the back control clears the shell window-drag strip (36px from the column top)',
+      view.backTopInColumn !== null && view.backTopInColumn >= 36,
+      JSON.stringify({ backTopInColumn: view.backTopInColumn, backRect: view.backRect }))
     check('A4 opening the view keeps the SAME page element (the container switches content, not page)',
       view.pageToken === token,
       `before=${String(token)} after=${JSON.stringify(view.pageToken)}`)
 
-    section('A4b — click 返回工作台', await win.webContents.executeJavaScript(CLICK_BACK))
+    // A POINTER event, not element.click(): the shell's 36px drag strip swallows
+    // real input, and a scripted click cannot see that — which is exactly how a
+    // control that sits inside the strip shipped while every assertion was green.
+    // Injected at the control's own centre, so the same hit test runs.
+    const backX = view.backRect === null ? 0 : Math.round(view.backRect.left + view.backRect.width / 2)
+    const backY = view.backRect === null ? 0 : Math.round(view.backRect.top + view.backRect.height / 2)
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: backX, y: backY })
+    win.webContents.sendInputEvent({ type: 'mouseDown', x: backX, y: backY, button: 'left', clickCount: 1 })
+    win.webContents.sendInputEvent({ type: 'mouseUp', x: backX, y: backY, button: 'left', clickCount: 1 })
+    // LOGGED, not asserted. Whether Electron delivers injected input to a window the
+    // OS has not focused depends on the host, so a miss here says nothing about the
+    // control; the contract that catches the drag-strip bug is the geometry check
+    // above, and this line is the diagnostic that explains a human seeing a dead
+    // button while the scripted click works.
+    section('A4b — injected pointer input', { x: backX, y: backY })
+    let injectedLanded = false
+    try {
+      await waitUntil('the grid to come back after injected input', 4_000, CENTRE_SNAP,
+        (centre) => centre.gridInDom === true && centre.viewInDom === false)
+      injectedLanded = true
+    } catch { injectedLanded = false }
+    section('A4b — injected pointer input landed', injectedLanded)
+    if (!injectedLanded) {
+      section('A4b — click 返回工作台', await win.webContents.executeJavaScript(CLICK_BACK))
+    }
     const backOnGrid = await waitUntil('the grid to come back after 返回工作台', 20_000, CENTRE_SNAP,
       (centre) => centre.pageInDom === true && centre.gridInDom === true && centre.viewInDom === false)
     section('A4b — centre column back on the grid', backOnGrid)

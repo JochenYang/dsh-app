@@ -218,6 +218,9 @@
     - id: workbench
       name: '@dsh-app/plugin-workbench'
 
+    - id: todo
+      name: '@dsh-app/plugin-todo'
+
     - id: codegraph
       name: '@dsh-app/plugin-codegraph'
 

@@ -39,5 +39,13 @@ a short summary and points here.
 - **The app update path asks the host before it kills it** — `DshHost.inspectQuit` / `askHostTasks`
   use the child's own `quit-inspection` and `update-tasks` control, and every failure reads as "work
   is in flight" (see `src/main/updater.ts` `confirmNoActiveTasks`).
+- **`plugin-todo`'s reminders are in-app only.** The watcher and the notice were moved to plugin
+  level (`client/reminders.ts` + `client/reminder-toast-host.tsx`, the React-root-on-body shape
+  `plugin-rewind`'s recall note uses), so a reminder now rings on any surface — including a
+  conversation, which the page-scoped version could not do. What it still cannot do is reach the user
+  outside the app: a minimised window or a hidden tray shows nothing, because an OS notification needs
+  the shell side (host + IPC) and that is a separate change. Setting, snoozing, marking as seen,
+  clearing and the "which task is due" rule are pinned by `store.test.ts`, `apply.test.ts` and
+  `reminders.test.ts`.
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version upgrades. `docs/capability-roadmap/`
   holds the rest of the roadmap; `docs/plans/` holds the plans that are still open.

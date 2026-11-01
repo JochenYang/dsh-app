@@ -39,6 +39,9 @@ const BASELINE = {
   'plugin-rewind': 0,
   'plugin-sidebar': 2,
   'plugin-swarm': 4,
+  // Zero: each tool answers a plain JSON object literal against an annotated
+  // `Promise<JsonValue>`, so no boundary needs an escape here.
+  'plugin-todo': 0,
   'plugin-usage': 0,
   'plugin-websearch': 0,
   'plugin-workbench': 0,

@@ -8,7 +8,7 @@ a plugin; read the plugin's own JSDoc header before changing its internals.
 
 ## 1. What the suite is
 
-Eighteen dsh plugins layered on top of the upstream kernel **without forking
+Nineteen dsh plugins layered on top of the upstream kernel **without forking
 it** — that is what keeps the desktop app updateable when upstream moves.
 `plugins/README.md` is the roster: which plugin owns which capability, and each
 one's host/client role. `plugins/dsh-app.patch.yml` is the loader overlay that
@@ -23,9 +23,10 @@ one capsule bar), `plugin-market`,
 `plugin-presets`, `plugin-websearch` (`web_search` / `web_fetch`),
 `plugin-rewind` (message recall + file revert), `plugin-effort` (reasoning
 effort), `plugin-workbench` (workbench hub: one sidebar entry plus the container
-page a domain registers its cards into — the card grid currently holds none, and
-a domain appears there by registering a card, never by a change to the
-container).
+page a domain registers its cards into — a domain appears there by registering a
+card, never by a change to the container), `plugin-todo` (daily todo board: one
+card into that grid plus the page it opens, and `todo_add`/`todo_done`/`todo_list`
+so the model can record a task from a conversation).
 
 Never modify harness source to make a plugin work: desktop adaptation stays
 shell-side (injected scripts, stylesheets, profile patch rows only).
@@ -48,12 +49,12 @@ for d in plugins/*/; do (cd "$d" && npm install --legacy-peer-deps && npm run bu
 for d in plugins/*/; do if [ -d "$d/tests" ]; then (cd "$d" && npm test); fi; done
 ```
 
-- **Build**: seventeen plugins run `node build.mjs` (esbuild bundles both halves).
+- **Build**: eighteen plugins run `node build.mjs` (esbuild bundles both halves).
   `plugin-brand` is the one exception — `tsc -p tsconfig.json` into `lib/`.
 - **Tests**: live in `plugins/plugin-*/tests/*.test.ts` and run through the
   plugin's own `scripts/test.mjs`, which esbuild-bundles them (type-only
   framework imports stripped) into `.test-dist/` and runs `node --test` over the
-  result. All eighteen plugins have suites.
+  result. All nineteen plugins have suites.
 - **CI runs every plugin with a `tests/` directory** (`.github/workflows/ci.yml`
   loops over `plugins/*/`), so a suite that passes locally also gates the PR.
   The root `test/plugin-version-bump.test.mjs` additionally fails any plugin
@@ -88,7 +89,7 @@ job in its per-plugin build loop — the two workflows through
    dependencies and devDependencies and **no peer**, so that declaration is what
    lets `tsc` resolve the import — the suite's convention is both fields with the
    same spec, which is what `@deepseek-ai/dsh-client-ui-primitives` does in all
-   fourteen plugins that import it. A peer that nothing installs makes the gate
+   fifteen plugins that import it. A peer that nothing installs makes the gate
    SKIP that plugin — one line naming the packages, never silently, instead of
    failing a release over an import nobody installed — and every run ends with a
    count of those skips: `0 of <n> plugins skipped it` is what a CI tree prints,

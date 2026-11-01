@@ -68,7 +68,13 @@ export async function buildHost(here, options = {}) {
 
 // Bundle the browser half (src/client.ts) into lib/client.js.
 export async function buildClient(here, id, options = {}) {
-  const { css = false, external = externalFramework() } = options
+  const { css = false, svg = false, external = externalFramework() } = options
+  // One loader table, built up: two spread keys of the same name would silently
+  // drop the first, so a plugin that wants both gets both.
+  const loader = {
+    ...(css ? { '.css': 'text' } : {}),
+    ...(svg ? { '.svg': 'dataurl' } : {}),
+  }
   await build({
     entryPoints: [join(here, 'src', 'client.ts')],
     bundle: true,
@@ -76,7 +82,7 @@ export async function buildClient(here, id, options = {}) {
     platform: 'browser',
     target: 'es2022',
     jsx: 'automatic',
-    ...(css ? { loader: { '.css': 'text' } } : {}),
+    ...(Object.keys(loader).length > 0 ? { loader } : {}),
     plugins: [external],
     outfile: join(here, 'lib', 'client.js'),
     banner: clientBanner(id),
@@ -89,10 +95,10 @@ export async function buildClient(here, id, options = {}) {
 // Standard dual-face plugin: host half + browser half.
 // Options: { cordis, css, extra, hostTarget } - see externalFramework.
 export async function buildDual(here, id, options = {}) {
-  const { cordis = true, css = false, extra = [], hostTarget = 'node20' } = options
+  const { cordis = true, css = false, svg = false, extra = [], hostTarget = 'node20' } = options
   const external = externalFramework(extra, cordis)
   await buildHost(here, { target: hostTarget, external })
-  await buildClient(here, id, { css, external })
+  await buildClient(here, id, { css, svg, external })
   console.log('built ' + id + ': lib/index.js + lib/client.js')
 }
 
