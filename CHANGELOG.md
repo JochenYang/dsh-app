@@ -8,6 +8,30 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.18.1] - 2026-11-02
+
+### 中文
+- 关于页「操作」的三个按钮改为并排：它们同级、没有先后，竖排读起来像步骤清单。
+- 代码图概览里的计数改成量级（`~360 files`、`~5.8k symbols`），一次普通编辑不再改动这段文本，因此不再触发内核重发整份运行时上下文快照。
+- 工作台待办：卡片改为标题、今日大数字、进度环与本周条；页面换成卡片式月历——日期大字居中、任务压底、今天整格浅绿、相邻月份灰显，配手绘日历插图；周视图按周一在前，年图附完成摘要；点日历某天弹窗为那天写待办，悬停显示当天事项；提醒在任意界面弹出（应用内），删除待办会回退那天的「新增」；返回工作台改为小按钮并修好其在窗口拖动带上点不动的问题。
+- Git 面板 diff 预览：右侧变更标尺现在与代码行严格对齐。此前它作为滚动容器的兄弟节点按**视口高度**铺开、且不随内容滚动，色块被压缩且静止，长 diff 里指的位置和实际改动完全对不上。
+- 模型设置里点一次「添加」就会立刻出现一行自定义请求头（此前第一下没有反应、要点第二次），「恢复默认」也不再让输入框留着旧值；长对话流式输出时设置页侧栏不再逐字重排，鲸鱼背景也不再每 250 毫秒重建一次填色表。
+- 代码图谱的概览把符号数改用「约 360 个文件、约 5.8k 个符号」这样的量级，不再让每轮索引都改动计数；装上一个语言语法后会立刻重建该语言的索引，不再等到下次重启；删除某个项目的图谱后，图谱页会告诉你去设置里重建或在该项目里打开一个会话，而不是一直转圈。
+- 插件市场打开时先显示上次的目录、在后台更新，不再等 6 小时后的第一次加载转圈三五秒；刷新失败会在面板上说明原因而不是只说「正在更新」；技能包下载有了大小上限；某个源暂时挂掉时保留它原有的条目并在下次重试，不再整源消失 6 小时；模型侧安装需要构建的包被拦下后，面板的「允许构建并重试」也能用上。
+- 往记忆卡里粘贴密钥会被拒绝保存，不再把明文密钥写进每次会话都会注入的文件；导出文档或配置到已存在的文件前会先要求确认，`pdf_edit` 也不再允许把结果写回源文件；PPT 与 PDF 的内置技能不再覆盖用户从市场装的同名技能。
+- 回滚（rewind）不再在超时后继续改写磁盘，被裁掉的撤销副本会让「已恢复」改报部分覆盖；用量统计在日志格式升级那一次不再把同一条消息数两遍；hook 条目要么整条生效、要么整条不生效，不会再出现「界面说没挂上、实际已经在拦」；子代理批量任务遇到网络瞬断会重试而不是整批按失败收尾；Git 面板在 macOS 从 Finder 启动时也能找到 git；删除归档会话前会核对目录名。
+
+### English
+- The About page's three maintenance actions now sit side by side: they are peers with no order between them, and a column read as a list of steps.
+- The code-graph overview now states its counts as magnitudes (`~360 files`, `~5.8k symbols`), so an ordinary edit no longer changes the text and no longer makes the kernel re-append the whole runtime-context snapshot.
+- The workbench todo board: a title, today's figure, a progress ring and a week strip on the card; the page becomes a card calendar — large centred dates, tasks along the bottom, today washed in green, neighbouring days muted — with a hand-drawn calendar illustration; the week runs Monday first, the year map carries a summary, pressing a day opens a dialog to write for it, hovering one lists its tasks; a reminder now rings on any surface in the app, deleting a task takes it back off that day's added count, and the back control is a small button again — one that can actually be clicked, since the previous link sat inside the window-drag strip.
+- Git panel diff preview: the change ruler now lines up with the code rows. It used to be a sibling of the scroll container, so it spanned the VIEWPORT height and stood still while the diff scrolled — the marks were compressed into the visible area and pointed at lines that were not there.
+- Adding a custom header row in the model settings now appears on the first click, restore-default no longer leaves the old value in the box, and a long streaming answer no longer makes the settings rail re-lay-out per character or the whale rebuild its colour table four times a second.
+- The graph overview reports its counts in magnitudes ("~360 files, ~5.8k symbols") so a re-index no longer churns the snapshot; installing a language grammar re-indexes that language immediately instead of waiting for a restart; and a project whose graph was deleted now says where to rebuild it instead of spinning.
+- The market shows the previous catalog immediately and refreshes behind it, so the first open after six hours no longer sits on a spinner; a failed refresh says why instead of claiming it is updating; skill downloads are size-capped; a source that is briefly down keeps its rows and is retried on the next open; and "allow the build and retry" now works for packages the model tried to install.
+- Secrets pasted into a memory card are refused instead of being written to a file that is re-injected into every session; exporting a document or a backup onto an existing file asks first, and pdf_edit no longer accepts its own source as the output; the built-in PPT and PDF skills no longer overwrite a same-named skill the user installed from the market.
+- Rewinding no longer keeps writing files after its deadline, and a trimmed undo copy makes the recall report partial coverage instead of full; usage statistics no longer count one message twice across a log-format upgrade; a hook entry is either fully mounted or not at all, never "reported off while blocking"; a batch of subagents retries a dropped connection instead of failing the whole batch; the Git panel finds git under a Finder launch on macOS; and deleting an archived session checks the directory name first.
+
 ## [v0.18.0] - 2026-10-30
 
 ### 中文
