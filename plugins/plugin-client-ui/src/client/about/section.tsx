@@ -256,8 +256,12 @@ const ABOUT_CSS = `
 .dshAbout-pathLabel { color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; flex: none; min-width: 84px; }
 .dshAbout-path { margin: 0; padding: 2px 6px; border-radius: 4px; background: var(--dsw-alias-bg-layer-2, #f8fafc); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; overflow-wrap: anywhere; }
 .dshAbout-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dshAbout-actionList { display: flex; flex-direction: column; gap: 8px; }
-.dshAbout-actionRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* The three actions sit side by side: they are peers — same weight, same trigger,
+   nothing to choose between them — and a column read as a menu of steps. Each one
+   keeps its own cluster so a status message stays beside the button it belongs to,
+   and the list wraps as whole clusters instead of splitting a message from it. */
+.dshAbout-actionList { display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px 12px; }
+.dshAbout-actionRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 28px; }
 .dshAbout-notice { color: #16a34a; font-size: 12px; }
 .dshAbout-error { margin: 0; color: #dc2626; font-size: 12px; }
 .dshAbout-button { padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; cursor: pointer; font-size: 12.5px; }
