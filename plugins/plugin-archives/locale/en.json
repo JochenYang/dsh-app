@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Session archives",
-    "description": "Manage archived sessions: a project-grouped list with delete and prune actions, presented as a settings section."
+    "description": "Manage archived sessions: a project-grouped list with undoable deletes (they move into a session trash), multi-select batch restore, a retention policy with delete-for-good, and an audit log of every action — presented as a settings section."
   }
 }

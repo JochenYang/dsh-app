@@ -1,10 +1,14 @@
 /**
  * DSH APP session archive manager — client half.
  *
- * Registers the settings-page section ("会话归档"): archived sessions grouped
- * by project, with per-session and per-project irreversible deletion. All
- * data comes from the host half's routes; every deletion is confirmed in-UI
- * and re-fenced server-side (see the host half's header).
+ * Registers the settings-page section (the "Session archives" page): archived
+ * sessions grouped
+ * by project, with per-session and per-project deletion that moves the session
+ * into the trash first (only "delete for good" and the retention sweep free
+ * bytes), plus the trash panel's multi-select, the retention panel and the
+ * page's own search. All data comes from the host half's routes; every
+ * irreversible action is confirmed in-UI and re-fenced server-side (see the host
+ * half's header).
  *
  * @module @dsh-app/plugin-archives/client
  */
@@ -123,8 +127,8 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,
-    // 23 = immediately before the suite's upkeep row (维护设置, 24) and two
-    // below upstream's "archived sessions" (pinned at 25): session memory is at
+    // 23 = immediately before the suite's upkeep row (Maintenance settings, 24) and
+    // two below upstream's "archived sessions" (pinned at 25): session memory is at
     // 22 right above this page, and the two are the same story (this one prunes,
     // memory keeps). See the order table in docs/desktop-optimization-plan.md.
     order: 23,
