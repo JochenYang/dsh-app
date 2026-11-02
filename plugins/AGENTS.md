@@ -24,9 +24,10 @@ one capsule bar), `plugin-market`,
 `plugin-rewind` (message recall + file revert), `plugin-effort` (reasoning
 effort), `plugin-workbench` (workbench hub: one sidebar entry plus the container
 page a domain registers its cards into — a domain appears there by registering a
-card, never by a change to the container), `plugin-todo` (daily todo board: one
-card into that grid plus the page it opens, and `todo_add`/`todo_done`/`todo_list`
-so the model can record a task from a conversation).
+card, never by a change to the container), `plugin-todo` (task board: one card
+into that grid plus the page it opens, with deadlines, lists, priorities, steps
+and repeat rules, and `todo_add`/`todo_update`/`todo_done`/`todo_list` so the
+model can record, edit or finish a task from a conversation).
 
 Never modify harness source to make a plugin work: desktop adaptation stays
 shell-side (injected scripts, stylesheets, profile patch rows only).
