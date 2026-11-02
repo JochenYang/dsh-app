@@ -24,21 +24,34 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   DETAIL_DAYS,
+  MAX_SUBTASKS,
+  MAX_SUBTASK_TEXT,
+  addSubtask,
   addTodo,
   dayKey,
   emptyTodos,
   loadTodos,
   pruneDetail,
+  removeSubtask,
   removeTodo,
+  renameSubtask,
+  retimeDueReminder,
   saveTodos,
   setDone,
+  setSubtaskDone,
   statsFor,
   todoDir,
   todoFile,
   updateReminder,
   validDay,
+  validRepeat,
+  validSubtaskText,
   validText,
+  type TodoFile,
+  type TodoItem,
 } from '../src/store.ts'
+import { MAX_REPEAT_INTERVAL } from '../src/wire.ts'
+import { subtaskProgress } from '../src/views.ts'
 
 const roots: string[] = []
 
@@ -113,6 +126,59 @@ test('setDone refuses an unknown id and is a no-op when the state already matche
   assert.equal(same.file, added)
 })
 
+test('the v2 fields survive a toggle, and the lists survive every write', () => {
+  const now = at(2026, 5, 4)
+  const base = addTodo(emptyTodos(), 'file the invoice', now, 'a1').file
+  const lists = [{ id: 'work', name: 'Work', order: 0 }]
+  // A task carrying everything v2 added: ticking it must not be the moment the
+  // deadline, the steps or the series disappear.
+  const rich: TodoItem = {
+    ...base.items[0]!,
+    due: '2026-05-09',
+    listId: 'work',
+    priority: 2,
+    notes: 'invoice 42',
+    subtasks: [{ id: 's1', text: 'find it', done: true }],
+    repeat: { freq: 'weekly', interval: 1 },
+    seriesId: 'series-1',
+  }
+  const file: TodoFile = { ...base, items: [rich], lists }
+
+  const ticked = setDone(file, 'a1', true, at(2026, 5, 4, 18))
+  assert.ok(ticked !== undefined)
+  const item = ticked.file.items[0]!
+  assert.equal(item.done, true)
+  assert.equal(item.due, '2026-05-09')
+  assert.equal(item.listId, 'work')
+  assert.equal(item.priority, 2)
+  assert.equal(item.notes, 'invoice 42')
+  assert.deepEqual(item.subtasks, [{ id: 's1', text: 'find it', done: true }])
+  assert.deepEqual(item.repeat, { freq: 'weekly', interval: 1 })
+  assert.equal(item.seriesId, 'series-1')
+  assert.deepEqual(ticked.file.lists, lists)
+  assert.equal(ticked.file.version, 2)
+
+  // Unticking and the prune pass leave them alone as well.
+  const unticked = setDone(ticked.file, 'a1', false, at(2026, 5, 5, 1))
+  assert.ok(unticked !== undefined)
+  const pruned = pruneDetail(unticked.file, at(2026, 5, 5))
+  assert.equal(pruned.items[0]!.due, '2026-05-09')
+  assert.deepEqual(pruned.items[0]!.subtasks, [{ id: 's1', text: 'find it', done: true }])
+  assert.deepEqual(pruned.lists, lists)
+
+  // And removing a task must not take the lists with it.
+  assert.deepEqual(removeTodo(pruned, 'a1').lists, lists)
+})
+
+test('a new task is owed the day it is written', () => {
+  const now = at(2026, 5, 4)
+  // The composer sends no deadline; "due today" is the default a v1 file is read
+  // with too, so every task has a day to compare against.
+  assert.equal(addTodo(emptyTodos(), 'ship it', now, 'a1').item.due, '2026-05-04')
+  // An explicit day moves the deadline with it.
+  assert.equal(addTodo(emptyTodos(), 'ship it', now, 'a1', '2026-05-08').item.due, '2026-05-08')
+})
+
 test('removeTodo takes the task off that day\'s created count and leaves done alone', () => {
   const added = addTodo(emptyTodos(), 'ship it', at(2026, 5, 4), 'a1').file
   const ticked = setDone(added, 'a1', true, at(2026, 5, 4, 18))
@@ -173,7 +239,9 @@ test('save and load round trip under $DSH_HOME/storages', () => {
   assert.deepEqual(loadTodos(home), file)
 
   const raw = JSON.parse(readFileSync(todoFile(home), 'utf8')) as { version: number }
-  assert.equal(raw.version, 1)
+  // v2 is what the store writes now; the previous assertion pinned v1, which was
+  // the shape before deadlines and lists existed.
+  assert.equal(raw.version, 2)
   // No tmp files left behind by the atomic write.
   assert.deepEqual(readdirSync(todoDir(home)), ['todos.json'])
 })
@@ -285,4 +353,235 @@ test('marking a reminder as seen keeps it; only an explicit clear removes it', (
   // An unknown id is left alone rather than creating anything.
   const untouched = updateReminder(cleared, 'nope', undefined, true)
   assert.deepEqual(untouched.items, cleared.items)
+})
+
+/** A board with one task, `a1`, that the step cases add to. */
+function withTask(): TodoFile {
+  return addTodo(emptyTodos(), 'pack for the trip', at(2026, 5, 4), 'a1').file
+}
+
+test('steps are added, renamed, ticked and removed, and progress follows them', () => {
+  // The store stores what `validSubtaskText` validated; trimming is that function's
+  // job (asserted below), so these cases hand it already-trimmed text.
+  const one = addSubtask(withTask(), 'a1', 'passport', 's1')
+  assert.ok(one !== undefined)
+  assert.deepEqual(one.subtask, { id: 's1', text: 'passport', done: false })
+  const two = addSubtask(one.file, 'a1', 'charger', 's2')
+  assert.ok(two !== undefined)
+  const three = addSubtask(two.file, 'a1', 'tickets', 's3')
+  assert.ok(three !== undefined)
+
+  let file = three.file
+  assert.deepEqual(file.items[0]!.subtasks?.map(step => step.text), ['passport', 'charger', 'tickets'])
+  assert.deepEqual(subtaskProgress(file.items[0]!), { done: 0, total: 3 })
+
+  file = setSubtaskDone(file, 'a1', 's2', true)
+  assert.deepEqual(subtaskProgress(file.items[0]!), { done: 1, total: 3 })
+  // The parent is NOT derived from its steps, in either direction.
+  assert.equal(file.items[0]!.done, false)
+
+  // Ticking again is a no-op, not a second count.
+  assert.equal(setSubtaskDone(file, 'a1', 's2', true), file)
+  // An unknown step or task leaves the file alone rather than creating anything.
+  assert.equal(setSubtaskDone(file, 'a1', 'nope', true), file)
+  assert.equal(setSubtaskDone(file, 'nope', 's2', true), file)
+
+  file = renameSubtask(file, 'a1', 's2', 'charger and cable')
+  assert.deepEqual(file.items[0]!.subtasks?.map(step => step.text), ['passport', 'charger and cable', 'tickets'])
+  assert.deepEqual(file.items[0]!.subtasks?.[1], { id: 's2', text: 'charger and cable', done: true })
+  assert.equal(renameSubtask(file, 'a1', 's2', 'charger and cable'), file)
+
+  file = removeSubtask(file, 'a1', 's2')
+  assert.deepEqual(file.items[0]!.subtasks?.map(step => step.id), ['s1', 's3'])
+  assert.deepEqual(subtaskProgress(file.items[0]!), { done: 0, total: 2 })
+  assert.equal(removeSubtask(file, 'a1', 's2'), file)
+})
+
+test('removing the last step drops the field rather than leaving an empty list', () => {
+  const added = addSubtask(withTask(), 'a1', 'passport', 's1')
+  assert.ok(added !== undefined)
+  const file = removeSubtask(added.file, 'a1', 's1')
+  // Absent is how a task with no steps is stored; `subtasks: []` would be a second
+  // way to say the same thing and a file that reads differently from its twin.
+  assert.equal('subtasks' in file.items[0]!, false)
+  assert.deepEqual(subtaskProgress(file.items[0]!), { done: 0, total: 0 })
+})
+
+test('step ids are unique inside one task, and only inside it', () => {
+  const first = addSubtask(withTask(), 'a1', 'one', 'dup')
+  assert.ok(first !== undefined)
+  // The second row could never be reached, because every mutator finds a step by id.
+  assert.equal(addSubtask(first.file, 'a1', 'two', 'dup'), undefined)
+  assert.equal(first.file.items[0]!.subtasks?.length, 1)
+
+  // Another task may reuse the id: the invariant is per task, not per board.
+  const board = addTodo(first.file, 'second task', at(2026, 5, 4), 'a2').file
+  const other = addSubtask(board, 'a2', 'one again', 'dup')
+  assert.ok(other !== undefined)
+  assert.equal(other.file.items[1]!.subtasks?.length, 1)
+})
+
+test('a task holds at most MAX_SUBTASKS steps', () => {
+  let file = withTask()
+  for (let index = 0; index < MAX_SUBTASKS; index += 1) {
+    const added = addSubtask(file, 'a1', `step ${String(index)}`, `s${String(index)}`)
+    assert.ok(added !== undefined, `step ${String(index)} is inside the cap`)
+    file = added.file
+  }
+  assert.equal(file.items[0]!.subtasks?.length, MAX_SUBTASKS)
+  // One more is refused, and the refusal leaves the file exactly as it was.
+  assert.equal(addSubtask(file, 'a1', 'one too many', 's-extra'), undefined)
+  assert.equal(file.items[0]!.subtasks?.length, MAX_SUBTASKS)
+})
+
+test('validSubtaskText trims and refuses what a checklist cannot draw', () => {
+  assert.equal(validSubtaskText('  find it  '), 'find it')
+  assert.equal(validSubtaskText('   '), null)
+  assert.equal(validSubtaskText(''), null)
+  assert.equal(validSubtaskText(42), null)
+  assert.equal(validSubtaskText('x'.repeat(MAX_SUBTASK_TEXT)), 'x'.repeat(MAX_SUBTASK_TEXT))
+  assert.equal(validSubtaskText('x'.repeat(MAX_SUBTASK_TEXT + 1)), null)
+  assert.equal(MAX_SUBTASK_TEXT, 200)
+  assert.equal(MAX_SUBTASKS, 20)
+})
+
+test('ticking the parent leaves its steps alone, and ticking every step leaves the parent open', () => {
+  const added = addSubtask(withTask(), 'a1', 'passport', 's1')
+  assert.ok(added !== undefined)
+  let file = added.file
+  file = addSubtask(file, 'a1', 'charger', 's2')!.file
+  assert.equal(file.items[0]!.subtasks?.length, 2)
+
+  // The parent can be ticked with steps left over — "the rest moved elsewhere" is a
+  // real answer, so completion is never forced down the checklist.
+  const ticked = setDone(file, 'a1', true, at(2026, 5, 4, 18))
+  assert.ok(ticked !== undefined)
+  assert.equal(ticked.item.done, true)
+  assert.deepEqual(ticked.item.subtasks?.map(step => step.done), [false, false])
+  assert.deepEqual(subtaskProgress(ticked.item), { done: 0, total: 2 })
+
+  // And every step ticked does not tick the task.
+  let allSteps = setSubtaskDone(file, 'a1', 's1', true)
+  allSteps = setSubtaskDone(allSteps, 'a1', 's2', true)
+  assert.equal(allSteps.items[0]!.done, false)
+  assert.deepEqual(subtaskProgress(allSteps.items[0]!), { done: 2, total: 2 })
+})
+
+test('removing the parent takes its steps with it, leaving no residue', () => {
+  const added = addSubtask(withTask(), 'a1', 'passport', 's1')
+  assert.ok(added !== undefined)
+  const file = addSubtask(added.file, 'a1', 'charger', 's2')!.file
+
+  const removed = removeTodo(file, 'a1')
+  assert.deepEqual(removed.items, [])
+  // The steps live INSIDE the task, so nothing can outlive it; the assertion is the
+  // proof that no side table was introduced for them.
+  assert.equal(JSON.stringify(removed).includes('passport'), false)
+  assert.deepEqual(removeSubtask(removed, 'a1', 's1'), removed)
+})
+
+
+test('a repeat rule is capped at MAX_REPEAT_INTERVAL, and exactly at the cap is a rule', () => {
+  // `weekday` walks one unit at a time, so an uncapped interval is a synchronous loop
+  // inside a request handler: 1e9 units is a request that never answers.
+  assert.deepEqual(validRepeat({ freq: 'weekly', interval: MAX_REPEAT_INTERVAL }), {
+    freq: 'weekly',
+    interval: MAX_REPEAT_INTERVAL,
+  })
+  assert.equal(validRepeat({ freq: 'weekly', interval: MAX_REPEAT_INTERVAL + 1 }), null)
+  assert.equal(validRepeat({ freq: 'weekday', interval: 1_000_000_000 }), null)
+  // The cap is not the only bound: the shape rules still apply.
+  assert.equal(validRepeat({ freq: 'weekly', interval: 0 }), null)
+  assert.equal(validRepeat({ freq: 'weekly', interval: 1.5 }), null)
+  assert.equal(validRepeat({ freq: 'hourly', interval: 1 }), null)
+  // A missing interval is one unit, which is what a hand-written rule means.
+  assert.deepEqual(validRepeat({ freq: 'daily' }), { freq: 'daily', interval: 1 })
+})
+
+test('a stored rule past the cap is dropped on the way out of the file', () => {
+  const home = scratch()
+  mkdirSync(todoDir(home), { recursive: true })
+  const row = {
+    id: 'huge',
+    text: 'walk to the moon',
+    day: '2026-05-04',
+    createdAt: at(2026, 5, 4),
+    done: false,
+    due: '2026-05-04',
+    repeat: { freq: 'weekday', interval: 1_000_000_000 },
+  }
+  writeFileSync(todoFile(home), JSON.stringify({ version: 2, items: [row], daily: {}, lists: [] }), 'utf8')
+
+  const file = loadTodos(home)
+  // The task survives; the unusable RULE is what goes, so nothing ever walks it.
+  assert.equal(file.items.length, 1)
+  assert.equal('repeat' in file.items[0]!, false)
+})
+
+test('a reminder is re-derived from the deadline only when it came from one', () => {
+  const file = emptyTodos()
+  // Written yesterday, due in a week, armed for 09:00 on the due day.
+  const base: TodoItem = {
+    id: 't',
+    text: 'pay the rent',
+    day: '2026-05-04',
+    createdAt: at(2026, 5, 4),
+    done: false,
+    due: '2026-05-11',
+    reminderAt: at(2026, 5, 11, 9),
+    reminderSource: 'due-day',
+  }
+  const withTasks: TodoFile = { ...file, items: [base] }
+
+  // Moving the deadline moves the instant with it: 09:00 on the NEW day.
+  const moved: TodoItem = { ...base, due: '2026-06-01' }
+  const retimed = retimeDueReminder({ ...withTasks, items: [moved] }, 't', at(2026, 5, 4))
+  assert.equal(retimed.items[0]!.reminderAt, at(2026, 6, 1, 9))
+  assert.equal(retimed.items[0]!.reminderSource, 'due-day')
+
+  // A hand-picked instant is the user's own and never moves.
+  const custom: TodoItem = { ...base, due: '2026-06-01', reminderSource: 'custom' }
+  assert.deepEqual(retimeDueReminder({ ...withTasks, items: [custom] }, 't', at(2026, 5, 4)).items, [custom])
+  // An absent source reads as custom, which is what every reminder written before the
+  // field existed was — re-deriving one of those would move a time the user chose.
+  const legacy: TodoItem = { ...base, due: '2026-06-01' }
+  const { reminderSource: _dropped, ...withoutSource } = legacy
+  assert.deepEqual(retimeDueReminder({ ...withTasks, items: [withoutSource] }, 't', at(2026, 5, 4)).items, [withoutSource])
+
+  // A deadline whose reminder moment has already gone arms NOTHING rather than leaving
+  // an instant that belongs to a day the task no longer has.
+  const past: TodoItem = { ...base, due: '2026-04-01' }
+  const cleared = retimeDueReminder({ ...withTasks, items: [past] }, 't', at(2026, 5, 4))
+  assert.equal('reminderAt' in cleared.items[0]!, false)
+  assert.equal('reminderSource' in cleared.items[0]!, false)
+})
+
+test('a reminder written before the source field existed reads as custom', () => {
+  const home = scratch()
+  mkdirSync(todoDir(home), { recursive: true })
+  const row = {
+    id: 'old',
+    text: 'call the bank',
+    day: '2026-05-04',
+    createdAt: at(2026, 5, 4),
+    done: false,
+    due: '2026-05-04',
+    reminderAt: at(2026, 5, 4, 17),
+    reminded: true,
+  }
+  writeFileSync(todoFile(home), JSON.stringify({ version: 2, items: [row], daily: {}, lists: [] }), 'utf8')
+
+  // The migration fills the field out explicitly, so the next deadline move reads a
+  // value instead of inferring one.
+  assert.equal(loadTodos(home).items[0]!.reminderSource, 'custom')
+
+  // A row with no armed reminder carries no source: it describes a reminder, and there
+  // is none.
+  writeFileSync(todoFile(home), JSON.stringify({
+    version: 2,
+    items: [{ ...row, reminderAt: undefined, reminded: undefined }],
+    daily: {},
+    lists: [],
+  }), 'utf8')
+  assert.equal('reminderSource' in loadTodos(home).items[0]!, false)
 })

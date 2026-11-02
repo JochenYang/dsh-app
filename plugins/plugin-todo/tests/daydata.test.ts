@@ -93,13 +93,18 @@ test('runSummary counts active days and the longest unbroken run, and a gap rese
   assert.deepEqual(runSummary(daily, days), { done: 6, created: 2, active: 5, longest: 3 })
 })
 
-test('overdueCount counts only open rows written before today', () => {
+test('overdueCount asks the shared predicate, so the deadline is the axis', () => {
   const items = [
     open('old', '2026-05-01', at(2026, 5, 1)),
     open('today', '2026-05-04', at(2026, 5, 4)),
     finished('done-old', '2026-05-01', at(2026, 5, 1), at(2026, 5, 2)),
+    // Written today, owed last week: late. The `day < today` comparison this
+    // function used to make called it "not late" while the host tool called it late.
+    { id: 'written-today-owed', text: 'written-today-owed', day: '2026-05-04', createdAt: at(2026, 5, 4), done: false, due: '2026-04-27' },
+    // Written last week, owed next month: not late.
+    { id: 'written-old-owed', text: 'written-old-owed', day: '2026-04-27', createdAt: at(2026, 4, 27), done: false, due: '2026-06-01' },
   ]
-  assert.equal(overdueCount(items, '2026-05-04'), 1)
+  assert.equal(overdueCount(items, '2026-05-04'), 2)
 })
 
 test('statOf and totalsOf zero-fill days the map does not carry', () => {

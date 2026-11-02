@@ -25,6 +25,7 @@ import { ReminderPicker } from './reminder.tsx'
 import { TaskRow } from './rows.tsx'
 import type { Translate } from './translate.ts'
 import { dateLabel, weekdayName } from './translate.ts'
+import type { TodoItem } from '../wire.ts'
 
 function DayEmptyCard({ text }: { text: string }): ReactNode {
   return (
@@ -74,6 +75,7 @@ export function DayPanel({
   onToggle,
   onRemove,
   onUpdateReminder,
+  onEdit,
   onClose,
 }: {
   open: boolean
@@ -86,6 +88,7 @@ export function DayPanel({
   onToggle: (id: string, done: boolean) => void
   onRemove: (id: string) => void
   onUpdateReminder?: (id: string, reminderAt?: number) => void
+  onEdit?: (item: TodoItem) => void
   onClose: () => void
 }): ReactNode {
   const [draft, setDraft] = useState('')
@@ -147,6 +150,7 @@ export function DayPanel({
                   onToggle={onToggle}
                   onRemove={onRemove}
                   onUpdateReminder={onUpdateReminder}
+                  onEdit={onEdit}
                 />
               ))}
             </ul>

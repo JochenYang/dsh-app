@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-todo",
-  "description": "DSH APP todo board: one workbench card and its full-page view for daily tasks, with completion statistics by week, month and year, plus three host tools so the model can record and tick a task from a conversation.",
-  "version": "0.1.0",
+  "description": "DSH APP todo board: one workbench card and its full-page view for tasks with deadlines, lists, priorities, steps and repeat rules, completion statistics by week, month and year, and four host tools so the model can record, edit or tick a task from a conversation.",
+  "version": "0.1.1",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",

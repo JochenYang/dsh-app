@@ -16,6 +16,7 @@
  */
 
 import { heatLevel, keyOf } from './format.ts'
+import { countInView } from '../views.ts'
 import type { TodoDayStat, TodoItem } from '../wire.ts'
 
 /** One day's rows, split by state, each side oldest first. */
@@ -112,14 +113,19 @@ export function runSummary(daily: Readonly<Record<string, TodoDayStat>>, days: r
 }
 
 /**
- * Count the open rows written on a day before `today`.
+ * Count the open rows the board calls late.
+ *
+ * THE PREDICATE IS NOT HERE. Lateness is one definition shared with the card, the
+ * page and the host tool, and it lives in `views.ts` `inView` / `countInView`: the
+ * deadline (`due`) is the axis, so a task written today and owed last week is late
+ * and a task written last week and owed next month is not. This used to compare
+ * `day < today`, which got both of those backwards for the card alone.
+ *
  * @param items - the board's detail rows.
  * @param today - the host's local day key.
  */
 export function overdueCount(items: readonly TodoItem[], today: string): number {
-  let count = 0
-  for (const item of items) if (!item.done && item.day < today) count += 1
-  return count
+  return countInView(items, 'overdue', today)
 }
 
 /** What a face draws for one day. */

@@ -10,6 +10,8 @@ export const CSS = `
 .dshTodo-view,
 .dshTodo-card,
 .dshTodo-dayPanelBody,
+.dshTodo-editor,
+.dshTodo-railDialog,
 .dshTodo-reminderToast {
   --dshTodo-text: var(--dsw-alias-label-primary);
   --dshTodo-text-2: var(--dsw-alias-label-secondary);
@@ -1721,6 +1723,571 @@ export const CSS = `
   display: flex;
   align-items: center;
   gap: var(--dshTodo-s2);
+}
+
+/* ── the board: list rail, view tabs, selection bar ─────────────────────── */
+.dshTodo-workspace {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--dshTodo-s4);
+  align-items: start;
+  min-width: 0;
+}
+.dshTodo-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dshTodo-s2);
+  min-width: 0;
+  padding: var(--dshTodo-s2);
+  border: 1px solid var(--dshTodo-line-2);
+  border-radius: var(--dshTodo-r-lg);
+  background: var(--dshTodo-surface);
+}
+.dshTodo-railHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dshTodo-s2);
+  padding: 0 var(--dshTodo-s1);
+}
+.dshTodo-railTitle {
+  font-size: var(--dshTodo-fs-s);
+  line-height: var(--dshTodo-lh-s);
+  font-weight: 600;
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-railList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+}
+.dshTodo-railItem {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.dshTodo-railBtn {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--dshTodo-s2);
+  min-width: 0;
+  min-height: 30px;
+  margin: 0;
+  padding: 0 var(--dshTodo-s2);
+  border: 0;
+  border-radius: var(--dshTodo-r-md);
+  background: transparent;
+  color: var(--dshTodo-text);
+  font: inherit;
+  font-size: var(--dshTodo-fs-m);
+  line-height: var(--dshTodo-lh-m);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.dshTodo-railBtn:hover {
+  background: var(--dshTodo-hover);
+}
+.dshTodo-railBtn[data-active='true'] {
+  background: var(--dshTodo-done-wash);
+  font-weight: 600;
+}
+.dshTodo-railBtn:focus-visible,
+.dshTodo-railEdit:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dshTodo-done);
+  outline-offset: 1px;
+}
+.dshTodo-railName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshTodo-railCount {
+  flex: none;
+  font-size: var(--dshTodo-fs-xs);
+  line-height: var(--dshTodo-lh-xs);
+  color: var(--dshTodo-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.dshTodo-railEdit {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dshTodo-r-sm);
+  background: transparent;
+  color: var(--dshTodo-text-2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s ease, background-color .15s ease, color .15s ease;
+}
+.dshTodo-railEdit svg {
+  width: 13px;
+  height: 13px;
+}
+.dshTodo-railItem:hover .dshTodo-railEdit,
+.dshTodo-railItem:focus-within .dshTodo-railEdit,
+.dshTodo-railEdit:focus-visible {
+  opacity: 1;
+}
+.dshTodo-railEdit:hover {
+  background: var(--dshTodo-hover);
+  color: var(--dshTodo-text);
+}
+@media (hover: none) {
+  .dshTodo-railEdit {
+    opacity: .6;
+  }
+}
+.dshTodo-railDialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dshTodo-s3);
+  min-width: 0;
+}
+.dshTodo-railDialogRow {
+  display: flex;
+  align-items: center;
+  gap: var(--dshTodo-s2);
+}
+/* The focus ring is this plugin's green rather than the primitive's business blue, so
+   the field reads like every other input in the sheet (the .dshTodo-addInput rule
+   above); the primitive sets its own :focus-within border, which is what the
+   importance is there to beat. */
+.dshTodo-railDialogInput {
+  width: 100%;
+  min-width: 0;
+}
+.dshTodo-railDialogInput:focus-within {
+  border-color: var(--dshTodo-done) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dshTodo-done) 35%, transparent);
+}
+/* The second step of the delete: it sits under the field in the body, so the button
+   that armed it (in the footer) is never the button that carries it out. */
+.dshTodo-railDangerText {
+  margin: 0;
+  font-size: var(--dshTodo-fs-s);
+  line-height: var(--dshTodo-lh-s);
+  color: var(--dshTodo-text-2);
+}
+/* A text action in the danger colour: no glyph and no outline — the words carry it.
+   The selector is scoped through the footer because the modal portals its footer out
+   of the card, where this plugin's own --dshTodo-* block is out of scope: the theme
+   alias is the token that still resolves, and the extra class outranks the
+   primitive's own .button colour whatever order the sheets land in. */
+.dshTodo-railDialogFooterSplit .dshTodo-railDeleteBtn {
+  flex: none;
+  color: var(--dsw-alias-state-error-primary);
+}
+.dshTodo-railDialogFooter,
+.dshTodo-editorFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* The managing card's footer holds two groups — delete on the left, cancel and save
+   on the right — so it fills the primitive's footer row instead of hugging its end.
+   The gaps are literal for the same reason as the colour above: a footer sits in the
+   portal, outside the token block. */
+/*
+ * The destructive confirm of the rail dialogs. A modal card is portalled to the
+ * document body, outside the token block the rail sets up, so this reads the
+ * theme's own aliases rather than a --dshTodo-* name - those resolve to nothing
+ * there and the colour would silently fall back. It moves the primitive's fill
+ * tokens instead of its background, so the primitive keeps deciding the
+ * foreground and the shape.
+ */
+.dshTodo-dangerPrimary {
+  --dsw-alias-button-primary-fill: var(--dsw-alias-state-error-primary);
+  --dsw-alias-button-primary-hover: var(--dsw-alias-state-error-primary);
+}
+.dshTodo-railDialogFooterSplit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+.dshTodo-railDialogActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* The delete button is absent while the confirmation is open; without this the
+     remaining group would fall to the left of a space-between row. */
+  margin-left: auto;
+}
+.dshTodo-board {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dshTodo-s3);
+  min-width: 0;
+}
+.dshTodo-boardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dshTodo-s2);
+  flex-wrap: wrap;
+}
+.dshTodo-viewTabs {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dshTodo-selectBtn {
+  flex: none;
+}
+.dshTodo-batch {
+  display: flex;
+  align-items: center;
+  gap: var(--dshTodo-s2);
+  flex-wrap: wrap;
+  padding: var(--dshTodo-s2);
+  border: 1px solid var(--dshTodo-line-2);
+  border-radius: var(--dshTodo-r-lg);
+  background: var(--dshTodo-surface);
+}
+.dshTodo-batchCount {
+  margin-right: auto;
+  font-size: var(--dshTodo-fs-s);
+  line-height: var(--dshTodo-lh-s);
+  color: var(--dshTodo-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.dshTodo-batchDate {
+  flex: none;
+  width: 150px;
+}
+.dshTodo-batchNote {
+  margin: 0;
+  padding: 0 var(--dshTodo-s1);
+  font-size: var(--dshTodo-fs-s);
+  line-height: var(--dshTodo-lh-s);
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-batchNote::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: var(--dshTodo-s2);
+  border-radius: 999px;
+  background: var(--dshTodo-done);
+  vertical-align: middle;
+}
+
+/* ── the row: selection box, tags, steps ────────────────────────────────── */
+.dshTodo-cardCounts {
+  display: flex;
+  align-items: baseline;
+  gap: var(--dshTodo-s4);
+}
+.dshTodo-cardCount {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--dshTodo-s1);
+}
+.dshTodo-cardCountNum {
+  font-size: var(--dshTodo-fs-l);
+  line-height: var(--dshTodo-lh-l);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.dshTodo-cardCountLabel {
+  font-size: var(--dshTodo-fs-xs);
+  line-height: var(--dshTodo-lh-xs);
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-cardCount[data-tone='warn'] .dshTodo-cardCountNum {
+  color: var(--dshTodo-error);
+}
+.dshTodo-row {
+  flex-wrap: wrap;
+}
+.dshTodo-row[data-selected='true'] {
+  background: var(--dshTodo-done-wash);
+}
+.dshTodo-rowPick {
+  flex: none;
+}
+.dshTodo-rowList {
+  flex: none;
+  max-width: 120px;
+  padding: 0 var(--dshTodo-s1);
+  overflow: hidden;
+  border-radius: var(--dshTodo-r-sm);
+  background: var(--dshTodo-track);
+  font-size: var(--dshTodo-fs-xs);
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-priorityDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--dshTodo-warn);
+}
+.dshTodo-priorityDot[data-priority='1'] {
+  background: var(--dshTodo-text-2);
+}
+.dshTodo-priorityDot[data-priority='0'] {
+  background: var(--dshTodo-text-2);
+  opacity: .45;
+}
+.dshTodo-tagDue {
+  background: var(--dshTodo-track);
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-tagLate {
+  background: color-mix(in srgb, var(--dshTodo-error) 16%, transparent);
+  color: var(--dshTodo-text);
+}
+.dshTodo-tagRepeat {
+  background: var(--dshTodo-track);
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-rowSteps {
+  flex: none;
+  height: 20px;
+  margin: 0;
+  padding: 0 var(--dshTodo-s2);
+  border: 0;
+  border-radius: 999px;
+  background: var(--dshTodo-track);
+  color: var(--dshTodo-text-2);
+  font: inherit;
+  font-size: var(--dshTodo-fs-xs);
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.dshTodo-rowSteps:hover {
+  color: var(--dshTodo-text);
+}
+.dshTodo-rowSteps[data-complete='true'] {
+  background: var(--dshTodo-done-wash);
+  color: var(--dshTodo-text);
+}
+.dshTodo-rowSteps:focus-visible,
+.dshTodo-stepRemove:focus-visible,
+.dshTodo-stepEdit:focus-visible,
+.dshTodo-rowEdit:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dshTodo-done);
+  outline-offset: 2px;
+}
+.dshTodo-rowEdit {
+  flex: none;
+  opacity: 0;
+  transition: opacity .15s ease;
+}
+.dshTodo-rowEdit svg {
+  width: 14px;
+  height: 14px;
+}
+.dshTodo-row:hover .dshTodo-rowEdit,
+.dshTodo-row:focus-within .dshTodo-rowEdit {
+  opacity: 1;
+}
+@media (hover: none) {
+  .dshTodo-rowEdit {
+    opacity: .7;
+  }
+}
+.dshTodo-steps {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--dshTodo-s1);
+  padding: 0 0 var(--dshTodo-s2) var(--dshTodo-s8);
+}
+.dshTodo-stepList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+}
+.dshTodo-step {
+  display: flex;
+  align-items: center;
+  gap: var(--dshTodo-s1);
+  min-height: 26px;
+}
+.dshTodo-stepCheck {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--dshTodo-fs-s);
+  line-height: var(--dshTodo-lh-s);
+}
+.dshTodo-stepCheck > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dshTodo-step[data-done='true'] .dshTodo-stepCheck > span {
+  color: var(--dshTodo-text-2);
+  text-decoration: line-through;
+}
+.dshTodo-stepInput {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dshTodo-stepEmpty {
+  margin: 0;
+  font-size: var(--dshTodo-fs-xs);
+  line-height: var(--dshTodo-lh-xs);
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-stepEdit,
+.dshTodo-stepRemove {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dshTodo-r-sm);
+  background: transparent;
+  color: var(--dshTodo-text-2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s ease, background-color .15s ease, color .15s ease;
+}
+.dshTodo-stepEdit svg,
+.dshTodo-stepRemove svg {
+  width: 12px;
+  height: 12px;
+}
+.dshTodo-step:hover .dshTodo-stepEdit,
+.dshTodo-step:hover .dshTodo-stepRemove,
+.dshTodo-step:focus-within .dshTodo-stepEdit,
+.dshTodo-step:focus-within .dshTodo-stepRemove,
+.dshTodo-stepEdit:focus-visible,
+.dshTodo-stepRemove:focus-visible {
+  opacity: 1;
+}
+.dshTodo-stepEdit:hover,
+.dshTodo-stepRemove:hover {
+  background: var(--dshTodo-hover);
+  color: var(--dshTodo-text);
+}
+@media (hover: none) {
+  .dshTodo-stepEdit,
+  .dshTodo-stepRemove {
+    opacity: .7;
+  }
+}
+.dshTodo-stepAdd {
+  display: flex;
+  align-items: center;
+  gap: var(--dshTodo-s2);
+  margin-top: var(--dshTodo-s1);
+}
+.dshTodo-stepAddInput {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── the task editor ───────────────────────────────────────────────────── */
+/* The editor's reminder popover is absolutely positioned inside the dialog's
+   scroll region, so that region must not clip it — the same fix the day dialog
+   carries, for the same reason. */
+.dshTodo-editorModal [class*="content"] {
+  overflow: visible !important;
+}
+.dshTodo-editor .dshTodo-reminderPickerCompact {
+  margin-left: 0;
+}
+.dshTodo-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dshTodo-s3);
+  min-width: 0;
+}
+.dshTodo-editorField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dshTodo-s1);
+  min-width: 0;
+}
+.dshTodo-editorLabel {
+  font-size: var(--dshTodo-fs-s);
+  line-height: var(--dshTodo-lh-s);
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-editorRow {
+  display: flex;
+  align-items: center;
+  gap: var(--dshTodo-s2);
+}
+.dshTodo-editorInput {
+  width: 100%;
+  min-width: 0;
+}
+.dshTodo-editorChoice {
+  justify-content: flex-start;
+  min-width: 148px;
+}
+.dshTodo-editorInterval {
+  width: 96px;
+}
+.dshTodo-editorHint {
+  margin: 0;
+  font-size: var(--dshTodo-fs-xs);
+  line-height: var(--dshTodo-lh-xs);
+  color: var(--dshTodo-text-2);
+}
+.dshTodo-editorError {
+  margin: 0;
+  font-size: var(--dshTodo-fs-s);
+  line-height: var(--dshTodo-lh-s);
+  color: var(--dshTodo-error);
+}
+.dshTodo-editorNotes {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--dshTodo-s2);
+  border: 1px solid var(--dshTodo-line-2);
+  border-radius: var(--dshTodo-r-md);
+  background: var(--dshTodo-surface);
+  color: var(--dshTodo-text);
+  font: inherit;
+  font-size: var(--dshTodo-fs-m);
+  line-height: var(--dshTodo-lh-m);
+  resize: vertical;
+}
+.dshTodo-editorNotes:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dshTodo-done);
+  outline-offset: 1px;
+}
+
+@media (max-width: 720px) {
+  .dshTodo-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dshTodo-railList {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .dshTodo-railBtn {
+    min-width: 128px;
+  }
 }
 
 @media (max-width: 560px) {

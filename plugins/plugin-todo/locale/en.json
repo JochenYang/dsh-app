@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "To-do board",
-    "description": "A workbench card and its full page: today's tasks, tick and remove them, completion statistics by week, month and year, and three tools so the model can record or finish a task from a conversation."
+    "description": "A workbench card and its full page: tasks carry a deadline, a list, a priority, steps and a repeat rule; switch between today, overdue, upcoming, done and all views, file work with the list rail, act on a selection at once, and set reminders. Four tools let the model record, edit or finish a task from a conversation."
   }
 }

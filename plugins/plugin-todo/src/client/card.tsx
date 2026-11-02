@@ -20,11 +20,12 @@ import { useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { refreshBoard, useBoard } from './board.ts'
-import { overdueCount, statOf } from './daydata.ts'
+import { statOf } from './daydata.ts'
 import { keyOf, percent, weekKeys } from './format.ts'
 import type { NS } from './locales.ts'
 import { dateLabel, weekdayName } from './translate.ts'
 import type { Translate } from './translate.ts'
+import { countInView } from '../views.ts'
 import type { TodoSnapshot } from '../wire.ts'
 
 /**
@@ -58,19 +59,33 @@ const RING_LENGTH = 2 * Math.PI * RING_RADIUS
 interface CardFigures {
   readonly open: number
   readonly total: number
+  /** Open and owed today — the card's headline number. */
+  readonly today: number
+  /** Open and owed before today, by the same rule the page filters with. */
   readonly overdue: number
   readonly percent: number
 }
 
 /**
  * Today's figures from the board.
+ *
+ * `today` and `overdue` come from the shared predicate (`views.ts` `countInView`),
+ * NOT from a comparison written here: the card used to count `day < today`, which
+ * called a task written today and owed last week "not late" while the host tool
+ * called it late. One definition, one answer.
  * @param board - the shared snapshot.
  */
 function figuresOf(board: TodoSnapshot): CardFigures {
   const open = board.items.filter(item => !item.done).length
   const finished = board.items.filter(item => item.done && keyOf(item.doneAt ?? item.createdAt) === board.today).length
   const total = open + finished
-  return { open, total, overdue: overdueCount(board.items, board.today), percent: percent(finished, total) }
+  return {
+    open,
+    total,
+    today: countInView(board.items, 'today', board.today),
+    overdue: countInView(board.items, 'overdue', board.today),
+    percent: percent(finished, total),
+  }
 }
 
 /**
@@ -126,12 +141,18 @@ export function TodoCard({ openView, t }: TodoCardProps): ReactNode {
         {figures === undefined ? null : <Ring percent={figures.percent} total={figures.total} />}
       </span>
 
-      {figures !== undefined && figures.overdue > 0 ? (
-        <span className="dshTodo-cardWarn">
-          <span className="dshTodo-warnDot" aria-hidden="true" />
-          {t('todo.card.overdue', { count: figures.overdue })}
+      {figures === undefined ? null : (
+        <span className="dshTodo-cardCounts">
+          <span className="dshTodo-cardCount" data-tone={figures.overdue > 0 ? 'warn' : undefined}>
+            <span className="dshTodo-cardCountNum">{figures.overdue}</span>
+            <span className="dshTodo-cardCountLabel">{t('todo.card.overdueLabel')}</span>
+          </span>
+          <span className="dshTodo-cardCount">
+            <span className="dshTodo-cardCountNum">{figures.open}</span>
+            <span className="dshTodo-cardCountLabel">{t('todo.card.openLabel')}</span>
+          </span>
         </span>
-      ) : null}
+      )}
 
       {board === undefined ? null : <WeekStrip board={board} t={t} />}
     </button>
@@ -177,8 +198,8 @@ function CardFigure({ figures, error, t }: {
   }
   return (
     <>
-      <span className="dshTodo-cardFigure">{figures.open}</span>
-      <span className="dshTodo-cardLabel">{t('todo.card.open', { count: figures.open })}</span>
+      <span className="dshTodo-cardFigure">{figures.today}</span>
+      <span className="dshTodo-cardLabel">{t('todo.card.today', { count: figures.today })}</span>
     </>
   )
 }
