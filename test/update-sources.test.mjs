@@ -250,6 +250,7 @@ test('a sha512 mismatch falls through to the next candidate and succeeds on its 
   ]
   const attempts = []
   const progress = []
+  const started = []
   globalThis.fetch = async (url) => {
     attempts.push(String(url))
     // The first candidate serves different bytes than latest.yml pins (a
@@ -260,8 +261,18 @@ test('a sha512 mismatch falls through to the next candidate and succeeds on its 
       : new Response(goodBytes, { status: 200 })
   }
   try {
-    const won = await downloadWithFallback(candidates, dest, sha512b64(goodBytes), (received) => progress.push(received))
+    const won = await downloadWithFallback(
+      candidates,
+      dest,
+      sha512b64(goodBytes),
+      (received) => progress.push(received),
+      (url) => started.push(url),
+    )
     assert.equal(attempts.length, 2, 'the mismatch did not stop the chain')
+    // Every attempt is announced BEFORE its first byte: that is the only way a
+    // caller can tell "the second candidate is starting" from "stuck on the
+    // first" when a candidate dies without ever sending one.
+    assert.deepEqual(started, attempts, 'each attempt was announced as it started')
     assert.equal(won, candidates[1], 'the candidate whose bytes verify wins')
     assert.equal(readFileSync(dest, 'utf8'), goodBytes, 'the verified bytes are what stayed on disk')
     assert.ok(progress.length > 0, 'download progress was reported')

@@ -535,24 +535,48 @@ export function manualDownloadHint(): string {
 }
 
 /**
- * Per-candidate download timeout. 180 s is generous for a ~180 MB installer
- * even on a slow mainland link, while bounding the worst case: with the
- * mirror appended, the chain holds at most four candidates, so a total
- * black-hole network costs ~12 min instead of ~40 min (the old 600 s value)
- * before the actionable "download manually" dialog appears. Exported for
- * the offline asset-layer tests.
+ * Per-candidate download deadline, measured from the request to the LAST byte:
+ * a fetch signal aborts the body as well as the headers, probed against a drip
+ * server that died mid-transfer (scratch/probe-abort-body.mjs).
+ *
+ * 180 s is generous for a ~180 MB installer even on a slow mainland link, while
+ * bounding the worst case: with the mirror appended, the chain holds at most
+ * four candidates, so a total black-hole network costs ~12 min instead of ~40
+ * min (the old 600 s value) before the actionable "download manually" dialog
+ * appears. Exported for the offline asset-layer tests.
+ *
+ * Because it is a TOTAL deadline, it is also a silent throughput floor: the
+ * 236 MB installer of v0.18.1 needs ~1.31 MB/s sustained, so a link below that
+ * can never finish any candidate and every update on it ends in the manual
+ * dialog. Measured on the owner's machine 2026-11-02: 216 s wall clock for that
+ * installer, ~36 s of it dead candidates (the mirror answered 500) — the
+ * transfer finished a couple of seconds inside this limit.
+ *
+ * A stall-based deadline (idle timer reset per chunk, plus a loose ceiling)
+ * would remove the floor. It is deliberately NOT done: the failure shape here is
+ * a fallback, not a broken app, and this is the only path that delivers updates,
+ * so it changes only if a sub-10 Mbps report arrives.
  */
 export const DOWNLOAD_TIMEOUT_MS = 180_000
 
-/** Download a file with progress, trying each candidate until one verifies. */
+/**
+ * Download a file with progress, trying each candidate until one verifies.
+ *
+ * @param onAttempt - told the URL of each candidate as it starts, BEFORE its
+ * first byte. A candidate can fail without ever yielding one (a mirror
+ * answering 500 twenty seconds in), so a caller that only hears `onProgress`
+ * cannot tell "starting" from "dead" — this is the hook that can.
+ */
 export async function downloadWithFallback(
   candidates: string[],
   dest: string,
   expectedSha512: string,
   onProgress: (received: number, total: number) => void,
+  onAttempt?: (url: string) => void,
 ): Promise<string> {
   let lastError: Error | null = null
   for (const url of candidates) {
+    onAttempt?.(url)
     try {
       await fs.rm(dest, { force: true })
       const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
@@ -991,6 +1015,12 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     // never inject.
     if (!/^[\w.~-]+\.exe$/.test(asset.url)) throw new Error(t('updater.badAssetName'))
 
+    // Nothing else may stay on screen while the decision dialog is up. This
+    // card paints at a HIGHER z-index than the dialog's mask (update-card.ts vs
+    // in-frame-dialog.ts), so leaving it up stacks two contradictory update
+    // states — the reported "the dialog says a new version is here, the toast
+    // behind it still says checking".
+    clearKernelProgress(win)
     const choice = decision === 'skipped'
       ? await promptSkippedVersionConfirm(win, yaml.version)
       : await promptUpdateConfirm(win, current, yaml.version)
@@ -1035,6 +1065,19 @@ async function downloadAndInstallPackage(
   // is an executeJavaScript hop into the renderer, and the per-chunk stream
   // fires far faster than the eye can perceive.
   let lastEmit = 0
+  const paintDownloading = (progress: number | null): void => {
+    showKernelProgress(win, {
+      phase: 'downloading',
+      message: t('updater.downloading', { app: APP_NAME, version }),
+      progress,
+    })
+  }
+  // One frame BEFORE the first request, not on its first chunk. A candidate can
+  // die without ever yielding a byte — the ModelScope mirror answered 500 after
+  // ~20 s (measured 2026-11-02) with three candidates still behind it — and a
+  // card painted on the first byte leaves that whole window blank, which reads
+  // as "the click did nothing". Indeterminate is the honest state for it.
+  paintDownloading(null)
   // The installer download is the shell's largest transfer, so it is bracketed
   // like the kernel's own: which mirror served it, and how long it took, are the
   // two facts a "the update never finished" report needs.
@@ -1049,11 +1092,16 @@ async function downloadAndInstallPackage(
         const now = Date.now()
         if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
         lastEmit = now
-        showKernelProgress(win, {
-          phase: 'downloading',
-          message: t('updater.downloading', { app: APP_NAME, version }),
-          progress: total > 0 ? Math.min(1, received / total) : null,
-        })
+        paintDownloading(total > 0 ? Math.min(1, received / total) : null)
+      },
+      // A candidate that dies mid-transfer (500, sha512 mismatch, stall) must not
+      // leave its last percentage on screen while the next one restarts at zero:
+      // that stale number is what a "the download restarted itself" report looks
+      // like. Back to indeterminate, and clear the throttle so the new
+      // candidate's first chunk paints immediately.
+      () => {
+        lastEmit = 0
+        paintDownloading(null)
       },
     ),
   )
