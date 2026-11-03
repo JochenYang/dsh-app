@@ -40,6 +40,16 @@ Two rules, and they are the reason this file exists:
 `settings.dsh-app-maintenance.tab` child slot. Order 1 is a vacant slot and stays
 vacant.
 
+## Why the bands are where they are
+
+Positions are banded by meaning, not by arrival. Upstream owns 0, 10, 15, 20 and the pinned 25; the
+suite's own settings surfaces take 11–14, the swarm row 19, the session-data band 21–23, code graph 24,
+and the two system-level rows 26–27. A new section picks a number inside its band rather than appending.
+
+维护设置 sits at the end of the suite's rows on purpose: maintenance is the last thing a user looks for,
+and while it lived mid-band among the session-data rows the rail read as data → system → data. A
+third-party row registered at 300 still sorts after every row above.
+
 ## Adding a section
 
 Pick the next free number above 27 unless the section belongs beside an existing

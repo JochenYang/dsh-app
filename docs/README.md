@@ -53,9 +53,10 @@ Everything under `docs/archive/` is history by location and is never marked `cur
 explain why something was done, not what the code does now.
 
 One document is deliberately mixed: [`desktop-optimization-plan.md`](desktop-optimization-plan.md).
-Its §3.1 order table («3. 顺序按语义分带») is still consulted, but its single source is
-[`agents/settings-rail-order.md`](agents/settings-rail-order.md); everything else — §0–§5 — is the
-progress record of an executed plan and reads as history.
+Its current part is §4 — the disk, process, network and user-visible contracts, the invariants and the
+change prohibitions. Everything else is the progress record of an executed plan and reads as history.
+Its order table was a copy of [`agents/settings-rail-order.md`](agents/settings-rail-order.md) and is
+gone from there, because the copy had drifted.
 
 ## Naming and placement
 
