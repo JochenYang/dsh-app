@@ -1,6 +1,7 @@
 # 插件市场的边界：与上游 Discover 的共存与退役判据
 
-- Status: active
+- Status: current
+- Note: 决策记录：边界仍成立，三条退役条件均未满足
 - 决策日期: 2026-10-17
 - 背景：内核 0.2.1 新增可选 bundle `plugin-market-bundle`（`packages/experimental/plugin-market-bundle`）：
   它挂载 Host 的 `pluginMarket` 服务、插件页的 **Discover** 标签，以及一个 `plugin_market` 模型工具。

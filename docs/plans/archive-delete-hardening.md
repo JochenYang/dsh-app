@@ -1,6 +1,7 @@
 # 归档删除加固：可撤销、无残留、Windows 可靠
 
-- Status: active
+- Status: done
+- Note: 五个阶段的 Gate 全部通过（2026-11-02）；W12 按终审结论撤回，理由记在该条目里
 - Plan date: 2026-11-02
 - Risk: high
 

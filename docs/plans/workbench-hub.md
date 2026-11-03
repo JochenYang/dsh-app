@@ -1,6 +1,7 @@
 # 工作台容器：可扩展的领域工作台入口
 
-- Status: active
+- Status: partial
+- Note: 容器与两个座位已落地（阶段表全过）；W19「可 import 的契约包」仍开放
 - Plan date: 2026-10-14
 - Reduced: 2026-10-17
 

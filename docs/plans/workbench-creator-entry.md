@@ -1,6 +1,7 @@
 # 工作台的创造模式入口：在工作台里按需求做插件
 
-- Status: active
+- Status: done
+- Note: 条目全 `[x]`；Creator 行与配套技能随 `feat(workbench): Creator entry that lands a card` 交付
 - Plan date: 2026-11-02
 - Risk: medium
 

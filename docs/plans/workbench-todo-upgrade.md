@@ -1,6 +1,7 @@
 # 待办板升级：截止时间、清单、子任务与智能视图
 
-- Status: active
+- Status: partial
+- Note: 阶段 3–5 Gate 通过；阶段 2 的 T6（卡片与页面的界面走查）因无图形界面仍未做
 - Plan date: 2026-11-02
 - Risk: medium
 
