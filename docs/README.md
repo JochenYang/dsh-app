@@ -30,8 +30,8 @@ category and names the one document that owns each fact, so a topic has a single
 ## Single source
 
 - Architecture facts live only in `ARCHITECTURE.md`; `AGENTS.md` §2–§3 point here.
-- Commands, gates and probes live only in `agents/commands.md`; the test layers and the CI order only
-  in `agents/testing.md`.
+- The full command, gate and probe list lives in `agents/commands.md` (`AGENTS.md` §4 keeps only the four
+  everyday ones and points there); the test layers and the CI order only in `agents/testing.md`.
 - Each security invariant's reasoning lives only in `agents/security-invariants.md`, each process
   rule's only in `agents/process-rules.md` — `AGENTS.md` §7 and §9 carry the one-line index.
 - The unfinished list lives only in `agents/known-gaps.md`; `ARCHITECTURE.md` §9 and `AGENTS.md` §10

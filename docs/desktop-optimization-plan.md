@@ -10,8 +10,9 @@
 > 相关立项：[capability-roadmap/desktop-shell-experience.md](capability-roadmap/desktop-shell-experience.md)。
 
 - Status: mixed
-- **当前参考只有 §4「不可回归清单」**：磁盘 / 进程 / 网络 / 用户可见流程契约、不变量与改动禁区；
-  §0–§3、§5–§7 是这次计划的进度记录，按历史读。§3.1 的 order 表已删除——那份副本没跟上后续改动，
+- **当前参考只有 §4「不可回归清单」**：磁盘 / 进程 / 网络 / 用户可见流程契约、不变量与改动禁区
+  （其中的 `file:line` 锚点截至 2026-09-15，读契约不要读行号）；§0–§3、§5–§7 是这次计划的进度记录，
+  按历史读。§3.1 的 order 表已删除——那份副本没跟上后续改动（24 归代码图谱、维护设置 26、关于 27），
   唯一来源是 [`agents/settings-rail-order.md`](agents/settings-rail-order.md)。
 
 ## 0 任务清单
