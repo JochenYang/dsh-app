@@ -192,11 +192,9 @@ The reason behind each one: [`docs/agents/process-rules.md`](docs/agents/process
 
 ## 10. Known TODOs and scaffolds
 
-Do not assume anything here is finished: `plugin-brand` and `plugin-client-ui` are partly scaffolds, the
-office payload is still not bundled with the installer, `plugin-sidebar` has no client test suite, macOS
-signing and Windows signing secrets are not supplied, and signed kernel manifests are future work.
-
-The full list: [`docs/agents/known-gaps.md`](docs/agents/known-gaps.md).
+Do not assume anything here is finished. What is declared but not built, what is deliberately absent and
+what is planned is [`docs/agents/known-gaps.md`](docs/agents/known-gaps.md) — the only place that list is
+maintained.
 
 ## 11. Commits and changesets
 

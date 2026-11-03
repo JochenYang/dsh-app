@@ -440,24 +440,8 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 - Signing: macOS notarization requires Apple credentials (CI secrets); Windows
   signing optional (SmartScreen without it); Linux unsigned.
 
-## 9. Known TODOs
+## 9. Known gaps
 
-- `plugin-brand`: settings namespace + app-info service remain scaffolds; the
-  desktop side of the bridge (action route + connection routes) is wired.
-- `plugin-client-ui`: slot ids still to be verified against the running UI
-  before any new enhancement slot is wired.
-- `plugin-sidebar`: no automated test suite for the client components — the
-  plugin is verified through tsc + esbuild + headless dsh server API smokes.
-- First-run UX: kernel download progress is wired into the in-window update
-  card, and the splash page offers pause/resume (`manager.ts`
-  `pauseDownload`/`resumeDownload`); checksum display is not.
-- Office payload: not bundled with the installer, so a first run with no network
-  converts no documents until the 诊断 row downloads the engine; the Python set
-  the office skills need travels in that same artifact and is staged per cell by
-  `scripts/build-primary-runtime.mjs` (`DSH_APP_PRIMARY_RUNTIME` carries it into
-  the build; win32 and darwin only, because no linux engine is staged or tested
-  here and one would ride ~150 MB in every linux office payload — a 0.1.7 host
-  reads a linux manifest itself). Every non-linux cell now smoke-verifies the
-  staged Python set with the host's own code before it ships (release.yml).
-- Optional: signed manifests + rollback of `$DSH_HOME` settings on major
-  version cross-grades.
+What is declared but not finished, what is deliberately absent and what is planned:
+[`agents/known-gaps.md`](agents/known-gaps.md). That file carries the only copy of the list; design
+trade-offs stay in §7–§8, and a behaviour that is merely constrained is not a gap.

@@ -13,10 +13,13 @@ a short summary and points here.
   Node child cannot reach the scheme, so `plugin-brand` hands the client coordinates and the
   diagnostics page calls it; requests carry the top frame's URL + a per-process secret (subframes
   refused).
-- **Office payload**: the Python half (upstream's `primary-runtime` set) is wired end to end and
-  smoke-verified by every non-linux release cell before shipping, but it is still not bundled with the
-  installer — a first run with no network converts no documents until the 诊断 row downloads it
-  (`docs/agents/build-and-release.md` §2).
+- **Office payload**: it is still not bundled with the installer — a first run with no network converts
+  no documents until the 诊断 row downloads it (`docs/agents/build-and-release.md` §2). The Python set
+  the office skills need travels in that same artifact, staged per cell by
+  `scripts/build-primary-runtime.mjs` (`DSH_APP_PRIMARY_RUNTIME` carries it into the build) on win32 and
+  darwin only: no linux engine is staged or tested here, and one would ride ~150 MB in every linux
+  payload (a 0.1.7 host reads a linux manifest itself). Every non-linux cell smoke-verifies the staged
+  Python set with the host's own code before shipping (`release.yml`).
 - **`plugin-sidebar`** has no automated test suite for its client components — the plugin is verified
   through tsc + esbuild + headless server API smokes. Its Git-panel UI walk
   (`scripts/probe-git-panel.cjs`) was RETIRED on 2026-10-22: it reached the Git view through the
