@@ -1,6 +1,6 @@
-#[x]plugin-codegraph
+# plugin-codegraph
 
--[x]Status:[x]active
+- Status: active
 - Plan date: 2026-10-22
 - Risk: medium
 
