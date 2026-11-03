@@ -47,7 +47,7 @@ older lines only warned. `profiles:peers` is the look-ahead for that.
 
 1. **Move the line** (only when you mean to): global `dsh` and the
    `deepseek-harness` checkout to the matching tag, then this repository's specs —
-   follow `docs/kernel-0.2.0-rc.2-adaptation-and-ports.md` §1 for the repository
+   follow `docs/archive/kernel-line/kernel-0.2.0-rc.2-adaptation-and-ports.md` §1 for the repository
    side. `dsh --version`, the checkout's tag and the running instance should agree.
 2. `npm run profiles:audit` → if anything is stale:
 3. `npm run profiles:prune` → the backup is printed; then in each profile

@@ -203,7 +203,7 @@ npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 | 编号 | 条目 | 状态 |
 |---|---|---|
 | U9 | `changesets/<name>.md` 片段（`shell: patch`；插件 peer 范围改了，按需声明 `plugins:`） | `[x]` | 四个片段：`kernel-line-0.2.0-rc.1.md`（本升级）、`schedule-row-inserts-itself.md`（日程行）、`spent-flip-rows-are-dropped.md`（套件残留行）、`market-lifts-the-release-age-policy-per-run.md`（`plugins: plugin-market`） |
-| U10 | 文档更新：`AGENTS.md` 的跟随线、`docs/agents/build-and-release.md` 的产物版本 | `[x]` | 核对结论：两处都不写具体线号——`AGENTS.md` 只说"新内核线把每个 `@deepseek-ai/dsh*` 依赖升到同一个 spec"，`build-and-release.md:121` 的 `0.1.7-rc.2` 是历史说明（解释一次重建为何解析到旧版本），保留。本轮真正要更新的文档是本文件的台账与 `docs/profile-patch-regeneration-regression.md` §3.4 |
+| U10 | 文档更新：`AGENTS.md` 的跟随线、`docs/agents/build-and-release.md` 的产物版本 | `[x]` | 核对结论：两处都不写具体线号——`AGENTS.md` 只说"新内核线把每个 `@deepseek-ai/dsh*` 依赖升到同一个 spec"，`build-and-release.md:121` 的 `0.1.7-rc.2` 是历史说明（解释一次重建为何解析到旧版本），保留。本轮真正要更新的文档是本文件的台账与 `docs/archive/profile-patch-regeneration-regression.md` §3.4 |
 
 ---
 

@@ -2,7 +2,7 @@
 
 - Status: active
 - Plan date: 2026-10-17
-- 前置：内核线 0.2.1-rc.1 的升级与 Office/模型页收敛先落地（`docs/kernel-0.2.1-rc.1-upgrade.md` §7）
+- 前置：内核线 0.2.1-rc.1 的升级与 Office/模型页收敛先落地（`docs/archive/kernel-line/kernel-0.2.1-rc.1-upgrade.md` §7）
 
 ## Goal
 

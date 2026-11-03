@@ -28,7 +28,7 @@
 // this file pinned "the row must land in the tail region", which was the old
 // mechanism's internal detail; a fix that removes the regeneration entirely would
 // have failed that assertion while being more correct. See
-// docs/profile-patch-regeneration-regression.md §4 (R1/R2) for the migration's own
+// docs/archive/profile-patch-regeneration-regression.md §4 (R1/R2) for the migration's own
 // contract, which lives in test/suite-layer.test.mjs.
 //
 // Run after the build: node --test test/   (or: npm test)

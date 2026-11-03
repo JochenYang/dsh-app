@@ -2,7 +2,7 @@
 
 > 立项/执行 2026-10-16。上一轮（0.2.0-rc.1 → 0.2.0-rc.2）的记录在
 > [`kernel-0.2.0-rc.2-adaptation-and-ports.md`](kernel-0.2.0-rc.2-adaptation-and-ports.md)，
-> 流程判据在 [`agents/kernel-line-regression.md`](agents/kernel-line-regression.md)。本文只写这一轮新增的：
+> 流程判据在 [`agents/kernel-line-regression.md`](../../agents/kernel-line-regression.md)。本文只写这一轮新增的：
 > 这次上游改**接口形状**的地方比前两轮多，五处直接打到我们的代码（四处编译期可见，一处是办公载荷的构建与启动契约）。
 >
 > **证据标记**：`[实测]` = 命令真跑过、有输出；`[静态]` = 读源码或配置；
@@ -119,7 +119,7 @@ preset 组合一起进来，我们不再有这个选择——opt-out 意味着�
 本地/Git 开发副本的拒绝规则。**结论：保留，不合并**——这不是本轮接口适配的范围，也是产品形态决定；
 但它现在是“两处能装插件”，写在这里，免得下一次有人重新发现。
 
-边界已定，落在 [`plans/plugin-market-boundary.md`](plans/plugin-market-boundary.md) `[实测]`：
+边界已定，落在 [`plans/plugin-market-boundary.md`](../../plans/plugin-market-boundary.md) `[实测]`：
 我们的市场是**主入口**（不因上游 Discover 降级）；已发布 bundle 的**发现**让给上游，技能目录与
 一次性安装意图归我们；安装串行化由内核的 profile 写锁保证（两条路径都走
 `runPluginCommand` → `withFileLock(<profile>/package.json)`，`packages/boot/plugin-manager/src/operations.ts:545`）；
@@ -416,6 +416,6 @@ rc.2 的 `WebRuntime` 把 `searchProvider` / `fetchProvider` 声明成 `z.string
 
 | 文档 | 用途 |
 |---|---|
-| [`agents/kernel-line-regression.md`](agents/kernel-line-regression.md) | 换线的流程、判据与常见误判 |
+| [`agents/kernel-line-regression.md`](../../agents/kernel-line-regression.md) | 换线的流程、判据与常见误判 |
 | [`kernel-0.2.0-rc.2-adaptation-and-ports.md`](kernel-0.2.0-rc.2-adaptation-and-ports.md) | 上一轮的调研与台账 |
-| [`agents/profile-supply-chain.md`](agents/profile-supply-chain.md) | 用户机器上的 profile 供应链 |
+| [`agents/profile-supply-chain.md`](../../agents/profile-supply-chain.md) | 用户机器上的 profile 供应链 |

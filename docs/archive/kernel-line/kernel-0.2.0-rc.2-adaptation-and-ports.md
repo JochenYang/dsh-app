@@ -52,7 +52,7 @@ caret 范围内）；真正钉住 rc.1 的是 **lockfile**。所以「跟不跟 
    `npm run check:plugins -- --kernel <新 tgz>` + M3 探针（`scratch/probe-schedule-ui.mjs`）。
 2. **`desktop-product-telemetry` / `product-analytics` 的守护方式是否变化** `[静态]`：我们是靠
    overlay 显式 `disabled: true` 关掉的（`plugins/dsh-app.patch.yml` 里那两条，理由见
-   `docs/kernel-0.2.0-rc.1-upgrade.md` 阶段 3）。升线后要复验：这两行仍由 `dsh-web-app` 携带、
+   `docs/archive/kernel-line/kernel-0.2.0-rc.1-upgrade.md` 阶段 3）。升线后要复验：这两行仍由 `dsh-web-app` 携带、
    我们的覆盖仍生效、启动日志**零条** `did not activate`。
 
 ### 1.3 不做
@@ -78,12 +78,12 @@ caret 范围内）；真正钉住 rc.1 的是 **lockfile**。所以「跟不跟 
 | 7 | Office/PDF 预览选区 | 归上游 | 上游 `ui-sidebar-documentpreview/.../PdfBody.module.css:113-118`；我们的 doc/sheet/pdf 只生成文件、不预览 |
 | 8 | 插件配置保存等待时间 | 归上游 | 上游 `ui-plugin-manager/README.zh.md:58-60`；我们的设置经内核配置编辑器写 patch |
 | 9 | 创造模式指引 + 体验技能 | 归上游 | 上游 `ui-agent-preset/src/client/guide-locales.ts:132-151`、`apps/cli/package.json:74` |
-| 10 | 账号模型免 Key 网页搜索 | **已有等价** | 我们默认链全 free 层（`plugins/plugin-websearch/src/wire.ts:403-431`）；`docs/kernel-0.2.0-rc.1-upgrade.md:460` 有全新 home 实测 |
+| 10 | 账号模型免 Key 网页搜索 | **已有等价** | 我们默认链全 free 层（`plugins/plugin-websearch/src/wire.ts:403-431`）；`docs/archive/kernel-line/kernel-0.2.0-rc.1-upgrade.md:460` 有全新 home 实测 |
 | 11 | Windows 沙箱权限诊断技能 | 归上游 | 上游 `packages/sandbox/sandbox-windows-acl/*`、`sandbox-local/package.json:36` |
 | 12 | 工具调度异常后继续/不盲重试 | 归上游 | 上游 `packages/core/session/README.zh.md:160`（`TOOL_OUTCOME_UNKNOWN`）、`agent-loop/README.zh.md:198` |
 | 13 | **弹窗/菜单/浮层避让标题栏** | **值得移植（最高）** | 上游通用机制 `ui-layout/src/client/AppFrame.module.css:93-113` + 标记由官方 preload 设（`apps/desktop/src/preload-windows.ts:9-13`）；我们 **0 命中**，只有逐点补偿（`src/main/window.ts:340,348,415,418,429-436`） |
 | 14 | Windows 打开/定位文件 | 归上游；我们两条路各不同 | 上游 `packages/util/native-command/src/path-opener.ts:139,307`；我们的 `open-logs` 走 `shell.openPath`（`src/main/shell-actions.ts:428-439`），套件 `native-actions.ts:101-114` 带 30s abort |
-| 15 | macOS 录音权限 | 无关（我们无录音） | `docs/kernel-0.2.0-rc.1-upgrade.md:217`；留意：CLI 闭包含 `dsh-experimental-voice-input-bundle`（`apps/cli/package.json:103`） |
+| 15 | macOS 录音权限 | 无关（我们无录音） | `docs/archive/kernel-line/kernel-0.2.0-rc.1-upgrade.md:217`；留意：CLI 闭包含 `dsh-experimental-voice-input-bundle`（`apps/cli/package.json:103`） |
 | 16 | Safari 刷新恢复回复 | 无关（只跑 Electron/Chromium） | 窗口只加载 `dsh-app://app`（`src/main/desktop-host.ts:79-81`） |
 | 17 | Linux 缺可选原生包致安装失败 | 归上游 | 上游 `native/system/packages/entry/package.json:40-45`；我们 runtime 用 pnpm 组装（`scripts/build-runtime.mjs`） |
 | 18 | 自动化任务改可选包 | **已有等价** | 我们 `plugins/dsh-app.patch.yml:303-308` 直挂同两包；见 §1.2 门禁 |

@@ -1,7 +1,7 @@
 # 内核线 0.2.1-rc.3：只换依赖，无源码适配
 
 > 执行 2026-10-24。上一轮记录在 [`kernel-0.2.1-rc.1-upgrade.md`](kernel-0.2.1-rc.1-upgrade.md)
-> （rc.1 → rc.2 是同文件的补充），流程判据在 [`agents/kernel-line-regression.md`](agents/kernel-line-regression.md)。
+> （rc.1 → rc.2 是同文件的补充），流程判据在 [`agents/kernel-line-regression.md`](../../agents/kernel-line-regression.md)。
 > 本文只写这一轮新增的判断。
 >
 > **证据标记**：`[实测]` = 命令真跑过、有输出；`[静态]` = 读源码或包内容；`[待验证]` = 推断。

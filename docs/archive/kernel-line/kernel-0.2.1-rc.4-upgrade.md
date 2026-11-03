@@ -1,14 +1,14 @@
 # 内核线 0.2.1-rc.4：只换依赖，无源码适配
 
 > 执行 2026-10-28。上一轮记录在 [`kernel-0.2.1-rc.3-upgrade.md`](kernel-0.2.1-rc.3-upgrade.md)，
-> 流程判据在 [`agents/kernel-line-regression.md`](agents/kernel-line-regression.md)。
+> 流程判据在 [`agents/kernel-line-regression.md`](../../agents/kernel-line-regression.md)。
 > 本文只写这一轮新增的判断。
 >
 > **证据标记**：`[实测]` = 命令真跑过、有输出；`[静态]` = 读源码或包内容；`[待验证]` = 推断。
 >
 > 下一站（0.2.2-alpha.2，另一条线）的预适配结论在
-> [`kernel-0.2.2-alpha.2-preflight.md`](kernel-0.2.2-alpha.2-preflight.md)，那份文档不进版本库，
-> 只在正式版发布前查阅。
+> [`kernel-0.2.2-alpha.2-preflight.md`](../../plans/kernel-0.2.2-alpha.2-preflight.md)，那份文档只在
+> 正式版发布前查阅。
 
 ---
 

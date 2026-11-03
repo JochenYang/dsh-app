@@ -55,4 +55,4 @@
 
 - 上游包：`packages/experimental/plugin-market-bundle`、`packages/boot/plugin-market`、`packages/client/ui-plugin-market`
 - 我们：`plugins/plugin-market/`（`src/install-intent.ts`、`src/installer.ts`、`src/bridge*.ts`）
-- 这一轮的重复项盘点：`docs/kernel-0.2.1-rc.1-upgrade.md` §2.2
+- 这一轮的重复项盘点：`docs/archive/kernel-line/kernel-0.2.1-rc.1-upgrade.md` §2.2

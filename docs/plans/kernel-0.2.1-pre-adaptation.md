@@ -1,6 +1,7 @@
 # 内核线 0.2.1 预适配：alpha.3 变更映射与可先行项
 
-- Status: draft
+- Status: superseded
+- Note: 0.2.1 线已由 rc.1–rc.5 的实际执行记录取代（`../archive/kernel-line/`）；本文件只作映射备查
 - Plan date: 2026-10-11（alpha.2 面）／2026-10-13 复核至 alpha.3
 - 上游检出：`D:\codes\deepseek-harness`，工作树 = `dsh-v0.2.1-alpha.3` + 16 提交（干净树）
 
@@ -133,7 +134,7 @@
 | W5 | P1 | **`experimental-package-composition`**：我们的 overlay 以 insert 直挂 `schedule` / `ui-schedule`。**修正上一轮的证据**：`@deepseek-ai/dsh-schedule` 确在 `apps/cli/package.json:55`，但 `@deepseek-ai/dsh-client-ui-schedule` **从来不在 `apps/cli` 里**（a2 与 a3 的 apps/cli 逐字节相同，`:80` 是 `@deepseek-ai/dsh-tool-schedule`）。ui 半的解析锚点是 `packages/bundle/web-app/package.json`（alpha.3 的 `:101`，alpha.2 的 `:96`），而 `apps/cli/package.json:88` 依赖 `@deepseek-ai/dsh-web-app` 构成传递闭包。换线日重跑 `check:plugins` 并显式检索启动日志里的 `patch: entry … not found`。 | `[–]` 无需改，换线日复验 |
 | W6 | P2 | **新 Session 语义**（`new-session-generations`）：我们没有任何代码依赖「复用空白会话」。无需动作。 | `[–]` 无需改 |
 | W7 | P2 | **working-directory**：`{{cwd}}` 提示变量移除。我们注入的系统提示/技能文档不用 `{{cwd}}`。无需动作。 | `[–]` 无需改 |
-| W8 | P0 | **版本面**：全部 `@deepseek-ai/*` spec 从 `^0.2.0-rc.2` → `0.2.1-alpha.3`（该线 336 个包同版本 `[实测]`），`@deepseek-ai/cordis` 从 `^4.0.4` → `4.0.5-alpha.2`，lockfile 重建（换线必须清 root `node_modules/`）；`docs/kernel-0.2.0-rc.2-adaptation-and-ports.md` 的「检出在 rc.2」基线更新为 alpha.3。**此项等 rc 版**——alpha 范围内上游还可能再动。 | `[!]` 待 rc 发布 |
+| W8 | P0 | **版本面**：全部 `@deepseek-ai/*` spec 从 `^0.2.0-rc.2` → `0.2.1-alpha.3`（该线 336 个包同版本 `[实测]`），`@deepseek-ai/cordis` 从 `^4.0.4` → `4.0.5-alpha.2`，lockfile 重建（换线必须清 root `node_modules/`）；`docs/archive/kernel-line/kernel-0.2.0-rc.2-adaptation-and-ports.md` 的「检出在 rc.2」基线更新为 alpha.3。**此项等 rc 版**——alpha 范围内上游还可能再动。 | `[!]` 待 rc 发布 |
 | W9 | P2 | 上游检出构建问题（tsdown 根包入口 `lib/types/{index,startup}.js` 无人生成、client face 767 条 test-spec 类型错）反馈上游或等 rc 修复；`tsdown --config-loader native --env.DSH_BUILD_FACE client` 是当时可用的绕过。**alpha.3 上未复核** `[待验证]`：检出已有 2.1G `node_modules`，最短验证路径是在该检出里跑 `pnpm run build`。 | `[ ]` |
 | W10 | P1 | **真机验证 W2/W3**：下次 rc.2 启动确认——① 无 `backgroundMode` 相关报错；② 会话里 `subagent`/`subagent_fork` 工具照常出现；③ 委派一个子智能体，descriptor 仍为 `mode: continuable`。 | `[ ]` 用户下次启动 |
 | W11 | P0 | **overlay 增加 `harness-dev-context` 禁用行**（换线日）。alpha.3 的 web-app bundle 新增该行（`web-app/cordis.patch.yml:211-212`），而我们的 desktop profile 列了 `@deepseek-ai/dsh-web-app` `[实测：profiles/dsh-app/package.json]` → 换线后它会挂上，把**内核检出路径**与 **GUI URL** 作为 runtime context 送进模型，并附一段 `pnpm run dev:web` 的 HMR 说明。上游 README 自己写的处置就是"在 profile 补丁里禁用这一行"。**不现在加**：rc.2 线没有这个 id，提前加会在每次启动留一条 `patch: entry "harness-dev-context" not found`（本仓库把这类行当噪声，见 §8 第 8 条）。换线日与 W1 一起做。 | `[ ]` 换线日 |
