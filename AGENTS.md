@@ -75,13 +75,9 @@ for the file you are about to change.
 
 ## 3. How the app actually runs
 
-The Electron main process **spawns a real Node child** running the dsh kernel from an installed, versioned
-tree, and the window loads `dsh-app://app/index.html` — a privileged custom scheme served only by
-forwarding to that child; there is no setup renderer, and the first run downloads or adopts a kernel in
-the background. `<userData>/kernel/current.json` is the single source of activation truth, activation is
-one atomic file rewrite, and a kernel that fails to become healthy twice is rolled back once.
-
-Full boot path: [`docs/agents/runtime-shape.md`](docs/agents/runtime-shape.md).
+The shell boots a real kernel child, and the window talks to it over a privileged custom scheme. That
+path — the child, the activation file, the brand-suite stitching, the office payload — is
+[`docs/agents/runtime-shape.md`](docs/agents/runtime-shape.md): read it before touching any of them.
 
 ## 4. Build, dev and verification commands
 
@@ -110,12 +106,10 @@ obliges you to re-run.
 
 ## 5. Testing
 
-Three layers, each blind to something the others see: the **root suites** (`npm test`, 70 files), the
-**plugin suites** (each plugin's own `scripts/test.mjs`), and the **real-kernel smoke** (`npm run
-verify`), the executable answer to "compile-green ≠ runtime-green". CI is the definition of done for a
-merge, and its job order matters: the root tests run *after* the per-plugin installs, because two suites
-resolve packages that exist only inside a plugin's own `node_modules`. What each layer covers and the
-smoke's assertions: [`docs/agents/testing.md`](docs/agents/testing.md).
+Three layers, each blind to something the others see: the root suites (`npm test`), each plugin's own
+`scripts/test.mjs`, and the real-kernel smoke (`npm run verify`). CI is the definition of done for a
+merge, and its job order is load-bearing. Layers, coverage, blind spots and that order:
+[`docs/agents/testing.md`](docs/agents/testing.md).
 
 ## 6. Code style and conventions
 

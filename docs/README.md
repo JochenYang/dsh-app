@@ -29,7 +29,7 @@ category and names the one document that owns each fact, so a topic has a single
 
 ## Single source
 
-- Architecture facts live only in `ARCHITECTURE.md`; `AGENTS.md` §2–§3 summarise and point here.
+- Architecture facts live only in `ARCHITECTURE.md`; `AGENTS.md` §2–§3 point here.
 - Commands, gates and probes live only in `agents/commands.md`; the test layers and the CI order only
   in `agents/testing.md`.
 - Each security invariant's reasoning lives only in `agents/security-invariants.md`, each process
