@@ -231,30 +231,17 @@ Rebuild note: the D: drive on the maintainer's machine rejects writes from
 electron-builder's bundled 7za and makensis, so local verification builds must
 pass `-c.directories.output=<C: path>`.
 
-## 2. The office payload (the engine that is NOT in the runtime)
+## 2. Building the office payload
 
-**The LibreOffice engine is not in the runtime artifact at all.** The kit
-(`@deepseek-ai/libreoffice-kit` + its `…-kit-<platform>-<arch>` engine, ~330 MiB
-unpacked / ~115 MiB compressed) leaves the tree entirely and travels in a
-**second artifact**, `office-payload-<platform>-<arch>-<version>.tgz` (+
-`.sha512` and an `office-payload-<platform>-<arch>.json` sidecar), built by
-`buildOfficePayload` from the same assembled tree and uploaded to the same
-release. `@deepseek-ai/dsh-office-to-pdf` imports the kit **statically at module
-scope**, so the runtime keeps a tiny loader shim at that specifier
-(`scripts/runtime-stubs/libreoffice-kit`, staged by `stageOfficeKitShim`) which
-loads the real kit out of the installed payload at call time and refuses with an
-actionable error while it is absent — dropping the package without the shim
-makes the provider fail to LOAD, which reads as a plugin-tree fault, not as "the
-engine is not installed".
+Why the engine is a separate artifact, where it lands on disk, why the runtime keeps a loader shim at
+the kit's specifier and why the asset name and the install directory disagree are
+[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §4.1 — that is the design. This section is the build side.
 
-The payload's own install/verify/prune lives in `src/kernel/office-payload.ts`
-(the settings row in 诊断 drives it; nothing downloads automatically). Its two
-version numbers are load-bearing: the asset name carries the dsh version
-(release assets are version-addressed, and the mirror's completeness check reads
-them that way), while `<userData>/dsh-app-office/payload/<version>` is named for
-the payload's CONTENT (kit version, plus the Python version when a Python set is
-carried) — that is what makes a kernel update or a rollback reuse the engine
-already on disk.
+`buildOfficePayload` assembles it (~330 MiB unpacked, ~115 MiB compressed) from the same tree into
+`office-payload-<platform>-<arch>-<version>.tgz` (+ `.sha512` and an
+`office-payload-<platform>-<arch>.json` sidecar) and uploads it to the same release;
+`stageOfficeKitShim` stages the loader shim into the runtime, and `src/kernel/office-payload.ts` installs
+the payload on demand from the 诊断 row — nothing downloads automatically.
 
 **The kit version is PINNED** (`DESKTOP_OFFICE_KIT_VERSION` in
 `scripts/kernel-line.mjs`, imported by `build-runtime.mjs` and overridden into

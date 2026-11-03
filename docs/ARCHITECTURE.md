@@ -216,7 +216,9 @@ identical for every kernel that wants the same kit — so it travels in a second
 release artifact (`office-payload-<platform>-<arch>-<dshVersion>.tgz`, resolved
 by the same official-first metadata chain and the same ModelScope → official →
 proxies transport order as the runtime) and is installed on
-demand from the 诊断 settings row. The runtime keeps a loader shim at
+demand from the 诊断 settings row. Building, pinning and uploading it — the kit
+pin, the arch matrix, the Python set — is
+[`agents/build-and-release.md`](agents/build-and-release.md) §2. The runtime keeps a loader shim at
 `app/node_modules/@deepseek-ai/libreoffice-kit` because
 `@deepseek-ai/dsh-office-to-pdf` imports that specifier **statically at module
 scope**: without it the provider fails to load, which is a plugin-tree fault
