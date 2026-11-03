@@ -1,5 +1,8 @@
 # 会话全文检索（P2）
 
+- Status: done
+- Note: agent 侧的 session_search 工具暂缓，见本目录 README 的搁置区
+
 > 目标：让用户和 agent 都能"搜到过去"——按内容搜历史会话（不是只搜标题），
 > 并与 plugin-memory 合流成"记忆 + 历史检索"双通道。
 

@@ -1,5 +1,8 @@
 # Schedule 会话内定时提醒（P3）
 
+- Status: done
+- Note: 用户已实测投递生效；系统通知 V2 待 desktop bridge
+
 > 目标：agent 会话内可定时提醒/定时续跑；桌面壳补上上游没有的**系统通知**。
 
 ## 1. 背景与内核契约（L1，`docs/user/guide/schedule.md` + overlay 示例）

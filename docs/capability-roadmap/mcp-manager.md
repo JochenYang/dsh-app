@@ -1,5 +1,7 @@
 # MCP 服务器管理（P0）
 
+- Status: done
+
 > 目标：把"配置一个 MCP 服务器要手写 patch YAML"变成设置页里的表单操作。
 > 内核侧能力（`@deepseek-ai/dsh-mcp-client`）已随 dsh 运行时发布，本需求是纯套件层工作。
 

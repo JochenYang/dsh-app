@@ -1,5 +1,8 @@
 # Hooks 桥（P1）
 
+- Status: done
+- Note: 用户已实测拦截生效
+
 > 目标：用户已有的 Claude Code / Codex `hooks.json` 在 DSH APP 里直接生效——
 > 会话启动、prompt 提交、工具调用前后、run 结束等时机执行用户 shell 钩子，
 > 可拦截 prompt/工具调用、注入上下文。这是"强制规则"的零上下文成本通道。

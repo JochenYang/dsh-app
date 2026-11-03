@@ -5,6 +5,7 @@ documents below. Read the one your change touches, and when a document and the c
 
 | Read this | When your change touches |
 |---|---|
+| [`docs/README.md`](docs/README.md) | finding which document owns a topic: the category index, the status vocabulary, and what counts as current fact versus history |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | a module's design: layers, update flow, security posture, packaging; §2.1 is the which-file-decides-what table |
 | [`docs/agents/commands.md`](docs/agents/commands.md) | a gate, a packaging target, or which probe your change obliges you to re-run |
 | [`docs/agents/runtime-shape.md`](docs/agents/runtime-shape.md) | the boot path: the kernel child, the activation file, the brand-suite stitching, the office payload |
@@ -21,6 +22,9 @@ documents below. Read the one your change touches, and when a document and the c
 | [`docs/agents/troubleshooting.md`](docs/agents/troubleshooting.md) | a timeout, an error code or a log line you cannot place |
 | [`docs/agents/kernel-line-regression.md`](docs/agents/kernel-line-regression.md) | a kernel-line move: the pre-flight touchpoint scan, the gates and what each one cannot see, the rendering-side blind spot, the checklist |
 | [`docs/agents/profile-supply-chain.md`](docs/agents/profile-supply-chain.md) | a machine's own `dsh` profiles after a kernel-line move |
+| [`docs/plans/`](docs/plans/README.md) | the plans that are still open — each plan's own `- Status:` header carries its state |
+| [`docs/capability-roadmap/`](docs/capability-roadmap/README.md) | whether a capability domain is planned, partly landed, done or stopped |
+| [`docs/archive/`](docs/archive/README.md) | the record of a finished migration or upgrade — history, never current fact |
 | [`plugins/AGENTS.md`](plugins/AGENTS.md) | anything under `plugins/` — the roster, the four artifact gates, the version-bump rule (also auto-loaded there) |
 | [`plugins/README.md`](plugins/README.md) | which plugin owns a capability, and each one's host/client role |
 | [`changesets/README.md`](changesets/README.md) | the release fragment a user-reaching commit must carry |

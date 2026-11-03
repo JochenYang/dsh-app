@@ -9,6 +9,11 @@
 >
 > 相关立项：[capability-roadmap/desktop-shell-experience.md](capability-roadmap/desktop-shell-experience.md)。
 
+- Status: mixed
+- **只有 §3.1 的 order 表（「3. 顺序按语义分带」那张表）仍是当前参考**——它与
+  [`agents/settings-rail-order.md`](agents/settings-rail-order.md) 内容重合，唯一来源是后者；
+  §0–§5 其余部分是这次计划的进度记录，按历史读。
+
 ## 0 任务清单
 
 | #  | 改什么                               | 主要落点                                            | 依赖 | 验收           |

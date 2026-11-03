@@ -1,5 +1,7 @@
 # 桌面壳体验（plugin-brand 落地 / 诊断中心 / 首启补全 / 工作区直达）
 
+- Status: active
+
 > 桌面壳相对"浏览器开 dsh web"的差异化都在这一层。plugin-brand 是多数项的前置地基。
 
 ## 1. plugin-brand 落地（前置项，最先做）

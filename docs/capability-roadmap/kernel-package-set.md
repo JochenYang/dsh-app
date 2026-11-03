@@ -1,5 +1,7 @@
 # 内核交付改为「包集」（profile 自持核心）
 
+- Status: planned
+
 > 2026-09-17 立项。来源：上游桌面端 0.1.6-alpha.2 的组装方式调研
 > （`apps/desktop/scripts/prepare-package-set.ts`、`prepare-dsh.ts`、
 > `src/core-package-set.ts`、`src/project-manager.ts:139`）。

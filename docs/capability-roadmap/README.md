@@ -3,7 +3,7 @@
 > 2026-09-06 调研立项。来源：对 0.1.2-rc.1 内核（与 dsh-app 适配线同版本）未挂载能力域的
 > 系统盘点 + 同类产品对标。证据等级与文件引用见各文档。
 >
-> 状态标记：📄 已立项（本文档）/ 🔍 待验证（有前置验证步骤）/ 👀 观望 / ✅ 已完成
+> 各专题的状态写在它自己的 `- Status:` 行（状态词见 [`../README.md`](../README.md)）；本文件只做索引。
 
 ## 背景与结论
 
@@ -18,16 +18,16 @@ workflow/ralph、subagent(spawn/fork)、web 检索、审批、权限预设、轨
 
 ## 文档索引与优先级
 
-| 优先级 | 文档 | 主题 | 状态 |
-|---|---|---|---|
-| P0 | [mcp-manager.md](mcp-manager.md) | MCP 服务器管理（UI 化配置 + 动态挂载） | ✅ 已落地 |
-| P1 | [hooks-bridge.md](hooks-bridge.md) | Hooks 桥 + DSH 原生规则 | ✅ 已落地（用户已实测拦截生效） |
-| P2 | [session-search.md](session-search.md) | 会话全文检索（sqlite 后端 + UI） | ✅ 已落地（agent 工具暂缓，见搁置区） |
-| P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 | ✅ 已落地（用户已实测投递生效；系统通知 V2 待 desktop bridge） |
-| — | [code-quality-enhancements.md](code-quality-enhancements.md) | 验收钩子（MVP 已验证，单门价值不足，停止投入；等效替代=原生 Hook 用户自配） | 📄 |
-| — | [desktop-shell-experience.md](desktop-shell-experience.md) | plugin-brand 落地 / 诊断中心 / 首启补全 | 📄 |
-| P2 | [kernel-package-set.md](kernel-package-set.md) | 内核交付改为包集（profile 自持核心，rc 线镜像与解压激活退场） | 📄 已立项（方向已定：只学装法，不绑定应用发布） |
-| — | [dev-process-tooling.md](dev-process-tooling.md) | PR CI / 套件冒烟探针 / 版本对齐脚本 | 🔧 CI 门 + 冒烟探针已落地；单测/对齐脚本/看板未做 |
+| 优先级 | 文档 | 主题 |
+|---|---|---|
+| P0 | [mcp-manager.md](mcp-manager.md) | MCP 服务器管理（UI 化配置 + 动态挂载） |
+| P1 | [hooks-bridge.md](hooks-bridge.md) | Hooks 桥 + DSH 原生规则 |
+| P2 | [session-search.md](session-search.md) | 会话全文检索（sqlite 后端 + UI） |
+| P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 |
+| — | [code-quality-enhancements.md](code-quality-enhancements.md) | 验收钩子（已停止投入，等效替代为原生 Hook 用户自配） |
+| — | [desktop-shell-experience.md](desktop-shell-experience.md) | plugin-brand 落地 / 诊断中心 / 首启补全 |
+| P2 | [kernel-package-set.md](kernel-package-set.md) | 内核交付改为包集（profile 自持核心，rc 线镜像与解压激活退场） |
+| — | [dev-process-tooling.md](dev-process-tooling.md) | PR CI / 套件冒烟探针 / 版本对齐脚本 |
 
 ## 搁置区（判死刑项，留档备查，不占队列）
 
