@@ -23,7 +23,7 @@ category and names the one document that owns each fact, so a topic has a single
 | Known gaps | [`agents/known-gaps.md`](agents/known-gaps.md) | what is declared but unfinished, and what is deliberately absent | it changes |
 | Plans | [`plans/`](plans/README.md) | open plans, their acceptance criteria and their status | a plan starts, changes or finishes |
 | Roadmap | [`capability-roadmap/`](capability-roadmap/README.md) | capability domains and whether each one landed | a domain is scoped, lands or stops |
-| Research cards | [`memory-topic-cards/`](memory-topic-cards/) | the design evidence behind `plugin-memory` | the conclusion changes |
+| Research cards | [`memory-topic-cards/DESIGN.md`](memory-topic-cards/DESIGN.md), [`memory-topic-cards/OPTIMIZATION.md`](memory-topic-cards/OPTIMIZATION.md) | the design evidence behind `plugin-memory`, and its optimisation ledger | the conclusion changes |
 | History | [`archive/`](archive/README.md), `.devflow/`, `repo/progress/` | finished migrations, regressions, process notes | append only — never current fact |
 | Changelog | [`../CHANGELOG.md`](../CHANGELOG.md) | the user-visible change per release, zh/en aligned | every release |
 
