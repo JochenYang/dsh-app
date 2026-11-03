@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.18.2] - 2026-11-03
+
+### 中文
+- 归档插件：删除改为先进回收站，回收站支持多选批量还原与彻底删除、删除时可选「先停止运行中的会话」；新增保留策略（7/15/30/90 天或永久、启动清理、立即清理与用量统计）与每次删除/还原/彻底删除/策略变更的审计日志；读不出的策略文件按「永久保留、不自动清理」处理。
+- 待办板：任务可以设截止日期、清单、优先级、子任务与重复规则，页面加了今天/逾期/即将/已完成/全部视图、清单侧栏与批量操作，卡片显示逾期数与今日数；模型侧新增 `todo_update`，`todo_add` 可写新字段，`todo_list` 可按清单与截止区间过滤。
+- 更新流程：确认弹窗前不再留下「正在检查」卡片，点「立即更新」立刻显示下载状态，换源时回到不定状态而不是留着上一个源的百分比。
+- 工作台插件：侧栏面板列表的「更多」菜单新增「在工作台里新建插件」，用来进入创造模式并带上工作台专用的开场提示（按界面语言取字典文案）；宿主半边把座位契约装成 `dsh-app-workbench-card` 技能，产出的插件据此注册进卡片与页面两个座位。技能正文自带完整的座位声明与 owner props 名单，并写明打包挂载归 `cordis-plugin-development`、数据落在 `$DSH_HOME/storages/<plugin-name>/`、宿主路由走会话连接，因此不指向任何仓库路径，在任意工作区里都够用。
+
+### English
+- Archive plugin: a deletion now moves the session into the trash first, the trash supports batch restore and batch purge plus a "stop running sessions first" option, and the page gains a retention policy (7/15/30/90 days or for ever, startup sweep, sweep-now and usage) plus an audit log with one line per delete/restore/purge/settings action; a settings file that cannot be read means "keep for ever, sweep nothing" rather than a 30-day policy nobody chose.
+- Todo board: tasks now carry a deadline, list, priority, steps and a repeat rule; the page gains today/overdue/upcoming/done/all views, a list rail and batch actions, and the card shows today's and overdue counts. The model gets a `todo_update` tool, `todo_add` can write the new fields, and `todo_list` filters by list and deadline window.
+- Updater: the "checking" card no longer stacks under the confirm dialog, the download state appears as soon as the button is pressed, and a source change goes back to indeterminate instead of keeping the previous source's percentage.
+- Workbench plugin: the sidebar panel list's More menu gains "Create a plugin in the workbench", which opens Creator mode with a workbench-specific prompt taken from the dictionary in the active language; the host half now installs the seat-contract skill `dsh-app-workbench-card`, so the plugin it produces registers into both of the container's card seats. The skill body carries the declaration and the owner-prop list itself and says where everything else lives (packaging is the `cordis-plugin-development` skill, data goes to `$DSH_HOME/storages/<plugin-name>/`, host routes ride the session connection), with no repository path in it — so it works from any workspace.
+
 ## [v0.18.1] - 2026-11-02
 
 ### 中文
