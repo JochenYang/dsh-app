@@ -8,7 +8,7 @@
  * main process" dialog on the author's desktop, which is what reached the user.
  * Nothing had looked at the file's syntax in between: the probe is hand-run, it
  * is not imported by any test, and the repository rule it violated ("no backticks
- * inside template-literal CSS/scripts", root AGENTS.md §5) is about two specific
+ * inside template-literal CSS/scripts", root AGENTS.md §9) is about two specific
  * shell strings rather than about this class.
  *
  * `node --check` parses a file WITHOUT executing it, and picks module vs script by

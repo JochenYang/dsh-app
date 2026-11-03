@@ -25,7 +25,7 @@ windows job 可后加（suite 代码有平台分支时再扩）。耗时预估 <
 ## 2. 套件冒烟探针（治"compile-green ≠ runtime-green"旧伤）
 
 背景：alpha.4 删 `Session.events` 后，套件 typecheck/test 全绿、运行时静默坏了几天
-（AGENTS.md §5 明文教训）。rc 线 API 漂移是常态，每次内核 bump 都在裸奔。
+（AGENTS.md §9 的 upstream API drift 一条）。rc 线 API 漂移是常态，每次内核 bump 都在裸奔。
 
 **方案**：`scripts/smoke-suite.mjs`（dev/prod 两态可跑）：
 1. 以 dev 模式起 `dsh web`（或对 bundled kernel 起进程），挂全套件 overlay；
@@ -35,7 +35,7 @@ windows job 可后加（suite 代码有平台分支时再扩）。耗时预估 <
    （client 半 bundle 完整性）；
 4. 退出码汇总，供 CI 与本地 `npm run verify`（package.json 新 script）使用。
 
-接入：ci.yml 追加 job（ubuntu 起真实内核）；内核 bump SOP（AGENTS.md §3）
+接入：ci.yml 追加 job（ubuntu 起真实内核）；内核 bump SOP（AGENTS.md §12）
 追加"跑 smoke-suite"步骤。
 
 **验收**：人为在 patch.yml 指向一个不存在的插件行 → 探针红；正常套件 → 绿。
@@ -44,14 +44,14 @@ windows job 可后加（suite 代码有平台分支时再扩）。耗时预估 <
 ## 3. 内核版本对齐脚本（消灭手工易错步骤）
 
 现状：内核 bump 要手改根 `package.json` + 8 个 `plugins/*/package.json` 的
-`@deepseek-ai/*` devDeps 到同一行（AGENTS.md §3），漏一个就 dual-instance
+`@deepseek-ai/*` devDeps 到同一行（AGENTS.md 的 kernel LINE 段），漏一个就 dual-instance
 dsh-llm、typecheck 爆炸。
 
 **方案**：`scripts/bump-kernel-deps.mjs <version|--dist-tag <tag>>`：
 - 解析 dist-tag（复用 `sources/registry.ts` 的解析规则）；
 - 改根 + 遍历插件 package.json 匹配 `@deepseek-ai/*` devDeps 统一改写；
 - 打印 diff 摘要；不改 lockfile（提示随后手动 `npm install` / 插件内
-  `--legacy-peer-deps`，遵循 AGENTS.md §3 的两个不同 install 纪律）。
+  `--legacy-peer-deps`，遵循 `docs/agents/commands.md` 的两个不同 install 纪律）。
 **验收**：对当前树 dry-run 输出的目标版本与手工计算一致。
 
 ## 4. shell/kernel 首批单测（node:test，与插件同风格）

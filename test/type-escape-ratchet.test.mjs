@@ -1,6 +1,6 @@
 // Type-escape ratchet. The kernel line moves underneath this suite, and
 // `as unknown as` bypasses the type gate: a kernel-deleted API leaves the
-// compile green and fails at runtime (AGENTS.md §5/§6 name this the standing
+// compile green and fails at runtime (AGENTS.md §9 names this the standing
 // upgrade risk). There is no compile-time gate for an escape that is already
 // written, so the count is pinned instead: it may go DOWN as call sites are
 // narrowed, and any increase fails this test until someone reviews why.
