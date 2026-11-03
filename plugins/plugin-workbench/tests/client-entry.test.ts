@@ -32,7 +32,7 @@
 import { strict as assert } from 'node:assert'
 import { afterEach, describe, it } from 'node:test'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import { apply, PANEL_ID, PANEL_ORDER } from '../src/client.ts'
+import { apply, CREATE_ROW_ID, CREATE_ROW_ORDER, PANEL_ID, PANEL_ORDER } from '../src/client.ts'
 import { en, NS, zh } from '../src/client/locales.ts'
 import type { WorkbenchKey } from '../src/client/locales.ts'
 
@@ -123,35 +123,66 @@ function loadClientEntry(): Registration[] {
   return registrations
 }
 
+/**
+ * The registration contributing to one seat.
+ *
+ * Looked up by NAME, not by index. An index-based lookup made every assertion
+ * below silently point at a different seat the moment this plugin contributed a
+ * third entry — measured: the page's tests read the Creator row instead and
+ * failed with `injected.viewIds is not a function`, which is the failure a
+ * seat-identity test must never be able to produce.
+ *
+ * @param registrations - everything one apply registered.
+ * @param name - the seat key the entry contributes into.
+ * @returns the registration, or undefined when nothing targeted that seat.
+ */
+function registrationFor(registrations: Registration[], name: string): Registration | undefined {
+  return registrations.find((entry) => entry.name === name)
+}
+
 describe('workbench sidebar entry', () => {
-  it('contributes the row and the page, and nothing else', () => {
+  it('contributes the panel row, the Creator row and the page, and nothing else', () => {
     const registrations = loadClientEntry()
-    assert.equal(registrations.length, 2, 'the row and the page it opens, and nothing else')
-    assert.deepEqual(registrations.map((entry) => entry.name), ['sidebar.panellist', 'main'])
+    assert.equal(registrations.length, 3, 'the row, the Creator row one seat over, and the page it opens')
+    assert.deepEqual(
+      registrations.map((entry) => entry.name),
+      ['sidebar.panellist', 'sidebar.panellist.actions', 'main'],
+    )
   })
 
   it('names itself with the exported panel id, so the row and the page cannot drift', () => {
-    const options = loadClientEntry()[0]?.options ?? {}
+    const options = registrationFor(loadClientEntry(), 'sidebar.panellist')?.options ?? {}
     assert.equal(PANEL_ID, 'workbench')
     assert.equal(options.id, PANEL_ID)
   })
 
   it('sorts above the kernel rows instead of tying with them', () => {
-    const options = loadClientEntry()[0]?.options ?? {}
+    const options = registrationFor(loadClientEntry(), 'sidebar.panellist')?.options ?? {}
     assert.equal(options.order, PANEL_ORDER)
     assert.ok(PANEL_ORDER < 0, `order must be negative, got ${String(PANEL_ORDER)}`)
   })
 
   it('resolves its label through this plugin own namespace', () => {
-    const options = loadClientEntry()[0]?.options ?? {}
+    const options = registrationFor(loadClientEntry(), 'sidebar.panellist')?.options ?? {}
     assert.equal(options.locale, NS)
     const label = options.label as (() => string) | undefined
     assert.equal(typeof label, 'function')
     assert.equal(label?.(), zh['workbench.nav'])
   })
 
+  it('sorts the Creator row AFTER the kernel pair, not above it', () => {
+    // The kernel's `entry-customization` renders 浏览更多插件 and 创建你的插件 inside
+    // ONE entry and omits `order`, which defaults to 0. A row therefore cannot sit
+    // between that pair — only before or after it — and a tie is broken by
+    // registration order, which is what put this row first. `> 0` is the whole
+    // requirement; the exact value stays in the constant so the reason travels.
+    const options = registrationFor(loadClientEntry(), 'sidebar.panellist.actions')?.options ?? {}
+    assert.equal(options.order, CREATE_ROW_ORDER)
+    assert.ok(CREATE_ROW_ORDER > 0, `order must be positive, got ${String(CREATE_ROW_ORDER)}`)
+  })
+
   it('registers a component, not data', () => {
-    assert.equal(typeof loadClientEntry()[0]?.component, 'function')
+    assert.equal(typeof registrationFor(loadClientEntry(), 'sidebar.panellist')?.component, 'function')
   })
 
   it('injects its stylesheet once, even when the entry is applied twice', () => {
@@ -163,22 +194,53 @@ describe('workbench sidebar entry', () => {
   })
 })
 
+describe('workbench Creator row', () => {
+  it('registers into the panel list actions seat under an id the kernel has not taken', () => {
+    const entry = registrationFor(loadClientEntry(), 'sidebar.panellist.actions')
+    assert.ok(entry !== undefined, 'the Creator row must register into the More menu seat')
+    assert.equal(entry.options.id, CREATE_ROW_ID)
+    // A list seat keys its cells by `id`, and a second registration under a
+    // taken id THROWS. The kernel's own entry in this exact seat is
+    // `entry-customization` (`dsh-client-ui-entry-customization`), so reusing
+    // that spelling would take the whole client half down at boot.
+    assert.notEqual(CREATE_ROW_ID, 'entry-customization')
+    assert.equal(entry.options.locale, NS)
+    assert.equal(typeof entry.component, 'function')
+  })
+
+  it('declares no label, because the row draws its own content', () => {
+    // A list `label` is metadata a navigation owner projects into a row it
+    // builds itself; this entry builds its own, so a label would describe a row
+    // nobody reads.
+    const entry = registrationFor(loadClientEntry(), 'sidebar.panellist.actions')
+    assert.equal(entry?.options.label, undefined)
+  })
+
+  it('hands the row the Creator door and the container copy, like the page', () => {
+    const face = registrationFor(loadClientEntry(), 'sidebar.panellist.actions')?.options.inject
+    assert.equal(typeof face, 'function')
+    const injected = (face as () => { createPlugin?: unknown; entryMessage?: unknown })()
+    assert.equal(typeof injected.createPlugin, 'function')
+    assert.equal(typeof injected.entryMessage, 'function')
+  })
+})
+
 describe('workbench container page seat', () => {
   it('registers the page under the exported panel id, so the row opens it', () => {
-    const page = loadClientEntry()[1]
+    const page = registrationFor(loadClientEntry(), 'main')
     assert.equal(page?.name, 'main')
     assert.equal(page?.options.key, PANEL_ID)
   })
 
   it('declares both domain seats as its children, which is what authorizes it to render them', () => {
-    const children = (loadClientEntry()[1]?.options.children ?? {}) as Record<string, unknown>
+    const children = (registrationFor(loadClientEntry(), 'main')?.options.children ?? {}) as Record<string, unknown>
     assert.deepEqual(Object.keys(children).sort(), ['workbench.item', 'workbench.view'])
     assert.equal((children['workbench.item'] as { kind?: string } | undefined)?.kind, 'list')
     assert.equal((children['workbench.view'] as { kind?: string })?.kind, 'keyed')
   })
 
   it('reads the view seat live and skips an entry no card can address', () => {
-    const face = loadClientEntry()[1]?.options.inject
+    const face = registrationFor(loadClientEntry(), 'main')?.options.inject
     assert.equal(typeof face, 'function')
     const injected = (face as () => {
       viewIds: () => readonly string[]
@@ -195,7 +257,7 @@ describe('workbench container page seat', () => {
   })
 
   it('answers the three problem tokens with sentences a user can act on', () => {
-    const face = loadClientEntry()[1]?.options.inject
+    const face = registrationFor(loadClientEntry(), 'main')?.options.inject
     const injected = (face as () => { entryMessage: (status: string) => string })()
     const message = (status: string): string => injected.entryMessage(status as Parameters<typeof injected.entryMessage>[0])
     assert.equal(message('pending'), zh['workbench.entry.pending'])

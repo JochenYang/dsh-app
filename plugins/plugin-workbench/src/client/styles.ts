@@ -171,6 +171,29 @@ const cssText = `
 .dshWorkbench-body {
   margin-top: 4px;
 }
+/* The Creator row's CONTENT, inside the primitive's own row. The row's chrome —
+   padding, hover fill, the group hairline, the menuitem button — is
+   MenuItemButton's (client/create-row.tsx composes it), so none of it is drawn
+   here; only what this plugin adds is styled: two lines when there is something
+   to say (the label, and the container's sentence for a problem token), and the
+   menu sets the row's width, so nothing here may claim one. */
+.dshWorkbench-create {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dshWorkbench-createLabel {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dshWorkbench-createProblem {
+  color: var(--dsw-alias-state-error-primary, #dc2626);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .dshWorkbench-empty {
   /* The fallback renders INSIDE the grid's anchor, so it is a grid item: without
      spanning every column it would sit in one track. */

@@ -16,6 +16,13 @@
  * a tie would have fallen back to registration order, and this plugin registers
  * after the kernel's.
  *
+ * A SECOND contribution sits one seat over, in `sidebar.panellist.actions` (the
+ * panel list's More menu): the Creator row, which starts the kernel's `cordis`
+ * agent preset with this container's own opening prompt so the plugin it
+ * produces lands as a workbench card (`client/create.ts`, `client/create-row.tsx`).
+ * The seat contract that agent needs is installed as a skill by the host half
+ * (`src/skill.ts`), not restated in the prompt.
+ *
  * @module @dsh-app/plugin-workbench/client
  */
 
@@ -35,6 +42,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { createWorkspaceEntry } from './client/entry.ts'
 import type { WorkspaceEntry, WorkbenchEntryProblem } from './client/entry.ts'
+import { createCreatorSession } from './client/create.ts'
+import type { CreateCreatorSession } from './client/create.ts'
+import { WorkbenchCreateRow } from './client/create-row.tsx'
 import { WorkbenchPanelIcon } from './client/icon.tsx'
 import { en as workbenchEn, NS as WORKBENCH_NS, zh as workbenchZh } from './client/locales.ts'
 import type { WorkbenchKey } from './client/locales.ts'
@@ -118,6 +128,31 @@ export const inject = ['slots', 'locale']
 export const PANEL_ID = 'workbench'
 
 /**
+ * List id of the Creator row inside `sidebar.panellist.actions`.
+ *
+ * A list seat keys its cells by `id`, and the kernel's own entry in that same
+ * seat uses `entry-customization` — a second registration under a taken id
+ * throws rather than replacing, so the id is a plain distinct name. Exported
+ * because the row's test asserts it by the constant the registration uses.
+ */
+export const CREATE_ROW_ID = 'workbench-create'
+
+/**
+ * Row order in `sidebar.panellist.actions`, and the only lever this row has.
+ *
+ * The kernel's own `entry-customization` entry is ONE registration that renders
+ * TWO rows inside its component (浏览更多插件, 创建你的插件) — so a row cannot be
+ * positioned between them, only before or after the pair. That entry omits
+ * `order`, which defaults to 0 and leaves it tied with ours; a tie is broken by
+ * registration order, which is what put this row above 创建你的插件.
+ *
+ * `1` therefore reads as "right after the kernel's pair" and stays there however
+ * the two plugins activate. The row keeps `separatorBefore`, so the grouping
+ * reads as: the generic plugin actions, a rule, then the workbench-scoped one.
+ */
+export const CREATE_ROW_ORDER = 1
+
+/**
  * Row order. `-1` is the smallest claim that meets the requirement: the row must
  * sort above the kernel's own rows, which carry `order: 0` (插件) and `order: 10`
  * (自动化任务) on this line, and the list sorts ascending with an omitted `order`
@@ -151,6 +186,10 @@ export function apply(ctx: ClientContext): void {
   // context; the SERVICES themselves are resolved inside it, per call — see
   // `client/entry.ts` for why that is a rule and not an optimisation.
   const enterWorkspace: WorkspaceEntry = createWorkspaceEntry(ctx)
+
+  // The Creator door, built the same way and for the same reason: it closes over
+  // this context, and `uiWorkspace` is resolved inside it at press time.
+  const createPlugin: CreateCreatorSession = createCreatorSession(ctx)
 
   /**
    * This container's copy for a problem token.
@@ -215,6 +254,23 @@ export function apply(ctx: ClientContext): void {
     locale: WORKBENCH_NS,
     label: () => t('workbench.nav'),
   }, WorkbenchPanelIcon))
+
+  // --- The Creator row, one seat over: `sidebar.panellist.actions` is the list
+  // the sidebar declares for extra rows in its panel-list More menu, which is
+  // where the kernel's own "Create your plugin" row lives. Ours says where the
+  // plugin lands — a card in this container — and the skill it is told to load
+  // carries the seat contract (src/skill.ts).
+  //
+  // No `label:` here, unlike the panel row above: a list `label` is the metadata
+  // a navigation owner projects into its own row, and this entry draws its own
+  // content. Registering one would describe a row nobody reads. ---
+  ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({
+    name: 'sidebar.panellist.actions',
+    id: CREATE_ROW_ID,
+    order: CREATE_ROW_ORDER,
+    locale: WORKBENCH_NS,
+    inject: () => ({ createPlugin, entryMessage }),
+  }, WorkbenchCreateRow))
 
   // --- The page the row opens. `key` is the SAME constant the row's `id` is,
   // and that identity is the whole panel: nothing in the type system relates a

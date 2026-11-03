@@ -36,6 +36,14 @@ buildSync({
   outdir: outDir,
   outExtension: { '.js': '.test.mjs' },
   logLevel: 'error',
+  alias: {
+    // The primitives package is a browser bundle (clsx, CSS modules, dynamic
+    // shikijs) that neither esbuild nor node can load from here, and
+    // `tests/client-entry.test.ts` reaches it through the Creator row. The build
+    // path does not need this: `buildClient` marks every `@deepseek-ai/*`
+    // external. See the stub's own header.
+    '@deepseek-ai/dsh-client-ui-primitives': join(here, 'stub-dsh-client-ui-primitives.mjs'),
+  },
 })
 
 execFileSync(

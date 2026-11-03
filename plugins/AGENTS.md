@@ -24,7 +24,9 @@ one capsule bar), `plugin-market`,
 `plugin-rewind` (message recall + file revert), `plugin-effort` (reasoning
 effort), `plugin-workbench` (workbench hub: one sidebar entry plus the container
 page a domain registers its cards into — a domain appears there by registering a
-card, never by a change to the container), `plugin-todo` (task board: one card
+card, never by a change to the container; its host half installs the
+`dsh-app-workbench-card` skill, the seat contract the Creator row's agent reads),
+`plugin-todo` (task board: one card
 into that grid plus the page it opens, with deadlines, lists, priorities, steps
 and repeat rules, and `todo_add`/`todo_update`/`todo_done`/`todo_list` so the
 model can record, edit or finish a task from a conversation).

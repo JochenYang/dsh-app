@@ -106,9 +106,12 @@
 #   and the full-page container the same id opens in the layout's root-scoped
 #   `main` keyed slot. The container owns the seat, the page and the extension
 #   slots; it owns no domain behaviour, so a new domain is a new card registered
-#   into it and never a change here. Client-only: the host half is an empty
-#   apply, and the row exists so the client-modules scan sees the package's
-#   `dsh.client` declaration.
+#   into it and never a change here. Its panel list's More menu carries a Creator
+#   row (`sidebar.panellist.actions`) that starts the kernel's plugin-authoring
+#   agent preset against this container, and the host half installs the seat
+#   contract as the `dsh-app-workbench-card` skill under `$DSH_HOME/skills/` — the
+#   row also exists so the client-modules scan sees the package's `dsh.client`
+#   declaration.
 
 - insert:
     - id: brand

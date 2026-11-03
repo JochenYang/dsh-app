@@ -89,10 +89,14 @@ function seamOf(ctx: ClientContext): EntrySeam | null {
  * a `RemoteError` carries `code` directly, while the client service wraps one in
  * a `WorkspaceCreateError` (its `rpcError` field).
  *
+ * Exported because the other door out of this container — starting a Creator
+ * session (`client/create.ts`) — rejects through the same envelope and must
+ * answer the same kind of token. One reading of the envelope, not two.
+ *
  * @param error - the rejection value.
  * @returns the code, or 'unexpected' when there is none to report.
  */
-function failureCodeOf(error: unknown): string {
+export function failureCodeOf(error: unknown): string {
   const record = (error ?? {}) as { code?: unknown; rpcError?: { code?: unknown } }
   const code = typeof record.code === 'string' ? record.code : record.rpcError?.code
   return typeof code === 'string' && code !== '' ? code : 'unexpected'

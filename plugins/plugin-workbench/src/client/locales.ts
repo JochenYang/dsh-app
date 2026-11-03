@@ -19,6 +19,20 @@
  * the screen-reader name both ride it, and the collapsed rail keeps the same
  * `aria-label` while its visible text is not rendered at all.
  *
+ * `workbench.create` is the same kind of value one seat over: it is the Creator
+ * row's visible text inside the sidebar's More menu, and that row is a plain
+ * `button`, so this text IS its accessible name — renaming it moves the row's
+ * name too.
+ *
+ * `workbench.createPrompt` is USER-VISIBLE copy even though it is not a label:
+ * `uiWorkspace.startSession` splits its second argument into the session options
+ * and the DRAFT, so this string lands in the composer, where the user reads and
+ * edits it before sending. That is why it is a dictionary value rather than a
+ * constant in `client/create.ts`, and why the kernel's own Creator rows carry one
+ * prompt per language. The skill name arrives as a `{skill}` parameter from
+ * `src/contract.ts`: one source for the name, and no copy that can drift from
+ * the directory the host half installs.
+ *
  * @module @dsh-app/plugin-workbench/client/locales
  */
 
@@ -28,6 +42,8 @@ export const NS = 'dsh-app.workbench'
 /** Simplified Chinese dictionary — the source of truth for this plugin. */
 export const zh = {
   'workbench.nav': '工作台',
+  'workbench.create': '在工作台里新建插件',
+  'workbench.createPrompt': '请先加载 {skill} 技能，然后写一个插件，向工作台注册一张卡片，并可再带一个它自己的页面——这张卡片仅在本次会话内有效，重启后不会保留。',
   'workbench.title': '工作台',
   'workbench.intro': '每个领域在这里放一张卡片，点开即是它自己的工作台。',
   'workbench.empty': '还没有注册任何领域工作台。领域插件向工作台的座位注册一张卡片后，它就会出现在这里。',
@@ -44,6 +60,8 @@ export type WorkbenchKey = keyof typeof zh
 /** English dictionary, key-identical to the Chinese source of truth. */
 export const en: Record<WorkbenchKey, string> = {
   'workbench.nav': 'Workbench',
+  'workbench.create': 'Create a plugin in the workbench',
+  'workbench.createPrompt': 'Load the {skill} skill first, then build a plugin that registers one card into the workbench and, optionally, a page of its own — the card lasts for this session only and a restart drops it.',
   'workbench.title': 'Workbench',
   'workbench.intro': 'Every domain keeps one card here, and opening a card is its own workbench.',
   'workbench.empty': 'No domain workbench has registered yet. A domain appears here once its plugin registers a card into the workbench seats.',

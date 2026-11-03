@@ -14,6 +14,10 @@
  * Regular weight, `aria-hidden` (the row supplies the accessible name from the
  * registration's label), and the requested edge as both width and height.
  *
+ * The Creator row's plus is NOT drawn here: that one exists in the set
+ * (`IconPlusOutlineRegular`) and is used from there — see
+ * `client/create-row.tsx`.
+ *
  * `active` is deliberately unused: the sidebar already marks the selected row
  * itself, and a glyph that painted its own selected state would be a second
  * reading of one fact.
