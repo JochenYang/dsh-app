@@ -61,3 +61,15 @@ test('pending template: clear empties a parked pick without notifying an empty s
 
   unsubscribe()
 })
+
+test('pending template: the colour source rides along with the template', () => {
+  // A hero pick can carry a colourway or a brand colour the user set before the
+  // session existed. Handing over only the template would silently land the deck in
+  // the template's own palette — a colour the user had already changed.
+  pendingTemplate.consume()
+  pendingTemplate.set({ template: 'dsh-slate-grid', palette: 'ikb', brand: null })
+  assert.deepEqual(pendingTemplate.consume(), { template: 'dsh-slate-grid', palette: 'ikb', brand: null })
+
+  pendingTemplate.set({ template: 'dsh-signal', brand: '#1e2bfa', palette: null })
+  assert.deepEqual(pendingTemplate.consume(), { template: 'dsh-signal', brand: '#1e2bfa', palette: null })
+})

@@ -13,12 +13,21 @@
  * `null` for 常规主题. Turning the mode off on the hero clears the slot instead
  * of parking a value, because the session default is already off.
  *
+ * The colour source rides along (`brand` / `palette`, both nullable): a hero pick
+ * already carries a colourway or a brand colour when the user set one before any
+ * session existed, and handing over only the template would land the deck in the
+ * template's own palette — a colour the user had already changed.
+ *
  * @module @dsh-app/plugin-ppt/client/pending-template
  */
 
 /** One parked hero pick: mode on with this template (`null` = 常规主题). */
 export interface PendingPick {
   readonly template: string | null
+  /** Brand colour `#RRGGBB`; absent/null means "not set". */
+  readonly brand?: string | null
+  /** Colourway id; absent/null means "template's own". */
+  readonly palette?: string | null
 }
 
 /** Parked pick, or `undefined` when the slot is empty. */

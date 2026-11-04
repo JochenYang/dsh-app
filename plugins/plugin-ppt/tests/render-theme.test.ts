@@ -14,7 +14,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PptModeStore } from '../src/mode-store.ts'
-import { allTemplates, PAPER_THEME, templateById, templatePptdTheme } from '../src/templates.ts'
+import { resolvePalette } from '../src/palette.ts'
+import { allTemplates, palettePptdTheme, PAPER_THEME, templateById, templatePptdTheme } from '../src/templates.ts'
 import { applyFallbackTheme, renderPptdProject } from '../src/pptd/render.ts'
 import { loadPptdProject } from '../src/pptd/load.ts'
 import type { PptdProject } from '../src/pptd/types.ts'
@@ -119,6 +120,61 @@ test('theme: rendering a theme-less deck with the session template colors the sl
     done()
     rmSync(storeDir, { recursive: true, force: true })
   }
+})
+
+test('theme: a colourway colours a theme-less deck, so the choice survives a model that writes no theme', async () => {
+  // The failure this pins: the prompt hands the model a finished `theme.colors` block,
+  // and a model that forgets it used to land the deck in the TEMPLATE's palette with no
+  // error at all — the user picks a colourway and gets the template's grey. The colour
+  // is now a fact about the session, not an instruction.
+  const { project, done } = await themelessProject()
+  try {
+    const resolved = resolvePalette({ palette: 'ikb' })
+    assert.equal(resolved.source, 'preset')
+    assert.ok(resolved.palette !== undefined)
+    const rendered = await renderPptdProject(project, { fallbackTheme: palettePptdTheme(resolved.palette) })
+    const slide1 = readZipEntry(rendered.bytes, 'ppt/slides/slide1.xml')
+    assert.ok(slide1 !== undefined)
+    assert.ok(slide1.includes('val="FAFAF8"'), 'the colourway paper reaches the slide XML')
+    assert.ok(slide1.includes('val="0A0A0A"'), 'and its ink')
+  } finally {
+    done()
+  }
+})
+
+test('theme: a brand colour reaches the slide XML through the same fallback', async () => {
+  const { project, done } = await themelessProject()
+  try {
+    const resolved = resolvePalette({ brand: '#1e2bfa' })
+    assert.equal(resolved.source, 'brand')
+    assert.ok(resolved.palette !== undefined)
+    const rendered = await renderPptdProject(project, { fallbackTheme: palettePptdTheme(resolved.palette) })
+    const slide1 = readZipEntry(rendered.bytes, 'ppt/slides/slide1.xml')
+    assert.ok(slide1 !== undefined)
+    // The DERIVED paper, not the brand colour itself: the value is the one the contrast
+    // gate produced, which is what makes "what the user typed" and "what the deck
+    // carries" two different, checkable things.
+    assert.ok(slide1.includes('val="F0F5FF"'), 'the derived paper reaches the slide XML')
+    assert.ok(!slide1.includes('val="1E2BFA"'), 'the raw brand colour is not used as a background')
+  } finally {
+    done()
+  }
+})
+
+test('theme: a colourway changes colours and leaves the template typography alone', async () => {
+  // Colour and layout are separate axes; fonts belong to the layout. A colourway that
+  // dropped `textStyles` would silently reset the deck to the renderer's default face.
+  const entry = await templateById('dsh-slate-grid')
+  assert.ok(entry !== undefined)
+  const resolved = resolvePalette({ palette: 'lemon' })
+  assert.ok(resolved.palette !== undefined)
+  const themed = palettePptdTheme(resolved.palette, entry.meta.fonts) as {
+    colors: Record<string, string>
+    textStyles: Record<string, { fontFamily?: { latin?: string } }>
+  }
+  assert.equal(themed.colors.accent, '#ffd500')
+  const latin = themed.textStyles.title?.fontFamily?.latin
+  assert.equal(latin, entry.meta.fonts.en?.title, 'the template title face survives the colour change')
 })
 
 test('theme: an authored theme wins over the fallback in the produced XML', async () => {

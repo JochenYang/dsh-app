@@ -344,6 +344,99 @@ const cssText = `
   padding: 8px 16px 12px;
   border-top: 1px solid var(--dsw-alias-border-l2);
 }
+
+/* The colour row: one radiogroup of colourways plus a brand-colour field.
+   It sits between the grid and the footer because it applies to whatever the
+   grid selected — reading it as one decision with the template pick. */
+.dshPptColours {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.dshPptColoursLabel {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dshPptColourChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dshPptColourChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 3px 10px 3px 4px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dshPptColourChipActive {
+  border-color: var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+
+/* Three panes — paper, ink, accent — because a colourway is a relationship, and a
+   single dot cannot show a warm ink on a cold paper. */
+.dshPptSwatch {
+  display: inline-flex;
+  width: 22px;
+  height: 14px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2);
+}
+
+.dshPptSwatchPane {
+  flex: 1 1 0;
+}
+
+.dshPptBrandRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.dshPptBrandLabel {
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.dshPptBrandInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 180px;
+  padding: 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.dshPptBrandInputInvalid {
+  border-color: var(--dsw-alias-danger-primary);
+}
+
+.dshPptBrandError {
+  color: var(--dsw-alias-danger-primary);
+}
 `
 
 /** Inject the capsule and panel styles once per document. */

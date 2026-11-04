@@ -45,7 +45,7 @@ import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, StandardSourceBinding, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { OFFICE_ACTIVE_FORMAT } from '../office-format.ts'
 import { pptModeApi } from './api.ts'
-import type { ModeUpdate, ModeValue, TemplateView } from './api.ts'
+import type { ModeUpdate, ModeValue, PalettePresetView, TemplateView } from './api.ts'
 import { PPT_LABEL, UNLOADED_MODE, capsuleState, resolveCapsuleMode } from './capsule-state.ts'
 import { NS as PPT_NS } from './locales.ts'
 import type { PptKey } from './locales.ts'
@@ -178,9 +178,11 @@ function TemplateCard(props: {
 function TemplatePanel(props: {
   activeId: string | null
   initialPick: string | null
+  initialBrand: string | null
+  initialPalette: string | null
   pending: boolean
   t: Translate
-  onApply: (templateId: string) => void
+  onApply: (templateId: string, colours: { brand: string | null, palette: string | null }) => void
   onDisable: () => void
   onClose: () => void
 }): ReactNode {
@@ -188,7 +190,18 @@ function TemplatePanel(props: {
   const [tab, setTab] = useState('all')
   const [picked, setPicked] = useState<string | null>(props.initialPick)
   const [templates, setTemplates] = useState<readonly TemplateView[] | undefined>(undefined)
+  const [palettes, setPalettes] = useState<readonly PalettePresetView[]>([])
+  // Colour state is local for the same reason the pick is: nothing leaves the panel
+  // until 使用此模板. Choosing a colourway and typing a brand colour are mutually
+  // exclusive IN THE UI (each clears the other) even though the host resolves brand
+  // over colourway — a panel that let both stand would show two selected colours.
+  const [palettePick, setPalettePick] = useState<string | null>(props.initialPalette)
+  const [brandText, setBrandText] = useState<string>(props.initialBrand ?? '')
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
+
+  const brandNormalized = brandText.trim()
+  const brandValid = /^#[0-9a-fA-F]{6}$/u.test(brandNormalized)
+  const brandInvalid = brandNormalized !== '' && !brandValid
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -201,7 +214,7 @@ function TemplatePanel(props: {
   useEffect(() => {
     let cancelled = false
     pptModeApi.templates().then(
-      (value) => { if (!cancelled) setTemplates(value.templates) },
+      (value) => { if (!cancelled) { setTemplates(value.templates); setPalettes(value.palettes ?? []) } },
       (cause: unknown) => { if (!cancelled) setLoadError(cause instanceof Error ? cause.message : String(cause)) },
     )
     return () => { cancelled = true }
@@ -267,6 +280,60 @@ function TemplatePanel(props: {
             />
           ))}
         </div>
+        <div className="dshPptColours">
+          <span className="dshPptColoursLabel">{t('panel.coloursTitle')}</span>
+          <div className="dshPptColourChips" role="radiogroup" aria-label={t('panel.coloursTitle')}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={palettePick === null && brandNormalized === ''}
+              className={palettePick === null && brandNormalized === '' ? 'dshPptColourChip dshPptColourChipActive' : 'dshPptColourChip'}
+              onClick={() => { setPalettePick(null); setBrandText('') }}
+            >
+              {t('panel.coloursOwn')}
+            </button>
+            {palettes.map(preset => (
+              <button
+                key={preset.id}
+                type="button"
+                role="radio"
+                aria-checked={palettePick === preset.id}
+                className={palettePick === preset.id ? 'dshPptColourChip dshPptColourChipActive' : 'dshPptColourChip'}
+                onClick={() => { setPalettePick(preset.id); setBrandText('') }}
+                title={preset.nameEn}
+              >
+                <span className="dshPptSwatch" aria-hidden="true">
+                  {['background', 'text', 'accent'].map(slot => (
+                    <span
+                      key={slot}
+                      className="dshPptSwatchPane"
+                      style={{ background: preset.colors[slot] ?? 'transparent' }}
+                    />
+                  ))}
+                </span>
+                {preset.name}
+              </button>
+            ))}
+          </div>
+          <label className="dshPptBrandRow">
+            <span className="dshPptBrandLabel">{t('panel.brandLabel')}</span>
+            <input
+              type="text"
+              className={brandInvalid ? 'dshPptBrandInput dshPptBrandInputInvalid' : 'dshPptBrandInput'}
+              value={brandText}
+              placeholder={t('panel.brandPlaceholder')}
+              aria-invalid={brandInvalid}
+              aria-label={t('panel.brandLabel')}
+              spellCheck={false}
+              onChange={(event) => {
+                setBrandText(event.target.value)
+                // Typing a colour is a choice of source, so it clears the colourway.
+                if (event.target.value.trim() !== '') setPalettePick(null)
+              }}
+            />
+            {brandInvalid && <span className="dshPptBrandError" role="alert">{t('panel.brandInvalid')}</span>}
+          </label>
+        </div>
         <div className="dshPptPanelFooter">
           {activeId !== null && (
             <button
@@ -282,8 +349,11 @@ function TemplatePanel(props: {
           <button
             type="button"
             className="dshPptPanelButton dshPptPanelButtonPrimary"
-            disabled={pending || templates === undefined || picked === null}
-            onClick={() => { if (picked !== null) onApply(picked) }}
+            disabled={pending || templates === undefined || picked === null || brandInvalid}
+            onClick={() => {
+              if (picked === null) return
+              onApply(picked, { brand: brandValid ? brandNormalized.toLowerCase() : null, palette: palettePick })
+            }}
           >
             {t('panel.apply')}
           </button>
@@ -334,8 +404,14 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: {
   const parkedPick = useSyncExternalStore(pendingTemplate.subscribe, pendingTemplate.get)
   const mode: ModeValue | undefined = sessionId === undefined
     ? parkedPick === undefined
-      ? { enabled: false, template: null, updatedAt: null }
-      : { enabled: true, template: parkedPick.template, updatedAt: null }
+      ? { enabled: false, template: null, brand: null, palette: null, updatedAt: null }
+      : {
+          enabled: true,
+          template: parkedPick.template,
+          brand: parkedPick.brand ?? null,
+          palette: parkedPick.palette ?? null,
+          updatedAt: null,
+        }
     : boundMode
 
   // Refs keep the callbacks (and so the memoized panel's props)
@@ -399,13 +475,18 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: {
       setPanelOpen(false)
     }
     const applyParked = (pick: PendingPick, previous: ModeValue): void => {
-      setBoundMode({ enabled: true, template: pick.template, updatedAt: null })
+      setBoundMode({ enabled: true, template: pick.template, brand: pick.brand ?? null, palette: pick.palette ?? null, updatedAt: null })
       if (pick.template !== null) setSelected(pick.template)
       // Same rule as the live path: only an off -> on edge seeds the skill
       // reference, so applying a parked template to a session that already had
       // the mode on is a template change, not a turn-on.
       announceSkill(!previous.enabled)
-      pptModeApi.setMode(sessionId, { enabled: true, template: pick.template }).then(
+      pptModeApi.setMode(sessionId, {
+        enabled: true,
+        template: pick.template,
+        brand: pick.brand ?? null,
+        palette: pick.palette ?? null,
+      }).then(
         (result) => { if (!cancelled) setBoundMode(result) },
         (cause: unknown) => {
           // The pick was already made; a failed hand-off only reports itself.
@@ -435,7 +516,10 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: {
       // session-bound pass instead of pretended. A turn-off just clears the
       // slot — the session default is already off.
       if (update.enabled) {
-        pendingTemplate.set({ template: update.template })
+        // The colour source is part of the decision: handing over only the template
+        // would land the deck in the template's own palette after the user had already
+        // picked a colourway or typed a brand colour.
+        pendingTemplate.set({ template: update.template, brand: update.brand ?? null, palette: update.palette ?? null })
         if (update.template !== null) setSelected(update.template)
         setNotice(PENDING_KEY)
       } else {
@@ -471,9 +555,9 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: {
 
   const openPanel = useCallback(() => { setPanelOpen(true) }, [])
   const closePanel = useCallback(() => { setPanelOpen(false) }, [])
-  const applyPicked = useCallback((templateId: string) => {
+  const applyPicked = useCallback((templateId: string, colours: { brand: string | null, palette: string | null }) => {
     setSelected(templateId)
-    applyMode({ enabled: true, template: templateId })
+    applyMode({ enabled: true, template: templateId, brand: colours.brand, palette: colours.palette })
   }, [applyMode])
   const disableMode = useCallback(() => { applyMode({ enabled: false, template: null }) }, [applyMode])
 
@@ -572,6 +656,8 @@ export const PptOfficeEntry = memo(function PptOfficeEntry(props: {
         <TemplatePanel
           activeId={resolved.enabled ? resolved.template : null}
           initialPick={selected}
+          initialBrand={mode?.brand ?? null}
+          initialPalette={mode?.palette ?? null}
           pending={busy}
           t={t}
           onApply={applyPicked}

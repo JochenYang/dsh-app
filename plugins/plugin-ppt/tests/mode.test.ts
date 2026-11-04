@@ -60,19 +60,64 @@ test('mode store: on-with-template, 常规主题 and off round-trip through mode
     assert.equal(neutral.isEnabled('s1'), true)
     assert.equal(neutral.templateOf('s1'), null)
 
-    neutral.clear('s1')
+    neutral.disable('s1')
     await neutral.flush()
-    const cleared = new PptModeStore(file)
-    cleared.load()
-    assert.equal(cleared.isEnabled('s1'), false)
-    assert.equal(cleared.updatedAtOf('s1'), null)
+    const disabled = new PptModeStore(file)
+    disabled.load()
+    assert.equal(disabled.isEnabled('s1'), false, 'the switch is off')
+    assert.equal(disabled.templateOf('s1'), null, 'and the entry survives with 常规主题, so a re-enable needs no re-pick')
+    assert.notEqual(disabled.updatedAtOf('s1'), null, 'the entry is still there — off is a state, not a deletion')
   } finally {
     done()
   }
 })
 
-test('mode store: switching templates overwrites the entry, not appends', async () => {
+test('mode store: the brand colour survives a template switch and a restart', async () => {
+  // The template switcher sends `template` alone. Clearing the brand as a side effect
+  // would lose the one value the user typed in, and the next page would silently fall
+  // back to the template's own palette — a colour change nobody asked for.
   const { store, file, done } = tempStore()
+  try {
+    store.set('s1', 'dsh-signal', '#1e2bfa')
+    assert.equal(store.brandOf('s1'), '#1e2bfa')
+
+    store.set('s1', 'dsh-slate-grid')
+    assert.equal(store.brandOf('s1'), '#1e2bfa', 'an absent brand argument keeps the stored one')
+    assert.equal(store.templateOf('s1'), 'dsh-slate-grid')
+
+    await store.flush()
+    const reopened = new PptModeStore(file)
+    reopened.load()
+    assert.equal(reopened.brandOf('s1'), '#1e2bfa', 'the brand belongs to the deck, not the assembly')
+
+    reopened.set('s1', 'dsh-slate-grid', null)
+    assert.equal(reopened.brandOf('s1'), null, 'null clears it explicitly')
+  } finally {
+    done()
+  }
+})
+
+test('mode store: a malformed brand colour is dropped at load, never repaired', () => {
+  // The value feeds a colour derivation. Guessing at `1e2bfa` or `#1e2bf` is how a
+  // deck ends up with a palette nobody chose, so it is discarded and the template's
+  // own colours stand.
+  const dir = mkdtempSync(join(tmpdir(), 'ppt-mode-test-'))
+  try {
+    const file = join(dir, 'mode.json')
+    writeFileSync(file, JSON.stringify({
+      s1: { template: 'dsh-signal', brand: '1e2bfa', updatedAt: Date.now() },
+      s2: { template: 'dsh-signal', brand: '#1E2BFA', updatedAt: Date.now() },
+    }), 'utf8')
+    const store = new PptModeStore(file)
+    store.load()
+    assert.equal(store.brandOf('s1'), null, 'a value that is not #RRGGBB is not a colour')
+    assert.equal(store.brandOf('s2'), '#1e2bfa', 'a valid one is normalised to lowercase')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('mode store: switching templates overwrites the entry, not appends', async () => {  const { store, file, done } = tempStore()
   try {
     store.set('s1', 'dsh-signal')
     store.set('s1', 'dsh-broadside')
@@ -323,6 +368,84 @@ test('mode routes: POST /mode enables with or without a template, GET reads, off
       body: JSON.stringify({ sessionId: 's1', enabled: true, template: null, pad: 'x'.repeat(16_384) }),
     }))
     assert.equal(oversized.status, 413)
+  } finally {
+    done()
+  }
+})
+
+test('mode routes: the brand colour is validated at the boundary and survives a template switch', async () => {
+  // A malformed colour must be a 400 naming the value, not a silent fallback: the
+  // derivation would otherwise receive text it cannot parse, and the user would see a
+  // palette swap with no explanation of why their brand colour was ignored.
+  const { store, activeFile, done } = tempStore()
+  try {
+    const registry = fakeConnectionFetch()
+    registerPptRoutes(registry, store, activeFile)
+
+    const withBrand = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-signal', brand: '#1E2BFA' })
+    assert.equal(withBrand.status, 200)
+    assert.equal(store.brandOf('s1'), '#1e2bfa', 'stored normalised, so two spellings are one colour')
+
+    const read = await get(registry, `${ROUTE_PREFIX}/mode?sessionId=s1`)
+    const value = (await envelope(read)).value as { brand: string | null }
+    assert.equal(value.brand, '#1e2bfa', 'the client can render the swatch from the state it reads back')
+
+    // The switcher sends `template` alone; the brand must survive that.
+    const switched = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-slate-grid' })
+    assert.equal(switched.status, 200)
+    assert.equal(store.brandOf('s1'), '#1e2bfa')
+
+    const cleared = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-slate-grid', brand: null })
+    assert.equal(cleared.status, 200)
+    assert.equal(store.brandOf('s1'), null)
+
+    for (const bad of ['1e2bfa', '#1e2bf', 'rgb(1,2,3)', 123]) {
+      const rejected = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-signal', brand: bad })
+      assert.equal(rejected.status, 400, `${JSON.stringify(bad)} must be refused`)
+      const body = await envelope(rejected)
+      assert.match(JSON.stringify(body), /品牌色/u, 'the refusal names the field')
+    }
+  } finally {
+    done()
+  }
+})
+
+test('mode routes: a colourway is validated, listed in the catalog and survives a template switch', async () => {
+  // The panel renders layouts and colours from ONE response so the two cannot disagree
+  // while the user is looking at them, and an unknown id must be a 400 rather than a
+  // silent fallback (which would look like the click did nothing).
+  const { store, activeFile, done } = tempStore()
+  try {
+    const registry = fakeConnectionFetch()
+    registerPptRoutes(registry, store, activeFile)
+
+    const catalog = await get(registry, `${ROUTE_PREFIX}/templates?covers=0`)
+    assert.equal(catalog.status, 200)
+    const listed = (await envelope(catalog)).value as { templates: unknown[], palettes: { id: string, colors: Record<string, string> }[] }
+    assert.equal(listed.palettes.length, 10)
+    for (const preset of listed.palettes) {
+      assert.ok(preset.id.length > 0)
+      assert.equal(Object.keys(preset.colors).length, 6)
+    }
+
+    const chosen = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-slate-grid', palette: 'ikb' })
+    assert.equal(chosen.status, 200)
+    assert.equal(store.paletteOf('s1'), 'ikb')
+
+    const switched = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-signal' })
+    assert.equal(switched.status, 200)
+    assert.equal(store.paletteOf('s1'), 'ikb', 'picking a layout keeps the colourway')
+
+    const read = await get(registry, `${ROUTE_PREFIX}/mode?sessionId=s1`)
+    const readValue = (await envelope(read)).value as { palette: string | null } | undefined
+    assert.equal(readValue?.palette, 'ikb')
+    const unknown = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-signal', palette: 'neon-dreams' })
+    assert.equal(unknown.status, 400)
+    assert.equal(store.paletteOf('s1'), 'ikb', 'a refused write leaves the state alone')
+
+    const cleared = await post(registry, `${ROUTE_PREFIX}/mode`, { sessionId: 's1', enabled: true, template: 'dsh-signal', palette: null })
+    assert.equal(cleared.status, 200)
+    assert.equal(store.paletteOf('s1'), null)
   } finally {
     done()
   }

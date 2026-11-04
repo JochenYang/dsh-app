@@ -24,6 +24,7 @@
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { PptModeStore } from './mode-store.ts'
 import { claimOfficeActive, readOfficeActive, releaseOfficeActive } from './office-active-store.ts'
+import { PALETTE_PRESETS, presetById } from './palette.ts'
 import { allTemplates, templateById, templateCoverBytes } from './templates.ts'
 
 /**
@@ -106,11 +107,15 @@ export async function templateViews(covers: boolean): Promise<readonly TemplateV
 function modeStateOf(store: PptModeStore, sessionId: string): {
   enabled: boolean
   template: string | null
+  brand: string | null
+  palette: string | null
   updatedAt: number | null
 } {
   return {
     enabled: store.isEnabled(sessionId),
     template: store.templateOf(sessionId),
+    brand: store.brandOf(sessionId),
+    palette: store.paletteOf(sessionId),
     updatedAt: store.updatedAtOf(sessionId),
   }
 }
@@ -143,7 +148,10 @@ export function registerPptRoutes(
         // capsule label); the picker panel fetches with covers.
         const covers = new URL(request.url).searchParams.get('covers') !== '0'
         try {
-          return ok({ templates: await templateViews(covers) })
+          // The colourways ride along with the catalog: the panel shows one list of
+          // layouts and one list of colours, and a second round trip would let the two
+          // disagree while the user is looking at them.
+          return ok({ templates: await templateViews(covers), palettes: PALETTE_PRESETS })
         } catch (cause: unknown) {
           return fail(500, 'catalog-error', `模板目录读取失败：${cause instanceof Error ? cause.message : String(cause)}`)
         }
@@ -180,11 +188,32 @@ export function registerPptRoutes(
           if (enabled && template !== null && await templateById(template) === undefined) {
             return fail(400, 'bad-request', `未知模板 id：${template}`)
           }
+          // Brand colour: absent keeps what the session already had (the template
+          // switcher sends only `template`), `null` clears it, a string must be a
+          // six-digit hex. Validated here rather than in the derivation so the client
+          // gets a 400 with the offending value instead of a silent fallback palette.
+          const brand = body.brand
+          if (brand !== undefined && brand !== null && (typeof brand !== 'string' || !/^#[0-9a-fA-F]{6}$/u.test(brand))) {
+            return fail(400, 'bad-request', `品牌色必须是 #RRGGBB：收到 ${JSON.stringify(brand)}`)
+          }
+          // Colourway: same three-state contract as the brand (absent keeps, null
+          // clears, an id must exist). An unknown id is a 400 rather than a silent
+          // fallback to the template's palette, which would look like the click did
+          // nothing.
+          const palette = body.palette
+          if (palette !== undefined && palette !== null
+            && (typeof palette !== 'string' || presetById(palette) === undefined)) {
+            return fail(400, 'bad-request', `未知配色 id：${JSON.stringify(palette)}`)
+          }
           if (enabled) {
-            store.set(sessionId, template === null ? null : template)
+            const normalizedBrand = typeof brand === 'string' ? brand.toLowerCase() : brand
+            store.set(sessionId, template === null ? null : template, normalizedBrand, palette)
             await claimOfficeActive(activeFile, sessionId)
           } else {
-            store.clear(sessionId)
+            // Turning the switch off keeps the session's colours: they belong to the
+            // deck being built, not to the switch, and losing a brand colour because
+            // the user hid the capsule would be a surprise the next turn pays for.
+            store.disable(sessionId)
             await releaseOfficeActive(activeFile, sessionId)
           }
           return ok(modeStateOf(store, sessionId))

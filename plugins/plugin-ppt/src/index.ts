@@ -55,9 +55,10 @@ import { checkPptdProject } from './pptd/check.ts'
 import { loadPptdProject, resolvePptdEntry } from './pptd/load.ts'
 import { validationReport, formatValidation } from './pptd/report.ts'
 import { applyFallbackTheme, renderPptdProject } from './pptd/render.ts'
+import { chooseColours } from './colour-choice.ts'
 import { PptModeStore } from './mode-store.ts'
 import { officeActiveFilePath } from './office-active-store.ts'
-import { pptDefaultSectionText, pptModeSectionText } from './prompt.ts'
+import { modeStateFrom, pptDefaultSectionText, pptModeSectionText } from './prompt.ts'
 import {
   existingProjectFile,
   existingWorkspaceEntry,
@@ -71,6 +72,7 @@ import { registerPptRoutes } from './routes.ts'
 import { installSkill, SKILL_NAME } from './skill.ts'
 import {
   allTemplates,
+  palettePptdTheme,
   PAPER_THEME,
   PPTD_CANVAS,
   pptdZone,
@@ -79,6 +81,7 @@ import {
   templatePageSourcePath,
   templatePptdTheme,
 } from './templates.ts'
+import { resolvePalette } from './palette.ts'
 import { resolveInWorkspace, workspaceRootOf } from './workspace.ts'
 
 export const name = 'plugin-ppt'
@@ -130,6 +133,46 @@ function sha256Of(bytes: Uint8Array | string): string {
  */
 function registerPptTools(ctx: Context, modeStore: PptModeStore): () => void {
   const disposers: (() => void)[] = []
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'ppt_set_colours',
+    description:
+      'Record the deck colours for this session: a brand colour (#RRGGBB) or one of the bundled colourways. '
+      + 'Use it when the user states their brand colour or picks a colourway in conversation, so the next assembly '
+      + 'hands you the finished theme.colors block instead of you computing colours. Requires PPT mode to be on.',
+    parameters: {
+      brand: { type: 'string', description: '品牌色，#RRGGBB。与 palette 二选一。' },
+      palette: { type: 'string', description: '配色 id（ppt_list_templates 的 palettes 里给出）。与 brand 二选一。' },
+      clear: { type: 'boolean', description: 'true 表示清除本会话的配色选择，回到模板自带调色板。' },
+    },
+    output: OUTCOME_OUTPUT,
+    async execute(args, exec: ToolRunContext): Promise<JsonValue> {
+      const sessionId = exec.agent?.session.header.id
+      const outcome = chooseColours(modeStore, typeof sessionId === 'string' ? sessionId : '', args as Record<string, unknown>)
+      if (outcome.status === 'needs_revision') return failed(outcome.issues.map(issue => issue.message))
+      // Built field by field rather than cast: `JsonValue` is an index-signature type,
+      // and a typed object (Palette, a readonly record) is not assignable to one. The
+      // previous shape of this file used `as unknown as` for exactly that, which the
+      // suite counts — a cast here would hide a real mismatch instead of declaring it.
+      const colours = outcome.colors
+      return {
+        status: 'ok',
+        source: outcome.source,
+        colors: colours === undefined
+          ? null
+          : {
+              background: colours.background,
+              text: colours.text,
+              accent: colours.accent,
+              surface: colours.surface,
+              secondary: colours.secondary,
+              muted: colours.muted,
+            },
+        contrast: outcome.contrast === undefined ? null : { ...outcome.contrast },
+        note: outcome.note,
+      }
+    },
+  })))
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'ppt_list_templates',
@@ -440,15 +483,24 @@ function registerPptTools(ctx: Context, modeStore: PptModeStore): () => void {
         const entry = await existingWorkspaceEntry(workspace.root, projectPath, 'project_path')
         const manifest = await resolvePptdEntry(entry)
         const loaded = await loadPptdProject(manifest)
-        // Theme fallback: a document that never wrote a theme is rendered with
-        // the template this session picked, so the user's template choice
-        // always steers the output. Without a template choice (natural-language
-        // PPT request) the paper default keeps the deck styled. Documents with
-        // their own theme keep it either way.
+        // Theme fallback, in the order the prompt states: the session's COLOURS (a
+        // brand colour or a colourway) outrank the template's own palette, which
+        // outranks the paper default. Documents with their own theme keep it either
+        // way — an author who wrote colours made a decision.
+        //
+        // Why the model is not the only carrier: the prompt hands it a finished
+        // `theme.colors` block, but a model that forgets the block used to land the
+        // deck in the template's palette with no error at all — the user picks 克莱因蓝
+        // and gets the template's grey. This fallback is what makes the colour
+        // choice a fact about the session rather than an instruction.
         const sessionId = exec.agent?.session.header.id
-        const templateId = typeof sessionId === 'string' && sessionId !== '' ? modeStore.templateOf(sessionId) : null
+        const scope = typeof sessionId === 'string' && sessionId !== '' ? sessionId : ''
+        const templateId = scope === '' ? null : modeStore.templateOf(scope)
         const templateEntry = templateId === null ? undefined : await templateById(templateId)
-        const fallbackTheme = templateEntry === undefined ? PAPER_THEME : templatePptdTheme(templateEntry.meta)
+        const colours = resolvePalette({ brand: scope === '' ? null : modeStore.brandOf(scope), palette: scope === '' ? null : modeStore.paletteOf(scope) })
+        const fallbackTheme = colours.palette !== undefined
+          ? palettePptdTheme(colours.palette, templateEntry?.meta.fonts)
+          : templateEntry === undefined ? PAPER_THEME : templatePptdTheme(templateEntry.meta)
         const project = applyFallbackTheme(loaded, fallbackTheme)
         const report = validationReport(checkPptdProject(project), {
           projectDirectory: path.dirname(manifest),
@@ -553,7 +605,7 @@ export function apply(ctx: Context): void {
     // Per-assembly provider: '' (dropped by the renderer) unless the
     // assembling session has PPT mode on.
     text: (context) => pptModeSectionText(
-      sessionId => ({ enabled: modeStore.isEnabled(sessionId), template: modeStore.templateOf(sessionId) }),
+      sessionId => modeStateFrom(modeStore, sessionId),
       id => templateNames.get(id),
       context,
     ),

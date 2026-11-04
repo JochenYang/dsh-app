@@ -14,6 +14,7 @@ import { readFile, readdir, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { recommendedTextCapacity } from './text-layout.ts'
+import type { Palette } from './palette.ts'
 
 /** Where the bundled asset directory sits relative to the built module. */
 const TEMPLATES_URL = new URL('../templates/', import.meta.url)
@@ -266,6 +267,60 @@ export const PAPER_THEME: Record<string, unknown> = {
  * session's chosen template must still steer the output (default page
  * background, default text color, theme fonts), so its palette lands in the
  * project AST under the same key names an authored theme uses.
+ */
+/**
+ * Turn a six-slot palette into a PPTD theme map.
+ *
+ * The joint this module and `palette.ts` meet at: a colourway or a brand-derived
+ * palette arrives as six `#RRGGBB` values, and PPTD wants exactly that plus the
+ * typography, which still belongs to the template — a colourway changes the colours
+ * and nothing else.
+ *
+ * Kept separate from `templatePptdTheme` because the sources differ (a template's
+ * metadata carries hex without the `#`, a derived palette carries it with), while the
+ * SHAPE must be one thing: two builders that disagree about `textStyles` would make a
+ * colourway deck lose its fonts.
+ *
+ * @param palette - the six slots, `#RRGGBB`.
+ * @param fonts - the template's font table, when one is chosen.
+ * @returns the theme map a PPTD manifest carries.
+ */
+export function palettePptdTheme(
+  palette: Palette,
+  fonts?: TemplateMetadata['fonts'],
+): Record<string, unknown> {
+  const colors: Record<string, string> = {
+    background: palette.background.toLowerCase(),
+    text: palette.text.toLowerCase(),
+    accent: palette.accent.toLowerCase(),
+    surface: palette.surface.toLowerCase(),
+    secondary: palette.secondary.toLowerCase(),
+    muted: palette.muted.toLowerCase(),
+  }
+  const family = (face: string | undefined, eaFace: string | undefined): Record<string, string> | undefined => {
+    if (typeof face !== 'string' || face === '') return undefined
+    const ea = typeof eaFace === 'string' && eaFace !== '' ? eaFace : face
+    return { latin: face, ea }
+  }
+  const titleFamily = family(fonts?.en?.title, fonts?.zh?.title)
+  const bodyFamily = family(fonts?.en?.body, fonts?.zh?.body)
+  return {
+    colors,
+    textStyles: {
+      ...(titleFamily === undefined ? {} : { title: { fontFamily: titleFamily, fontSize: 28, bold: true, color: '$text' } }),
+      ...(bodyFamily === undefined ? {} : { body: { fontFamily: bodyFamily, fontSize: 18, color: '$text' } }),
+    },
+    // The synthesized theme owns the same minimal table spec as the paper default, so
+    // a colourway deck colours tables the same way a template deck does.
+    tableStyles: { default: MINIMAL_TABLE_STYLES },
+  }
+}
+
+/**
+ * Synthesize one template's PPTD theme from its palette and fonts.
+ *
+ * @param meta - the template metadata.
+ * @returns the theme map.
  */
 export function templatePptdTheme(meta: TemplateMetadata): Record<string, unknown> {
   const hex = (value: unknown): string | undefined =>

@@ -53,18 +53,49 @@ export interface TemplateView {
 
 /**
  * GET /mode payload: whether the session's PPT mode is on, the chosen template
- * (`null` = 常规主题, the neutral default), and when the entry was written.
+ * (`null` = 常规主题, the neutral default), the colour source for the deck, and
+ * when the entry was written.
  */
 export interface ModeValue {
   readonly enabled: boolean
   readonly template: string | null
+  /** Brand colour `#RRGGBB`, or null when the deck uses a colourway/template palette. */
+  readonly brand?: string | null
+  /** Colourway id from the catalog's `palettes`, or null. */
+  readonly palette?: string | null
   readonly updatedAt: number | null
 }
 
-/** POST /mode body: turn the mode on with a template (or none), or off. */
+/**
+ * POST /mode body: turn the mode on with a template (or none), or off.
+ *
+ * `brand` / `palette` are OPTIONAL on purpose: the template switcher sends
+ * `template` alone and the host keeps whatever colour the session already had.
+ * Sending `null` clears explicitly.
+ */
 export interface ModeUpdate {
   readonly enabled: boolean
   readonly template: string | null
+  readonly brand?: string | null
+  readonly palette?: string | null
+}
+
+/**
+ * One colourway as the picker needs it (host `PALETTE_PRESETS` row).
+ *
+ * The panel renders the six colours as a swatch strip rather than a single dot: a
+ * colourway is a relationship between paper, ink and accent, and one dot cannot
+ * show that the ink is warm on a cold paper.
+ */
+export interface PalettePresetView {
+  readonly id: string
+  readonly name: string
+  readonly nameEn: string
+  readonly family: string
+  readonly scheme: string
+  readonly colors: Readonly<Record<string, string>>
+  /** Accent against background. Below 3 means the accent is a block, not an ink. */
+  readonly accentOnBackground: number
 }
 
 /** The PPT-mode API face. */
@@ -93,8 +124,8 @@ export const pptModeApi = {
     return request<{ active: OfficeActive | null }>(`${ROUTE_PREFIX}/office-active`)
       .then(value => value.active)
   },
-  templates(options?: { covers?: boolean }): Promise<{ templates: readonly TemplateView[] }> {
+  templates(options?: { covers?: boolean }): Promise<{ templates: readonly TemplateView[], palettes: readonly PalettePresetView[] }> {
     const covers = options?.covers === false ? '?covers=0' : ''
-    return request<{ templates: readonly TemplateView[] }>(`${ROUTE_PREFIX}/templates${covers}`)
+    return request<{ templates: readonly TemplateView[], palettes: readonly PalettePresetView[] }>(`${ROUTE_PREFIX}/templates${covers}`)
   },
 }
