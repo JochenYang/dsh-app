@@ -449,6 +449,22 @@ jobs:
           # last-writer's platform in the shared name.
           cp runtime-dist/manifest.json "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
           upload "$TAG" runtime-dist/dsh-runtime-*.tgz runtime-dist/dsh-runtime-*.tgz.sha512 "runtime-dist/manifest-${PLATFORM}-${ARCH}.json"
+          # The on-demand code-graph grammars (Scala, Elixir, Zig, Julia, Haskell,
+          # Groovy) travel with this release because the plugin downloads them from
+          # here — the ONLY hosting path they have (`plugin-codegraph`'s
+          # `GRAMMAR_RELEASE`). They are platform-independent, so every cell uploads
+          # the same six files and `--clobber` makes that idempotent; whichever cell
+          # finishes last leaves one copy, and the mirror job's folder upload carries
+          # them to ModelScope beside the tarballs. A missing one is invisible at
+          # release time and surfaces as a settings-page download that 404s, which is
+          # why the digest each plugin build records is checked against these exact
+          # bytes by `plugins/plugin-codegraph/tests/languages.test.ts`.
+          if compgen -G "plugins/plugin-codegraph/grammars-optional/*.wasm" > /dev/null; then
+            upload "$TAG" plugins/plugin-codegraph/grammars-optional/*.wasm
+          else
+            echo "::error::no grammars-optional/*.wasm in this tree — the on-demand code-graph languages would have nothing to download" >&2
+            exit 1
+          fi
           # The office payload (the LibreOffice engine the runtime no longer
           # carries): uploaded here, with the cell that built it. Its absence is
           # invisible to the runtime install — the tree boots fine without an

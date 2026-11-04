@@ -210,7 +210,14 @@ export function renderOverviewContext(
     // without spending a single extra token on a selector.
     lines.push('Files nothing else imports \u2014 where a project starts, or a library\u2019s public surface (query one with `codegraph_context("<path>")`):')
     for (const entry of entries) {
-      const head = entry.symbol === undefined ? '' : ` (starts at ${entry.symbol.kind} ${entry.symbol.name})`
+      // The LINE, because "which file" is not the question that was asked. Measured in a
+      // real session: the model read this block, saw `apps/api/src/main.ts (starts at
+      // function bootstrap)`, then ran glob plus four reads anyway — and cited
+      // `main.ts:34` in its answer. It wanted the line, and paying five tool calls for a
+      // number this block already knew is exactly the cost the block exists to remove.
+      const head = entry.symbol === undefined
+        ? ''
+        : ` (starts at ${entry.symbol.kind} ${entry.symbol.name}:${String(entry.symbol.line)})`
       lines.push(`- ${entry.path}${head}`)
     }
   }

@@ -126,6 +126,8 @@ export interface ProjectRow {
     readonly noRules: number
     readonly parseErrors: number
     readonly tooLarge: number
+    readonly ignored: number
+    readonly generated: number
     readonly durationMs: number
     readonly removalSkipped: boolean
   } | undefined

@@ -59,6 +59,7 @@ const sym = (path: string, name: string, line = 1, parent?: string): SymbolRecor
   name,
   kind: parent === undefined ? 'function' : 'method',
   line,
+  endLine: line,
   parent,
 })
 
@@ -75,6 +76,93 @@ describe('findSymbols', () => {
     replaceFile(g.db, file('a.ts'), [sym('a.ts', 'diffRulerMarks')], [])
     const result = findSymbols(g, 'RulerMark', 10)
     assert.deepEqual(result.symbols.map(symbol => symbol.name), ['diffRulerMarks'])
+  })
+
+  it('finds a name through a word inside it', () => {
+    // `ruler` is inside `diffRulerMarks`, so the substring tier answers it. No inverted
+    // index is involved: a word-part match is always a substring match, which is why
+    // this plugin does not pay for a full-text table it would never need.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'diffRulerMarks'), sym('a.ts', 'markup')], [])
+    const result = findSymbols(g, 'ruler', 10)
+    assert.deepEqual(result.symbols.map(symbol => symbol.name), ['diffRulerMarks'])
+  })
+
+  it('still finds a substring match when no whole word matches', () => {
+    // The merge, not a short-circuit: a tier that fills must not starve the rows a
+    // weaker query needs.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'oauth_handler')], [])
+    assert.deepEqual(findSymbols(g, 'auth', 10).symbols.map(symbol => symbol.name), ['oauth_handler'])
+  })
+
+  it('finds a symbol from two words that never appear together in its name', () => {
+    // The one thing the substring scan genuinely cannot do: `marks ruler` is not a
+    // substring of `diffRulerMarks`, but it is two words of it. This is the only tier
+    // that a word list is for, and it runs LAST so it can only fill, never displace.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'diffRulerMarks')], [])
+    assert.deepEqual(findSymbols(g, 'marks ruler', 5).symbols.map(symbol => symbol.name), ['diffRulerMarks'])
+  })
+
+  it('keeps a plain substring match, in path order, when the query is one word', () => {
+    // The tiers are disjoint by construction: a bag-of-words scan only runs for a
+    // multi-word query, and a multi-word query cannot be a substring of anything. So a
+    // single word's answer is decided by the substring scan alone and stays in path
+    // order — a later tier can fill, never reorder or displace.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), ['Baruler1', 'Baruler2', 'Baruler3', 'Baruler4', 'Baruler5'].map(name => sym('a.ts', name)), [])
+    assert.deepEqual(
+      findSymbols(g, 'ruler', 3).symbols.map(symbol => symbol.name),
+      ['Baruler1', 'Baruler2', 'Baruler3'],
+    )
+  })
+
+  it('requires EVERY word of a multi-word query, so a partial match is not a match', () => {
+    // The tier is AND, like a bare multi-token FTS5 query. An OR would fill the answer
+    // with rows that share one word and push out the rows the caller meant — and this
+    // tier runs last precisely because it may only add, never displace.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'marksOnly'), sym('a.ts', 'rulerOnly')], [])
+    assert.deepEqual(findSymbols(g, 'marks ruler', 5).symbols.map(symbol => symbol.name), [])
+  })
+
+  it('still runs the multi-word tier when only one word survives filtering', () => {
+    // The gate counts the words as WRITTEN: `a star` is two words for `aStar`, and
+    // counting the filtered tokens would skip the only tier that can find it.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'aStar')], [])
+    assert.deepEqual(findSymbols(g, 'a star', 5).symbols.map(symbol => symbol.name), ['aStar'])
+  })
+
+  it('treats an exact name case-insensitively, so an exact hit still ends the search', () => {
+    // `LIKE` is case-insensitive for ASCII and `=` is not, so `ruler` would miss
+    // `Ruler` and then rank `RulerFactory` above it in the prefix tier.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'RulerFactory')], [])
+    replaceFile(g.db, file('b.ts'), [sym('b.ts', 'Ruler')], [])
+    assert.deepEqual(findSymbols(g, 'ruler', 5).symbols.map(symbol => symbol.name), ['Ruler'])
+  })
+
+  it('narrows with kind:, path:, lang: and name:', () => {
+    const g = graph()
+    replaceFile(g.db, file('src/api/a.ts'), [sym('src/api/a.ts', 'Service')], [])
+    replaceFile(g.db, { ...file('lib/b.py'), lang: 'python' }, [sym('lib/b.py', 'Service')], [])
+    replaceFile(g.db, file('src/api/c.ts'), [sym('src/api/c.ts', 'service')], [])
+
+    assert.deepEqual(findSymbols(g, 'kind:class Service', 10).symbols.map(symbol => symbol.path), [], 'neither row is a class')
+    assert.deepEqual(findSymbols(g, 'path:src/api serv', 10).symbols.map(symbol => symbol.path), ['src/api/a.ts', 'src/api/c.ts'])
+    assert.deepEqual(findSymbols(g, 'lang:python Service', 10).symbols.map(symbol => symbol.path), ['lib/b.py'])
+    assert.deepEqual(findSymbols(g, 'kind:function Service', 10).symbols.map(symbol => symbol.path), ['lib/b.py', 'src/api/a.ts', 'src/api/c.ts'], 'the kind filter reads a caller’s capitalisation, and the exact tier compares case-insensitively')
+  })
+
+  it('treats LIKE wildcards in the query as characters, not as a pattern', () => {
+    // A symbol named `100%` is not "everything"; unescaped, the query would answer
+    // with the whole table — a wrong answer that looks like a working search.
+    const g = graph()
+    replaceFile(g.db, file('a.ts'), [sym('a.ts', 'parse_100%'), sym('a.ts', 'unrelated')], [])
+    const result = findSymbols(g, '100%', 10)
+    assert.deepEqual(result.symbols.map(symbol => symbol.name), ['parse_100%'])
   })
 
   it('reports truncation rather than silently dropping matches', () => {
@@ -426,7 +514,7 @@ describe('documentsFor', () => {
     const graph = openGraph(join(dir, 'graph.db'))
     graphs.push(graph)
     const file: FileRecord = { path: 'a.ts', mtime: 1, size: 1, hash: 'h', lang: 'typescript' }
-    const symbol: SymbolRecord = { id: 'a.ts#function:alpha', path: 'a.ts', name: 'alpha', kind: 'function', line: 1, parent: undefined }
+    const symbol: SymbolRecord = { id: 'a.ts#function:alpha', path: 'a.ts', name: 'alpha', kind: 'function', line: 1, endLine: 1, parent: undefined }
     replaceFile(graph.db, file, [symbol], targets.map(t => ({ from: symbol.id, to: `file:${t.path}`, kind: 'documents' as const, line: t.line })))
     return graph
   }

@@ -27,7 +27,12 @@ import { mkdirSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 /**
- * Bumped whenever a table, an index, or the MEANING of a stored row changes.
+ * Bumped whenever a table, an index, or the MEANING of a stored row changes — with one
+ * exception worth knowing before the next bump: DROPPING a table nothing reads needs no
+ * bump. The rule exists because a stale stored value would make the graph answer
+ * wrongly; a table that no query and no write path touches makes nothing both true and
+ * stale, so a bump would only cost every machine a full rebuild (and another pass down
+ * `peekProjectMeta`'s path) for zero correction.
  *
  * A stored value that differs makes {@link openGraph} rebuild from scratch. Do not
  * add migrations for a derived graph: the rebuild is the migration.
@@ -38,8 +43,14 @@ import { dirname } from 'node:path'
  * an existing installation would answer "no implementers" forever. The table shape is
  * identical, which is exactly why this needs a bump rather than an assumption — a
  * derived graph is only as good as the pass that filled it.
+ *
+ * Version 4 adds `symbols.end_line`, and it is the same story with a sharper edge: a
+ * graph written by an older build has the column's absence filled with zeros, and the
+ * incremental pass would keep those zeros for every unchanged file — so a source slice
+ * would collapse to one line for the whole repository while the tool reported a
+ * successful read. The rebuild is what makes the column true.
  */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 /** One indexed file, as the incremental pass sees it. */
 export interface FileRecord {
@@ -87,6 +98,16 @@ export interface SymbolRecord {
   readonly kind: SymbolKind
   /** 1-based line of the declaration. */
   readonly line: number
+  /**
+   * 1-based line of the declaration's LAST line, inclusive.
+   *
+   * The pair `line`..`endLine` is the whole of what the graph knows about a
+   * declaration's extent, and it is what a query uses to cut the source out of
+   * the file at read time. It is NOT part of the id for the same reason `line`
+   * is not: inserting a line inside a function must not retire the references
+   * other files hold to it.
+   */
+  readonly endLine: number
   /** The enclosing symbol's name, when the grammar nests one (a method in a class). */
   readonly parent: string | undefined
 }
@@ -175,12 +196,17 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE TABLE IF NOT EXISTS symbols (
-  id     TEXT PRIMARY KEY,
-  path   TEXT NOT NULL,
-  name   TEXT NOT NULL,
-  kind   TEXT NOT NULL,
-  line   INTEGER NOT NULL,
-  parent TEXT
+  id       TEXT PRIMARY KEY,
+  path     TEXT NOT NULL,
+  name     TEXT NOT NULL,
+  kind     TEXT NOT NULL,
+  line     INTEGER NOT NULL,
+  -- The declaration's LAST line, so a tool can hand a model the source it needs
+  -- without a search. Only the graph's own extent is stored; the bytes are read
+  -- at query time (see source.ts), because a copy here would be a second, staler
+  -- version of the repository.
+  end_line INTEGER NOT NULL,
+  parent   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -245,13 +271,52 @@ export function openGraph(file: string): Graph {
   db.exec('PRAGMA foreign_keys = ON')
 
   const stored = readMetaValue(db, 'schema_version')
-  if (stored !== undefined && stored !== String(SCHEMA_VERSION)) {
+  // A schema that EXISTS without a matching version is rebuilt, and "no version row"
+  // counts as a mismatch rather than as a fresh database. The difference matters since
+  // v4: a version-3 `symbols` table has no `end_line`, so every write into it throws —
+  // and if the absent version row meant "nothing to do", that graph would throw on every
+  // open for ever, which is the one outcome a derived store must never have (see
+  // `openOrRecreate`). A genuinely first open has no `symbols` table either, so this
+  // still creates rather than drops.
+  const hasSchema = hasTable(db, 'symbols')
+  // `symbols_fts` is not part of the schema any more (a word-part hit is always a
+  // substring hit, so the index bought no recall). The drop is UNCONDITIONAL and
+  // idempotent: a graph built by an intermediate build carries the table plus its four
+  // shadow tables at the SAME version, so a version-gated drop would never reach it and
+  // the space would sit on disk for ever. On a clean or first-open database this is a
+  // no-op, which is why it is not worth a bump — see the note on SCHEMA_VERSION.
+  db.exec('DROP TABLE IF EXISTS symbols_fts')
+  const rebuild = hasSchema && stored !== String(SCHEMA_VERSION)
+  // The rebuild drops derived data — and `meta.project` is NOT derived data: it is the
+  // only record of which project this graph describes, and the directory name is a hash
+  // that cannot be reversed. Dropping it loses the PROJECT, not just its index: measured
+  // on a real machine, a version bump emptied the settings list and left twelve graph
+  // directories that no longer knew their own path. So the identity is read first and
+  // written back after, with its counts zeroed — the rows they describe are gone, and a
+  // page showing "3000 files" over an empty graph would be the wrong kind of reassuring.
+  // The next pass fills them in.
+  const identity = rebuild ? readProjectMeta(db) : undefined
+  if (rebuild) {
     db.exec('DROP TABLE IF EXISTS edges')
     db.exec('DROP TABLE IF EXISTS symbols')
     db.exec('DROP TABLE IF EXISTS files')
     db.exec('DROP TABLE IF EXISTS meta')
   }
   db.exec(SCHEMA)
+  if (identity !== undefined) {
+    writeProjectMeta(db, {
+      ...identity,
+      indexedAt: 0,
+      fileCount: 0,
+      symbolCount: 0,
+      edgeCount: 0,
+      truncated: false,
+      removalSkipped: false,
+      missingLanguage: 0,
+      noRules: 0,
+      parseErrors: 0,
+    })
+  }
   writeMetaValue(db, 'schema_version', String(SCHEMA_VERSION))
 
   return { db, close: () => { db.close() } }
@@ -348,6 +413,41 @@ export function readProjectMeta(db: DatabaseSync): ProjectMeta | undefined {
   return parsed as ProjectMeta
 }
 
+/**
+ * Read a graph file's project metadata WITHOUT opening it as a graph.
+ *
+ * The difference from {@link openGraph} is the whole point, and it is not an
+ * optimisation: `openGraph` applies {@link SCHEMA_VERSION}, which DROPS every table
+ * when the stored version differs. A caller that only wants to know which projects
+ * exist would therefore erase each project's `meta` row — `cwd` included — and since
+ * the directory name is `sha256(cwd)`, that root is unrecoverable. Measured: after a
+ * schema bump the settings list came up empty and every graph had to be re-opened by
+ * hand, one project at a time, for the list to come back.
+ *
+ * So this opens the file, reads, and closes: no schema, no pragma, no write. A version
+ * mismatch is invisible here on purpose — an OLD graph still knows its root, and the
+ * list must survive the upgrade. The rebuild happens where it belongs, the first time
+ * the project is actually opened.
+ *
+ * A file that is not a database is skipped (`undefined`), not repaired: fixing it is
+ * the opener's job, and a listing must not delete anything.
+ *
+ * @param file - the absolute path of a `graph.db`.
+ * @returns the recorded metadata, or `undefined` when it is absent, unusable or locked.
+ */
+export function peekProjectMeta(file: string): ProjectMeta | undefined {
+  let db: DatabaseSync | undefined
+  try {
+    db = new DatabaseSync(file, { timeout: 2_000 })
+    // Opening is lazy, so the first statement is what proves the file is a database.
+    return readProjectMeta(db)
+  } catch {
+    return undefined
+  } finally {
+    try { db?.close() } catch { /* already closed by a failed open */ }
+  }
+}
+
 /** A value a query may bind. All queries here bind parameters; none interpolate. */
 export type SqlValue = string | number | bigint | null | Uint8Array
 
@@ -388,7 +488,10 @@ export function readFiles(db: DatabaseSync): Map<string, FileRecord> {
  * @returns the symbol rows, in no particular order.
  */
 export function symbolsOf(db: DatabaseSync): SymbolRecord[] {
-  return allRows<SymbolRecord>(db, 'SELECT id, path, name, kind, line, parent FROM symbols')
+  // `end_line` is aliased because the row is handed back as a `SymbolRecord`
+  // (camelCase); every other column happens to have the same name in both worlds,
+  // which is exactly why the one that does not needs the alias rather than a cast.
+  return allRows<SymbolRecord>(db, 'SELECT id, path, name, kind, line, end_line AS endLine, parent FROM symbols')
 }
 
 /**
@@ -448,9 +551,9 @@ export function replaceFile(
     db.prepare('INSERT INTO files (path, mtime, size, hash, lang) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, size = excluded.size, hash = excluded.hash, lang = excluded.lang')
       .run(file.path, file.mtime, file.size, file.hash, file.lang)
 
-    const insertSymbol = db.prepare('INSERT INTO symbols (id, path, name, kind, line, parent) VALUES (?, ?, ?, ?, ?, ?)')
+    const insertSymbol = db.prepare('INSERT INTO symbols (id, path, name, kind, line, end_line, parent) VALUES (?, ?, ?, ?, ?, ?, ?)')
     for (const symbol of symbols) {
-      insertSymbol.run(symbol.id, symbol.path, symbol.name, symbol.kind, symbol.line, symbol.parent ?? null)
+      insertSymbol.run(symbol.id, symbol.path, symbol.name, symbol.kind, symbol.line, symbol.endLine, symbol.parent ?? null)
     }
     // OR IGNORE, not a bare INSERT: the primary key is what collapses a
     // duplicate observation, and a parse that reports the same reference twice

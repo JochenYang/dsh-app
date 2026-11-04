@@ -37,7 +37,7 @@ const file = (path: string, lang = 'typescript'): FileRecord => ({ path, mtime: 
 
 const sym = (path: string, name: string, line = 1, parent?: string): SymbolRecord => ({
   id: `${path}#function:${parent === undefined ? '' : `${parent}.`}${name}`,
-  path, name, kind: 'function', line, parent,
+  path, name, kind: 'function', line, endLine: line, parent,
 })
 
 /** A fresh graph for one case. */

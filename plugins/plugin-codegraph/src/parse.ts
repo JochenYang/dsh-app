@@ -26,6 +26,25 @@
 import type { EdgeRecord, SymbolKind, SymbolRecord } from './store.ts'
 
 /**
+ * One way a node type declares a symbol.
+ *
+ * A grammar with one construct per node type needs one rule per type; a grammar that
+ * spells everything as the same node (Elixir) needs several, told apart by {@link match}.
+ */
+export interface DeclarationRule {
+  readonly kind: SymbolKind
+  readonly nameField?: string
+  readonly nameChild?: string
+  readonly match?: {
+    /** The field whose TEXT must be one of `anyOf` (`call.target` → `def`). */
+    readonly field?: string
+    readonly anyOf?: readonly string[]
+    /** A named child (direct) that must be present (`function_definition`). */
+    readonly anyChildType?: string
+  }
+}
+
+/**
  * How one grammar names the things this plugin looks for.
  *
  * `declarations` maps a tree-sitter node type to the symbol kind it declares and
@@ -42,11 +61,30 @@ export interface GrammarShape {
    * fall back to. Exactly one of the two is required; a row with neither would
    * silently never produce a symbol, which the per-declaration suite catches.
    */
-  readonly declarations: Readonly<Record<string, { kind: SymbolKind, nameField?: string, nameChild?: string }>>
+  readonly declarations: Readonly<Record<string, DeclarationRule | readonly DeclarationRule[]>>
   /** Node types that wrap a body whose declarations belong to the enclosing symbol. */
   readonly scopes: readonly string[]
-  /** Node type used for a call, and the field naming the callee. */
+  /**
+   * Node type used for a call, and the field naming the callee.
+   *
+   * An empty `field` means the grammar names the callee as a CHILD rather than
+   * through a field — the same convention `import` below uses. Kotlin's and
+   * Swift's `call_expression` carry no fields at all (measured: the node's whole
+   * child list is the callee expression plus a `call_suffix`), so a field name
+   * there would never match and every call site would silently vanish. The first
+   * named child is the callee in both grammars; a member call arrives as a
+   * `navigation_expression`, whose name the callee rules do not resolve, so it
+   * yields no edge rather than a wrong one.
+   */
   readonly call: { readonly type: string, readonly field: string } | undefined
+  /**
+   * Further call node types, because one grammar may spell an invocation two ways.
+   *
+   * Objective-C is the case: `[self area]` is a `message_expression` (field `method`) and
+   * `helper(x)` is a `call_expression` (field `function`). One row would drop about a
+   * fifth of the file's calls, silently.
+   */
+  readonly alsoCall?: readonly { readonly type: string, readonly field: string }[]
   /** Node type used for an import statement, and the field naming the target. */
   readonly import: { readonly type: string, readonly field: string } | undefined
   /**
@@ -80,6 +118,18 @@ export interface GrammarShape {
    */
   readonly typeRef?: readonly string[]
   /**
+   * Heritage carried by a FIELD on the declaration itself, rather than by a clause node.
+   *
+   * Objective-C's superclass is `class_interface.superclass`, and Groovy's is
+   * `class_definition.superclass` — no clause node exists, so a `heritage` table keyed by
+   * node type can never match them.
+   */
+  readonly heritageFields?: readonly {
+    readonly parent: string
+    readonly field: string
+    readonly kind: 'extends' | 'implements'
+  }[]
+  /**
    * How an export names what it exports, when the grammar distinguishes it.
    *
    * A module's public surface is what other packages may depend on, and it is not
@@ -110,9 +160,24 @@ export interface GrammarShape {
  * broken once, and why `tests/parse.test.ts` now has one case per declaration
  * kind rather than one case per language.
  */
+/**
+ * The TypeScript family's ONE table.
+ *
+ * Hoisted rather than built per id, because these four ids parse the same syntax: `.ts`,
+ * `.tsx` (JSX is a superset, and the table names no JSX-only declaration), and the
+ * `<script>` block of a `.vue`/`.svelte` file, which `sfc.ts` masks into place before
+ * this table is consulted. Sharing the object is what lets the suite tell an alias from
+ * a table that merely looks alike: an id that grew its own rows would have its own
+ * object and would be required to bring samples with it.
+ */
+const TYPESCRIPT_FAMILY = typescriptShape()
+
 export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
-  typescript: typescriptShape(),
-  tsx: typescriptShape(),
+  typescript: TYPESCRIPT_FAMILY,
+  tsx: TYPESCRIPT_FAMILY,
+  vue: TYPESCRIPT_FAMILY,
+  svelte: TYPESCRIPT_FAMILY,
+  astro: TYPESCRIPT_FAMILY,
   // JavaScript has no `interface` / `type` / `enum` declarations, so it gets its
   // own table rather than a copy of TypeScript's: a row the grammar cannot
   // produce is a row that silently never fires.
@@ -151,6 +216,11 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     },
     scopes: ['class_body', 'interface_body', 'block'],
     call: { type: 'method_invocation', field: 'name' },
+    // `new Foo()` is `object_creation_expression` in this grammar, with the type on
+    // its `type` field — measured, not guessed (`scratch/cg-new-shape.mjs`). A
+    // constructor call is how a Java class is used, so leaving it out made every
+    // class look uncalled.
+    alsoCall: [{ type: 'object_creation_expression', field: 'type' }],
     // `import_declaration` has no fields; the target is a child node. The
     // `field` is empty and the extractor falls back to the first scoped name.
     import: { type: 'import_declaration', field: '' },
@@ -174,6 +244,9 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     },
     scopes: ['declaration_list', 'block'],
     call: { type: 'invocation_expression', field: 'function' },
+    // Same measured reason as Java: C#'s `new Foo()` is `object_creation_expression`
+    // with the type on its `type` field.
+    alsoCall: [{ type: 'object_creation_expression', field: 'type' }],
     import: { type: 'using_directive', field: 'name' },
     // C# puts base types AND implemented interfaces in one `base_list`, so the
     // distinction the other languages make is not available here. Recorded as
@@ -255,6 +328,162 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
     call: { type: 'command', field: 'command_name' },
     import: undefined,
   },
+  // ---- Kotlin, Swift, Dart, Scala -------------------------------------------
+  //
+  // These four grammars are BUILT, not downloaded: `tree-sitter build --wasm`
+  // over the upstream grammar sources, shipped in `grammars/` like the other
+  // eight. Every node name below was read off a real parse of a sample file
+  // (the census in `scratch/cg-grammar-dump.ts`), never from memory: a name the
+  // grammar does not produce yields no symbol and no error.
+  //
+  // Kotlin declares NO `name` field on any declaration — `class_declaration`,
+  // `function_declaration`, `object_declaration` and `type_alias` carry their
+  // name as a `type_identifier` / `simple_identifier` CHILD, and a `val`/`var`
+  // wraps it in a `variable_declaration` child whose TEXT is the name. That is
+  // what `nameChild` is for, and a `nameField: 'name'` here would have produced
+  // an empty symbol table that looked like an unsupported language.
+  kotlin: {
+    declarations: {
+      // One node type for `class`, `interface`, `data class` and `enum class`:
+      // the grammar distinguishes them by modifier, not by node type.
+      class_declaration: { kind: 'class', nameChild: 'type_identifier' },
+      object_declaration: { kind: 'class', nameChild: 'type_identifier' },
+      // Also a class's methods: the parent in the id (`Square.area`) is what
+      // tells a member from a top-level function, which is the same trade the
+      // Swift and Dart rows below make — one `kind` per grammar node.
+      function_declaration: { kind: 'function', nameChild: 'simple_identifier' },
+      property_declaration: { kind: 'variable', nameChild: 'variable_declaration' },
+      // A primary-constructor `val` (`class Square(val side: Double)`) is the
+      // usual way a Kotlin class declares a field, so it is a declaration.
+      class_parameter: { kind: 'variable', nameChild: 'simple_identifier' },
+      type_alias: { kind: 'type', nameChild: 'type_identifier' },
+    },
+    scopes: ['class_body', 'enum_class_body', 'function_body', 'statements'],
+    // No field on `call_expression`; the callee is its first named child.
+    call: { type: 'call_expression', field: '' },
+    import: { type: 'import_header', field: '' },
+    // `: Base(0), Shape` arrives as `delegation_specifier` nodes, and the grammar
+    // does not say which entry is the superclass and which an interface — the
+    // same C# situation, recorded as `extends` rather than guessed apart.
+    heritage: { extends: ['delegation_specifier'] },
+    typeRef: ['user_type'],
+  },
+  // Swift spells every nominal type with ONE node: `class`, `struct`, `enum` and
+  // `extension` all parse as `class_declaration` (measured — a sample with all
+  // four produced five `class_declaration` nodes and no `struct_declaration`).
+  // A struct or enum therefore lands under `kind: 'class'`, which is the honest
+  // reading of a grammar that does not tell them apart.
+  swift: {
+    declarations: {
+      class_declaration: { kind: 'class', nameField: 'name' },
+      protocol_declaration: { kind: 'interface', nameField: 'name' },
+      function_declaration: { kind: 'function', nameField: 'name' },
+      // A protocol requirement has no body and its own node type; without this row
+      // a protocol's whole surface is missing (`area` in `protocol Shape`).
+      protocol_function_declaration: { kind: 'method', nameField: 'name' },
+      // The grammar gives `init` a `name` field holding the keyword itself, so the
+      // constructor is addressable as `C.init` under its class.
+      init_declaration: { kind: 'method', nameField: 'name' },
+      // `let id: Int` — the `name` field's node is a `pattern`, whose text is the
+      // identifier; a tuple pattern (`let (a, b)`) is rejected by the extractor's
+      // bracket guard rather than stored as a name.
+      property_declaration: { kind: 'variable', nameField: 'name' },
+      typealias_declaration: { kind: 'type', nameField: 'name' },
+    },
+    scopes: ['class_body', 'enum_class_body', 'protocol_body', 'statements'],
+    call: { type: 'call_expression', field: '' },
+    import: { type: 'import_declaration', field: '' },
+    heritage: { extends: ['inheritance_specifier'] },
+    typeRef: ['type_annotation'],
+  },
+  // Dart has no call node: an invocation is an `identifier` followed by a
+  // `selector` that holds only the `argument_part`, so the callee sits OUTSIDE
+  // the node that would be the call. `call` is therefore undefined rather than
+  // pointed at `selector`, where the first child is the arguments and every call
+  // would resolve to nothing. Call edges for Dart need a rule this shape does not
+  // have; the declarations below are unaffected.
+  dart: {
+    declarations: {
+      class_definition: { kind: 'class', nameField: 'name' },
+      mixin_declaration: { kind: 'class', nameChild: 'identifier' },
+      enum_declaration: { kind: 'enum', nameField: 'name' },
+      extension_declaration: { kind: 'class', nameField: 'name' },
+      // Covers a top-level function AND a method (the grammar wraps both in
+      // `function_signature`), so one kind has to serve both — see the Kotlin row.
+      function_signature: { kind: 'function', nameField: 'name' },
+      // A field or local WITH an initialiser (`final local = x + 1`) and one
+      // without (`final double side;`) are different nodes in this grammar.
+      initialized_variable_definition: { kind: 'variable', nameField: 'name' },
+      initialized_identifier: { kind: 'variable', nameChild: 'identifier' },
+      constructor_signature: { kind: 'method', nameField: 'name' },
+      type_alias: { kind: 'type', nameChild: 'type_identifier' },
+    },
+    scopes: ['class_body', 'extension_body', 'enum_body', 'block'],
+    call: undefined,
+    import: { type: 'import_specification', field: '' },
+    heritage: { extends: ['superclass'], implements: ['interfaces'] },
+  },
+  // Scala names each construct with its OWN node type — unlike Kotlin, where one
+  // `class_declaration` serves `class`, `interface` and `enum`. A `case class` is not
+  // a node of its own either: it is a `class_definition` carrying a `case` MODIFIER
+  // (measured — a sample holding `abstract class`, `case class` and `class` produced
+  // three `class_definition` nodes and no `case_class_definition`).
+  scala: {
+    declarations: {
+      class_definition: { kind: 'class', nameField: 'name' },
+      // A trait is a contract, so it is an `interface` — the same reading Swift's
+      // `protocol_declaration` gets.
+      trait_definition: { kind: 'interface', nameField: 'name' },
+      enum_definition: { kind: 'enum', nameField: 'name' },
+      // A Scala `object` is a singleton module rather than a class. Recorded as
+      // `class` anyway, because Kotlin's `object_declaration` already is and one
+      // convention for one construct beats two: a companion object is addressed
+      // through its type, and `module` here would split that pair.
+      object_definition: { kind: 'class', nameField: 'name' },
+      // Serves a top-level `def` AND a method (the parent in the id tells them apart),
+      // the same trade the Kotlin and Dart rows make.
+      function_definition: { kind: 'function', nameField: 'name' },
+      // A body-less `def` in a trait or an abstract class is its own node type;
+      // without this row a trait's whole surface is missing (`area` in `trait Shape`).
+      function_declaration: { kind: 'method', nameField: 'name' },
+      // `val entries: Int = 0` names itself through a `pattern` field, NOT `name` — a
+      // `nameField: 'name'` here would produce no symbol at all. A destructuring
+      // pattern (`val (a, b) = …`) is rejected by the extractor's bracket guard
+      // instead of being stored as a name.
+      val_definition: { kind: 'variable', nameField: 'pattern' },
+      // `given ordering: Ordering[Point] = …`: a named value definition. An ANONYMOUS
+      // given has no `name` field, so it produces no symbol — which is correct, since
+      // there is no name for a caller to reference.
+      given_definition: { kind: 'variable', nameField: 'name' },
+      // A primary-constructor `val` (`class Square(val side: Double)`) is how a Scala
+      // class usually declares a field, and it is the only thing that makes a `case
+      // class`'s parameters addressable at all.
+      class_parameter: { kind: 'variable', nameField: 'name' },
+      type_definition: { kind: 'type', nameField: 'name' },
+    },
+    scopes: ['template_body', 'enum_body', 'block'],
+    // `call_expression` DOES carry fields here, unlike Kotlin's and Swift's: `function`
+    // is the callee (`identifier`, or a `field_expression` for `square.area()`, whose
+    // own `field` the callee rules resolve) and `arguments` is the argument list.
+    call: { type: 'call_expression', field: 'function' },
+    // `new Square(2)` is `instance_expression`, and its type is the node's FIRST
+    // named child rather than a field — measured. An empty `field` is the extractor's
+    // existing "first named child" convention (Kotlin and Swift use it for callees).
+    alsoCall: [{ type: 'instance_expression', field: '' }],
+    // `import scala.collection.mutable.ListBuffer` marks its dotted path with a
+    // REPEATED `path` field — one `identifier` child per segment, four of them here —
+    // so `childForFieldName('path')` answers the FIRST segment. Nothing better is
+    // expressible through this table, and nothing is lost by it: `resolveImport` only
+    // resolves `./`-relative specifiers, so a dotted Scala import produces no `imports`
+    // edge either way. The row stays because a statement the graph did not record is
+    // one a later resolver change cannot find.
+    import: { type: 'import_declaration', field: 'path' },
+    // `extends Base("square") with Shape` is ONE node with ONE repeated `type` field,
+    // so the grammar does not say which entry is the superclass and which a trait — the
+    // same C# and Kotlin situation, recorded as `extends` rather than guessed apart. A
+    // wrong `implements` would answer "who implements this trait" with derivations.
+    heritage: { extends: ['extends_clause'] },
+  },
   // CSS, INI and regex are DOWNLOADABLE and PARSEABLE but carry no extraction
   // shape on purpose. Their "declarations" are a selector, a config key and a
   // regular-expression fragment: none names a thing a caller can reference, so an
@@ -264,6 +493,157 @@ export const GRAMMAR_SHAPES: Readonly<Record<string, GrammarShape>> = {
   css: { declarations: {}, scopes: [], call: undefined, import: undefined },
   ini: { declarations: {}, scopes: [], call: undefined, import: undefined },
   regex: { declarations: {}, scopes: [], call: undefined, import: undefined },
+  // ---- lua: Lua's call field is `name`; there is no import node (`require` is a plain call).
+  lua: {
+    declarations: {
+      function_declaration: { kind: 'function', nameField: 'name' },
+      // `local utils = require("example.utils")`: the name is the first entry of the
+      // assignment's variable list, two nodes down.
+      variable_declaration: { kind: 'variable', nameChild: 'assignment_statement > variable_list > #first' },
+      field: { kind: 'variable', nameField: 'name' },
+      method_index_expression: { kind: 'method', nameField: 'method' },
+    },
+    scopes: ['function_declaration', 'do_statement'],
+    // The field is `name`, NOT `function` (Lua's parser names it that way), and it holds
+    // an identifier, a dot_index_expression or a method_index_expression — so the callee
+    // is the field's whole text, not an identifier child.
+    call: { type: 'function_call', field: 'name' },
+    import: undefined,
+  },
+  // ---- zig: A container is a VALUE of a const, so its name lives on the enclosing declaration.
+  zig: {
+    declarations: {
+      function_declaration: { kind: 'function', nameField: 'name' },
+      // `const Shape = struct { … }`, `const Color = enum { … }`, `const Value = union(enum) { … }`:
+      // the container is a VALUE, so the name lives on the enclosing variable declaration.
+      // Recorded as `constant` — the three container rows would each need "the value is a
+      // struct/enum/union", which this table cannot express, and the symbol is findable
+      // either way.
+      variable_declaration: { kind: 'constant', nameChild: 'identifier' },
+      container_field: { kind: 'variable', nameField: 'name' },
+    },
+    scopes: ['struct_declaration', 'enum_declaration', 'union_declaration'],
+    call: { type: 'call_expression', field: 'function' },
+    import: undefined,
+  },
+  // ---- elixir: no declaration nodes exist — `defmodule`, `def`, `defimpl`, `@type` are all
+  // `call`, told apart by target text, so one node type carries an ORDERED list of rules.
+  // No call row and no import row on purpose: every macro invocation is a `call` too, so an
+  // edge taken from this node type would be mostly noise.
+  elixir: {
+    declarations: {
+      call: [
+        { kind: 'module', nameChild: 'arguments > #first', match: { field: 'target', anyOf: ['defmodule'] } },
+        // `def area(shape) do … end`: the head is a call inside the arguments, and its own
+        // target is the function name.
+        { kind: 'function', nameChild: 'arguments > call > field:target', match: { field: 'target', anyOf: ['def', 'defp', 'defmacro', 'defmacrop'] } },
+        { kind: 'interface', nameChild: 'arguments > #first', match: { field: 'target', anyOf: ['defprotocol', 'defimpl'] } },
+        // `@type t :: %__MODULE__{…}` — the attribute wraps the call, whose first argument
+        // is an operator, so the name is that operator's `left`.
+        { kind: 'variable', nameChild: 'arguments > #first > field:left', match: { field: 'target', anyOf: ['type', 'typep', 'opaque'] } },
+      ],
+    },
+    scopes: ['do_block'],
+    call: undefined,
+    import: undefined,
+  },
+  // ---- julia: No field names anywhere: names sit inside `type_head` and the signature call.
+  julia: {
+    declarations: {
+      module_definition: { kind: 'module', nameField: 'name' },
+      struct_definition: { kind: 'struct', nameChild: 'type_head > **identifier' },
+      abstract_definition: { kind: 'type', nameChild: 'type_head > **identifier' },
+      // The name is inside the signature's call, one level down in the simple case and
+      // wrapped in a typed_expression when the return type is annotated.
+      function_definition: { kind: 'function', nameChild: 'signature > **call_expression > #first' },
+      // `helper(x) = x * 2`: the short form is an ASSIGNMENT. The path only resolves when
+      // a call is present, which keeps `x = 5` out.
+      assignment: { kind: 'function', nameChild: 'call_expression > #first' },
+      const_statement: { kind: 'constant', nameChild: 'assignment > #first' },
+    },
+    scopes: ['module_definition', 'function_definition'],
+    // `call_expression` carries NO fields: its children are the callee and the argument
+    // list, so the callee is the first named child.
+    call: { type: 'call_expression', field: '' },
+    import: undefined,
+  },
+  // ---- haskell: `function` is both a binding and a type; only the binding has a name.
+  haskell: {
+    declarations: {
+      // `function` is BOTH a binding and the type in a signature, and only the binding
+      // has a name — so the row requires that field to exist. `signature` is deliberately
+      // NOT a row: it would emit a second symbol for the same function.
+      function: { kind: 'function', nameField: 'name', match: { field: 'name' } },
+      data_type: { kind: 'struct', nameField: 'name' },
+      newtype: { kind: 'struct', nameField: 'name' },
+      type_synonym: { kind: 'type', nameField: 'name' },
+      class: { kind: 'interface', nameField: 'name' },
+    },
+    scopes: ['where'],
+    // Juxtaposition IS application here, so `apply` covers calls, constructor application
+    // and partial application alike.
+    call: { type: 'apply', field: 'function' },
+    import: { type: 'import', field: 'module' },
+  },
+  // ---- r: The function node's `name` field is the `function` keyword — the name is on the assignment.
+  r: {
+    declarations: {
+      // `area <- function(shape) …`: the function node's own `name` field is the
+      // `function` KEYWORD, so the name comes from the assignment. The operator guard is
+      // not cosmetic: measured, without it `self$x <- x` and four other assignments became
+      // functions (10 candidates before, 3 after).
+      binary_operator: {
+        kind: 'function',
+        nameChild: 'field:lhs',
+        match: { field: 'operator', anyOf: ['<-', '<<-', '=', '->', '->>'], anyChildType: 'function_definition' },
+      },
+      // A named argument whose value is a function: the R6/R5 method form, which hides
+      // inside `list(...)`.
+      argument: { kind: 'method', nameField: 'name', match: { anyChildType: 'function_definition' } },
+      parameter: { kind: 'variable', nameField: 'name' },
+    },
+    scopes: ['function_definition', 'braced_expression'],
+    call: { type: 'call', field: 'function' },
+    import: undefined,
+  },
+  // ---- objc: Every name is positional, and there are two call node types.
+  objc: {
+    declarations: {
+      // No Objective-C declaration has a `name` field; every name is positional.
+      class_interface: { kind: 'class', nameChild: 'identifier' },
+      class_implementation: { kind: 'class', nameChild: 'identifier' },
+      protocol_declaration: { kind: 'interface', nameChild: 'identifier' },
+      method_definition: { kind: 'method', nameChild: 'identifier' },
+      method_declaration: { kind: 'method', nameChild: 'identifier' },
+      property_declaration: { kind: 'variable', nameChild: 'struct_declaration > struct_declarator > #first' },
+      instance_variable: { kind: 'variable', nameChild: 'struct_declaration > struct_declarator > #first' },
+      function_definition: { kind: 'function', nameChild: 'field:declarator > field:declarator' },
+    },
+    scopes: ['class_implementation', 'class_interface', 'protocol_declaration'],
+    // TWO call node types: `[self area]` is a message_expression (field `method`) and
+    // `helper(x)` is a call_expression (field `function`). One row would drop about a fifth
+    // of a file's calls, silently.
+    call: { type: 'message_expression', field: 'method' },
+    alsoCall: [{ type: 'call_expression', field: 'function' }],
+    // The superclass is a FIELD on the class node, never a clause node.
+    heritageFields: [{ parent: 'class_interface', field: 'superclass', kind: 'extends' }],
+    import: { type: 'preproc_include', field: 'path' },
+  },
+  // ---- groovy: Names come from a field called `function`; the grammar has known holes (see the table).
+  groovy: {
+    declarations: {
+      class_definition: { kind: 'class', nameField: 'name' },
+      // Groovy names a method through a field called `function`, not `name`.
+      function_definition: { kind: 'method', nameField: 'function' },
+      function_declaration: { kind: 'method', nameField: 'function' },
+      declaration: { kind: 'variable', nameField: 'name' },
+    },
+    scopes: ['class_definition'],
+    call: { type: 'function_call', field: 'function' },
+    alsoCall: [{ type: 'juxt_function_call', field: 'function' }],
+    heritageFields: [{ parent: 'class_definition', field: 'superclass', kind: 'extends' }],
+    import: { type: 'groovy_import', field: 'import' },
+  },
 }
 
 /** The TypeScript shape, shared by the three JS-family ids. */
@@ -287,6 +667,13 @@ function typescriptShape(): GrammarShape {
     },
     scopes: ['class_body', 'object', 'statement_block'],
     call: { type: 'call_expression', field: 'function' },
+    // `new Foo()` is a DIFFERENT node, and leaving it out is not a small omission:
+    // measured in a real session on a TypeScript monorepo, the most-used class in the
+    // repository answered "0 call site(s)" because every use of it was a constructor
+    // call, and the model then read twenty files by hand. The node type and its
+    // `constructor` field are measured from the grammar, not inferred
+    // (`scratch/cg-new-shape.mjs`).
+    alsoCall: [{ type: 'new_expression', field: 'constructor' }],
     import: { type: 'import_statement', field: 'source' },
     heritage: { extends: ['extends_clause'], implements: ['implements_clause'] },
     typeRef: ['type_annotation'],
@@ -313,6 +700,9 @@ function javascriptShape(): GrammarShape {
     },
     scopes: ['class_body', 'object', 'statement_block'],
     call: { type: 'call_expression', field: 'function' },
+    // Same measured reason as the TypeScript family above: `new Foo()` is not a
+    // `call_expression`, so without this row every constructed class has no callers.
+    alsoCall: [{ type: 'new_expression', field: 'constructor' }],
     import: { type: 'import_statement', field: 'source' },
   }
 }
@@ -353,6 +743,27 @@ export const SUPPORTED_LANGUAGE_IDS: readonly string[] = Object.entries(GRAMMAR_
   .map(([id]) => id)
 
 /**
+ * What to answer for a file whose grammar is NOT installed.
+ *
+ * Two different refusals, and the settings page promises different things for them:
+ * `missing` tells the user a download fixes this, `noShape` tells them nothing will.
+ * A language whose extraction table is empty (CSS, INI, a bare regex file) declares no
+ * symbol by design, so offering it as a download is advice that cannot work — measured
+ * on a real project, ten `.css`/`.scss` files were reported as "skipped because the
+ * language is not installed — download it below", and downloading it changed nothing.
+ *
+ * @param languageId - the language the file maps to.
+ * @param grammarInstalled - whether the wasm for it is on disk.
+ * @returns `false` when the parser should decide, otherwise the refusal to report.
+ */
+export function unsupportedFor(languageId: string, grammarInstalled: boolean): false | 'missing' | 'noShape' {
+  // An installed grammar is the parser's question: it answers `noShape` itself when the
+  // table declares nothing.
+  if (grammarInstalled) return false
+  return SUPPORTED_LANGUAGE_IDS.includes(languageId) ? 'missing' : 'noShape'
+}
+
+/**
  * The minimal tree-sitter node surface this module reads.
  *
  * Declared structurally rather than imported from `web-tree-sitter` so a test
@@ -364,6 +775,14 @@ export interface SyntaxNode {
   readonly type: string
   readonly text: string
   readonly startPosition: { readonly row: number }
+  /**
+   * Where the node ENDS. Read for one thing only — a symbol's `endLine`, which is
+   * the half of its extent a source slice needs. A caller driving this module with
+   * a hand-written node must supply it: defaulting it would make every fixture's
+   * declarations look one line long, and the failure would surface as an empty
+   * tool answer rather than a test failure.
+   */
+  readonly endPosition: { readonly row: number }
   readonly namedChildren: readonly SyntaxNode[]
   childForFieldName(name: string): SyntaxNode | null
 }
@@ -476,13 +895,16 @@ export function symbolId(path: string, kind: SymbolKind, name: string, parent: s
 function leafName(node: SyntaxNode): string {
   // Every grammar spells an identifier slightly differently: TS uses
   // `property_identifier` for a member name and a class field, Go uses
-  // `field_identifier`, C uses `identifier`. A list that omits one of them makes
-  // `this.helper()` resolve to nothing — measured as every member call in this
-  // repository producing no edge.
+  // `field_identifier`, C uses `identifier`, and Kotlin/Swift use
+  // `simple_identifier` for every name they carry. A list that omits one of them
+  // makes `this.helper()` resolve to nothing — measured as every member call in this
+  // repository producing no edge, and again as every call site in a Kotlin or Swift
+  // file producing none when a callee is a `simple_identifier`.
   if (node.type === 'identifier'
     || node.type === 'type_identifier'
     || node.type === 'field_identifier'
     || node.type === 'property_identifier'
+    || node.type === 'simple_identifier'
     || node.type === 'name') return node.text
   const declarator = node.childForFieldName('declarator')
   if (declarator !== null) return leafName(declarator)
@@ -622,6 +1044,89 @@ function typeNameOf(node: SyntaxNode): string {
  * @param language - the language id, selecting the shape.
  * @returns what the file declares and calls.
  */
+/**
+ * The node a declaration's name lives on, following a small path.
+ *
+ * `nameField` is a tree-sitter FIELD and `nameChild` used to be a direct child TYPE. That
+ * covers TypeScript and Python; it does not cover a grammar that nests the name two levels
+ * down, which is most of the newer languages here. Measured: Elixir's `def` names itself at
+ * `arguments > call > target`, Julia's struct at `type_head > **identifier`, Objective-C's
+ * properties at `struct_declaration > struct_declarator > #first`, and R's functions not at
+ * all (the node's `name` field is the `function` KEYWORD).
+ *
+ * So a path is a `>`-separated list of segments, each one of:
+ *
+ *   - `TYPE`          first named child of that type
+ *   - `field:NAME`   the child in that field
+ *   - `#first`       the first named child
+ *   - `**TYPE`       the first descendant of that type (depth-first)
+ *
+ * A bare `TYPE` with no `>` behaves exactly as before, so every existing table is
+ * unchanged.
+ *
+ * @param node - the declaration node.
+ * @param path - the path expression from the table.
+ * @returns the name node, or `null` when the path does not resolve.
+ */
+function resolveNameChild(node: SyntaxNode, path: string): SyntaxNode | null {
+  let current: SyntaxNode | null = node
+  for (const segment of path.split('>').map(part => part.trim()).filter(part => part !== '')) {
+    if (current === null) return null
+    current = selectSegment(current, segment)
+  }
+  return current
+}
+
+/** One path segment. */
+function selectSegment(node: SyntaxNode, segment: string): SyntaxNode | null {
+  if (segment === '#first') return node.namedChildren[0] ?? null
+  if (segment.startsWith('field:')) return node.childForFieldName(segment.slice('field:'.length))
+  if (segment.startsWith('**')) return firstDescendant(node, segment.slice(2))
+  return node.namedChildren.find(child => child.type === segment) ?? null
+}
+
+/** The first descendant of a type, depth-first. */
+function firstDescendant(node: SyntaxNode, type: string): SyntaxNode | null {
+  for (const child of node.namedChildren) {
+    if (child.type === type) return child
+    const found = firstDescendant(child, type)
+    if (found !== null) return found
+  }
+  return null
+}
+
+/** Every `{type, field}` a call may be spelled as, in table order. */
+function callShapes(shape: GrammarShape): readonly { readonly type: string, readonly field: string }[] {
+  return shape.call === undefined
+    ? shape.alsoCall ?? []
+    : [shape.call, ...(shape.alsoCall ?? [])]
+}
+
+/**
+ * Does a node satisfy a declaration row's `match` discriminator?
+ *
+ * Absent means yes — every other language's rows declare by node type alone. Present is
+ * how one node type with five meanings (Elixir's `call`) or one node type that is a
+ * function only under an operator (R's `binary_operator`) becomes expressible.
+ *
+ * @param match - the row's discriminator, if any.
+ * @param node - the node the row matched by type.
+ * @returns whether this node is really that declaration.
+ */
+function matchesDeclaration(
+  match: { readonly field?: string, readonly anyOf?: readonly string[], readonly anyChildType?: string } | undefined,
+  node: SyntaxNode,
+): boolean {
+  if (match === undefined) return true
+  if (match.anyChildType !== undefined && !node.namedChildren.some(child => child.type === match.anyChildType)) return false
+  if (match.field !== undefined) {
+    const field = node.childForFieldName(match.field)
+    if (field === null) return false
+    if (match.anyOf !== undefined && !match.anyOf.includes(field.text.trim())) return false
+  }
+  return true
+}
+
 export function extractSymbols(root: SyntaxNode, path: string, language: string): ParsedFile {
   // `hasOwn` rather than a bare index: `node.type` is grammar-controlled text,
   // and a name like `constructor` would otherwise hit `Object.prototype`.
@@ -668,7 +1173,12 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
    * included — two overloads of one name are two different callers.
    */
   const walk = (node: SyntaxNode, parent: string | undefined, ownerId: string | undefined, parentType: string | undefined): void => {
-    const declaration = Object.hasOwn(shape.declarations, node.type) ? shape.declarations[node.type] : undefined
+    const entry = Object.hasOwn(shape.declarations, node.type) ? shape.declarations[node.type] : undefined
+    // ONE node type may declare several things (Elixir's `call` is `defmodule`, `def`,
+    // `defimpl`, `@type` …), so a type maps to an ordered list and the first rule whose
+    // discriminator holds wins. A single rule stays a single rule.
+    const candidates = entry === undefined ? [] : Array.isArray(entry) ? entry : [entry as DeclarationRule]
+    const declaration = candidates.find(rule => matchesDeclaration(rule.match, node))
     if (declaration !== undefined) {
       // A named field first; otherwise the first child of the declared TYPE, which
       // is how PowerShell's `function_statement` (child `function_name`, no
@@ -679,7 +1189,7 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
       const nameNode = fieldNode ?? (
         declaration.nameChild === undefined
           ? null
-          : node.namedChildren.find(child => child.type === declaration.nameChild) ?? null
+          : resolveNameChild(node, declaration.nameChild)
       )
       const rawName = nameNode === null
         ? ''
@@ -698,6 +1208,10 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
           name,
           kind: declaration.kind,
           line: node.startPosition.row + 1,
+          // The extent the grammar itself reports. Not derived from the children:
+          // a declaration with a body ends where the body ends, and a signature
+          // with no body (an interface member, a Rust `fn` prototype) is one line.
+          endLine: node.endPosition.row + 1,
           parent,
         })
         // A declaration's own body belongs to it.
@@ -705,12 +1219,16 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
         return
       }
     }
-    if (shape.call !== undefined && node.type === shape.call.type) {
-      const callee = node.childForFieldName(shape.call.field)
-      if (callee !== null) {
-        const name = calleeName(callee)
-        if (name !== '') calls.push({ name, line: node.startPosition.row + 1, owner: ownerId })
-      }
+    for (const callShape of callShapes(shape)) {
+      if (node.type !== callShape.type) continue
+      // An empty `field` is the child convention (Kotlin, Swift): their
+      // `call_expression` has no fields, so the callee is the first named child.
+      const callee = callShape.field === ''
+        ? firstNamedChild(node)
+        : node.childForFieldName(callShape.field)
+      if (callee === null) continue
+      const name = calleeName(callee)
+      if (name !== '') calls.push({ name, line: node.startPosition.row + 1, owner: ownerId })
     }
     if (shape.import !== undefined && node.type === shape.import.type) {
       // An empty `field` means the grammar names the target as a CHILD node
@@ -730,11 +1248,21 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
           const text = local?.text.trim() ?? ''
           if (text !== '' && !names.includes(text)) names.push(text)
         }
-        // A default import (`import Foo from './x'`) is an `identifier` child that is
-        // not inside a specifier list.
+        // A default import (`import Foo from './x'`) is an `identifier` one level
+        // DOWN, inside the `import_clause` — not a child of the import statement, and
+        // not inside a specifier list. Reading only the statement's own children
+        // missed it, which silently disabled the import layer for every default
+        // import (a class imported the usual way).
+        const addName = (text: string): void => {
+          const name = text.trim()
+          if (name !== '' && !names.includes(name)) names.push(name)
+        }
         for (const child of node.namedChildren) {
-          if (child.type === 'identifier' && child.text.trim() !== '' && !names.includes(child.text.trim())) {
-            names.push(child.text.trim())
+          if (child.type === 'identifier') addName(child.text)
+          else if (child.type === 'import_clause') {
+            for (const inner of child.namedChildren) {
+              if (inner.type === 'identifier') addName(inner.text)
+            }
           }
         }
         imports.push({
@@ -761,6 +1289,15 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
           heritage.push({ from: ownerId, name, line: node.startPosition.row + 1, kind: isExtends ? 'extends' : 'implements' })
         }
       }
+    }
+    // Heritage that lives in a FIELD of the declaration rather than in a clause node:
+    // Objective-C's `class_interface.superclass`, Groovy's `class_definition.superclass`.
+    for (const entry of shape.heritageFields ?? []) {
+      if (node.type !== entry.parent || ownerId === undefined) continue
+      const field = node.childForFieldName(entry.field)
+      if (field === null) continue
+      const name = leafName(field)
+      if (name !== '') heritage.push({ from: ownerId, name, line: field.startPosition.row + 1, kind: entry.kind })
     }
     // A type reference in a signature or a field: `function f(x: Foo)`.
     if (shape.typeRef !== undefined && shape.typeRef.includes(node.type)) {
@@ -861,22 +1398,17 @@ const MAX_SHARED_TARGETS = 10
 /**
  * The declarations one call or type reference should link to.
  *
- * Three layers, most precise first. Measured on a real project, the layers matter
- * unevenly — but the middle one is nearly free and prevents the shape that cost the
- * most in this plugin's history:
+ * Two layers, most precise first. Both matter, and the second exists because the
+ * first is only about the file that is DOING the referring:
  *
  *   1. **Declared in the same file.** A module-private name can only mean the local
  *      declaration; a file-local match is exact, not a guess. `streamWithDeltas` was
  *      declared in production code and in a test harness, and the project-wide
  *      uniqueness rule dropped all thirteen call sites — the local declaration was
  *      right there.
- *   2. **Declared in a file this one imports.** `see base.ts` is the author stating
- *      which declaration they mean, so a match inside an imported file beats a global
- *      count. Not implemented yet: it needs the names an import clause carries, which
- *      the parse does not record, and measured on a real project the heritage targets
- *      that fan out are already type-distinct (`type Container` versus
- *      `class Container`). Recorded here as the next layer rather than pretended.
- *   3. **Unique project-wide**, or few enough to list.
+ *   2. **Unique project-wide**, or few enough to list. The import clause is the layer
+ *      before both of these and lives in {@link linkFor}, because it needs the names
+ *      an import clause carries rather than only the candidate ids.
  *
  * @param targets - every declaration carrying the name.
  * @param sameFile - the declarations of those that live in the referring file.
@@ -892,6 +1424,73 @@ function linkTargets(targets: readonly string[], sameFile: readonly string[] = [
   // all of them buries the real callers, and linking to one would be a guess.
   if (targets.length > MAX_SHARED_TARGETS) return []
   return targets
+}
+
+/**
+ * The names one file imports, and the project paths each came from.
+ *
+ * `import { Base } from './base'` states that THIS file's `Base` is the one in
+ * `./base`, which is the most precise signal available after "declared here". Kept
+ * as its own function because BOTH the call walk and the relationship walk resolve
+ * through it; two copies would be two answers to one question, and the first one to
+ * drift would produce calls that disagree with heritage about what a name means.
+ *
+ * @param parsed - one file's parse.
+ * @param resolveModule - turns a specifier into a project-relative path, or `undefined`.
+ * @returns name → the paths this file imports it from, in clause order.
+ */
+function importedFromMap(
+  parsed: ParsedFile,
+  resolveModule: ((specifier: string) => string | undefined) | undefined,
+): Map<string, string[]> {
+  const importedFrom = new Map<string, string[]>()
+  if (resolveModule === undefined) return importedFrom
+  for (const clause of parsed.imports) {
+    const target = resolveModule(clause.specifier)
+    if (target === undefined) continue
+    for (const name of clause.names) {
+      const list = importedFrom.get(name)
+      if (list === undefined) importedFrom.set(name, [target])
+      else if (!list.includes(target)) list.push(target)
+    }
+  }
+  return importedFrom
+}
+
+/**
+ * The candidate ids one NAME should link to, through all three layers.
+ *
+ * The import layer applies only when it can ANSWER: a clause naming a module that
+ * declares none of this name falls through to the project-wide layer instead of
+ * returning nothing. That is what keeps a barrel honest — `import { Modal } from
+ * './components'` where `components/index.ts` only re-exports (`export * from
+ * './modal'`) says nothing about which file declares `Modal`, so the graph must not
+ * read "not in that file" as "not called anywhere". A converged, empty answer here
+ * would delete a real caller edge and make `codegraph_impact` say "nothing calls
+ * this" about a function with call sites — the worst answer this plugin can give.
+ *
+ * @param name - the call's callee, or the heritage/annotation's type name.
+ * @param resolve - name → every declaration id carrying it.
+ * @param local - this file's declarations, by name.
+ * @param importedFrom - this file's import clauses, by name.
+ * @returns the ids worth an edge.
+ */
+function linkFor(
+  name: string,
+  resolve: (name: string) => readonly string[],
+  local: ReadonlyMap<string, string[]>,
+  importedFrom: ReadonlyMap<string, string[]>,
+): readonly string[] {
+  const sameFile = local.get(name) ?? []
+  if (sameFile.length > 0) return linkTargets(resolve(name), sameFile)
+  const sources = importedFrom.get(name)
+  if (sources !== undefined && sources.length > 0) {
+    const inSources = resolve(name).filter(id => sources.some(source => id.startsWith(`${source}#`)))
+    // Only a HIT narrows. A miss means the module re-exports the name rather than
+    // declaring it, and the clause then carries no information about the target.
+    if (inSources.length > 0) return linkTargets(inSources)
+  }
+  return linkTargets(resolve(name))
 }
 
 /**
@@ -945,43 +1544,16 @@ export function relationEdges(
     if (list === undefined) local.set(symbol.name, [symbol.id])
     else list.push(symbol.id)
   }
-  // IMPORT-GUIDED: the names this file imports, and the module each came from.
+  // IMPORT-GUIDED: the names this file imports, and the module each came from. The
+  // map is shared with the call walk (`importedFromMap`), so a call and a heritage
+  // clause can never disagree about which declaration a name means.
   //
-  // `import { Base } from './base'` states that THIS file's `Base` is the one in
-  // `./base`, which is the most precise signal available and outranks any
-  // project-wide name count. Measured on a real project: `Model` is declared in two
-  // files, so every signature naming it produced TWO edges and the count read about
-  // double the truth. The import clause is what tells them apart.
-  const importedFrom = new Map<string, string[]>()
-  if (resolveModule !== undefined) {
-    for (const clause of parsed.imports) {
-      const target = resolveModule(clause.specifier)
-      if (target === undefined) continue
-      for (const name of clause.names) {
-        const list = importedFrom.get(name)
-        if (list === undefined) importedFrom.set(name, [target])
-        else if (!list.includes(target)) list.push(target)
-      }
-    }
-  }
+  // Measured on a real project: `Model` is declared in two files, so every signature
+  // naming it produced TWO edges and the count read about double the truth. The
+  // import clause is what tells them apart.
+  const importedFrom = importedFromMap(parsed, resolveModule)
   const add = (from: string, name: string, kind: 'extends' | 'implements' | 'type_refs', line: number): void => {
-    const localTargets = local.get(name) ?? []
-    // Layer 1: a declaration in this file is exact.
-    if (localTargets.length > 0) {
-      for (const target of linkTargets(resolve(name), localTargets)) edges.push({ from, to: target, kind, line })
-      return
-    }
-    // Layer 2: the module this file imports the name from. Only the declarations
-    // inside that module are candidates, so a same-named symbol elsewhere is not
-    // even considered.
-    const sources = importedFrom.get(name)
-    if (sources !== undefined && sources.length > 0) {
-      const inSources = resolve(name).filter(id => sources.some(source => id.startsWith(`${source}#`)))
-      for (const target of linkTargets(inSources)) edges.push({ from, to: target, kind, line })
-      return
-    }
-    // Layer 3: unique project-wide, or few enough to list.
-    for (const target of linkTargets(resolve(name))) edges.push({ from, to: target, kind, line })
+    for (const target of linkFor(name, resolve, local, importedFrom)) edges.push({ from, to: target, kind, line })
   }
   for (const relation of parsed.heritage) add(relation.from, relation.name, relation.kind, relation.line)
   // ONE edge per (declaration, type), at its first line.
@@ -1036,18 +1608,33 @@ export function callEdges(
   parsed: ParsedFile,
   callerId: string,
   resolve: (name: string) => readonly string[],
+  /**
+   * Turns a specifier into the project-relative path the graph keys files by.
+   *
+   * The same resolver `imports` and `relationEdges` use. With it, a call links to the
+   * declaration in the module the file says it comes from, instead of to every
+   * same-named declaration in the project — the difference measured on `Model`, whose
+   * signature references read about double the truth before the import layer.
+   */
+  resolveModule?: (specifier: string) => string | undefined,
 ): EdgeRecord[] {
   const edges: EdgeRecord[] = []
   // The ids this file declares, by name. A module-private declaration can only mean
   // itself, so a local match is exact and outranks any project-wide count.
+  //
+  // No path guard here, unlike `relationEdges`: `callerId` is whatever a file-scope
+  // call should start at, and it is a SYMBOL id when the caller has one. Filtering the
+  // list by "does this symbol live in the file callerId names" would empty it for every
+  // such caller, which is why the guard belongs to the function that takes a file id.
   const local = new Map<string, string[]>()
   for (const symbol of parsed.symbols) {
     const list = local.get(symbol.name)
     if (list === undefined) local.set(symbol.name, [symbol.id])
     else list.push(symbol.id)
   }
+  const importedFrom = importedFromMap(parsed, resolveModule)
   for (const call of parsed.calls) {
-    const targets = linkTargets(resolve(call.name), local.get(call.name) ?? [])
+    const targets = linkFor(call.name, resolve, local, importedFrom)
     // Zero targets means one of two things, and neither can produce an edge: the
     // callee is outside this project, or its name is shared so widely that every
     // declaration of it would be noise.

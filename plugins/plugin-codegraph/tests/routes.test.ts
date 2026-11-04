@@ -43,7 +43,7 @@ const file = (path: string): FileRecord => ({ path, mtime: 1, size: 1, hash: `h-
 
 /** A symbol row for a view case. */
 const sym = (path: string, name: string, line = 1): SymbolRecord => ({
-  id: `${path}#function:${name}`, path, name, kind: 'function', line, parent: undefined,
+  id: `${path}#function:${name}`, path, name, kind: 'function', line, endLine: line, parent: undefined,
 })
 
 type FetchHandler = (request: Request) => Promise<Response>

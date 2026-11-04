@@ -46,7 +46,10 @@ describe('renderOverviewContext', () => {
     assert.match(text, /900 symbols/u)
     assert.match(text, /typescript ~100/u)
     assert.match(text, /src\/cli\.ts/u)
-    assert.match(text, /starts at function run/u)
+    // The LINE, not just the file: measured in a real session, the model read this block,
+    // saw `src/cli.ts (starts at function run)`, then ran glob plus four reads anyway and
+    // cited `main.ts:34` in its answer — it wanted the number this row already knew.
+    assert.match(text, /starts at function run:12/u)
     assert.match(text, /shared/u)
   })
 

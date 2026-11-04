@@ -26,9 +26,10 @@
 import { strict as assert } from 'node:assert'
 import { after, describe, it } from 'node:test'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { openGraph, writeProjectMeta } from '../src/store.ts'
 
 /** Scratch directories this suite created, removed on the way out. */
@@ -90,6 +91,16 @@ function fakeContext() {
         if (at >= 0) current.splice(at, 1)
       }
     },
+    /**
+     * Cordis's optional-injection door. This fake has every service, so the callback
+     * runs immediately with the same context — what cordis does for a composition
+     * that provides the service at activation time. The route tests rely on it: the
+     * plugin registers its settings routes through this door now, not through the
+     * required `inject` list.
+     */
+    inject(_deps: readonly string[], callback: (scope: unknown) => void): void {
+      callback(this)
+    },
     /** Fire one event at the listeners the plugin registered. */
     emit(event: string, ...args: never[]): void {
       for (const listener of [...(listeners.get(event) ?? [])]) listener(...args)
@@ -118,6 +129,30 @@ describe('apply', () => {
     const { ctx, tools } = fakeContext()
     apply(ctx as never)
     assert.deepEqual(tools.sort(), ['codegraph_context', 'codegraph_find', 'codegraph_impact'])
+  })
+
+  it('mounts without a Connection carrier, registering no routes', () => {
+    // The tools need `tools` and `systemPrompt`; only the settings routes need the
+    // Fetch registry. Measured in a real headless kernel with the suite mounted: while
+    // `connection` was a REQUIRED service, the plugin never applied and the session
+    // answered "this environment has no code graph tool" — after the model had already
+    // read twenty files by hand. A headless or TUI profile must still get the tools.
+    const tools: string[] = []
+    const routes: ConnectionFetchRoute[] = []
+    const withoutConnection = {
+      tools: { register(tool: { name: string }): () => void { tools.push(tool.name); return () => {} } },
+      systemPrompt: { context(): () => void { return () => {} } },
+      on(): () => void { return () => {} },
+      effect(body: () => () => void): void { body() },
+      // Cordis runs the callback only where the dependency resolves; this fake has no
+      // `connection`, so the door stays shut — exactly the headless case.
+      inject(deps: readonly string[], callback: (scope: unknown) => void): void {
+        if (deps.every(dep => dep !== 'connection')) callback(this)
+      },
+    }
+    apply(withoutConnection as never)
+    assert.deepEqual(tools.sort(), ['codegraph_context', 'codegraph_find', 'codegraph_impact'])
+    assert.equal(routes.length, 0, 'no carrier means no routes, and no crash')
   })
 
   it('leaves codegraph_context callable with no argument', () => {
@@ -265,12 +300,14 @@ describe('apply', () => {
 
   it('declares the module contract the loader reads', () => {
     assert.equal(name, 'plugin-codegraph')
-    // Three services, each with a reason: `tools` and `connection` for the
-    // registration itself, `systemPrompt` for the overview pushed as runtime
-    // context. Nothing else may creep in — every extra required service is one
-    // more reason the plugin silently fails to activate on a kernel line that
-    // lacks it.
-    assert.deepEqual(inject, ['tools', 'connection', 'systemPrompt'])
+    // TWO services, each with a reason: `tools` for the three tools themselves,
+    // `systemPrompt` for the overview pushed as runtime context. `connection` is
+    // deliberately absent — its Fetch registry only carries the settings routes, which
+    // mount through `ctx.inject(['connection'], …)` where a web-shaped composition
+    // provides it. Measured in a real headless kernel: while it was required, the whole
+    // plugin stayed inactive and the session had no code graph tools at all. Nothing
+    // else may creep in either: every required service is one more reason to go silent.
+    assert.deepEqual(inject, ['tools', 'systemPrompt'])
   })
 })
 
@@ -359,5 +396,54 @@ describe('knownProjects', () => {
     mkdirSync(join(storage, 'projects', 'deadbeef'), { recursive: true })
     assert.deepEqual(knownProjects(storage), [])
     assert.deepEqual(knownProjects(join(dir, 'absent')), [], 'a storage root that does not exist yet is empty, not a throw')
+  })
+
+  it('reads an outdated graph WITHOUT rebuilding it', () => {
+    // The regression this test exists for: the listing used to open each graph with
+    // `openGraph`, which applies the schema version — and a version bump DROPS every
+    // table, `meta` and its `cwd` included. The directory name is `sha256(cwd)`, so the
+    // list erased the only field it needed and then excluded the project it had just
+    // erased. Measured after the 3→4 bump: an empty project list, and each project
+    // reappearing only once a session opened it by hand.
+    const dir = mkdtempSync(join(tmpdir(), 'cg-known-old-'))
+    created.push(dir)
+    const storage = join(dir, 'storage')
+    const root = 'D:/codes/legacy'
+    const file = join(storage, 'projects', createHash('sha256').update(root).digest('hex').slice(0, 32), 'graph.db')
+    mkdirSync(dirname(file), { recursive: true })
+    const graph = openGraph(file)
+    writeProjectMeta(graph.db, {
+      cwd: root, name: 'legacy', head: '', indexedAt: 7, fileCount: 3, symbolCount: 9, edgeCount: 4,
+      truncated: false, removalSkipped: false, missingLanguage: 0, noRules: 0, parseErrors: 0,
+    })
+    // Pretend a previous build wrote it, with a schema this version would rebuild.
+    graph.db.prepare('UPDATE meta SET value = ? WHERE key = ?').run('3', 'schema_version')
+    graph.close()
+
+    const found = knownProjects(storage)
+    assert.deepEqual(found.map(entry => entry.cwd), [root], 'an old graph still knows its root')
+
+    // And the peek wrote nothing: the version is still the OLD one and the project row
+    // is still there. Read through a bare handle on purpose — `openGraph` would apply
+    // the version and rebuild, which is exactly what must not happen during a listing.
+    const raw = new DatabaseSync(file, { timeout: 2_000 })
+    const version = raw.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }
+    const project = raw.prepare('SELECT value FROM meta WHERE key = ?').get('project') as { value: string } | undefined
+    raw.close()
+    assert.equal(version.value, '3', 'a listing must not apply the schema version')
+    assert.notEqual(project, undefined, 'and must not drop the row it came to read')
+  })
+
+  it('skips a graph file that is not a database, without throwing', () => {
+    // A listing must not repair anything: deleting an unreadable file is `openGraph`'s
+    // decision, made when that project is actually opened.
+    const dir = mkdtempSync(join(tmpdir(), 'cg-known-junk-'))
+    created.push(dir)
+    const storage = join(dir, 'storage')
+    const file = join(storage, 'projects', 'junk', 'graph.db')
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, 'this is not a sqlite database')
+
+    assert.deepEqual(knownProjects(storage), [])
   })
 })

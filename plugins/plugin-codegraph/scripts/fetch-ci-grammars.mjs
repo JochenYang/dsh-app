@@ -22,7 +22,7 @@
  *
  * @module dsh-app/plugin-codegraph/scripts/fetch-ci-grammars
  */
-import { mkdirSync } from 'node:fs'
+import { copyFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -52,6 +52,25 @@ const wanted = LANGUAGES.filter(language => !language.bundled)
 
 let fetched = 0
 for (const spec of wanted) {
+  // The six grammars this plugin BUILDS but does not ship are downloaded from the
+  // app's own kernel release at run time, so there is nothing to fetch here: the
+  // repository keeps exactly those bytes under `grammars-optional/`, and copying them
+  // is what makes their cases run in CI without a release or a network. The digest
+  // each one must match is asserted against these same files by
+  // `tests/languages.test.ts`.
+  if (spec.source === 'release') {
+    const from = join(pluginRoot, 'grammars-optional', `tree-sitter-${spec.grammar}.wasm`)
+    const to = join(target, `tree-sitter-${spec.grammar}.wasm`)
+    try {
+      copyFileSync(from, to)
+      fetched += 1
+      console.log(`copied: ${spec.id} (tree-sitter-${spec.grammar}.wasm — release-hosted, kept in the tree)`)
+    } catch (error) {
+      console.error(`FAILED to copy ${spec.id}: ${error instanceof Error ? error.message : String(error)}`)
+      process.exitCode = 1
+    }
+    continue
+  }
   // A language with NO extraction rules still downloads: the settings page has to
   // be able to report its install state, and `css` appearing in the route suite is
   // what makes "installed but not indexable" a tested claim.

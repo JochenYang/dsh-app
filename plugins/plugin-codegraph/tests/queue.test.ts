@@ -27,7 +27,8 @@ import type { IndexOutcome } from '../src/indexer.ts'
 
 /** An outcome with every counter zeroed. */
 const EMPTY: IndexOutcome = {
-  parsed: 0, skipped: 0, removed: 0, truncated: false, missingLanguage: 0, noRules: 0, parseErrors: 0, durationMs: 1,
+  parsed: 0, skipped: 0, removed: 0, truncated: false, missingLanguage: 0, noRules: 0, parseErrors: 0,
+  tooLarge: 0, ignored: 0, generated: 0, removalSkipped: false, durationMs: 1,
 }
 
 /** The metadata a settled project carries. */

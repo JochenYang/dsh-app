@@ -13,6 +13,11 @@
  * that covers 90% of a project and says so is useful; one that silently covers
  * 60% is not.
  *
+ * Which files are candidates at all is decided in two steps: the fixed directory
+ * list below, then the project's own `.gitignore` (`ignore.ts`), then generation
+ * by name or by header banner. Both of the last two only ever SHRINK the walk,
+ * which is why the counts they produce are reported rather than dropped.
+ *
  * What counts as changed. `mtime` + `size` first, because that is one `stat` per
  * file and catches every ordinary edit. A same-size rewrite with a preserved
  * mtime (a checkout, a restore from backup, some editors) slips past both, so a
@@ -26,11 +31,20 @@
 
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { languageForPath } from './languages.ts'
 import { DOCUMENT_EXTENSIONS, documentMentions, knownNames } from './docs.ts'
+import {
+  GENERATED_HEAD_BYTES,
+  hasNegation,
+  isGeneratedHead,
+  isGeneratedPath,
+  isIgnored,
+  parseGitignore,
+  type IgnoreRule,
+} from './ignore.ts'
 import { callEdges, relationEdges, type ParsedFile } from './parse.ts'
 import {
   allRows,
@@ -52,7 +66,13 @@ const execFileAsync = promisify(execFile)
 /** How many files one pass will consider. */
 export const MAX_FILES = 20_000
 
-/** Directories never worth walking: dependency trees, build output, VCS metadata. */
+/**
+ * Directories never worth walking: dependency trees, build output, VCS metadata.
+ *
+ * This list stays the floor under `.gitignore` rather than being replaced by it.
+ * A project that excludes nothing still has a `node_modules/`, and the walk must
+ * not descend into one to ask a rule that was never written.
+ */
 const SKIP_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor',
   '.next', '.nuxt', '.cache', '.turbo', '.venv', 'venv', '__pycache__',
@@ -85,6 +105,20 @@ export interface IndexOutcome {
   readonly parseErrors: number
   /** Files present but not indexed because they exceed the size limit. */
   readonly tooLarge: number
+  /**
+   * Paths the walk skipped because a `.gitignore` rule excludes them.
+   *
+   * Counted rather than hidden: a graph that covers less than the tree must be
+   * able to say why, and "your `.gitignore` excludes 4000 files" is a different
+   * fact from "the index gave up". A pruned directory counts as one path.
+   */
+  readonly ignored: number
+  /**
+   * Files the walk skipped because they are generated, by name or by header
+   * banner. Separate from {@link ignored} because nobody excluded these — they
+   * are tracked files that no human wrote.
+   */
+  readonly generated: number
   /** Wall time of the pass. */
   readonly durationMs: number
   /**
@@ -178,6 +212,16 @@ export interface ScanResult {
   /** Files that exist but were skipped for size; never candidates for deletion. */
   readonly tooLarge: string[]
   /**
+   * Paths that exist but a `.gitignore` rule excludes.
+   *
+   * A pruned directory is listed once, with a trailing `/`, because the walk does
+   * not descend to enumerate it; the `/` is what tells the removal pass that the
+   * entry covers a subtree.
+   */
+  readonly ignored: string[]
+  /** Files that exist but are generated, by name or by header banner. */
+  readonly generated: string[]
+  /**
    * True when the ROOT itself could not be read.
    *
    * An unreadable subdirectory is tolerable (it may be a permission quirk), but
@@ -187,19 +231,102 @@ export interface ScanResult {
   readonly rootUnreadable: boolean
 }
 
+/** The first bytes of a file decoded as UTF-8, or '' when it cannot be read. */
+function readHead(absolute: string, bytes: number): string {
+  let fd: number
+  try {
+    fd = openSync(absolute, 'r')
+  } catch {
+    return ''
+  }
+  try {
+    const buffer = Buffer.alloc(bytes)
+    const read = readSync(fd, buffer, 0, bytes, 0)
+    return buffer.subarray(0, read).toString('utf8')
+  } catch {
+    return ''
+  } finally {
+    try { closeSync(fd) } catch { /* already closed */ }
+  }
+}
+
+/** The contents of a directory's `.gitignore`, or undefined when it has none. */
+function readIgnoreFile(absolute: string): string | undefined {
+  try {
+    return readFileSync(absolute, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The walk's refusals, in the two shapes the removal pass needs.
+ *
+ * A path the walk refused is still ON DISK. Comparing the graph against the
+ * walked files alone reads every one of them as a deletion, so they are collected
+ * here once and consulted by `projectChanged` as well as by the pass itself — a
+ * check that disagreed with the pass about which files count would report a
+ * change the pass then has nothing to do about, on every single run.
+ */
+interface WalkSkips {
+  /** Refused paths that name exactly one file or directory. */
+  readonly exact: ReadonlySet<string>
+  /** Refused directories, which cover everything beneath them. */
+  readonly directories: ReadonlySet<string>
+}
+
+function walkSkips(scan: ScanResult): WalkSkips {
+  const exact = new Set<string>(scan.tooLarge)
+  const directories = new Set<string>()
+  for (const entry of scan.ignored) {
+    if (entry.endsWith('/')) directories.add(entry.slice(0, -1))
+    else exact.add(entry)
+  }
+  for (const entry of scan.generated) exact.add(entry)
+  return { exact, directories }
+}
+
+/** Does this path fall under something the walk refused? */
+function skippedByWalk(skips: WalkSkips, path: string): boolean {
+  if (skips.exact.has(path)) return true
+  if (skips.directories.size === 0) return false
+  const segments = path.split('/')
+  let prefix = ''
+  for (const segment of segments.slice(0, -1)) {
+    prefix = prefix === '' ? segment : `${prefix}/${segment}`
+    if (skips.directories.has(prefix)) return true
+  }
+  return false
+}
+
 /**
  * Walk a project for parseable files.
  *
  * @param root - the absolute project root.
  * @param limit - the file budget.
+ * @param indexed - paths the graph already holds. A file that is already indexed was
+ *   judged not-generated by the pass that read it, so its header does not have to be
+ *   read again — which is what keeps `projectChanged` (a read-only check that runs
+ *   after every settled tool call) from opening every source file in the project. The
+ *   verdict is therefore STICKY for an indexed file: if one later gains a generation
+ *   banner, its symbols still follow its bytes (the hash re-parses it) but it is not
+ *   dropped as generated. That is the trade — one imprecise exclusion, against opening
+ *   N files after every tool call.
  * @returns the candidates plus the facts that decide whether removal is safe.
  */
-export function scanProject(root: string, limit = MAX_FILES): ScanResult {
+export function scanProject(root: string, limit = MAX_FILES, indexed?: ReadonlySet<string>): ScanResult {
   const files: Candidate[] = []
   const tooLarge: string[] = []
+  const ignored: string[] = []
+  const generated: string[] = []
   let truncated = false
 
-  const walk = (dir: string): void => {
+  /**
+   * @param dir - the absolute directory to read.
+   * @param base - its project-relative POSIX path, `''` at the root.
+   * @param inherited - the `.gitignore` rules in force from its ancestors.
+   */
+  const walk = (dir: string, base: string, inherited: readonly IgnoreRule[]): void => {
     if (truncated) return
     let entries
     try {
@@ -208,21 +335,51 @@ export function scanProject(root: string, limit = MAX_FILES): ScanResult {
       // An unreadable SUBdirectory is skipped; the root is checked below.
       return
     }
+    const own = readIgnoreFile(join(dir, '.gitignore'))
+    const rules = own === undefined ? inherited : [...inherited, ...parseGitignore(own, base)]
     for (const entry of entries) {
       if (truncated) return
+      // Built from the walk's own segments rather than `path.relative`: the graph
+      // stores POSIX paths on every platform, and a Windows walk that formatted a
+      // path through the shell's separator would key two files the same way.
+      const relativePath = base === '' ? entry.name : `${base}/${entry.name}`
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
-        walk(join(dir, entry.name))
+        if (isIgnored(rules, relativePath, true)) {
+          // A negated rule can bring a file back out of an excluded directory, so
+          // that directory has to be walked to find it. Any other ignored
+          // directory is pruned as one entry, which is what keeps an excluded tree
+          // of thousands of files from costing the walk anything.
+          if (hasNegation(rules)) walk(join(dir, entry.name), relativePath, rules)
+          else ignored.push(`${relativePath}/`)
+          continue
+        }
+        walk(join(dir, entry.name), relativePath, rules)
         continue
       }
       if (!entry.isFile()) continue
-      const absolute = join(dir, entry.name)
-      const relativePath = relative(root, absolute).split(sep).join('/')
       // A document is walked for its own sake, not parsed. It carries no symbols
       // and no imports; what it contributes is the list of symbols it NAMES
       // (`docs.ts`), which the second phase turns into `documents` edges.
       const isDocument = DOCUMENT_EXTENSIONS.includes(extensionOf(relativePath))
       if (!isDocument && languageForPath(relativePath) === undefined) continue
+      // AFTER the candidate test, so the count means "source files a rule took away"
+      // rather than "every file in an ignored directory": a rule that excludes a
+      // `.log` is worth nothing to a count of what the graph is missing.
+      if (isIgnored(rules, relativePath, false)) {
+        // Listed, never silently dropped: the file is on disk, so its absence from
+        // `files` must not be read as a deletion.
+        ignored.push(relativePath)
+        continue
+      }
+      // Generation by NAME is settled before the file is opened: a `.min.js` is
+      // generated in every project that has one, and reading its head to confirm
+      // what its name already says costs a read per file per pass.
+      if (isGeneratedPath(relativePath)) {
+        generated.push(relativePath)
+        continue
+      }
+      const absolute = join(dir, entry.name)
       let stat
       try {
         stat = statSync(absolute)
@@ -233,6 +390,14 @@ export function scanProject(root: string, limit = MAX_FILES): ScanResult {
         // Recorded, never silently dropped: a file that grew past the limit is
         // still on disk, so the removal pass must not treat it as gone.
         tooLarge.push(relativePath)
+        continue
+      }
+      // The banner is checked during the walk rather than when the bytes are
+      // parsed, because the two callers of this walk have to agree: `projectChanged`
+      // never parses, so a verdict that needed the parse would leave a generated file
+      // looking "new" to the check on every pass forever.
+      if (!(indexed?.has(relativePath) ?? false) && isGeneratedHead(readHead(absolute, GENERATED_HEAD_BYTES))) {
+        generated.push(relativePath)
         continue
       }
       if (files.length >= limit) {
@@ -249,8 +414,8 @@ export function scanProject(root: string, limit = MAX_FILES): ScanResult {
   } catch {
     rootUnreadable = true
   }
-  if (!rootUnreadable) walk(root)
-  return { files, truncated, tooLarge, rootUnreadable }
+  if (!rootUnreadable) walk(root, '', [])
+  return { files, truncated, tooLarge, ignored, generated, rootUnreadable }
 }
 
 /**
@@ -388,15 +553,17 @@ function forgetStatCache(graph: Graph, entries: readonly { readonly path: string
  */
 export function projectChanged(graph: Graph, root: string, limit = MAX_FILES): boolean {
   const known = readFiles(graph.db)
-  const scan = scanProject(root, limit)
+  const scan = scanProject(root, limit, new Set(known.keys()))
   // Cannot prove "nothing changed": the walk was cut short or could not read the root.
   // `true` is the honest answer and the only safe one — `false` would let a caller
   // report a current, complete graph over a tree this call never saw.
   if (scan.truncated || scan.rootUnreadable) return true
-  // `tooLarge` is seeded for the same reason `indexProject` seeds it: a file that
-  // grew past the size cap leaves `scan.files`, and comparing against that set alone
-  // reads the absence as a deletion — a change reported on every pass forever.
-  const seen = new Set<string>(scan.tooLarge)
+  // The walk's refusals are seeded for the same reason `indexProject` seeds them: a
+  // file that is too large, excluded by `.gitignore` or generated LEAVES `scan.files`
+  // while staying on disk, and comparing against that set alone reads the absence as
+  // a deletion — a change reported on every pass forever.
+  const skips = walkSkips(scan)
+  const seen = new Set<string>(skips.exact)
   for (const candidate of scan.files) {
     seen.add(candidate.path)
     const previous = known.get(candidate.path)
@@ -404,7 +571,8 @@ export function projectChanged(graph: Graph, root: string, limit = MAX_FILES): b
     if (previous === undefined || previous.mtime !== candidate.mtime || previous.size !== candidate.size) return true
   }
   for (const path of known.keys()) {
-    if (!seen.has(path)) return true
+    if (seen.has(path) || skippedByWalk(skips, path)) continue
+    return true
   }
   return false
 }
@@ -448,8 +616,9 @@ export async function indexProject(
   const checkAborted = (): void => { if (signal?.aborted === true) throw new IndexAbortedError() }
   checkAborted()
   const known = readFiles(graph.db)
-  const scan = scanProject(root, limit)
-  const seen = new Set<string>(scan.tooLarge)
+  const scan = scanProject(root, limit, new Set(known.keys()))
+  const skips = walkSkips(scan)
+  const seen = new Set<string>(skips.exact)
 
   let parsed = 0
   let skipped = 0
@@ -615,7 +784,12 @@ export async function indexProject(
     const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)')
     // `imports` targets are project-relative paths; the graph's file nodes are
     // keyed the same way, so membership in the known set is the resolution test.
-    const knownPaths = new Set<string>([...known.keys(), ...seen])
+    // What an import may resolve TO: the files the graph already holds, plus the ones
+    // this pass is about to write. The walk's skips are deliberately NOT here — an
+    // `import './dist/bundle.js'` that targets an ignored file would otherwise get an
+    // `imports` edge pointing at a node no pass ever creates, and nothing would ever
+    // clean it up.
+    const knownPaths = new Set<string>([...known.keys(), ...scan.files.map(entry => entry.path)])
     // ONE query for the whole name table, not one per call edge.
     //
     // `resolveName` used to run a SELECT per edge, inside this transaction, and
@@ -638,7 +812,14 @@ export async function indexProject(
     graph.db.exec('BEGIN')
     try {
       for (const entry of pending) {
-        for (const edge of callEdges(entry.parsed, entry.fileId, resolveOnce)) {
+        for (const edge of callEdges(
+          entry.parsed,
+          entry.fileId,
+          resolveOnce,
+          // The import layer, so a call to a name declared in several files links to
+          // the one this file actually imports.
+          specifier => resolveImport(entry.path, specifier, path => knownPaths.has(path)),
+        )) {
           insert.run(edge.from, edge.to, edge.kind, edge.line)
         }
         // Heritage and type references, resolved the same way calls are. These are
@@ -821,7 +1002,12 @@ export async function indexProject(
   let removed = 0
   if (!removalSkipped) {
     for (const path of known.keys()) {
-      if (seen.has(path)) continue
+      // Everything the walk refused is skipped here too, INCLUDING a path under an
+      // ignored directory that was pruned rather than descended: `.gitignore` makes
+      // the walk smaller without anything leaving the disk, and a removal pass that
+      // read that as a deletion would empty the graph of every file it stopped
+      // reading. Same rule as `tooLarge`, one predicate for both.
+      if (seen.has(path) || skippedByWalk(skips, path)) continue
       checkAborted()
       forgetFile(graph.db, path)
       removed += 1
@@ -860,6 +1046,8 @@ export async function indexProject(
     noRules,
     parseErrors,
     tooLarge: scan.tooLarge.length,
+    ignored: scan.ignored.length,
+    generated: scan.generated.length,
     durationMs: now() - started,
     removalSkipped,
   }

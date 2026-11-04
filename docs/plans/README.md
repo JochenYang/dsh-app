@@ -8,6 +8,7 @@
 |---|---|
 | [archive-delete-hardening.md](archive-delete-hardening.md) | 归档删除：可撤销、无残留、Windows 可靠 |
 | [codegraph-development-freshness.md](codegraph-development-freshness.md) | CodeGraph 开发期新鲜度与模型输出的真实性 |
+| [codegraph-retrieval-upgrade.md](codegraph-retrieval-upgrade.md) | CodeGraph 检索升级：源码切片、分段召回、走查范围 |
 | [kernel-0.2.1-pre-adaptation.md](kernel-0.2.1-pre-adaptation.md) | 0.2.1 预适配：alpha.3 变更映射与可先行项 |
 | [kernel-0.2.2-alpha.2-preflight.md](kernel-0.2.2-alpha.2-preflight.md) | 0.2.2-alpha.2 预适配结论：正式版发布那一轮照此执行 |
 | [office-slash-entry.md](office-slash-entry.md) | Office 套件的 `/` 入口 |

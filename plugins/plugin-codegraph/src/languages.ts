@@ -18,13 +18,19 @@
  *     language id disagree upstream; the mapping lives here so nothing else has
  *     to know.
  *
- * Bundled vs on-demand. The eight bundled grammars ship inside the plugin (see
- * the `files` field), because a first parse that waits on a network fetch is a
- * worse first impression than ~10 MB of install size. Everything else is
- * downloaded into `$DSH_HOME/storages/dsh-app-plugin-codegraph/grammars/` on
- * request from the settings page, and a language that is not installed answers
- * `LANGUAGE_NOT_INSTALLED` — never a silent fallback, because a graph silently
- * missing a language looks like a graph where that language has no symbols.
+ * Bundled vs on-demand. Fourteen bundled grammar FILES ship inside the plugin (see the
+ * `files` field), because a first parse that waits on a network fetch is a worse first
+ * impression than the install size. More languages than files: C and C++ share one
+ * build, and Vue/Svelte/Astro share TypeScript's because the code in a component's
+ * `<script>` block IS TypeScript (`sfc.ts` masks the markup away). Everything else is
+ * downloaded into `$DSH_HOME/storages/dsh-app-plugin-codegraph/grammars/` on request
+ * from the settings page, and a language that is not installed answers
+ * `LANGUAGE_NOT_INSTALLED` — never a silent fallback, because a graph silently missing
+ * a language looks like a graph where that language has no symbols.
+ *
+ * The on-demand set has TWO sources, and the difference is which package the bytes
+ * could come from: the pinned grammar package for a language it carries, and this app's
+ * own kernel release for a grammar this plugin builds itself. See `grammarUrls`.
  *
  * @module @dsh-app/plugin-codegraph/host/languages
  */
@@ -33,6 +39,9 @@ import { existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+/** Where an on-demand grammar's bytes come from. */
+export type GrammarSource = 'cdn' | 'release'
 
 /** One language this plugin can parse. */
 export interface LanguageSpec {
@@ -46,6 +55,12 @@ export interface LanguageSpec {
   readonly extensions: readonly string[]
   /** True when the grammar ships inside the plugin. */
   readonly bundled: boolean
+  /**
+   * Where a NON-bundled grammar is downloaded from. Absent means `cdn` — the
+   * pinned grammar package. `release` means the app's own runtime release, which
+   * is the only place a grammar this plugin builds itself can live.
+   */
+  readonly source?: GrammarSource
 }
 
 /**
@@ -64,8 +79,55 @@ export const LANGUAGES: readonly LanguageSpec[] = [
   { id: 'c', grammar: 'cpp', label: 'C', extensions: ['.c', '.h'], bundled: true },
   { id: 'cpp', grammar: 'cpp', label: 'C++', extensions: ['.cc', '.cpp', '.cxx', '.hpp', '.hh', '.hxx'], bundled: true },
   { id: 'c_sharp', grammar: 'c-sharp', label: 'C#', extensions: ['.cs'], bundled: true },
-  // Everything below is on-demand: present in the grammar package, absent from
-  // the plugin's own bundle.
+  // The twelve grammars BUILT for this plugin rather than taken from the pinned
+  // package: `tree-sitter build --wasm` over the upstream grammar sources. Six of them
+  // ship beside the other eight because they are what a phone, a desktop or a data
+  // team's project is written in — Android, iOS, Flutter, Apple's legacy Objective-C,
+  // Lua and R. The other six are large and rarely the language of a whole repository,
+  // so they are downloaded on request from this app's own kernel release (see
+  // `grammarUrls`): Scala, Elixir, Zig, Julia, Haskell and Groovy together are 13 MB of
+  // an artifact every user downloads, and none of them answers "what is this project"
+  // for more than a handful of repositories.
+  //
+  // The upstream commits the committed bytes came from are in
+  // `docs/agents/codegraph.md` §11 — a `--depth 1` clone of `main` does not reproduce
+  // them, and the files live in `grammars-optional/` in the repository until they are
+  // uploaded beside a release.
+  { id: 'kotlin', grammar: 'kotlin', label: 'Kotlin', extensions: ['.kt', '.kts'], bundled: true },
+  { id: 'swift', grammar: 'swift', label: 'Swift', extensions: ['.swift'], bundled: true },
+  { id: 'dart', grammar: 'dart', label: 'Dart', extensions: ['.dart'], bundled: true },
+  { id: 'objc', grammar: 'objc', label: 'Objective-C', extensions: ['.m', '.mm'], bundled: true },
+  { id: 'lua', grammar: 'lua', label: 'Lua', extensions: ['.lua'], bundled: true },
+  { id: 'r', grammar: 'r', label: 'R', extensions: ['.r', '.R'], bundled: true },
+  // Single-file components cost NOTHING to ship: the code in one is TypeScript or
+  // JavaScript, so `sfc.ts` masks the markup away and the grammar above reads what is
+  // left, at its original line numbers. A component whose `<script>` says `lang="tsx"`
+  // is read as TypeScript, which is the one shape this does not cover.
+  { id: 'vue', grammar: 'typescript', label: 'Vue', extensions: ['.vue'], bundled: true },
+  { id: 'svelte', grammar: 'typescript', label: 'Svelte', extensions: ['.svelte'], bundled: true },
+  // Astro's `---` frontmatter is TypeScript; the template beside it is markup, masked away
+  // by the same module (`sfc.ts`).
+  { id: 'astro', grammar: 'typescript', label: 'Astro', extensions: ['.astro'], bundled: true },
+  // SQL ships as CODE, not as a grammar: the pinned grammar package has none, and
+  // `sql.ts` reads the handful of `CREATE` keywords with a scanner (see its header).
+  // `grammar: ''` is what marks that here — nothing will ever be downloaded for it.
+  { id: 'sql', grammar: '', label: 'SQL', extensions: ['.sql', '.ddl'], bundled: true },
+  // Schema languages, scanned for the same reason SQL is: a block header is a keyword and
+  // a name, and the pinned grammar package has neither (`schema.ts`).
+  { id: 'prisma', grammar: '', label: 'Prisma', extensions: ['.prisma'], bundled: true },
+  { id: 'graphql', grammar: '', label: 'GraphQL', extensions: ['.graphql', '.gql'], bundled: true },
+  // Terraform / HCL, scanned for the same reason: block headers are labels, and the
+  // backend's has no HCL grammar (`hcl.ts`).
+  { id: 'terraform', grammar: '', label: 'Terraform / HCL', extensions: ['.tf', '.tfvars', '.hcl', '.tofu'], bundled: true },
+  // Everything below is on-demand. `source: 'release'` entries are the six grammars
+  // this plugin builds itself, fetched from the app's own runtime release; the rest come
+  // from the pinned grammar package.
+  { id: 'scala', grammar: 'scala', label: 'Scala', extensions: ['.scala', '.sc'], bundled: false, source: 'release' },
+  { id: 'elixir', grammar: 'elixir', label: 'Elixir', extensions: ['.ex', '.exs'], bundled: false, source: 'release' },
+  { id: 'zig', grammar: 'zig', label: 'Zig', extensions: ['.zig'], bundled: false, source: 'release' },
+  { id: 'julia', grammar: 'julia', label: 'Julia', extensions: ['.jl'], bundled: false, source: 'release' },
+  { id: 'haskell', grammar: 'haskell', label: 'Haskell', extensions: ['.hs'], bundled: false, source: 'release' },
+  { id: 'groovy', grammar: 'groovy', label: 'Groovy', extensions: ['.groovy'], bundled: false, source: 'release' },
   { id: 'rust', grammar: 'rust', label: 'Rust', extensions: ['.rs'], bundled: false },
   { id: 'ruby', grammar: 'ruby', label: 'Ruby', extensions: ['.rb'], bundled: false },
   { id: 'php', grammar: 'php', label: 'PHP', extensions: ['.php'], bundled: false },
@@ -76,7 +138,7 @@ export const LANGUAGES: readonly LanguageSpec[] = [
   { id: 'regex', grammar: 'regex', label: 'Regular expression', extensions: [], bundled: false },
 ]
 
-/** The bundled eight, as the plan's default set. */
+/** The languages whose grammar ships inside the plugin, as the plan's default set. */
 export const BUNDLED_LANGUAGE_IDS: readonly string[] = LANGUAGES.filter(language => language.bundled).map(language => language.id)
 
 /** Extension → language, built once. A duplicate extension is a table bug. */
@@ -154,7 +216,7 @@ export function languageStatuses(paths: GrammarPaths): LanguageStatus[] {
 }
 
 /**
- * The base URL a grammar is downloaded from.
+ * The base URL a grammar from the pinned package is downloaded from.
  *
  * Pinned to the exact version whose wasm this plugin's runtime was measured
  * against: a newer grammar can bump the ABI and stop loading, which is the
@@ -164,8 +226,32 @@ export function languageStatuses(paths: GrammarPaths): LanguageStatus[] {
 export const GRAMMAR_BASE_URL = 'https://unpkg.com/@vscode/tree-sitter-wasm@0.3.1/wasm'
 
 /**
- * sha512 (base64) of every grammar this plugin can download, at
- * {@link GRAMMAR_BASE_URL}.
+ * Release coordinates for a grammar this plugin builds itself.
+ *
+ * These MIRROR `src/shared/constants.ts` and `src/kernel/sources/artifact.ts` in the
+ * shell, which cannot be imported from here: the plugin runs inside the kernel child,
+ * the shell resolves its own artifacts. The duplication is deliberate and CHECKED —
+ * `test/codegraph-grammar-release.test.mjs` reads both sides and fails when they drift,
+ * because a plugin pointing at a release path the upload never wrote is a download that
+ * 404s for every user.
+ *
+ * Why the kernel release, of all places: it is the one artifact the app already
+ * publishes on every cut, through the mirror chain a mainland user can reach, and it is
+ * cut from THIS repository — so the bytes and the code that verifies them travel
+ * together. Nothing new has to be hosted.
+ */
+export const GRAMMAR_RELEASE = {
+  /** ModelScope's copy, which leads the chain for the same reason the kernel's does. */
+  modelscopeEndpoint: 'https://www.modelscope.cn',
+  modelscopeRepo: 'jochenYang/dsh-app',
+  /** The GitHub release host, second. */
+  githubRepo: 'JochenYang/dsh-app',
+  /** Kernel releases are tagged `runtime-<version>`. */
+  tagPrefix: 'runtime-',
+} as const
+
+/**
+ * sha512 (base64) of every grammar this plugin can download.
  *
  * The download path loads a remote binary into the kernel process, so the bytes
  * are verified against this table before they are renamed into place — the same
@@ -174,6 +260,9 @@ export const GRAMMAR_BASE_URL = 'https://unpkg.com/@vscode/tree-sitter-wasm@0.3.
  * before activation"). A CDN compromise or a swapped response is refused rather
  * than executed. Updating the grammar version means recomputing these values;
  * that is the point, not an inconvenience.
+ *
+ * One table for both sources: a digest describes BYTES, and which host serves them
+ * must not change what they have to be.
  */
 export const GRAMMAR_SHA512: Readonly<Record<string, string>> = {
   typescript: 'aYh34S26Dvk4RZH6AMz8ucTwiz2fbkZYxIGhErtcdSz0shUwDQEzIhNkEM+wFNGyNeeHp3VeAxqjAMDKF1b1mg==',
@@ -192,9 +281,53 @@ export const GRAMMAR_SHA512: Readonly<Record<string, string>> = {
   ini: 'jky36dOyF+89iyv7eEy5MDTvnq5A2iobv+c8febN5zTJHr6KZRJ4q4E3IEQlEDF8L3s3Sbv3fWMFE3xyPFxLEA==',
   powershell: 'G47wlygEk/shL0R6E1Wz819Ltv+Qt6yAFA6PU1IjVGzcHZ2E6/cC0R4UlWz6x3fAmrukUUbjOKp7sZC3ysocrA==',
   regex: 'Pxh69HAvK/prkTy3SpvQW5Z46HN4pEKyhRyIeg/20HdiOeNy0YngRvoFlYoV+mJc5zPtx7Uhph/3XRl8eKZIbg==',
+  // The six built here. These bytes are in the repository under `grammars-optional/`
+  // and upload beside a kernel release; the digest is what makes that upload
+  // verifiable in both directions.
+  scala: 'VF0Oi7jZYAVGsDk7bgMDWmeTd+PWU4QlBc28HJoMmpUnrn8JmQjfae4RmCK1hIjfytqNE9ZLqSHSEt3XNcoiPQ==',
+  elixir: 'XI2yyZsLOtbZjm/rSWchtqecnmg9wCXFhhZ7UpeFEHj2xDadQ5yrfVbsyz/6Q3sr6cv8VdKWOUOL1SIhl35hIw==',
+  zig: 's9ZRHygEiEschYMWA9p3whp4GCid1X8B2vH4+8GjGaKQLfZ2qYjjIL7Uy2N9J6eZAEbbIARKonJzOe0xZuCtDQ==',
+  julia: 'ZLBArp7nKHGVdKRHvu+CaUP/5SSmUa/0SQJGMvRye6AaxzAc1Hlgvyq/9xTAFcTOxRVhHODkPJ9ElcNL9t6WiQ==',
+  haskell: 'WZe0ZFRH58fAa5q6jlCiT75n/ZSuPGMGZ2sq8W8Hq2skCr0ptHr/bztixy6VTY2NakV0yE8GoBu91aOrykZeVw==',
+  groovy: 'C3DiGVmv1jJMZ/617psZxcId4i+XrS1CZepgzaZj/JY4+ufeCXnHsJYM6QFN2J4X/Kw+ejtVfLp4SH/5aW8nuw==',
 }
 
-/** The largest grammar this plugin will accept, in bytes (cpp is ~5.4 MB). */
+/** The kernel version this build belongs to, as the shell tells its child. */
+export function kernelVersion(): string {
+  return (process.env.DSH_APP_KERNEL_VERSION ?? '').trim()
+}
+
+/**
+ * Ordered URLs to try for one on-demand grammar, or `[]` when this build cannot
+ * name one.
+ *
+ * Two sources, for two kinds of grammar. A language the pinned package carries is
+ * fetched from it under a pinned version. A language this plugin BUILDS has no
+ * package to pin to, so its bytes come from the app's own kernel release — the
+ * artifact every cut already publishes through the mainland-reachable mirror, which
+ * means no new hosting and no second trust root. The mirror leads and the official
+ * host follows, matching `assetCandidates` in the shell's `src/kernel/sources/`.
+ *
+ * @param spec - the language to locate.
+ * @param version - the kernel version (defaults to the env the shell sets).
+ * @returns candidate URLs in download order.
+ */
+export function grammarUrls(spec: LanguageSpec, version: string = kernelVersion()): string[] {
+  if (spec.bundled) return []
+  const asset = `tree-sitter-${spec.grammar}.wasm`
+  if (spec.source !== 'release') return [`${GRAMMAR_BASE_URL}/${asset}`]
+  if (version === '') return []
+  const tag = `${GRAMMAR_RELEASE.tagPrefix}${version}`
+  // Segment-wise encoding keeps the slashes literal while a crafted version string
+  // can neither smuggle `&`/`#` into the query nor turn a literal `+` into a space.
+  const encoded = `releases/runtime/${tag}/${asset}`.split('/').map(encodeURIComponent).join('/')
+  return [
+    `${GRAMMAR_RELEASE.modelscopeEndpoint}/api/v1/models/${GRAMMAR_RELEASE.modelscopeRepo}/repo?Revision=master&FilePath=${encoded}`,
+    `https://github.com/${GRAMMAR_RELEASE.githubRepo}/releases/download/${tag}/${asset}`,
+  ]
+}
+
+/** The largest grammar this plugin will accept, in bytes (kotlin is ~5.8 MB). */
 const MAX_GRAMMAR_BYTES = 12 * 1024 * 1024
 
 /**
@@ -225,9 +358,61 @@ export async function downloadGrammar(
     // alternative is executing bytes nobody verified.
     throw new Error(`no recorded sha512 for grammar "${spec.grammar}"; refusing to download it unverified`)
   }
+  const candidates = grammarUrls(spec)
+  if (candidates.length === 0) {
+    // Two different situations, two different sentences: a source this build cannot
+    // name at all is an environment problem, a table entry with no source is a bug.
+    throw new Error(spec.source === 'release'
+      ? `grammar "${spec.grammar}" comes from this app's kernel release, and this run names no kernel version (DSH_APP_KERNEL_VERSION is unset) — a dev tree cannot download it; point DSH_APP_CODEGRAPH_GRAMMARS at a directory holding tree-sitter-${spec.grammar}.wasm instead`
+      : `no download source for grammar "${spec.grammar}"`)
+  }
   mkdirSync(paths.downloadDir, { recursive: true })
   const target = join(paths.downloadDir, `tree-sitter-${spec.grammar}.wasm`)
-  const response = await fetchImpl(`${GRAMMAR_BASE_URL}/tree-sitter-${spec.grammar}.wasm`, {
+  // Every candidate is verified against the SAME digest. A mirror that serves a
+  // different build therefore fails and falls through to the next one instead of
+  // substituting content — the ordering is a transport preference, never an
+  // authority.
+  const attempts: string[] = []
+  let bytes: Uint8Array | undefined
+  for (const url of candidates) {
+    try {
+      bytes = await fetchVerifiedGrammar(url, spec, expected, fetchImpl)
+      break
+    } catch (error) {
+      attempts.push(`${hostOf(url)}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (bytes === undefined) {
+    throw new Error(`grammar download for ${spec.id} failed from every source — ${attempts.join('; ')}`)
+  }
+  // Unique per attempt: a fixed `.partial` name lets two concurrent downloads
+  // rename each other's in-progress file and publish a truncated wasm.
+  const partial = `${target}.partial-${String(process.pid)}-${String(Date.now())}`
+  writeFileSync(partial, bytes)
+  renameSync(partial, target)
+  return target
+}
+
+/** The host of a URL, for an error message that names where the bytes came from. */
+function hostOf(url: string): string {
+  try { return new URL(url).host } catch { return url }
+}
+
+/**
+ * Fetch one URL and refuse anything that is not exactly the expected grammar.
+ *
+ * Three refusals before the digest, in increasing cost: a non-2xx status, an
+ * oversized body, and a body that does not start with `\0asm` (a CDN error page
+ * arrives with a 200). The digest is the one that matters — the others exist so a
+ * wrong response is reported as what it is instead of as a digest mismatch.
+ */
+async function fetchVerifiedGrammar(
+  url: string,
+  spec: LanguageSpec,
+  expected: string,
+  fetchImpl: typeof fetch,
+): Promise<Uint8Array> {
+  const response = await fetchImpl(url, {
     // A CDN that stalls must not hang the settings page forever.
     signal: AbortSignal.timeout(30_000),
   })
@@ -238,20 +423,14 @@ export async function downloadGrammar(
   if (bytes.length > MAX_GRAMMAR_BYTES) {
     throw new Error(`grammar download for ${spec.id} exceeded ${String(MAX_GRAMMAR_BYTES)} bytes`)
   }
-  // A wasm module starts with \0asm; a CDN error page does not.
   if (bytes.length < 8 || bytes[0] !== 0x00 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
     throw new Error(`grammar download for ${spec.id} returned something that is not a wasm module`)
   }
   const digest = createHash('sha512').update(bytes).digest('base64')
   if (digest !== expected) {
-    throw new Error(`grammar download for ${spec.id} failed its sha512 check (got ${digest})`)
+    throw new Error(`grammar download for ${spec.id} failed its sha512 check`)
   }
-  // Unique per attempt: a fixed `.partial` name lets two concurrent downloads
-  // rename each other's in-progress file and publish a truncated wasm.
-  const partial = `${target}.partial-${String(process.pid)}-${String(Date.now())}`
-  writeFileSync(partial, bytes)
-  renameSync(partial, target)
-  return target
+  return bytes
 }
 
 /**

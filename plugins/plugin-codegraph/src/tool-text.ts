@@ -170,14 +170,85 @@ export function renderFind(result: FindResult): TextBlock[] {
   // The count goes ON the row, and the advice goes LAST. A caller count is what tells
   // the model whether the next question is cheap or expensive: at 7 matches a text
   // search is the right tool, at 482 it costs ~15k tokens and a judgement per line.
+  //
+  // THE ID IS ON THE ROW because `codegraph_impact` accepts ONE declaration and a name
+  // that resolves to several is refused. That collision is ordinary, not exotic: one
+  // entity usually has a declaration per notation — a type alias, the model class an ORM
+  // maps a table onto, and the table an SQL migration creates — so the refusal is met on
+  // the names asked about most. The refusal DOES print candidate ids, but the handler
+  // asks `ambiguousCandidates` for five (`index.ts`), while this answer carries up to
+  // forty rows: past five declarations, the refusal cannot name what it declines to
+  // answer, and a text search is the only way to one. Printing the id on every row also
+  // removes the round trip in the ordinary case, where the first answer already names the
+  // declaration and the second call is the real question.
   const lines = result.symbols.map((symbol) => {
-    const row = `- ${formatSymbol(symbol)} — ${String(symbol.references)} call site(s)`
+    const row = `- ${formatSymbol(symbol)} — ${String(symbol.references)} call site(s) (id: ${symbol.id})`
     return symbol.references > 20
-      ? `${row} (large: \`codegraph_impact("${symbol.id}")\` is cheaper than searching)`
+      ? `${row} (large: prefer \`codegraph_impact\` over searching)`
       : row
   })
+  // The hint is not only for the large counts. Measured in a real session: `find` answered
+  // a name with "5 call site(s)", the model then read the same file FIVE times to work
+  // out which function each call site sits in — a list `codegraph_impact` returns in one
+  // call, with the calling symbol named on every row. The old hint fired only above 20, so
+  // the small, common case got no pointer at all and the read reflex won.
+  //
+  // It names no id of its own: every row above now carries one, and repeating it here
+  // spends the line on a copy of data the reader already has.
+  const hinted = result.symbols.filter(symbol => symbol.references > 20).length
+  const small = result.symbols.find(symbol => symbol.references >= 2 && symbol.references <= 20)
   const head = `codegraph_find: ${String(result.symbols.length)} match(es)${result.truncated ? ' (truncated)' : ''}`
-  return block([head, ...(result.note === undefined ? [] : [`note: ${result.note}`]), ...lines])
+  return block([
+    head,
+    ...(result.note === undefined ? [] : [`note: ${result.note}`]),
+    ...lines,
+    ...(hinted > 0 || small === undefined
+      ? []
+      : ['`codegraph_impact` on one of those ids lists its call sites WITH the declaring symbol of each — cheaper than reading the file to find them, and the same call answers "what breaks if I change it".']),
+  ])
+}
+
+/**
+ * The source section of a `codegraph_context` answer, or nothing.
+ *
+ * Three facts have to survive into the model's context, and each has its own
+ * sentence because each changes what the model should do next: the text itself (so
+ * the file does not need opening), the cut when the declaration is longer than the
+ * budget (so a missing tail is not read as the whole body), and the drift when the
+ * bytes are newer than the graph (so they are not attributed to the indexed state).
+ *
+ * A refusal is rendered too. Silence would be indistinguishable from "the graph had
+ * nothing to add", and the five reasons have five different next steps.
+ *
+ * @param result - the context answer the host produced.
+ * @returns the section's lines, empty when there is nothing to say.
+ */
+function renderSourceSection(result: ContextResult): string[] {
+  if (result.source !== undefined) {
+    const source = result.source
+    const cut = source.endLine - source.startLine + 1
+    return [
+      `source — ${source.path}:${String(source.startLine)}-${String(source.endLine)} (verbatim, line-numbered: this IS the file; treat it as already read)`,
+      ...(source.truncated
+        ? [`only the first ${String(cut)} line(s) of this declaration are here — the rest is past the answer's budget, and that specific range is the one thing worth opening the file for.`]
+        : []),
+      ...(source.drift
+        ? [`${source.path} changed after it was indexed: these bytes are the CURRENT ones, so they are fresher than the counts below.`]
+        : []),
+      '',
+      source.text,
+    ]
+  }
+  const refusal = result.sourceRefused
+  if (refusal === undefined) return []
+  const sentences: Record<typeof refusal, string> = {
+    'disabled': 'source reading is switched off for this installation (DSH_APP_CODEGRAPH_SOURCE=0), so only the location is given.',
+    'not-indexed': 'the graph holds no row for this file, so no source was read.',
+    'outside-root': 'this file resolves outside the project root, so its source was not read.',
+    'unreadable': 'the file is indexed but not readable on disk right now (moved, deleted, or permission), so no source was read.',
+    'shortened': 'the file is shorter than the graph recorded — it changed since the last pass, so the declaration this answer points at no longer has those lines.',
+  }
+  return [`source: not included — ${sentences[refusal]}`, '']
 }
 
 /**
@@ -232,6 +303,7 @@ export function renderContext(result: ContextResult, maxRows: number): TextBlock
   const lines = [
     `codegraph_context: ${formatSymbol(result.symbol)}`,
     ...(result.note === undefined ? [] : [`note: ${result.note}`]),
+    ...renderSourceSection(result),
     `same file (${String(result.siblings.length)}):`,
     ...result.siblings.map(symbol => `- ${formatSymbol(symbol)}`),
     ...(result.calls.length === 0 ? [] : ['calls made from here:', ...result.calls.map(edge => `- ${edge.name ?? '?'} at line ${String(edge.line)}`)]),

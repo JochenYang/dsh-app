@@ -226,8 +226,59 @@ describe('renderFind', () => {
     const rendered = text(renderFind(answer))
     assert.match(rendered, /2 call site\(s\)/u)
     assert.match(rendered, /482 call site\(s\)/u)
-    assert.match(rendered, /`codegraph_impact\("src\/b\.ts#function:busy"\)` is cheaper than searching/u)
-    assert.equal(rendered.match(/is cheaper than searching/gu)?.length, 1, 'the cheap symbol does not get the advice')
+    assert.match(rendered, /\(large: prefer `codegraph_impact` over searching\)/u)
+    assert.equal(rendered.match(/prefer `codegraph_impact`/gu)?.length, 1, 'the cheap symbol does not get the advice')
+  })
+
+  it('prints an id on every row, so a refused name has a followable next step', () => {
+    // `codegraph_impact` takes ONE declaration and REFUSES a name that resolves to
+    // several. That is not exotic: one entity commonly has a declaration per notation —
+    // a type alias, a model/schema class, an SQL table — so the id is what makes the
+    // refusal answerable. The row used to print kind, name and location only, and the
+    // model's only way to name one declaration was to search the file for it.
+    const rendered = text(renderFind({
+      freshness: 'current',
+      note: undefined,
+      truncated: false,
+      symbols: [
+        { id: 'app/types.ts#interface:User', name: 'User', kind: 'interface', path: 'app/types.ts', line: 4, parent: undefined, references: 9 },
+        { id: 'db/schema.prisma#struct:User', name: 'User', kind: 'struct', path: 'db/schema.prisma', line: 12, parent: undefined, references: 3 },
+      ],
+    }))
+    const rows = rendered.split('\n').filter(line => line.startsWith('- '))
+    assert.equal(rows.length, 2)
+    assert.match(rows[0] ?? '', /\(id: app\/types\.ts#interface:User\)$/u)
+    assert.match(rows[1] ?? '', /\(id: db\/schema\.prisma#struct:User\)$/u)
+    assert.equal(rendered.match(/\(id: /gu)?.length, 2, 'one id per row, never twice on one row')
+  })
+
+  it('points at codegraph_impact for a SMALL call-site count too', () => {
+    // Measured in a real session: `find` answered "5 call site(s)", and the model then read
+    // the same file five times to work out which function each call site sits in — the
+    // list `codegraph_impact` returns in one call. The hint used to fire only above 20.
+    const rendered = text(renderFind({
+      freshness: 'current',
+      note: undefined,
+      truncated: false,
+      symbols: [{
+        id: 'src/a.ts#function:saveDraft', name: 'saveDraft', kind: 'function',
+        path: 'src/a.ts', line: 1, parent: undefined, references: 5,
+      }],
+    }))
+    assert.match(rendered, /`codegraph_impact` on one of those ids lists its call sites WITH the declaring symbol/u)
+  })
+
+  it('says nothing extra when there is nothing to list', () => {
+    const rendered = text(renderFind({
+      freshness: 'current',
+      note: undefined,
+      truncated: false,
+      symbols: [{
+        id: 'src/a.ts#function:unused', name: 'unused', kind: 'function',
+        path: 'src/a.ts', line: 1, parent: undefined, references: 0,
+      }],
+    }))
+    assert.doesNotMatch(rendered, /codegraph_impact/u, 'a symbol nothing calls has no list to point at')
   })
 
   it('flags a cut match list', () => {
@@ -305,5 +356,69 @@ describe('renderContext', () => {
     }
     const rendered = text(renderContext(answer, 40))
     assert.match(rendered, /TRUNCATED: at least one list was cut at 40 rows/u)
+  })
+})
+
+describe('renderContext — the source section', () => {
+  const base: ContextResult = {
+    freshness: 'current',
+    note: undefined,
+    symbol: { id: 'src/a.ts#function:alpha', name: 'alpha', kind: 'function', path: 'src/a.ts', line: 1, parent: undefined },
+    siblings: [],
+    calls: [],
+    calledBy: [],
+    imports: [],
+    documents: [],
+    truncated: false,
+  }
+
+  it('prints the declaration’s own source and says the file is already read', () => {
+    // The whole point of the slice: the answer must claim what it earned. A section
+    // that prints source without saying so leaves the model free to open the file
+    // anyway, which is the cost the section exists to remove.
+    const rendered = text(renderContext({
+      ...base,
+      source: { path: 'src/a.ts', startLine: 1, endLine: 2, text: '1\texport function alpha() {\n2\t}', truncated: false, drift: false },
+    }, 40))
+    assert.match(rendered, /source — src\/a\.ts:1-2/u)
+    assert.match(rendered, /1\texport function alpha\(\) \{/u)
+    assert.match(rendered, /treat it as already read/u)
+    assert.doesNotMatch(rendered, /past the answer's budget/u, 'nothing was cut, so nothing may claim it was')
+    assert.doesNotMatch(rendered, /changed after it was indexed/u)
+  })
+
+  it('says the tail is missing when the budget cut the declaration', () => {
+    const rendered = text(renderContext({
+      ...base,
+      source: { path: 'src/a.ts', startLine: 1, endLine: 400, text: '1\tx', truncated: true, drift: false },
+    }, 40))
+    assert.match(rendered, /only the first 400 line\(s\) of this declaration are here/u)
+    assert.match(rendered, /worth opening the file for/u)
+  })
+
+  it('names the file when its bytes are newer than the graph', () => {
+    const rendered = text(renderContext({
+      ...base,
+      source: { path: 'src/a.ts', startLine: 1, endLine: 1, text: '1\tx', truncated: false, drift: true },
+    }, 40))
+    assert.match(rendered, /src\/a\.ts changed after it was indexed/u)
+    assert.match(rendered, /fresher than the counts below/u)
+  })
+
+  it('explains a refusal instead of going silent, with one sentence per reason', () => {
+    // Silence would read as "the graph had nothing to add", and the four reasons have
+    // four different next steps — a switched-off reader is not a missing file.
+    const sentences = new Map<string, RegExp>([
+      ['disabled', /switched off/u],
+      ['not-indexed', /no row for this file/u],
+      ['outside-root', /outside the project root/u],
+      ['unreadable', /not readable on disk/u],
+      ['shortened', /shorter than the graph recorded/u],
+    ])
+    for (const [reason, pattern] of sentences) {
+      const rendered = text(renderContext({ ...base, sourceRefused: reason as 'disabled' }, 40))
+      assert.match(rendered, /source: not included/u, `${reason} must say there is no source`)
+      assert.match(rendered, pattern, `${reason} must name its own reason`)
+    }
   })
 })

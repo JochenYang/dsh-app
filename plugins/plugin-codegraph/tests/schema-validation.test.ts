@@ -74,6 +74,10 @@ function fakeContext() {
     effect(body: () => (() => void) | (() => Promise<void>)): void {
       disposers.push(body())
     },
+    /** Cordis's optional-injection door; every service exists in this fake. */
+    inject(_deps: readonly string[], callback: (scope: unknown) => void): void {
+      callback(this)
+    },
   }
   return { ctx, tools, emit: ctx.emit, dispose: async () => { for (const dispose of disposers.splice(0)) await dispose() } }
 }
@@ -221,9 +225,11 @@ describe('the registered output schemas accept the real answers', () => {
     }
   })
 
-  it('codegraph_find and codegraph_context still satisfy their schemas', async () => {
-    // The two tools this round did not change the schema of. Included because a change
-    // to a shared helper (`listMetaSchema`, `dropUndefined`) would land here first.
+  it('codegraph_context carries a source slice, and its refusal, through the same schema', async () => {
+    // Two shapes of the same answer: with the declaration's own source (the field this
+    // round added) and with the refusal that replaces it when the reader is switched
+    // off. Both are `codegraph_context` answers, so both must satisfy ONE schema —
+    // `source` and `sourceRefused` are optional properties of it, not two tools.
     const { root } = fixture()
     writeFileSync(join(root, 'src', 'lib.ts'), 'export function only(): number { return 1 }\n')
     const { ctx, tools, emit, dispose } = fakeContext()
@@ -238,7 +244,27 @@ describe('the registered output schemas accept the real answers', () => {
       await callAndValidate(tools, 'codegraph_find', { query: 'only' }, root)
       await callAndValidate(tools, 'codegraph_context', {}, root)
       await callAndValidate(tools, 'codegraph_context', { symbol: 'src/lib.ts' }, root)
-      await callAndValidate(tools, 'codegraph_context', { symbol: 'only' }, root)
+
+      const withSource = await callAndValidate(tools, 'codegraph_context', { symbol: 'only' }, root)
+      const source = withSource.source as { path: string, startLine: number, endLine: number, text: string, truncated: boolean, drift: boolean }
+      assert.ok(source !== undefined, 'a symbol answer must carry its own source')
+      assert.equal(source.path, 'src/lib.ts')
+      assert.equal(source.text, '1\texport function only(): number { return 1 }')
+      assert.equal(source.drift, false)
+      // The indexer wrote this file in the same test, so the hash matches and the
+      // answer must not claim drift — a flag that is always true is not a warning.
+      assert.equal(source.truncated, false)
+
+      // The kill switch turns the same call into a refusal, and the schema has to
+      // accept that answer too.
+      process.env.DSH_APP_CODEGRAPH_SOURCE = '0'
+      try {
+        const refused = await callAndValidate(tools, 'codegraph_context', { symbol: 'only' }, root)
+        assert.equal(refused.source, undefined)
+        assert.equal(refused.sourceRefused, 'disabled')
+      } finally {
+        delete process.env.DSH_APP_CODEGRAPH_SOURCE
+      }
     } finally {
       await dispose()
     }

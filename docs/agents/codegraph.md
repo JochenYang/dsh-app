@@ -16,9 +16,21 @@ rebuilds rather than migrates, because a graph is derived data).
 | Table | One row is | Key |
 |---|---|---|
 | `files` | a file the pass looked at, with its stat cache | `path` |
-| `symbols` | a declaration | `id` = `<path>#<kind>:<parent>.<name>` |
+| `symbols` | a declaration, with its line extent (`line`..`end_line`) | `id` = `<path>#<kind>:<parent>.<name>` |
 | `edges` | a relation between two nodes | `(src, dst, kind)` |
 | `meta` | the project's own state | one row |
+
+There is deliberately **no full-text index**. A word-part hit is always also a
+substring hit (`ruler` is inside `diffRulerMarks`), so an inverted index — with its
+per-symbol write, its second copy of every name and a `rowid` contract between two
+modules — would add no recall to a search that does not rank by score. The one query
+a substring scan cannot answer is a bag of words in any order, and that is answered
+by scanning for each word (`queryTokens`).
+
+`end_line` is the half of a declaration's extent the tools need: a query cuts
+`line`..`end_line` out of the file at read time (`src/source.ts`), so no source
+bytes are stored. Storing them would make the database a second, staler copy of
+the repository — one edit would have to rewrite a shelf.
 
 `edges.src` / `edges.dst` are NODE ids, and a node is one of two things:
 
@@ -59,8 +71,16 @@ second of extra index time.
 | Module | Owns | Never does |
 |---|---|---|
 | `src/store.ts` | the schema, and `replaceFile` / `forgetFile` as the only writers | read the disk |
-| `src/languages.ts` | which extensions map to which grammar, and the download + sha512 check | parse |
-| `src/parse.ts` | the per-language extraction tables (`GRAMMAR_SHAPES`) | touch the disk |
+| `src/languages.ts` | which extensions map to which grammar, the download + sha512 check, and which three grammars the plugin builds itself (§11) | parse |
+| `src/parse.ts` | the per-language extraction tables (`GRAMMAR_SHAPES`) and the three-layer name resolution (`linkFor`) | touch the disk |
+| `src/search.ts` | how a query string becomes filters, and which words a multi-word query is made of | query a database, or index anything |
+| `src/ignore.ts` | `.gitignore` matching and the generated-file verdict, as pure functions over strings | walk a tree |
+| `src/sfc.ts` | the code region of a Vue/Svelte/Astro component (a `<script>` block, or Astro's `---` frontmatter), masked into its own line positions | parse anything |
+| `src/sql.ts` | the SQL scanner: `CREATE` keywords and the objects a statement names | parse SQL properly, or resolve schemas |
+| `src/schema.ts` | the block scanner behind Prisma and GraphQL SDL, and their two keyword/reference tables | parse either language, or resolve a type to a declaration |
+| `src/hcl.ts` | Terraform/HCL: labelled blocks as addresses (`aws_instance.web`, `var.region`) and the references between them | evaluate expressions, follow `for_each`, or resolve a module's inputs |
+| `src/source.ts` | the ONE read of source bytes at query time: path containment, hash comparison, line budget | write anything |
+| `src/budget.ts` | how much source one answer may carry, per project size | know what a symbol is |
 | `src/docs.ts` | which symbols a document NAMES | parse markdown |
 | `src/indexer.ts` | the walk, the incremental comparison, the three phases, `projectChanged` (the read-only "did anything move" answer), and the pass's cancellation checkpoints | write SQL |
 | `src/query.ts` | every read the three tools perform | own state |
@@ -71,8 +91,12 @@ second of extra index time.
 | `src/tool-text.ts` | what the three tools SAY (`renderFind` / `renderImpact` / `renderContext`) | read a graph, a queue or a clock |
 | `src/queue.ts` | serialisation, the state machine, the read-only change decision, the compensating pass a mid-pass change owes, and cancelling a deleted project's work | write to a graph, or decide staleness from Git |
 
-`store.ts` is the only module that writes SQL and `indexer.ts` is the only module
-that reads the disk, which is what makes each one testable without the other.
+`store.ts` is the only module that writes SQL, and `indexer.ts` is the only module
+that reads the tree. **`source.ts` is the second module that reads a file, and it
+is the narrowest read in the plugin**: one file, at query time, only when the
+graph already holds a `files` row for it, and only when its absolute form stays
+inside the project root. That pair of checks is why a path in a tool answer
+(which a MODEL produced) cannot become an arbitrary file read — see §9b.
 
 ## 3. The pass, in three phases
 
@@ -93,9 +117,11 @@ Phases 2 and 3 must be transactional and separate from phase 1: their file rows
 are already committed, so the next pass would SKIP those files and the edges would
 be lost permanently rather than retried.
 
-Every 64 files the pass yields to the event loop. Without it a 20 000-file pass
-holds the kernel's loop for its whole duration and no tool call can ever observe
-the `indexing` state — the state machine would be unreachable in practice.
+The pass yields to the event loop: phase 1 after 8ms of work (by TIME, not by a
+file count — §7 has the measurement that killed the count), phases 2 and 3 after
+each batch of 50 files / 25 documents. Without it a 20 000-file pass holds the
+kernel's loop for its whole duration and no tool call can ever observe the
+`indexing` state — the state machine would be unreachable in practice.
 
 ## 4. The four ways this can be quietly wrong
 
@@ -130,6 +156,22 @@ Collapsing them told users "N files skipped because the language is not installe
 for projects whose only gap was a `.css` file, so the settings page asked them to
 download something that would not help. Measured on this machine: every skipped
 file belonged to a language that was already installed.
+
+The split had a second half, found the same way: a file whose grammar is ABSENT but
+whose language has no extraction rules was counted as `missingLanguage` — a download
+that cannot help, offered as the cure. Measured on a real project: ten `.css`/`.scss`
+files told the user "download the language below", and downloading the CSS grammar
+changed nothing, because a selector is not a symbol. `unsupportedFor` now decides by
+what a download would BUY: only a language with rules is ever reported as missing.
+
+**A narrower tree read as deletions.** `.gitignore`, the generated-file verdict and
+the size limit all make the walk return FEWER files than the directory holds — and
+the removal step deletes a graph row for every path it did not see. So the walk
+reports what it excluded (`ignored`, `generated`, `tooLarge`) and the pass must not
+treat those as gone, or a `.gitignore` edit would empty half a graph. The freshness
+check (`projectChanged`) runs through the SAME walker for a related reason: a check
+with its own idea of "which files count" reports work that a pass then does not do,
+and the project never converges.
 
 **A shared name linked to one match.** A call target that resolves to several
 declarations must not pick one — that would be a guess dressed as an answer. It must
@@ -178,6 +220,28 @@ project a session happened to open — five graphs could be on disk with one
 visible. At activation the plugin now walks `storages/.../projects/` and adopts
 every graph that carries `meta.cwd` (the directory name is a hash of the root and
 cannot be reversed). It reads metadata only; no pass is queued.
+
+**It peeks, it does not open** (`peekProjectMeta` in `src/store.ts`). The
+difference is not an optimisation, it is the whole correctness of this step:
+`openGraph` applies `SCHEMA_VERSION`, and a mismatch DROPS every table — `meta`
+and its `cwd` with them. A listing built on `openGraph` therefore erased the one
+field it needs, on the first launch after every schema bump, and because the
+directory name is `sha256(cwd)` there was nothing left to recover from: the
+settings page came up with no projects and each one reappeared only once a
+session opened it by hand. Measured after the 3→4 bump. So the listing opens the
+file, reads, and closes — no schema, no pragma, no write — and an OLD graph still
+knows its root as long as its metadata validates. The rebuild happens where it
+belongs: the first real open of that project (`graphFor` → `openGraph`), which
+then runs a full pass.
+
+A graph that cannot be read (a half-written file from a killed pass, or a file
+that is not a database) is skipped, never repaired here: deleting an unreadable
+file is `openGraph`'s decision, made when that project is actually opened.
+
+The same reasoning applies INSIDE `openGraph`: `meta.project` is not derived data —
+it is the only record of which project a graph describes — so a schema rebuild reads
+it first and writes it back with its counts zeroed. Without that, every version bump
+would lose the projects it touched, one library upgrade at a time.
 
 That walk is **deferred past activation** (`ctx.effect` + `setTimeout(0)`): reading
 each graph takes an exclusive SQLite lock, and on a machine whose graph was
@@ -295,6 +359,53 @@ answers while the edges are being repaired.
 `codegraph_context` (what is X's neighbourhood) split by the QUESTION asked, not
 by the data touched — three tools is prompt budget the model spends on every turn.
 
+`codegraph_context` on a symbol now also returns the declaration's own source,
+line-numbered, so the call is a place to EDIT from rather than an index to read
+afterwards (§9b owns the read, the containment rules and the drift flag; §1 owns
+why the bytes are not stored). Everything else in that answer — siblings, calls,
+callers, imports, documents — is a pointer, and a pointer is what made a model open
+the file anyway.
+
+`codegraph_find` ranks by evidence rather than by one scan. An exact name —
+compared case-insensitively, because `LIKE` is and an `=` that is not would let
+`ruler` miss `Ruler` and then rank `RulerFactory` above it — ends the search. Otherwise
+a prefix, a substring scan, and a bag-of-words scan for a MULTI-WORD query merge in
+that order; duplicates collapse by id and the answer keeps path-and-line order.
+
+`codegraph_find` also points at `codegraph_impact` for a SMALL call-site count, not
+only for a large one. Measured in a real session: it answered `saveDraft` with
+"5 call site(s)", and the model then read the same file five times to work out which
+function each call site sits in — the list `codegraph_impact` returns in one call, with
+the declaring symbol named on every row. The hint used to fire only above 20, so the
+common case got no pointer and the read reflex won.
+
+**Every `codegraph_find` row prints its id, because a refused name needs one.** The
+row used to carry kind, name and location only. `codegraph_impact` accepts ONE
+declaration and refuses a name that resolves to several, and that collision is
+ordinary rather than exotic: one entity normally has a declaration per notation — a
+type alias beside the model class an ORM maps a table onto beside the table an SQL
+migration creates — so the model meets the refusal on the names it asks about most.
+The refusal does print candidate ids, but only FIVE of them, while `find` answers up
+to forty rows: past five declarations the refusal cannot name what it declines to
+answer, and the model's only way to one is a text search for it. Printing the id on
+every row also removes the round trip in the ordinary case, where the first answer
+already names the declaration and the second call is the real question.
+
+The row APPENDS the id rather than replacing the label, unlike the overview's hub
+rows (§8b-1). The difference is the line number: an id carries no line, and a `find`
+answer spans files, so `path:line` is the only thing on the row that says where to
+look. The id is what to copy; the label is what to read.
+
+The four tiers are deliberately not four kinds of index. Tiers 1–3 are one table and
+one scan; tier 4 exists because `marks ruler` is not a substring of anything, which is
+the single hole a substring scan has. That is also why the bag-of-words tier runs
+LAST: every row it can find is a row the substring tier would find for a single word,
+so letting it go first would only let it push those rows past the limit. Nothing here
+ranks by score — a stable order is worth more to a reader than a marginally better
+one. It also accepts `kind:` / `path:` / `lang:` / `name:` prefixes, because a common
+name narrowed by a fact the caller already knows is a better question than a longer
+word.
+
 The first two need a name and always will. `codegraph_context` used to require one
 too, which made the plugin unreachable for the question it was built to answer:
 "what is this project, where does it start" names no symbol, so the model had
@@ -351,6 +462,13 @@ Three properties make it safe to run on every turn:
 - **Bounded** — five entry candidates, five hubs, three languages, ~14 lines. This
   is context spent on every turn; an unbounded list would cost more than the reading
   it saves.
+- **Complete enough to stop, down to the line.** The entry rows carry the start
+  symbol's LINE (`apps/api/src/main.ts (starts at function bootstrap:34)`). Measured
+  in a real session before that: the model read a row saying only `… (starts at
+  function bootstrap)`, then ran glob plus four reads, and answered with
+  `main.ts:34` — five tool calls for a number the block already knew. A row that
+  answers "which file" but not "where in it" leaves exactly enough missing to justify
+  the exploration it was meant to replace.
 - **Silent when it cannot back itself up** — no graph, or a graph with no files,
   contributes `''`. "0 files" would read as a fact about the project rather than about
   the pass. An `indexing` pass contributes a BOUNDED STATUS instead (§8b-1): silence
@@ -581,6 +699,39 @@ session, whose writes always arrive through this pipeline. An edit from an exter
 editor with no tool call in between is covered one observation late, on the next
 tool call or the next HEAD move.
 
+### 9b. The source slice, and its own freshness flag
+
+`codegraph_context` on a symbol returns the declaration's bytes, read from disk at
+query time (`src/source.ts`). Four properties make that safe and honest:
+
+- **A path in an answer is a request, not a fact.** A tool answer is produced with
+  a model in the loop, so `path` is admitted only when the graph holds a `files`
+  row for it AND its resolved absolute form stays inside the project root. An
+  indexed path alone is not enough (a row can name `../x`), and containment alone
+  is not enough (it would read any file under the root). `relative()` is the
+  containment check, not a string prefix: `D:\app` is a prefix of `D:\app-evil`.
+- **The recorded hash decides `source.drift`.** The bytes served are always the
+  CURRENT ones — refusing to answer would hide the very edit being asked about —
+  and the flag is what stops those bytes from being read as the graph's view.
+  This is a SECOND freshness channel: `freshness` describes the graph,
+  `source.drift` describes the bytes just handed over. They normally agree; when
+  they do not, the answer says which half moved.
+- **The budget is a table** (`src/budget.ts`). Per-file depth never shrinks as the
+  project grows — a big repo with a 4000-line module needs MORE of one file, not
+  less — and a declaration longer than the budget is reported as cut in words, not
+  only in a boolean.
+- **A kill switch, not a config row.** `DSH_APP_CODEGRAPH_SOURCE=0` answers without
+  source, exactly as before the reader existed. The risky half of the feature is
+  one filesystem read; turning it off must not need a code change on a user's
+  machine.
+
+A refusal is a stable code (`disabled` / `not-indexed` / `outside-root` /
+`unreadable` / `shortened`), rendered as its own sentence: the five reasons have
+five different next steps, and silence would read as "the graph had nothing to
+add". `unreadable` and `shortened` are the pair worth keeping apart — the first
+sends a reader to check permissions, while the second means the file is fine and
+simply got shorter than the graph's record of it, which is a re-index problem.
+
 ## 10. What it does not do
 
 Stated here because the tool descriptions promise exactly this and no more:
@@ -605,18 +756,19 @@ than an unfinished one. Listed so a reader knows where an answer stops.
 
 | boundary | consequence | why it stays |
 |---|---|---|
-| A name declared in several files links to all of them (up to ten) | a signature's type dependencies can read about twice the real count — `Model` has 364 annotations but 728 edges because two files declare it | under-reporting callers changes code silently; over-reporting is a row the reader can dismiss. Import-guided resolution is the next layer |
+| A name declared in several files links to all of them (up to ten) — unless this file IMPORTS it from one of them | a signature's type dependencies can read about twice the real count when nothing narrows it — `Model` has 364 annotations but 728 edges because two files declare it | under-reporting callers changes code silently; over-reporting is a row the reader can dismiss. The import clause is the narrowing that costs nothing: `import { Model } from './model'` states which one. What is still missing is a specifier that no `import` clause names (a re-export chain, a path alias), where the same name stays ambiguous |
 | `extends` / `implements` have shapes for the TypeScript/JavaScript family only | a Python, Go, Java, C# or Rust project answers these queries with nothing | each language needs its own node table; the grammars differ more here than for calls |
 | A module's public surface stops at file → symbol | `export * from './x'` is a file→file edge, so "is this symbol part of the package API" is one hop away, not answered directly | deriving symbol-level publication across a re-export chain means re-scanning every exporting file whenever one changes — the W11b shape that lost edges before |
-| A shared name's re-export resolves inside the named module only | an `export { x } from './y'` where `y` re-exports `x` from `z` links to nothing at the second hop | one hop is what the `from` clause states; following the chain needs import resolution for every step |
+| A shared name's re-export resolves inside the named module only — for the EXPORT surface | an `export { x } from './y'` where `y` re-exports `x` from `z` links to nothing at the second hop | one hop is what the `from` clause states; following the chain needs import resolution for every step. Calls and signature references are NOT bounded this way: when the clause names a module that declares none of the name (a barrel), the import layer falls back to the project-wide rule, so the cost of a re-export is precision rather than a missing caller |
 | The graph is rebuilt from scratch on a schema bump | the first launch after an upgrade shows `indexing` for ~30s | a derived graph is only as good as the pass that filled it; an interrupted rebuild leaves an empty graph that the next open repairs |
+| A constructor call is recorded only where the extraction table names its node type — the TypeScript/JavaScript family (`new_expression`), Java and C# (`object_creation_expression`) and Scala (`instance_expression`) | `Dart`'s `Widget()` is a `selector` on the identifier, not a call node, so a Dart class still answers "0 call sites" | measured in a real session: before these rows existed, the most-used class in a TypeScript monorepo answered `0 call site(s)` and the model read twenty files by hand. The four rows above close the case that showed up; Dart's shape needs selector-chain resolution, which is a different piece of work |
 
 The last one has a sharp edge worth stating: an interrupted rebuild leaves a graph
 with no rows, and nothing marks it as incomplete. The next open rebuilds it, so the
 state is transient — but a query issued during it answers from an empty graph, and
 `indexing` is the only signal.
 
-### 10a. The five ways an answer is incomplete, and what each now says
+### 10c. The five ways an answer is incomplete, and what each now says
 
 Every one of these was measured, and each used to read as a complete answer.
 
@@ -626,7 +778,7 @@ Every one of these was measured, and each used to read as a complete answer.
 | the sample came from three files out of a hundred | 40 rows, all from one file | 40 rows drawn one-per-file, so a sample looks like a sample |
 | the name is declared several times, so no edge was ever built | "no unambiguous symbol matched" | the declarations that share it, their ids, and "ambiguity is not absence" |
 | the call goes through an interface, a dispatch or a variable, so no edge exists | an empty list | "no direct callers found — that is NOT safe to change" |
-| the symbol has hundreds of callers, so searching for them is expensive | the declaration only | `482 call site(s) — codegraph_impact is cheaper than searching` |
+| the symbol has hundreds of callers, so searching for them is expensive | the declaration only | `482 call site(s) — prefer codegraph_impact over searching` |
 
 The second row is a different failure from the first: `truncated: true` was honest
 about the cut and silent about the SHAPE. Measured, `impact` on a symbol with 664
@@ -651,7 +803,7 @@ times, because no answer said which was which.
 The rule the tools now follow: a result that cannot be trusted says which way it is
 untrustworthy, and names the next step.
 
-### 10b. What this plugin is, in one sentence
+### 10d. What this plugin is, in one sentence
 
 A **code graph**: a static index of declarations and the name-resolved references
 between them. It is not a knowledge graph and not a semantic one — it encodes "A
@@ -665,7 +817,7 @@ matches and no callers of consequence, and why the plugin now reports the caller
 in `codegraph_find`: choosing well needs the size of the question, not more
 instructions.
 
-### 10c. Unloading: the pass must stop before the handles close
+### 10e. Unloading: the pass must stop before the handles close
 
 The teardown has three steps and their ORDER is the whole contract:
 
@@ -716,10 +868,12 @@ Three layers, each blind to something:
 
 **A fourth, narrower gap worth knowing.** `tests/parse.test.ts` has one case per
 extraction-table row, and each runs a REAL grammar: a node name the grammar does
-not produce yields no symbol and the case fails. That covers the nine bundled
-languages on every run. The four on-demand tables (`rust`, `ruby`, `php`, `bash`)
-are verified only where their wasm is present, because the repository ships no
-second copy of a download.
+not produce yields no symbol and the case fails. That covers every bundled
+language on every run, and `tests/sfc.test.ts` does the same for the two component
+languages (Vue and Svelte), whose `<script>` block is masked into place before the
+TypeScript grammar reads it. The on-demand tables (`rust`, `ruby`, `php`, `bash`,
+and PowerShell's two rows) are verified only where their wasm is present, because
+the repository ships no second copy of a download.
 
 CI closes that gap instead of accepting it: `ci.yml` runs
 `plugins/plugin-codegraph/scripts/fetch-ci-grammars.mjs` before the plugin suites
@@ -727,5 +881,77 @@ and points `DSH_APP_CODEGRAPH_GRAMMARS` at what it fetched. The script goes
 through the product's own `downloadGrammar`, so the recorded sha512 and the wasm
 magic check apply to those bytes exactly as they do to a user's, and a fetch
 failure is fatal rather than a quiet fallback to skips. A local run without that
-variable prints **16 skips** — visible in the count, never silent — and
-`DSH_APP_CODEGRAPH_GRAMMARS=<dir>` runs all 233.
+variable prints **18 skips** — visible in the count, never silent — and
+`DSH_APP_CODEGRAPH_GRAMMARS=<dir>` runs all 125.
+
+**Twelve grammars are BUILT here, not downloaded, and six of them ship on request.**
+Kotlin, Swift, Dart, Scala, Elixir, Lua, Zig, R, Julia, Haskell, Objective-C and Groovy
+have no entry in the pinned `@vscode/tree-sitter-wasm` set, so their wasm files are
+produced from the upstream grammar sources with the tree-sitter CLI. Six of those ship
+inside the plugin — Kotlin, Swift, Dart, Objective-C, Lua and R — because they are what a
+phone, a desktop or a data team's project is written in. The other six are downloaded from
+this app's own kernel release (`grammarUrls` in `languages.ts`): Scala, Elixir, Zig, Julia,
+Haskell and Groovy together were 13 MB of an artifact every user downloads, for languages
+that almost no repository is written in. Their bytes live in `grammars-optional/` in the
+repository, ride the `runtime-<version>` release (release.yml uploads them; the mirror job's
+folder upload carries them to ModelScope), and every download is checked against a recorded
+sha512 before it is renamed into place. `tree-sitter` CLI 0.27.1 is the version to use — it
+must match `web-tree-sitter` 0.27, and a mismatch shows up as `Language.load` failing rather
+than as a parse difference. Rebuilding one, from the commits these bytes came from — a
+`--depth 1` clone of `main` does not reproduce them:
+
+| Grammar | Upstream | Commit |
+|---|---|---|
+| Kotlin | `fwcd/tree-sitter-kotlin` | `d6af96d` (2026-10-31) |
+| Swift | `alex-pinkus/tree-sitter-swift` | `9e3b87f` (2026-10-13) |
+| Dart | `UserNobody14/tree-sitter-dart` | `0038280` (2026-10-18) |
+| Scala | `tree-sitter/tree-sitter-scala` | `8c0b6d4` (`v0.26.4`, 2026-11-01) |
+
+```sh
+git clone <upstream> /tmp/g && git -C /tmp/g checkout <commit>
+cd /tmp/g && tree-sitter generate          # only when src/parser.c is absent
+tree-sitter build --wasm . -o <plugin>/grammars/tree-sitter-<lang>.wasm
+```
+
+Three of these needed the table to grow a shape it did not have, and the reasons are
+worth keeping: `nameChild` accepts a PATH (`arguments > #first`, `type_head > **identifier`,
+`field:declarator > field:declarator`) because most of these grammars nest the name;
+`declarations` accepts an ORDERED LIST per node type because Elixir spells `defmodule`,
+`def`, `defimpl` and `@type` as the same `call` node, told apart by its `target` text; and
+`alsoCall`/`heritageFields` exist because Objective-C has two call node types and a
+superclass in a FIELD rather than in a clause node.
+
+`tree-sitter-swift` needs one source change first: its scanner reports an
+allocation failure with `fprintf(stderr, …)` + `exit(1)`, which leaves
+`GOT.mem.stderr`, `fwrite` and `exit` as undefined imports — the wasm runtime
+provides no stdio, so the module fails to instantiate. `abort()` keeps the
+fail-fast behaviour and links — which means the committed Swift module is NOT
+byte-identical to upstream, and a rebuild must reapply that one-line change
+(`scanner.c`, the OOM branch) or it will fail to load again. Verify a rebuilt
+module through the plugin's own
+`parseFile` (`scratch/cg-grammar-probe.ts` is the shape) before committing it:
+loading, a clean tree and real symbols are three separate facts.
+
+**What is verified about these bytes, and what is not.** All 20 grammars this plugin
+can parse with have been loaded through the pinned `web-tree-sitter` under BOTH host
+binaries this app can run — the dev machine's Node 24 and the kernel runtime's own
+`node.exe` (22.x) — and every load succeeded. Fourteen of them ship in the plugin; the
+six release-hosted ones were read from `grammars-optional/`, which is the same bytes
+the release carries. Twelve (the ones built here) were then used to parse a real sample
+each, `rootNode.hasError === false` on all twelve. The other eight are the pinned
+upstream set, whose real-grammar coverage is `tests/parse.test.ts`: one case per
+extraction-table row, each running a real grammar, so a node name the grammar does not
+produce fails a case on every run. The ABI that decides whether a module loads at all
+is `web-tree-sitter`'s rather than Node's, so those host runs are evidence about the
+binary, not about the artifact.
+
+Still unverified: the PACKAGED tree, where `web-tree-sitter` resolves through the
+profile's install of the plugin rather than this working tree, and where the six
+release-hosted grammars download from a URL that only exists once a release has been
+cut with them attached. `npm run verify` proves every suite plugin ACTIVATES in a real
+kernel, that its own routes answer and that the resources it ships exist; it parses no
+source file and probes no `codegraph` route, so it cannot see a grammar that fails to
+load. To repeat the load check by hand: load each `.wasm` (from `grammars/` and
+`grammars-optional/`) with `web-tree-sitter` and parse one real sample per language,
+asserting `rootNode.hasError === false` — a load failure throws, a version skew parses
+into ERROR nodes, and the two are different bugs.

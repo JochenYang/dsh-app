@@ -38,6 +38,7 @@ const symbol = (name: string, kind = 'function'): SymbolRecord => ({
   name,
   kind: kind as SymbolRecord['kind'],
   line: 1,
+  endLine: 1,
 })
 
 /** The name set the scan consults. */

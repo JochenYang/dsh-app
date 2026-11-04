@@ -51,6 +51,14 @@ import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { gitHead, indexProject, isStale, projectChanged } from './indexer.ts'
 
+/** The languages read by a scanner instead of a grammar, by id. */
+const SCANNERS: Readonly<Record<string, (source: string, path: string) => ParsedFile>> = {
+  sql: parseSql,
+  prisma: parsePrisma,
+  graphql: parseGraphql,
+  terraform: parseHcl,
+}
+
 /** How many project graphs one process keeps open at a time. */
 const MAX_OPEN_GRAPHS = 8
 
@@ -79,6 +87,12 @@ async function gitHeadCached(cwd: string): Promise<string> {
   return head
 }
 import { parseFile } from './tree-sitter.ts'
+import { unsupportedFor } from './parse.ts'
+import { textForParse } from './sfc.ts'
+import { parseSql } from './sql.ts'
+import { parseGraphql, parsePrisma } from './schema.ts'
+import { parseHcl } from './hcl.ts'
+import type { ParsedFile } from './parse.ts'
 import { LANGUAGES, bundledGrammarDir, downloadGrammar, grammarPath, type GrammarPaths } from './languages.ts'
 import {
   ambiguousCandidates,
@@ -88,37 +102,43 @@ import {
   dropUndefined,
   findSymbols,
   fileOutline,
+  fileCount,
   freshnessNote,
   importsOf,
   projectOverview,
   referencesTo,
   relatedTo,
   resolveSymbol,
+  symbolSpan,
   symbolsInFile,
   type ContextResult,
   type FindResult,
   type Freshness,
   type ImpactResult,
 } from './query.ts'
+import { sourceBudget } from './budget.ts'
+import { readSourceSlice } from './source.ts'
 import { createIndexQueue, type IndexQueue } from './queue.ts'
 import { overviewContextText } from './prompt.ts'
 import { createRefreshScheduler } from './refresh.ts'
 import { renderContext, renderFind, renderImpact } from './tool-text.ts'
 import { removeTree } from './remove-tree.ts'
-import { registerCodegraphRoutes } from './routes.ts'
-import { fileNodeId, forgetFile, openGraph, readFiles, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
+import { registerCodegraphRoutes, type CodegraphRoutesOptions } from './routes.ts'
+import { fileNodeId, forgetFile, openGraph, peekProjectMeta, readFiles, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
 
 export const name = 'plugin-codegraph'
 
 /**
  * Services this plugin cannot work without.
  *
- * `connection` is required because the settings routes ride its exact-Fetch
- * registry; `tools` because the three tools are the plugin's whole point;
- * `systemPrompt` because the project overview is pushed as runtime context — the
- * one mechanism that does not depend on the model choosing to look.
+ * `tools` because the three tools are the plugin's whole point; `systemPrompt`
+ * because the project overview is pushed as runtime context — the one mechanism that
+ * does not depend on the model choosing to look. `connection` is deliberately ABSENT:
+ * only the settings routes ride its exact-Fetch registry, and a headless or TUI
+ * profile has no such carrier, so requiring it made the tools vanish from every
+ * composition that is not web-shaped (measured — see the route block in `apply`).
  */
-export const inject = ['tools', 'connection', 'systemPrompt']
+export const inject = ['tools', 'systemPrompt']
 
 /** How many rows one tool answer may carry before it reports truncation. */
 const MAX_ROWS = 40
@@ -207,16 +227,12 @@ export function knownProjects(storageRoot: string): { cwd: string, meta: Project
     if (!entry.isDirectory()) continue
     const file = join(projectsDir, entry.name, 'graph.db')
     if (!existsSync(file)) continue
-    let graph: Graph | undefined
-    try {
-      graph = openGraph(file)
-      const meta = readProjectMeta(graph.db)
-      if (meta !== undefined && meta.cwd !== '') found.push({ cwd: meta.cwd, meta })
-    } catch {
-      // Unreadable graph: skipped, and the next pass for that project rebuilds it.
-    } finally {
-      try { graph?.close() } catch { /* already closed */ }
-    }
+    // A PEEK, never `openGraph`: opening applies the schema version, and a version
+    // mismatch drops every table — `meta` and its `cwd` with them. The directory name
+    // is `sha256(cwd)`, so a listing that opened the graphs would erase the one field
+    // it needs and could not recover it. See `peekProjectMeta`.
+    const meta = peekProjectMeta(file)
+    if (meta !== undefined && meta.cwd !== '') found.push({ cwd: meta.cwd, meta })
   }
   return found
 }
@@ -243,11 +259,32 @@ export function apply(ctx: Context): void {
       // not-yet-installed language answers `unsupported` and the file is still
       // recorded, so the next pass skips it on the cheap comparison.
       const language = LANGUAGES.find(entry => entry.id === languageId)
-      if (language === undefined) return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: 'missing' as const }
+      // No table entry at all means the extension slipped past `languageForPath`, which
+      // is a mapping bug rather than a missing download — but it is still reported as
+      // `noShape`, because that is the answer that does not send anyone to a download.
+      if (language === undefined) return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: 'noShape' as const }
+      // Scanned rather than parsed: these have no grammar in the pinned package, and
+      // their declarations are keywords rather than a syntax tree (`sql.ts`, `schema.ts`).
+      // One table, so adding the next scanned language is a row rather than a branch that
+      // has to be placed in the right order.
+      const scanner = SCANNERS[language.id]
+      if (scanner !== undefined) return scanner(source, path)
       const paths = grammarPaths()
       const grammar = grammarPath(language, paths)
-      if (grammar === undefined) return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: 'missing' as const }
-      return await parseFile(grammar, runtimeWasm(), source, path, languageId)
+      if (grammar === undefined) {
+        // `missing` only when a download would actually help: a stylesheet declares
+        // nothing by design, so offering its grammar as the cure is advice that cannot
+        // work (measured: ten `.css`/`.scss` files told the user exactly that).
+        const refusal = unsupportedFor(language.id, false)
+        return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: refusal === false ? 'noShape' : refusal }
+      }
+      // A single-file component's code lives in its `<script>` block, at its own line
+      // numbers; `textForParse` masks everything else away so the grammar can read it.
+      // A component with no script block declares nothing, which is a `noShape` answer —
+      // not a missing download and not an empty file.
+      const text = textForParse(source, language.id)
+      if (text === undefined) return { symbols: [], calls: [], imports: [], heritage: [], typeRefs: [], exports: [], hasError: false, unsupported: 'noShape' as const }
+      return await parseFile(grammar, runtimeWasm(), text, path, languageId)
     }, Date.now, undefined, signal)
   }, {
     // THE READ-ONLY HALF OF THE FRESHNESS QUESTION. A tool result proves a tool ran,
@@ -554,7 +591,10 @@ export function apply(ctx: Context): void {
     description:
       'Locate a symbol in this project WITHOUT reading files: answers "where is X declared / defined" with '
       + 'its kind, file and line, and its call-site count, in one call. Use it as the first step of almost '
-      + 'any question about the codebase — before opening files, grepping, or guessing a path.',
+      + 'any question about the codebase — before opening files, grepping, or guessing a path. '
+      + 'The query accepts field prefixes, alone or with words: `kind:function`, `path:src/main`, `lang:typescript`, '
+      + '`name:auth` — combine them to narrow a common name (`kind:class name:Service path:src`) instead of '
+      + 'scanning a long list.',
     parameters: {
       query: {
         type: 'string',
@@ -839,6 +879,19 @@ export function apply(ctx: Context): void {
               parent: { type: 'string' },
             },
           },
+          source: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              path: { type: 'string', required: true },
+              startLine: { type: 'number', required: true },
+              endLine: { type: 'number', required: true },
+              text: { type: 'string', required: true },
+              truncated: { type: 'boolean', required: true },
+              drift: { type: 'boolean', required: true },
+            },
+          },
+          sourceRefused: { type: 'string', enum: ['disabled', 'not-indexed', 'outside-root', 'unreadable', 'shortened'] },
           siblings: {
             type: 'array',
             required: true,
@@ -1067,10 +1120,39 @@ export function apply(ctx: Context): void {
       const called = calledBy(graph, symbol.id, MAX_ROWS)
       const imported = importsOf(graph, symbol.path, MAX_ROWS)
       const docs = documentsFor(graph, symbol.id, MAX_ROWS)
+      // The answer's reason to exist: the declaration's own bytes, so a model can
+      // edit from this call instead of opening the file. Read at query time from
+      // disk (source.ts explains why they are not stored), bounded by a budget
+      // that is tiered by the project's size (budget.ts explains why per-file depth
+      // never shrinks with it).
+      const span = symbolSpan(graph, symbol.id)
+      const budget = sourceBudget(fileCount(graph))
+      const read = span === undefined
+        ? { ok: false as const, reason: 'not-indexed' as const }
+        : readSourceSlice({
+          db: graph.db,
+          root: cwd,
+          path: symbol.path,
+          startLine: span.line,
+          endLine: span.endLine,
+          maxLines: budget.maxLines,
+          maxChars: budget.maxChars,
+        })
       return dropUndefined({
         freshness,
         note,
         symbol,
+        source: read.ok
+          ? {
+            path: symbol.path,
+            startLine: read.slice.startLine,
+            endLine: read.slice.endLine,
+            text: read.slice.text,
+            truncated: read.slice.truncated,
+            drift: read.slice.drift,
+          }
+          : undefined,
+        sourceRefused: read.ok ? undefined : read.reason,
         siblings: symbolsInFile(graph, symbol.path, MAX_ROWS),
         // The symbol's OWN calls, plus whatever its file calls at file scope.
         // Before W11b this was the file's calls for every symbol in it, so a
@@ -1085,7 +1167,16 @@ export function apply(ctx: Context): void {
     },
   })))
 
-  disposers.push(registerCodegraphRoutes(ctx.connection.fetch, {
+  // Settings routes ride the Connection carrier's exact-Fetch registry, which only a
+  // WEB-SHAPED composition has. That is why `connection` is NOT in this plugin's
+  // required `inject` list: the three tools and the pushed overview need only `tools`
+  // and `systemPrompt`, and a headless or TUI profile has neither a browser nor a
+  // Fetch registry. Measured in a real headless kernel with the suite mounted: while
+  // `connection` was required, the whole plugin stayed inactive and the session
+  // answered "this environment has no code graph tool" — the tools were gated by a
+  // service they never touch. `ctx.inject` is cordis's optional door: the routes
+  // mount where the carrier exists, and nothing is registered where it does not.
+  const routeHandler: CodegraphRoutesOptions = {
     statuses: () => queue.statuses(),
     grammarPaths,
     installLanguage: async (id) => {
@@ -1141,7 +1232,10 @@ export function apply(ctx: Context): void {
     reindex: async (cwd) => { await queue.request(cwd) },
     forgetProject,
     graphFor,
-  }))
+  }
+  ctx.inject(['connection'], (routeCtx) => {
+    disposers.push(registerCodegraphRoutes(routeCtx.connection.fetch, routeHandler))
+  })
 
   // THE ONE MECHANISM THAT DOES NOT DEPEND ON THE MODEL LOOKING.
   //

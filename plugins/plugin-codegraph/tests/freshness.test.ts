@@ -89,6 +89,10 @@ function fakeContext() {
     effect(body: () => (() => void) | (() => Promise<void>)): void {
       disposers.push(body())
     },
+    /** Cordis's optional-injection door; every service exists in this fake. */
+    inject(_deps: readonly string[], callback: (scope: unknown) => void): void {
+      callback(this)
+    },
   }
   return {
     ctx,

@@ -59,6 +59,7 @@ const symbol = (path: string, name: string, line: number, kind: SymbolRecord['ki
   name,
   kind,
   line,
+  endLine: line,
   parent: undefined,
 })
 
@@ -90,6 +91,37 @@ describe('openGraph', () => {
     const version = second.db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string }
     assert.equal(version.value, String(SCHEMA_VERSION))
     second.close()
+  })
+
+  it('carries a project’s identity across a rebuild, with its counts zeroed', () => {
+    // The identity is not derived data: `meta.project` is the only record of which
+    // project a graph describes, and the directory name is a hash that cannot be
+    // reversed. A rebuild that dropped it lost the PROJECT — measured on a real machine,
+    // a version bump emptied the settings list and left twelve graph directories that no
+    // longer knew their own path. The counts must NOT survive, because the rows they
+    // describe are gone.
+    const path = tempGraph()
+    const first = openGraph(path)
+    writeProjectMeta(first.db, {
+      cwd: 'D:/codes/kept', name: 'kept', head: 'abc', indexedAt: 42,
+      fileCount: 12, symbolCount: 34, edgeCount: 56,
+      truncated: true, removalSkipped: true, missingLanguage: 3, noRules: 2, parseErrors: 1,
+    })
+    first.db.prepare('UPDATE meta SET value = ? WHERE key = ?').run('1', 'schema_version')
+    first.close()
+
+    const second = openGraph(path)
+    const meta = readProjectMeta(second.db)
+    second.close()
+    assert.ok(meta !== undefined, 'the project survives the schema version it had')
+    assert.equal(meta.cwd, 'D:/codes/kept')
+    assert.equal(meta.head, 'abc')
+    assert.deepEqual(
+      [meta.indexedAt, meta.fileCount, meta.symbolCount, meta.edgeCount, meta.missingLanguage, meta.noRules, meta.parseErrors],
+      [0, 0, 0, 0, 0, 0, 0],
+      'the counts describe rows that no longer exist',
+    )
+    assert.deepEqual([meta.truncated, meta.removalSkipped], [false, false])
   })
 
   it('keeps the project metadata round-tripping', () => {
@@ -266,5 +298,20 @@ describe('openGraph file handling', () => {
     const graph = openGraph(path)
     graph.close()
     assert.equal(existsSync(path), true)
+  })
+
+  it('rebuilds a schema that exists without a version row', () => {
+    // The v4 consequence: a `symbols` table without `end_line` throws on every write,
+    // so "no version row" must not read as "nothing to do" — that would turn a
+    // half-written graph into a permanent failure on every open.
+    const path = tempGraph()
+    const first = openGraph(path)
+    first.db.prepare('INSERT INTO files (path, mtime, size, hash, lang) VALUES (?, ?, ?, ?, ?)').run('a.ts', 1, 1, 'h', 'typescript')
+    first.db.prepare('DELETE FROM meta WHERE key = ?').run('schema_version')
+    first.close()
+
+    const second = openGraph(path)
+    assert.equal(readFiles(second.db).size, 0, 'a schema without a version is rebuilt, not trusted')
+    second.close()
   })
 })

@@ -49,6 +49,8 @@ interface ProjectRow {
     readonly noRules: number
     readonly parseErrors: number
     readonly tooLarge: number
+    readonly ignored: number
+    readonly generated: number
     readonly durationMs: number
     readonly removalSkipped: boolean
   }
@@ -239,6 +241,16 @@ function ProjectPanel({ project, busy, onReindex, onForget, t }: {
         : null}
       {outcome !== undefined && outcome.tooLarge > 0
         ? <p className="dshcg_notice">{t('codegraph.outcome.tooLarge', { count: outcome.tooLarge })}</p>
+        : null}
+      {/* The two counters that explain a graph smaller than the tree. Kept apart for
+          the same reason the two above are: "your .gitignore excludes these" asks
+          nothing of the user, while "these are generated" asks them to look at a
+          build artefact — and one summed number would say neither. */}
+      {outcome !== undefined && outcome.ignored > 0
+        ? <p className="dshcg_notice">{t('codegraph.outcome.ignored', { count: outcome.ignored })}</p>
+        : null}
+      {outcome !== undefined && outcome.generated > 0
+        ? <p className="dshcg_notice">{t('codegraph.outcome.generated', { count: outcome.generated })}</p>
         : null}
     </div>
   )

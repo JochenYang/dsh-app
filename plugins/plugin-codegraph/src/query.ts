@@ -19,6 +19,8 @@
  */
 
 import { allRows, fileNodeId, oneRow, type Graph } from './store.ts'
+import { parseSymbolQuery, queryTokens, type SymbolQuery } from './search.ts'
+import type { SourceRefusal } from './source.ts'
 
 /**
  * How fresh the graph is, as every answer reports it.
@@ -259,6 +261,22 @@ export interface ContextResult extends ToolEnvelope {
     readonly reExports: readonly string[]
   } | undefined
   /**
+   * The declaration's own source, numbered like `Read` numbers it.
+   *
+   * Present only on the symbol branch, and only when the file could be read: this
+   * is the difference between an answer that says WHERE a declaration is and one a
+   * model can edit from. `drift` is carried rather than hidden because the bytes are
+   * read now, from disk, while the graph's view of the file may be older.
+   */
+  readonly source?: SourceView | undefined
+  /**
+   * Why there is no source, when a symbol was named and none came back.
+   *
+   * A stable code, not prose: the render turns it into a sentence, so the same
+   * refusal does not acquire a second wording on the other side of the wire.
+   */
+  readonly sourceRefused?: SourceRefusalCode | undefined
+  /**
    * True when any of the symbol's lists was cut to the row limit.
    *
    * Same reason as `ImpactResult.truncated`: a 40-entry `calledBy` that is really
@@ -274,6 +292,32 @@ export interface DocumentRef {
   /** 1-based line in that document. */
   readonly line: number
 }
+
+/** A declaration's source, as a tool reports it. */
+export interface SourceView {
+  /** The file the text came from. */
+  readonly path: string
+  /** 1-based first line `text` carries. */
+  readonly startLine: number
+  /** 1-based last line `text` carries. */
+  readonly endLine: number
+  /** Line-numbered source, `<n>\t<line>`. */
+  readonly text: string
+  /** True when the declaration is longer than the answer's budget. */
+  readonly truncated: boolean
+  /** True when the bytes on disk no longer match what the graph indexed. */
+  readonly drift: boolean
+}
+
+/**
+ * Why a source slice is missing.
+ *
+ * Re-exported from the reader rather than re-declared: the set is the reader's
+ * vocabulary, and a second copy here would let the tool answer with a code the render
+ * has no sentence for. The TYPE import keeps this module free of the filesystem work
+ * behind it.
+ */
+export type SourceRefusalCode = SourceRefusal
 
 /** The note a freshness value carries. */
 export function freshnessNote(freshness: Freshness, truncated: boolean, removalSkipped: boolean): string | undefined {
@@ -311,26 +355,117 @@ export function readSymbol(graph: Graph, id: string): SymbolView | undefined {
   return row === undefined ? undefined : toSymbolView(row)
 }
 
-/** The SELECT list every symbol query shares; a change here is a schema change. */
-const SYMBOL_COLUMNS = 'id, name, kind, path, line, parent'
-
-/** Find symbols by exact name, or by a case-insensitive substring. */
-export function findSymbols(graph: Graph, query: string, limit: number): { symbols: FoundSymbol[], truncated: boolean } {
-  const exact = allRows<SymbolRow>(
+/**
+ * One symbol's line extent, for a source slice.
+ *
+ * Deliberately NOT part of {@link SymbolView}: a view is what a tool hands the
+ * model, and its output schema lists every property (`additionalProperties:
+ * false`). Adding `endLine` to the view would therefore force it into six nested
+ * schemas where nothing reads it, and one of them would drift. The extent is an
+ * input to the reader in `source.ts`, so it is its own one-row query.
+ *
+ * @param graph - the project's graph.
+ * @param id - the symbol id.
+ * @returns both ends when the row exists, `undefined` when it does not.
+ */
+export function symbolSpan(graph: Graph, id: string): { line: number, endLine: number } | undefined {
+  const row = oneRow<{ line: number, endLine: number }>(
     graph.db,
-    `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE name = ? ORDER BY path, line LIMIT ?`,
-    query, limit + 1,
+    'SELECT line, end_line AS endLine FROM symbols WHERE id = ?',
+    id,
   )
-  // Exact matches win outright: a model asking for `diffRulerMarks` means that
-  // symbol, not every symbol containing "diff". The +1 in each LIMIT is what
-  // lets `truncated` be a fact rather than a guess.
-  const rows = exact.length > 0
-    ? exact
-    : allRows<SymbolRow>(
-      graph.db,
-      `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE name LIKE ? ORDER BY path, line LIMIT ?`,
-      `%${query}%`, limit + 1,
-    )
+  return row === undefined ? undefined : { line: row.line, endLine: row.endLine }
+}
+
+/**
+ * How many files the graph holds.
+ *
+ * Its own function rather than a side effect of `projectOverview`, because it is
+ * what tiers the source budget: the overview runs four more queries to answer a
+ * question about the project, and a caller that only needs the size must not pay
+ * for them.
+ *
+ * @param graph - the project's graph.
+ * @returns the indexed file count.
+ */
+export function fileCount(graph: Graph): number {
+  return oneRow<{ n: number }>(graph.db, 'SELECT COUNT(*) AS n FROM files')?.n ?? 0
+}
+
+/** The SELECT list every symbol query shares; a change here is a schema change. */
+function symbolColumns(prefix = ''): string {
+  return ['id', 'name', 'kind', 'path', 'line', 'parent'].map(column => `${prefix}${column}`).join(', ')
+}
+
+/**
+ * Find symbols, through four tiers of increasingly weak evidence.
+ *
+ * The ordering is the answer's quality: a caller who types `diffRulerMarks` means
+ * THAT symbol, and a substring scan that lists it beside every `diff`-prefixed name
+ * makes the right row one of forty. So exact comes first, then a prefix, then a
+ * substring scan, and last a multi-word scan.
+ *
+ * **An exact hit ends the search.** That is not a micro-optimisation: it is the rule
+ * that a name the caller typed in full IS the answer, and padding it with
+ * `diffRulerMarks` beside `diff` makes the row they wanted one of several. The other
+ * tiers merge instead of short-circuiting, because none of them is exact — a tier that
+ * fills must not starve the rows a weaker query needs, or `auth` would stop finding
+ * `oauth_handler`. Duplicates collapse by id, and the merge order is the priority.
+ *
+ * Filter prefixes (`kind:`, `path:`, `lang:`, `name:`) narrow every tier alike: they
+ * are the caller stating a fact, not a weaker kind of match.
+ *
+ * @param graph - the project's graph.
+ * @param raw - the query, field prefixes included.
+ * @param limit - how many rows the answer may carry.
+ * @returns the ranked matches, and whether more exist.
+ */
+export function findSymbols(graph: Graph, raw: string, limit: number): { symbols: FoundSymbol[], truncated: boolean } {
+  const query = parseSymbolQuery(raw)
+  const text = query.text
+  const rows: SymbolRow[] = []
+  const merged = new Map<string, SymbolRow>()
+  const tier = (extra: readonly string[], params: readonly (string | number)[]): void => {
+    for (const row of rowsIn(graph, query, extra, params, limit + 1)) {
+      if (!merged.has(row.id)) merged.set(row.id, row)
+    }
+  }
+  if (text === '') {
+    tier([], [])
+  } else {
+    // Case-insensitive on purpose: `LIKE` below is, so a case-sensitive `=` here would
+    // make `ruler` miss a symbol named `Ruler` and then rank `RulerFactory` above it in
+    // the prefix tier — an order that contradicts "an exact name ends the search".
+    const exact = rowsIn(graph, query, ['s.name = ? COLLATE NOCASE'], [text], limit + 1)
+    if (exact.length > 0) {
+      for (const row of exact) merged.set(row.id, row)
+    } else {
+      tier(["s.name LIKE ? ESCAPE '\\'"], [`${escapeLike(text)}%`])
+      // The substring scan runs BEFORE the multi-word one, and the order is load-bearing:
+      // one word is the common query, and a tier that could only repeat its rows must
+      // not decide the limit. Every row is ordered by path and line at the end anyway, so
+      // tier order decides WHICH rows survive the limit, not how they read.
+      tier(["s.name LIKE ? ESCAPE '\\'"], [`%${escapeLike(text)}%`])
+      // A MULTI-WORD query: every word must appear in the name (AND, the same meaning
+      // FTS5 gives a bare multi-token query). This is the one question a substring scan
+      // cannot answer — `marks ruler` is not a substring of anything — and it runs LAST
+      // because for one word it could only repeat what the scan above already found.
+      //
+      // The gate counts the words as WRITTEN, not the tokens left after dropping short
+      // ones: `a star` is a two-word query for `aStar`, and gating on the filtered list
+      // would skip the only tier that can find it.
+      if (queryTokens(text, { keepShort: true }).length > 1) {
+        const tokens = queryTokens(text)
+        if (tokens.length > 0) {
+          tier(
+            tokens.map(() => "s.name LIKE ? ESCAPE '\\'"),
+            tokens.map(token => `%${escapeLike(token)}%`),
+          )
+        }
+      }
+    }
+  }
+  rows.push(...merged.values())
   const kept = rows.slice(0, limit)
   // ONE query for every kept symbol's caller count, not one per row.
   //
@@ -353,6 +488,50 @@ export function findSymbols(graph: Graph, query: string, limit: number): { symbo
     symbols: kept.map(row => ({ ...toSymbolView(row), references: counts.get(row.id) ?? 0 })),
     truncated: rows.length > limit,
   }
+}
+
+/**
+ * One tier: the rows the query's filters and this tier's own condition select.
+ *
+ * `lang` is the one filter that is not on the symbols table — it is the file's
+ * recorded language — so it joins `files`. The join is only added when the filter is
+ * present: every extra join on the hot path is paid by the common query that names
+ * none of it.
+ */
+function rowsIn(
+  graph: Graph,
+  query: SymbolQuery,
+  extra: readonly string[],
+  params: readonly (string | number)[],
+  limit: number,
+): SymbolRow[] {
+  const conditions = [...extra]
+  const values: (string | number)[] = [...params]
+  if (query.kind !== undefined) { conditions.push('s.kind = ?'); values.push(query.kind.toLowerCase()) }
+  if (query.path !== undefined) { conditions.push("s.path LIKE ? ESCAPE '\\'"); values.push(`%${escapeLike(query.path)}%`) }
+  if (query.name !== undefined) { conditions.push("s.name LIKE ? ESCAPE '\\'"); values.push(`%${escapeLike(query.name)}%`) }
+  // Lowercased on the VALUE, not on the column: stored kinds and language ids are
+  // already lowercase, and `lower(s.kind)` would throw away the index for a filter a
+  // caller wrote as `kind:Function`.
+  if (query.lang !== undefined) { conditions.push('f.lang = ?'); values.push(query.lang.toLowerCase()) }
+  const from = query.lang === undefined ? 'symbols s' : 'symbols s JOIN files f ON f.path = s.path'
+  const where = conditions.length === 0 ? '' : ` WHERE ${conditions.join(' AND ')}`
+  return allRows<SymbolRow>(
+    graph.db,
+    `SELECT ${symbolColumns('s.')} FROM ${from}${where} ORDER BY s.path, s.line LIMIT ?`,
+    ...values, limit,
+  )
+}
+
+/**
+ * Escape the LIKE wildcards in a caller's text.
+ *
+ * A symbol named `parse_100%` is not a wildcard, and unescaped `%` would turn every
+ * query for it into "everything". `LIKE ... ESCAPE` is spelled out at the one place
+ * that needs it rather than guessed from the string.
+ */
+function escapeLike(text: string): string {
+  return text.replace(/[\\%_]/gu, character => `\\${character}`)
 }
 
 /** The raw shape of an edge row read by its source or destination. */
@@ -618,7 +797,7 @@ export function documentsFor(graph: Graph, symbolId: string, limit: number): { r
 export function symbolsInFile(graph: Graph, path: string, limit: number): SymbolView[] {
   const rows = allRows<SymbolRow>(
     graph.db,
-    `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE path = ? ORDER BY line LIMIT ?`,
+    `SELECT ${symbolColumns()} FROM symbols WHERE path = ? ORDER BY line LIMIT ?`,
     path, limit,
   )
   return rows.map(toSymbolView)
@@ -716,7 +895,7 @@ export function fileOutline(graph: Graph, path: string, limit: number): FileOutl
   const total = (graph.db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE path = ?').get(path) as { n: number }).n
   const rows = allRows<SymbolRow>(
     graph.db,
-    `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE path = ? ORDER BY line`,
+    `SELECT ${symbolColumns()} FROM symbols WHERE path = ? ORDER BY line`,
     path,
   )
   const ordered = rows
@@ -926,7 +1105,7 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
     // class is what an entry file actually does first.
     const first = oneRow<SymbolRow>(
       graph.db,
-      `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE path = ?
+      `SELECT ${symbolColumns()} FROM symbols WHERE path = ?
        ORDER BY CASE WHEN kind IN ('function', 'class', 'method') THEN 0 ELSE 1 END, line
        LIMIT 1`,
       row.path,
@@ -997,7 +1176,7 @@ export function ambiguousCandidates(graph: Graph, selector: string, limit: numbe
   const total = (graph.db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE name = ?').get(selector) as { n: number }).n
   const rows = allRows<SymbolRow>(
     graph.db,
-    `SELECT ${SYMBOL_COLUMNS} FROM symbols WHERE name = ? ORDER BY path, line LIMIT ?`,
+    `SELECT ${symbolColumns()} FROM symbols WHERE name = ? ORDER BY path, line LIMIT ?`,
     selector, limit,
   )
   return { candidates: rows.map(toSymbolView), total }

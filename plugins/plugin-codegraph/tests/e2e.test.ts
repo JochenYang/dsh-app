@@ -96,6 +96,11 @@ describe('real parse → index → query', () => {
     const found = findSymbols(graph, 'caller', 10)
     assert.deepEqual(found.symbols.map(symbol => symbol.name), ['caller'])
     assert.equal(found.symbols[0]?.kind, 'function')
+    // And the id `codegraph_find` prints is the argument `codegraph_impact` resolves:
+    // the two tools meet on this string, so a row no one can act on fails here rather
+    // than in a session. `renderFind` prints `symbol.id` verbatim; this is that value.
+    const printed = found.symbols[0]?.id ?? ''
+    assert.equal(resolveSymbol(graph, printed)?.path, 'src/use.ts', 'a printed id is a usable impact selector')
     assert.equal(graphStats(graph.db).files, 2)
   })
 
@@ -152,5 +157,27 @@ describe('real parse → index → query', () => {
     const after = graphStats(graph.db)
     assert.equal(after.edges, before.edges, 'a re-run over unchanged files is idempotent')
     assert.equal(after.symbols, before.symbols)
+  })
+
+  it('links a call to the same-named declaration the file imports, across a real parse', async () => {
+    // The integration half of the import layer: `parse.ts` decides which declaration a
+    // name means, and `indexer.ts` is what hands it the module resolver. A unit test on
+    // either side alone cannot show that the resolver reaches the call walk — and the
+    // symptom of it not reaching would be a call edge to the wrong file, which reads
+    // like a working answer.
+    const { root, graph } = fixture()
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src', 'a.ts'), 'export function shared(): number { return 1 }\n')
+    writeFileSync(join(root, 'src', 'b.ts'), 'export function shared(): number { return 2 }\n')
+    writeFileSync(join(root, 'src', 'use.ts'), [
+      "import { shared } from './a'",
+      'export function caller(): number { return shared() }',
+    ].join('\n'))
+
+    await indexProject(graph, root, realParse)
+    const caller = resolveSymbol(graph, 'caller')
+    assert.ok(caller !== undefined)
+    const targets = callsOf(graph, caller.id, 10).rows.map(edge => edge.path)
+    assert.deepEqual(targets, ['src/a.ts'], 'the imported declaration, not every same-named one')
   })
 })

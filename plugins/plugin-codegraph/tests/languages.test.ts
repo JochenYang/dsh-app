@@ -11,7 +11,8 @@
 
 import { strict as assert } from 'node:assert'
 import { after, describe, it } from 'node:test'
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,10 +23,12 @@ import {
   LANGUAGES,
   downloadGrammar,
   grammarPath,
+  grammarUrls,
   installedGrammarFiles,
   languageForPath,
   languageStatuses,
   type GrammarPaths,
+  type LanguageSpec,
 } from '../src/languages.ts'
 
 const scratch: string[] = []
@@ -83,16 +86,30 @@ describe('languageForPath', () => {
 })
 
 describe('BUNDLED_LANGUAGE_IDS', () => {
-  it('ships the common set, with C and C++ as two ids sharing one grammar file', () => {
-    // Nine ids, eight grammar files: C and C++ are separate languages to a
-    // reader and to `files.lang`, but the grammar set has no pure-C build, so
-    // both parse through `cpp` (measured: a C file parses with no ERROR node).
+  it('ships the common set, with ids outnumbering grammar files', () => {
+    // Twenty-two ids, fourteen grammar files. C and C++ are separate languages to a
+    // reader and to `files.lang`, but the grammar set has no pure-C build, so both parse
+    // through `cpp` (measured: a C file parses with no ERROR node). Vue, Svelte and
+    // Astro share the TypeScript grammar for the other reason: their code IS TypeScript
+    // inside a `<script>` block, so shipping a container grammar would buy nothing.
+    //
+    // The six that are NOT here — scala, elixir, zig, julia, haskell, groovy — are
+    // downloaded on request. They are the six large grammars this plugin builds that a
+    // repository is rarely written in, and shipping them cost every user ~13 MB.
     assert.deepEqual([...BUNDLED_LANGUAGE_IDS].sort(), [
-      'c', 'c_sharp', 'cpp', 'go', 'java', 'javascript', 'python', 'tsx', 'typescript',
+      'astro', 'c', 'c_sharp', 'cpp', 'dart',
+      'go', 'graphql', 'java', 'javascript',
+      'kotlin', 'lua', 'objc', 'prisma', 'python', 'r',
+      'sql', 'svelte', 'swift', 'terraform',
+      'tsx', 'typescript', 'vue',
     ])
-    const files = new Set(LANGUAGES.filter(l => l.bundled).map(l => l.grammar))
-    assert.equal(files.size, 8, 'nine bundled ids resolve to eight grammar files')
+    // SQL, Prisma, GraphQL and Terraform are bundled as CODE and scanned (`sql.ts`,
+    // `schema.ts`, `hcl.ts`), which is why the count below only looks at languages that
+    // name a grammar.
+    const files = new Set(LANGUAGES.filter(l => l.bundled && l.grammar !== '').map(l => l.grammar))
+    assert.equal(files.size, 14, 'eighteen grammar-backed bundled ids resolve to fourteen grammar files')
     assert.equal(LANGUAGES.find(l => l.id === 'c')?.grammar, LANGUAGES.find(l => l.id === 'cpp')?.grammar)
+    assert.equal(LANGUAGES.find(l => l.id === 'vue')?.grammar, LANGUAGES.find(l => l.id === 'typescript')?.grammar)
   })
 
   it('marks exactly the bundled ones as bundled', () => {
@@ -161,19 +178,19 @@ describe('downloadGrammar', () => {
 
   it('rejects a failed status with the status in the message', async () => {
     const paths = tempDirs()
-    const spec = LANGUAGES.find(language => !language.bundled)!
+    const spec = LANGUAGES.find(language => !language.bundled && language.source !== 'release')!
     const fakeFetch = (async () => new Response('', { status: 503 })) as unknown as typeof fetch
-    await assert.rejects(() => downloadGrammar(spec, paths, fakeFetch), /HTTP 503/)
+    await assert.rejects(() => downloadGrammar(spec, paths, fakeFetch), /HTTP 503/u)
   })
 
   it('rejects bytes whose sha512 does not match the recorded digest', async () => {
     // A well-formed wasm module that is not the one we pinned: the supply-chain
     // case the digest exists for.
     const paths = tempDirs()
-    const spec = LANGUAGES.find(language => !language.bundled)!
+    const spec = LANGUAGES.find(language => !language.bundled && language.source !== 'release')!
     const wrongModule = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
     const fakeFetch = (async () => new Response(wrongModule, { status: 200 })) as unknown as typeof fetch
-    await assert.rejects(() => downloadGrammar(spec, paths, fakeFetch), /sha512/)
+    await assert.rejects(() => downloadGrammar(spec, paths, fakeFetch), /sha512/u)
     assert.equal(existsSync(join(paths.downloadDir, `tree-sitter-${spec.grammar}.wasm`)), false,
       'a failed digest must not leave a file that later looks installed')
   })
@@ -194,6 +211,9 @@ describe('bundled grammars on disk', () => {
     const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'grammars')
     const present = new Set(installedGrammarFiles(dir))
     for (const spec of LANGUAGES.filter(language => language.bundled)) {
+      // SQL is bundled as CODE and scanned instead (`sql.ts`), so it names no grammar —
+      // the empty stem is the marker, not an oversight.
+      if (spec.grammar === '') continue
       assert.ok(present.has(`tree-sitter-${spec.grammar}.wasm`),
         `${spec.id} is bundled but grammars/tree-sitter-${spec.grammar}.wasm is missing`)
     }
@@ -207,5 +227,86 @@ describe('GRAMMAR_BASE_URL', () => {
     // A floating version can bump the wasm ABI and stop loading — the failure
     // that ruled out the other grammar package.
     assert.match(GRAMMAR_BASE_URL, /@vscode\/tree-sitter-wasm@\d+\.\d+\.\d+\/wasm$/u)
+  })
+})
+
+describe('grammarUrls — where an on-demand grammar comes from', () => {
+  const spec = (id: string): LanguageSpec => LANGUAGES.find(language => language.id === id)!
+
+  it('answers nothing for a bundled language', () => {
+    assert.deepEqual(grammarUrls(spec('typescript')), [])
+  })
+
+  it('uses the pinned package for a grammar the package carries', () => {
+    assert.deepEqual(grammarUrls(spec('rust')), [`${GRAMMAR_BASE_URL}/tree-sitter-rust.wasm`])
+  })
+
+  it('uses this app’s own kernel release for a grammar this plugin builds', () => {
+    // A grammar compiled here has no package to pin to. Its bytes ship with the kernel
+    // release, which is the only artifact the app already publishes — and it does so
+    // through the mirror a mainland user can reach, so the mirror leads.
+    const urls = grammarUrls(spec('scala'), '0.2.1-rc.5')
+    assert.equal(urls.length, 2, 'mirror then official host')
+    assert.match(urls[0] ?? '', /modelscope\.cn/u)
+    assert.match(urls[0] ?? '', /runtime-0\.2\.1-rc\.5/u)
+    assert.match(urls[0] ?? '', /tree-sitter-scala\.wasm/u)
+    assert.match(urls[1] ?? '', /github\.com\/JochenYang\/dsh-app\/releases\/download\/runtime-0\.2\.1-rc\.5\/tree-sitter-scala\.wasm$/u)
+    // The path must survive a hostile version string, because the version reaches this
+    // function from an environment the shell sets.
+    const hostile = grammarUrls(spec('scala'), '1.0+weird&x#y')[0] ?? ''
+    assert.doesNotMatch(hostile, /&x#y/u, 'no query or fragment can be smuggled in')
+  })
+
+  it('answers nothing when this run names no kernel version', () => {
+    assert.deepEqual(grammarUrls(spec('scala'), ''), [])
+  })
+
+  it('downloads a release grammar from the second source when the mirror refuses', async () => {
+    // The mirror is a transport, not an authority: whatever it serves is checked
+    // against the same digest, and a refusal falls through to the next candidate.
+    const paths = tempDirs()
+    const scala = spec('scala')
+    const bytes = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'grammars-optional', `tree-sitter-${scala.grammar}.wasm`))
+    const seen: string[] = []
+    const fakeFetch = (async (url: string) => {
+      seen.push(url)
+      return seen.length === 1 ? new Response('', { status: 404 }) : new Response(bytes, { status: 200 })
+    }) as unknown as typeof fetch
+    const previous = process.env.DSH_APP_KERNEL_VERSION
+    process.env.DSH_APP_KERNEL_VERSION = '0.2.1-rc.5'
+    let installed: string
+    try {
+      installed = await downloadGrammar(scala, paths, fakeFetch)
+    } finally {
+      if (previous === undefined) delete process.env.DSH_APP_KERNEL_VERSION
+      else process.env.DSH_APP_KERNEL_VERSION = previous
+    }
+    assert.equal(seen.length, 2, 'the first candidate failed and the second was tried')
+    assert.match(seen[1] ?? '', /github\.com/u)
+    assert.deepEqual(readFileSync(installed), bytes, 'the bytes are installed verbatim')
+  })
+
+  it('says which environment fact is missing when a release source cannot be named', async () => {
+    const paths = tempDirs()
+    const previous = process.env.DSH_APP_KERNEL_VERSION
+    delete process.env.DSH_APP_KERNEL_VERSION
+    try {
+      await assert.rejects(() => downloadGrammar(spec('scala'), paths), /DSH_APP_KERNEL_VERSION is unset/u)
+    } finally {
+      if (previous !== undefined) process.env.DSH_APP_KERNEL_VERSION = previous
+    }
+  })
+
+  it('records a digest that matches the bytes committed beside it', () => {
+    // The digest table is transcribed from the files by hand, and a single wrong
+    // character makes every download of that language fail the check forever. Reading
+    // both sides here is cheaper than discovering it in a user's install.
+    const optional = join(dirname(fileURLToPath(import.meta.url)), '..', 'grammars-optional')
+    for (const language of LANGUAGES.filter(spec => spec.source === 'release')) {
+      const file = join(optional, `tree-sitter-${language.grammar}.wasm`)
+      assert.ok(existsSync(file), `${language.id}: grammars-optional/${language.grammar}.wasm is missing`)
+      const digest = createHash('sha512').update(readFileSync(file)).digest('base64')
+      assert.equal(GRAMMAR_SHA512[language.grammar], digest, `${language.id}: the recorded digest is not these bytes`)
+    }
   })
 })
