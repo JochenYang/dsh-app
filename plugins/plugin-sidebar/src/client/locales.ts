@@ -118,8 +118,8 @@ export const zh = {
   'sidebar.unstageAll.done': '已取消全部暂存',
   'sidebar.status.loading': '正在读取 Git 状态…',
   'sidebar.status.clean': '工作区干净。',
-  'sidebar.status.unstagedCount': '{count} 个文件待提交',
-  'sidebar.status.staged': '已暂存（{count}）',
+  'sidebar.status.changes': '更改（{count}）',
+  'sidebar.status.staged': '暂存的更改（{count}）',
   'sidebar.status.noStaged': '无已暂存变更。',
   'sidebar.detail.empty': '点击左侧文件查看预览。',
 
@@ -257,8 +257,8 @@ export const en: Record<SidebarKey, string> = {
   'sidebar.unstageAll.done': 'All changes unstaged',
   'sidebar.status.loading': 'Reading Git status…',
   'sidebar.status.clean': 'The working tree is clean.',
-  'sidebar.status.unstagedCount': '{count} file(s) to commit',
-  'sidebar.status.staged': 'Staged ({count})',
+  'sidebar.status.changes': 'Changes ({count})',
+  'sidebar.status.staged': 'Staged changes ({count})',
   'sidebar.status.noStaged': 'Nothing is staged.',
   'sidebar.detail.empty': 'Click a file on the left to preview it.',
 

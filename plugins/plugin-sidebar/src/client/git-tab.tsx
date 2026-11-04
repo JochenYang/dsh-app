@@ -961,31 +961,44 @@ export function GitTab(props: GitTabProps): ReactNode {
               {notice !== undefined ? <p className="dshAsb-notice" role="status">{notice}</p> : null}
               {error === undefined && !(statusLoading && entries.length === 0) ? (
                 <>
-                  {/* One control for the whole unstaged set, because restoring a
-                      working tree is the operation a reader wants most often and
-                      doing it file by file is the slow path. `git restore -- .`
-                      already means exactly this; the confirmation names the count
-                      so nobody clears a tree by accident. */}
-                  {unstaged.length > 0
+                  {/* STAGED FIRST. It is the half the commit button acts on, so it is
+                      what the reader is deciding about; VS Code orders the two the same
+                      way for the same reason. This panel used to put the working tree
+                      first, which read as "these are already committed" once a stage
+                      happened — the list under the commit box is the queue, not the log. */}
+                  {staged.length > 0
                     ? (
-                      <div className="dshAsbGit-bulkRow">
-                        <span className="dshAsbGit-bulkCount">{t('sidebar.status.unstagedCount', { count: unstaged.length })}</span>
-                        <Tooltip label={t('sidebar.action.restoreAll')} side="bottom">
-                          <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger"
-                            disabled={busy || sessionId === undefined}
-                            aria-label={t('sidebar.action.restoreAll')}
-                            onClick={() => { setRestoreFor('.') }}>
-                            {t('sidebar.action.restoreAll')}
-                          </button>
-                        </Tooltip>
-                      </div>
+                      <>
+                        <p className="dshAsbGit-group">{t('sidebar.status.staged', { count: staged.length })}</p>
+                        {renderList(staged, stagedTree, true, false, 's:')}
+                      </>
                     )
                     : null}
-                  {renderList(unstaged, unstagedTree, false, false, 'u:')}
-                  {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsbGit-hint">{t('sidebar.status.clean')}</p> : null}
-                  {staged.length > 0 || unstaged.length > 0 ? <p className="dshAsbGit-group">{t('sidebar.status.staged', { count: staged.length })}</p> : null}
-                  {renderList(staged, stagedTree, true, false, 's:')}
                   {!statusLoading && entries.length > 0 && staged.length === 0 ? <p className="dshAsb-hint">{t('sidebar.status.noStaged')}</p> : null}
+                  {unstaged.length > 0
+                    ? (
+                      <>
+                        <p className="dshAsbGit-group">{t('sidebar.status.changes', { count: unstaged.length })}</p>
+                        {/* One control for the whole unstaged set, because restoring a
+                            working tree is the operation a reader wants most often and
+                            doing it file by file is the slow path. `git restore -- .`
+                            already means exactly this; the confirmation names the count
+                            so nobody clears a tree by accident. */}
+                        <div className="dshAsbGit-bulkRow">
+                          <Tooltip label={t('sidebar.action.restoreAll')} side="bottom">
+                            <button type="button" className="dshAsbGit-link dshAsbGit-linkDanger"
+                              disabled={busy || sessionId === undefined}
+                              aria-label={t('sidebar.action.restoreAll')}
+                              onClick={() => { setRestoreFor('.') }}>
+                              {t('sidebar.action.restoreAll')}
+                            </button>
+                          </Tooltip>
+                        </div>
+                        {renderList(unstaged, unstagedTree, false, false, 'u:')}
+                      </>
+                    )
+                    : null}
+                  {!statusLoading && unstaged.length === 0 && staged.length === 0 ? <p className="dshAsb-hint">{t('sidebar.status.clean')}</p> : null}
                 </>
               ) : null}
             </>
@@ -1221,8 +1234,7 @@ body[data-ds-dark-theme] { --dshapp-overlay: var(--dsw-alias-bg-layer-1); }
 .dshAsbGit-dirLine:hover .dshAsbGit-dirAction,
 .dshAsbGit-dirAction:focus-visible { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .dshAsbGit-dirAction { transition: none; } }
-.dshAsbGit-bulkRow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 2px 4px; }
-.dshAsbGit-bulkCount { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.dshAsbGit-bulkRow { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 2px 2px 4px; }
 .dshAsbGit-list { flex: none; min-height: 0; overflow: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 6px; padding-right: 10px; }
 .dshAsbGit-list > * { flex-shrink: 0; }
 .dshAsbGit-resize { flex: none; width: 8px; cursor: col-resize; margin: 0 -2px 0 2px; z-index: 2; }

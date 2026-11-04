@@ -399,3 +399,40 @@ describe('parseDiffRows — header vs content', () => {
     assert.equal(rows[8]?.old, 1)
   })
 })
+
+/**
+ * The status list's section ORDER, pinned against the source that builds it.
+ *
+ * Why a source assertion: the two sections are JSX blocks, and this suite has no DOM
+ * renderer, so "which one comes first" is not reachable from any pure function. What
+ * the check can prove is narrow and is exactly what regressed before: the staged block
+ * is emitted before the unstaged one, both render their own list, and neither prints a
+ * header when its own list is empty.
+ */
+describe('the status list puts staged changes first', () => {
+  const source = readFileSync(new URL('../src/client/git-tab.tsx', import.meta.url), 'utf8')
+
+  it('emits the staged section before the unstaged one', () => {
+    const stagedLabel = source.indexOf("t('sidebar.status.staged'")
+    const changesLabel = source.indexOf("t('sidebar.status.changes'")
+    const stagedList = source.indexOf('renderList(staged,')
+    const unstagedList = source.indexOf('renderList(unstaged,')
+    assert.notEqual(stagedLabel, -1, 'the staged heading is gone')
+    assert.notEqual(changesLabel, -1, 'the changes heading is gone')
+    assert.notEqual(stagedList, -1, 'the staged list is gone')
+    assert.notEqual(unstagedList, -1, 'the unstaged list is gone')
+    assert.ok(stagedLabel < changesLabel,
+      'staged changes come first: they are what the commit button acts on')
+    assert.ok(stagedList < unstagedList,
+      'and their list follows that order, not just the heading')
+  })
+
+  it('does not print a section heading for an empty list', () => {
+    // A "暂存的更改（0）" header above a full changes list reads as a bug in the
+    // staging itself; the empty case is covered by the hint instead.
+    assert.match(source, /staged\.length > 0[\s\S]{0,200}sidebar\.status\.staged/u,
+      'the staged heading is guarded by its own count')
+    assert.match(source, /unstaged\.length > 0[\s\S]{0,200}sidebar\.status\.changes/u,
+      'and so is the changes heading')
+  })
+})
