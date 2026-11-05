@@ -16,6 +16,8 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TodoItem } from '../wire.ts'
+import { formatStamp } from './format.ts'
+import { isLateReminder } from './reminders.ts'
 import type { TodoKey } from './locales.ts'
 import type { Translate } from './translate.ts'
 
@@ -427,18 +429,23 @@ export function ReminderPicker({
  */
 export function ReminderToast({
   item,
+  waiting = 0,
   onDone,
   onSnooze,
   onDismiss,
   t,
 }: {
   item: TodoItem
+  /** How many more reminders are due behind this one. */
+  waiting?: number
   onDone: () => void
   onSnooze: () => void
   onDismiss: () => void
   /** The dictionary seat: the toast's copy and its action labels come from it. */
   t: Translate
 }): ReactNode {
+  const now = Date.now()
+  const late = isLateReminder(item, now)
   return (
     <div className="dshTodo-reminderToast" role="alert">
       <div className="dshTodo-reminderToastHead">
@@ -446,9 +453,12 @@ export function ReminderToast({
           <span className="dshTodo-reminderToastBell" aria-hidden="true">
             <IconAlarmClockOutlineRegular />
           </span>
-          <span>{t('todo.reminder.toastTitle')}</span>
+          <span>{t(late ? 'todo.reminder.toastLateTitle' : 'todo.reminder.toastTitle')}</span>
           {item.reminderAt !== undefined ? (
-            <span className="dshTodo-reminderToastTime">{formatTime(item.reminderAt)}</span>
+            <span className="dshTodo-reminderToastTime">{formatStamp(item.reminderAt, now)}</span>
+          ) : null}
+          {waiting > 0 ? (
+            <span className="dshTodo-reminderToastWaiting">{t('todo.reminder.waiting', { count: waiting })}</span>
           ) : null}
         </div>
         <Tooltip label={t('todo.view.close')} side="top">

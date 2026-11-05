@@ -13,6 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  formatStamp,
   heatLevel,
   keyOf,
   monthGrid,
@@ -132,4 +133,12 @@ test('tipDivider adapts to content length and never wraps', () => {
   const long = tipDivider(['11月2日 · 星期一 (完成 0 · 新增 2)', '○ 优化coding usage的antigravity用量接口协议'])
   assert.equal(long.length, 25)
   assert.equal(tipDivider(['a'.repeat(200)]).length, 25)
+})
+
+test('formatStamp names the day once the reminder is not from today', () => {
+  // The catch-up case: a notice that rang yesterday evening must not print "21:30" and
+  // read as if it were on time today.
+  const evening = Date.parse('2026-11-04T21:30:00+08:00')
+  assert.equal(formatStamp(evening, Date.parse('2026-11-04T21:31:00+08:00')), '21:30')
+  assert.equal(formatStamp(evening, Date.parse('2026-11-05T11:30:00+08:00')), '2026-11-04 21:30')
 })

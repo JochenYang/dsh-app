@@ -1670,10 +1670,16 @@ export const CSS = `
   display: flex;
   align-items: center;
   gap: 6px;
+  /* The row now carries three pieces: the title, a stamp that may include the DATE
+     (a reminder noticed the next day) and the backlog count. It used to be one
+     nowrap line, so the long form overflowed the card at its 240px floor; the row
+     wraps instead — the bell and title stay on the first line, the stamp drops
+     below when it must. */
+  flex-wrap: wrap;
+  row-gap: 2px;
   font-size: var(--dshTodo-fs-m);
   font-weight: 600;
   color: var(--dshTodo-text);
-  white-space: nowrap;
 }
 .dshTodo-reminderToastBell {
   display: inline-flex;
@@ -1689,6 +1695,19 @@ export const CSS = `
   font-weight: 400;
   color: var(--dshTodo-text-2);
   margin-left: 2px;
+  /* A stamp that carries a date must not split across lines: the date and the time
+     are one value, not two words. */
+  white-space: nowrap;
+}
+/* The backlog count. Deliberately quiet: it sits beside the reminder's own stamp and
+   must not compete with it, but it has to be readable enough that a weekend's worth of
+   missed reminders is not mistaken for one. */
+.dshTodo-reminderToastWaiting {
+  font-size: var(--dshTodo-fs-xs);
+  font-weight: 400;
+  color: var(--dshTodo-text-2);
+  margin-left: 6px;
+  white-space: nowrap;
 }
 .dshTodo-reminderToastClose {
   display: inline-flex;

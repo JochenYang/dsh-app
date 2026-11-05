@@ -50,6 +50,7 @@ export function ReminderToastHost({ t }: { t: Translate }): ReactNode {
     <ReminderToast
       key={shown.seq}
       item={shown.item}
+      waiting={shown.waiting}
       t={t}
       onDone={() => { void completeReminder(id).catch(report) }}
       onSnooze={() => { void snoozeReminder(id).catch(report) }}

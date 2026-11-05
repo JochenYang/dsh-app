@@ -205,6 +205,28 @@ export function shortDay(key: string): string {
 }
 
 /**
+ * Stamp one instant for a reader who may be a day or more late.
+ *
+ * `HH:MM` alone is what a notice shows while it is on time, and it is exactly what
+ * makes a CATCH-UP unreadable: a reminder set for 09:00 on the 4th, noticed at 11:30 on
+ * the 5th, would print "09:00" and read as if it had just rung on time. So the day is
+ * included as soon as the instant is not TODAY (in the machine's own zone, which is the
+ * zone the reminder was set in).
+ *
+ * @param at - the instant, epoch ms.
+ * @param now - the current instant, epoch ms.
+ * @returns `HH:MM` for today, `YYYY-MM-DD HH:MM` otherwise.
+ */
+export function formatStamp(at: number, now: number): string {
+  const date = new Date(at)
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  const time = `${hh}:${mm}`
+  if (keyOf(at) === keyOf(now)) return time
+  return `${keyOf(at)} ${time}`
+}
+
+/**
  * Render a divider line of box-drawing characters matching the visual width of the content,
  * clamped so it neither falls short in a wide card nor wraps past the bubble's maxWidth.
  */
