@@ -9,8 +9,8 @@
 | [archive-delete-hardening.md](archive-delete-hardening.md) | 归档删除：可撤销、无残留、Windows 可靠 |
 | [codegraph-development-freshness.md](codegraph-development-freshness.md) | CodeGraph 开发期新鲜度与模型输出的真实性 |
 | [codegraph-retrieval-upgrade.md](codegraph-retrieval-upgrade.md) | CodeGraph 检索升级：源码切片、分段召回、走查范围 |
-| [kernel-0.2.1-pre-adaptation.md](kernel-0.2.1-pre-adaptation.md) | 0.2.1 预适配：alpha.3 变更映射与可先行项 |
-| [kernel-0.2.2-alpha.2-preflight.md](kernel-0.2.2-alpha.2-preflight.md) | 0.2.2-alpha.2 预适配结论：正式版发布那一轮照此执行 |
+| [kernel-0.2.1-pre-adaptation.md](kernel-0.2.1-pre-adaptation.md) | 0.2.1 预适配：alpha.3 变更映射与可先行项（superseded） |
+| [kernel-0.2.2-alpha.2-preflight.md](kernel-0.2.2-alpha.2-preflight.md) | 0.2.2 预适配结论；rc.1 已在 §9 执行完毕，执行记录在归档（superseded） |
 | [office-slash-entry.md](office-slash-entry.md) | Office 套件的 `/` 入口 |
 | [plugin-codegraph.md](plugin-codegraph.md) | plugin-codegraph：图谱、三个阶段与三个模型工具 |
 | [plugin-market-boundary.md](plugin-market-boundary.md) | 插件市场与上游 Discover 的边界与退役判据（决策记录） |

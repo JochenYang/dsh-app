@@ -212,6 +212,8 @@ npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 | 客户端存储按线清理 | 换线后 `src/main/client-state.ts` 应报 `cleared`（客户端状态属于写它的那条线） |
 | overlay 行 id 是否还有目标 | 组合树里逐行确认；行 id 会在 bundle 层之间移动，override 因此可能失去目标 |
 | 插件本地 `node_modules` 已随线 | 见第 8 节第 2 条——插件本地不跟着升就是版本偏斜 |
+| **内核 peer 差集为空** | 见第 8 节第 4 条：0.2.2 起内核包把兄弟包声明成 peer，而本仓按 `--legacy-peer-deps` 安装不装 peer。取目标线里我们 devDepend 的内核包，读它们的 `peerDependencies`，与插件树里实际存在的包求差集；非空就是建包/运行期的 `Could not resolve` 或 `ERR_MODULE_NOT_FOUND`，**类型检查看不见** |
+| **类型门禁真跑过** | 19 个插件的 `npm run build` 是 esbuild，**不做类型检查**。换线后必须跑 `plugin-gates` 的 type gate：0.2.2-rc.1 的 `ProjectionHandle` 改动就只被它发现，否则会以「运行期 throw」出现在用户那里 |
 
 ---
 
@@ -410,6 +412,15 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
     内核子进程必须用真正的 Node，runtime 树自带的那份就在 `runtime/node/`。
 12. **换行符是 CRLF。** 写会匹配源码的正则（变异脚本、校验器）时，基于 `\n` 的模式会静默
     不匹配。本仓库已有两个实例因此报错。
+13. **`--legacy-peer-deps` 不装 peer，而内核包越来越多地把兄弟包声明成 peer。** 0.2.2-rc.1 起
+    `dsh-session` / `dsh-tools` 运行时 `import "@deepseek-ai/dsh-scope"`，`dsh-subagent` 还 import
+    `dsh-attachment` / `dsh-util-time`，三者都只在 `peerDependencies` 里。`[实测]`：插件测试把内核包
+    一起 esbuild 打包，于是 9 个插件的套件在建包阶段报 `Could not resolve`，`plugin-pdf` 的 e2e 在
+    运行期报 `ERR_MODULE_NOT_FOUND`。修法是在需要它的插件 `devDependencies` 里显式声明；换线前按
+    第 4 节的 peer 差集先查一遍。
+14. **`npm run build` 全绿不代表类型对。** 19 个插件里 18 个 build 是 esbuild，**不做类型检查**。
+    0.2.2-rc.1 的 `register` 返回值从 disposer 换成 `ProjectionHandle`，只被 `plugin-gates` 的
+    type gate 抓到；跳过 type gate 的话，这个错误会以运行期 throw 的形式出现在用户那里。
 
 ---
 

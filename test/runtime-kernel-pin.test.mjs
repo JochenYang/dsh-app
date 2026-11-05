@@ -47,16 +47,29 @@ function lockfileKernelVersions() {
   const lock = JSON.parse(readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'))
   const versions = new Set()
   for (const [key, value] of Object.entries(lock.packages ?? {})) {
-    if (!/^node_modules\/@deepseek-ai\/dsh(?:-|$)/u.test(key)) continue
+    // The PACKAGE NAME, not the path prefix: a nested copy
+    // (`node_modules/@deepseek-ai/dsh-<pkg>/node_modules/@deepseek-ai/cosmokit`)
+    // starts with the same characters, and reading its version reported a
+    // vendored package's line as a second kernel version (measured on 0.2.2-rc.1:
+    // cosmokit 1.9.0 and schemastery 3.19.0 appeared as "two kernels"). A nested
+    // copy of a KERNEL package is still caught, which is the double-instance bug
+    // this test exists for.
+    const name = key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length)
+    if (!/^@deepseek-ai\/dsh(?:-|$)/u.test(name)) continue
     if (typeof value?.version === 'string' && value.version !== '') versions.add(value.version)
   }
   return versions
 }
 
-test('the tree pins exactly one kernel version', () => {
-  const versions = lockfileKernelVersions()
-  // The premise of reading the lockfile at all: one line resolves as one version.
-  assert.equal(versions.size, 1, `expected one kernel version in package-lock.json, got ${[...versions].join(', ')}`)
+test('the tree pins exactly one kernel version', async () => {
+  // Read through the SHARED resolver, not a copy: the copy this test used to keep
+  // matched lockfile keys by path prefix, so a nested vendored package
+  // (`…/dsh-<pkg>/node_modules/@deepseek-ai/cosmokit`) read as a second kernel
+  // version. It reported that as a test failure; `build-runtime` hit the same bug
+  // and refused to build a runtime at all — one rule, one place.
+  const { lockfileKernelVersion } = await import('../scripts/kernel-line.mjs')
+  const version = lockfileKernelVersion(ROOT)
+  assert.ok(typeof version === 'string' && version !== '', 'the lockfile names the kernel version')
 })
 
 test('the kernel version comes from the lockfile before the dist-tag', () => {

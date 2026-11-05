@@ -1,8 +1,8 @@
 # 内核线 0.2.2-alpha.2：预适配结论
 
-- Status: active
+- Status: superseded
 - Plan date: 2026-10-28
-- Note: 结论是 2026-10-28 的实测快照，本轮整理未复验；标 `[待验证]` 的项须在正式版发布前补测
+- Note: 结论是 2026-10-28 的实测快照；0.2.2 线已在 rc.1 上执行完毕（见 §9 与 `../archive/kernel-line/kernel-0.2.2-rc.1-upgrade.md`），本文件保留作 alpha.2 → rc.1 的差异备查。§9 里仍标 `[待验证]` 的项没有补测
 
 > 执行 2026-10-28。**这不是一次升线**：本仓跟随 RC 线，0.2.2-alpha.2 是 alpha 线的首个版本，
 > 本文只记录「正式版发布时需做什么」，供那一轮直接照此执行。
@@ -160,3 +160,87 @@ semver 实测：`^0.2.1-rc.3` **不接受** `0.2.2-alpha.2`（caret 不含其它
   与「原生 / PTC 执行拆成 Agent 作用域插件」这两条只影响 `tools.mode` / `DSH_TOOLS_MODE` 与
   `resolve`/`executable` 使用者 —— 我们两样都不用，所以判为无影响；这是**按调用点推断**，
   不是按运行时验证的结论。
+
+---
+
+## 9 rc.1 复核与执行（2026-11-04）
+
+> 上面 §0–§8 的结论针对 `0.2.2-alpha.2`。rc.1 是这条线的第一个 RC，本节记录「与 alpha.2 相比要做什么」
+> 以及本轮的执行结果。执行记录归档在 [`../archive/kernel-line/kernel-0.2.2-rc.1-upgrade.md`](../archive/kernel-line/kernel-0.2.2-rc.1-upgrade.md)。
+> **上游没有 `docs/upgrade-guide/v0.2.2-rc.1/`**（指南是事后补写的，0.2.1 线就补过 14 篇回填），
+> 所以本节全部结论来自逐包载荷比对 + 我们 import 的符号的声明比对，不读指南。
+
+### 9.1 事实 `[实测]`
+
+```
+dist-tags: next = 0.2.2-rc.1, latest = 0.2.1-rc.5, alpha = 0.2.2-alpha.3
+engines:   node >= 24.9.0（与 alpha.2 相同）
+vendor:    cordis ~4.1.0、schemastery ~3.19.0、loader ~1.1.0、timer ~1.2.0 —— 从预发布转为稳定 minor
+alpha.2 → rc.1：466 个提交（发布提交只改版本号，vendor 转正单独一条）
+载荷（rc.5 → rc.1，40 包）：34 改 / 4 相同 / 2 不在该线（cordis、schemastery 各走自己的版本线）
+我们 import 的符号：23 个包，0 丢失，15 个声明有变
+```
+
+### 9.2 与 §3「必改项」的差异
+
+| §3 的预判（alpha.2） | rc.1 的实际 |
+|---|---|
+| 全量换线 20 个 manifest | 成立：404 处 `^0.2.1-rc.5` → `^0.2.2-rc.1` |
+| cordis / schemastery 必须写 `~` + 预发布字面量 | **不成立**：rc.1 里它们是稳定 minor，`^` 已能覆盖。仍写成 `^4.1.0` / `^3.19.0`，让声明等于我们被测过的组合 |
+| Node ≥ 24.9 是发布阻断项，CI 五处要提 | 成立，已改成 `'24.9'`（钉 floor，不只提 major） |
+| 唯一源码改动 = 会话投影两处 | 成立，且仍是**唯一**的源码适配——但实际是三处：`ProjectionDefinition` 的第二泛型、删 `SessionProjectionStateMap` 增强、以及 `register` 返回值从 disposer 变成 `ProjectionHandle`（后者只有 type gate 能看见，见 9.5） |
+| （未列出） | **新增一类**：内核包把兄弟包声明成 peer，见 9.3 |
+
+### 9.3 rc.1 新出现的一类：内核 peer 不在我们的安装约定里 `[实测]`
+
+`dsh-session` / `dsh-tools` 的运行时代码 import `@deepseek-ai/dsh-scope`，`dsh-subagent` 还 import
+`dsh-attachment` / `dsh-util-time`；这三个包在各自 manifest 里都是 **peerDependencies**。
+本仓插件的安装约定是 `npm install --legacy-peer-deps`，**不装 peer**，于是：
+
+- 插件的测试 harness 用 esbuild 把内核包一起打包（没有 `external` 列表）→ 9 个插件的套件在建包阶段
+  就报 `Could not resolve "@deepseek-ai/dsh-scope"`；
+- 另几个在运行期 `ERR_MODULE_NOT_FOUND`（`plugin-pdf` 的六条 e2e 全红）。
+
+处置：在这些插件自己的 `devDependencies` 里显式声明这些内核 peer（`dsh-scope` 12 个插件 + 根，
+`plugin-swarm` 另加 `dsh-attachment` / `dsh-util-time`）。这与套件既有约定一致：
+**测试期要能解析的内核 peer，也要出现在 devDependencies 里**。
+
+### 9.4 一处测试钉在旧线上 `[实测]`
+
+`plugin-workbench/tests/create-entry.test.ts` 把 primitives 的 peer/dev spec 写成 `'^0.2.1-rc.5'`
+再比较。已改成从根 manifest 读当前跟随的线（`@deepseek-ai/dsh-session` 的 spec）并断言相等：
+换线不再造成假失败，真正的偏差仍然会红。
+
+### 9.5 本轮执行结果 `[实测]`
+
+- 19 个插件：`npm install --legacy-peer-deps` + `npm run build` 全成功；套件 19/19 PASS。
+- **build 全绿不等于适配完成**：`ProjectionHandle` 那一处（§9.2 的第 4 行没有预见到）只有
+  `plugin-gates` 的 type gate 能看见，因为 esbuild 不检查类型。换线后必须跑 type gate。
+- 另修两条**根测试**：`runtime-kernel-pin` 用路径前缀匹配 `@deepseek-ai/dsh*`，把嵌套的
+  vendored 包（cosmokit 1.9.0 / schemastery 3.19.0）读成了第二个内核版本——改成按**包名**匹配，
+  并改成直接 import `scripts/kernel-line.mjs` 的共享 resolver（那条规则原来有两份拷贝）；
+  `kernel-surface` 拿 `dsh-atomic-write` 当「已安装包」样本，而 rc.1 起它不再是根树的传递依赖，
+  换成根 devDependency 里的 `dsh-session`。两条都是**测试自身的口径**问题，不是产品缺陷。
+- **同一个前缀匹配 bug 也阻塞了构包**：`npm run runtime:build` 直接拒绝（
+  `resolved 3 different @deepseek-ai/dsh* versions`）。它在 `scripts/kernel-line.mjs` 里，
+  修法同上（按包名匹配）。这条说明「测试失败」有时是产品代码的真 bug，只是先被测试撞见。
+- 根套件、`plugin-gates`（19 个插件）、`check:graph`、`check:suites`：见 `scratch/kernel-0.2.2/verify2.log`。
+- `plugin-rewind` 0.1.9 → 0.2.0（单位数规则：9 进位到 minor）。
+
+### 9.6 仍未验证（与 §8 相比没有减少的部分）
+
+- **真内核已验，真窗口未验**：`npm run runtime:build -- win32 x64` 构出 0.2.2-rc.1 的 runtime
+  （`runtime-dist/dsh-runtime-win32-x64-0.2.2-rc.1.tgz`，119.2 MB / 23556 文件，node 24.21.0），
+  解到 `scratch/kernel-0.2.2-rc.1/runtime` 后 `npm run verify -- --runtime <该树>`
+  **`smoke: all checks passed`**——19 个套件插件在真内核里全部激活、路由与打包资源都应答。
+  但仍然**没有跑过 `npm run dev` 的窗口**：客户端渲染面（`dsh-client-ui-primitives` 45 个文件改动、
+  rc.1 新增 `settings.section.icon` 槽与我们自己注入图标的方式是否冲突）只能真机看设置页。
+- **office 载荷**：仍只比了类型；新构的 `office-payload-win32-x64-0.2.2-rc.1.tgz`（70.5 MB，
+  引擎 0.1.2）没有在应用里实际装过、也没有跑过一次转换。
+- **可选增强**：`WebSearchSource.summary` 未补（比内核自带 provider 弱一档）；`MenuItemButton.disabledReason`
+  未用（可把「为什么不能点」说出来）。
+
+### 9.7 下一轮的前置检查（新增，写进流程）
+
+换线前先算一次「内核 peer 差集」：取目标线里我们 devDepend 的内核包，读它们的 `peerDependencies`，
+与插件树里实际存在的包求差集；非空就是 9.3 这类失败——它在建包/运行期才出现，类型检查看不见。

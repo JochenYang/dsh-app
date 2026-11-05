@@ -1,9 +1,12 @@
 # 内核线 0.2.1 预适配：alpha.3 变更映射与可先行项
 
 - Status: superseded
-- Note: 0.2.1 线已由 rc.1–rc.5 的实际执行记录取代（`../archive/kernel-line/`）；本文件只作映射备查
+- Note: 0.2.1 线已由 rc.1–rc.5 的实际执行记录取代（`../archive/kernel-line/`）；本文件只作映射备查。
+  0.2.2 线的预适配结论在 [`kernel-0.2.2-alpha.2-preflight.md`](kernel-0.2.2-alpha.2-preflight.md)，
+  执行记录见 [`../archive/kernel-line/kernel-0.2.2-rc.1-upgrade.md`](../archive/kernel-line/kernel-0.2.2-rc.1-upgrade.md)。
 - Plan date: 2026-10-11（alpha.2 面）／2026-10-13 复核至 alpha.3
-- 上游检出：`D:\codes\deepseek-harness`，工作树 = `dsh-v0.2.1-alpha.3` + 16 提交（干净树）
+- 上游检出：`D:\codes\deepseek-harness`（**本文件的测量当时**工作树 = `dsh-v0.2.1-alpha.3` + 16 提交；
+  该检出此后已跟到 `dsh-v0.2.2-rc.1`，文件名与行号引用不再对应它，读源码结论请以 tag 为准）
 
 **证据标记**：`[实测]` = 命令真跑过（本轮全部结论来自在上游检出里真跑的 `git` 命令，以及消费方仓库里的 grep）；
 `[静态]` = 源码或配置阅读；`[待验证]` = 推断未执行。**任何条目标记为未验证时，不得据此下"已适配"的结论。**

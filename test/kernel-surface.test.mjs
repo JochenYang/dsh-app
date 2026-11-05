@@ -101,10 +101,15 @@ test('the shared export helper is what both directions read', async () => {
   // Importing it here proves it is loadable and that its two entry points work;
   // `test/plugin-kernel-imports.test.mjs` imports the same module.
   const helper = await import('../scripts/lib/kernel-exports.mjs')
-  const pkgDir = join(ROOT, 'node_modules', '@deepseek-ai', 'dsh-atomic-write')
+  // A package the ROOT manifest declares, not one that merely used to be hoisted:
+  // `dsh-atomic-write` stopped being a transitive dependency of the root tree at
+  // 0.2.2-rc.1, so this case was reading a directory that no longer exists and
+  // reporting the helper as broken. `dsh-session` is a root devDependency, so it is
+  // present whenever the tree is installed at all.
+  const pkgDir = join(ROOT, 'node_modules', '@deepseek-ai', 'dsh-session')
   const exports = helper.exportsOf(pkgDir)
   assert.ok(exports instanceof Set, 'exportsOf must return a Set for an installed package')
-  assert.ok(exports.has('writeFileAtomic'), 'dsh-atomic-write exports writeFileAtomic on the followed line')
+  assert.ok(exports.has('SESSION_FORMAT_VERSION'), 'dsh-session exports SESSION_FORMAT_VERSION on the followed line')
 
   // A package with no readable entry answers null — "cannot judge", never an
   // empty set, because an empty set would read as "exports nothing".

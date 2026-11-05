@@ -82,15 +82,12 @@ export interface RewindWire {
 }
 
 /**
- * Declare this plugin's projection key in the framework's merge-extensible
- * tables, so `ctx.sessionProjections.register` type-checks and a host reader
- * can name the key. Both tables are declared because the key is client-visible.
+ * Declare this plugin's projection key in the framework's merge-extensible map,
+ * so `ctx.sessionProjections.register` type-checks and a host reader can name the
+ * key. `SessionProjectionStateMap` no longer exists on this kernel line: the fold's
+ * state type is the definition's second generic argument (see `rewindProjection`).
  */
 declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionStateMap {
-    /** Surface model plus hidden turns; see {@link RewindState}. */
-    rewindAnchors: RewindState
-  }
   interface SessionProjectionMap {
     /** Recall points and hidden turns. */
     rewindAnchors: RewindWire
@@ -363,4 +360,4 @@ export const rewindProjection = {
   // 3: a surface node now records whether a compaction wrote it, and the wire
   // value carries `stoppedAtCompaction`.
   stateVersion: 3,
-} satisfies ProjectionDefinition<'rewindAnchors'>
+} satisfies ProjectionDefinition<'rewindAnchors', RewindState>

@@ -516,7 +516,15 @@ export function apply(ctx: Context, config: Config): void {
   // deliberately not here — it rides the command result instead, because a
   // projection is durable and a reload would replay the composer prefill.
   ctx.effect(
-    () => ctx.sessionProjections.register(rewindProjection),
+    () => {
+      // `register` answers a HANDLE, not a disposer, from 0.2.2-rc.1 on: the handle
+      // can also read state (`stateOf`) and outlive its registration (`readerFor`).
+      // The effect therefore returns the handle's own `dispose`, which keeps the
+      // teardown shape this suite relies on — and an effect body that returned the
+      // promise itself would fail the `SyncEffect | Effect` overloads.
+      const registering = ctx.sessionProjections.register(rewindProjection)
+      return () => registering.then(handle => handle.dispose())
+    },
     'plugin-rewind: rewindAnchors projection',
   )
 

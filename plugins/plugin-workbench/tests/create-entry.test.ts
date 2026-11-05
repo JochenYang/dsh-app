@@ -412,12 +412,22 @@ describe('workbench Creator row composition', () => {
     // fails to resolve in the profile; and `tsc` resolves the import through
     // `devDependencies`, so a peer without its dev twin makes the type gate skip
     // this plugin instead of checking it.
+    //
+    // The expected spec is read from the FOLLOWED LINE, not written out here: a
+    // literal on the old kernel line turned every line move into a test failure with
+    // no product defect behind it (measured on 0.2.2-rc.1), while "equals the line"
+    // is the property this case actually asserts.
     const manifest = JSON.parse(readFileSync(join(pluginRoot, 'package.json'), 'utf8')) as {
       peerDependencies?: Record<string, string>
       devDependencies?: Record<string, string>
     }
-    assert.equal(manifest.peerDependencies?.['@deepseek-ai/dsh-client-ui-primitives'], '^0.2.1-rc.5')
-    assert.equal(manifest.devDependencies?.['@deepseek-ai/dsh-client-ui-primitives'], '^0.2.1-rc.5')
+    const rootManifest = JSON.parse(readFileSync(join(pluginRoot, '..', '..', 'package.json'), 'utf8')) as {
+      devDependencies?: Record<string, string>
+    }
+    const followedLine = rootManifest.devDependencies?.['@deepseek-ai/dsh-session']
+    assert.ok(typeof followedLine === 'string' && followedLine !== '', 'the root manifest declares the followed line')
+    assert.equal(manifest.peerDependencies?.['@deepseek-ai/dsh-client-ui-primitives'], followedLine)
+    assert.equal(manifest.devDependencies?.['@deepseek-ai/dsh-client-ui-primitives'], followedLine)
 
     // The test bundle aliases the package to a stub (it is a browser bundle: clsx,
     // CSS modules, dynamic shikijs). Every name this plugin imports from it has to

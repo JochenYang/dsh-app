@@ -255,7 +255,18 @@ export function lockfileKernelVersion(repoRoot = root) {
   }
   const versions = new Set()
   for (const [key, value] of Object.entries(lock.packages ?? {})) {
-    if (!/^node_modules\/@deepseek-ai\/dsh(?:-|$)/u.test(key)) continue
+    // The PACKAGE NAME, not the path prefix. A nested copy under another kernel
+    // package (`node_modules/@deepseek-ai/dsh-<pkg>/node_modules/@deepseek-ai/cosmokit`)
+    // starts with the same characters, and its version then reads as a second
+    // KERNEL version — measured on 0.2.2-rc.1: the two vendored packages
+    // (cosmokit 1.9.0, schemastery 3.19.0) made this refuse every runtime build
+    // with "3 different versions". A nested copy of a KERNEL package is still
+    // caught, which is the double-instance bug this check exists for; whether the
+    // two copies agree is a separate question (`packages` vs `dependencies`
+    // dedupe), so a nested kernel package with a DIFFERENT version also lands in
+    // this set.
+    const name = key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length)
+    if (!/^@deepseek-ai\/dsh(?:-|$)/u.test(name)) continue
     if (typeof value?.version === 'string' && value.version !== '') versions.add(value.version)
   }
   if (versions.size === 0) return null

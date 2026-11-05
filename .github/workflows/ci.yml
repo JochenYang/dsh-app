@@ -31,7 +31,11 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          # 0.2.2's engines floor is node >= 24.9, and `build-runtime.mjs` packs the
+          # RUNNING node into the artifact: a 22 here ships a v22 runtime that the
+          # kernel refuses to boot. Pinned to the floor, not to the major, so a
+          # 24.0 runner cannot slip under it.
+          node-version: '24.9'
           cache: npm
       - name: Install dependencies
         run: npm ci
@@ -171,7 +175,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          # 0.2.2's engines floor is node >= 24.9, and `build-runtime.mjs` packs the
+          # RUNNING node into the artifact: a 22 here ships a v22 runtime that the
+          # kernel refuses to boot. Pinned to the floor, not to the major, so a
+          # 24.0 runner cannot slip under it.
+          node-version: '24.9'
           cache: npm
       # This job builds a real kernel runtime, and build-runtime.mjs assembles it
       # with pnpm (asserting ≥10). Pin the version: the runner's preinstalled one
