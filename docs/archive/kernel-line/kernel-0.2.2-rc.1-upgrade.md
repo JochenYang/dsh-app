@@ -139,11 +139,70 @@ rc.1 里 `dsh-session` / `dsh-tools` 的运行时代码 `import "@deepseek-ai/ds
 
 ## 6 未验证项与风险
 
-- **真内核验过，真窗口没验**：构出的 0.2.2-rc.1 runtime 解到 `scratch/kernel-0.2.2-rc.1/runtime` 后，
-  `npm run verify -- --runtime <该树>` 报 `smoke: all checks passed`——19 个套件插件在真内核里全部激活，
-  路由与打包资源都应答。但没有跑过 `npm run dev` 的窗口，所以**客户端渲染面**仍未验：
-  `dsh-client-ui-primitives` 有 45 个文件改动，rc.1 新增 `settings.section.icon` 导航图标槽位，
-  与我们 `plugin-client-ui` 自己注入图标的方式是否冲突，只能真机看设置页。`[待验证]`
+### 6.1 换线后暴露的两处客户端回归 `[实测]`（真机看到，探针复核）
+
+1. **设置导航行出现两个图标（我们的 + 默认齿轮）**——已修。真实标记（rc.1 设置页实测）：
+
+   ```html
+   <button class="VOzbGW_navCell dshMcpNav">
+     <span class="VOzbGW_navIcon"><span data-slot="settings.section.icon" style="display:contents"><svg/></span></span>
+     <span class="VOzbGW_navLabel">MCP 服务器</span>
+   </button>
+   ```
+
+   原生字形只有**一个**，但 rc.1 把它包进了 `.navIcon` 格子（类名带构建哈希），旧规则
+   `button.<cls> > svg:first-child { display: none }` 因此**一个都匹配不到**，齿轮与我们的
+   `::before` mask 并排。修法：`button.<cls> [class*="navIcon"], button.<cls> svg { display: none }`
+   ——按类名子串隐藏格子，再留一条裸 `svg` 规则覆盖没有包一层的行。
+
+   **真正让它在真机上一半有效、一半无效的原因是副本**：这条规则在八个插件里各有一份
+   （`plugin-client-ui`、`plugin-archives`、`plugin-codegraph`、`plugin-hooks`、`plugin-mcp`、
+   `plugin-memory`、`plugin-swarm`、`plugin-websearch`——套件不共享包）。只改一份时，
+   实测 `iconCellDisplay` 在三行上是 `none`、在其余行上是 `flex`，于是同一屏一半行已好、一半仍双图标。
+   八份全改 + `plugin-codegraph/tests/nav-icon.test.ts` 的两条跨副本用例（八份规则逐字相同；且每份
+   画的类名必须是它自己给行打标的那一个——归一化比较看不出「指错了类」）之后，真机复核：12 个带字形的
+   行 `visibleNativeSvgs` 与 `visibleIconCells` 全为 0。
+   版本：`plugin-client-ui` 0.5.5、`plugin-archives` 0.2.6、`plugin-hooks` 0.2.9、`plugin-mcp` 0.2.7、
+   `plugin-memory` 0.10.2、`plugin-swarm` 0.8.7、`plugin-websearch` 0.2.4 在本次改动里 bump；
+   `plugin-codegraph` 0.2.9 随换线那次提交已 bump，不重复。
+2. **用户消息旁的「撤回」图标消失**——已修，且真机确认回到时间/复制那一行。真实原因**不是**图标没了：
+   - rc.1 的 `UserMessageNodeView` 消费子槽 `conversation.chat.user.before`，内核注册它时**已经声明**
+     了 `children: { 'conversation.chat.user.before': { kind: 'chain', scope: 'session' } }`；
+   - 包装器一并声明同一个 child 时，槽注册表**拒绝第二次声明**，渲染进程在启动期直接抛
+     `slot "conversation.chat.user.before" is already declared` → 整个 transcript 不再渲染
+     （界面停在「载入历史…」、CPU 与内存高企，这就是那一轮「一启动就卡死」的真凶）；
+   - 最终修法与内核自己给 `steering` 的写法一致：注册上**不再声明 children**，改用
+     `inject: () => ({ renderSlotChain: () => null })` 供一个空渲染器。本 profile 里
+     `conversation.chat.user.before` 没有注册者（只有未启用的实验性 liveshare 用），空渲染器无副作用；
+     一旦启用，这里必须改成透传。**`steering` 也必须带这一行**：它渲染的是同一个
+     `UserMessageNodeView`，也会调同一个渲染器；内核自己的 `steering` 注册就带着它，漏掉会让
+     该条目首次渲染即抛错，随即被槽系统退役（行本身还在，由内核自己的条目接管）。
+   - `sessionId` / `useProjection` 仍是 `conversation.chat.node`（`scope: 'session'`）的标准 seat，
+     由 `ui-session` 合并进 `SessionStandardProps`，所以图标读数据的方式不用改。
+   - 验证：`ELECTRON_ENABLE_LOGGING=1` 下 `Uncaught` 计数 0；CDP 驱动真实鼠标悬停后
+     `.dshRewind-iconRow` 的 `opacity` 由 0 → 1，截图里箭头图标在时间旁。版本：`plugin-rewind`
+     的 0.1.9 → 0.2.0 随换线那次提交已 bump，本次不重复。
+
+### 6.1a 这一轮的方法论收获
+
+两处回归都是**「类型绿、测试绿、界面坏」**：设置图标是纯 CSS 选择器假设，撤回图标是槽契约的运行时配对。
+从它们身上得到三条可复用的做法：
+
+- **同一段注入代码被复制到 N 个插件时，一个跨副本的用例比 N 次人工检查可靠**；`settings-merge.test.ts`
+  早就为槽声明这么做过，图标规则没有，于是它坏在只有一份的地方。跨副本比较还要另外钉一条「每份画的
+  类名 == 这份自己打标的类名」：把类名归一化掉的比较，看不见"指错了类"。
+- **排序占优的并发用例证明不了顺序**。给采集与清理加门之后写过一个「两路采集 + 一路清理跑 12 轮」的
+  用例，它永远是「清理先跑完、两个提交后到」，把门删掉也不会红。真正的保证是结构性的（清单落盘与
+  hold 释放同在一个门内、清理走同一道门），所以那条也照本仓既有的做法固化成源码断言。
+- **界面结论必须来自运行中的窗口**。这一轮用 `--remote-debugging-port` + CDP 驱动（`scratch/cdp*.mjs`）
+  取真实 DOM、真实悬停与截图，替代了此前「读构建产物推断」的方式；推断过的那一版正是一半行已好、一半仍坏的版本。
+
+### 6.2 其余未验证
+
+- **真内核验过，真窗口验了启动、设置页图标与撤回图标**：`npm run verify -- --runtime <rc.1 树>` 报
+  `smoke: all checks passed`；`npm run dev` 起得来并 ready；设置页 12 个带字形的行与撤回图标已用
+  CDP 驱动 + 截图逐项确认（§6.1）。仍未过的是 `dsh-client-ui-primitives` 那 45 个文件改动带来的
+  可用性变化（还没逐个界面走）。
 - **office 载荷**（LibreOffice 引擎）只比了类型，没比运行时行为；本轮构出
   `office-payload-win32-x64-0.2.2-rc.1.tgz`（引擎 0.1.2）但没在应用里装过。
 - **peer 清单还会继续长**：rc.1 把内核内部的兄弟依赖改成 peer，我们的安装约定不装 peer，
