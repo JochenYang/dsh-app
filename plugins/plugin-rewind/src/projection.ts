@@ -193,12 +193,19 @@ const SURFACE_EVENT_TYPES = new Set([
  * turn itself — the same thing the client's assembler does.
  */
 export interface RewindState {
-  /** Surface nodes in order. */
-  nodes: SurfaceNode[]
+  /**
+   * Surface nodes in order.
+   *
+   * The FIELDS are readonly so the fold cannot reassign them; the arrays stay
+   * mutable because the kernel's `ProjectionDefinition` types state with mutable
+   * arrays. Contents are still replaced, never pushed into: the view cache keys on
+   * object identity, so an in-place `nodes.push()` would leave a stale view behind.
+   */
+  readonly nodes: SurfaceNode[]
   /** Turns hidden by every cut so far, ascending and deduplicated. */
-  hiddenTurns: number[]
+  readonly hiddenTurns: number[]
   /** Turn opened by the latest `turn/start`, or null before the first one. */
-  openTurn: number | null
+  readonly openTurn: number | null
 }
 
 /** Initial state: an empty surface and no cuts. */
@@ -292,6 +299,27 @@ function isOwnReplacement(event: { readonly data?: unknown }): boolean {
 }
 
 /**
+ * Wire payloads already built, keyed by the state they came from.
+ *
+ * A hit saves rebuilding the anchor list. It does NOT save the projection key's
+ * schema `parse`: that runs on the read path outside this function, so a re-read
+ * between two state changes still pays O(anchors) there.
+ *
+ * Two facts make the key sound and the saving real:
+ *
+ *   - the registry already skips `view` when the state reference is unchanged, so a
+ *     hit comes from a REPEATED READ of the same state (`snapshot()`,
+ *     `viewCheckpoint`), not from the fold handing us the same object per event;
+ *   - the fold therefore returns the SAME object for every event it ignores
+ *     (`applyRewindEvent` below returns `state` unchanged), and returns a new one
+ *     otherwise — which is why identity can be the key at all.
+ *
+ * Soundness depends on state being replaced, never mutated: marking
+ * {@link RewindState}'s fields `readonly` is what keeps that premise checkable.
+ */
+const viewCache = new WeakMap<RewindState, RewindWire>()
+
+/**
  * Project state to the wire value: recall points newest first, plus what has
  * already been hidden.
  *
@@ -304,6 +332,8 @@ function isOwnReplacement(event: { readonly data?: unknown }): boolean {
  * functions against one surface.
  */
 export function rewindView(state: RewindState): RewindWire {
+  const cached = viewCache.get(state)
+  if (cached !== undefined) return cached
   const anchors: RewindAnchor[] = []
   // "First prompt of its turn is the recall point", applied in LOG order — a
   // steering message shares the prompt shape but is a mid-turn interjection, and
@@ -332,7 +362,7 @@ export function rewindView(state: RewindState): RewindWire {
       preview: previewText(node.text),
     })
   }
-  return {
+  const wire: RewindWire = {
     anchors,
     hiddenTurns: state.hiddenTurns,
     // Derived from the CURRENT node list, exactly like the host's
@@ -340,6 +370,8 @@ export function rewindView(state: RewindState): RewindWire {
     // other asks "which is the newest", and both must answer together.
     stoppedAtCompaction: state.nodes.some((node) => node.checkpoint),
   }
+  viewCache.set(state, wire)
+  return wire
 }
 
 /**

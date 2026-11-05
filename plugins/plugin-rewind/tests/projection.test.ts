@@ -237,3 +237,20 @@ test('folded state satisfies its own schema', () => {
   const parsed = rewindStateSchema.safeParse(state)
   assert.equal(parsed.success, true, JSON.stringify(parsed.error?.issues))
 })
+
+test('the wire view is memoised on state identity, because a replay asks per event', () => {
+  // 0.2.2-rc.1 hands the reader one frame per COMMITTED event, and the fold returns the
+  // same state reference for events it does not handle. Without this cache a replay
+  // rebuilt the anchor list once per event: measured on a real session with 36,238
+  // events (68.5 MB decoded), the client sat at "载入历史" with the CPU pegged.
+  const state = fold([turnStart(0, 1), user(1, 'first'), assistant(2, 'a')])
+  assert.equal(rewindView(state), rewindView(state), 'one state, one view object')
+
+  // A different state must produce a different view, or a recall would never reach the
+  // client: that is the failure this cache could introduce.
+  const next = applyRewindEvent(state, user(3, 'second'))
+  assert.notEqual(next, state)
+  const view = rewindView(next)
+  assert.notEqual(view, rewindView(state))
+  assert.equal(rewindView(next), view, 'and the new state is cached too')
+})

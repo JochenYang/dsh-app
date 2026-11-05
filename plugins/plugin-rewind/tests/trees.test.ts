@@ -40,15 +40,26 @@ import {
   collectGarbage,
   DEFAULT_TREE_LIMITS,
   diffWorkspace,
+  drainGarbageCollection,
   dropSnapshots,
   latestSnapshotBefore,
   pathKey,
   pruneSnapshots,
   readSnapshot,
+  requestGarbageCollection,
   treesRoot,
   type TreeLimits,
   type TreeSnapshot,
 } from '../src/trees.ts'
+
+/** Schedule the collection a drop/prune owes, then wait for it. */
+async function collect(home: string, limits?: TreeLimits): Promise<void> {
+  // The report is a no-op because `drainGarbageCollection` re-raises the same
+  // rejection, which is how a failing pass reaches the assertion instead of
+  // becoming an unhandled rejection inside the scheduler.
+  requestGarbageCollection(home, () => {}, limits)
+  await drainGarbageCollection(home)
+}
 
 /** A scratch workspace plus a scratch `$DSH_HOME`, both removed by the caller. */
 function scratch(): { root: string, home: string } {
@@ -65,7 +76,11 @@ function scratch(): { root: string, home: string } {
 
 /** The shipped bounds, with per-test overrides. */
 function limits(overrides: Partial<TreeLimits> = {}): TreeLimits {
-  return { ...DEFAULT_TREE_LIMITS, ...overrides }
+  // The walk bound is a wall clock, and these cases are not about it: under the load
+  // of the whole 19-plugin batch a 1500 ms walk could report `timeout`, which changes
+  // the manifest and the blob tally. One real flake was observed that way (193/194 in
+  // a batch run, green in six isolated runs). The bound has its own case.
+  return { ...DEFAULT_TREE_LIMITS, maxWalkMs: 60_000, ...overrides }
 }
 
 /** Count the blobs the store holds. */
@@ -306,36 +321,104 @@ test('dropping a turn collects the blobs nothing references any more', async () 
 
   await dropSnapshots(home, 's', [2])
   assert.equal(await readSnapshot(home, 's', 2), undefined, 'the manifest is gone')
+  // The drop itself must NOT scan the store: collection parses every manifest of
+  // every session and stats every blob, and the recall answers on the other side
+  // of that call. The orphan is still here, which is what makes the recall fast.
+  assert.equal(blobCount(home), 3, 'the blob outlives the drop, because nothing scanned for it yet')
+
+  await collect(home)
   // 'A2' is referenced by nothing; 'A' and 'B' are still live for turn 1.
   assert.equal(blobCount(home), 2, 'the orphaned blob is collected, the shared ones survive')
   assert.ok(existsSync(treesRoot(home, 's')), 'the session directory stays')
   await cleanup(root, home)
 })
 
-test('a blob a capture is holding is never collected under it', async () => {
-  // A capture stores bytes BEFORE the manifest that names them, so a collection
-  // running in that window must not treat them as orphans — the manifest written
-  // a moment later would name bytes that no longer exist. The hold is in-process
-  // and exact (an mtime grace period is not: a blob that already existed because
-  // another turn stored the same content keeps its OLD mtime). This test runs the
-  // two concurrently; the interleaving is not guaranteed, so it can only fail in
-  // the bad case.
+test('a collection requested twice while one runs costs one extra pass, and drains to nothing', async () => {
   const { root, home } = scratch()
   writeFileSync(join(root, 'a.txt'), 'A')
-  writeFileSync(join(root, 'b.txt'), 'B')
-  const [snapshot] = await Promise.all([
-    captureWorkspace(home, 's', 1, root, limits()),
-    collectGarbage(home),
-  ])
-  const hashes = Object.values(snapshot.entries).map((entry) => entry[0])
-  assert.equal(hashes.length, 2)
-  for (const hash of hashes) {
-    assert.ok(
-      existsSync(join(blobsRoot(home), hash.slice(0, 2), hash)),
-      'every blob the manifest names survived the concurrent collection',
-    )
+  await captureWorkspace(home, 's', 1, root, limits())
+  await dropSnapshots(home, 's', [1])
+  // Two requests in the same tick: the second only marks the store dirty, so the
+  // running pass repeats once instead of a second full scan queueing behind it.
+  requestGarbageCollection(home, () => {})
+  requestGarbageCollection(home, () => {})
+  await drainGarbageCollection(home)
+  assert.equal(blobCount(home), 0, 'the orphaned blob is gone')
+  // Nothing is pending afterwards: a drain with no work resolves immediately
+  // rather than waiting on a promise the scheduler forgot to clear.
+  await drainGarbageCollection(home)
+  await cleanup(root, home)
+})
+
+test('a collection overlapping two captures deletes nothing they stored', async () => {
+  // A capture stores bytes BEFORE the manifest that names them, and releases its
+  // hold as the manifest starts protecting them. A collection pass overlapping that
+  // commit would see the bytes as orphans. This runs the two together, which is what
+  // the overlap looks like from outside.
+  //
+  // What it canNOT prove: the interleaving. `collectGarbage` takes the collection
+  // gate synchronously, so in a test's own ordering the pass usually finishes before
+  // either capture reaches its commit, and every blob is referenced by the time a
+  // pass scans. The gate's own guarantee is pinned structurally in the case below.
+  // Measured downstream before that gate existed: 172–193 of 200 blobs lost, and the
+  // snapshot then read back as "every file changed".
+  const { root, home } = scratch()
+  for (let round = 0; round < 12; round += 1) {
+    writeFileSync(join(root, `a${String(round)}.txt`), `A${String(round)}`)
+    writeFileSync(join(root, `b${String(round)}.txt`), `B${String(round)}`)
+    const [first, second] = await Promise.all([
+      captureWorkspace(home, 's', round * 2 + 1, root, limits()),
+      captureWorkspace(home, 's', round * 2 + 2, root, limits()),
+      collectGarbage(home),
+    ])
+    for (const snapshot of [first, second]) {
+      for (const [rel, entry] of Object.entries(snapshot.entries)) {
+        const hash = entry[0]
+        assert.ok(
+          existsSync(join(blobsRoot(home), hash.slice(0, 2), hash)),
+          `${rel} survived the concurrent collection (round ${String(round)})`,
+        )
+      }
+    }
   }
   await cleanup(root, home)
+})
+
+test('the manifest commit and the collection pass share one gate', () => {
+  // A TIMING property is what closes the blob-loss window, and no test can force the
+  // interleaving through the public API (see the case above). So the two structural
+  // facts that close it are pinned as source text — the same idiom this suite uses
+  // for the client wiring it cannot execute.
+  //
+  // What it asserts is CO-OCCURRENCE inside one gated block, not textual containment:
+  // a commit that writes the manifest and then releases the holds, both inside the
+  // gate, would still pass — and that ordering is safe, because the manifest already
+  // protects the bytes when the hold goes.
+  const text = readFileSync(new URL('../src/trees.ts', import.meta.url), 'utf8')
+
+  const commit = text.indexOf('await withCollectionGate(async () => {')
+  assert.notEqual(commit, -1, 'a capture must write its manifest inside the gate')
+  const block = text.slice(commit, commit + 700)
+  assert.ok(block.includes('writeManifest'), 'the manifest write must be inside that gate')
+  assert.ok(block.includes('inFlight.delete'), 'the hold must be released inside the same gate, after it')
+
+  assert.ok(
+    text.includes('await withCollectionGate(() => collectOnce('),
+    'a collection pass must take the same gate as the commit',
+  )
+
+  for (const name of ['dropSnapshots', 'pruneSnapshots']) {
+    const start = text.indexOf(`export async function ${name}`)
+    assert.notEqual(start, -1, `${name} must exist`)
+    // `\n}` is a brace at column 0 — every nested one is indented — and it does not
+    // assume a line ending after it (this tree mixes CRLF and LF).
+    const end = text.indexOf('\n}', start)
+    assert.notEqual(end, -1, `${name} must close with a brace at column 0`)
+    assert.ok(
+      !text.slice(start, end).includes('collectGarbage'),
+      `${name} must not scan the store on its caller's path — that is the recall's answer time`,
+    )
+  }
 })
 
 test('the retention cap keeps the newest manifests and collects what it drops', async () => {
@@ -347,6 +430,7 @@ test('the retention cap keeps the newest manifests and collects what it drops', 
   }
   assert.equal(blobCount(home), 4)
   await pruneSnapshots(home, 's', limits({ maxSnapshotsPerSession: 2 }))
+  await collect(home, limits({ maxSnapshotsPerSession: 2 }))
   assert.equal(await readSnapshot(home, 's', 1), undefined, 'the oldest manifests are dropped')
   assert.equal(await readSnapshot(home, 's', 2), undefined)
   assert.ok(await readSnapshot(home, 's', 3) !== undefined, 'the newest are kept')

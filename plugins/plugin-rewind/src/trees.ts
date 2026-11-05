@@ -206,6 +206,34 @@ export function blobsRoot(dshHome: string): string {
  */
 const inFlight = new Set<string>()
 
+/**
+ * Serializes the two sides of the store: a capture's commit and a collection pass.
+ *
+ * `inFlight` alone cannot close the window, because it is released exactly when
+ * the manifest starts protecting the bytes — so between the release and the
+ * manifest write there is a moment where the blobs are referenced by nothing and
+ * a pass running beside it deletes them. Measured downstream on this design:
+ * 172–193 of 200 blobs gone with a collector looping beside two captures, and the
+ * snapshot then read back as "every file changed" with the before-images
+ * unrecoverable.
+ *
+ * So the release happens INSIDE this gate, together with the manifest write, and
+ * a collection takes the same gate. A capture and a pass can therefore never
+ * interleave across that boundary; a time-based grace period cannot substitute
+ * (a blob shared with an older turn keeps its old mtime).
+ */
+let collectionGate: Promise<void> = Promise.resolve()
+
+/** Run one store-mutating step after every step already queued. */
+function withCollectionGate<T>(fn: () => Promise<T>): Promise<T> {
+  // The chain is always reassigned to a promise that settles, never to one that
+  // rejects, so a rejection handler here would be dead code; the caller's own
+  // promise is what carries the failure.
+  const run = collectionGate.then(fn)
+  collectionGate = run.then(() => undefined, () => undefined)
+  return run
+}
+
 /** The manifest path for one turn. */
 function manifestPath(dshHome: string, sessionId: string, turn: number): string {
   return join(treesRoot(dshHome, sessionId), `${String(turn)}.json`)
@@ -250,13 +278,23 @@ async function putBlob(dshHome: string, bytes: Buffer): Promise<string> {
   const hash = hashOf(bytes)
   inFlight.add(hash)
   const path = blobPath(dshHome, hash)
-  await mkdir(join(blobsRoot(dshHome), hash.slice(0, 2)), { recursive: true })
   try {
-    // `wx` makes this a no-op when the content is already stored, which is the
-    // common case: an unchanged file is never written twice.
-    await writeFile(path, bytes, { flag: 'wx' })
+    await mkdir(join(blobsRoot(dshHome), hash.slice(0, 2)), { recursive: true })
+    try {
+      // `wx` makes this a no-op when the content is already stored, which is the
+      // common case: an unchanged file is never written twice.
+      await writeFile(path, bytes, { flag: 'wx' })
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'EEXIST') throw error
+    }
   } catch (error) {
-    if ((error as { code?: unknown }).code !== 'EEXIST') throw error
+    // The caller adds to its own `held` set only on RETURN, so a failed store would
+    // leave this hash held with no manifest pointing at it — bytes on disk that no
+    // pass may collect. A later capture of the same content takes the EEXIST path and
+    // re-holds it, so the leak is bounded, but the hold belongs to the failure: release
+    // it here, where it happened.
+    inFlight.delete(hash)
+    throw error
   }
   return hash
 }
@@ -460,11 +498,11 @@ export async function captureWorkspace(
       held.add(hash)
       entries[rel] = [hash, found.size, found.mtimeMs]
     }
-  } finally {
-    // Release only THIS capture's holds. A blanket `inFlight.clear()` dropped a
-    // concurrent capture's blobs into the next collection pass, which then deleted
-    // bytes a live turn's snapshot still pointed at.
+  } catch (error) {
+    // Nothing was committed, so nothing may stay held: a leaked hold pins those
+    // bytes against every future pass until the process exits.
     for (const hash of held) inFlight.delete(hash)
+    throw error
   }
   const snapshot: TreeSnapshot = {
     v: 1,
@@ -477,7 +515,19 @@ export async function captureWorkspace(
     entries,
     uncaptured,
   }
-  await writeManifest(dshHome, snapshot)
+  // The commit is ONE gated step: the manifest write and this capture's release
+  // cannot be interleaved by a collection pass. Releasing first left the blobs
+  // referenced by nothing for as long as the write took, and a pass running in
+  // that window deleted them — the measured failure listed in the gate's own
+  // comment. A blanket `inFlight.clear()` is wrong for the same reason from the
+  // other side: it released a CONCURRENT capture's holds.
+  await withCollectionGate(async () => {
+    try {
+      await writeManifest(dshHome, snapshot)
+    } finally {
+      for (const hash of held) inFlight.delete(hash)
+    }
+  })
   return snapshot
 }
 
@@ -639,12 +689,92 @@ export async function diffWorkspace(
 }
 
 /**
- * Drop the manifests for turns that are no longer on the surface, then collect
- * the blobs nothing references any more.
+ * Collections the store still owes, coalesced per `$DSH_HOME`.
+ *
+ * A collection is O(THE WHOLE STORE): it parses every session's manifest and
+ * stats every blob. Measured on a real store of this machine — 115 sessions,
+ * 577 manifests, 77.8 MB of JSON, 575,672 entries, 23,970 blobs — that is 1.4 s
+ * of pure reading before it deletes anything, and it grows with every session
+ * ever used. So it never runs on a caller's awaited path: a recall waits on
+ * this store, and a recall that took a second and a half to answer is the
+ * "frozen" confirmation dialog.
+ *
+ * Coalescing is not an optimisation either: `pruneSnapshots` runs on every turn
+ * start, so a busy session would otherwise queue collections faster than they
+ * finish, each rescanning the store the previous one just scanned.
+ */
+const pendingCollections = new Map<string, Promise<void>>()
+const missedWhileCollecting = new Set<string>()
+
+/**
+ * Ask for a collection without waiting for it.
+ *
+ * A request arriving while one runs does not queue a second full scan: it
+ * records that the store changed again, and the running pass repeats once when
+ * it finishes. Two requests therefore cost one scan, not two.
+ *
+ * A pass holds {@link withCollectionGate}, so a capture that arrives while one
+ * runs waits for it and a turn's tool gate can wait at most one pass. That wait
+ * is not new — the inline collection this replaced charged the same pass, at
+ * every capture — only now it is paid when a tool actually needs the snapshot
+ * instead of unconditionally. Do not "fix" the wait by taking either side out of
+ * the gate: that is the blob-loss window described there.
+ *
+ * @param dshHome - resolved `$DSH_HOME`.
+ * @param report - where a failed pass is reported. A collection that failed
+ *   silently would leave the store growing with nobody able to see why.
+ * @param limits - the retention bounds.
+ */
+export function requestGarbageCollection(
+  dshHome: string,
+  report: (error: unknown) => void,
+  limits: TreeLimits = DEFAULT_TREE_LIMITS,
+): void {
+  if (pendingCollections.has(dshHome)) {
+    missedWhileCollecting.add(dshHome)
+    return
+  }
+  const run = (async (): Promise<void> => {
+    try {
+      await collectGarbage(dshHome, limits)
+      while (missedWhileCollecting.delete(dshHome)) await collectGarbage(dshHome, limits)
+    } finally {
+      pendingCollections.delete(dshHome)
+      // Drop the dirty mark too. A pass that threw skipped the loop above, so the
+      // mark was never consumed; it stands for work that arrived DURING this pass,
+      // and that work is retriggered by the next request rather than by a second
+      // immediate scan of a store this pass could not read.
+      missedWhileCollecting.delete(dshHome)
+    }
+  })()
+  pendingCollections.set(dshHome, run)
+  // Attached synchronously: a rejection with no handler is an unhandled
+  // rejection, and this promise is deliberately one nobody awaits. The report is
+  // the caller's logger and must not throw — a throwing reporter would turn this
+  // derived promise into the very unhandled rejection it exists to prevent.
+  run.catch(report)
+}
+
+/**
+ * Wait for the store's outstanding collection.
+ *
+ * The tests use it to observe what a deferred pass did. Nothing in the app
+ * awaits it — that deferral is the point of {@link requestGarbageCollection}.
+ *
+ * @param dshHome - resolved `$DSH_HOME`.
+ */
+export async function drainGarbageCollection(dshHome: string): Promise<void> {
+  await pendingCollections.get(dshHome)
+}
+
+/**
+ * Drop the manifests for turns that are no longer on the surface.
  *
  * Called after a recall: those turns are gone from the model's view, so their
- * snapshots can never be a restore target again. Content addressing means a blob
- * shared with a live turn survives.
+ * snapshots can never be a restore target again. The manifests go immediately —
+ * that is a handful of `rm` calls — while the blobs they orphaned are collected
+ * by {@link requestGarbageCollection}, which the caller schedules rather than
+ * waits for. Content addressing means a blob shared with a live turn survives.
  *
  * @param dshHome - resolved `$DSH_HOME`.
  * @param sessionId - the session whose turns were recalled.
@@ -658,16 +788,17 @@ export async function dropSnapshots(dshHome: string, sessionId: string, turns: r
       /* nothing to drop */
     }
   }
-  await collectGarbage(dshHome)
 }
 
 /**
- * Enforce the per-session retention cap, then collect what that orphaned.
+ * Enforce the per-session retention cap.
  *
  * A long session captures one manifest per mutating turn, so without this the
  * store grows without bound. The newest manifests win; the oldest are dropped,
  * and a recall reaching further back than the cap then reports a partial snapshot
- * rather than pretending.
+ * rather than pretending. The orphaned blobs are collected by
+ * {@link requestGarbageCollection}, scheduled by the caller: this runs on the
+ * turn-start path, which must not wait on a whole-store scan.
  *
  * @param dshHome - resolved `$DSH_HOME`.
  * @param sessionId - the session to prune.
@@ -683,7 +814,6 @@ export async function pruneSnapshots(
   for (const turn of excess) {
     await rm(manifestPath(dshHome, sessionId, turn), { force: true })
   }
-  await collectGarbage(dshHome)
 }
 
 /** The turns this session has a manifest for, ascending. */
@@ -719,6 +849,14 @@ interface ManifestRef {
  * @param limits - the retention bounds.
  */
 export async function collectGarbage(dshHome: string, limits: TreeLimits = DEFAULT_TREE_LIMITS): Promise<void> {
+  // The gate is what makes this safe beside a capture: a capture publishes its
+  // manifest inside the same gate before releasing its holds, so a pass can never
+  // read the manifest set in the middle of that commit.
+  await withCollectionGate(() => collectOnce(dshHome, limits))
+}
+
+/** One pass; see {@link collectGarbage} for the serialization contract. */
+async function collectOnce(dshHome: string, limits: TreeLimits): Promise<void> {
   const treesDir = join(dshHome, 'storages', 'dsh-app-plugin-rewind', 'trees')
   const manifests: ManifestRef[] = []
   let sessions: string[]

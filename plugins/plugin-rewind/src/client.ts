@@ -376,12 +376,29 @@ export function apply(ctx: ClientContext): void {
     key: 'user',
     priority: -1,
     locale: CHAT_NS,
+    // 0.2.2-rc.1 gave the user node view a CHILD slot
+    // (`conversation.chat.user.before`) and made its renderer call that child's
+    // renderer on every row. This entry replaces that renderer, and it cannot declare
+    // the same child — the registry refuses a second declaration outright ("slot
+    // …already declared", measured: it throws at client boot and the whole transcript
+    // never loads). So the child renderer is supplied here instead: with no
+    // registrant in this profile the chain renders nothing, which is what the
+    // unmodified kernel row would show anyway. If a plugin that decorates the spot
+    // above a user bubble (the kernel's experimental liveshare does) is ever enabled,
+    // this must become a pass-through rather than a null renderer.
+    inject: () => ({ renderSlotChain: () => null }),
   }, makeMessageActionView('user', deps)))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',
     key: 'steering',
     priority: -1,
     locale: CHAT_NS,
+    // Steering renders through the SAME built-in component (`UserMessageNodeView`),
+    // so it calls the same child renderer and needs the same seat — the kernel's own
+    // steering registration supplies exactly this. Without it the first steering row
+    // it renders throws, and the slot system retires this entry for good: the row
+    // survives (the kernel's own entry takes over) but the wrapper is gone.
+    inject: () => ({ renderSlotChain: () => null }),
   }, makeMessageActionView('steering', deps)))
 
   // --- The typed-command path. A recall typed by hand (`/rewind 2`) runs

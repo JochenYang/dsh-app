@@ -130,6 +130,7 @@ import {
   pathKey,
   pruneSnapshots,
   readSnapshot,
+  requestGarbageCollection,
   type TreeLimits,
   type TreeSnapshot,
 } from './trees.ts'
@@ -612,6 +613,14 @@ export function apply(ctx: Context, config: Config): void {
         const previous = await latestSnapshotBefore(dshHome, info.id, info.turn)
         const capture = await captureWorkspace(dshHome, info.id, info.turn, info.cwd, limits, previous, signal)
         await pruneSnapshots(dshHome, info.id, limits)
+        // Scheduled, not awaited: collecting parses every manifest of every
+        // session and stats every blob, so awaiting it here put the whole store's
+        // size in front of the turn's first tool call. A background pass can still
+        // hold the collection gate when a capture arrives, which delays that one
+        // capture by at most a pass — the same wait this used to charge every time.
+        requestGarbageCollection(dshHome, (error: unknown) => {
+          log.warn(`rewind: snapshot collection failed: ${messageOf(error)}`)
+        }, limits)
         // A CANCELLED walk is not a snapshot: `captureWorkspace` answers
         // `complete:false, reason:'cancelled'` instead of throwing. Keeping the claim
         // would make every later tool gate in this turn await a promise that recorded
@@ -815,11 +824,20 @@ export function apply(ctx: Context, config: Config): void {
     // file state is still restorable, so the data stays.
     if (!conversationOnly) {
       recorder.forget(sessionId, plan.turns)
+      const dshHome = resolveDshHome()
       try {
-        await dropSnapshots(resolveDshHome(), sessionId, plan.turns)
+        await dropSnapshots(dshHome, sessionId, plan.turns)
       } catch (error) {
         log.warn(`rewind: snapshot cleanup failed: ${messageOf(error)}`)
       }
+      // The command answers WITHOUT waiting for the blobs to be collected: a
+      // collection is a whole-store scan (2.7 s for the full pass on a store of 577
+      // manifests and 24k blobs, 1.4 s of it pure reading, growing with every session
+      // ever used), and the recall's dialog is on the other side of this answer — it
+      // sat there looking frozen for as long as the scan ran.
+      requestGarbageCollection(dshHome, (error: unknown) => {
+        log.warn(`rewind: snapshot collection failed: ${messageOf(error)}`)
+      }, limits)
     }
 
     return {
