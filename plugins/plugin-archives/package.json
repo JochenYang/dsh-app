@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-archives",
   "description": "DSH APP session archive manager: dual-face plugin (host list/delete/trash routes over the workspace registry's archive set + a settings-page section grouped by project, with undoable deletes, a session trash, retention and an audit log).",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",

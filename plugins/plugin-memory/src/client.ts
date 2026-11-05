@@ -65,7 +65,10 @@ function mountNavIconPatch(labelOf: () => string): () => void {
   const style = document.createElement('style')
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
   style.textContent = [
-    'button.dshmNav > svg:first-child { display: none; }',
+    // The shell's glyph sits in a `.navIcon` cell whose class carries a build
+    // hash, as of 0.2.2-rc.1; without this rule the default gear shows beside
+    // our painted glyph. The bare `svg` half covers a row with no such wrapper.
+    'button.dshmNav [class*="navIcon"], button.dshmNav svg { display: none; }',
     'button.dshmNav::before {',
     '  content: ""; width: 16px; height: 16px; flex: none;',
     `  background-color: currentColor; -webkit-mask-image: ${maskUrl}; mask-image: ${maskUrl};`,

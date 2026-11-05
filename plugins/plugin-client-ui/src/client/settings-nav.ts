@@ -37,7 +37,10 @@ export interface NavGlyph {
 const glyphRules = (glyph: NavGlyph): string[] => {
   const maskUrl = `url("data:image/svg+xml,${encodeURIComponent(glyph.svg)}")`
   return [
-    `button.${glyph.cls} > svg:first-child { display: none; }`,
+    // The shell's glyph sits in a `.navIcon` cell whose class carries a build
+    // hash, as of 0.2.2-rc.1; without this rule the default gear shows beside
+    // our painted glyph. The bare `svg` half covers a row with no such wrapper.
+    `button.${glyph.cls} [class*="navIcon"], button.${glyph.cls} svg { display: none; }`,
     `button.${glyph.cls}::before {`,
     '  content: ""; width: 16px; height: 16px; flex: none;',
     `  background-color: currentColor; -webkit-mask-image: ${maskUrl}; mask-image: ${maskUrl};`,
