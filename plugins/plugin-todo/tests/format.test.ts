@@ -138,7 +138,12 @@ test('tipDivider adapts to content length and never wraps', () => {
 test('formatStamp names the day once the reminder is not from today', () => {
   // The catch-up case: a notice that rang yesterday evening must not print "21:30" and
   // read as if it were on time today.
-  const evening = Date.parse('2026-11-04T21:30:00+08:00')
-  assert.equal(formatStamp(evening, Date.parse('2026-11-04T21:31:00+08:00')), '21:30')
-  assert.equal(formatStamp(evening, Date.parse('2026-11-05T11:30:00+08:00')), '2026-11-04 21:30')
+  //
+  // Built from LOCAL components, not from an offset string: `formatStamp` renders in
+  // the machine's local time, so a `+08:00` literal asserts 21:30 only on a machine in
+  // that zone — it read 13:30 on CI's UTC runner, which is how this test failed the
+  // release build.
+  const evening = new Date(2026, 10, 4, 21, 30).getTime()
+  assert.equal(formatStamp(evening, new Date(2026, 10, 4, 21, 31).getTime()), '21:30')
+  assert.equal(formatStamp(evening, new Date(2026, 10, 5, 11, 30).getTime()), '2026-11-04 21:30')
 })
