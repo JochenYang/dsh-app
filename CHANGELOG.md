@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.18.4] - 2026-11-06
+
+### 中文
+- 推理等级滑块：换档不再瞬移。位置改由弹簧驱动（约 150ms 收敛，带轻微回弹），拖动、点击和方向键都是连续位移，不再一格一跳。整条轨道铺上由确定性哈希生成的星空栅格——每一档都有，最低档也有一小片在闪，越往右越密，滑块之前的区域比之后亮，所以低档不再是「什么都不动」。最顶档把它们推成一次爆发：加色混合的粒子从滑块边缘向外扩散、滑块放大并带上同色光晕、底色加深而不是变淡（浅色主题下变淡等于把轨道往白色卡片里兑，整条发白）。顶档按档位列表的最后一档判定，不是按位置阈值，所以六档模型不会把倒数第二档当成顶档；单档模型不触发。原先那排从右往左匀速平移的方块去掉了，它读起来像传送带而不是星空。开启「减少动态效果」时不跑动画循环，只画一帧静态星野，位置直接落位。
+
+### English
+- Effort slider: changing level no longer teleports. The position is driven by a spring (~150ms settle, slight overshoot), so a drag, a click and the arrow keys are all continuous movement instead of a one-notch jump. The whole track carries a starfield lattice derived from a deterministic hash — every level has one, the lowest included (a handful of squares still twinkle there), denser toward the right, brighter before the knob than after it, so the bottom of the scale is no longer a dead bar. The top level pushes all of it into a burst: additively blended sparks fly out of the knob's rim, the knob swells with a halo of the level's own colour, and the bar deepens instead of fading (in the light theme a fade mixes the track toward the white card and the whole thing reads as washed out). The top level is decided by the level LIST's last entry rather than by a position threshold, so a six-level model does not treat its second-to-last level as the top one, and a single-level model never bursts. The old row of squares sweeping right to left is gone — it read as a conveyor rather than as a sky. Under reduced motion no animation loop runs: one static frame of the same starfield is painted and the position lands directly.
+
 ## [v0.18.3] - 2026-11-05
 
 ### 中文
