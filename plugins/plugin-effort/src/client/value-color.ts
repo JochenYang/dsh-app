@@ -448,6 +448,20 @@ export function mixHex(from: string, to: string, t: number): string {
 }
 
 /**
+ * The three channels of a `#RRGGBB` colour.
+ *
+ * Exported for the canvas: a 2d context wants channels, not a hex string, because
+ * the field varies one colour's alpha across ~200 cells per frame and rebuilding a
+ * hex string per cell would be the expensive half of that loop.
+ *
+ * @param color - a `#RRGGBB` colour.
+ * @returns its channels, 0..255.
+ */
+export function rgbOf(color: string): readonly [number, number, number] {
+  return parseHex(color)
+}
+
+/**
  * WCAG relative luminance of a `#RRGGBB` colour.
  * @param color - the colour.
  * @returns the luminance, 0..1.

@@ -17,8 +17,7 @@
 
 import { strict as assert } from 'node:assert'
 import { afterEach, describe, it } from 'node:test'
-import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TICK_HOVER_SCALE, TICK_SIZE, TRACK_HEIGHT } from '../src/client/geometry.ts'
-import { DRIFT_AMPLITUDE } from '../src/client/mosaic.ts'
+import { ENERGY_VAR, GALAXY_VAR, PCT_VAR, TICK_HOVER_SCALE, TICK_SIZE, BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TRACK_HEIGHT, fillClip, headEdgeExpr, offsetExpr } from '../src/client/geometry.ts'
 import { EFFORT_TEXT_ATTRIBUTE, EFFORT_TEXT_WEIGHT, adoptStyles } from '../src/client/styles.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from '../src/client/value-color.ts'
 
@@ -75,7 +74,7 @@ describe('adoptStyles', () => {
     assert.ok(css.includes(fillGradient(FILL_RAMP_LIGHT)), 'the light ramp is not the shared one')
     assert.ok(css.includes(fillGradient(FILL_RAMP_DARK)), 'the dark ramp is not the shared one')
     assert.ok(css.includes('body[data-ds-dark-theme]'), 'the dark ramp is not bound to the kernel theme hook')
-    assert.ok(css.includes('prefers-reduced-motion'), 'the mosaic has no reduced-motion opt-out')
+    assert.ok(css.includes('prefers-reduced-motion'), 'the sheet has no reduced-motion opt-out')
   })
 
   it('gives the container a line of its own inside the row', () => {
@@ -107,38 +106,90 @@ describe('adoptStyles', () => {
     )
   })
 
-  it('keeps an unlit tile mounted, invisible and paused', () => {
+  it('places the knob, the clip and the bloom from the animated variable', () => {
     stubDocument()
     adoptStyles()
     const css = injected.join('')
-    // Unmounting an unlit tile is what made squares appear and vanish in the
-    // middle of the track; the fade needs the element to stay.
+    // One position, three surfaces, one owner. The component writes none of them:
+    // a level change is a step and the animation is what is between two steps, so a
+    // literal here would be a second source for the same value — the knob would
+    // jump to the new level on the render that announced it and the spring would
+    // pull it back on the next frame.
+    const token = `var(${PCT_VAR}, 0)`
     assert.ok(
-      /\.dshAppEffort-tile\[data-on="0"\] \{[^}]*animation-play-state: paused/u.test(css),
-      'an unlit tile keeps sweeping invisibly',
+      /\n\.dshAppEffort-knob \{[^}]*left: calc\(/u.test(css),
+      'the knob is not placed by a calc() any more',
     )
-    assert.ok(
-      /\n\.dshAppEffort-square \{[^}]*transition: opacity/u.test(css),
-      'the square cannot fade between its tone and nothing',
-    )
+    assert.ok(css.includes(offsetExpr(token)), 'the knob does not read the animated position')
+    assert.ok(css.includes(fillClip(token)), 'the fill is not clipped to the animated position')
+    assert.ok(css.includes(headEdgeExpr(token)), 'the bloom does not ride the animated position')
+    assert.ok(css.includes(`--dshAppEffort-head: ${headEdgeExpr(token)};`), 'the bloom derives its own leading edge')
   })
 
-  it('gates the drift on the top of the energy range, centring included', () => {
+  it('gives the starfield a capsule-shaped layer of its own', () => {
     stubDocument()
     adoptStyles()
     const css = injected.join('')
+    // The field is a canvas, so it cannot be clipped by its own `border-radius`:
+    // the wrapper carries the radius and the overflow, or ~200 squares would be
+    // painted into the corners the track's rounding cuts off — and the top level's
+    // sparks, which fly well past the knob, would leave the capsule entirely and
+    // paint over the official menu's own rows.
+    assert.ok(/\n\.dshAppEffort-field \{/u.test(css), 'the field layer is missing')
+    const rule = /\n\.dshAppEffort-field \{([^}]*)\}/u.exec(css)?.[1] ?? ''
+    assert.ok(rule.includes('border-radius: 999px'), 'the field layer has no capsule shape')
+    assert.ok(rule.includes('overflow: hidden'), 'the field is not clipped to the track')
+    assert.ok(rule.includes('pointer-events: none'), 'the field intercepts the pointer')
     assert.ok(
-      /\.dshAppEffort-track\[data-drift="1"\] \.dshAppEffort-tile\[data-on="1"\] \.dshAppEffort-square \{[^}]*animation-name: dshAppEffort-drift/u.test(css),
-      'the drift is not gated on the track and on lit tiles',
+      /\.dshAppEffort-field canvas \{[^}]*width: 100%/u.test(css),
+      'the canvas does not fill its layer',
     )
-    // A keyframe replaces the element's transform outright: a drift that wrote
-    // only the vertical offset would slide every square half a tile up and left.
+    // The canvas is sized from its own CSS box, in device pixels, by the loop.
+    assert.ok(!css.includes('--dshAppEffort-field-width'), 'a width is being pinned in the sheet')
+  })
+
+  it('hands the top level to the field, and adds a halo to the knob', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    // The top level is a swell, not a class: every value it drives is read from a
+    // variable the loop eases, so none of them is transitioned.
     assert.ok(
-      css.includes('translate(-50%, -50%) translateY('),
-      'the drift keyframe dropped the centring transform',
+      new RegExp(`\\.dshAppEffort-knob \\{[^}]*var\\(${GALAXY_VAR}, 0\\)`, 'u').test(css),
+      'the knob does not take its swell from the animated variable',
     )
-    assert.ok(css.includes(`translateY(${DRIFT_AMPLITUDE}px)`), 'the drift amplitude is not the constant')
-    assert.ok(css.includes(`translateY(${-DRIFT_AMPLITUDE}px)`), 'the drift has no other end')
+    assert.ok(
+      new RegExp(`\\.dshAppEffort-fill \\{[^}]*opacity: calc\\(1 - [0-9.]+ \\* var\\(${GALAXY_VAR}, 0\\)\\)`, 'u').test(css),
+      'the fill does not answer the top level',
+    )
+    assert.ok(
+      new RegExp(`\\.dshAppEffort-track \\{[^}]*var\\(${ENERGY_VAR}, 0\\)`, 'u').test(css),
+      'the track glow is not driven by the animated energy',
+    )
+    assert.ok(css.includes('--dshAppEffort-halo'), 'the top level has no halo colour')
+  })
+
+  it('deepens the top level instead of fading the bar toward the card', () => {
+    stubDocument()
+    adoptStyles()
+    const css = injected.join('')
+    // Measured, on the running app, as a defect: the fill faded to 35% at the top
+    // level, and because the card behind the track is WHITE in the light theme,
+    // what showed through was the card — the top level read as washed out rather
+    // than as the richest one. The reference fades its fill out completely, which
+    // works only because its track sits on near-black. So the fade has to stay
+    // shallow here, and the number is what this pins.
+    const fillRule = /\n\.dshAppEffort-fill \{([^}]*)\}/u.exec(css)?.[1] ?? ''
+    const fade = new RegExp(`opacity: calc\\(1 - ([0-9.]+) \\* var\\(${GALAXY_VAR}, 0\\)\\)`, 'u').exec(fillRule)?.[1]
+    assert.ok(fade !== undefined, 'the fill no longer recedes in proportion to the swell')
+    assert.ok(Number(fade) <= 0.2, `the fill recedes by ${fade}, so the card shows through as a pale bar`)
+    // The white bloom is the second source in the same 30px: it sits exactly where
+    // the enlarged knob is, so it has to retreat as the knob's halo arrives.
+    const bloomRule = /\n\.dshAppEffort-bloom \{([^}]*)\}/u.exec(css)?.[1] ?? ''
+    assert.ok(
+      new RegExp(`\\(1 - [0-9.]+ \\* var\\(${GALAXY_VAR}, 0\\)\\)`, 'u').test(bloomRule),
+      'the white bloom keeps full strength under an enlarged knob',
+    )
   })
 
   it('anchors the bloom on the knob\'s rim, inside the fill', () => {

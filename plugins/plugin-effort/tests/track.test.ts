@@ -1,10 +1,16 @@
 /**
- * Track geometry and the mosaic curves, pinned.
+ * Track geometry, the starfield's curves and the springs, pinned.
  *
  * The single-level case is the one that carries a user-visible rule rather than
  * arithmetic: a model that advertises one level must read as FULL, because that
  * level IS the maximum. `pctFromIndex(0, 1)` returning 0 — the "obvious" answer —
  * is what put a one-level model's knob at the empty end of the track.
+ *
+ * The field's curves are here rather than in a rendering test because this plugin
+ * has no test that mounts React: what a canvas paints is not observable in a node
+ * test, but the density floor that makes the low levels alive, the determinism that
+ * keeps a repaint from reshuffling the sky and the bounds every spark stays inside
+ * are all pure functions.
  *
  * @module plugin-effort/tests/track
  */
@@ -13,8 +19,10 @@ import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import {
   BLOOM_WIDTH,
+  GALAXY_VAR,
   KNOB_RADIUS,
   KNOB_SIZE,
+  PCT_VAR,
   TRACK_HEIGHT,
   clamp01,
   createGestureMap,
@@ -27,23 +35,24 @@ import {
   pctFromIndex,
 } from '../src/client/geometry.ts'
 import {
-  DRIFT_MS,
-  ENERGY_START,
-  MOSAIC_TILES,
-  TILE_MAX_SIZE,
-  TILE_MIN_SIZE,
-  driftDelayMsFor,
+  DENSITY_FLOOR,
+  FIELD_PAD,
+  SPARK_DOTS,
+  SPARK_INNER,
+  SPARK_SPAN,
+  cellAlphaFor,
+  cellDensityFor,
+  cellSeed,
   energyFor,
-  mosaicTiles,
-  sweepDurationMsFor,
-  sweepPctFor,
-  sweepSpeedFor,
-  tileCountFor,
-  tileDelayMsFor,
-  tileLayerOpacityFor,
-  tileStateFor,
-  type MosaicTile,
-} from '../src/client/mosaic.ts'
+  fieldGrid,
+  sparkRadiusFor,
+} from '../src/client/starfield.ts'
+import {
+  MAX_STEP_SECONDS,
+  POSITION_SPRING,
+  advanceSpring,
+  createSpring,
+} from '../src/client/spring.ts'
 
 describe('geometry constants', () => {
   it('keeps the knob the same size as the track', () => {
@@ -265,64 +274,141 @@ describe('clamp01', () => {
   })
 })
 
-describe('mosaicTiles', () => {
-  it('is deterministic: the same position always paints the same mosaic', () => {
-    assert.deepEqual(mosaicTiles(), mosaicTiles())
+describe('the animated position operand', () => {
+  it('passes a CSS expression through instead of rounding it', () => {
+    // The animation writes the position as a custom property; the same three
+    // formulas place the knob, the clip and the bloom for both callers, so the one
+    // operand has to accept a variable as well as a number.
+    const token = `var(${PCT_VAR}, 0)`
+    assert.equal(offsetExpr(token), `calc(${KNOB_RADIUS}px + ${token} * (100% - ${KNOB_SIZE}px))`)
+    assert.equal(headEdgeExpr(token), `calc(${token} * (100% - ${KNOB_SIZE}px))`)
+    assert.ok(fillClip(token).includes(token))
   })
 
-  it('gives every tile a distinct phase, so the sweep reads as a stream', () => {
-    const phases = mosaicTiles().map(tile => tile.phase)
-    assert.equal(new Set(phases).size, MOSAIC_TILES)
+  it('names the variables the stylesheet reads', () => {
+    // Two names for one value is how the animation and the sheet drift apart.
+    assert.equal(PCT_VAR, '--dshAppEffort-pct')
+    assert.equal(GALAXY_VAR, '--dshAppEffort-galaxy')
+  })
+})
+
+describe('fieldGrid', () => {
+  it('holds whole cells only, and centres the leftover pixels', () => {
+    const grid = fieldGrid(300, 28)
+    assert.ok(grid !== null)
+    const pad = FIELD_PAD * 2
+    assert.equal(grid.cols, Math.floor((300 - pad) / grid.pitch))
+    assert.equal(grid.rows, Math.floor((28 - pad) / grid.pitch))
+    // Centred rather than left-aligned: otherwise the lattice is keyed to the
+    // menu's own width and the leftmost column moves when the card resizes.
+    const span = 300 - pad
+    assert.ok(Math.abs(grid.originX - (FIELD_PAD + (span - grid.cols * grid.pitch) / 2)) < 1e-9)
   })
 
-  it('keeps size, height and tone inside the track', () => {
-    for (const tile of mosaicTiles()) {
-      assert.ok(tile.size >= TILE_MIN_SIZE && tile.size <= TILE_MAX_SIZE, `size ${tile.size}`)
-      assert.ok(tile.top >= 0.12 && tile.top <= 0.78, `top ${tile.top}`)
-      assert.ok(tile.tone >= 0.45 && tile.tone <= 1, `tone ${tile.tone}`)
-      // A tile is centred on its line, so its real extent is half a size either
-      // side; asserting the whole size keeps a margin against the track's edge.
-      assert.ok(tile.top * TRACK_HEIGHT + tile.size <= TRACK_HEIGHT, `overflow at ${tile.top}`)
+  it('holds the rows a 28px track needs to read as a texture', () => {
+    // Measured against the real control: at a 6px pitch the bar held four rows and
+    // read as a line of dashes. The row count is what the pitch is chosen for.
+    const grid = fieldGrid(230, TRACK_HEIGHT)
+    assert.ok(grid !== null)
+    assert.ok(grid.rows >= 5, `only ${String(grid.rows)} rows fit`)
+    assert.ok(grid.cols >= 40, `only ${String(grid.cols)} columns fit`)
+  })
+
+  it('answers null where no cell fits', () => {
+    assert.equal(fieldGrid(0, 28), null)
+    assert.equal(fieldGrid(300, 0), null)
+    assert.equal(fieldGrid(4, 4), null)
+  })
+})
+
+describe('cellSeed', () => {
+  it('is deterministic, and unrelated between neighbouring cells', () => {
+    // Determinism is what keeps the field assertable and a repaint from shuffling
+    // the sky; the low correlation is what stops a row twinkling in lockstep.
+    assert.equal(cellSeed(7, 17), cellSeed(7, 17))
+    const values = Array.from({ length: 40 }, (_, index) => cellSeed(index, 17))
+    assert.ok(new Set(values).size > 30, 'the hash repeats too much to be a sky')
+    for (let index = 1; index < values.length; index += 1) {
+      assert.notEqual(values[index], values[index - 1], `cells ${index - 1} and ${index} share a seed`)
     }
   })
 })
 
-describe('mosaic curves', () => {
-  it('paints nothing below the energy floor and everything at the far end', () => {
-    assert.equal(tileCountFor(0), 0)
-    assert.equal(tileCountFor(ENERGY_START), 0)
-    assert.equal(tileLayerOpacityFor(ENERGY_START), 0)
-    assert.equal(tileCountFor(1), MOSAIC_TILES)
-    assert.equal(tileLayerOpacityFor(1), 1)
-  })
-
-  it('rises monotonically with the position', () => {
-    let lastCount = -1
-    let lastOpacity = -1
-    for (let pct = 0; pct <= 1.0001; pct += 0.05) {
-      const count = tileCountFor(pct)
-      const opacity = tileLayerOpacityFor(pct)
-      assert.ok(count >= lastCount, `count dropped at ${pct}`)
-      assert.ok(opacity >= lastOpacity, `opacity dropped at ${pct}`)
-      lastCount = count
-      lastOpacity = opacity
+describe('cellDensityFor', () => {
+  it('never empties the track, at any position', () => {
+    // The whole point of the floor: the bottom of the scale used to show nothing
+    // moving at all, which read as a disabled control rather than as a low level.
+    for (const col of [0, 0.25, 0.5, 1]) {
+      assert.ok(cellDensityFor(col, 0, 0) >= DENSITY_FLOOR, `col ${col} at the bottom of the scale`)
     }
   })
 
-  it('sweeps faster the further the track is pushed, within its bounds', () => {
-    assert.ok(sweepSpeedFor(1) > sweepSpeedFor(0.2))
-    assert.ok(sweepSpeedFor(0) >= 0.35)
-    assert.ok(sweepSpeedFor(1) <= 2)
-    assert.ok(sweepDurationMsFor(1, 0.5) < sweepDurationMsFor(0.2, 0.5))
+  it('rises with the position, with the swell, and toward the right', () => {
+    assert.ok(cellDensityFor(0.5, 1, 0) > cellDensityFor(0.5, 0, 0))
+    assert.ok(cellDensityFor(0.5, 1, 1) > cellDensityFor(0.5, 1, 0))
+    assert.ok(cellDensityFor(1, 0.5, 0) > cellDensityFor(0, 0.5, 0))
   })
 
-  it('starts every tile partway through its own sweep', () => {
-    const duration = sweepDurationMsFor(0.8, 0.5)
-    for (const tile of mosaicTiles()) {
-      const delay = tileDelayMsFor(tile, duration)
-      assert.ok(delay <= 0, `delay ${delay}`)
-      assert.ok(delay > -duration, `delay ${delay} past one sweep`)
+  it('stays a likelihood', () => {
+    for (const energy of [0, 0.5, 1, 2]) {
+      for (const galaxy of [0, 0.5, 1]) {
+        const density = cellDensityFor(1, energy, galaxy)
+        assert.ok(density >= 0 && density <= 1, `density ${density}`)
+      }
     }
+  })
+})
+
+describe('cellAlphaFor', () => {
+  it('keeps a lit cell visible and dims the ones past the knob', () => {
+    assert.ok(cellAlphaFor(0, 0, true) > 0, 'a cell at the dimmest end is invisible')
+    assert.ok(cellAlphaFor(1, 1, true) <= 1)
+    // Past the knob is dimmer, never gone: the bar to the right is still the scale,
+    // and a texture that stopped dead at the knob would read as a hard edge.
+    assert.ok(cellAlphaFor(0.5, 0.5, false) < cellAlphaFor(0.5, 0.5, true))
+    assert.ok(cellAlphaFor(0.5, 0.5, false) > 0)
+  })
+
+  it('lights the left of the top level as brightly as the rest of it', () => {
+    // The reported defect: at the top level the left third of the bar looked
+    // empty. It was not — 171 cells were drawn there. The column ramp was applied
+    // TWICE (once in the density, once in the opacity), so those cells landed at
+    // about 7% over a saturated fill and none of them read.
+    const topLeft = cellAlphaFor(0.5, 0, true, 1)
+    const plainLeft = cellAlphaFor(0.5, 0, true, 0)
+    const topRight = cellAlphaFor(0.5, 1, true, 1)
+    assert.ok(
+      topLeft > plainLeft * 2,
+      `the top level's left end is ${String(topLeft)} against ${String(plainLeft)} at the same column elsewhere`,
+    )
+    assert.ok(topLeft > topRight * 0.6, 'the top level still dies out toward the left')
+    assert.ok(cellDensityFor(0, 1, 1) > 0.7, 'the top level leaves its left columns half-empty')
+  })
+})
+
+describe('sparkRadiusFor', () => {
+  it('stays inside the burst, for every dot and every instant', () => {
+    for (const seed of [0, 0.37, 0.91]) {
+      for (let dot = 0; dot < SPARK_DOTS; dot += 1) {
+        for (const seconds of [0, 0.5, 3.25, 100]) {
+          const radius = sparkRadiusFor(dot, seconds, seed)
+          assert.ok(radius >= 0 && radius < SPARK_SPAN, `radius ${radius}`)
+        }
+      }
+    }
+  })
+
+  it('moves: the same dot is elsewhere a moment later', () => {
+    assert.notEqual(sparkRadiusFor(0, 0, 0.5), sparkRadiusFor(0, 0.4, 0.5))
+    assert.ok(SPARK_INNER > 0)
+  })
+})
+
+describe('energyFor', () => {
+  it('starts at a third of the travel and reaches 1 at the far end', () => {
+    assert.equal(energyFor(0), 0)
+    assert.equal(energyFor(1 / 3), 0)
+    assert.equal(energyFor(1), 1)
   })
 
   it('clamps energy outside 0..1', () => {
@@ -331,70 +417,46 @@ describe('mosaic curves', () => {
   })
 })
 
-describe('sweepPctFor', () => {
-  it('reads the displayed position while the two are level', () => {
-    assert.equal(sweepPctFor(0.8, false, 0.2), 0.8)
-    assert.equal(sweepPctFor(0, false, 0.9), 0)
-  })
-
-  it('holds the settled position while a gesture is in flight', () => {
-    // The whole point of the freeze: `animation-duration` re-times a RUNNING
-    // animation rather than restarting it, so a duration that followed every
-    // crossing remapped each square's progress and moved it. A drag crosses one
-    // node per level, which was one jump per node.
-    assert.equal(sweepPctFor(0.8, true, 0.2), 0.2)
-    assert.equal(sweepPctFor(0, true, 0.2), 0.2)
-    assert.equal(sweepPctFor(1, true, 0.2), 0.2)
-    assert.equal(sweepPctFor(0.9, true, 0.9), 0.9)
-  })
-
-  it('clamps either position into the travel', () => {
-    assert.equal(sweepPctFor(2, false, 0), 1)
-    assert.equal(sweepPctFor(-1, false, 0), 0)
-    assert.equal(sweepPctFor(0.5, true, 4), 1)
-    assert.equal(sweepPctFor(0.5, true, Number.NaN), 0)
-  })
-})
-
-describe('tileStateFor', () => {
-  it('lights tiles in order, and an unlit one carries no opacity at all', () => {
-    const tiles = mosaicTiles()
-    for (const pct of [0, ENERGY_START, 0.5, 0.75, 1]) {
-      const count = tileCountFor(pct)
-      tiles.forEach((tile, index) => {
-        const state = tileStateFor(tile, index, pct)
-        assert.equal(state.on, index < count, `tile ${index} at ${pct}`)
-        // Not "a small opacity": 0, so the fade comes to rest on exactly the tone
-        // it returns to.
-        assert.equal(state.opacity, index < count ? tile.tone : 0, `opacity of tile ${index} at ${pct}`)
-      })
+describe('springs', () => {
+  it('arrives and stops, so the loop can stop with it', () => {
+    const state = createSpring(0)
+    let moving = true
+    let frames = 0
+    while (moving && frames < 600) {
+      moving = advanceSpring(state, 1, 1 / 60, POSITION_SPRING)
+      frames += 1
     }
+    assert.ok(!moving, 'the spring never settled')
+    assert.equal(state.value, 1)
+    assert.equal(state.velocity, 0)
+    // Under a second at 60fps: a level change that took longer would read as lag
+    // behind the pointer, which is what the position spring exists to avoid.
+    assert.ok(frames < 60, `the spring took ${String(frames)} frames`)
   })
 
-  it('keeps a tile that is off in the table rather than dropping it', () => {
-    // The count is not a mount list: the component renders all MOSAIC_TILES and
-    // this decides which of them are lit. Unmounting instead made squares appear
-    // and vanish mid-track, because every tile starts partway through its sweep.
-    const tiles = mosaicTiles()
-    assert.equal(tiles.length, MOSAIC_TILES)
-    assert.equal(tileStateFor(tiles[0] as MosaicTile, 0, 0).opacity, 0)
-    assert.equal(tileStateFor(tiles[MOSAIC_TILES - 1] as MosaicTile, MOSAIC_TILES - 1, 0).on, false)
-  })
-
-  it('lights nothing below the energy floor and everything at the far end', () => {
-    const tiles = mosaicTiles()
-    assert.ok(tiles.every((tile, index) => !tileStateFor(tile, index, ENERGY_START).on))
-    assert.ok(tiles.every((tile, index) => tileStateFor(tile, index, 1).on))
-  })
-})
-
-describe('driftDelayMsFor', () => {
-  it('spreads the drift across the tiles instead of bobbing in lockstep', () => {
-    const delays = mosaicTiles().map(tile => driftDelayMsFor(tile))
-    assert.equal(new Set(delays.map(delay => delay.toFixed(3))).size, MOSAIC_TILES)
-    for (const delay of delays) {
-      assert.ok(delay <= 0, `delay ${delay}`)
-      assert.ok(delay > -DRIFT_MS, `delay ${delay} past one period`)
+  it('overshoots on the way, which is the whole point of a spring', () => {
+    const state = createSpring(0)
+    let peak = 0
+    for (let frame = 0; frame < 60; frame += 1) {
+      advanceSpring(state, 1, 1 / 60, POSITION_SPRING)
+      peak = Math.max(peak, state.value)
     }
+    assert.ok(peak > 1, 'the position arrives without any movement')
+  })
+
+  it('survives a frame far longer than the clamp', () => {
+    // A backgrounded tab or a layout stall hands the loop a frame of hundreds of
+    // milliseconds; integrating that in one step is what makes a spring ring.
+    const state = createSpring(0)
+    advanceSpring(state, 1, 5, POSITION_SPRING)
+    assert.ok(state.value > 0 && state.value < 2, `diverged to ${String(state.value)}`)
+    assert.ok(MAX_STEP_SECONDS > 0)
+  })
+
+  it('treats a negative or missing duration as no movement rather than as backwards time', () => {
+    const state = createSpring(0.4)
+    assert.equal(advanceSpring(state, 1, -1, POSITION_SPRING), true)
+    assert.equal(state.value, 0.4)
   })
 })
+

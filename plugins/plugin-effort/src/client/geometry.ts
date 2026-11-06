@@ -73,6 +73,36 @@ export const TICK_HOVER_SCALE = 2.2
 const FRACTION_DIGITS = 4
 
 /**
+ * The custom property the animated position is written to, 0..1 of the travel.
+ *
+ * The stylesheet's three position expressions read it, and `./motion` is what
+ * writes it — every frame, which is why it is a custom property rather than an
+ * inline style written by a render: a level change is a step, and the expression
+ * has to follow a value that is between two steps.
+ */
+export const PCT_VAR = '--dshAppEffort-pct'
+
+/** The custom property the mid-band intensity is written to; see {@link PCT_VAR}. */
+export const ENERGY_VAR = '--dshAppEffort-energy'
+
+/** The custom property the top level's swell is written to; see {@link PCT_VAR}. */
+export const GALAXY_VAR = '--dshAppEffort-galaxy'
+
+/**
+ * One position operand: a rounded literal, or a CSS expression passed through.
+ *
+ * The single-argument form is what makes one formula serve both callers — the
+ * component's first paint writes a number, the animation writes a variable — so
+ * the two can never be different arithmetic.
+ *
+ * @param pct - a fraction, or a CSS expression that evaluates to one.
+ * @returns the operand for a `calc()`.
+ */
+export function pctOperand(pct: number | string): string {
+  return typeof pct === 'string' ? pct : clamp01(pct).toFixed(FRACTION_DIGITS)
+}
+
+/**
  * Clamp to 0..1, mapping NaN and negatives to 0.
  * @param value - any number, including NaN.
  * @returns the value inside 0..1.
@@ -118,11 +148,11 @@ export function indexFromPct(pct: number, count: number): number {
  * left edge: the travel is the track width minus one diameter, and the first
  * half-diameter is the inset that keeps the knob inside the rounded ends.
  *
- * @param pct - fraction of the travel, 0..1.
+ * @param pct - fraction of the travel, 0..1, or a CSS expression for one.
  * @returns a `calc()` length, relative to the element's own width.
  */
-export function offsetExpr(pct: number): string {
-  const t = clamp01(pct).toFixed(FRACTION_DIGITS)
+export function offsetExpr(pct: number | string): string {
+  const t = pctOperand(pct)
   return `calc(${KNOB_RADIUS}px + ${t} * (100% - ${KNOB_SIZE}px))`
 }
 
@@ -136,29 +166,29 @@ export function offsetExpr(pct: number): string {
  * radius term. The bloom anchors here rather than at the clip, so its bright end
  * lands on the edge that is actually visible.
  *
- * @param pct - fraction of the travel, 0..1.
+ * @param pct - fraction of the travel, 0..1, or a CSS expression for one.
  * @returns a `calc()` length, relative to the element's own width.
  */
-export function headEdgeExpr(pct: number): string {
-  const t = clamp01(pct).toFixed(FRACTION_DIGITS)
+export function headEdgeExpr(pct: number | string): string {
+  const t = pctOperand(pct)
   return `calc(${t} * (100% - ${KNOB_SIZE}px))`
 }
 
 /**
  * The clip that keeps a full-width layer inside the filled part of the track.
  *
- * The fill and the mosaic layer are painted at the track's full width with a
+ * The fill and the field layer are painted at the track's full width with a
  * gradient anchored to the track itself, then clipped — rather than being sized
  * to `pct` with the gradient inside them. The difference is visible while
  * dragging: an anchored gradient keeps the colour at a given x constant and only
  * changes how far it reaches, so the bar looks like a cover sliding off a fixed
  * scale instead of a colour that recomputes itself on every frame.
  *
- * @param pct - fraction of the travel, 0..1.
+ * @param pct - fraction of the travel, 0..1, or a CSS expression for one.
  * @returns an `inset()` clip for the element's own box.
  */
-export function fillClip(pct: number): string {
-  const t = clamp01(pct).toFixed(FRACTION_DIGITS)
+export function fillClip(pct: number | string): string {
+  const t = pctOperand(pct)
   return `inset(0 calc(100% - ${KNOB_RADIUS}px - ${t} * (100% - ${KNOB_SIZE}px)) 0 0)`
 }
 

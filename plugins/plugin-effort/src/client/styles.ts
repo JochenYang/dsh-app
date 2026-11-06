@@ -52,30 +52,59 @@
  * user drags — the bar would look like it was being repainted rather than
  * uncovered. See {@link ./geometry.fillClip}.
  *
- * ## The two moving parts
+ * ## Where the position comes from
  *
- * The mosaic's tiles sweep, and at the top of the energy range they also drift
- * vertically. Both are driven by the component through the two variables the
- * stylesheet exposes for them: the tile's own animation (duration, delay, and the
- * `data-on` that pauses it) and the `data-drift` gate on the track.
+ * Not from this file's callers. A level change is a step, and the three
+ * expressions that place things on the track — the knob's `left`, the fill's clip,
+ * the bloom's edge — read {@link PCT_VAR} instead of a literal, because
+ * `./motion` writes that property every frame from a spring. The React layer
+ * writes nothing positional at all: a render carries the level's identity, and the
+ * position is a continuous value no render can represent.
+ *
+ * ## The field
+ *
+ * The texture over the whole bar — the starfield in `./starfield` — is a canvas
+ * inside a rounded, clipped wrapper, so it is drawn at every level and never
+ * leaves the capsule. It reads {@link ENERGY_VAR} and {@link GALAXY_VAR} only
+ * through `./motion`, which is also what paints it; nothing about it is expressible
+ * in CSS, so this sheet only states the layer and its clip.
  *
  * ## Reduced motion
  *
- * The mosaic is decoration with no information the fill does not already carry,
- * so `prefers-reduced-motion` removes it outright rather than parking a cluster
- * of squares at the fill's edge. The drift lives inside that layer, so it goes
- * with it — the bloom does not, and does not need to: it is a static highlight,
- * not motion.
+ * The field is decoration, but it is not motion: a reduced-motion reader gets the
+ * same sky at a frozen instant — one painted frame, no loop, no springs (see
+ * `./motion`). The transitions this sheet declares are the ones that survive that
+ * decision, and they are switched off here too.
  *
  * @module @dsh-app/plugin-effort/client/styles
  */
 
-import { BLOOM_WIDTH, KNOB_SIZE, NOTE_LINE_HEIGHT, NOTE_MARGIN_TOP, TICK_HOVER_SCALE, TICK_SIZE, TRACK_HEIGHT } from './geometry.ts'
-import { DRIFT_AMPLITUDE, DRIFT_MS } from './mosaic.ts'
+import {
+  BLOOM_WIDTH,
+  ENERGY_VAR,
+  GALAXY_VAR,
+  KNOB_SIZE,
+  NOTE_LINE_HEIGHT,
+  NOTE_MARGIN_TOP,
+  PCT_VAR,
+  TICK_HOVER_SCALE,
+  TICK_SIZE,
+  TRACK_HEIGHT,
+  fillClip,
+  headEdgeExpr,
+  offsetExpr,
+} from './geometry.ts'
 import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, fillGradient } from './value-color.ts'
 
 /** Id of the injected stylesheet, so a second mount is a no-op. */
 const STYLE_ID = 'dsh-app-plugin-effort-style'
+
+/**
+ * The animated position, as it appears inside a CSS expression: the custom property
+ * `./motion` writes, with the left end as its fallback for a frame before the loop
+ * has run (or for a control the loop never started in).
+ */
+const PCT_TOKEN = `var(${PCT_VAR}, 0)`
 
 /**
  * The attribute this plugin marks the COMPOSER capsule's level text with, and the
@@ -141,6 +170,11 @@ const cssText = `
      the fill at the deep indigo end; above the dark one it goes to near-white and
      stops reading as a push. */
   --dshAppEffort-bloom: rgb(255 255 255 / 26%);
+  /* The top level's outer halo, on the knob. The end of this theme's own ramp, at
+     an alpha that reads as light on the knob's rim rather than as a glow cloud
+     around it — the bar behind it is at full strength now, so it does not need the
+     extra reach it had when the fill receded. */
+  --dshAppEffort-halo: rgb(75 63 214 / 40%);
 }
 body[data-ds-dark-theme] .dshAppEffort {
   /* Dark theme: brand blue brightening toward a light violet. */
@@ -148,6 +182,7 @@ body[data-ds-dark-theme] .dshAppEffort {
   --dshAppEffort-glow: rgb(185 166 255 / 50%);
   --dshAppEffort-ring: rgb(185 166 255 / 62%);
   --dshAppEffort-bloom: rgb(255 255 255 / 34%);
+  --dshAppEffort-halo: rgb(185 166 255 / 50%);
 }
 
 /* The anchor the bridge walks up from. It must stay in the DOM — an unmounted
@@ -180,7 +215,10 @@ body[data-ds-dark-theme] .dshAppEffort {
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
-  transition: box-shadow 160ms ease;
+  /* The glow grows with the position, which the animation writes. Not
+     transitioned: its radius is a variable that is already being eased every
+     frame, and a transition on top of that would chase a moving target. */
+  box-shadow: 0 0 calc(var(${ENERGY_VAR}, 0) * 12px) var(--dshAppEffort-glow);
 }
 .dshAppEffort-track[data-mode="static"],
 .dshAppEffort-track[data-mode="single"] {
@@ -190,16 +228,42 @@ body[data-ds-dark-theme] .dshAppEffort {
   outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 2px;
 }
-.dshAppEffort-track[data-energy="1"] {
-  box-shadow: 0 0 calc(var(--dshAppEffort-energy, 0) * 12px) var(--dshAppEffort-glow);
-}
 
 .dshAppEffort-fill {
   position: absolute;
   inset: 0;
   border-radius: 999px;
   background: var(--dshAppEffort-fill);
+  /* The clip reads the animated position; see the header. */
+  clip-path: ${fillClip(PCT_TOKEN)};
   pointer-events: none;
+  /* The top level DEEPENS the bar rather than fading it.
+     The reference fades its fill out completely, and that is right there: its
+     track sits on near-black, so what shows through is a dark bar with coloured
+     pixels in it. Here the card behind the track is white in the light theme, so
+     the same fade mixes the gradient toward the CARD — the bar goes pale, and the
+     top level reads as washed out instead of as the richest one. Keeping nearly
+     all of the gradient and letting the field sit on top of it is the same idea
+     translated to a surface that is not dark. */
+  opacity: calc(1 - 0.12 * var(${GALAXY_VAR}, 0));
+}
+
+/* The starfield. A canvas inside a capsule-shaped clip, drawn by motion.ts:
+   at every level (faintly at the bottom — see starfield.ts), pushed into a
+   burst at the top one. It sits above the fill so a dense field is not tinted by
+   the gradient under it, and below the bloom so the leading edge stays the
+   brightest thing in the row. */
+.dshAppEffort-field {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.dshAppEffort-field canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* The bloom at the fill's visible leading edge. It rides the SAME variable the
@@ -218,75 +282,22 @@ body[data-ds-dark-theme] .dshAppEffort {
   inset: 0;
   border-radius: 999px;
   pointer-events: none;
+  /* Derived here rather than written by the component: the animation owns the
+     position, and a value written from two places is a value that disagrees with
+     itself for one frame per level change. */
+  --dshAppEffort-head: ${headEdgeExpr(PCT_TOKEN)};
   background: linear-gradient(
     90deg,
     transparent calc(var(--dshAppEffort-head) - ${BLOOM_WIDTH}px),
     var(--dshAppEffort-bloom) var(--dshAppEffort-head)
   );
-  /* The same 160ms the mosaic layer uses, because the two fade in together and
-     read as one thing; without it the bloom would step at each level crossing
-     while the tiles beside it glided. */
-  transition: opacity 160ms ease;
-}
-
-.dshAppEffort-mosaic {
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  overflow: hidden;
-  pointer-events: none;
-  transition: opacity 160ms ease;
-}
-.dshAppEffort-tile {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 0;
-  animation-name: dshAppEffort-sweep;
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-}
-/* A tile that is not part of the mosaic stays mounted and keeps its phase — it is
-   its square that fades. Paused as well: fourteen invisible elements sweeping is
-   fourteen elements' worth of compositing for nothing. */
-.dshAppEffort-tile[data-on="0"] {
-  animation-play-state: paused;
-}
-.dshAppEffort-square {
-  position: absolute;
-  left: 100%;
-  top: 0;
-  border-radius: 1px;
-  background: #fff;
-  transform: translate(-50%, -50%);
-  /* The fade is the whole point of keeping the tile mounted: the square's opacity
-     is its own tone while the tile is on and 0 while it is not, so it always comes
-     to rest exactly on the tone it had. */
-  transition: opacity 260ms ease;
-}
-body[data-ds-dark-theme] .dshAppEffort-square {
-  background: #f2eeff;
-}
-@keyframes dshAppEffort-sweep {
-  0% { transform: translate3d(0, 0, 0); }
-  100% { transform: translate3d(-100%, 0, 0); }
-}
-
-/* The high-energy drift. Gated on the data-drift attribute, which is the TOP of
-   the energy range — not the same threshold as data-energy, which only says the
-   mosaic is on at all. It is gated on the lit tiles too, so an unlit one is not
-   drifting invisibly. The keyframe carries the centring transform as well: a
-   keyframe replaces the element's transform outright, so a drift that only wrote
-   the vertical offset would slide every square half a tile up and left. */
-@keyframes dshAppEffort-drift {
-  0%, 100% { transform: translate(-50%, -50%) translateY(${-DRIFT_AMPLITUDE}px); }
-  50% { transform: translate(-50%, -50%) translateY(${DRIFT_AMPLITUDE}px); }
-}
-.dshAppEffort-track[data-drift="1"] .dshAppEffort-tile[data-on="1"] .dshAppEffort-square {
-  animation-name: dshAppEffort-drift;
-  animation-duration: ${DRIFT_MS}ms;
-  animation-timing-function: ease-in-out;
-  animation-iteration-count: infinite;
+  clip-path: ${fillClip(PCT_TOKEN)};
+  /* The energy the position carries, so the edge highlight arrives with the field
+     rather than on a level boundary — and it RETREATS at the top level. The bloom
+     is a white ramp sitting exactly where the knob is about to be, so keeping it at
+     full opacity under an enlarged knob is a third white source in the same 30px;
+     the top level's edge light is the knob's own halo instead. */
+  opacity: calc(min(1, var(${ENERGY_VAR}, 0) * 3) * (1 - 0.7 * var(${GALAXY_VAR}, 0)));
 }
 
 .dshAppEffort-tick {
@@ -327,22 +338,35 @@ body[data-ds-dark-theme] .dshAppEffort-square {
 .dshAppEffort-knob {
   position: absolute;
   top: 50%;
+  /* The position, from the animation's own variable. Nothing positional is
+     written by a render: a level change is a step and this is a spring. */
+  left: ${offsetExpr(PCT_TOKEN)};
   width: ${KNOB_SIZE}px;
   height: ${KNOB_SIZE}px;
   margin: ${-KNOB_SIZE / 2}px 0 0 ${-KNOB_SIZE / 2}px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 5px rgb(0 0 0 / 34%), 0 0 0 0.5px rgb(0 0 0 / 6%);
-  pointer-events: none;
-  transition: box-shadow 160ms ease;
-}
-.dshAppEffort-track[data-energy="1"] .dshAppEffort-knob {
-  box-shadow: 0 1px 5px rgb(0 0 0 / 34%), 0 0 0 2px var(--dshAppEffort-ring);
-}
-.dshAppEffort-track[data-dragging="1"] .dshAppEffort-knob {
-  transition: none;
-}
+  /* Three shadows for two facts. The ring's width is the mid-band energy — the
+     same signal the track's own glow carries — and the halo's radius is the top
+     level's swell, so the atmosphere is a thing the knob DOES rather than a class
+     the component toggles. Both are scaled from a variable that is being eased
+     every frame, so neither is transitioned.
 
+     The halo is a tight 12px, not the 20px a first cut had: the knob is already a
+     white disc on a coloured bar, and a wide soft glow around it reads as one white
+     blob with the bar's end erased, which on a light card is exactly the "washed
+     out" the fill no longer causes. */
+  box-shadow:
+    0 1px 5px rgb(0 0 0 / 34%),
+    0 0 0 calc(2px * var(${ENERGY_VAR}, 0)) var(--dshAppEffort-ring),
+    0 0 calc(var(${GALAXY_VAR}, 0) * 12px) var(--dshAppEffort-halo);
+  pointer-events: none;
+  will-change: transform;
+  /* A 15% swell: enough that the knob is visibly the event's centre, small enough
+     that it stays inside the track's own height instead of becoming a ball the bar
+     hangs off. */
+  transform: scale(calc(1 + 0.15 * var(${GALAXY_VAR}, 0)));
+}
 /* The one line under the track: the sentence the current state needs, and — when
    it needs none — the empty box of that line. The line is ALWAYS mounted, and its
    box is what keeps the container the same height in every shape: the official
@@ -362,11 +386,15 @@ body[data-ds-dark-theme] .dshAppEffort-square {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dshAppEffort-mosaic { display: none; }
+  /* The field is NOT hidden: a reduced-motion reader gets the same sky at a
+     frozen instant (see motion.ts), because the texture is information about how
+     much of the scale is in play, not an animation. What goes is everything that
+     moves between frames — the springs are already skipped in the loop, and the
+     transitions declared above are what is left. */
   .dshAppEffort-track,
   .dshAppEffort-knob,
-  .dshAppEffort-mosaic,
   .dshAppEffort-tick { transition: none; }
+  .dshAppEffort-knob { will-change: auto; }
 }
 `
 

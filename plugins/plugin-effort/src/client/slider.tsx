@@ -34,6 +34,11 @@
  *      from its own content, so a control whose box changed shape would move the
  *      card AND move the scale under a pointer that never moved. The sheet's
  *      `contain: inline-size` is the third leg of that (see `styles.ts`).
+ *   5. **The position on screen is not the position in state.** A level change is a
+ *      step; the knob, the fill's clip and the bloom's edge follow a spring through
+ *      it, in `./motion`, which writes a custom property on the track every frame.
+ *      Nothing positional is written by a render — a value that changes at 60Hz has
+ *      no place in a subtree inside the official menu (see that module's header).
  *
  * The container this file portals into is the SECOND LINE of the official row's
  * capsule, and the capsule's edge and the row's value cell carry the current
@@ -43,7 +48,7 @@
  * @module @dsh-app/plugin-effort/client/slider
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -51,22 +56,12 @@ import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { createEffortBridge, type EffortBridge, type EffortBridgeHost, type EffortRowLabels, type LevelColors } from './bridge.ts'
-import { createGestureMap, fillClip, headEdgeExpr, hoverIndexAt, indexFromPct, offsetExpr, pctFromIndex } from './geometry.ts'
+import { createGestureMap, hoverIndexAt, indexFromPct, offsetExpr, pctFromIndex } from './geometry.ts'
 import { commitIndexFor, levelKey, resolveEffort, trackModeOf } from './levels.ts'
-import {
-  ENERGY_END,
-  driftDelayMsFor,
-  energyFor,
-  mosaicTiles,
-  sweepDurationMsFor,
-  sweepPctFor,
-  tileDelayMsFor,
-  tileLayerOpacityFor,
-  tileStateFor,
-} from './mosaic.ts'
+import { createTrackMotion, type TrackMotion } from './motion.ts'
 import { NS, type EffortKey } from './locales.ts'
 import { controlShapeFor, type EffortFailure } from './shape.ts'
-import { isDarkTheme, ringColorAt, textColorAt } from './value-color.ts'
+import { FILL_RAMP_DARK, FILL_RAMP_LIGHT, isDarkTheme, ringColorAt, textColorAt } from './value-color.ts'
 
 /** How long a committed level may stay unconfirmed before the display rolls back. */
 const COMMIT_TIMEOUT_MS = 10_000
@@ -169,12 +164,15 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
    */
   const tintRef = useRef<{ index: number, count: number, level: string }>({ index: -1, count: 0, level: '' })
   /**
-   * The position the mosaic's sweep timing was last read at. Held across a gesture
-   * so the animation is not re-timed under the pointer; see `sweepPctFor`.
+   * The canvas the starfield is painted on, and the loop that paints it.
+   *
+   * Both are refs rather than state for the same reason: the loop writes a value
+   * every frame, and a value that changes every frame has no place in a render —
+   * see `motion.ts` for what it would cost to route a 60Hz position through the
+   * portal's subtree.
    */
-  const settledSweepRef = useRef(0)
-
-  const tiles = useMemo(() => mosaicTiles(), [])
+  const fieldRef = useRef<HTMLCanvasElement | null>(null)
+  const motionRef = useRef<TrackMotion | null>(null)
 
   /**
    * The colours the official surfaces should carry right now: the level name's text
@@ -295,18 +293,54 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
 
   const shownIndex = draft ?? pending ?? committedIndex
   const shownPct = shownIndex >= 0 ? pctFromIndex(shownIndex, count) : 0
-  const energy = energyFor(shownPct)
   const shownName = shownIndex >= 0 ? levels[shownIndex]?.name : undefined
+  /**
+   * Whether the level being shown is the top of a scale the user can move.
+   *
+   * The top level is the one that gets the burst, and it is decided from the LIST
+   * rather than from a fraction of the travel: with three levels the last band
+   * starts at 0.5 and with six at 0.833, so a threshold on the position would make
+   * the second-to-last level of a six-level model look like the top. A single-level
+   * model is excluded: its whole track is the top, and a burst that never stops on
+   * a control with nothing to choose would be decoration with no event behind it.
+   */
+  const topLevel = count > 1 && shownIndex === count - 1
   tintRef.current = { index: shownIndex, count, level: shownIndex >= 0 ? levels[shownIndex]?.id ?? '' : '' }
 
-  // The sweep's timing is frozen while the display is ahead of the session; see
-  // `sweepPctFor` for why reading it off the displayed position made the squares
-  // jump on every node a drag crossed. The ref is written with the value just
-  // used, so it tracks the position while the two are level and holds still while
-  // they are not.
-  const ahead = draft !== null || pending !== null
-  const sweepPct = sweepPctFor(shownPct, ahead, settledSweepRef.current)
-  settledSweepRef.current = sweepPct
+  /**
+   * The track's animation loop, created with the DOM it animates.
+   *
+   * A LAYOUT effect, not a plain one: the loop writes the position's own custom
+   * property, and this is the only pass that runs before the browser paints, so the
+   * first frame shows the knob where it belongs instead of at the left end for one
+   * frame and then jumping. It is keyed on `host` because the portal — and the
+   * canvas inside it — is what it paints on.
+   */
+  useLayoutEffect(() => {
+    if (host === null) return undefined
+    const doc = typeof document === 'undefined' ? null : document
+    const motion = createTrackMotion({
+      doc,
+      win: typeof window === 'undefined' ? null : window,
+      track: () => trackRef.current,
+      canvas: () => fieldRef.current,
+      // Read per frame rather than captured: a theme switch while the menu is open
+      // repaints the field in the other theme's accent without a remount.
+      ramp: () => (isDarkTheme(doc) ? FILL_RAMP_DARK : FILL_RAMP_LIGHT),
+    })
+    if (motion === null) return undefined
+    motionRef.current = motion
+    return () => {
+      motionRef.current = null
+      motion.dispose()
+    }
+  }, [host])
+
+  // The springs' target. Declared after the loop's own effect, so the first pass
+  // creates it and then points it — in that order — before the first paint.
+  useLayoutEffect(() => {
+    motionRef.current?.setTarget(shownPct, topLevel)
+  }, [host, shownPct, topLevel])
 
   // The level's colours follow the position, on both official surfaces — the menu
   // row's capsule and the composer capsule's own level text. A level change inserts
@@ -459,7 +493,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
    *
    * `pointerleave` rather than `pointerout`: `out` also fires when the pointer
    * crosses onto a child element, which would flicker the mark off and on as the
-   * pointer passes over the knob or the mosaic inside the track.
+   * pointer passes over the knob or the starfield inside the track.
    */
   const onPointerLeave = useCallback((): void => {
     setHoverIndex(null)
@@ -616,10 +650,7 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
               aria-keyshortcuts="ArrowLeft ArrowRight"
               aria-disabled={mode !== 'interactive'}
               data-mode={mode}
-              data-energy={energy > 0 ? '1' : '0'}
-              data-drift={shownPct > ENERGY_END ? '1' : '0'}
               data-dragging={draft !== null ? '1' : '0'}
-              style={{ '--dshAppEffort-energy': String(energy) } as React.CSSProperties}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
@@ -628,52 +659,20 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
               onClick={onTrackClick}
               onKeyDown={onKeyDown}
             >
-              <div className="dshAppEffort-fill" style={{ clipPath: fillClip(shownPct) }} />
-              {/* The leading edge's bloom. It fades in with the mosaic's own energy,
-                  so the low end of the scale stays calm, and it is anchored on the
-                  knob's rim rather than on the clip's edge — see `headEdgeExpr`. */}
-              <div
-                className="dshAppEffort-bloom"
-                style={{
-                  '--dshAppEffort-head': headEdgeExpr(shownPct),
-                  clipPath: fillClip(shownPct),
-                  opacity: energy,
-                } as React.CSSProperties}
-              />
-              <div
-                className="dshAppEffort-mosaic"
-                style={{ clipPath: fillClip(shownPct), opacity: tileLayerOpacityFor(shownPct) }}
-              >
-                {/* Every tile is always rendered: the ones outside the count are faded
-                    out and paused rather than unmounted, which is what stopped them
-                    appearing and vanishing in the middle of the track. */}
-                {tiles.map((tile, index) => {
-                  const state = tileStateFor(tile, index, shownPct)
-                  const duration = sweepDurationMsFor(sweepPct, tile.tone)
-                  return (
-                    <span
-                      key={index}
-                      className="dshAppEffort-tile"
-                      data-on={state.on ? '1' : '0'}
-                      style={{
-                        top: `${(tile.top * 100).toFixed(2)}%`,
-                        animationDuration: `${duration.toFixed(0)}ms`,
-                        animationDelay: `${tileDelayMsFor(tile, duration).toFixed(0)}ms`,
-                      }}
-                    >
-                      <span
-                        className="dshAppEffort-square"
-                        style={{
-                          width: tile.size,
-                          height: tile.size,
-                          opacity: state.opacity,
-                          animationDelay: `${driftDelayMsFor(tile).toFixed(0)}ms`,
-                        }}
-                      />
-                    </span>
-                  )
-                })}
+              {/* Neither layer carries a position of its own: the clip and the
+                  leading edge are read from the custom property the animation
+                  writes (`styles.ts`), so a level change is one movement rather than
+                  a jump followed by a re-measure. */}
+              <div className="dshAppEffort-fill" />
+              {/* The starfield. Drawn at every level — faintly at the bottom of the
+                  scale, so the low levels are alive too — and pushed into a burst at
+                  the top one. Hidden from assistive technology: it carries no
+                  information the value does not already report. */}
+              <div className="dshAppEffort-field">
+                <canvas ref={fieldRef} aria-hidden="true" />
               </div>
+              {/* The leading edge's bloom; its ramp and clip come from the sheet. */}
+              <div className="dshAppEffort-bloom" />
               {shape.ticks ? levels.map((level, index) => (
                 <span
                   key={level.id}
@@ -689,8 +688,10 @@ export function EffortEntry(props: EffortEntryProps): ReactNode {
               {/* The knob marks a position, so it is absent while there is none —
                   an unset track with a knob parked at the left end would claim the
                   session is running at the lowest level. It is the ONLY layer that
-                  tells an unset track from a ready one; see `controlShapeFor`. */}
-              {shape.knob ? <div className="dshAppEffort-knob" style={{ left: offsetExpr(shownPct) }} /> : null}
+                  tells an unset track from a ready one; see `controlShapeFor`. Its
+                  position, ring and swell are all the sheet's, from the animated
+                  variables. */}
+              {shape.knob ? <div className="dshAppEffort-knob" /> : null}
             </div>
           </Tooltip>
           {/* The line is drawn in EVERY shape — an empty one included. Its box is
