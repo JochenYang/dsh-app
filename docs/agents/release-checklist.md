@@ -30,6 +30,13 @@ gate:
     `src/kernel/bundled.ts` `decideBundledAdoption`.)
   - both → one shell release with a refreshed `bundled-kernel/`; the shell update
     installs the newer bundled kernel and the channel follows it.
+
+**A runtime-only dispatch is not the complete release for a user-visible plugin
+change.** Dispatch it first to publish the new runtime; after its six cells and
+runtime mirror pass, continue with the shell version and changelog steps below.
+The shell release then reuses that runtime and publishes the bilingual notes
+with the installers. `shell: none` means no shell source changed; it does not
+mean skip the root version bump, changelog section, or shell tag.
 - [ ] **A suite-only release must keep the SAME kernel.** A plugin change forces
       the runtime to be rebuilt, and the rebuild used to re-resolve the kernel from
       npm — so a plugin fix silently shipped a different kernel (v0.17.8: `next` →
@@ -73,6 +80,10 @@ gate:
 
 ## Bump and changelog
 
+- [ ] For a plugin-only release, do this after the runtime-only dispatch has
+      completed successfully. `release.yml` will recognize the complete runtime
+      for the new suite version and skip rebuilding its six cells while the
+      shell jobs publish the changelog-bearing installers.
 - [ ] `version` in `package.json`.
 - [ ] `node scripts/fold-changesets.mjs X.Y.Z` — assembles the bilingual
       section from the `changesets/` fragments each change carried (the gate in

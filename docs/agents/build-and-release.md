@@ -412,6 +412,15 @@ shell update.
    release's own mirror run never touches runtime assets, so "the shell mirrored
    fine" says nothing about them.
 
+   For a user-visible plugin change declared by a changeset, this is only the
+   runtime leg of the release. After all six cells and the runtime mirror pass,
+   continue with steps 1–6 above: bump the root shell version, fold the changeset
+   into `CHANGELOG.md`, generate release notes, then tag and publish the shell
+   release. The shell `resolve` job sees the already-published suite version and
+   skips the runtime matrix; the app jobs publish installers carrying that
+   runtime. `shell: none` records that no shell source changed, not that the
+   changelog or shell release is omitted.
+
 ## 5. Mirror and layer facts
 
 Mirror internals: `.github/scripts/mirror_release.py` (+ tests).

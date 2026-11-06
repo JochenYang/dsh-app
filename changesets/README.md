@@ -24,9 +24,11 @@ plugins: plugin-market, plugin-memory
 Market plugin: the SVG busy ring now pulses in the primary colour.
 ```
 
-- `shell` — the shell tag's impact: `none | patch | minor | major`. `none` for
-  a change that only travels through the runtime (a plugin-only change still
-  needs its plugin's version bumped; see below).
+- `shell` — the shell source impact: `none | patch | minor | major`. `none`
+  means no shell source behaviour changed; it does not waive the root version
+  bump, changelog section, or shell tag for a user-visible plugin release. A
+  runtime-only dispatch is the runtime leg; after it succeeds, complete the
+  shell release steps in `docs/agents/build-and-release.md` §4.1–§4.6.
 - `plugins` — comma-separated suite plugin directory names whose behaviour
   changed. **Each must bump its own `package.json` version in the same
   commit**: `suiteVersion` hashes plugin versions, not code, so an unbumped
