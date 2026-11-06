@@ -30,6 +30,9 @@ export const NS = 'dsh-app.usage'
 /** Simplified Chinese dictionary — the pre-i18n page copy, verbatim. */
 export const zh = {
   'usage.title': '用量统计',
+  'usage.hero.eyebrow': 'ACTIVITY · 使用热度',
+  'usage.hero.summary': '近 {days} 天 · {requests} 次请求 · {tokens} tokens',
+  'usage.hero.loadingSummary': '正在汇总近期会话用量',
   'usage.tabs.aria': '统计区间',
   'usage.tabs.days': '{days}天',
   'usage.refresh': '刷新',
@@ -136,6 +139,9 @@ export const zh = {
 /** English dictionary, key-identical to the Chinese source of truth. */
 export const en: Record<UsageKey, string> = {
   'usage.title': 'Usage statistics',
+  'usage.hero.eyebrow': 'ACTIVITY · Usage',
+  'usage.hero.summary': 'Last {days} days · {requests} requests · {tokens} tokens',
+  'usage.hero.loadingSummary': 'Summarizing recent session usage',
   'usage.tabs.aria': 'Statistics range',
   'usage.tabs.days': '{days}d',
   'usage.refresh': 'Refresh',

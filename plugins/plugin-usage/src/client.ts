@@ -25,6 +25,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { UsageSection } from './client/usage-section.tsx'
 import { en as usageEn, NS as USAGE_NS, zh as usageZh } from './client/locales.ts'
 import type { UsageKey } from './client/locales.ts'
+import { mountUsageNavIcon } from './client/nav-icon.ts'
 import { adoptStyles } from './client/styles.ts'
 
 // The locale namespace table lives in ui-slots: this merge is what makes
@@ -76,6 +77,7 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(USAGE_NS)
 
   adoptStyles()
+  ctx.effect(() => mountUsageNavIcon(() => t(SECTION_TITLE)), 'dsh-app plugin-usage: nav icon patch')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,

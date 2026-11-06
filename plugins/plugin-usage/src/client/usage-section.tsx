@@ -51,16 +51,14 @@ const HEAT_WEEKS = 53
 
 /**
  * Heatmap cell size in px. The grid sizes itself to the panel it is drawn in
- * (see {@link HeatCalendar}): 53 weeks of fixed 13px cells need ~850px, which a
- * settings panel does not have, so the cells used to run off the right edge
- * behind a scrollbar that nothing announced. Clamped to stay legible; below
- * {@link MIN_CELL_PX} the grid scrolls rather than shrinking into noise.
+ * (see {@link HeatCalendar}); below {@link MIN_CELL_PX} it scrolls rather than
+ * shrinking the squares into noise.
  */
-const MAX_CELL_PX = 13
-const MIN_CELL_PX = 5
+const MAX_CELL_PX = 15
+const MIN_CELL_PX = 7
 /** Gap between cells: the wide default, and the tight one used when the panel
  *  cannot fit the wide grid at a legible cell size. */
-const CELL_GAP_PX = 3
+const CELL_GAP_PX = 2
 const MIN_GAP_PX = 1
 
 /** Granularity of the heatmap grid: each day, each week, or the running total. */
@@ -442,15 +440,14 @@ function toHeatView(
 
 function HeatCalendar({ heat, metric, onTip, t }: { heat: HeatmapWire; metric: 'tokens' | 'requests'; onTip: (tip: Tip | null) => void; t: UsageTranslate }): ReactNode {
   const { cells, weeks } = heat
+  const currentYear = new Date().getFullYear()
   // Size the grid to the panel it is drawn in. 53 weeks at the full cell size
   // need ~850px; a narrower panel used to hide the newest weeks behind an
   // unannounced horizontal scrollbar, which reads as "the heatmap is
   // incomplete". Measured from the container so it follows a window resize.
   //
-  // The GAP gives way before the cell does: at 53 columns the 3px gaps cost
-  // 156px, so dropping them to 1px buys more room than shaving cells below the
-  // legibility floor would — and only once both are exhausted does the grid
-  // scroll.
+  // The GAP gives way before the cell does; only once both are exhausted does
+  // the grid scroll rather than shrinking cells below the legibility floor.
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [fit, setFit] = useState<{ cell: number, gap: number }>({ cell: MAX_CELL_PX, gap: CELL_GAP_PX })
   const [mode, setMode] = useState<HeatMode>('day')
@@ -512,41 +509,44 @@ function HeatCalendar({ heat, metric, onTip, t }: { heat: HeatmapWire; metric: '
   return (
     <>
       <div className="dshau_calRow">
-        <div
-          ref={containerRef}
-          className="dshau_calendar"
-          style={{
-            gridTemplateColumns: `repeat(${String(weeks)}, ${String(fit.cell)}px)`,
-            gridTemplateRows: `repeat(7, ${String(fit.cell)}px) 14px`,
-            gap: `${String(fit.gap)}px`,
-          }}
-        >
-          {view.map((cell, i) => {
-            const week = Math.floor(i / 7)
-            const row = i % 7
-            if (cell === undefined) return null
-            return (
-              <div
-                className="dshau_calCell"
-                data-level={cell.level}
-                style={{ gridRow: row + 1, gridColumn: week + 1, width: fit.cell, height: fit.cell }}
-                key={cell.date}
-                onMouseEnter={(event) => {
-                  const rect = event.currentTarget.getBoundingClientRect()
-                  onTip({ text: cell.tip, x: rect.left + rect.width / 2, y: rect.top })
-                }}
-                onMouseMove={(event) => {
-                  onTip({ text: cell.tip, x: event.clientX + 14, y: event.clientY + 14 })
-                }}
-                onMouseLeave={() => { onTip(null) }}
-              >
-                {cell.date}
-              </div>
-            )
-          })}
-          {monthTags.map((tag, w) => tag === '' ? null : (
-            <div className="dshau_calMonth" style={{ gridRow: 8, gridColumn: w + 1 }} key={`m${w}`}>{tag}</div>
-          ))}
+        <div className="dshau_calendarShell">
+          <span className="dshau_yearMark" aria-hidden="true">{currentYear}</span>
+          <div
+            ref={containerRef}
+            className="dshau_calendar"
+            style={{
+              gridTemplateColumns: `repeat(${String(weeks)}, ${String(fit.cell)}px)`,
+              gridTemplateRows: `repeat(7, ${String(fit.cell)}px) 14px`,
+              gap: `${String(fit.gap)}px`,
+            }}
+          >
+            {view.map((cell, i) => {
+              const week = Math.floor(i / 7)
+              const row = i % 7
+              if (cell === undefined) return null
+              return (
+                <div
+                  className="dshau_calCell"
+                  data-level={cell.level}
+                  style={{ gridRow: row + 1, gridColumn: week + 1, width: fit.cell, height: fit.cell }}
+                  key={cell.date}
+                  onMouseEnter={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect()
+                    onTip({ text: cell.tip, x: rect.left + rect.width / 2, y: rect.top })
+                  }}
+                  onMouseMove={(event) => {
+                    onTip({ text: cell.tip, x: event.clientX + 14, y: event.clientY + 14 })
+                  }}
+                  onMouseLeave={() => { onTip(null) }}
+                >
+                  {cell.date}
+                </div>
+              )
+            })}
+            {monthTags.map((tag, w) => tag === '' ? null : (
+              <div className="dshau_calMonth" style={{ gridRow: 8, gridColumn: w + 1 }} key={`m${w}`}>{tag}</div>
+            ))}
+          </div>
         </div>
         <dl className="dshau_calStats">
           <div>
@@ -660,12 +660,12 @@ function TrendChart({ daily, range, metric, onTip, t }: {
   onTip: (tip: Tip | null) => void
   t: UsageTranslate
 }): ReactNode {
-  const W = 680
-  const H = 240
-  const padL = 52
-  const padR = 44
-  const padT = 14
-  const padB = 24
+  const W = 760
+  const H = 250
+  const padL = 54
+  const padR = 42
+  const padT = 18
+  const padB = 30
   const plotW = W - padL - padR
   const plotH = H - padT - padB
   // Weekly buckets once bars would get unreadably thin.
@@ -714,6 +714,10 @@ function TrendChart({ daily, range, metric, onTip, t }: {
   }
 
   const hitY = (rate: number): number => padT + plotH - rate * plotH
+  const ratePoints = points.map((p, i) => `${padL + i * bw + bw / 2},${hitY(p.cacheHitRate)}`)
+  const rateArea = points.length > 0
+    ? `${padL + bw / 2},${padT + plotH} ${ratePoints.join(' ')} ${padL + (points.length - 1) * bw + bw / 2},${padT + plotH}`
+    : ''
 
   return (
     <svg className="dshau_chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={t('usage.trend.aria')}>
@@ -733,52 +737,63 @@ function TrendChart({ daily, range, metric, onTip, t }: {
           {`${Math.round(rate * 100)}%`}
         </text>
       ))}
-      {/* bars */}
+      {/* Soft hover column behind the data keeps the selected period easy to follow. */}
       {points.map((p, i) => {
-        const x = padL + i * bw
+        if (hover !== i) return null
+        const x = padL + i * bw + 1
+        return <rect key={`focus${p.range}`} x={x} y={padT} width={Math.max(1, bw - 2)} height={plotH} rx={6} fill="var(--dsw-alias-brand-primary)" fillOpacity={0.08} />
+      })}
+      {/* Rounded tracks keep quiet days visible without competing with activity. */}
+      {points.map((p, i) => {
+        const barWidth = Math.min(30, Math.max(2, bw * 0.66))
+        const x = padL + i * bw + (bw - barWidth) / 2
         const baseY = padT + plotH
+        const track = <rect x={x} y={padT} width={barWidth} height={plotH} rx={Math.min(5, barWidth / 2)} fill="var(--dsw-alias-bg-layer-2)" fillOpacity={0.48} />
         if (metric === 'tokens') {
           let y = baseY
           const rects = SEGMENTS.map((seg, s) => {
             const h = (p[seg.key] / max) * plotH
             y -= h
-            return <rect x={x} y={y} width={Math.max(1, bw - 2)} height={Math.max(0, h)} rx={1} fill={seg.color} key={s} />
+            if (h <= 0) return null
+            return <rect x={x} y={y} width={barWidth} height={h} rx={Math.min(4, barWidth / 2)} fill={seg.color} key={s} />
           })
           return (
             <g key={p.range}>
+              {track}
               {rects}
-              {i % xLabelStep === 0 && <text x={x + bw / 2} y={H - 8} textAnchor="middle">{p.label}</text>}
+              {i % xLabelStep === 0 && <text x={padL + i * bw + bw / 2} y={H - 8} textAnchor="middle">{p.label}</text>}
             </g>
           )
         }
         const h = (pointValue(p, metric) / max) * plotH
         return (
           <g key={p.range}>
-            <rect x={x} y={baseY - h} width={Math.max(1, bw - 2)} height={Math.max(0, h)} rx={1} fill="var(--dsw-alias-brand-primary)" />
-            {i % xLabelStep === 0 && <text x={x + bw / 2} y={H - 8} textAnchor="middle">{p.label}</text>}
+            {track}
+            {h > 0 && <rect x={x} y={baseY - h} width={barWidth} height={h} rx={Math.min(5, barWidth / 2)} fill="var(--dsw-alias-brand-primary)" />}
+            {i % xLabelStep === 0 && <text x={padL + i * bw + bw / 2} y={H - 8} textAnchor="middle">{p.label}</text>}
           </g>
         )
       })}
-      {/* hit-rate line (right axis) — tokens mode only, and drawn as one
-          quiet stroke: per-point circles added visual noise without information */}
+      {/* A restrained hit-rate area gives the second scale a clear visual shape. */}
+      {metric === 'tokens' && (
+        <polygon points={rateArea} fill="var(--dsw-alias-label-primary)" fillOpacity={0.07} />
+      )}
       {metric === 'tokens' && (
         <polyline
-          points={points.map((p, i) => `${padL + i * bw + bw / 2},${hitY(p.cacheHitRate)}`).join(' ')}
+          points={ratePoints.join(' ')}
           fill="none"
           stroke="var(--dsw-alias-label-primary)"
-          strokeWidth={1.5}
-          strokeOpacity={0.55}
-          strokeDasharray="4 3"
+          strokeWidth={2}
+          strokeOpacity={0.72}
+          strokeLinejoin="round"
+          strokeLinecap="round"
         />
       )}
-      {/* hover hit zones + column highlight */}
+      {/* Hover hit zones */}
       {points.map((p, i) => {
         const x = padL + i * bw
         return (
           <g key={`hit${p.range}`}>
-            {hover === i && (
-              <rect x={x + 0.5} y={padT + 0.5} width={Math.max(1, bw - 1)} height={plotH - 1} fill="var(--dsw-alias-brand-primary)" fillOpacity={0.06} stroke="var(--dsw-alias-label-primary)" strokeWidth={1} strokeDasharray="3 2" />
-            )}
             <rect
               x={x}
               y={padT}
@@ -964,8 +979,20 @@ export function UsageSection({ t }: UsageSectionProps): ReactNode {
 
   return (
     <section className="dshau_section" aria-labelledby="dsh-app-usage-title">
-      <div className="dshau_header">
+      <div className="dshau_hero">
+        <div className="dshau_eyebrow">{t('usage.hero.eyebrow')}</div>
         <h2 id="dsh-app-usage-title" className="dshau_title">{t('usage.title')}</h2>
+        <div className="dshau_summaryLine">
+          {summary !== null
+            ? t('usage.hero.summary', {
+              days: range,
+              requests: fmtInt(summary.totals.requests),
+              tokens: fmtTokens(summary.totals.inputTokens + summary.totals.outputTokens + summary.totals.cacheReadTokens + summary.totals.cacheWriteTokens),
+            })
+            : t('usage.hero.loadingSummary')}
+        </div>
+      </div>
+      <div className="dshau_header">
         <div className="dshau_tabs" role="tablist" aria-label={t('usage.tabs.aria')}>
           {RANGES.map((days) => (
             <button

@@ -12,22 +12,43 @@ const cssText = `
 .dshau_section {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   min-width: 0;
+}
+.dshau_hero {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 4px 0 2px;
+}
+.dshau_eyebrow {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
 }
 .dshau_header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
   min-width: 0;
 }
 .dshau_title {
   margin: 0;
-  font-size: 15px;
-  line-height: 22px;
-  font-weight: 650;
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -.035em;
   color: var(--dsw-alias-label-primary);
+}
+.dshau_summaryLine {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
 }
 .dshau_tabs {
   display: inline-flex;
@@ -88,16 +109,17 @@ const cssText = `
 }
 .dshau_cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   min-width: 0;
 }
 .dshau_card {
   min-width: 0;
-  padding: 10px 12px;
+  padding: 13px 14px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
+  border-radius: 14px;
   background: var(--dsw-alias-bg-layer-1);
+  box-shadow: 0 2px 10px var(--dsw-alias-bg-mask-1);
 }
 .dshau_cardLabel {
   color: var(--dsw-alias-label-tertiary);
@@ -105,10 +127,10 @@ const cssText = `
   line-height: 16px;
 }
 .dshau_cardValue {
-  margin-top: 3px;
+  margin-top: 5px;
   color: var(--dsw-alias-label-primary);
-  font-size: 17px;
-  line-height: 24px;
+  font-size: 21px;
+  line-height: 27px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
@@ -135,10 +157,14 @@ const cssText = `
 .dshau_panel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  padding: 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 16px;
+  background: var(--dsw-alias-bg-layer-1);
 }
 .dshau_panelHeader {
   display: flex;
@@ -176,7 +202,7 @@ const cssText = `
 .dshau_legendLine {
   width: 14px;
   height: 0;
-  border-top: 1.5px dashed var(--dsw-alias-label-primary);
+  border-top: 2px solid var(--dsw-alias-label-primary);
 }
 .dshau_legendCell {
   width: 11px;
@@ -198,6 +224,7 @@ const cssText = `
 }
 .dshau_calendar {
   position: relative;
+  z-index: 1;
   display: grid;
   /* Width comes from the grid template (set inline from the measured panel);
      the fallback scroll only engages at the minimum cell size. */
@@ -218,6 +245,28 @@ const cssText = `
      inside the grid). */
   will-change: transform;
   transform: translateZ(0);
+}
+.dshau_calendarShell {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
+.dshau_yearMark {
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  opacity: .075;
+  font-size: clamp(76px, 18vw, 156px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -.08em;
+  pointer-events: none;
+  user-select: none;
 }
 /* The grid and its side stats share one row: the numbers anchor the shape
    (how many days, which one peaked) instead of leaving the reader to count. */
@@ -291,14 +340,16 @@ const cssText = `
 .dshau_calCell {
   /* Size is set inline (the grid scales to its panel); these are the
      pre-measurement fallbacks, matching the largest step. */
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
+  box-sizing: border-box;
+  aspect-ratio: 1;
   border-radius: 3px;
   /* The empty-day base has to be VISIBLE against the panel, or a 53-week grid
      reads as scattered fragments instead of a calendar — the empty days are
      what give the filled ones their shape. A hairline keeps the grid legible
      in both schemes without competing with the fill scale. */
-  background: var(--dsw-alias-bg-layer-1);
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 38%, transparent);
   box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l1);
   cursor: default;
   overflow: hidden;
@@ -306,24 +357,25 @@ const cssText = `
   font-size: 0;
 }
 .dshau_calCell[data-level='1'] {
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, var(--dsw-alias-bg-layer-1));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent);
 }
 .dshau_calCell[data-level='2'] {
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, var(--dsw-alias-bg-layer-1));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, transparent);
 }
 .dshau_calCell[data-level='3'] {
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 72%, var(--dsw-alias-bg-layer-1));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 72%, transparent);
 }
 .dshau_calCell[data-level='4'] {
   background: var(--dsw-alias-brand-primary);
 }
 .dshau_chart {
   width: 100%;
-  aspect-ratio: 680 / 240;
+  aspect-ratio: 760 / 250;
 }
 .dshau_chart text {
   fill: var(--dsw-alias-label-tertiary);
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 .dshau_tableWrap {
   min-width: 0;
@@ -407,6 +459,16 @@ const cssText = `
 .dshau_tooltipTitle {
   font-weight: 600;
   color: var(--dsw-alias-label-primary);
+}
+@media (max-width: 600px) {
+  .dshau_cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 420px) {
+  .dshau_title { font-size: 24px; }
+  .dshau_panel { padding: 11px; border-radius: 13px; }
+  .dshau_card { padding: 11px; }
+  .dshau_cardValue { font-size: 18px; }
+  .dshau_header > .dshau_secondaryButton { margin-left: auto; }
 }
 `
 
