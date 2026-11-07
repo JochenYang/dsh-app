@@ -1,5 +1,5 @@
 /**
- * The settings-page knobs of the swarm plugin: the ten editable fields, the
+ * The settings-page knobs of the swarm plugin: the eleven editable fields, the
  * validation a write must pass, and how a patch becomes the config object the
  * kernel stores.
  *
@@ -39,19 +39,20 @@ const NUMERIC_FIELDS = [
 ] as const
 
 /** Boolean editable fields. */
-const BOOLEAN_FIELDS = ['enabled', 'adaptive'] as const
+const BOOLEAN_FIELDS = ['enabled', 'adaptive', 'backgroundInPtc'] as const
 
 /** Every editable field name (a write addressing anything else is refused). */
 export const SWARM_CONFIG_FIELDS: readonly string[] = [...NUMERIC_FIELDS, ...BOOLEAN_FIELDS]
 
 /**
- * The ten editable values as one plain object: the shape the settings page
+ * The editable values as one plain object: the shape the settings page
  * reads and the shape downstream code uses, with the kernel's volatile config
  * references already snapshotted.
  */
 export type SwarmConfigValues = {
   readonly enabled: boolean
   readonly adaptive: boolean
+  readonly backgroundInPtc: boolean
   readonly defaultConcurrency: number
   readonly maxConcurrency: number
   readonly maxItems: number

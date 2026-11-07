@@ -6,7 +6,7 @@
  *   POST /config — write a partial patch through the kernel's config editor
  *                  (a field set to null clears the override)
  *
- * The page edits the ten fields the plugin declares as volatile config
+ * The page edits the eleven fields the plugin declares as volatile config
  * (`src/index.ts`): the kernel's config editor stores them in the profile's
  * `cordis.patch.yml`, so this plugin owns no configuration file. `defaults` is
  * what the composing layers alone yield, `effective` is what the running

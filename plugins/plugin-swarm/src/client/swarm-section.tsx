@@ -1,6 +1,7 @@
 /**
  * The swarm settings section: enable toggle (restart-applied), adaptive
- * toggle, and the numeric scheduling knobs. Values are read from and written
+ * toggle, the run_code detach toggle, and the numeric scheduling knobs. Values
+ * are read from and written
  * through the host half's routes, which store them as declarative plugin
  * config in the profile's patch document; scheduling edits apply to the next
  * swarm call without a restart.
@@ -266,8 +267,20 @@ export function SwarmSection({ t }: SwarmSectionProps): ReactNode {
     }
   }, [config, post])
 
+  const onToggleBackground = useCallback(async () => {
+    if (config === null) return
+    const next = !(config.effective.backgroundInPtc !== false)
+    try {
+      await post({ backgroundInPtc: next })
+      setNotice({ source: 'key', key: next ? 'swarm.notice.backgroundOn' : 'swarm.notice.backgroundOff' })
+    } catch {
+      // post() already surfaced the error banner.
+    }
+  }, [config, post])
+
   const enabled = config !== null && config.effective.enabled !== false
   const adaptive = config !== null && config.effective.adaptive !== false
+  const backgroundInPtc = config !== null && config.effective.backgroundInPtc !== false
   /** `{state}` for the toggle labels; the unknown state reads as pending. */
   const pending = t('swarm.state.pending')
 
@@ -310,6 +323,22 @@ export function SwarmSection({ t }: SwarmSectionProps): ReactNode {
           aria-label={t('swarm.toggle.adaptive.aria')}
           disabled={busy || config === null}
           onClick={() => { void onToggleAdaptive() }}
+        />
+      </div>
+
+      <div className="dshs_toggleRow">
+        <span className="dshs_toggleLabel">
+          {t('swarm.toggle.background', { state: config === null ? pending : backgroundInPtc ? t('swarm.state.on') : t('swarm.state.off') })}
+          <span className="dshs_toggleHint">{t('swarm.toggle.background.hint')}</span>
+        </span>
+        <button
+          type="button"
+          className="dshs_toggle"
+          role="switch"
+          aria-checked={backgroundInPtc}
+          aria-label={t('swarm.toggle.background.aria')}
+          disabled={busy || config === null}
+          onClick={() => { void onToggleBackground() }}
         />
       </div>
 

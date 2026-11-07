@@ -19,6 +19,17 @@
  *   3. A system-prompt section — short standing guidance on when batching
  *      beats repeated single delegation.
  *
+ * Detached lane: a batch invoked from INSIDE a `run_code` program detaches
+ * into a host background job instead of blocking the program (`background.ts`).
+ * That program's deadline — 120 s by default, 600 s at the deployment cap,
+ * covering nested tool waits — discards the runtime and aborts every in-flight
+ * nested call when it fires, so a synchronous batch there is killed with its
+ * children. The job is owned by the calling agent's session rather than the
+ * tool call, so the work outlives the call: the tool returns a job id, and the
+ * settled report arrives as one background-job notice, read through
+ * `job_output`. Everywhere else (no `run_code` wrapper) the synchronous path is
+ * unchanged.
+ *
  * Stability discipline: no global side effects beyond these registrations —
  * no context prototype mutation, no process-wide state. A kernel without the
  * subagent provider simply never mounts the tool or the command.
@@ -60,7 +71,8 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-client-connection'
-import { projectOutputItems, runSwarmBatch, type SwarmBatchOutcome, type SwarmItemOutcome } from './orchestrator.ts'
+import { projectOutputItems, runSwarmBatch, type SwarmBatchOptions, type SwarmBatchOutcome, type SwarmItemOutcome } from './orchestrator.ts'
+import { clampUtf8, resolveExecutionMode, startSwarmBackground, utf8Bytes, type SwarmJobs } from './background.ts'
 import { MIN_ITEMS, expandTasks } from './expand.ts'
 import type { SwarmToolArgs } from './expand.ts'
 import { projectSwarmConfig, readRetiredSwarmConfig, retireSwarmConfigFile, type SwarmConfigValues } from './user-config.ts'
@@ -112,7 +124,7 @@ const SWARM_EXPLORE_CEILING = 64
 /**
  * Config: provider, scheduling bounds, and child defaults.
  *
- * The ten fields the settings page edits are `Volatile` references (see
+ * The eleven fields the settings page edits are `Volatile` references (see
  * user-config.ts): the kernel's config editor stores them in the profile's
  * `cordis.patch.yml` and commits a new value into this running plugin's
  * references, so a saved knob applies to the next swarm call with no restart.
@@ -137,6 +149,15 @@ export interface Config {
    * `subagent` row's `maxActiveSubagents` minus a margin: the kernel's pool is
    * shared with the model's own delegations. */
   maxConcurrency: Volatile<number>
+  /**
+   * Whether a batch invoked from inside a `run_code` program detaches into a
+   * host background job (default true). That program has a deployment deadline
+   * covering nested tool waits, and it kills every in-flight nested call when
+   * it fires; detaching is what turns "the batch was killed" into "the batch
+   * keeps running and reports back". Off means `auto` never detaches, and the
+   * model can still ask for a background batch per call.
+   */
+  backgroundInPtc: Volatile<boolean>
   /**
    * Adaptive scheduling: item failures halve the live pool (floor 1) and
    * double the start stagger (cap 30s); a streak of clean completions grows
@@ -198,6 +219,7 @@ export const Config = z.object({
   defaultConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4).volatile(),
   maxConcurrency: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(8).volatile(),
   adaptive: z.boolean().default(true).volatile(),
+  backgroundInPtc: z.boolean().default(true).volatile(),
   itemMaxRetries: z.natural().max(Number.MAX_SAFE_INTEGER).default(2).volatile(),
   itemRetryDelayMs: z.natural().max(Number.MAX_SAFE_INTEGER).default(15000).volatile(),
   perItemOutputLimit: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(4000).volatile(),
@@ -212,11 +234,12 @@ export const Config = z.object({
   maxDepth: z.natural().max(Number.MAX_SAFE_INTEGER).default(1),
 })
 
-/** The ten editable values, as the settings page and the write path see them. */
+/** The editable values, as the settings page and the write path see them. */
 function editableValues(config: ResolvedConfig): SwarmConfigValues {
   return {
     enabled: config.enabled,
     adaptive: config.adaptive,
+    backgroundInPtc: config.backgroundInPtc,
     defaultConcurrency: config.defaultConcurrency,
     maxConcurrency: config.maxConcurrency,
     maxItems: config.maxItems,
@@ -379,8 +402,15 @@ function resolveConcurrency(requested: number | undefined, config: ResolvedConfi
   return Math.max(1, Math.min(value, config.maxConcurrency))
 }
 
-/** Render the batch outcome as the model-facing text form of the tool result. */
-function renderBatch(outcome: SwarmBatchOutcome, warnings: readonly string[]): string {
+/**
+ * The batch header's tail — the counts, concurrency, wall time, usage and
+ * budget stop — i.e. everything the label introduces.
+ *
+ * Split out from {@link batchHeader} because a budgeted report must be able to
+ * trade label length for the counts: clamping the whole header would keep the
+ * label and cut the numbers, which are the part a reader needs first.
+ */
+function batchCounts(outcome: SwarmBatchOutcome): string {
   // peakConcurrency appears only on adaptive batches, where the live pool
   // legitimately differs from the requested steady-state size.
   const concurrencyNote = outcome.peakConcurrency === undefined
@@ -390,29 +420,219 @@ function renderBatch(outcome: SwarmBatchOutcome, warnings: readonly string[]): s
   const usageNote = outcome.usage === undefined
     ? ''
     : `, tokens ${outcome.usage.totalTokens ?? outcome.usage.inputTokens + outcome.usage.outputTokens} (in ${outcome.usage.inputTokens} / out ${outcome.usage.outputTokens})`
-  const header = `swarm "${outcome.label}": ${outcome.completed} completed, ${outcome.failed} failed, ${outcome.aborted} aborted (${concurrencyNote}, ${outcome.durationMs}ms${usageNote}${budgetNote})`
-  const entries = outcome.items.map((item) => {
-    const lines = [`[${item.index}] ${item.item}`, `status: ${item.status}`]
-    // The child id is the handle a later resume_entries call needs; surface
-    // it explicitly so the model does not have to infer it from elsewhere.
-    if (item.childId !== undefined) lines.push(`childId: ${item.childId}`)
-    if (item.failureKind !== undefined) lines.push(`failureKind: ${item.failureKind}`)
-    if (item.failureCode !== undefined) lines.push(`failureCode: ${item.failureCode}`)
-    if (item.durationMs !== undefined) lines.push(`durationMs: ${item.durationMs}`)
-    if (item.usage !== undefined) lines.push(`tokens: ${item.usage.totalTokens ?? item.usage.inputTokens + item.usage.outputTokens}`)
-    if (item.retries !== undefined && item.retries > 0) lines.push(`retries: ${item.retries}`)
-    if (item.output !== undefined) lines.push(`output:\n${item.output}`)
-    if (item.error !== undefined) lines.push(`error: ${item.error}`)
-    return lines.join('\n')
-  })
-  const sections = [header]
-  if (warnings.length > 0) sections.push(`split hints:\n${warnings.map(w => `- ${w}`).join('\n')}`)
+  return `: ${outcome.completed} completed, ${outcome.failed} failed, ${outcome.aborted} aborted (${concurrencyNote}, ${outcome.durationMs}ms${usageNote}${budgetNote})`
+}
+
+/** The batch header line: the label, then {@link batchCounts}. */
+function batchHeader(outcome: SwarmBatchOutcome): string {
+  return `swarm "${outcome.label}"${batchCounts(outcome)}`
+}
+
+/** One item's block: its identity, terminal detail, and output. */
+function itemEntry(item: SwarmItemOutcome): string {
+  const lines = [`[${item.index}] ${item.item}`, `status: ${item.status}`]
+  // The child id is the handle a later resume_entries call needs; surface
+  // it explicitly so the model does not have to infer it from elsewhere.
+  if (item.childId !== undefined) lines.push(`childId: ${item.childId}`)
+  if (item.failureKind !== undefined) lines.push(`failureKind: ${item.failureKind}`)
+  if (item.failureCode !== undefined) lines.push(`failureCode: ${item.failureCode}`)
+  if (item.durationMs !== undefined) lines.push(`durationMs: ${item.durationMs}`)
+  if (item.usage !== undefined) lines.push(`tokens: ${item.usage.totalTokens ?? item.usage.inputTokens + item.usage.outputTokens}`)
+  if (item.retries !== undefined && item.retries > 0) lines.push(`retries: ${item.retries}`)
+  if (item.output !== undefined) lines.push(`output:\n${item.output}`)
+  if (item.error !== undefined) lines.push(`error: ${item.error}`)
+  return lines.join('\n')
+}
+
+/** The non-blocking split hints block. */
+function splitHints(warnings: readonly string[]): string {
+  return `split hints:\n${warnings.map(w => `- ${w}`).join('\n')}`
+}
+
+/** Render the batch outcome as the model-facing text form of the tool result. */
+function renderBatch(outcome: SwarmBatchOutcome, warnings: readonly string[]): string {
+  const entries = outcome.items.map(itemEntry)
+  const sections = [batchHeader(outcome)]
+  if (warnings.length > 0) sections.push(splitHints(warnings))
   if (entries.length > 0) sections.push(entries.join('\n\n'))
   return sections.join('\n\n')
 }
 
+/**
+ * Render a batch report that FITS a hard byte budget.
+ *
+ * Why this exists: a detached batch's report is read back through the host job
+ * ring and `job_output`, and both of those bound model-facing text by
+ * truncating the TAIL — `dsh-tool-jobs` `fitWithSuffix`/`retainTail` and
+ * `dsh-jobs-local`'s ring `utf8Tail`. A report over the bound therefore loses
+ * its header and its first items, exactly the part that says what happened.
+ *
+ * The budget is HARD: every section, status line and trailer below is charged
+ * to the same byte accountant, and the join is clamped at the end, so the
+ * returned string never exceeds `budgetBytes`. When the budget cannot hold every
+ * item — a thousand items, a 640-byte budget, an unbounded label — the counts
+ * win: the label is clamped so they fit, and the normal degradation path ends
+ * with a trailer naming the items it could not list. Only when not even an
+ * empty-label header fits does the report fall back to a fragment of the counts
+ * plus a compact `[+N]` omission mark (or the fragment alone, below a dozen
+ * bytes of room). That trade is deliberate: a report that overruns is destroyed
+ * by the kernel's tail cut, which loses both the header and the omission count.
+ *
+ * @param outcome - the settled batch.
+ * @param warnings - non-blocking split hints.
+ * @param budgetBytes - the model-facing byte budget (see `SWARM_REPORT_BYTES`).
+ * @returns the report: at most `budgetBytes` bytes of UTF-8, header first.
+ */
+export function renderBatchBounded(
+  outcome: SwarmBatchOutcome,
+  warnings: readonly string[],
+  budgetBytes: number,
+): string {
+  if (budgetBytes <= 0) return ''
+  const full = renderBatch(outcome, warnings)
+  if (utf8Bytes(full) <= budgetBytes) return full
+
+  /** Reserved for the closing note: what turns a cut into a finding. */
+  const reserved = Math.min(240, Math.floor(budgetBytes / 4))
+  const limit = budgetBytes - reserved
+  const sep = 2
+  const sections: string[] = []
+  let used = 0
+  /** The cut note, if any: what the budget could not carry. */
+  let cutNote = ''
+  /** The one accountant: charge a whole section, or report that it does not fit. */
+  const charge = (text: string): boolean => {
+    if (text === '') return false
+    const cost = utf8Bytes(text) + (sections.length === 0 ? 0 : sep)
+    if (used + cost > limit) return false
+    sections.push(text)
+    used += cost
+    return true
+  }
+
+  // The header always leads, and the counts are the part that must survive: a
+  // label long enough to eat the budget is clamped so the numbers still fit,
+  // rather than the whole line being head-clamped past them. When even an
+  // empty-label header cannot fit, the report stops there — items must never
+  // come first, and a fragment of the counts beats a fragment of the label.
+  const counts = batchCounts(outcome)
+  const shortestHeader = `swarm ""${counts}`
+  if (utf8Bytes(shortestHeader) > limit) {
+    // Not even an empty-label header fits. The counts win, and what survives of
+    // them is a fragment rather than a promise — but the items dropped must
+    // still be counted, so the note gets its room before the header does (and a
+    // budget too small even for the compact mark returns the fragment alone).
+    const dropped = outcome.items.length
+    if (dropped > 0) {
+      for (const note of [
+        `\n[+${dropped} item(s) omitted: budget too small for the report]`,
+        `\n[+${dropped}]`,
+      ]) {
+        const room = budgetBytes - utf8Bytes(note)
+        if (room > 12) return `${clampUtf8(shortestHeader, room)}${note}`
+      }
+    }
+    return clampUtf8(shortestHeader, Math.max(0, budgetBytes))
+  }
+  const labelRoom = Math.max(0, limit - utf8Bytes(shortestHeader))
+  const header = `swarm "${clampUtf8(outcome.label, labelRoom)}"${counts}`
+  if (!charge(header)) return clampUtf8(shortestHeader, Math.max(0, budgetBytes))
+
+  // Hints are advisory: they get at most a quarter of what is left, and drop
+  // out entirely when that cannot say anything useful.
+  if (warnings.length > 0 && sections.length > 0) {
+    const room = Math.floor((limit - used) / 4)
+    if (room > 80) charge(clampUtf8(splitHints(warnings), room))
+  }
+
+  // Whole item blocks while they fit. The projection here is deliberately
+  // conservative (a separator per block); `charge` recomputes and is the
+  // authority.
+  const blocks: string[] = []
+  let cutAt = outcome.items.length
+  let projected = used
+  for (const [index, item] of outcome.items.entries()) {
+    const block = itemEntry(item)
+    const cost = utf8Bytes(block) + sep
+    if (projected + cost > limit) {
+      cutAt = index
+      break
+    }
+    blocks.push(block)
+    projected += cost
+  }
+  if (blocks.length > 0) {
+    charge(blocks.join('\n\n'))
+  } else if (outcome.items.length > 0) {
+    // Not one block fit: a single item can be larger than the whole budget. Split
+    // what is left evenly so the report still carries content — each item keeps
+    // its metadata plus as much output as its share allows.
+    const remaining = Math.max(0, limit - used)
+    /** `itemEntry` prefixes an included output with this, so the share pays for it. */
+    const OUTPUT_LABEL = '\noutput:\n'
+    let perItem = Math.floor(remaining / outcome.items.length) - sep
+    // Shares are computed from an estimate, so a marginal miss is retried at
+    // 80% rather than dropping straight to status lines; `charge` stays the
+    // authority and the report budget is hard either way.
+    for (let attempt = 0; attempt < 4 && perItem > 64; attempt += 1) {
+      let clamped = false
+      const share = outcome.items.map((item) => {
+        const meta = itemEntry({ ...item, output: undefined })
+        const room = perItem - utf8Bytes(meta) - utf8Bytes(OUTPUT_LABEL)
+        if (item.output === undefined || room < 24) return meta
+        const output = clampUtf8(item.output, room)
+        if (output !== item.output) clamped = true
+        return itemEntry({ ...item, output })
+      }).join('\n\n')
+      if (charge(share)) {
+        cutAt = outcome.items.length
+        if (clamped) cutNote = `[report cut to the job-output budget: every item's output was truncated to its share of the budget`
+          + ' — rerun with output_mode "summary" for a compact report]'
+        break
+      }
+      perItem = Math.floor(perItem * 0.8) - 1
+    }
+  }
+
+  const rest = outcome.items.slice(cutAt)
+  if (rest.length > 0) {
+    // Every remaining item is at least named, one line each, while they fit.
+    const lines: string[] = []
+    let lineUsed = used
+    const lineSep = sections.length === 0 ? 0 : sep
+    for (const item of rest) {
+      const line = `[${item.index}] ${item.status}`
+      const cost = utf8Bytes(line) + (lines.length === 0 ? lineSep : 1)
+      if (lineUsed + cost > limit) break
+      lines.push(line)
+      lineUsed += cost
+    }
+    if (lines.length > 0) {
+      charge(lines.join('\n'))
+    }
+    const unlisted = rest.length - lines.length
+    const detail = unlisted === 0
+      ? `output of items ${rest.map(item => item.index).join(', ')} is not included`
+      : `${unlisted} of ${rest.length} remaining item(s) could not even be named`
+    cutNote = `[report cut to the job-output budget: ${detail}`
+      + ' — rerun with output_mode "summary" for a compact report, or resume those children by childId]'
+  }
+
+  if (cutNote !== '') {
+    const room = budgetBytes - used - (sections.length === 0 ? 0 : sep)
+    const note = clampUtf8(cutNote, Math.max(0, room))
+    if (note !== '') sections.push(note)
+  }
+
+  const report = sections.join('\n\n')
+  // Hard guarantee: the accountant reserves room for the note, so this clamp is
+  // a backstop that makes "never over budget" true rather than intended. It can
+  // only ever trim the trailer, which is the tail.
+  return utf8Bytes(report) <= budgetBytes ? report : clampUtf8(report, budgetBytes)
+}
+
 /** Render a dry-run preview: what WOULD run, nothing executed. */
-function renderDryRun(output: SwarmToolOutput): string {
+function renderDryRun(output: SwarmBatchToolOutput): string {
   const header = `swarm "${output.label}" (dry run, nothing executed): ${output.total} children would start (concurrency ${output.concurrency})`
   const previews = output.items.map(item => `[${item.index}] ${item.item}\nprompt:\n${item.prompt ?? ''}`)
   const sections = [header]
@@ -423,23 +643,54 @@ function renderDryRun(output: SwarmToolOutput): string {
   return sections.join('\n\n')
 }
 
-/** Render either tool output flavor to its model-facing text. */
+/** Render a detached batch's acknowledgement: what started, and how to collect it. */
+function renderBackground(output: SwarmBackgroundToolOutput): string {
+  const sections = [
+    `swarm "${output.label}" is running as background job ${output.jobId}: ${output.total} children (concurrency ${output.concurrency}).`,
+    'This call returns without waiting. The batch is owned by this session, not by the program that started it, so a run_code deadline or cancellation no longer kills it.',
+    `Collect the report with job_output on ${output.jobId} when its completion notice arrives; job_list shows its status and job_kill stops it.`,
+  ]
+  if (output.warnings !== undefined && output.warnings.length > 0) {
+    sections.push(`split hints:\n${output.warnings.map(w => `- ${w}`).join('\n')}`)
+  }
+  return sections.join('\n\n')
+}
+
+/** Render any tool output flavor to its model-facing text. */
 function renderToolOutput(value: SwarmToolOutput): string {
+  if (value.kind === 'swarm-background') return renderBackground(value)
   if (value.kind === 'swarm-dry-run') return renderDryRun(value)
   // Executed batches always carry durationMs (execute maps the outcome
   // verbatim); the fallback keeps a hand-shaped value renderable.
   return renderBatch({ ...value, durationMs: value.durationMs ?? 0 }, value.warnings ?? [])
 }
 
-/** Structured tool output: the batch outcome with the schema's field names,
+/** Structured tool output: a settled batch, a dry-run preview, or a delegated job. */
+type SwarmToolOutput = SwarmBatchToolOutput | SwarmBackgroundToolOutput
+
+/** The executed batch (or its preview), with the schema's field names,
  * derived from the orchestrator shape so the two never drift apart. */
-interface SwarmToolOutput extends Pick<SwarmBatchOutcome,
+interface SwarmBatchToolOutput extends Pick<SwarmBatchOutcome,
   'label' | 'concurrency' | 'peakConcurrency' | 'learnedCeiling' | 'total'
   | 'completed' | 'failed' | 'aborted' | 'budgetExhausted' | 'usage'> {
   readonly kind: 'swarm' | 'swarm-dry-run'
   readonly durationMs?: number
   readonly warnings?: readonly string[]
   readonly items: readonly SwarmItemOutput[]
+}
+
+/**
+ * The detached flavour: an acknowledgement, not a result. Nothing has settled
+ * when this returns, which is why it carries no counters and no items — those
+ * arrive in the job's report.
+ */
+interface SwarmBackgroundToolOutput {
+  readonly kind: 'swarm-background'
+  readonly jobId: string
+  readonly label: string
+  readonly total: number
+  readonly concurrency: number
+  readonly warnings?: readonly string[]
 }
 
 /** One item row of the tool output (orchestrator shape plus the dry-run
@@ -473,6 +724,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
     defaultConcurrency: baseConfig.defaultConcurrency.get(),
     maxConcurrency: baseConfig.maxConcurrency.get(),
     adaptive: baseConfig.adaptive.get(),
+    backgroundInPtc: baseConfig.backgroundInPtc.get(),
     itemMaxRetries: baseConfig.itemMaxRetries.get(),
     itemRetryDelayMs: baseConfig.itemRetryDelayMs.get(),
     perItemOutputLimit: baseConfig.perItemOutputLimit.get(),
@@ -568,7 +820,11 @@ export function apply(ctx: Context, baseConfig: Config): void {
         + 'running at once — batch analyses, per-module edits in disjoint areas, parallel lookups — and prefer '
         + 'it over calling the subagent tool repeatedly: one call, one aggregated result. '
         + 'Children run with the full tool set by default; for read-only batches (analysis, review, lookups) '
-        + 'pass agent_preset to compose every child from a read/search-scoped preset.',
+        + 'pass agent_preset to compose every child from a read/search-scoped preset. '
+        + 'Inside run_code the batch runs as a background job by default (mode "auto"): the call returns a job id '
+        + 'at once, because that program has a hard elapsed-time deadline that would otherwise kill the whole '
+        + 'batch mid-flight. Its report then arrives as a background-job notice; read it with job_output when the '
+        + 'notice does not carry the full text. Pass mode "inline" only for a batch you know finishes quickly.',
       parameters: {
         description: {
           type: 'string',
@@ -629,16 +885,25 @@ export function apply(ctx: Context, baseConfig: Config): void {
           enum: ['full', 'summary', 'status_only'],
           description: 'How much of each item\'s output the result carries. full (default): complete outputs; summary: each output truncated to ~500 characters; status_only: statuses and childIds only, no output text. Use status_only for large batches to keep the parent context lean.',
         },
+        mode: {
+          type: 'string',
+          enum: ['auto', 'inline', 'background'],
+          description: 'How the batch is executed. auto (default): a background job when this call runs inside run_code, synchronous otherwise — that program\'s deadline would otherwise kill the batch, so this is the safe choice. inline: always wait for the batch and return its aggregate now (use for a batch you know finishes in well under the program\'s remaining time). background: always detach into a host background job, even outside run_code, and return its job id at once.',
+        },
       },
       output: {
         schema: {
           type: 'object',
           additionalProperties: false,
           properties: {
-            // 'swarm' = executed batch; 'swarm-dry-run' = validated preview only.
-            kind: { type: 'string', required: true, enum: ['swarm', 'swarm-dry-run'] },
+            // 'swarm' = executed batch; 'swarm-dry-run' = validated preview
+            // only; 'swarm-background' = detached into a host job, whose
+            // report arrives as a job settlement notice + job_output read.
+            kind: { type: 'string', required: true, enum: ['swarm', 'swarm-dry-run', 'swarm-background'] },
             label: { type: 'string', required: true },
             concurrency: { type: 'number', required: true },
+            // Background batches only: the host job carrying the batch.
+            jobId: { type: 'string' },
             // Present only on adaptive batches: the highest simultaneous
             // live children actually observed, and the ceiling the pool was
             // growing toward at batch end (exploration may push it past the
@@ -646,9 +911,12 @@ export function apply(ctx: Context, baseConfig: Config): void {
             peakConcurrency: { type: 'number' },
             learnedCeiling: { type: 'number' },
             total: { type: 'number', required: true },
-            completed: { type: 'number', required: true },
-            failed: { type: 'number', required: true },
-            aborted: { type: 'number', required: true },
+            // Settled-batch counters: absent on 'swarm-background' (nothing
+            // has settled when the call returns), present and required by
+            // construction on 'swarm' and 'swarm-dry-run'.
+            completed: { type: 'number' },
+            failed: { type: 'number' },
+            aborted: { type: 'number' },
             // Whole-batch wall time in ms (executed batches only).
             durationMs: { type: 'number' },
             // True when the token budget stopped the batch early.
@@ -667,7 +935,6 @@ export function apply(ctx: Context, baseConfig: Config): void {
             warnings: { type: 'array', items: { type: 'string' } },
             items: {
               type: 'array',
-              required: true,
               items: {
                 type: 'object',
                 additionalProperties: false,
@@ -741,10 +1008,19 @@ export function apply(ctx: Context, baseConfig: Config): void {
           },
         }
       },
-      // Completed card: the aggregated outcome, one status line per item.
+      // Completed card: the aggregated outcome, one status line per item, or
+      // the job handle when the batch detached.
       presentResult(args, result) {
         const value = result.meta as unknown as SwarmToolOutput | undefined
-        if (value === undefined || typeof value !== 'object' || value.kind !== 'swarm') return undefined
+        if (value === undefined || typeof value !== 'object') return undefined
+        if (value.kind === 'swarm-background') {
+          return {
+            card: 'generic',
+            title: `swarm · ${args.description} — 后台运行 ${value.total} 个子任务`,
+            content: [{ type: 'text', text: `job ${value.jobId}\n完成后自动回传汇总；也可用 job_output 读取、job_kill 停止。` }],
+          }
+        }
+        if (value.kind !== 'swarm') return undefined
         const lines = value.items.map((item) => {
           const mark = item.status === 'completed' ? '✓' : item.status === 'failed' ? '✗' : '−'
           const detail = item.status === 'failed' && item.failureKind !== undefined ? ` (${item.failureKind})` : ''
@@ -801,10 +1077,9 @@ export function apply(ctx: Context, baseConfig: Config): void {
             })),
           }
         }
-        const outcome = await runSwarmBatch(ctx, {
+        const batchOptions: Omit<SwarmBatchOptions, 'signal'> = {
           provider: live.provider,
           parent,
-          signal: exec.signal,
           label,
           tasks: expanded.tasks,
           concurrency,
@@ -821,7 +1096,47 @@ export function apply(ctx: Context, baseConfig: Config): void {
           ...live.agentOptions !== undefined ? { agentOptions: live.agentOptions } : {},
           ...args.agent_preset !== undefined ? { agentPreset: args.agent_preset } : {},
           maxDepth: live.maxDepth,
-        })
+        }
+        const callId = exec.callId === undefined ? undefined : String(exec.callId)
+        if (resolveExecutionMode(args.mode, callId, live.backgroundInPtc) === 'background') {
+          // Detach BEFORE anything can abort this call. A batch nested inside a
+          // run_code program dies with the program's deadline — the runtime
+          // discards its worker and the executor aborts every in-flight nested
+          // call — and no later promotion can revive work that is already
+          // stopped. The job is owned by the calling session, so it outlives
+          // this call and reports through one settlement notice.
+          const jobs = ctx.get('jobs') as SwarmJobs | undefined
+          if (jobs === undefined) {
+            throw new Error('swarm: this composition provides no host job registry (ctx.jobs), so a background batch cannot start — rerun with mode "inline"')
+          }
+          const started = startSwarmBackground({
+            ctx,
+            jobs,
+            parent,
+            batch: batchOptions,
+            warnings: expanded.warnings,
+            ...callId === undefined ? {} : { callId },
+            // The bounded renderer keeps the header and names every item; the
+            // job tooling below it truncates from the TAIL, which would be the
+            // header.
+            render: (batchOutcome, batchWarnings, budgetBytes) => renderBatchBounded(
+              // The same projection the synchronous result applies, so an explicit
+              // output_mode is honoured on the collected report too.
+              { ...batchOutcome, items: projectOutputItems(batchOutcome.items, args.output_mode ?? 'full') },
+              batchWarnings,
+              budgetBytes,
+            ),
+          })
+          return {
+            kind: 'swarm-background' as const,
+            jobId: started.jobId,
+            label,
+            total: expanded.tasks.length,
+            concurrency,
+            ...expanded.warnings.length > 0 ? { warnings: expanded.warnings } : {},
+          }
+        }
+        const outcome = await runSwarmBatch(ctx, { ...batchOptions, signal: exec.signal })
         if (exec.signal.aborted) {
           throw new Error('swarm batch was cancelled')
         }

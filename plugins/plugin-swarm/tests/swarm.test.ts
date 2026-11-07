@@ -653,6 +653,7 @@ const LAYER = {
   defaultConcurrency: 8,
   maxConcurrency: 16,
   adaptive: true,
+  backgroundInPtc: true,
   itemMaxRetries: 2,
   itemRetryDelayMs: 15000,
   perItemOutputLimit: 4000,
@@ -669,6 +670,9 @@ test('validateSwarmConfigPatch: unknown fields, wrong types, and floors reject t
   assert.throws(() => validateSwarmConfigPatch({ maxItems: 1 }), { code: 'config.belowMinimum', params: { field: 'maxItems', minimum: 2 } })
   assert.throws(() => validateSwarmConfigPatch({ perItemOutputLimit: 0 }), { code: 'config.belowMinimum', params: { field: 'perItemOutputLimit', minimum: 1 } })
   assert.throws(() => validateSwarmConfigPatch({ adaptive: 'yes' }), { code: 'config.notBoolean', params: { field: 'adaptive' } })
+  // The detach knob is a plain boolean: a non-boolean is refused whole.
+  assert.throws(() => validateSwarmConfigPatch({ backgroundInPtc: 'on' }), { code: 'config.notBoolean', params: { field: 'backgroundInPtc' } })
+  assert.deepEqual(validateSwarmConfigPatch({ backgroundInPtc: false }), { backgroundInPtc: false })
   assert.throws(() => validateSwarmConfigPatch({ enabled: 1 }), { code: 'config.notBoolean', params: { field: 'enabled' } })
   assert.deepEqual(validateSwarmConfigPatch({ tokenBudget: 0 }), { tokenBudget: 0 }, 'the budget legitimately allows 0 (disabled)')
   assert.deepEqual(validateSwarmConfigPatch({ maxConcurrency: 12.6 }), { maxConcurrency: 12 }, 'a fractional count floors')
@@ -683,6 +687,7 @@ test('projectSwarmConfig: a one-field patch carries every editable field and lea
   assert.equal(next.startStaggerMs, 1000, 'nor the schema default 800')
   assert.equal(next.provider, 'spawn', 'structural fields survive the row replacement')
   assert.equal(next.maxDepth, 1)
+  assert.equal(next.backgroundInPtc, true, 'a boolean knob travels with the write too')
   for (const field of SWARM_CONFIG_FIELDS) assert.ok(field in next, `${field} must travel with every write`)
 })
 
@@ -1059,4 +1064,152 @@ test('mount: the Team section is optional in inject so a composition without Age
     'a required agentTeams service would gate the whole plugin on a composition without the Agent Teams bundle; '
     + 'the section mounts through ctx.inject inside apply instead',
   )
+})
+
+// --- detached report budget ---------------------------------------------------
+
+/**
+ * The report a detached batch writes is read back through the job ring and
+ * `job_output`, both of which truncate the TAIL. So the producer bounds its own
+ * report and keeps the header: these cases pin that the counts survive whenever
+ * the shortest (empty-label) header fits, that every item is at least named
+ * while the budget allows, and that what the budget could not carry is counted —
+ * in the trailer, or in the compact `[+N]` mark when not even that header fits.
+ */
+test('renderBatchBounded: a report inside the budget is byte-identical to the synchronous one', async () => {
+  const { renderBatchBounded } = await import('../src/index.ts')
+  const outcome = {
+    label: 'small',
+    concurrency: 2,
+    total: 2,
+    completed: 2,
+    failed: 0,
+    aborted: 0,
+    durationMs: 7,
+    items: [
+      { index: 0, item: 'alpha', status: 'completed', output: 'a', childId: 'child-a' },
+      { index: 1, item: 'beta', status: 'completed', output: 'b', childId: 'child-b' },
+    ],
+  } as unknown as SwarmBatchOutcome
+  const rendered = renderBatchBounded(outcome, [], 64 * 1024)
+  assert.ok(rendered.includes('output:\na'))
+  assert.ok(rendered.includes('childId: child-b'))
+  assert.ok(!rendered.includes('[report cut'))
+})
+
+test('renderBatchBounded: over the budget the header survives and every item is still named', async () => {
+  const { renderBatchBounded } = await import('../src/index.ts')
+  // Four blocks of ~4 KB each: with a 2 KB budget only some can carry output.
+  const output = 'line of report text\n'.repeat(200)
+  const outcome = {
+    label: 'big',
+    concurrency: 4,
+    total: 4,
+    completed: 3,
+    failed: 1,
+    aborted: 0,
+    durationMs: 1234,
+    items: [0, 1, 2, 3].map(index => ({
+      index,
+      item: `item-${index}`,
+      status: index === 3 ? 'failed' : 'completed',
+      output,
+      childId: `child-${index}`,
+      ...index === 3 ? { error: 'child refused' } : {},
+    })),
+  } as unknown as SwarmBatchOutcome
+
+  const budget = 2 * 1024
+  const rendered = renderBatchBounded(outcome, ['a split hint'], budget)
+  assert.ok(rendered.startsWith('swarm "big": 3 completed, 1 failed'), 'the header must open the report')
+  assert.ok(rendered.includes('a split hint'), 'the split hints must survive')
+  for (const index of [0, 1, 2, 3]) assert.ok(rendered.includes(`[${index}]`), `item ${index} must still be named`)
+  assert.ok(rendered.includes('[report cut to the job-output budget'), 'the cut must be stated, not silent')
+  assert.ok(
+    Buffer.byteLength(rendered, 'utf8') <= budget + 400,
+    `the report must stay near the budget, got ${Buffer.byteLength(rendered, 'utf8')}`,
+  )
+})
+
+test('renderBatchBounded: one oversized multi-byte block degrades to a truncated share, not to nothing', async () => {
+  const { renderBatchBounded } = await import('../src/index.ts')
+  // 3-byte characters: a 4000-character item is ~12 KB, far past a 3 KB budget.
+  const output = '输出内容'.repeat(1000)
+  const outcome = {
+    label: 'cjk',
+    concurrency: 2,
+    total: 2,
+    completed: 2,
+    failed: 0,
+    aborted: 0,
+    durationMs: 9,
+    items: [
+      { index: 0, item: '甲', status: 'completed', output, childId: 'child-a' },
+      { index: 1, item: '乙', status: 'completed', output, childId: 'child-b' },
+    ],
+  } as unknown as SwarmBatchOutcome
+
+  const budget = 3 * 1024
+  const rendered = renderBatchBounded(outcome, [], budget)
+  assert.ok(rendered.startsWith('swarm "cjk": 2 completed'), 'the header still leads')
+  assert.ok(rendered.includes('childId: child-a') && rendered.includes('childId: child-b'), 'both children stay addressable')
+  assert.ok(rendered.includes('输出内容'), 'the shared content survives, truncated rather than dropped')
+  assert.ok(!rendered.includes('\ufffd'), 'a byte cut must not ship a replacement character')
+  assert.ok(rendered.includes('every item\'s output was truncated'))
+})
+
+test('renderBatchBounded: the byte budget is hard, whatever the shape of the batch', async () => {
+  const { renderBatchBounded } = await import('../src/index.ts')
+  const shape = (options: { label: string, items: number, output: string }): SwarmBatchOutcome => ({
+    label: options.label,
+    concurrency: 4,
+    total: options.items,
+    completed: options.items,
+    failed: 0,
+    aborted: 0,
+    durationMs: 10,
+    items: Array.from({ length: options.items }, (_, index) => ({
+      index,
+      item: `item-${index}`,
+      status: 'completed',
+      output: options.output,
+      childId: `child-${index}`,
+    })),
+  }) as unknown as SwarmBatchOutcome
+
+  // A label longer than the whole budget must not cost the reader the counts:
+  // the label is clamped, the numbers survive.
+  const longLabel = renderBatchBounded(shape({ label: 'L'.repeat(5000), items: 2, output: 'x'.repeat(4000) }), [], 512)
+  assert.ok(longLabel.includes('2 completed, 0 failed'), longLabel)
+  assert.ok(longLabel.startsWith('swarm "'), longLabel)
+
+  // A budget too small for any item: the header still comes first, never an
+  // item block that got in before it.
+  const tinyBudget = renderBatchBounded(shape({ label: 'tiny', items: 2, output: 'a' }), [], 32)
+  assert.ok(tinyBudget.startsWith('swarm "'), JSON.stringify(tinyBudget))
+  assert.ok(Buffer.byteLength(tinyBudget, 'utf8') <= 32)
+  // A budget too small even for an empty-label header still counts what it
+  // dropped, rather than silently returning a header fragment.
+  assert.ok(tinyBudget.includes('[+2]'), JSON.stringify(tinyBudget))
+
+  const cases = [
+    // A label longer than the whole budget.
+    { outcome: shape({ label: 'L'.repeat(5000), items: 2, output: 'x'.repeat(4000) }), budget: 512 },
+    // Many items, little room each.
+    { outcome: shape({ label: 'many', items: 500, output: 'z'.repeat(200) }), budget: 1024 },
+    // Multi-byte output far past the budget.
+    { outcome: shape({ label: 'cjk', items: 3, output: '输出内容'.repeat(2000) }), budget: 700 },
+    // Almost no budget at all.
+    { outcome: shape({ label: 'tiny', items: 2, output: 'a' }), budget: 64 },
+    // A budget the full report already fits.
+    { outcome: shape({ label: 'fits', items: 2, output: 'a' }), budget: 64 * 1024 },
+  ]
+
+  for (const { outcome, budget } of cases) {
+    const rendered = renderBatchBounded(outcome, [], budget)
+    const bytes = Buffer.byteLength(rendered, 'utf8')
+    assert.ok(bytes <= budget, `${outcome.label}: ${bytes} bytes must fit the ${budget}-byte budget`)
+    assert.ok(rendered.startsWith('swarm "'), `${outcome.label}: the report must open with its header`)
+    assert.ok(!rendered.includes('\ufffd'), `${outcome.label}: a byte cut must not ship a replacement character`)
+  }
 })

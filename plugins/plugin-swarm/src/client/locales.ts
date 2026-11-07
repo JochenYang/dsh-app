@@ -32,6 +32,9 @@ export const zh = {
   'swarm.toggle.adaptive': '自适应调度（{state}）',
   'swarm.toggle.adaptive.aria': '自适应调度',
   'swarm.toggle.adaptive.hint': '失败后并发自动减半、恢复后逐步爬升；关闭后并发固定为起始值',
+  'swarm.toggle.background': 'run_code 内自动转后台（{state}）',
+  'swarm.toggle.background.aria': 'run_code 内自动转后台',
+  'swarm.toggle.background.hint': '在 run_code 程序内发起的并行任务交给后台任务执行：程序的超时会终止程序本身，不再连子代理一起中止，结果照常回传；其他场景仍为同步返回',
   'swarm.state.pending': '…',
   'swarm.state.enabled': '已启用',
   'swarm.state.disabled': '已禁用',
@@ -78,6 +81,8 @@ export const zh = {
   'swarm.notice.disabled': '已设为禁用，重启应用后生效',
   'swarm.notice.adaptiveOn': '已开启自适应调度，下一次调用即生效',
   'swarm.notice.adaptiveOff': '已关闭自适应调度：并发将固定为起始值，下一次调用即生效',
+  'swarm.notice.backgroundOn': '已开启 run_code 内自动转后台，下一次调用即生效',
+  'swarm.notice.backgroundOff': '已关闭 run_code 内自动转后台：run_code 中的批次将同步返回，下一次调用即生效',
   'swarm.path': '配置文件：{path}',
 } as const
 
@@ -92,6 +97,9 @@ export const en: Record<SwarmKey, string> = {
   'swarm.toggle.adaptive': 'Adaptive scheduling ({state})',
   'swarm.toggle.adaptive.aria': 'Adaptive scheduling',
   'swarm.toggle.adaptive.hint': 'Concurrency halves after a failure and climbs back step by step as it recovers; when off, concurrency stays at the starting value',
+  'swarm.toggle.background': 'Detach batches started inside run_code ({state})',
+  'swarm.toggle.background.aria': 'Detach batches started inside run_code',
+  'swarm.toggle.background.hint': 'A batch started inside a run_code program runs as a background job: the program\'s timeout stops the program only, not its subagents, and the report still comes back. Every other call stays synchronous',
   'swarm.state.pending': '…',
   'swarm.state.enabled': 'Enabled',
   'swarm.state.disabled': 'Disabled',
@@ -136,6 +144,8 @@ export const en: Record<SwarmKey, string> = {
   'swarm.notice.disabled': 'Set to disabled; takes effect after an app restart',
   'swarm.notice.adaptiveOn': 'Adaptive scheduling is on; applies to the next call',
   'swarm.notice.adaptiveOff': 'Adaptive scheduling is off: concurrency stays at the starting value and applies to the next call',
+  'swarm.notice.backgroundOn': 'Batches started inside run_code now detach into background jobs; applies to the next call',
+  'swarm.notice.backgroundOff': 'Batches started inside run_code stay synchronous again; applies to the next call',
   'swarm.path': 'Configuration file: {path}',
 }
 

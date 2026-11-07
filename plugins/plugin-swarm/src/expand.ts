@@ -29,6 +29,8 @@ export interface SwarmToolArgs {
   readonly dry_run?: boolean
   readonly token_budget?: number
   readonly output_mode?: 'full' | 'summary' | 'status_only'
+  /** Execution lane; `auto` detaches only inside a `run_code` program. */
+  readonly mode?: 'auto' | 'inline' | 'background'
 }
 
 /** One flattened resume entry, keyed by its durable child id. */

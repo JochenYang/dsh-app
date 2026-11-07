@@ -166,6 +166,15 @@
         # pool, and only transport qualifies for auto-retry (a capacity
         # rejection re-queues the item instead, since the slot is still held).
         adaptive: true
+        # A batch invoked from INSIDE a run_code program detaches into a host
+        # background job instead of blocking that program. The program's
+        # elapsed-time deadline (120 s default, 600 s at the ptc-runtime cap,
+        # covering nested tool waits) discards its worker and aborts every
+        # in-flight nested call, so a synchronous batch there is killed with its
+        # children; the job belongs to the session, so it survives the call and
+        # reports through one completion notice + job_output. Off = every batch
+        # stays synchronous (one fewer round trip, at the cost of the deadline).
+        backgroundInPtc: true
         defaultConcurrency: 8
         maxConcurrency: 12
         startStaggerMs: 1000

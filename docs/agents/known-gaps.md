@@ -50,5 +50,14 @@ a short summary and points here.
   the shell side (host + IPC) and that is a separate change. Setting, snoozing, marking as seen,
   clearing and the "which task is due" rule are pinned by `store.test.ts`, `apply.test.ts` and
   `reminders.test.ts`.
+- **`run_code`'s deadline cannot be handed a nested call.** A PTC program carries a deployment
+  elapsed-time deadline (600 s at the cap) that covers nested tool waits; when it fires the runtime
+  discards its worker and aborts every in-flight nested call, so work in progress is stopped, not merely
+  uncollected. The suite's answer is to keep the long tool OUT of the call: `plugin-swarm` detaches a batch
+  invoked inside a `run_code` program into a host background job (`plugins/plugin-swarm/src/background.ts`,
+  see `docs/agents/delegation-division.md`). What remains open is the kernel side — a nested tool cannot
+  read its caller's remaining budget, so the choice to detach is made on "is nested" rather than on an
+  estimate, and no tool can promote a still-running call at the deadline. Both would need upstream changes
+  (`exec.deadline` exposure and a promotion contract); neither is planned here.
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version upgrades. `docs/capability-roadmap/`
   holds the rest of the roadmap; `docs/plans/` holds the plans that are still open.

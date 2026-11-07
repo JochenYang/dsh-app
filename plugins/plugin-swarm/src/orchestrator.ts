@@ -14,10 +14,13 @@
  *    `delivery: 'parent'` — the shape this tool had before the seam was
  *    unified — or resumes a prior child through `sendMessage()`, which
  *    cold-loads its persisted session so a failed item continues with its
- *    prior context instead of restarting from scratch. A follow-up has no
- *    activation of its own, so settlement is observed for BOTH backends
- *    through the runtime's `subagent/end` lifecycle event, which carries the
- *    terminal stop reason and the epoch's final assistant output.
+ *    prior context instead of restarting from scratch. A DETACHED batch
+ *    additionally passes `delivery: 'caller'`, so the FRESH children's own
+ *    notices give way to the batch's aggregate report; a resumed child keeps
+ *    the delivery it was created with, because `sendMessage` carries no policy.
+ *    A follow-up has no activation of its own, so settlement is observed for
+ *    BOTH backends through the runtime's `subagent/end` lifecycle event, which
+ *    carries the terminal stop reason and the epoch's final assistant output.
  *  - One-shot runs (fallback for providers without continuable support):
  *    `startActivation({ delivery: 'caller' })` + `activation.result`, the
  *    classic delegation path, disposed per item. One-shot children are not
@@ -269,7 +272,31 @@ export interface SwarmBatchOptions {
    * budget is best-effort, never an exact accounting.
    */
   readonly tokenBudget?: number
+  /**
+   * Who a continuable child reports settlement to. `parent` (default) keeps
+   * the kernel's per-child completion notice, which a synchronous batch
+   * tolerates because the tool result is the aggregate. A detached batch uses
+   * `caller`: settlement observation is unchanged (the `subagent/end` edge
+   * does not depend on delivery) while the fresh children's notices are
+   * suppressed, leaving the job's aggregate report as the delivery. Resumed
+   * items are unaffected — `sendMessage` carries no delivery policy, so a
+   * resumed child keeps the one it was created with (a cold resume
+   * materializes with the kernel default `parent`).
+   */
+  readonly delivery?: 'parent' | 'caller'
+  /**
+   * Live batch progress, for a caller that renders it somewhere other than the
+   * tool result (a background job's progress line and observer stream).
+   * Optional and advisory: a throwing consumer must never break the batch, so
+   * events are emitted inside a guard.
+   */
+  readonly onProgress?: (event: SwarmProgressEvent) => void
 }
+
+/** One observable batch step. Items settle once; `item-started` may precede a retry. */
+export type SwarmProgressEvent =
+  | { readonly type: 'item-started', readonly index: number, readonly item: string }
+  | { readonly type: 'item-settled', readonly outcome: SwarmItemOutcome }
 
 /** Join a child result's text blocks into one string. */
 function textOf(blocks: readonly ContentBlock[]): string {
@@ -862,10 +889,12 @@ async function runContinuableTask(
         signal: options.signal,
         // Parent delivery, unchanged from the pre-0.2.1 continuable shape: the
         // kernel injects each child's settlement message into the delegating
-        // turn, and the batch's own aggregate is the tool's result. Caller
-        // delivery would silence those notices, which is a product decision
-        // this upgrade does not make on its own.
-        delivery: 'parent',
+        // turn, and the batch's own aggregate is the tool's result. A detached
+        // batch passes `caller` instead: those per-child notices would arrive
+        // long after the tool call returned, and the job's aggregate report is
+        // what arrives there instead. Resumed children keep their own delivery
+        // (`sendMessage` carries no policy), so only fresh ones are silenced.
+        delivery: options.delivery ?? 'parent',
       })
       childId = String(started.childId)
     }
@@ -1073,6 +1102,26 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
   const continuable = provider?.prepareContinuable !== undefined
   const watch = continuable ? watchSettlements(ctx, options.parent, options.signal) : undefined
   const outcomes: (SwarmItemOutcome | undefined)[] = new Array(options.tasks.length)
+
+  /** Publish one progress event without letting a consumer break the batch. */
+  const notify = (event: SwarmProgressEvent): void => {
+    try {
+      options.onProgress?.(event)
+    } catch {
+      // A progress sink is an observer, never a participant.
+    }
+  }
+
+  /**
+   * Record one item's terminal outcome and announce it. Every terminal
+   * assignment goes through here so the stream and the result cannot disagree
+   * about what settled.
+   */
+  const record = (outcome: SwarmItemOutcome): void => {
+    outcomes[outcome.index] = outcome
+    notify({ type: 'item-settled', outcome })
+  }
+
   const clock = new LaunchClock(options.startStaggerMs)
   const adaptive = options.adaptive === true
   const ceiling = adaptive
@@ -1118,7 +1167,7 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
       // Pending retries would spend further tokens on items the budget can no
       // longer finish; their items report aborted with the budget note.
       for (const entry of retryQueue.splice(0)) {
-        outcomes[entry.task.index] = {
+        record({
           index: entry.task.index,
           item: entry.task.item,
           status: 'aborted',
@@ -1126,7 +1175,7 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
           // Keep the resume handle: the child session survives, so a later
           // resume_entries call can finish the item once budget allows.
           ...entry.task.resumeChildId === undefined ? {} : { childId: entry.task.resumeChildId },
-        }
+        })
       }
     }
   }
@@ -1167,7 +1216,7 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
       const { task, retries } = claimed
       if (!(await gate.acquire(options.signal))) {
         // Aborted while queued for a slot: the task never started.
-        outcomes[task.index] = { index: task.index, item: task.item, status: 'aborted' }
+        record({ index: task.index, item: task.item, status: 'aborted' })
         return
       }
       if (budgetStop) {
@@ -1175,15 +1224,16 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
         // claimed before the trip but must not launch. Covers fresh claims
         // AND retries already dequeued before accountUsage reaped the queue.
         gate.release()
-        outcomes[task.index] = {
+        record({
           index: task.index,
           item: task.item,
           status: 'aborted',
           error: 'batch token budget exhausted before this item started',
           ...task.resumeChildId === undefined ? {} : { childId: task.resumeChildId },
-        }
+        })
         continue
       }
+      notify({ type: 'item-started', index: task.index, item: task.item })
       let outcome: SwarmItemOutcome
       try {
         outcome = watch !== undefined
@@ -1221,10 +1271,10 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
         // Patience exhausted: record it as the capacity failure it is, with the
         // bound named so the model can decide to resume later rather than
         // reading it as a task-level defect.
-        outcomes[task.index] = {
+        record({
           ...outcome,
           error: `${outcome.error ?? 'launch rejected'}; still at the kernel's live-child limit after ${maxCapacityRequeues} requeues — resume this item once other children finish`,
-        }
+        })
         continue
       }
       // An error-settled continuable child is a retry candidate: its session
@@ -1253,7 +1303,7 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
         }
         continue
       }
-      outcomes[task.index] = retries > 0 ? { ...outcome, retries } : outcome
+      record(retries > 0 ? { ...outcome, retries } : outcome)
       // Steer launch pacing in step with any pool adjustment: TRANSPORT
       // failures stretch the start interval (eased back on growth), so a
       // struggling gateway gets proportionally gentler traffic, not just fewer
