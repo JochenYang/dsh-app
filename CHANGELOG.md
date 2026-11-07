@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.18.6] - 2026-11-07
+
+### 中文
+- 并行子代理：在 run_code 程序内发起的批次改为交给后台任务执行，程序超时不再连带中止子代理，结果照常回传。
+
+### English
+- Swarm plugin: a batch started inside a run_code program now runs as a host background job, so the program's deadline no longer kills the batch with its subagents and the report still comes back.
+
 ## [v0.18.5] - 2026-11-06
 
 ### 中文
