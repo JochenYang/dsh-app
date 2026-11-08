@@ -53,7 +53,7 @@
 | 写入（后台） | distiller：静默 60s + `MIN_NEW_MESSAGES=2` + `MIN_NEW_CHARS=4000` | `distiller.ts:60,146,156` |
 | 写入时防重 | bigram Jaccard，`τ_dup=0.8` 拒绝、`τ_rel=0.3` 报 related | `memory-store.ts:71-72`、`tools.ts:199-208` |
 | 轻量维护 | 每次写入后无模型跑：精确重复合并 + 嫌疑记录 + 索引重建 | `light-sweep.ts:36-93` |
-| 重量维护 | curator：≥8 卡 + 指纹变化 + 10 分钟冷却，按键引用的 merge/delete/rewrite | `curator.ts:55,61,346-359` |
+| 重量维护 | curator：≥8 卡 + 指纹变化 + 3 分钟冷却（`CURATE_COOLDOWN_MS = 3 * 60_000`），按键引用的 merge/delete/rewrite | `curator.ts:55,61,94,346-359` |
 | 注入 | 索引全文（≤50 行）+ 按 category 配额选正文，global 1200 / project 2800 字符 | `prompt.ts:33,36,192`、`prompt.ts:114-185` |
 | 检索 | `memory_recall`：topic 精确 / query 子串，无索引无 embedding | `tools.ts:259-336` |
 | 归档 | **无**。删除即 `removeTree` | `memory-store.ts:452-463`、`memory-store.ts:508-527` |
@@ -676,7 +676,7 @@ npm run check:graph        # 插件图与套件名册规则
 | 产物核验 | `lib/client.js` 无 `node:` 内建；`memory.activity` / `memory.backend` / `memory.scope.global` / `archiveError` / `MemoryDistillActivity` / `ownSaveSeqOf` / `recordDirectSave` / `distillSeqOf` / `advanceDistill` / `distillActivity` / `recordDistill` 在两个产物里均为 **0 次命中** |
 | 仓库根 `npm run check:graph` | `plugin graph: 17 plugins, followed line ^0.1.6-alpha.2 / ok — no violations` |
 | 仓库根 `npm test` | `tests 336 / pass 335 / fail 0 / skipped 1`（build 通过） |
-| **迁移实测**（真实 store 的副本，原 store 只读） | 副本启动前：`topics/` 2 张卡 + `index.md`；一次启动后：`topics/` 0 张、`index.md` 消失、`projects/legacy-global/topics/` 2 张；`config.json` 的 sha256 前后一致；第二次启动仍为 2 张（幂等）；在该副本的 6 个会话（含无工作区会话与 5 个真实项目 cwd）上，迁移过来的 2 张卡在注入文本里 **0 次**出现，root store 卡数为 0 |
+| **迁移实测**（真实 store 的副本，原 store 只读） | 副本启动前：`topics/` 2 张卡 + `index.md`；一次启动后：`topics/` 0 张、`index.md` 消失、`projects/legacy-global/topics/` 2 张；`config.json` 的 sha256 前后一致；第二次启动仍为 2 张（幂等）；root store 卡数为 0。**同一实测里「2 张卡在 6 个会话的注入文本中 0 次出现」是已知失效，不是验收通过**：`legacy-global` 由占位 cwd 写入，不是任何真实 cwd 能生成的 slug，所以这两张卡可列出、可删除、永远不可注入。归位入口见 §4.11（`POST /move` + 设置页「移动到项目…」） |
 | **老状态文件容错**（同一副本） | 副本的 `distill-state.json` 仍带着 `sessions`（17 条旧会话进度）/ `activity`（20 条旧运行记录）：一次写入后这两个键消失、`curated` 保留、台账照常追加 |
 
 **残余风险**
@@ -785,6 +785,38 @@ npm run check:graph        # 插件图与套件名册规则
 | 手动 pass 期间整段设置页处于 busy | 与既有单飞语义一致（避免删除项目与 pass 交错），代价是这一两分钟内开关也点不动 |
 | 客户端渲染没有自动化覆盖 | 本插件没有 DOM/React 测试面：按钮位置、进行中标签、结果后的刷新只有代码审查 + 类型检查 + 路由用例，出片前值得真机点一遍（分别在有会话与无会话时点，验证 `completed` 与 `no-route` 两种提示） |
 
+### 4.11 N legacy-global 归位、注入量埋点与选择轮转（2026-11-08）
+
+**来源**：2026-11-08 的审查（阿梨的复核、雪洛的跨项目方案、林舒的用例口径）。三条判定：`legacy-global` 是死胡同（§4.8 把「注入 0 次」误记为验收证据）；正文预算只约束正文，索引与 guidelines 不在账内；`selectCards` 分块串行让尾部三类正文永久为 0。
+
+| 项 | 改动 | 落点 |
+|---|---|---|
+| P0-1 归位 | `MemoryStore.moveCardTo()`（pin 跟随、源端留归档副本、同名不静默覆盖）；`POST /move`（目标必须已是项目、`legacy-global` 只出不进、同名 409 后 `overwrite:true` 重发）；设置页每张卡「移动到项目…」+ 未归位横幅；`LEGACY_GLOBAL_SLUG` 下沉到 `types.ts` 供浏览器半边复用 | `memory-store.ts`、`routes.ts`、`types.ts`、`client/memory-section.tsx` |
+| P0-2 埋点 | `assembleMemoryText()` 在文本旁返回字符账（guidelines / 索引 / 正文 / 合计 / 卡数 / 索引行数 / 截断），`renderMemoryText` 签名不变；`InjectionMetricsRing` 内存环形 20 条；`/status` 的 `injection`（无数据时**缺键**而不是 `undefined`）；设置页显示最近一次与均值 | `prompt.ts`、`injection-metrics.ts`、`index.ts`、`routes.ts`、`types.ts` |
+| P1 轮转 | `priority` 从「分类分块拼接」改为按配额封顶后的**轮转**；pinned 与 malformed 仍置顶 | `prompt.ts` |
+| 文档 | 本节 + §2 冷却时间（10 → 3 分钟，以 `curator.ts:94` 为准）+ §4.8 措辞 | 本文件 |
+
+**版本**：0.10.2 → **0.10.3**。
+
+**验收证据（本次实跑：未改动源码的临时 bundle 探针 + 单测）**
+
+| 命令 | 结果 |
+|---|---|
+| `npx tsc --noEmit` | 通过，无输出 |
+| `npm test` | `tests 199 / pass 199 / fail 0`（新增 6 条：`/move` 的六道闸门 + pin 跟随 + 覆盖确认、`/status` 埋点、五类轮转、轮转下的 pin 完整性、账目与注入文本一致、环形缓冲上限；另更新路由清单 1 条以纳入 `/move`） |
+| 60 张满长卡（5 类 × 12，body 370、summary 40）**改前**探针 | `bodiesInjectedByCategory = {preference: 3, convention: 3}`，`totalChars 10764`，`indexLines 50` |
+| 同一夹具**改后**探针 | `{preference: 2, convention: 1, decision: 1, lesson: 1, fact: 1}`；`metrics = {guidelinesChars 3174, indexChars 4880, bodyChars 2508, totalChars 10740, cardCount 6, indexLines 50, truncated true}` |
+| `npx esbuild src/index.ts`、`src/client.ts`（`--packages=external`） | 两半均能产出（冒烟，不等于仓库根 `build.mjs` 的正式产物） |
+
+**残余风险**
+
+| 风险 | 说明 |
+|---|---|
+| 目标项目必须先有记忆目录 | `POST /move` 只接受已存在的项目（否则 `route.projectUnknown`）：移动不会创建目录，但也意味着从未保存过记忆的项目不能直接作为归位目标，需要先去该项目存一条 |
+| 归位会在源端留下归档副本 | 移动走 `remove()`，源项目的「已删除的记忆」会多一条同名副本（可恢复、可按天清理）；换来的是「卡去哪了」可回退 |
+| 埋点只在内存里 | 重启后 `/status` 变回「无数据」；不落盘是刻意的：每轮装配都写文件会把 I/O 放上提示词路径 |
+| 客户端渲染仍无自动化覆盖 | 与 §4.10 相同：横幅、下拉、「覆盖并移动」二次确认只有类型检查与代码审查，出片前需真机点一遍 |
+
 ## 5. 明确不做的事
 
 | 不做 | 理由 |
@@ -821,3 +853,4 @@ npm run check:graph        # 插件图与套件名册规则
 | 2026-09-21 | J 退役收尾实施完成（插件 0.8.9 → 0.8.10），记录见 §4.8：删除只为退役全局作用域存在的路由/字段与客户端分支，删除 distiller 抽取链路（`src/distiller.ts` 整文件）与 distill 游标/审计状态，删掉主题已消失的 29 条用例（另改写 2 条作用域用例、新增 1 条老状态文件容错用例）。两份文档补 supersede 说明，`docs/ARCHITECTURE.md` 的插件行同步 |
 | 2026-09-21 | L 读侧纪律与索引增长策略实施完成（插件 0.8.10 → 0.9.0），记录见 §4.9：索引溢出提示改为可执行的整理指令、guidelines 补「卡片是写入那一刻的快照」的读侧纪律、guidance 类卡补「结论 → 理由 → 边界」形状；新增 3 条用例。版本号约定改为补丁位单位数进位（`0.8.9` → `0.9.0`，不再堆叠 `0.8.10`），规则写入 `plugins/AGENTS.md` §5 与 `docs/agents/build-and-release.md` §3 |
 | 2026-09-21 | M 后台整理的任务说明与手动触发实施完成（插件 0.9.0 → 0.9.1 → 0.9.2），记录见 §4.10：curator 的 brief 补六条整理任务（矛盾卡以较新者为准、工作日志里的教训改写而不是只删、废话类别补全、保留清单、自洽、反捏造），并新增**手动触发**——`curateNow()` 跳过程序性门控（卡数下限、指纹、冷却、空转退避、后台开关）但保留全部落盘守卫，`POST /curate` + 设置页项目行的「整理」按钮按状态回报结果，自动与手动共用一个单飞标记。新增 7 条用例（1 条 brief + 5 条 `curateNow` + 2 条路由） |
+| 2026-11-08 | N 归位 / 埋点 / 轮转实施完成（插件 0.10.2 → 0.10.3），记录见 §4.11：`legacy-global` 获得卡片级 `POST /move` 与设置页「移动到项目…」（此前可列出、可删除、永远不可注入），注入量加了字符账并通过 `/status` 暴露（埋点不落盘），`selectCards` 的 `priority` 改轮转（改前实测 decision/lesson/fact 正文注入量为 0）。新增 6 条用例，更新路由清单 1 条 |
