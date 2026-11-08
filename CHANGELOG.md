@@ -11,13 +11,13 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 ## [v0.18.7] - 2026-11-08
 
 ### 中文
-- 供应商管理页（原「模型高级设置」）重做：照搬 dsh-provider-studio 的面板样式，页面改为 供应商列表 → 模板选择 → 创建 → 单个供应商卡片页；模型清单（或目录覆盖）与高级配置共用一次保存，返回列表前确认未保存改动，卡片内可重命名、删除供应商、设置或清除 API Key。
+- 供应商管理页（原「模型高级设置」）重做：改为 供应商列表 → 模板选择 → 创建 → 单个供应商卡片页；模型清单（或目录覆盖）与高级配置共用一次保存，返回列表前确认未保存改动，卡片内可重命名、删除供应商、设置或清除 API Key。
 - 列表按「已配置 / 未配置」分段，已配置的供应商可置顶（顺序持久化）；切换设置页时内容区自动回到顶部。
 - 新建供应商可从 218 个 models.dev 模板（或自定义端点）预填；供应商行显示随包的 188 个品牌 logo（新增 google / microsoft / aws / antgroup）。
 - 每个模型行可测连通性：新增 host 探针路由发送真实最小请求，密钥不出主机、拒绝跨源重定向、20 秒超时，失败按错误码本地化。
 
 ### English
-- Provider manager (formerly "Advanced models") reworked: ports dsh-provider-studio's panel design and turns the page into a provider list → template picker → create → per-provider card; the model list (or catalog overrides) and the advanced configuration share one save, leaving the list asks before discarding a draft, and the card can rename/delete the provider and set or clear its API Key.
+- Provider manager (formerly "Advanced models") reworked: the page is now a provider list → template picker → create → per-provider card; the model list (or catalog overrides) and the advanced configuration share one save, leaving the list asks before discarding a draft, and the card can rename/delete the provider and set or clear its API Key.
 - The list is split into configured and unconfigured providers, configured rows can be pinned to the top (order persisted), and switching settings sections returns the pane to the top.
 - A new provider can be prefilled from 218 models.dev templates (or a hand-typed endpoint); rows show the 188 bundled brand logos (google / microsoft / aws / antgroup added).
 - Each model row can run a connectivity test: a new host probe route sends the real minimal request without the key leaving the host, refuses cross-origin redirects and times out at 20 s; failures are localized by code.
