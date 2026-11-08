@@ -1,72 +1,48 @@
 /**
- * The advanced route parameters card.
+ * The advanced route parameters of one provider.
  *
- * A fourth card beside 路由默认推理档 / 重试策略 / 自定义请求头, on the same page and
- * for the same route: it carries the profile fields those three do not — the
- * credential variable, thinking budgets, request timeouts, route capability
- * defaults, cache/transport preference and the image budgets — which until now had
- * no editing surface anywhere in the application.
+ * This is the provider's own half of the page: the credential reference,
+ * reasoning default and thinking budgets, timeouts, retry policy, capability
+ * defaults, cache/transport preference, image budgets and custom request
+ * headers — the profile fields the official Models page has no editor for.
  *
- * Shape of the surface, and why:
+ * Two pieces, split so the page can own one Save for the whole provider:
  *
- *   - **Groups, not one column of twenty inputs.** Grouped by the question they
- *     answer, a user finds the knob by intent instead of by scanning.
- *   - **One save, and only what the user touched.** The operations name just the
- *     changed keys (`route-fields.ts`), so a save can never rewrite an unrelated
- *     field from a stale view — and clearing a field writes an `unset`, which is
- *     what restores the inherited value.
- *   - **A conflict never discards the draft.** It reloads for a fresh revision and
- *     retries once; a second conflict asks, keeping the input until the user says
- *     otherwise.
+ *   - {@link useRouteAdvancedDraft} holds the working copy, the touched set and
+ *     the live credential status. Nothing is written here.
+ *   - {@link RouteAdvancedFields} renders the sections, laid out in the source
+ *     design's grammar: one section label, its hint, then a responsive grid of
+ *     labelled fields. The page's footer saves every touched key as a path op
+ *     (`route-fields.ts`), so a save can never rewrite an unrelated field from a
+ *     stale view, and clearing a field writes an `unset`, which is what restores
+ *     the inherited value.
  *
- * The seed is the USER layer, exactly like the three cards beside it: this page
- * edits the user's own overrides, and "（继承默认）" is the honest label for a field
- * the user has not set even when a lower layer carries a value.
+ * The seed is the USER layer: this page edits the user's own overrides, and an
+ * empty control is the honest label for a field the user has not set even when a
+ * lower layer carries a value.
  *
  * @module @dsh-app/plugin-client-ui/client/models-advanced/route-advanced
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
-import { getPath, setPath, deletePath, REASONING_LEVELS, type ModelDraft } from './fields.ts'
-import { message, messageText } from './messages.ts'
-import type { PageMessage, Translate } from './messages.ts'
-import type { AdvancedModelsRemote, AdvancedModelsStore, RouteRow } from './store.ts'
-import { writeOps } from './store.ts'
+import { getPath, setPath, deletePath, REASONING_LEVELS, MODALITIES, type ModelDraft } from './fields.ts'
+import { messageText } from './messages.ts'
+import type { Translate } from './messages.ts'
+import type { AdvancedModelsRemote, RouteRow } from './store.ts'
 import {
   CACHE_RETENTION, TRANSPORT_CHOICES,
-  managedSubset, normalizeManaged, overriddenKeys, retryFailure, routeOps,
+  managedSubset, overriddenKeys, retryFailure,
 } from './route-fields.ts'
-import type { RoutePathOp } from './route-fields.ts'
-import { CheckField, FieldGroup, HeadersField, ScalarField } from './ui.tsx'
+import { AdvancedField, Chip, HeadersField } from './ui.tsx'
 import type { AdvancedModelsKey } from './locales.ts'
 
-/** Everything the card receives; the same shape its three siblings take. */
-export interface RouteAdvancedCardProps {
-  /** The route being edited (its settings path addresses every write). */
-  readonly row: RouteRow
-  /** Read-only surface, or a write in flight elsewhere on the page. */
-  readonly disabled: boolean
-  /** The page's Remote face. */
-  readonly api: AdvancedModelsRemote
-  /** The page's namespace-bound translate. */
-  readonly t: Translate
-  /** The route namespace's view (revision for the write fence). */
-  readonly namespace: SettingsNamespaceView | undefined
-  /** The page's store, for the reload after a conflict. */
-  readonly controller: AdvancedModelsStore
-}
-
-/** One control's spec, so the groups stay declarative. */
+/** One control's spec, so the sections stay declarative. */
 interface FieldSpec {
   /** Profile key this control writes. */
   key: string
   /** Locale key of the label. */
   labelKey: AdvancedModelsKey
-  /** Locale key of the hint under the control. */
-  hintKey: AdvancedModelsKey
   /** Control kind. */
   kind: 'count' | 'duration' | 'retries' | 'ratio' | 'text' | 'credential' | 'enum'
   /** Accepted values for an enum. */
@@ -75,137 +51,154 @@ interface FieldSpec {
   within?: readonly string[]
 }
 
-/** One group of fields. */
-interface GroupSpec {
+/** One section of the advanced block. */
+interface SectionSpec {
   /** Stable id, also the control id prefix. */
   id: string
-  /** Locale key of the title. */
+  /** Locale key of the section label. */
   titleKey: AdvancedModelsKey
-  /** Locale key of the group description. */
-  hintKey: AdvancedModelsKey
-  /** Every profile key this group shows a value for, custom rows included. */
+  /** Every profile key this section shows a value for, custom rows included. */
   keys: readonly string[]
   /** The scalar controls. */
   fields: readonly FieldSpec[]
 }
 
-/** The groups, in render order. */
-const GROUPS: readonly GroupSpec[] = [
+/** The sections, in render order — the source design's section grammar: a
+ *  quiet label, then a responsive grid of labelled fields, no prose. */
+const SECTIONS: readonly SectionSpec[] = [
   {
     id: 'credential',
     titleKey: 'adv.pg.g.credential',
-    hintKey: 'adv.pg.g.credential.hint',
     keys: ['apiKeyEnv'],
     fields: [
-      { key: 'apiKeyEnv', labelKey: 'adv.pg.apiKeyEnv', hintKey: 'adv.pg.apiKeyEnv.hint', kind: 'credential' },
+      { key: 'apiKeyEnv', labelKey: 'adv.pg.apiKeyEnv', kind: 'credential' },
     ],
   },
   {
     id: 'reasoning',
     titleKey: 'adv.pg.g.reasoning',
-    hintKey: 'adv.pg.g.reasoning.hint',
     keys: ['reasoning', 'thinkingBudgets'],
     fields: [
-      { key: 'reasoning', labelKey: 'adv.reasoningCard.field', hintKey: 'adv.reasoningCard.hint', kind: 'enum', choices: REASONING_LEVELS },
-      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.minimal', hintKey: 'adv.pg.budget.hint', kind: 'count', within: ['minimal'] },
-      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.low', hintKey: 'adv.pg.budget.hint', kind: 'count', within: ['low'] },
-      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.medium', hintKey: 'adv.pg.budget.hint', kind: 'count', within: ['medium'] },
-      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.high', hintKey: 'adv.pg.budget.hint', kind: 'count', within: ['high'] },
+      { key: 'reasoning', labelKey: 'adv.reasoningCard.field', kind: 'enum', choices: REASONING_LEVELS },
+      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.minimal', kind: 'count', within: ['minimal'] },
+      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.low', kind: 'count', within: ['low'] },
+      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.medium', kind: 'count', within: ['medium'] },
+      { key: 'thinkingBudgets', labelKey: 'adv.pg.budget.high', kind: 'count', within: ['high'] },
     ],
   },
   {
     id: 'retry',
     titleKey: 'adv.pg.g.retry',
-    hintKey: 'adv.retry.hint',
     keys: ['retryPolicy'],
     fields: [
-      { key: 'retryPolicy', labelKey: 'adv.retry.mode', hintKey: 'adv.pg.retry.modeHint', kind: 'enum', choices: ['normal', 'always'], within: ['mode'] },
-      { key: 'retryPolicy', labelKey: 'adv.retry.maxRetries', hintKey: 'adv.pg.retry.maxRetriesHint', kind: 'retries', within: ['maxRetries'] },
-      { key: 'retryPolicy', labelKey: 'adv.retry.initialDelay', hintKey: 'adv.pg.retry.backoffHint', kind: 'duration', within: ['backoff', 'initialDelayMs'] },
-      { key: 'retryPolicy', labelKey: 'adv.retry.maxDelay', hintKey: 'adv.pg.retry.backoffHint', kind: 'duration', within: ['backoff', 'maxDelayMs'] },
-      { key: 'retryPolicy', labelKey: 'adv.retry.jitter', hintKey: 'adv.pg.retry.backoffHint', kind: 'ratio', within: ['backoff', 'jitterRatio'] },
+      { key: 'retryPolicy', labelKey: 'adv.retry.mode', kind: 'enum', choices: ['normal', 'always'], within: ['mode'] },
+      { key: 'retryPolicy', labelKey: 'adv.retry.maxRetries', kind: 'retries', within: ['maxRetries'] },
+      { key: 'retryPolicy', labelKey: 'adv.retry.initialDelay', kind: 'duration', within: ['backoff', 'initialDelayMs'] },
+      { key: 'retryPolicy', labelKey: 'adv.retry.maxDelay', kind: 'duration', within: ['backoff', 'maxDelayMs'] },
+      { key: 'retryPolicy', labelKey: 'adv.retry.jitter', kind: 'ratio', within: ['backoff', 'jitterRatio'] },
     ],
   },
   {
     id: 'timeout',
     titleKey: 'adv.pg.g.timeout',
-    hintKey: 'adv.pg.g.timeout.hint',
     keys: ['timeoutMs', 'websocketConnectTimeoutMs', 'streamIdleTimeoutMs'],
     fields: [
-      { key: 'timeoutMs', labelKey: 'adv.pg.timeoutMs', hintKey: 'adv.pg.timeoutMs.hint', kind: 'duration' },
-      { key: 'websocketConnectTimeoutMs', labelKey: 'adv.pg.wsTimeoutMs', hintKey: 'adv.pg.wsTimeoutMs.hint', kind: 'duration' },
-      { key: 'streamIdleTimeoutMs', labelKey: 'adv.pg.idleTimeoutMs', hintKey: 'adv.pg.idleTimeoutMs.hint', kind: 'duration' },
+      { key: 'timeoutMs', labelKey: 'adv.pg.timeoutMs', kind: 'duration' },
+      { key: 'websocketConnectTimeoutMs', labelKey: 'adv.pg.wsTimeoutMs', kind: 'duration' },
+      { key: 'streamIdleTimeoutMs', labelKey: 'adv.pg.idleTimeoutMs', kind: 'duration' },
     ],
   },
   {
     id: 'defaults',
     titleKey: 'adv.pg.g.defaults',
-    hintKey: 'adv.pg.g.defaults.hint',
     keys: ['defaultContextWindow', 'defaultMaxTokens', 'defaultInput'],
     fields: [
-      { key: 'defaultContextWindow', labelKey: 'adv.pg.defaultContextWindow', hintKey: 'adv.pg.defaultContextWindow.hint', kind: 'count' },
-      { key: 'defaultMaxTokens', labelKey: 'adv.pg.defaultMaxTokens', hintKey: 'adv.pg.defaultMaxTokens.hint', kind: 'count' },
+      { key: 'defaultContextWindow', labelKey: 'adv.pg.defaultContextWindow', kind: 'count' },
+      { key: 'defaultMaxTokens', labelKey: 'adv.pg.defaultMaxTokens', kind: 'count' },
     ],
   },
   {
     id: 'request',
     titleKey: 'adv.pg.g.request',
-    hintKey: 'adv.pg.g.request.hint',
     keys: ['cacheRetention', 'transport', 'maxRequestImageBytes', 'requestImagePixelBudget', 'requestImageMaxBytes'],
     fields: [
-      { key: 'cacheRetention', labelKey: 'adv.pg.cacheRetention', hintKey: 'adv.pg.cacheRetention.hint', kind: 'enum', choices: CACHE_RETENTION },
-      { key: 'transport', labelKey: 'adv.pg.transport', hintKey: 'adv.pg.transport.hint', kind: 'enum', choices: TRANSPORT_CHOICES },
-      { key: 'maxRequestImageBytes', labelKey: 'adv.pg.maxImageBytes', hintKey: 'adv.pg.maxImageBytes.hint', kind: 'count' },
-      { key: 'requestImagePixelBudget', labelKey: 'adv.pg.pixelBudget', hintKey: 'adv.pg.pixelBudget.hint', kind: 'count' },
-      { key: 'requestImageMaxBytes', labelKey: 'adv.pg.imageMaxBytes', hintKey: 'adv.pg.imageMaxBytes.hint', kind: 'count' },
+      { key: 'cacheRetention', labelKey: 'adv.pg.cacheRetention', kind: 'enum', choices: CACHE_RETENTION },
+      { key: 'transport', labelKey: 'adv.pg.transport', kind: 'enum', choices: TRANSPORT_CHOICES },
+      { key: 'maxRequestImageBytes', labelKey: 'adv.pg.maxImageBytes', kind: 'count' },
+      { key: 'requestImagePixelBudget', labelKey: 'adv.pg.pixelBudget', kind: 'count' },
+      { key: 'requestImageMaxBytes', labelKey: 'adv.pg.imageMaxBytes', kind: 'count' },
     ],
   },
   {
     id: 'headers',
     titleKey: 'adv.headers.title',
-    hintKey: 'adv.headers.hint',
     keys: ['headers'],
-    // The rows are a child component of the field itself, not scalar controls.
+    // The rows are a child component of the section itself, not scalar controls.
     fields: [],
   },
 ]
 
-/**
- * The advanced parameters card.
- * @param props - the route, the page's face and the write fence.
- * @returns the card.
- */
-export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
-  const { row, disabled, api, t, namespace, controller } = props
-  const [draft, setDraft] = useState<ModelDraft | null>(null)
-  const [touched, setTouched] = useState<ReadonlySet<string>>(new Set())
-  /** Bumped when the draft is dropped (saved or discarded).
-   *
-   *  `HeadersField` keeps its rows in local state — a half-typed header has to stay
-   *  on screen to be fixed — so the table only re-seeds when it is remounted. The
-   *  key used to be derived from `touched.has('headers')`, which also flipped on the
-   *  FIRST edit: adding a row to an empty table remounted the component immediately
-   *  and the row vanished. This counter is the signal the key actually needs. */
-  const [draftEpoch, setDraftEpoch] = useState(0)
-  const [busy, setBusy] = useState(false)
-  const [failure, setFailure] = useState<PageMessage | undefined>(undefined)
-  const [notice, setNotice] = useState<PageMessage | undefined>(undefined)
-  const [credentials, setCredentials] = useState<Record<string, { configured: boolean, source?: string }>>({})
+/** The credential status of one reference, as `credentials.describe` answers. */
+export interface CredentialState {
+  readonly configured: boolean
+  readonly source?: string
+}
 
-  // The user layer is this card's baseline, the same way the three cards beside it
-  // read their own key out of `row.userProfile`.
+/** What the page needs from the provider's advanced draft. */
+export interface RouteAdvancedDraft {
+  /** The working copy of the managed keys (user layer, plus edits). */
+  readonly working: ModelDraft
+  /** Keys the user changed or reset in this session. */
+  readonly touched: ReadonlySet<string>
+  /** Bumped whenever the draft is dropped, to re-seed the header table. */
+  readonly epoch: number
+  /** The overridden keys of the stored user layer. */
+  readonly overridden: ReadonlySet<string>
+  /** Live credential status of `working.apiKeyEnv`, when it names one. */
+  readonly credential: CredentialState | undefined
+  /** Change one key (or one nested key) and mark it touched. */
+  readonly edit: (key: string, within: readonly string[] | undefined, value: unknown) => void
+  /** Drop the draft, the touched set and the header table. */
+  readonly reset: () => void
+}
+
+/**
+ * Hold the advanced draft of one provider.
+ *
+ * The baseline is the user layer, so `working` is what this page would write,
+ * not what the composed profile currently resolves to. A selection change
+ * unmounts the caller (the detail is keyed by route), which is what re-seeds it.
+ *
+ * @param row - the route being edited.
+ * @param api - the page's Remote face, for the credential status.
+ * @param fallbackRefs - the adapter's native-auth variables, used when the
+ *   profile names none (a shipped route).
+ * @returns the draft and its operations.
+ */
+export function useRouteAdvancedDraft(
+  row: RouteRow,
+  api: AdvancedModelsRemote,
+  fallbackRefs: readonly string[] = [],
+): RouteAdvancedDraft {
   const base = useMemo(() => managedSubset(row.userProfile), [row.userProfile])
   const overridden = useMemo(() => overriddenKeys(row.userProfile), [row.userProfile])
+  const [draft, setDraft] = useState<ModelDraft | null>(null)
+  const [touched, setTouched] = useState<ReadonlySet<string>>(new Set())
+  const [epoch, setEpoch] = useState(0)
+  const [credentials, setCredentials] = useState<Record<string, CredentialState>>({})
   const working = draft ?? base
-  const fieldDisabled = disabled || busy
 
-  const reference = typeof working.apiKeyEnv === 'string' && working.apiKeyEnv !== ''
-    ? working.apiKeyEnv
-    : undefined
+  // The profile's own variable is exclusive: native auth applies only when the
+  // profile names none. When it does name one, that single reference is all the
+  // page may report.
+  const candidates = typeof working.apiKeyEnv === 'string' && working.apiKeyEnv !== ''
+    ? [working.apiKeyEnv]
+    : fallbackRefs.filter(ref => ref !== '')
+  const candidateKey = candidates.join('\u0000')
   useEffect(() => {
-    if (reference === undefined) return undefined
+    if (candidateKey === '') return undefined
     let live = true
-    void api.credentials.describe([reference]).then(
+    void api.credentials.describe(candidateKey.split('\u0000')).then(
       (response) => {
         if (!live) return
         setCredentials(response.ok ? response.value : {})
@@ -213,7 +206,7 @@ export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
       () => { if (live) setCredentials({}) },
     )
     return () => { live = false }
-  }, [api, reference])
+  }, [api, candidateKey])
 
   const edit = useCallback((key: string, within: readonly string[] | undefined, value: unknown): void => {
     setDraft((current) => {
@@ -233,182 +226,141 @@ export function RouteAdvancedCard(props: RouteAdvancedCardProps): ReactNode {
       return next
     })
     setTouched((current) => new Set(current).add(key))
-    setNotice(undefined)
-    setFailure(undefined)
   }, [base])
 
-  const save = useCallback(async (): Promise<void> => {
-    // The retry policy is validated as a whole before anything is written: the
-    // form can hold a pair the schema resolves differently (initial 30000 beside a
-    // blank max), and the value that goes on the wire is the one the schema's own
-    // reader builds.
-    const normalized = normalizeManaged(working)
-    if (!normalized.ok) {
-      setFailure(normalized.failure)
-      return
-    }
-    const ops = routeOps(row.entry.settingsPath, normalized.draft, touched)
-    if (ops.length === 0) return
-    setBusy(true)
-    setFailure(undefined)
-    let outcome = await writeOps(api, ops as readonly SettingsPathOpView[], namespace?.revision)
-    if (outcome.kind === 'conflict') {
-      // Someone else wrote first. The operations name only the keys this user
-      // touched, so reloading for a fresh revision and re-applying them is exactly
-      // what was asked for — and it beats throwing the draft away. One automatic
-      // retry; a second conflict means two surfaces are being edited at once.
-      await controller.load()
-      const fresh = controller.store.getSnapshot().namespaces.get(row.entry.settingsNs)?.revision
-      outcome = await writeOps(api, ops as readonly SettingsPathOpView[], fresh)
-    }
-    setBusy(false)
-    if (outcome.kind === 'ok') {
-      setDraft(null)
-      setTouched(new Set())
-      setNotice(message('adv.pg.saved'))
-      // AFTER the reload, never before: the remount reads `working` on mount, so
-      // bumping first re-seeded the table from the PRE-save server state and left it
-      // showing the old headers — and editing from there wrote them back over the
-      // save that had just succeeded.
-      await controller.load()
-      setDraftEpoch((value) => value + 1)
-      return
-    }
-    if (outcome.kind === 'conflict') {
-      setFailure(message('adv.pg.conflict'))
-      return
-    }
-    setFailure(outcome.message)
-  }, [api, controller, namespace, row.entry.settingsNs, row.entry.settingsPath, touched, working])
+  const reset = useCallback((): void => {
+    setDraft(null)
+    setTouched(new Set())
+    setEpoch((value) => value + 1)
+  }, [])
 
-  const configuredCount = GROUPS.reduce(
-    (total, group) => total + group.keys.filter(key => working[key] !== undefined).length,
-    0,
-  )
-  const dirty = touched.size
+  return {
+    working,
+    touched,
+    epoch,
+    overridden,
+    // The adapter reads the native list in order, so the first variable that
+    // resolves is the one a request would actually carry.
+    credential: candidates.map(ref => credentials[ref]).find(state => state?.configured === true)
+      ?? (candidates.length === 0 ? undefined : credentials[candidates[0]]),
+    edit,
+    reset,
+  }
+}
+
+/** Props of {@link RouteAdvancedFields}. */
+export interface RouteAdvancedFieldsProps {
+  /** The draft, from {@link useRouteAdvancedDraft}. */
+  readonly draft: RouteAdvancedDraft
+  /** Read-only surface, or a write in flight elsewhere on the page. */
+  readonly disabled: boolean
+  /** The page's namespace-bound translate. */
+  readonly t: Translate
+}
+
+/**
+ * Render the advanced sections of a provider.
+ * @param props - see {@link RouteAdvancedFieldsProps}.
+ * @returns the sections.
+ */
+export function RouteAdvancedFields({ draft, disabled, t }: RouteAdvancedFieldsProps): ReactNode {
+  const { working, credential, edit, epoch } = draft
   const retryError = retryFailure(working.retryPolicy)
-  const credentialState = reference === undefined ? undefined : credentials[reference]
+  const defaultInput = Array.isArray(working.defaultInput)
+    ? working.defaultInput.filter((value): value is string => typeof value === 'string')
+    : []
 
   return (
-    <details className="dshAma-card dshAma-retryCard">
-      <summary className="dshAma-cardSummary">
-        {t('adv.pg.title')}
-        {configuredCount === 0
-          ? t('adv.pg.summaryDefault')
-          : t('adv.pg.summaryCount', { count: configuredCount })}
-      </summary>
-      <div className="dshAma-cardBody">
-        <p className="dshAma-hint">{t('adv.pg.intro')}</p>
-        {GROUPS.map(group => (
-          <FieldGroup
-            key={group.id}
-            title={t(group.titleKey)}
-            hint={t(group.hintKey)}
-            summary={groupSummary(group, working, t)}
-            forceOpen={group.fields.some(field => touched.has(field.key))
-              || (group.id === 'headers' && touched.has('headers'))}
-            error={group.id === 'retry' && retryError !== undefined ? messageText(retryError, t) : undefined}
-          >
-            {group.id === 'credential' ? (
-              <p className="dshAma-hint">
-                {credentialState === undefined
-                  ? t('adv.pg.credential.unknown')
-                  : credentialState.configured
-                    ? t('adv.pg.credential.configured', { source: credentialState.source ?? '' })
-                    : t('adv.pg.credential.missing')}
-              </p>
-            ) : null}
-            {group.fields.map(field => (
-              <ScalarField
-                key={`${field.key}:${(field.within ?? []).join('.')}`}
-                id={`dshAma-adv-${group.id}-${field.key}-${(field.within ?? []).join('-')}`}
-                label={t(field.labelKey)}
-                hint={t(field.hintKey)}
-                value={field.within === undefined ? working[field.key] : getPath(working[field.key], field.within)}
-                kind={field.kind}
-                choices={field.choices}
-                choiceLabel={field.key === 'retryPolicy' && field.within?.[0] === 'mode'
-                  ? (choice) => (choice === 'always' ? t('adv.retry.modeAlways') : t('adv.retry.modeNormal'))
-                  : undefined}
-                disabled={fieldDisabled}
-                invalidCopy={t('adv.pg.numberInvalid')}
-                inheritLabel={t('adv.pg.inherit')}
-                overridden={overridden.has(field.key)}
-                overriddenLabel={t('adv.pg.overridden')}
-                resetLabel={t('adv.pg.reset')}
-                onCommit={(next) => { edit(field.key, field.within, next) }}
-              />
-            ))}
-            {group.id === 'headers' ? (
-              <HeadersField
-                key={`headers:${row.entry.provider}:${String(draftEpoch)}`}
-                t={t}
-                value={working.headers}
-                disabled={fieldDisabled}
-                onChange={(next) => { edit('headers', undefined, next) }}
-              />
-            ) : null}
-            {group.id === 'defaults' ? (
-              <div className="dshAma-field">
-                <span className="dshAma-fieldLabel">{t('adv.pg.defaultInput')}</span>
-                <div className="dshAma-inline">
-                  {(['text', 'image'] as const).map(modality => (
-                    <CheckField
-                      key={modality}
-                      label={modality === 'text' ? t('adv.pg.modality.text') : t('adv.pg.modality.image')}
-                      checked={Array.isArray(working.defaultInput)
-                        && (working.defaultInput as readonly unknown[]).includes(modality)}
-                      disabled={fieldDisabled}
-                      onChange={(on) => {
-                        const current = Array.isArray(working.defaultInput)
-                          ? (working.defaultInput as readonly string[]).filter(value => value !== modality)
-                          : []
-                        const next = on ? [...current, modality] : current
-                        edit('defaultInput', undefined, next.length === 0 ? undefined : next)
-                      }}
-                    />
-                  ))}
+    <>
+      {SECTIONS.map(section => (
+        <section className="dshAma-advSection" key={section.id}>
+          <span className="dshAma-advLabel">{t(section.titleKey)}</span>
+          {section.id === 'credential' ? (
+            <p className="dshAma-hint">
+              {credential === undefined
+                ? t('adv.pg.credential.unknown')
+                : credential.configured
+                  ? t('adv.pg.credential.configured', { source: credential.source ?? '' })
+                  : t('adv.pg.credential.missing')}
+            </p>
+          ) : null}
+          {section.fields.length === 0 ? null : (
+            <div className="dshAma-formGrid">
+              {section.fields.map(field => (
+                <AdvancedField
+                  key={`${field.key}:${(field.within ?? []).join('.')}`}
+                  id={`dshAma-adv-${section.id}-${field.key}-${(field.within ?? []).join('-')}`}
+                  label={t(field.labelKey)}
+                  value={field.within === undefined ? working[field.key] : getPath(working[field.key], field.within)}
+                  kind={field.kind}
+                  choices={field.choices}
+                  choiceLabel={field.key === 'retryPolicy' && field.within?.[0] === 'mode'
+                    ? (choice) => (choice === 'always' ? t('adv.retry.modeAlways') : t('adv.retry.modeNormal'))
+                    : undefined}
+                  disabled={disabled}
+                  invalidCopy={t('adv.pg.numberInvalid')}
+                  inheritLabel={t('adv.pg.inherit')}
+                  onCommit={(next) => { edit(field.key, field.within, next) }}
+                />
+              ))}
+              {section.id === 'defaults' ? (
+                <div className="dshAma-field">
+                  <span className="dshAma-fieldLabel">{t('adv.pg.defaultInput')}</span>
+                  <div className="dshAma-chipRow">
+                    {MODALITIES.map(modality => (
+                      <Chip
+                        key={modality}
+                        on={defaultInput.includes(modality)}
+                        disabled={disabled}
+                        onClick={() => {
+                          const next = defaultInput.includes(modality)
+                            ? defaultInput.filter(value => value !== modality)
+                            : [...defaultInput, modality]
+                          edit('defaultInput', undefined, next.length === 0 ? undefined : next)
+                        }}
+                      >{modality === 'text' ? t('adv.pg.modality.text') : t('adv.pg.modality.image')}</Chip>
+                    ))}
+                  </div>
                 </div>
-                <p className="dshAma-fieldHint">{t('adv.pg.defaultInput.hint')}</p>
-              </div>
-            ) : null}
-          </FieldGroup>
-        ))}
-
-        {failure === undefined ? null : <p className="dshAma-error">{messageText(failure, t)}</p>}
-        {notice === undefined ? null : <p className="dshAma-notice">{messageText(notice, t)}</p>}
-        <div className="dshAma-footer">
-          <Button
-            type="button" variant="primary" size="sm"
-            disabled={fieldDisabled || dirty === 0}
-            onClick={() => { void save() }}
-          >{busy ? t('adv.save.busy') : t('adv.pg.save')}</Button>
-          <Button
-            type="button" variant="outline" size="sm"
-            disabled={fieldDisabled || dirty === 0}
-            onClick={() => { setDraft(null); setTouched(new Set()); setDraftEpoch((value) => value + 1); setNotice(undefined); setFailure(undefined) }}
-          >{t('adv.pg.reset')}</Button>
-          {dirty === 0 ? null : <span className="dshAma-hint">{t('adv.pg.dirty', { count: dirty })}</span>}
-        </div>
-      </div>
-    </details>
+              ) : null}
+            </div>
+          )}
+          {section.id === 'retry' && retryError !== undefined
+            ? <span className="dshAma-rowError" role="status">{messageText(retryError, t)}</span>
+            : null}
+          {section.id === 'headers' ? (
+            <HeadersField
+              key={`headers:${String(epoch)}`}
+              t={t}
+              value={working.headers}
+              disabled={disabled}
+              onChange={(next) => { edit('headers', undefined, next) }}
+            />
+          ) : null}
+        </section>
+      ))}
+    </>
   )
 }
 
 /**
- * The collapsed group's summary line.
- * @param group - the group definition.
+ * How many of the sections' own keys carry a value, for the block header's
+ * badge. Scoping it to the section keys (rather than the whole draft) is what
+ * keeps the number honest — the draft also carries `api` and `baseURL` on a
+ * written route.
+ *
  * @param working - the working draft.
- * @param t - translate.
- * @returns the summary copy.
+ * @returns the number of configured managed keys.
  */
-function groupSummary(group: GroupSpec, working: ModelDraft, t: Translate): string {
-  const set = group.keys.filter((key) => {
-    const value = working[key]
-    return value !== undefined && !(typeof value === 'object' && value !== null && Object.keys(value).length === 0)
-  })
-  return set.length === 0 ? t('adv.pg.summaryDefault') : t('adv.pg.summaryCount', { count: set.length })
+export function configuredRouteCount(working: ModelDraft): number {
+  let count = 0
+  for (const section of SECTIONS) {
+    for (const key of section.keys) {
+      const value = working[key]
+      if (value === undefined) continue
+      if (typeof value === 'object' && value !== null && Object.keys(value).length === 0) continue
+      count += 1
+    }
+  }
+  return count
 }
-
-/** Re-exported so the page's own import list stays one line per module. */
-export type { RoutePathOp }

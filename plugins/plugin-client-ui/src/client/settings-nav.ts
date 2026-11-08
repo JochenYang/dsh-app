@@ -3,8 +3,9 @@
  * needs there.
  *
  * **Two of our rows want a real glyph.** Upstream maps a few section ids to
- * icons and falls back to a generic gear for everything else, so Advanced
- * Models and 维护 (the merged upkeep section) would both wear that same gear.
+ * icons and falls back to a generic gear for everything else, so the provider
+ * manager (供应商管理) and 维护 (the merged upkeep section) would both wear that
+ * same gear.
  *
  * The rail's own scrolling is NOT ours any more. It used to be: upstream sized
  * the rail for its own five sections and made only the content column
@@ -47,6 +48,66 @@ const glyphRules = (glyph: NavGlyph): string[] => {
     '  mask-size: contain; mask-repeat: no-repeat; mask-position: center;',
     '}',
   ]
+}
+
+/**
+ * Open every settings page at its top.
+ *
+ * The shell keeps ONE scroller for whatever section the rail points at, so a
+ * newly selected page inherits the previous page's scroll offset — a tall page
+ * (or the one just left) can leave the next one showing its bottom half. Rows are
+ * matched the same way the glyphs are (a button inside the nav list, no per-id
+ * hook), and the pane is reset one frame later, after React has mounted it.
+ *
+ * Only the pane is touched: the nav list itself keeps its own scroll so the row
+ * the user just clicked stays where their pointer is.
+ *
+ * @returns the disposer (click listener).
+ */
+export function resetSettingsPaneOnNav(): () => void {
+  const frames = new Set<number>()
+  const timers = new Set<ReturnType<typeof setTimeout>>()
+  const reset = (dialog: Element): void => {
+    for (const node of dialog.querySelectorAll<HTMLElement>('*')) {
+      // Skip the nav column and every wrapper that contains it (the dialog root),
+      // so only the settings CONTENT scroller is moved.
+      if (node.closest('[class*="navList"]') !== null) continue
+      if (node.querySelector('[class*="navList"]') !== null) continue
+      if (!/(auto|scroll)/u.test(getComputedStyle(node).overflowY)) continue
+      if (node.scrollHeight <= node.clientHeight) continue
+      node.scrollTop = 0
+    }
+  }
+  const onClick = (event: MouseEvent): void => {
+    const target = event.target instanceof Element ? event.target.closest('button') : null
+    const nav = target === null ? null : target.closest('[class*="navList"]')
+    if (target === null || nav === null) return
+    // The dialog that OWNS this rail, not whichever dialog happens to come
+    // first in the document (a settings dialog can sit under another one).
+    const dialog = nav.closest('[role="dialog"]')
+    if (dialog === null) return
+    // One frame for React to mount the new pane, then a second read for a
+    // layout that finished after that frame (a lazy list, a font swap). Both
+    // are tracked so unmounting cancels them instead of leaking a later scroll.
+    const frame = requestAnimationFrame(() => {
+      frames.delete(frame)
+      reset(dialog)
+      const timer = setTimeout(() => {
+        timers.delete(timer)
+        reset(dialog)
+      }, 80)
+      timers.add(timer)
+    })
+    frames.add(frame)
+  }
+  document.addEventListener('click', onClick, true)
+  return () => {
+    document.removeEventListener('click', onClick, true)
+    for (const frame of frames) cancelAnimationFrame(frame)
+    for (const timer of timers) clearTimeout(timer)
+    frames.clear()
+    timers.clear()
+  }
 }
 
 /**

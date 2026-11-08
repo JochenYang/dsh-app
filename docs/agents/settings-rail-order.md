@@ -20,7 +20,7 @@ Two rules, and they are the reason this file exists:
 | 3 | 诊断 / Diagnostics (tab of 维护设置) | this suite, same |
 | 4 | 撤回隔离区 / Quarantine (tab of 维护设置) | this suite, same |
 | 10 | upstream row | upstream |
-| 11 | 模型高级设置 / Advanced models | this suite |
+| 11 | 供应商管理 / Providers | this suite |
 | 12 | MCP 服务器 / MCP | this suite |
 | 13 | Hooks | this suite |
 | 14 | 网络搜索 / Web search | this suite |

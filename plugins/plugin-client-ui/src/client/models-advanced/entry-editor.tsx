@@ -1,27 +1,34 @@
 /**
- * One model entry's advanced editor: the reasoning-effort tri-state with its
- * compat auto-fill, and the protocol-gated compat switches — the field groups
- * the official Models page has no editor for.
+ * One model entry's editor: the identity and capacity fields, the input-modality
+ * chips, and the advanced half (reasoning levels, compat switches) — the field
+ * groups the official Models page has no editor for.
  *
- * An override row (one catalog model corrected by id) additionally edits its
- * capacities and input modalities. A hand-declared route's rows hide those two
- * groups: the official page owns model-list membership, capacities and
- * modalities, so repeating them here would invite two editors to disagree.
+ * The layout is the source design's model dialog: a responsive grid of labelled
+ * fields, chips for modalities, and one disclosure for the advanced half. An
+ * override row (one catalog model corrected by id) additionally edits its
+ * capacities and input modalities. A declared route's rows edit the same fields:
+ * this page creates such routes, so it owns their capacities and modalities too
+ * — only the identifier itself is locked for an override.
  *
  * Rows are structurally open like upstream's editors: the draft carries every
  * stored key, this form edits the ones it knows, and anything else survives
  * untouched (a future schema field, a hand-written `chatTemplateKwargs`).
+ *
+ * @module @dsh-app/plugin-client-ui/client/models-advanced/entry-editor
  */
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, Checkbox, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   COMPAT_PRESETS, MODALITIES, REASONING_LEVELS,
   compatFieldsForApi, formatCapacity, parseCapacity, readReasoning, reasoningCompatFill,
 } from './fields.ts'
 import type { ModelDraft, ReasoningDraft } from './fields.ts'
+import { BoolToggle, Chip } from './ui.tsx'
+import { IconChevron, IconPlus, IconTrash } from './icons.tsx'
 import type { Translate } from './messages.ts'
+import type { AdvancedModelsKey } from './locales.ts'
 
 /** Props of {@link ModelEntryEditor}. */
 export interface ModelEntryEditorProps {
@@ -38,12 +45,12 @@ export interface ModelEntryEditorProps {
    */
   api?: string
   /**
-   * True when the owning route is hand-declared (no catalog base). Such a row
-   * hides capacities and input modalities — the official Models page owns them
-   * — and the reasoning editor warns that nothing is inherited.
+   * True when the owning route is hand-declared (no catalog base). The reasoning
+   * editor warns that nothing is inherited then; capacities and modalities are
+   * edited here either way.
    */
   handDeclared?: boolean
-  /** Index for aria labels. */
+  /** Index for aria labels (0 where the dialog has no list position). */
   index: number
   /** Disable every control (read-only settings or a pending write). */
   disabled: boolean
@@ -92,30 +99,6 @@ function reasoningChange(
     : { ...row, reasoningEfforts: next })
 }
 
-/** Chevron that rotates while its row is open. */
-export function IconChevron({ open }: { open: boolean }): ReactNode {
-  return (
-    <svg
-      width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden
-      style={{ transform: open ? 'rotate(90deg)' : undefined, transition: 'transform 120ms ease' }}
-    >
-      <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-/** Trash glyph for row removal (rendered by the parent list). */
-export function IconTrash(): ReactNode {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9a1 1 0 001 .9h4.6a1 1 0 001-.9L12 4M6.5 6.8v4.4M9.5 6.8v4.4"
-        stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
 /**
  * Reasoning-effort editor: inherit / disabled / explicit level set.
  *
@@ -137,10 +120,10 @@ function ReasoningEditor(props: {
   const { value, onChange, handDeclared, index, disabled, t } = props
   const mode = value === undefined ? 'inherit' : value === false ? 'off' : 'custom'
   const dict = mode === 'custom' && typeof value === 'object' && value !== null ? value : {}
+  const rows = Object.entries(dict)
+  const used = new Set(rows.map(([level]) => level))
 
-  const suggestedLevels = (): string[] => ['low', 'medium', 'high']
-
-  const setMode = (next: 'inherit' | 'off' | 'custom'): void => {
+  const setMode = (next: string): void => {
     if (next === 'inherit') {
       onChange(undefined)
       return
@@ -149,13 +132,7 @@ function ReasoningEditor(props: {
       onChange(false)
       return
     }
-    const initial = suggestedLevels()
-    onChange(Object.fromEntries(initial.map(level => [level, level])))
-  }
-
-  const enableReasoning = (): void => {
-    const initial = suggestedLevels()
-    onChange(Object.fromEntries(initial.map(level => [level, level])))
+    onChange(Object.fromEntries(['low', 'medium', 'high'].map(level => [level, level])))
   }
 
   const toggleLevel = (level: string, on: boolean): void => {
@@ -169,18 +146,26 @@ function ReasoningEditor(props: {
     onChange({ ...dict, [level]: level })
   }
 
-  const enabled = new Set(Object.keys(dict))
-  const spellable = Object.entries(dict)
+  const available = REASONING_LEVELS.filter(level => !used.has(level))
+  const addLevel = (): void => {
+    if (available.length === 0) return
+    // Offer the next escalation step after the highest declared level, so a
+    // model that already speaks low/high gains "max" rather than "off".
+    const highest = rows.reduce((top, [level]) => Math.max(top, REASONING_LEVELS.findIndex(candidate => candidate === level)), -1)
+    const nextLevel = REASONING_LEVELS.find((level, position) => position > highest && !used.has(level))
+      ?? available[0]
+    onChange({ ...dict, [nextLevel]: nextLevel === 'off' ? null : nextLevel })
+  }
+
   return (
-    <div className="dshAma-field">
-      <span className="dshAma-fieldLabel">{t('adv.entry.reasoningTitle')}</span>
-      <div className="dshAma-inline">
+    <div className="dshAma-thinking">
+      <span className="dshAma-selectWrap">
         <select
           className="dshAma-input dshAma-select"
           value={mode}
           aria-label={t('adv.entry.reasoningModeAria', { index: index + 1 })}
           disabled={disabled}
-          onChange={(event) => { setMode(event.target.value as 'inherit' | 'off' | 'custom') }}
+          onChange={(event) => { setMode(event.target.value) }}
         >
           <option value="inherit">
             {handDeclared ? t('adv.entry.reasoningInheritDeclared') : t('adv.entry.reasoningInherit')}
@@ -188,67 +173,53 @@ function ReasoningEditor(props: {
           <option value="off">{t('adv.entry.reasoningOff')}</option>
           <option value="custom">{t('adv.entry.reasoningCustom')}</option>
         </select>
-        {mode === 'inherit' && handDeclared
-          ? (
-            <Button
-              type="button" variant="primary" size="sm"
-              disabled={disabled}
-              onClick={enableReasoning}
-            >{t('adv.entry.enableReasoning')}</Button>
-          )
-          : null}
-      </div>
+      </span>
       {mode === 'inherit'
         ? (
           handDeclared
             ? (
-              <p className="dshAma-error">
-                {t('adv.entry.handDeclaredWarning')}
-                <b>{t('adv.entry.noTiers')}</b>{t('adv.entry.handDeclaredWarningTail')}
-              </p>
+              <span className="dshAma-rowError">
+                {t('adv.entry.handDeclaredWarning')}<b>{t('adv.entry.noTiers')}</b>{t('adv.entry.handDeclaredWarningTail')}
+              </span>
             )
-            : (
-              <p className="dshAma-hint">
-                {t('adv.entry.inheritHint')}
-              </p>
-            )
+            : <span className="dshAma-fieldHint">{t('adv.entry.inheritHint')}</span>
         )
         : null}
-      {mode === 'off'
-        ? <p className="dshAma-hint">{t('adv.entry.offHint')}</p>
-        : null}
-      {mode === 'custom'
-        ? (
-          <>
-            <div className="dshAma-levelGrid" role="group" aria-label={t('adv.entry.levelGroupAria', { index: index + 1 })}>
-              {REASONING_LEVELS.map(level => (
-                <Checkbox
-                  key={level}
-                  checked={enabled.has(level)}
-                  disabled={disabled}
-                  label={level}
-                  onChange={(on) => { toggleLevel(level, on) }}
-                />
-              ))}
-            </div>
-            <div className="dshAma-hint">
-              {t('adv.entry.customHint')}
-            </div>
-          </>
-        )
-        : null}
-      {mode === 'custom' && spellable.length > 0
-        ? (
-          <div className="dshAma-field">
-            <span className="dshAma-fieldLabel">{t('adv.entry.spellingLabel')}</span>
-            {spellable.map(([level, spelling]) => (
-              <div key={level} className="dshAma-kvRow">
-                <span className="dshAma-kvKey">{level}</span>
+      {mode === 'off' ? <span className="dshAma-fieldHint">{t('adv.entry.offHint')}</span> : null}
+      {mode === 'custom' ? (
+        <>
+          <div className="dshAma-effList" role="group" aria-label={t('adv.entry.levelGroupAria', { index: index + 1 })}>
+            {rows.map(([level, spelling]) => (
+              <div className="dshAma-kvRow" key={level}>
+                <span className="dshAma-selectWrap dshAma-effLevel">
+                  <select
+                    className="dshAma-input dshAma-select"
+                    value={level}
+                    aria-label={t('adv.entry.levelSelectAria')}
+                    disabled={disabled}
+                    onChange={(event) => {
+                      const nextLevel = event.target.value
+                      if (nextLevel === level) return
+                      // The wire spelling belongs to the OLD level: a renamed row keeps
+                      // its custom spelling only between real levels, and an `off` row
+                      // must send no parameter rather than the previous level's value.
+                      const nextWire = nextLevel === 'off' ? null : level === 'off' ? nextLevel : spelling
+                      const next: Record<string, string | null> = {}
+                      for (const [key, wire] of rows) next[key === level ? nextLevel : key] = wire
+                      next[nextLevel] = nextWire
+                      onChange(next)
+                    }}
+                  >
+                    {REASONING_LEVELS
+                      .filter(candidate => candidate === level || !used.has(candidate))
+                      .map(candidate => <option key={candidate} value={candidate}>{candidate}</option>)}
+                  </select>
+                </span>
                 <Input
                   className="dshAma-inputWrap"
                   type="text"
                   value={spelling ?? ''}
-                  placeholder={t('adv.entry.spellingPlaceholder')}
+                  placeholder={level === 'off' ? t('adv.entry.spellingPlaceholder') : level}
                   aria-label={t('adv.entry.spellingAria', { level })}
                   disabled={disabled}
                   onChange={(event) => {
@@ -258,7 +229,7 @@ function ReasoningEditor(props: {
                 />
                 <Button
                   type="button" variant="ghost" size="sm" icon={<IconTrash />}
-                  className="dshAma-iconAction"
+                  className="dshAma-iconAction dshAma-iconDanger"
                   aria-label={t('adv.entry.removeLevelAria', { level })}
                   disabled={disabled}
                   onClick={() => { toggleLevel(level, false) }}
@@ -266,8 +237,15 @@ function ReasoningEditor(props: {
               </div>
             ))}
           </div>
-        )
-        : null}
+          {available.length === 0 ? null : (
+            <button type="button" className="dshAma-addRow is-compact" disabled={disabled} onClick={addLevel}>
+              <span className="dshAma-addRowIcon" aria-hidden="true"><IconPlus /></span>
+              {t('adv.entry.addLevel')}
+            </button>
+          )}
+          <span className="dshAma-fieldHint">{t('adv.entry.customHint')}</span>
+        </>
+      ) : null}
     </div>
   )
 }
@@ -303,32 +281,32 @@ function CompatEditor(props: {
     delete next[key]
     onChange(Object.keys(next).length === 0 ? undefined : next)
   }
-  const valueControl = (field: { key: string; kind: 'boolean' | { enum: readonly string[] } }, current: unknown) => {
+  const valueControl = (field: { key: string; labelKey: AdvancedModelsKey; kind: 'boolean' | { enum: readonly string[] } }, current: unknown) => {
     if (field.kind === 'boolean') {
       return (
-        <select
-          className="dshAma-input dshAma-select"
-          value={current === true ? 'true' : 'false'}
-          aria-label={field.key}
+        <BoolToggle
+          label={t(field.labelKey)}
+          value={current === true}
+          onLabel={t('adv.common.enabled')}
+          offLabel={t('adv.common.disabled')}
           disabled={disabled}
-          onChange={(event) => { setKey(field.key, event.target.value === 'true') }}
-        >
-          <option value="true">{t('adv.common.enabled')}</option>
-          <option value="false">{t('adv.common.disabled')}</option>
-        </select>
+          onChange={(next) => { setKey(field.key, next) }}
+        />
       )
     }
     return (
-      <select
-        className="dshAma-input dshAma-select"
-        value={typeof current === 'string' ? current : ''}
-        aria-label={field.key}
-        disabled={disabled}
-        onChange={(event) => { setKey(field.key, event.target.value) }}
-      >
-        <option value="">{t('adv.compat.selectValue')}</option>
-        {field.kind.enum.map(choice => <option key={choice} value={choice}>{choice}</option>)}
-      </select>
+      <span className="dshAma-selectWrap">
+        <select
+          className="dshAma-input dshAma-select"
+          value={typeof current === 'string' ? current : ''}
+          aria-label={field.key}
+          disabled={disabled}
+          onChange={(event) => { setKey(field.key, event.target.value) }}
+        >
+          <option value="">{t('adv.compat.selectValue')}</option>
+          {field.kind.enum.map(choice => <option key={choice} value={choice}>{choice}</option>)}
+        </select>
+      </span>
     )
   }
 
@@ -344,95 +322,126 @@ function CompatEditor(props: {
   }
 
   return (
-    <div className="dshAma-field">
-      <span className="dshAma-fieldLabel">{t('adv.compat.title')}</span>
-      <div className="dshAma-inline">
-        <select
-          className="dshAma-input dshAma-select"
-          value=""
-          aria-label={t('adv.compat.applyPresetAria', { index: index + 1 })}
-          disabled={disabled}
-          onChange={(event) => {
-            if (event.target.value !== '') applyPreset(event.target.value)
-          }}
-        >
-          <option value="">{t('adv.compat.applyPreset')}</option>
-          {COMPAT_PRESETS.map(preset => <option key={preset.id} value={preset.id}>{t(preset.labelKey)}</option>)}
-        </select>
-        <select
-          className="dshAma-input dshAma-select"
-          value=""
-          aria-label={t('adv.compat.addSwitchAria', { index: index + 1 })}
-          disabled={disabled || unusedKeys.length === 0}
-          onChange={(event) => {
-            const field = fields.find(candidate => candidate.key === event.target.value)
-            if (field === undefined) return
-            setKey(field.key, field.kind === 'boolean' ? false : field.kind.enum[0])
-          }}
-        >
-          {unusedKeys.length === 0
-            ? <option value="">{t('adv.compat.allAdded')}</option>
-            : <option value="">{t('adv.compat.addSwitch')}</option>}
-          {unusedKeys.map(field => <option key={field.key} value={field.key}>{t(field.labelKey)}</option>)}
-        </select>
-        {api === undefined || api === ''
-          ? <span className="dshAma-muted">{t('adv.compat.protocolUnknown')}</span>
-          : <span className="dshAma-muted">{api}</span>}
-      </div>
-      <div className="dshAma-hint">
-        {api === undefined || api === ''
-          ? t('adv.compat.hintUnknownProtocol')
-          : t('adv.compat.hintFiltered', { api })}
-        {' '}{t('adv.compat.hintTail')}
-      </div>
-      {invalidKeys.map(key => (
-        <div key={key} className="dshAma-kvRow">
-          <span className="dshAma-kvKey dshAma-invalid" title={key}>{key}</span>
-          <span className="dshAma-readonlyValue">
-            {t('adv.compat.notApplicable', { api: api ?? t('adv.compat.currentProtocol') })}
-          </span>
-          <Button
-            type="button" variant="ghost" size="sm" icon="×"
-            className="dshAma-iconAction dshAma-iconDanger"
-            aria-label={t('adv.compat.removeInvalidAria', { key })}
-            disabled={disabled}
-            onClick={() => { removeKey(key) }}
-          />
-        </div>
-      ))}
-      {Object.entries(dict).map(([key, current]) => {
-        if (!knownKeys.has(key)) return null
-        const meta = fields.find(field => field.key === key)
-        return (
-          <div key={key} className="dshAma-kvRow">
-            <span className="dshAma-kvKey" title={key}>{meta === undefined ? key : t(meta.labelKey)}</span>
-            {meta === undefined
-              ? <span className="dshAma-readonlyValue">{JSON.stringify(current)}</span>
-              : valueControl(meta, current)}
+    <>
+      <div className="dshAma-kvList">
+        {invalidKeys.map(key => (
+          <div className="dshAma-kvRow" key={key}>
+            <span className="dshAma-kvLabel dshAma-invalid">{key}</span>
+            <span className="dshAma-kvValue dshAma-muted">
+              {t('adv.compat.notApplicable', { api: api ?? t('adv.compat.currentProtocol') })}
+            </span>
             <Button
               type="button" variant="ghost" size="sm" icon={<IconTrash />}
-              className="dshAma-iconAction"
-              aria-label={t('adv.compat.removeAria', { key })}
+              className="dshAma-iconAction dshAma-iconDanger"
+              aria-label={t('adv.compat.removeInvalidAria', { key })}
               disabled={disabled}
               onClick={() => { removeKey(key) }}
             />
           </div>
-        )
-      })}
+        ))}
+        {Object.entries(dict).map(([key, current]) => {
+          if (!knownKeys.has(key)) return null
+          const meta = fields.find(field => field.key === key)
+          if (meta === undefined) return null
+          return (
+            <div className="dshAma-kvRow" key={key}>
+              <span className="dshAma-kvLabel">{t(meta.labelKey)}</span>
+              <div className="dshAma-kvValue">{valueControl(meta, current)}</div>
+              <Button
+                type="button" variant="ghost" size="sm" icon={<IconTrash />}
+                className="dshAma-iconAction dshAma-iconDanger"
+                aria-label={t('adv.compat.removeAria', { key })}
+                disabled={disabled}
+                onClick={() => { removeKey(key) }}
+              />
+            </div>
+          )
+        })}
+      </div>
+      <div className="dshAma-inline">
+        <span className="dshAma-selectWrap" style={{ flex: '1 1 160px' }}>
+          <select
+            className="dshAma-input dshAma-select"
+            value=""
+            aria-label={t('adv.compat.applyPresetAria', { index: index + 1 })}
+            disabled={disabled}
+            onChange={(event) => {
+              if (event.target.value !== '') applyPreset(event.target.value)
+            }}
+          >
+            <option value="">{t('adv.compat.applyPreset')}</option>
+            {COMPAT_PRESETS.map(preset => <option key={preset.id} value={preset.id}>{t(preset.labelKey)}</option>)}
+          </select>
+        </span>
+        <span className="dshAma-selectWrap" style={{ flex: '1 1 160px' }}>
+          <select
+            className="dshAma-input dshAma-select"
+            value=""
+            aria-label={t('adv.compat.addSwitchAria', { index: index + 1 })}
+            disabled={disabled || unusedKeys.length === 0}
+            onChange={(event) => {
+              const field = fields.find(candidate => candidate.key === event.target.value)
+              if (field === undefined) return
+              setKey(field.key, field.kind === 'boolean' ? false : field.kind.enum[0])
+            }}
+          >
+            {unusedKeys.length === 0
+              ? <option value="">{t('adv.compat.allAdded')}</option>
+              : <option value="">{t('adv.compat.addSwitch')}</option>}
+            {unusedKeys.map(field => <option key={field.key} value={field.key}>{t(field.labelKey)}</option>)}
+          </select>
+        </span>
+      </div>
+      <span className="dshAma-fieldHint">
+        {api === undefined || api === ''
+          ? t('adv.compat.hintUnknownProtocol')
+          : t('adv.compat.hintFiltered', { api })}
+        {' '}{t('adv.compat.hintTail')}
+      </span>
+    </>
+  )
+}
+
+/**
+ * The disclosure the advanced half lives in: a quiet toggle with the configured
+ * count, opening the reasoning and compat editors. Open by default when the row
+ * already declares either, so an existing configuration is never hidden.
+ */
+function AdvancedPanel(props: {
+  t: Translate
+  initiallyOpen: boolean
+  count: number
+  children: ReactNode
+}): ReactNode {
+  const { t, count } = props
+  const [open, setOpen] = useState(props.initiallyOpen)
+  return (
+    <div className="dshAma-thinking">
+      <button
+        type="button"
+        className="dshAma-advToggle"
+        aria-expanded={open}
+        onClick={() => { setOpen((was) => !was) }}
+      >
+        <IconChevron open={open} />
+        {t('adv.models.advanced')}
+        {count === 0 ? null : <span className="dshAma-badge">{count}</span>}
+      </button>
+      {open ? <div className="dshAma-advPanel">{props.children}</div> : null}
     </div>
   )
 }
 
 /**
- * Render one model entry's expanded editor.
+ * Render one model entry's editor.
  * @param props - the drafted row, its replacement callback, and chrome state.
- * @returns the entry editor.
+ * @returns the editor.
  */
 export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
   const { row, onChange, api, handDeclared, index, disabled, t } = props
   // Capacities are edited as text; the buffer lives here so keystrokes are
-  // never rewritten by the K/M formatter mid-word. The component stays
-  // mounted while its row does, so the buffer is displaced only by the user.
+  // never rewritten by the K/M formatter mid-word. The dialog stays mounted
+  // while it is open, so the buffer is displaced only by the user.
   const [contextText, setContextText] = useState(() => formatCapacity(
     typeof row.contextWindow === 'number' ? row.contextWindow : undefined,
   ))
@@ -448,8 +457,8 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
     if (key === 'contextWindow') setContextText(text)
     else setMaxTokensText(text)
     const parsed = parseCapacity(text)
-    // NaN is kept in the buffer so the refusal names a row the user can
-    // still see; the section's save gate refuses the write.
+    // NaN is kept in the buffer so the refusal names a model the user can
+    // still see; the page's save gate refuses the write.
     onChange(parsed === undefined
       ? withoutUndefined({ ...row }, key)
       : { ...row, [key]: parsed })
@@ -465,105 +474,125 @@ export function ModelEntryEditor(props: ModelEntryEditorProps): ReactNode {
     // missing array anyway, and absence keeps "inherit the catalog" legible.
     onChange(next.length === 0 ? withoutUndefined({ ...row }, 'input') : { ...row, input: next })
   }
+  const advancedCount = (row.reasoningEfforts === undefined ? 0 : 1) + (row.compat === undefined ? 0 : 1)
   return (
-    <div className="dshAma-entryBody">
-      {props.lockedId === true
-        ? null
-        : (
-          <label className="dshAma-field">
-            <span className="dshAma-fieldLabel">{t('adv.entry.modelId')}</span>
-            <Input
-              className="dshAma-inputWrap"
-              type="text"
-              value={stringAt('id')}
-              placeholder={t('adv.entry.modelIdPlaceholder')}
-              aria-label={t('adv.entry.modelIdAria', { index: index + 1 })}
-              disabled={disabled}
-              onChange={(event) => { onChange({ ...row, id: event.target.value }) }}
-            />
+    <div className="dshAma-modelForm">
+      <div className="dshAma-formGrid">
+        {props.lockedId === true
+          ? (
+            <div className="dshAma-field is-wide">
+              <span className="dshAma-fieldLabel">{t('adv.entry.modelId')}</span>
+              <div className="dshAma-readonly">{stringAt('id')}</div>
+            </div>
+          )
+          : (
+            <div className="dshAma-field is-wide">
+              <label className="dshAma-fieldLabel" htmlFor={`dshAma-model-id-${String(index)}`}>
+                {t('adv.entry.modelId')}
+              </label>
+              <Input
+                id={`dshAma-model-id-${String(index)}`}
+                className="dshAma-inputWrap"
+                type="text"
+                value={stringAt('id')}
+                placeholder={t('adv.entry.modelIdPlaceholder')}
+                aria-label={t('adv.entry.modelIdAria', { index: index + 1 })}
+                disabled={disabled}
+                data-modal-autofocus
+                onChange={(event) => { onChange({ ...row, id: event.target.value }) }}
+              />
+            </div>
+          )}
+        <div className="dshAma-field is-wide">
+          <label className="dshAma-fieldLabel" htmlFor={`dshAma-model-name-${String(index)}`}>
+            {t('adv.entry.name')}
           </label>
-        )}
-      <label className="dshAma-field">
-        <span className="dshAma-fieldLabel">{t('adv.entry.name')}</span>
-        <Input
-          className="dshAma-inputWrap"
-          type="text"
-          value={stringAt('name')}
-          placeholder={t('adv.entry.namePlaceholder')}
-          aria-label={t('adv.entry.nameAria', { index: index + 1 })}
-          disabled={disabled}
-          onChange={(event) => { setString('name', event.target.value) }}
-        />
-      </label>
-      {handDeclared === true
-        ? null
-        : (
-          <>
-            <div className="dshAma-capacityRow">
-              <label className="dshAma-field">
-                <span className="dshAma-fieldLabel">{t('adv.field.contextWindow')}</span>
-                <Input
-                  className="dshAma-inputWrap"
-                  type="text"
-                  inputMode="numeric"
-                  value={contextText}
-                  placeholder={t('adv.entry.contextPlaceholder')}
-                  aria-label={t('adv.entry.contextAria', { index: index + 1 })}
-                  disabled={disabled}
-                  onChange={(event) => { editCapacity('contextWindow', event.target.value) }}
-                />
-              </label>
-              <label className="dshAma-field">
-                <span className="dshAma-fieldLabel">{t('adv.field.maxTokens')}</span>
-                <Input
-                  className="dshAma-inputWrap"
-                  type="text"
-                  inputMode="numeric"
-                  value={maxTokensText}
-                  placeholder={t('adv.entry.maxTokensPlaceholder')}
-                  aria-label={t('adv.entry.maxTokensAria', { index: index + 1 })}
-                  disabled={disabled}
-                  onChange={(event) => { editCapacity('maxTokens', event.target.value) }}
-                />
-              </label>
-            </div>
-            <div className="dshAma-field">
-              <span className="dshAma-fieldLabel">{t('adv.entry.input')}</span>
-              <div className="dshAma-inline">
-                {MODALITIES.map(modality => (
-                  <Checkbox
-                    key={modality}
-                    checked={input.includes(modality)}
-                    disabled={disabled}
-                    label={modality === 'text' ? t('adv.entry.inputText') : t('adv.entry.inputImage')}
-                    onChange={() => { toggleModality(modality) }}
-                  />
-                ))}
-              </div>
-              <div className="dshAma-hint">{t('adv.entry.inputHint')}</div>
-            </div>
-          </>
-        )}
-      <ReasoningEditor
-        t={t}
-        index={index}
-        disabled={disabled}
-        handDeclared={handDeclared === true}
-        value={readReasoning(row.reasoningEfforts)}
-        onChange={(next) => reasoningChange(row, onChange, next, api)}
-      />
-      <CompatEditor
-        t={t}
-        index={index}
-        disabled={disabled}
-        api={api}
-        value={typeof row.compat === 'object' && row.compat !== null && !Array.isArray(row.compat)
-          ? row.compat as Record<string, unknown>
-          : undefined}
-        onChange={(next) => {
-          onChange(next === undefined ? withoutUndefined({ ...row }, 'compat') : { ...row, compat: next })
-        }}
-      />
+          <Input
+            id={`dshAma-model-name-${String(index)}`}
+            className="dshAma-inputWrap"
+            type="text"
+            value={stringAt('name')}
+            placeholder={t('adv.entry.namePlaceholder')}
+            aria-label={t('adv.entry.nameAria', { index: index + 1 })}
+            disabled={disabled}
+            onChange={(event) => { setString('name', event.target.value) }}
+          />
+        </div>
+        <div className="dshAma-field">
+          <label className="dshAma-fieldLabel" htmlFor={`dshAma-model-context-${String(index)}`}>
+            {t('adv.field.contextWindow')}
+          </label>
+          <Input
+            id={`dshAma-model-context-${String(index)}`}
+            className="dshAma-inputWrap"
+            type="text"
+            inputMode="numeric"
+            value={contextText}
+            placeholder={t('adv.entry.contextPlaceholder')}
+            aria-label={t('adv.entry.contextAria', { index: index + 1 })}
+            disabled={disabled}
+            onChange={(event) => { editCapacity('contextWindow', event.target.value) }}
+          />
+        </div>
+        <div className="dshAma-field">
+          <label className="dshAma-fieldLabel" htmlFor={`dshAma-model-max-${String(index)}`}>
+            {t('adv.field.maxTokens')}
+          </label>
+          <Input
+            id={`dshAma-model-max-${String(index)}`}
+            className="dshAma-inputWrap"
+            type="text"
+            inputMode="numeric"
+            value={maxTokensText}
+            placeholder={t('adv.entry.maxTokensPlaceholder')}
+            aria-label={t('adv.entry.maxTokensAria', { index: index + 1 })}
+            disabled={disabled}
+            onChange={(event) => { editCapacity('maxTokens', event.target.value) }}
+          />
+        </div>
+      </div>
+      <div className="dshAma-field">
+        <span className="dshAma-fieldLabel">{t('adv.entry.input')}</span>
+        <div className="dshAma-chipRow">
+          {MODALITIES.map(modality => (
+            <Chip
+              key={modality}
+              on={input.includes(modality)}
+              disabled={disabled}
+              onClick={() => { toggleModality(modality) }}
+            >{modality === 'text' ? t('adv.entry.inputText') : t('adv.entry.inputImage')}</Chip>
+          ))}
+        </div>
+        <span className="dshAma-fieldHint">{t('adv.entry.inputHint')}</span>
+      </div>
+      <AdvancedPanel t={t} initiallyOpen={advancedCount > 0} count={advancedCount}>
+        <div className="dshAma-field">
+          <span className="dshAma-fieldLabel">{t('adv.entry.reasoningTitle')}</span>
+          <ReasoningEditor
+            t={t}
+            index={index}
+            disabled={disabled}
+            handDeclared={handDeclared === true}
+            value={readReasoning(row.reasoningEfforts)}
+            onChange={(next) => reasoningChange(row, onChange, next, api)}
+          />
+        </div>
+        <div className="dshAma-field">
+          <span className="dshAma-fieldLabel">{t('adv.compat.title')}</span>
+          <CompatEditor
+            t={t}
+            index={index}
+            disabled={disabled}
+            api={api}
+            value={typeof row.compat === 'object' && row.compat !== null && !Array.isArray(row.compat)
+              ? row.compat as Record<string, unknown>
+              : undefined}
+            onChange={(next) => {
+              onChange(next === undefined ? withoutUndefined({ ...row }, 'compat') : { ...row, compat: next })
+            }}
+          />
+        </div>
+      </AdvancedPanel>
     </div>
   )
 }

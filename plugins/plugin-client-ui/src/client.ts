@@ -40,7 +40,7 @@ import type { MaintenanceKey } from './client/maintenance/locales.ts'
 import { en as advancedEn, zh as advancedZh } from './client/models-advanced/locales.ts'
 import type { AdvancedModelsKey } from './client/models-advanced/locales.ts'
 import { NS } from './client/namespace.ts'
-import { mountSettingsNav } from './client/settings-nav.ts'
+import { mountSettingsNav, resetSettingsPaneOnNav } from './client/settings-nav.ts'
 import { installWorkspaceLaunch } from './client/workspace-launch.ts'
 import { mountWhaleBackground } from './client/whale-background.ts'
 // The ledger projection reads each tab entry's registered label, which a
@@ -97,7 +97,9 @@ export const inject = [
 
 export const BRAND_THEME_ID = 'dsh-app-brand'
 
-/** Nav identity of the Advanced Models page (its label is the `adv.nav` key). */
+/** Nav identity of the provider manager page (its label is the `adv.nav` key).
+ *  The id predates the page's rename to provider management; it is the slot
+ *  identity, not a user-visible label, so it stays put. */
 const ADVANCED_SECTION_ID = 'model-advanced'
 
 /** Nav identity of the merged 维护 section (its label is the `maint.nav` key). */
@@ -227,9 +229,10 @@ export function apply(ctx: ClientContext): void {
     ),
   })
 
-  // --- Advanced Models settings page: model-level fields (reasoning
-  // efforts, input modalities, compat switches) the official page leaves to
-  // settings.yaml, plus a guarded create flow for out-of-catalog models. ---
+  // --- Provider manager settings page: one rail row listing the llm-pi-ai
+  // providers, each opening on its own page with the model fields (reasoning
+  // efforts, input modalities, compat switches) and route parameters the
+  // official page leaves to settings.yaml. ---
   const schemaService = ctx.settingsSchema as SettingsSchemaService
   // Bound method references keep the service's own signatures (the store's
   // SchemaOps type is a Pick of the service); hand-written wrappers would
@@ -403,12 +406,16 @@ export function apply(ctx: ClientContext): void {
       { label: () => t('maint.nav'), cls: 'dshMaintNav', svg: NAV_ICON_MAINTENANCE_SVG },
       { label: () => t('about.nav'), cls: 'dshAboutNav', svg: NAV_ICON_ABOUT_SVG },
     ])
+    // Every settings page opens at its top: the shell reuses one scroller, so a
+    // page can otherwise inherit the previous one's scroll offset.
+    const disposePaneScroll = resetSettingsPaneOnNav()
     // Brand whale background: Canvas 2D port of the DeepSeek hero digitile
     // whale (assembles on load, swims idly, scatters from the pointer),
     // theme-aware through the live --dsw-alias-* tokens.
     const disposeWhale = mountWhaleBackground()
     return () => {
       disposeNav()
+      disposePaneScroll()
       disposeWhale()
       for (const dispose of disposers) dispose()
     }

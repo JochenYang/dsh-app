@@ -57,7 +57,7 @@ dev-process-tooling 的套件冒烟探针 ── 建议先于 P0-P3 落地（否
    用户可编辑状态放 storages 配置文件（同 plugin-swarm / plugin-usage / plugin-memory）。
 3. **UI**：client 半 `ctx.slots.inject('settings.section', ...)`（参照
    `plugins/plugin-client-ui/src/client.ts:265`），order 分配避开上游
-   （11=模型高级设置已占用，15=Plugins，20=agent-presets）：
+   （11=供应商管理已占用，15=Plugins，20=agent-presets）：
    **12=MCP 服务器，13=Hooks，14=网络搜索**。完整取值表见
    `docs/desktop-optimization-plan.md` §3.1。
 4. **Host routes**：`/api/plugins/dsh-app/plugin-<name>/*`，注册在 Connection 的

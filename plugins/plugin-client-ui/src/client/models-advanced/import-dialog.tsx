@@ -116,7 +116,7 @@ export function ModelsDevImportDialog(props: ModelsDevImportDialogProps): ReactN
       onClose={onClose}
       title={t('adv.import.title')}
       closeLabel={t('adv.common.close')}
-      className="dshAma-importModal"
+      className="dshAma-importModal dshAma-scope"
       contentClassName="dshAma-modalScroll"
       footer={(
         <div className="dshAma-footer">

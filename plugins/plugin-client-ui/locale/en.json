@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Interface & diagnostics",
-    "description": "Brand theme, the advanced models settings page, and the diagnostics page (kernel log tail, feature status, diagnostics export)."
+    "description": "Brand theme, the provider manager page (provider list → advanced model and route configuration), and the diagnostics page (kernel log tail, feature status, diagnostics export)."
   }
 }

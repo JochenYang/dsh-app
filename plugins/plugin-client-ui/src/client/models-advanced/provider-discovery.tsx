@@ -161,7 +161,7 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
       onClose={onClose}
       title={t('adv.discovery.title')}
       closeLabel={t('adv.common.close')}
-      className="dshAma-discoveryModal"
+      className="dshAma-discoveryModal dshAma-scope"
       contentClassName="dshAma-modalScroll"
       footer={(
         <div className="dshAma-footer">
@@ -231,6 +231,11 @@ export function ProviderModelDiscoveryDialog(props: ProviderModelDiscoveryDialog
                         type="button" variant="outline" size="sm"
                         onClick={() => { void discover(apiKey) }}
                       >{t('adv.discovery.refresh')}</Button>
+                      <Button
+                        type="button" variant="ghost" size="sm"
+                        disabled={picked.size === 0}
+                        onClick={() => { setPicked(new Set()) }}
+                      >{t('adv.discovery.clearSelection')}</Button>
                     </div>
                     <div className="dshAma-discoveryList">
                       {visibleModels.map(model => {

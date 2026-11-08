@@ -66,6 +66,10 @@ export interface AdvancedModelsRemote {
      * status-only: no call on this face ever returns a secret value.
      */
     describe(refs: string[]): Promise<RemoteResult<Record<string, CredentialInfo>>>
+    /** Write one credential. The value is never echoed back by any read. */
+    set(ref: string, value: string): Promise<RemoteResult<void>>
+    /** Remove one credential. */
+    unset(ref: string): Promise<RemoteResult<void>>
   }
   session: {
     /**
@@ -95,6 +99,10 @@ export interface ProviderDirectoryEntry {
   readonly settingsPath: readonly string[]
   readonly active: boolean
   readonly declared?: boolean
+  /** Credential variables the ADAPTER resolves when the profile names none. */
+  readonly nativeAuthEnv?: readonly string[]
+  /** Endpoint the ADAPTER uses when the profile names none. */
+  readonly defaultBaseURL?: string
 }
 
 /**
@@ -116,6 +124,8 @@ export function joinProviderDirectory(
     settingsPath: [...entry.settingsPath],
     active: active.has(entry.provider),
     ...entry.declared === undefined ? {} : { declared: entry.declared },
+    ...entry.nativeAuth?.env === undefined ? {} : { nativeAuthEnv: [...entry.nativeAuth.env] },
+    ...entry.defaultBaseURL === undefined ? {} : { defaultBaseURL: entry.defaultBaseURL },
   }))
   for (const provider of registered) {
     if (declared.has(provider.id)) continue
@@ -130,8 +140,31 @@ export function joinProviderDirectory(
   return rows
 }
 
-/** One pi-ai route this page can edit, with its user-layer profile state. */
-export interface RouteRow {
+/**
+ * Every credential reference a route would use: the profile's own variable
+ * first, then the adapter's native-auth variables in lookup order.
+ *
+ * A shipped route can authenticate from the adapter (no `apiKeyEnv` in the
+ * profile), and the page must see that variable when it reports whether a key
+ * is configured, when it refuses to write a colliding new provider, and when it
+ * decides whether deleting one leaves the key in use.
+ *
+ * @param entry - the route's directory entry.
+ * @param profile - its resolved profile (any layer).
+ * @returns the references, deduplicated, in lookup order.
+ */
+export function credentialRefs(entry: ProviderDirectoryEntry, profile: unknown): string[] {
+  // The adapter's native authentication is consulted only when the profile
+  // names NO credential reference. A declared-but-unresolved reference does
+  // NOT fall back to it, so this order is exclusive rather than cumulative.
+  if (typeof profile === 'object' && profile !== null && !Array.isArray(profile)) {
+    const value = (profile as Record<string, unknown>).apiKeyEnv
+    if (typeof value === 'string' && value.trim() !== '') return [value.trim()]
+  }
+  return [...new Set((entry.nativeAuthEnv ?? []).filter(env => env !== ''))]
+}
+
+/** One pi-ai route this page can edit, with its user-layer profile state. */export interface RouteRow {
   /** The directory entry (route id, display name, settings address, live state). */
   entry: ProviderDirectoryEntry
   /** The user-layer profile object, or undefined when only composition configures it. */

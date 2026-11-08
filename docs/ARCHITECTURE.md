@@ -117,9 +117,13 @@ Client-side composition (all zero-upstream-change):
   grouped change list, dual-line-number unified diff, stage/restore/commit,
   tracked files, graph modal with `%B` + `--stat`. The file-tree tab was retired
   once the upstream sidebar shipped workspace file management.
-- **Advanced models settings page** (`plugin-client-ui`): `settings.section` —
-  model-level editors over llm-pi-ai providers, companion-route migration,
-  models.dev prefill with gh-proxy mirror fallback.
+- **Provider manager settings page** (`plugin-client-ui`): `settings.section` —
+  one rail row listing the llm-pi-ai providers with an add flow (218 templates
+  from models.dev, or a hand-typed endpoint), each provider opening on its own
+  page: the model rows (or catalog overrides) with their advanced fields, the
+  route's advanced parameters, the key and the connectivity test, saved as one
+  unit. Its host half serves the key-bearing probe on one authenticated
+  Connection route, because the browser never receives a key.
 - **Maintenance settings section** (`plugin-client-ui`, one rail row at order
   24): the suite's three system-level upkeep pages — preset packages
   (`plugin-presets`, tab order 2), diagnostics (tab order 3) and the

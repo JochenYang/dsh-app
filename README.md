@@ -26,7 +26,7 @@ DSH APP 是 **self-contained、no-fork** 的封装客户端：内核自托管（
 | 功能 | 插件 | 实现位置 |
 |---|---|---|
 | 会话侧边栏（原生视图）：**Git 页**——按目录分组的变更列表、统一 diff 双行号、暂存/还原/提交、仓库文件列表、Git 图谱（点提交查看标题/正文/文件统计）。文件树页已退役：上游侧边栏原生提供工作区文件管理 | `@dsh-app/plugin-sidebar`（host + client 双面） | `plugins/plugin-sidebar/src/client/git-tab.tsx` |
-| 模型高级设置页：llm-pi-ai 模型级编辑器与整表管理（推理强度、输入模态、兼容开关）；声明推理强度自动填充兼容开关（`supportsDeveloperRole` false + `maxTokensField`，仅增量、不覆盖用户显式设置）；目录外模型的伴生路由迁移；models.dev 表单预填（直连失败自动回退 gh-proxy 镜像） | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
+| 供应商管理页（原「模型高级设置」）：先列供应商（带随包发布的 184 个品牌 logo），再进单个供应商的页面——模型清单（或目录覆盖）、高级配置（凭据变量、推理与思考预算、重试、超时、默认能力、请求细节）合成一次保存；声明推理强度自动填充兼容开关（`supportsDeveloperRole` false + `maxTokensField`，仅增量、不覆盖用户显式设置）；目录外模型的伴生路由迁移；models.dev 补全/导入（直连失败自动回退 gh-proxy 镜像） | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/models-advanced/` |
 | 品牌主题与中英双语 UI：`--dsw-alias-*` 令牌覆盖 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client.ts:58` |
 | 品牌鲸鱼背景：空闲静态帧、悬停时指针散开（指针离开即暂停渲染循环，滚动不卡顿）；主题感知对比度（亮色增强可读性、暗色低透明度水印）；悬停悬浮于输入框上方、活跃时放大并居中于会话列 | `@dsh-app/plugin-client-ui` | `plugins/plugin-client-ui/src/client/whale-background.ts` |
 | 跨会话记忆：`memory_save`/`memory_recall`/`memory_forget` 工具 + 系统提示注入（预算内最新优先），全局与项目记忆按会话 cwd 路由；设置页开关；后台提炼在会话静默 60 秒后直调模型回填要点（每次调用的 token 与耗时记录在案），策展清扫按冷却窗口与文件变更检测触发（同样直调模型） | `@dsh-app/plugin-memory` | `plugins/plugin-memory/src/{tools,routes,distiller,curator}.ts` |
