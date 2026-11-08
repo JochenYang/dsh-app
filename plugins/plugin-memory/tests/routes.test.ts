@@ -12,7 +12,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { join } from 'node:path'
-import { projectSlug } from '../src/memory-store.ts'
+import { LEGACY_GLOBAL_SLUG, listProjects, projectSlug } from '../src/memory-store.ts'
+import { renderMemoryText } from '../src/prompt.ts'
 import { scratchRoot } from './scratch.ts'
 import type { MemoryArchiveRow, MemoryLedgerResponse } from '../src/types.ts'
 import { registerMemoryRoutes, ROUTE_PREFIX } from '../src/routes.ts'
@@ -47,6 +48,7 @@ test('every settings route owns one exact path, its own methods, and a buffered 
     `${ROUTE_PREFIX}/entries`,
     `${ROUTE_PREFIX}/pin`,
     `${ROUTE_PREFIX}/forget`,
+    `${ROUTE_PREFIX}/move`,
     `${ROUTE_PREFIX}/curate`,
     `${ROUTE_PREFIX}/llm-audit`,
     `${ROUTE_PREFIX}/ledger`,
@@ -56,7 +58,7 @@ test('every settings route owns one exact path, its own methods, and a buffered 
     `${ROUTE_PREFIX}/archive-clear`,
   ])
   assert.deepEqual(routes.map(route => route.methods), [
-    ['GET'], ['POST'], ['POST'], ['GET'], ['POST'], ['POST'], ['POST'], ['GET'], ['GET'], ['GET'], ['POST'], ['POST'], ['POST'],
+    ['GET'], ['POST'], ['POST'], ['GET'], ['POST'], ['POST'], ['POST'], ['POST'], ['GET'], ['GET'], ['GET'], ['POST'], ['POST'], ['POST'],
   ])
   // The carrier buffers the body under its own cap, so a handler always reads a
   // complete request (and applies its own, smaller limit on top).
@@ -396,4 +398,180 @@ test('POST /archive-delete and /archive-clear drop copies without touching live 
   assert.notEqual(project.get('survivor'), undefined, 'and emptying never touches the memory list')
   assert.equal(project.list().length, 1)
   void dispose()
+})
+
+test('POST /move drains the legacy-global dead end into a real project', async () => {
+  const routes: RegisteredRoute[] = []
+  const root = scratchRoot('dshm-routes-move-')
+  const dispose = registerMemoryRoutes({
+    register: (route: RegisteredRoute) => {
+      routes.push(route)
+      return () => Promise.resolve()
+    },
+  } as never, root)
+  const call = async (body: unknown): Promise<Response> => {
+    const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/move`)
+    assert.ok(route !== undefined, 'the move route is registered')
+    return route.fetch(new Request(`https://localhost${route.path}`, { method: 'POST', body: JSON.stringify(body) }))
+  }
+
+  // The retired root scope, migrated exactly the way boot does it, with its pin:
+  // the card lands in projects/legacy-global, a slug NO cwd can ever resolve.
+  await root.global.upsert({ name: 'old-global-card', category: 'lesson', summary: '旧全局钩子', body: '旧全局卡的内容' })
+  await root.global.addPin('old-global-card')
+  assert.equal(await root.migrateLegacyGlobalScope(), 1)
+
+  const targetCwd = 'D:/codes/Demo'
+  const targetSlug = projectSlug(targetCwd)
+  const target = root.projectFor(targetCwd)
+  await target.upsert({ name: 'existing', category: 'fact', summary: '已有', body: '目标项目原有内容' })
+
+  const legacy = root.projectBySlug(LEGACY_GLOBAL_SLUG)
+  assert.ok(legacy !== undefined)
+  assert.ok(legacy.get('old-global-card') !== undefined, 'the card is visible under the holding pen')
+  // The defect this route exists for: the card is on disk and in the project
+  // list, yet no session can reach it.
+  assert.ok(!renderMemoryText(root, targetCwd).includes('旧全局卡的内容'), 'before the move: injected by nobody')
+
+  const moved = await call({ scope: 'project', slug: LEGACY_GLOBAL_SLUG, topic: 'old-global-card', targetSlug })
+  assert.equal(moved.status, 200)
+  const movedBody = await moved.json() as { ok: boolean, value: { moved: boolean, from: string, to: string, overwritten: boolean } }
+  assert.equal(movedBody.value.from, LEGACY_GLOBAL_SLUG)
+  assert.equal(movedBody.value.to, targetSlug)
+  assert.equal(movedBody.value.overwritten, false)
+  assert.equal(target.get('old-global-card')?.body, '旧全局卡的内容', 'the card is in the REAL project now')
+  assert.ok(target.pinnedSet().has('old-global-card'), 'the pin followed the card')
+  assert.equal(legacy.get('old-global-card'), undefined, 'and the source no longer holds it')
+  assert.ok(legacy.archiveCount() >= 1, 'the source keeps an undo copy of what left')
+  assert.ok(renderMemoryText(root, targetCwd).includes('旧全局卡的内容'), 'after the move: the project session reads it')
+
+  // Every fence, one call each, and none of them moves anything.
+  const missing = await call({ scope: 'project', slug: LEGACY_GLOBAL_SLUG, topic: 'no-such-topic', targetSlug })
+  assert.equal(missing.status, 400)
+  assert.equal(((await missing.json()) as { error: { host: { code: string } } }).error.host.code, 'route.topicUnknown')
+  const malformed = await call({ scope: 'project', slug: LEGACY_GLOBAL_SLUG, topic: 'existing', targetSlug: '../etc' })
+  assert.equal(malformed.status, 400)
+  assert.equal(((await malformed.json()) as { error: { host: { code: string } } }).error.host.code, 'route.slugInvalid')
+  const unknown = await call({ scope: 'project', slug: LEGACY_GLOBAL_SLUG, topic: 'existing', targetSlug: 'nobody-1234' })
+  assert.equal(unknown.status, 400, 'a destination must already be a project — a move never creates one')
+  assert.equal(((await unknown.json()) as { error: { host: { code: string } } }).error.host.code, 'route.projectUnknown')
+  const back = await call({ scope: 'project', slug: targetSlug, topic: 'existing', targetSlug: LEGACY_GLOBAL_SLUG })
+  assert.equal(back.status, 400, 'the dead end is one-way: it can be drained, never filled')
+  assert.equal(((await back.json()) as { error: { host: { code: string } } }).error.host.code, 'route.moveTargetLegacy')
+  const same = await call({ scope: 'project', slug: targetSlug, topic: 'existing', targetSlug })
+  assert.equal(same.status, 400)
+  assert.equal(((await same.json()) as { error: { host: { code: string } } }).error.host.code, 'route.moveSameProject')
+  const noScope = await call({ slug: LEGACY_GLOBAL_SLUG, topic: 'existing', targetSlug })
+  assert.equal(noScope.status, 400)
+  assert.equal(((await noScope.json()) as { error: { host: { code: string } } }).error.host.code, 'route.scopeRequired')
+  assert.notEqual(target.get('existing'), undefined, 'no refused call destroyed the destination card')
+
+  // A same-topic conflict is ASKED, never silently overwritten.
+  await legacy.upsert({ name: 'conflict-card', category: 'lesson', summary: '冲突卡', body: '来搬的版本' })
+  await target.upsert({ name: 'conflict-card', category: 'fact', summary: '目标版本', body: '目标已经有的版本' })
+  const conflict = await call({ scope: 'project', slug: LEGACY_GLOBAL_SLUG, topic: 'conflict-card', targetSlug })
+  assert.equal(conflict.status, 409)
+  assert.equal(((await conflict.json()) as { error: { host: { code: string } } }).error.host.code, 'route.moveOccupied')
+  assert.equal(target.get('conflict-card')?.body, '目标已经有的版本', 'nothing overwritten on the first ask')
+  assert.notEqual(legacy.get('conflict-card'), undefined, 'and the source card is still there')
+  const overwritten = await call({ scope: 'project', slug: LEGACY_GLOBAL_SLUG, topic: 'conflict-card', targetSlug, overwrite: true })
+  assert.equal(overwritten.status, 200)
+  assert.equal(((await overwritten.json()) as { value: { overwritten: boolean } }).value.overwritten, true)
+  assert.equal(target.get('conflict-card')?.body, '来搬的版本', 'the confirmed overwrite went through')
+  assert.equal(legacy.get('conflict-card'), undefined)
+  void dispose()
+})
+
+test('GET /status carries the injection ledger exactly when the host has one', async () => {
+  const routes: RegisteredRoute[] = []
+  const root = scratchRoot('dshm-routes-injection-')
+  const sample = {
+    at: 1_760_000_000_000,
+    project: 'demo-aaaaaaaa',
+    guidelinesChars: 3_226,
+    indexChars: 5_199,
+    bodyChars: 2_657,
+    totalChars: 11_082,
+    cardCount: 6,
+    indexLines: 50,
+    truncated: true,
+  }
+  const dispose = registerMemoryRoutes({
+    register: (route: RegisteredRoute) => {
+      routes.push(route)
+      return () => Promise.resolve()
+    },
+  } as never, root, {
+    injectionMetrics: () => ({
+      latest: sample,
+      samples: 1,
+      mean: {
+        guidelinesChars: 3_226,
+        indexChars: 5_199,
+        bodyChars: 2_657,
+        totalChars: 11_082,
+        cardCount: 6,
+        indexLines: 50,
+      },
+      truncatedSamples: 1,
+    }),
+  })
+  const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/status`)
+  assert.ok(route !== undefined)
+  const response = await route.fetch(new Request(`https://localhost${route.path}`, { method: 'GET' }))
+  const body = await response.json() as { value: { injection?: { latest: typeof sample, samples: number } } }
+  assert.equal(body.value.injection?.latest.indexChars, 5_199, 'the page reads the numbers the probe measured')
+  assert.equal(body.value.injection?.samples, 1)
+  // The earlier status test pins the no-provider shape (three keys): a kernel
+  // without the provider must NOT ship an `injection: undefined` key that reads
+  // as "measured, all zero".
+  void dispose()
+})
+
+test('POST /move refuses a destination whose cwd cannot round-trip', async () => {
+  const { mkdirSync, writeFileSync } = await import('node:fs')
+  const routes: RegisteredRoute[] = []
+  const root = scratchRoot('dshm-routes-move-target-')
+  const dispose = registerMemoryRoutes({
+    register: (route: RegisteredRoute) => {
+      routes.push(route)
+      return () => Promise.resolve()
+    },
+  } as never, root)
+  const call = async (body: unknown): Promise<Response> => {
+    const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/move`)
+    assert.ok(route !== undefined, 'the move route is registered')
+    return route.fetch(new Request(`https://localhost${route.path}`, { method: 'POST', body: JSON.stringify(body) }))
+  }
+
+  const sourceCwd = 'D:/codes/MoveTargetSrc'
+  await root.projectFor(sourceCwd).upsert({ name: 'card', category: 'fact', summary: '待迁移卡', body: '待迁移内容' })
+
+  // A directory that exists but carries no stamp at all.
+  const bareSlug = 'bare-target-0001'
+  mkdirSync(join(root.dir, 'projects', bareSlug), { recursive: true })
+  // A directory whose stamp names a different workspace, so the slug it was
+  // stored under cannot be resolved back from its cwd.
+  const staleSlug = 'stale-target-0001'
+  const staleDir = join(root.dir, 'projects', staleSlug)
+  mkdirSync(staleDir, { recursive: true })
+  writeFileSync(join(staleDir, 'project.json'), `${JSON.stringify({ cwd: 'D:/codes/SomewhereElse' })}\n`, 'utf8')
+
+  for (const targetSlug of [bareSlug, staleSlug]) {
+    const response = await call({ scope: 'project', slug: projectSlug(sourceCwd), topic: 'card', targetSlug })
+    assert.equal(response.status, 400, `${targetSlug} must be refused as a destination`)
+    assert.equal(
+      ((await response.json()) as { error: { host: { code: string } } }).error.host.code,
+      'route.projectUnknown',
+    )
+  }
+
+  assert.equal(root.projectFor(sourceCwd).get('card')?.body, '待迁移内容', 'nothing left the source')
+
+  // The settings list has to mark them unusable too: offering a destination the
+  // host refuses only produces a dead end for the user.
+  const rows = listProjects(root.dir)
+  assert.equal(rows.find(row => row.slug === bareSlug)?.movable, false)
+  assert.equal(rows.find(row => row.slug === staleSlug)?.movable, false)
+  await dispose()
 })

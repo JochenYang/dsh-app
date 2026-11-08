@@ -6,6 +6,8 @@
  *   GET  /llm-audit     — recent background-LLM cost rows (newest 20)
  *   POST /config        — set toggles (body {enabled?, distill?} booleans)
  *   POST /pin           — pin/unpin one card (body {topic, pinned, scope, slug})
+ *   POST /move          — relocate one card into another project
+ *                         (body {topic, targetSlug, overwrite?, scope, slug})
  *   POST /forget        — delete cards by topic key or content substring
  *                         (body {match, scope, slug})
  *   POST /clear         — {scope:'project', slug} removes that project directory
@@ -34,7 +36,7 @@
 
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
-import { ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryStatus } from './types.ts'
+import { LEGACY_GLOBAL_SLUG, ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSummary, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryMoveResponse, type MemoryStatus } from './types.ts'
 
 /** Route namespace on the shared `/api` channel (single source in types.ts,
  * shared with the browser half). Re-exported so existing importers keep
@@ -150,6 +152,12 @@ export interface MemoryRouteHooks {
    * @returns what the pass did, in the wire vocabulary the page renders.
    */
   curateNow?: (slug: string) => Promise<MemoryCurateResult>
+  /**
+   * The character ledger of recent prompt assemblies, for the "how much does
+   * injection actually cost" panel. Undefined until the provider has assembled
+   * once (and always absent on a kernel whose page never asks).
+   */
+  injectionMetrics?: () => MemoryInjectionSummary | undefined
 }
 
 /**
@@ -171,14 +179,20 @@ export function registerMemoryRoutes(
       methods: ['GET'],
       requestBody: 'buffered',
       fetch: async () => {
-        // The payload is exactly what the page renders: the two toggle states
-        // and the project list. The retired global block's stats and the
-        // extractor's run traces are gone with their surfaces — card bodies
+        // The payload is exactly what the page renders: the two toggle states,
+        // the project list and — when a provider has assembled something — what
+        // the last injection actually cost. The retired global block's stats and
+        // the extractor's run traces are gone with their surfaces; card bodies
         // are served on demand by /entries.
+        const injection = hooks.injectionMetrics?.()
         const status: MemoryStatus = {
           enabled: root.global.isEnabled(),
           distill: root.global.isDistillEnabled(),
           projects: listProjects(root.dir),
+          // Absent (not undefined) when nothing has assembled yet: a key with an
+          // undefined value would still show up in Object.keys and read like
+          // "measured, empty".
+          ...(injection === undefined ? {} : { injection }),
         }
         return ok(status)
       },
@@ -320,6 +334,100 @@ export function registerMemoryRoutes(
         // the store's substring fallback only fires for hand-typed calls.
         const result = await store.forget(match)
         return ok({ forgotten: result.removed.length, removed: result.removed })
+      },
+    }),
+
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/move`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body: Record<string, unknown>
+        try {
+          body = await readJsonBody(request)
+        } catch (error) {
+          return bodyFailure(error)
+        }
+        const topic = body.topic
+        if (typeof topic !== 'string' || !isValidTopic(topic)) {
+          return fail(400, 'bad-request', { code: 'route.topicInvalid', text: 'topic must be a valid topic key (ASCII kebab-case)' })
+        }
+        // The SOURCE goes through the shared resolver: no scope, a malformed
+        // slug or the retired global scope is refused before anything moves.
+        const source = resolveStore(root, body)
+        if (source instanceof Response) return source
+        const targetSlug = body.targetSlug
+        if (typeof targetSlug !== 'string' || !isValidSlug(targetSlug)) {
+          return fail(400, 'bad-request', { code: 'route.slugInvalid', text: 'the target slug is malformed' })
+        }
+        // The dead end stays one-way: `legacy-global` is the holding pen this
+        // route drains, so it can never be a DESTINATION. Without this a move
+        // would rebuild the exact defect it exists to fix.
+        if (targetSlug === LEGACY_GLOBAL_SLUG) {
+          return fail(400, 'bad-request', {
+            code: 'route.moveTargetLegacy',
+            text: 'legacy-global holds unassigned cards; it cannot receive a card',
+          })
+        }
+        if (targetSlug === body.slug) {
+          return fail(400, 'bad-request', { code: 'route.moveSameProject', text: 'the target project is the source project' })
+        }
+        // A destination must ALREADY be a project AND carry a stamp that walks
+        // back to its own slug: the resolver's bare fallback (needed for the
+        // legacy holding pen as a SOURCE) would otherwise let a card land in a
+        // directory no session can resolve — recreating the dead end this route
+        // drains.
+        const target = root.moveTargetBySlug(targetSlug)
+        if (target === undefined) {
+          return fail(400, 'bad-request', {
+            code: 'route.projectUnknown',
+            text: 'unknown target project, or its directory cannot be resolved back to a workspace',
+          })
+        }
+        const overwrite = body.overwrite
+        if (overwrite !== undefined && typeof overwrite !== 'boolean') {
+          return fail(400, 'bad-request', { code: 'route.overwriteNotBoolean', text: 'overwrite must be a boolean' })
+        }
+        let outcome: Awaited<ReturnType<MemoryStore['moveCardTo']>>
+        try {
+          outcome = await source.moveCardTo(target, topic, overwrite === true)
+        } catch (error) {
+          // A hand-edited card can fail the card validation the target applies;
+          // the store compensates by undoing the target copy, so nothing moved
+          // and the caller can retry the same request.
+          return fail(500, 'io', {
+            code: 'route.moveFailed',
+            text: error instanceof Error ? error.message : 'could not move the card',
+          })
+        }
+        if (outcome === 'partial') {
+          // Compensation itself failed: the card is in BOTH stores. Saying
+          // "nothing moved" here would be false, and a blind retry turns into a
+          // 409 or a duplicate.
+          return fail(500, 'io', {
+            code: 'route.movePartial',
+            text: 'the card now exists in both projects; remove one copy before retrying',
+          })
+        }
+        if (outcome === 'missing') {
+          return fail(400, 'bad-request', { code: 'route.topicUnknown', text: 'unknown topic' })
+        }
+        if (outcome === 'same-store') {
+          return fail(400, 'bad-request', { code: 'route.moveSameProject', text: 'the target project is the source project' })
+        }
+        if (outcome === 'occupied') {
+          // Never a silent overwrite: the page asks, then resends with overwrite.
+          return fail(409, 'conflict', {
+            code: 'route.moveOccupied',
+            text: 'the target project already holds a card with that topic',
+          })
+        }
+        const from = String(body.slug)
+        // The one record that explains, later, why a card left a project — and
+        // where it went (the ledger's `rename` already carries the target).
+        root.recordLedger({ scope: from, pass: 'forget', op: 'rename', keys: [topic], target: targetSlug })
+        const value: MemoryMoveResponse = { moved: true, topic, from, to: targetSlug, overwritten: overwrite === true }
+        return ok(value)
       },
     }),
 

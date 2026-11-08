@@ -60,7 +60,11 @@ import { promises as fsp } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { removeTree } from './remove-tree.ts'
 import type { MemoryCategory, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
-import { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, MEMORY_CATEGORIES } from './types.ts'
+import { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, LEGACY_GLOBAL_SLUG, MEMORY_CATEGORIES } from './types.ts'
+// The slug is DEFINED in types.ts so the browser half can recognise the row
+// without importing host code; re-exported here because every host-side caller
+// imports it from this module.
+export { LEGACY_GLOBAL_SLUG }
 
 /** One card body gets at most this many characters: room for a consolidated
  *  fact (roughly two legacy lines) without bloating every session's re-read. */
@@ -442,6 +446,30 @@ export function validateCardInput(input: { name: string, category: string, summa
  * each returns a promise that rejects on I/O failure, which the callers (tool
  * execute / route handlers) translate into user-facing errors.
  */
+/** Move chains, keyed by `<source dir>::<topic>`.
+ *
+ * A move is two writes (target upsert, source remove) with an await between
+ * them, so two concurrent calls for one card could both pass the existence
+ * check and leave a copy in each destination. Chaining per card makes the
+ * second caller observe the finished first one, which reports 'missing'.
+ * The map entry is dropped once its chain drains, so it does not grow.
+ */
+const moveChains = new Map<string, Promise<unknown>>()
+
+function withCardMoveLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = moveChains.get(key) ?? Promise.resolve()
+  const run = previous.then(fn, fn)
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  moveChains.set(key, settled)
+  void settled.then(() => {
+    if (moveChains.get(key) === settled) moveChains.delete(key)
+  })
+  return run
+}
+
 export class MemoryStore {
   readonly dir: string
   private readonly topicsDirPath: string
@@ -565,6 +593,78 @@ export class MemoryStore {
     await this.removePin(name)
     await this.reindex()
     return true
+  }
+
+  /**
+   * Move one card INTO another project store.
+   *
+   * A relocation, not a copy: the target gets the same topic, category, summary
+   * and body, and the source no longer holds the card. The user's PIN follows it
+   * — a pin is the "always inject this" intent, and a move that silently dropped
+   * it would change what the next session sees.
+   *
+   * The source deletion runs through {@link remove}, so the card also lands in
+   * the SOURCE project's archive (byte-identical, undoable there). That is
+   * deliberate: a move is the one operation that makes a card disappear from a
+   * project the user is looking at, and the archive is the undo for it (restore
+   * puts it back).
+   *
+   * Never overwrites silently: an existing target topic answers 'occupied' and
+   * the caller has to ask the user (then pass `overwrite`).
+   *
+   * @param target - the destination project store.
+   * @param name - the topic key to move (the key is kept; a rename is not a move).
+   * @param overwrite - replace an existing target card with the same topic.
+   * @returns what happened; 'same-store' is a caller bug, refused rather than
+   *   executed as a pointless delete-and-recreate.
+   */
+  async moveCardTo(
+    target: MemoryStore,
+    name: string,
+    overwrite = false,
+  ): Promise<'moved' | 'missing' | 'occupied' | 'same-store' | 'partial'> {
+    // Serialized per (source store, topic): two concurrent moves of one card
+    // used to both report success and leave a copy in each target. The second
+    // caller now waits, then observes the card is gone.
+    return withCardMoveLock(`${this.dir}::${name}`, () => this.moveCardToLocked(target, name, overwrite))
+  }
+
+  private async moveCardToLocked(
+    target: MemoryStore,
+    name: string,
+    overwrite: boolean,
+  ): Promise<'moved' | 'missing' | 'occupied' | 'same-store' | 'partial'> {
+    const card = this.get(name)
+    if (card === undefined) return 'missing'
+    if (target.dir === this.dir) return 'same-store'
+    const replaced = target.get(name)
+    if (!overwrite && replaced !== undefined) return 'occupied'
+    const pinned = this.pinnedSet().has(name)
+
+    await target.upsert({ name: card.name, category: card.category, summary: card.summary, body: card.body })
+    try {
+      if (pinned) await target.addPin(name)
+      await this.remove(name, 'unspecified')
+    } catch (error) {
+      // The two halves are not one transaction: undo the target side so a retry
+      // starts from the same state instead of leaving a copy in both stores.
+      // Restoring the PREVIOUS target card (not deleting) keeps `overwrite`
+      // recoverable too.
+      try {
+        if (replaced === undefined) {
+          await target.remove(name)
+        } else {
+          await target.upsert({ name: replaced.name, category: replaced.category, summary: replaced.summary, body: replaced.body })
+        }
+      } catch {
+        // Compensation itself failed: the card is now in BOTH stores. Report it
+        // as a distinct outcome so the page can say "clean up manually" rather
+        // than the false "nothing moved".
+        return 'partial'
+      }
+      throw error
+    }
+    return 'moved'
   }
 
   /** Drop every card, the index, the legacy archive and every pin (full reset).
@@ -1106,9 +1206,12 @@ const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
  * {@link MemoryRoot.migrateLegacyGlobalScope}). Also the placeholder `cwd`
  * stamped into its `project.json`: the settings page shows the basename, and
  * no session's real cwd ever equals this, so its cards are never injected —
- * they are listable and deletable, which is what the removal requires.
+ * they are listable, deletable and (since P0-1) movable, see
+ * {@link MemoryStore.moveCardTo}.
+ *
+ * Defined in `types.ts` and re-exported above because the settings page has to
+ * recognise this row too.
  */
-export const LEGACY_GLOBAL_SLUG = 'legacy-global'
 
 /** Whether a slug is well-formed (used to fence the clear route). */
 export function isValidSlug(slug: string): boolean {
@@ -1116,7 +1219,7 @@ export function isValidSlug(slug: string): boolean {
 }
 
 /** One project's summary for the settings page (store view of the wire shape). */
-export type ProjectSummary = Pick<MemoryProjectSummary, 'slug' | 'cwd' | 'cards' | 'sizeBytes'>
+export type ProjectSummary = Pick<MemoryProjectSummary, 'slug' | 'cwd' | 'cards' | 'sizeBytes' | 'movable'>
 /** Summarize every project directory, busiest first. */
 export function listProjects(rootDir: string): ProjectSummary[] {
   const projectsDir = join(rootDir, 'projects')
@@ -1136,7 +1239,11 @@ export function listProjects(rootDir: string): ProjectSummary[] {
       // missing/stale metadata → keep empty, the slug still identifies it
     }
     const { cards, sizeBytes } = new MemoryStore(dir).stats()
-    out.push({ slug: entry.name, cwd, cards, sizeBytes })
+    // A target is only usable when its stamp walks back to this very slug; a
+    // bare directory or a stale stamp would swallow cards into a store no
+    // session can resolve.
+    const movable = cwd !== '' && projectSlug(cwd) === entry.name
+    out.push({ slug: entry.name, cwd, cards, sizeBytes, movable })
   }
   out.sort((a, b) => b.sizeBytes - a.sizeBytes || b.cards - a.cards)
   return out
@@ -1333,6 +1440,30 @@ export class MemoryRoot {
     const store = new MemoryStore(dir)
     store.attachLedger(this, slug)
     return store
+  }
+
+  /**
+   * Destination store for a card move.
+   *
+   * Deliberately stricter than {@link projectBySlug}: the bare fallback is what
+   * makes the legacy holding pen readable, but using it as a MOVE TARGET would
+   * rebuild the very dead end the move exists to drain — cards parked in a
+   * directory no cwd can resolve. A destination therefore needs a usable stamp
+   * that round-trips to its own slug, and never the holding pen itself.
+   */
+  moveTargetBySlug(slug: string): MemoryStore | undefined {
+    if (!isValidSlug(slug) || slug === LEGACY_GLOBAL_SLUG) return undefined
+    const dir = join(this.dir, 'projects', slug)
+    if (!existsSync(dir)) return undefined
+    try {
+      const meta: unknown = JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8'))
+      const cwd = (meta as { cwd?: unknown }).cwd
+      if (typeof cwd !== 'string' || cwd === '') return undefined
+      if (projectSlug(cwd) !== slug) return undefined
+      return this.projectFor(cwd)
+    } catch {
+      return undefined
+    }
   }
 
   /**

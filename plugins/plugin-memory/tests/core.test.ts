@@ -31,7 +31,8 @@ import {
   stripCommitIds,
   validateCardInput,
 } from '../src/memory-store.ts'
-import { renderCardBlock, renderMemoryText, selectCards } from '../src/prompt.ts'
+import { MAX_PROJECT_CHARS, assembleMemoryText, renderCardBlock, renderMemoryText, selectCards } from '../src/prompt.ts'
+import { MAX_INJECTION_SAMPLES, InjectionMetricsRing } from '../src/injection-metrics.ts'
 import { lightSweep } from '../src/light-sweep.ts'
 import { ROUTE_PREFIX, registerMemoryRoutes } from '../src/routes.ts'
 import { CARD_TEXT_DISCIPLINE, CARD_TEXT_SURFACES, type CardTextSurface } from '../src/card-discipline.ts'
@@ -1133,5 +1134,145 @@ test('containsCredential recognises credential shapes, not only key names', () =
   ]
   for (const sample of allowed) {
     assert.equal(containsCredential(sample), false, `must not be caught: ${sample}`)
+  }
+})
+
+// --- P0-2 / P1: what injection costs, and the rotation that spends it fairly ---
+
+/** The five categories in the order memory-store sorts them. */
+const CATEGORIES: MemoryCategory[] = ['preference', 'convention', 'decision', 'lesson', 'fact']
+
+test('selectCards: rotation spends the budget across every category, not the first two', async () => {
+  const store = tmpStore()
+  // 60 full-length cards, 12 per category: the shape that produced
+  // bodiesInjectedByCategory = {preference: 3, convention: 3} and zero bodies for
+  // the other three. Blocks, not rotation, was why.
+  for (const category of CATEGORIES) {
+    for (let i = 0; i < 12; i += 1) {
+      await save(store, `${category}-${String(i).padStart(2, '0')}`, 'x'.repeat(370), category, 'y'.repeat(40))
+    }
+  }
+  const sel = selectCards(store.list(), MAX_PROJECT_CHARS, new Set())
+  const perCategory = new Map<MemoryCategory, number>()
+  for (const card of sel.selected) perCategory.set(card.category, (perCategory.get(card.category) ?? 0) + 1)
+  for (const category of CATEGORIES) {
+    assert.ok((perCategory.get(category) ?? 0) >= 1, `${category} 的正文必须进入注入（分块串行时为 0）`)
+  }
+  assert.equal(sel.truncated, true, 'something is still left out, and the ledger still says so')
+})
+
+test('selectCards: rotation never lets a pin fall behind the round-robin', async () => {
+  const store = tmpStore()
+  // Full buckets ahead of the pinned card in the SAME category: rotation shifts
+  // ordinary cards earlier, so this pins that a pin is still chosen and whole.
+  for (const category of CATEGORIES) {
+    for (let i = 0; i < 4; i += 1) {
+      await save(store, `${category}-${String(i).padStart(2, '0')}`, 'x'.repeat(300), category, 'y'.repeat(40))
+    }
+  }
+  await save(store, 'pinned-fact', 'P'.repeat(200), 'fact', '固定卡')
+  const sel = selectCards(store.list(), 1_400, new Set(['pinned-fact']))
+  const pin = sel.selected.find(card => card.name === 'pinned-fact')
+  assert.ok(pin !== undefined, 'the pin reaches the prompt')
+  assert.equal(pin.body, 'P'.repeat(200), 'and whole — the pin contract is unchanged')
+  assert.equal(sel.truncated, true)
+})
+
+test('assembleMemoryText: the ledger measures what the body budget does NOT bound', async () => {
+  const root = tmpRoot()
+  const store = root.projectFor('D:/codes/Demo')
+  for (let i = 0; i < 60; i += 1) {
+    await save(store, `card-${String(i).padStart(2, '0')}`, 'x'.repeat(370), CATEGORIES[i % CATEGORIES.length]!, 'y'.repeat(40))
+  }
+  const assembly = assembleMemoryText(root, 'D:/codes/Demo')
+  const metrics = assembly.metrics
+  assert.ok(metrics !== undefined, 'a project-scoped assembly carries a ledger')
+  assert.equal(metrics.totalChars, assembly.text.length, 'total is exactly what the prompt received')
+  assert.equal(metrics.indexLines, 50, 'the index is capped at its ceiling, and the ledger says how many lines rode')
+  assert.ok(metrics.indexChars > MAX_PROJECT_CHARS, '索引单独就超过正文预算 — 这正是它必须进账的原因')
+  assert.ok(metrics.bodyChars <= MAX_PROJECT_CHARS, 'the bodies stay inside the budget they are the only subject of')
+  assert.equal(metrics.truncated, true)
+  assert.ok(metrics.guidelinesChars > 0, 'the fixed guidelines cost is part of the ledger')
+  assert.ok(metrics.cardCount >= 5)
+  // Nothing project-scoped rendered -> nothing measured: a session with no
+  // workspace must not record a sample against a project.
+  assert.equal(assembleMemoryText(root, undefined).metrics, undefined)
+  // The master toggle off: no text, no ledger.
+  root.global.setEnabled(false)
+  assert.deepEqual(assembleMemoryText(root, 'D:/codes/Demo'), { text: '' })
+})
+
+test('InjectionMetricsRing: bounded, latest wins, the mean covers the ring', () => {
+  const ring = new InjectionMetricsRing()
+  assert.equal(ring.summary(), undefined, 'a fresh mount answers "no data", not four zeroes')
+  for (let i = 0; i < MAX_INJECTION_SAMPLES + 5; i += 1) {
+    ring.record({ guidelinesChars: 10, indexChars: 20, bodyChars: 30, totalChars: 60, cardCount: 1, indexLines: 1, truncated: i % 2 === 0 }, 'demo-aaaaaaaa', 1_000 + i)
+  }
+  assert.equal(ring.size(), MAX_INJECTION_SAMPLES, 'the ring is bounded — the prompt path may not grow forever')
+  const summary = ring.summary()!
+  assert.equal(summary.samples, MAX_INJECTION_SAMPLES)
+  assert.equal(summary.latest.at, 1_000 + MAX_INJECTION_SAMPLES + 4, 'latest is the newest assembly')
+  assert.equal(summary.mean.totalChars, 60)
+  assert.ok(summary.truncatedSamples > 0)
+})
+
+test('moveCardTo serializes concurrent moves of one card', async () => {
+  const root = scratchRoot('dshm-move-race-')
+  const source = root.projectFor('D:/codes/MoveRaceSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '竞态卡', body: '竞态内容' })
+  const first = root.projectFor('D:/codes/MoveRaceA')
+  const second = root.projectFor('D:/codes/MoveRaceB')
+
+  const outcomes = await Promise.all([
+    source.moveCardTo(first, 'card'),
+    source.moveCardTo(second, 'card'),
+  ])
+
+  assert.deepEqual(outcomes.slice().sort(), ['missing', 'moved'], 'the second caller sees the card already gone')
+  const holders = [first.get('card'), second.get('card')].filter(card => card !== undefined)
+  assert.equal(holders.length, 1, 'exactly one target holds the card')
+})
+
+test('moveCardTo undoes the target copy when the source removal fails', async () => {
+  const root = scratchRoot('dshm-move-compensate-')
+  const source = root.projectFor('D:/codes/MoveCompSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '补偿卡', body: '补偿内容' })
+  const target = root.projectFor('D:/codes/MoveCompDst')
+
+  const originalRemove = source.remove.bind(source)
+  const patched = source as unknown as { remove: typeof source.remove }
+  patched.remove = async () => {
+    throw new Error('source store is read-only')
+  }
+  try {
+    await assert.rejects(source.moveCardTo(target, 'card'), /read-only/)
+    assert.equal(target.get('card'), undefined, 'the target copy was undone, so a retry starts clean')
+    assert.equal(source.get('card')?.body, '补偿内容', 'the source still holds the card')
+  } finally {
+    patched.remove = originalRemove
+  }
+})
+
+test('moveCardTo reports partial when the compensation also fails', async () => {
+  const root = scratchRoot('dshm-move-partial-')
+  const source = root.projectFor('D:/codes/MovePartialSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '半成品卡', body: '半成品内容' })
+  const target = root.projectFor('D:/codes/MovePartialDst')
+
+  const sourceRemove = source.remove.bind(source)
+  const targetRemove = target.remove.bind(target)
+  ;(source as unknown as { remove: typeof source.remove }).remove = async () => {
+    throw new Error('source write failed')
+  }
+  ;(target as unknown as { remove: typeof target.remove }).remove = async () => {
+    throw new Error('target cleanup failed')
+  }
+  try {
+    assert.equal(await source.moveCardTo(target, 'card'), 'partial', 'both stores now hold a copy')
+    assert.equal(target.get('card')?.body, '半成品内容')
+    assert.equal(source.get('card')?.body, '半成品内容')
+  } finally {
+    ;(source as unknown as { remove: typeof source.remove }).remove = sourceRemove
+    ;(target as unknown as { remove: typeof target.remove }).remove = targetRemove
   }
 })

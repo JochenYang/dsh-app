@@ -12,6 +12,17 @@
  * `projects/legacy-global`, so both are an ordinary project row — listed,
  * restorable and deletable like any other.
  *
+ * That row is a DEAD END by construction: `projectSlug` is derived from a real
+ * cwd, so no session can ever resolve `legacy-global` and its cards are never
+ * injected. The page therefore (a) warns above the project list while cards
+ * are still in there, and (b) gives the row a "move to project…" control per
+ * card, because "visible but forever unreadable" is not a state a user can act
+ * on from Delete alone.
+ *
+ * The section also shows the P0-2 injection ledger: last assembly + the mean of
+ * the ring, in characters. The body budget bounds only the bodies, so the fixed
+ * costs (guidelines + index) have to be visible for the budget to mean anything.
+ *
  * Every string comes from the `dsh-app.memory` namespace through the `t`
  * standard seat: the section registers with `locale: NS`, so the renderer
  * hands the component a namespace-bound translate that reads the active UI
@@ -29,7 +40,7 @@ import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
 import type { MemoryKey } from './locales.ts'
-import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
+import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, LEGACY_GLOBAL_SLUG, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSample, type MemoryMoveResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type MemorySectionProps = PropsLocale<typeof NS>
@@ -98,6 +109,11 @@ function routeErrorCopy(t: TranslateNS<typeof NS>, host: HostText | undefined, f
     'route.restoreInvalid': t('memory.host.restoreInvalid'),
     'route.restoreArgsRequired': t('memory.host.restoreArgsRequired'),
     'route.archiveFailed': t('memory.host.archiveFailed'),
+    'route.moveTargetLegacy': t('memory.host.moveTargetLegacy'),
+    'route.moveSameProject': t('memory.host.moveSameProject'),
+    'route.moveOccupied': t('memory.host.moveOccupied'),
+    'route.moveFailed': t('memory.host.moveFailed', { detail: String(params.detail ?? '') }),
+    'route.overwriteNotBoolean': t('memory.host.overwriteNotBoolean'),
   }, fallback)
 }
 
@@ -205,6 +221,9 @@ type ConfirmState =
   | { kind: 'forget', slug: string, topic: string, summary: string, pinned: boolean }
   | { kind: 'archive-one', slug: string, day: string, file: string, topic: string }
   | { kind: 'archive-all', count: number }
+  /** The target already holds this topic: the move ran, answered 409, and its
+   *  consent to overwrite is what this dialog collects. */
+  | { kind: 'move-overwrite', slug: string, topic: string, targetSlug: string, targetTitle: string }
 
 /** Display line for a card summary, capped for the row. */
 function summaryLine(summary: string): string {
@@ -232,6 +251,7 @@ function confirmTitle(state: ConfirmState | null, t: TranslateNS<typeof NS>): st
   if (state.kind === 'clear') return t('memory.confirm.clearProjectTitle')
   if (state.kind === 'archive-one') return t('memory.confirm.archiveOneTitle')
   if (state.kind === 'archive-all') return t('memory.confirm.archiveAllTitle')
+  if (state.kind === 'move-overwrite') return t('memory.confirm.moveOverwriteTitle')
   return state.pinned ? t('memory.confirm.forgetPinnedTitle') : t('memory.confirm.forgetTitle')
 }
 
@@ -244,12 +264,37 @@ function confirmMessage(state: ConfirmState | null, t: TranslateNS<typeof NS>): 
   }
   if (state.kind === 'archive-one') return t('memory.confirm.archiveOneMessage', { topic: state.topic, day: state.day })
   if (state.kind === 'archive-all') return t('memory.confirm.archiveAllMessage', { count: String(state.count) })
+  if (state.kind === 'move-overwrite') return t('memory.confirm.moveOverwriteMessage', { to: state.targetTitle, topic: state.topic })
   return t('memory.confirm.forgetMessage', { where: t('memory.scope.project.inline'), summary: state.summary, topic: state.topic })
 }
 
 /** Expansion-set key for one card row. */
 function rowKey(slug: string, topic: string): string {
   return `${slug}:${topic}`
+}
+
+/** The character ledger as one line. Takes the subset both the latest sample
+ *  and the mean carry, so one formatter serves both. */
+function injectionText(
+  sample: Pick<MemoryInjectionSample, 'guidelinesChars' | 'indexChars' | 'indexLines' | 'bodyChars' | 'totalChars'>,
+  t: TranslateNS<typeof NS>,
+): string {
+  return t('memory.injection.row', {
+    guidelines: String(sample.guidelinesChars),
+    index: String(sample.indexChars),
+    lines: String(sample.indexLines),
+    body: String(sample.bodyChars),
+    total: String(sample.totalChars),
+  })
+}
+
+/** Relocate one card into another project (the legacy-global drain). */
+async function postMove(from: string, topic: string, targetSlug: string, overwrite: boolean): Promise<MemoryMoveResponse> {
+  return fetchJson<MemoryMoveResponse>(`${ROUTE_PREFIX}/move`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope: 'project', slug: from, topic, targetSlug, overwrite }),
+  })
 }
 
 /** One card row: summary + meta line, click the main area to expand the body. */
@@ -263,8 +308,15 @@ function CardRow(props: {
   onToggle: () => void
   onPin: () => void
   onForget: () => void
+  /** Destination projects, present only on the legacy-global row: the one row
+   *  whose cards nothing injects until they are assigned somewhere real. */
+  moveTargets?: MemoryProjectSummary[]
+  onMove?: (targetSlug: string) => void
 }): ReactNode {
-  const { card, body, expanded, busy, t, onToggle, onPin, onForget } = props
+  const { card, body, expanded, busy, t, onToggle, onPin, onForget, moveTargets, onMove } = props
+  // Local to the row: the picker is a choice ABOUT this card, and keeping it
+  // here means one card's selection never moves another's.
+  const [moveTo, setMoveTo] = useState('')
   return (
     <div className="dshm_entryRow">
       <Tooltip label={expanded ? t('memory.card.collapse') : t('memory.card.expand')} side="top">
@@ -289,6 +341,30 @@ function CardRow(props: {
         disabled={busy}
         onClick={onPin}
       >{card.pinned ? t('memory.card.pinned') : t('memory.card.pin')}</button>
+      {moveTargets === undefined
+        ? null
+        : (
+          <>
+            <select
+              className="dshm_select"
+              aria-label={t('memory.action.moveTo')}
+              disabled={busy || moveTargets.length === 0}
+              value={moveTo}
+              onChange={event => { setMoveTo(event.target.value) }}
+            >
+              <option value="">{moveTargets.length === 0 ? t('memory.move.noTargets') : t('memory.move.pick')}</option>
+              {moveTargets.map(project => (
+                <option key={project.slug} value={project.slug}>{projectTitle(project)}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="dshm_button"
+              disabled={busy || moveTo === ''}
+              onClick={() => { onMove?.(moveTo) }}
+            >{t('memory.action.move')}</button>
+          </>
+        )}
       <button
         type="button"
         className="dshm_button dshm_buttonDanger"
@@ -454,6 +530,37 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   }, [loadProjectRows])
 
   /**
+   * Relocate one card into another project — the legacy-global drain.
+   *
+   * A same-topic target is not an error to report and swallow: the host answers
+   * 409 `route.moveOccupied`, nothing was overwritten, and the page turns that
+   * into the consent dialog. The overwrite itself only runs from onConfirm.
+   */
+  const onMove = useCallback(async (from: string, topic: string, targetSlug: string, targetTitle: string) => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    setNotice(undefined)
+    try {
+      const result = await postMove(from, topic, targetSlug, false)
+      setNotice({ source: 'key', key: 'memory.notice.moved', params: { topic: result.topic, to: targetTitle } })
+      await load()
+      if (openSlug === from) await loadProjectRows(from)
+      // A move archives the source copy, so the undo panel changes too.
+      await loadArchive()
+    } catch (failure) {
+      if (failure instanceof HostError && failure.host?.code === 'route.moveOccupied') {
+        setConfirming({ kind: 'move-overwrite', slug: from, topic, targetSlug, targetTitle })
+        return
+      }
+      setError(wireNotice(failure))
+    } finally {
+      setBusy(false)
+      inFlight.current = false
+    }
+  }, [load, loadArchive, loadProjectRows, openSlug])
+
+  /**
    * Run one maintenance pass for a project — the row's "curate now" button.
    *
    * The request IS the report: there is no push channel, so the button holds
@@ -582,6 +689,14 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         })
         setNotice({ source: 'key', key: 'memory.notice.archiveCleared', params: { count: target.count } })
         await loadArchive()
+      } else if (target.kind === 'move-overwrite') {
+        // The user said yes to replacing the target's same-topic card: the same
+        // request, now carrying the consent the 409 asked for.
+        const result = await postMove(target.slug, target.topic, target.targetSlug, true)
+        setNotice({ source: 'key', key: 'memory.notice.moved', params: { topic: result.topic, to: target.targetTitle } })
+        await load()
+        if (openSlug === target.slug) await loadProjectRows(target.slug)
+        await loadArchive()
       } else {
         await runForget(target.slug, target.topic)
       }
@@ -591,10 +706,20 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
       setBusy(false)
       inFlight.current = false
     }
-  }, [confirming, load, loadArchive, runForget])
+  }, [confirming, load, loadArchive, loadProjectRows, openSlug, runForget])
 
   /** `{state}` for the toggle labels; the unknown state reads as pending. */
   const pending = t('memory.state.pending')
+  // The holding pen's card count: what the banner above the project list reports,
+  // and the one number that says "this much memory is on disk and unreadable".
+  const legacyCards = status?.projects.find(project => project.slug === LEGACY_GLOBAL_SLUG)?.cards ?? 0
+  // Destinations the page offers for a legacy card. `legacy-global` is excluded:
+  // the host refuses it as a target, so offering it would only produce a refusal.
+  // A directory whose stamp cannot round-trip is excluded as well: the host
+  // refuses it too, and showing it would invite the user into the dead end.
+  const moveTargets = status === null
+    ? []
+    : status.projects.filter(project => project.slug !== LEGACY_GLOBAL_SLUG && project.movable !== false)
 
   return (
     <div className="dshm_section">
@@ -612,7 +737,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         open={confirming !== null}
         title={confirmTitle(confirming, t)}
         message={confirmMessage(confirming, t)}
-        confirmLabel={t('memory.action.delete')}
+        confirmLabel={confirming?.kind === 'move-overwrite' ? t('memory.action.overwrite') : t('memory.action.delete')}
         cancelLabel={t('memory.action.cancel')}
         busy={busy}
         onConfirm={() => { void onConfirm() }}
@@ -655,6 +780,33 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         </div>
       </div>
 
+      {/* P0-2: the character ledger of the last assembly. The body budget only
+          bounds the bodies; the guidelines and the index are fixed cost paid
+          every turn, and they are the larger half in practice — so they are on
+          the page, not just in /status. */}
+      {status?.injection === undefined
+        ? null
+        : (
+          <div className="dshm_projects">
+            <div className="dshm_projectsTitle">{t('memory.injection.title')}</div>
+            <div className="dshm_hint">{t('memory.injection.hint')}</div>
+            <div className="dshm_activityRow">
+              <span className="dshm_metricLine">{t('memory.injection.latest')} · {injectionText(status.injection.latest, t)}</span>
+            </div>
+            <div className="dshm_activityRow">
+              <span className="dshm_metricLine">
+                {t('memory.injection.mean', { samples: String(status.injection.samples) })} · {injectionText(status.injection.mean, t)}
+              </span>
+            </div>
+            <div className="dshm_hint">
+              {t('memory.injection.cards', {
+                count: String(status.injection.latest.cardCount),
+                truncated: status.injection.latest.truncated ? t('memory.injection.truncated') : '',
+              })}
+            </div>
+          </div>
+        )}
+
       {/* The change ledger (D) has no panel here on purpose: a panel that
           cannot be acted on competed with 已删除的记忆 below, which is the one
           surface a deletion should appear on. The DATA is still recorded
@@ -676,7 +828,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                 <span className="dshm_activityTime">{t('memory.archive.row', {
                   topic: entry.topic,
                   day: entry.day,
-                  scope: projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug, cwd: '', cards: 0, sizeBytes: 0 }),
+                  scope: projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug, cwd: '', cards: 0, sizeBytes: 0, movable: false }),
                 })}</span>
                 <button
                   type="button"
@@ -739,6 +891,11 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">{t('memory.scope.project')}</div>
             <div className="dshm_hint">{t('memory.projects.hint')}</div>
+            {/* The dead end, said out loud: cards that exist, are listed, and
+                that no session can ever read until they are assigned. */}
+            {legacyCards > 0
+              ? <div className="dshm_bannerWarn">{t('memory.legacy.banner', { count: String(legacyCards) })}</div>
+              : null}
             {status.projects.map(project => (
               <div key={project.slug} className="dshm_projectBlock">
                 <div className="dshm_projectRow">
@@ -783,6 +940,16 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                             onToggle={() => { onToggleCard(project.slug, card.topic) }}
                             onPin={() => { void onPin(project.slug, card.topic, !card.pinned) }}
                             onForget={() => { setConfirming({ kind: 'forget', slug: project.slug, topic: card.topic, summary: card.summary, pinned: card.pinned }) }}
+                            moveTargets={project.slug === LEGACY_GLOBAL_SLUG ? moveTargets : undefined}
+                            onMove={target => {
+                              const title = moveTargets.find(entry => entry.slug === target)
+                              void onMove(
+                                project.slug,
+                                card.topic,
+                                target,
+                                title === undefined ? target : projectTitle(title),
+                              )
+                            }}
                           />
                         ))
                   )

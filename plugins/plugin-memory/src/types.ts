@@ -54,6 +54,15 @@ export interface MemoryProjectSummary {
   /** Topic-card count. */
   cards: number
   sizeBytes: number
+  /**
+   * Whether this directory may RECEIVE a moved card.
+   *
+   * A move into a store whose cwd cannot round-trip back to the slug creates a
+   * dead end nothing injects — the exact defect the move feature exists to
+   * drain. So a destination must carry a usable `project.json` stamp; the
+   * legacy holding pen keeps its fallback because it is only ever a SOURCE.
+   */
+  movable: boolean
 }
 
 /** One background-LLM audit row (cost observability). Rows written before the
@@ -216,7 +225,75 @@ export interface MemoryStatus {
    *  of its own: its cards are `projects/legacy-global/`, listed like any
    *  other project. */
   projects: MemoryProjectSummary[]
+  /**
+   * What the last prompt assembly actually injected (the character ledger).
+   *
+   * Absent when nothing has been assembled since mount — a fresh kernel must
+   * say "no data" rather than four zeroes that read like an empty prompt.
+   */
+  injection?: MemoryInjectionSummary
 }
+
+/** One assembly's character ledger, as /status serves it. The host-side shape
+ *  is `InjectionMetrics` (prompt.ts); it is repeated here because this module is
+ *  the browser-safe one and must not import host-only code. */
+export interface MemoryInjectionSample {
+  /** Epoch ms of the assembly. */
+  at: number
+  /** Project slug the assembly was for. */
+  project: string
+  /** The static guidelines block (outside every budget). */
+  guidelinesChars: number
+  /** The injected index text (capped, never budget-trimmed). */
+  indexChars: number
+  /** The injected card bodies — the only part `MAX_PROJECT_CHARS` bounds. */
+  bodyChars: number
+  /** The whole injected section. */
+  totalChars: number
+  /** Cards whose body was injected. */
+  cardCount: number
+  /** Index lines injected. */
+  indexLines: number
+  /** Whether any card was left out. */
+  truncated: boolean
+}
+
+/** The /status injection block: latest assembly + the ring's averages. */
+export interface MemoryInjectionSummary {
+  latest: MemoryInjectionSample
+  /** How many samples the mean covers. */
+  samples: number
+  mean: {
+    guidelinesChars: number
+    indexChars: number
+    bodyChars: number
+    totalChars: number
+    cardCount: number
+    indexLines: number
+  }
+  /** How many samples had cards left out. */
+  truncatedSamples: number
+}
+
+/** Response of POST api/move — one card relocated to another project. */
+export interface MemoryMoveResponse {
+  moved: boolean
+  topic: string
+  from: string
+  to: string
+  /** True when the target already held that topic and was overwritten. */
+  overwritten: boolean
+}
+
+/**
+ * Slug of the directory the retired GLOBAL scope was moved into at boot
+ * (`projects/legacy-global/`). No real cwd can produce it, so its cards are
+ * never injected — they are the "not yet assigned to a project" pile the
+ * settings page has to offer a way OUT of (POST /move). Defined here (not in
+ * memory-store.ts) so the browser half can recognise the row without importing
+ * host modules; memory-store re-exports it.
+ */
+export const LEGACY_GLOBAL_SLUG = 'legacy-global'
 
 /** Route namespace on the shared Connection `/api` channel. The registry admits
  * only path segments matching `[A-Za-z0-9_$.-]`, so the npm scope's `@` cannot

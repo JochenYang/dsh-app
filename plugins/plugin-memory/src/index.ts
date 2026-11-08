@@ -20,7 +20,12 @@
  *    stale cards. Both are triggered by the WRITE path (a memory_save that
  *    actually changed something) and mount only when the agents + llm
  *    services are available (graceful on kernels without them);
- * 4. settings-page routes (status/toggle/pin/clear) for the client half.
+ * 4. settings-page routes (status/toggle/pin/move/clear) for the client half.
+ *
+ * Every prompt assembly also feeds a bounded in-memory ledger
+ * (`injection-metrics.ts`) of what the injection COST — guidelines, index and
+ * card bodies in characters — served by `/status`, because the body budget can
+ * only be shown to bind if the fixed costs beside it are measured too.
  *
  * What is deliberately NOT mounted any more: session-driven EXTRACTION. Its
  * pass read a quiet session's conversation and proposed cards, and a session
@@ -62,10 +67,11 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { MemoryRoot, type MemoryStore } from './memory-store.ts'
+import { MemoryRoot, projectSlug, type MemoryStore } from './memory-store.ts'
 import { MemoryCurator } from './curator.ts'
 import { lightSweep } from './light-sweep.ts'
-import { renderMemoryText } from './prompt.ts'
+import { assembleMemoryText } from './prompt.ts'
+import { InjectionMetricsRing } from './injection-metrics.ts'
 import { registerMemoryRoutes } from './routes.ts'
 import { registerMemoryTools } from './tools.ts'
 import type { MemoryCurateResult } from './types.ts'
@@ -108,6 +114,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const log = ctx.logger(name)
   const dir = config.storePath !== '' ? config.storePath : join(resolveDshHome(), 'storages', 'dsh-app-plugin-memory')
   const root = new MemoryRoot(dir)
+  // One ledger per mount: the provider writes it, /status reads it. In memory
+  // only — this is written on EVERY assembly, and a file rewrite per turn on
+  // the prompt path is a cost that outgrows the diagnostic it serves.
+  const injectionMetrics = new InjectionMetricsRing()
 
   // Boot migrations, one entry point: any legacy memory.md timeline becomes
   // topic cards, and the retired global scope's cards move into a project
@@ -138,7 +148,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     name: 'tool:memory',
     order: PROMPT_SECTION_ORDER,
     interpolate: false,
-    text: context => renderMemoryText(root, context.agent?.session.header.cwd),
+    text: context => {
+      const cwd = context.agent?.session.header.cwd
+      const assembly = assembleMemoryText(root, cwd)
+      // Measured at the ONE point an assembly exists, so the numbers can never
+      // disagree with the text the prompt actually received. A session without
+      // a workspace assembles only the static guidelines, so there is nothing
+      // project-scoped to record (and no project to record it against).
+      if (assembly.metrics !== undefined && cwd !== undefined) {
+        injectionMetrics.record(assembly.metrics, projectSlug(cwd))
+      }
+      return assembly.text
+    },
   }), 'plugin-memory: system prompt section')
 
   // The write path's maintenance trigger. Tools mount regardless of the
@@ -164,7 +185,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     requestCurate?.(parent, sessionId)
   }
   ctx.effect(() => registerMemoryTools(ctx, root, onSaved), 'plugin-memory: llm tools')
-  ctx.effect(() => registerMemoryRoutes(ctx.connection.fetch, root, { curateNow: hookCurateNow }), 'plugin-memory: settings routes')
+  ctx.effect(() => registerMemoryRoutes(ctx.connection.fetch, root, {
+    curateNow: hookCurateNow,
+    injectionMetrics: () => injectionMetrics.summary(),
+  }), 'plugin-memory: settings routes')
 
   // The background maintenance pass needs the agents + llm services; on a
   // kernel without them (e.g. a rollback target) the plugin still mounts

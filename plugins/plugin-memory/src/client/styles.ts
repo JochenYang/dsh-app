@@ -36,6 +36,16 @@ const cssText = `
   font-size: 13px;
   line-height: 20px;
 }
+/* The legacy-global warning: a state the user must act on, but not an error. */
+.dshm_bannerWarn {
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-brand-primary);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
 .dshm_noticeOk {
   padding: 8px 12px;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -149,6 +159,30 @@ const cssText = `
 .dshm_buttonDanger {
   border-color: var(--dsw-alias-state-error-secondary);
   color: var(--dsw-alias-state-error-primary);
+}
+/* The per-card destination picker on the legacy-global row. */
+.dshm_select {
+  max-width: 160px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 3px 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dshm_select:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+}
+/* One line of the injection ledger (characters, so tabular numbers). */
+.dshm_metricLine {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
 }
 /* Confirmation modal: body-portal mask + centered card. */
 .dshm_mask {

@@ -129,6 +129,30 @@ export const zh = {
   'memory.host.restoreInvalid': '归档条目的日期或主题名不合法',
   'memory.host.restoreArgsRequired': '缺少 day 或 topic',
   'memory.host.archiveFailed': '读取归档失败，请稍后重试',
+
+  // --- Draining the legacy-global holding pen (P0-1) and the injection ledger
+  // (P0-2). ---
+  'memory.legacy.banner': '有 {count} 条旧版「全局记忆」还没有归位：它们保存在磁盘上，但任何会话都读不到。展开这一行，用卡片上的「移动到项目…」把它们指派给真实项目。',
+  'memory.action.move': '移动',
+  'memory.action.moveTo': '移动到项目…',
+  'memory.action.overwrite': '覆盖并移动',
+  'memory.move.pick': '选择项目',
+  'memory.move.noTargets': '还没有可移动到的项目：先在目标项目里保存一条记忆，或直接把这张卡删除。',
+  'memory.notice.moved': '已把「{topic}」移动到项目「{to}」',
+  'memory.confirm.moveOverwriteTitle': '目标项目已有同名记忆',
+  'memory.confirm.moveOverwriteMessage': '项目「{to}」里已经有一条同名记忆（{topic}）：\n「{summary}」\n继续会用这次移动的版本覆盖它，被覆盖的内容不会保留。',
+  'memory.host.moveTargetLegacy': '「未归位」是旧全局卡的收容处，不能再作为移动目标',
+  'memory.host.moveSameProject': '目标项目就是源项目',
+  'memory.host.moveOccupied': '目标项目已有同名记忆，未覆盖',
+  'memory.host.moveFailed': '移动失败：{detail}',
+  'memory.host.overwriteNotBoolean': 'overwrite 必须是布尔值',
+  'memory.injection.title': '注入量实测',
+  'memory.injection.hint': '最近一次提示词装配实际注入的字符数。guidelines 与索引是每轮都要付的固定开销，只有「正文」受 2800 字符预算约束；没有这组数就没法判断预算是否真的在起作用。',
+  'memory.injection.latest': '最近一次',
+  'memory.injection.mean': '近 {samples} 次均值',
+  'memory.injection.row': 'guidelines {guidelines} · 索引 {index}（{lines} 行）· 正文 {body} · 合计 {total}',
+  'memory.injection.cards': '正文 {count} 张卡{truncated}',
+  'memory.injection.truncated': '（仍有卡未注入）',
 } as const
 
 /** English dictionary, key-identical to the Chinese source of truth. */
@@ -237,6 +261,28 @@ export const en: Record<MemoryKey, string> = {
   'memory.host.restoreInvalid': 'The archived entry has a malformed day or topic',
   'memory.host.restoreArgsRequired': 'day or topic is missing',
   'memory.host.archiveFailed': 'Could not read the archive. Try again later.',
+
+  'memory.legacy.banner': '{count} old "global" memories are still unassigned: they are on disk, but no session can read them. Open this row and use "Move to project…" on each card to assign it to a real project.',
+  'memory.action.move': 'Move',
+  'memory.action.moveTo': 'Move to project…',
+  'memory.action.overwrite': 'Overwrite and move',
+  'memory.move.pick': 'Pick a project',
+  'memory.move.noTargets': 'No project can receive it yet: save one memory in the target project first, or just delete this card.',
+  'memory.notice.moved': 'Moved "{topic}" to project "{to}"',
+  'memory.confirm.moveOverwriteTitle': 'The target project already has that topic',
+  'memory.confirm.moveOverwriteMessage': 'Project "{to}" already holds a memory with the topic "{topic}":\n"{summary}"\nContinuing overwrites it with the version being moved; the replaced text is not kept.',
+  'memory.host.moveTargetLegacy': '"Unassigned" is the holding pen for old global cards and cannot be a move target',
+  'memory.host.moveSameProject': 'The target project is the source project',
+  'memory.host.moveOccupied': 'The target project already has that topic; nothing was overwritten',
+  'memory.host.moveFailed': 'The move failed: {detail}',
+  'memory.host.overwriteNotBoolean': 'overwrite must be a boolean',
+  'memory.injection.title': 'What injection actually costs',
+  'memory.injection.hint': 'Characters the last prompt assembly really injected. The guidelines and the index are fixed cost paid every turn; only the bodies are bounded by the 2800-character budget \u2014 without these numbers there is no way to tell whether that budget binds.',
+  'memory.injection.latest': 'Last assembly',
+  'memory.injection.mean': 'Mean of the last {samples}',
+  'memory.injection.row': 'guidelines {guidelines} · index {index} ({lines} lines) · bodies {body} · total {total}',
+  'memory.injection.cards': '{count} card bodies{truncated}',
+  'memory.injection.truncated': ' (some cards not injected)',
 }
 
 /** Key domain of the `dsh-app.memory` namespace (zh is the source of truth). */

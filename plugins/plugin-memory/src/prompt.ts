@@ -104,6 +104,42 @@ interface CardSelection {
   truncated: boolean
 }
 
+/**
+ * The character ledger of ONE prompt assembly. Recorded at the call site
+ * (`index.ts`) and served by `/status`, because a budget nobody measures cannot
+ * be shown to bind: `MAX_PROJECT_CHARS` bounds the card BODIES only, while the
+ * guidelines and the (separately capped) index ride every assembly outside that
+ * ledger. Without these numbers the "over 80% of budget" trigger has no
+ * denominator.
+ */
+export interface InjectionMetrics {
+  /** The static guidelines block (fixed cost, outside every budget). */
+  guidelinesChars: number
+  /** The injected index text: the routing map, capped but never budget-trimmed. */
+  indexChars: number
+  /** The injected card BODIES — the only number `MAX_PROJECT_CHARS` bounds. */
+  bodyChars: number
+  /** The whole injected section, as the prompt receives it. */
+  totalChars: number
+  /** Cards whose body was injected. */
+  cardCount: number
+  /** Index lines injected (capped at {@link MAX_INDEX_LINES}). */
+  indexLines: number
+  /** Whether any card was left out (budget or per-category quota). */
+  truncated: boolean
+}
+
+/** One assembly: the text plus its ledger.
+ *
+ * `metrics` is absent exactly when nothing project-scoped was rendered (the
+ * plugin is off, or the session has no workspace): those assemblies carry only
+ * static text and measure nothing about a project.
+ */
+export interface MemoryAssembly {
+  text: string
+  metrics?: InjectionMetrics
+}
+
 /** Shortest clipped remainder worth injecting: a card needs its heading line
  *  (~50 chars) plus a body fragment to carry any information, so below this a
  *  pin is skipped rather than emitted as a heading-only stub. */
@@ -145,9 +181,21 @@ export function selectCards(cards: readonly TopicCard[], budget: number, pinned:
   // list() arrives sorted category → updated-desc already, so each bucket's
   // head IS the freshest; take the quota off the head.
   const priority: TopicCard[] = [...pinnedCards, ...handNotes]
-  for (const list of byCategory.values()) {
-    const quota = CATEGORY_QUOTA[list[0]!.category] ?? 2
-    priority.push(...list.slice(0, quota))
+  // ROTATION, not blocks: taking one bucket to exhaustion before the next made
+  // the comment on CATEGORY_QUOTA false the moment cards are long — preference
+  // (3) + convention (3) consumed the whole budget and the budget loop's `break`
+  // left decision / lesson / fact with ZERO bodies in the prompt, every turn
+  // (measured: bodiesInjectedByCategory = {preference: 3, convention: 3}).
+  // Each round now takes one card from every category, so the budget is spent
+  // across the classes instead of on the first two; the quotas still cap each
+  // class, and pins/hand-notes still ride ahead of all of it.
+  const buckets = [...byCategory.values()].map(list => list.slice(0, CATEGORY_QUOTA[list[0]!.category] ?? 2))
+  const deepest = buckets.reduce((max, bucket) => Math.max(max, bucket.length), 0)
+  for (let round = 0; round < deepest; round += 1) {
+    for (const bucket of buckets) {
+      const card = bucket[round]
+      if (card !== undefined) priority.push(card)
+    }
   }
 
   const pinnedSet = new Set(pinnedCards)
@@ -230,13 +278,25 @@ function cappedIndex(store: MemoryStore): string {
   ].join('\n')
 }
 
+/** One scope's injection block: index in full + selected card bodies, with the
+ *  character counts the caller records (see {@link InjectionMetrics}). */
+interface ScopeAssembly {
+  parts: string[]
+  indexChars: number
+  indexLines: number
+  bodyChars: number
+  cardCount: number
+  truncated: boolean
+}
+
 /** One scope's injection block: index in full + selected card bodies. */
-function renderScope(store: MemoryStore, heading: string, budget: number): string[] {
+function renderScope(store: MemoryStore, heading: string, budget: number): ScopeAssembly | undefined {
   const cards = store.list()
-  if (cards.length === 0) return []
+  if (cards.length === 0) return undefined
   const pinned = store.pinnedSet()
   const selection = selectCards(cards, budget, pinned)
-  const parts = [`### ${heading} — index`, '', cappedIndex(store)]
+  const index = cappedIndex(store)
+  const parts = [`### ${heading} — index`, '', index]
   // renderCardBlock carries malformed cards (and clipped pins, marked
   // malformed) verbatim — both paths agree, so no special-casing here.
   const bodies = selection.selected.map(card => renderCardBlock(card))
@@ -246,11 +306,18 @@ function renderScope(store: MemoryStore, heading: string, budget: number): strin
   if (selection.truncated) {
     parts.push('', '— some cards not injected; memory_recall reads them by topic or keyword.')
   }
-  return parts
+  return {
+    parts,
+    indexChars: index.length,
+    indexLines: index.split('\n').filter(line => line.startsWith('- ')).length,
+    bodyChars: bodies.reduce((sum, body) => sum + body.length, 0),
+    cardCount: bodies.length,
+    truncated: selection.truncated,
+  }
 }
 
 /**
- * Render the whole injected memory block for one assembly.
+ * Assemble the injected memory block AND its character ledger.
  *
  * The retired root-level scope is never rendered: its cards are relocated into
  * a project directory at boot (see `MemoryRoot.migrateLegacyGlobalScope`), so
@@ -259,21 +326,61 @@ function renderScope(store: MemoryStore, heading: string, budget: number): strin
  * @param root - the two-level memory root.
  * @param cwd - the assembling session's workspace path; undefined (agentless
  *   diagnostics) injects nothing but the guidelines — memory is per project.
- * @returns the section text; '' when the master toggle is off.
+ * @returns the section text and, when a project scope was rendered, its
+ *   {@link InjectionMetrics}; `text` is '' when the master toggle is off.
  */
-export function renderMemoryText(root: MemoryRoot, cwd: string | undefined): string {
-  if (!root.global.isEnabled()) return ''
+export function assembleMemoryText(root: MemoryRoot, cwd: string | undefined): MemoryAssembly {
+  if (!root.global.isEnabled()) return { text: '' }
+  const guidelinesChars = GUIDELINES_TEXT.length
   const parts: string[] = [GUIDELINES_TEXT]
   if (cwd === undefined) {
     parts.push('', '## Memory (persisted)', '', '(this session has no workspace — memory is stored per project, so none is injected)')
-    return parts.join('\n')
+    return { text: parts.join('\n') }
   }
   const projectName = cwd.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
-  const projectParts = renderScope(root.projectFor(cwd), `Memory — current project (${projectName})`, MAX_PROJECT_CHARS)
-  if (projectParts.length === 0) {
+  const scope = renderScope(root.projectFor(cwd), `Memory — current project (${projectName})`, MAX_PROJECT_CHARS)
+  if (scope === undefined) {
     parts.push('', '## Memory (persisted)', '', '(empty — nothing saved for this workspace yet)')
-    return parts.join('\n')
+    const text = parts.join('\n')
+    return {
+      text,
+      metrics: {
+        guidelinesChars,
+        indexChars: 0,
+        bodyChars: 0,
+        totalChars: text.length,
+        cardCount: 0,
+        indexLines: 0,
+        truncated: false,
+      },
+    }
   }
-  parts.push('', ...projectParts)
-  return parts.join('\n')
+  parts.push('', ...scope.parts)
+  const text = parts.join('\n')
+  return {
+    text,
+    metrics: {
+      guidelinesChars,
+      indexChars: scope.indexChars,
+      bodyChars: scope.bodyChars,
+      totalChars: text.length,
+      cardCount: scope.cardCount,
+      indexLines: scope.indexLines,
+      truncated: scope.truncated,
+    },
+  }
+}
+
+/**
+ * Render the whole injected memory block for one assembly.
+ *
+ * Kept as the text-only entry point (the prompt provider and the tests read
+ * it); {@link assembleMemoryText} carries the metrics beside it.
+ *
+ * @param root - the two-level memory root.
+ * @param cwd - the assembling session's workspace path.
+ * @returns the section text; '' when the master toggle is off.
+ */
+export function renderMemoryText(root: MemoryRoot, cwd: string | undefined): string {
+  return assembleMemoryText(root, cwd).text
 }
