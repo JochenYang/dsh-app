@@ -125,6 +125,13 @@ export interface InjectionMetrics {
   cardCount: number
   /** Index lines injected (capped at {@link MAX_INDEX_LINES}). */
   indexLines: number
+  /** Cards this assembly LEFT OUT — the store's size minus what it carried.
+   *  This is the loss the budget and the per-category quota incur every turn,
+   *  and it is the number the plan's "18 of 26 cards dropped" baseline names. */
+  droppedCards: number
+  /** Index lines the ceiling cut (`0` when the index fits). A non-zero value
+   *  means topics exist that no session of this project is told about. */
+  indexOverflowLines: number
   /** Whether any card was left out (budget or per-category quota). */
   truncated: boolean
 }
@@ -255,6 +262,10 @@ export function selectCards(cards: readonly TopicCard[], budget: number, pinned:
  *  structural, so the only durable fix is fewer, coarser topics. */
 const MAX_INDEX_LINES = 50
 
+/** The ceiling, exported for the warning band (80% is `INDEX_WARN_AT`) and for
+ *  the health audit's overflow count — one definition, three readers. */
+export const INDEX_LINE_CEILING = MAX_INDEX_LINES
+
 /** The index text for injection, capped with an overflow note that states BOTH
  *  where the dropped topics can still be reached AND the consolidation that
  *  stops the overflow — a ceiling without a growth policy turns into a silent
@@ -286,6 +297,8 @@ interface ScopeAssembly {
   indexLines: number
   bodyChars: number
   cardCount: number
+  droppedCards: number
+  indexOverflowLines: number
   truncated: boolean
 }
 
@@ -295,6 +308,7 @@ function renderScope(store: MemoryStore, heading: string, budget: number): Scope
   if (cards.length === 0) return undefined
   const pinned = store.pinnedSet()
   const selection = selectCards(cards, budget, pinned)
+  const storeIndexLines = store.indexText().split('\n').filter(line => line.startsWith('- ')).length
   const index = cappedIndex(store)
   const parts = [`### ${heading} — index`, '', index]
   // renderCardBlock carries malformed cards (and clipped pins, marked
@@ -312,6 +326,13 @@ function renderScope(store: MemoryStore, heading: string, budget: number): Scope
     indexLines: index.split('\n').filter(line => line.startsWith('- ')).length,
     bodyChars: bodies.reduce((sum, body) => sum + body.length, 0),
     cardCount: bodies.length,
+    // Counted from the SELECTION, not from the text: a clipped pin is injected
+    // (partially) and must not be reported as dropped.
+    droppedCards: cards.length - selection.selected.length,
+    // Counted against the STORE's index, not the rendered block: once the
+    // ceiling is hit the block only ever carries the allowed lines, so the
+    // rendered block cannot say how many topics it had to leave out.
+    indexOverflowLines: Math.max(0, storeIndexLines - MAX_INDEX_LINES),
     truncated: selection.truncated,
   }
 }
@@ -351,6 +372,8 @@ export function assembleMemoryText(root: MemoryRoot, cwd: string | undefined): M
         totalChars: text.length,
         cardCount: 0,
         indexLines: 0,
+        droppedCards: 0,
+        indexOverflowLines: 0,
         truncated: false,
       },
     }
@@ -366,6 +389,8 @@ export function assembleMemoryText(root: MemoryRoot, cwd: string | undefined): M
       totalChars: text.length,
       cardCount: scope.cardCount,
       indexLines: scope.indexLines,
+      droppedCards: scope.droppedCards,
+      indexOverflowLines: scope.indexOverflowLines,
       truncated: scope.truncated,
     },
   }

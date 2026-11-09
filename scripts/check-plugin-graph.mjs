@@ -171,6 +171,12 @@ export function checkHanCharacters(repoRoot) {
     // model-facing text as the files above. It was Han-free until that
     // sentence was added.
     'plugins/plugin-memory/src/card-discipline.ts',
+    // The recall alias table. Its Han entries are neither display copy nor
+    // prompt prose: they are the literal search terms a user types and a card
+    // stores, so they must stay byte-identical to what people write — a locale
+    // dictionary (keyed by a stable id, translated per language) is the wrong
+    // shape for them, and translating one would silently stop matching.
+    'plugins/plugin-memory/src/recall-aliases.ts',
     // The market parses pnpm's own stdout, which is Chinese on a Chinese
     // Windows; matching its wording is the function.
     'plugins/plugin-market/src/installer.ts',

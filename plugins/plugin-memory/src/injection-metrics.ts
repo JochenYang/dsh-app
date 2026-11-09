@@ -37,6 +37,10 @@ export interface InjectionMean {
   totalChars: number
   cardCount: number
   indexLines: number
+  /** Cards left out, on average per assembly. */
+  droppedCards: number
+  /** Index lines the ceiling cut, on average per assembly. */
+  indexOverflowLines: number
 }
 
 /** What `/status` serves: the latest assembly + the ring's averages. */
@@ -103,6 +107,10 @@ export class InjectionMetricsRing {
         totalChars: sum(sample => sample.totalChars),
         cardCount: sum(sample => sample.cardCount),
         indexLines: sum(sample => sample.indexLines),
+        // Means, not sums: one huge assembly would otherwise dominate every
+        // reading of "how much is typically dropped".
+        droppedCards: sum(sample => sample.droppedCards),
+        indexOverflowLines: sum(sample => sample.indexOverflowLines),
       },
       truncatedSamples: this.samples.filter(sample => sample.truncated).length,
     }

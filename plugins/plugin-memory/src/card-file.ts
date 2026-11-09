@@ -30,6 +30,12 @@ export const MAX_SUMMARY_CHARS = 40
  *  words slugify to '' and are rejected — the model must translate. */
 export const TOPIC_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/u
 
+/** Domain-key shape. Deliberately the same alphabet as a topic key but
+ *  shorter: a domain prefixes EVERY index line of its group, so its length is
+ *  a per-card cost in the injected index (48 characters would cost more than
+ *  the summaries it groups). */
+export const DOMAIN_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,15}$/u
+
 /** One parsed topic card. */
 export interface TopicCard {
   /** Topic key = filename stem (authoritative, even if frontmatter disagrees). */
@@ -42,6 +48,12 @@ export interface TopicCard {
   updated: string
   /** Card text (no dates, no prefixes). */
   body: string
+  /** Optional DECLARED domain (a subject bucket wider than one topic, e.g.
+   *  `dsh`, `windows`). Absent on every card written before this field
+   *  existed; {@link domainOf} derives one from the topic key in that case, so
+   *  no migration is needed. Never invented here: a value the frontmatter
+   *  cannot validate is read as absent. */
+  domain?: string
   /** Hand-edited file whose frontmatter failed to parse: the body is carried
    *  verbatim (like the old hand-note lines) and the card is injectable but
    *  not upsertable until rewritten. */
@@ -66,6 +78,42 @@ export function isValidTopic(name: string): boolean {
   return TOPIC_KEY_PATTERN.test(name)
 }
 
+/** Whether a declared domain is well-formed (see {@link DOMAIN_KEY_PATTERN}). */
+export function isValidDomain(domain: string): boolean {
+  return DOMAIN_KEY_PATTERN.test(domain)
+}
+
+/** Which domain a card belongs to, and where that answer came from. */
+export interface CardDomain {
+  /** The domain key: declared, or the topic key's first `-` segment. */
+  key: string
+  /** `declared` = the card carries `domain:`; `inferred` = derived from the
+   *  topic key because the card predates (or omits) the field. The distinction
+   *  is the whole point: a metric that mixed the two could not tell a store
+   *  organised by its writer from one grouped by a filename convention. */
+  src: 'declared' | 'inferred'
+}
+
+/**
+ * The domain of one card: its declared `domain`, else the FIRST SEGMENT of the
+ * topic key (`dsh-plugin-install` → `dsh`).
+ *
+ * Read-only and never persisted — a derived domain has to stay derivable, so a
+ * later change to this rule re-groups old cards instead of leaving half a store
+ * on the previous rule. Deployment-independent of `memory-store.ts` on purpose:
+ * the index, the curator input and the health audit all ask this one question.
+ *
+ * The first segment is coarse on purpose (the plan's ruled-out list rejects
+ * prefix GROUPING as a consolidation strategy, not as a derivation): a `dsh`
+ * domain holds 16 unrelated `dsh-*` cards today, and that is a measurable fact
+ * about the store, not a merge proposal.
+ */
+export function domainOf(card: Pick<TopicCard, 'name' | 'domain'>): CardDomain {
+  if (card.domain !== undefined && card.domain !== '') return { key: card.domain, src: 'declared' }
+  const cut = card.name.indexOf('-')
+  return { key: cut === -1 ? card.name : card.name.slice(0, cut), src: 'inferred' }
+}
+
 /** Local-date stamp for frontmatter fields. */
 export function todayStamp(): string {
   const now = new Date()
@@ -81,6 +129,7 @@ export function renderCard(card: TopicCard): string {
     `name: ${card.name}`,
     `category: ${card.category}`,
     `summary: ${card.summary}`,
+    ...(card.domain === undefined || card.domain === '' ? [] : [`domain: ${card.domain}`]),
     `created: ${card.created}`,
     `updated: ${card.updated}`,
     '---',
@@ -103,7 +152,7 @@ export function renderCard(card: TopicCard): string {
  * dates out is what makes this both stable and sufficient.
  */
 export function cardFingerprint(card: TopicCard): string {
-  return [card.name, card.category, card.summary, card.body, card.malformed ? 'malformed' : ''].join('\u0000')
+  return [card.name, card.category, card.summary, card.domain ?? '', card.body, card.malformed ? 'malformed' : ''].join('\u0000')
 }
 
 /**
@@ -135,10 +184,18 @@ export function parseCard(name: string, text: string): TopicCard {
   const category = fields.category
   if (body === '') return fail()
   if (!MEMORY_CATEGORIES.includes(category as MemoryCategory)) return fail()
+  // A `domain:` line the shape check refuses is read as ABSENT, not as a
+  // malformed card: the tolerance rule is "never lose the body because one
+  // optional key is odd", and an absent domain simply falls back to the
+  // topic-key derivation. Unknown keys are ignored the same way — the field
+  // map is consulted by name, so a stray key costs nothing.
+  const declared = fields.domain
+  const domain = declared !== undefined && isValidDomain(declared) ? declared : undefined
   return {
     name,
     category: category as MemoryCategory,
     summary: (fields.summary ?? '').slice(0, MAX_SUMMARY_CHARS) || '(no summary)',
+    ...(domain === undefined ? {} : { domain }),
     created: fields.created ?? today,
     updated: fields.updated ?? today,
     body,

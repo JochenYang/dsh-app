@@ -63,6 +63,20 @@ export interface MemoryProjectSummary {
    * legacy holding pen keeps its fallback because it is only ever a SOURCE.
    */
   movable: boolean
+  /** Lines of this store's `index.md` that name a card (the injected map). */
+  indexLines: number
+  /** Distinct domains among this store's cards (declared or derived). */
+  domains: number
+  /** Cards in the biggest single domain — the number the cap decision needs. */
+  maxDomainCards: number
+  /** Cards naming decay-prone external state (versions, paths, shas, lines). */
+  rotCards: number
+  /** Cards not edited within the staleness window (measured, never gated). */
+  staleCards: number
+  /** Card count is in the warning band (80% of the curator's target). */
+  cardWarn: boolean
+  /** Index lines are in the warning band (80% of the injection ceiling). */
+  indexWarn: boolean
 }
 
 /** One background-LLM audit row (cost observability). Rows written before the
@@ -196,6 +210,12 @@ export interface MemoryLedgerRow {
   keys: string[]
   /** Merge/rewrite destination when it differs from the single cited key. */
   target?: string
+  /**
+   * Which domain the edit happened in. Attribution: "three merges in `dsh`" is
+   * a sentence a reader can act on, "three merges" is not. Absent on rows
+   * written before the field existed (and on non-curate rows).
+   */
+  domain?: string
   /** Present when the edit was REFUSED instead of applied. */
   rejected?: 'unseen' | 'stale' | 'over-limit'
   /** Short session id (curate only). */
@@ -232,6 +252,28 @@ export interface MemoryStatus {
    * say "no data" rather than four zeroes that read like an empty prompt.
    */
   injection?: MemoryInjectionSummary
+  /**
+   * How many stores sit in each warning band (80% of a structural cap), and how
+   * many crossed the cap itself.
+   *
+   * Counts, never the stores' contents: the page says "2 projects are near the
+   * card ceiling" without re-reading anything, and nothing is trimmed. A store
+   * past a cap is not an error — the caps are handled by the curator — this is
+   * the signal that the growth happened.
+   */
+  warnings: MemoryWarningCounts
+}
+
+/** Aggregate warning counts across every project store. */
+export interface MemoryWarningCounts {
+  /** Stores at or above the card warning band. */
+  cardsWarning: number
+  /** Stores at or above the curator's card target. */
+  cardsAtCap: number
+  /** Stores at or above the index warning band. */
+  indexWarning: number
+  /** Stores above the injection ceiling (lines are being cut). */
+  indexOverflow: number
 }
 
 /** One assembly's character ledger, as /status serves it. The host-side shape
@@ -254,6 +296,10 @@ export interface MemoryInjectionSample {
   cardCount: number
   /** Index lines injected. */
   indexLines: number
+  /** Cards whose body was NOT injected (budget or per-category quota). */
+  droppedCards: number
+  /** Index lines left out by the ceiling (0 when the index fits). */
+  indexOverflowLines: number
   /** Whether any card was left out. */
   truncated: boolean
 }
@@ -270,6 +316,8 @@ export interface MemoryInjectionSummary {
     totalChars: number
     cardCount: number
     indexLines: number
+    droppedCards: number
+    indexOverflowLines: number
   }
   /** How many samples had cards left out. */
   truncatedSamples: number

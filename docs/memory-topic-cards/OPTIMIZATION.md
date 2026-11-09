@@ -818,6 +818,116 @@ npm run check:graph        # 插件图与套件名册规则
 | 客户端渲染仍无自动化覆盖 | 与 §4.10 相同：横幅、下拉、「覆盖并移动」二次确认只有类型检查与代码审查，出片前需真机点一遍 |
 | **接受**：移动完成后的陈旧 `index.md` 不会在启动时重建 | `reindexQuietly` 吞掉的索引重建失败会一直陈旧到该 store 下一次成功写入或下一次光扫；两者都不发生（写入停滞且光扫关闭）时不会自愈，**这一点不能写成「短暂」**。**boot 不是修复点**：`migrateAll` 只处理仍有 legacy `memory.md` 的 store，普通项目直接跳过，不会重建索引。改 boot 去重建意味着每次启动全量读所有 store，代价大于收益，明确不做。索引是派生数据、卡片本身完好，代价是索引可能长期与真实卡不一致 |
 
+### 4.12 P1 机制化：度量、对账、域与召回（2026-11-09）
+
+**来源**：`docs/plans/memory-mechanization.md`（用户拍板 Q0–Q4）。问题不是「卡太多」，而是**四件事没有载体**：注入丢了哪些卡没人算、索引与磁盘是否一致没人查、域只能靠模型自觉、多词召回靠子串。本轮只做「可测量、可拒绝、可观测」，**不压卡数**：合并的算术上限是每域 −1 张（全库理论上限 −14 张，−7.3%），把它当目标是达不到的。
+
+| 项 | 改动 | 落点 |
+|---|---|---|
+| B1 健康度量 | `auditRoot()` / `storeHealth()` / `formatHealthTable()`：每 store 一行（cards / pinned / indexLines / indexChars / bodyChars / bodiesInjected / droppedCards / atCap / indexOverflowLines / rotCards / rotMarkers / staleCards / maxPairwiseSim / domains / maxDomainCards / overBudget / indexGhosts / indexDuplicates / indexMalformed / indexUnlisted）+ 合计行；`--snapshot` 首行冻结时点/卡数/指纹，`--json` 输出同一份数据；**不存在的 root 也走同一条输出路径**（零行、指纹仍是 64 位）。脚本本身只做参数与打印，指标全在 `src/health.ts`（避免第二份定义）。**无 `--fix`** | `src/health.ts`（新）、`scripts/memory-health.mjs`（新） |
+| B2 注入计数 | `InjectionMetrics` 增 `droppedCards`（`cards - 选中数`，被剪裁的 pin 不算丢）与 `indexOverflowLines`（按 store 的索引行数减上限，不按渲染块——触顶后渲染块永远看不出少了多少）；环形缓冲的均值含两项；`/status` 透出 | `prompt.ts`、`injection-metrics.ts`、`types.ts` |
+| B3 相似度语料 | `tests/fixtures/similarity-corpus.json`：66 对（dup/related/distinct 各 22）。用例只断言结构合法与分布可打印——把今天的分值钉成回归测试，才是把校准数据变成「现状即正确」 | `tests/fixtures/`、`tests/corpus.test.ts` |
+| B4 召回语料 | `tests/fixtures/recall-queries.json`：20 张自带卡 + 38 条查询（8 条负例），`expectTopics` 是契约。改前/改后同一语料对比，旧的「整句子串」规则原样保留在用例里作基线 | 同上 |
+| D1 域推导 | `domainOf(card)`：有声明用它，否则取 topic key 第一段；返回 `declared` / `inferred` 两态（指标要能说「多少张是声明的」）。只读不落盘 | `card-file.ts` |
+| D2 域字段 | `TopicCard.domain?`；`parseCard` 容忍缺失/未知键，形状不合法的域读作**缺失**而不是 malformed；`renderCard` 仅在有值时输出（**存量卡字节不变**）；`cardFingerprint` 纳入 domain；`validateCardInput` 校验形状；**`upsert` 判等纳入 domain**，否则「只改域」被判 `unchanged` 静默丢弃 | `card-file.ts`、`memory-store.ts` |
+| D3 工具面 | `memory_save` 增可选 `domain`（先 slugify 再校验形状；纯 CJK 拒绝而不是静默按推导处理），返回值增 `domain:{key,src,cards,summaries(≤5×40)}` 与恒 false 的 `domainOver`。**工具描述常量未改**：只加参数与返回值 | `tools.ts` |
+| D4 索引与状态 | `reindex` 先按域、域内按 category→updated；`/status` 的 store 行增 `domains`、`maxDomainCards`、`indexLines`、`rotCards`、`staleCards`、`cardWarn`、`indexWarn` | `memory-store.ts`、`types.ts`、`routes.ts` |
+| D5/S3 curator 输入 | 卡分节头 `(updated …; domain X, refs N)`，`refs` = 正文里会腐烂的具体外部引用的出现次数（`card-rot` 计数，宿主算好传入，不让模型数）；prompt 增两条：域是合并边界、`refs > 0` 要么补失效条件要么按陈旧删除；台账行增 `domain` 供归因 | `curator.ts`、`memory-store.ts`、`types.ts` |
+| D6 域超限度量 | `DOMAIN_CAP = 8`（**不设闸**，只决定是否写一行）；light sweep 统计每域卡数，超限写 `distill-state.json` 的 `domainOver`（FIFO 50，旧文件读成 `[]`） | `memory-store.ts`、`light-sweep.ts` |
+| R1 召回 | `search()` 与 `forget()` 的文本扫描共用一个匹配器：①整句短语（旧的归一化子串，保留即保证**超集**：改前命中的一定还命中）②token-AND（ASCII 按词边界、CJK 按归一化子串）。空查询语义不变 | `memory-store.ts` |
+| S1 腐烂标记 | `src/card-rot.ts`：纯函数统计版本号/路径/sha/行号四类，`refs` 与 `rotCards` 都从这里来 | `src/card-rot.ts`（新） |
+| S2 状态字段 | `/status` store 行增 `rotCards`、`staleCards`；`ROT_DAYS = 90` 常量并标注「未启用门控」。**注入文本一个字符都没变**（guidelines 仍是 3174） | `memory-store.ts`、`routes.ts` |
+| W1 分级预警 | 24/30 卡、40/50 行为黄线，30/50 为触顶；`/status` 增 `warnings` 四个计数（不裁剪、不改注入）。阈值是 80% 常量，和 `CURATE_BUDGET.cards`、`INDEX_LINE_CEILING` 的一致性由用例绑定（不 import，避免 `curator.ts` ↔ `memory-store.ts` 循环） | `memory-store.ts`、`routes.ts` |
+| W2 索引对账 | `indexDrift()`：只比**目录条目名**与索引行的 key（2 次 readdir + 1 次读文件/store，与卡数无关），四种漂移各自可检出（ghost / 未入索引 / 重复行 / 畸形行——后者因为 `cappedIndex()` 会把未知行原样注入所以也必须算）；发现漂移才读卡（含不可读卡时拒绝处理，否则 reindex 会抹掉它的行）；`reconcileIndexes()` 在**挂载时与 `/status` 时**重建并记 `indexDrift` 事件（FIFO 20） | `memory-store.ts`、`index.ts`、`routes.ts` |
+| T2 版本与文档 | 0.11.0；本节 + §7；changeset 片段 | 本文件、`changesets/memory-mechanization.md` |
+
+**与被推翻的旧决定的差异（必须记清）**：§4.11 曾写「改 boot 去重建索引 = 每次启动全量读所有 store，代价大于收益，明确不做」。W2 在挂载时跑，但**只读目录条目名**：21 个 store 是 42 次 readdir + 21 次读 `index.md`，与卡数无关；只有真漂移的 store（实测 21 个里 1 个）才付读卡的代价，且那种 store 本来就要重建索引。§4.11 拒绝的是「启动时全量读卡」，这一条没被推翻。
+
+**索引域前缀的一次让步（实测驱动）**：按计划每行都带 `[domain]` 前缀在真实库上是 194 行 × 8.02 字符 = **1555 字符**，超过计划里「卡数 × 8」的预算（194 行 × 8 = 1552），而 194 行里 100% 是推导域——前缀正好等于 key 第一段，是纯重复。因此改为**只在声明域与 key 第一段不同时渲染**：推导域零增量（只是排序变了），声明域才付 `[domain] ` 的开销，而分组本身由 `reindex` 的排序承担。这条与计划的 D4 描述有出入，记录在此。
+
+**验收证据（本次实跑）**
+
+| 命令 | 结果 |
+|---|---|
+| `cd plugins/plugin-memory && npx tsc --noEmit` | exit 0，无输出 |
+| `npm test` | `tests 281 / pass 281 / fail 0`（基线 219 + 新增 62：语料 7、域 29、度量/对账 26） |
+| `npm run build` | `lib/index.js` / `lib/client.js` 均产出 |
+| `node scripts/memory-health.mjs --root <真实根> --snapshot` | 21 行 store + 合计行，exit 0；`# snapshot 2026-11-09T03:12:28.825Z cards=193 stores=21 fingerprint=05a14affe90d`（指纹改内容后换了一副）；合计 `indexLines 194 / indexChars 18654 / bodyChars 58681 / bodiesInjected 86 / droppedCards 107 / rotCards 53 / rotMarkers 89 / staleCards 0 / indexGhosts 1` |
+| 同一命令对空目录 | 0 行 + 合计行，exit 0 |
+| 最大 store（28 卡） | `bodiesInjected 7 / droppedCards 21`；26 卡夹具在单测里复现计划断言的 `droppedCards === 18` |
+| 构造 51 行索引 | `indexLines 50 / indexOverflowLines 1` |
+| B4 语料改前/改后 | 旧整句子串 **16/38** → token-AND **30/38**（8 条负例两边都为空）。这与计划基线的「180 次尝试命中 7 次（4%）」不是同一口径：那是同库试探的多词查询集合，这是新语料，两边的数字不能相加也不能当作趋势 |
+| B3 语料分布 | `dup n22 mean 0.392 max 0.762` · `related n22 mean 0.055 max 0.231` · `distinct n22 mean 0.006 max 0.060` |
+| W2 真实漂移实例 | 21 个 store 里 1 个：`index 29 行 / 28 卡 / ghost playwright-cli-motion-measurement / unlisted 0`（与交接记录的实例一致；修复由插件挂载或 `/status` 完成，本轮未从工作区写用户的真实 store） |
+| `guidelinesChars` | 3174，与改前一致（注入文本未变） |
+| S1 口径差异 | 计划基线是 `20 张 / 43 处`，实测是 **`53 张 / 89 处`**（只统计 `body`，不含 summary）。差不是库变大了（同一 193 张卡），而是**模式更宽**：基线把「版本号」限定为带 `v` 的、路径限定为绝对路径；本轮按「会不会静默过期」定义，`3.19.0`、`src/main/x.ts`、`.github/…` 都算。调参过程中剔掉的误报都有用例锁住：`config.toml/config.yaml`（两个文件名，不是路径）、`127.0.0.1`（IPv4，不是版本）、`FF00:0002`（BLE UUID）、`localhost:3000` 与 `api.github.com:443`（端口，不是行号）、`deadbeef`（纯字母，不是 commit id）、`L2`（缓存层级） |
+
+**独立审查与修复（本轮）**：两份审查（宿主半区逻辑 / 用例与文档口径）共提 11 条真缺陷，无一条是建议项；第 2 轮只审修复 diff，发现 4 条 PARTIAL 与 1 条修复本身引入的真缺陷；第 3 轮（外部只读审查 + 定向探针）认为不应结案，提 6 条 P2 + 1 条 P3，其中 3 条带 L1 复现。逐条修法与证据在计划文档的 Review log；对读者最重要的八条：`indexDrift` 从 Set 比较改为 multiset（重复行也是漂移），后又补上**畸形行**（`cappedIndex()` 会把它们原样注入）；`reconcileIndexes` 原来走 `listProjects` 等于全量读卡，改为从 `projects/` 枚举目录，并补上两处未包的读取（EACCES 会让 `/status` 回 500）；`memory_forget` 的文本扫描对 key 形状退回整句规则；声明域在 move / 补偿 / curator 改名三处不再丢失，且 `upsert` 接受 `domain: null` 使回滚能**清除**声明域；`queryTokens` 增加 ASCII↔CJK 边界切分（`memory召回` 从漏召变为命中）；light sweep 的域计数改取 sweep **之后**的卡集；`MemoryLedgerRow.domain` 补齐并走通到 `/ledger`；行号类不再认 `.ext:NN`。审查方均**未跑命令**（第 3 轮除外，它跑了定向探针），所以这些修复的验证全部由本节实跑的输出承担。
+
+**残余风险**
+
+| 风险 | 说明 |
+|---|---|
+| `memory_forget` 对非 key 形状的输入仍是**放宽** | 多词短语（带空格或中文）走 token-AND，能删到以前删不到的卡；key 形状（含带连字符的）仍走整句子串。工具描述里的「substring」措辞因此对短语不完全准确，按要求本轮不改 prompt，留给「对外语义统一」批次 |
+| ASCII token 用词边界 | 单词查询仍走整句子串（超集保证），但**多词查询**里一个 ASCII 词若只作为更长单词的一部分出现（`dsh` 之于 `dshapp`）不会再命中。B4 语料里没有这种用例，真实库上也没观察到；如出现漏召，revert R1 即恢复子串 |
+| 纯 CJK 复合词不分词 | `索引漂移` 是一个 token（中文没有分隔符），因此只在文本里逐字出现时才命中；`索引 漂移`（带空格）才会走 token-AND。分词需要词典与分词器，不在本轮范围，已用用例把这个边界钉住，而不是假装它不存在 |
+| `refs` 的口径 | 取「正文里可腐烂引用的出现次数」，不是「有多少张卡引用它」。S3 要求的是「这条卡会不会静默过期」，出现次数才是那个信号；若将来需要入链计数，得另加字段 |
+| `DOMAIN_CAP = 8` 是暂定值 | 只决定是否写一行度量，没有任何写入路径读它。声明域落地后用 B1 重跑真实分布再定 |
+| 挂载时多一次索引对账 | 1 次枚举 `projects/` + 每 store 2 次 readdir + 1 次读 `index.md`，与卡数无关；只有真漂移的 store 才读卡；对账失败只记日志，不影响挂载 |
+| 索引按域排序会重排存量 `index.md` | 行内容（除声明域前缀外）不变、注入总字符不变，但行序变了：第一次 `reindex` 后 `index.md` 会显示为已修改 |
+
+### 4.13 召回别名词汇层（2026-11-09）
+
+**来源**：用户提出的现象——记忆在，但用「卡里那个词」才能查到。「幻灯片」找不到 pptd 的卡，「powershell」找不到 pwsh，「工作区」找不到 workspace。§4.12 的 token-AND 解决不了这一层：卡里根本没写那个词。
+
+**核心形状：按「词位」给候选，而不是按「整句」生成变体。** 第一版实现是「每条变体替换一个成员」，雪洛的复审用实跑证明它漏召：`powershell 工作区` 只生成 `pwsh 工作区` 与 `powershell workspace`，永远没有 `pwsh workspace`，只写后者的卡三个变体都不满足；加预算也没用，因为组合从未生成。现实现把查询拆成词位，每个词位得到一组成员候选，匹配语义是「每个词位至少一个候选出现在卡里」——这等于笛卡尔积的答案，但不必建出乘积。
+
+| 决定 | 理由 |
+|---|---|
+| **只展开查询侧，不改卡文本** | 别名组无向，查询侧展开覆盖两个方向；改卡侧要 O(卡×别名) 且会引出「替换是否改变卡片语义」的问题（`pptd→ppt` 会把 `pptd-plugin` 改成 `ppt-plugin`） |
+| **别名只进读路径** | `forget` 不经 `search()`，直接调匹配器，用户表与内置组都宽不到它 |
+| **词位展开 + 有界改写（上限 12）** | 词位覆盖绝大多数查询且不建乘积；只有「含分隔符的成员」（`hot-reload`）需要整句改写，那是 BFS 且受上限约束 |
+| **中文复合词不展开** | `工作区域` 是「work area」不是「workspace」，`非工作区` 是否定语义。没有分词器就当它是一个词。实跑：子串展开会把 `工作区域` 变成 `workspace域` 并误命中 |
+| **含分隔符成员用「匹配到的 span」替换，且两端加 ASCII 边界** | 用 `member.length` 会把多空格场景切开；不加边界则 `shot-reload` 被当成 `hot-reload`。一个成员同时覆盖 `hot-reload` / `hot reload` / `hotreload` |
+| **精确命中排在前** | 展开只能增加可达卡；否则查 `ppt` 第一条是写「幻灯片」的卡 |
+| **`search` 默认不展开（`groups = []`）** | 读路径必须显式 opt-in，未来的删除调用方就无法「顺手」继承放宽语义。`memory_recall` 已显式传表，运行时行为不变 |
+| **别名文件独立** `<root>/aliases.json` | `config.json` 是 host 状态文件（`writeConfig` 反复 merge 写 enabled/distill/pinned），逻辑数据混进去，手改坏一个逗号会连带开关一起失效 |
+| **内置表只放双向实测都有收益的组** | 见下 |
+
+**内置表（复审判定后的最终 4 组）与实测**：`pwsh/powershell`、`pptd/幻灯片`、`workspace/工作区/工作目录`、`热重载/hotreload/hot-reload/hmr`。真实库跨 21 个项目、193 张卡：
+
+| 查询 | 改前 | 改后 | 结论 |
+|---|---:|---:|---|
+| `幻灯片` | 0 | 1 | 找到 `pptd-render-pitfalls` |
+| `powershell` | 0 | 4 | 找到含 `pwsh` 的卡 |
+| `工作区` / `workspace` / `工作目录` | 8 / 5 / 0 | 12 / 12 / 12 | 双向都有收益 |
+| `hotreload` / `hmr` | 0 | 2 | 找到写「热重载」的卡 |
+| `ws` / `ps1` / `pdfjs` / `压缩会话` / `ppt` / `pptd` / `dsh` | 28 / 0 / 0 / 0 / 4 / 1 / 60 | **不变** | 这些曾是内置成员，实测是噪声，已剔除 |
+| `工作区域` / `非工作区` | 0 | 0 | 复合词与否定不展开 |
+
+被剔除的成员及理由（都写进了代码注释，防止回潮）：`ws` 自带 28 张（`pwsh` 子串）再扩 9 张 WebSocket 噪声；`ps1` 把 PowerShell 查询扩到运行时/凭据卡；`pdf`/`pdfjs` 正向 1→1、反向凭空多一张没有 PDF.js 的卡；`ppt`/`pptx`/`slides` 正向 4→4，反向让 `pptd` 答出一张只写了「翻页式 PPT」的视频卡；`compact`/`compactification` 扩到 DynamicIsland 的 `compact` 胶囊与 pnpm 的 `dsh-live-compact` 依赖；**`dsh`/`deepseek-harness` 的反向是灾难**——`dsh` 在 60 张卡里，把长名展开成它会答出整个库（0→60）。展开是双向对称的，所以一个只能单向成立的组不能进对称表。
+
+**落点**：`src/recall-aliases.ts`（新：表、`planAliases`、`parseAliasGroups`、`mergeAliasGroups`、`queryTokens` 迁入）、`MemoryStore.search(query, groups = [])`（词位候选 + 精确优先）、`MemoryRoot.aliasGroups()`、`tools.ts`（显式传表 + 更新 `query` 参数描述）、`textMatchesQuery` 增 `words` 模式（变体与候选都用它：短语规则是子串测试，短别名会从它漏出去，实跑 `ws` 对 `pwsh` 是 `full=true / words=false`）。卡格式、索引、注入文本均未动。
+
+**雪洛第 2 轮复审后的三处修复**（都是实跑反例，不是预防性调整）：
+
+1. **候选侧也必须有边界**：`hot-reload` 作为**候选**去匹配卡文本时只做了归一化子串，于是「只写了 `shot reload` 的卡」会被 `hmr` 命中。改成复用同一个 `separatedMemberPattern()`（查询侧与卡片侧同一份正则），CJK 仍走子串。实测：`hmr` 现在只命中真写 `hot reload`/`hotreload` 的卡，`shot reload` 保持 0→0。
+2. **预算不能再饿死组合**：两个合法的 7 成员组会把 12 项预算全花在第一个组的成员上，一个双替换都不产生。改成两阶段——阶段 A 每个成员轮流给一个替换（预算一半封顶），阶段 B 才从已产出的变体继续加深。实测 `a-1 b-1` → 出现 `a2 b2`。
+3. **去重键要折叠分隔符**：`a-b` 与 `a b` 对上面的正则等价，却被当成两个变体各占一个额度，`limit = 2` 时真正的别名 `x` 反而进不来。`variantKey` 现在把 `-`/`_`/空白折叠成一个空格；实测 `planAliases('a-b', [['a-b','a b','x']], 2)` → `['a-b','x']`。
+
+顺带修掉一处由此暴露的小缺陷：阶段 A 的「本轮有没有产出」判据改成「成员还有没有替换可给」，否则「唯一候选被去重掉」会让整个阶段提前结束。
+
+**验证**：`npx tsc --noEmit` exit 0；`npm test` **311/311**（基线 281 + 30 条别名用例）；`npm run build` 两半均产出；根 `typecheck` / `check:graph` / `test`（729 pass）/ `check:suites:gate` 全过。
+
+**残余风险**
+
+| 风险 | 说明 |
+|---|---|
+| 中文复合词不展开 | `幻灯片模板` 不命中 `pptd` 卡（写 `幻灯片 模板` 即可）。这是刻意的取舍：子串展开实测会切碎词语并造出不存在的匹配 |
+| 原句仍走宽松短语规则 | `search('ws')` 仍因 `pwsh` 子串返回 28 张——那是既有行为且在「召回不丢」的红线内；别名变体已用 `words` 模式避开。要改原句语义属于「对外语义统一」批次 |
+| 用户表只能加组 | 内置表先占位（`mergeAliasGroups` 首次优先），用户能加新组、不能改内置组成员。要改就提进仓库 |
+| 每次带 query 的 `memory_recall` 读一次 `aliases.json` | 不缓存是刻意的（手改即生效）；不在每轮装配路径上 |
+
 ## 5. 明确不做的事
 
 | 不做 | 理由 |
@@ -856,3 +966,5 @@ npm run check:graph        # 插件图与套件名册规则
 | 2026-09-21 | M 后台整理的任务说明与手动触发实施完成（插件 0.9.0 → 0.9.1 → 0.9.2），记录见 §4.10：curator 的 brief 补六条整理任务（矛盾卡以较新者为准、工作日志里的教训改写而不是只删、废话类别补全、保留清单、自洽、反捏造），并新增**手动触发**——`curateNow()` 跳过程序性门控（卡数下限、指纹、冷却、空转退避、后台开关）但保留全部落盘守卫，`POST /curate` + 设置页项目行的「整理」按钮按状态回报结果，自动与手动共用一个单飞标记。新增 7 条用例（1 条 brief + 5 条 `curateNow` + 2 条路由） |
 | 2026-11-08 | N 归位 / 埋点 / 轮转实施完成（插件 0.10.2 → 0.10.3），记录见 §4.11：`legacy-global` 获得卡片级 `POST /move` 与设置页「移动到项目…」（此前可列出、可删除、永远不可注入），注入量加了字符账并通过 `/status` 暴露（埋点不落盘），`selectCards` 的 `priority` 改轮转（改前实测 decision/lesson/fact 正文注入量为 0）。新增 6 条用例，更新路由清单 1 条 |
 | 2026-11-08 | 归位的复审修复（F1 / F2）完成：`get()` 同时用 `undefined` 表示「卡不存在」与「读失败」，两处存在性判断因此会被读故障骗过。改为三态探测 `probeCardFile`（`present` / `absent` / `unreadable`，按读取错误码分流：只有 `ENOENT`/`ENOTDIR` 是 `absent`）——目标端在任何写入前探测，`unreadable` 直接中止（`overwrite:true` 亦然，既不覆盖也不并列新副本）；源端 `unreadable` 返回 `partial` 而不是猜 `moved`，且报 `moved` 前回读目标确认 `body` 一致；补偿按快照状态（`present` / `absent`）判断，不再靠 `replaced !== undefined` 推断。同一类问题在 `remove()` 上收口：读不到的卡无法归档，因此**拒绝删除并抛错**（`false` / `removed: []` 只表示「本来就没有」「确实没命中」）；`forget` 还拒绝「无法确认是否命中」的文本扫描，`POST /forget` 回 500 `route.forgetFailed` 带 detail；移动在删除阶段失败时返回 `partial` 并保留两份副本。`partial` 中英文案改为「无法确认是否完成或已回滚」。三态探测与卡格式抽到 `src/card-file.ts`（move 探测其他 store、`remove`/`forget` 共用 `probeOrThrow`），store 内不再有第二份三态判断；move 的**入口**也不再走 `get()`，源卡不可读时报 500 `moveFailed` + detail，而不是 400 `topicUnknown`（「没有这张卡」是假话）。新增 11 条用例（4 条三态探测 + 1 条错误码分流 + 2 条 `remove` + 2 条 `forget` + 1 条 `POST /forget` 真实 EISDIR + 1 条 `POST /move` 源卡 EISDIR），并实测这 11 条与上一轮 3 条在 HEAD 实现下共 14 条逐一失败 |
+| 2026-11-09 | P1 机制化实施完成（插件 0.10.3 → 0.11.0），记录见 §4.12：健康度量脚本与注入丢卡/索引溢出计数（B1/B2）、两份语料（B3/B4）、域字段与推导（D1–D4）、curator 头带 domain/refs（D5/S3）、域超限度量（D6）、token-AND 召回（R1）、腐烂标记（S1/S2）、分级预警（W1）、索引对账（W2，被改写的旧决定也记在 §4.12）。新增 62 条用例；多词召回命中 16/38 → 30/38。三轮审查共提 21 条缺陷（含重复行/畸形行不算漂移、对账实际全量读卡、forget 被放宽到误删、声明域在移动/改名/回滚中丢失、指纹哈希计数、host:port 被当行号、`memory召回` 不拆词、域计数取旧卡集）全部修复并补用例 |
+| 2026-11-09 | 召回别名词汇层（同一未发布的 0.11.0 内），记录见 §4.13：按词位给候选（不是整句变体）+ 独立 `aliases.json` + 只进读路径 + 默认不展开 + 精确优先。雪洛复审后改了三件事：词位化（修组合漏召）、中文复合词不展开（修语义误命中）、内置表按双向实测砍到 4 组（`dsh` 反向 0→60 被剔除）。新增 27 条用例；真实库上「幻灯片」0→1、「powershell」0→4、「工作区」8→12，噪声项（`ws`/`ps1`/`pdfjs`/`压缩会话`）全部回到不变 |

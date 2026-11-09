@@ -35,8 +35,9 @@
  */
 
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
-import { isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
-import { LEGACY_GLOBAL_SLUG, ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSummary, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryMoveResponse, type MemoryStatus } from './types.ts'
+import { CARD_CAP, CARD_WARN_AT, INDEX_WARN_AT, isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type ProjectSummary, type MemoryStore, type TopicCard } from './memory-store.ts'
+import { INDEX_LINE_CEILING } from './prompt.ts'
+import { LEGACY_GLOBAL_SLUG, ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSummary, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryMoveResponse, type MemoryStatus, type MemoryWarningCounts } from './types.ts'
 
 /** Route namespace on the shared `/api` channel (single source in types.ts,
  * shared with the browser half). Re-exported so existing importers keep
@@ -161,6 +162,25 @@ export interface MemoryRouteHooks {
 }
 
 /**
+ * The warning counts `/status` serves: how many stores sit in each band.
+ *
+ * Counts come from the SAME rows the page renders, so the aggregate can never
+ * disagree with the list beside it. A store AT the cap is counted in both
+ * buckets on purpose: "24 or more" and "30 or more" are different alarms.
+ */
+function warningCounts(projects: readonly ProjectSummary[]): MemoryWarningCounts {
+  return {
+    cardsWarning: projects.filter(project => project.cards >= CARD_WARN_AT).length,
+    // `>=`, matching the health audit's `atCap`: one definition of "at the cap"
+    // across the two surfaces, or `/status` and the audit disagree on exactly
+    // the store that has reached it.
+    cardsAtCap: projects.filter(project => project.cards >= CARD_CAP).length,
+    indexWarning: projects.filter(project => project.indexLines >= INDEX_WARN_AT).length,
+    indexOverflow: projects.filter(project => project.indexLines > INDEX_LINE_CEILING).length,
+  }
+}
+
+/**
  * Register the settings-page routes on the Connection exact-Fetch registry.
  *
  * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
@@ -184,11 +204,18 @@ export function registerMemoryRoutes(
         // the last injection actually cost. The retired global block's stats and
         // the extractor's run traces are gone with their surfaces; card bodies
         // are served on demand by /entries.
+        //
+        // Reconciliation runs FIRST: this is one of the two moments a stale
+        // index would be read by the sessions of that project, and the payload
+        // must describe the index the sessions will actually get.
+        await root.reconcileIndexes()
         const injection = hooks.injectionMetrics?.()
+        const projects = listProjects(root.dir)
         const status: MemoryStatus = {
           enabled: root.global.isEnabled(),
           distill: root.global.isDistillEnabled(),
-          projects: listProjects(root.dir),
+          projects,
+          warnings: warningCounts(projects),
           // Absent (not undefined) when nothing has assembled yet: a key with an
           // undefined value would still show up in Object.keys and read like
           // "measured, empty".

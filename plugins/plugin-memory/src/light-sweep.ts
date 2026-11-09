@@ -10,13 +10,15 @@
  *   2. log similarity suspects (≥ SIM_DUPLICATE pairs under DIFFERENT topic
  *      keys — the topic model's boundary-overlap failure mode) into
  *      distill-state.json for threshold tuning and the heavy sweep's prompt;
- *   3. rebuild the index, so hand edits between writes are corrected at the
+ *   3. count each DOMAIN's cards and record the buckets over `DOMAIN_CAP`
+ *      (measurement only — nothing is trimmed, split or refused here);
+ *   4. rebuild the index, so hand edits between writes are corrected at the
  *      next write rather than accumulating.
  *
  * @module @dsh-app/plugin-memory/light-sweep
  */
 
-import { SIM_RELATED, contentSimilarity, normalizeForMatch, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
+import { DOMAIN_CAP, SIM_RELATED, contentSimilarity, domainOf, normalizeForMatch, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
 
 /** Pick the survivor of an exact-duplicate group: a pinned card beats an
  *  unpinned one; otherwise the most recently updated wins (ties broken by
@@ -97,7 +99,26 @@ export async function lightSweep(
       log.info(`memory light sweep: ${label} logged ${String(suspects)} similarity suspect pair(s)`)
     }
 
-    // 3. Index parity after possible hand edits.
+    // 3. Domain distribution — read from the store AS IT IS NOW. Step 1 may just
+    //    have deleted exact duplicates (the list at the top still counts them),
+    //    and a malformed hand-edited card is still a card that occupies the
+    //    bucket. A number measured for the `DOMAIN_CAP` decision has to describe
+    //    the store the next pass will see, not the one this pass started with.
+    const current = store.list()
+    const perDomain = new Map<string, number>()
+    for (const card of current) {
+      const domain = domainOf(card).key
+      perDomain.set(domain, (perDomain.get(domain) ?? 0) + 1)
+    }
+    const over = [...perDomain.entries()]
+      .filter(([, count]) => count > DOMAIN_CAP)
+      .map(([domain, count]) => ({ domain, cards: count, cap: DOMAIN_CAP }))
+    if (over.length > 0) {
+      root.recordDomainOvers(label, over)
+      log.info(`memory light sweep: ${label} has ${String(over.length)} domain(s) over ${String(DOMAIN_CAP)} cards (${over.map(entry => `${entry.domain}=${String(entry.cards)}`).join(', ')})`)
+    }
+
+    // 4. Index parity after possible hand edits.
     await store.reindex()
     return { merged, suspects }
   } catch (error) {

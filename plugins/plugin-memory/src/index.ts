@@ -125,6 +125,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // order). Deterministic (no model), idempotent, and a failure leaves the
   // store untouched for the next boot.
   await root.migrateAll(log)
+  // Index/card reconciliation (W2). The index is derived data that rides into
+  // every session of its project, and nothing used to check it against the
+  // cards: measured on a real store, 29 index lines beside 28 cards, the ghost
+  // injected into that project's every prompt. Mount and `/status` are the two
+  // moments a project's index is about to be read, so both reconcile.
+  await root.reconcileIndexes(log)
 
   if (!root.global.isEnabled()) {
     log.info(`memory plugin: disabled by user config (${join(dir, 'config.json')})`)

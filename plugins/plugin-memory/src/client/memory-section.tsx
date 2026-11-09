@@ -190,7 +190,12 @@ function fmtBytes(n: number): string {
 }
 
 /** Display name for a project: basename of the cwd, falling back to slug. */
-function projectTitle(project: MemoryProjectSummary): string {
+/** The fallback row for an archive entry whose project is no longer in the
+ *  status list (a directory deleted while the panel was open). Only `slug` and
+ *  `cwd` are ever READ here, so the fallback carries exactly those and the
+ *  metrics the payload grew do not have to be invented at a call site.
+ */
+function projectTitle(project: Pick<MemoryProjectSummary, 'slug' | 'cwd'>): string {
   if (project.cwd === '') return project.slug
   const parts = project.cwd.replace(/[\\/]+$/u, '').split(/[\\/]/u)
   return parts[parts.length - 1] ?? project.slug
@@ -830,7 +835,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                 <span className="dshm_activityTime">{t('memory.archive.row', {
                   topic: entry.topic,
                   day: entry.day,
-                  scope: projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug, cwd: '', cards: 0, sizeBytes: 0, movable: false }),
+                  scope: projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug, cwd: '' }),
                 })}</span>
                 <button
                   type="button"

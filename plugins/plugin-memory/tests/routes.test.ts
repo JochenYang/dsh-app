@@ -163,10 +163,12 @@ test('GET /status answers the envelope the settings page reads', async () => {
   assert.equal(response.headers.get('content-type'), 'application/json')
   const body = await response.json() as { ok: boolean, value: Record<string, unknown> }
   assert.equal(body.ok, true)
-  // The payload is the page's world and nothing more: the two toggles and the
-  // project list. Card bodies stay out (the entries route serves them on
-  // demand), and the retired global scope has no row of its own.
-  assert.deepEqual(Object.keys(body.value).sort(), ['distill', 'enabled', 'projects'])
+  // The payload is the page's world and nothing more: the two toggles, the
+  // project list and the aggregate warning counts. Card bodies stay out (the
+  // entries route serves them on demand), and the retired global scope has no
+  // row of its own. A NEW field updates this list; a field that disappears is a
+  // breaking change for the page and must be argued for here.
+  assert.deepEqual(Object.keys(body.value).sort(), ['distill', 'enabled', 'projects', 'warnings'])
   void dispose()
 })
 
@@ -494,7 +496,21 @@ test('GET /status carries the injection ledger exactly when the host has one', a
     totalChars: 11_082,
     cardCount: 6,
     indexLines: 50,
+    // Distinct from the mean below on purpose: equal values would make an
+    // assertion pass whatever the DTO dropped.
+    droppedCards: 18,
+    indexOverflowLines: 1,
     truncated: true,
+  }
+  const mean = {
+    guidelinesChars: 3_226,
+    indexChars: 5_199,
+    bodyChars: 2_657,
+    totalChars: 11_082,
+    cardCount: 6,
+    indexLines: 50,
+    droppedCards: 12.5,
+    indexOverflowLines: 0.5,
   }
   const dispose = registerMemoryRoutes({
     register: (route: RegisteredRoute) => {
@@ -505,23 +521,32 @@ test('GET /status carries the injection ledger exactly when the host has one', a
     injectionMetrics: () => ({
       latest: sample,
       samples: 1,
-      mean: {
-        guidelinesChars: 3_226,
-        indexChars: 5_199,
-        bodyChars: 2_657,
-        totalChars: 11_082,
-        cardCount: 6,
-        indexLines: 50,
-      },
+      mean,
       truncatedSamples: 1,
     }),
   })
   const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/status`)
   assert.ok(route !== undefined)
   const response = await route.fetch(new Request(`https://localhost${route.path}`, { method: 'GET' }))
-  const body = await response.json() as { value: { injection?: { latest: typeof sample, samples: number } } }
+  const body = await response.json() as {
+    value: {
+      injection?: {
+        latest: typeof sample
+        samples: number
+        mean: typeof mean
+        truncatedSamples: number
+      }
+    }
+  }
   assert.equal(body.value.injection?.latest.indexChars, 5_199, 'the page reads the numbers the probe measured')
   assert.equal(body.value.injection?.samples, 1)
+  // The two counters B2 added, checked item by item: a DTO mapping that dropped
+  // either field would leave every other assertion in this file green.
+  assert.equal(body.value.injection?.latest.droppedCards, 18)
+  assert.equal(body.value.injection?.latest.indexOverflowLines, 1)
+  assert.equal(body.value.injection?.mean.droppedCards, 12.5)
+  assert.equal(body.value.injection?.mean.indexOverflowLines, 0.5)
+  assert.equal(body.value.injection?.truncatedSamples, 1)
   // The earlier status test pins the no-provider shape (three keys): a kernel
   // without the provider must NOT ship an `injection: undefined` key that reads
   // as "measured, all zero".

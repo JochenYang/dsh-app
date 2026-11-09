@@ -62,9 +62,12 @@ import { removeTree } from './remove-tree.ts'
 import type { MemoryCategory, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
 import { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, LEGACY_GLOBAL_SLUG, MEMORY_CATEGORIES } from './types.ts'
 import {
+  DOMAIN_KEY_PATTERN,
   MAX_SUMMARY_CHARS,
   TOPIC_KEY_PATTERN,
   cardFingerprint,
+  domainOf,
+  isValidDomain,
   isValidTopic,
   parseCard,
   probeCardFile as probeCardFileAt,
@@ -73,26 +76,45 @@ import {
   renderCard,
   slugifyTopic,
   todayStamp,
+  type CardDomain,
   type CardFileReader,
   type CardProbe,
   type CardState,
   type TopicCard,
 } from './card-file.ts'
+import { rotMarkerCount } from './card-rot.ts'
+import {
+  DEFAULT_ALIAS_GROUPS,
+  mergeAliasGroups,
+  parseAliasGroups,
+  planAliases,
+  queryTokens,
+  separatedMemberPattern,
+  type AliasGroup,
+  type AliasPlan,
+} from './recall-aliases.ts'
+// The words of a query are a VOCABULARY question, so the splitter lives beside
+// the alias table and is re-exported here: every existing caller imports it
+// from this module, and a second copy would drift the moment one of them changes.
+export { queryTokens } from './recall-aliases.ts'
 // The card format and its three-state read live in card-file.ts: a move probes
 // ANOTHER store's card and every delete path asks the same question, so neither
 // may own its own copy. Re-exported here so the host half and the tests keep one
 // import site — the arrangement LEGACY_GLOBAL_SLUG and the archive bounds use.
 export {
+  DOMAIN_KEY_PATTERN,
   MAX_SUMMARY_CHARS,
   TOPIC_KEY_PATTERN,
   cardFingerprint,
+  domainOf,
+  isValidDomain,
   isValidTopic,
   parseCard,
   renderCard,
   slugifyTopic,
   todayStamp,
 } from './card-file.ts'
-export type { CardFileReader, CardProbe, CardState, TopicCard } from './card-file.ts'
+export type { CardDomain, CardFileReader, CardProbe, CardState, TopicCard } from './card-file.ts'
 // The slug is DEFINED in types.ts so the browser half can recognise the row
 // without importing host code; re-exported here because every host-side caller
 // imports it from this module.
@@ -111,6 +133,14 @@ export const MAX_TOPIC_BODY_CHARS = 400
  *  the same tool score ≤0.2 and stay below the floor. */
 export const SIM_DUPLICATE = 0.8
 export const SIM_RELATED = 0.3
+
+/** How long a card may go unedited before `/status` counts it as STALE.
+ *
+ * NOT a gate: nothing is deleted, degraded or omitted because of this number —
+ * it only feeds a count the settings payload and the health audit serve. The
+ * library is younger than this bound today, so the count is 0 by construction;
+ * that is the honest state, not a reason to lower it (see the plan's Q2). */
+export const ROT_DAYS = 90
 
 /** Archive bounds — declared in `types.ts` (shared with the browser half) and
  *  re-exported here so the store's callers keep one import site. */
@@ -146,6 +176,115 @@ export function contentSimilarity(a: string, b: string): number {
   let shared = 0
   for (const gram of setA) { if (setB.has(gram)) shared += 1 }
   return shared / (setA.size + setB.size - shared)
+}
+
+/**
+ * The words a query contributes to token-AND matching: the query split on
+ * everything that is not a letter or a digit, lowercased, empties dropped.
+ *
+ * Splitting on separators (not on whitespace) is what makes a Chinese query
+ * work: `memory 召回` and `memory召回` yield the same two tokens, and
+ * `dsh-app-vs-stock` yields four, each matched on its own.
+ */
+
+/** Whether a token is pure ASCII letters/digits, the only shape that has a
+ *  word boundary to respect. A token containing CJK has no such notion in the
+ *  text (Chinese is written without spaces), so it is matched as a substring. */
+const ASCII_TOKEN = /^[a-z0-9]+$/u
+
+/**
+ * Match one ASCII token on a WORD boundary.
+ *
+ * `(?<![A-Za-z0-9])` / `(?![A-Za-z0-9])` rather than `\b`: `\b` treats `_` as a
+ * word character, so `_` would end a match that the text considers mid-word,
+ * and this must line up with what an author would call a separate word. The
+ * token itself contains only ASCII letters and digits ({@link queryTokens}
+ * guarantees it), so it needs no regex escaping.
+ */
+function asciiTokenMatches(text: string, token: string): boolean {
+  const pattern = new RegExp(`(?<![A-Za-z0-9])${token}(?![A-Za-z0-9])`, 'iu')
+  return pattern.test(text)
+}
+
+/**
+ * Whether `text` mentions `query` — the ONE matcher behind `memory_recall`'s
+ * keyword filter, `memory_forget`'s text sweep and the recall corpus.
+ *
+ * Two rules, in order, because the second is a strict widening of the first and
+ * the first is a contract:
+ *
+ *   1. EXACT PHRASE (the historical rule): the normalized query appears in the
+ *      normalized text. This is what a caller who pastes a phrase expects, and
+ *      keeping it is what guarantees the switch cannot lose a hit it used to
+ *      find — every card matched before is still matched.
+ *   2. TOKEN AND: every token matches on its own — ASCII tokens on a word
+ *      boundary, CJK tokens as a normalized substring.
+ *
+ * Rule 2 is what rule 1 could not do. Measured on a real 193-card store, a
+ * two-word query hit 7 of 180 attempts (4%) because the words had to sit
+ * adjacent in that exact order; token-AND doubles the yield on the recall
+ * corpus (16/38 → 30/38). The superset is deliberate: recall is the feature
+ * that must not regress, so the new rule only ever ADDS matches.
+ *
+ * @param mode - `full` (both rules, the default) or `phrase` (rule 1 only).
+ *   The DESTRUCTIVE caller (`forget`) passes `phrase` for key-shaped input:
+ *   adding matches is a gain when reading and a hazard when deleting, and the
+ *   one-token-per-hyphen split would turn a mistyped topic key into a sweep.
+ *   `words` is rule 2 only, and it is what alias VARIANTS are matched with: the
+ *   phrase rule is a substring test, so a short alias would leak through it
+ *   (`ws` inside `pwsh`, `pdf` inside `pdfjs`) — the very over-match the alias
+ *   table is written to avoid. The original query keeps `full`, because its
+ *   loose behaviour is a published contract (see the superset note above) while
+ *   an expanded variant is new reach and owes nobody a substring match.
+ */
+export function textMatchesQuery(text: string, query: string, mode: 'full' | 'phrase' | 'words' = 'full'): boolean {
+  const needle = normalizeForMatch(query)
+  if (needle === '') return false
+  const normalized = normalizeForMatch(text)
+  if (mode !== 'words' && normalized.includes(needle)) return true
+  if (mode === 'phrase') return false
+  const tokens = queryTokens(query)
+  if (tokens.length === 0) return false
+  return tokens.every(token =>
+    ASCII_TOKEN.test(token) ? asciiTokenMatches(text, token) : normalized.includes(normalizeForMatch(token)))
+}
+
+/**
+ * Whether ONE word of a query is present in `text`.
+ *
+ * The strict counterpart to {@link textMatchesQuery}'s loose phrase rule, used
+ * for alias alternatives and rewrites, where a substring test is wrong:
+ *   - an ASCII word matches on its boundary (`ws` is not inside `pwsh`);
+ *   - a member carrying a separator matches with the SAME anchored pattern the
+ *     query side uses, which is what covers `hot-reload`, `hot reload` and
+ *     `hotreload` without also matching `shot reload` — the normalised-substring
+ *     version of this test was measured to hit exactly that;
+ *   - everything else (a Chinese word) matches on the normalised text, because
+ *     it has no boundary to anchor.
+ */
+function candidateMatchesText(text: string, candidate: string): boolean {
+  if (ASCII_TOKEN.test(candidate)) return asciiTokenMatches(text, candidate)
+  const anchored = separatedMemberPattern(candidate)
+  if (anchored !== undefined) return anchored.test(text)
+  const needle = normalizeForMatch(candidate)
+  return needle !== '' && normalizeForMatch(text).includes(needle)
+}
+
+/**
+ * Whether a card satisfies a whole {@link AliasPlan}: every word position has one
+ * of its alternatives present, or a whole-query rewrite matches.
+ *
+ * This is the cartesian product's ANSWER without building the product — which is
+ * what makes `powershell 工作区` find a card written `pwsh workspace`. The first
+ * implementation enumerated rewritten sentences and could only change one member
+ * at a time, so that card matched nothing.
+ */
+function matchesAliasPlan(text: string, plan: AliasPlan): boolean {
+  const byPosition = plan.positions.length > 0
+    && plan.positions.every(alternatives => alternatives.some(alternative => candidateMatchesText(text, alternative)))
+  if (byPosition) return true
+  return plan.variants.length > 1
+    && plan.variants.slice(1).some(variant => textMatchesQuery(text, variant, 'words'))
 }
 
 /**
@@ -325,21 +464,120 @@ const CATEGORY_ORDER: Record<MemoryCategory, number> = {
   preference: 0, convention: 1, decision: 2, lesson: 3, fact: 4,
 }
 
-/** Index line for one card: `- [category] name — summary (updated date)`. */
+/** The index file's one fixed line. Exported because the drift check reads it
+ *  BACK: the header is the only non-card line the host writes, so a line that is
+ *  neither this nor a parseable card row means somebody (or something) edited
+ *  the file, and `cappedIndex` would inject that line verbatim. */
+export const INDEX_HEADER = '# Memory index (auto-generated from topics/; edits are overwritten)'
+
+/**
+ * The topic key an index line names, or undefined for a line that names none.
+ *
+ * The index is host-generated, so this reads back the shape `indexLine`
+ * writes: `- [pin ]([category] )([domain] )<key> — <summary> (updated <date>)`.
+ * Bracket segments are SKIPPED rather than counted, so the reader keeps
+ * working across the domain prefix that was added later — one parser, two
+ * formats, and a hand-edited line answers undefined instead of a wrong key.
+ *
+ * Exported because index/card reconciliation (W2) is the only thing that reads
+ * the index back, and it has to be testable on its own.
+ */
+export function indexLineKey(line: string): string | undefined {
+  if (!line.startsWith('- ')) return undefined
+  let rest = line.slice(2).trim()
+  if (rest.startsWith('📌 ')) rest = rest.slice(3)
+  while (rest.startsWith('[')) {
+    const close = rest.indexOf(']')
+    if (close === -1) return undefined
+    rest = rest.slice(close + 1).trim()
+  }
+  const dash = rest.indexOf(' — ')
+  const key = (dash === -1 ? rest : rest.slice(0, dash)).trim()
+  return isValidTopic(key) ? key : undefined
+}
+
+/** What one store looks like in numbers — `/status` per project, and the
+ *  health audit's row. Every field is derived from a single `list()` (see
+ *  {@link MemoryStore.metrics}). */
+export interface StoreMetrics {
+  cards: number
+  sizeBytes: number
+  pinned: number
+  /** Lines in `index.md` that name a card. */
+  indexLines: number
+  /** Characters of `index.md` (the injected routing map's cost). */
+  indexChars: number
+  /** Summed card-body characters. */
+  bodyChars: number
+  /** Distinct domains (declared or derived). */
+  domains: number
+  /** Cards in the biggest single domain (the cap decision's raw number). */
+  maxDomainCards: number
+  /** Cards whose body names decay-prone external state (see card-rot.ts). */
+  rotCards: number
+  /** How many such mentions, across all cards. */
+  rotMarkers: number
+  /** Cards not edited for more than {@link ROT_DAYS} days (measured, never gated). */
+  staleCards: number
+}
+
+/** How `index.md` and `topics/` disagree (see {@link MemoryStore.indexDrift}). */
+export interface IndexDrift {
+  /** Lines the index carries that name a card. */
+  indexLines: number
+  /** Cards on disk. */
+  cards: number
+  /** Named by the index, absent from disk — injected into every session. */
+  ghostKeys: string[]
+  /** On disk, named by no line — invisible to the write-side routing map. */
+  unlistedKeys: string[]
+  /** Named by MORE THAN ONE line — the duplicate rides every session too. */
+  duplicatedKeys: string[]
+  /** Lines the host would never write, injected verbatim by `cappedIndex`. */
+  malformedLines: string[]
+}
+
+/**
+ * Index line for one card: `- [category] ([domain] )name — summary (updated date)`.
+ *
+ * The domain prefix is emitted ONLY when it carries information the key does
+ * not — a card that DECLARES a domain differing from its key's first segment.
+ * An inferred domain IS that segment, so prefixing it repeats the key on every
+ * line: measured on the real 193-card store, prefixing every line cost 1555
+ * characters across 194 lines (8.3% of the whole index) and told a reader
+ * nothing that the key plus the (domain-grouped) ordering did not already say.
+ * `reindex` sorts by domain, so grouping stays visible; this is only the
+ * redundant copy that goes away.
+ *
+ * That choice is also what keeps every existing LINE of an upgraded store
+ * unchanged: nothing declares a domain yet, so no line gains or loses a
+ * character. The index FILE is still rewritten on the first rebuild, because
+ * `reindex` now sorts by domain — the lines are the same, their ORDER is not.
+ * Injection length is unchanged; only the sequence a reader sees moves, and (as
+ * measured: `droppedCards 107` of 193 cards) the bodies a session gets are
+ * chosen by category quota, not by index order.
+ */
 function indexLine(card: TopicCard, pinned: Set<string>): string {
   const pin = pinned.has(card.name) ? '📌 ' : ''
   const summary = card.malformed ? '(hand-edited file)' : card.summary
-  return `- ${pin}[${card.category}] ${card.name} — ${summary} (updated ${card.updated})`
+  const declared = domainOf(card)
+  const prefix = declared.src === 'declared' && declared.key !== domainOf({ name: card.name }).key
+    ? `[${declared.key}] `
+    : ''
+  return `- ${pin}[${card.category}] ${prefix}${card.name} — ${summary} (updated ${card.updated})`
 }
 
 /** Validate an upsert payload; returns an error string or undefined. Exported
  *  so the tool and the curator share one rule set. The summary rides the
  *  index into every session's prompt, so it is credential-checked alongside
  *  the body — a secret is not safer at 40 characters. */
-export function validateCardInput(input: { name: string, category: string, summary: string, body: string }): string | undefined {
+export function validateCardInput(input: { name: string, category: string, summary: string, body: string, domain?: string }): string | undefined {
   if (!isValidTopic(input.name)) return `invalid topic key "${input.name}"; must match ${TOPIC_KEY_PATTERN.source} (ASCII kebab-case)`
   if (!MEMORY_CATEGORIES.includes(input.category as MemoryCategory)) {
     return `unknown category "${input.category}"; must be one of: ${MEMORY_CATEGORIES.join(', ')}`
+  }
+  if (input.domain !== undefined && input.domain !== '' && !isValidDomain(input.domain)) {
+    return `invalid domain "${input.domain}"; must match ${DOMAIN_KEY_PATTERN.source} (ASCII kebab-case, ≤16 chars)`
   }
   if (input.summary === '') return 'summary is required (≤40 chars, states what the card covers)'
   if (input.summary.length > MAX_SUMMARY_CHARS) return `summary too long (${String(input.summary.length)}/${String(MAX_SUMMARY_CHARS)} chars)`
@@ -483,7 +721,7 @@ export class MemoryStore {
    * summary independently of the date. Rejects on invalid input — callers
    * pre-validate with {@link validateCardInput} for friendly errors.
    */
-  async upsert(input: { name: string, category: MemoryCategory, summary?: string, body: string }): Promise<{ op: 'created' | 'updated' | 'unchanged', card: TopicCard }> {
+  async upsert(input: { name: string, category: MemoryCategory, summary?: string, body: string, domain?: string | null }): Promise<{ op: 'created' | 'updated' | 'unchanged', card: TopicCard }> {
     // Three-state for the same reason the move probes are: `get()` folds "the
     // read failed" into `undefined`, and reading an UNREADABLE card as "new"
     // makes this write replace the very file it could not read. Only a genuinely
@@ -491,17 +729,31 @@ export class MemoryStore {
     const before = probeOrThrow(this.topicsDirPath, input.name, this.cardFileReader, 'the card was not saved')
     const existing = before.state === 'present' ? before.card : undefined
     const summary = input.summary !== undefined && input.summary !== '' ? input.summary : existing?.summary ?? ''
-    const invalid = validateCardInput({ name: input.name, category: input.category, summary, body: input.body })
+    // An OMITTED domain inherits (like the summary): a caller that only revises
+    // the body must not silently drop the card's bucket. `null` means "no
+    // declared domain" and is the only way to go back to the key-derived one —
+    // it exists because a ROLLBACK has to restore a target that declared
+    // nothing, and inheriting there would leave the failed move's domain
+    // behind on a card nobody edited.
+    const domain = input.domain === null
+      ? undefined
+      : input.domain !== undefined && input.domain !== '' ? input.domain : existing?.domain
+    const invalid = validateCardInput({ name: input.name, category: input.category, summary, body: input.body, domain })
     if (invalid !== undefined) throw new Error(invalid)
     const today = todayStamp()
+    // `domain` is part of the equality test: leaving it out makes a
+    // domain-only change answer `unchanged` and get dropped without a trace —
+    // the silent no-op the plan calls out by name.
     if (existing !== undefined && !existing.malformed
-      && existing.body === input.body && existing.summary === summary && existing.category === input.category) {
+      && existing.body === input.body && existing.summary === summary && existing.category === input.category
+      && existing.domain === domain) {
       return { op: 'unchanged', card: existing }
     }
     const card: TopicCard = {
       name: input.name,
       category: input.category,
       summary,
+      ...(domain === undefined ? {} : { domain }),
       created: existing?.created ?? today,
       updated: existing === undefined || existing.body !== input.body ? today : existing.updated,
       body: input.body,
@@ -619,7 +871,19 @@ export class MemoryStore {
       // index, so a throw after that write is precisely the case that needs
       // undoing. Leaving it outside is what made a reindex failure lose the
       // overwritten target card.
-      await target.upsert({ name: card.name, category: card.category, summary: card.summary, body: card.body })
+      // `domain` rides along: a declared domain is part of the card's identity,
+      // and a move that dropped it would silently re-bucket the card under its
+      // key's first segment — the same silent change the pin handling exists to
+      // prevent, one field over. `null` when the source declares none, so an
+      // `overwrite` onto a target that DID declare one lands the moved card's
+      // state instead of inheriting the target's.
+      await target.upsert({
+        name: card.name,
+        category: card.category,
+        summary: card.summary,
+        body: card.body,
+        domain: card.domain ?? null,
+      })
       if (pinned) await target.addPin(name)
       await this.remove(name, 'unspecified')
     } catch (error) {
@@ -656,7 +920,17 @@ export class MemoryStore {
           await target.remove(name)
         } else {
           const replaced = before.card
-          await target.upsert({ name: replaced.name, category: replaced.category, summary: replaced.summary, body: replaced.body })
+          await target.upsert({
+            name: replaced.name,
+            category: replaced.category,
+            summary: replaced.summary,
+            body: replaced.body,
+            // The snapshot's domain goes back too, and `null` is load-bearing:
+            // the target declared nothing, so omitting the field would INHERIT
+            // the domain the failed move just wrote and leave the rollback
+            // looking like a success with a bucket nobody chose.
+            domain: replaced.domain ?? null,
+          })
           // Put the pin back too: an unpinned destination card that stays
           // pinned would keep injecting a card the user never pinned there.
           if (target.pinnedSet().has(name) !== replacedPinned) {
@@ -961,17 +1235,49 @@ export class MemoryStore {
     return scored.slice(0, limit)
   }
 
-  /** Substring search over name+summary+body (the recall/forget matcher). */
-  search(query: string): TopicCard[] {
-    const needle = normalizeForMatch(query)
-    if (needle === '') return this.list()
-    return this.list().filter(card =>
-      normalizeForMatch(`${card.name} ${card.summary} ${card.body}`).includes(needle))
+  /**
+   * Cards matching a query, EXACT HITS FIRST.
+   *
+   * Two layers, in this order:
+   *   1. `textMatchesQuery` — phrase or token-AND (see that function);
+   *   2. alias expansion — the query's words swapped for their other names (see
+   *      recall-aliases.ts), which is the only layer that can find a card whose
+   *      author used a different word for the same thing.
+   *
+   * The ordering is part of the contract, not a nicety: expansion can only ADD
+   * cards, so a direct hit must never sit behind an indirect one — searching
+   * `ppt` should open with the card that says `ppt`, not with four cards that
+   * say `幻灯片`.
+   *
+   * @param query - the user's words.
+   * @param groups - the alias table in force. `[]` (the default) means NO
+   *   synonym expansion: a caller opts in explicitly, so a future reader or
+   *   destructive caller cannot inherit it by accident. {@link forget} does not
+   *   call this method at all.
+   */
+  search(query: string, groups: readonly AliasGroup[] = []): TopicCard[] {
+    if (normalizeForMatch(query) === '') return this.list()
+    // An EMPTY table is the default, so a caller opts into synonyms explicitly.
+    // The read path is the only one that may pass a table, and making that
+    // visible at every call site is what keeps a future destructive caller from
+    // inheriting widened semantics by accident.
+    const plan = groups.length === 0 ? undefined : planAliases(query, groups)
+    const exact: TopicCard[] = []
+    const viaAlias: TopicCard[] = []
+    for (const card of this.list()) {
+      const text = `${card.name} ${card.summary} ${card.body}`
+      if (textMatchesQuery(text, query)) {
+        exact.push(card)
+      } else if (plan !== undefined && matchesAliasPlan(text, plan)) {
+        viaAlias.push(card)
+      }
+    }
+    return viaAlias.length === 0 ? exact : [...exact, ...viaAlias]
   }
 
   /**
-   * Remove cards by topic key (exact) or content/summary substring; returns
-   * the removed keys. Rebuilds the index once at the end.
+   * Remove cards by topic key (exact) or by text (see {@link textMatchesQuery});
+   * returns the removed keys. Rebuilds the index once at the end.
    *
    *  Like {@link remove}, a card that cannot be READ is never treated as a card
    *  that is not there: it cannot be archived, so deleting it would be
@@ -989,8 +1295,28 @@ export class MemoryStore {
     if (named.state === 'present') {
       doomed = [named.card]
     } else {
-      const needle = normalizeForMatch(match)
-      if (needle !== '') {
+      // The sweep runs with the PHRASE half of the matcher when the text is
+      // key-shaped, and the full matcher otherwise.
+      //
+      // Two deliberate narrowings on the destructive path, both because adding
+      // matches is a gain when reading and a hazard when deleting.
+      //
+      // 1. ALIASES ARE NOT EXPANDED. This does not call {@link search} at all —
+      //    it calls the matcher directly — so a user file or a built-in group
+      //    cannot widen it. `memory_forget("幻灯片")` must not delete the `pptd`
+      //    cards: the user named a word, not the set of cards that word might
+      //    refer to.
+      //
+      // 2. KEY-SHAPED TEXT KEEPS THE EXACT-PHRASE RULE. A hyphen is what turns
+      //    one written word into two tokens: `memory_forget("pnpm")` (a word)
+      //    and `memory_forget("dsh-config")` (a topic key that may not exist)
+      //    parse identically to the tokenizer, but the second is a TYPO far more
+      //    often than it is a phrase — and under full token-AND it would delete
+      //    every card mentioning both `dsh` and `config`. A phrase that is not
+      //    key-shaped (spaces, Chinese) gets the full matcher, which is the case
+      //    the widening was for.
+      if (normalizeForMatch(match) !== '') {
+        const mode = isValidTopic(match) ? 'phrase' : 'full'
         const cards = this.list()
         // `list()` drops a card whose read failed. Such a card can neither be
         // archived nor searched, so this sweep cannot know whether it matches:
@@ -999,8 +1325,7 @@ export class MemoryStore {
         if (unreadable.length > 0) {
           throw new Error(`cannot read ${String(unreadable.length)} card(s) in ${this.dir} (${unreadable.join(', ')}); nothing was forgotten`)
         }
-        doomed = cards.filter(card =>
-          normalizeForMatch(`${card.summary} ${card.body}`).includes(needle))
+        doomed = cards.filter(card => textMatchesQuery(`${card.summary} ${card.body}`, match, mode))
       }
     }
     for (const card of doomed) {
@@ -1068,7 +1393,16 @@ export class MemoryStore {
 
   // --- index -----------------------------------------------------------------
 
-  /** Rebuild index.md from the live cards (host-owned; hand edits overwritten). */
+  /**
+   * Rebuild index.md from the live cards (host-owned; hand edits overwritten).
+   *
+   * Ordered by DOMAIN first, then by category → updated-desc inside it: `list()`
+   * keeps its own (category → updated) order for injection and for the
+   * curator's rotation, while the index groups so that cards of one subject sit
+   * next to each other. Adjacency is the point — a reader (or the model routing
+   * a save) has to be able to see the whole bucket in one glance, and it is what
+   * makes a growing domain visible before it becomes a cap problem.
+   */
   async reindex(): Promise<void> {
     const cards = this.list()
     const pinned = this.pinnedSet()
@@ -1076,10 +1410,15 @@ export class MemoryStore {
       if (existsSync(this.indexPath)) await removeTree(this.indexPath)
       return
     }
+    const ordered = [...cards].sort((a, b) =>
+      domainOf(a).key.localeCompare(domainOf(b).key)
+      || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]
+      || b.updated.localeCompare(a.updated)
+      || a.name.localeCompare(b.name))
     const text = [
-      '# Memory index (auto-generated from topics/; edits are overwritten)',
+      INDEX_HEADER,
       '',
-      ...cards.map(card => indexLine(card, pinned)),
+      ...ordered.map(card => indexLine(card, pinned)),
       '',
     ].join('\n')
     mkdirSync(this.dir, { recursive: true })
@@ -1091,14 +1430,153 @@ export class MemoryStore {
     return existsSync(this.indexPath) ? readFileSync(this.indexPath, 'utf8').trim() : ''
   }
 
-  /** Content fingerprint over all cards (curator change detection). */
-  fingerprint(): string {
-    return contentHash(this.list().map(card => renderCard(card)).join('\n'))
+  /**
+   * The index text for a MEASUREMENT, i.e. never throwing.
+   *
+   * `indexText()` is deliberately strict — injection must not quietly pretend an
+   * index is empty. But two callers only COUNT with it (`metrics`, and the drift
+   * probe above), and for them a damaged `index.md` (a directory, an EACCES, a
+   * torn mount) must not take down `/status`, the health audit or the plugin
+   * mount. `undefined` is "could not read it", which the callers report as
+   * zero lines rather than as "no index": the distinction reaches the reader
+   * through `indexDrift()`, which refuses to reconcile a store whose index it
+   * could not read.
+   */
+  private indexTextForCount(): string | undefined {
+    try {
+      return this.indexText()
+    } catch {
+      return undefined
+    }
   }
 
-  /** Card count + total size of topics/ (settings page). */
-  stats(): { cards: number, sizeBytes: number } {
-    const cards = this.list()
+  /**
+   * Does `index.md` still describe the cards on disk?
+   *
+   * The index is DERIVED data that rides into every session, so a stale copy is
+   * not cosmetic: a ghost key is injected into every prompt of that project for
+   * a card nobody can open (measured on a real store: 29 index lines beside 28
+   * cards, one of them a topic that had vanished outside the plugin), and a
+   * missing line hides a card from the only routing map the writer gets.
+   *
+   * Nothing used to check. "The index is rebuilt after every write" was a
+   * convention, and a card lost any other way (a hand edit, an `rm`, a synced
+   * folder, another machine) left the index lying indefinitely — `migrateAll`
+   * only visits stores that still hold a legacy `memory.md`.
+   *
+   * Cheap enough to run at mount: two directory reads and one file read per
+   * store, regardless of how many cards it holds.
+   *
+   * `undefined` means "in sync". Answers named so the caller can log or record
+   * WHICH way it drifted, instead of "there was a problem".
+   *
+   * A scope holding a card it cannot READ answers `undefined` as well: `list()`
+   * drops such a card, so it would look like a ghost, and reindexing would
+   * erase its line — turning a read failure into a permanently invisible card.
+   * The probe decides, not a guess.
+   */
+  indexDrift(): IndexDrift | undefined {
+    // Card NAMES come from the directory, not from `list()`: the comparison is
+    // about which keys exist, and parsing every card body to answer it would
+    // make the mount-time check read every store in full — the cost that kept
+    // index reconciliation out of the boot path before this existed (see §4.11
+    // of docs/memory-topic-cards/OPTIMIZATION.md). Two readdirs and one file
+    // read per store is what actually runs here.
+    //
+    // Nothing here may throw: the caller is the mount path and `/status`, and
+    // an unreadable `index.md` must not fail either. A failure answers
+    // `undefined` = "in step", i.e. "do not touch it"; `reindex` would
+    // otherwise overwrite a file nobody could read.
+    let names: Set<string>
+    let listed: string[]
+    let malformedLines: string[]
+    try {
+      names = new Set(this.diskCardKeys())
+      listed = []
+      malformedLines = []
+      for (const line of this.indexText().split('\n')) {
+        if (line.trim() === '') continue
+        if (line === INDEX_HEADER) continue
+        const key = indexLineKey(line)
+        // A line the host did not write is drift, not noise: `cappedIndex()`
+        // injects the index VERBATIM, so an unparseable row rides every session
+        // of that project until somebody rebuilds the file.
+        if (key === undefined) malformedLines.push(line)
+        else listed.push(key)
+      }
+    } catch {
+      return undefined
+    }
+    // MULTISET comparison, not set membership: an index that names one card
+    // twice injects the duplicate into every session of that project for as
+    // long as it stands, and a set comparison would call that "in step".
+    const counts = new Map<string, number>()
+    for (const key of listed) counts.set(key, (counts.get(key) ?? 0) + 1)
+    const ghostKeys = [...counts.keys()].filter(key => !names.has(key))
+    const duplicatedKeys = [...counts.entries()].filter(([key, count]) => names.has(key) && count > 1).map(([key]) => key)
+    const unlistedKeys = [...names].filter(name => !counts.has(name))
+    if (ghostKeys.length === 0 && unlistedKeys.length === 0 && duplicatedKeys.length === 0 && malformedLines.length === 0) return undefined
+    // A drift WAS found, so pay for the read now: a scope holding a card it
+    // cannot read must not be reconciled, because `reindex` rebuilds from
+    // `list()` — which drops such a card, erasing its line for good. Only the
+    // drifted stores (measured: 1 of 21) ever reach this.
+    try {
+      if (this.unreadableKeys(this.list()).length > 0) return undefined
+    } catch {
+      return undefined
+    }
+    return { indexLines: listed.length, cards: names.size, ghostKeys, unlistedKeys, duplicatedKeys, malformedLines }
+  }
+
+  /** The topic keys present in `topics/`, from the directory entries alone.
+   *  A `.md` DIRECTORY counts: that is the shape of a card nobody can read
+   *  (`EISDIR`), not of a card that is absent — the same rule {@link unreadableKeys}
+   *  applies, so the two agree on what "a card is here" means. */
+  private diskCardKeys(): string[] {
+    if (!existsSync(this.topicsDirPath)) return []
+    let entries: Array<{ name: string }>
+    try {
+      entries = readdirSync(this.topicsDirPath, { withFileTypes: true })
+    } catch {
+      return []
+    }
+    return entries
+      .map(entry => entry.name)
+      .filter(name => name.endsWith('.md'))
+      .map(name => name.slice(0, -3))
+      .filter(key => isValidTopic(key))
+  }
+
+  /**
+   * Structural metrics from ONE read of the cards — what `/status` serves per
+   * project and what the health audit prints per store.
+   *
+   * One read, not six: `list()` parses every card file, so a metric set that
+   * called it again per number (domains, rot, staleness) would multiply the
+   * directory walk for a page that is opened on demand.
+   */
+  metrics(cards: readonly TopicCard[] = this.list()): StoreMetrics {
+    const bodies = cards.map(card => card.body)
+    const pinned = this.pinnedSet()
+    const indexText = this.indexTextForCount() ?? ''
+    const domains = new Map<string, number>()
+    let rotCards = 0
+    let rotMarkers = 0
+    let staleCards = 0
+    const cutoff = Date.now() - ROT_DAYS * 24 * 60 * 60 * 1000
+    for (const card of cards) {
+      const domain = domainOf(card).key
+      domains.set(domain, (domains.get(domain) ?? 0) + 1)
+      const markers = rotMarkerCount(card.body)
+      if (markers > 0) {
+        rotCards += 1
+        rotMarkers += markers
+      }
+      // `updated` is a local-date stamp; a card that cannot be dated counts as
+      // FRESH (never as stale) — a missing date must not raise an alarm.
+      const stamp = Date.parse(`${card.updated}T00:00:00`)
+      if (Number.isFinite(stamp) && stamp < cutoff) staleCards += 1
+    }
     let sizeBytes = 0
     if (existsSync(this.topicsDirPath)) {
       for (const entry of readdirSync(this.topicsDirPath)) {
@@ -1109,7 +1587,25 @@ export class MemoryStore {
         }
       }
     }
-    return { cards: cards.length, sizeBytes }
+    const indexLines = indexText.split('\n').filter(line => line.startsWith('- ')).length
+    return {
+      cards: cards.length,
+      sizeBytes,
+      pinned: pinned.size,
+      indexLines,
+      indexChars: indexText.length,
+      bodyChars: bodies.reduce((sum, body) => sum + body.length, 0),
+      domains: domains.size,
+      maxDomainCards: Math.max(0, ...domains.values()),
+      rotCards,
+      rotMarkers,
+      staleCards,
+    }
+  }
+
+  /** Content fingerprint over all cards (curator change detection). */
+  fingerprint(): string {
+    return cardsFingerprint(this.list())
   }
 
   /** Topics directory path (the settings "edit by hand" affordance). */
@@ -1265,6 +1761,19 @@ export function contentHash(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
 
+/**
+ * Content fingerprint over a set of cards — what {@link MemoryStore.fingerprint}
+ * and the health audit's snapshot line both anchor on.
+ *
+ * CONTENT, through `renderCard`, not counts: a snapshot that hashed card counts
+ * and sizes would answer "unchanged" for a store whose card was rewritten to
+ * the same length, which is exactly the edit a before/after comparison is
+ * trying to notice.
+ */
+export function cardsFingerprint(cards: readonly TopicCard[]): string {
+  return contentHash(cards.map(card => renderCard(card)).join('\n'))
+}
+
 /** Slug shape the clear route accepts — also the traversal fence. */
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 
@@ -1285,8 +1794,38 @@ export function isValidSlug(slug: string): boolean {
   return SLUG_PATTERN.test(slug)
 }
 
+/** Card count at which a store is IN THE WARNING BAND: 80% of the curator's
+ *  30-card target. Not a gate — nothing is trimmed or refused — the count rides
+ *  in `/status` so the crossing is visible before the cap is hit. The pairing
+ *  with `CURATE_BUDGET.cards` is asserted by a test rather than by an import:
+ *  `curator.ts` imports this module, so reaching back would make a cycle. */
+export const CARD_WARN_AT = 24
+
+/** The curator's card target, restated here for the same reason as
+ *  {@link CARD_WARN_AT} (no import cycle) and bound to it by a test. A store
+ *  ABOVE this is over budget; the count reaches `/status`, nothing enforces it. */
+export const CARD_CAP = 30
+
+/** Cards per domain above which the light sweep RECORDS the bucket as over.
+ *
+ * Measurement only — nothing is trimmed, refused or split because of this
+ * number (the plan's Q1: the real distribution is not known until declared
+ * domains exist). It is set where a bucket stops being a bucket: the injected
+ * index shows 50 lines, so a single domain claiming more than a sixth of it is
+ * the shape that makes an index unreadable.
+ */
+export const DOMAIN_CAP = 8
+
+/** Index lines at which a store is in the warning band: 80% of
+ *  `MAX_INDEX_LINES` (50). Same rule as {@link CARD_WARN_AT} — measured, not
+ *  enforced, and bound to the real cap by a test. */
+export const INDEX_WARN_AT = 40
+
 /** One project's summary for the settings page (store view of the wire shape). */
-export type ProjectSummary = Pick<MemoryProjectSummary, 'slug' | 'cwd' | 'cards' | 'sizeBytes' | 'movable'>
+export type ProjectSummary = Pick<MemoryProjectSummary,
+  | 'slug' | 'cwd' | 'cards' | 'sizeBytes' | 'movable'
+  | 'indexLines' | 'domains' | 'maxDomainCards' | 'rotCards' | 'staleCards'
+  | 'cardWarn' | 'indexWarn'>
 /** Summarize every project directory, busiest first. */
 export function listProjects(rootDir: string): ProjectSummary[] {
   const projectsDir = join(rootDir, 'projects')
@@ -1305,12 +1844,25 @@ export function listProjects(rootDir: string): ProjectSummary[] {
     } catch {
       // missing/stale metadata → keep empty, the slug still identifies it
     }
-    const { cards, sizeBytes } = new MemoryStore(dir).stats()
+    const metrics = new MemoryStore(dir).metrics()
     // A target is only usable when its stamp walks back to this very slug; a
     // bare directory or a stale stamp would swallow cards into a store no
     // session can resolve.
     const movable = cwd !== '' && projectSlug(cwd) === entry.name
-    out.push({ slug: entry.name, cwd, cards, sizeBytes, movable })
+    out.push({
+      slug: entry.name,
+      cwd,
+      cards: metrics.cards,
+      sizeBytes: metrics.sizeBytes,
+      movable,
+      indexLines: metrics.indexLines,
+      domains: metrics.domains,
+      maxDomainCards: metrics.maxDomainCards,
+      rotCards: metrics.rotCards,
+      staleCards: metrics.staleCards,
+      cardWarn: metrics.cards >= CARD_WARN_AT,
+      indexWarn: metrics.indexLines >= INDEX_WARN_AT,
+    })
   }
   out.sort((a, b) => b.sizeBytes - a.sizeBytes || b.cards - a.cards)
   return out
@@ -1377,6 +1929,10 @@ export interface LedgerEntry {
    *  `over-limit` is a well-formed edit refused by policy (it would cite more
    *  keys than one pass may touch), which the model gets no other signal for. */
   rejected?: 'unseen' | 'stale' | 'over-limit'
+  /** Which domain the edit happened in (curate only, and only once the card's
+   *  domain is known). Attribution: "three merges in `dsh`" is actionable,
+   *  "three merges" is not. Absent on rows written before the field existed. */
+  domain?: string
   /** Short session id, when the event rode a session (curate only). */
   session?: string
 }
@@ -1401,6 +1957,7 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
   if (entry.op !== 'merge' && entry.op !== 'delete' && entry.op !== 'rewrite' && entry.op !== 'rename') return false
   if (!Array.isArray(entry.keys) || !entry.keys.every(key => typeof key === 'string')) return false
   if (entry.rejected !== undefined && entry.rejected !== 'unseen' && entry.rejected !== 'stale' && entry.rejected !== 'over-limit') return false
+  if (entry.domain !== undefined && typeof entry.domain !== 'string') return false
   return true
 }
 
@@ -1408,6 +1965,74 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
 interface LlmAuditState {
   version: 1
   runs: LlmAuditRun[]
+}
+
+/** How many index/card reconciliation events distill-state.json retains (FIFO).
+ *  These explain a silently rewritten `index.md`: the file is host-owned, so a
+ *  hand edit is expected to be overwritten — but WHICH store drifted and by how
+ *  much used to leave no trace at all. */
+export const MAX_INDEX_DRIFT_EVENTS = 20
+
+/** One reconciliation event (see {@link MemoryRoot.reconcileIndexes}). */
+export interface IndexDriftEvent {
+  at: number
+  /** 'global' or a project slug. */
+  scope: string
+  indexLines: number
+  cards: number
+  ghostKeys: string[]
+  unlistedKeys: string[]
+  /** Named by more than one line. Absent in events written before this field
+   *  existed; the reader answers `[]`. */
+  duplicatedKeys: string[]
+  /** Lines the host would never write (injected verbatim until rebuilt).
+   *  Absent in older events; the reader answers `[]`. */
+  malformedLines: string[]
+  /** Whether the index was rebuilt in that same pass. */
+  repaired: boolean
+}
+
+/** Whether a parsed value is a usable drift event (the file can be hand-edited). */
+function isIndexDriftEvent(value: unknown): value is IndexDriftEvent {
+  if (typeof value !== 'object' || value === null) return false
+  const event = value as Record<string, unknown>
+  if (typeof event.at !== 'number' || !Number.isFinite(event.at)) return false
+  if (typeof event.scope !== 'string') return false
+  if (typeof event.indexLines !== 'number' || typeof event.cards !== 'number') return false
+  if (!Array.isArray(event.ghostKeys) || !event.ghostKeys.every(key => typeof key === 'string')) return false
+  if (!Array.isArray(event.unlistedKeys) || !event.unlistedKeys.every(key => typeof key === 'string')) return false
+  if (event.duplicatedKeys !== undefined
+    && (!Array.isArray(event.duplicatedKeys) || !event.duplicatedKeys.every(key => typeof key === 'string'))) return false
+  if (event.malformedLines !== undefined
+    && (!Array.isArray(event.malformedLines) || !event.malformedLines.every(line => typeof line === 'string'))) return false
+  return typeof event.repaired === 'boolean'
+}
+
+/** How many domain-over-cap events distill-state.json retains (FIFO). */
+export const MAX_DOMAIN_OVER_EVENTS = 50
+
+/** One measurement of a domain whose card count crossed {@link DOMAIN_CAP}. */
+export interface DomainOverEvent {
+  at: number
+  /** 'global' or a project slug. */
+  scope: string
+  /** The domain key the cards were grouped by. */
+  domain: string
+  /** How many cards it held when measured. */
+  cards: number
+  /** The cap in force at that moment (so an old row stays interpretable after
+   *  the constant is retuned). */
+  cap: number
+}
+
+/** Whether a parsed value is a usable domain-over row. */
+function isDomainOverEvent(value: unknown): value is DomainOverEvent {
+  if (typeof value !== 'object' || value === null) return false
+  const event = value as Record<string, unknown>
+  if (typeof event.at !== 'number' || !Number.isFinite(event.at)) return false
+  if (typeof event.scope !== 'string' || typeof event.domain !== 'string') return false
+  if (typeof event.cards !== 'number' || typeof event.cap !== 'number') return false
+  return true
 }
 
 /**
@@ -1450,6 +2075,16 @@ interface DistillState {
    * "why is this card gone" — the archive answers "and how do I get it back".
    */
   ledger?: LedgerEntry[]
+  /**
+   * Recent index/card reconciliations (bounded FIFO). Absent in a file written
+   * before this existed; the reader answers `[]` and the next write adds it.
+   */
+  indexDrift?: IndexDriftEvent[]
+  /**
+   * Recent domain-over-cap measurements (bounded FIFO). Absent in an older
+   * file, read as `[]` — an old state file must never make the store throw.
+   */
+  domainOver?: DomainOverEvent[]
 }
 
 /**
@@ -1478,11 +2113,37 @@ export class MemoryRoot {
     this.llmAuditPath = join(dir, 'llm-audit.json')
   }
 
-  /** Project store for a workspace cwd (cheap: no I/O until a write). */
+  /**
+   * Project store for a workspace cwd (cheap: no I/O until a write).
+   */
   projectFor(cwd: string): MemoryStore {
     const store = new MemoryStore(join(this.dir, 'projects', projectSlug(cwd)), cwd)
     store.attachLedger(this, projectSlug(cwd))
     return store
+  }
+
+  /**
+   * The alias table in force: the built-in groups, then whatever
+   * `<root>/aliases.json` adds.
+   *
+   * Read on every call rather than cached at construction: the file is
+   * hand-editable by design, and "edit the file, run recall again" has to work
+   * without a restart. The cost is one small read per `memory_recall` with a
+   * query — not per prompt assembly, which is what every other read on this path
+   * is careful about.
+   *
+   * A broken or unreadable file answers the built-in table, never an error: an
+   * alias file with a stray comma must not take recall down. The built-in groups
+   * come FIRST, so a member a user re-declares keeps its shipped meaning. */
+  aliasGroups(): AliasGroup[] {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(readFileSync(join(this.dir, 'aliases.json'), 'utf8'))
+    } catch {
+      return mergeAliasGroups(DEFAULT_ALIAS_GROUPS)
+    }
+    const { groups } = parseAliasGroups(parsed)
+    return mergeAliasGroups(DEFAULT_ALIAS_GROUPS, groups)
   }
 
   /** Project store by slug (the settings routes resolve projects by slug,
@@ -1873,7 +2534,129 @@ export class MemoryRoot {
       .map(item => item.entry)
   }
 
-  /** Append one background-LLM audit row and persist (bounded FIFO). */
+  /**
+   * Record what recent index/card reconciliations found, and persist — one
+   * read/write per pass (a mount may reconcile every store at once).
+   *
+   * Never throws: this is diagnostic. A failure to record that an index was
+   * rebuilt must not turn a mount into a failure.
+   */
+  recordIndexDrifts(events: ReadonlyArray<Omit<IndexDriftEvent, 'at'>>): void {
+    if (events.length === 0) return
+    try {
+      const state = this.readDistillState()
+      const drift = state.indexDrift ?? []
+      const at = Date.now()
+      for (const event of events) drift.push({ ...event, at })
+      state.indexDrift = drift.slice(-MAX_INDEX_DRIFT_EVENTS)
+      mkdirSync(this.dir, { recursive: true })
+      atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+    } catch (error) {
+      console.warn(`memory index: could not record ${String(events.length)} reconciliation event(s): ${String(error)}`)
+    }
+  }
+
+  /** Recent reconciliation events, newest first. */
+  indexDrifts(): IndexDriftEvent[] {
+    return [...(this.readDistillState().indexDrift ?? [])].reverse()
+  }
+
+  /**
+   * Record one light sweep's over-cap domains and persist — one read/write per
+   * sweep, and none at all when every bucket is under the cap.
+   *
+   * Never throws: this is MEASUREMENT (the plan's Q1 keeps `DOMAIN_CAP` out of
+   * every gate this round), and a failure to measure must not break the write
+   * that triggered the sweep.
+   */
+  recordDomainOvers(scope: string, entries: ReadonlyArray<{ domain: string, cards: number, cap: number }>): void {
+    if (entries.length === 0) return
+    try {
+      const state = this.readDistillState()
+      const over = state.domainOver ?? []
+      const at = Date.now()
+      for (const entry of entries) over.push({ ...entry, scope, at })
+      state.domainOver = over.slice(-MAX_DOMAIN_OVER_EVENTS)
+      mkdirSync(this.dir, { recursive: true })
+      atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+    } catch (error) {
+      console.warn(`memory domain: could not record ${String(entries.length)} over-cap domain(s): ${String(error)}`)
+    }
+  }
+
+  /** Recent over-cap domain measurements, newest first. */
+  domainOvers(): DomainOverEvent[] {
+    return [...(this.readDistillState().domainOver ?? [])].reverse()
+  }
+
+  /**
+   * Reconcile every store's `index.md` against its cards, rebuilding the ones
+   * that disagree (W2). Runs at mount and on `/status` — the two moments a
+   * session can start reading a stale index without anything else noticing.
+   *
+   * Why not every write: `reindex()` already runs there. The gap is exactly the
+   * writes that never happen — a card removed outside the plugin, a hand-edited
+   * index, a store restored from another machine.
+   *
+   * Deliberately NOT fatal: a store whose index cannot be rebuilt keeps its
+   * cards and answers the rest of the pass. Never throws — a `/status` request
+   * must not fail because one project's index is unreadable.
+   *
+   * @param log - host logger (optional).
+   * @returns the events recorded, in the order the stores were visited.
+   */
+  async reconcileIndexes(log?: { info(msg: string): void }): Promise<Array<Omit<IndexDriftEvent, 'at'>>> {
+    // Enumerated from the DIRECTORY, not through `listProjects()`: that call
+    // computes every store's metrics, i.e. parses every card — the full read
+    // this check exists to avoid at mount. One readdir here, then one cheap
+    // drift check per store.
+    const stores: Array<[string, MemoryStore]> = [['global', this.global]]
+    for (const slug of this.projectSlugs()) {
+      const store = this.projectBySlug(slug)
+      if (store !== undefined) stores.push([slug, store])
+    }
+    const events: Array<Omit<IndexDriftEvent, 'at'>> = []
+    for (const [label, store] of stores) {
+      const drift = store.indexDrift()
+      if (drift === undefined) continue
+      let repaired = false
+      try {
+        await store.reindex()
+        repaired = true
+      } catch (error) {
+        log?.info(`memory index: ${label} drifted (index ${String(drift.indexLines)} lines / ${String(drift.cards)} cards) and the rebuild failed: ${String(error)}`)
+      }
+      events.push({ scope: label, ...drift, repaired })
+      const detail = [
+        drift.ghostKeys.length > 0 ? `ghost ${drift.ghostKeys.join(', ')}` : '',
+        drift.unlistedKeys.length > 0 ? `unlisted ${drift.unlistedKeys.join(', ')}` : '',
+        drift.duplicatedKeys.length > 0 ? `duplicated ${drift.duplicatedKeys.join(', ')}` : '',
+        drift.malformedLines.length > 0 ? `malformed ${String(drift.malformedLines.length)} line(s)` : '',
+      ].filter(part => part !== '').join('; ')
+      log?.info(`memory index: ${label} was out of step (index ${String(drift.indexLines)} lines / ${String(drift.cards)} cards; ${detail})${repaired ? ' — rebuilt' : ''}`)
+    }
+    if (events.length > 0) this.recordIndexDrifts(events)
+    return events
+  }
+
+  /** Project directory slugs, from the DIRECTORY (no `project.json` read, no
+   *  card read). Used by {@link reconcileIndexes}, whose whole point is to cost
+   *  nothing on a healthy root. A linked project directory is skipped — the
+   *  same rule {@link listProjects} applies — and healed on its next write. */
+  private projectSlugs(): string[] {
+    const dir = join(this.dir, 'projects')
+    if (!existsSync(dir)) return []
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && isValidSlug(entry.name))
+        .map(entry => entry.name)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Append one background-LLM audit row and persist (bounded FIFO). */
   recordLlmAudit(run: Omit<LlmAuditRun, 'at'> & { at?: number }): void {
     let runs: LlmAuditRun[] = []
     try {
@@ -1915,6 +2698,8 @@ export class MemoryRoot {
         const curateCursor = (parsed as { curateCursor?: unknown }).curateCursor
         const curateStalls = (parsed as { curateStalls?: unknown }).curateStalls
         const ledger = (parsed as { ledger?: unknown }).ledger
+        const indexDrift = (parsed as { indexDrift?: unknown }).indexDrift
+        const domainOver = (parsed as { domainOver?: unknown }).domainOver
         return {
           version: 1,
           curated: typeof curated === 'object' && curated !== null
@@ -1928,6 +2713,8 @@ export class MemoryRoot {
             ? curateStalls as Record<string, number>
             : undefined,
           ledger: Array.isArray(ledger) ? ledger.filter(isLedgerEntry) : [],
+          indexDrift: Array.isArray(indexDrift) ? indexDrift.filter(isIndexDriftEvent) : [],
+          domainOver: Array.isArray(domainOver) ? domainOver.filter(isDomainOverEvent) : [],
         }
       }
     } catch {

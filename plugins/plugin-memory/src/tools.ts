@@ -47,6 +47,8 @@ import {
   SIM_DUPLICATE,
   SIM_RELATED,
   containsCredential,
+  domainOf,
+  isValidDomain,
   slugifyTopic,
   stripCommitIds,
   validateCardInput,
@@ -129,6 +131,38 @@ function cardView(card: TopicCard, pinned: ReadonlySet<string>): Record<string, 
   }
 }
 
+/** How many sibling summaries the domain context carries, and how long each
+ *  may be — a routing hint, not a second index. */
+const DOMAIN_CONTEXT_SUMMARIES = 5
+const DOMAIN_CONTEXT_SUMMARY_CHARS = 40
+
+/**
+ * What the model gets to see about the domain a saved card landed in.
+ *
+ * `cards` is how many of this store's cards share the domain (the number a cap
+ * decision would need); `summaries` names up to five of them so the model can
+ * see what the bucket already covers BEFORE writing a sixteenth near-duplicate.
+ * Computed by the host from the same read the save already did — the model is
+ * told the number instead of being asked to count.
+ *
+ * `domainOver` is hard-wired false: `DOMAIN_CAP` is measurement-only this round
+ * (the plan's Q1), and a field that were true without the cap being enforced
+ * would be a lie the model could act on.
+ */
+function domainContext(store: MemoryStore, topic: string): { domain: Record<string, unknown>, domainOver: boolean } {
+  const card = store.get(topic)
+  if (card === undefined) return { domain: { key: '', src: 'inferred', cards: 0, summaries: [] }, domainOver: false }
+  const { key, src } = domainOf(card)
+  const siblings = store.list().filter(other => domainOf(other).key === key)
+  const summaries = siblings
+    .slice(0, DOMAIN_CONTEXT_SUMMARIES)
+    .map(other => other.summary.slice(0, DOMAIN_CONTEXT_SUMMARY_CHARS))
+  return {
+    domain: { key, src, cards: siblings.length, summaries },
+    domainOver: false,
+  }
+}
+
 /**
  * Register the memory tools on the context.
  * @param ctx - host plugin context (tools service).
@@ -168,6 +202,16 @@ export function registerMemoryTools(
         type: 'string',
         description: `Index hook, at most ${String(MAX_SUMMARY_CHARS)} characters: what the card covers, `
           + 'so future saves route by it. Required when CREATING a topic; omit when updating to keep the old one.',
+      },
+      domain: {
+        type: 'string',
+        // A new parameter, not new prose in the tool description: the save
+        // contract is unchanged except that a writer MAY now name the subject
+        // bucket. Omitted means "derive it from the topic key" — nothing is
+        // persisted in that case (see domainOf).
+        description: 'Optional subject bucket wider than one topic (ASCII kebab-case, ≤16 chars, e.g. "dsh", '
+          + '"windows"). Omit to derive it from the topic key\'s first segment; an update that omits it keeps the '
+          + 'stored value.',
       },
       content: {
         type: 'string',
@@ -243,11 +287,26 @@ export function registerMemoryTools(
         } as unknown as JsonValue)
       }
       const store = root.projectFor(cwd)
+      // A declared domain is SLUGIFIED first (a model may write "Dsh App"), then
+      // shape-checked: slugify alone would accept a 48-character string that the
+      // per-line index prefix cannot afford.
+      const requestedDomain = typeof args.domain === 'string' ? args.domain.trim() : ''
+      const declared = requestedDomain === '' ? '' : slugifyTopic(requestedDomain)
+      // A domain the caller asked for but that slugifies to nothing (pure CJK)
+      // is REFUSED rather than quietly dropped: silently deriving `dsh` from the
+      // key would record the save under a bucket nobody asked for.
+      if (requestedDomain !== '' && (declared === '' || !isValidDomain(declared))) {
+        return Promise.resolve({
+          saved: false,
+          reason: `invalid domain "${requestedDomain}"; must be ASCII kebab-case, at most 16 characters`,
+        } as unknown as JsonValue)
+      }
+      const domain = declared === '' ? undefined : declared
       const existing = store.get(topic)
       if (existing === undefined) {
         // Write-time gate: a new key must not be a near-duplicate of a card
         // the index already covers under another name.
-        const invalid = validateCardInput({ name: topic, category, summary, body: content })
+        const invalid = validateCardInput({ name: topic, category, summary, body: content, domain })
         if (invalid !== undefined) {
           return Promise.resolve({ saved: false, reason: invalid } as unknown as JsonValue)
         }
@@ -261,7 +320,13 @@ export function registerMemoryTools(
           } as unknown as JsonValue)
         }
         const related = similar.filter(hit => hit.score >= SIM_RELATED && hit.score < SIM_DUPLICATE).map(hit => hit.name)
-        const { op } = await store.upsert({ name: topic, category: category as MemoryCategory, summary, body: content })
+        const { op } = await store.upsert({
+          name: topic,
+          category: category as MemoryCategory,
+          summary,
+          body: content,
+          ...(domain === undefined ? {} : { domain }),
+        })
         return Promise.resolve(finishSave({ saved: true, op, topic, scope: 'project', ...(related.length > 0 ? { related } : {}) } as Record<string, unknown>, store, exec) as unknown as JsonValue)
       }
       // Update path: same key rewrites the card; the summary is inherited
@@ -273,6 +338,7 @@ export function registerMemoryTools(
         category,
         summary: summary !== '' ? summary : existing.summary,
         body: content,
+        domain: domain ?? existing.domain,
       })
       if (invalid !== undefined) {
         return Promise.resolve({ saved: false, reason: invalid } as unknown as JsonValue)
@@ -282,6 +348,7 @@ export function registerMemoryTools(
         category: category as MemoryCategory,
         ...(summary !== '' ? { summary } : {}),
         body: content,
+        ...(domain === undefined ? {} : { domain }),
       })
       return Promise.resolve(finishSave({ saved: true, op, topic, scope: 'project' } as Record<string, unknown>, store, exec) as unknown as JsonValue)
     },
@@ -290,7 +357,12 @@ export function registerMemoryTools(
   /** Shared tail of the save paths: the background trigger fires only when
    *  the store actually changed. */
   async function finishSave(result: Record<string, unknown>, store: MemoryStore, exec: ToolRunContext): Promise<Record<string, unknown>> {
-    if (result.op === 'unchanged') return result
+    // The domain context is attached HERE, at the one tail both save paths
+    // share: a new path cannot forget it, and the two paths cannot disagree
+    // about what domain the card ended up in. It is a read of the store the
+    // save just wrote, so it reflects the landed card, not the request.
+    const withContext = { ...result, ...domainContext(store, String(result.topic ?? '')) }
+    if (result.op === 'unchanged') return withContext
     // The write path is the ONLY trigger the background maintenance pass has
     // (nothing reads a conversation — see index.ts), so without this call a
     // project's memory would grow forever with the curator never running.
@@ -302,7 +374,7 @@ export function registerMemoryTools(
     if (parent !== undefined && agent !== undefined) {
       await onSaved?.(parent as NonNullable<ReturnType<Context['agents']['get']>>, agent.id, store)
     }
-    return result
+    return withContext
   }
 
   const disposeRecall = ctx.tools.register(defineTool({
@@ -324,9 +396,11 @@ export function registerMemoryTools(
       },
       query: {
         type: 'string',
-        description: 'Optional keyword filter (normalized, Chinese-native substring) over '
-          + 'topic+summary+body, with the scope\'s total card count so a filtered view is never '
-          + 'mistaken for the whole memory.',
+        description: 'Optional keyword filter over topic+summary+body: a phrase, or several words '
+          + 'that must all appear (Chinese-native, no word-segmentation needed for a space-separated '
+          + 'query). Configured aliases are expanded too, so 幻灯片 finds a card written as pptd. '
+          + 'Returns the scope\'s total card count so a filtered view is never mistaken for the whole '
+          + 'memory.',
       },
     },
     output: {
@@ -365,7 +439,7 @@ export function registerMemoryTools(
             ? { found: false, topic }
             : { found: true, card: cardView(card, pinned) }
         }
-        const cards = query === '' ? store.list() : store.search(query)
+        const cards = query === '' ? store.list() : store.search(query, root.aliasGroups())
         // Cap by dropping the tail (oldest-updated cards first), never by
         // slicing the JSON text — a truncated card array must stay valid.
         const views = cards.map(card => cardView(card, pinned))

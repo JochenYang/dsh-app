@@ -63,6 +63,7 @@ import {
   cardFingerprint,
   containsCredential,
   contentHash,
+  domainOf,
   isValidTopic,
   listProjects,
   normalizeForMatch,
@@ -73,7 +74,9 @@ import {
   type LedgerEntry,
   type MemoryRoot,
   type MemoryStore,
+  type TopicCard,
 } from './memory-store.ts'
+import { rotMarkerCount } from './card-rot.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory, type MemoryCurateResult } from './types.ts'
 
 /** A store below this many cards is not worth an LLM pass. */
@@ -217,7 +220,15 @@ export function serializeStore(store: MemoryStore, start = 0): {
   const cards = store.list()
   const offset = cards.length === 0 ? 0 : ((start % cards.length) + cards.length) % cards.length
   const rotated = offset === 0 ? cards : [...cards.slice(offset), ...cards.slice(0, offset)]
-  const sections = rotated.map(card => `### ${card.name} [${card.category}] (updated ${card.updated})\n${card.body}`)
+  const sections = rotated.map((card) => {
+    const { key: domain } = domainOf(card)
+    // `refs` counts the concrete external state the body names (see
+    // card-rot.ts). The curator is told the NUMBER rather than asked to
+    // judge decay-prone text: a model reading sixteen bodies will not count
+    // anything reliably, and "refs 3" is a fact it can act on.
+    const refs = rotMarkerCount(card.body)
+    return `### ${card.name} [${card.category}] (updated ${card.updated}; domain ${domain}, refs ${String(refs)})\n${card.body}`
+  })
   const index = store.indexText()
   let text = index === '' ? '' : `${index}\n\n`
   const seen = new Map<string, string>()
@@ -283,6 +294,19 @@ export function buildCuratePrompt(
     '- contradicting cards: when two cards assert different things about one subject, the',
     '  LATER-updated one is the current state. Keep that truth — merge them into one card, or',
     '  delete the superseded one — rather than leaving both to be injected side by side.',
+    // Domain is a first-class field now (the header states it), so the merge
+    // rule gets the boundary it was missing: two cards may share a phrase and
+    // still be about different subjects, and their domain says which.
+    '- Each card header states its DOMAIN (`domain dsh`) and its REFERENCE COUNT (`refs N`).',
+    '  The domain is the subject bucket: merging two cards from DIFFERENT domains is almost',
+    '  always wrong, and merging within one is how a growing bucket gets smaller instead of',
+    '  longer.',
+    // S3: the reference count is the stale signal, already computed by the host.
+    '- `refs` is how many pieces of concrete external state the body names (a version number, a',
+    '  file path, a commit sha, a line number). Those decay without anyone editing the card, so',
+    '  for a card with refs > 0 either state what would have to change for it to stop holding',
+    '  (an invalidation condition a future session can check) or delete it as stale when that',
+    '  state is already gone. A refs count of 0 needs no such work.',
     '- delete: cards whose own text NARRATES the remembering instead of stating the fact',
     '  ("I saved a note that…", "according to the memory index…") — that narration gets',
     '  re-injected into every future session. Do NOT delete a card merely for MENTIONING this',
@@ -876,7 +900,7 @@ export class MemoryCurator {
     /** The edit's cited keys, or a rejection reason. Enforces the cited-keys
      *  ceiling (an edit that would push the pass past MAX_CURATE_CITED_KEYS is
      *  skipped, not fatal to other edits) and the read-before-edit rule. */
-    const claim = (keys: unknown): { ok: true, keys: string[] } | { ok: false, reason: ClaimFailure } => {
+    const claim = (keys: unknown): { ok: true, keys: string[], cards: TopicCard[] } | { ok: false, reason: ClaimFailure } => {
       if (!Array.isArray(keys) || keys.length === 0) return { ok: false, reason: 'invalid' }
       // A well-formed edit that would push the pass past the ceiling: a POLICY
       // refusal, not malformed input, so it is counted and recorded rather
@@ -884,6 +908,7 @@ export class MemoryCurator {
       // for too much in one edit).
       if (cited.size + keys.length > MAX_CURATE_CITED_KEYS) return { ok: false, reason: 'over-limit' }
       const out: string[] = []
+      const cards: TopicCard[] = []
       for (const key of keys) {
         if (typeof key !== 'string' || !isValidTopic(key)) return { ok: false, reason: 'invalid' }
         if (cited.has(key) || pinned.has(key)) return { ok: false, reason: 'invalid' }
@@ -899,8 +924,9 @@ export class MemoryCurator {
         if (shown === undefined) return { ok: false, reason: 'unseen' }
         if (shown !== contentHash(cardFingerprint(card))) return { ok: false, reason: 'stale' }
         out.push(key)
+        cards.push(card)
       }
-      return { ok: true, keys: out }
+      return { ok: true, keys: out, cards }
     }
 
     /** Validate a card body the model proposes (merge target / rewrite). */
@@ -939,10 +965,14 @@ export class MemoryCurator {
       }
       const keys = claimResult.keys
       keys.forEach(key => cited.add(key))
+      // The ledger row carries the DOMAIN the edit happened in: attribution is
+      // the whole point of the field — "three merges in `dsh`" is a sentence a
+      // reader can act on, "three merges" is not.
+      const domain = domainOf(claimResult.cards[0]!).key
       for (const key of keys) {
         if (await store.remove(key, 'curate-delete')) deleted += 1
       }
-      events.push({ op: 'delete', keys })
+      events.push({ op: 'delete', keys, domain })
       applied += 1
     }
 
@@ -979,7 +1009,7 @@ export class MemoryCurator {
         if (summary === undefined && edit.summary !== undefined) continue
         cited.add(keys[0]!)
         await store.upsert({ name: card.name, category: card.category, ...(summary === undefined ? {} : { summary }), body })
-        events.push({ op: 'rewrite', keys: [card.name] })
+        events.push({ op: 'rewrite', keys: [card.name], domain: domainOf(card).key })
         applied += 1
         rewritten += 1
         continue
@@ -1043,11 +1073,25 @@ export class MemoryCurator {
         !card.malformed && !absorbed.has(card.name) && normalizeForMatch(card.body) === needle)
       if (duplicates) continue
       keys.forEach(key => cited.add(key))
-      await store.upsert({ name: targetKey, category, ...(summary === '' ? {} : { summary }), body })
+      // A DECLARED domain follows the content it belonged to. Without this a
+      // rename silently re-buckets the card under its new key's first segment —
+      // the field would decay every time the curator did its job. Only an
+      // unambiguous declaration moves: when the cited cards disagree (a merge
+      // across domains, which the prompt now discourages but cannot forbid),
+      // the target keeps whatever its own key derives.
+      const declaredDomains = new Set(claimResult.cards.map(entry => domainOf(entry)).filter(entry => entry.src === 'declared').map(entry => entry.key))
+      const carriedDomain = declaredDomains.size === 1 ? [...declaredDomains][0] : undefined
+      await store.upsert({
+        name: targetKey,
+        category,
+        ...(summary === '' ? {} : { summary }),
+        body,
+        ...(carriedDomain === undefined ? {} : { domain: carriedDomain }),
+      })
       for (const key of keys) {
         if (key !== targetKey) await store.remove(key, isRename ? 'curate-rename' : 'curate-merge')
       }
-      events.push({ op: isRename ? 'rename' : 'merge', keys, target: targetKey })
+      events.push({ op: isRename ? 'rename' : 'merge', keys, target: targetKey, domain: domainOf(claimResult.cards[0]!).key })
       applied += 1
       merged += 1
     }
