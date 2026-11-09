@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchRoot, scratchStore } from './scratch.ts'
 import {
@@ -285,6 +285,27 @@ test('migrateLegacy: a genuinely unmatched legacy pin is reported, not silently 
   const { pinsRemapped, pinsDropped } = await store.migrateLegacy()
   assert.equal(pinsRemapped, 0)
   assert.deepEqual(pinsDropped, ['早已不存在的条目内容'])
+})
+
+test('migrateLegacy: a pin whose card cannot be read survives the migration', async () => {
+  const store = tmpStore()
+  await save(store, 'existing', 'existing-body')
+  await store.addPin('existing')
+  // A legacy timeline is required for the migration to run at all; the pin under
+  // test is already topic-keyed, so it takes the remap branch.
+  writeFileSync(join(store.dir, 'memory.md'), '- [fact] 2026-09-01 无关条目\n', 'utf8')
+
+  // A REAL EISDIR, not a patched reader: `get()` reads the file directly, so a
+  // fake reader would leave the old code's `get() !== undefined` check passing and
+  // the regression would not reproduce.
+  const cardPath = join(store.dir, 'topics', 'existing.md')
+  unlinkSync(cardPath)
+  mkdirSync(cardPath)
+
+  const { pinsDropped, pinsRemapped } = await store.migrateLegacy()
+  assert.deepEqual(pinsDropped, [], 'an unreadable card is not a missing card')
+  assert.equal(pinsRemapped, 1, 'the pin is carried over instead of written away')
+  assert.ok(store.pinnedSet().has('existing'), 'the pin still points at the card it always did')
 })
 
 test('migrateLegacy: credential-looking entries are not carried over', async () => {
@@ -1275,4 +1296,362 @@ test('moveCardTo reports partial when the compensation also fails', async () => 
     ;(source as unknown as { remove: typeof source.remove }).remove = sourceRemove
     ;(target as unknown as { remove: typeof target.remove }).remove = targetRemove
   }
+})
+
+test('moveCardTo compensates when the target write lands but its reindex fails', async () => {
+  const root = scratchRoot('dshm-move-target-reindex-')
+  const source = root.projectFor('D:/codes/MoveIdxSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  const target = root.projectFor('D:/codes/MoveIdxDst')
+  await target.upsert({ name: 'card', category: 'fact', summary: '目标原卡', body: 'original-body' })
+
+  const realReindex = target.reindex.bind(target)
+  let first = true
+  ;(target as unknown as { reindex: typeof target.reindex }).reindex = async () => {
+    if (first) {
+      first = false
+      throw new Error('index rebuild failed')
+    }
+    await realReindex()
+  }
+  try {
+    await assert.rejects(source.moveCardTo(target, 'card', true), /index rebuild failed/)
+    assert.equal(target.get('card')?.body, 'original-body', 'the overwritten target card is back')
+    assert.equal(source.get('card')?.body, 'source-body', 'the source still holds its card')
+  } finally {
+    ;(target as unknown as { reindex: typeof target.reindex }).reindex = realReindex
+  }
+})
+
+test('a move whose source file is already gone is not compensated away', async () => {
+  const root = scratchRoot('dshm-move-source-reindex-')
+  const source = root.projectFor('D:/codes/MoveSrcIdx')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  const target = root.projectFor('D:/codes/MoveDstIdx')
+
+  const realReindex = source.reindex.bind(source)
+  let first = true
+  ;(source as unknown as { reindex: typeof source.reindex }).reindex = async () => {
+    if (first) {
+      first = false
+      throw new Error('index rebuild failed after the delete')
+    }
+    await realReindex()
+  }
+  try {
+    assert.equal(await source.moveCardTo(target, 'card'), 'moved', 'a bookkeeping failure must not undo a completed move')
+    assert.equal(source.get('card'), undefined, 'the source card is gone')
+    assert.equal(target.get('card')?.body, 'source-body', 'the only live copy is in the target')
+  } finally {
+    ;(source as unknown as { reindex: typeof source.reindex }).reindex = realReindex
+  }
+})
+
+test('a failed overwrite move gives the destination its own pin state back', async () => {
+  const root = scratchRoot('dshm-move-pin-')
+  const source = root.projectFor('D:/codes/MovePinSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  await source.addPin('card')
+  const target = root.projectFor('D:/codes/MovePinDst')
+  await target.upsert({ name: 'card', category: 'fact', summary: '目标原卡', body: 'original-body' })
+  assert.equal(target.pinnedSet().has('card'), false, 'the destination card starts unpinned')
+
+  const originalRemove = source.remove.bind(source)
+  ;(source as unknown as { remove: typeof source.remove }).remove = async () => {
+    throw new Error('source store is read-only')
+  }
+  try {
+    await assert.rejects(source.moveCardTo(target, 'card', true), /read-only/)
+    assert.equal(target.get('card')?.body, 'original-body', 'the text is back')
+    assert.equal(target.pinnedSet().has('card'), false, 'the pin the move added was taken back')
+  } finally {
+    ;(source as unknown as { remove: typeof source.remove }).remove = originalRemove
+  }
+})
+
+// --- the move's three-state probes (F1/F2 复审) ------------------------------
+//
+// `get()` answers `undefined` for BOTH "no such card" and "the read failed",
+// and both move decisions (did the source leave? what must the target give
+// back?) delete or overwrite on that answer. An fs-level read failure cannot be
+// produced in-process, so these drive the store's one read seam into throwing.
+
+/** Make every card probe on `store` fail its file read. Returns the restore.
+ *  The throw carries a `code` on purpose: the probe classifies by it (ENOENT /
+ *  ENOTDIR ⇒ absent, anything else ⇒ unreadable), so an uncoded error would be
+ *  testing a shape no real fs call produces. */
+const failCardReads = (store: MemoryStore): (() => void) => {
+  const patched = store as unknown as { cardFileReader: (path: string) => string }
+  const restore = patched.cardFileReader
+  patched.cardFileReader = () => {
+    throw Object.assign(new Error('EACCES: permission denied, open card'), { code: 'EACCES' })
+  }
+  return () => {
+    patched.cardFileReader = restore
+  }
+}
+
+/** Fail the probe's read for ONE card file only, leaving its siblings readable. */
+const failCardRead = (store: MemoryStore, key: string): (() => void) => {
+  const patched = store as unknown as { cardFileReader: (path: string) => string }
+  const restore = patched.cardFileReader
+  patched.cardFileReader = (path: string) => {
+    if (path.endsWith(`${key}.md`)) {
+      throw Object.assign(new Error('EACCES: permission denied, open card'), { code: 'EACCES' })
+    }
+    return restore(path)
+  }
+  return () => {
+    patched.cardFileReader = restore
+  }
+}
+
+test('a source card that cannot be read after the failure must not be reported as moved', async () => {
+  const root = scratchRoot('dshm-move-source-unreadable-')
+  const source = root.projectFor('D:/codes/MoveUnreadSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  const target = root.projectFor('D:/codes/MoveUnreadDst')
+
+  // The card file is on disk and readable at ENTRY (the entry probe answers
+  // 'present'); the PROBE's read starts failing only after the destination write,
+  // i.e. exactly when the move's catch has to judge what happened. That is the
+  // state the old `get() === undefined` check called "gone".
+  const patched = source as unknown as { cardFileReader: (path: string) => string }
+  const restoreReader = patched.cardFileReader
+  let failReads = false
+  patched.cardFileReader = (path: string) => {
+    if (failReads) throw Object.assign(new Error('EACCES: permission denied, open card'), { code: 'EACCES' })
+    return restoreReader(path)
+  }
+  const originalRemove = source.remove.bind(source)
+  ;(source as unknown as { remove: typeof source.remove }).remove = async () => {
+    failReads = true
+    throw new Error('source store is read-only')
+  }
+  try {
+    const outcome = await source.moveCardTo(target, 'card')
+    assert.notEqual(outcome, 'moved', 'an unreadable source is NOT proof that the card left')
+    assert.equal(outcome, 'partial', 'the undecidable case is handed back, never guessed')
+    assert.equal(target.get('card')?.body, 'source-body', 'the destination copy is left alone, not "compensated" away')
+    assert.equal(source.get('card')?.body, 'source-body', 'and the source file is still on disk')
+  } finally {
+    ;(source as unknown as { remove: typeof source.remove }).remove = originalRemove
+    patched.cardFileReader = restoreReader
+  }
+})
+
+test('an unreadable destination aborts the move before any write', async () => {
+  const root = scratchRoot('dshm-move-target-unreadable-')
+  const source = root.projectFor('D:/codes/MoveTgtUnreadSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  const target = root.projectFor('D:/codes/MoveTgtUnreadDst')
+  await target.upsert({ name: 'card', category: 'fact', summary: '目标原卡', body: 'original-body' })
+
+  const restoreReads = failCardReads(target)
+  try {
+    await assert.rejects(
+      source.moveCardTo(target, 'card'),
+      /cannot read the destination card/,
+      'a destination nobody can read is not an empty destination (and not "occupied" either)',
+    )
+    assert.equal(target.get('card')?.body, 'original-body', 'the destination card is untouched')
+    assert.equal(source.get('card')?.body, 'source-body', 'the source card is still there')
+  } finally {
+    restoreReads()
+  }
+})
+
+test('an unreadable destination aborts overwrite:true too, leaving no second copy', async () => {
+  const root = scratchRoot('dshm-move-target-unreadable-ow-')
+  const source = root.projectFor('D:/codes/MoveTgtOwSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  const target = root.projectFor('D:/codes/MoveTgtOwDst')
+  await target.upsert({ name: 'card', category: 'fact', summary: '目标原卡', body: 'original-body' })
+
+  const restoreReads = failCardReads(target)
+  try {
+    await assert.rejects(
+      source.moveCardTo(target, 'card', true),
+      /cannot read the destination card/,
+      'overwrite is consent to replace what was READ, not a licence to write beside what could not be',
+    )
+    assert.equal(target.get('card')?.body, 'original-body', 'the destination keeps its own body')
+    assert.equal(target.get('card')?.summary, '目标原卡', 'and its own summary')
+    assert.deepEqual(target.list().map(card => card.name), ['card'], 'no duplicate appeared')
+    assert.equal(source.get('card')?.body, 'source-body', 'the source card is still there')
+  } finally {
+    restoreReads()
+  }
+})
+
+test('a failed overwrite move restores the destination body AND its pin', async () => {
+  const root = scratchRoot('dshm-move-snapshot-pin-')
+  const source = root.projectFor('D:/codes/MoveSnapSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  await source.addPin('card')
+  const target = root.projectFor('D:/codes/MoveSnapDst')
+  await target.upsert({ name: 'card', category: 'fact', summary: '目标原卡', body: 'original-body' })
+  await target.addPin('card')
+  assert.equal(target.pinnedSet().has('card'), true, 'the destination card starts pinned')
+
+  const realReindex = target.reindex.bind(target)
+  let first = true
+  ;(target as unknown as { reindex: typeof target.reindex }).reindex = async () => {
+    if (first) {
+      first = false
+      throw new Error('index rebuild failed')
+    }
+    await realReindex()
+  }
+  try {
+    await assert.rejects(source.moveCardTo(target, 'card', true), /index rebuild failed/)
+    assert.equal(target.get('card')?.body, 'original-body', 'the overwritten destination body came back')
+    assert.equal(target.get('card')?.summary, '目标原卡', 'with its own summary, not the source card')
+    assert.equal(target.pinnedSet().has('card'), true, 'and its pin — a "restore" that dropped it flips what that project injects')
+    assert.equal(source.get('card')?.body, 'source-body', 'the source card is untouched')
+    assert.equal(source.pinnedSet().has('card'), true, 'including its pin')
+  } finally {
+    ;(target as unknown as { reindex: typeof target.reindex }).reindex = realReindex
+  }
+})
+
+test('the absent/unreadable split follows the read error code, not a prior existence check', async () => {
+  const root = scratchRoot('dshm-move-probe-code-')
+  const source = root.projectFor('D:/codes/MoveCodeSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  const target = root.projectFor('D:/codes/MoveCodeDst')
+
+  const patched = target as unknown as { cardFileReader: (path: string) => string }
+  const restore = patched.cardFileReader
+  try {
+    // 1) The destination REALLY has no card, but the read fails for a reason
+    //    that is not "missing". An unclassifiable failure must not be read as
+    //    an empty destination (that is the existsSync-first mistake this pins).
+    patched.cardFileReader = () => {
+      throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' })
+    }
+    await assert.rejects(source.moveCardTo(target, 'card'), /cannot read the destination card/)
+    assert.equal(target.get('card'), undefined, 'nothing was written into an unreadable destination')
+    assert.equal(source.get('card')?.body, 'source-body', 'and the source is untouched')
+
+    // 2) ENOENT is the one answer that DOES mean absent: the same move now goes
+    //    through, so the split is driven by the error code, not by a pre-check.
+    patched.cardFileReader = () => {
+      throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+    }
+    assert.equal(await source.moveCardTo(target, 'card'), 'moved')
+    assert.equal(target.get('card')?.body, 'source-body', 'the card landed')
+    assert.equal(source.get('card'), undefined, 'and the source is gone')
+  } finally {
+    patched.cardFileReader = restore
+  }
+})
+
+test('remove refuses to delete a card it cannot read, because it cannot be archived', async () => {
+  const store = tmpStore()
+  await save(store, 'card', 'body-text')
+
+  const restore = failCardReads(store)
+  try {
+    await assert.rejects(
+      store.remove('card'),
+      /cannot read the card/,
+      'a delete that cannot be archived is not a delete we may perform silently',
+    )
+    assert.equal(store.get('card')?.body, 'body-text', 'the card file is still there')
+    const archiveDir = join(store.dir, 'archive')
+    assert.ok(
+      !existsSync(archiveDir) || readdirSync(archiveDir).length === 0,
+      'nothing was archived, so a `true` here would have been a lie',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a move whose source cannot be read at removal time reports partial and keeps both copies', async () => {
+  const root = scratchRoot('dshm-move-remove-unreadable-')
+  const source = root.projectFor('D:/codes/MoveRemoveUnreadSrc')
+  await source.upsert({ name: 'card', category: 'fact', summary: '源卡', body: 'source-body' })
+  const target = root.projectFor('D:/codes/MoveRemoveUnreadDst')
+
+  // The destination copy lands first; THEN the source card becomes genuinely
+  // unreadable (a directory where the file was → EISDIR), so the source delete
+  // refuses — it cannot archive what it cannot read. Two live copies, one
+  // undecidable outcome: that is 'partial', not 'moved'. The entry probe saw a
+  // readable card, which is the point: this is the removal-time failure.
+  const cardPath = join(source.dir, 'topics', 'card.md')
+  const realUpsert = target.upsert.bind(target)
+  ;(target as unknown as { upsert: typeof target.upsert }).upsert = async (input) => {
+    const result = await realUpsert(input)
+    unlinkSync(cardPath)
+    mkdirSync(cardPath)
+    return result
+  }
+  try {
+    assert.equal(await source.moveCardTo(target, 'card'), 'partial')
+    assert.equal(target.get('card')?.body, 'source-body', 'the destination copy landed')
+    assert.equal(existsSync(cardPath), true, 'and the source card entry is still there — verify by hand')
+  } finally {
+    ;(target as unknown as { upsert: typeof target.upsert }).upsert = realUpsert
+  }
+})
+
+test('forget refuses a named card it cannot read instead of sweeping by text', async () => {
+  const store = tmpStore()
+  await save(store, 'target-card', '要被删掉的内容')
+  await save(store, 'bystander', '无关的内容')
+
+  // Only the NAMED card fails its read. Its message must be the named one, not
+  // the sweep's — that is what tells the two branches apart.
+  const restore = failCardRead(store, 'target-card')
+  try {
+    await assert.rejects(
+      store.forget('target-card'),
+      /cannot read the card "target-card"/,
+      'a named card nobody can read is not "no such card, sweep by text instead"',
+    )
+    assert.equal(store.get('target-card')?.body, '要被删掉的内容', 'the card is still there')
+    assert.equal(store.get('bystander')?.body, '无关的内容', 'and nothing else was swept')
+    assert.equal(store.list().length, 2, 'not one card left the store')
+  } finally {
+    restore()
+  }
+})
+
+test('a content sweep refuses to run while a card it cannot read might match', async () => {
+  const store = tmpStore()
+  await save(store, 'match-card', 'pnpm 相关的内容')
+  await save(store, 'hidden-card', 'pnpm 也要命中的内容')
+
+  // A REAL unreadable card, no seam: a directory where the card file must be
+  // (EISDIR on read). `list()` skips it, and the sweep must notice the skip.
+  const hiddenPath = join(store.dir, 'topics', 'hidden-card.md')
+  unlinkSync(hiddenPath)
+  mkdirSync(hiddenPath)
+  // No manual teardown: the scratch root's walker removes the directory at the
+  // end of the run (a `unlinkSync` here would fail on a directory).
+  await assert.rejects(
+    store.forget('pnpm'),
+    /cannot read 1 card\(s\).*hidden-card/,
+    'a sweep that cannot see every card must not delete a subset and call it done',
+  )
+  assert.equal(store.get('match-card')?.body, 'pnpm 相关的内容', 'the readable match survived the refusal')
+  assert.equal(existsSync(hiddenPath), true, 'and the unreadable card was not touched')
+})
+
+test('upsert refuses to overwrite a card it cannot read', async () => {
+  const store = tmpStore()
+  await save(store, 'card', 'original-body')
+
+  const restore = failCardReads(store)
+  try {
+    await assert.rejects(
+      store.upsert({ name: 'card', category: 'fact', summary: '试图覆盖', body: 'replacement-body' }),
+      /cannot read the card/,
+    )
+  } finally {
+    restore()
+  }
+  assert.equal(store.get('card')?.body, 'original-body', 'the saved card was not replaced')
 })

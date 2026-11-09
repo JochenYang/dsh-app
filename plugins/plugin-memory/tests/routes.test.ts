@@ -575,3 +575,96 @@ test('POST /move refuses a destination whose cwd cannot round-trip', async () =>
   assert.equal(rows.find(row => row.slug === staleSlug)?.movable, false)
   await dispose()
 })
+
+test('POST /forget refuses a card it cannot read, with the reason on the wire', async () => {
+  const routes: RegisteredRoute[] = []
+  const root = scratchRoot('dshm-routes-forget-')
+  const dispose = registerMemoryRoutes({
+    register: (route: RegisteredRoute) => {
+      routes.push(route)
+      return () => Promise.resolve()
+    },
+  } as never, root)
+  const { existsSync, mkdirSync, unlinkSync } = await import('node:fs')
+
+  const cwd = 'D:/codes/ForgetUnreadable'
+  // A NEW store per call (see projectFor), so the route must see the same thing
+  // on disk — the failure below is real, not injected through a seam.
+  const store = root.projectFor(cwd)
+  await store.upsert({ name: 'card', category: 'fact', summary: '删不掉的卡', body: '主体内容' })
+  await store.upsert({ name: 'bystander', category: 'fact', summary: '旁观卡', body: '别动的内容' })
+  // The shape of a card file nobody can read on Windows: a directory where the
+  // file must be (EISDIR on read).
+  const cardPath = join(store.dir, 'topics', 'card.md')
+  unlinkSync(cardPath)
+  mkdirSync(cardPath)
+
+  const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/forget`)
+  assert.ok(route !== undefined, 'the forget route is registered')
+  const response = await route.fetch(new Request(`https://localhost${route.path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ scope: 'project', slug: projectSlug(cwd), match: 'card' }),
+  }))
+
+  assert.equal(response.status, 500, 'a refused delete is not a 200 with 0 forgotten')
+  const payload = await response.json() as {
+    error: { code: string, host: { code: string, params: { detail: string } } }
+  }
+  assert.equal(payload.error.host.code, 'route.forgetFailed')
+  assert.match(payload.error.host.params.detail, /cannot read the card/, 'the reason rides the answer, not a bare 500')
+  assert.equal(existsSync(cardPath), true, 'the unreadable card was not deleted')
+  assert.equal(store.get('bystander')?.body, '别动的内容', 'and no card was swept by its text')
+
+  await dispose()
+})
+
+test('POST /move says "cannot read the card", not "unknown topic", for an unreadable source', async () => {
+  const routes: RegisteredRoute[] = []
+  const root = scratchRoot('dshm-routes-move-unreadable-')
+  const dispose = registerMemoryRoutes({
+    register: (route: RegisteredRoute) => {
+      routes.push(route)
+      return () => Promise.resolve()
+    },
+  } as never, root)
+  const { existsSync, mkdirSync, unlinkSync } = await import('node:fs')
+
+  const sourceCwd = 'D:/codes/MoveUnreadableSrc'
+  const targetCwd = 'D:/codes/MoveUnreadableDst'
+  const source = root.projectFor(sourceCwd)
+  await source.upsert({ name: 'card', category: 'fact', summary: '读不了的卡', body: '主体内容' })
+  // The destination has to exist (and stamp its cwd) or the route refuses it
+  // before it ever looks at the source.
+  const target = root.projectFor(targetCwd)
+  await target.upsert({ name: 'seed', category: 'fact', summary: '占位卡', body: '让项目存在' })
+  // A REAL unreadable source card: a directory where the file must be (EISDIR).
+  const cardPath = join(source.dir, 'topics', 'card.md')
+  unlinkSync(cardPath)
+  mkdirSync(cardPath)
+
+  const route = routes.find(entry => entry.path === `${ROUTE_PREFIX}/move`)
+  assert.ok(route !== undefined, 'the move route is registered')
+  const response = await route.fetch(new Request(`https://localhost${route.path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scope: 'project',
+      slug: projectSlug(sourceCwd),
+      topic: 'card',
+      targetSlug: projectSlug(targetCwd),
+    }),
+  }))
+
+  assert.equal(response.status, 500, 'not 400 topicUnknown — the card is there, it just cannot be read')
+  const payload = await response.json() as {
+    error: { code: string, host: { code: string, params: { detail: string } } }
+  }
+  assert.equal(payload.error.host.code, 'route.moveFailed')
+  assert.match(payload.error.host.params.detail, /cannot read the card "card"/)
+  assert.match(payload.error.host.params.detail, /nothing was moved/, 'and it says nothing was touched')
+  assert.equal(target.get('card'), undefined, 'no card landed in the destination')
+  assert.equal(existsSync(cardPath), true, 'the source card entry is still there')
+
+  await dispose()
+})

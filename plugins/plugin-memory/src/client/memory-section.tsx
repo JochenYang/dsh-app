@@ -113,6 +113,8 @@ function routeErrorCopy(t: TranslateNS<typeof NS>, host: HostText | undefined, f
     'route.moveSameProject': t('memory.host.moveSameProject'),
     'route.moveOccupied': t('memory.host.moveOccupied'),
     'route.moveFailed': t('memory.host.moveFailed', { detail: String(params.detail ?? '') }),
+    'route.forgetFailed': t('memory.host.forgetFailed', { detail: String(params.detail ?? '') }),
+    'route.movePartial': t('memory.host.movePartial'),
     'route.overwriteNotBoolean': t('memory.host.overwriteNotBoolean'),
   }, fallback)
 }

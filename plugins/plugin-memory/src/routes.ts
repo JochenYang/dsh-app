@@ -332,7 +332,20 @@ export function registerMemoryRoutes(
         if (store instanceof Response) return store
         // The settings-page delete sends the card's topic key (exact match);
         // the store's substring fallback only fires for hand-typed calls.
-        const result = await store.forget(match)
+        // The store REFUSES (throws) when a card exists but cannot be read —
+        // it cannot be archived, and a text sweep cannot tell whether it
+        // matches — so answer with the reason rather than a bare failure or a
+        // confident "0 forgotten".
+        let result: Awaited<ReturnType<MemoryStore['forget']>>
+        try {
+          result = await store.forget(match)
+        } catch (error) {
+          return fail(500, 'io', {
+            code: 'route.forgetFailed',
+            params: { detail: error instanceof Error ? error.message : 'could not delete the card' },
+            text: error instanceof Error ? error.message : 'could not delete the card',
+          })
+        }
         return ok({ forgotten: result.removed.length, removed: result.removed })
       },
     }),
@@ -397,16 +410,19 @@ export function registerMemoryRoutes(
           // and the caller can retry the same request.
           return fail(500, 'io', {
             code: 'route.moveFailed',
+            params: { detail: error instanceof Error ? error.message : 'could not move the card' },
             text: error instanceof Error ? error.message : 'could not move the card',
           })
         }
         if (outcome === 'partial') {
-          // Compensation itself failed: the card is in BOTH stores. Saying
-          // "nothing moved" here would be false, and a blind retry turns into a
-          // 409 or a duplicate.
+          // Two shapes of "more than failed, less than done": compensation itself
+          // failed, OR the source could not be read so we cannot say whether the
+          // move completed. Either way the outcome is UNKNOWN — claiming
+          // "nothing moved" would be false (and a blind retry turns into a 409 or
+          // a duplicate), claiming it worked would be a guess.
           return fail(500, 'io', {
             code: 'route.movePartial',
-            text: 'the card now exists in both projects; remove one copy before retrying',
+            text: 'cannot confirm whether the move completed or was rolled back; check both projects before retrying',
           })
         }
         if (outcome === 'missing') {

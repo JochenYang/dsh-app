@@ -61,6 +61,38 @@ import { basename, dirname, join } from 'node:path'
 import { removeTree } from './remove-tree.ts'
 import type { MemoryCategory, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
 import { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, LEGACY_GLOBAL_SLUG, MEMORY_CATEGORIES } from './types.ts'
+import {
+  MAX_SUMMARY_CHARS,
+  TOPIC_KEY_PATTERN,
+  cardFingerprint,
+  isValidTopic,
+  parseCard,
+  probeCardFile as probeCardFileAt,
+  probeOrThrow,
+  readCardFile,
+  renderCard,
+  slugifyTopic,
+  todayStamp,
+  type CardFileReader,
+  type CardProbe,
+  type CardState,
+  type TopicCard,
+} from './card-file.ts'
+// The card format and its three-state read live in card-file.ts: a move probes
+// ANOTHER store's card and every delete path asks the same question, so neither
+// may own its own copy. Re-exported here so the host half and the tests keep one
+// import site — the arrangement LEGACY_GLOBAL_SLUG and the archive bounds use.
+export {
+  MAX_SUMMARY_CHARS,
+  TOPIC_KEY_PATTERN,
+  cardFingerprint,
+  isValidTopic,
+  parseCard,
+  renderCard,
+  slugifyTopic,
+  todayStamp,
+} from './card-file.ts'
+export type { CardFileReader, CardProbe, CardState, TopicCard } from './card-file.ts'
 // The slug is DEFINED in types.ts so the browser half can recognise the row
 // without importing host code; re-exported here because every host-side caller
 // imports it from this module.
@@ -69,14 +101,6 @@ export { LEGACY_GLOBAL_SLUG }
 /** One card body gets at most this many characters: room for a consolidated
  *  fact (roughly two legacy lines) without bloating every session's re-read. */
 export const MAX_TOPIC_BODY_CHARS = 400
-
-/** Index hook length ceiling: the summary is what future saves route by, so
- *  it must state coverage in one glance. */
-export const MAX_SUMMARY_CHARS = 40
-
-/** Topic-key shape: ASCII kebab-case, also the card filename. Chinese topic
- *  words slugify to '' and are rejected — the model must translate. */
-export const TOPIC_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/u
 
 /** Similarity thresholds for the write-time gate (char-bigram Jaccard over
  *  normalized text). τ_dup hard-rejects/redirects (near-verbatim only, by
@@ -94,50 +118,6 @@ export { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS } from './types.ts'
 
 /** Why a card was removed — diagnostics only, never stored with the copy. */
 export type ArchiveReason = 'forget' | 'curate-delete' | 'curate-merge' | 'curate-rename' | 'light-sweep-dup' | 'unspecified'
-
-/** One parsed topic card. */
-export interface TopicCard {
-  /** Topic key = filename stem (authoritative, even if frontmatter disagrees). */
-  name: string
-  category: MemoryCategory
-  summary: string
-  /** `YYYY-MM-DD` of first save. */
-  created: string
-  /** `YYYY-MM-DD` of last content change. */
-  updated: string
-  /** Card text (no dates, no prefixes). */
-  body: string
-  /** Hand-edited file whose frontmatter failed to parse: the body is carried
-   *  verbatim (like the old hand-note lines) and the card is injectable but
-   *  not upsertable until rewritten. */
-  malformed: boolean
-}
-
-/** Normalize a model-proposed topic into a key: lowercase, non [a-z0-9]
- *  runs collapse to '-', trimmed, capped at 48 chars. '' means the proposal
- *  carried no ASCII letters/digits at all (e.g. pure Chinese) — reject it. */
-export function slugifyTopic(input: string): string {
-  const slug = input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, '-')
-    .replace(/^-+|-+$/gu, '')
-    .slice(0, 48)
-    .replace(/-+$/u, '')
-  return slug
-}
-
-/** Whether a topic key is well-formed (also the traversal fence for card paths). */
-export function isValidTopic(name: string): boolean {
-  return TOPIC_KEY_PATTERN.test(name)
-}
-
-/** Local-date stamp for frontmatter fields. */
-export function todayStamp(): string {
-  const now = new Date()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  return `${now.getFullYear()}-${month}-${day}`
-}
 
 /** Normalize text for matching: lowercase, keep every Unicode letter/digit
  *  (Latin, CJK, kana, Hangul, Cyrillic, ...), drop the rest. Shared by dedupe,
@@ -333,78 +313,6 @@ export function repairDoublePrefix(text: string): { fixed: string, count: number
 // Card (de)serialization
 // ---------------------------------------------------------------------------
 
-/** Render one card to its file text (frontmatter + blank line + body). */
-export function renderCard(card: TopicCard): string {
-  return [
-    '---',
-    `name: ${card.name}`,
-    `category: ${card.category}`,
-    `summary: ${card.summary}`,
-    `created: ${card.created}`,
-    `updated: ${card.updated}`,
-    '---',
-    '',
-    card.body,
-    '',
-  ].join('\n')
-}
-
-/**
- * Clock-independent content fingerprint of one card: everything a reader
- * would call its CONTENT, with the dates left out.
- *
- * Used as the read-before-edit witness, so it must not move on its own. The
- * dates CAN: a card whose frontmatter lost `created`/`updated` falls back to
- * `todayStamp()` on every parse, so a pass serialized at 23:59 and validated
- * after midnight would see a different hash for byte-identical content and
- * reject a legitimate edit as stale. A summary-only rewrite does NOT bump
- * `updated` either, yet it changes what the next reader sees — leaving the
- * dates out is what makes this both stable and sufficient.
- */
-export function cardFingerprint(card: TopicCard): string {
-  return [card.name, card.category, card.summary, card.body, card.malformed ? 'malformed' : ''].join('\u0000')
-}
-
-/**
- * Parse a card file tolerantly. The filename stem is the authoritative key.
- * A file whose frontmatter is missing/broken (hand edits) still yields a card
- * with `malformed: true` and the WHOLE raw text as body — injectable verbatim,
- * excluded from upsert targeting until rewritten, never silently dropped.
- */
-export function parseCard(name: string, text: string): TopicCard {
-  const today = todayStamp()
-  const fail = (): TopicCard => ({
-    name, category: 'fact', summary: '(hand-edited)', created: today, updated: today,
-    body: text.trim(), malformed: true,
-  })
-  // Hand-edited files arrive with CRLF endings on Windows hosts; normalize
-  // before the fence search or the whole card silently degrades to malformed.
-  const normalized = text.replace(/\r\n/gu, '\n')
-  if (!normalized.startsWith('---\n')) return fail()
-  const close = normalized.indexOf('\n---\n', 4)
-  if (close === -1) return fail()
-  const header = normalized.slice(4, close)
-  const body = normalized.slice(close + 5).trim()
-  const fields: Record<string, string> = {}
-  for (const line of header.split('\n')) {
-    const colon = line.indexOf(':')
-    if (colon === -1) continue
-    fields[line.slice(0, colon).trim()] = line.slice(colon + 1).trim()
-  }
-  const category = fields.category
-  if (body === '') return fail()
-  if (!MEMORY_CATEGORIES.includes(category as MemoryCategory)) return fail()
-  return {
-    name,
-    category: category as MemoryCategory,
-    summary: (fields.summary ?? '').slice(0, MAX_SUMMARY_CHARS) || '(no summary)',
-    created: fields.created ?? today,
-    updated: fields.updated ?? today,
-    body,
-    malformed: false,
-  }
-}
-
 /** Crash-safe replace: write a sibling temp file, then rename over. */
 function atomicWrite(path: string, text: string): void {
   const tmp = `${path}.tmp`
@@ -526,7 +434,16 @@ export class MemoryStore {
     return cards
   }
 
-  /** One card by topic key (undefined when absent or the key is malformed). */
+  /** One card by topic key (undefined for an invalid key, an absent file, or a
+   *  read failure — NOT for malformed content: `parseCard` still returns a card
+   *  and flags `malformed: true`).
+   *
+   *  Absent and unreadable are NOT the same answer, and this signature cannot
+   *  tell them apart: a read failure and a missing file both come back as
+   *  `undefined`.
+   *  Anything that DESTROYS on the strength of this (a move compensates or
+   *  deletes based on it) has to use {@link probeCardFile} instead. Kept as-is
+   *  for the read-mostly callers that genuinely mean "the card I asked for". */
   get(name: string): TopicCard | undefined {
     if (!isValidTopic(name)) return undefined
     const path = join(this.topicsDirPath, `${name}.md`)
@@ -536,6 +453,25 @@ export class MemoryStore {
     } catch {
       return undefined
     }
+  }
+
+  /** How this store reads a card file: the production reader, replaced by the
+   *  tests to drive the probe's 'unreadable' branch (an fs-level read failure
+   *  cannot be reproduced in-process any other way). See `card-file.ts` for the
+   *  classification itself — it is shared, not re-implemented here. */
+  private cardFileReader: CardFileReader = readCardFile
+
+  /** `card-file.ts`'s three-state probe over THIS store's `topics/`. {@link get}
+   *  collapses `absent` and `unreadable` into `undefined`, which is fine for a
+   *  page render and wrong for a decision that deletes or overwrites. */
+  private probeCardFile(name: string): CardProbe {
+    return probeCardFileAt(this.topicsDirPath, name, this.cardFileReader)
+  }
+
+  /** The state half of {@link probeCardFile}, for the calls that do not need
+   *  the card itself. */
+  private readCardState(name: string): CardState {
+    return this.probeCardFile(name).state
   }
 
   /**
@@ -548,7 +484,12 @@ export class MemoryStore {
    * pre-validate with {@link validateCardInput} for friendly errors.
    */
   async upsert(input: { name: string, category: MemoryCategory, summary?: string, body: string }): Promise<{ op: 'created' | 'updated' | 'unchanged', card: TopicCard }> {
-    const existing = this.get(input.name)
+    // Three-state for the same reason the move probes are: `get()` folds "the
+    // read failed" into `undefined`, and reading an UNREADABLE card as "new"
+    // makes this write replace the very file it could not read. Only a genuinely
+    // absent file means create; an unreadable one aborts before anything lands.
+    const before = probeOrThrow(this.topicsDirPath, input.name, this.cardFileReader, 'the card was not saved')
+    const existing = before.state === 'present' ? before.card : undefined
     const summary = input.summary !== undefined && input.summary !== '' ? input.summary : existing?.summary ?? ''
     const invalid = validateCardInput({ name: input.name, category: input.category, summary, body: input.body })
     if (invalid !== undefined) throw new Error(invalid)
@@ -580,13 +521,24 @@ export class MemoryStore {
    *  {@link ARCHIVE_RETENTION_DAYS}. `reason` is not stored with the copy —
    *  an archived file is byte-identical to what `topics/<key>.md` held, so it
    *  can be copied straight back.
+   *
+   *  A card that exists but cannot be READ is not deleted: it cannot be
+   *  archived, so deleting it would be the one removal with no copy to undo from.
+   *  That case THROWS instead of answering `false` — `false` means "there was
+   *  nothing to delete", and a stat-level failure is not that. It is the same
+   *  conflation the move's probe exists to remove ({@link probeCardFile}), one
+   *  layer down: previously `existsSync` answered `false` for any failure, so a
+   *  caller read "could not read it" as "nothing to do" and reported success on
+   *  a delete that never happened.
    */
   async remove(name: string, reason: ArchiveReason = 'unspecified'): Promise<boolean> {
     if (!isValidTopic(name)) return false
+    // 'absent' and 'present' are answers; 'unreadable' throws inside probeOrThrow
+    // — a card that cannot be archived must not be deleted.
+    const state = probeOrThrow(this.topicsDirPath, name, this.cardFileReader, 'it was not removed')
+    if (state.state === 'absent') return false
     const path = join(this.topicsDirPath, `${name}.md`)
-    if (!existsSync(path)) return false
-    const card = this.get(name)
-    if (card !== undefined) await this.archiveCard(card, reason)
+    await this.archiveCard(state.card, reason)
     await removeTree(path)
     // Drop the pin BEFORE the index rebuild: a crash may leave a card without
     // its pin (visible, harmless), never an index/pin pointing at a ghost.
@@ -634,37 +586,109 @@ export class MemoryStore {
     name: string,
     overwrite: boolean,
   ): Promise<'moved' | 'missing' | 'occupied' | 'same-store' | 'partial'> {
-    const card = this.get(name)
-    if (card === undefined) return 'missing'
+    // The ENTRY probe, in three states for the same reason the destination
+    // probe below is: `get()` answers `undefined` for both "no such card" and
+    // "the read failed", so an unreadable source used to fall through to
+    // `return 'missing'` → 400 `route.topicUnknown`, telling the user the card
+    // does not exist while it is sitting right there. Absent stays 'missing';
+    // unreadable throws (500 `moveFailed` + detail — the shape every other
+    // destructive path already reports). 'partial' would be wrong here: nothing
+    // has been written yet, so there is no half-done move to describe.
+    const source = probeOrThrow(this.topicsDirPath, name, this.cardFileReader, 'nothing was moved')
+    if (source.state === 'absent') return 'missing'
+    const card = source.card
     if (target.dir === this.dir) return 'same-store'
-    const replaced = target.get(name)
-    if (!overwrite && replaced !== undefined) return 'occupied'
+    // Probe the destination BEFORE any write, and in three states. `get()`
+    // answers `undefined` both for "no such card" and for "the read failed",
+    // and the difference decides two destructive things: whether an existing
+    // card is overwritten, and what the compensation puts back. A failed read
+    // is not an empty destination, so it aborts here — before anything is
+    // written — and surfaces as a failed move with a reason instead of a
+    // silent overwrite of, or a new copy beside, a card nobody could read.
+    const before = probeOrThrow(target.topicsDirPath, name, target.cardFileReader, 'nothing was moved', 'destination card')
+    if (before.state === 'present' && !overwrite) return 'occupied'
     const pinned = this.pinnedSet().has(name)
+    // Snapshot the destination's injection state BEFORE touching it. A failed
+    // move has to give the target back exactly what it had — text AND pin —
+    // otherwise an operation that reported failure silently changes what every
+    // later session injects from that project.
+    const replacedPinned = target.pinnedSet().has(name)
 
-    await target.upsert({ name: card.name, category: card.category, summary: card.summary, body: card.body })
     try {
+      // Inside the try on purpose: upsert writes the card BEFORE it rebuilds the
+      // index, so a throw after that write is precisely the case that needs
+      // undoing. Leaving it outside is what made a reindex failure lose the
+      // overwritten target card.
+      await target.upsert({ name: card.name, category: card.category, summary: card.summary, body: card.body })
       if (pinned) await target.addPin(name)
       await this.remove(name, 'unspecified')
     } catch (error) {
-      // The two halves are not one transaction: undo the target side so a retry
-      // starts from the same state instead of leaving a copy in both stores.
-      // Restoring the PREVIOUS target card (not deleting) keeps `overwrite`
-      // recoverable too.
+      // Did the source card actually leave? remove() deletes the card file
+      // before it rebuilds the index and drops the pin, so a throw can happen
+      // AFTER the only live copy is gone. Compensating then would erase the
+      // card from BOTH projects and leave nothing but two archives. Asked in
+      // three states: `this.get(name) === undefined` could not tell the two.
+      const sourceState = this.readCardState(name)
+      if (sourceState === 'unreadable') {
+        // Neither answer is available: the move may or may not have completed,
+        // and compensating a completed move deletes the last copy while
+        // claiming 'moved' would be a guess. Hand it back for a human look.
+        return 'partial'
+      }
+      if (sourceState === 'absent') {
+        // The file is gone, so the move landed — but only say so once the
+        // destination has been READ back and provably carries this body. A
+        // destination that cannot be read is not one we may call 'moved'.
+        const landing = target.probeCardFile(name)
+        if (landing.state === 'present' && landing.card.body === card.body) {
+          await this.reindexQuietly()
+          await target.reindexQuietly()
+          return 'moved'
+        }
+        return 'partial'
+      }
       try {
-        if (replaced === undefined) {
+        // The snapshot taken before the write decides the undo: a destination
+        // that was ABSENT is deleted again, one that was PRESENT gets its own
+        // text back. `replaced !== undefined` was a second guess at what the
+        // probe had already answered.
+        if (before.state === 'absent') {
           await target.remove(name)
         } else {
+          const replaced = before.card
           await target.upsert({ name: replaced.name, category: replaced.category, summary: replaced.summary, body: replaced.body })
+          // Put the pin back too: an unpinned destination card that stays
+          // pinned would keep injecting a card the user never pinned there.
+          if (target.pinnedSet().has(name) !== replacedPinned) {
+            if (replacedPinned) await target.addPin(name)
+            else await target.removePin(name)
+          }
         }
       } catch {
-        // Compensation itself failed: the card is now in BOTH stores. Report it
-        // as a distinct outcome so the page can say "clean up manually" rather
-        // than the false "nothing moved".
+        // Compensation itself failed: the stores disagree and we cannot say
+        // which copy is authoritative. 'partial' means "verify by hand", not
+        // "both stores hold the card".
         return 'partial'
       }
       throw error
     }
     return 'moved'
+  }
+
+  /** Rebuild the index, but never turn a completed move into a failure: the
+   *  card is already where the caller asked, and a stale `index.md` is only
+   *  repaired by the next successful write to that store (or its next light
+   *  sweep) — NOT at boot. `migrateAll` skips every store without a legacy
+   *  `memory.md`, so a project that never migrates keeps the stale index until
+   *  something writes again. Accepted: the index is derived data and the cards
+   *  it summarizes are intact; rebuilding it at boot would cost a full read of
+   *  every store on every start. */
+  private async reindexQuietly(): Promise<void> {
+    try {
+      await this.reindex()
+    } catch {
+      // deliberately swallowed: bookkeeping, not payload
+    }
   }
 
   /** Drop every card, the index, the legacy archive and every pin (full reset).
@@ -948,16 +972,34 @@ export class MemoryStore {
   /**
    * Remove cards by topic key (exact) or content/summary substring; returns
    * the removed keys. Rebuilds the index once at the end.
+   *
+   *  Like {@link remove}, a card that cannot be READ is never treated as a card
+   *  that is not there: it cannot be archived, so deleting it would be
+   *  irreversible, and a text sweep cannot even tell whether it matches. Both
+   *  cases THROW with nothing deleted instead of reporting a confident
+   *  `removed: []`.
    */
   async forget(match: string): Promise<{ removed: string[], remaining: number }> {
-    const direct = this.get(match)
+    // A key-shaped match is answered by the probe, not by get(): `get()` folds
+    // "unreadable" into `undefined`, and the fall-through then matched by TEXT —
+    // deleting whatever happened to mention that string while the card the
+    // caller named survived untouched.
+    const named = probeOrThrow(this.topicsDirPath, match, this.cardFileReader, 'nothing was forgotten')
     let doomed: TopicCard[] = []
-    if (direct !== undefined) {
-      doomed = [direct]
+    if (named.state === 'present') {
+      doomed = [named.card]
     } else {
       const needle = normalizeForMatch(match)
       if (needle !== '') {
-        doomed = this.list().filter(card =>
+        const cards = this.list()
+        // `list()` drops a card whose read failed. Such a card can neither be
+        // archived nor searched, so this sweep cannot know whether it matches:
+        // refuse the whole call rather than delete a subset and call it done.
+        const unreadable = this.unreadableKeys(cards)
+        if (unreadable.length > 0) {
+          throw new Error(`cannot read ${String(unreadable.length)} card(s) in ${this.dir} (${unreadable.join(', ')}); nothing was forgotten`)
+        }
+        doomed = cards.filter(card =>
           normalizeForMatch(`${card.summary} ${card.body}`).includes(needle))
       }
     }
@@ -975,6 +1017,25 @@ export class MemoryStore {
       this.ledgerOwner?.recordLedger({ scope: this.ledgerScope, pass: 'forget', op: 'delete', keys: removed })
     }
     return { removed, remaining: this.list().length }
+  }
+
+  /** Topic keys whose `topics/<key>.md` entry exists but was not readable: exactly
+   *  the keys {@link list} had to drop. Nothing but a failed read can put a key
+   *  here — the name and the extension are filtered the same way `list` does.
+   *  A `.md` DIRECTORY counts too: that is the shape of a card file nobody can
+   *  read (`EISDIR`), not a card that is absent.
+   *
+   *  This is the probe's `unreadable` state seen through the reader the sweep
+   *  actually uses (`list()`'s read — the same `readFileSync` the default
+   *  {@link CardFileReader} is), so the set that was searched and the set that
+   *  was checked come from one read, not two. */
+  private unreadableKeys(listed: TopicCard[]): string[] {
+    if (!existsSync(this.topicsDirPath)) return []
+    const readable = new Set(listed.map(card => card.name))
+    return readdirSync(this.topicsDirPath, { withFileTypes: true })
+      .filter(entry => entry.name.endsWith('.md'))
+      .map(entry => entry.name.slice(0, -3))
+      .filter(key => isValidTopic(key) && !readable.has(key))
   }
 
   // --- pins (keyed by topic name) -------------------------------------------
@@ -1112,8 +1173,14 @@ export class MemoryStore {
       const mapped = bodyKeys.get(pin)
       if (mapped !== undefined) {
         newPins.add(mapped)
-      } else if (isValidTopic(pin) && this.get(pin) !== undefined) {
-        newPins.add(pin)
+      } else if (isValidTopic(pin)) {
+        // Three states, again: `get()` answers `undefined` both for "no such
+        // card" and for "the read failed", and the next statement WRITES the pin
+        // set. Only a confirmed absence may drop a pin. An unreadable card keeps
+        // its pin: it costs nothing while the card is missing, and the pin applies
+        // again the moment the file can be read.
+        if (this.readCardState(pin) === 'absent') pinsDropped.push(pin)
+        else newPins.add(pin)
       } else {
         pinsDropped.push(pin)
       }
