@@ -116,7 +116,14 @@ test('B1 script: the CLI prints the table and exits 0, and an empty root prints 
   // that is printed but unreadable is worse than none).
   const withStore = runHealth('--root', root.dir, '--snapshot')
   assert.match(withStore, /^# snapshot .*cards=2 /u)
-  assert.match(withStore, /^cli-[0-9a-f]{8}/mu, 'the project row is printed by slug')
+  // Computed, not hard-coded: the slug hashes the LITERAL cwd, and `D:\proj\cli`
+  // has basename `cli` on Windows but `D:\proj\cli` on Linux — a hard-coded
+  // `cli-…` passed here and failed in CI (measured on run 42571114763).
+  const seededSlug = projectSlug('D:\\proj\\cli')
+  assert.ok(
+    withStore.split('\n').some(line => line.startsWith(seededSlug)),
+    `the project row is printed by slug (${seededSlug})`,
+  )
   assert.match(withStore, /^TOTAL/mu)
 })
 
