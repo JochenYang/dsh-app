@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.18.8] - 2026-11-09
+
+### 中文
+- 记忆插件：跨项目移动卡片前校验目标目录能解析回工作区，同一张卡的并发移动串行执行，失败时把目标端的正文与 pin 一起还原；卡片读取区分「不存在」与「读不到」，读不到的卡不再被当成新建覆盖，也不再被报告为删除成功。
+- 记忆插件：`/status` 与设置页显示注入实测——每轮被预算丢掉的卡片数、被索引上限截掉的行数，以及会腐烂的引用（版本号/路径/sha/行号）与陈旧卡计数。
+- 索引与卡片集合在启动时和刷新状态页时对账：幽灵话题、重复行、格式错误行不再被注入每个会话，漂移会被重建并记入事件。
+- 卡片支持可选 `domain` 字段（缺省按主题键推导），索引按域分组排序，`memory_save` 回报同域的卡片数与摘要。
+- 记忆召回改短语 + 词位 AND 匹配，并按别名表扩展：内置 `pwsh`/`powershell`、`pptd`/`幻灯片`、`workspace`/`工作区`/`工作目录`、`热重载`/`hot-reload`/`hmr`，可在记忆根目录的 `aliases.json` 增量追加；别名只用于读取，删除路径不受影响。
+- 新增只读健康脚本 `plugins/plugin-memory/scripts/memory-health.mjs`：一次打印每个项目的卡数、注入量、丢卡数、索引溢出与腐烂引用计数，支持 `--snapshot` 冻结与 `--json`。
+
+### English
+- Memory plugin: a cross-project card move now validates that the destination resolves back to a workspace, serialises concurrent moves of one card, and restores the target's text and pin when it fails; a card read separates "absent" from "unreadable", so a card that cannot be read is never overwritten as new nor reported as deleted.
+- Memory plugin: `/status` and the settings section now show what injection actually costs — the cards each budget drops, the index lines the ceiling cuts, plus counts of decay-prone references (versions, paths, shas, line numbers) and stale cards.
+- The index is reconciled against the cards at boot and whenever the status is read: ghost topics, duplicated lines and malformed rows stop riding every session, and a drifted index is rebuilt and recorded as an event.
+- A card may declare an optional `domain` (derived from its topic key when absent); the index groups by domain, and `memory_save` reports the domain's card count and summaries.
+- Recall matches a phrase or all words of a query, and expands through an alias table: `pwsh`/`powershell`, `pptd`/`幻灯片`, `workspace`/`工作区`/`工作目录`, `热重载`/`hot-reload`/`hmr` ship by default, and `<memory root>/aliases.json` adds more. Aliases apply to reading only; deletion is unaffected.
+- A read-only health script, `plugins/plugin-memory/scripts/memory-health.mjs`, prints each project's cards, injection volume, dropped cards, index overflow and decay-prone reference counts, with `--snapshot` and `--json`.
+
 ## [v0.18.7] - 2026-11-08
 
 ### 中文
