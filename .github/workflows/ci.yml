@@ -146,6 +146,26 @@ jobs:
       # and with those absent the check would report registrations as unjudged.
       - name: Slot registrations (static)
         run: npm run check:slots
+      # Kernel preflight against the installed line: a copy BELOW the followed
+      # line (a stale nested copy wins resolution silently, and the runtime
+      # assembly refuses a mixed one), a kernel package that stopped exporting a
+      # symbol we import at runtime, a retired slot or service id, and an
+      # `engines.node` floor above the Node pinned at the top of this workflow.
+      # Offline and under a second.
+      #
+      # It runs AFTER the per-plugin installs for the same reason the two steps
+      # above do: nine of the packages we import live only inside a plugin's own
+      # node_modules, and without those the preflight reports them as absent
+      # (measured on a fresh `npm ci` tree: 15 blockers, all step-order artifacts;
+      # 0 after the plugin installs).
+      #
+      # A copy ABOVE the line — upstream tagged a release and the plugin trees
+      # floated on `^` while the root lockfile still pins the old version — is a
+      # NOTE here, not a blocker: nothing is stale, a bump is due, and blocking on
+      # it would turn every unrelated PR red the day upstream publishes.
+      # `--line-policy=exact` (a hand-run release check) makes that fatal again.
+      - name: Kernel preflight (installed line)
+        run: npm run check:preflight
       # Suite-drift gate: the suite roster is written down five times (the
       # overlay's insert rows, SUITE_PLUGINS, SUITE_PLUGIN_DIRS, SUITE_DIRS and
       # the release workflow's pre-build loop) and AGENTS.md requires all five to

@@ -23,7 +23,12 @@ really contains the resource directories the plugins declare. This is the execut
 "compile-green ≠ runtime-green": the type gate cannot see across the plugin/kernel boundary, and this can.
 
 **CI** (`.github/workflows/ci.yml`) is the definition of done for a merge. Its `gate` job runs the
-changeset gate, the typecheck, the three static checks and both test layers; its order matters — the
+changeset gate, the typecheck, the four static checks and both test layers; its order matters — the
 root tests run *after* the per-plugin installs because two suites resolve packages that exist only
-inside a plugin's own `node_modules`, and the slot check for the same reason. Its `smoke` job builds
-the suite and a real linux-x64 runtime, then runs `smoke-suite.mjs --tgz` on it.
+inside a plugin's own `node_modules`, and the slot check and the kernel preflight for the same reason
+(measured: the preflight reports 15 phantom blockers on a fresh `npm ci` tree, 0 once the plugins are
+installed). The preflight is the only gate here that reads the kernel line itself — a copy below the
+followed line, a symbol that stopped being exported, a retired slot or service id, or an `engines.node`
+floor above the pinned Node; a copy *above* the line is a note, because it means upstream published and
+blocking on it would red every unrelated pull request. Its `smoke` job builds the suite and a real
+linux-x64 runtime, then runs `smoke-suite.mjs --tgz` on it.

@@ -53,7 +53,7 @@ npm run check:preflight -- --npm <目标版本>             # 下载 + 校验 sh
 
 | 检查 | 问的问题 | 能看见的断裂 |
 |---|---|---|
-| `line` | 我们消费的每个包是否落在同一个版本 | 混线（装配期直接拒） |
+| `line` | 我们消费的每个包是否落在同一个版本；**低于**跟随线的拷贝一律 blocker，**高于**它的是「该 bump 了」的 note（`--line-policy=exact` 下升为 blocker） | 脏拷贝静默赢得解析、上游发版后插件树按 `^` 先行 |
 | `published` | 目标线是否还发布这些包 | 改名（`dsh-office-to-pdf` → `dsh-office-kit`） |
 | `engines` | 目标的 `engines.node` 下限 vs CI 的 Node | 打包进运行时的 Node 低于内核要求 |
 | `exports` | 我们 import 的每个具名导出是否还在 | 内核删掉具名导出（编译期是 `undefined`） |

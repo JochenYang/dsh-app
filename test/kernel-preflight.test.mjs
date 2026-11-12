@@ -43,7 +43,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { followedSpec } from '../scripts/kernel-line.mjs'
-import { ourImports, ourOverlayRows } from '../scripts/kernel-preflight.mjs'
+import { Findings, checkLine, compareVersions, installedTarget, ourImports, ourOverlayRows } from '../scripts/kernel-preflight.mjs'
 import { scratchDir } from './scratch.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -290,4 +290,56 @@ test('the line-move process keeps the preflight as its first step', () => {
   //    worse than no doc at all
   const manifest = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8'))
   assert.match(manifest.scripts['check:preflight'] ?? '', /kernel-preflight\.mjs/u)
+})
+
+test('one line: a copy BELOW the followed line blocks, a copy ABOVE it is a bump', () => {
+  // Two failures used to share one blocker, and that is why the check could not
+  // run on every pull request: the day upstream tags a release, the plugin trees
+  // float ahead of the root lockfile and every unrelated PR went red. They mean
+  // different things, so they get different severities.
+  const installed = (pluginVersion, rootVersion) => {
+    const dir = scratchDir('dsh-preflight-line-')
+    for (const [relative, version] of [['node_modules', rootVersion], [path.join('plugins', 'plugin-x', 'node_modules'), pluginVersion]]) {
+      const pkg = path.join(dir, relative, '@deepseek-ai', 'dsh-tools')
+      mkdirSync(pkg, { recursive: true })
+      writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-tools', version }, null, 2))
+      writeFileSync(path.join(pkg, 'index.d.ts'), 'export const defineTool = 1\n')
+    }
+    return dir
+  }
+  const report = (dir, policy) => {
+    const findings = new Findings()
+    checkLine(installedTarget(dir), new Map([['@deepseek-ai/dsh-tools', new Set(['defineTool'])]]), findings, policy)
+    return findings.items
+  }
+  const floor = followedSpec().replace(/^[\^~]/u, '')
+  const older = '0.2.2-rc.1'
+  const newer = '0.2.2-rc.99'
+
+  const stale = report(installed(older, floor))
+  const staleFinding = stale.find((item) => item.check === 'line' && item.severity === 'blocker' && item.subject.startsWith('@deepseek-ai/dsh-tools'))
+  assert.ok(staleFinding, 'a copy older than the followed line must block — it wins resolution silently')
+  assert.match(staleFinding.subject, new RegExp(older.replace(/\./gu, '\.')))
+
+  const ahead = report(installed(newer, floor))
+  assert.ok(!ahead.some((item) => item.check === 'line' && item.severity === 'blocker' && item.subject.includes(newer)),
+    'a copy ahead of the line is a bump that is due, not a defect')
+  const bump = ahead.find((item) => item.check === 'line' && item.severity === 'note' && item.subject.includes('ahead of the followed line'))
+  assert.ok(bump, 'the drift must still be reported, with the action')
+  assert.match(bump.detail, /bump the line/u)
+
+  // …and a release run wants it fatal again.
+  const exact = report(installed(newer, floor), 'exact')
+  assert.ok(exact.some((item) => item.check === 'line' && item.severity === 'blocker'), '--line-policy=exact must block on drift')
+})
+
+test('version comparison understands prereleases', () => {
+  // The whole repository moves BETWEEN prereleases; a comparator that drops the
+  // rc number reads 0.2.2-rc.1 and 0.2.2-rc.2 as equal, and the drift rule above
+  // then never fires.
+  assert.ok(compareVersions('0.2.2-rc.1', '0.2.2-rc.2') < 0)
+  assert.ok(compareVersions('0.2.2-rc.10', '0.2.2-rc.9') > 0)
+  assert.ok(compareVersions('0.2.2', '0.2.2-rc.9') > 0)
+  assert.ok(compareVersions('^0.2.2-rc.2', '0.2.2-rc.2') === 0)
+  assert.ok(compareVersions('0.2.1', '0.2.2-rc.2') < 0)
 })

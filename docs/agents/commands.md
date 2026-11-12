@@ -63,6 +63,7 @@ npm run check:preflight -- --dir <checkout>      # a checkout / worktree of the 
 npm run check:preflight -- --npm 0.2.3-rc.1      # published packages (download + sha512 check)
 npm run check:preflight -- --npm 0.2.2-rc.2 --baseline-npm 0.2.2-rc.1   # re-audit a move
 npm run check:preflight -- --json                # machine-readable
+npm run check:preflight -- --line-policy=exact   # a copy ABOVE the line is a blocker too
 ```
 
 `--npm` is the mode that compares like with like: it reads published declarations
@@ -71,6 +72,13 @@ line as the other side of the comparison, so a move that already happened can be
 re-run in its own direction; pair like with like (two checkouts, or two published
 lines). A registry other than npmjs is `DSH_PREFLIGHT_REGISTRY`; downloads land in
 `scratch/kernel-preflight/<version>/` and are reused.
+
+The one-line check separates two failures that used to share a severity: a copy
+BELOW the followed line is always a blocker (a stale nested copy wins resolution
+silently), while a copy ABOVE it means upstream published and the bump is due — a
+note by default so a release day does not red unrelated pull requests, and a
+blocker under `--line-policy=exact` for a hand-run release check. The CI `gate`
+job runs the default form.
 
 ## Gates (all static — no kernel, no network)
 

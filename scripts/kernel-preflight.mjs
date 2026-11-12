@@ -53,6 +53,7 @@
  *   node scripts/kernel-preflight.mjs --npm <version>    # the published packages
  *   node scripts/kernel-preflight.mjs --baseline-dir <dir>   # re-audit a move:
  *   node scripts/kernel-preflight.mjs --baseline-npm <version># old line vs new
+ *   node scripts/kernel-preflight.mjs --line-policy=exact  # a copy above the line is a blocker
  *   node scripts/kernel-preflight.mjs --json
  *
  * `--dir` is the mode that answers "upstream just tagged a release" — point it
@@ -388,15 +389,21 @@ function verifyIntegrity(file, integrity, name) {
 /** This repository's own installed tree: root scope plus every plugin-local one. */
 function installedTarget(repoRoot) {
   const index = new Map()
+  const copies = new Map()
+  const record = (pkg, where) => {
+    const name = `@deepseek-ai/${pkg.name}`
+    const manifest = readManifest(pkg.dir)
+    const seen = copies.get(name) ?? []
+    seen.push({ version: manifest.version, where })
+    copies.set(name, seen)
+    if (!index.has(name)) index.set(name, { dir: pkg.dir, manifest })
+  }
   for (const dir of pluginDirs(repoRoot)) {
-    for (const pkg of installedKernelPackages(path.join(dir, 'node_modules', '@deepseek-ai'))) {
-      if (!index.has(`@deepseek-ai/${pkg.name}`)) index.set(`@deepseek-ai/${pkg.name}`, { dir: pkg.dir, manifest: readManifest(pkg.dir) })
-    }
+    const where = path.relative(repoRoot, dir).split(path.sep).join('/')
+    for (const pkg of installedKernelPackages(path.join(dir, 'node_modules', '@deepseek-ai'))) record(pkg, where)
   }
-  for (const pkg of installedKernelPackages(path.join(repoRoot, 'node_modules', '@deepseek-ai'))) {
-    if (!index.has(`@deepseek-ai/${pkg.name}`)) index.set(`@deepseek-ai/${pkg.name}`, { dir: pkg.dir, manifest: readManifest(pkg.dir) })
-  }
-  return targetFacade({ mode: 'installed', index, bundles: null })
+  for (const pkg of installedKernelPackages(path.join(repoRoot, 'node_modules', '@deepseek-ai'))) record(pkg, 'node_modules')
+  return targetFacade({ mode: 'installed', index, copies, bundles: null })
 }
 
 function readManifest(dir) {
@@ -441,6 +448,7 @@ function targetFacade(state) {
     mode: state.mode,
     has: (name) => state.index.has(name),
     packageNames: () => [...state.index.keys()].sort(),
+    copiesOf: (name) => state.copies?.get(name) ?? [],
     packageOf: (name) => state.index.get(name),
     versionOf: (name) => state.index.get(name)?.manifest?.version,
     surfaceOf,
@@ -799,11 +807,35 @@ function skillNamesOf(state) {
 
 // ----------------------------------------------------------------- checks
 
-/** 1. One line: every consumed package at the same version. */
-function checkLine(target, imports, findings) {
-  const versions = new Map()
+/**
+ * 1. One line.
+ *
+ * Two different failures live under "mixed line", and merging them is what made
+ * this check unusable in CI:
+ *
+ *   - a copy BELOW the followed line (a stale nested copy that wins resolution
+ *     silently, or a tree someone half-reinstalled) — never acceptable, always a
+ *     blocker;
+ *   - a copy ABOVE it (upstream published, plugin trees float on `^` while the
+ *     root lockfile still pins the old version) — nothing is stale, the line bump
+ *     is simply due. Blocking on that turns every unrelated pull request red the
+ *     day upstream tags a release, so it is reported as a note with the action
+ *     spelled out. `--line-policy=exact` (what a release run wants) makes it a
+ *     blocker again.
+ *
+ * @param {object} target - the target facade.
+ * @param {Map<string, Set<string>>} imports - our import map.
+ * @param {object} findings - the report.
+ * @param {'floor'|'exact'} policy - how to treat a copy above the followed line.
+ * @returns {string | undefined} the line version, for the header line.
+ */
+function checkLine(target, imports, findings, policy = 'floor') {
   const packages = [...new Set([...imports.keys()].map((spec) => splitSpec(spec).pkg))]
-  for (const name of packages) {
+  const floor = followedSpec()
+  const drift = []
+  const versions = new Map()
+
+  for (const name of packages.sort()) {
     const version = target.versionOf(name)
     if (version === undefined) {
       const reason = target.packageOf(name)?.missing
@@ -814,11 +846,27 @@ function checkLine(target, imports, findings) {
     const bucket = versions.get(version) ?? []
     bucket.push(name)
     versions.set(version, bucket)
+
+    for (const copy of target.copiesOf(name)) {
+      if (compareVersions(copy.version, floor) >= 0) continue
+      findings.blocker('line', `${name} ${copy.version}`, `older than the followed line ${floor} · ${copy.where}`,
+        'a stale copy wins the resolution silently: reinstall that plugin (or the root tree) before trusting any build')
+    }
+    const ahead = target.copiesOf(name).filter((copy) => compareVersions(copy.version, floor) > 0)
+    if (ahead.length > 0) drift.push(`${name} (${[...new Set(ahead.map((copy) => copy.version))].join('/')})`)
   }
+
+  if (drift.length > 0) {
+    findings.add(policy === 'exact' ? 'blocker' : 'note', 'line',
+      `${String(drift.length)} package(s) ahead of the followed line ${floor}`,
+      `this tree already carries what upstream published — bump the line (specs + lockfile + the two version resolutions): ${drift.slice(0, 6).join(', ')}`,
+      policy === 'exact' ? 'a release must be built from one line; bump before shipping' : undefined)
+  }
+
   if (versions.size > 1) {
     for (const [version, names] of versions) {
-      findings.blocker('line', `${String(names.length)} package(s) at ${version}`, names.slice(0, 6).join(', '),
-        'a mixed line is the failure the runtime assembly refuses; check for a stale nested copy')
+      findings.blocker('line', `${String(names.length)} package(s) resolve at ${version}`, names.slice(0, 6).join(', '),
+        'two lines inside one tree: a stale copy, or a half-reinstalled plugin; find it before trusting any build')
     }
   } else if (versions.size === 1) {
     findings.note('line', [...versions.keys()][0], `${String(packages.length)} consumed packages resolve at one version`)
@@ -1166,12 +1214,32 @@ function installedVersionOf(name) {
  * @returns {number} negative when left is older.
  */
 function compareVersions(left, right) {
-  const parts = (value) => value.split('-')[0].split('.').map((part) => Number.parseInt(part, 10) || 0)
-  const a = parts(left)
-  const b = parts(right)
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    const difference = (a[index] ?? 0) - (b[index] ?? 0)
+  const split = (value) => {
+    const [release, ...rest] = String(value).replace(/^[\^~>=]+/u, '').split('+')[0].split('-')
+    return { release: release.split('.').map((part) => Number.parseInt(part, 10) || 0), prerelease: rest.join('-') }
+  }
+  const a = split(left)
+  const b = split(right)
+  for (let index = 0; index < Math.max(a.release.length, b.release.length); index += 1) {
+    const difference = (a.release[index] ?? 0) - (b.release[index] ?? 0)
     if (difference !== 0) return difference
+  }
+  // A release outranks any prerelease of the same version (semver §11): 0.2.2
+  // is newer than 0.2.2-rc.3. This line moves BETWEEN prereleases, so the rc
+  // numbers themselves have to be compared, not discarded.
+  if (a.prerelease === b.prerelease) return 0
+  if (a.prerelease === '') return 1
+  if (b.prerelease === '') return -1
+  const leftParts = a.prerelease.split('.')
+  const rightParts = b.prerelease.split('.')
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const x = leftParts[index] ?? ''
+    const y = rightParts[index] ?? ''
+    if (x === y) continue
+    const nx = Number.parseInt(x, 10)
+    const ny = Number.parseInt(y, 10)
+    if (Number.isFinite(nx) && Number.isFinite(ny)) return nx - ny
+    return x < y ? -1 : 1
   }
   return 0
 }
@@ -1308,6 +1376,12 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
     if (token === '--json') { options.json = true; continue }
+    if (token.startsWith('--line-policy=')) {
+      const value = token.slice('--line-policy='.length)
+      if (value !== 'floor' && value !== 'exact') throw new Error(`--line-policy takes floor or exact, not ${value}`)
+      options.linePolicy = value
+      continue
+    }
     if (token === '--dir' || token === '--npm' || token === '--baseline-dir' || token === '--baseline-npm') {
       const value = argv[index + 1]
       if (value === undefined || value.startsWith('--')) throw new Error(`${token} needs a value`)
@@ -1355,7 +1429,7 @@ async function main() {
     : target.mode === 'installed' ? target : await buildTarget({})
   const findings = new Findings()
 
-  const line = checkLine(target, imports, findings)
+  const line = checkLine(target, imports, findings, options.linePolicy ?? 'floor')
   checkEngines(target, findings)
   checkExports(target, imports, findings)
   checkDeclarations(target, imports, findings, baseline)
@@ -1405,4 +1479,17 @@ if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLTo
   })
 }
 
-export { ourImports, ourSlotIds, ourOverlayRows, collectSurface, relativeTarget, splitSpec, buildTarget, Findings }
+export {
+  ourImports,
+  ourSlotIds,
+  ourServiceUses,
+  ourOverlayRows,
+  collectSurface,
+  relativeTarget,
+  splitSpec,
+  compareVersions,
+  buildTarget,
+  installedTarget,
+  checkLine,
+  Findings,
+}
