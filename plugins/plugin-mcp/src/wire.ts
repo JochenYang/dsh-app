@@ -210,7 +210,11 @@ export function nextEntryId(servers: readonly McpServerEntry[]): string {
 export function validateEntry(raw: unknown, existingIds: ReadonlySet<string>): McpServerEntry {
   if (!isRecord(raw)) throw new McpValidationError('entry.notObject')
   const id = asString(raw.id)
-  if (id === undefined || !/^mcp-\d+$/.test(id) || existingIds.has(id)) {
+  // The id IS the key the fleet is stored under since 0.2.2-rc.2 (the kernel
+  // manager derives `mcp__<name>__<tool>` from it), so it carries the same
+  // contract as a server name instead of the `mcp-<n>` sequence this plugin
+  // used when it kept its own file.
+  if (id === undefined || !SERVER_NAME_PATTERN.test(id) || existingIds.has(id)) {
     throw new McpValidationError('entry.badId')
   }
   const serverName = asString(raw.serverName)

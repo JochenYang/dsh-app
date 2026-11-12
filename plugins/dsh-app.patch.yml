@@ -36,13 +36,15 @@
 #   settings-page toggles). Model-driven saving with a code-guaranteed async
 #   net; users disable it via
 #   <DSH_HOME>/storages/dsh-app-plugin-memory/config.json.
-# - mcp: MCP manager — settings-page CRUD over external MCP servers. The
-#   user's server set lives in
-#   $DSH_HOME/storages/dsh-app-plugin-mcp/servers.json (the overlay is
-#   rewritten by the shell on every start and can never hold user state);
-#   the plugin dynamically mounts one @deepseek-ai/dsh-mcp-client instance
-#   per enabled server, so their tools register as mcp__<server>__<tool>.
-#   Mount failures degrade to per-server status and never fail the boot.
+# - mcp: MCP settings page over the kernel's own fleet. Since 0.2.2-rc.2
+#   `@deepseek-ai/dsh-mcp-manager` mounts and supervises one
+#   `@deepseek-ai/dsh-mcp-client` per configured server, so this plugin owns no
+#   store and mounts nothing: it writes the `mcp-manager` row's `config.servers`
+#   through the kernel config editor and reads status from `ctx.mcpManager`.
+#   The store this plugin used before the move
+#   ($DSH_HOME/storages/dsh-app-plugin-mcp/servers.json) is imported once and
+#   renamed aside. Without the manager or the editor the page degrades to
+#   read-only and the boot still succeeds.
 # - ppt: editable PPTX generation — pptd_write_file / pptd_check / pptd_render
 #   tools over a validated PPTD project format, a guiding skill installed into
 #   $DSH_HOME/skills/dsh-ppt (content-compared, idempotent), and a

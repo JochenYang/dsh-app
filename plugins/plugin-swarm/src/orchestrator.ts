@@ -145,6 +145,13 @@ export interface SwarmItemOutcome {
    * its full prior context.
    */
   readonly childId?: string
+  /**
+   * The child's model-facing name as the kernel assigned it (`agent-1`,
+   * `lead/agent-2`, …). This is the identity the kernel's own delegation and
+   * team tools use, so a batch report and a `list_agents` listing agree; a
+   * resumed child omits it, because `sendMessage` returns no name.
+   */
+  readonly name?: string
   /** Automatic retries the item consumed before settling (absent when 0). */
   readonly retries?: number
 }
@@ -864,6 +871,7 @@ async function runContinuableTask(
     // documented best-effort, unchanged from the event-index watermark this
     // replaced. Fresh children start from zero either way.
     let usageBaseline: UsageTotals | undefined
+    let childName: string | undefined
     if (task.resumeChildId !== undefined) {
       // rc.1 renamed followup → sendMessage (and dropped the explicit source
       // option: the coordinator-relay provenance is now implicit to the seam).
@@ -900,13 +908,25 @@ async function runContinuableTask(
       // The launch raced the batch abort and won: the abort sweep only knows
       // children it had already tracked, so stop this one directly.
       ctx.subagents.interrupt(SessionId(childId), { kind: 'ancestor', agent: options.parent })
-      return { index: task.index, item: task.item, status: 'aborted', childId, durationMs: Date.now() - startedAt }
+      return {
+        index: task.index,
+        item: task.item,
+        status: 'aborted',
+        childId,
+        ...childName === undefined ? {} : { name: childName },
+        durationMs: Date.now() - startedAt,
+      }
     }
     const terminal = await watch.wait(childId)
     const session = liveChildSession(ctx, childId)
     const usage = childUsage(ctx, session, usageBaseline)
     const durationMs = Date.now() - startedAt
-    const metrics = { childId, durationMs, ...usage === undefined ? {} : { usage } }
+    const metrics = {
+      childId,
+      durationMs,
+      ...childName === undefined ? {} : { name: childName },
+      ...usage === undefined ? {} : { usage },
+    }
     if (terminal.stopReason === 'completed') {
       return {
         index: task.index,
@@ -996,7 +1016,7 @@ async function runOneShotTask(
     const session = liveChildSession(ctx, String(activation.childId))
     const usage = childUsage(ctx, session, undefined)
     const durationMs = Date.now() - startedAt
-    const metrics = { durationMs, ...usage === undefined ? {} : { usage } }
+    const metrics = { durationMs, name: activation.name, ...usage === undefined ? {} : { usage } }
     if (result.stopReason === 'completed') {
       return { index: task.index, item: task.item, status: 'completed', ...metrics, output: truncate(textOf(result.output), options.outputLimit) }
     }

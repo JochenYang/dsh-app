@@ -211,13 +211,15 @@ function mockOneShotCtx(children: Record<string, MockChild>): Context {
     },
     subagents: {
       getProvider: () => ({}),
-      startActivation: async (spec: { request: { prompt: readonly { text: string }[] } }) => {
-        const text = spec.request.prompt[0].text
+      startActivation: async (spec: { prompt: readonly { text: string }[] }) => {
+        const text = spec.prompt[0].text
         const key = Object.keys(children).find(k => text.includes(k))
         assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
         const child = children[key]
         return {
           childId: `child-${key}`,
+          // 0.2.2-rc.2 returns the model-facing name; the batch report carries it.
+          name: key,
           result: Promise.resolve({
             stopReason: child.stopReason,
             output: child.text === undefined ? [] : [{ type: 'text', text: child.text }],
@@ -243,6 +245,8 @@ test('runSwarmBatch (one-shot): aggregates outputs, per-item durationMs, and bat
   const outcome = await runSwarmBatch(ctx, { ...baseOptions(), tasks: tasksOf('alpha', 'beta') })
   assert.equal(outcome.completed, 2)
   assert.equal(outcome.items[0].output, 'alpha done')
+  assert.equal(outcome.items[0].name, 'alpha', 'the kernel name rides the item, so a report and list_agents agree')
+  assert.equal(outcome.items[1].name, 'beta')
   assert.ok(outcome.items[0].durationMs !== undefined)
   assert.ok(outcome.durationMs >= 0)
   assert.deepEqual(outcome.items[0].usage, { inputTokens: 10, outputTokens: 5, totalTokens: 15 })
@@ -320,14 +324,14 @@ function mockCapacityCtx(children: Record<string, MockChild>, rejects: number): 
     },
     subagents: {
       getProvider: () => ({}),
-      startActivation: async (spec: { request: { prompt: readonly { text: string }[] } }) => {
+      startActivation: async (spec: { prompt: readonly { text: string }[] }) => {
         launches += 1
         if (launches <= rejects) {
           const error = new Error('subagent limit reached (active child limit: 8); wait for an existing child to finish or complete this work with the current agents')
           Object.assign(error, { code: 'ACTIVATION_LIMIT_REACHED' })
           throw error
         }
-        const text = spec.request.prompt[0].text
+        const text = spec.prompt[0].text
         const key = Object.keys(children).find(k => text.includes(k))
         assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
         const child = children[key]
@@ -429,8 +433,8 @@ function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHar
     },
     subagents: {
       getProvider: () => ({ prepareContinuable: async () => ({}) }),
-      startActivation: async (spec: { request: { prompt: readonly { text: string }[] } }) => {
-        const text = spec.request.prompt[0].text
+      startActivation: async (spec: { prompt: readonly { text: string }[] }) => {
+        const text = spec.prompt[0].text
         const key = Object.keys(children).find(k => text.includes(k))
         assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
         launches += 1

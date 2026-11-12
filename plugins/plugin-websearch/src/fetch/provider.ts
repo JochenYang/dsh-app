@@ -85,8 +85,23 @@ export interface FetchProviderDeps {
   readonly clock?: () => number
 }
 
+/** The provider's display name in the kernel's own Web fetch page. */
+const PROVIDER_TITLE = 'DSH APP'
+
+/**
+ * What the provider is suited for and what it costs, shown by the kernel's
+ * provider picker (0.2.2-rc.2 added these two fields; without them that page
+ * can only show the id). English is required, the rest is optional.
+ */
+const PROVIDER_DESCRIPTION = {
+  en: 'Resolves through the injected proxy when one applies, skips fake-IP answers from a TUN client, and falls back to DNS-over-HTTPS when a canary probes it as poisoned.',
+  zh: '走注入的代理（有的话），识别 TUN 客户端给出的假 IP 并跳过，DNS 被污染时回退到 DoH。',
+}
+
 export class WebFetchNetworkProvider implements WebFetchProvider {
   readonly id: string
+  readonly title = PROVIDER_TITLE
+  readonly description = PROVIDER_DESCRIPTION
 
   private readonly send: HopSend
   private readonly lookupHost: (hostname: string) => Promise<readonly string[]>

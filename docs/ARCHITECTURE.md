@@ -206,8 +206,12 @@ runtime at all — see below.
 
 ```
 <userData>/dsh-app-office/
-  office-skills/            materialized from <kernelDir>/runtime/office-skills
-                            (the four skill files the host's boot check needs)
+  primary-runtime           link to payload/<version>/primary-runtime when the
+                            payload carries a Python set; answered as the child's
+                            fourth positional (its own DSH_PRIMARY_RUNTIME). The
+                            office SKILLS are not here any more: since 0.2.2-rc.2
+                            `dsh-skill-office` reads them from its own packaged
+                            `assets/` inside the runtime tree
   payload/<payloadVersion>/ the installed engine: manifest.json + node_modules
                             (@deepseek-ai/libreoffice-kit, its closure and the
                             target's `…-kit-<platform>-<arch>` engine)

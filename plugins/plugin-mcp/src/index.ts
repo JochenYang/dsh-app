@@ -1,27 +1,26 @@
 /**
  * DSH APP MCP manager — host half.
  *
- * Mounts two things over one store
- * (`$DSH_HOME/storages/dsh-app-plugin-mcp/servers.json`):
+ * 0.2.2-rc.2 moved the fleet to the kernel: `@deepseek-ai/dsh-mcp-manager`
+ * mounts one `@deepseek-ai/dsh-mcp-client` per configured server, reconciles
+ * them as the row's config changes, and reports status over one view. This
+ * plugin keeps the settings page and gives it that manager instead of a fleet of
+ * its own — one store (`mcp-manager`'s `config.servers`), one set of instances,
+ * so the same tool name is never registered twice.
  *
- * 1. Dynamic `@deepseek-ai/dsh-mcp-client` instances — one loader entry per
- *    enabled server (see mount.ts). The kernel's MCP bridge turns each
- *    server's tools into native `mcp__<serverName>__<tool>` tools; this
- *    plugin owns the user-facing CRUD around it, because the loader overlay
- *    is rewritten by the shell on every start and can never hold user state.
- *    The profile root the loader writes back to is reset by the harness each
- *    boot, so instances are process-scoped and the file is the only durable
- *    truth.
- * 2. Settings-page routes (list/create/update/delete) for the client half.
- *    Reads mask literal env/header values; writes are validated against the
- *    upstream contract (serverName pattern, transport fields, unique live
- *    namespaces) and applied to the running process inline.
+ * What it still owns:
  *
- * Stability discipline: a kernel without the loader seam or the tools
- * registry degrades (status `unavailable` / no tool counts) — the routes
- * still work against the file, and the boot never fails because of this
- * plugin. The master `enabled: false` in the file stops all mounts and makes
- * the write routes answer 409.
+ * 1. Settings-page routes (list/create/update/delete/import) for the client
+ *    half, written through the kernel's config editor — the same path its own
+ *    pages take, including the revision check that refuses a stale write.
+ * 2. The one-time import of `$DSH_HOME/storages/dsh-app-plugin-mcp/servers.json`,
+ *    the store this plugin had before the move (see legacy.ts).
+ *
+ * Stability discipline: a kernel without `ctx.configEditor` or `ctx.mcpManager`
+ * degrades — the page reports it cannot manage, and the boot never fails because
+ * of this plugin. `enabled: false` in this plugin's own config makes the page
+ * read-only (409 on writes) and reports every entry as disabled, without
+ * touching what the user configured.
  *
  * @module @dsh-app/plugin-mcp
  */
@@ -32,9 +31,10 @@ import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 // Type-only: pulls the connection Context merge (ctx.connection) into scope.
 import type {} from '@deepseek-ai/dsh-client-connection'
-import { McpMountManager } from './mount.ts'
+import { importLegacyServers } from './legacy.ts'
 import { registerMcpRoutes } from './routes.ts'
-import { McpStore } from './store.ts'
+import { McpStore, type ConfigEditorLike } from './store.ts'
+import { McpFleetStatus, type McpFleetLike } from './status.ts'
 
 export const name = 'plugin-mcp'
 
@@ -46,51 +46,57 @@ export const name = 'plugin-mcp'
  */
 export const inject = ['connection']
 
-/** Config: storage location. */
+/** Config: this plugin's own switch, plus where the pre-0.2.2 file lived. */
 export interface Config {
-  /** Absolute store directory; empty → $DSH_HOME/storages/dsh-app-plugin-mcp. */
+  /** Master switch: false makes the page read-only and reports every entry as disabled. */
+  enabled: boolean
+  /** Absolute directory of the legacy store; empty → $DSH_HOME/storages/dsh-app-plugin-mcp. */
   storePath: string
 }
 
 export const Config: z<Config> = z.object({
+  enabled: z.boolean().default(true),
   storePath: z.string().default(''),
 })
 
 /**
- * Host apply: mount the dynamic mounts + routes. Mount failures and missing
- * kernel seams degrade to per-entry status instead of failing the boot.
+ * Host apply: register the routes over the kernel manager's fleet.
+ *
+ * Both kernel services are read structurally: the config editor and the manager
+ * are resolved by name, so a line without them starts this plugin with a
+ * read-only page instead of failing.
+ *
  * @param ctx - the host plugin context.
  * @param config - validated plugin config.
  */
 export function apply(ctx: Context, config: Config): void {
   const log = ctx.logger(name)
   const dir = config.storePath !== '' ? config.storePath : join(resolveDshHome(), 'storages', 'dsh-app-plugin-mcp')
-  const store = new McpStore(dir, (message) => log.warn(message))
+  const legacyFile = join(dir, 'servers.json')
 
-  // The loader face is a process service on the context, not an injectable;
-  // read it structurally so a kernel without it degrades instead of throwing.
-  const loader = (ctx as unknown as { loader?: unknown }).loader
-  const tools = ctx.get('tools')
-  const manager = new McpMountManager((message) => log.warn(message), loader, tools)
+  const editor = ctx.get('configEditor') as ConfigEditorLike | undefined
+  const fleet = ctx.get('mcpManager') as McpFleetLike | undefined
+  const store = new McpStore(editor, config.enabled, (message) => log.warn(message))
+  const status = new McpFleetStatus(fleet)
+
+  if (editor === undefined) {
+    log.warn('mcp: this kernel mounts no config editor; the page is read-only and nothing is imported')
+  } else if (fleet === undefined) {
+    log.warn('mcp: this kernel mounts no mcp-manager; servers configured here cannot be mounted')
+  }
 
   ctx.effect(() => {
-    const file = store.load()
-    if (!file.enabled) {
-      log.info(`mcp manager: disabled by user config (${store.filePath})`)
-      return () => undefined
-    }
-    if (!manager.available) {
-      log.warn('mcp manager: loader seam unavailable on this kernel; servers stay unmounted')
-    }
-    void manager.syncAll(file.servers).catch((error: unknown) => {
-      log.warn(`mcp manager: initial sync failed: ${(error as Error).message}`)
+    if (editor === undefined) return () => undefined
+    void importLegacyServers(store, legacyFile, (message) => {
+      if (message.includes('imported')) log.info(message)
+      else log.warn(message)
+    }).catch((error: unknown) => {
+      log.warn(`mcp: legacy import failed: ${(error as Error).message}`)
     })
-    return () => {
-      void manager.disposeAll().catch(() => undefined)
-    }
-  }, 'plugin-mcp: dynamic mounts')
+    return () => undefined
+  }, 'plugin-mcp: legacy store import')
 
-  ctx.effect(() => registerMcpRoutes(ctx.connection.fetch, store, manager), 'plugin-mcp: api routes')
+  ctx.effect(() => registerMcpRoutes(ctx.connection.fetch, store, status), 'plugin-mcp: api routes')
 
-  log.info(`mcp store: ${store.filePath}`)
+  log.info(`mcp store: ${store.filePath}${config.enabled ? '' : ' (disabled by config)'}`)
 }

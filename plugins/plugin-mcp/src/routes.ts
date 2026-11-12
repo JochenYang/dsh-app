@@ -30,7 +30,7 @@
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { invalidServerNameError, mapExternalServer, parseMcpServersJson, SERVER_NAME_PATTERN, slugifyServerName } from './wire.ts'
 import { McpValidationError, McpStore } from './store.ts'
-import type { McpMountManager } from './mount.ts'
+import type { McpFleetStatus } from './status.ts'
 import type { HostText, McpMountStatus, McpServerEntry } from './wire.ts'
 
 /**
@@ -43,6 +43,12 @@ export const ROUTE_PREFIX = '/api/plugins/dsh-app/plugin-mcp'
 
 /** Mask sentinel for secret-ish values on reads; on writes it means "keep". */
 export const VALUE_MASK = '••••••'
+
+/**
+ * A value that names a credential instead of carrying one: either reference
+ * syntax reads back in plaintext, so the user can see what is stored.
+ */
+const REFERENCE_VALUE = /^\$ENV:|\$\{credential:/u
 
 /** The client-facing view of one entry: fields + mount status, values masked. */
 export interface McpServerView {
@@ -116,7 +122,11 @@ export function maskSecretValues(entry: McpServerEntry): McpServerEntry {
     if (map === undefined) return undefined
     const out: Record<string, string> = {}
     for (const [key, value] of Object.entries(map)) {
-      out[key] = /^\$ENV:/.test(value) ? value : VALUE_MASK
+      // A reference is not a secret. `$ENV:NAME` was this plugin's own syntax
+      // before the fleet moved to the kernel manager, `${credential:NAME}` is the
+      // manager's template, and either way the user has to read back WHICH
+      // reference is stored — masking it would leave nothing to edit.
+      out[key] = REFERENCE_VALUE.test(value) ? value : VALUE_MASK
     }
     return out
   }
@@ -167,14 +177,14 @@ function bodyRejection(error: unknown): Response {
 /**
  * Register the MCP manager routes on the Connection exact-Fetch registry.
  * @param connectionFetch - the registry (`ctx.connection.fetch`).
- * @param store - the servers.json store.
- * @param manager - the dynamic mount manager.
+ * @param store - the fleet store (the `mcp-manager` row's config).
+ * @param fleet - the kernel manager's live status view.
  * @returns disposer removing the routes.
  */
 export function registerMcpRoutes(
   connectionFetch: HostConnectionFetch,
   store: McpStore,
-  manager: McpMountManager,
+  fleet: McpFleetStatus,
 ): () => Promise<void> {
   const respond = async (extra: Record<string, unknown> = {}): Promise<Response> => {
     const file = store.load()
@@ -182,13 +192,13 @@ export function registerMcpRoutes(
     for (const entry of file.servers) {
       servers.push({
         ...maskSecretValues(entry),
-        status: manager.statusFor(entry),
+        status: fleet.statusFor(entry),
       })
     }
     return ok({
       enabled: file.enabled,
       filePath: store.filePath,
-      mountAvailable: manager.available,
+      mountAvailable: fleet.available,
       servers,
       ...extra,
     } satisfies McpServersResponse)
@@ -222,8 +232,7 @@ export function registerMcpRoutes(
     const denied = guardWrite()
     if (denied !== undefined) return denied
     try {
-      const entry = store.create(body)
-      await manager.syncOne(entry)
+      await store.create(body)
     } catch (error) {
       return writeRejection(error)
     }
@@ -246,15 +255,14 @@ export function registerMcpRoutes(
       return fail(404, 'not-found', { code: 'server.notFound', params: { id } })
     }
     try {
-      const entry = store.update(id, unmaskSecretValues(body, existing))
-      await manager.syncOne(entry)
+      await store.update(id, unmaskSecretValues(body, existing))
     } catch (error) {
       return writeRejection(error)
     }
     return await respond()
   }
 
-  /** One entry removal: the file is the truth, the loader instance follows. */
+  /** One entry removal: the row is the truth and the manager unmounts it. */
   const remove = async (request: Request): Promise<Response> => {
     let body: Record<string, unknown>
     try {
@@ -265,8 +273,11 @@ export function registerMcpRoutes(
     const denied = guardWrite()
     if (denied !== undefined) return denied
     const id = typeof body.id === 'string' ? body.id : ''
-    store.remove(id)
-    await manager.unmount(id)
+    try {
+      await store.remove(id)
+    } catch (error) {
+      return writeRejection(error)
+    }
     return await respond()
   }
 
@@ -304,8 +315,7 @@ export function registerMcpRoutes(
           renamed.push({ from: name, to: slug })
           serverName = slug
         }
-        const entry = store.create(mapExternalServer(serverName, def))
-        await manager.syncOne(entry)
+        await store.create(mapExternalServer(serverName, def))
         imported.push(serverName)
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)

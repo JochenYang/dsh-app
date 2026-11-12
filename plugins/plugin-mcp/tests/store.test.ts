@@ -1,160 +1,190 @@
 /**
- * Store behavior tests: entry validation, id allocation, CRUD round trips,
- * the enabled-serverName uniqueness contract, and the invalid-entry
- * preservation guarantee (a hand-edited broken entry must survive saves).
+ * The fleet store: CRUD over the `mcp-manager` row's `config.servers`.
+ *
+ * What these pin, and why each one matters:
+ *
+ * - a write MERGES into the raw map, so an entry this version cannot validate is
+ *   never dropped from the user's document by an edit made here;
+ * - the key is the identity (`serverName`), because the manager derives the tool
+ *   namespace from it — a rename is refused rather than silently moving tools;
+ * - the effective map is `override.servers ?? inherited.servers`, so a profile
+ *   layer that pins servers still shows up, and the first write retains them.
  *
  * @module plugin-mcp/tests/store
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, beforeEach, describe, it } from 'node:test'
-import { McpStore, McpValidationError, nextEntryId, validateEntry } from '../src/store.ts'
-import type { McpServerEntry } from '../src/wire.ts'
+import { describe, it } from 'node:test'
+import { MANAGER_ROW_ID, McpStore, type ConfigEditorLike, type ConfigRow } from '../src/store.ts'
+import { McpValidationError } from '../src/wire.ts'
 
-const VALID_STDIO = {
-  serverName: 'github',
-  transport: 'stdio',
-  command: 'npx',
-  args: ['-y', '@modelcontextprotocol/server-github'],
-  env: { GITHUB_TOKEN: '$ENV:GITHUB_TOKEN' },
+interface FakeEditor {
+  readonly editor: ConfigEditorLike
+  readonly document: Record<string, unknown>
+  readonly writes: number
 }
 
-function makeStore(): { store: McpStore, dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-mcp-test-'))
-  return { store: new McpStore(dir, () => {}), dir }
+/**
+ * A config document in memory, shaped the way the kernel's editor reports it.
+ * @param initial - the `servers` map the row starts with.
+ * @param inherited - a composed layer the row inherits from, when testing that.
+ */
+function fakeEditor(
+  initial: Record<string, unknown> = {},
+  inherited?: Record<string, unknown>,
+  /** True when the row itself declares no `servers` key (the inherited case). */
+  rowHasNoServers = false,
+): FakeEditor {
+  const document: Record<string, unknown> = rowHasNoServers ? {} : { servers: initial }
+  const row: ConfigRow = { options: { id: MANAGER_ROW_ID } }
+  const state = { writes: 0 }
+  const editor: ConfigEditorLike = {
+    entries: () => [row],
+    configuration: () => [{ entry: row, inherited: inherited ?? {}, override: document }],
+    edit: async (_entry, change) => {
+      state.writes += 1
+      const next = change({ ...document }, inherited ?? {})
+      for (const key of Object.keys(document)) Reflect.deleteProperty(document, key)
+      Object.assign(document, next)
+    },
+  }
+  return {
+    editor,
+    document,
+    get writes() { return state.writes },
+  }
 }
 
-describe('validateEntry', () => {
-  it('rejects a serverName outside the upstream pattern', () => {
-    assert.throws(() => validateEntry({ ...VALID_STDIO, id: 'mcp-1', serverName: 'has 空格' }, new Set()), McpValidationError)
-    assert.throws(() => validateEntry({ ...VALID_STDIO, id: 'mcp-1', serverName: '' }, new Set()), McpValidationError)
-    assert.throws(() => validateEntry({ ...VALID_STDIO, id: 'mcp-1', serverName: 'x'.repeat(33) }, new Set()), McpValidationError)
+describe('reading', () => {
+  it('projects every configured key onto an entry, keyed by its name', () => {
+    const fake = fakeEditor({ github: { transport: 'stdio', command: 'npx', args: ['-y', 'x'], enabled: true } })
+    const store = new McpStore(fake.editor, true, () => {})
+    const file = store.load()
+    assert.equal(file.servers.length, 1)
+    assert.equal(file.servers[0]?.id, 'github')
+    assert.equal(file.servers[0]?.serverName, 'github')
+    assert.equal(file.servers[0]?.command, 'npx')
+    assert.deepEqual(file.servers[0]?.args, ['-y', 'x'])
   })
 
-  it('rejects a stdio entry without a command', () => {
-    assert.throws(() => validateEntry({ id: 'mcp-1', serverName: 'a', transport: 'stdio' }, new Set()), McpValidationError)
+  it('reports this plugin master switch, not a stored one', () => {
+    const fake = fakeEditor({})
+    assert.equal(new McpStore(fake.editor, true, () => {}).load().enabled, true)
+    assert.equal(new McpStore(fake.editor, false, () => {}).load().enabled, false)
   })
 
-  it('rejects a streamable-http entry with a non-http URL', () => {
-    assert.throws(() => validateEntry({ id: 'mcp-1', serverName: 'a', transport: 'streamable-http', url: 'ftp://x' }, new Set()), McpValidationError)
-    assert.throws(() => validateEntry({ id: 'mcp-1', serverName: 'a', transport: 'streamable-http', url: 'not-a-url' }, new Set()), McpValidationError)
+  it('falls back to the inherited layer when the profile row has no servers', () => {
+    const fake = fakeEditor({}, { servers: { pinned: { transport: 'stdio', command: 'pinned' } } }, true)
+    const store = new McpStore(fake.editor, true, () => {})
+    assert.deepEqual(store.load().servers.map((entry) => entry.serverName), ['pinned'])
   })
 
-  it('rejects an id that is absent, malformed, or already used', () => {
-    assert.throws(() => validateEntry(VALID_STDIO, new Set()), McpValidationError)
-    assert.throws(() => validateEntry({ ...VALID_STDIO, id: 'nope' }, new Set()), McpValidationError)
-    assert.throws(() => validateEntry({ ...VALID_STDIO, id: 'mcp-1' }, new Set(['mcp-1'])), McpValidationError)
+  it('skips an entry it cannot validate and says so, without failing the read', () => {
+    const warnings: string[] = []
+    const fake = fakeEditor({ broken: { transport: 'stdio' }, good: { transport: 'stdio', command: 'npx' } })
+    const store = new McpStore(fake.editor, true, (message) => warnings.push(message))
+    assert.deepEqual(store.load().servers.map((entry) => entry.serverName), ['good'])
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0]!, /broken/u)
   })
 
-  it('accepts a valid stdio entry and normalizes enabled to true by default', () => {
-    const entry = validateEntry({ ...VALID_STDIO, id: 'mcp-1' }, new Set())
-    assert.equal(entry.enabled, true)
-    assert.equal(entry.serverName, 'github')
+  it('is unavailable rather than throwing when the kernel mounts no editor', () => {
+    const store = new McpStore(undefined, true, () => {})
+    assert.equal(store.available, false)
+    assert.deepEqual(store.load().servers, [])
   })
 })
 
-describe('nextEntryId', () => {
-  it('continues the monotonic sequence past the highest existing id', () => {
-    const servers = [{ id: 'mcp-3' }, { id: 'mcp-1' }] as unknown as McpServerEntry[]
-    assert.equal(nextEntryId(servers), 'mcp-4')
-    assert.equal(nextEntryId([]), 'mcp-1')
-  })
-})
-
-describe('McpStore CRUD', () => {
-  let handle: { store: McpStore, dir: string }
-  beforeEach(() => { handle = makeStore() })
-  afterEach(() => { rmSync(handle.dir, { recursive: true, force: true }) })
-
-  it('create persists a validated entry that load() returns', () => {
-    const { store } = handle
-    const entry = store.create(VALID_STDIO)
-    assert.equal(entry.id, 'mcp-1')
-    assert.equal(store.load().servers.length, 1)
-    assert.equal(store.load().servers[0]?.serverName, 'github')
+describe('writing', () => {
+  it('creates an entry under its server name and keeps the rest of the map', () => {
+    const fake = fakeEditor({ kept: { transport: 'stdio', command: 'kept' }, broken: { transport: 'stdio' } })
+    const store = new McpStore(fake.editor, true, () => {})
+    return store.create({ serverName: 'github', transport: 'stdio', command: 'npx' }).then((entry) => {
+      assert.equal(entry.id, 'github')
+      const servers = fake.document.servers as Record<string, unknown>
+      assert.deepEqual(Object.keys(servers).sort(), ['broken', 'github', 'kept'])
+      // The entry this version cannot validate survived the write verbatim.
+      assert.deepEqual(servers.broken, { transport: 'stdio' })
+    })
   })
 
-  it('update replaces the entry by id and keeps others', () => {
-    const { store } = handle
-    const first = store.create(VALID_STDIO)
-    const second = store.create({ serverName: 'web', transport: 'streamable-http', url: 'http://127.0.0.1:3000/mcp' })
-    store.update(second.id, { serverName: 'web2', transport: 'streamable-http', url: 'http://127.0.0.1:3001/mcp' })
-    const servers = store.load().servers
-    assert.equal(servers.length, 2)
-    assert.equal(servers.find(entry => entry.id === first.id)?.serverName, 'github')
-    assert.equal(servers.find(entry => entry.id === second.id)?.serverName, 'web2')
-  })
-
-  it('update rejects an unknown id', () => {
-    const { store } = handle
-    assert.throws(() => store.update('mcp-9', VALID_STDIO), McpValidationError)
-    assert.throws(
-      () => store.update('mcp-9', VALID_STDIO),
-      (error: unknown) => error instanceof McpValidationError && error.code === 'server.notFound' && error.params?.id === 'mcp-9',
+  it('refuses a duplicate server name', async () => {
+    const fake = fakeEditor({ github: { transport: 'stdio', command: 'npx' } })
+    const store = new McpStore(fake.editor, true, () => {})
+    await assert.rejects(
+      () => store.create({ serverName: 'github', transport: 'stdio', command: 'other' }),
+      (error: unknown) => error instanceof McpValidationError && error.code === 'serverName.taken',
     )
   })
 
-  it('create rejects a second ENABLED server with the same serverName but allows a disabled one', () => {
-    const { store } = handle
-    store.create(VALID_STDIO)
-    assert.throws(() => store.create({ ...VALID_STDIO, command: 'node' }), McpValidationError)
-    // Disabled twins are fine: they mount nothing, so no live namespace clash.
-    store.create({ ...VALID_STDIO, command: 'node', enabled: false })
-    assert.equal(store.load().servers.length, 2)
+  it('replaces an entry in place and keeps its key', async () => {
+    const fake = fakeEditor({ github: { transport: 'stdio', command: 'npx' } })
+    const store = new McpStore(fake.editor, true, () => {})
+    await store.update('github', { serverName: 'github', transport: 'stdio', command: 'npx', enabled: false })
+    const servers = fake.document.servers as Record<string, { enabled?: boolean }>
+    assert.equal(servers.github?.enabled, false)
+    assert.equal(Object.keys(servers).length, 1)
   })
 
-  it('remove deletes exactly the targeted entry', () => {
-    const { store } = handle
-    const entry = store.create(VALID_STDIO)
-    store.remove(entry.id)
-    assert.equal(store.load().servers.length, 0)
+  it('refuses to rename an entry: the key is the tool namespace', async () => {
+    const fake = fakeEditor({ github: { transport: 'stdio', command: 'npx' } })
+    const store = new McpStore(fake.editor, true, () => {})
+    await assert.rejects(
+      () => store.update('github', { serverName: 'gitlab', transport: 'stdio', command: 'npx' }),
+      (error: unknown) => error instanceof McpValidationError && error.code === 'serverName.immutable',
+    )
+  })
+
+  it('answers not-found for a key the document does not hold', async () => {
+    const store = new McpStore(fakeEditor({}).editor, true, () => {})
+    await assert.rejects(
+      () => store.update('ghost', { serverName: 'ghost', transport: 'stdio', command: 'npx' }),
+      (error: unknown) => error instanceof McpValidationError && error.code === 'server.notFound',
+    )
+  })
+
+  it('removes one key and leaves the others', async () => {
+    const fake = fakeEditor({ a: { transport: 'stdio', command: 'a' }, b: { transport: 'stdio', command: 'b' } })
+    const store = new McpStore(fake.editor, true, () => {})
+    await store.remove('a')
+    assert.deepEqual(Object.keys(fake.document.servers as Record<string, unknown>), ['b'])
+  })
+
+  it('treats a missing key on remove as a no-op and writes nothing', async () => {
+    const fake = fakeEditor({})
+    const store = new McpStore(fake.editor, true, () => {})
+    await store.remove('ghost')
+    assert.equal(fake.writes, 0)
+  })
+
+  it('refuses every write when the kernel mounts no editor', async () => {
+    const store = new McpStore(undefined, true, () => {})
+    await assert.rejects(
+      () => store.create({ serverName: 'github', transport: 'stdio', command: 'npx' }),
+      (error: unknown) => error instanceof McpValidationError && error.code === 'store.unavailable',
+    )
   })
 })
 
-describe('McpStore invalid-entry preservation', () => {
-  let dir: string
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dsh-mcp-test-')) })
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
-
-  it('keeps a hand-edited broken entry on disk through later saves', () => {
-    mkdirSync(dir, { recursive: true })
-    const filePath = join(dir, 'servers.json')
-    const broken = { id: 'mcp-9', serverName: 'broken-服务器', transport: 'stdio' }
-    writeFileSync(filePath, JSON.stringify({
-      version: 1,
-      enabled: true,
-      servers: [broken, { ...VALID_STDIO, id: 'mcp-1' }],
-    }), 'utf8')
-    const store = new McpStore(dir, () => {})
-    // The broken entry is invisible to the mounted set...
-    assert.equal(store.load().servers.length, 1)
-    // ...but a create (which rewrites the whole file) must not silently drop it.
-    store.create({ serverName: 'extra', transport: 'stdio', command: 'node' })
-    const onDisk = JSON.parse(readFileSync(filePath, 'utf8')) as { servers: Array<{ id?: string, serverName?: string }> }
-    assert.equal(onDisk.servers.some(entry => entry.id === 'mcp-9' && entry.serverName === 'broken-服务器'), true)
-    assert.equal(onDisk.servers.length, 3)
-  })
-})
-
-describe('McpStore master switch', () => {
-  let dir: string
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dsh-mcp-test-')) })
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
-
-  it('persists enabled:false and reports it through load()', () => {
-    const store = new McpStore(dir, () => {})
-    store.create(VALID_STDIO)
-    const file = store.load()
-    store.save({ ...file, enabled: false })
-    assert.equal(store.load().enabled, false)
+describe('batch import', () => {
+  it('writes the whole batch in one edit and skips keys already configured', async () => {
+    const fake = fakeEditor({ kept: { transport: 'stdio', command: 'kept' } })
+    const store = new McpStore(fake.editor, true, () => {})
+    const written = await store.importAll([
+      { id: 'kept', serverName: 'kept', transport: 'stdio', enabled: true, command: 'other' },
+      { id: 'fresh', serverName: 'fresh', transport: 'stdio', enabled: true, command: 'fresh' },
+    ])
+    assert.equal(written, 1)
+    assert.equal(fake.writes, 1, 'one write for the batch, not one per entry')
+    const servers = fake.document.servers as Record<string, { command?: string }>
+    assert.equal(servers.kept?.command, 'kept', 'the configured entry was not overwritten')
+    assert.equal(servers.fresh?.command, 'fresh')
   })
 
-  it('defaults to enabled when the file does not exist', () => {
-    const store = new McpStore(dir, () => {})
-    assert.equal(store.load().enabled, true)
-    assert.equal(store.load().servers.length, 0)
+  it('writes nothing when every key is already there', async () => {
+    const fake = fakeEditor({ kept: { transport: 'stdio', command: 'kept' } })
+    const store = new McpStore(fake.editor, true, () => {})
+    assert.equal(await store.importAll([{ id: 'kept', serverName: 'kept', transport: 'stdio', enabled: true, command: 'kept' }]), 0)
+    assert.equal(fake.writes, 0)
   })
 })

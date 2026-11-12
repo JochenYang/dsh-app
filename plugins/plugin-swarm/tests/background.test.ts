@@ -82,9 +82,9 @@ function continuationCtx(children: Record<string, FakeChild>): FakeHarness {
     },
     subagents: {
       getProvider: () => ({ prepareContinuable: async () => ({}) }),
-      startActivation: async (spec: { request: { prompt: readonly { text: string }[] }, delivery?: string }) => {
+      startActivation: async (spec: { prompt: readonly { text: string }[], delivery?: string }) => {
         deliveries.push(spec.delivery)
-        const text = spec.request.prompt[0].text
+        const text = spec.prompt[0].text
         const key = Object.keys(children).find(candidate => text.includes(candidate))
         assert.ok(key !== undefined, `no mock child for prompt "${text}"`)
         const childId = `child-${key}`

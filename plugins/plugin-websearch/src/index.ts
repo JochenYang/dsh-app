@@ -85,11 +85,16 @@ const unresolvedKeysFor = (entry: EngineEntry): number => unresolvedKeyCount(ent
 interface WebSeamLike {
   registerSearchProvider(provider: {
     id: string
+    /** Display name and picker copy; 0.2.2-rc.2 added them, older lines ignore them. */
+    title?: string
+    description?: Readonly<Record<string, string>>
     available(): boolean
     search(request: { query: string, maxResults?: number }, signal?: AbortSignal): Promise<unknown>
   }): () => void
   registerFetchProvider?(provider: {
     id: string
+    title?: string
+    description?: Readonly<Record<string, string>>
     available(): boolean
     fetch(request: { url: string }, signal?: AbortSignal): Promise<unknown>
   }): () => void
@@ -178,6 +183,13 @@ export function apply(ctx: Context, config: Config): void {
    */
   const provider = {
     id: BRAND_PROVIDER_ID,
+    // Shown by the kernel's own Web search page; without these it can only
+    // print the id. This is the engine chain, not one engine.
+    title: 'DSH APP',
+    description: {
+      en: 'The suite engine chain: anysearch, bing, parallel, exa and a SearXNG instance list, tried in order with automatic fallback.',
+      zh: '套件自带的引擎链：anysearch、bing、parallel、exa 与自填的 SearXNG 实例，按顺序尝试并自动回退。',
+    },
     available(): boolean {
       const file = store.load()
       if (!file.enabled) return false

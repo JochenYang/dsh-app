@@ -4,25 +4,24 @@
  * secret mask/unmask round trip (literal values are never returned to the
  * client; a mask sentinel sent back keeps the stored value).
  *
- * The registry stand-in mirrors the carrier: a request whose path is not
- * registered, or whose method the route does not own, falls through to the
- * shared channel's 404 (`HostConnectionService.createSharedFetchHandler`).
+ * The store under these routes is the `mcp-manager` row (see src/store.ts), so
+ * "persisted" here means "in the config document", and the assertions read that
+ * document rather than a file. The registry stand-in mirrors the carrier: a
+ * request whose path is not registered, or whose method the route does not own,
+ * falls through to the shared channel's 404.
  *
  * @module plugin-mcp/tests/routes
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, beforeEach, describe, it } from 'node:test'
-import { McpMountManager } from '../src/mount.ts'
+import { beforeEach, describe, it } from 'node:test'
 import { maskSecretValues, registerMcpRoutes, ROUTE_PREFIX, unmaskSecretValues, VALUE_MASK } from '../src/routes.ts'
-import { McpStore, McpValidationError } from '../src/store.ts'
-import type { McpServerEntry } from '../src/wire.ts'
+import { MANAGER_ROW_ID, McpStore, type ConfigEditorLike, type ConfigRow } from '../src/store.ts'
+import { McpFleetStatus } from '../src/status.ts'
+import { McpValidationError, type McpServerEntry } from '../src/wire.ts'
 
 const STORED: McpServerEntry = {
-  id: 'mcp-1',
+  id: 'github',
   serverName: 'github',
   transport: 'stdio',
   enabled: true,
@@ -46,6 +45,26 @@ interface Harness {
   readonly dispose: () => Promise<void>
 }
 
+/** A config document in memory, shaped the way the kernel's editor reports it. */
+function fakeEditor(initial: Record<string, unknown> = {}) {
+  const document: Record<string, unknown> = { servers: initial }
+  const row: ConfigRow = { options: { id: MANAGER_ROW_ID } }
+  const editor: ConfigEditorLike = {
+    entries: () => [row],
+    configuration: () => [{ entry: row, inherited: {}, override: document }],
+    edit: async (_entry, change) => {
+      const next = change({ ...document }, {})
+      for (const key of Object.keys(document)) Reflect.deleteProperty(document, key)
+      Object.assign(document, next)
+    },
+  }
+  return {
+    editor,
+    /** The stored servers, keyed by server name. */
+    servers: () => (document.servers ?? {}) as Record<string, Record<string, unknown>>,
+  }
+}
+
 function harness(store: McpStore): Harness {
   const routes: RegisteredRoute[] = []
   const fetchRegistry = {
@@ -54,8 +73,8 @@ function harness(store: McpStore): Harness {
       return async () => undefined
     },
   }
-  const manager = new McpMountManager(() => {}, undefined, undefined)
-  const dispose = registerMcpRoutes(fetchRegistry as never, store, manager)
+  const status = new McpFleetStatus(undefined)
+  const dispose = registerMcpRoutes(fetchRegistry as never, store, status)
 
   const dispatch = async (path: string, method: string, body?: unknown): Promise<Response> => {
     const route = routes.find(candidate => candidate.path === path)
@@ -79,35 +98,32 @@ function harness(store: McpStore): Harness {
 }
 
 interface Envelope {
-  readonly ok: boolean
-  readonly value?: {
-    readonly enabled: boolean
-    readonly filePath: string
-    readonly mountAvailable: boolean
-    readonly servers: readonly McpServerEntry[]
-    readonly imported?: readonly string[]
-    readonly failed?: readonly { readonly name: string, readonly reason: { readonly code: string } }[]
+  ok: boolean
+  value?: {
+    enabled: boolean
+    filePath: string
+    mountAvailable: boolean
+    servers: Array<{
+      id: string
+      serverName: string
+      enabled: boolean
+      env?: Record<string, string>
+      status: { state: string }
+    }>
+    imported?: string[]
+    failed?: Array<{ name: string, reason: { code: string } }>
   }
-  readonly error?: { readonly code: string, readonly host?: { readonly code: string } }
+  error?: { code: string, message: string, host?: { code: string } }
 }
 
 async function envelope(response: Response): Promise<Envelope> {
   return await response.json() as Envelope
 }
 
+const okEnvelope = (response: Response): Promise<Envelope> => envelope(response)
+
 describe('route registration', () => {
-  let dir: string
-  let harnessed: Harness
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dsh-mcp-routes-'))
-    harnessed = harness(new McpStore(dir, () => {}))
-  })
-
-  afterEach(async () => {
-    await harnessed.dispose()
-    rmSync(dir, { recursive: true, force: true })
-  })
+  const harnessed = harness(new McpStore(fakeEditor().editor, true, () => {}))
 
   it('registers the five routes under the Connection prefix, reads GET, writes POST', () => {
     assert.deepEqual(harnessed.routes.map(route => route.path).sort(), [
@@ -137,26 +153,21 @@ describe('route registration', () => {
 })
 
 describe('route behavior', () => {
-  let dir: string
+  let fake: ReturnType<typeof fakeEditor>
   let store: McpStore
   let harnessed: Harness
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dsh-mcp-routes-'))
-    store = new McpStore(dir, () => {})
+    fake = fakeEditor()
+    store = new McpStore(fake.editor, true, () => {})
     harnessed = harness(store)
   })
 
-  afterEach(async () => {
-    await harnessed.dispose()
-    rmSync(dir, { recursive: true, force: true })
-  })
-
-  it('GET /servers reports the file, the mount availability, and the masked entries', async () => {
-    store.save({ version: 1, enabled: true, servers: [STORED] })
+  it('GET /servers reports the store location, the mount availability, and the masked entries', async () => {
+    await store.create({ serverName: 'github', transport: 'stdio', command: 'npx', env: { GITHUB_TOKEN: 'gh_secret_value', HOME_REF: '$ENV:HOME' } })
     const response = await harnessed.get(`${ROUTE_PREFIX}/servers`)
     assert.equal(response.status, 200)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.equal(body.ok, true)
     assert.equal(body.value?.enabled, true)
     assert.equal(body.value?.filePath, store.filePath)
@@ -166,9 +177,12 @@ describe('route behavior', () => {
     assert.equal(view?.env?.GITHUB_TOKEN, VALUE_MASK)
     assert.equal(view?.env?.HOME_REF, '$ENV:HOME')
     assert.equal(JSON.stringify(body.value).includes('gh_secret_value'), false)
+    // No manager was mounted, so the entry reads as unavailable rather than
+    // claiming its tools are live.
+    assert.equal(view?.status.state, 'unavailable')
   })
 
-  it('POST /server/create persists the literal value and answers the masked list', async () => {
+  it('POST /server/create stores the literal value and answers the masked list', async () => {
     const response = await harnessed.post(`${ROUTE_PREFIX}/server/create`, {
       serverName: 'github',
       transport: 'stdio',
@@ -176,49 +190,48 @@ describe('route behavior', () => {
       env: { GITHUB_TOKEN: 'gh_secret_value' },
     })
     assert.equal(response.status, 200)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.equal(body.value?.servers.length, 1)
     assert.equal(body.value?.servers[0]?.env?.GITHUB_TOKEN, VALUE_MASK)
-    const onDisk = JSON.parse(readFileSync(store.filePath, 'utf8')) as { servers: McpServerEntry[] }
-    assert.equal(onDisk.servers[0]?.env?.GITHUB_TOKEN, 'gh_secret_value')
+    assert.equal(fake.servers().github?.env && (fake.servers().github!.env as Record<string, string>).GITHUB_TOKEN, 'gh_secret_value')
   })
 
   it('POST /server/create answers the coded validation failure for a bad entry', async () => {
     const response = await harnessed.post(`${ROUTE_PREFIX}/server/create`, { serverName: 'has space', transport: 'stdio' })
     assert.equal(response.status, 400)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.equal(body.ok, false)
     assert.equal(body.error?.code, 'bad-request')
     assert.equal(typeof body.error?.host?.code, 'string')
   })
 
   it('POST /server/update keeps the stored value behind a returned mask sentinel', async () => {
-    const created = store.create({ serverName: 'github', transport: 'stdio', command: 'npx', env: { GITHUB_TOKEN: 'gh_secret_value' } })
+    const created = await store.create({ serverName: 'github', transport: 'stdio', command: 'npx', env: { GITHUB_TOKEN: 'gh_secret_value' } })
     const response = await harnessed.post(`${ROUTE_PREFIX}/server/update`, {
       ...created,
       enabled: false,
       env: { GITHUB_TOKEN: VALUE_MASK },
     })
     assert.equal(response.status, 200)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.equal(body.value?.servers[0]?.enabled, false)
-    const onDisk = JSON.parse(readFileSync(store.filePath, 'utf8')) as { servers: McpServerEntry[] }
-    assert.equal(onDisk.servers[0]?.env?.GITHUB_TOKEN, 'gh_secret_value')
+    assert.equal((fake.servers().github!.env as Record<string, string>).GITHUB_TOKEN, 'gh_secret_value')
   })
 
-  it('POST /server/update answers 404 for an id this file does not hold', async () => {
-    const response = await harnessed.post(`${ROUTE_PREFIX}/server/update`, { id: 'mcp-404', serverName: 'github', transport: 'stdio', command: 'npx' })
+  it('POST /server/update answers 404 for a name the document does not hold', async () => {
+    const response = await harnessed.post(`${ROUTE_PREFIX}/server/update`, { id: 'ghost', serverName: 'ghost', transport: 'stdio', command: 'npx' })
     assert.equal(response.status, 404)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.equal(body.error?.host?.code, 'server.notFound')
   })
 
   it('POST /server/delete removes the entry and answers the remaining list', async () => {
-    const created = store.create({ serverName: 'github', transport: 'stdio', command: 'npx' })
+    const created = await store.create({ serverName: 'github', transport: 'stdio', command: 'npx' })
     const response = await harnessed.post(`${ROUTE_PREFIX}/server/delete`, { id: created.id })
     assert.equal(response.status, 200)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.deepEqual(body.value?.servers, [])
+    assert.deepEqual(fake.servers(), {})
   })
 
   it('POST /server/import reports the per-server failures without failing the batch', async () => {
@@ -226,21 +239,27 @@ describe('route behavior', () => {
       json: JSON.stringify({ mcpServers: { good: { command: 'npx' }, 'bad name': { command: 'npx' }, broken: { transport: 'streamable-http' } } }),
     })
     assert.equal(response.status, 200)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.deepEqual(body.value?.imported, ['good', 'bad_name'])
     assert.equal(body.value?.failed?.length, 1)
     assert.equal(body.value?.failed?.[0]?.name, 'broken')
   })
 
   it('answers 409 for every write route while the master switch is off', async () => {
-    store.save({ version: 1, enabled: false, servers: [] })
-    for (const path of ['create', 'update', 'delete', 'import']) {
-      const response = await harnessed.post(`${ROUTE_PREFIX}/server/${path}`, { json: '{"mcpServers":{}}' })
-      assert.equal(response.status, 409, `${path} must answer 409`)
-      const body = await envelope(response)
-      assert.equal(body.error?.host?.code, 'route.disabled')
+    const readOnly = fakeEditor()
+    const disabledStore = new McpStore(readOnly.editor, false, () => {})
+    const disabled = harness(disabledStore)
+    try {
+      for (const path of ['create', 'update', 'delete', 'import']) {
+        const response = await disabled.post(`${ROUTE_PREFIX}/server/${path}`, { json: '{"mcpServers":{}}' })
+        assert.equal(response.status, 409, `${path} must answer 409`)
+        const body = await okEnvelope(response)
+        assert.equal(body.error?.host?.code, 'route.disabled')
+      }
+      assert.equal((await disabled.get(`${ROUTE_PREFIX}/servers`)).status, 200)
+    } finally {
+      await disabled.dispose()
     }
-    assert.equal((await harnessed.get(`${ROUTE_PREFIX}/servers`)).status, 200)
   })
 
   it('answers a coded 400 when the body is not JSON', async () => {
@@ -250,7 +269,7 @@ describe('route behavior', () => {
       body: 'not json',
     }))
     assert.equal(response.status, 400)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.equal(body.error?.host?.code, 'route.invalidBody')
   })
 
@@ -262,22 +281,27 @@ describe('route behavior', () => {
       body: JSON.stringify({ json: 'x'.repeat(70_000) }),
     }))
     assert.equal(response.status, 413)
-    const body = await envelope(response)
+    const body = await okEnvelope(response)
     assert.equal(body.error?.host?.code, 'route.bodyTooLarge')
   })
 })
 
 describe('secret masking round trip', () => {
-  it('masks literal env values on read but keeps $ENV: references verbatim', () => {
+  it('masks literal env values on read but keeps references verbatim', () => {
     const masked = maskSecretValues(STORED)
     assert.equal(masked.env?.GITHUB_TOKEN, VALUE_MASK)
     assert.equal(masked.env?.HOME_REF, '$ENV:HOME')
     assert.equal(masked.command, STORED.command)
   })
 
+  it('keeps the manager credential template readable too', () => {
+    const masked = maskSecretValues({ ...STORED, env: { TOKEN: '${credential:GH_TOKEN}' } })
+    assert.equal(masked.env?.TOKEN, '${credential:GH_TOKEN}')
+  })
+
   it('masks literal headers and keeps the URL untouched', () => {
     const entry: McpServerEntry = {
-      id: 'mcp-2',
+      id: 'web',
       serverName: 'web',
       transport: 'streamable-http',
       enabled: true,

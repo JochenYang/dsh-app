@@ -433,6 +433,7 @@ function itemEntry(item: SwarmItemOutcome): string {
   const lines = [`[${item.index}] ${item.item}`, `status: ${item.status}`]
   // The child id is the handle a later resume_entries call needs; surface
   // it explicitly so the model does not have to infer it from elsewhere.
+  if (item.name !== undefined) lines.push(`name: ${item.name}`)
   if (item.childId !== undefined) lines.push(`childId: ${item.childId}`)
   if (item.failureKind !== undefined) lines.push(`failureKind: ${item.failureKind}`)
   if (item.failureCode !== undefined) lines.push(`failureCode: ${item.failureCode}`)
@@ -696,7 +697,7 @@ interface SwarmBackgroundToolOutput {
 /** One item row of the tool output (orchestrator shape plus the dry-run
  * `prompt`); a dry-run row carries `prompt` instead of outcome detail. */
 interface SwarmItemOutput extends Pick<SwarmItemOutcome,
-  'index' | 'item' | 'status' | 'childId' | 'output' | 'error'
+  'index' | 'item' | 'status' | 'name' | 'childId' | 'output' | 'error'
   | 'failureKind' | 'failureCode' | 'durationMs' | 'usage' | 'retries'> {
   readonly prompt?: string
 }

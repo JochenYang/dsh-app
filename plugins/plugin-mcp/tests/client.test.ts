@@ -37,8 +37,17 @@ describe('hostMessage', () => {
   })
 
   it('falls back to the host English diagnostic for a code this build does not know', () => {
-    assert.equal(hostMessage({ code: 'mount.failed', text: 'ENOENT: npx not found' }, t), 'ENOENT: npx not found')
+    // `mount.failed` used to be the example here; since the fleet moved to the
+    // kernel manager it HAS copy, so the fixture is a code this build genuinely
+    // does not serve.
     assert.equal(hostMessage({ code: 'route.crossOrigin', text: 'cross-origin request' }, t), 'cross-origin request')
+    assert.equal(hostMessage({ code: 'mcp-manager/reconcileFailed', text: 'reconcile failed' }, t), 'reconcile failed')
+  })
+
+  it('renders the manager mount failure with its own copy, keeping the diagnostic as the reason', () => {
+    const rendered = hostMessage({ code: 'mount.failed', params: { reason: 'load' }, text: 'ENOENT: npx not found' }, t)
+    assert.match(rendered, /挂载失败/u)
+    assert.match(rendered, /load/u)
   })
 
   it('never renders blank: the caller\'s generic line, then the code itself', () => {
@@ -50,7 +59,7 @@ describe('hostMessage', () => {
     assert.equal(hostMessage({ code: 'route.writeFailed', params: { detail: 'EACCES' }, text: 'EACCES' }, t), '写入服务器配置失败：EACCES')
     assert.equal(hostMessage({ code: 'route.invalidBody', params: { detail: 'Unexpected token' }, text: 'Unexpected token' }, t), '请求无法解析：Unexpected token')
     assert.equal(hostMessage({ code: 'json.parseFailed', params: { detail: 'Unexpected token' } }, t), 'JSON 解析失败：Unexpected token')
-    assert.equal(hostMessage({ code: 'secret.masked', params: { field: 'env.TOKEN' } }, t), 'env.TOKEN 是掩码值：请重新输入真实值，或改用 $ENV:VAR 引用')
+    assert.equal(hostMessage({ code: 'secret.masked', params: { field: 'env.TOKEN' } }, t), 'env.TOKEN 是掩码值：请重新输入真实值，或改用 ${credential:NAME} 引用')
   })
 })
 
@@ -69,7 +78,7 @@ describe('hostListText', () => {
 describe('host copy table', () => {
   /** Every param name a host code carries, so a copy placeholder can be filled. */
   const SAMPLE_PARAMS: Readonly<Record<string, string | number>> = {
-    name: 'x', id: 'x', field: 'x', detail: 'x', type: 'x', value: 'x',
+    name: 'x', id: 'x', field: 'x', detail: 'x', type: 'x', value: 'x', from: 'a', to: 'b', reason: 'load',
   }
 
   it('has no placeholder the host cannot fill, so no raw {param} can reach the screen', () => {
