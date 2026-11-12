@@ -76,7 +76,7 @@ export function apply(ctx: Context, config: Config): void {
 
   const editor = ctx.get('configEditor') as ConfigEditorLike | undefined
   const fleet = ctx.get('mcpManager') as McpFleetLike | undefined
-  const store = new McpStore(editor, config.enabled, (message) => log.warn(message))
+  const store = new McpStore(editor, config.enabled)
   const status = new McpFleetStatus(fleet)
 
   if (editor === undefined) {

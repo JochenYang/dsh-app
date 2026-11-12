@@ -195,11 +195,13 @@ export function registerMcpRoutes(
       // Reporting an empty fleet here would hide servers the manager is running.
       return writeRejection(error)
     }
+    // One manager read for the whole page (see McpFleetStatus.snapshot).
+    const statusOf = fleet.snapshot()
     const servers: McpServerView[] = []
     for (const entry of file.servers) {
       servers.push({
         ...maskSecretValues(entry),
-        status: fleet.statusFor(entry),
+        status: statusOf(entry),
       })
     }
     return ok({

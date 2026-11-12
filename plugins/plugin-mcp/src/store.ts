@@ -188,13 +188,7 @@ export class McpStore {
   constructor(
     private readonly editor: ConfigEditorLike | undefined,
     private readonly enabled: boolean,
-    private readonly log: (message: string) => void,
   ) {}
-
-  /** Whether the config editor is available at all. */
-  get available(): boolean {
-    return this.editor !== undefined
-  }
 
   /** The row this store addresses, or undefined when the composition has none. */
   private row(): ConfigRow | undefined {

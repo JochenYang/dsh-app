@@ -9,7 +9,6 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import {
-  assertUniqueServerName,
   entryToExternal,
   invalidServerNameError,
   mapExternalServer,
@@ -135,14 +134,6 @@ describe('coded validation', () => {
     assert.equal(codeOf(() => validateEntry({ ...VALID_STDIO, id: 'mcp-1', toolCallTimeoutMs: 0 }, new Set())), 'timeout.notPositive')
   })
 
-  it('carries the duplicate-namespace code with the clashing name', () => {
-    const entry = validateEntry({ ...VALID_STDIO, id: 'mcp-2' }, new Set())
-    assert.equal(codeOf(() => assertUniqueServerName(entry, [{ ...entry, id: 'mcp-1' }])), 'serverName.duplicate')
-    assert.throws(
-      () => assertUniqueServerName(entry, [{ ...entry, id: 'mcp-1' }]),
-      (error: unknown) => error instanceof McpValidationError && error.params?.name === 'github',
-    )
-  })
 })
 
 describe('slugifyServerName', () => {

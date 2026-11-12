@@ -92,7 +92,9 @@ it the suite is 588/588. To reproduce CI locally, run it into a directory and se
 | `probe-office-menu.cjs` | after touching `plugin-ppt`'s `office-menu.ts`, its icons, the `menu.*` keys, or the client entry's registration | the four rows rendering, ordered, clicking to ONE chip |
 | `probe-swarm-team-prompt.mjs` | after touching `plugin-swarm`'s prompt sections | whether both delegation sections survive assembly, contiguous and ordered |
 | `probe-team-section-mount.mjs` | after touching the Team section's mount | the optional `agentTeams` mount in BOTH composition orders |
-| `probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` / `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-whale.cjs` / `probe-mirror.mjs` | after touching the surface each names | that surface |
+| `probe-chrome-surfaces.cjs` / `probe-in-frame-dialog.cjs` / `probe-overlay-modal.cjs` / `probe-update-card.cjs` / `probe-mirror.mjs` | after touching the surface each names | that surface |
+| `probe-whale.mjs` | after touching the home decorations — our `whale-background` layer, `ui-brand-official`'s `conversation.hero.frame` occupant, or the overlay row that disables it | what the two canvases PAINT: ours at rest, theirs transparent at rest and painting only after a blank click. It drives the running dev window over CDP (`--remote-debugging-port=9222`), because `dsh-app://app` exists only in the app's own process |
+| `probe-settings-rail.mjs` | after touching a settings section, the rail order, or the nav glyph rules | the rail in the running window: rows, one native glyph per row, the merged 维护 section as one row, and (in an English window) no Han left. `probe-settings-nav.cjs` remains the full probe but needs a built harness checkout |
 
 `scripts/capture.mjs` screenshots the running UI for visual work.
 

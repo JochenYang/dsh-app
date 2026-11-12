@@ -77,6 +77,7 @@ const HOST_KEYS: Readonly<Record<string, McpKey>> = {
   'import.writeFailed': 'mcp.host.importWriteFailed',
   'mount.unavailable': 'mcp.host.mountUnavailable',
   'mount.failed': 'mcp.host.mountFailed',
+  'mount.retained': 'mcp.host.mountRetained',
   'mount.closed': 'mcp.host.mountClosed',
   'mount.needsCredentials': 'mcp.host.mountNeedsCredentials',
   'env.inlineRef': 'mcp.host.envInlineRef',

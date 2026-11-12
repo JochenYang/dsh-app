@@ -1243,3 +1243,39 @@ test('the tool output schema accepts every field a real batch item carries', asy
   const problems = validateJsonSchemaValue(compiled as never, outcome.items[0])
   assert.deepEqual(problems, [])
 })
+
+/**
+ * The three shapes the tool can answer with, validated against the compiled
+ * schema: a dry-run row carries `prompt` and no child, `status_only` drops
+ * `output`, and a background call answers a job id instead of items. A field
+ * the schema does not declare fails the WHOLE call, so each shape is checked
+ * rather than only the executed batch.
+ */
+test('every item shape the tool can answer with validates against its schema', async () => {
+  const { valueSchemaSpecToJsonSchema, validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools')
+  const { SWARM_ITEM_SCHEMA } = await import('../src/index.ts')
+  const { projectOutputItems } = await import('../src/orchestrator.ts')
+  const compiled = valueSchemaSpecToJsonSchema(SWARM_ITEM_SCHEMA as never)
+  const ctx = mockOneShotCtx({ alpha: { stopReason: 'completed', text: 'alpha done' } })
+  const outcome = await runSwarmBatch(ctx, { ...baseOptions(), tasks: tasksOf('alpha') })
+
+  const full = outcome.items[0]!
+  assert.deepEqual(validateJsonSchemaValue(compiled as never, full), [])
+  const statusOnly = projectOutputItems([full], 'status_only')[0]!
+  assert.deepEqual(validateJsonSchemaValue(compiled as never, statusOnly), [])
+  const dryRun = { index: 0, item: 'alpha', status: 'aborted' as const, prompt: 'expanded prompt text' }
+  assert.deepEqual(validateJsonSchemaValue(compiled as never, dryRun), [])
+})
+
+/**
+ * The schema is one object, not a copy: this pins the wiring. Re-inlining the
+ * item shape into the tool would leave the test above green while the registered
+ * schema drifted, so the registration itself is asserted.
+ */
+test('the tool registers the exported item schema, not a copy of it', async () => {
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  assert.match(source, /items:\s*SWARM_ITEM_SCHEMA/u)
+  assert.equal(/additionalProperties:\s*false,[\s\S]*?index:\s*\{\s*type:\s*'number'/u.test(source.slice(source.indexOf('output: {'))), false,
+    'the item shape must not be re-inlined inside the tool output schema')
+})

@@ -518,15 +518,20 @@ export function McpSection({ t }: McpSectionProps): ReactNode {
                   <div className="dshMcp-row">
                     <div className="dshMcp-field dshMcp-fieldGrow">
                       <span className="dshMcp-label">{t('mcp.field.serverName')}</span>
+                      {/* The key IS the tool namespace, so an existing entry's name
+                          is immutable (the host refuses a rename); offering an
+                          editable field only produced a 400 per attempt. */}
                       <input
                         className="dshMcp-input"
                         value={draft.serverName}
                         placeholder={t('mcp.field.serverNamePlaceholder')}
-                        disabled={busy}
+                        disabled={busy || draft.id !== null}
                         aria-label={t('mcp.field.serverNameAria')}
                         onChange={(event) => { setDraft({ ...draft, serverName: event.target.value }) }}
                       />
-                      <span className="dshMcp-fieldHint">{t('mcp.field.serverNameHint')}</span>
+                      <span className="dshMcp-fieldHint">
+                        {draft.id === null ? t('mcp.field.serverNameHint') : t('mcp.field.serverNameFixed')}
+                      </span>
                     </div>
                     <div className="dshMcp-field">
                       <span className="dshMcp-label">{t('mcp.field.transport')}</span>
@@ -750,7 +755,9 @@ export function McpSection({ t }: McpSectionProps): ReactNode {
           ? <div className="dshMcp-empty">{t('mcp.empty')}</div>
           : null}
         {sortedServers.map((view) => {
-          const badge = STATUS_BADGE[view.status.state] ?? STATUS_BADGE.disabled
+          // An unknown state must not claim "stopped": the host maps anything it
+          // does not recognise to `starting`, and this mirror follows it.
+          const badge = STATUS_BADGE[view.status.state] ?? STATUS_BADGE.starting
           const meta = view.transport === 'stdio'
             ? `${view.command ?? ''} ${(view.args ?? []).join(' ')}`
             : view.url ?? ''

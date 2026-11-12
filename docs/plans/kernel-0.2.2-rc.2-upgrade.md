@@ -35,9 +35,9 @@
 | W5 kit 0.2.3 + 垫片改名 + 白名单共享 | 完成 | 新树里 `import.meta.resolve` 解析到垫片并加载出真 kit；payload 0.2.3 |
 | W6 `dsh-error` peer | 完成 | 6 个 manifest；19/19 插件建包 |
 | W7 类型门禁 | 完成 | 19/19；它抓到 swarm 参数摊平与 rewind 的 zod 漂移 |
-| W8 hero 层 | 完成（结论订正） | 上游 canvas 空闲时 0 像素；不否决上游，保持默认开启 |
+| W8 hero 层 | 完成（结论订正） | `probe-whale.mjs` 5 项全过：我们的层空闲有像素、上游空闲 0、点击后 62042 像素；不否决上游 |
 | W10 provider title/description | 完成 | `plugin-websearch` 0.3.1 |
-| W11 文档与注释 | 完成 | ARCHITECTURE / build-and-release / build-runtime / office-payload / desktop-host 均已改 |
+| W11 文档与注释 | 完成 | ARCHITECTURE / build-and-release / build-runtime / office-payload / desktop-host / 探针名册均已改 |
 | W12 Agent Teams 默认开启 | 完成（裁决） | 不加否决行 |
 | W13 MCP 归内核管理器 | 待审查 | 真机：`mounted` + `toolCount 1`，写入落在 `mcp-manager` 行 |
 | W13b 旧配置迁移 | 完成 | `tests/legacy.test.ts` 5 例；真机文件是空舰队，无迁移可做 |
@@ -153,7 +153,7 @@ rc.2 只有 git tag（`dsh-v0.2.2-rc.2`，release 提交 `91319233e1`）与 GitH
 | 10 (W8) | 首页只有一层鲸鱼 | 真机开首页 + CDP 读 DOM | 我们的 canvas 在且 `is-visible`；`[data-home-whale]` 计数 0；无 `slot entry crashed` | 运行中的窗口 + `scratch/cdp.mjs` | PASS（订正：静止时只有我们那层；上游画布透明，点击才播） |
 | 11 (W1/W14) | 根套件与真内核 | `npm test`；`npm run verify -- --tgz <新产物>` | 全绿 | 命令 | PASS（npm test 737/735/0；verify --tgz smoke 全过，过程中修了导入后单次读状态的断言） |
 | 12 (W1) | 路由载体未变 | `probe-routes.cjs` 的 S1–S5 段 | RESULT 全 PASS | `node scripts/probe-routes.cjs` | PASS（--tgz 跑新产物：RESULT: PASS (32 checks)） |
-| 13 (W3) | 设置页图标未回退 | `probe-settings-nav.cjs --lang en-US` | 无双图标、无残留 Han | 命令 | N/A（跑不了：该探针需要一个已构建的 harness 检出，本机没有；不是本轮回归） |
+| 13 (W3) | 设置页图标未回退 | 真机设置栏 | 无双图标、维护区一行、英文下无残留 Han | `node scripts/probe-settings-rail.mjs` | PASS（17 行、无双图标、维护设置 1 行；英文项需把应用切成英文后复跑，探针会自己跳过并说明） |
 | 14 (W12) | Agent Teams 裁决的可见结果 | 真机看模型菜单/工具列表 | 与裁决一致 | 手工 | N/A（未做手工确认；默认开启按上游） |
 | 15 (W13) | MCP 只有一套实例 | 在内核页面之外的我们的页面加一个服务器 | 工具以 `mcp__<server>__<tool>` 注册，且 loader 条目里没有第二个 mcp-client 实例 | 手工 + 启动日志 | PASS（真机 mounted + toolCount 1；patch 只有一个存储） |
 | 16 (W13b) | 旧配置迁移 | 预置一个带 `$ENV:` 引用的 `servers.json` 后启动 | 条目出现在 `mcp-manager` 行 config，`$ENV:` 变成 `${credential:…}`，原文件仍在 | 手工 + 读 profile patch | PASS（tests/legacy.test.ts；真机空舰队未触发迁移） |

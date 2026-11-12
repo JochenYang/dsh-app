@@ -159,7 +159,7 @@ describe('route behavior', () => {
 
   beforeEach(() => {
     fake = fakeEditor()
-    store = new McpStore(fake.editor, true, () => {})
+    store = new McpStore(fake.editor, true)
     harnessed = harness(store)
   })
 
@@ -247,7 +247,7 @@ describe('route behavior', () => {
 
   it('answers 409 for every write route while the master switch is off', async () => {
     const readOnly = fakeEditor()
-    const disabledStore = new McpStore(readOnly.editor, false, () => {})
+    const disabledStore = new McpStore(readOnly.editor, false)
     const disabled = harness(disabledStore)
     try {
       for (const path of ['create', 'update', 'delete', 'import']) {

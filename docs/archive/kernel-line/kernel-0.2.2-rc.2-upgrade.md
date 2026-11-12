@@ -183,3 +183,12 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
 |---|---|---|
 | 1 | `verify --tgz` 红在「mcp: imported server mounted」：导入后立刻读一次状态，拿到 `starting` | 挂载现在是内核管理器的异步 reconcile，smoke 改成轮询（与 create 路径一致，20 s 预算） |
 | 2 | 经工具调用 `office_to_pdf` 恒报 `unavailable`，而直接用 payload 里的 kit 又能转 | rc.2 的 kit 从消费方解析到的入口锚定引擎；垫片在运行树里、引擎在 payload 里。垫片现在把 `resolveEnginePackage` 显式指向 payload 的 `node_modules`，修后经垫片也转出 18303 字节 |
+
+## 12 覆盖补齐（P2 与探针） `[实测]`
+
+| 项 | 做了什么 |
+|---|---|
+| `probe-whale.cjs` → `probe-whale.mjs` | 旧探针要一个 http URL，而桌面窗口的文档是 `dsh-app://app`（只在应用进程内），宿主 URL 的 token 又被日志脱敏，因此它一直跑不了。改为 CDP 驱动运行中的窗口，量两张 canvas 的**已绘像素**：我们的层空闲有像素、上游空闲 0、点击空白后 62042 像素并自行清空。5 项全过 |
+| 新增 `probe-settings-rail.mjs` | `probe-settings-nav.cjs` 需要一个装好并构建过的 harness 检出（它靠 `pnpm dsh web` 起内核），本机没有。新探针走 CDP：设置栏 17 行、每行至多一个原生字形、合并后的「维护设置」恰好一行；英文窗口的 Han 检查在中文窗口下自动跳过并说明原因 |
+| `plugin-mcp` 的 P2 | `fleet.list()` 每页只读一次（原先每条一次，O(n²)）；删掉已无人用的 `nextEntryId` / `assertUniqueServerName` / `McpStore.log` / `McpStore.available`；`configured: false` 的记录现在报告为「已移除、内核收尾中」而不是普通条目；客户端未知状态回退成 `starting` 而不是「已停用」；编辑表单不再允许改 `serverName`（host 一律拒，等于每次一个 400）；`package.json` 描述改成新机制；`dsh-tools` 从 peer/dev 里删掉（已无人 import） |
+| `plugin-swarm` 的 P2 | schema 测试现在校验**编译后**的 schema，并覆盖 ready / `status_only` / dry-run 三种形态；另加一条源码断言，钉住「注册的就是导出的那个常量，不是内联副本」 |

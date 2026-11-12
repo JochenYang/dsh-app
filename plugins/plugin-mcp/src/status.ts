@@ -98,21 +98,41 @@ export class McpFleetStatus {
   }
 
   /**
-   * The state of one configured entry.
+   * The manager's view, read once.
    *
-   * A server the manager does not list at all (removed a moment ago, or a
-   * composition that mounted no manager) answers `starting` while the manager
-   * exists: it is about to be mounted, or it was just removed.
+   * The page asks for one state per entry, so reading `list()` inside
+   * {@link statusFor} made a page read O(n²) — invisible at five servers,
+   * visible at two hundred.
+   *
+   * @returns a lookup over the current fleet; empty when no manager is mounted.
+   */
+  snapshot(): (entry: McpServerEntry) => McpMountStatus {
+    if (this.fleet === undefined) return () => ({ state: 'unavailable' })
+    const views = new Map(this.fleet.list().map((view) => [view.name, view]))
+    return (entry) => {
+      // An entry this version cannot parse may still be mounted by the manager,
+      // so its status is reported before the disabled check: the page must not
+      // say "disabled" about a server whose tools are live.
+      if (entry.invalid !== undefined) return { state: 'error', message: entry.invalid }
+      if (!entry.enabled) return { state: 'disabled' }
+      const view = views.get(entry.serverName)
+      if (view === undefined) return { state: 'starting' }
+      // `configured: false` is a runtime record the manager kept for a key that
+      // is no longer in the row (a removal whose cleanup did not finish): the
+      // page must not present it as an ordinary configured server.
+      if (!view.configured) return { state: 'error', message: { code: 'mount.retained' } }
+      return toMountStatus(view.status)
+    }
+  }
+
+  /**
+   * The state of one configured entry (single-shot; prefer {@link snapshot}
+   * when reading a whole page).
+   *
+   * @param entry - the configured entry.
+   * @returns its state as the page shows it.
    */
   statusFor(entry: McpServerEntry): McpMountStatus {
-    if (this.fleet === undefined) return { state: 'unavailable' }
-    // An entry this version cannot parse may still be mounted by the manager,
-    // so its status is reported before the disabled check: the page must not
-    // say "disabled" about a server whose tools are live.
-    if (entry.invalid !== undefined) return { state: 'error', message: entry.invalid }
-    if (!entry.enabled) return { state: 'disabled' }
-    const view = this.fleet.list().find((candidate) => candidate.name === entry.serverName)
-    if (view === undefined) return { state: 'starting' }
-    return toMountStatus(view.status)
+    return this.snapshot()(entry)
   }
 }

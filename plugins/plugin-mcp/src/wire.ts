@@ -207,15 +207,6 @@ function asStringRecord(value: unknown, field: string, owner?: string): Record<s
   return out
 }
 
-/** The id sequence is monotonic per file: `mcp-1`, `mcp-2`, … */
-export function nextEntryId(servers: readonly McpServerEntry[]): string {
-  let max = 0
-  for (const entry of servers) {
-    const match = /^mcp-(\d+)$/.exec(entry.id)
-    if (match !== null) max = Math.max(max, Number(match[1]))
-  }
-  return `mcp-${String(max + 1)}`
-}
 
 /**
  * Validate one raw entry object into a {@link McpServerEntry}. Throws
@@ -304,12 +295,6 @@ export function validateEntry(raw: unknown, existingIds: ReadonlySet<string>): M
   return entry
 }
 
-/** Enforce the upstream uniqueness contract: one live namespace per name. */
-export function assertUniqueServerName(entry: McpServerEntry, servers: readonly McpServerEntry[]): void {
-  if (!entry.enabled) return
-  const clash = servers.some(other => other.id !== entry.id && other.enabled && other.serverName === entry.serverName)
-  if (clash) throw new McpValidationError('serverName.duplicate', { name: entry.serverName })
-}
 
 // ---- external mcpServers JSON ------------------------------------------------
 
