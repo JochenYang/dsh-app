@@ -203,3 +203,18 @@ CI 工作流发布到 GitHub Releases：
 ```sh
 node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
 ```
+
+### 换内核线之前的预检
+
+跟随的内核线要动时，先让脚本对着目标版本回答「这次会打到我们哪里」：十二项检查覆盖包是否还
+发布、我们 import 的具名导出、声明签名、slot 与服务 id、overlay 行、技能名单、传递依赖版本、
+新增 peer，以及发布版的逐包载荷差异。
+
+```sh
+npm run check:preflight -- --npm <目标版本>   # 已发布：下载 + 校验 sha512
+npm run check:preflight -- --dir <tag 检出>   # 刚打 tag：离线，不下载
+```
+
+blocker 不为 0 就不动代码；每条要么本轮解决，要么写进台账并给出理由。检查项与判据见
+[`docs/agents/commands.md`](docs/agents/commands.md) 与
+[`docs/agents/kernel-line-regression.md` §1](docs/agents/kernel-line-regression.md)。

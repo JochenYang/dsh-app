@@ -245,3 +245,21 @@ platform/arch); CI publishes them to GitHub Releases:
 ```sh
 node scripts/build-runtime.mjs win32 x64 0.1.0-rc.8
 ```
+
+### Preflight before moving the kernel line
+
+When the followed kernel line is about to move, make the script answer "what will
+this do to us" against the target version first: twelve checks cover whether the
+packages are still published, the named exports we import, declaration shape, slot
+and service ids, overlay rows, the office skill list, transitive pin versions,
+newly added peers, and the published payload delta.
+
+```sh
+npm run check:preflight -- --npm <version>     # published: download + sha512 check
+npm run check:preflight -- --dir <tag dir>     # just tagged: offline, no download
+```
+
+A non-zero blocker count means no code changes yet — each one is either fixed in
+that round or written into the record with its reason. The checks and their
+rulings: [`docs/agents/commands.md`](docs/agents/commands.md) and
+[`docs/agents/kernel-line-regression.md` §1](docs/agents/kernel-line-regression.md).
