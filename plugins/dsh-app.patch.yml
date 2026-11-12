@@ -334,7 +334,7 @@
 # here either. The row's own module still mounts — the guard is inside its
 # `apply()` — so the disabled row leaves the brand slots empty exactly as before.
 - id: ui-brand-official
-  disabled: true
+  disabled: false
 
 # Session full-text search: override the base/web-app row's openAt from
 # 'never' to 'first-search' (the sqlite handle is created lazily on the first

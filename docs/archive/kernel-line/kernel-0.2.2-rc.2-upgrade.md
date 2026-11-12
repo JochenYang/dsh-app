@@ -78,13 +78,15 @@ POST /server/delete → servers: []，patch 中已无该键
 ## 5 hero 层：保留我们的品牌层 `[实测]`
 
 rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelWhale` 注册进新座位 `conversation.hero.frame`
-（`packages/client/ui-brand-official/src/client/index.ts:17`），于是首页同时出现两只鲸鱼：
-我们的 `#dshapp-whale-bg`（fixed，752×611，opacity 1，z-index -1）与内核的 `[data-home-whale]`
-（absolute，1224×843，opacity 0.18，z-index -1）。
+（`packages/client/ui-brand-official/src/client/index.ts:17`），于是在我们这种第三方构建里，首页也出现了一张 `[data-home-whale]` canvas。
+**但它是空的**：渲染器自称 "initially transparent"，实测首页空闲时 alpha>8 的像素 0 个，点击空白处才播一段自结束动画
+（+1.6s 76180 个像素，+2.5s 衰减回 2）；我们的 `#dshapp-whale-bg` 空闲就有 7529 个。
+（早先版本把"两个 canvas 元素都在"写成"两只鲸鱼同时可见"，是只看元素存在得出的错误结论，已作废。）
 
-**定案：保留我们的层，overlay 关掉 `ui-brand-official` 一行。** 该行另外两个座位（`sidebar.brand.mark` / `brand.name`）
-本来就在官方构建门控后，第三方构建从未注册，所以关掉不损失别的。实测关掉后：我们的 canvas 在且 `is-visible`，
-`[data-home-whale]` 计数 0，`slot entry crashed` 0。
+**定案：两层共存，不否决上游。** 静止状态没有冲突（上游那张画布是透明的），点击时上游播它自己的动画；
+`ui-brand-official` 保持默认开启，它的另外两个座位（`sidebar.brand.mark` / `brand.name`）本来就在官方构建门控后，
+第三方构建从未注册。若日后觉得点击动画与我们的层打架，overlay 一行 `- id: ui-brand-official / disabled: true` 即可。
+复现：`node scratch/whale-click-probe.mjs`（对 `--remote-debugging-port=9222` 的 dev 窗口）。
 
 （中途曾把「跟官方」读成「删掉自画层」，已回退：那是产品资产，不是换线适配。）
 
@@ -128,9 +130,14 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
 
 ## 9 未验证 / 下一轮
 
-- **办公转换的端到端**：kit 0.2.3 的 payload 已构建，但没有走「设置 → 诊断 → 办公组件 → 下载」把它装进应用再跑一次
-  `office_to_pdf`；`office-docx` 的 `workspace-dependencies` 分支同样未验（本机 payload 是 `0.1.2-py3.12.14`，与新线要求不同）。
-- **MCP 真挂载**：本轮用 `enabled: false` 的条目验了写路径与单一存储；一个真实服务器连上、工具以
-  `mcp__<key>__<tool>` 注册的完整链路未跑（需要一次真实 stdio/HTTP 服务器）。
+- **办公转换的引擎链已验，工具链未验** `[实测]`：把构建出的 0.2.3 payload 装进
+  `<userData>/dsh-app-office/payload/0.2.3`，用 runtime 自带 node 直接调 kit —— `backend: native`、
+  `engine 0.2.3`、一个手搓的真 `.docx` 转出 18303 字节的单页 PDF（1990 ms）；同一份 payload 下，
+  运行树里的垫片 `import.meta.resolve('@deepseek-ai/libreoffice-kit')` 解析到垫片并成功加载出真 kit。
+  仍差两步：经 `office_to_pdf` 工具（需要一次 agent turn）以及 `office-docx` 的 `workspace-dependencies`
+  分支（我们的 payload 是 `python: null`，没有 Python 集，需要在设置了 `DSH_APP_PRIMARY_RUNTIME` 的构建里再验）。
+- **MCP 挂载已验** `[实测]`：起了一个真 stdio MCP 服务器（`scratch/mcp-probe/server.mjs`），经页面 API 建条目后
+  `GET /servers` 返回 `state: "mounted"`、`toolCount: 1`，说明内核管理器挂上了它、客户端握手并注册了工具；
+  删除后条目与 patch 里的键都消失。工具的确切名字（`mcp__probe__ping`）没有直接观测到，只验到数量与挂载状态。
 - **构建侧 `stageOfficeSkills`** 仍是死重量（见 §2）。
 - 探针：`probe-startup`（启动页）通过；`probe-settings-nav` / `probe-workbench` / `probe-routes` 本轮未复跑。
