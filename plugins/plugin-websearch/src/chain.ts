@@ -29,12 +29,19 @@
 
 import type { WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-web'
 import type { Engine } from './engines/index.ts'
+import { Keyring, runEngineWithKeys } from './engines/keyring.ts'
 import type { ChainMode } from './wire.ts'
 
 /** One engine the chain will attempt, already resolved and ready to run. */
 export interface ChainStep {
   readonly id: string
   readonly engine: Engine
+  /**
+   * The engine's keys, in try order. Absent means "no keys to try": the step
+   * is one anonymous call, which is what the keyless engines (Bing, SearXNG)
+   * and every unconfigured optional engine are.
+   */
+  readonly keyring?: Keyring
 }
 
 /** One attempt's outcome, kept for diagnostics and the settings-page probe. */
@@ -45,6 +52,13 @@ export interface AttemptRecord {
   readonly error?: string
   readonly resultCount: number
   readonly latencyMs: number
+  /**
+   * Which of the engine's configured keys answered, 0-based. Absent when the
+   * anonymous call answered (or when no key was configured). Reported so the
+   * settings page can prove WHICH key took effect instead of just claiming a
+   * list was saved.
+   */
+  readonly keyIndex?: number
 }
 
 /** A search outcome plus the chain's own accounting. */
@@ -78,7 +92,13 @@ export class ChainExhaustedError extends Error {
  */
 function composeSignal(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal, dispose: () => void } {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(new Error('search timed out')), timeoutMs)
+  // The reason is named AbortError on purpose: the key ring tells "the caller
+  // cancelled" apart from "this engine broke" by that name, so a budget timeout
+  // must not look like an engine failure — it would otherwise spend one more
+  // (already-aborted) request trying keys and the anonymous tier.
+  const timeout = new Error('search timed out')
+  timeout.name = 'AbortError'
+  const timer = setTimeout(() => controller.abort(timeout), timeoutMs)
   const onAbort = (): void => controller.abort(signal?.reason)
   if (signal !== undefined) {
     if (signal.aborted) controller.abort(signal.reason)
@@ -292,12 +312,22 @@ export async function runChain(
       }
       const startedAt = Date.now()
       try {
-        const sources = await step.engine.run({
-          query: request.query,
-          maxResults: limit,
-          signal,
+        // The key ring stays INSIDE the attempt: swapping keys is a property of
+        // one engine call, so it must not show up as extra attempts (which
+        // would inflate the fallback note and the reported latency).
+        const outcome = await runEngineWithKeys(
+          step.engine,
+          { query: request.query, maxResults: limit, signal },
+          step.keyring ?? new Keyring(step.id, []),
+        )
+        const sources = outcome.value
+        attempts.push({
+          id: step.id,
+          ok: true,
+          resultCount: sources.length,
+          latencyMs: Date.now() - startedAt,
+          ...outcome.keyIndex !== undefined ? { keyIndex: outcome.keyIndex } : {},
         })
-        attempts.push({ id: step.id, ok: true, resultCount: sources.length, latencyMs: Date.now() - startedAt })
         if (sources.length > 0) succeeded.push({ sources })
         if (succeeded.length >= SATISFYING_RESULT_COUNT) break
       } catch (error) {

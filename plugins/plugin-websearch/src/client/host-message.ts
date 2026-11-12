@@ -46,10 +46,23 @@ export function hostMessage(
  */
 export function statusLabel(status: EngineStatus, t: T): { text: string, tone: 'ok' | 'err' | 'muted' } {
   const blocked = {
-    'engine.missingKey': t('ws.status.missingKey'),
     'engine.missingInstance': t('ws.status.missingInstance'),
     'engine.disabled': t('ws.status.disabled'),
     'engine.unknown': t('ws.status.unknownEngine'),
+  }
+  // A spent key list is neither "blocked" (the engine still answers, just
+  // anonymously) nor "ready" (the user's keys are not being used). It is the
+  // one condition on this page the user has to act on, so it is reported even
+  // when a ready badge would otherwise be honest — except on a disabled
+  // engine, where "off" is the whole truth.
+  if (status.state !== 'disabled' && status.keyState === 'exhausted') {
+    return { text: t('ws.status.keysExhausted'), tone: 'err' }
+  }
+  // A configured `$ENV:` reference whose variable is unset resolves to no key
+  // at all. Without this line the row reads "ready" while every search runs
+  // anonymously and never mentions the variable.
+  if (status.state !== 'disabled' && (status.keyCount ?? 0) === 0 && (status.keyUnresolved ?? 0) > 0) {
+    return { text: t('ws.status.keysUnresolved'), tone: 'err' }
   }
   switch (status.state) {
     case 'ready':
@@ -101,6 +114,7 @@ export function routeErrorCopy(t: T, host: HostText | undefined, fallback: strin
   // placeholder (the failure mode this table is tested against).
   const detail = DETAIL_CODES.has(host?.code ?? '') ? (host?.text ?? '') : ''
   const params = host?.params ?? {}
+  // `{id}` names the ENGINE whose row was rejected.
   const text = (template: string): string => template.replace('{id}', String(params.id ?? ''))
   return hostMessage(host, {
     'config.notObject': t('ws.host.configNotObject'),
@@ -109,6 +123,9 @@ export function routeErrorCopy(t: T, host: HostText | undefined, fallback: strin
     'engine.unknownId': text(t('ws.host.engineUnknownId')),
     'engine.duplicate': text(t('ws.host.engineDuplicate')),
     'engine.keyMasked': text(t('ws.host.engineKeyMasked')),
+    'engine.keysNotArray': text(t('ws.host.engineKeysNotArray')),
+    'engine.keyMalformed': t('ws.host.engineKeyMalformed'),
+    'engine.keyTooMany': t('ws.host.engineKeyTooMany', { max: String(params.max ?? '') }),
     'searxng.notArray': t('ws.host.searxngNotArray'),
     'searxng.notHttp': t('ws.host.searxngNotHttp', { url: String(params.url ?? '') }),
     'route.noTestableEngine': t('ws.host.noTestableEngine'),

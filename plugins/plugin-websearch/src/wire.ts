@@ -102,15 +102,37 @@ export const ENGINE_IDS = ['anysearch', 'bing', 'parallel', 'exa', 'searxng'] as
 /** One engine id. */
 export type EngineId = (typeof ENGINE_IDS)[number]
 
-/** Whether an engine needs a user-supplied key. */
-export type EngineTier = 'free' | 'key'
+/**
+ * Whether an engine can use a user-supplied key.
+ *
+ * - `none` — the endpoint takes no credential. Bing: its public Search API was
+ *   retired on 2025-08-11 and accepts no new signups, so an input box there
+ *   would be an entrance with no door. SearXNG: the instance is the
+ *   credential, configured as a URL list instead.
+ * - `optional` — the endpoint answers anonymously at a metered rate AND
+ *   accepts a key that raises the ceiling (AnySearch, Exa, Parallel). A key is
+ *   an UPGRADE, never a prerequisite, so `activeEngines` must not drop these
+ *   for lacking one.
+ *
+ * There is deliberately no `required` level. Nothing in the roster needs one,
+ * and the level would have had to decide whether a missing key may skip the
+ * anonymous path — which `runWithKeys` never does (it always makes that one
+ * anonymous attempt), so the level would have been a lie before it had a user.
+ */
+export type KeySupport = 'none' | 'optional'
 
 /** Static description of one engine (never persisted — the roster is code). */
 export interface EngineSpec {
   readonly id: EngineId
   /** Display name — a proper noun (Bing, Exa), so it needs no translation. */
   readonly label: string
-  readonly tier: EngineTier
+  readonly keySupport: KeySupport
+  /**
+   * Where the user creates a key, for `optional` engines. Shown as a link
+   * beside the key field. Verified live on 2026-11-12; a provider that moves
+   * its console is one constant to edit.
+   */
+  readonly keyConsole?: string
 }
 
 /**
@@ -135,12 +157,25 @@ export interface HostText {
 
 /** The engine roster. Order here is documentation only; priority is per-user. */
 export const ENGINE_SPECS: readonly EngineSpec[] = [
-  { id: 'bing', label: 'Bing', tier: 'free' },
-  { id: 'anysearch', label: 'AnySearch', tier: 'free' },
-  { id: 'searxng', label: 'SearXNG', tier: 'free' },
-  { id: 'parallel', label: 'Parallel', tier: 'free' },
-  { id: 'exa', label: 'Exa', tier: 'free' },
+  { id: 'bing', label: 'Bing', keySupport: 'none' },
+  { id: 'anysearch', label: 'AnySearch', keySupport: 'optional', keyConsole: 'https://anysearch.com/console/api-keys' },
+  { id: 'searxng', label: 'SearXNG', keySupport: 'none' },
+  { id: 'parallel', label: 'Parallel', keySupport: 'optional', keyConsole: 'https://platform.parallel.ai/api-keys' },
+  { id: 'exa', label: 'Exa', keySupport: 'optional', keyConsole: 'https://dashboard.exa.ai/api-keys' },
 ]
+
+/**
+ * How many keys one engine may hold.
+ *
+ * A bound, not a design limit: keys are tried in order and a search that walks
+ * a dozen of them costs a dozen round-trips inside one tool call. Ten is far
+ * more than the free tiers of three different accounts can use. Enforcement
+ * lives on the WRITE path ({@link assertKeysWellFormed}) so a paste that
+ * exceeds it is refused with a message; the load path only clamps, because a
+ * config that cannot load must never be worse than a key that cannot
+ * authenticate.
+ */
+export const MAX_KEYS_PER_ENGINE = 10
 
 
 /** Look up one engine's static spec. */
@@ -181,11 +216,17 @@ export interface EngineEntry {
   /** Ascending: lower runs first. */
   readonly priority: number
   /**
-   * Key for `key`-tier engines. `$ENV:NAME` references are resolved at call
-   * time; literal values are stored but never returned to the client (routes
-   * mask them).
+   * Keys for engines whose `keySupport` allows one, in the order to try them.
+   * Each entry is either a literal or an `$ENV:NAME` reference resolved at call
+   * time. Reads mask each literal to an opaque placeholder (`./keymask.ts`) so
+   * a value never crosses to the client.
+   *
+   * More than one key is worth having only because a spent key can be swapped
+   * for another MID-SEARCH (see `engines/keyring.ts`). Note what it does NOT
+   * buy: every provider here meters per ACCOUNT, so keys from one account
+   * share the same quota. The settings copy says so; this comment is why.
    */
-  readonly apiKey?: string
+  readonly apiKeys?: readonly string[]
 }
 
 /** The persisted config file shape. */
@@ -263,15 +304,109 @@ export function validateEngine(raw: unknown, seen: ReadonlySet<string>): EngineE
     id: EngineId
     enabled: boolean
     priority: number
-    apiKey?: string
+    apiKeys?: readonly string[]
   } = {
     id: id as EngineId,
     enabled: raw.enabled !== false,
     priority: clampNumber(raw.priority, 0, 999, 0),
   }
-  const apiKey = asString(raw.apiKey)
-  if (apiKey !== undefined && apiKey.trim() !== '') entry.apiKey = apiKey.trim()
+  // `apiKey` is the pre-0.3 single-key field. Reading it keeps a config written
+  // by an older build working; this build only ever writes `apiKeys`.
+  const collected: string[] = []
+  const legacy = asString(raw.apiKey)
+  if (legacy !== undefined) collected.push(legacy)
+  if (raw.apiKeys !== undefined) {
+    if (!Array.isArray(raw.apiKeys)) throw new WebSearchValidationError('engine.keysNotArray', { id })
+    for (const item of raw.apiKeys) {
+      if (typeof item !== 'string') throw new WebSearchValidationError('engine.keysNotArray', { id })
+      collected.push(item)
+    }
+  }
+  const keys = splitKeys(collected.join(','))
+  // The cap is CLAMPED here, not refused: this runs on the load path too, and a
+  // config that throws fails to load at all (see `store.load`), which would
+  // hand the user a page full of defaults and lose the keys entirely. The write
+  // path refuses an oversized paste with a message instead.
+  if (keys.length > 0) entry.apiKeys = keys.slice(0, MAX_KEYS_PER_ENGINE)
   return entry
+}
+
+/**
+ * Split one key field into the list to store.
+ *
+ * Keys are separated by commas or newlines, surrounding whitespace is dropped,
+ * empty entries disappear, and duplicates collapse in first-seen order. This
+ * is a PARSER and nothing else: it does not reject, does not cap. Policy
+ * ("these keys are malformed", "too many") belongs to
+ * {@link assertKeysWellFormed}, which only the write path calls — a stored
+ * value the user can no longer reach must never be able to stop the config
+ * from loading.
+ *
+ * @param text - the raw field value.
+ * @returns the keys it contains, in order.
+ */
+export function splitKeys(text: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const part of text.split(/[,\n\r]+/)) {
+    const key = part.trim()
+    if (key === '' || seen.has(key)) continue
+    seen.add(key)
+    out.push(key)
+  }
+  return out
+}
+
+/**
+ * A key that would fail at the endpoint for a reason the store cannot fix.
+ *
+ * Printable ASCII is the whole space every provider uses; anything else in a
+ * key is a paste accident (a wrapped line, a full-width character, the page's
+ * own mask copied out of an older build). Rejecting the whole class on the
+ * write path is what keeps a look-alike from being stored as a key that can
+ * only ever 401.
+ */
+const MALFORMED_KEY = /[^\x21-\x7E]/
+
+/**
+ * Refuse a key list that is malformed or oversized — on the write path only.
+ *
+ * Called by the save route with the engines array as the CLIENT sent it, before
+ * any merge, because that is the only moment the raw text still exists and the
+ * user is still looking at the field that produced it. A key with whitespace
+ * inside it is rejected rather than trimmed: a truncated key authenticates as
+ * `401` with no way to tell it apart from a revoked one, so the rejection has
+ * to happen where a message can be shown.
+ *
+ * @param engines - the raw `engines` field of a save request, AFTER the mask
+ *   has been expanded (an untouched field arrives as one masked entry, so
+ *   counting before expansion would undercount by the whole stored list).
+ * @throws {WebSearchValidationError} `engine.keyMalformed` or `engine.keyTooMany`.
+ */
+export function assertKeysWellFormed(engines: unknown): void {
+  if (!Array.isArray(engines)) return
+  for (const raw of engines) {
+    if (!isRecord(raw)) continue
+    const id = asString(raw.id) ?? ''
+    const pieces: string[] = []
+    const legacy = asString(raw.apiKey)
+    if (legacy !== undefined) pieces.push(legacy)
+    if (Array.isArray(raw.apiKeys)) {
+      for (const item of raw.apiKeys) if (typeof item === 'string') pieces.push(item)
+    }
+    // Counted before dedupe/cap so the message can say how many were sent.
+    for (const key of pieces.join(',').split(/[,\n\r]+/)) {
+      const trimmed = key.trim()
+      if (trimmed === '') continue
+      if (MALFORMED_KEY.test(trimmed)) {
+        throw new WebSearchValidationError('engine.keyMalformed', { id })
+      }
+    }
+    const unique = new Set(pieces.join(',').split(/[,\n\r]+/).map(key => key.trim()).filter(key => key !== ''))
+    if (unique.size > MAX_KEYS_PER_ENGINE) {
+      throw new WebSearchValidationError('engine.keyTooMany', { id, max: MAX_KEYS_PER_ENGINE })
+    }
+  }
 }
 
 /**
@@ -335,9 +470,9 @@ export function validateFile(raw: unknown): WebSearchFile {
 /** One engine's live status, computed by the host. */
 export interface EngineStatus {
   /**
-   * ready = usable now; blocked = enabled but missing what it needs (an API
-   * key, or a SearXNG instance) with `message` saying which; disabled = off;
-   * error = last probe failed; unknown = not yet determined.
+   * ready = usable now; blocked = enabled but missing what it needs (a SearXNG
+   * instance, in the current roster) with `message` saying which; disabled =
+   * off; error = last probe failed; unknown = not yet determined.
    */
   readonly state: 'ready' | 'blocked' | 'disabled' | 'error' | 'unknown'
   /** Why it cannot run, in the coded shape; see {@link HostText}. */
@@ -346,6 +481,29 @@ export interface EngineStatus {
   readonly latencyMs?: number
   /** Source count of the last probe. */
   readonly resultCount?: number
+  /**
+   * How many keys the user has configured (resolved, so an unset `$ENV:VAR`
+   * does not count). Reported alongside the placeholders rather than derived
+   * from them, because a placeholder list also contains readable `$ENV:`
+   * references and could not be counted correctly on the client.
+   */
+  readonly keyCount?: number
+  /**
+   * `none` = no key configured and the engine runs anonymously;
+   * `configured` = at least one key is usable; `exhausted` = every configured
+   * key is cooling off after a quota/auth rejection, so the next search falls
+   * back to anonymous until the cooldown expires.
+   */
+  readonly keyState?: 'none' | 'configured' | 'exhausted'
+  /**
+   * How many configured entries resolved to nothing — an `$ENV:` reference
+   * whose variable is unset, typically. The page cannot tell on its own (it
+   * would have to know which entries are references AND be able to read the
+   * environment), and a user who wired a variable into their shell deserves to
+   * read why their key is not being used instead of an authoritative
+   * "匿名" that never mentions it.
+   */
+  readonly keyUnresolved?: number
 }
 
 /**
@@ -388,51 +546,55 @@ export interface WebSearchView {
   readonly seamAvailable: boolean
 }
 
-/** Mask sentinel for secret values on reads; on writes it means "keep stored". */
+/** Prefix of the placeholder the client sees in place of a stored key value. */
 export const VALUE_MASK = '••••••'
 
 /**
- * Mask literal keys before they cross to the client. `$ENV:NAME` references
- * stay verbatim (they are not secrets, and the UI shows which variable is
- * referenced).
+ * Whether a stored entry is a usable `$ENV:NAME` reference.
+ *
+ * Strict on purpose, and shared by everything that has to agree about it: the
+ * resolver only substitutes a well-formed reference, so a hand-edited
+ * `$ENV:MY KEY` is a literal string that will authenticate nowhere. Using a
+ * loose prefix test here would hide that from the page and count it as fine.
  */
-export function maskEngines(engines: readonly EngineEntry[]): EngineEntry[] {
-  return engines.map((entry) => {
-    if (entry.apiKey === undefined) return { ...entry }
-    return { ...entry, apiKey: /^\$ENV:/.test(entry.apiKey) ? entry.apiKey : VALUE_MASK }
-  })
-}
-
-/** Re-attach stored keys where the client sent the mask sentinel back. */
-export function unmaskEngines(raw: unknown, existing: readonly EngineEntry[]): unknown {
-  if (!Array.isArray(raw)) return raw
-  const stored = new Map(existing.map(entry => [entry.id, entry.apiKey]))
-  return raw.map((item) => {
-    if (!isRecord(item)) return item
-    if (item.apiKey !== VALUE_MASK) return item
-    const kept = typeof item.id === 'string' ? stored.get(item.id as EngineId) : undefined
-    if (kept === undefined) {
-      throw new WebSearchValidationError('engine.keyMasked', { id: String(item.id) })
-    }
-    return { ...item, apiKey: kept }
-  })
-}
+export const ENV_REFERENCE = /^\$ENV:([A-Za-z_][A-Za-z0-9_]*)$/
 
 /**
- * The engines the chain will actually try, in priority order. Disabled
- * engines and `key`-tier engines without a key are dropped here rather than
- * at call time, so the chain's attempt list is inspectable in the UI.
+ * The shape of a stored-key placeholder: the mask prefix plus a short reference
+ * derived from the value (see `keymask.ts`) — never the value itself.
+ *
+ * The reference is what makes a chip deletable. A placeholder that carried only
+ * "there is a stored key here" forced positional reconstruction, which can only
+ * ever drop the LAST stored key: the page shows indistinguishable chips, so the
+ * user's click removes one — just not necessarily a different one when it is
+ * mixed with `$ENV:` entries, where the swap became visible.
  */
+const STORED_TOKEN = /^•+#[0-9a-f]{8}$/
+
+/**
+ * Whether one `apiKeys` entry is a placeholder for a stored literal key.
+ *
+ * Exported because the page renders one chip per entry and has to tell a
+ * placeholder from a readable reference without knowing the pattern.
+ *
+ * @param value - one `apiKeys` entry as the client received it.
+ */
+export function isStoredKeyToken(value: string): boolean {
+  return STORED_TOKEN.test(value)
+}
+
 /**
  * The engines the chain will actually try, in priority order.
  *
  * Filtering happens here rather than at call time so the attempt list is
  * inspectable in the UI: an engine that cannot succeed is dropped instead of
- * being attempted and failing on every search. Three reasons to drop one:
- * disabled by the user, a `key`-tier engine with no key, and SearXNG with no
- * instance configured (it has no working default — public instances disabled
- * the JSON API — so attempting it only spends a round-trip and adds noise to
- * the fallback note).
+ * being attempted and failing on every search. Two reasons to drop one:
+ * disabled by the user, and SearXNG with no instance configured (it has no
+ * working default — public instances disabled the JSON API — so attempting it
+ * only spends a round-trip and adds noise to the fallback note).
+ *
+ * A missing KEY is deliberately not a reason: every engine that accepts one
+ * also answers anonymously.
  */
 export function activeEngines(file: WebSearchFile): EngineEntry[] {
   return [...file.engines]
@@ -440,7 +602,6 @@ export function activeEngines(file: WebSearchFile): EngineEntry[] {
     .filter((entry) => {
       const spec = engineSpec(entry.id)
       if (spec === undefined) return false
-      if (spec.tier === 'key') return entry.apiKey !== undefined && entry.apiKey !== ''
       if (entry.id === 'searxng') return file.searxngInstances.length > 0
       return true
     })
@@ -450,15 +611,11 @@ export function activeEngines(file: WebSearchFile): EngineEntry[] {
 /** Why one engine cannot run right now, or undefined when it can. */
 export function engineBlockReason(
   entry: EngineEntry,
-  resolvedKey: string | undefined,
   searxngInstanceCount = 0,
 ): HostText | undefined {
   if (!entry.enabled) return { code: 'engine.disabled', params: { id: entry.id } }
   const spec = engineSpec(entry.id)
   if (spec === undefined) return { code: 'engine.unknown', params: { id: entry.id } }
-  if (spec.tier === 'key' && (resolvedKey === undefined || resolvedKey === '')) {
-    return { code: 'engine.missingKey', params: { label: spec.label } }
-  }
   if (entry.id === 'searxng' && searxngInstanceCount === 0) {
     return { code: 'engine.missingInstance', params: { label: spec.label } }
   }

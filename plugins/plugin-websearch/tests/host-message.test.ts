@@ -111,11 +111,28 @@ describe('host message rendering', () => {
 
   it('renders the per-engine blocked reasons from their codes', () => {
     const t = makeT(zh)
-    assert.equal(statusLabel({ state: 'blocked', message: { code: 'engine.missingKey' } }, t).text, zh['ws.status.missingKey'])
     assert.equal(statusLabel({ state: 'blocked', message: { code: 'engine.missingInstance' } }, t).text, zh['ws.status.missingInstance'])
     // A blocked engine whose code this build does not know still says something.
     assert.equal(statusLabel({ state: 'blocked', message: { code: 'engine.future', text: 'no key' } }, t).text, 'no key')
     assert.equal(statusLabel({ state: 'blocked' }, t).text, zh['ws.status.blocked'])
     assert.equal(statusLabel({ state: 'ready' }, t).tone, 'ok')
+  })
+
+  it('reports a key problem over a plain ready badge', () => {
+    // Both states look "ready" at the state level, and both hide a condition the
+    // user has to act on: a spent key list (the engine is answering anonymously)
+    // and a configured `$ENV:` reference whose variable is unset (no key at all
+    // is being used, and the row would otherwise read 免费 · 已配置).
+    const t = makeT(zh)
+    const spent = statusLabel({ state: 'ready', keyCount: 2, keyState: 'exhausted' }, t)
+    assert.equal(spent.text, zh['ws.status.keysExhausted'])
+    assert.equal(spent.tone, 'err')
+    const unset = statusLabel({ state: 'ready', keyCount: 0, keyUnresolved: 1, keyState: 'none' }, t)
+    assert.equal(unset.text, zh['ws.status.keysUnresolved'])
+    assert.equal(unset.tone, 'err')
+    // A disabled engine is off, which is the whole truth — not a quota story.
+    assert.equal(statusLabel({ state: 'disabled', keyState: 'exhausted' }, t).text, zh['ws.status.disabled'])
+    // A healthy key list keeps the ready badge.
+    assert.equal(statusLabel({ state: 'ready', keyCount: 2, keyState: 'configured' }, t).text, zh['ws.status.ready'])
   })
 })

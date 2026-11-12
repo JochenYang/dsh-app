@@ -1,5 +1,11 @@
 /**
- * Exa — anonymous hosted MCP endpoint (`https://mcp.exa.ai/mcp`), no key.
+ * Exa — hosted MCP endpoint (`https://mcp.exa.ai/mcp`), anonymous at a
+ * rate-limited tier and keyed above it.
+ *
+ * A user key goes in the `x-api-key` REQUEST HEADER (documented at
+ * exa.ai/auth.md: "API key — `https://mcp.exa.ai/mcp` with the `x-api-key`
+ * header"). It is deliberately not a URL parameter: a query string ends up in
+ * logs and in any error message that echoes the URL.
  *
  * The tool answers with a plain-text block, one result per group, shaped as:
  *
@@ -65,8 +71,14 @@ export function parseExa(text: string, limit: number): WebSearchSource[] {
 export function exaEngine(): Engine {
   return {
     id: 'exa',
-    async run({ query, maxResults, signal }: EngineRequest): Promise<WebSearchSource[]> {
-      const text = await callMcpTool(ENDPOINT, TOOL, { query, numResults: maxResults }, signal)
+    async run({ query, maxResults, signal, apiKey }: EngineRequest): Promise<WebSearchSource[]> {
+      const text = await callMcpTool(
+        ENDPOINT,
+        TOOL,
+        { query, numResults: maxResults },
+        signal,
+        apiKey === undefined ? undefined : { 'x-api-key': apiKey },
+      )
       return parseExa(text, maxResults)
     },
   }

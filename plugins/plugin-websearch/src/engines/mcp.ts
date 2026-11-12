@@ -14,10 +14,15 @@
  * both into the JSON-RPC envelope and lets each engine own its own result
  * parsing.
  *
+ * A user key travels as a request HEADER (Exa and Parallel both document
+ * `x-api-key` for the hosted MCP server; Exa's OAuth token would travel as
+ * `Authorization: Bearer`). Without one the call is anonymous, which is why
+ * `headers` is optional rather than a required argument.
+ *
  * @module @dsh-app/plugin-websearch/engines/mcp
  */
 
-import { request } from './types.ts'
+import { HttpError, request } from './types.ts'
 
 /** The JSON-RPC envelope both endpoints answer with. */
 interface JsonRpcResponse {
@@ -59,18 +64,26 @@ export function parseJsonRpc(text: string): JsonRpcResponse {
 /**
  * Call one tool on a hosted MCP endpoint and return its text content blocks
  * joined. Throws on a JSON-RPC error, a transport error, or an empty result.
+ *
+ * @param url - the endpoint (no query string; credentials go in headers).
+ * @param tool - the tool name the endpoint documents.
+ * @param args - the tool arguments.
+ * @param signal - the caller's composed cancellation signal.
+ * @param headers - extra request headers, i.e. the user's key.
  */
 export async function callMcpTool(
   url: string,
   tool: string,
   args: Readonly<Record<string, unknown>>,
   signal: AbortSignal,
+  headers?: Readonly<Record<string, string>>,
 ): Promise<string> {
   const response = await request(url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
+      ...headers,
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -80,7 +93,7 @@ export async function callMcpTool(
     }),
     signal,
   })
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  if (!response.ok) throw new HttpError(response.status)
   const envelope = parseJsonRpc(await response.text())
   if (envelope.error !== undefined) {
     const message = typeof envelope.error.message === 'string' ? envelope.error.message : 'unknown error'
@@ -93,6 +106,18 @@ export async function callMcpTool(
     .map(block => block.text as string)
     .join('\n')
   if (text.trim() === '') throw new Error('MCP returned empty content')
-  if (envelope.result?.isError === true) throw new Error(`MCP tool call failed: ${text.slice(0, 200)}`)
+  if (envelope.result?.isError === true) {
+    // Exa reports auth and quota failures IN BAND: HTTP 200, `isError: true`,
+    // and the status inside the text — measured live as
+    // "web_search_exa error (401): Invalid API key. …". The retry policy and
+    // the settings badge both need the STATUS, not the sentence, so it is
+    // lifted out here rather than arriving at the chain as an ordinary
+    // failure that no key rotation could react to.
+    const detail = text.split('\n')[0]?.slice(0, 200) ?? ''
+    const status = /error \((\d{3})\)/.exec(text)?.[1]
+    throw status === undefined
+      ? new Error(`MCP tool call failed: ${detail}`)
+      : new HttpError(Number(status), detail)
+  }
   return text
 }

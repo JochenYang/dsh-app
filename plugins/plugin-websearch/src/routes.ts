@@ -23,14 +23,15 @@
 
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import type { FetchNetworkStatus } from './fetch/provider.ts'
+import { keyStatus } from './engines/keyring.ts'
+import { maskEngines, unmaskEngines } from './keymask.ts'
 import { WebSearchStore } from './store.ts'
 import {
   activeEngines,
+  assertKeysWellFormed,
   BRAND_PROVIDER_ID,
   engineBlockReason,
   engineSpec,
-  maskEngines,
-  unmaskEngines,
   UPSTREAM_PROVIDER_IDS,
   WebSearchValidationError,
   type EngineEntry,
@@ -55,6 +56,8 @@ const MAX_BODY_BYTES = 65_536
 export interface ProbeResult {
   readonly latencyMs: number
   readonly resultCount: number
+  /** Which configured key answered (0-based); absent = the anonymous call did. */
+  readonly keyIndex?: number
 }
 
 /** The host services the routes need. */
@@ -77,12 +80,19 @@ export interface RouteDeps {
   /** Drop cached results (config changed: an entry may name a disabled engine). */
   clearCache(): void
   /**
-   * Resolve one engine's key (`$ENV:NAME` → the environment variable's value).
-   * Lives on the host because only the host can read the environment; the
-   * status badge must judge the RESOLVED key, or an unset variable would
-   * report "ready" and fail at the next search.
+   * Resolve one engine's keys (`$ENV:NAME` → the environment variable's value),
+   * in try order. Lives on the host because only the host can read the
+   * environment; the status badge must judge the RESOLVED list, or an unset
+   * variable would report "ready" and fail at the next search.
    */
-  resolveKey(entry: EngineEntry): string | undefined
+  resolveKeys(entry: EngineEntry): string[]
+  /**
+   * How many of an engine's configured entries are `$ENV:NAME` references
+   * whose variable is not set. Computed on the host for the same reason as
+   * {@link resolveKeys}: only the host can read the environment, and the page
+   * must be able to say why a key it can see is not being used.
+   */
+  unresolvedKeys(entry: EngineEntry): number
   /**
    * Every search provider the seam's registry holds right now, mapped to its
    * own `available()`. Undefined when the registry is not inspectable (a kernel
@@ -160,7 +170,14 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Error('payload-too-large')
   const text = await request.text()
   if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) throw new Error('payload-too-large')
-  const parsed: unknown = JSON.parse(text)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    // The parser's own message quotes the offending input, which now holds
+    // literal API keys — hence a fixed code rather than a rethrown SyntaxError.
+    throw new Error('invalid-json')
+  }
   return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
 }
 
@@ -182,18 +199,23 @@ export function buildView(
   store: WebSearchStore,
   seamAvailable: boolean,
   activeProvider: string,
-  resolveKey: (entry: EngineEntry) => string | undefined,
+  resolveKeys: (entry: EngineEntry) => string[],
+  unresolvedKeys: (entry: EngineEntry) => number,
   availability: ReadonlyMap<string, boolean> | undefined,
 ): Record<string, unknown> {
   const file = store.load()
   const usable = new Set(activeEngines(file).map(entry => entry.id))
   const engines = file.engines.map((entry) => {
     const spec = engineSpec(entry.id)
+    const keys = resolveKeys(entry)
     // `engineBlockReason` is the single owner of "why can this not run": the
     // chain filters with the same rule, so the badge and the behavior cannot
-    // disagree. The key passed in is the RESOLVED one, so an unset
-    // `$ENV:VAR` reports missing-key instead of a false "ready".
-    const block = engineBlockReason(entry, resolveKey(entry), file.searxngInstances.length)
+    // disagree.
+    const block = engineBlockReason(entry, file.searxngInstances.length)
+    // Key state comes from the same ring the chain and the probe use, so a
+    // key the last search found spent reads as spent here — no second opinion.
+    const keyState = spec === undefined || spec.keySupport === 'none' ? undefined : keyStatus(entry.id, keys)
+    const unresolved = spec === undefined || spec.keySupport === 'none' ? 0 : unresolvedKeys(entry)
     let status: EngineStatus
     if (block !== undefined) {
       // `blocked` covers both "needs a key" and "needs an instance" — the
@@ -206,8 +228,15 @@ export function buildView(
     else status = { state: 'unknown' }
     return {
       ...spec,
-      entry: { ...entry, ...entry.apiKey !== undefined ? { apiKey: maskEngines([entry])[0].apiKey } : {} },
-      status,
+      entry: { ...entry, ...entry.apiKeys !== undefined ? { apiKeys: maskEngines([entry])[0].apiKeys } : {} },
+      status: {
+        ...status,
+        ...keyState === undefined ? {} : {
+          keyCount: keyState.count,
+          keyState: keyState.count === 0 ? 'none' : keyState.cooling >= keyState.count ? 'exhausted' : 'configured',
+          ...unresolved > 0 ? { keyUnresolved: unresolved } : {},
+        },
+      },
     }
   })
   return {
@@ -336,7 +365,8 @@ export function registerWebSearchRoutes(
       store,
       deps.seamAvailable(),
       deps.activeProviderId() ?? file.provider,
-      deps.resolveKey,
+      deps.resolveKeys,
+      deps.unresolvedKeys,
       deps.providerAvailability(),
     ))
   }
@@ -347,6 +377,12 @@ export function registerWebSearchRoutes(
     if (message === 'payload-too-large') {
       return fail(413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (64 KiB cap)' })
     }
+    if (message === 'invalid-json') {
+      // Deliberately no echo of the parser's message: V8 quotes a slice of the
+      // offending input, and that input now holds literal API keys.
+      return fail(400, 'bad-request', { code: 'route.invalidBody', text: 'the request body is not valid JSON' })
+    }
+    if (error instanceof WebSearchValidationError) return fail(400, 'bad-request', error.hostText())
     return fail(400, 'bad-request', { code: 'route.invalidBody', text: message })
   }
 
@@ -369,7 +405,13 @@ export function registerWebSearchRoutes(
             // The client sends the whole config back; engine keys that came
             // down masked are re-attached from the stored copy here, so a
             // save that did not touch a key never destroys it.
+            //
+            // Format and count are judged AFTER the mask is expanded: an
+            // untouched field arrives as ONE masked entry, so a check on the
+            // raw body would send "ten stored keys plus one typed" past a cap
+            // of ten and have `validateEngine` silently drop the typed key.
             const merged = { ...body, engines: unmaskEngines(body.engines, existing.engines) }
+            assertKeysWellFormed(merged.engines)
             const file = store.save(merged)
             // The store write is this page's record; the seam's configured
             // provider belongs to the loader. Re-pointing it is a write to the
@@ -433,6 +475,7 @@ export function registerWebSearchRoutes(
               ok: true,
               latencyMs: probe.latencyMs,
               resultCount: probe.resultCount,
+              ...probe.keyIndex !== undefined ? { keyIndex: probe.keyIndex } : {},
             })
           } catch (error) {
             results.push({

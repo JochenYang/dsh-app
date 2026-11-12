@@ -6,12 +6,15 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   activeEngines,
+  assertKeysWellFormed,
   BRAND_PROVIDER_ID,
   defaultFile,
   ENGINE_IDS,
   engineBlockReason,
-  maskEngines,
-  unmaskEngines,
+  engineSpec,
+  isStoredKeyToken,
+  MAX_KEYS_PER_ENGINE,
+  splitKeys,
   UPSTREAM_PROVIDER_IDS,
   validateFile,
   WebSearchValidationError,
@@ -131,70 +134,154 @@ describe('activeEngines', () => {
     assert.ok(ids.indexOf('bing') < ids.indexOf('exa'))
   })
 
-  it('drops a key-tier engine with no key', () => {
+  it('keeps a metered engine that has no key', () => {
+    // Exa, Parallel and AnySearch all answer anonymously, so a row with no key
+    // must stay in the chain. Asserted on a file where it is the ONLY engine
+    // enabled, so the result cannot be true by accident.
     const base = defaultFile()
-    const withKeyEngine = {
+    const file = validateFile({
       ...base,
-      engines: base.engines.map(entry => entry.id === 'exa' ? { ...entry, apiKey: undefined } : entry),
-    }
-    // Every shipped engine is free tier, so this asserts the rule holds for
-    // the roster as it stands: a free engine is never filtered by key.
-    assert.ok(activeEngines(withKeyEngine).some(entry => entry.id === 'exa'))
+      engines: base.engines.map(entry => ({
+        ...entry,
+        enabled: entry.id === 'exa',
+        ...entry.id === 'exa' ? { apiKeys: undefined } : {},
+      })),
+    })
+    const active = activeEngines(file)
+    assert.deepEqual(active.map(entry => entry.id), ['exa'])
   })
 })
 
 describe('engineBlockReason', () => {
   it('reports a disabled engine', () => {
-    assert.deepEqual(engineBlockReason({ id: 'bing', enabled: false, priority: 0 }, undefined), { code: 'engine.disabled', params: { id: 'bing' } })
+    assert.deepEqual(engineBlockReason({ id: 'bing', enabled: false, priority: 0 }), { code: 'engine.disabled', params: { id: 'bing' } })
   })
 
-  it('reports a free engine as runnable', () => {
-    assert.equal(engineBlockReason({ id: 'bing', enabled: true, priority: 0 }, undefined), undefined)
+  it('reports a keyless engine as runnable', () => {
+    assert.equal(engineBlockReason({ id: 'bing', enabled: true, priority: 0 }), undefined)
   })
 
-  it('judges the RESOLVED key, not the stored reference', () => {
-    // A key-tier engine holding an `$ENV:` reference whose variable is unset
-    // resolves to undefined. Passing the raw reference (or the entry itself)
-    // would report "ready" and fail at the next search — the badge must track
-    // what the chain will actually have.
-    const entry = { id: 'bing' as const, enabled: true, priority: 0, apiKey: '$ENV:NOT_SET_ANYWHERE' }
-    assert.equal(engineBlockReason(entry, undefined), undefined, 'free tier is never blocked by a key')
+  it('never blocks a keyed engine for its key, whatever the list holds', () => {
+    // A missing, unmatched or unset key is not a reason to block: the anonymous
+    // path is a real search path. Blocking here would have the badge contradict
+    // the chain, which keeps the engine either way.
+    for (const apiKeys of [undefined, [], ['$ENV:NOT_SET_ANYWHERE']]) {
+      assert.equal(engineBlockReason({ id: 'exa', enabled: true, priority: 0, ...apiKeys === undefined ? {} : { apiKeys } }), undefined)
+    }
+  })
+
+  it('blocks SearXNG with no instance, and only then', () => {
+    assert.deepEqual(engineBlockReason({ id: 'searxng', enabled: true, priority: 0 }, 0), {
+      code: 'engine.missingInstance',
+      params: { label: 'SearXNG' },
+    })
+    assert.equal(engineBlockReason({ id: 'searxng', enabled: true, priority: 0 }, 1), undefined)
   })
 })
 
-describe('secret masking', () => {
-  it('masks a literal key but keeps an $ENV: reference verbatim', () => {
-    const masked = maskEngines([
-      { id: 'bing', enabled: true, priority: 0, apiKey: 'sk-literal-secret' },
-      { id: 'exa', enabled: true, priority: 1, apiKey: '$ENV:EXA_KEY' },
-      { id: 'anysearch', enabled: true, priority: 2 },
-    ])
-    assert.equal(masked[0].apiKey, '••••••')
-    assert.equal(masked[1].apiKey, '$ENV:EXA_KEY')
-    assert.equal(masked[2].apiKey, undefined)
+describe('key parsing', () => {
+  it('splits on commas and newlines, trimming and dropping empties', () => {
+    assert.deepEqual(splitKeys(' a , b\n c ,, \n'), ['a', 'b', 'c'])
   })
 
-  it('re-attaches the stored key when the client sends the mask back', () => {
-    const stored = [{ id: 'bing' as const, enabled: true, priority: 0, apiKey: 'sk-real' }]
-    const merged = unmaskEngines(
-      [{ id: 'bing', enabled: true, priority: 0, apiKey: '••••••' }],
-      stored,
-    ) as { apiKey?: string }[]
-    assert.equal(merged[0].apiKey, 'sk-real')
+  it('collapses duplicates in first-seen order', () => {
+    assert.deepEqual(splitKeys('b,a,b'), ['b', 'a'])
   })
 
-  it('refuses a mask with no stored value instead of writing the sentinel', () => {
+  it('does not reject or cap: policy belongs to the write path', () => {
+    // This runs on the LOAD path too (`validateEngine`). A parser that throws
+    // there makes an unreadable config out of one bad character: the store falls
+    // back to defaults and the next save writes them over the real file.
+    assert.deepEqual(splitKeys('sk-a b'), ['sk-a b'])
+    assert.equal(splitKeys(Array.from({ length: 40 }, (_, index) => `k${index}`).join(',')).length, 40)
+  })
+
+  it('clamps an oversized stored list instead of failing the load', () => {
+    const keys = Array.from({ length: 40 }, (_, index) => `k${index}`)
+    const file = validateFile({ engines: [{ id: 'exa', enabled: true, priority: 0, apiKeys: keys }] })
+    assert.equal(file.engines[0].apiKeys?.length, MAX_KEYS_PER_ENGINE)
+  })
+
+  it('reads the pre-0.3 single apiKey field into the list form', () => {
+    const file = validateFile({ engines: [{ id: 'exa', enabled: true, priority: 0, apiKey: 'k1, k2' }] })
+    assert.deepEqual(file.engines[0].apiKeys, ['k1', 'k2'])
+  })
+
+  it('merges apiKeys arrays with the same split rules', () => {
+    const file = validateFile({ engines: [{ id: 'exa', enabled: true, priority: 0, apiKeys: ['k1\nk2', 'k1'] }] })
+    assert.deepEqual(file.engines[0].apiKeys, ['k1', 'k2'])
+  })
+
+  it('rejects a non-array apiKeys field', () => {
     assert.throws(
-      () => unmaskEngines([{ id: 'bing', apiKey: '••••••' }], []),
+      () => validateFile({ engines: [{ id: 'exa', apiKeys: 'k1' }] }),
       WebSearchValidationError,
     )
   })
 
-  it('passes a freshly typed key through untouched', () => {
-    const merged = unmaskEngines(
-      [{ id: 'bing', apiKey: 'sk-new' }],
-      [{ id: 'bing' as const, enabled: true, priority: 0, apiKey: 'sk-old' }],
-    ) as { apiKey?: string }[]
-    assert.equal(merged[0].apiKey, 'sk-new')
+  it('declares key support per engine, and a console only where a key exists', () => {
+    assert.equal(engineSpec('bing')?.keySupport, 'none')
+    assert.equal(engineSpec('searxng')?.keySupport, 'none')
+    assert.equal(engineSpec('exa')?.keySupport, 'optional')
+    assert.equal(engineSpec('parallel')?.keySupport, 'optional')
+    assert.equal(engineSpec('anysearch')?.keySupport, 'optional')
+    // Bing's public Search API was retired in 2025-08, so a signup link there
+    // would be an entrance with no door.
+    assert.equal(engineSpec('bing')?.keyConsole, undefined)
+    assert.match(engineSpec('exa')?.keyConsole ?? '', /^https:\/\//)
+  })
+})
+
+describe('assertKeysWellFormed (the write path\'s strict half)', () => {
+  it('accepts a well-formed list', () => {
+    assertKeysWellFormed([{ id: 'exa', apiKeys: ['sk-a', 'sk-b'] }])
+    assertKeysWellFormed([{ id: 'exa', apiKey: 'sk-legacy' }])
+    assertKeysWellFormed(undefined)
+  })
+
+  it('names the engine when a key has whitespace inside it', () => {
+    assert.throws(
+      () => assertKeysWellFormed([{ id: 'parallel', apiKeys: ['sk-a b'] }]),
+      (error: unknown) => error instanceof WebSearchValidationError
+        && error.code === 'engine.keyMalformed'
+        && error.params?.id === 'parallel',
+    )
+  })
+
+  it('rejects anything outside printable ASCII, including the mask itself', () => {
+    // Every provider's keys are printable ASCII. A full-width character or a
+    // copy of the placeholder is a paste accident, and storing it would create a
+    // "key" that can only ever 401 while the read path masks it back out of
+    // sight.
+    for (const key of ['••••••', '•••••', 'sk－fullwidth', 'sk\u00a0nbsp']) {
+      assert.throws(
+        () => assertKeysWellFormed([{ id: 'exa', apiKeys: [key] }]),
+        WebSearchValidationError,
+        `expected "${key}" to be refused`,
+      )
+    }
+  })
+
+  it('refuses more keys than the cap instead of silently dropping the tail', () => {
+    const keys = Array.from({ length: MAX_KEYS_PER_ENGINE + 1 }, (_, index) => `k${index}`)
+    assert.throws(
+      () => assertKeysWellFormed([{ id: 'exa', apiKeys: keys }]),
+      (error: unknown) => error instanceof WebSearchValidationError && error.code === 'engine.keyTooMany',
+    )
+  })
+
+  it('does not count duplicates toward the cap', () => {
+    const keys = Array.from({ length: MAX_KEYS_PER_ENGINE }, () => 'k-same')
+    assertKeysWellFormed([{ id: 'exa', apiKeys: keys }])
+  })
+})
+
+describe('isStoredKeyToken', () => {
+  it('recognises the placeholder the host sends and nothing a user would type', () => {
+    assert.equal(isStoredKeyToken('••••••#a1b2c3d4'), true)
+    assert.equal(isStoredKeyToken('••••••'), false, 'the pre-reference shape is no longer a placeholder')
+    assert.equal(isStoredKeyToken('$ENV:EXA_KEY'), false)
+    assert.equal(isStoredKeyToken('sk-live-key'), false)
+    assert.equal(isStoredKeyToken('••••••#NOTHEX!!'), false)
   })
 })

@@ -8,10 +8,10 @@
  * the defaults with a warning) instead of failing the boot — the same
  * discipline as plugin-mcp's store. Writes are atomic (tmp + rename).
  *
- * Secret hygiene: `apiKey` values may be `$ENV:NAME` references (resolved at
+ * Secret hygiene: `apiKeys` entries may be `$ENV:NAME` references (resolved at
  * call time, never persisted resolved); literal values are allowed (the file
  * is local and user-owned) but are never returned to the client — routes mask
- * them.
+ * the whole list.
  *
  * @module @dsh-app/plugin-websearch/store
  */

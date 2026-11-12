@@ -16,8 +16,11 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, describe, it } from 'node:test'
+import { anySearchEngine } from '../src/engines/anysearch.ts'
 import { bingEngine } from '../src/engines/bing.ts'
-import { request } from '../src/engines/types.ts'
+import { exaEngine } from '../src/engines/exa.ts'
+import { parallelEngine } from '../src/engines/parallel.ts'
+import { HttpError, request } from '../src/engines/types.ts'
 
 const realFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = realFetch })
@@ -42,6 +45,71 @@ describe('the engines ask for an uncompressed body', () => {
     const headers = seen[0]?.init?.headers as Record<string, string> | undefined
     assert.equal(headers?.['accept-encoding'], 'identity')
     assert.equal(headers?.['user-agent'], 'UA', 'the caller headers are merged, not replaced')
+  })
+})
+
+/** The headers one engine put on the wire for one call. */
+async function headersFor(
+  run: (signal: AbortSignal, apiKey?: string) => Promise<unknown>,
+  apiKey?: string,
+): Promise<Record<string, string>> {
+  const seen = stubFetch(() => new Response('{"code":0,"data":{"results":[]}}', { status: 200 }))
+  const signal = new AbortController().signal
+  await run(signal, apiKey).catch(() => undefined)
+  return (seen[0]?.init?.headers ?? {}) as Record<string, string>
+}
+
+describe('a user key reaches the endpoint as a header', () => {
+  it('AnySearch sends it as a bearer token, and sends nothing without one', async () => {
+    const withKey = await headersFor((signal, apiKey) => anySearchEngine().run({
+      query: 'q', maxResults: 1, signal, ...apiKey === undefined ? {} : { apiKey },
+    }), 'sk-any')
+    assert.equal(withKey.authorization, 'Bearer sk-any')
+    const without = await headersFor((signal, apiKey) => anySearchEngine().run({
+      query: 'q', maxResults: 1, signal, ...apiKey === undefined ? {} : { apiKey },
+    }))
+    assert.equal(without.authorization, undefined)
+  })
+
+  it('Exa sends x-api-key', async () => {
+    const headers = await headersFor((signal, apiKey) => exaEngine().run({
+      query: 'q', maxResults: 1, signal, ...apiKey === undefined ? {} : { apiKey },
+    }), 'sk-exa')
+    assert.equal(headers['x-api-key'], 'sk-exa')
+  })
+
+  it('Parallel sends x-api-key to the documented host', async () => {
+    const seen = stubFetch(() => new Response('{"jsonrpc":"2.0","result":{"content":[]}}', { status: 200 }))
+    const signal = new AbortController().signal
+    await parallelEngine().run({ query: 'q', maxResults: 1, signal, apiKey: 'sk-par' }).catch(() => undefined)
+    assert.equal(seen[0]?.url, 'https://mcp.parallel.ai/mcp')
+    assert.equal((seen[0]?.init?.headers as Record<string, string>)['x-api-key'], 'sk-par')
+  })
+})
+
+describe('fast failures carry the status the key ring reads', () => {
+  it('a non-2xx becomes HttpError, not a bare message', async () => {
+    stubFetch(() => new Response('', { status: 402 }))
+    const signal = new AbortController().signal
+    await assert.rejects(
+      () => anySearchEngine().run({ query: 'q', maxResults: 1, signal }),
+      (error: unknown) => error instanceof HttpError && error.status === 402,
+    )
+  })
+
+  it('an MCP tool error that names a status in band becomes HttpError too', async () => {
+    // Measured live: Exa answers an invalid key with HTTP 200, isError: true,
+    // and the status inside the text — so a policy that only looked at the
+    // HTTP status would never have seen it.
+    stubFetch(() => new Response(
+      'data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"web_search_exa error (401): Invalid API key."}],"isError":true}}',
+      { status: 200 },
+    ))
+    const signal = new AbortController().signal
+    await assert.rejects(
+      () => exaEngine().run({ query: 'q', maxResults: 1, signal, apiKey: 'sk-bad' }),
+      (error: unknown) => error instanceof HttpError && error.status === 401,
+    )
   })
 })
 

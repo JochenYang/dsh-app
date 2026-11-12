@@ -58,7 +58,8 @@ function harness(overrides: Partial<RouteDeps> = {}): Harness {
     clearCache: () => undefined,
     isChainExhausted: () => false,
     probe: async () => ({ latencyMs: 12, resultCount: 3 }),
-    resolveKey: () => undefined,
+    resolveKeys: () => [],
+    unresolvedKeys: () => 0,
     seamAvailable: () => true,
     searchThroughSeam: async () => ({ provider: 'dsh-app', resultCount: 5, latencyMs: 7 }),
     networkStatus: async () => ({ route: 'direct', resolver: 'system', verdict: 'clean', checkedAt: null }),
@@ -256,5 +257,123 @@ describe('web search route registration', () => {
     assert.equal((fetch.error as Record<string, unknown>).code, 'selftest.fetchFailed')
     // The search half still reports: a fetch failure must not swallow it.
     assert.equal((value.provider as string), 'dsh-app')
+  })
+})
+
+describe('engine keys over the config route', () => {
+  /** Resolve the stored list as the host would (no `$ENV:` in these cases). */
+  const resolveKeys = (entry: { readonly apiKeys?: readonly string[] }): string[] => [...entry.apiKeys ?? []]
+  /** A host whose keys never reference the environment. */
+  const noEnvRefs = (): number => 0
+
+  /** One save body carrying just the engines (everything else defaults). */
+  const saveEngines = (engines: unknown[]): RequestInit => post({ engines })
+
+  /** The `exa` row as the page receives it. */
+  async function exaRow(call: Harness['call']): Promise<{ entry: { apiKeys?: string[] }, status: { keyCount?: number, keyState?: string } }> {
+    const { body } = await call(`${ROUTE_PREFIX}/config`)
+    const engines = (body.value as { engines: { id: string }[] }).engines
+    return engines.find(engine => engine.id === 'exa') as never
+  }
+
+  it('masks a stored key and reports how many are configured', async () => {
+    // The masking boundary and the count are two halves of one contract: the
+    // value must not cross, and the page must still be able to say "two".
+    const { call } = harness({ resolveKeys, unresolvedKeys: noEnvRefs })
+    await call(`${ROUTE_PREFIX}/config/save`, saveEngines([{ id: 'exa', enabled: true, priority: 0, apiKeys: ['sk-one', 'sk-two'] }]))
+    const row = await exaRow(call)
+    // One placeholder per key, each naming its own value: the page needs a chip
+    // per key to delete exactly that one, and the count is what the badge says.
+    assert.equal(row.entry.apiKeys?.length, 2)
+    for (const token of row.entry.apiKeys ?? []) assert.match(token, /^•+#[0-9a-f]{8}$/)
+    assert.notEqual(row.entry.apiKeys?.[0], row.entry.apiKeys?.[1])
+    assert.equal(row.status.keyCount, 2)
+    assert.equal(row.status.keyState, 'configured')
+  })
+
+  it('keeps the stored list when the page sends the mask back', async () => {
+    const { call, store } = harness({ resolveKeys, unresolvedKeys: noEnvRefs })
+    await call(`${ROUTE_PREFIX}/config/save`, saveEngines([{ id: 'exa', enabled: true, priority: 0, apiKeys: ['sk-one'] }]))
+    const row = await exaRow(call)
+    // Exactly what the page posts back when the field was never touched.
+    await call(`${ROUTE_PREFIX}/config/save`, saveEngines([{ id: 'exa', enabled: true, priority: 0, apiKeys: row.entry.apiKeys }]))
+    assert.deepEqual(store.load().engines.find(entry => entry.id === 'exa')?.apiKeys, ['sk-one'])
+  })
+
+  it('refuses a malformed key with a coded 400 naming the engine', async () => {
+    // Refused on the WRITE path so nothing is stored: a key with a space inside
+    // it would authenticate as 401 with no way to tell it from a revoked one.
+    const { call, store } = harness({ resolveKeys, unresolvedKeys: noEnvRefs })
+    const { status, body } = await call(`${ROUTE_PREFIX}/config/save`, saveEngines([{ id: 'exa', enabled: true, priority: 0, apiKeys: ['sk a'] }]))
+    assert.equal(status, 400)
+    const host = (body.error as Record<string, unknown>).host as Record<string, unknown>
+    assert.equal(host.code, 'engine.keyMalformed')
+    assert.deepEqual(host.params, { id: 'exa' })
+    assert.equal(store.load().engines.find(entry => entry.id === 'exa')?.apiKeys, undefined)
+  })
+
+  it('does not echo a secret when the body is not valid JSON', async () => {
+    // JSON.parse's own message quotes a slice of the input, and the input now
+    // carries literal API keys.
+    const { call } = harness({ resolveKeys, unresolvedKeys: noEnvRefs })
+    const { status, body } = await call(
+      `${ROUTE_PREFIX}/config/save`,
+      post('{"engines":[{"id":"exa","apiKeys":["sk-do-not-echo"]'),
+    )
+    assert.equal(status, 400)
+    assert.equal(JSON.stringify(body).includes('sk-do-not-echo'), false)
+    assert.equal((body.error as Record<string, unknown>).host instanceof Object, true)
+  })
+})
+
+describe('key count and the mask, end to end', () => {
+  const resolveKeys = (entry: { readonly apiKeys?: readonly string[] }): string[] => [...entry.apiKeys ?? []]
+  const noEnvRefs = (): number => 0
+
+  /** Store a config, then read the `exa` row back the way the page sees it. */
+  async function roundTrip(call: Harness['call'], apiKeys?: readonly string[]): Promise<{ entry: { apiKeys?: string[] }, status: { keyCount?: number, keyState?: string } }> {
+    await call(`${ROUTE_PREFIX}/config/save`, post({ engines: [{ id: 'exa', enabled: true, priority: 0, ...apiKeys === undefined ? {} : { apiKeys } }] }))
+    const { body } = await call(`${ROUTE_PREFIX}/config`)
+    return ((body.value as { engines: { id: string }[] }).engines.find(engine => engine.id === 'exa')) as never
+  }
+
+  it('refuses an eleventh key even when it arrives beside the mask', async () => {
+    // The mask expands AFTER the raw body is read, so a cap checked on the raw
+    // body would count "mask + typed key" as two and let the eleventh through
+    // to be silently dropped by the clamp — a green save that lost a key.
+    const { call, store } = harness({ resolveKeys, unresolvedKeys: noEnvRefs })
+    const ten = Array.from({ length: 10 }, (_, index) => `sk-${index}`)
+    const row = await roundTrip(call, ten)
+    const { status, body } = await call(`${ROUTE_PREFIX}/config/save`, post({
+      engines: [{ id: 'exa', enabled: true, priority: 0, apiKeys: [...row.entry.apiKeys ?? [], 'sk-eleven'] }],
+    }))
+    assert.equal(status, 400)
+    const host = (body.error as Record<string, unknown>).host as Record<string, unknown>
+    assert.equal(host.code, 'engine.keyTooMany')
+    assert.equal(store.load().engines.find(entry => entry.id === 'exa')?.apiKeys?.length, 10)
+    assert.equal(row.entry.apiKeys?.length, 10, 'ten chips, one per stored key')
+  })
+
+  it('clears the stored keys when the field is emptied', async () => {
+    // The copy says an empty field clears the keys, so this is deliberate — and
+    // it must clear, not keep, or the sentence would be a lie.
+    const { call, store } = harness({ resolveKeys, unresolvedKeys: noEnvRefs })
+    await roundTrip(call, ['sk-one'])
+    await roundTrip(call, [])
+    assert.equal(store.load().engines.find(entry => entry.id === 'exa')?.apiKeys, undefined)
+  })
+
+  it('reports an unset $ENV reference instead of a bare ready badge', async () => {
+    // The ONE case where the stored value is visible on the page but no key is
+    // in use: dropping the reference is right (resolveKeys cannot use it) but
+    // silence would make the page claim a key is configured.
+    const { call } = harness({
+      resolveKeys: () => [],
+      unresolvedKeys: (entry: { readonly apiKeys?: readonly string[] }) => entry.apiKeys?.length ?? 0,
+    })
+    const row = await roundTrip(call, ['$ENV:NOT_SET_FOR_THIS_TEST'])
+    assert.equal(row.status.keyCount, 0)
+    assert.equal(row.status.keyState, 'none')
+    assert.equal(row.status.keyUnresolved, 1)
   })
 })

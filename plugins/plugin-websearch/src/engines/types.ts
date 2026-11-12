@@ -25,7 +25,12 @@ export interface EngineRequest {
    * Engines must forward it to `fetch` and must not swallow aborts.
    */
   readonly signal: AbortSignal
-  /** Resolved key, when the engine is `key` tier. */
+  /**
+   * The ONE key this attempt uses, already resolved from the store. Undefined
+   * means "call anonymously" — every engine with a key support level of
+   * `optional` still answers without one, which is what makes the retry policy
+   * in `keyring.ts` end in a real attempt rather than a failure.
+   */
   readonly apiKey?: string
 }
 
@@ -55,6 +60,25 @@ export function describeError(error: unknown): string {
  */
 export function isAbort(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.message.includes('aborted'))
+}
+
+/**
+ * An engine's HTTP-level failure, carrying the status the retry policy reads.
+ *
+ * The status is the whole reason this class exists: `keyring.ts` swaps in the
+ * next key on 401/402/429 and gives up on anything else, and a bare
+ * `Error('HTTP 402')` would force it to parse a message string to tell the two
+ * apart.
+ */
+export class HttpError extends Error {
+  /**
+   * @param status - the HTTP status the endpoint answered.
+   * @param detail - optional context appended to the message.
+   */
+  constructor(readonly status: number, detail?: string) {
+    super(detail === undefined ? `HTTP ${status}` : `HTTP ${status}: ${detail}`)
+    this.name = 'HttpError'
+  }
 }
 
 /**
@@ -93,14 +117,14 @@ export async function request(
 /** Fetch text, turning a non-2xx status into a short descriptive error. */
 export async function requestText(url: string, init: RequestInit & { readonly signal: AbortSignal }): Promise<string> {
   const response = await request(url, init)
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  if (!response.ok) throw new HttpError(response.status)
   return await response.text()
 }
 
 /** Fetch JSON, turning a non-2xx status into a short descriptive error. */
 export async function requestJson(url: string, init: RequestInit & { readonly signal: AbortSignal }): Promise<unknown> {
   const response = await request(url, init)
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  if (!response.ok) throw new HttpError(response.status)
   try {
     return await response.json()
   } catch {

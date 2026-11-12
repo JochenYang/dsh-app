@@ -1,9 +1,13 @@
 /**
- * AnySearch — anonymous JSON API (`https://api.anysearch.com/v1/search`), no
- * key. Verified against the live endpoint: it answers a bare POST with
- * `{code, message, data: {results: [...]}}` and needs no registration.
+ * AnySearch — JSON search API (`https://api.anysearch.com/v1/search`).
  *
- * This is the chain's second engine by default. It is a plain JSON API rather
+ * Anonymous access is metered: 1,000 calls a day per account-equivalent
+ * (verified against the live endpoint, which answers a bare POST with
+ * `{code, message, data: {results: [...]}}` and needs no registration). Past
+ * that the API answers **HTTP 402**, which is the exact signal `keyring.ts`
+ * waits for before swapping in the user's own key (`Authorization: Bearer`).
+ *
+ * This is the chain's first engine by default. It is a plain JSON API rather
  * than an HTML scrape, so it does not break when a search page is redesigned,
  * and it is reachable from mainland China without a proxy — the two
  * properties that put it ahead of the engines it replaced.
@@ -17,7 +21,7 @@
 
 import type { WebSearchSource } from '@deepseek-ai/dsh-web'
 import type { Engine, EngineRequest } from './types.ts'
-import { dedupeSources, request, source } from './types.ts'
+import { dedupeSources, HttpError, request, source } from './types.ts'
 
 const ENDPOINT = 'https://api.anysearch.com/v1/search'
 
@@ -71,14 +75,18 @@ export function parseAnySearch(payload: unknown, limit: number): WebSearchSource
 export function anySearchEngine(): Engine {
   return {
     id: 'anysearch',
-    async run({ query, maxResults, signal }: EngineRequest): Promise<WebSearchSource[]> {
+    async run({ query, maxResults, signal, apiKey }: EngineRequest): Promise<WebSearchSource[]> {
       const response = await request(ENDPOINT, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json',
+          ...apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` },
+        },
         body: JSON.stringify({ query, max_results: maxResults }),
         signal,
       })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (!response.ok) throw new HttpError(response.status)
       const payload = await response.json().catch(() => {
         throw new Error('response is not valid JSON')
       }) as unknown

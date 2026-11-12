@@ -45,6 +45,8 @@ import type {} from '@deepseek-ai/dsh-web'
 import { ChainExhaustedError, runChainCached, SearchCache, type ChainStep } from './chain.ts'
 import { AccountingBox } from './accounting.ts'
 import { createEngine } from './engines/index.ts'
+import { keyringFor, runEngineWithKeys } from './engines/keyring.ts'
+import { resolveKeys, unresolvedKeyCount } from './keys.ts'
 import { createWebFetchProvider } from './fetch/provider.ts'
 import { registerWebSearchRoutes } from './routes.ts'
 import { WebSearchStore } from './store.ts'
@@ -70,25 +72,14 @@ export const Config: z<Config> = z.object({
   storePath: z.string().default(''),
 })
 
-/** `$ENV:NAME` reference syntax accepted in apiKey values (used by key-tier engines). */
-const ENV_REF = /^\$ENV:([A-Za-z_][A-Za-z0-9_]*)$/
+/** The host's environment, as the key resolver wants it. */
+const envLookup = (name: string): string | undefined => process.env[name]
 
-/**
- * Resolve one engine's key. `$ENV:NAME` reads the environment at call time (so
- * a rotated variable reaches the next search without a restart); a literal is
- * returned as-is; absent means "no key".
- *
- * No SHIPPED engine is key-tier yet (all six are free), so this is the
- * documented extension point for the next engine that needs one — it exists so
- * adding such an engine is a roster entry, not a plumbing change.
- */
-export function resolveKey(entry: EngineEntry): string | undefined {
-  if (entry.apiKey === undefined) return undefined
-  const match = ENV_REF.exec(entry.apiKey)
-  if (match === null) return entry.apiKey
-  const value = process.env[match[1]]
-  return value === undefined || value === '' ? undefined : value
-}
+/** Resolve one engine's keys through the real environment. */
+const resolveKeysFor = (entry: EngineEntry): string[] => resolveKeys(entry, envLookup)
+
+/** How many of an engine's `$ENV:` references do not resolve. */
+const unresolvedKeysFor = (entry: EngineEntry): number => unresolvedKeyCount(entry, envLookup)
 
 /** Structural slice of the web seam: enough to register + resolve. */
 interface WebSeamLike {
@@ -201,6 +192,7 @@ export function apply(ctx: Context, config: Config): void {
       const steps: ChainStep[] = entries.map(entry => ({
         id: entry.id,
         engine: createEngine(entry.id, file),
+        keyring: keyringFor(entry.id, resolveKeysFor(entry)),
       }))
       rotation += 1
       const outcome = await runChainCached(steps, request, {
@@ -356,12 +348,19 @@ export function apply(ctx: Context, config: Config): void {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(new Error('probe timed out')), 20_000)
       try {
-        const sources = await engine.run({
-          query,
-          maxResults: Math.min(file.maxResults, 5),
-          signal: controller.signal,
-        })
-        return { latencyMs: Date.now() - startedAt, resultCount: sources.length }
+        // The probe walks the keys in the SAME order a search would, so a
+        // reported success means the rotation that produced it is the one the
+        // user's searches will use — and `keyIndex` names which key answered.
+        const outcome = await runEngineWithKeys(
+          engine,
+          { query, maxResults: Math.min(file.maxResults, 5), signal: controller.signal },
+          keyringFor(entry.id, resolveKeysFor(entry)),
+        )
+        return {
+          latencyMs: Date.now() - startedAt,
+          resultCount: outcome.value.length,
+          ...outcome.keyIndex !== undefined ? { keyIndex: outcome.keyIndex } : {},
+        }
       } finally {
         clearTimeout(timer)
       }
@@ -370,7 +369,8 @@ export function apply(ctx: Context, config: Config): void {
     seamAvailable,
     /** Config changed: cached answers may name an engine that is now off. */
     clearCache: () => { cache.clear() },
-    resolveKey,
+    resolveKeys: resolveKeysFor,
+    unresolvedKeys: unresolvedKeysFor,
     /**
      * Read the upstream provider's state off the seam's registry. Guarded at
      * every step: the registry is an unexported implementation detail, so a

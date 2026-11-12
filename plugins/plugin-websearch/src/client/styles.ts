@@ -259,6 +259,69 @@ const cssText = `
   color: var(--dsw-alias-label-tertiary);
   line-height: 16px;
 }
+/*
+ * The per-engine key panel. It sits INSIDE the engine row's main column on
+ * purpose: a key belongs to one engine, and a shared dialog would let a user
+ * save the field against the wrong one. The left rule marks it as subordinate
+ * to the row rather than as another card.
+ */
+.dshWs-keyPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px 0 2px 10px;
+  border-left: 2px solid var(--dsw-alias-border-l2);
+}
+.dshWs-keyHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+/*
+ * One chip per configured key. The chip is the whole state of "what will be
+ * saved", which is why removal is a visible × rather than a rule about what an
+ * empty text field means.
+ */
+.dshWs-keyChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dshWs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 16px;
+}
+.dshWs-chipText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshWs-chipRemove {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 16px;
+}
+.dshWs-chipRemove:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-3); }
+.dshWs-chipRemove:disabled { opacity: 0.4; cursor: not-allowed; }
 .dshWs-segmented {
   display: inline-flex;
   border: 1px solid var(--dsw-alias-border-l2);

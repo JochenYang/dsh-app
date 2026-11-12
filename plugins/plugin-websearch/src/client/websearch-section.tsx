@@ -30,7 +30,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { EngineEntry, EngineStatus, HostText, WebSearchFile } from '../wire.ts'
+import type { EngineEntry, EngineStatus, HostText, KeySupport, WebSearchFile } from '../wire.ts'
+import { isStoredKeyToken, MAX_KEYS_PER_ENGINE } from '../wire.ts'
 // Coded host messages: the code → copy tables live in a React-free module so
 // the suite can test them (a .tsx cannot be bundled by the test harness).
 import { hostMessage, providerReasonCopy, routeErrorCopy, statusLabel } from './host-message.ts'
@@ -49,7 +50,9 @@ const ROUTE = '/api/plugins/dsh-app/plugin-websearch'
 interface EngineView {
   readonly id: string
   readonly label: string
-  readonly tier: 'free' | 'key'
+  readonly keySupport: KeySupport
+  /** Where the user creates a key; absent for `none` engines. */
+  readonly keyConsole?: string
   readonly entry: EngineEntry
   readonly status: EngineStatus
 }
@@ -79,6 +82,8 @@ interface ProbeRow {
   readonly ok: boolean
   readonly latencyMs?: number
   readonly resultCount?: number
+  /** Which configured key answered; absent when the anonymous call did. */
+  readonly keyIndex?: number
   readonly error?: HostText
 }
 
@@ -185,6 +190,19 @@ const ENGINE_HINT_KEYS: Readonly<Record<string, WebSearchKey>> = {
   exa: 'ws.engine.exa.hint',
 }
 
+/**
+ * What the engine's own free tier gives before a key matters.
+ *
+ * A fact the user cannot see from inside the app and would otherwise have to
+ * leave the page to learn, stated once per engine in the dictionary — a quota
+ * that changes is one line of copy, not a code path.
+ */
+const ENGINE_QUOTA_KEYS: Readonly<Record<string, WebSearchKey>> = {
+  anysearch: 'ws.engine.anysearch.keyQuota',
+  parallel: 'ws.engine.parallel.keyQuota',
+  exa: 'ws.engine.exa.keyQuota',
+}
+
 export type WebSearchSectionProps = PropsLocale<typeof NS>
 
 /**
@@ -212,6 +230,32 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
   const [draft, setDraft] = useState<WebSearchFile | null>(null)
   const [instancesText, setInstancesText] = useState('')
   const [confirmSwitch, setConfirmSwitch] = useState<string | null>(null)
+  /** The engine whose key panel is expanded, if any. */
+  const [openKey, setOpenKey] = useState<string | null>(null)
+  /**
+   * Per-engine panel state: the chips (exactly the engine's wire entries — one
+   * placeholder per stored literal key, any `$ENV:NAME` verbatim) plus the add
+   * field's pending text.
+   *
+   * Keyed by engine id rather than one shared slot, because switching to another
+   * engine and back must not silently discard a list the user was half way
+   * through building.
+   */
+  const [panelDrafts, setPanelDrafts] = useState<Record<string, { chips: string[], input: string }>>({})
+  /**
+   * The one key input on screen, focused when a panel opens.
+   *
+   * The panel sits BEFORE its toggle in the DOM (inside the row's main column),
+   * so without this a keyboard user who activates 配置密钥 is left with focus
+   * past the field and has to shift-tab back to reach it.
+   */
+  const keyInputRef = useRef<HTMLInputElement | null>(null)
+  /**
+   * The 配置密钥 button of the expanded row, so closing the panel puts focus
+   * back where the user opened it instead of dropping it onto `<body>` (which
+   * is where Enter-to-save would otherwise leave a keyboard user).
+   */
+  const keyToggleRef = useRef<HTMLButtonElement | null>(null)
 
   /** Show a transient success notice, replacing any previous one. */
   const showNotice = useCallback((key: WebSearchKey): void => {
@@ -227,26 +271,45 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
     return () => { clearTimeout(timer) }
   }, [notice])
 
-  const load = useCallback(async (): Promise<void> => {
+  /**
+   * Re-read the stored config.
+   *
+   * `clearError` is FALSE on the recovery path after a refused save: the
+   * refusal is the message the user has to read, and a successful GET a moment
+   * later must not paint it away. A reload that clears an error it did not
+   * raise is how a rejected write ends up looking like a silent no-op.
+   */
+  const load = useCallback(async (clearError: boolean): Promise<WebSearchFile | null> => {
     try {
       const next = await fetchJson<ConfigResponse>(`${ROUTE}/config`)
       setView(next)
       setDraft(next.file)
       setInstancesText(next.file.searxngInstances.join('\n'))
-      setError(null)
+      if (clearError) setError(null)
+      return next.file
     } catch (cause) {
       // A coded failure (a rejected write, a refused route) gets this page's
       // copy; anything else keeps its own diagnosis.
       setError(cause instanceof HostError
         ? routeErrorCopy(t, cause.host, cause.message)
         : cause instanceof Error ? cause.message : String(cause))
+      return null
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => { void load(true) }, [load])
 
-  /** Persist the current draft (plus the instance textarea) and refresh. */
-  const save = useCallback(async (next: WebSearchFile, instances: string, key: WebSearchKey): Promise<void> => {
+  /**
+   * Persist the current draft (plus the instance textarea) and refresh.
+   *
+   * Returns whether the write landed. The caller needs that answer: a failed
+   * save leaves the draft holding the values the host just REFUSED, so any
+   * later action that persists the draft (reorder, toggle, save settings) would
+   * re-send them and report their rejection against an unrelated button.
+   * `load()` on failure discards the poisoned draft and re-renders from the
+   * store, which is the only state the page can be honest about.
+   */
+  const save = useCallback(async (next: WebSearchFile, instances: string, key: WebSearchKey): Promise<boolean> => {
     setBusy(true)
     setNotice(null)
     try {
@@ -267,16 +330,23 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
       setInstancesText(saved.file.searxngInstances.join('\n'))
       setError(null)
       showNotice(key)
+      return true
     } catch (cause) {
       // A coded failure (a rejected write, a refused route) gets this page's
       // copy; anything else keeps its own diagnosis.
       setError(cause instanceof HostError
         ? routeErrorCopy(t, cause.host, cause.message)
         : cause instanceof Error ? cause.message : String(cause))
+      // Discard the refused draft so the next reorder/toggle cannot re-send it,
+      // but keep the error: this reload is not the message being superseded.
+      // The panels are re-derived from what actually got stored, so a stale
+      // placeholder cannot wedge them into repeating the same refusal.
+      void load(false).then((file) => { if (file !== null) reseedDrafts(file) })
+      return false
     } finally {
       setBusy(false)
     }
-  }, [showNotice])
+  }, [showNotice, load])
 
   /** Move one engine up or down, then persist the new order. */
   const move = useCallback((id: string, delta: number): void => {
@@ -304,21 +374,131 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
     void save(next, instancesText, 'ws.notice.toggleSaved')
   }, [draft, instancesText, save])
 
-  /** Edit one engine's key (kept in the draft until Save is pressed). */
-  const setKey = useCallback((id: string, apiKey: string): void => {
-    if (draft === null) return
-    setDraft({
-      ...draft,
-      engines: draft.engines.map(entry => entry.id === id ? { ...entry, apiKey } : entry),
+  /**
+   * Expand or collapse one engine's key panel.
+   *
+   * The chips are seeded from the saved list the FIRST time a panel opens — one
+   * placeholder per stored literal key (the host never sends the literals) and
+   * `$ENV:NAME` references verbatim — and then kept per engine until it is
+   * saved or the page reloads.
+   */
+  const toggleKeyPanel = (id: string, keys: readonly string[] | undefined): void => {
+    if (openKey === id) {
+      setOpenKey(null)
+      return
+    }
+    setPanelDrafts((current) => current[id] === undefined
+      ? { ...current, [id]: { chips: [...keys ?? []], input: '' } }
+      : current)
+    setOpenKey(id)
+  }
+
+  // Move focus into the panel that just opened (see keyInputRef).
+  useEffect(() => {
+    if (openKey !== null) keyInputRef.current?.focus()
+  }, [openKey])
+
+  /** Update one engine's panel draft. */
+  const patchPanelDraft = (id: string, patch: Partial<{ chips: string[], input: string }>): void => {
+    setPanelDrafts((current) => {
+      const base = current[id] ?? { chips: [], input: '' }
+      return {
+        ...current,
+        [id]: { chips: patch.chips ?? base.chips, input: patch.input ?? base.input },
+      }
     })
-  }, [draft])
+  }
 
-  /** Persist the engine keys the user typed. */
-  const saveKeys = useCallback((): void => {
+  /** Keys typed into the add field but not yet committed to a chip. */
+  const pendingKeys = (text: string): string[] => text
+    .split(/[,\n]+/)
+    .map(part => part.trim())
+    .filter(part => part !== '')
+
+  /**
+   * Re-derive every open panel's stored chips from the host's truth.
+   *
+   * Runs after a REFUSED save. Without it a panel seeded from an older store
+   * keeps sending placeholders the host no longer recognises, so every retry
+   * fails the same way and the panel has no in-page way back. Keys typed in
+   * this session are kept — they are the user's work, not the host's state.
+   */
+  const reseedDrafts = (file: WebSearchFile): void => {
+    setPanelDrafts((current) => {
+      const next: Record<string, { chips: string[], input: string }> = {}
+      for (const [id, draft] of Object.entries(current)) {
+        const stored = file.engines.find(entry => entry.id === id)?.apiKeys ?? []
+        next[id] = {
+          chips: [...stored, ...draft.chips.filter(chip => !isStoredKeyToken(chip))],
+          input: draft.input,
+        }
+      }
+      return next
+    })
+  }
+
+  /**
+   * Commit the add field to chips (Enter, or the 添加 button).
+   *
+   * The cap is applied HERE, not only at save time: a paste that would overflow
+   * otherwise builds a list the host must refuse, with the screen showing a
+   * count the error message explains and no obvious way to trim it.
+   */
+  const addKeyChips = (id: string, chips: readonly string[], input: string): void => {
+    const parsed = pendingKeys(input)
+    if (parsed.length === 0) return
+    const room = Math.max(0, MAX_KEYS_PER_ENGINE - chips.length)
+    if (room === 0) {
+      setError(t('ws.key.tooManyNotice', { max: MAX_KEYS_PER_ENGINE }))
+      return
+    }
+    const accepted = parsed.slice(0, room)
+    if (accepted.length < parsed.length) setError(t('ws.key.tooManyNotice', { max: MAX_KEYS_PER_ENGINE }))
+    patchPanelDraft(id, { chips: [...chips, ...accepted], input: '' })
+  }
+
+  /** Drop one chip — the only way a stored key is removed. */
+  const removeKeyChip = (id: string, chips: readonly string[], index: number): void => {
+    patchPanelDraft(id, { chips: chips.filter((_, position) => position !== index) })
+    // The × unmounts itself; without this the keyboard user lands on <body> and
+    // has to tab back from the top of the page for every deletion.
+    keyInputRef.current?.focus()
+  }
+
+  /**
+   * Persist one engine's key list, then probe that engine.
+   *
+   * The probe runs AFTER the save because it reads the store: testing first
+   * would report the previous keys as though they were the new ones.
+   */
+  const saveKeysFor = (id: string, chips: readonly string[], input: string): void => {
     if (draft === null) return
-    void save(draft, instancesText, 'ws.notice.keysSaved')
-  }, [draft, instancesText, save])
-
+    // Whatever is still sitting in the add field is included: a user who pasted
+    // a key and pressed 保存 must not silently lose it to a forgotten 添加.
+    const apiKeys = [...chips, ...pendingKeys(input)]
+    const next: WebSearchFile = {
+      ...draft,
+      engines: draft.engines.map(entry => entry.id === id ? { ...entry, apiKeys } : entry),
+    }
+    setDraft(next)
+    // Close the panel only once the write landed: the chips keep what the user
+    // built while the request is in flight, and the reopened panel is seeded
+    // from the host's masked answer rather than from a literal key that the
+    // store no longer has in that form.
+    void save(next, instancesText, 'ws.notice.keysSaved').then((saved) => {
+      if (!saved) return
+      setPanelDrafts((current) => {
+        const next = { ...current }
+        delete next[id]
+        return next
+      })
+      setOpenKey(null)
+      // Focus the toggle BEFORE the panel unmounts, or the row loses the
+      // keyboard's place entirely.
+      keyToggleRef.current?.focus()
+      void runProbe(id)
+    })
+  }
   /** Persist the non-engine settings (mode, budget, cache, cap, instances). */
   const saveSettings = useCallback((patch: Partial<WebSearchFile>): void => {
     if (draft === null) return
@@ -481,12 +661,23 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
         {ordered.map((entry, index) => {
           const meta = view.engines.find(item => item.id === entry.id)
           const label = meta?.label ?? entry.id
-          const tier = meta?.tier ?? 'free'
+          const keySupport = meta?.keySupport ?? 'none'
           const hintKey = ENGINE_HINT_KEYS[entry.id]
           const hint = hintKey === undefined ? '' : t(hintKey)
+          const quotaKey = ENGINE_QUOTA_KEYS[entry.id]
           const status = meta?.status ?? { state: 'unknown' as const }
+          const keyCount = status.keyCount ?? 0
           const rendered = statusLabel(status, t)
           const probeRow = probe?.results.find(row => row.id === entry.id)
+          // This row's panel draft (empty until the panel is opened).
+          const chips = panelDrafts[entry.id]?.chips ?? []
+          const chipInput = panelDrafts[entry.id]?.input ?? ''
+          // The badge states which of the two quota regimes the engine is in:
+          // a keyless engine is simply free, and an engine that can take a key
+          // shows how many are configured.
+          const badge = keyCount > 0
+            ? { text: t('ws.chain.keyed', { count: keyCount }), className: 'dshWs-badgeKey' }
+            : { text: t('ws.chain.free'), className: 'dshWs-badgeFree' }
           return (
             <div className="dshWs-engineRow" key={entry.id}>
               <div className="dshWs-order">
@@ -512,8 +703,8 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
               <div className="dshWs-engineMain">
                 <div className="dshWs-engineName">
                   <span>{index + 1}. {label}</span>
-                  <span className={`dshWs-badge ${tier === 'free' ? 'dshWs-badgeFree' : 'dshWs-badgeKey'}`}>
-                    {tier === 'free' ? t('ws.chain.free') : t('ws.chain.needsKey')}
+                  <span className={`dshWs-badge ${badge.className}`}>
+                    {badge.text}
                   </span>
                   <span className={`dshWs-engineStatus${rendered.tone === 'ok' ? ' dshWs-engineStatusOk' : rendered.tone === 'err' ? ' dshWs-engineStatusErr' : ''}`}>
                     {rendered.text}
@@ -526,23 +717,145 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
                       ? t('ws.chain.probeOk', {
                           count: probeRow.resultCount ?? 0,
                           latency: probeRow.latencyMs ?? 0,
-                        })
+                        }) + (probeRow.keyIndex === undefined
+                          ? ''
+                          : t('ws.chain.probeKey', { index: probeRow.keyIndex + 1 }))
                       : t('ws.chain.probeFail', { reason: probeRow.error?.text ?? t('ws.chain.probeReason') })}
                   </div>
                 )}
-                {tier === 'key' && (
-                  <input
-                    className="dshWs-input"
-                    type="text"
-                    placeholder={t('ws.chain.keyPlaceholder')}
-                    aria-label={t('ws.chain.keyAria', { label })}
-                    value={entry.apiKey ?? ''}
-                    disabled={busy}
-                    onChange={(event) => { setKey(entry.id, event.target.value) }}
-                  />
+                {keySupport !== 'none' && openKey === entry.id && (
+                  <div className="dshWs-keyPanel" id={`dshWs-key-${entry.id}`}>
+                    <div className="dshWs-keyHead">
+                      <span className="dshWs-label">{t('ws.key.title')}</span>
+                      {chips.length > 0 && (
+                        <span className="dshWs-fieldHint">{t('ws.key.chipCount', { count: chips.length })}</span>
+                      )}
+                      {status.keyState === 'exhausted' && (
+                        <span className="dshWs-engineStatusErr">{t('ws.key.exhausted')}</span>
+                      )}
+                      {(status.keyUnresolved ?? 0) > 0 && (
+                        <span className="dshWs-engineStatusErr">
+                          {t('ws.key.unresolved', { count: status.keyUnresolved ?? 0 })}
+                        </span>
+                      )}
+                    </div>
+                    {quotaKey !== undefined && <p className="dshWs-fieldHint">{t(quotaKey)}</p>}
+                    {/*
+                      * The chips ARE the configured list, one per key: a stored
+                      * literal reads 「已保存 #N」, a key typed in this session
+                      * reads 「新密钥 #N」, and an `$ENV:NAME` reference shows
+                      * itself (it is not a secret). No chip ever shows a literal
+                      * value, stored or not — see the label comment below.
+                      */}
+                    {chips.length > 0 && (
+                      <div className="dshWs-keyChips">
+                        {chips.map((chip, position) => {
+                          const stored = isStoredKeyToken(chip)
+                          const reference = chip.startsWith('$ENV:')
+                          // A literal key is NEVER rendered — not the stored ones
+                          // and not the one typed a second ago. The chip is a
+                          // label, not a value: a value in the DOM is a value in
+                          // devtools, in a screenshot, in someone's shoulder
+                          // view of the screen. The only place a literal appears
+                          // is the input field while it is being typed, and that
+                          // field is cleared the moment the key becomes a chip.
+                          const kind = stored
+                            ? chips.slice(0, position + 1).filter(item => isStoredKeyToken(item)).length
+                            : chips.slice(0, position + 1).filter(item => !isStoredKeyToken(item) && !item.startsWith('$ENV:')).length
+                          const chipLabel = stored
+                            ? t('ws.key.storedChip', { index: kind })
+                            : reference
+                              ? chip
+                              : t('ws.key.newChip', { index: kind })
+                          return (
+                            <span className="dshWs-chip" key={`${chip}-${String(position)}`}>
+                              <span className="dshWs-chipText">{chipLabel}</span>
+                              <button
+                                type="button"
+                                className="dshWs-chipRemove"
+                                aria-label={t('ws.key.remove', { label: chipLabel })}
+                                disabled={busy}
+                                onClick={() => { removeKeyChip(entry.id, chips, position) }}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div className="dshWs-row">
+                      <input
+                        className="dshWs-input dshWs-fieldGrow"
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label={t('ws.key.label')}
+                        placeholder={t('ws.key.placeholder')}
+                        value={chipInput}
+                        disabled={busy || chips.length >= MAX_KEYS_PER_ENGINE}
+                        ref={keyInputRef}
+                        onChange={(event) => { patchPanelDraft(entry.id, { input: event.target.value }) }}
+                        onKeyDown={(event) => {
+                          // Enter commits the field to a chip, so a keyboard user
+                          // can build the list without reaching for the button.
+                          if (event.key !== 'Enter') return
+                          event.preventDefault()
+                          addKeyChips(entry.id, chips, chipInput)
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="dshWs-button"
+                        disabled={busy || chipInput.trim() === '' || chips.length >= MAX_KEYS_PER_ENGINE}
+                        onClick={() => { addKeyChips(entry.id, chips, chipInput) }}
+                      >
+                        {t('ws.key.add')}
+                      </button>
+                    </div>
+                    <p className="dshWs-fieldHint">{t('ws.key.chipNote', { max: MAX_KEYS_PER_ENGINE })}</p>
+                    <p className="dshWs-fieldHint">{t('ws.key.fallback')}</p>
+                    <p className="dshWs-fieldHint">{t('ws.key.sharedAccount')}</p>
+                    <div className="dshWs-row">
+                      {meta?.keyConsole === undefined ? null : (
+                        <a
+                          className="dshWs-button"
+                          href={meta.keyConsole}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                        >
+                          {t('ws.key.get')}
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        className="dshWs-button dshWs-buttonPrimary"
+                        disabled={busy}
+                        onClick={() => { saveKeysFor(entry.id, chips, chipInput) }}
+                      >
+                        {t('ws.key.save')}
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
               <div className="dshWs-engineActions">
+                {keySupport === 'none' ? null : (
+                  <button
+                    type="button"
+                    className="dshWs-button"
+                    ref={(element) => { if (openKey === entry.id) keyToggleRef.current = element }}
+                    aria-expanded={openKey === entry.id}
+                    aria-controls={`dshWs-key-${entry.id}`}
+                    // Three rows would otherwise share one accessible name;
+                    // naming the engine is what tells them apart.
+                    aria-label={t('ws.chain.configureAria', { label })}
+                    disabled={busy}
+                    onClick={() => { toggleKeyPanel(entry.id, meta?.entry.apiKeys) }}
+                  >
+                    {t('ws.chain.configure')}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="dshWs-button"
@@ -567,9 +880,6 @@ export function WebSearchSection({ t }: WebSearchSectionProps): ReactNode {
         <div className="dshWs-row">
           <button type="button" className="dshWs-button" disabled={probeBusy} onClick={() => { void runProbe() }}>
             {probeBusy ? t('ws.chain.testing') : t('ws.chain.testAll')}
-          </button>
-          <button type="button" className="dshWs-button" disabled={busy} onClick={saveKeys}>
-            {t('ws.chain.saveKeys')}
           </button>
         </div>
         <div className="dshWs-row">

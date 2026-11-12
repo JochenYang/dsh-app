@@ -7,7 +7,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { ChainExhaustedError, runChain, runChainCached, SearchCache, type ChainStep } from '../src/chain.ts'
-import type { Engine } from '../src/engines/types.ts'
+import { HttpError, type Engine } from '../src/engines/types.ts'
+import { Keyring } from '../src/engines/keyring.ts'
 import type { WebSearchSource } from '@deepseek-ai/dsh-web'
 
 function source(url: string): WebSearchSource {
@@ -273,5 +274,70 @@ describe('runChainCached', () => {
     )
     const second = await runChainCached([fake('a', 1, calls)], { query: 'q' }, { ...CACHE_OPTIONS, cache })
     assert.equal(second.cached, false)
+  })
+})
+
+describe('a step carrying keys', () => {
+  /**
+   * An engine that rejects its first key with a quota status and answers with
+   * the second — the shape `runWithKeys` is built for.
+   */
+  function keyed(id: string, keys: string[], seen: (string | undefined)[]): ChainStep {
+    const engine: Engine = {
+      id,
+      async run(request): Promise<WebSearchSource[]> {
+        seen.push(request.apiKey)
+        if (request.apiKey === keys[0]) throw new HttpError(402)
+        return [source(`https://${id}.example/hit`)]
+      },
+    }
+    return { id, engine, keyring: new Keyring(id, keys) }
+  }
+
+  it('keeps the key swap inside ONE attempt and reports which key answered', async () => {
+    // The distinction matters downstream: a second ATTEMPT would add a failure
+    // to the fallback note and double the reported latency for one engine.
+    const seen: (string | undefined)[] = []
+    const outcome = await runChain([keyed('a', ['spent', 'good'], seen)], { query: 'q' }, OPTIONS)
+    assert.deepEqual(seen, ['spent', 'good'])
+    assert.equal(outcome.attempts.length, 1)
+    assert.equal(outcome.attempts[0]?.ok, true)
+    assert.equal(outcome.attempts[0]?.keyIndex, 1)
+    assert.equal(outcome.result.sources.length, 1)
+  })
+
+  it('records no keyIndex when the anonymous call answered', async () => {
+    const seen: (string | undefined)[] = []
+    const engine: Engine = {
+      id: 'b',
+      async run(request): Promise<WebSearchSource[]> {
+        seen.push(request.apiKey)
+        return [source('https://b.example/anon')]
+      },
+    }
+    const outcome = await runChain([{ id: 'b', engine, keyring: new Keyring('b', []) }], { query: 'q' }, OPTIONS)
+    assert.deepEqual(seen, [undefined])
+    assert.equal(outcome.attempts[0]?.keyIndex, undefined)
+  })
+})
+
+describe('the budget abort', () => {
+  it('aborts with a cancellation reason, not an engine failure', async () => {
+    // The key ring decides "cancelled" vs "this engine broke" by the error's
+    // NAME. A budget timeout that arrived as an ordinary Error would make it try
+    // every remaining key and then the anonymous tier against an already-aborted
+    // signal.
+    let reason: unknown
+    const engine: Engine = {
+      id: 'slow',
+      async run(request): Promise<WebSearchSource[]> {
+        await new Promise(resolve => setTimeout(resolve, 30))
+        reason = request.signal.reason
+        return []
+      },
+    }
+    await runChain([{ id: 'slow', engine }], { query: 'q' }, { ...OPTIONS, timeoutMs: 5 }).catch(() => undefined)
+    assert.equal((reason as Error | undefined)?.name, 'AbortError')
+    assert.match((reason as Error).message, /timed out/)
   })
 })

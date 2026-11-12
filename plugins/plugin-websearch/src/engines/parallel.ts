@@ -1,12 +1,23 @@
 /**
- * Parallel — anonymous hosted MCP endpoint (`https://search.parallel.ai/mcp`),
- * no key. It meters anonymously and reports per-call usage in the response
- * `_meta`, which is why the settings page probes it like any other engine.
+ * Parallel — hosted MCP endpoint (`https://mcp.parallel.ai/mcp`).
+ *
+ * Anonymous calls are free at a lower rate limit and report per-call usage in
+ * the response `_meta`; a user key (`x-api-key`) bills to their account with a
+ * higher ceiling, which is why the settings page probes it like any other
+ * engine.
+ *
+ * The host moved from `search.parallel.ai` to `mcp.parallel.ai` (the address
+ * Parallel's own MCP documentation gives as of 2026-11). Both answered 200
+ * with an identical payload when measured, and both reject a bad key with
+ * HTTP 401 `{"code":16,"message":"Invalid API key (C.1)"}` — the new one is
+ * used because it is the documented address.
  *
  * Response shape (verified against the live endpoint): the MCP text block is
  * itself a JSON document — `{ search_id, results: [{ url, title,
  * publish_date, excerpts: [...] }] }` — so this engine parses a nested JSON
- * string rather than the `Title:`/`URL:` text layout Exa uses.
+ * string rather than the `Title:`/`URL:` text layout Exa uses. The new host
+ * frames it as SSE (`event: message` + `data: {...}`), which the shared
+ * transport already parses; `search.parallel.ai` answered with plain JSON.
  *
  * The tool requires both `objective` and `search_queries`. With only one
  * query available at this layer, the query serves as both: `objective` wants
@@ -21,7 +32,7 @@ import type { Engine, EngineRequest } from './types.ts'
 import { callMcpTool } from './mcp.ts'
 import { dedupeSources, source } from './types.ts'
 
-const ENDPOINT = 'https://search.parallel.ai/mcp'
+const ENDPOINT = 'https://mcp.parallel.ai/mcp'
 const TOOL = 'web_search'
 
 /**
@@ -78,12 +89,18 @@ export function parseParallel(text: string, limit: number): WebSearchSource[] {
 export function parallelEngine(): Engine {
   return {
     id: 'parallel',
-    async run({ query, maxResults, signal }: EngineRequest): Promise<WebSearchSource[]> {
-      const text = await callMcpTool(ENDPOINT, TOOL, {
-        objective: query,
-        search_queries: [query],
-        session_id: SESSION_ID,
-      }, signal)
+    async run({ query, maxResults, signal, apiKey }: EngineRequest): Promise<WebSearchSource[]> {
+      const text = await callMcpTool(
+        ENDPOINT,
+        TOOL,
+        {
+          objective: query,
+          search_queries: [query],
+          session_id: SESSION_ID,
+        },
+        signal,
+        apiKey === undefined ? undefined : { 'x-api-key': apiKey },
+      )
       return parseParallel(text, maxResults)
     },
   }
