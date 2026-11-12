@@ -51,6 +51,14 @@ npm run check:preflight -- --npm <目标版本>             # 下载 + 校验 sh
 退出码是判据：`0` 无 blocker、`1` 有 blocker、`2` 参数或输入错误；`--json` 给机器读。**它看不见的**：某个包新增
 职责这类架构位移、以及渲染与运行期行为——前者只能读变更说明，后者进第 5、6 节。
 
+**CI 里也跑一份**（`gate` job，排在逐插件安装之后，见 `docs/agents/testing.md`）。这个事实改变两件事：
+
+- 升线不再是发现问题的唯一时机：某个插件被单独重装成脏拷贝、或者内核包停止导出我们 import 的符号，
+  当个 PR 就会红。
+- 反过来，它在 CI 里跑的是默认 `floor` 策略：**低于**跟随线的拷贝一律拦，**高于**它的只报 note。
+  所以上游发版那天，PR 上会出现「N 个包已经领先跟随线」的 note——那不是失败，是提示该做本节的
+  第 1–3 步了。想在发版前确认完全没有混线，在本地用 `--line-policy=exact` 跑一次。
+
 | 检查 | 问的问题 | 能看见的断裂 |
 |---|---|---|
 | `line` | 我们消费的每个包是否落在同一个版本；**低于**跟随线的拷贝一律 blocker，**高于**它的是「该 bump 了」的 note（`--line-policy=exact` 下升为 blocker） | 脏拷贝静默赢得解析、上游发版后插件树按 `^` 先行 |
@@ -234,6 +242,7 @@ npm run typecheck
 npm run build
 npm test
 npm run check:graph
+npm run check:preflight
 npm run verify -- --tgz runtime-dist/dsh-runtime-<platform>-<arch>-<版本>.tgz
 npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 ```
@@ -248,12 +257,15 @@ npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 | `verify --tgz` | 真内核起得来；每个插件的设置路由 200；客户端 bundle 非空；MCP 挂载链路通 | **不驱动浏览器**：`slot entry crashed` 恰恰在路由 200 且 bundle 非空时发生 |
 | `check:plugins` | 用给定内核以临时 `DSH_HOME` 短启动，扫启动输出的失败信号 | 它的失败规则收窄为 `ERR_*` / `Cannot find module` / `duplicate …` / `failed to load\|start` / 缩进堆栈行——**不含** `patch: entry … not found` 这类文案，所以它"通过"不能替代对启动日志的显式检索 |
 | `check:slots` | 客户端半注册的每个座位在跟随线上仍然存在（**已在 CI 里**，见 §2.2.2） | 组件真的渲染了吗；注册方插件未安装时该注册进 `unjudged` 而不是判定 |
+| `check:preflight` | 跟随线上的十二项（§1.0）：混线、包还在不在发布、我们 import 的具名导出、声明形状、slot 与服务 id、overlay 行、技能名单、传递依赖、peer、发布版的载荷差异。**已在 CI 里**（`gate` job，排在逐插件安装之后；默认 `floor` 策略，低于跟随线的拷贝才拦） | 架构位移（某个包新增职责）；渲染与运行期；`--npm` 才有声明级 diff 与载荷差异；`overlay`/`skill-office` 在只有 `node_modules` 的树里直接 skip |
 
 因此第 3 节的结论必须与第 6 节的渲染面判定合起来看，缺一条就不算覆盖。
 
 本轮交付时这六条的实际结果 `[实测]`：`typecheck` exit 0、`check:graph` `ok — no violations`、
 `npm test` 531 用例 / 530 pass / 1 skipped / 0 fail、`check:slots` exit 0；`verify --tgz` 与
-`check:plugins` 需一份 runtime 产物或真实 `DSH_HOME`，本轮未跑。
+`check:plugins` 需一份 runtime 产物或真实 `DSH_HOME`，本轮未跑。（`check:preflight` 那一行是
+后补的：rc.2 那一轮还没有它，对那次换线的复算见
+[`../archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md`](../archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md) §15。）
 
 ---
 

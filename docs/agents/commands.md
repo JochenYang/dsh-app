@@ -77,14 +77,23 @@ The one-line check separates two failures that used to share a severity: a copy
 BELOW the followed line is always a blocker (a stale nested copy wins resolution
 silently), while a copy ABOVE it means upstream published and the bump is due — a
 note by default so a release day does not red unrelated pull requests, and a
-blocker under `--line-policy=exact` for a hand-run release check. The CI `gate`
-job runs the default form.
+blocker under `--line-policy=exact` for a hand-run release check.
+
+**It is also a CI step.** `.github/workflows/ci.yml` runs the default form in the
+`gate` job, right after `Slot registrations (static)` — i.e. after the per-plugin
+installs, because nine of the packages we import live only inside a plugin's own
+`node_modules` (measured on a fresh `npm ci` tree: 15 phantom blockers). Offline,
+about half a second. So the preflight is no longer only a line-move ritual: a
+plugin reinstalled into a different version, or a kernel package that stopped
+exporting a symbol we import, reds the same pull request that did it. See
+[`testing.md`](testing.md) for the job order and `kernel-line-regression.md` §1.0
+for what the CI form deliberately does not block on.
 
 ## Gates (all static — no kernel, no network)
 
 ```sh
 npm run check:graph           # plugin-graph + suite-roster rules
-npm run check:preflight       # kernel-line preflight against the installed line
+npm run check:preflight       # kernel-line preflight (also a CI step, after the plugin installs)
 npm run check:suites          # the five roster copies agree (--check form: check:suites:gate)
 npm run check:slots           # every ctx.slots id a client half names still exists in the line
 npm run check:surface         # kernel-surface report
