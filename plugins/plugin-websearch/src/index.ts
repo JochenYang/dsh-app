@@ -51,6 +51,7 @@ import { createWebFetchProvider } from './fetch/provider.ts'
 import { registerWebSearchRoutes } from './routes.ts'
 import { WebSearchStore } from './store.ts'
 import { activeEngines, BRAND_PROVIDER_ID, BRAND_FETCH_PROVIDER_ID, FETCH_PROBE_URL, type EngineEntry, type WebSearchFile } from './wire.ts'
+import { PROVIDER_TITLE, SEARCH_PROVIDER_DESCRIPTION } from './locales.ts'
 
 export const name = 'plugin-websearch'
 
@@ -185,11 +186,8 @@ export function apply(ctx: Context, config: Config): void {
     id: BRAND_PROVIDER_ID,
     // Shown by the kernel's own Web search page; without these it can only
     // print the id. This is the engine chain, not one engine.
-    title: 'DSH APP',
-    description: {
-      en: 'The suite engine chain: anysearch, bing, parallel, exa and a SearXNG instance list, tried in order with automatic fallback.',
-      zh: '套件自带的引擎链：anysearch、bing、parallel、exa 与自填的 SearXNG 实例，按顺序尝试并自动回退。',
-    },
+    title: PROVIDER_TITLE,
+    description: SEARCH_PROVIDER_DESCRIPTION,
     available(): boolean {
       const file = store.load()
       if (!file.enabled) return false
