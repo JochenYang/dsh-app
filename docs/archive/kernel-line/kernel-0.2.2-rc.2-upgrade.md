@@ -217,3 +217,17 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
 
 **未处理并已登记**：`stageOfficeSkills` 死重量（Deferred 行）、设置页暴露 `restart`/`probe`（Deferred 行）、
 swarm 批次级 schema 没有独立校验（真机一轮 turn 已覆盖整值，但无单测）、`docs/plans/…:94` 的 W13 与 Deferred 已改为一致表述。
+
+## 14 发布 `[实测]`
+
+| 项 | 结果 |
+|---|---|
+| shell 发布 | `v0.19.0`，tag 与 `main` 同一提交；CI（`43184524734`）两作业全绿；release 运行（`43184563006`）`prepare-release` / `resolve` / 六个 runtime cell / `mirror runtime` / 四个 app cell 全绿 |
+| runtime 产物 | `runtime-0.2.2-rc.2` **保持 prerelease**；六个 cell 的 manifest 均为 `dshVersion 0.2.2-rc.2`、`suiteVersion ededa5ec`（无混版）；每个 cell 的 `.sha512` 与 manifest `integrity` 逐一对上 |
+| 产物内容 | 从 `dsh-runtime-win32-x64-0.2.2-rc.2.tgz` 里读出六个改动插件的版本：`plugin-mcp 0.3.3`、`plugin-swarm 0.9.5`、`plugin-pdf 0.3.0`、`plugin-rewind 0.2.1`、`plugin-websearch 0.3.2`、`plugin-client-ui 0.6.1` |
+| 办公载荷 | 六个 cell 各带 `office-payload-<cell>-0.2.2-rc.2.tgz` + `.sha512` + `.json`，`payloadVersion` 均为 `0.2.3-py3.12.14` |
+| 发布页 | `gh release edit v0.19.0 --draft=false --notes-file release-notes.md`（12980 字节）→ 正文 9843 字符，`releases/latest` 指向 v0.19.0 |
+| ModelScope 镜像 | `publish-mirror`（`43188542745`）Summary **OK**：`releases/latest` + `releases/archive/0.19.0`、21 个资产；prune 保留最新 10 个 stable 并删除 0.17.9；latest cleanup 保留本次 21 个名字、删掉 17 个 0.18.8 残留 |
+
+发版过程中被 release-check 拦下的一处：`check:graph` 在 `plugin-websearch` 的两个文件里发现字典外的 Han 字符（provider 的 `zh` 说明），
+搬到 `plugins/plugin-websearch/src/locales.ts` 后才打 tag。
