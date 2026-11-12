@@ -147,13 +147,13 @@ rc.2 只有 git tag（`dsh-v0.2.2-rc.2`，release 提交 `91319233e1`）与 GitH
 | 4 (W7) | 类型门禁 | 19 个插件 + 根 | 0 error | `for d in plugins/*/; do node scripts/plugin-gates.mjs "$d"; done`；`npm run typecheck` | PASS |
 | 5 (W3) | 构建不再因技能缺失拒绝 | 只有 4 个技能目录的 source | `missingOfficeSkills` 返回空 | `npm run runtime:build` | PASS |
 | 6 (W4) | 启动不再要求 office-skills | 无 `<dataDir>/dsh-app-office/office-skills` | host 正常启动到主界面 | `npm run dev`，看启动日志 | PASS（删掉 office-skills 后 host ready、失败 0） |
-| 7 (W4) | Python 走 workspace-dependencies | 真机 `/office-docx` 一次 | 技能指示使用内置 Python，而不是用户的 | 手工 + `load_workspace_dependencies` 输出 | N/A（本地 payload 是 python: null，没有 Python 集可验；叶子按约定只回答不创建） |
-| 8 (W2) | 转换服务可取到 | 真机跑 `office_to_pdf` 一次 | `status: exported` 且文件已写入 | 手工 | PASS（引擎链：真 .docx → 18303 字节 PDF；经工具的调用需 agent turn，见 T8 备注） |
+| 7 (W4) | Python 走 workspace-dependencies | 真机 `/office-docx` 一次 | 技能指示使用内置 Python，而不是用户的 | 手工 + `load_workspace_dependencies` 输出 | PASS（带 Python 集的 payload 装好后，真机 turn 拿到内置 python.exe，`import docx/pptx/openpyxl` 退出码 0） |
+| 8 (W2) | 转换服务可取到 | 真机跑 `office_to_pdf` 一次 | `status: exported` 且文件已写入 | 手工 | PASS（真机 turn：`status: exported`、18303 字节；并因此发现垫片的引擎锚点问题，见归档 §11） |
 | 9 (W5) | 引擎 0.2.3 的 API 与 payload 布局 | 用新 payload 跑一次转换 | 不报 kit/engine 定位失败 | 手工 + 日志 | PASS |
 | 10 (W8) | 首页只有一层鲸鱼 | 真机开首页 + CDP 读 DOM | 我们的 canvas 在且 `is-visible`；`[data-home-whale]` 计数 0；无 `slot entry crashed` | 运行中的窗口 + `scratch/cdp.mjs` | PASS（订正：静止时只有我们那层；上游画布透明，点击才播） |
-| 11 (W1/W14) | 根套件与真内核 | `npm test`；`npm run verify -- --tgz <新产物>` | 全绿 | 命令 | PASS（npm test）/ N/A（verify --tgz 本轮未跑） |
-| 12 (W1) | 路由载体未变 | `probe-routes.cjs` 的 S1–S5 段 | RESULT 全 PASS | `node scripts/probe-routes.cjs` | N/A（probe-routes 本轮未跑；其技能名单已改为从 build-runtime.mjs 解析） |
-| 13 (W3) | 设置页图标未回退 | `probe-settings-nav.cjs --lang en-US` | 无双图标、无残留 Han | 命令 | N/A（probe-settings-nav 本轮未跑） |
+| 11 (W1/W14) | 根套件与真内核 | `npm test`；`npm run verify -- --tgz <新产物>` | 全绿 | 命令 | PASS（npm test 737/735/0；verify --tgz smoke 全过，过程中修了导入后单次读状态的断言） |
+| 12 (W1) | 路由载体未变 | `probe-routes.cjs` 的 S1–S5 段 | RESULT 全 PASS | `node scripts/probe-routes.cjs` | PASS（--tgz 跑新产物：RESULT: PASS (32 checks)） |
+| 13 (W3) | 设置页图标未回退 | `probe-settings-nav.cjs --lang en-US` | 无双图标、无残留 Han | 命令 | N/A（跑不了：该探针需要一个已构建的 harness 检出，本机没有；不是本轮回归） |
 | 14 (W12) | Agent Teams 裁决的可见结果 | 真机看模型菜单/工具列表 | 与裁决一致 | 手工 | N/A（未做手工确认；默认开启按上游） |
 | 15 (W13) | MCP 只有一套实例 | 在内核页面之外的我们的页面加一个服务器 | 工具以 `mcp__<server>__<tool>` 注册，且 loader 条目里没有第二个 mcp-client 实例 | 手工 + 启动日志 | PASS（真机 mounted + toolCount 1；patch 只有一个存储） |
 | 16 (W13b) | 旧配置迁移 | 预置一个带 `$ENV:` 引用的 `servers.json` 后启动 | 条目出现在 `mcp-manager` 行 config，`$ENV:` 变成 `${credential:…}`，原文件仍在 | 手工 + 读 profile patch | PASS（tests/legacy.test.ts；真机空舰队未触发迁移） |

@@ -87,10 +87,38 @@ function payloadMissing(root) {
 }
 
 /**
+ * Resolve an engine package from the payload, beside the real kit.
+ *
+ * Why this is passed explicitly: since 0.2.2-rc.2 the kit resolves its engine
+ * from `createRequire(<the entry the consumer resolved>)` — and the consumer
+ * (the office provider) resolves THIS SHIM, which lives in the runtime tree
+ * where the engine package was trimmed out. Anchored there, the engine lookup
+ * fails and every conversion answers `unavailable` even with a payload
+ * installed. Anchoring at the payload's own `node_modules` is what the resolution
+ * would have done had the provider imported the real kit directly.
+ *
+ * @param root - the payload directory.
+ * @returns a resolver in the kit's `EnginePackageResolver` shape.
+ */
+function engineResolver(root) {
+  const payloadModules = join(root, 'node_modules')
+  return (name) => {
+    const manifest = join(payloadModules, ...name.split('/'), 'package.json')
+    if (!existsSync(manifest)) {
+      const error = new Error(`LibreOffice engine package ${name} is missing from the office payload at ${root}`)
+      error.code = 'MODULE_NOT_FOUND'
+      throw error
+    }
+    return manifest
+  }
+}
+
+/**
  * Create a converter exactly like the kit's `createConverter`, resolved through
  * the installed office payload.
  *
- * @param options - the provider's kit options (fonts, timeouts, …), passed through.
+ * @param options - the provider's kit options (fonts, timeouts, …); the engine
+ *   resolver is supplied here and cannot be overridden by the caller.
  * @returns a promise of the kit's Converter; rejects with `code: 'unavailable'`
  *   when the payload is missing, and with the kit's own error otherwise.
  */
@@ -99,5 +127,5 @@ export async function createConverter(options) {
   const entry = kitEntry(root)
   if (entry === null) throw payloadMissing(root)
   const kit = await import(pathToFileURL(entry).href)
-  return kit.createConverter(options)
+  return kit.createConverter({ ...options, resolveEnginePackage: engineResolver(root) })
 }

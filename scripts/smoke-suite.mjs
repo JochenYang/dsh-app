@@ -482,8 +482,18 @@ async function probeMcpChain(base) {
   check('mcp: import smokeecho2 via mcpServers JSON', imported.status === 200 && imported.body?.ok === true
     && (imported.body?.value?.imported ?? []).includes('smokeecho2'),
   `HTTP ${imported.status}: ${JSON.stringify(imported.body).slice(0, 200)}`)
-  const importedView = (await getJson(base, `${MCP_PREFIX}/servers`)).body?.value?.servers
-    ?.find(entry => entry.serverName === 'smokeecho2')
+  // Mounting is the kernel manager's job since 0.2.2-rc.2: the write returns
+  // before the instance is connected, so this polls like the create path above
+  // instead of reading once (a single read caught `starting` and called it a
+  // failure).
+  let importedView = null
+  const importDeadline = Date.now() + 20_000
+  while (Date.now() < importDeadline) {
+    importedView = (await getJson(base, `${MCP_PREFIX}/servers`)).body?.value?.servers
+      ?.find(entry => entry.serverName === 'smokeecho2') ?? null
+    if (importedView?.status?.state === 'mounted') break
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+  }
   check('mcp: imported server mounted', importedView?.status?.state === 'mounted', `view: ${JSON.stringify(importedView)}`)
   await postJson(base, `${MCP_PREFIX}/server/delete`, { id: importedView?.id })
 

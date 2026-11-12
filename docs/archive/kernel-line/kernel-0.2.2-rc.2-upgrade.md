@@ -136,12 +136,21 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
 
 ## 9 未验证 / 下一轮
 
-- **办公转换的引擎链已验，工具链未验** `[实测]`：把构建出的 0.2.3 payload 装进
-  `<userData>/dsh-app-office/payload/0.2.3`，用 runtime 自带 node 直接调 kit —— `backend: native`、
-  `engine 0.2.3`、一个手搓的真 `.docx` 转出 18303 字节的单页 PDF（1990 ms）；同一份 payload 下，
-  运行树里的垫片 `import.meta.resolve('@deepseek-ai/libreoffice-kit')` 解析到垫片并成功加载出真 kit。
-  仍差两步：经 `office_to_pdf` 工具（需要一次 agent turn）以及 `office-docx` 的 `workspace-dependencies`
-  分支（我们的 payload 是 `python: null`，没有 Python 集，需要在设置了 `DSH_APP_PRIMARY_RUNTIME` 的构建里再验）。
+- **办公转换已全程验通** `[实测]`：真机一轮 agent turn 调用 `office_to_pdf`，返回
+  `{"status":"exported","outputPath":"scratch/office-probe/out-tool.pdf","sizeBytes":18303,"missingFonts":[]}`
+  且文件落盘。**这一步推翻了此前的一个错误结论**：早先我拿 payload 里的真 kit 直接调，看到
+  `backend: native` 就判定引擎链通过；经工具走的是垫片，而 rc.2 的 kit 从**消费方解析到的入口**锚定引擎
+  （`locate.ts` 的 `createEnginePackageResolver(kitEntry)`）—— 垫片在运行树里、引擎在 payload 里，于是注定
+  `unavailable`。修法见 §11 第 2 条；修后经垫片同样转出 18303 字节。
+- **`office-docx` 的内置 Python 已验** `[实测]`：带 Python 集的 payload（`0.2.3-py3.12.14`，624.9 MB unpacked）
+  装好后，真机 agent turn 调用 `load_workspace_dependencies` 得到
+  `<DSH_HOME>/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe`，用它
+  `import docx, pptx, openpyxl` 退出码 0、`libs ok 1.2.0`；`<userData>/dsh-app-office/primary-runtime`
+  是指向 payload 内 `primary-runtime` 的链接，即 `preparePrimaryRuntime` 的新行为。
+- **`probe-settings-nav` 在本机跑不了** `[实测]`：它靠 `pnpm dsh web` 在一个**已构建的 harness 检出**里起内核
+  （`scripts/probe-settings-nav.cjs:423-435`），本机检出没装依赖也没构建，`DSH_APP_DEV_RUNTIME` 的兜底同样走
+  `pnpm dsh`，所以内核从未打印 URL。这是环境前提，不是本轮的回归；`probe-routes`（32 checks）与
+  `verify --tgz`（smoke 全过）都已复跑。
 - **MCP 挂载已验** `[实测]`：起了一个真 stdio MCP 服务器（`scratch/mcp-probe/server.mjs`），经页面 API 建条目后
   `GET /servers` 返回 `state: "mounted"`、`toolCount: 1`（修复后复跑仍成立），删除后条目与 patch 里的键都消失。
   工具的确切名字（`mcp__probe__ping`）仍未直接观测到，只验到数量与挂载状态。
@@ -167,3 +176,10 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
 `plugin-mcp` 的 `tests/` 补上了 `legacy.test.ts`（此前这次不可逆导入零测试）。
 - **构建侧 `stageOfficeSkills`** 仍是死重量（见 §2）。
 - 探针：`probe-startup`（启动页）通过；`probe-settings-nav` / `probe-workbench` / `probe-routes` 本轮未复跑。
+
+## 11 真机验证又抓到的两处 `[实测]`
+
+| # | 症状 | 修法 |
+|---|---|---|
+| 1 | `verify --tgz` 红在「mcp: imported server mounted」：导入后立刻读一次状态，拿到 `starting` | 挂载现在是内核管理器的异步 reconcile，smoke 改成轮询（与 create 路径一致，20 s 预算） |
+| 2 | 经工具调用 `office_to_pdf` 恒报 `unavailable`，而直接用 payload 里的 kit 又能转 | rc.2 的 kit 从消费方解析到的入口锚定引擎；垫片在运行树里、引擎在 payload 里。垫片现在把 `resolveEnginePackage` 显式指向 payload 的 `node_modules`，修后经垫片也转出 18303 字节 |
