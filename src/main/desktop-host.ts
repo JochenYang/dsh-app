@@ -635,7 +635,7 @@ function shapeArgs(shape: HostArgShape, options: DshHostOptions): string[] {
  * would land in a positional slot.
  *
  * @param options - the start's inputs.
- * @param primaryRuntime - the office payload path (see {@link prepareOfficePayload}).
+ * @param primaryRuntime - the primary-runtime path (see {@link preparePrimaryRuntime}).
  * @returns the argument list, empty of Node flags except the one the child requires.
  */
 function webShapeArgs(options: DshHostOptions, primaryRuntime: string): string[] {

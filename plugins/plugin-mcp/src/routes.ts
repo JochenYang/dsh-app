@@ -2,9 +2,9 @@
  * Settings-page API on the shared Connection `/api` channel, under
  * `/api/plugins/dsh-app/plugin-mcp`:
  *   GET  /servers        — sanitized entries + mount status + the file path
- *   POST /server/create  — validate + persist + dynamically mount
- *   POST /server/update  — validate + persist + remount (or unmount when disabled)
- *   POST /server/delete  — persist + unmount
+ *   POST /server/create  — validate + persist into the mcp-manager row
+ *   POST /server/update  — validate + replace that row's entry
+ *   POST /server/delete  — remove the row's entry
  *   POST /server/import  — bulk-paste mcpServers JSON; per-server failures
  *                          never abort the batch; invalid display-name keys
  *                          are auto-slugged and reported as `renamed`
@@ -48,7 +48,7 @@ export const VALUE_MASK = '••••••'
  * A value that names a credential instead of carrying one: either reference
  * syntax reads back in plaintext, so the user can see what is stored.
  */
-const REFERENCE_VALUE = /^\$ENV:|\$\{credential:/u
+const REFERENCE_VALUE = /^(?:\$ENV:|\$\{credential:)/u
 
 /** The client-facing view of one entry: fields + mount status, values masked. */
 export interface McpServerView {
@@ -232,7 +232,9 @@ export function registerMcpRoutes(
     const denied = guardWrite()
     if (denied !== undefined) return denied
     try {
-      await store.create(body)
+      // A mask sentinel with nothing behind it is a copy/paste mistake, not a
+      // secret: refuse it here rather than persisting `••••••` as the token.
+      await store.create(unmaskSecretValues(body, undefined))
     } catch (error) {
       return writeRejection(error)
     }
@@ -315,7 +317,7 @@ export function registerMcpRoutes(
           renamed.push({ from: name, to: slug })
           serverName = slug
         }
-        await store.create(mapExternalServer(serverName, def))
+        await store.create(unmaskSecretValues(mapExternalServer(serverName, def), undefined))
         imported.push(serverName)
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)

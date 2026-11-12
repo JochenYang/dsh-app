@@ -449,7 +449,10 @@ function mockContinuableCtx(children: Record<string, MockChild>): ContinuableHar
         }
         // The continuable backend settles through the `subagent/end` watch, so
         // this activation's own result is never awaited; it stays pending.
-        return { childId, messageId: 'm1', result: new Promise(() => {}), dispose: async () => {} }
+        // `name` is a required field of the kernel's activation (0.2.2-rc.2):
+        // a mock without it compiles only through the `as unknown as Context`
+        // cast, and the batch report then silently loses the field.
+        return { childId, name: `agent-${launches}`, messageId: 'm1', result: new Promise(() => {}), dispose: async () => {} }
       },
       sendMessage: async (_parent: unknown, childId: unknown) => {
         sentFollowups.push(String(childId))
@@ -1216,4 +1219,24 @@ test('renderBatchBounded: the byte budget is hard, whatever the shape of the bat
     assert.ok(rendered.startsWith('swarm "'), `${outcome.label}: the report must open with its header`)
     assert.ok(!rendered.includes('\ufffd'), `${outcome.label}: a byte cut must not ship a replacement character`)
   }
+})
+
+/**
+ * The tool's output schema is `additionalProperties: false`, and the kernel
+ * validates a tool's value against it AFTER execute() returns
+ * (`@deepseek-ai/dsh-tools` pipeline): an item field the schema does not declare
+ * makes the whole call fail with ToolOutputError, which no orchestrator-level
+ * test can see. This is the bridge between the two: a real batch outcome,
+ * validated against the schema the tool declares.
+ */
+test('the tool output schema accepts every field a real batch item carries', async () => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools')
+  const { SWARM_ITEM_SCHEMA } = await import('../src/index.ts')
+  const ctx = mockOneShotCtx({ alpha: { stopReason: 'completed', text: 'alpha done' } })
+  const outcome = await runSwarmBatch(ctx, { ...baseOptions(), tasks: tasksOf('alpha') })
+  assert.equal(outcome.items.length, 1)
+  // The item really carries the kernel name here, so the schema is exercised.
+  assert.equal(outcome.items[0].name, 'alpha')
+  const problems = validateJsonSchemaValue(SWARM_ITEM_SCHEMA as never, outcome.items[0])
+  assert.deepEqual(problems, [])
 })

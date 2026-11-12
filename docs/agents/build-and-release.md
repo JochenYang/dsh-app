@@ -21,14 +21,17 @@ peer/dev deps), re-run `npm install` so the lockfile moves with it, then
 pinned `@deepseek-ai/dsh-web-frontend` (`latest` lags), the private
 `@deepseek-ai/dsh-desktop-host` (from the line's tag; escape hatches in
 `environment.md`), and the **Office skills payload** at
-`<kernelDir>/runtime/office-skills` — the host composes `skill-office` with that
-asset root and the package reads `<assetRoot>/<skill>/SKILL.md` for every skill
-it registers, so a partial payload is as fatal as a missing host (meta layer).
-The skill set is the payload's contract with the kernel line: four directories
-on 0.2.2-rc.2 (`office`, `office-docx`, `office-pptx`, `office-xlsx`; 0.2.1 also
-carried `office-render`, `office-recalculate` and `office-export-pdf`, which the
-replacement of the conversion provider retired), asserted by `stageOfficeSkills`
-at build time and by the shell (`OFFICE_SKILL_NAMES`) before every start.
+`<kernelDir>/runtime/office-skills` — four directories on 0.2.2-rc.2 (`office`,
+`office-docx`, `office-pptx`, `office-xlsx`; 0.2.1 also carried `office-render`,
+`office-recalculate` and `office-export-pdf`, retired with the old conversion
+provider). **Nothing reads it on this line**: `dsh-skill-office` serves its own
+packaged `assets/` from inside the runtime tree, and the shell stopped copying
+and asserting the directory in the same round (`preparePrimaryRuntime` answers
+the primary-runtime path only). It stays because `stageOfficeSkills` still writes
+it and the copy is part of the meta layer's content; removing it changes that
+layer's hash and is deliberately its own step. The build asserts the set it
+stages; `scripts/probe-routes.cjs` parses that list out of the build script
+rather than keeping a copy.
 
 The runtime also carries **pnpm** at `<kernelDir>/runtime/pnpm` (`stagePnpm`),
 pinned by `scripts/primary-runtime-lock.json` — the same pin the office payload

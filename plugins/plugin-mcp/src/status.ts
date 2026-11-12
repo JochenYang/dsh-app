@@ -106,6 +106,10 @@ export class McpFleetStatus {
    */
   statusFor(entry: McpServerEntry): McpMountStatus {
     if (this.fleet === undefined) return { state: 'unavailable' }
+    // An entry this version cannot parse may still be mounted by the manager,
+    // so its status is reported before the disabled check: the page must not
+    // say "disabled" about a server whose tools are live.
+    if (entry.invalid !== undefined) return { state: 'error', message: entry.invalid }
     if (!entry.enabled) return { state: 'disabled' }
     const view = this.fleet.list().find((candidate) => candidate.name === entry.serverName)
     if (view === undefined) return { state: 'starting' }

@@ -22,6 +22,30 @@
 > `slots.mjs`（SlotMap 抽取）、`peers.mjs` / `peers2.mjs`（peer 差集）。两个 tag 的源码是从
 > `D:/codes/_wt-rc1` 与 `D:/codes/_wt-rc2`（sparse worktree）读的。
 
+## 当前状态（2026-11-12 收尾时）
+
+图例：**完成** = 代码已改、测试或真机有证据；**待审查** = 实现完成但第二轮独立审查尚未关闭；
+**未做** = 本轮明确不做（理由在 Deferred）。
+
+| 条目 | 状态 | 证据 |
+|---|---|---|
+| W1 换线（418 处 spec / 20 manifest） | 完成 | 两处解析 rc.2；`npm test` 736 用例 0 fail |
+| W2 office 服务改名 | 完成 | `plugin-pdf` 0.3.0，插件内无旧名 |
+| W3 技能名单 7→4 | 完成 | 构建期+启动期两份名单 + 两份夹具；`runtime:build` 成功 |
+| W5 kit 0.2.3 + 垫片改名 + 白名单共享 | 完成 | 新树里 `import.meta.resolve` 解析到垫片并加载出真 kit；payload 0.2.3 |
+| W6 `dsh-error` peer | 完成 | 6 个 manifest；19/19 插件建包 |
+| W7 类型门禁 | 完成 | 19/19；它抓到 swarm 参数摊平与 rewind 的 zod 漂移 |
+| W8 hero 层 | 完成（结论订正） | 上游 canvas 空闲时 0 像素；不否决上游，保持默认开启 |
+| W10 provider title/description | 完成 | `plugin-websearch` 0.3.1 |
+| W11 文档与注释 | 完成 | ARCHITECTURE / build-and-release / build-runtime / office-payload / desktop-host 均已改 |
+| W12 Agent Teams 默认开启 | 完成（裁决） | 不加否决行 |
+| W13 MCP 归内核管理器 | 待审查 | 真机：`mounted` + `toolCount 1`，写入落在 `mcp-manager` 行 |
+| W13b 旧配置迁移 | 完成 | `tests/legacy.test.ts` 5 例；真机文件是空舰队，无迁移可做 |
+| W14 changesets + 换线记录 | 完成 | `changesets/*`、`docs/archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md` |
+| W15 swarm 带内核名字 | 完成（真机） | 真机一轮 swarm：`[0] one … name: agent-1`，`[1] … name: agent-2` |
+| W4 启动路径不再要 office-skills | 完成 | 删掉 `office-skills` 后启动健康；旧解释器树被清 |
+| W9 垫片清理判定 | 完成（判定） | 保留垫片；`lib/cli.js` 保留但已无读者 |
+
 ## Goal / Why
 
 把跟随的内核线从 `^0.2.2-rc.1` 换到 `^0.2.2-rc.2`，并修掉这条线上三个会让我们**构不出来或起不来**的音：
@@ -117,23 +141,23 @@ rc.2 只有 git tag（`dsh-v0.2.2-rc.2`，release 提交 `91319233e1`）与 GitH
 
 | # | 用例 | 输入/操作 | 预期 | 验证方式 | 结果 |
 |---|------|-----------|------|----------|------|
-| 1 (W1) | 两处版本解析落到新线 | 根与 `plugins/plugin-archives` 各读一个内核包的版本 | 都是 `0.2.2-rc.2` | `node -e "console.log(require('./node_modules/@deepseek-ai/dsh-app-boot/package.json').version)"` 与 `plugins/plugin-archives` 同名命令 | pending |
-| 2 (W1) | 构建产物版本与 spec 一致 | `npm run runtime:build` | `dsh-runtime-<platform>-<arch>-0.2.2-rc.2.tgz` | 命令 + 产物名核对 | pending |
-| 3 (W6) | 新 peer 可解析 | 5 个插件的套件构建 | 无 `Could not resolve "@deepseek-ai/dsh-error"` | `cd plugins/plugin-swarm && npm test`（其余四个同） | pending |
-| 4 (W7) | 类型门禁 | 19 个插件 + 根 | 0 error | `for d in plugins/*/; do node scripts/plugin-gates.mjs "$d"; done`；`npm run typecheck` | pending |
-| 5 (W3) | 构建不再因技能缺失拒绝 | 只有 4 个技能目录的 source | `missingOfficeSkills` 返回空 | `npm run runtime:build` | pending |
-| 6 (W4) | 启动不再要求 office-skills | 无 `<dataDir>/dsh-app-office/office-skills` | host 正常启动到主界面 | `npm run dev`，看启动日志 | pending |
-| 7 (W4) | Python 走 workspace-dependencies | 真机 `/office-docx` 一次 | 技能指示使用内置 Python，而不是用户的 | 手工 + `load_workspace_dependencies` 输出 | pending |
-| 8 (W2) | 转换服务可取到 | 真机跑 `office_to_pdf` 一次 | `status: exported` 且文件已写入 | 手工 | pending |
-| 9 (W5) | 引擎 0.2.3 的 API 与 payload 布局 | 用新 payload 跑一次转换 | 不报 kit/engine 定位失败 | 手工 + 日志 | pending |
-| 10 (W8) | 首页只有一层鲸鱼 | 真机开首页 + CDP 读 DOM | 我们的 canvas 在且 `is-visible`；`[data-home-whale]` 计数 0；无 `slot entry crashed` | 运行中的窗口 + `scratch/cdp.mjs` | pending |
-| 11 (W1/W14) | 根套件与真内核 | `npm test`；`npm run verify -- --tgz <新产物>` | 全绿 | 命令 | pending |
-| 12 (W1) | 路由载体未变 | `probe-routes.cjs` 的 S1–S5 段 | RESULT 全 PASS | `node scripts/probe-routes.cjs` | pending |
-| 13 (W3) | 设置页图标未回退 | `probe-settings-nav.cjs --lang en-US` | 无双图标、无残留 Han | 命令 | pending |
-| 14 (W12) | Agent Teams 裁决的可见结果 | 真机看模型菜单/工具列表 | 与裁决一致 | 手工 | pending |
-| 15 (W13) | MCP 只有一套实例 | 在内核页面之外的我们的页面加一个服务器 | 工具以 `mcp__<server>__<tool>` 注册，且 loader 条目里没有第二个 mcp-client 实例 | 手工 + 启动日志 | pending |
-| 16 (W13b) | 旧配置迁移 | 预置一个带 `$ENV:` 引用的 `servers.json` 后启动 | 条目出现在 `mcp-manager` 行 config，`$ENV:` 变成 `${credential:…}`，原文件仍在 | 手工 + 读 profile patch | pending |
-| 17 (W15) | child label 用内核名字 | 跑一次 4 项的 swarm 批次 | 目录/回执里是内核名字，不是自拼序号 | 手工 | pending |
+| 1 (W1) | 两处版本解析落到新线 | 根与 `plugins/plugin-archives` 各读一个内核包的版本 | 都是 `0.2.2-rc.2` | `node -e "console.log(require('./node_modules/@deepseek-ai/dsh-app-boot/package.json').version)"` 与 `plugins/plugin-archives` 同名命令 | PASS |
+| 2 (W1) | 构建产物版本与 spec 一致 | `npm run runtime:build` | `dsh-runtime-<platform>-<arch>-0.2.2-rc.2.tgz` | 命令 + 产物名核对 | PASS |
+| 3 (W6) | 新 peer 可解析 | 5 个插件的套件构建 | 无 `Could not resolve "@deepseek-ai/dsh-error"` | `cd plugins/plugin-swarm && npm test`（其余四个同） | PASS |
+| 4 (W7) | 类型门禁 | 19 个插件 + 根 | 0 error | `for d in plugins/*/; do node scripts/plugin-gates.mjs "$d"; done`；`npm run typecheck` | PASS |
+| 5 (W3) | 构建不再因技能缺失拒绝 | 只有 4 个技能目录的 source | `missingOfficeSkills` 返回空 | `npm run runtime:build` | PASS |
+| 6 (W4) | 启动不再要求 office-skills | 无 `<dataDir>/dsh-app-office/office-skills` | host 正常启动到主界面 | `npm run dev`，看启动日志 | PASS（删掉 office-skills 后 host ready、失败 0） |
+| 7 (W4) | Python 走 workspace-dependencies | 真机 `/office-docx` 一次 | 技能指示使用内置 Python，而不是用户的 | 手工 + `load_workspace_dependencies` 输出 | N/A（本地 payload 是 python: null，没有 Python 集可验；叶子按约定只回答不创建） |
+| 8 (W2) | 转换服务可取到 | 真机跑 `office_to_pdf` 一次 | `status: exported` 且文件已写入 | 手工 | PASS（引擎链：真 .docx → 18303 字节 PDF；经工具的调用需 agent turn，见 T8 备注） |
+| 9 (W5) | 引擎 0.2.3 的 API 与 payload 布局 | 用新 payload 跑一次转换 | 不报 kit/engine 定位失败 | 手工 + 日志 | PASS |
+| 10 (W8) | 首页只有一层鲸鱼 | 真机开首页 + CDP 读 DOM | 我们的 canvas 在且 `is-visible`；`[data-home-whale]` 计数 0；无 `slot entry crashed` | 运行中的窗口 + `scratch/cdp.mjs` | PASS（订正：静止时只有我们那层；上游画布透明，点击才播） |
+| 11 (W1/W14) | 根套件与真内核 | `npm test`；`npm run verify -- --tgz <新产物>` | 全绿 | 命令 | PASS（npm test）/ N/A（verify --tgz 本轮未跑） |
+| 12 (W1) | 路由载体未变 | `probe-routes.cjs` 的 S1–S5 段 | RESULT 全 PASS | `node scripts/probe-routes.cjs` | N/A（probe-routes 本轮未跑；其技能名单已改为从 build-runtime.mjs 解析） |
+| 13 (W3) | 设置页图标未回退 | `probe-settings-nav.cjs --lang en-US` | 无双图标、无残留 Han | 命令 | N/A（probe-settings-nav 本轮未跑） |
+| 14 (W12) | Agent Teams 裁决的可见结果 | 真机看模型菜单/工具列表 | 与裁决一致 | 手工 | N/A（未做手工确认；默认开启按上游） |
+| 15 (W13) | MCP 只有一套实例 | 在内核页面之外的我们的页面加一个服务器 | 工具以 `mcp__<server>__<tool>` 注册，且 loader 条目里没有第二个 mcp-client 实例 | 手工 + 启动日志 | PASS（真机 mounted + toolCount 1；patch 只有一个存储） |
+| 16 (W13b) | 旧配置迁移 | 预置一个带 `$ENV:` 引用的 `servers.json` 后启动 | 条目出现在 `mcp-manager` 行 config，`$ENV:` 变成 `${credential:…}`，原文件仍在 | 手工 + 读 profile patch | PASS（tests/legacy.test.ts；真机空舰队未触发迁移） |
+| 17 (W15) | child label 用内核名字 | 跑一次 4 项的 swarm 批次 | 目录/回执里是内核名字，不是自拼序号 | 手工 | PASS（真机 swarm 批次输出 name: agent-1 / agent-2） |
 
 ## Verification commands
 

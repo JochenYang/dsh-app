@@ -2,7 +2,7 @@
 //
 // Why this test exists — two failures, both measured on this tree:
 //
-//   1. The kernel line declares `@deepseek-ai/libreoffice-kit: ^0.1.1`, and that
+//   1. The kernel line declares `@deepseek-ai/libreoffice-kit: 0.2.3`, and that
 //      version becomes the OFFICE PAYLOAD's version
 //      (`officePayloadVersion(kitVersion, pythonVersion)`). The payload is a
 //      separate artifact published once per runtime release, named after the

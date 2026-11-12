@@ -78,6 +78,15 @@ describe('fleet status', () => {
     assert.deepEqual(fleetOf({ state: 'connected', toolCount: 1 }, 'other').statusFor(ENTRY), { state: 'starting' })
   })
 
+  it('reports an entry it cannot parse as an error, never as disabled', () => {
+    // The manager may well have mounted it; saying "disabled" would tell the
+    // user their tools are off while they are live.
+    const withInvalid = { ...ENTRY, enabled: false, invalid: { code: 'entry.invalid', text: 'bad shape' } }
+    const status = fleetOf({ state: 'connected', toolCount: 2 }).statusFor(withInvalid)
+    assert.equal(status.state, 'error')
+    assert.equal(status.message?.code, 'entry.invalid')
+  })
+
   it('reports unavailable when the kernel mounts no manager', () => {
     const status = new McpFleetStatus(undefined)
     assert.equal(status.available, false)

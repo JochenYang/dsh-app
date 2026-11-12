@@ -702,6 +702,56 @@ interface SwarmItemOutput extends Pick<SwarmItemOutcome,
   readonly prompt?: string
 }
 
+/**
+ * One item's shape in the tool's output schema.
+ *
+ * Exported so the suite can validate a real orchestrator outcome against it:
+ * the schema is `additionalProperties: false`, so a field the orchestrator
+ * fills but this object omits makes the KERNEL reject the whole tool result
+ * with `ToolOutputError` — an outcome no unit test of `runSwarmBatch` can see.
+ */
+export const SWARM_ITEM_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    index: { type: 'number', required: true },
+    item: { type: 'string', required: true },
+    status: { type: 'string', required: true, enum: ['completed', 'failed', 'aborted'] },
+    // Present only when the child is durable (continuable backend): the handle
+    // resume_entries addresses.
+    childId: { type: 'string' },
+    // The kernel's model-facing name for the child.
+    name: { type: 'string' },
+    output: { type: 'string' },
+    error: { type: 'string' },
+    // Why a failed item failed: transport (provider/network; throttles the
+    // pool, auto-retried unless terminal like QUOTA), capacity (the kernel's
+    // live-child limit was reached; throttles the pool and the item is
+    // re-queued rather than retried in place), content (the task itself),
+    // structural (the call was unsound).
+    failureKind: { type: 'string', enum: ['transport', 'content', 'structural', 'capacity'] },
+    // The provider-neutral failure code (e.g. RATE_LIMIT).
+    failureCode: { type: 'string' },
+    // Wall time of this item's settled attempt(s) in ms.
+    durationMs: { type: 'number' },
+    // Token accounting recovered from the child session.
+    usage: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        inputTokens: { type: 'number', required: true },
+        outputTokens: { type: 'number', required: true },
+        totalTokens: { type: 'number' },
+      },
+    },
+    // Present when the item needed automatic retries to settle.
+    retries: { type: 'number' },
+    // Dry-run only: the fully expanded prompt the child WOULD receive (status
+    // is always 'aborted' on a dry run).
+    prompt: { type: 'string' },
+  },
+} as const
+
 export function apply(ctx: Context, baseConfig: Config): void {
   /**
    * The kernel's persistent config editor, when this host has one. It appends
@@ -936,46 +986,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
             warnings: { type: 'array', items: { type: 'string' } },
             items: {
               type: 'array',
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  index: { type: 'number', required: true },
-                  item: { type: 'string', required: true },
-                  status: { type: 'string', required: true, enum: ['completed', 'failed', 'aborted'] },
-                  // Present only when the child is durable (continuable
-                  // backend): the handle resume_entries addresses.
-                  childId: { type: 'string' },
-                  output: { type: 'string' },
-                  error: { type: 'string' },
-                  // Why a failed item failed: transport (provider/network;
-                  // throttles the pool, auto-retried unless terminal like
-                  // QUOTA), capacity (the kernel's live-child limit was
-                  // reached; throttles the pool and the item is re-queued
-                  // rather than retried in place), content (the task itself),
-                  // structural (the call was unsound).
-                  failureKind: { type: 'string', enum: ['transport', 'content', 'structural', 'capacity'] },
-                  // The provider-neutral failure code (e.g. RATE_LIMIT).
-                  failureCode: { type: 'string' },
-                  // Wall time of this item's settled attempt(s) in ms.
-                  durationMs: { type: 'number' },
-                  // Token accounting recovered from the child session.
-                  usage: {
-                    type: 'object',
-                    additionalProperties: false,
-                    properties: {
-                      inputTokens: { type: 'number', required: true },
-                      outputTokens: { type: 'number', required: true },
-                      totalTokens: { type: 'number' },
-                    },
-                  },
-                  // Present when the item needed automatic retries to settle.
-                  retries: { type: 'number' },
-                  // Dry-run only: the fully expanded prompt the child WOULD
-                  // receive (status is always 'aborted' on a dry run).
-                  prompt: { type: 'string' },
-                },
-              },
+              items: SWARM_ITEM_SCHEMA,
             },
           },
         },

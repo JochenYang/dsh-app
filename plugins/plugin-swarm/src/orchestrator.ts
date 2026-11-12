@@ -903,6 +903,9 @@ async function runContinuableTask(
         delivery: options.delivery ?? 'parent',
       })
       childId = String(started.childId)
+      // The kernel returns the child's model-facing name with the activation;
+      // the batch report carries it so a report and `list_agents` agree.
+      childName = started.name
     }
     if (options.signal.aborted) {
       // The launch raced the batch abort and won: the abort sweep only knows

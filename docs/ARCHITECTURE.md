@@ -228,9 +228,11 @@ demand from the 诊断 settings row. Building, pinning and uploading it — the 
 pin, the arch matrix, the Python set — is
 [`agents/build-and-release.md`](agents/build-and-release.md) §2. The runtime keeps a loader shim at
 `app/node_modules/@deepseek-ai/libreoffice-kit` because
-`@deepseek-ai/dsh-office-to-pdf` imports that specifier **statically at module
-scope**: without it the provider fails to load, which is a plugin-tree fault
-rather than "the engine is not installed". The shim loads the real kit out of
+`@deepseek-ai/dsh-office-kit` resolves that specifier before its first
+conversion (`import.meta.resolve` + a dynamic `import()`; 0.2.2-rc.2 stopped
+importing it at module scope). With the real package trimmed out of the runtime,
+that lookup throws and every conversion answers `unavailable` — quieter than the
+old load-time failure, and just as dead. The shim loads the real kit out of
 `DSH_APP_OFFICE_PAYLOAD` at call time (`scripts/runtime-stubs/libreoffice-kit`),
 so a payload installed while the kernel runs takes effect without a restart, and
 an absent one produces an actionable refusal instead of a mystery failure.

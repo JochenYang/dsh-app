@@ -66,6 +66,12 @@ rc.2 的 web-app 新增 `mcp-manager` 行（`@deepseek-ai/dsh-mcp-manager`），
 状态读 `ctx.get('mcpManager').list()`，不再有任何动态挂载。旧 `servers.json` 一次性导入（`$ENV:NAME` → `${credential:NAME}`），
 导入成功后才把文件改名为 `servers.json.migrated`。
 
+第一轮独立审查提出五条 P1，全部修在这个迁移里（§10 有逐条清单）：写路径改成在 `editor.edit` 的回调里按**文档当时的**
+`servers` 计算（原来用 await 之前的快照覆盖整张表，另一个写者新加的服务器会被抹掉）；条目按「在原有裸对象上合并」写入
+（原来按字段白名单重建，`reconnect` 这类本版本不认识的开关会在一次开关切换里丢掉）；插件开关如实降级为「本页只读」并改掉
+会同时显示「整体停用」和「已挂载」的文案；旧文件的全局 `enabled: false` 映射成逐条 `enabled: false`；校验不过的条目
+不再从页面消失，而是带 `invalid` 标记与 `error` 状态显示（管理器可能已经把它挂上、工具是活的）。
+
 真机（rc.2 内核，跑中的窗口里用 CDP 打自家 API）：
 
 ```
@@ -137,7 +143,27 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
   仍差两步：经 `office_to_pdf` 工具（需要一次 agent turn）以及 `office-docx` 的 `workspace-dependencies`
   分支（我们的 payload 是 `python: null`，没有 Python 集，需要在设置了 `DSH_APP_PRIMARY_RUNTIME` 的构建里再验）。
 - **MCP 挂载已验** `[实测]`：起了一个真 stdio MCP 服务器（`scratch/mcp-probe/server.mjs`），经页面 API 建条目后
-  `GET /servers` 返回 `state: "mounted"`、`toolCount: 1`，说明内核管理器挂上了它、客户端握手并注册了工具；
-  删除后条目与 patch 里的键都消失。工具的确切名字（`mcp__probe__ping`）没有直接观测到，只验到数量与挂载状态。
+  `GET /servers` 返回 `state: "mounted"`、`toolCount: 1`（修复后复跑仍成立），删除后条目与 patch 里的键都消失。
+  工具的确切名字（`mcp__probe__ping`）仍未直接观测到，只验到数量与挂载状态。
+- **swarm 真机批次已验** `[实测]`：在运行中的窗口里发一轮真实 agent turn（`scratch/composer-turn.mjs`），模型调用了
+  `swarm`，两个子代理 `agent-1` / `agent-2` 跑完，transcript 里出现 `[0] one … name: agent-1`。这条同时证明
+  item 的 `name` 字段**通过了内核的 output-schema 校验** —— 第一轮审查指出的「字段未声明 → 整个工具返回被拒」正是靠它验的。
+
+## 10 第一轮审查与修复 `[实测]`
+
+| # | 发现（P1） | 修法 | 验证 |
+|---|---|---|---|
+| 1 | `plugin-swarm` 的 item 加了 `name`，但工具 output schema 是 `additionalProperties: false` 且未声明它 → 内核以 `ToolOutputError` 拒掉整个返回 | `SWARM_ITEM_SCHEMA` 抽成导出常量并声明 `name`；新增一条用例把真实批次 outcome 交给 `validateJsonSchemaValue` | 变异测试：删掉 `name` 声明后该用例红在 `"value.name" is not a declared property`；真机批次通过 |
+| 2 | `childName` 只声明未赋值，continuable 分支（默认 provider）永远丢名字 | 在 `startActivation` 之后 `childName = started.name`；continuable 的 mock 补上 `name` | 真机 `name: agent-1` / `agent-2` |
+| 3 | `scripts/probe-routes.cjs` 还留着第三份 7 项技能名单，会让「升线后必跑」的探针拒绝每个产物 | 改成从 `build-runtime.mjs` 解析 `OFFICE_SKILL_NAMES` | 解析出 4 项；`node --check` 通过 |
+| 4 | MCP 写路径用 await 前的快照覆盖整张 `servers`，另一个写者新加的服务器被静默抹掉 | 写改成在 `editor.edit` 回调里按 live `current`/`inherited` 计算；行匹配改结构化；读不到配置就拒绝写 | `store.test.ts` 新增「第二个写者插入的条目仍在」 |
+| 5 | 每次保存都按字段白名单重建条目，本版本不认识的开关（`reconnect`）在开关切换时丢失 | `toRawServer(entry, previous)` 在原有裸对象上合并，只有换 transport 才删另一套字段 | `store.test.ts` 新增两条（保留未知字段 / 换 transport 清理） |
+| 6 | 插件开关不再能阻止挂载，页面却同时显示「整体停用」与「已挂载」 | 文案与文档改成「本页只读，服务器仍由内核挂载」；状态不再受该开关影响 | 文案与 `wire.ts` 契约一致 |
+| 7 | 迁移丢掉旧文件的全局 `enabled: false`，用户关掉的舰队会在升级后被挂起来 | `readLegacyServers` 返回 `disabledGlobally`，导入时逐条写 `enabled: false` | `tests/legacy.test.ts` 新增用例（含日志一行说明） |
+| 8 | 管理器能接受、我们校验不了的条目被页面静默隐藏，工具却仍在跑 | `load()` 改为宽松投影：带 `invalid` 标记 + `error` 状态显示，可删除、可改回合法形状 | `store.test.ts` / `status.test.ts` 各一条 |
+
+另修两条安全向 P2：掩码豁免正则两个分支都锚定（原来 `\$\{credential:` 未锚定，任何**包含**它的字面密钥会被明文返回）；
+`create` / `import` 也走 `unmaskSecretValues(body, undefined)`，掩码哨兵不再能被存成真实密钥。
+`plugin-mcp` 的 `tests/` 补上了 `legacy.test.ts`（此前这次不可逆导入零测试）。
 - **构建侧 `stageOfficeSkills`** 仍是死重量（见 §2）。
 - 探针：`probe-startup`（启动页）通过；`probe-settings-nav` / `probe-workbench` / `probe-routes` 本轮未复跑。

@@ -105,7 +105,11 @@ export type McpTransport = 'stdio' | 'streamable-http'
  * default upstream.
  */
 export interface McpServerEntry {
-  /** Stable CRUD id (`mcp-<n>`), independent of `serverName`. */
+  /**
+   * The entry's key in the `mcp-manager` row, which is also its `serverName`:
+   * the manager derives the model-facing tool namespace from it, so the two are
+   * one identity and a rename is refused (see store.ts).
+   */
   readonly id: string
   /** Tool namespace, `[A-Za-z0-9_-]{1,32}`, unique among ENABLED servers. */
   readonly serverName: string
@@ -124,12 +128,24 @@ export interface McpServerEntry {
   readonly headers?: Readonly<Record<string, string>>
   /** Per-tool-call timeout in ms; omitted uses the upstream default (60s). */
   readonly toolCallTimeoutMs?: number
+  /**
+   * Set when this version could not validate the entry's stored form. The entry
+   * is still shown (the manager may well have mounted it, so its tools are
+   * live) and carries an `error` status; the form can rewrite it into a valid
+   * shape. Never persisted: the store strips it on write.
+   */
+  readonly invalid?: HostText
 }
 
 /** The persisted `servers.json` shape. */
 export interface McpServersFile {
   readonly version: 1
-  /** Master switch: false mounts nothing and refuses writes from the UI. */
+  /**
+   * This plugin's own switch: false makes the page read-only. It does NOT stop
+   * the fleet — the kernel manager owns mounting, and it does not read this
+   * value — so the page reports the servers as configured and marks itself
+   * read-only rather than claiming they are off.
+   */
   readonly enabled: boolean
   readonly servers: readonly McpServerEntry[]
 }

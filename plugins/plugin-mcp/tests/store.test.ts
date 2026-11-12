@@ -79,13 +79,15 @@ describe('reading', () => {
     assert.deepEqual(store.load().servers.map((entry) => entry.serverName), ['pinned'])
   })
 
-  it('skips an entry it cannot validate and says so, without failing the read', () => {
-    const warnings: string[] = []
+  it('SHOWS an entry it cannot validate, marked invalid, instead of hiding it', () => {
     const fake = fakeEditor({ broken: { transport: 'stdio' }, good: { transport: 'stdio', command: 'npx' } })
-    const store = new McpStore(fake.editor, true, (message) => warnings.push(message))
-    assert.deepEqual(store.load().servers.map((entry) => entry.serverName), ['good'])
-    assert.equal(warnings.length, 1)
-    assert.match(warnings[0]!, /broken/u)
+    const store = new McpStore(fake.editor, true, () => {})
+    const names = store.load().servers.map((entry) => entry.serverName).sort()
+    // The manager may have mounted `broken` and its tools are live: dropping the
+    // row would make the page under-report a running fleet with no way to act.
+    assert.deepEqual(names, ['broken', 'good'])
+    const broken = store.load().servers.find((entry) => entry.serverName === 'broken')
+    assert.equal(broken?.invalid?.code, 'entry.invalid')
   })
 
   it('is unavailable rather than throwing when the kernel mounts no editor', () => {
@@ -96,6 +98,42 @@ describe('reading', () => {
 })
 
 describe('writing', () => {
+  it('applies the change to the document as it is at write time, not to an earlier read', async () => {
+    const fake = fakeEditor({ a: { transport: 'stdio', command: 'a' } })
+    // A second writer lands between our read and our write — the kernel's own
+    // page edits this same row, so this is the ordinary case, not a race.
+    const original = fake.editor.edit
+    fake.editor.edit = async (entry, change) => {
+      ;(fake.document.servers as Record<string, unknown>).b = { transport: 'stdio', command: 'b' }
+      return original(entry, change)
+    }
+    const store = new McpStore(fake.editor, true, () => {})
+    await store.create({ serverName: 'c', transport: 'stdio', command: 'c' })
+    assert.deepEqual(Object.keys(fake.document.servers as object).sort(), ['a', 'b', 'c'])
+  })
+
+  it('keeps fields this version does not model when an entry is edited', async () => {
+    const fake = fakeEditor({
+      gh: { transport: 'stdio', command: 'npx', enabled: true, reconnect: { maxAttempts: 5 }, futureKnob: 'keep' },
+    })
+    const store = new McpStore(fake.editor, true, () => {})
+    await store.update('gh', { serverName: 'gh', transport: 'stdio', command: 'npx', enabled: false })
+    const stored = fake.document.servers as Record<string, Record<string, unknown>>
+    assert.deepEqual(stored.gh?.reconnect, { maxAttempts: 5 }, 'a knob this version does not model survives')
+    assert.equal(stored.gh?.futureKnob, 'keep')
+    assert.equal(stored.gh?.enabled, false)
+  })
+
+  it('drops the other transport fields when the transport changes', async () => {
+    const fake = fakeEditor({ gh: { transport: 'stdio', command: 'npx', args: ['-y'], enabled: true } })
+    const store = new McpStore(fake.editor, true, () => {})
+    await store.update('gh', { serverName: 'gh', transport: 'streamable-http', url: 'https://x/mcp', enabled: true })
+    const stored = fake.document.servers as Record<string, Record<string, unknown>>
+    assert.equal(stored.gh?.url, 'https://x/mcp')
+    assert.equal(stored.gh?.command, undefined, 'a cross-transport entry is refused by the manager')
+    assert.equal(stored.gh?.args, undefined)
+  })
+
   it('creates an entry under its server name and keeps the rest of the map', () => {
     const fake = fakeEditor({ kept: { transport: 'stdio', command: 'kept' }, broken: { transport: 'stdio' } })
     const store = new McpStore(fake.editor, true, () => {})

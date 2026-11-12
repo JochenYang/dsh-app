@@ -6,8 +6,9 @@
 // needed when a document is actually converted, while the runtime artifact is
 // downloaded by every user on every kernel update. The kit package itself stays
 // in the runtime as a tiny loader shim (scripts/runtime-stubs/libreoffice-kit),
-// because `@deepseek-ai/dsh-office-to-pdf` imports the specifier statically and
-// would fail to LOAD without it.
+// because `@deepseek-ai/dsh-office-kit` resolves that specifier before its first
+// conversion: without the shim the lookup throws and every conversion answers
+// `unavailable`, whether or not a payload is installed.
 //
 // Naming:
 //   office-payload-<platform>-<arch>-<dshVersion>.tgz        (+ .sha512)

@@ -8,7 +8,7 @@
  * because an uninstall/rollback path may want it and a silent delete of user
  * data is not this plugin's call.
  *
- * Two conversions are real, not cosmetic:
+ * Three conversions are real, not cosmetic:
  *
  * - `$ENV:NAME` (this plugin's own reference syntax) becomes `${credential:NAME}`,
  *   the template the manager's instances resolve. A literal value stays literal:
@@ -17,6 +17,11 @@
  * - An entry's `id` (`mcp-1`…) is dropped. The key IS the identity now: the
  *   manager derives the model-facing namespace `mcp__<key>__<tool>` from it, so
  *   keeping a separate id would leave two names for one server.
+ * - The retired file's GLOBAL `enabled: false` becomes per-entry `enabled: false`
+ *   on every imported entry. That switch meant "mount nothing"; carrying the
+ *   fleet in with `enabled: true` would start every one of those servers — and
+ *   the file is renamed aside after the write, so the intent would be lost with
+ *   it. The manager has no global switch, so per-entry is the faithful mapping.
  *
  * @module @dsh-app/plugin-mcp/legacy
  */
@@ -55,24 +60,28 @@ function convertMap(map: unknown): Record<string, string> | undefined {
  *
  * @param file - absolute path of the old `servers.json`.
  * @param log - warning sink (the caller passes its logger).
- * @returns the entries that survived, and the raw count that did not.
+ * @returns the entries that survived, the raw count that did not, and whether
+ *   the retired file's own master switch was off.
  */
-export function readLegacyServers(file: string, log: (message: string) => void): { entries: McpServerEntry[], skipped: number } {
-  if (!existsSync(file)) return { entries: [], skipped: 0 }
+export function readLegacyServers(file: string, log: (message: string) => void): { entries: McpServerEntry[], skipped: number, disabledGlobally: boolean } {
+  if (!existsSync(file)) return { entries: [], skipped: 0, disabledGlobally: false }
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(file, 'utf8'))
   } catch (error) {
     log(`legacy servers file: unreadable, left in place: ${(error as Error).message}`)
-    return { entries: [], skipped: 0 }
+    return { entries: [], skipped: 0, disabledGlobally: false }
   }
   const servers = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
     ? (parsed as { servers?: unknown }).servers
     : undefined
   if (!Array.isArray(servers)) {
     log('legacy servers file: no `servers` array, left in place')
-    return { entries: [], skipped: 0 }
+    return { entries: [], skipped: 0, disabledGlobally: false }
   }
+  // The retired global switch: false meant "mount nothing". See the module docs
+  // for why that becomes per-entry `enabled: false` rather than being dropped.
+  const disabledGlobally = (parsed as { enabled?: unknown }).enabled === false
   const entries: McpServerEntry[] = []
   const taken = new Set<string>()
   let skipped = 0
@@ -95,7 +104,7 @@ export function readLegacyServers(file: string, log: (message: string) => void):
       log(`legacy servers file: skipped one entry: ${(error as Error).message}`)
     }
   }
-  return { entries, skipped }
+  return { entries, skipped, disabledGlobally }
 }
 
 /**
@@ -111,7 +120,8 @@ export function readLegacyServers(file: string, log: (message: string) => void):
  * @param log - warning/info sink.
  */
 export async function importLegacyServers(store: McpStore, file: string, log: (message: string) => void): Promise<void> {
-  const { entries, skipped } = readLegacyServers(file, log)
+  const { entries: read, skipped, disabledGlobally } = readLegacyServers(file, log)
+  const entries = disabledGlobally ? read.map((entry) => ({ ...entry, enabled: false })) : read
   if (entries.length === 0) {
     if (skipped > 0) log(`legacy servers file: nothing importable (${skipped} skipped); left in place`)
     return
@@ -128,5 +138,7 @@ export async function importLegacyServers(store: McpStore, file: string, log: (m
     log(`legacy servers file: imported ${written} entry/entries but could not rename it aside: ${(error as Error).message}`)
     return
   }
-  log(`legacy servers file: imported ${written} entry/entries into the mcp-manager row${skipped > 0 ? `, ${skipped} skipped` : ''}`)
+  log(`legacy servers file: imported ${written} entry/entries into the mcp-manager row`
+    + `${disabledGlobally ? ' as disabled (the old file had its global switch off)' : ''}`
+    + `${skipped > 0 ? `, ${skipped} skipped` : ''}`)
 }

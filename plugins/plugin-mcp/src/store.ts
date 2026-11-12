@@ -8,16 +8,28 @@
  * fleets — two mounters, the same tool names registered twice — so this module
  * is now a thin CRUD adapter over the row, and the manager owns mounting.
  *
- * Writes go through the kernel's own config editor (`ctx.configEditor`), the
- * same path its settings pages take: the row lands in the profile patch, values
- * are validated by the manager's own schema before they are stored, and a
- * concurrent edit is refused rather than silently overwritten.
+ * Three rules this module is built around, each paid for by a failure mode:
  *
- * Reads keep the raw map: our own validation only decides what the PAGE shows,
- * and a write merges into the raw map, so an entry this version does not
- * understand survives an edit made in this version. The `id` of an entry IS its
- * key — the manager derives the tool namespace (`mcp__<name>__<tool>`) from the
- * key, so a separate id would only be a second name for the same thing.
+ * 1. **Every write is computed from the document's LIVE state.** The mutation
+ *    runs inside `editor.edit`'s callback and receives `current`/`inherited` as
+ *    the editor reads them; a snapshot taken before the await would silently
+ *    drop a server added by another writer (the kernel's own page edits this
+ *    same row) in the window between read and write.
+ * 2. **An entry is merged, never rebuilt.** The fields this version knows are
+ *    written over the entry's previous raw object and everything else is kept,
+ *    so a knob this version does not model (`reconnect`, or whatever the next
+ *    manager adds) survives a toggle made here. Only a transport change drops
+ *    the other transport's fields, because the manager's schema refuses a
+ *    cross-transport entry.
+ * 3. **The read path shows what is there, even when it cannot be managed.** An
+ *    entry that fails this version's validation is still mounted by the manager
+ *    and still serves tools; hiding it would leave the page under-reporting a
+ *    live fleet with no row to delete it from. It is projected with an
+ *    {@link McpServerEntry.invalid} marker and an `error` status instead.
+ *
+ * The `id` of an entry IS its key: the manager derives the tool namespace
+ * (`mcp__<name>__<tool>`) from the key, so a rename would move a tool namespace
+ * out from under a model that was told the old one — it is refused.
  *
  * @module @dsh-app/plugin-mcp/store
  */
@@ -25,12 +37,13 @@
 import {
   McpValidationError,
   validateEntry,
+  type HostText,
   type McpServerEntry,
-  type McpTransport,
   type McpServersFile,
+  type McpTransport,
 } from './wire.ts'
 
-export { McpValidationError, SERVER_NAME_PATTERN, nextEntryId, validateEntry } from './wire.ts'
+export { McpValidationError, SERVER_NAME_PATTERN, validateEntry } from './wire.ts'
 
 /** The loader row whose `config.servers` holds the fleet. */
 export const MANAGER_ROW_ID = 'mcp-manager'
@@ -45,11 +58,13 @@ export interface ConfigRow {
  *
  * Read structurally rather than imported: the service is resolved by name from
  * the shared context, and a kernel without it degrades (the page reports that
- * it cannot manage) instead of failing this plugin's activation.
+ * it cannot manage) instead of failing this plugin's activation. `configuration`
+ * is optional for the same reason `entries` is: a line that provides the editor
+ * without it can still be told apart from one that has no editor at all.
  */
 export interface ConfigEditorLike {
   entries(): readonly ConfigRow[]
-  configuration(): readonly {
+  configuration?(): readonly {
     readonly entry: ConfigRow
     readonly inherited: Record<string, unknown>
     readonly override: Record<string, unknown>
@@ -62,36 +77,86 @@ export interface ConfigEditorLike {
 
 /** One configured server as the manager's schema accepts it. */
 type RawServer = Record<string, unknown>
+/** The whole `servers` map. */
+type RawServers = Record<string, unknown>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
 /**
- * Project one raw config entry onto the shape the settings page shows.
+ * The effective `servers` map from one editor view.
  *
- * The key is the identity, so it is also the entry's `id`; an entry naming a
- * different `serverName` would address a tool namespace the manager does not
- * mount under it, so the key wins.
+ * The profile override wins over the composed layer, and only a *missing* key
+ * falls through — an explicit `{}` is a real value (the user emptied the map).
+ * @param view - one `configuration()` row.
  */
-function toEntry(key: string, raw: RawServer): McpServerEntry {
+function serversOf(view: { readonly inherited: Record<string, unknown>, readonly override: Record<string, unknown> }): RawServers {
+  if (isRecord(view.override.servers)) return view.override.servers
+  if (isRecord(view.inherited.servers)) return view.inherited.servers
+  return {}
+}
+
+/**
+ * Project one raw config entry onto the shape the page shows.
+ *
+ * Lenient on purpose: an entry the local validator refuses is returned with an
+ * `invalid` marker instead of being dropped, because the manager may well have
+ * mounted it and its tools are live.
+ */
+function projectEntry(key: string, raw: RawServer): McpServerEntry {
   const transport: McpTransport = raw.transport === 'streamable-http' ? 'streamable-http' : 'stdio'
-  const candidate = {
+  const base = {
     ...raw,
     id: key,
     serverName: key,
     transport,
     enabled: raw.enabled !== false,
   }
-  return validateEntry(candidate, new Set())
+  try {
+    return validateEntry(base, new Set())
+  } catch (error) {
+    const invalid: HostText = {
+      code: 'entry.invalid',
+      ...(error instanceof McpValidationError ? { params: { reason: error.code } } : {}),
+      text: error instanceof Error ? error.message : String(error),
+    }
+    return {
+      id: key,
+      serverName: key,
+      transport,
+      enabled: raw.enabled !== false,
+      ...asString(raw.command) === undefined ? {} : { command: asString(raw.command) },
+      ...asString(raw.url) === undefined ? {} : { url: asString(raw.url) },
+      ...typeof raw.toolCallTimeoutMs === 'number' ? { toolCallTimeoutMs: raw.toolCallTimeoutMs } : {},
+      invalid,
+    }
+  }
 }
 
-/** One entry as the manager's config stores it (no `id`, no duplicated name). */
-function toRawServer(entry: McpServerEntry): RawServer {
-  const raw: RawServer = {
-    transport: entry.transport,
-    enabled: entry.enabled,
+/**
+ * One entry as the manager's config stores it.
+ *
+ * Merged over the entry's previous raw object (see rule 2 in the module docs):
+ * the fields this version models are written, everything else the entry already
+ * carried is kept. A transport change drops the previous transport's fields,
+ * because the manager refuses an entry that names both.
+ *
+ * @param entry - the validated entry to store.
+ * @param previous - its raw form before this write, when it had one.
+ * @returns the raw config object.
+ */
+function toRawServer(entry: McpServerEntry, previous: RawServer | undefined): RawServer {
+  const raw: RawServer = { ...previous }
+  if (previous !== undefined && previous.transport !== entry.transport) {
+    for (const field of ['command', 'args', 'env', 'cwd', 'url', 'headers']) Reflect.deleteProperty(raw, field)
   }
+  raw.transport = entry.transport
+  raw.enabled = entry.enabled
   if (entry.transport === 'stdio') {
     if (entry.command !== undefined) raw.command = entry.command
     if (entry.args !== undefined) raw.args = [...entry.args]
@@ -106,13 +171,13 @@ function toRawServer(entry: McpServerEntry): RawServer {
 }
 
 /**
- * The fleet, over the runner's `config.servers`.
+ * The fleet, over the manager's `config.servers`.
  *
- * Every method is synchronous on the read side (the config document is already
- * in memory) and asynchronous on the write side (the editor persists, then the
- * loader reconciles). `enabled` is this plugin's own switch, carried by its own
- * config: turning it off stops the page from writing and reports every entry as
- * disabled, without touching the servers the user configured.
+ * Reads are synchronous (the config document is already in memory); writes go
+ * through the editor and are computed from its live view. `enabled` is this
+ * plugin's own switch: it makes the page read-only and reports the fleet as
+ * offline, and it does NOT stop the manager — the servers the user configured
+ * keep running, which is why the page says "read-only" rather than "stopped".
  */
 export class McpStore {
   /** What the settings page shows as the store's location. */
@@ -134,75 +199,110 @@ export class McpStore {
     return this.editor?.entries().find((entry) => entry.options?.id === MANAGER_ROW_ID)
   }
 
-  /** The effective `servers` map: the profile override wins over the composed layer. */
-  private rawServers(): Record<string, unknown> {
+  /**
+   * The effective map, read through the editor's own view.
+   *
+   * Matched STRUCTURALLY: `configuration()` may hand back row objects that are
+   * not the same JS object `entries()` returned, and an identity match would
+   * then read nothing — which the write path would turn into "replace the whole
+   * map with this one entry".
+   */
+  private rawServers(): RawServers {
     const editor = this.editor
-    const row = this.row()
-    if (editor === undefined || row === undefined) return {}
-    const configuration = editor.configuration().find((candidate) => candidate.entry === row)
-    if (configuration === undefined) return {}
-    const override = configuration.override.servers
-    if (isRecord(override)) return override
-    const inherited = configuration.inherited.servers
-    return isRecord(inherited) ? inherited : {}
+    if (editor?.configuration === undefined) return {}
+    const view = editor.configuration().find((candidate) => candidate.entry.options?.id === MANAGER_ROW_ID)
+    return view === undefined ? {} : serversOf(view)
   }
 
   /**
-   * Read the fleet for display.
+   * Read the fleet for display: every configured key, valid or not.
    *
-   * An entry this version cannot validate is skipped with a warning and left in
-   * the document (see {@link rawServers}: a write merges into the raw map).
+   * @returns the fleet as the page sees it; `enabled` mirrors this plugin's own
+   *   switch, not the manager's state.
    */
   load(): McpServersFile {
-    const servers: McpServerEntry[] = []
-    for (const [key, value] of Object.entries(this.rawServers())) {
-      if (!isRecord(value)) {
-        this.log(`mcp: entry "${key}" is not an object; ignored`)
-        continue
-      }
-      try {
-        servers.push(toEntry(key, value))
-      } catch (error) {
-        this.log(`mcp: entry "${key}" is invalid and stays untouched: ${(error as Error).message}`)
-      }
+    return {
+      version: 1,
+      enabled: this.enabled,
+      servers: Object.entries(this.rawServers()).map(([key, value]) => (isRecord(value)
+        ? projectEntry(key, value)
+        : projectEntry(key, {}))),
     }
-    return { version: 1, enabled: this.enabled, servers }
   }
 
-  /** Persist one whole map through the config editor. */
-  private async write(next: Record<string, unknown>): Promise<void> {
+  /**
+   * Apply one mutation to the document's live `servers` map.
+   *
+   * The callback runs inside `editor.edit`, so it sees the current document
+   * (rule 1) and its result is what gets persisted. A callback that returns
+   * `undefined` leaves the document untouched — that is how a no-op delete
+   * avoids writing at all.
+   *
+   * @param change - derives the next `servers` map, or undefined for no write.
+   * @throws McpValidationError when the row or its configuration is unreadable.
+   */
+  private async mutate(change: (servers: RawServers, previous: (key: string) => RawServer | undefined) => RawServers | undefined): Promise<void> {
     const editor = this.editor
     const row = this.row()
     if (editor === undefined || row === undefined) {
       throw new McpValidationError('store.unavailable', { row: MANAGER_ROW_ID })
     }
-    await editor.edit(row, (current) => ({ ...current, servers: next }))
+    if (editor.configuration === undefined) {
+      // Without the view we cannot read what is there, and writing anyway would
+      // replace the whole map with a guess. Refuse instead.
+      throw new McpValidationError('store.unreadable', { row: MANAGER_ROW_ID })
+    }
+    await editor.edit(row, (current, inherited) => {
+      const servers = serversOf({ inherited, override: current })
+      const next = change(servers, (key) => (isRecord(servers[key]) ? servers[key] as RawServer : undefined))
+      return next === undefined ? current : { ...current, servers: next }
+    })
   }
 
   /** Validate + insert one entry, keyed by its server name. */
   async create(raw: unknown): Promise<McpServerEntry> {
-    const servers = this.rawServers()
     const draft = isRecord(raw) ? raw : {}
-    const name = typeof draft.serverName === 'string' ? draft.serverName : undefined
+    const name = asString(draft.serverName)
     if (name === undefined) throw new McpValidationError('serverName.invalid', { name: String(draft.serverName ?? '') })
-    if (Object.hasOwn(servers, name)) throw new McpValidationError('serverName.taken', { name })
-    const entry = validateEntry({ ...draft, id: name, serverName: name }, new Set(Object.keys(servers)))
-    await this.write({ ...servers, [name]: toRawServer(entry) })
+    const entry = validateEntry({ ...draft, id: name, serverName: name }, new Set())
+    await this.mutate((servers, previous) => {
+      if (Object.hasOwn(servers, name)) throw new McpValidationError('serverName.taken', { name })
+      return { ...servers, [name]: toRawServer(entry, previous(name)) }
+    })
     return entry
   }
 
   /** Validate + replace the entry stored under one key. */
   async update(id: string, raw: unknown): Promise<McpServerEntry> {
-    const servers = this.rawServers()
-    if (!Object.hasOwn(servers, id)) throw new McpValidationError('server.notFound', { id })
     const draft = isRecord(raw) ? raw : {}
-    const requested = typeof draft.serverName === 'string' ? draft.serverName : id
+    const requested = asString(draft.serverName) ?? id
     // The key is the identity: a rename here would move the tool namespace out
     // from under a model that was told the old one, so it is refused instead.
     if (requested !== id) throw new McpValidationError('serverName.immutable', { from: id, to: requested })
-    const entry = validateEntry({ ...draft, id, serverName: id }, new Set(Object.keys(servers).filter((key) => key !== id)))
-    await this.write({ ...servers, [id]: toRawServer(entry) })
+    const entry = validateEntry({ ...draft, id, serverName: id }, new Set())
+    await this.mutate((servers, previous) => {
+      if (!Object.hasOwn(servers, id)) throw new McpValidationError('server.notFound', { id })
+      return { ...servers, [id]: toRawServer(entry, previous(id)) }
+    })
     return entry
+  }
+
+  /**
+   * Remove one entry by key; a missing key is a no-op.
+   *
+   * The pre-read only answers "is there anything to do" — a needless write
+   * makes the loader reconcile for nothing. The write itself is still computed
+   * from the live document, so a key that appeared after this check is simply
+   * left for the next attempt.
+   */
+  async remove(id: string): Promise<void> {
+    if (!Object.hasOwn(this.rawServers(), id)) return
+    await this.mutate((servers) => {
+      if (!Object.hasOwn(servers, id)) return undefined
+      const next = { ...servers }
+      Reflect.deleteProperty(next, id)
+      return next
+    })
   }
 
   /**
@@ -216,24 +316,19 @@ export class McpStore {
    * @returns how many entries were written (0 when every key already existed).
    */
   async importAll(entries: readonly McpServerEntry[]): Promise<number> {
-    const servers = this.rawServers()
-    const next = { ...servers }
+    // Same rule as remove: this pre-read only decides whether a write is needed.
+    const present = this.rawServers()
+    if (entries.every((entry) => Object.hasOwn(present, entry.serverName))) return 0
     let written = 0
-    for (const entry of entries) {
-      if (Object.hasOwn(next, entry.serverName)) continue
-      next[entry.serverName] = toRawServer(entry)
-      written += 1
-    }
-    if (written > 0) await this.write(next)
+    await this.mutate((servers, previous) => {
+      const next = { ...servers }
+      for (const entry of entries) {
+        if (Object.hasOwn(next, entry.serverName)) continue
+        next[entry.serverName] = toRawServer(entry, previous(entry.serverName))
+        written += 1
+      }
+      return written === 0 ? undefined : next
+    })
     return written
-  }
-
-  /** Remove one entry by key; a missing key is a no-op. */
-  async remove(id: string): Promise<void> {
-    const servers = this.rawServers()
-    if (!Object.hasOwn(servers, id)) return
-    const next = { ...servers }
-    delete next[id]
-    await this.write(next)
   }
 }

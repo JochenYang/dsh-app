@@ -231,15 +231,20 @@ function parseArgs(argv) {
  * single `scripts/check_office.py` marker no longer exists anywhere. Asserting
  * the old marker rejected every artifact of this line.
  */
-const OFFICE_SKILL_NAMES = [
-  'office',
-  'office-docx',
-  'office-pptx',
-  'office-xlsx',
-  'office-render',
-  'office-recalculate',
-  'office-export-pdf',
-]
+function officeSkillNames() {
+  // Parsed from the build script rather than copied here: this probe used to be
+  // the third copy of the list, and it kept requiring three directories the
+  // 0.2.2-rc.2 line removed — the probe then refused every artifact of the line
+  // with a message blaming the artifact. A grep of a literal would only prove
+  // this file contains what was typed; the contract belongs to build-runtime.mjs
+  // (itself mirroring `@deepseek-ai/dsh-skill-office`'s SKILL_NAMES).
+  const source = fs.readFileSync(path.join(__dirname, 'build-runtime.mjs'), 'utf8')
+  const block = /const OFFICE_SKILL_NAMES = \[([\s\S]*?)\n\]/u.exec(source)
+  if (block === null) throw new Error('scripts/build-runtime.mjs no longer declares OFFICE_SKILL_NAMES')
+  const names = [...block[1].matchAll(/'([a-z-]+)'/gu)].map((match) => match[1])
+  if (names.length === 0) throw new Error('OFFICE_SKILL_NAMES parsed empty from scripts/build-runtime.mjs')
+  return names
+}
 
 function assertRuntimeTree(dir, source) {
   const bin = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -249,7 +254,7 @@ function assertRuntimeTree(dir, source) {
   for (const file of [bin, nodeBin, hostEntry]) {
     if (!fs.existsSync(file)) throw new Error(`${source} is not a runtime tree: ${file} is missing`)
   }
-  for (const name of OFFICE_SKILL_NAMES) {
+  for (const name of officeSkillNames()) {
     const skill = path.join(officeSkills, name, 'SKILL.md')
     if (!fs.existsSync(skill)) throw new Error(`${source} is not a runtime tree: ${skill} is missing`)
   }

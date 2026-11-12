@@ -1450,10 +1450,11 @@ async function startServerAndOpenWindow(): Promise<void> {
   }
   try {
     // `profileAnchor` is the shell's own reading of the host line; only the
-    // transport's own options travel to the start. `userDataDir` is where the
-    // web transport materializes the office skills it must hand the child, and
-    // `officePrimaryRuntime` is where a Python-carrying office payload landed
-    // (absent: the fixed leaf beside those skills).
+    // transport's own options travel to the start. `userDataDir` is the shell
+    // data directory whose `dsh-app-office/primary-runtime` leaf the child is
+    // handed (nothing is copied there since 0.2.2-rc.2 — see
+    // preparePrimaryRuntime), and `officePrimaryRuntime` is the installed
+    // payload's own primary-runtime directory when it carries a Python set.
     const { profileAnchor: _anchor, ...hostOptions } = host
     // BEFORE the host starts, not after: the kernel publishes its account session
     // while it boots (measured — the publisher runs before the host's own `ready`),

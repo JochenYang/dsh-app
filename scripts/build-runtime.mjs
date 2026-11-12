@@ -61,15 +61,15 @@
  *     or from a prebuilt tarball. The shell starts this package as the kernel
  *     child, so a runtime without it cannot boot at all.
  *
- * One payload the host needs is neither a package nor optional:
+ * One payload the host asks for is neither a package nor optional:
  *   - the Office skills (packages/skill/skill-office/assets in a harness
  *     checkout), staged beside the kernel tree as `runtime/office-skills` (see
- *     stageOfficeSkills). The host derives its skill asset root from its
- *     primary-runtime argument — `join(dirname(<kernelDir>/app), 'office-skills')`
- *     — and @deepseek-ai/dsh-skill-office reads
- *     `<assetRoot>/<skill>/SKILL.md` for every skill it registers, throwing at
- *     boot when one is absent, so a runtime shipped with a partial payload dies
- *     a few seconds into the first start.
+ *     stageOfficeSkills). Since 0.2.2-rc.2 NOTHING reads it: `dsh-skill-office`
+ *     serves its own packaged `assets/` from inside the runtime tree, and the
+ *     shell stopped deriving an asset root from the child's fourth positional.
+ *     It is still staged (and asserted) because the copy is part of the meta
+ *     layer's content and removing it is its own step — see the plan's Deferred
+ *     entry for kernel-0.2.2-rc.2.
  *
  * One payload the OFFICE PROVIDER needs is deliberately NOT in the tree:
  *   - the LibreOffice engine (@deepseek-ai/libreoffice-kit + its per-platform
@@ -659,18 +659,18 @@ const OFFICE_KIT_STUB_DIR = ['scripts', 'runtime-stubs', 'libreoffice-kit']
 /**
  * Where the Office SKILLS land inside the built runtime tree.
  *
- * The shell hands the host `primaryRuntime = <kernelDir>/app` and
- * @deepseek-ai/dsh-skill-office takes its asset root from
- * `join(dirname(primaryRuntime), 'office-skills')`, so the directory has to sit
- * at `<kernelDir>/runtime/office-skills` — a path nothing else in the runtime
- * occupies, because the kernel tree itself is `<kernelDir>/app`.
+ * Before 0.2.2-rc.2 the host derived its skill asset root from the argument the
+ * shell hands it (`join(dirname(primaryRuntime), 'office-skills')`), which is
+ * why the directory sits at `<kernelDir>/runtime/office-skills`. Since then
+ * `dsh-skill-office` reads its own packaged `assets/` and the shell answers the
+ * primary-runtime path only, so this copy has no reader in the app — keep the
+ * staging and the assertion together, and remove both in one step.
  *
  * These are the four skill directories (one SKILL.md each, plus their
  * references), not the conversion engine: the engine is the separate payload
  * artifact. The name list is the payload's contract with
- * @deepseek-ai/dsh-skill-office's `SKILL_NAMES`, and the shell validates the
- * same set before it starts the host (src/main/desktop-host.ts
- * OFFICE_SKILL_NAMES) — a line that renames a skill must move both.
+ * @deepseek-ai/dsh-skill-office's `SKILL_NAMES`; `scripts/probe-routes.cjs`
+ * parses this list rather than keeping its own copy.
  */
 const OFFICE_SKILLS_DIR = 'runtime/office-skills'
 
@@ -813,13 +813,10 @@ function officeSkillsCheckout() {
 /**
  * Stage the Office skills a harness checkout carries into the runtime tree.
  *
- * The payload is not optional for a runtime of this line: the host composes
- * @deepseek-ai/dsh-skill-office with
- * `assetRoot = join(dirname(primaryRuntime), 'office-skills')`, and that plugin
- * reads `<assetRoot>/<skill>/SKILL.md` for every skill it registers, throwing at
- * boot when one is absent. Dev mode reads it from the checkout it runs from; a
- * shipped artifact has nothing but its own tree to read, so the copy is a
- * build-side duty.
+ * Nothing on 0.2.2-rc.2 reads this copy (see OFFICE_SKILLS_DIR): the package
+ * serves its own `assets/`. It is staged anyway so the artifact keeps the
+ * layout the previous line needed and so removing it can be one deliberate
+ * change; the set is asserted here, and `probe-routes` reads the same list.
  *
  * No separate inventory step is needed: writeFileInventory walks the whole
  * runtime tree, so every staged file lands in runtime/app/runtime-files.json —
