@@ -5,9 +5,9 @@
  * Why it is not inside the runtime: the engine is ~115 MiB compressed (330 MiB
  * unpacked) and is needed only when a document is actually converted, while the
  * runtime is downloaded by every user on every kernel update. The runtime keeps
- * a tiny loader shim at the specifier `@deepseek-ai/dsh-office-to-pdf` imports
- * statically, and that shim loads the real kit out of the directory this module
- * installs (`scripts/runtime-stubs/libreoffice-kit`).
+ * a tiny loader shim at the specifier `@deepseek-ai/dsh-office-kit` resolves
+ * before its first conversion, and that shim loads the real kit out of the
+ * directory this module installs (`scripts/runtime-stubs/libreoffice-kit`).
  *
  * Where it lands: `<userData>/dsh-app-office/payload/<payloadVersion>/`, with
  * the payload's own manifest and a `node_modules` tree holding the kit, its

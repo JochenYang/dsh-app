@@ -98,7 +98,7 @@ function readJson(file) {
  *   2. Only after that artifact is public does a runtime requiring it become
  *      installable by existing users.
  */
-export const DESKTOP_OFFICE_KIT_VERSION = '0.1.2'
+export const DESKTOP_OFFICE_KIT_VERSION = '0.2.3'
 
 /** The devDependency spec every shell/plugin build is typechecked against. */
 export function followedSpec(repoRoot = root) {

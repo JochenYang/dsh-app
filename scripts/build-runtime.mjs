@@ -77,11 +77,12 @@
  *     when a document is actually converted, so it travels in a SECOND artifact
  *     (`office-payload-<platform>-<arch>-<version>.tgz`, built by
  *     buildOfficePayload) that the shell downloads on demand and installs under
- *     its own data directory. @deepseek-ai/dsh-office-to-pdf imports the kit
- *     STATICALLY at module scope, so the runtime keeps a tiny loader shim at
- *     that specifier instead (stageOfficeKitShim) — without it the provider
- *     entry fails to LOAD, which is a different failure from "no engine
- *     installed" and much harder to explain. See scripts/lib/office-payload.mjs.
+ *     its own data directory. @deepseek-ai/dsh-office-kit resolves the kit
+ *     before first use (not at module scope since 0.2.2-rc.2), so the runtime
+ *     keeps a tiny loader shim at that specifier instead (stageOfficeKitShim) —
+ *     without it the resolution throws and conversion is permanently
+ *     `unavailable`, which reads like "no engine installed"
+ *     while nothing is wrong with the payload. See scripts/lib/office-payload.mjs.
  *
  * Assembly is pnpm ≥ 10 with the hoisted linker (see "pnpm assembly" above
  * main()): a lockfile is generated first and asserted to hold no
@@ -320,6 +321,30 @@ function pnpmBin() {
     throw new Error('pnpm not found on PATH — the runtime is assembled with pnpm >= 10 (npm i -g pnpm)')
   }
   return found
+}
+
+/**
+ * The dependency build-script allowlist, in the key the installed pnpm reads.
+ *
+ * pnpm ≥ 10 blocks dependency lifecycle scripts by default and *fails* a frozen
+ * install when a blocked package needed one; the key it reads was renamed in
+ * pnpm 11 (`onlyBuiltDependencies` list → `allowBuilds` map), so the field name
+ * follows the toolchain in use. pnpm also appends a `set this to true or false`
+ * stub to the file when the allowlist is missing — the same policy, spelled out.
+ *
+ * Shared by BOTH installs this build runs. The payload project used to go
+ * without it because the kit it installed had no such dependency; 0.2.3 pulls
+ * `koffi`, whose postinstall is blocked, and the payload build died on
+ * ERR_PNPM_IGNORED_BUILDS. Two copies of this rule would drift the moment pnpm
+ * renames the key again.
+ *
+ * @param pnpmMajor - the installed pnpm's major version.
+ * @returns the workspace-file lines that allow {@link NATIVE_BUILD_ALLOWLIST}.
+ */
+function buildScriptAllowlistLines(pnpmMajor) {
+  return pnpmMajor >= 11
+    ? ['allowBuilds:', ...NATIVE_BUILD_ALLOWLIST.map((name) => `  '${name}': true`)]
+    : ['onlyBuiltDependencies:', ...NATIVE_BUILD_ALLOWLIST.map((name) => `  - '${name}'`)]
 }
 
 /**
@@ -612,13 +637,21 @@ const DESKTOP_OFFICE_KIT_PACKAGE = '@deepseek-ai/libreoffice-kit'
 // JSDoc carries the full rationale and the two-step bump order.
 
 /**
- * The provider that imports the kit STATICALLY, at module scope. It is what
- * makes the engine package non-optional in a different way: with no
- * `@deepseek-ai/libreoffice-kit` resolvable at all, this package fails to load
- * and the whole plugin entry is refused — so the runtime ships a stub under that
- * specifier (see stageOfficeKitShim).
+ * The provider that reaches for the kit. It is what makes the engine package
+ * non-optional in a different way: the real kit is trimmed out of the runtime
+ * tree because it travels in the separate payload artifact, so the specifier
+ * must still resolve to something — the runtime ships a stub under it (see
+ * stageOfficeKitShim).
+ *
+ * 0.2.2-rc.2 changed HOW that reach happens and not WHETHER we need the shim:
+ * the provider now only `import type`s the kit and calls
+ * `import.meta.resolve('@deepseek-ai/libreoffice-kit')` at first use, then
+ * dynamically imports what it resolved (packages/document/office-kit/src/
+ * index.ts:347,351). A missing specifier therefore stops being a load-time
+ * failure and becomes a permanent "unavailable" — quieter, but just as dead:
+ * without the stub the installed payload's kit can never be found.
  */
-const DESKTOP_OFFICE_PROVIDER_PACKAGE = '@deepseek-ai/dsh-office-to-pdf'
+const DESKTOP_OFFICE_PROVIDER_PACKAGE = '@deepseek-ai/dsh-office-kit'
 
 /** Where the runtime's stub of {@link DESKTOP_OFFICE_KIT_PACKAGE} comes from in this repo. */
 const OFFICE_KIT_STUB_DIR = ['scripts', 'runtime-stubs', 'libreoffice-kit']
@@ -1678,23 +1711,28 @@ async function trimRuntimePayload(runtimeDir, platform, arch) {
 }
 
 /**
- * Put the kit loader shim where the provider imports it.
+ * Put the kit loader shim where the provider looks for it.
  *
- * `@deepseek-ai/dsh-office-to-pdf` imports `@deepseek-ai/libreoffice-kit` at
- * module scope, so with the real package gone the specifier must still resolve:
- * a runtime without it makes that plugin fail to LOAD, which surfaces as "the
- * plugin tree did not activate" rather than as "the engine is not installed".
+ * `@deepseek-ai/dsh-office-kit` resolves `@deepseek-ai/libreoffice-kit` before
+ * every first use (see DESKTOP_OFFICE_PROVIDER_PACKAGE). The real package is
+ * trimmed out of the tree because it travels in the payload artifact, so
+ * without this stub that resolution throws and office conversion answers
+ * `unavailable` for every document, payload installed or not. Measured on
+ * 0.2.2-rc.2 before this rename: the build logged `no
+ * @deepseek-ai/dsh-office-to-pdf in the tree; no kit shim needed`, staged
+ * nothing, and the capability was silently gone — a build that exits 0 says
+ * nothing about it.
+ *
  * The shim is a few hundred bytes that load the real kit out of the installed
  * payload at call time and refuse with an actionable message while it is absent
  * (scripts/runtime-stubs/libreoffice-kit).
  *
  * Written only when the provider is actually in the tree — the shim exists for
- * that one importer, and a package nothing imports is payload too.
+ * that one consumer, and a package nothing reads is payload too.
  *
- * It must also carry `lib/cli.js`: a 0.1.7-rc.1 desktop host derives that path
- * from this package's manifest as it boots and hands it to `skill-office`, which
- * `statSync`s it while registering its skills. A shim without the file fails the
- * host's own startup, whether or not the payload is installed.
+ * It still carries `lib/cli.js` although 0.2.2-rc.2's host no longer derives that
+ * path: a 0.1.7-rc.1 host statSync'd it at boot, the file costs nothing, and
+ * dropping it would make a rolled-back kernel fail its own startup.
  *
  * @param runtimeDir - the runtime tree being assembled (the kernel dir).
  * @returns the absolute stub directory, or null when no provider needs it.
@@ -1877,6 +1915,10 @@ async function buildOfficePayload(work, runtimeDir, platform, arch) {
     '',
     'overrides:',
     `  '${DESKTOP_OFFICE_KIT_PACKAGE}': '${kitVersion}'`,
+    '',
+    '# Build-script allowlist — one rule for both installs this build runs (see',
+    '# buildScriptAllowlistLines).',
+    ...buildScriptAllowlistLines(assertPnpm().major),
     '',
   ].join('\n'))
 
@@ -2188,15 +2230,9 @@ async function main() {
     '# side effect of this script: raise it here and re-verify the runtime boots.',
     'minimumReleaseAge: 0',
     '',
-    // Build-script allowlist. pnpm ≥ 10 blocks dependency lifecycle scripts by
-    // default and *fails* a frozen install when a blocked package needed one; the
-    // key it reads was renamed in pnpm 11 (`onlyBuiltDependencies` list →
-    // `allowBuilds` map), so the field name follows the toolchain in use. pnpm
-    // also appends a `set this to true or false` stub to this file when the
-    // allowlist is missing — the same policy, spelled out.
-    ...(pnpm.major >= 11
-      ? ['allowBuilds:', ...NATIVE_BUILD_ALLOWLIST.map((name) => `  '${name}': true`)]
-      : ['onlyBuiltDependencies:', ...NATIVE_BUILD_ALLOWLIST.map((name) => `  - '${name}'`)]),
+    '# Build-script allowlist — the same rule and the same list the runtime',
+    '# assembly uses (see buildScriptAllowlistLines).',
+    ...buildScriptAllowlistLines(pnpm.major),
     '',
     "# Core packages never come from the registry. `@deepseek-ai/dsh*` is pinned to",
     '# the version this runtime ships (the kernel moves as one line) and every',
@@ -2309,9 +2345,9 @@ async function main() {
   //     the artifact.
   await trimRuntimePayload(runtimeDir, platform, arch)
 
-  // 2f. The loader shim that keeps `@deepseek-ai/dsh-office-to-pdf` loadable
-  //     now that the real kit is gone. AFTER the trim, because the trim is what
-  //     removes the package it replaces.
+  // 2f. The loader shim that keeps `@deepseek-ai/dsh-office-kit` able to resolve
+  //     the kit now that the real package is gone. AFTER the trim, because the
+  //     trim is what removes the package it replaces.
   await stageOfficeKitShim(runtimeDir)
 
   // 3. Runtime manifest. No publishedAt here: every byte of the in-archive
